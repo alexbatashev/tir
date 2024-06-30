@@ -12,6 +12,7 @@ mod r#type;
 pub mod utils;
 mod validate;
 mod value;
+mod walkers;
 
 pub use assembly::*;
 pub use attrs::*;
@@ -25,3 +26,4 @@ pub use r#type::*;
 pub use region::*;
 pub use validate::*;
 pub use value::*;
+pub use walkers::*;

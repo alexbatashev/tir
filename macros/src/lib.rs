@@ -501,10 +501,14 @@ pub fn derive_op(input: TokenStream) -> TokenStream {
         quote! {}
     };
 
-    let region_names = fields.iter().filter_map(|f| match f.attrs {
-        OpFieldAttrs::Region(_) => f.ident.as_ref().map(|i| format_ident!("get_{}_region", i)),
-        _ => None,
-    });
+    let region_names: Vec<_> = fields
+        .iter()
+        .filter_map(|f| match f.attrs {
+            OpFieldAttrs::Region(_) => f.ident.as_ref().map(|i| format_ident!("get_{}_region", i)),
+            _ => None,
+        })
+        .collect();
+    let has_regions = region_names.len() > 0;
 
     let op_ident_const = format_ident!("{}_METADATA", &op_ident.to_string().to_uppercase());
 
@@ -594,6 +598,16 @@ pub fn derive_op(input: TokenStream) -> TokenStream {
 
             fn get_meta(&self) -> &'static linkme::DistributedSlice<[fn() -> tir_core::utils::CastableMeta]> {
                 &#op_ident_const
+            }
+
+            fn get_regions(&self) -> tir_core::OpRegionIter {
+                tir_core::OpRegionIter::new(&[
+                    #(self.#region_names()),*
+                ])
+            }
+
+            fn has_regions(&self) -> bool {
+                #has_regions
             }
 
             #return_type
