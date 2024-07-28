@@ -1,0 +1,20 @@
+enum Features {
+    Riscv32,
+    Riscv64,
+}
+
+enum RegClass {
+    GPR,
+}
+
+struct Register {
+    abi_name: String,
+    saved_by_caller: Bool = false,
+    saved_by_callee: Bool = false,
+    encoding: Bits<5>,
+    hw_zero: Bool = false,
+    class: RegClass,
+}
+
+reg X0: Register = { abi_name: "zero", reg_class = RegClass::GPR, encoding = 0 }
+reg X1: Register = { abi_name: "r1", reg_class = RegClass::GPR, encoding = 1 }
