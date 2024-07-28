@@ -85,3 +85,41 @@ where
         Ok((result, next_input))
     }
 }
+
+pub fn separated<'a, P1, P2, Input: ParseStream<'a> + 'a, Output>(
+    parser: P1,
+    ignored: P2,
+) -> impl Parser<'a, Input, Vec<Output>>
+where
+    P1: Parser<'a, Input, Output>,
+    P2: Parser<'a, Input, ()>,
+{
+    move |input| {
+        let mut result = Vec::new();
+
+        let mut next_input: Option<Input> = Some(input);
+
+        while let Some(ref inp) = next_input.clone() {
+            if let Ok((next_item, ni)) = parser.parse(inp.clone()) {
+                next_input = ni;
+                result.push(next_item);
+            } else {
+                break;
+            }
+
+            if let Some(ref inp) = next_input.clone() {
+                if let Ok((_, ni)) = ignored.parse(inp.clone()) {
+                    next_input = ni;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        if result.is_empty() {
+            return Err("no items could be parserd".to_string());
+        }
+
+        Ok((result, next_input))
+    }
+}

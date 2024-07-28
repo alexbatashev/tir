@@ -5,9 +5,11 @@ enum Features {
 
 enum RegClass {
     GPR,
+    Zero,
+    Return,
 }
 
-struct Register {
+record Register {
     abi_name: String,
     saved_by_caller: Bool = false,
     saved_by_callee: Bool = false,
@@ -16,5 +18,5 @@ struct Register {
     class: RegClass,
 }
 
-reg X0: Register = { abi_name: "zero", reg_class = RegClass::GPR, encoding = 0 }
-reg X1: Register = { abi_name: "r1", reg_class = RegClass::GPR, encoding = 1 }
+reg X0: Register = { abi_name: "zero", reg_class = RegClass::Zero, encoding = 0 }
+reg X1: Register = { abi_name: "ra", reg_class = RegClass::Return, encoding = 1 }

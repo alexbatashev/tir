@@ -12,7 +12,7 @@ where
     move |input: Input| {
         parser
             .parse(input)
-            .map(|(result, next_input)| (map_fn(result), next_input))
+            .map(|(result, next_input)| ((map_fn(result.0), result.1), next_input))
     }
 }
 

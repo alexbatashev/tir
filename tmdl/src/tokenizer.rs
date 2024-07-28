@@ -12,10 +12,8 @@ pub enum Token<'a> {
     Whitespace,
     // Keywords
     Enum,
-    Template,
-    RegClass,
-    Impl,
-    For,
+    Record,
+    Reg,
     // Punctuation
     Colon,
     Semicolon,
@@ -79,15 +77,17 @@ impl<'a> ParseStream<'a> for TokenStream<'a> {
     fn len(&self) -> usize {
         self.tokens.len()
     }
+
+    fn span(&self) -> lpl::Span {
+        todo!()
+    }
 }
 
 fn keyword<'a>() -> impl Parser<'a, StrStream<'a>, Token<'a>> {
     literal("enum")
         .map(|_| Token::Enum)
-        .or_else(literal("template").map(|_| Token::Template))
-        .or_else(literal("reg_class").map(|_| Token::RegClass))
-        .or_else(literal("impl").map(|_| Token::Impl))
-        .or_else(literal("for").map(|_| Token::For))
+        .or_else(literal("record").map(|_| Token::Record))
+        .or_else(literal("reg").map(|_| Token::Reg))
 }
 
 fn ident<'a>() -> impl Parser<'a, StrStream<'a>, Token<'a>> {

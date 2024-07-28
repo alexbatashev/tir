@@ -7,7 +7,9 @@ where
     Input::Slice: PartialEq<&'a str>,
 {
     move |input: Input| match input.get(0..expected.len()) {
-        Some(next) if next == expected => Ok(((), input.slice(expected.len()..input.len()))),
+        Some(next) if next == expected => {
+            Ok((((), input.span()), input.slice(expected.len()..input.len())))
+        }
         _ => Err(format!("Expected `{:?}` not found", expected)),
     }
 }

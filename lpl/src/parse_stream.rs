@@ -1,4 +1,6 @@
-use std::ops::Range;
+use std::ops::{Range, RangeBounds};
+
+use crate::Span;
 
 pub trait ParseStream<'a>: Clone {
     type Slice;
@@ -8,6 +10,8 @@ pub trait ParseStream<'a>: Clone {
     where
         Self: Sized;
     fn len(&self) -> usize;
+
+    fn span(&self) -> Span;
 
     fn is_string_like(&self) -> bool {
         false
@@ -25,6 +29,7 @@ pub trait ParseStream<'a>: Clone {
 #[derive(Debug, Clone)]
 pub struct StrStream<'a> {
     string: &'a str,
+    offset: usize,
 }
 
 impl<'a> ParseStream<'a> for StrStream<'a> {
@@ -35,7 +40,12 @@ impl<'a> ParseStream<'a> for StrStream<'a> {
     }
 
     fn slice(&self, range: Range<usize>) -> Option<Self> {
-        self.string.get(range).map(|string| Self { string })
+        let offset = match range.start_bound() {
+            std::ops::Bound::Included(bound) => self.offset + bound,
+            std::ops::Bound::Excluded(bound) => self.offset + bound + 1,
+            std::ops::Bound::Unbounded => self.offset,
+        };
+        self.string.get(range).map(|string| Self { string, offset })
     }
 
     fn len(&self) -> usize {
@@ -53,10 +63,14 @@ impl<'a> ParseStream<'a> for StrStream<'a> {
     fn substr(&self, range: Range<usize>) -> Option<&'a str> {
         self.string.get(range)
     }
+
+    fn span(&self) -> Span {
+        Span::new(None, self.offset)
+    }
 }
 
 impl<'a> From<&'a str> for StrStream<'a> {
-    fn from(value: &'a str) -> Self {
-        StrStream { string: value }
+    fn from(string: &'a str) -> Self {
+        StrStream { string, offset: 0 }
     }
 }

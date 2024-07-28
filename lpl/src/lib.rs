@@ -4,7 +4,33 @@ mod parse_stream;
 
 pub use parse_stream::*;
 
-pub type ParseResult<Input, Output> = Result<(Output, Option<Input>), String>;
+use std::sync::Arc;
+
+pub struct Span {
+    filename: Option<Arc<String>>,
+    offset: usize,
+}
+
+impl Span {
+    pub fn new(filename: Option<Arc<String>>, offset: usize) -> Self {
+        Self { filename, offset }
+    }
+
+    pub fn get_filename<'a>(&'a self) -> Option<&'a str> {
+        match &self.filename {
+            Some(filename) => Some(filename.as_ref()),
+            None => None,
+        }
+    }
+
+    pub fn get_offset(&self) -> usize {
+        self.offset
+    }
+}
+
+pub type Spanned<Type> = (Type, Span);
+
+pub type ParseResult<Input, Output> = Result<(Spanned<Output>, Option<Input>), String>;
 
 pub trait Parser<'a, Input: ParseStream<'a> + 'a, Output> {
     fn parse(&self, input: Input) -> ParseResult<Input, Output>;

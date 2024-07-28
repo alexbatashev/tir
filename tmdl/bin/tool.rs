@@ -1,5 +1,5 @@
 use clap::Parser;
-use tmdl::tokenize;
+use tmdl::{parse, tokenize};
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -15,4 +15,7 @@ fn main() {
     let tokens = tokenize(&source).unwrap();
 
     println!("{:?}", tokens);
+
+    let tu = parse(&tokens);
+    println!("{}", tu);
 }
