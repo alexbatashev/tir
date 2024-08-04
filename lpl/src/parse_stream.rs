@@ -65,7 +65,7 @@ impl<'a> ParseStream<'a> for StrStream<'a> {
     }
 
     fn span(&self) -> Span {
-        Span::new(None, self.offset)
+        Span::unbound(None, self.offset)
     }
 }
 

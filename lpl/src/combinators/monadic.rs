@@ -1,4 +1,4 @@
-use crate::{ParseStream, Parser};
+use crate::{ParseStream, Parser, ParserError};
 
 pub fn map<'a, P, F, Input, Output1, Output2>(
     parser: P,
@@ -12,7 +12,7 @@ where
     move |input: Input| {
         parser
             .parse(input)
-            .map(|(result, next_input)| ((map_fn(result.0), result.1), next_input))
+            .map(|(result, next_input)| (map_fn(result), next_input))
     }
 }
 
@@ -48,7 +48,10 @@ where
                 Some(next_input) => parser2
                     .parse(next_input)
                     .map(|(out2, next_input)| ((out, out2), next_input)),
-                None => Err("no more input to parse".to_string()),
+                None => Err(ParserError::new(
+                    "no more input to parse".to_string(),
+                    input.span(),
+                )),
             })
     }
 }

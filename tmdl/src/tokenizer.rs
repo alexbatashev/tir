@@ -2,7 +2,7 @@ use std::ops::{Bound, RangeBounds};
 
 use lpl::{
     combinators::{any_whitespace1, interleaved, literal, text::take_while},
-    ParseStream, Parser, StrStream,
+    ParseStream, Parser, ParserError, StrStream,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -106,7 +106,7 @@ fn punct<'a>() -> impl Parser<'a, StrStream<'a>, Token<'a>> {
         .or_else(literal("<").map(|_| Token::Lt))
 }
 
-pub fn tokenize<'a>(input: &'a str) -> Result<Vec<Token<'a>>, String> {
+pub fn tokenize<'a>(input: &'a str) -> Result<Vec<Token<'a>>, ParserError> {
     let stream: StrStream = input.into();
 
     let token = keyword().or_else(ident()).or_else(punct());

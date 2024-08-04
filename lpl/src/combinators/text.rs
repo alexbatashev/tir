@@ -1,11 +1,14 @@
-use crate::{parse_stream::ParseStream, ParseResult, Parser};
+use crate::{parse_stream::ParseStream, ParseResult, Parser, ParserError};
 
 pub fn any_char<'a, Input>(input: Input) -> ParseResult<Input, char>
 where
     Input: ParseStream<'a>,
 {
     if !input.is_string_like() {
-        return Err("Expected string-like input".to_string());
+        return Err(ParserError::new(
+            "Expected string-like input".to_string(),
+            input.span(),
+        ));
     }
 
     match input.chars().next() {
@@ -13,7 +16,10 @@ where
             let next_input: Option<Input> = input.slice(next.len_utf8()..input.len());
             Ok((next, next_input))
         }
-        _ => Err("Expected a char, got end of string".to_string()),
+        _ => Err(ParserError::new(
+            "Expected a char, got end of string".to_string(),
+            input.span(),
+        )),
     }
 }
 
@@ -24,7 +30,10 @@ where
 {
     move |input: Input| {
         if !input.is_string_like() {
-            return Err("Expected string-like input".to_string());
+            return Err(ParserError::new(
+                "Expected string-like input".to_string(),
+                input.span(),
+            ));
         }
 
         let mut last = 0;
@@ -39,7 +48,7 @@ where
         }
 
         if last == 0 {
-            return Err("".to_string());
+            return Err(ParserError::new("".to_string(), input.span()));
         }
 
         let next_input: Option<Input> = input.slice(last..input.len());

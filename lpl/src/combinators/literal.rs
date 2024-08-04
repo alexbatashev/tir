@@ -1,4 +1,4 @@
-use crate::{ParseStream, Parser};
+use crate::{ParseStream, Parser, ParserError};
 
 pub fn literal<'a, Input: ParseStream<'a> + 'a>(
     expected: &'static str,
@@ -7,10 +7,11 @@ where
     Input::Slice: PartialEq<&'a str>,
 {
     move |input: Input| match input.get(0..expected.len()) {
-        Some(next) if next == expected => {
-            Ok((((), input.span()), input.slice(expected.len()..input.len())))
-        }
-        _ => Err(format!("Expected `{:?}` not found", expected)),
+        Some(next) if next == expected => Ok(((), input.slice(expected.len()..input.len()))),
+        _ => Err(ParserError::new(
+            format!("Expected `{:?}` not found", expected),
+            input.span(),
+        )),
     }
 }
 

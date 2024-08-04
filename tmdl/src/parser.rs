@@ -1,5 +1,5 @@
 use lpl::combinators::{one_or_more, separated};
-use lpl::{ParseStream, Parser};
+use lpl::{ParseStream, Parser, ParserError};
 
 use crate::{Ident, Item, ItemEnum, ItemRecord, Token, TokenStream, TranslationUnit};
 
@@ -37,13 +37,13 @@ fn enum_<'a>() -> impl Parser<'a, TokenStream<'a>, ItemEnum> {
 fn literal_token<'a>(token: Token<'static>) -> impl Parser<'a, TokenStream<'a>, ()> {
     move |stream: TokenStream<'a>| {
         if stream.len() == 0 {
-            return Err("Empty stream".to_string());
+            return Err(ParserError::new("empty stream".to_string(), stream.span()));
         }
 
         if stream.get(0..1).unwrap()[0] == token {
             Ok(((), stream.slice(1..stream.len())))
         } else {
-            Err("".to_string())
+            Err(ParserError::new("".to_string(), stream.span()))
         }
     }
 }
@@ -51,6 +51,9 @@ fn literal_token<'a>(token: Token<'static>) -> impl Parser<'a, TokenStream<'a>, 
 fn ident<'a>() -> impl Parser<'a, TokenStream<'a>, Ident> {
     move |stream: TokenStream<'a>| match stream.get(0..1).unwrap()[0] {
         Token::Ident(ident) => Ok((Ident(ident.to_string()), stream.slice(1..stream.len()))),
-        _ => Err("expected an identifier".to_string()),
+        _ => Err(ParserError::new(
+            "expected an identifier".to_string(),
+            stream.span(),
+        )),
     }
 }

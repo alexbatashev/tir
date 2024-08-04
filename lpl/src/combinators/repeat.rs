@@ -1,4 +1,4 @@
-use crate::{ParseStream, Parser};
+use crate::{ParseStream, Parser, ParserError};
 
 pub fn one_or_more<'a, P, Input: ParseStream<'a> + 'a, Output>(
     parser: P,
@@ -6,16 +6,16 @@ pub fn one_or_more<'a, P, Input: ParseStream<'a> + 'a, Output>(
 where
     P: Parser<'a, Input, Output>,
 {
-    move |input| {
+    move |input: Input| {
         let mut result = Vec::new();
 
         let mut next_input: Option<Input>;
 
-        if let Ok((first_item, ni)) = parser.parse(input) {
+        if let Ok((first_item, ni)) = parser.parse(input.clone()) {
             next_input = ni;
             result.push(first_item);
         } else {
-            return Err("none found".to_string());
+            return Err(ParserError::new("none found".to_string(), input.span()));
         }
 
         while let Some(ref inp) = next_input {
@@ -94,10 +94,10 @@ where
     P1: Parser<'a, Input, Output>,
     P2: Parser<'a, Input, ()>,
 {
-    move |input| {
+    move |input: Input| {
         let mut result = Vec::new();
 
-        let mut next_input: Option<Input> = Some(input);
+        let mut next_input: Option<Input> = Some(input.clone());
 
         while let Some(ref inp) = next_input.clone() {
             if let Ok((next_item, ni)) = parser.parse(inp.clone()) {
@@ -117,7 +117,10 @@ where
         }
 
         if result.is_empty() {
-            return Err("no items could be parserd".to_string());
+            return Err(ParserError::new(
+                "no items could be parserd".to_string(),
+                input.span(),
+            ));
         }
 
         Ok((result, next_input))

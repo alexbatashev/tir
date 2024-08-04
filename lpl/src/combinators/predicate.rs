@@ -1,4 +1,4 @@
-use crate::{parse_stream::ParseStream, Parser};
+use crate::{parse_stream::ParseStream, Parser, ParserError};
 
 pub fn pred<'a, Input, Output, P, F>(parser: P, predicate: F) -> impl Parser<'a, Input, Output>
 where
@@ -6,12 +6,15 @@ where
     F: Fn(&Output) -> bool,
     P: Parser<'a, Input, Output>,
 {
-    move |input| match parser.parse(input) {
+    move |input: Input| match parser.parse(input.clone()) {
         Ok((value, next_input)) => {
             if predicate(&value) {
                 Ok((value, next_input))
             } else {
-                Err("TODO error message".to_string())
+                Err(ParserError::new(
+                    "TODO error message".to_string(),
+                    input.span(),
+                ))
             }
         }
         Err(err) => Err(err),
