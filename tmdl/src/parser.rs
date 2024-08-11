@@ -1,9 +1,9 @@
 use lpl::combinators::{one_or_more, separated};
-use lpl::{ParseStream, Parser, ParserError};
+use lpl::{ParseStream, Parser, ParserError, Spanned};
 
 use crate::{Ident, Item, ItemEnum, ItemRecord, Token, TokenStream, TranslationUnit};
 
-pub fn parse<'a>(tokens: &'a [Token<'a>]) -> TranslationUnit {
+pub fn parse<'a>(tokens: &'a [Spanned<Token<'a>>]) -> TranslationUnit {
     let token_stream = TokenStream::new(tokens);
 
     let items_parser = one_or_more(item());

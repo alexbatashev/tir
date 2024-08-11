@@ -59,7 +59,13 @@ pub type ParseResult<Input, Output> = Result<(Output, Option<Input>), ParserErro
 pub trait Parser<'a, Input: ParseStream<'a> + 'a, Output> {
     fn parse(&self, input: Input) -> ParseResult<Input, Output>;
 
-    fn with_span(&self, input: Input) -> ParseResult<Input, Spanned<Output>>;
+    fn spanned(self) -> BoxedParser<'a, Input, Spanned<Output>>
+    where
+        Self: Sized + 'a,
+        Output: 'a,
+    {
+        BoxedParser::new(combinators::spanned(self))
+    }
 
     fn map<F, NewOutput>(self, map_fn: F) -> BoxedParser<'a, Input, NewOutput>
     where
@@ -99,38 +105,7 @@ where
     fn parse(&self, input: Input) -> ParseResult<Input, Output> {
         self(input)
     }
-
-    fn with_span(&self, input: Input) -> ParseResult<Input, Spanned<Output>> {
-        let span = input.span();
-        self(input).map(|(output, input)| {
-            let new_span = input
-                .clone()
-                .map_or(None, |input| Some(input.span().get_offset_start()));
-            let final_span = Span::new(span.clone_filename(), span.get_offset_start(), new_span);
-            ((output, final_span), input)
-        })
-    }
 }
-
-// impl<'a, F, Input, Output> Parser<'a, Input, Output> for F
-// where
-//     F: Fn(Input) -> Result<(Output, Option<Input>), String>,
-//     Input: ParseStream<'a> + 'a,
-// {
-//     fn parse(&self, input: Input) -> ParseResult<Input, Output> {
-//         let span = input.span();
-//         self(input).map_err(|message| ParserError::new(message, span))
-//     }
-//
-//     fn with_span(&self, input: Input) -> ParseResult<Input, Spanned<Output>> {
-//         let span = input.span();
-//         self(input).map(|(output, input)| {
-//             let new_span = input.clone().map_or(None, |input| Some(input.span().get_offset_start()));
-//             let final_span = Span::new(span.clone_filename(), span.get_offset_start(), new_span);
-//             ((output, final_span), input)
-//         }).map_err(|message| ParserError::new(message, span))
-//     }
-// }
 
 pub struct BoxedParser<'a, Input, Output>
 where
@@ -155,9 +130,5 @@ impl<'a, Input: ParseStream<'a>, Output> Parser<'a, Input, Output>
 {
     fn parse(&self, input: Input) -> ParseResult<Input, Output> {
         self.parser.parse(input)
-    }
-
-    fn with_span(&self, input: Input) -> ParseResult<Input, Spanned<Output>> {
-        self.parser.with_span(input)
     }
 }

@@ -1,4 +1,4 @@
-use crate::{ParseStream, Parser, ParserError};
+use crate::{ParseStream, Parser, ParserError, Span, Spanned};
 
 pub fn map<'a, P, F, Input, Output1, Output2>(
     parser: P,
@@ -55,3 +55,25 @@ where
             })
     }
 }
+
+pub fn spanned<'a, P, Input, Output>(
+    parser: P,
+) -> impl Parser<'a, Input, Spanned<Output>>
+where
+    Input: ParseStream<'a> + 'a,
+    P: Parser<'a, Input, Output>,
+{
+    move |input: Input| {
+        let span = input.span();
+        parser
+            .parse(input.clone())
+            .map(|(output, next_input)| {
+                let new_span = next_input 
+                    .clone()
+                    .map_or(None, |input| Some(input.span().get_offset_start()));
+                let final_span = Span::new(span.clone_filename(), span.get_offset_start(), new_span);
+                ((output, final_span), next_input)
+            })
+    }
+}
+
