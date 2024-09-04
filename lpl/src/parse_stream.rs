@@ -1,9 +1,14 @@
-use std::ops::{Range, RangeBounds};
+use std::{
+    any::Any,
+    ops::{Range, RangeBounds},
+    rc::Rc,
+};
 
 use crate::Span;
 
 pub trait ParseStream<'a>: Clone {
     type Slice;
+    type Extra;
 
     fn get(&self, range: Range<usize>) -> Option<Self::Slice>;
     fn slice(&self, range: Range<usize>) -> Option<Self>
@@ -12,6 +17,9 @@ pub trait ParseStream<'a>: Clone {
     fn len(&self) -> usize;
 
     fn span(&self) -> Span;
+
+    fn set_extra(&mut self, extra: Self::Extra);
+    fn get_extra(&self) -> Option<&Self::Extra>;
 
     fn is_string_like(&self) -> bool {
         false
@@ -30,10 +38,12 @@ pub trait ParseStream<'a>: Clone {
 pub struct StrStream<'a> {
     string: &'a str,
     offset: usize,
+    extra: Option<Rc<dyn Any>>,
 }
 
 impl<'a> ParseStream<'a> for StrStream<'a> {
     type Slice = &'a str;
+    type Extra = ();
 
     fn get(&self, range: Range<usize>) -> Option<Self::Slice> {
         self.string.get(range)
@@ -45,7 +55,7 @@ impl<'a> ParseStream<'a> for StrStream<'a> {
             std::ops::Bound::Excluded(bound) => self.offset + bound + 1,
             std::ops::Bound::Unbounded => self.offset,
         };
-        self.string.get(range).map(|string| Self { string, offset })
+        self.string.get(range).map(|string| Self { string, offset, extra: self.extra.clone() })
     }
 
     fn len(&self) -> usize {
@@ -67,10 +77,18 @@ impl<'a> ParseStream<'a> for StrStream<'a> {
     fn span(&self) -> Span {
         Span::unbound(None, self.offset)
     }
+
+    fn set_extra(&mut self, _extra: Self::Extra) {
+        unimplemented!("default string stream does not support attached extra info")
+    }
+
+    fn get_extra(&self) -> Option<&Self::Extra> {
+        unimplemented!("default string stream does not support attached extra info")
+    }
 }
 
 impl<'a> From<&'a str> for StrStream<'a> {
     fn from(string: &'a str) -> Self {
-        StrStream { string, offset: 0 }
+        StrStream { string, offset: 0, extra: None }
     }
 }
