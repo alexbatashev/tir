@@ -9,6 +9,7 @@ use crate::Span;
 pub trait ParseStream<'a>: Clone {
     type Slice;
     type Extra;
+    type Item;
 
     fn get(&self, range: Range<usize>) -> Option<Self::Slice>;
     fn slice(&self, range: Range<usize>) -> Option<Self>
@@ -20,6 +21,8 @@ pub trait ParseStream<'a>: Clone {
 
     fn set_extra(&mut self, extra: Self::Extra);
     fn get_extra(&self) -> Option<&Self::Extra>;
+
+    fn peek(&self) -> Option<Self::Item>;
 
     fn is_string_like(&self) -> bool {
         false
@@ -44,6 +47,7 @@ pub struct StrStream<'a> {
 impl<'a> ParseStream<'a> for StrStream<'a> {
     type Slice = &'a str;
     type Extra = ();
+    type Item = char;
 
     fn get(&self, range: Range<usize>) -> Option<Self::Slice> {
         self.string.get(range)
@@ -84,6 +88,10 @@ impl<'a> ParseStream<'a> for StrStream<'a> {
 
     fn get_extra(&self) -> Option<&Self::Extra> {
         unimplemented!("default string stream does not support attached extra info")
+    }
+
+    fn peek(&self) -> Option<Self::Item> {
+        self.string.chars().next()
     }
 }
 

@@ -8,7 +8,7 @@ pub use parse_stream::*;
 
 use std::sync::Arc;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Span {
     filename: Option<Arc<String>>,
     offset_start: usize,
@@ -104,6 +104,16 @@ pub trait Parser<'a, Input: ParseStream<'a> + 'a, Output> {
         P2: Parser<'a, Input, Output2> + 'a,
     {
         BoxedParser::new(combinators::and_then(self, parser2))
+    }
+
+    fn try_map<F, NewOutput>(self, map_fn: F) -> BoxedParser<'a, Input, NewOutput>
+    where
+        Self: Sized + 'a,
+        Output: 'a,
+        NewOutput: 'a,
+        F: Fn(Output, Span) -> Result<NewOutput, ParserError> + 'a,
+    {
+        BoxedParser::new(combinators::try_map(self, map_fn))
     }
 }
 
