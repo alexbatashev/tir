@@ -156,6 +156,50 @@ pub struct ITypeBuilder {
     instr: u32,
 }
 
+pub struct UTypeInstr {
+    instr: u32,
+}
+
+impl UTypeInstr {
+    pub fn from_bytes(bytes: &[u8; 4]) -> Self {
+        UTypeInstr {
+            instr: u32::from_le_bytes(*bytes),
+        }
+    }
+
+    pub fn builder() -> UTypeBuilder {
+        UTypeBuilder::default()
+    }
+
+    pub fn to_bytes(&self) -> [u8; 4] {
+        self.instr.to_le_bytes()
+    }
+    
+    pub fn opcode(&self) -> u8 {
+        (self.instr & 0b1111111) as u8
+    }
+
+    pub fn rd(&self) -> u8 {
+        ((self.instr & (0b11111 << 7)) >> 7) as u8
+    }
+    
+    pub fn imm(&self) -> u32 {
+        (self.instr & (0b11111111111111111111 << 12)) >> 12
+    }
+}
+
+#[derive(Default)]
+pub struct UTypeBuilder {
+    instr: u32,
+}
+
+impl Debug for UTypeInstr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let string = format!("{:#032b}: opcode = {:#07b}, rd = {:#05b}, imm = {:#020b}", self.instr, self.opcode(), self.rd(), self.imm());
+        f.write_str(&string)
+    }
+}
+
 impl ITypeBuilder {
     pub fn opcode(mut self, opcode: u8) -> Self {
         assert!(opcode <= 0b1111111);
@@ -292,6 +336,30 @@ impl STypeBuilder {
 
     pub fn build(self) -> STypeInstr {
         STypeInstr { instr: self.instr }
+    }
+}
+
+impl UTypeBuilder {
+    pub fn opcode(mut self, opcode: u8) -> Self {
+        assert!(opcode <= 0b1111111);
+        self.instr += opcode as u32;
+        self
+    }
+    
+    pub fn rd(mut self, rd: u8) -> Self {
+        assert!(rd <= 0b11111);
+        self.instr += (rd as u32) << 7;
+        self
+    }
+    
+    pub fn imm(mut self, imm: u32) -> Self {
+        assert!(imm <= 0b11111111111111111111);
+        self.instr += imm << 12;
+        self
+    }
+
+    pub fn build(self) -> UTypeInstr {
+        UTypeInstr { instr: self.instr }
     }
 }
 

@@ -98,6 +98,7 @@ pub trait RegFile {
 #[derive(Debug)]
 pub struct RISCVRegFile {
     registers: Vec<Value>,
+    virtual_registers: Vec<Value>,
     base_width: u8,
 }
 
@@ -106,8 +107,12 @@ impl RISCVRegFile {
         let mut registers = vec![];
         registers.resize(32, Value::default());
 
+        let mut virtual_registers = vec![];
+        virtual_registers.resize(32, Value::default());
+
         Rc::new(RefCell::new(Self {
             registers,
+            virtual_registers,
             base_width: 8,
         }))
     }
@@ -119,19 +124,26 @@ impl RegFile for RISCVRegFile {
     }
 
     fn read_register(&self, reg_name: &str) -> Value {
-        let reg = tir_riscv::register_parser.parse(reg_name).unwrap();
-        self.registers[tir_riscv::get_reg_num(&reg)].clone()
+        if reg_name.starts_with("v") {
+            let reg = usize::from_str_radix(&reg_name[1..], 10).unwrap();
+            self.virtual_registers[reg].clone()
+        } else {
+            let reg = tir_riscv::register_parser.parse(reg_name).unwrap();
+            self.registers[tir_riscv::get_reg_num(&reg)].clone()
+        }
     }
 
     fn write_register(&mut self, reg_name: &str, value: &Value) {
-        let reg = tir_riscv::register_parser.parse(reg_name).unwrap();
-
-        // hardwired zero
-        if let tir_riscv::Register::X0 = reg {
-            return;
+        if reg_name.starts_with("v") {
+            let reg = usize::from_str_radix(&reg_name[1..], 10).unwrap();
+            self.virtual_registers[reg] = value.clone();
+        } else {
+            let reg = tir_riscv::register_parser.parse(reg_name).unwrap();
+            if let tir_riscv::Register::X0 = reg {
+                return;
+            }
+            self.registers[tir_riscv::get_reg_num(&reg)] = value.clone();
         }
-
-        self.registers[tir_riscv::get_reg_num(&reg)] = value.clone();
     }
 
     fn dump(&self) -> String {

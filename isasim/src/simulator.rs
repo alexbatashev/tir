@@ -17,10 +17,10 @@ enum Either<L, R> {
 
 fn exec_alu_op_impl<T>(
     rs1: &str,
-    rhs: Either<String, i16>,
+    rhs: Either<String, i32>,
     rd: &str,
     get_bits: impl Fn(Value) -> T,
-    imm_cvt: impl Fn(i16) -> T,
+    imm_cvt: impl Fn(i32) -> T,
     op: impl Fn(T, T) -> T,
     reg_file: &Rc<RefCell<dyn RegFile>>,
 ) where
@@ -56,7 +56,7 @@ macro_rules! exec_alu {
                 let rs2: String = rs2.try_into().expect("should have been validated");
                 Either::Left(rs2)
             } else {
-                let imm: i16 = op
+                let imm: i32 = op
                     .borrow()
                     .get_imm_attr()
                     .expect("Either rs2 or imm must be present")
@@ -71,14 +71,14 @@ macro_rules! exec_alu {
             match width {
                 64 => {
                     let get_bits = |value: Value| value.get_lower64();
-                    let imm_cvt = |imm: i16| imm as u64;
+                    let imm_cvt = |imm: i32| imm as u64;
                     let op_impl = |a: u64, b: u64| a $op b;
 
                     exec_alu_op_impl(&rs1, rhs, &rd, get_bits, imm_cvt, op_impl, reg_file);
                 },
                 32 => {
                     let get_bits = |value: Value| value.get_lower32();
-                    let imm_cvt = |imm: i16| imm as u32;
+                    let imm_cvt = |imm: i32| imm as u32;
                     let op_impl = |a: u32, b: u32| a $op b;
 
                     exec_alu_op_impl(&rs1, rhs, &rd, get_bits, imm_cvt, op_impl, reg_file);
@@ -150,6 +150,7 @@ fn execute_store(
     reg_file: &Rc<RefCell<dyn RegFile>>,
     mem: &Rc<RefCell<MemoryMap>>,
 ) -> Result<(), SimErr> {
+    println!("Store");
     let base_reg: String = op
         .borrow()
         .get_base_addr_attr()
@@ -160,7 +161,9 @@ fn execute_store(
     let base_addr = reg_file.borrow().read_register(&base_reg).get_lower64() as u64;
     let offset: i16 = op.borrow().get_offset_attr().try_into().expect("");
 
+    println!("offset = {}", offset);
     let addr = (base_addr as i64 + offset as i64) as u64;
+    println!("addr = {}", addr);
     let width: i32 = op.borrow().get_width_attr().try_into().expect("");
 
     let src: String = op.borrow().get_src_attr().clone().try_into().expect("");

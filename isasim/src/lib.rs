@@ -54,6 +54,11 @@ pub fn sim_main(
     if let Some(a) = config.map_faults_to_address {
         mem.borrow_mut().set_map_faults_to_address(a);
     }
+    if let Some(unaligned) = config.prohibit_unaligned_access {
+        if unaligned {
+            mem.borrow_mut().prohibit_unaligned_access();
+        }
+    }
 
     for (name, value) in &config.register_state {
         reg_file.borrow_mut().write_register(&name, &value.into());
@@ -96,6 +101,7 @@ pub fn sim_main(
     let max_repeat = config.repeat.unwrap_or(1);
 
     for _ in 0..max_repeat {
+        println!("RUN");
         simulator.run(&reg_file, &mem)?;
     }
 

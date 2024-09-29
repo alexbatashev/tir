@@ -1,5 +1,6 @@
 use crate::utils::ITypeInstr;
 use crate::utils::RTypeInstr;
+use crate::utils::UTypeInstr;
 use crate::{assemble_reg, disassemble_gpr};
 use crate::{register_parser, Register};
 use tir_backend::isema;
@@ -161,11 +162,11 @@ macro_rules! alu_imm_op_base {
                 let comma1 = one_of(|t| t == AsmToken::Comma).void();
                 let comma2 = one_of(|t| t == AsmToken::Comma).void();
                 let imm = one_of(|t| matches!(t, AsmToken::Number(_))).map(|t| match t {
-                    AsmToken::Number(num) => num as i16,
+                    AsmToken::Number(num) => num as i32,
                     _ => unreachable!("Why is this not a number?"),
                 });
 
-                let args: (Vec<Register>, i16) = preceded(
+                let args: (Vec<Register>, i32) = preceded(
                     opcode,
                     separated_pair(separated(2, reg, comma1), comma2, imm),
                 )
@@ -266,6 +267,112 @@ isema::def! {dialect = riscv, OrImmOp => tir_backend::isema::OrOp{rd = get_rd, r
 isema::def! {dialect = riscv, SllImmOp => tir_backend::isema::SllOp{rd = get_rd, rs1 = get_rs1, imm = get_imm_attr, width = get_op_width}}
 isema::def! {dialect = riscv, SrlImmOp => tir_backend::isema::SrlOp{rd = get_rd, rs1 = get_rs1, imm = get_imm_attr, width = get_op_width}}
 isema::def! {dialect = riscv, SraImmOp => tir_backend::isema::SraOp{rd = get_rd, rs1 = get_rs1, imm = get_imm_attr, width = get_op_width}}
+
+#[derive(Op, OpAssembly, OpValidator)]
+#[operation(name = "lui", dialect = riscv, known_attrs(imm: IntegerAttr))]
+pub struct LUIOp {
+    #[operand]
+    rd: Register,
+    r#impl: OpImpl,
+}
+
+impl LUIOp {
+    pub fn get_op_width(&self) -> u8 {
+        64
+    }
+}
+
+impl BinaryEmittable for LUIOp {
+    fn encode(
+        &self,
+        _target_opts: &tir_backend::TargetOptions,
+        stream: &mut Box<dyn tir_backend::BinaryStream>,
+    ) -> tir_core::Result<()> {
+        let instr = UTypeInstr::builder()
+            .opcode(0b0110111)
+            .rd(assemble_reg(self.get_rd())?)
+            .imm(
+                self.get_imm_attr()
+                    .try_into()
+                    .map_err(|_| tir_core::Error::Unknown)?,
+            )
+            .build();
+        stream.write(&instr.to_bytes());
+        Ok(())
+    }
+}
+
+impl ISAParser for LUIOp {
+    fn parse(input: &mut TokenStream<'_, '_>) -> AsmPResult<()> {
+        let opcode = one_of(|t| {
+            if let AsmToken::Ident(name) = t {
+                name == "lui" || name == "LUI"
+            } else {
+                false
+            }
+        });
+        let reg = one_of(|t| matches!(t, AsmToken::Ident(_)))
+            .map(|t| {
+                if let AsmToken::Ident(name) = t {
+                    name
+                } else {
+                    unreachable!();
+                }
+            })
+            .and_then(register_parser);
+        let comma = one_of(|t| t == AsmToken::Comma).void();
+        let imm = one_of(|t| matches!(t, AsmToken::Number(_))).map(|t| match t {
+            AsmToken::Number(num) => num as i32,
+            _ => unreachable!("Why is this not a number?"),
+        });
+
+        let args: (Register, i32) = preceded(
+            opcode,
+            separated_pair(reg, comma, imm),
+        )
+        .parse_next(input)?;
+        let (rd, imm) = (args.0, args.1);
+
+        let builder = input.get_builder();
+        let context = builder.get_context();
+        let op = LUIOp::builder(&context)
+            .imm(imm.into())
+            .rd(rd)
+            .build();
+        builder.insert(&op);
+
+        Ok(())
+    }
+}
+
+impl WithISema for LUIOp {
+    fn convert(&self, builder: &tir_core::OpBuilder) {
+        let context = builder.get_context();
+        let container = isema::CompInstrOp::builder(&context).build();
+        builder.insert(&container);
+        builder.set_insertion_point_to_start(container.borrow().get_body());
+        let load = isema::AddOp::builder(&context)
+            .rd("v0".to_owned().into())
+            .rs1(Register::X0.into())
+            .imm(self.get_imm_attr().try_into().unwrap())
+            .build();
+        builder.insert(&load);
+        let shift = isema::SllOp::builder(&context)
+            .rd("v0".to_owned().into())
+            .rs1("v0".to_owned().into())
+            .imm(12.into())
+            .build();
+        builder.insert(&shift);
+        let store = isema::AddOp::builder(&context)
+            .rd(self.get_rd().into())
+            .rs1(self.get_rd().into())
+            .rs2("v0".to_owned().into())
+            .build();
+        builder.insert(&store);
+        let end = isema::CompInstrEndOp::builder(&context).build();
+        builder.insert(&end);
+    }
+}
 
 #[cfg(test)]
 mod tests {

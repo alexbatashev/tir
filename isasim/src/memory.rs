@@ -77,7 +77,7 @@ impl MemoryMap {
     }
 
     pub fn store(&mut self, address: u64, data: &[u8]) -> Result<(), SimErr> {
-        if address % data.len() as u64 != 0 && !self.unaligned_access {
+        if (address % data.len() as u64 != 0) && !self.unaligned_access {
             return Err(SimErr::UnalignedAccess(address, data.len()));
         }
 
