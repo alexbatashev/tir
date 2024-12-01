@@ -8,6 +8,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let compiler = Compiler::builder()
         .action(Action::EmitRust)
         .add_input("defs/registers.tmdl")
+        .add_input("defs/instr_formats.tmdl")
+        .add_input("defs/alu.tmdl")
         .output(tmdl::OutputKind::Batch(
             out_dir.to_str().unwrap().to_string(),
         ))

@@ -1,70 +1,76 @@
 use quote::{format_ident, quote};
-use std::{collections::HashMap, io::Write};
+use std::{collections::HashMap, io::Write, iter::zip};
 
 use crate::ast::{self, AttrListOwner};
 
 pub fn emit_rust<'a>(
-    buf: &mut dyn Write,
-    ast: &'a ast::SourceFile,
+    bufs: &mut [Box<dyn Write>],
+    ast: &'a Vec<ast::SourceFile>,
     dialect_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut items = HashMap::<String, &'a ast::Item>::new();
     let mut impls = HashMap::<String, Vec<&'a ast::Item>>::new();
 
-    for i in ast.items() {
-        match i {
-            ast::Item::AsmDecl(decl) => {
-                let name = decl.target_name();
-                let vec = if impls.contains_key(&name) {
-                    impls.get_mut(&name).unwrap()
-                } else {
-                    let vec = vec![];
-                    impls.insert(name.clone(), vec);
-                    impls.get_mut(&name).unwrap()
-                };
-                vec.push(i);
-            }
-            ast::Item::EncodingDecl(decl) => {
-                let name = decl.target_name();
-                let vec = if impls.contains_key(&name) {
-                    impls.get_mut(&name).unwrap()
-                } else {
-                    let vec = vec![];
-                    impls.insert(name.clone(), vec);
-                    impls.get_mut(&name).unwrap()
-                };
-                vec.push(i);
-            }
-            ast::Item::ImplDecl(decl) => {
-                let name = decl.target_name();
-                let vec = if impls.contains_key(&name) {
-                    impls.get_mut(&name).unwrap()
-                } else {
-                    let vec = vec![];
-                    impls.insert(name.clone(), vec);
-                    impls.get_mut(&name).unwrap()
-                };
-                vec.push(i);
-            }
-            _ => {
-                items.insert(i.name(), i);
+    for source in ast {
+        for i in source.items() {
+            match i {
+                ast::Item::AsmDecl(decl) => {
+                    let name = decl.target_name();
+                    let vec = if impls.contains_key(&name) {
+                        impls.get_mut(&name).unwrap()
+                    } else {
+                        let vec = vec![];
+                        impls.insert(name.clone(), vec);
+                        impls.get_mut(&name).unwrap()
+                    };
+                    vec.push(i);
+                }
+                ast::Item::EncodingDecl(decl) => {
+                    let name = decl.target_name();
+                    let vec = if impls.contains_key(&name) {
+                        impls.get_mut(&name).unwrap()
+                    } else {
+                        let vec = vec![];
+                        impls.insert(name.clone(), vec);
+                        impls.get_mut(&name).unwrap()
+                    };
+                    vec.push(i);
+                }
+                ast::Item::ImplDecl(decl) => {
+                    let name = decl.target_name();
+                    let vec = if impls.contains_key(&name) {
+                        impls.get_mut(&name).unwrap()
+                    } else {
+                        let vec = vec![];
+                        impls.insert(name.clone(), vec);
+                        impls.get_mut(&name).unwrap()
+                    };
+                    vec.push(i);
+                }
+                _ => {
+                    items.insert(i.name(), i);
+                }
             }
         }
     }
 
-    let rust_items: Vec<_> = ast
-        .items()
-        .filter_map(|item| match item {
-            ast::Item::FlagDecl(ref flag) => Some(generate_flag(flag)),
-            ast::Item::EnumDecl(ref enum_) => Some(generate_enum(&impls, enum_)),
-            ast::Item::InstrDecl(ref instr) => Some(generate_instr(&items, instr, dialect_name)),
-            _ => None,
-        })
-        .collect();
+    for (source, buf) in zip(ast, bufs) {
+        let rust_items: Vec<_> = source
+            .items()
+            .filter_map(|item| match item {
+                ast::Item::FlagDecl(ref flag) => Some(generate_flag(flag)),
+                ast::Item::EnumDecl(ref enum_) => Some(generate_enum(&impls, enum_)),
+                ast::Item::InstrDecl(ref instr) => {
+                    Some(generate_instr(&items, instr, dialect_name))
+                }
+                _ => None,
+            })
+            .collect();
 
-    let file: syn::File = syn::parse2(quote! { #(#rust_items)* }).unwrap();
+        let file: syn::File = syn::parse2(quote! { #(#rust_items)* }).unwrap();
 
-    writeln!(buf, "{}", prettyplease::unparse(&file))?;
+        writeln!(buf, "{}", prettyplease::unparse(&file))?;
+    }
 
     Ok(())
 }
@@ -255,6 +261,15 @@ fn generate_enum<'a>(
     }
 }
 
+fn capitalized(string: String) -> String {
+    let capitalized_name = string.to_lowercase();
+    let mut chars = capitalized_name.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(f) => f.to_uppercase().collect::<String>() + chars.as_str(),
+    }
+}
+
 fn generate_instr<'a>(
     other_decls: &'a HashMap<String, &'a ast::Item>,
     decl: &ast::InstrDecl,
@@ -282,7 +297,7 @@ fn generate_instr<'a>(
         }
     }
 
-    let name = format_ident!("{}", decl.name());
+    let name = format_ident!("{}Op", capitalized(decl.name()));
     let dialect_name = format_ident!("{}", dialect_name);
     let op_name = decl.name().to_lowercase();
 
@@ -292,6 +307,22 @@ fn generate_instr<'a>(
         pub struct #name {
             #(#fields),*,
             r#impl: OpImpl,
+        }
+
+        impl tir_backend::ISAParser for #name {
+            fn parse(input: tir_backend::TokenStream) -> lpl::ParseResult<tir_backend::TokenStream, ()> {
+                todo!()
+            }
+        }
+
+        impl tir_backend::BinaryEmittable for #name {
+            fn encode(
+                &self,
+                _target_opts: &tir_backend::TargetOptions,
+                stream: &mut Box<dyn tir_backend::BinaryStream>,
+            ) -> tir_core::Result<()> {
+                todo!()
+            }
         }
     }
 }

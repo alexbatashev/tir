@@ -1,10 +1,11 @@
 use std::io::Write;
+use std::iter::zip;
 use std::path::PathBuf;
 use std::{fs, io};
 
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, ValueEnum};
 
-use crate::{ast, emit_rust, lex, parse, SyntaxNodeData};
+use crate::{ast, check_tmdl_sema, emit_rust, lex, parse, SyntaxNodeData};
 
 pub struct Compiler {
     action: Action,
@@ -27,7 +28,7 @@ pub enum OutputKind {
     Stdout,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq)]
 pub enum Action {
     EmitTokens,
     EmitSyntaxTree,
@@ -57,6 +58,9 @@ impl Compiler {
     }
 
     pub fn compile(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let mut sources = vec![];
+        let mut outputs = vec![];
+
         for input in &self.inputs {
             let mut output: Box<dyn Write> = match &self.output {
                 OutputKind::Stdout => Box::new(io::BufWriter::new(io::stdout())),
@@ -85,43 +89,44 @@ impl Compiler {
 
             let source = std::fs::read_to_string(input)?;
 
-            match &self.action {
-                Action::EmitTokens => {
-                    let tokens = lex(&source).unwrap();
-                    writeln!(output, "{:#?}", tokens)?;
-                }
-                Action::EmitSyntaxTree => {
-                    let tokens = lex(&source).unwrap();
-                    let root = parse(&tokens);
-                    writeln!(output, "{:#?}", root)?;
-                }
-                Action::EmitAst => {
-                    let tokens = lex(&source).unwrap();
-                    let root = parse(&tokens);
-                    let red_root = SyntaxNodeData::new(root);
-                    let translation_unit = ast::SourceFile::new(red_root);
-                    writeln!(output, "{:#?}", translation_unit)?;
-                }
-                Action::EmitRust => {
-                    if self.dialect.is_none() {
-                        let mut cmd = Cli::command();
-                        cmd.error(
-                            clap::error::ErrorKind::ArgumentConflict,
-                            "--dialect must be specified with --action=emit-rust",
-                        )
-                        .exit();
-                    }
-                    let tokens = lex(&source).unwrap();
-                    let root = parse(&tokens);
-                    let red_root = SyntaxNodeData::new(root);
-                    let translation_unit = ast::SourceFile::new(red_root);
-                    emit_rust(
-                        &mut output,
-                        &translation_unit.unwrap(),
-                        self.dialect.as_ref().unwrap(),
-                    )?;
-                }
+            let tokens = lex(&source).unwrap();
+            if self.action == Action::EmitTokens {
+                writeln!(output, "{:#?}", tokens)?;
+                continue;
             }
+
+            let root = parse(&tokens);
+            if self.action == Action::EmitSyntaxTree {
+                writeln!(output, "{:#?}", root)?;
+                continue;
+            }
+
+            let red_root = SyntaxNodeData::new(root);
+            let translation_unit = ast::SourceFile::new(red_root);
+
+            sources.push(translation_unit.unwrap());
+            outputs.push(output);
+        }
+
+        // TODO handle errors
+        let (ast, _) = check_tmdl_sema(sources);
+        if self.action == Action::EmitAst {
+            for (ast, out) in zip(ast, outputs.iter_mut()) {
+                writeln!(out, "{:#?}", ast)?;
+            }
+            return Ok(());
+        }
+
+        if self.action == Action::EmitRust {
+            if self.dialect.is_none() {
+                let mut cmd = Cli::command();
+                cmd.error(
+                    clap::error::ErrorKind::ArgumentConflict,
+                    "--dialect must be specified with --action=emit-rust",
+                )
+                .exit();
+            }
+            emit_rust(outputs.as_mut_slice(), &ast, self.dialect.as_ref().unwrap())?;
         }
 
         Ok(())

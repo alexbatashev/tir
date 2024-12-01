@@ -1,0 +1,25 @@
+instr_template ALUInstr<$funct7: bits<7>, $funct3: bits<3>, $mnemonic: str> 
+  : RInstr<$funct7, $funct3, $mnemonic, 0b0110011> {}
+
+instr_template IALUInstr<$funct3: bits<3>, $mnemonic: str> 
+  : IInstr<$funct3, $mnemonic, 0b0010011> {}
+
+instr ADD : ALUInstr<0b0000000, 0b000, "add">;
+instr SUB : ALUInstr<0b0100000, 0b000, "sub">;
+instr SLL : ALUInstr<0b0000000, 0b001, "sll">;
+instr SLT : ALUInstr<0b0000000, 0b010, "slt">;
+instr SLTU : ALUInstr<0b0000000, 0b011, "sltu">;
+instr XOR : ALUInstr<0b0000000, 0b100, "xor">;
+instr SRL : ALUInstr<0b0000000, 0b101, "srl">;
+instr SRA : ALUInstr<0b0100000, 0b101, "sra">;
+instr OR : ALUInstr<0b0000000, 0b110, "or">;
+instr AND : ALUInstr<0b0000000, 0b111, "and">;
+
+instr ADDI : IALUInstr<0b000, "addi">;
+instr SLTI : IALUInstr<0b010, "slt">;
+instr SLTIU : IALUInstr<0b011, "sltiu">;
+instr XORI : IALUInstr<0b100, "xori">;
+instr ORI : IALUInstr<0b110, "ori">;
+instr ANDI : IALUInstr<0b111, "andi">;
+
+// FIXME add SLLI, SRLI, SRAI
