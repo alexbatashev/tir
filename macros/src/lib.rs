@@ -627,6 +627,12 @@ pub fn derive_op(input: TokenStream) -> TokenStream {
     .into()
 }
 
+#[proc_macro_attribute]
+pub fn operation(args: TokenStream, input: TokenStream) -> TokenStream {
+    build_operation(args, input)
+    // todo!("args: {:?}\ninput: {:?}", args, input)
+}
+
 #[proc_macro_derive(OpAssembly)]
 pub fn derive_op_assembly(input: TokenStream) -> TokenStream {
     let op = parse_macro_input!(input as syn::DeriveInput);

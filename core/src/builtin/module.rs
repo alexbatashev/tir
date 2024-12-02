@@ -4,6 +4,7 @@ use crate::{
     IRFormatter, IRStrStream, Op, OpAssembly, OpImpl, OpRef, Printable, RegionRef, Terminator,
 };
 use lpl::{ParseResult, ParseStream, Parser};
+use tir_macros::operation;
 use tir_macros::{op_implements, Op, OpAssembly, OpValidator};
 
 use crate as tir_core;

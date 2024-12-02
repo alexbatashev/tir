@@ -2,10 +2,12 @@
 #![allow(clippy::manual_unwrap_or_default)]
 
 use darling::{FromDeriveInput, FromField, FromMeta};
-use quote::{format_ident, quote};
+use proc_macro::TokenStream;
+use quote::{format_ident, quote, quote_spanned};
 use syn::parse::{Parse, ParseStream, Parser};
 use syn::punctuated::Punctuated;
-use syn::{Path, Token, Type};
+use syn::spanned::Spanned;
+use syn::{parse_macro_input, Item, ItemStruct, Path, Token, Type};
 
 #[derive(Debug)]
 pub struct OpAttrs {
@@ -162,4 +164,54 @@ pub fn build_attr_accessors(attrs: &[Attr]) -> proc_macro2::TokenStream {
     quote! {
         #(#attr_accessors)*
     }
+}
+
+fn build_inner_struct(op: &ItemStruct) -> proc_macro2::TokenStream {
+    let name = &op.ident;
+    let span = op.span();
+
+    let inner_name = format_ident!("{}Inner", name);
+
+    let fields = op.fields.iter().map(|f| {
+        let name = f.ident.as_ref().unwrap();
+        let ty = &f.ty;
+        let span = f.span();
+
+        quote_spanned! {span =>
+            #name: #ty
+        }
+    });
+
+    quote_spanned! {span=>
+        pub struct #inner_name {
+            #(#fields),*
+        }
+    }
+}
+
+fn build_wrapper_struct(op: &ItemStruct) -> proc_macro2::TokenStream {
+    let span = op.span();
+
+    let name = &op.ident;
+    let inner_name = format_ident!("{}Inner", name);
+
+    quote_spanned! {span=>
+        pub struct #name {
+            context: tir_core::ContextWRef,
+            inner: #inner_name
+        }
+    }
+}
+
+pub fn build_operation(args: TokenStream, input: TokenStream) -> TokenStream {
+    let op_struct = parse_macro_input!(input as ItemStruct);
+
+    let inner = build_inner_struct(&op_struct);
+    let wrapper = build_wrapper_struct(&op_struct);
+
+    quote! {
+        #wrapper
+        #inner
+    }
+    .into()
 }

@@ -6,6 +6,7 @@ mod common_traits;
 mod context;
 mod dialect;
 mod error;
+pub mod green;
 mod operation;
 mod pass_manager;
 mod region;

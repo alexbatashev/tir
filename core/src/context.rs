@@ -6,7 +6,7 @@ use std::fmt::Debug;
 use std::rc::Rc;
 use std::sync::{Arc, RwLock, Weak};
 
-use crate::{builtin, Dialect, Op, OpRef};
+use crate::{builtin, green, Dialect, Op, OpRef};
 
 pub type ContextRef = Arc<Context>;
 pub type ContextWRef = Weak<Context>;
@@ -26,6 +26,7 @@ impl Default for AllocId {
 struct ContextImpl {
     dialects: Vec<Arc<Dialect>>,
     allocated_operations: HashMap<AllocId, OpRef>,
+    nodes: HashMap<green::NodeId, green::Node>,
 }
 
 impl ContextImpl {
@@ -34,6 +35,7 @@ impl ContextImpl {
         let mut r#impl = ContextImpl {
             dialects: vec![],
             allocated_operations: HashMap::new(),
+            nodes: HashMap::new(),
         };
         r#impl.add_dialect(builtin_dialect);
         RwLock::new(r#impl)
