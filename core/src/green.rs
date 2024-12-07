@@ -42,4 +42,8 @@ impl Node {
     pub fn kind(&self) -> NodeKind {
         self.kind
     }
+
+    pub fn children(&self) -> &[NodeId] {
+        &self.children
+    }
 }
