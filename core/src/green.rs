@@ -1,8 +1,11 @@
 use smallvec::SmallVec;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(transparent)]
 pub struct NodeId(u32);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
 pub enum NodeKind {
     Region,
     Block,
@@ -12,6 +15,7 @@ pub enum NodeKind {
 pub type NodeCaster = fn(*mut ()) -> ();
 
 /// A green node is a type-erased immutable storage that holds the internal data of each operation
+#[derive(Debug, Clone)]
 pub struct Node {
     id: NodeId,
     kind: NodeKind,
@@ -31,5 +35,11 @@ impl NodeId {
 impl Default for NodeId {
     fn default() -> Self {
         Self::invalid()
+    }
+}
+
+impl Node {
+    pub fn kind(&self) -> NodeKind {
+        self.kind
     }
 }

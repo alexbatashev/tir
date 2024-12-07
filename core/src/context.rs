@@ -6,6 +6,7 @@ use std::fmt::Debug;
 use std::rc::Rc;
 use std::sync::{Arc, RwLock, Weak};
 
+use crate::green::NodeId;
 use crate::{builtin, green, Dialect, Op, OpRef};
 
 pub type ContextRef = Arc<Context>;
@@ -85,6 +86,10 @@ impl ContextImpl {
     pub fn get_op(&self, id: AllocId) -> Option<OpRef> {
         self.allocated_operations.get(&id).cloned()
     }
+
+    pub fn get_node(&self, id: NodeId) -> Option<green::Node> {
+        self.nodes.get(&id).cloned()
+    }
 }
 
 /// Context holds all the resources required for building an IR
@@ -150,6 +155,12 @@ impl Context {
     pub fn get_op(&self, id: AllocId) -> Option<OpRef> {
         let lock = self.r#impl.read().unwrap();
         lock.get_op(id)
+    }
+
+    /// Find green node in the current context and return a shared reference
+    pub fn get_node(&self, id: NodeId) -> Option<green::Node> {
+        let lock = self.r#impl.read().unwrap();
+        lock.get_node(id)
     }
 }
 

@@ -1,5 +1,6 @@
 mod assembly;
 mod attrs;
+mod block;
 mod builder;
 pub mod builtin;
 mod common_traits;
