@@ -19,6 +19,7 @@ pub type NodeCaster = fn(*mut ()) -> ();
 pub struct Node {
     id: NodeId,
     kind: NodeKind,
+    parent: Option<NodeId>,
     // Data and caster can only be set for NodeKind::Operation
     data: Option<*mut ()>,
     caster: Option<NodeCaster>,

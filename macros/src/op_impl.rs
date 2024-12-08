@@ -7,7 +7,7 @@ use quote::{format_ident, quote, quote_spanned};
 use syn::parse::{Parse, ParseStream, Parser};
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
-use syn::{parse_macro_input, Item, ItemStruct, Path, Token, Type};
+use syn::{parse_macro_input, ItemStruct, Path, Token, Type};
 
 #[derive(Debug)]
 pub struct OpAttrs {
@@ -189,6 +189,49 @@ fn build_inner_struct(op: &ItemStruct) -> proc_macro2::TokenStream {
     }
 }
 
+fn derive_op_trait(op: &ItemStruct) -> proc_macro2::TokenStream {
+    let name = &op.ident;
+    let span = op.ident.span();
+
+    quote_spanned! {span =>
+        impl tir_core::Op for #name {
+            fn get_operation_name(&self) -> &'static str { todo!() }
+            fn get_attrs(&self) -> &std::collections::HashMap<String, tir_core::Attr> { todo!() }
+            fn add_attrs(&mut self, attrs: &std::collections::HashMap<String, tir_core::Attr>) { todo!() }
+            fn get_context(&self) -> tir_core::ContextRef { todo!() }
+            fn get_parent_region(&self) -> Option<tir_core::RegionRef> { todo!() }
+            fn set_parent_region(&mut self, region: tir_core::RegionWRef) { todo!() }
+            fn get_return_type(&self) -> Option<tir_core::Type> { todo!() }
+            fn get_return_value(&self) -> Option<tir_core::Value> { todo!() }
+
+            fn set_alloc_id(&mut self, id: tir_core::AllocId) { todo!() }
+            fn get_alloc_id(&self) -> tir_core::AllocId { todo!() }
+
+            fn get_dialect_id(&self) -> u32 { todo!() }
+
+            fn get_regions(&self) -> tir_core::OpRegionIter { todo!() }
+            fn has_regions(&self) -> bool { todo!() }
+
+            #[doc(hidden)]
+            fn has_trait(&self, type_id: std::any::TypeId) -> bool { todo!() }
+            #[doc(hidden)]
+            fn get_meta(&self) -> &'static linkme::DistributedSlice<[fn() -> tir_core::utils::CastableMeta]> { todo!() }
+        }
+    }
+}
+
+fn derive_validate_trait(op: &ItemStruct) -> proc_macro2::TokenStream {
+    let name = &op.ident;
+
+    quote! {
+        impl tir_core::Validate for #name {
+            fn validate(&self) -> Result<(), tir_core::ValidateErr> {
+                todo!()
+            }
+        }
+    }
+}
+
 fn build_wrapper_struct(op: &ItemStruct) -> proc_macro2::TokenStream {
     let span = op.span();
 
@@ -198,7 +241,12 @@ fn build_wrapper_struct(op: &ItemStruct) -> proc_macro2::TokenStream {
     quote_spanned! {span=>
         pub struct #name {
             context: tir_core::ContextWRef,
+            id: tir_core::green::NodeId,
             inner: #inner_name
+        }
+
+        impl #name {
+            pub fn get_operation_name() -> &'static str { todo!() }
         }
     }
 }
@@ -208,10 +256,34 @@ pub fn build_operation(args: TokenStream, input: TokenStream) -> TokenStream {
 
     let inner = build_inner_struct(&op_struct);
     let wrapper = build_wrapper_struct(&op_struct);
+    let op_trait = derive_op_trait(&op_struct);
+    let validate_trait = derive_validate_trait(&op_struct);
+
+    let name = &op_struct.ident;
 
     quote! {
         #wrapper
         #inner
+        #op_trait
+        #validate_trait
+
+        impl tir_core::OpValidator for #name {
+            fn validate_op(&self) -> Result<(), tir_core::ValidateErr> {
+                todo!()
+            }
+        }
+
+        impl tir_core::Printable for #name {
+            fn print(&self, fmt: &mut dyn tir_core::IRFormatter) {
+                todo!()
+            }
+        }
+
+        impl tir_core::OpAssembly for #name {
+            fn print_assembly(&self, fmt: &mut dyn tir_core::IRFormatter) { todo!() }
+            fn parse_assembly(input: tir_core::IRStrStream<'_>) -> lpl::ParseResult<tir_core::IRStrStream<'_>, tir_core::OpRef> { todo!() }
+
+        }
     }
     .into()
 }

@@ -4,6 +4,7 @@ use crate::{
     RegionWRef, Type, Validate, Value,
 };
 use std::any::Any;
+use std::sync::Arc;
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 pub type OpRef = Rc<RefCell<dyn Op>>;
