@@ -1,13 +1,14 @@
 #![allow(clippy::redundant_pattern_matching)]
 #![allow(clippy::manual_unwrap_or_default)]
 
+use darling::ast::NestedMeta;
 use darling::{FromDeriveInput, FromField, FromMeta};
 use proc_macro::TokenStream;
-use quote::{format_ident, quote, quote_spanned};
+use quote::{format_ident, quote, quote_spanned, ToTokens};
 use syn::parse::{Parse, ParseStream, Parser};
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
-use syn::{parse_macro_input, ItemStruct, Path, Token, Type};
+use syn::{parse_macro_input, ItemStruct, Meta, MetaList, Path, Token, Type};
 
 #[derive(Debug)]
 pub struct OpAttrs {
@@ -66,6 +67,14 @@ pub struct OpReceiver {
     pub data: darling::ast::Data<(), OpFieldReceiver>,
     pub name: String,
     pub dialect: syn::Ident,
+    #[darling(default)]
+    pub known_attrs: Option<OpAttrs>,
+}
+
+#[derive(Debug, FromMeta)]
+pub struct OpArgs {
+    pub name: String,
+    pub path: syn::Path,
     #[darling(default)]
     pub known_attrs: Option<OpAttrs>,
 }
@@ -166,6 +175,80 @@ pub fn build_attr_accessors(attrs: &[Attr]) -> proc_macro2::TokenStream {
     }
 }
 
+fn build_op_builder(args: &OpArgs, op: &ItemStruct) -> proc_macro2::TokenStream {
+    let span = op.ident.span();
+    let builder_name = format_ident!("{}Builder", op.ident);
+    let name = op.ident;
+    let op_name = args.name;
+
+    let fields = op
+        .fields
+        .iter()
+        .map(|f| OpFieldReceiver::from_field(f).unwrap())
+        .collect::<Vec<_>>();
+
+    let builder_fields = fields.iter().map(|f| {
+        let span = f.ident.as_ref().unwrap().span();
+
+        let name = f.ident.clone().unwrap();
+        let ty = f.ty.clone();
+
+        quote_spanned! {span=>
+            #name: Option<#ty>
+        }
+    });
+
+    let builder_setters = fields.iter().map(|f| {
+        let span = f.ident.as_ref().unwrap().span();
+        let name = f.ident.clone().unwrap();
+        let ty = f.ty.clone();
+
+        quote_spanned! {span =>
+            pub fn #name(mut self, v: #ty) -> Self {
+                self.#name = Some(v);
+                self
+            }
+        }
+    });
+
+    let builder_creators = fields.iter().map(|f| {
+        let span = f.ident.as_ref().unwrap().span();
+        let name = f.ident.clone().unwrap();
+
+        quote_spanned! {span=>
+            #name: None
+        }
+    });
+
+    quote_spanned! {span =>
+        pub struct #builder_name {
+            context: tir_core::ContextRef,
+            #(#builder_fields),*
+        }
+
+        impl #builder_name {
+            #(#builder_setters)*
+
+            pub fn build(self) {
+                let context = self.context;
+                let dialect = context.get_dialect_by_name(DIALECT_NAME).expect("Did you forget to register the dialect?");
+                let dialect_id = dialect.get_id();
+                let operation_id = dialect.get_operation_id(#op_name).expect("Did you forget to register operation?");
+                let mut attrs = std::collections::HashMap::new();
+            }
+        }
+
+        impl #name {
+            fn builder(context: &tir_core::ContextRef) -> #builder_name {
+                #builder_name {
+                    context: context.clone(),
+                    #(#builder_creators),*
+                }
+            }
+        }
+    }
+}
+
 fn build_inner_struct(op: &ItemStruct) -> proc_macro2::TokenStream {
     let name = &op.ident;
     let span = op.span();
@@ -178,36 +261,44 @@ fn build_inner_struct(op: &ItemStruct) -> proc_macro2::TokenStream {
         let span = f.span();
 
         quote_spanned! {span =>
-            #name: #ty
+            #name: #ty,
         }
     });
 
     quote_spanned! {span=>
+        #[derive(Clone)]
         pub struct #inner_name {
-            #(#fields),*
+            #(#fields)*
+            attrs: std::collections::HashMap<String, tir_core::Attr>,
+            dialect_id: u32,
         }
     }
 }
 
-fn derive_op_trait(op: &ItemStruct) -> proc_macro2::TokenStream {
+fn derive_op_trait(args: &OpArgs, op: &ItemStruct) -> proc_macro2::TokenStream {
     let name = &op.ident;
     let span = op.ident.span();
+    let name_str = args.name.as_str();
 
     quote_spanned! {span =>
         impl tir_core::Op for #name {
-            fn get_operation_name(&self) -> &'static str { todo!() }
-            fn get_attrs(&self) -> &std::collections::HashMap<String, tir_core::Attr> { todo!() }
+            fn get_operation_name(&self) -> &'static str { #name_str }
+
+            fn get_attrs(&self) -> &std::collections::HashMap<String, tir_core::Attr> { &self.inner.attrs }
             fn add_attrs(&mut self, attrs: &std::collections::HashMap<String, tir_core::Attr>) { todo!() }
-            fn get_context(&self) -> tir_core::ContextRef { todo!() }
+
+            fn get_context(&self) -> tir_core::ContextRef { self.context.upgrade().unwrap() }
+
             fn get_parent_region(&self) -> Option<tir_core::RegionRef> { todo!() }
             fn set_parent_region(&mut self, region: tir_core::RegionWRef) { todo!() }
+
             fn get_return_type(&self) -> Option<tir_core::Type> { todo!() }
             fn get_return_value(&self) -> Option<tir_core::Value> { todo!() }
 
             fn set_alloc_id(&mut self, id: tir_core::AllocId) { todo!() }
             fn get_alloc_id(&self) -> tir_core::AllocId { todo!() }
 
-            fn get_dialect_id(&self) -> u32 { todo!() }
+            fn get_dialect_id(&self) -> u32 { self.inner.dialect_id }
 
             fn get_regions(&self) -> tir_core::OpRegionIter { todo!() }
             fn has_regions(&self) -> bool { todo!() }
@@ -226,56 +317,106 @@ fn derive_validate_trait(op: &ItemStruct) -> proc_macro2::TokenStream {
     quote! {
         impl tir_core::Validate for #name {
             fn validate(&self) -> Result<(), tir_core::ValidateErr> {
-                todo!()
+                use tir_core::OpValidator;
+                self.validate_op()?;
+
+                // #(
+                //     self.#region_names().validate()?;
+                // )*
+
+                Ok(())
             }
         }
     }
 }
 
-fn build_wrapper_struct(op: &ItemStruct) -> proc_macro2::TokenStream {
+fn build_wrapper_struct(args: &OpArgs, op: &ItemStruct) -> proc_macro2::TokenStream {
     let span = op.span();
+
+    let derive_list = op
+        .attrs
+        .iter()
+        .find(|attr| {
+            if let Meta::List(list) = &attr.meta {
+                let name = format!("{}", list.path.to_token_stream());
+                name == "derive"
+            } else {
+                false
+            }
+        })
+        .map(|attr| attr.to_token_stream() as proc_macro2::TokenStream);
+
+    let derive_list = derive_list.unwrap_or(quote! {});
 
     let name = &op.ident;
     let inner_name = format_ident!("{}Inner", name);
+    let name_str = args.name.as_str();
 
     quote_spanned! {span=>
+        #derive_list
         pub struct #name {
             context: tir_core::ContextWRef,
-            id: tir_core::green::NodeId,
+            id: tir_core::AllocId,
             inner: #inner_name
         }
 
         impl #name {
-            pub fn get_operation_name() -> &'static str { todo!() }
+            pub fn get_operation_name() -> &'static str { #name_str }
         }
     }
 }
 
 pub fn build_operation(args: TokenStream, input: TokenStream) -> TokenStream {
+    let attr_args = match NestedMeta::parse_meta_list(args.into()) {
+        Ok(v) => v,
+        Err(e) => {
+            return TokenStream::from(darling::Error::from(e).write_errors());
+        }
+    };
+
+    let args = match OpArgs::from_list(&attr_args) {
+        Ok(v) => v,
+        Err(e) => {
+            return TokenStream::from(e.write_errors());
+        }
+    };
+
     let op_struct = parse_macro_input!(input as ItemStruct);
 
     let inner = build_inner_struct(&op_struct);
-    let wrapper = build_wrapper_struct(&op_struct);
-    let op_trait = derive_op_trait(&op_struct);
+    let wrapper = build_wrapper_struct(&args, &op_struct);
+    let op_trait = derive_op_trait(&args, &op_struct);
     let validate_trait = derive_validate_trait(&op_struct);
+    let builder = build_op_builder(&args, &op_struct);
 
     let name = &op_struct.ident;
+
+    let path_str = format!("{}", args.path.to_token_stream()).replace(" ", "");
+    let test_name = format_ident!(
+        "test_{}_module_path",
+        args.name.to_lowercase().replace(".", "_")
+    );
 
     quote! {
         #wrapper
         #inner
         #op_trait
         #validate_trait
-
-        impl tir_core::OpValidator for #name {
-            fn validate_op(&self) -> Result<(), tir_core::ValidateErr> {
-                todo!()
-            }
-        }
+        #builder
 
         impl tir_core::Printable for #name {
             fn print(&self, fmt: &mut dyn tir_core::IRFormatter) {
-                todo!()
+                fmt.indent();
+                if DIALECT_NAME != tir_core::builtin::DIALECT_NAME {
+                    fmt.write_direct(DIALECT_NAME);
+                    fmt.write_direct(".");
+                }
+
+                fmt.write_direct(self.get_operation_name());
+                fmt.write_direct(" ");
+
+                self.print_assembly(fmt);
+                fmt.write_direct("\n");
             }
         }
 
@@ -283,6 +424,12 @@ pub fn build_operation(args: TokenStream, input: TokenStream) -> TokenStream {
             fn print_assembly(&self, fmt: &mut dyn tir_core::IRFormatter) { todo!() }
             fn parse_assembly(input: tir_core::IRStrStream<'_>) -> lpl::ParseResult<tir_core::IRStrStream<'_>, tir_core::OpRef> { todo!() }
 
+        }
+
+        #[cfg(test)]
+        #[test]
+        fn #test_name() {
+            assert_eq!(#path_str, std::module_path!());
         }
     }
     .into()
