@@ -2,17 +2,9 @@
 resolver = "2"
 
 members = [
-    "core",
-    "macros",
-    "backends/common",
-    "backends/riscv",
-    "fuzz",
     "utils/check-runner",
     "utils/filecheck",
     "utils/not",
-    "tools",
-    "isasim",
-    "lpl",
     "tmdl",
     "xtask",
 ]

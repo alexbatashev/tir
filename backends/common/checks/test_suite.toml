@@ -1,4 +1,0 @@
-[suite]
-name = "TIR common Backend dialects checks"
-glob = ["**/*.tir"]
-

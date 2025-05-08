@@ -1,5 +1,6 @@
-use tmdl::compiler_main;
+// use tmdl::compiler_main;
 
 pub fn main() -> Result<(), Box<dyn std::error::Error>> {
-    compiler_main(None)
+    todo!()
+    // compiler_main(None)
 }
