@@ -62,6 +62,18 @@ pub enum Token {
     KwSelf,
     /// `registers`
     KwRegisters,
+    /// `parameters`
+    KwParameters,
+}
+
+impl Token {
+    pub fn as_ident(&self) -> &str {
+        if let Token::Identifier(ident) = self {
+            ident.as_str()
+        } else {
+            unreachable!()
+        }
+    }
 }
 
 pub(crate) fn lexer<'src>()
@@ -104,6 +116,7 @@ pub(crate) fn lexer<'src>()
         "for" => Token::KwFor,
         "registers" => Token::KwRegisters,
         "register_class" => Token::KwRegClass,
+        "parameters" => Token::KwParameters,
         _ => Token::Identifier(ident.to_owned()),
     });
 

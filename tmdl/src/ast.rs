@@ -37,7 +37,7 @@ pub enum RegisterDef {
 pub struct RegisterClass {
     pub name: String,
     pub for_isas: Vec<String>,
-    pub width_expr: String,
+    pub parameters: HashMap<String, i32>,
     pub registers: Vec<RegisterDef>,
 }
 
@@ -52,7 +52,7 @@ pub enum IsaRequirement {
 pub struct Isa {
     pub name: String,
     pub requires: Option<IsaRequirement>,
-    pub parameters: HashMap<String, String>,
+    pub parameters: HashMap<String, i32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
