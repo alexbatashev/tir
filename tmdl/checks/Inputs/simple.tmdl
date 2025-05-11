@@ -1,0 +1,21 @@
+isa TestIsa32 {
+    PARAM1 = 100,
+    WIDTH = 32,
+}
+
+isa TestIsa64 {
+    PARAM1 = 100,
+    WIDTH = 64
+}
+
+register_class GPR for [TestIsa32, TestIsa64] {
+    parameters {
+        width = self.WIDTH,
+        encoding_len = 5,
+    }
+    registers {
+        x0("zero") => { traits = [hardwired_zero] },
+        x1("ra") => { traits = [return_address, caller_saved] },
+        x2..x31("r{}") => { traits = [callee_saved] },
+    }
+}

@@ -54,7 +54,12 @@ pub struct Isa {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum Item {
+    Isa(Isa),
+    RegisterClass(RegisterClass),
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct File {
-    pub isas: Vec<Isa>,
-    pub register_classes: Vec<RegisterClass>,
+    pub items: Vec<Item>,
 }

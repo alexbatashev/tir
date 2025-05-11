@@ -2,50 +2,33 @@ use std::collections::HashMap;
 
 use chumsky::{input::ValueInput, prelude::*};
 
-fn register_range<'src, I>()
--> impl Parser<'src, I, RegisterDef, extra::Err<Rich<'src, Token, Span>>>
+use crate::{Span, Spanned, ast::*, lexer::Token};
+
+pub fn parse<'src>(
+    source: &'src str,
+    tokens: &'src [Spanned<Token>],
+) -> (Option<File>, Vec<Rich<'src, Token, Span>>) {
+    file()
+        .then_ignore(trivia())
+        .then_ignore(end())
+        .parse(tokens.map((source.len()..source.len()).into(), |(t, s)| (t, s)))
+        .into_output_errors()
+}
+
+/// Parse single translation unit
+fn file<'src, I>() -> impl Parser<'src, I, File, extra::Err<Rich<'src, Token, Span>>>
 where
     I: ValueInput<'src, Token = Token, Span = Span>,
 {
-    let ident = select! { Token::Identifier(ident) => ident.to_string() };
-    let alias_pattern = just(Token::LParen)
-        .ignored()
-        .then(select! { Token::StringLit(s) => s.to_string() })
-        .then_ignore(just(Token::RParen))
-        .map(|(_, alias)| Some(alias))
-        .or_not()
-        .map(|o| o.flatten());
-
-    let reg_traits = parse_register_traits();
-
-    ident
-        .padded_by(trivia())
-        .then_ignore(
-            just(Token::Dot)
-                .then_ignore(just(Token::Dot))
-                .padded_by(trivia()),
-        )
-        .then(ident.padded_by(trivia()))
-        .then(alias_pattern.padded_by(trivia()))
-        .then_ignore(
-            just(Token::Equals)
-                .then_ignore(just(Token::RAngle))
-                .padded_by(trivia()),
-        )
-        .then_ignore(just(Token::LBrace).padded_by(trivia()))
-        .then(reg_traits)
-        .then_ignore(just(Token::RBrace).padded_by(trivia()))
-        .map(|(((start, end), alias_pattern), traits)| {
-            RegisterDef::Range(RegisterRange {
-                start,
-                end,
-                alias_pattern,
-                traits,
-            })
-        })
+    choice((
+        isa_def().map(Item::Isa),
+        register_class_def().map(Item::RegisterClass),
+    ))
+    .repeated()
+    .at_least(0)
+    .collect()
+    .map(|items| File { items })
 }
-
-use crate::{Span, ast::*, lexer::Token};
 
 /// Parse isa definition.
 /// Example:
@@ -64,7 +47,13 @@ where
         .then(ident())
         .then(isa_requirements())
         .then_ignore(just(Token::LBrace).padded_by(trivia()))
-        .then(isa_parameter().separated_by(just(Token::Comma)).collect())
+        .then(
+            isa_parameter()
+                .padded_by(trivia())
+                .separated_by(just(Token::Comma))
+                .allow_trailing()
+                .collect(),
+        )
         .then_ignore(just(Token::RBrace).padded_by(trivia()))
         .map(
             |(((_kw, name), requires), parameters): (
@@ -117,6 +106,7 @@ where
                 registers,
             },
         )
+        .labelled("register class definition")
 }
 
 fn isa_parameter<'src, I>()
@@ -177,11 +167,16 @@ where
 {
     let ident = select! { Token::Identifier(ident) => ident.to_string() };
     just(Token::KwFor)
+        .padded_by(trivia())
         .ignored()
         .then(
             ident
                 .separated_by(just(Token::Comma).padded_by(trivia()))
-                .collect::<Vec<_>>(),
+                .collect::<Vec<_>>()
+                .delimited_by(
+                    just(Token::LBracket).padded_by(trivia()),
+                    just(Token::RBracket).padded_by(trivia()),
+                ),
         )
         .map(|(_, isas)| isas)
         .or_not()
@@ -207,6 +202,7 @@ where
                 .map_err(|e| Rich::custom(span, e))
         });
     just(Token::KwParameters)
+        .padded_by(trivia())
         .ignored()
         .then(
             single_parameter
@@ -217,7 +213,12 @@ where
                     just(Token::RBrace).padded_by(trivia()),
                 ),
         )
+        .delimited_by(
+            just(Token::LBrace).padded_by(trivia()),
+            just(Token::RBrace).padded_by(trivia()),
+        )
         .map(|((), v)| v)
+        .labelled("register class parameters")
 }
 
 fn register_class_registers<'src, I>()
@@ -237,6 +238,7 @@ where
                 ),
         )
         .map(|((), v)| v)
+        .labelled("register class registers")
 }
 
 fn single_register<'src, I>()
@@ -277,7 +279,7 @@ where
 
     let range = register_range();
 
-    choice((range, single))
+    choice((range, single)).labelled("register")
 }
 
 fn ident<'src, I>() -> impl Parser<'src, I, String, extra::Err<Rich<'src, Token, Span>>>
@@ -314,6 +316,49 @@ where
                     _ => None,
                 })
                 .collect()
+        })
+}
+
+fn register_range<'src, I>()
+-> impl Parser<'src, I, RegisterDef, extra::Err<Rich<'src, Token, Span>>>
+where
+    I: ValueInput<'src, Token = Token, Span = Span>,
+{
+    let ident = select! { Token::Identifier(ident) => ident.to_string() };
+    let alias_pattern = just(Token::LParen)
+        .ignored()
+        .then(select! { Token::StringLit(s) => s.to_string() })
+        .then_ignore(just(Token::RParen))
+        .map(|(_, alias)| Some(alias))
+        .or_not()
+        .map(|o| o.flatten());
+
+    let reg_traits = parse_register_traits();
+
+    ident
+        .padded_by(trivia())
+        .then_ignore(
+            just(Token::Dot)
+                .then_ignore(just(Token::Dot))
+                .padded_by(trivia()),
+        )
+        .then(ident.padded_by(trivia()))
+        .then(alias_pattern.padded_by(trivia()))
+        .then_ignore(
+            just(Token::Equals)
+                .then_ignore(just(Token::RAngle))
+                .padded_by(trivia()),
+        )
+        .then_ignore(just(Token::LBrace).padded_by(trivia()))
+        .then(reg_traits)
+        .then_ignore(just(Token::RBrace).padded_by(trivia()))
+        .map(|(((start, end), alias_pattern), traits)| {
+            RegisterDef::Range(RegisterRange {
+                start,
+                end,
+                alias_pattern,
+                traits,
+            })
         })
 }
 

@@ -1,3 +1,5 @@
+use core::fmt;
+
 use chumsky::prelude::*;
 
 use crate::{Span, Spanned};
@@ -76,6 +78,12 @@ impl Token {
     }
 }
 
+pub fn lex<'src>(source: &'src str) -> (Vec<Spanned<Token>>, Vec<Rich<'src, char, Span>>) {
+    let (tokens, errors) = lexer().parse(source).into_output_errors();
+
+    (tokens.unwrap_or_default(), errors)
+}
+
 pub(crate) fn lexer<'src>()
 -> impl Parser<'src, &'src str, Vec<Spanned<Token>>, extra::Err<Rich<'src, char, Span>>> {
     let num = text::int(10)
@@ -88,6 +96,11 @@ pub(crate) fn lexer<'src>()
         .at_least(1)
         .to_slice()
         .map(|w: &str| Token::Whitespace(w.to_string()));
+
+    let str_ = just('"')
+        .ignore_then(none_of('"').repeated().to_slice())
+        .then_ignore(just('"'))
+        .map(|s: &str| Token::StringLit(s.to_string()));
 
     let control = choice((
         just("{").to(Token::LBrace),
@@ -120,7 +133,7 @@ pub(crate) fn lexer<'src>()
         _ => Token::Identifier(ident.to_owned()),
     });
 
-    let token = whitespace.or(num).or(control).or(op).or(ident);
+    let token = whitespace.or(str_).or(num).or(control).or(op).or(ident);
 
     token
         .map_with(|tok, e| (tok, e.span()))
@@ -147,5 +160,19 @@ mod test {
         let result = parser.parse(input);
 
         println!("{:#?}", result);
+    }
+}
+
+impl fmt::Display for Token {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Token::Dot => f.write_str("."),
+            Token::Asterisk => f.write_str("*"),
+            Token::Whitespace(ws) => f.write_str(ws),
+            Token::Identifier(i) => f.write_str(i),
+            Token::LBrace => f.write_str("{"),
+            Token::RBrace => f.write_str("}"),
+            _ => unimplemented!("{:#?}", self),
+        }
     }
 }
