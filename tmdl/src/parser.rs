@@ -2,6 +2,49 @@ use std::collections::HashMap;
 
 use chumsky::{input::ValueInput, prelude::*};
 
+fn register_range<'src, I>()
+-> impl Parser<'src, I, RegisterDef, extra::Err<Rich<'src, Token, Span>>>
+where
+    I: ValueInput<'src, Token = Token, Span = Span>,
+{
+    let ident = select! { Token::Identifier(ident) => ident.to_string() };
+    let alias_pattern = just(Token::LParen)
+        .ignored()
+        .then(select! { Token::StringLit(s) => s.to_string() })
+        .then_ignore(just(Token::RParen))
+        .map(|(_, alias)| Some(alias))
+        .or_not()
+        .map(|o| o.flatten());
+
+    let reg_traits = parse_register_traits();
+
+    ident
+        .padded_by(trivia())
+        .then_ignore(
+            just(Token::Dot)
+                .then_ignore(just(Token::Dot))
+                .padded_by(trivia()),
+        )
+        .then(ident.padded_by(trivia()))
+        .then(alias_pattern.padded_by(trivia()))
+        .then_ignore(
+            just(Token::Equals)
+                .then_ignore(just(Token::RAngle))
+                .padded_by(trivia()),
+        )
+        .then_ignore(just(Token::LBrace).padded_by(trivia()))
+        .then(reg_traits)
+        .then_ignore(just(Token::RBrace).padded_by(trivia()))
+        .map(|(((start, end), alias_pattern), traits)| {
+            RegisterDef::Range(RegisterRange {
+                start,
+                end,
+                alias_pattern,
+                traits,
+            })
+        })
+}
+
 use crate::{Span, ast::*, lexer::Token};
 
 /// Parse isa definition.
@@ -40,7 +83,7 @@ where
 ///
 /// Example:
 /// ```tmdl
-/// register_class GPR for RV32I {
+/// register_class GPR for TestIsa {
 ///   parameters {
 ///     width = self.XLEN,
 ///     encoding_len = 5,
@@ -48,6 +91,7 @@ where
 ///   registers {
 ///     x0("zero") => { traits = [hardwired_zero] },
 ///     x1("ra") => { traits = [return_address, caller_saved] },
+///     x2..x31("r{}") => { traits = [ callee_saved ] },
 ///   }
 /// }
 /// ```
@@ -60,16 +104,19 @@ where
     just(Token::KwRegClass)
         .ignored()
         .then(ident.clone().padded_by(trivia()))
+        .then(register_class_for_isas())
         .then_ignore(just(Token::LBrace))
         .then(register_class_parameters())
         .then(register_class_registers())
         .then_ignore(just(Token::RBrace).padded_by(trivia()))
-        .map(|((((), name), parameters), registers)| RegisterClass {
-            name,
-            for_isas: Vec::new(),
-            parameters,
-            registers,
-        })
+        .map(
+            |(((((), name), for_isas), parameters), registers)| RegisterClass {
+                name,
+                for_isas,
+                parameters,
+                registers,
+            },
+        )
 }
 
 fn isa_parameter<'src, I>()
@@ -121,6 +168,24 @@ where
         .then(choice((single_isa, any, all)))
         .or_not()
         .map(|isa| isa.map(|(_, isa)| isa))
+}
+
+fn register_class_for_isas<'src, I>()
+-> impl Parser<'src, I, Vec<String>, extra::Err<Rich<'src, Token, Span>>>
+where
+    I: ValueInput<'src, Token = Token, Span = Span>,
+{
+    let ident = select! { Token::Identifier(ident) => ident.to_string() };
+    just(Token::KwFor)
+        .ignored()
+        .then(
+            ident
+                .separated_by(just(Token::Comma).padded_by(trivia()))
+                .collect::<Vec<_>>(),
+        )
+        .map(|(_, isas)| isas)
+        .or_not()
+        .map(|isas_opt| isas_opt.unwrap_or_default())
 }
 
 fn register_class_parameters<'src, I>()
@@ -179,7 +244,40 @@ fn single_register<'src, I>()
 where
     I: ValueInput<'src, Token = Token, Span = Span>,
 {
-    todo()
+    let ident = select! { Token::Identifier(ident) => ident.to_string() };
+    let alias = just(Token::LParen)
+        .ignored()
+        .then(select! { Token::StringLit(s) => s.to_string() })
+        .then_ignore(just(Token::RParen))
+        .map(|(_, alias)| Some(alias))
+        .or_not()
+        .map(|o| o.flatten());
+
+    let reg_traits = parse_register_traits();
+
+    let single = ident
+        .padded_by(trivia())
+        .then(alias.padded_by(trivia()))
+        .then_ignore(
+            just(Token::Equals)
+                .then_ignore(just(Token::RAngle))
+                .padded_by(trivia()),
+        )
+        .then_ignore(just(Token::LBrace).padded_by(trivia()))
+        .then(reg_traits)
+        .then_ignore(just(Token::RBrace).padded_by(trivia()))
+        .map(|((name, alias), traits)| {
+            RegisterDef::Single(Register {
+                name,
+                alias,
+                traits,
+                subregisters: Vec::new(),
+            })
+        });
+
+    let range = register_range();
+
+    choice((range, single))
 }
 
 fn ident<'src, I>() -> impl Parser<'src, I, String, extra::Err<Rich<'src, Token, Span>>>
@@ -187,6 +285,36 @@ where
     I: ValueInput<'src, Token = Token, Span = Span>,
 {
     any().filter(is_ident).map(|t| t.as_ident().to_string())
+}
+
+fn parse_register_traits<'src, I>()
+-> impl Parser<'src, I, Vec<RegisterTrait>, extra::Err<Rich<'src, Token, Span>>>
+where
+    I: ValueInput<'src, Token = Token, Span = Span>,
+{
+    just(Token::Identifier("traits".into()))
+        .padded_by(trivia())
+        .then_ignore(just(Token::Equals).padded_by(trivia()))
+        .then_ignore(just(Token::LBracket).padded_by(trivia()))
+        .ignore_then(
+            select! { Token::Identifier(t) => t.to_string() }
+                .separated_by(just(Token::Comma).padded_by(trivia()))
+                .collect::<Vec<_>>(),
+        )
+        .then_ignore(just(Token::RBracket).padded_by(trivia()))
+        .map(|traits| {
+            traits
+                .into_iter()
+                .filter_map(|t| match t.as_str() {
+                    "hardwired_zero" => Some(RegisterTrait::HardwiredZero),
+                    "return_address" => Some(RegisterTrait::ReturnAddress),
+                    "caller_saved" => Some(RegisterTrait::CallerSaved),
+                    "callee_saved" => Some(RegisterTrait::CalleeSaved),
+                    "stack_pointer" => Some(RegisterTrait::StackPointer),
+                    _ => None,
+                })
+                .collect()
+        })
 }
 
 fn trivia<'src, I>() -> impl Parser<'src, I, (), extra::Err<Rich<'src, Token, Span>>>

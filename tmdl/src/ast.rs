@@ -1,7 +1,5 @@
 use std::collections::HashMap;
 
-// Core AST nodes
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum RegisterTrait {
     HardwiredZero,
