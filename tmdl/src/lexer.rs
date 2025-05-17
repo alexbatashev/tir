@@ -7,7 +7,6 @@ use crate::{Span, Spanned};
 // Token definition
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
-    Whitespace(String),
     Comment(String),
     Identifier(String),
     Number(String),
@@ -91,12 +90,6 @@ pub(crate) fn lexer<'src>()
         .to_slice()
         .map(|n: &str| Token::Number(n.to_owned()));
 
-    let whitespace = one_of(" \t\n\r")
-        .repeated()
-        .at_least(1)
-        .to_slice()
-        .map(|w: &str| Token::Whitespace(w.to_string()));
-
     let str_ = just('"')
         .ignore_then(none_of('"').repeated().to_slice())
         .then_ignore(just('"'))
@@ -133,9 +126,10 @@ pub(crate) fn lexer<'src>()
         _ => Token::Identifier(ident.to_owned()),
     });
 
-    let token = whitespace.or(str_).or(num).or(control).or(op).or(ident);
+    let token = str_.or(num).or(control).or(op).or(ident);
 
     token
+        .padded()
         .map_with(|tok, e| (tok, e.span()))
         .recover_with(skip_then_retry_until(any().ignored(), end()))
         .repeated()
@@ -168,10 +162,10 @@ impl fmt::Display for Token {
         match self {
             Token::Dot => f.write_str("."),
             Token::Asterisk => f.write_str("*"),
-            Token::Whitespace(ws) => f.write_str(ws),
             Token::Identifier(i) => f.write_str(i),
             Token::LBrace => f.write_str("{"),
             Token::RBrace => f.write_str("}"),
+            Token::KwParameters => f.write_str("parameters"),
             _ => unimplemented!("{:#?}", self),
         }
     }

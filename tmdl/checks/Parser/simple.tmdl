@@ -1,0 +1,121 @@
+// This file was generated with ./utils/scripts/update_tmdlc_checks.py. Do not modify CHECKs manually.
+
+// RUN: tmdlc --action=emit-ast --output=- %S/../Inputs/simple.tmdl | filecheck %s
+
+// CHECK: Some(
+// CHECK-NEXT:     File {
+// CHECK-NEXT:         items: [
+// CHECK-NEXT:             Isa(
+// CHECK-NEXT:                 Isa {
+// CHECK-NEXT:                     name: "TestIsa32",
+// CHECK-NEXT:                     requires: None,
+// CHECK-NEXT:                     parameters: {
+// CHECK-NEXT:                         "PARAM1": Lit(
+// CHECK-NEXT:                             Int(
+// CHECK-NEXT:                                 LitInt {
+// CHECK-NEXT:                                     value: "100",
+// CHECK-NEXT:                                 },
+// CHECK-NEXT:                             ),
+// CHECK-NEXT:                         ),
+// CHECK-NEXT:                         "WIDTH": Lit(
+// CHECK-NEXT:                             Int(
+// CHECK-NEXT:                                 LitInt {
+// CHECK-NEXT:                                     value: "32",
+// CHECK-NEXT:                                 },
+// CHECK-NEXT:                             ),
+// CHECK-NEXT:                         ),
+// CHECK-NEXT:                     },
+// CHECK-NEXT:                 },
+// CHECK-NEXT:             ),
+// CHECK-NEXT:             Isa(
+// CHECK-NEXT:                 Isa {
+// CHECK-NEXT:                     name: "TestIsa64",
+// CHECK-NEXT:                     requires: None,
+// CHECK-NEXT:                     parameters: {
+// CHECK-NEXT:                         "PARAM1": Lit(
+// CHECK-NEXT:                             Int(
+// CHECK-NEXT:                                 LitInt {
+// CHECK-NEXT:                                     value: "100",
+// CHECK-NEXT:                                 },
+// CHECK-NEXT:                             ),
+// CHECK-NEXT:                         ),
+// CHECK-NEXT:                         "WIDTH": Lit(
+// CHECK-NEXT:                             Int(
+// CHECK-NEXT:                                 LitInt {
+// CHECK-NEXT:                                     value: "64",
+// CHECK-NEXT:                                 },
+// CHECK-NEXT:                             ),
+// CHECK-NEXT:                         ),
+// CHECK-NEXT:                     },
+// CHECK-NEXT:                 },
+// CHECK-NEXT:             ),
+// CHECK-NEXT:             RegisterClass(
+// CHECK-NEXT:                 RegisterClass {
+// CHECK-NEXT:                     name: "GPR",
+// CHECK-NEXT:                     for_isas: [
+// CHECK-NEXT:                         "TestIsa32",
+// CHECK-NEXT:                         "TestIsa64",
+// CHECK-NEXT:                     ],
+// CHECK-NEXT:                     parameters: {
+// CHECK-NEXT:                         "width": Field(
+// CHECK-NEXT:                             Field {
+// CHECK-NEXT:                                 base: Ident(
+// CHECK-NEXT:                                     Ident {
+// CHECK-NEXT:                                         name: "self",
+// CHECK-NEXT:                                     },
+// CHECK-NEXT:                                 ),
+// CHECK-NEXT:                                 member: "WIDTH",
+// CHECK-NEXT:                             },
+// CHECK-NEXT:                         ),
+// CHECK-NEXT:                         "encoding_len": Lit(
+// CHECK-NEXT:                             Int(
+// CHECK-NEXT:                                 LitInt {
+// CHECK-NEXT:                                     value: "5",
+// CHECK-NEXT:                                 },
+// CHECK-NEXT:                             ),
+// CHECK-NEXT:                         ),
+// CHECK-NEXT:                     },
+// CHECK-NEXT:                     registers: [
+// CHECK-NEXT:                         Single(
+// CHECK-NEXT:                             Register {
+// CHECK-NEXT:                                 name: "x0",
+// CHECK-NEXT:                                 alias: Some(
+// CHECK-NEXT:                                     "zero",
+// CHECK-NEXT:                                 ),
+// CHECK-NEXT:                                 traits: [
+// CHECK-NEXT:                                     HardwiredZero,
+// CHECK-NEXT:                                 ],
+// CHECK-NEXT:                                 subregisters: [],
+// CHECK-NEXT:                             },
+// CHECK-NEXT:                         ),
+// CHECK-NEXT:                         Single(
+// CHECK-NEXT:                             Register {
+// CHECK-NEXT:                                 name: "x1",
+// CHECK-NEXT:                                 alias: Some(
+// CHECK-NEXT:                                     "ra",
+// CHECK-NEXT:                                 ),
+// CHECK-NEXT:                                 traits: [
+// CHECK-NEXT:                                     ReturnAddress,
+// CHECK-NEXT:                                     CallerSaved,
+// CHECK-NEXT:                                 ],
+// CHECK-NEXT:                                 subregisters: [],
+// CHECK-NEXT:                             },
+// CHECK-NEXT:                         ),
+// CHECK-NEXT:                         Range(
+// CHECK-NEXT:                             RegisterRange {
+// CHECK-NEXT:                                 start: "x2",
+// CHECK-NEXT:                                 end: "x31",
+// CHECK-NEXT:                                 alias_pattern: Some(
+// CHECK-NEXT:                                     "r{}",
+// CHECK-NEXT:                                 ),
+// CHECK-NEXT:                                 traits: [
+// CHECK-NEXT:                                     CalleeSaved,
+// CHECK-NEXT:                                 ],
+// CHECK-NEXT:                             },
+// CHECK-NEXT:                         ),
+// CHECK-NEXT:                     ],
+// CHECK-NEXT:                 },
+// CHECK-NEXT:             ),
+// CHECK-NEXT:         ],
+// CHECK-NEXT:     },
+// CHECK-NEXT: )

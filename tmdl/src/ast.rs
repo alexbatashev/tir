@@ -35,7 +35,7 @@ pub enum RegisterDef {
 pub struct RegisterClass {
     pub name: String,
     pub for_isas: Vec<String>,
-    pub parameters: HashMap<String, i32>,
+    pub parameters: HashMap<String, Expr>,
     pub registers: Vec<RegisterDef>,
 }
 
@@ -50,7 +50,7 @@ pub enum IsaRequirement {
 pub struct Isa {
     pub name: String,
     pub requires: Option<IsaRequirement>,
-    pub parameters: HashMap<String, i32>,
+    pub parameters: HashMap<String, Expr>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -60,6 +60,64 @@ pub enum Item {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum Lit {
+    Str(LitStr),
+    Int(LitInt),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LitStr {
+    value: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LitInt {
+    value: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Field {
+    pub base: Box<Expr>,
+    pub member: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Ident {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Expr {
+    Lit(Lit),
+    Field(Field),
+    Ident(Ident),
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct File {
     pub items: Vec<Item>,
+}
+
+impl LitInt {
+    pub fn new(value: String) -> Self {
+        Self { value }
+    }
+}
+
+impl Into<Expr> for LitInt {
+    fn into(self) -> Expr {
+        Expr::Lit(Lit::Int(self))
+    }
+}
+
+impl Ident {
+    pub fn new(name: String) -> Ident {
+        Ident { name }
+    }
+}
+
+impl Into<Expr> for Ident {
+    fn into(self) -> Expr {
+        Expr::Ident(self)
+    }
 }

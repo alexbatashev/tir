@@ -9,7 +9,6 @@ pub fn parse<'src>(
     tokens: &'src [Spanned<Token>],
 ) -> (Option<File>, Vec<Rich<'src, Token, Span>>) {
     file()
-        .then_ignore(trivia())
         .then_ignore(end())
         .parse(tokens.map((source.len()..source.len()).into(), |(t, s)| (t, s)))
         .into_output_errors()
@@ -43,22 +42,20 @@ where
     I: ValueInput<'src, Token = Token, Span = Span>,
 {
     just(Token::KwIsa)
-        .then_ignore(any().filter(is_trivia).repeated())
         .then(ident())
         .then(isa_requirements())
-        .then_ignore(just(Token::LBrace).padded_by(trivia()))
+        .then_ignore(just(Token::LBrace))
         .then(
             isa_parameter()
-                .padded_by(trivia())
                 .separated_by(just(Token::Comma))
                 .allow_trailing()
                 .collect(),
         )
-        .then_ignore(just(Token::RBrace).padded_by(trivia()))
+        .then_ignore(just(Token::RBrace))
         .map(
             |(((_kw, name), requires), parameters): (
                 ((Token, String), Option<IsaRequirement>),
-                HashMap<String, i32>,
+                HashMap<String, Expr>,
             )| Isa {
                 name,
                 requires,
@@ -92,12 +89,12 @@ where
     let ident = select! { Token::Identifier(ident) => ident.to_string() };
     just(Token::KwRegClass)
         .ignored()
-        .then(ident.clone().padded_by(trivia()))
+        .then(ident.clone())
         .then(register_class_for_isas())
         .then_ignore(just(Token::LBrace))
         .then(register_class_parameters())
         .then(register_class_registers())
-        .then_ignore(just(Token::RBrace).padded_by(trivia()))
+        .then_ignore(just(Token::RBrace))
         .map(
             |(((((), name), for_isas), parameters), registers)| RegisterClass {
                 name,
@@ -110,7 +107,7 @@ where
 }
 
 fn isa_parameter<'src, I>()
--> impl Parser<'src, I, (String, i32), extra::Err<Rich<'src, Token, Span>>>
+-> impl Parser<'src, I, (String, Expr), extra::Err<Rich<'src, Token, Span>>>
 where
     I: ValueInput<'src, Token = Token, Span = Span>,
 {
@@ -118,14 +115,9 @@ where
     let number = select! { Token::Number(i) => i };
 
     ident
-        .then_ignore(just(Token::Equals).padded_by(trivia()))
+        .then_ignore(just(Token::Equals))
         .then(number)
-        .try_map(|(ident, number), span| {
-            number
-                .parse::<i32>()
-                .map(|n| (ident, n))
-                .map_err(|e| Rich::custom(span, e))
-        })
+        .map(|(ident, number)| (ident, Expr::Lit(Lit::Int(LitInt::new(number)))))
 }
 
 fn isa_requirements<'src, I>()
@@ -137,21 +129,15 @@ where
     let single_isa = select! { Token::Identifier(ident) => IsaRequirement::Single(ident) };
     let any = ident
         .clone()
-        .separated_by(just(Token::Pipe).padded_by(trivia()))
+        .separated_by(just(Token::Pipe))
         .collect::<Vec<_>>()
-        .delimited_by(
-            just(Token::LBracket).padded_by(trivia()),
-            just(Token::RBracket).padded_by(trivia()),
-        )
+        .delimited_by(just(Token::LBracket), just(Token::RBracket))
         .map(|any| IsaRequirement::Any(any));
     let all = ident
         .clone()
-        .separated_by(just(Token::Comma).padded_by(trivia()))
+        .separated_by(just(Token::Comma))
         .collect::<Vec<_>>()
-        .delimited_by(
-            just(Token::LBracket).padded_by(trivia()),
-            just(Token::RBracket).padded_by(trivia()),
-        )
+        .delimited_by(just(Token::LBracket), just(Token::RBracket))
         .map(|all| IsaRequirement::All(all));
     just(Token::KwRequires)
         .ignored()
@@ -167,16 +153,12 @@ where
 {
     let ident = select! { Token::Identifier(ident) => ident.to_string() };
     just(Token::KwFor)
-        .padded_by(trivia())
         .ignored()
         .then(
             ident
-                .separated_by(just(Token::Comma).padded_by(trivia()))
+                .separated_by(just(Token::Comma))
                 .collect::<Vec<_>>()
-                .delimited_by(
-                    just(Token::LBracket).padded_by(trivia()),
-                    just(Token::RBracket).padded_by(trivia()),
-                ),
+                .delimited_by(just(Token::LBracket), just(Token::RBracket)),
         )
         .map(|(_, isas)| isas)
         .or_not()
@@ -184,38 +166,24 @@ where
 }
 
 fn register_class_parameters<'src, I>()
--> impl Parser<'src, I, HashMap<String, i32>, extra::Err<Rich<'src, Token, Span>>>
+-> impl Parser<'src, I, HashMap<String, Expr>, extra::Err<Rich<'src, Token, Span>>>
 where
     I: ValueInput<'src, Token = Token, Span = Span>,
 {
     let ident = select! { Token::Identifier(ident) => ident.clone() };
-    let number = select! { Token::Number(num) => num.clone() };
 
     let single_parameter = ident
         .clone()
-        .then_ignore(just(Token::Equals).padded_by(trivia()))
-        .then(number)
-        .try_map(|(name, value), span| {
-            value
-                .parse::<i32>()
-                .map(|n| (name, n))
-                .map_err(|e| Rich::custom(span, e))
-        });
+        .then_ignore(just(Token::Equals))
+        .then(inline_expr());
     just(Token::KwParameters)
-        .padded_by(trivia())
         .ignored()
         .then(
             single_parameter
-                .separated_by(just(Token::Comma).padded_by(trivia()))
-                .collect::<HashMap<String, i32>>()
-                .delimited_by(
-                    just(Token::LBrace).padded_by(trivia()),
-                    just(Token::RBrace).padded_by(trivia()),
-                ),
-        )
-        .delimited_by(
-            just(Token::LBrace).padded_by(trivia()),
-            just(Token::RBrace).padded_by(trivia()),
+                .separated_by(just(Token::Comma))
+                .allow_trailing()
+                .collect::<HashMap<String, Expr>>()
+                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
         )
         .map(|((), v)| v)
         .labelled("register class parameters")
@@ -230,12 +198,10 @@ where
         .ignored()
         .then(
             single_register()
-                .separated_by(just(Token::Comma).padded_by(trivia()))
+                .separated_by(just(Token::Comma))
+                .allow_trailing()
                 .collect()
-                .delimited_by(
-                    just(Token::LBrace).padded_by(trivia()),
-                    just(Token::RBrace).padded_by(trivia()),
-                ),
+                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
         )
         .map(|((), v)| v)
         .labelled("register class registers")
@@ -255,19 +221,14 @@ where
         .or_not()
         .map(|o| o.flatten());
 
-    let reg_traits = parse_register_traits();
+    let reg_traits = register_traits();
 
     let single = ident
-        .padded_by(trivia())
-        .then(alias.padded_by(trivia()))
-        .then_ignore(
-            just(Token::Equals)
-                .then_ignore(just(Token::RAngle))
-                .padded_by(trivia()),
-        )
-        .then_ignore(just(Token::LBrace).padded_by(trivia()))
+        .then(alias)
+        .then_ignore(just(Token::Equals).then_ignore(just(Token::RAngle)))
+        .then_ignore(just(Token::LBrace))
         .then(reg_traits)
-        .then_ignore(just(Token::RBrace).padded_by(trivia()))
+        .then_ignore(just(Token::RBrace))
         .map(|((name, alias), traits)| {
             RegisterDef::Single(Register {
                 name,
@@ -289,21 +250,20 @@ where
     any().filter(is_ident).map(|t| t.as_ident().to_string())
 }
 
-fn parse_register_traits<'src, I>()
+fn register_traits<'src, I>()
 -> impl Parser<'src, I, Vec<RegisterTrait>, extra::Err<Rich<'src, Token, Span>>>
 where
     I: ValueInput<'src, Token = Token, Span = Span>,
 {
     just(Token::Identifier("traits".into()))
-        .padded_by(trivia())
-        .then_ignore(just(Token::Equals).padded_by(trivia()))
-        .then_ignore(just(Token::LBracket).padded_by(trivia()))
+        .then_ignore(just(Token::Equals))
+        .then_ignore(just(Token::LBracket))
         .ignore_then(
             select! { Token::Identifier(t) => t.to_string() }
-                .separated_by(just(Token::Comma).padded_by(trivia()))
+                .separated_by(just(Token::Comma))
                 .collect::<Vec<_>>(),
         )
-        .then_ignore(just(Token::RBracket).padded_by(trivia()))
+        .then_ignore(just(Token::RBracket))
         .map(|traits| {
             traits
                 .into_iter()
@@ -333,25 +293,16 @@ where
         .or_not()
         .map(|o| o.flatten());
 
-    let reg_traits = parse_register_traits();
+    let reg_traits = register_traits();
 
     ident
-        .padded_by(trivia())
-        .then_ignore(
-            just(Token::Dot)
-                .then_ignore(just(Token::Dot))
-                .padded_by(trivia()),
-        )
-        .then(ident.padded_by(trivia()))
-        .then(alias_pattern.padded_by(trivia()))
-        .then_ignore(
-            just(Token::Equals)
-                .then_ignore(just(Token::RAngle))
-                .padded_by(trivia()),
-        )
-        .then_ignore(just(Token::LBrace).padded_by(trivia()))
+        .then_ignore(just(Token::Dot).then_ignore(just(Token::Dot)))
+        .then(ident)
+        .then(alias_pattern)
+        .then_ignore(just(Token::Equals).then_ignore(just(Token::RAngle)))
+        .then_ignore(just(Token::LBrace))
         .then(reg_traits)
-        .then_ignore(just(Token::RBrace).padded_by(trivia()))
+        .then_ignore(just(Token::RBrace))
         .map(|(((start, end), alias_pattern), traits)| {
             RegisterDef::Range(RegisterRange {
                 start,
@@ -362,18 +313,36 @@ where
         })
 }
 
-fn trivia<'src, I>() -> impl Parser<'src, I, (), extra::Err<Rich<'src, Token, Span>>>
+fn inline_expr<'src, I>() -> impl Parser<'src, I, Expr, extra::Err<Rich<'src, Token, Span>>>
 where
     I: ValueInput<'src, Token = Token, Span = Span>,
 {
-    any().filter(is_trivia).repeated().at_least(0).to(())
-}
+    recursive(|expr| {
+        let val = select! {
+            Token::Identifier(i) => Ident::new(i).into(),
+            Token::Number(n) => LitInt::new(n).into(),
+        }
+        .labelled("value");
 
-fn is_trivia(token: &Token) -> bool {
-    match token {
-        Token::Whitespace(_) | Token::Comment(_) => true,
-        _ => false,
-    }
+        let atom = val
+            .or(expr
+                .clone()
+                .delimited_by(just(Token::LParen), just(Token::RParen)))
+            .boxed();
+
+        let ident = select! {Token::Identifier(i) => i};
+
+        let access =
+            atom.clone()
+                .foldl_with(just(Token::Dot).then(ident).repeated(), |a, (op, b), e| {
+                    Expr::Field(Field {
+                        base: Box::new(a),
+                        member: b,
+                    })
+                });
+
+        access.or(atom)
+    })
 }
 
 fn is_ident(token: &Token) -> bool {
