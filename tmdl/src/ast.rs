@@ -54,9 +54,33 @@ pub struct Isa {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct Template {
+    pub name: String,
+    pub for_isas: Vec<String>,
+    pub params: HashMap<String, (Type, Option<Expr>)>,
+    pub operands: HashMap<String, String>,
+    pub encoding: Vec<EncodingArm>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EncodingArm {
+    pub start: u16,
+    pub end: Option<u16>,
+    pub value: Expr,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Item {
     Isa(Isa),
     RegisterClass(RegisterClass),
+    Template(Template),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Type {
+    String,
+    Integer,
+    Bits(u16),
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -1,4 +1,5 @@
 use core::fmt;
+use std::fmt::Write;
 
 use chumsky::prelude::*;
 
@@ -28,6 +29,10 @@ pub enum Token {
     Dot,
     /// `,`
     Comma,
+    /// `:`
+    Colon,
+    /// `;`
+    Semicolon,
     /// `\`
     BackSlash,
 
@@ -59,12 +64,18 @@ pub enum Token {
     KwRegClass,
     /// `for`
     KwFor,
-    /// `self`
-    KwSelf,
     /// `registers`
     KwRegisters,
     /// `parameters`
     KwParameters,
+    /// `template`
+    KwTemplate,
+    /// `instruction`
+    KwInstruction,
+    /// `param`
+    KwParam,
+    /// `operands`
+    KwOperands,
 }
 
 impl Token {
@@ -105,6 +116,8 @@ pub(crate) fn lexer<'src>()
         just("<").to(Token::LAngle),
         just(">").to(Token::RAngle),
         just(",").to(Token::Comma),
+        just(":").to(Token::Colon),
+        just(";").to(Token::Semicolon),
     ));
 
     let op = choice((
@@ -123,6 +136,10 @@ pub(crate) fn lexer<'src>()
         "registers" => Token::KwRegisters,
         "register_class" => Token::KwRegClass,
         "parameters" => Token::KwParameters,
+        "template" => Token::KwTemplate,
+        "instruction" => Token::KwInstruction,
+        "param" => Token::KwParam,
+        "operands" => Token::KwOperands,
         _ => Token::Identifier(ident.to_owned()),
     });
 
@@ -172,6 +189,8 @@ impl fmt::Display for Token {
             Token::Equals => f.write_str("="),
             Token::Plus => f.write_str("+"),
             Token::Dash => f.write_str("-"),
+            Token::Colon => f.write_char(':'),
+            Token::Semicolon => f.write_char(';'),
             Token::ForwardSlash => f.write_str("/"),
             Token::BackSlash => f.write_str("\\"),
             Token::Comma => f.write_str(","),
@@ -186,8 +205,11 @@ impl fmt::Display for Token {
             Token::KwRequires => f.write_str("requires"),
             Token::KwRegClass => f.write_str("register_class"),
             Token::KwFor => f.write_str("for"),
-            Token::KwSelf => f.write_str("self"),
             Token::KwRegisters => f.write_str("registers"),
+            Token::KwTemplate => f.write_str("template"),
+            Token::KwInstruction => f.write_str("instruction"),
+            Token::KwParam => f.write_str("param"),
+            Token::KwOperands => f.write_str("operands"),
         }
     }
 }

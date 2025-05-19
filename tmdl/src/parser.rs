@@ -2,7 +2,11 @@ use std::collections::HashMap;
 
 use chumsky::{input::ValueInput, prelude::*};
 
-use crate::{Span, Spanned, ast::*, lexer::Token};
+use crate::{
+    Span, Spanned,
+    ast::{self, *},
+    lexer::Token,
+};
 
 pub fn parse<'src>(
     source: &'src str,
@@ -22,6 +26,7 @@ where
     choice((
         isa_def().map(Item::Isa),
         register_class_def().map(Item::RegisterClass),
+        template_def().map(Item::Template),
     ))
     .repeated()
     .at_least(0)
@@ -89,8 +94,8 @@ where
     let ident = select! { Token::Identifier(ident) => ident.to_string() };
     just(Token::KwRegClass)
         .ignored()
-        .then(ident.clone())
-        .then(register_class_for_isas())
+        .then(ident)
+        .then(for_isas())
         .then_ignore(just(Token::LBrace))
         .then(register_class_parameters())
         .then(register_class_registers())
@@ -104,6 +109,98 @@ where
             },
         )
         .labelled("register class definition")
+}
+
+fn template_def<'src, I>() -> impl Parser<'src, I, Template, extra::Err<Rich<'src, Token, Span>>>
+where
+    I: ValueInput<'src, Token = Token, Span = Span>,
+{
+    let ident = select! { Token::Identifier(ident) => ident.to_string() };
+
+    just(Token::KwTemplate)
+        .ignored()
+        .then(ident)
+        .then(for_isas().or_not())
+        .then(
+            choice((
+                parameter().map(TemplateBody::Param),
+                operands().map(TemplateBody::Operands),
+            ))
+            .repeated()
+            .collect::<Vec<_>>()
+            .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+        )
+        .map(|((((), name), for_isas), body)| {
+            let params = body
+                .iter()
+                .filter_map(|b| match b {
+                    TemplateBody::Param(p) => Some(p.clone()),
+                    _ => None,
+                })
+                .collect();
+
+            let operands = body
+                .iter()
+                .find_map(|b| {
+                    if let TemplateBody::Operands(o) = b {
+                        Some(o.clone())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default();
+
+            Template {
+                name,
+                for_isas: for_isas.unwrap_or_default(),
+                params,
+                operands,
+                encoding: vec![],
+            }
+        })
+}
+
+enum TemplateBody {
+    Param((String, (ast::Type, Option<ast::Expr>))),
+    Operands(HashMap<String, String>),
+}
+
+fn parameter<'src, I>()
+-> impl Parser<'src, I, (String, (ast::Type, Option<ast::Expr>)), extra::Err<Rich<'src, Token, Span>>>
+where
+    I: ValueInput<'src, Token = Token, Span = Span>,
+{
+    let ident = select! { Token::Identifier(ident) => ident.to_string() };
+    just(Token::KwParam)
+        .ignored()
+        .then(ident.clone())
+        .then_ignore(just(Token::Colon))
+        .then(type_())
+        .then(just(Token::Equals).then(inline_expr()).or_not())
+        .then_ignore(just(Token::Semicolon))
+        .map(|((((), name), ty), expr)| {
+            let expr = expr.map(|e| e.1);
+            (name, (ty, expr))
+        })
+}
+
+fn operands<'src, I>()
+-> impl Parser<'src, I, HashMap<String, String>, extra::Err<Rich<'src, Token, Span>>>
+where
+    I: ValueInput<'src, Token = Token, Span = Span>,
+{
+    let ident = select! { Token::Identifier(i) => i.to_string() };
+    let single_operand = ident.clone().then_ignore(just(Token::Colon)).then(ident);
+    just(Token::KwOperands)
+        .ignored()
+        .then(
+            single_operand
+                .separated_by(just(Token::Comma))
+                .allow_trailing()
+                .collect()
+                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+        )
+        .map(|((), operands)| operands)
 }
 
 fn isa_parameter<'src, I>()
@@ -146,8 +243,7 @@ where
         .map(|isa| isa.map(|(_, isa)| isa))
 }
 
-fn register_class_for_isas<'src, I>()
--> impl Parser<'src, I, Vec<String>, extra::Err<Rich<'src, Token, Span>>>
+fn for_isas<'src, I>() -> impl Parser<'src, I, Vec<String>, extra::Err<Rich<'src, Token, Span>>>
 where
     I: ValueInput<'src, Token = Token, Span = Span>,
 {
@@ -343,6 +439,28 @@ where
 
         access.or(atom)
     })
+}
+
+fn type_<'src, I>() -> impl Parser<'src, I, ast::Type, extra::Err<Rich<'src, Token, Span>>>
+where
+    I: ValueInput<'src, Token = Token, Span = Span>,
+{
+    let num = select! { Token::Number(n) => n };
+
+    let bits = just(Token::Identifier("bits".to_string()))
+        .ignored()
+        .then_ignore(just(Token::LAngle))
+        .then(num.try_map_with(|n, e| {
+            n.parse::<u16>()
+                .map_err(|_| Rich::custom(e.span(), "Expected unsigned integer"))
+        }))
+        .then_ignore(just(Token::RAngle))
+        .map(|((), bits)| Type::Bits(bits));
+    choice((
+        just(Token::Identifier("String".to_string())).to(ast::Type::String),
+        just(Token::Identifier("Integer".to_string())).to(ast::Type::Integer),
+        bits,
+    ))
 }
 
 fn is_ident(token: &Token) -> bool {
