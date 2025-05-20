@@ -143,7 +143,7 @@ where
         .then(
             choice((
                 parameter().map(TemplateOrInstBody::Param),
-                operands().map(TemplateOrInstBody::Operands),
+                instruction_operands().map(TemplateOrInstBody::Operands),
                 encoding().map(TemplateOrInstBody::Encoding),
                 asm().map(TemplateOrInstBody::Asm),
             ))
@@ -216,7 +216,7 @@ where
         .then(
             choice((
                 parameter().map(TemplateOrInstBody::Param),
-                operands().map(TemplateOrInstBody::Operands),
+                instruction_operands().map(TemplateOrInstBody::Operands),
                 encoding().map(TemplateOrInstBody::Encoding),
                 asm().map(TemplateOrInstBody::Asm),
                 behavior().map(TemplateOrInstBody::Behavior),
@@ -291,7 +291,7 @@ where
 
 enum TemplateOrInstBody {
     Param((String, (ast::Type, Option<ast::Expr>))),
-    Operands(HashMap<String, String>),
+    Operands(HashMap<String, Type>),
     Encoding(Vec<EncodingArm>),
     Asm(Expr),
     Behavior(Expr),
@@ -395,13 +395,13 @@ where
         })
 }
 
-fn operands<'src, I>()
--> impl Parser<'src, I, HashMap<String, String>, extra::Err<Rich<'src, Token<'src>, Span>>>
+fn instruction_operands<'src, I>()
+-> impl Parser<'src, I, HashMap<String, ast::Type>, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
     let ident = select! { Token::Identifier(i) => i.to_string() };
-    let single_operand = ident.clone().then_ignore(just(Token::Colon)).then(ident);
+    let single_operand = ident.clone().then_ignore(just(Token::Colon)).then(type_());
     just(Token::KwOperands)
         .ignored()
         .then(
@@ -620,6 +620,10 @@ where
         }
         .labelled("value");
 
+        let num = select! {
+          Token::Number(n) => n.parse::<u16>().unwrap(),
+        };
+
         let ident = select! { Token::Identifier(i) => i.to_string() };
 
         let atom = val
@@ -636,6 +640,36 @@ where
                         member: b,
                     })
                 });
+
+        let slice = access
+            .clone()
+            .or(atom.clone())
+            .then(
+                num.clone()
+                    .then_ignore(range_op())
+                    .then(num.clone())
+                    .delimited_by(just(Token::LBracket), just(Token::RBracket)),
+            )
+            .map(|(base, (start, end))| {
+                Expr::Slice(Slice {
+                    base: Box::new(base),
+                    start,
+                    end,
+                })
+            })
+            .boxed();
+
+        let index = access
+            .clone()
+            .or(atom.clone())
+            .then(num.delimited_by(just(Token::LBracket), just(Token::RBracket)))
+            .map(|(base, index)| {
+                Expr::IndexAccess(IndexAccess {
+                    base: Box::new(base),
+                    index,
+                })
+            })
+            .boxed();
 
         let items = expr
             .clone()
@@ -663,7 +697,7 @@ where
             })
         };
 
-        let basic = access.or(call).or(atom);
+        let basic = slice.or(index).or(access).or(call).or(atom);
 
         let op = just(Token::Asterisk)
             .to(BinOp::Mul)
@@ -753,6 +787,8 @@ where
 {
     let num = select! { Token::Number(n) => n };
 
+    let ident = select! { Token::Identifier(i) => i.to_string() };
+
     let bits = just(Token::Identifier("bits"))
         .ignored()
         .then_ignore(just(Token::LAngle))
@@ -766,6 +802,7 @@ where
         just(Token::Identifier("String")).to(ast::Type::String),
         just(Token::Identifier("Integer")).to(ast::Type::Integer),
         bits,
+        ident.map(ast::Type::Struct),
     ))
 }
 

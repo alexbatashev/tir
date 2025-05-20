@@ -164,7 +164,12 @@ pub(crate) fn lexer<'src>()
 
     let token = str_.or(num).or(control).or(op).or(ident);
 
+    let comment = just("//")
+        .then(any().and_is(just('\n').not()).repeated())
+        .padded();
+
     token
+        .padded_by(comment.repeated())
         .padded()
         .map_with(|tok, e| (tok, e.span()))
         .recover_with(skip_then_retry_until(any().ignored(), end()))

@@ -59,7 +59,7 @@ pub struct Template {
     pub for_isas: Vec<String>,
     pub parent_template: Option<String>,
     pub params: HashMap<String, (Type, Option<Expr>)>,
-    pub operands: HashMap<String, String>,
+    pub operands: HashMap<String, Type>,
     pub encoding: Vec<EncodingArm>,
     pub asm: Option<Expr>,
 }
@@ -70,7 +70,7 @@ pub struct Instruction {
     pub for_isas: Vec<String>,
     pub parent_template: Option<String>,
     pub params: HashMap<String, (Type, Option<Expr>)>,
-    pub operands: HashMap<String, String>,
+    pub operands: HashMap<String, Type>,
     pub encoding: Vec<EncodingArm>,
     pub asm: Option<Expr>,
     pub behavior: Expr,
@@ -96,6 +96,7 @@ pub enum Type {
     String,
     Integer,
     Bits(u16),
+    Struct(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -166,15 +167,30 @@ pub struct Call {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct Slice {
+    pub base: Box<Expr>,
+    pub start: u16,
+    pub end: u16,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct IndexAccess {
+    pub base: Box<Expr>,
+    pub index: u16,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Assign(Assign),
     Binary(Binary),
+    Block(Block),
     Call(Call),
-    Lit(Lit),
     Field(Field),
     Ident(Ident),
     If(If),
-    Block(Block),
+    IndexAccess(IndexAccess),
+    Lit(Lit),
+    Slice(Slice),
     Invalid,
 }
 
