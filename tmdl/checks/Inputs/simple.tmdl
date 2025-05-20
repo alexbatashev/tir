@@ -1,11 +1,11 @@
 isa TestIsa32 {
-    PARAM1 = 100,
-    WIDTH = 32,
+    param PARAM1: Integer = 100;
+    param WIDTH: Integer = 32;
 }
 
 isa TestIsa64 {
-    PARAM1 = 100,
-    WIDTH = 64
+    param PARAM1: Integer = 100;
+    param WIDTH: Integer = 64;
 }
 
 register_class GPR for [TestIsa32, TestIsa64] {

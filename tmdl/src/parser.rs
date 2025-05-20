@@ -48,26 +48,16 @@ where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
     just(Token::KwIsa)
-        .then(ident())
+        .ignore_then(ident())
         .then(isa_requirements())
         .then_ignore(just(Token::LBrace))
-        .then(
-            isa_parameter()
-                .separated_by(just(Token::Comma))
-                .allow_trailing()
-                .collect(),
-        )
+        .then(parameter().repeated().collect())
         .then_ignore(just(Token::RBrace))
-        .map(
-            |(((_kw, name), requires), parameters): (
-                ((Token, String), Option<IsaRequirement>),
-                HashMap<String, Expr>,
-            )| Isa {
-                name,
-                requires,
-                parameters,
-            },
-        )
+        .map(|((name, requires), parameters)| Isa {
+            name,
+            requires,
+            parameters,
+        })
         .labelled("ISA definition")
 }
 
@@ -395,20 +385,6 @@ where
                 .delimited_by(just(Token::LBrace), just(Token::RBrace)),
         )
         .map(|((), operands)| operands)
-}
-
-fn isa_parameter<'src, I>()
--> impl Parser<'src, I, (String, Expr), extra::Err<Rich<'src, Token<'src>, Span>>>
-where
-    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
-{
-    let ident = select! { Token::Identifier(i) => i.to_string() };
-    let number = select! { Token::Number(i) => i };
-
-    ident
-        .then_ignore(just(Token::Equals))
-        .then(number)
-        .map(|(ident, number)| (ident, Expr::Lit(Lit::Int(LitInt::new(number.to_string())))))
 }
 
 fn isa_requirements<'src, I>()

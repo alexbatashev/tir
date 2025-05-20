@@ -50,7 +50,7 @@ pub enum IsaRequirement {
 pub struct Isa {
     pub name: String,
     pub requires: Option<IsaRequirement>,
-    pub parameters: HashMap<String, Expr>,
+    pub parameters: HashMap<String, (Type, Option<Expr>)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
