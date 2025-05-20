@@ -35,7 +35,7 @@ pub enum RegisterDef {
 pub struct RegisterClass {
     pub name: String,
     pub for_isas: Vec<String>,
-    pub parameters: HashMap<String, Expr>,
+    pub parameters: HashMap<String, (Type, Option<Expr>)>,
     pub registers: Vec<RegisterDef>,
 }
 

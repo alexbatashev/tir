@@ -84,22 +84,49 @@ where
 {
     let ident = select! { Token::Identifier(ident) => ident.to_string() };
     just(Token::KwRegClass)
-        .ignored()
-        .then(ident)
+        .ignore_then(ident)
         .then(for_isas())
-        .then_ignore(just(Token::LBrace))
-        .then(register_class_parameters())
-        .then(register_class_registers())
-        .then_ignore(just(Token::RBrace))
-        .map(
-            |(((((), name), for_isas), parameters), registers)| RegisterClass {
+        .then(
+            choice((
+                parameter().map(RegClassBody::Param),
+                register_class_registers().map(RegClassBody::Registers),
+            ))
+            .repeated()
+            .collect::<Vec<_>>()
+            .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+        )
+        .map(|((name, for_isas), body)| {
+            let parameters = body
+                .iter()
+                .filter_map(|b| match b {
+                    RegClassBody::Param(p) => Some(p.clone()),
+                    _ => None,
+                })
+                .collect();
+
+            let registers = body
+                .iter()
+                .find_map(|b| {
+                    if let RegClassBody::Registers(r) = b {
+                        Some(r.clone())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default();
+            RegisterClass {
                 name,
                 for_isas,
                 parameters,
                 registers,
-            },
-        )
+            }
+        })
         .labelled("register class definition")
+}
+
+enum RegClassBody {
+    Param((String, (ast::Type, Option<ast::Expr>))),
+    Registers(Vec<RegisterDef>),
 }
 
 fn template_def<'src, I>()

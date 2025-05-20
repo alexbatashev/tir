@@ -9,10 +9,7 @@ isa TestIsa64 {
 }
 
 register_class GPR for [TestIsa32, TestIsa64] {
-    parameters {
-        width = self.WIDTH,
-        encoding_len = 5,
-    }
+    param ENCODING_LEN: Integer = 5;
     registers {
         x0("zero") => { traits = [hardwired_zero] },
         x1("ra") => { traits = [return_address, caller_saved] },
