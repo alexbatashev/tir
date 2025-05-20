@@ -9,3 +9,6 @@ pub type Span = SimpleSpan;
 pub type Spanned<T> = (T, Span);
 
 pub use compiler::compiler_main;
+
+pub use lexer::lex;
+pub use parser::parse;

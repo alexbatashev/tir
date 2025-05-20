@@ -7,11 +7,11 @@ use crate::{Span, Spanned};
 
 // Token definition
 #[derive(Debug, Clone, PartialEq)]
-pub enum Token {
-    Comment(String),
-    Identifier(String),
-    Number(String),
-    StringLit(String),
+pub enum Token<'a> {
+    Comment(&'a str),
+    Identifier(&'a str),
+    Number(&'a str),
+    StringLit(&'a str),
 
     /// `=`
     Equals,
@@ -88,24 +88,24 @@ pub enum Token {
     KwBehavior,
 }
 
-impl Token {
-    pub fn as_ident(&self) -> &str {
+impl<'a> Token<'a> {
+    pub fn as_ident(&self) -> &'a str {
         if let Token::Identifier(ident) = self {
-            ident.as_str()
+            ident
         } else {
             unreachable!()
         }
     }
 }
 
-pub fn lex<'src>(source: &'src str) -> (Vec<Spanned<Token>>, Vec<Rich<'src, char, Span>>) {
+pub fn lex<'src>(source: &'src str) -> (Vec<Spanned<Token<'src>>>, Vec<Rich<'src, char, Span>>) {
     let (tokens, errors) = lexer().parse(source).into_output_errors();
 
     (tokens.unwrap_or_default(), errors)
 }
 
 pub(crate) fn lexer<'src>()
--> impl Parser<'src, &'src str, Vec<Spanned<Token>>, extra::Err<Rich<'src, char, Span>>> {
+-> impl Parser<'src, &'src str, Vec<Spanned<Token<'src>>>, extra::Err<Rich<'src, char, Span>>> {
     let num = just("0b")
         .then(text::int(2).repeated().at_least(1))
         .to_slice()
@@ -113,34 +113,34 @@ pub(crate) fn lexer<'src>()
             .then(text::int(16).repeated().at_least(1))
             .to_slice())
         .or(text::int(10).repeated().at_least(1).to_slice())
-        .map(|n: &str| Token::Number(n.to_owned()));
+        .map(|n: &str| Token::Number(n));
 
     let str_ = just('"')
         .ignore_then(none_of('"').repeated().to_slice())
         .then_ignore(just('"'))
-        .map(|s: &str| Token::StringLit(s.to_string()));
+        .map(|s: &str| Token::StringLit(s));
 
     let control = choice((
-        just("{").to(Token::LBrace),
-        just("}").to(Token::RBrace),
-        just("[").to(Token::LBracket),
-        just("]").to(Token::RBracket),
-        just("(").to(Token::LParen),
-        just(")").to(Token::RParen),
-        just("<").to(Token::LAngle),
-        just(">").to(Token::RAngle),
-        just(",").to(Token::Comma),
-        just(":").to(Token::Colon),
-        just(";").to(Token::Semicolon),
+        just('{').to(Token::LBrace),
+        just('}').to(Token::RBrace),
+        just('[').to(Token::LBracket),
+        just(']').to(Token::RBracket),
+        just('(').to(Token::LParen),
+        just(')').to(Token::RParen),
+        just('<').to(Token::LAngle),
+        just('>').to(Token::RAngle),
+        just(',').to(Token::Comma),
+        just(':').to(Token::Colon),
+        just(';').to(Token::Semicolon),
     ));
 
     let op = choice((
-        just("=").to(Token::Equals),
-        just("+").to(Token::Plus),
-        just("*").to(Token::Asterisk),
-        just("/").to(Token::ForwardSlash),
-        just("|").to(Token::Pipe),
-        just(".").to(Token::Dot),
+        just('=').to(Token::Equals),
+        just('+').to(Token::Plus),
+        just('*').to(Token::Asterisk),
+        just('/').to(Token::ForwardSlash),
+        just('|').to(Token::Pipe),
+        just('.').to(Token::Dot),
     ));
 
     let ident = text::ascii::ident().map(|ident: &str| match ident {
@@ -159,7 +159,7 @@ pub(crate) fn lexer<'src>()
         "else" => Token::KwElse,
         "asm" => Token::KwAsm,
         "behavior" => Token::KwBehavior,
-        _ => Token::Identifier(ident.to_owned()),
+        _ => Token::Identifier(ident),
     });
 
     let token = str_.or(num).or(control).or(op).or(ident);
@@ -193,7 +193,7 @@ mod test {
     }
 }
 
-impl fmt::Display for Token {
+impl<'a> fmt::Display for Token<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Token::Dot => f.write_str("."),

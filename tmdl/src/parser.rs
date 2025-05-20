@@ -11,7 +11,7 @@ use crate::{
 pub fn parse<'src>(
     source: &'src str,
     tokens: &'src [Spanned<Token>],
-) -> (Option<File>, Vec<Rich<'src, Token, Span>>) {
+) -> (Option<File>, Vec<Rich<'src, Token<'src>, Span>>) {
     file()
         .then_ignore(end())
         .parse(tokens.map((source.len()..source.len()).into(), |(t, s)| (t, s)))
@@ -19,9 +19,9 @@ pub fn parse<'src>(
 }
 
 /// Parse single translation unit
-fn file<'src, I>() -> impl Parser<'src, I, File, extra::Err<Rich<'src, Token, Span>>>
+fn file<'src, I>() -> impl Parser<'src, I, File, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
-    I: ValueInput<'src, Token = Token, Span = Span>,
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
     choice((
         isa_def().map(Item::Isa),
@@ -43,9 +43,9 @@ where
 ///   XLEN = 32,
 /// }
 /// ```
-fn isa_def<'src, I>() -> impl Parser<'src, I, Isa, extra::Err<Rich<'src, Token, Span>>>
+fn isa_def<'src, I>() -> impl Parser<'src, I, Isa, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
-    I: ValueInput<'src, Token = Token, Span = Span>,
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
     just(Token::KwIsa)
         .then(ident())
@@ -88,9 +88,9 @@ where
 /// }
 /// ```
 fn register_class_def<'src, I>()
--> impl Parser<'src, I, RegisterClass, extra::Err<Rich<'src, Token, Span>>>
+-> impl Parser<'src, I, RegisterClass, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
-    I: ValueInput<'src, Token = Token, Span = Span>,
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
     let ident = select! { Token::Identifier(ident) => ident.to_string() };
     just(Token::KwRegClass)
@@ -112,9 +112,10 @@ where
         .labelled("register class definition")
 }
 
-fn template_def<'src, I>() -> impl Parser<'src, I, Template, extra::Err<Rich<'src, Token, Span>>>
+fn template_def<'src, I>()
+-> impl Parser<'src, I, Template, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
-    I: ValueInput<'src, Token = Token, Span = Span>,
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
     let ident = select! { Token::Identifier(ident) => ident.to_string() };
 
@@ -185,9 +186,9 @@ where
 }
 
 fn instruction_def<'src, I>()
--> impl Parser<'src, I, Instruction, extra::Err<Rich<'src, Token, Span>>>
+-> impl Parser<'src, I, Instruction, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
-    I: ValueInput<'src, Token = Token, Span = Span>,
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
     let ident = select! { Token::Identifier(ident) => ident.to_string() };
 
@@ -279,23 +280,24 @@ enum TemplateOrInstBody {
     Behavior(Expr),
 }
 
-fn asm<'src, I>() -> impl Parser<'src, I, Expr, extra::Err<Rich<'src, Token, Span>>>
+fn asm<'src, I>() -> impl Parser<'src, I, Expr, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
-    I: ValueInput<'src, Token = Token, Span = Span>,
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
     just(Token::KwAsm).ignore_then(expr())
 }
 
-fn behavior<'src, I>() -> impl Parser<'src, I, Expr, extra::Err<Rich<'src, Token, Span>>>
+fn behavior<'src, I>() -> impl Parser<'src, I, Expr, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
-    I: ValueInput<'src, Token = Token, Span = Span>,
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
     just(Token::KwBehavior).ignore_then(expr())
 }
 
-fn encoding<'src, I>() -> impl Parser<'src, I, Vec<EncodingArm>, extra::Err<Rich<'src, Token, Span>>>
+fn encoding<'src, I>()
+-> impl Parser<'src, I, Vec<EncodingArm>, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
-    I: ValueInput<'src, Token = Token, Span = Span>,
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
     let num = select! { Token::Number(i) => i.parse::<u16>().unwrap() };
 
@@ -331,9 +333,9 @@ where
         .map(|((), arms)| arms)
 }
 
-fn arrow<'src, I>() -> impl Parser<'src, I, (), extra::Err<Rich<'src, Token, Span>>>
+fn arrow<'src, I>() -> impl Parser<'src, I, (), extra::Err<Rich<'src, Token<'src>, Span>>>
 where
-    I: ValueInput<'src, Token = Token, Span = Span>,
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
     just(Token::Equals)
         .ignored()
@@ -342,9 +344,9 @@ where
         .labelled("arrow operator")
 }
 
-fn range_op<'src, I>() -> impl Parser<'src, I, (), extra::Err<Rich<'src, Token, Span>>>
+fn range_op<'src, I>() -> impl Parser<'src, I, (), extra::Err<Rich<'src, Token<'src>, Span>>>
 where
-    I: ValueInput<'src, Token = Token, Span = Span>,
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
     just(Token::Dot)
         .ignored()
@@ -353,10 +355,14 @@ where
         .labelled("range operator")
 }
 
-fn parameter<'src, I>()
--> impl Parser<'src, I, (String, (ast::Type, Option<ast::Expr>)), extra::Err<Rich<'src, Token, Span>>>
+fn parameter<'src, I>() -> impl Parser<
+    'src,
+    I,
+    (String, (ast::Type, Option<ast::Expr>)),
+    extra::Err<Rich<'src, Token<'src>, Span>>,
+>
 where
-    I: ValueInput<'src, Token = Token, Span = Span>,
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
     let ident = select! { Token::Identifier(ident) => ident.to_string() };
     just(Token::KwParam)
@@ -373,9 +379,9 @@ where
 }
 
 fn operands<'src, I>()
--> impl Parser<'src, I, HashMap<String, String>, extra::Err<Rich<'src, Token, Span>>>
+-> impl Parser<'src, I, HashMap<String, String>, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
-    I: ValueInput<'src, Token = Token, Span = Span>,
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
     let ident = select! { Token::Identifier(i) => i.to_string() };
     let single_operand = ident.clone().then_ignore(just(Token::Colon)).then(ident);
@@ -392,26 +398,27 @@ where
 }
 
 fn isa_parameter<'src, I>()
--> impl Parser<'src, I, (String, Expr), extra::Err<Rich<'src, Token, Span>>>
+-> impl Parser<'src, I, (String, Expr), extra::Err<Rich<'src, Token<'src>, Span>>>
 where
-    I: ValueInput<'src, Token = Token, Span = Span>,
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
-    let ident = select! { Token::Identifier(i) => i };
+    let ident = select! { Token::Identifier(i) => i.to_string() };
     let number = select! { Token::Number(i) => i };
 
     ident
         .then_ignore(just(Token::Equals))
         .then(number)
-        .map(|(ident, number)| (ident, Expr::Lit(Lit::Int(LitInt::new(number)))))
+        .map(|(ident, number)| (ident, Expr::Lit(Lit::Int(LitInt::new(number.to_string())))))
 }
 
 fn isa_requirements<'src, I>()
--> impl Parser<'src, I, Option<IsaRequirement>, extra::Err<Rich<'src, Token, Span>>>
+-> impl Parser<'src, I, Option<IsaRequirement>, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
-    I: ValueInput<'src, Token = Token, Span = Span>,
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
     let ident = select! { Token::Identifier(ident) => ident.to_string() };
-    let single_isa = select! { Token::Identifier(ident) => IsaRequirement::Single(ident) };
+    let single_isa =
+        select! { Token::Identifier(ident) => IsaRequirement::Single(ident.to_string()) };
     let any = ident
         .clone()
         .separated_by(just(Token::Pipe))
@@ -431,9 +438,10 @@ where
         .map(|isa| isa.map(|(_, isa)| isa))
 }
 
-fn for_isas<'src, I>() -> impl Parser<'src, I, Vec<String>, extra::Err<Rich<'src, Token, Span>>>
+fn for_isas<'src, I>()
+-> impl Parser<'src, I, Vec<String>, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
-    I: ValueInput<'src, Token = Token, Span = Span>,
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
     let ident = select! { Token::Identifier(ident) => ident.to_string() };
     just(Token::KwFor)
@@ -450,11 +458,11 @@ where
 }
 
 fn register_class_parameters<'src, I>()
--> impl Parser<'src, I, HashMap<String, Expr>, extra::Err<Rich<'src, Token, Span>>>
+-> impl Parser<'src, I, HashMap<String, Expr>, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
-    I: ValueInput<'src, Token = Token, Span = Span>,
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
-    let ident = select! { Token::Identifier(ident) => ident.clone() };
+    let ident = select! { Token::Identifier(ident) => ident.to_string() };
 
     let single_parameter = ident
         .clone()
@@ -474,9 +482,9 @@ where
 }
 
 fn register_class_registers<'src, I>()
--> impl Parser<'src, I, Vec<RegisterDef>, extra::Err<Rich<'src, Token, Span>>>
+-> impl Parser<'src, I, Vec<RegisterDef>, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
-    I: ValueInput<'src, Token = Token, Span = Span>,
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
     just(Token::KwRegisters)
         .ignored()
@@ -492,9 +500,9 @@ where
 }
 
 fn single_register<'src, I>()
--> impl Parser<'src, I, RegisterDef, extra::Err<Rich<'src, Token, Span>>>
+-> impl Parser<'src, I, RegisterDef, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
-    I: ValueInput<'src, Token = Token, Span = Span>,
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
     let ident = select! { Token::Identifier(ident) => ident.to_string() };
     let alias = just(Token::LParen)
@@ -527,17 +535,17 @@ where
     choice((range, single)).labelled("register")
 }
 
-fn ident<'src, I>() -> impl Parser<'src, I, String, extra::Err<Rich<'src, Token, Span>>>
+fn ident<'src, I>() -> impl Parser<'src, I, String, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
-    I: ValueInput<'src, Token = Token, Span = Span>,
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
     any().filter(is_ident).map(|t| t.as_ident().to_string())
 }
 
 fn register_traits<'src, I>()
--> impl Parser<'src, I, Vec<RegisterTrait>, extra::Err<Rich<'src, Token, Span>>>
+-> impl Parser<'src, I, Vec<RegisterTrait>, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
-    I: ValueInput<'src, Token = Token, Span = Span>,
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
     just(Token::Identifier("traits".into()))
         .then_ignore(just(Token::Equals))
@@ -564,9 +572,9 @@ where
 }
 
 fn register_range<'src, I>()
--> impl Parser<'src, I, RegisterDef, extra::Err<Rich<'src, Token, Span>>>
+-> impl Parser<'src, I, RegisterDef, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
-    I: ValueInput<'src, Token = Token, Span = Span>,
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
     let ident = select! { Token::Identifier(ident) => ident.to_string() };
     let alias_pattern = just(Token::LParen)
@@ -597,15 +605,15 @@ where
         })
 }
 
-fn inline_expr<'src, I>() -> impl Parser<'src, I, Expr, extra::Err<Rich<'src, Token, Span>>>
+fn inline_expr<'src, I>() -> impl Parser<'src, I, Expr, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
-    I: ValueInput<'src, Token = Token, Span = Span>,
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
     recursive(|expr| {
         let val = select! {
-            Token::Identifier(i) => Ident::new(i).into(),
-            Token::Number(n) => LitInt::new(n).into(),
-            Token::StringLit(s) => LitStr::new(s).into(),
+            Token::Identifier(i) => Ident::new(i.to_string()).into(),
+            Token::Number(n) => LitInt::new(n.to_string()).into(),
+            Token::StringLit(s) => LitStr::new(s.to_string()).into(),
         }
         .labelled("value");
 
@@ -670,11 +678,11 @@ where
     })
 }
 
-fn expr<'src, I>() -> impl Parser<'src, I, Expr, extra::Err<Rich<'src, Token, Span>>>
+fn expr<'src, I>() -> impl Parser<'src, I, Expr, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
-    I: ValueInput<'src, Token = Token, Span = Span>,
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
-    let ident = select! {Token::Identifier(i) => i};
+    let ident = select! {Token::Identifier(i) => i.to_string()};
 
     recursive(|expr| {
         let assign = ident
@@ -736,13 +744,13 @@ where
     })
 }
 
-fn type_<'src, I>() -> impl Parser<'src, I, ast::Type, extra::Err<Rich<'src, Token, Span>>>
+fn type_<'src, I>() -> impl Parser<'src, I, ast::Type, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
-    I: ValueInput<'src, Token = Token, Span = Span>,
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
     let num = select! { Token::Number(n) => n };
 
-    let bits = just(Token::Identifier("bits".to_string()))
+    let bits = just(Token::Identifier("bits"))
         .ignored()
         .then_ignore(just(Token::LAngle))
         .then(num.try_map_with(|n, e| {
@@ -752,8 +760,8 @@ where
         .then_ignore(just(Token::RAngle))
         .map(|((), bits)| Type::Bits(bits));
     choice((
-        just(Token::Identifier("String".to_string())).to(ast::Type::String),
-        just(Token::Identifier("Integer".to_string())).to(ast::Type::Integer),
+        just(Token::Identifier("String")).to(ast::Type::String),
+        just(Token::Identifier("Integer")).to(ast::Type::Integer),
         bits,
     ))
 }

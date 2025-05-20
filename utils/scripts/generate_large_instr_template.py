@@ -7,11 +7,17 @@ def generate(num_fields, num_decls, out):
     for i in range(num_decls):
         template += f"""
 // Some comment for Template{i}
-instr_template Template{i}<$param1: bits<100>, $param2: bits<2>, $param3: bits<1>, $param3: str> {{
-        """
+template Template{i} {{
+    param param1: bits<100>;
+    param2: bits<2>;
+    param3: bits<1>;
+    param3: String;
+
+    operands {{
+"""
         for j in range(num_fields):
-            template += f"  field{j}: Register,\n"
-        template += "}\n\n"
+            template += f"      field{j}: Register,\n"
+        template += "   }\n}\n"
 
     with open(out, "w") as f:
         f.write(template)
