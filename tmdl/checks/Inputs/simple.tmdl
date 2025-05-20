@@ -22,11 +22,32 @@ register_class GPR for [TestIsa32, TestIsa64] {
 
 template ParentInst for [TestIsa32, TestIsa64] {
     param MNEMONIC: String;
-    param OPCODE: Integer;
+    param OPCODE: bits<7>;
 
     operands {
         rs1: GPR,
         rs2: GPR,
         rd: GPR,
+    }
+
+    encoding {
+        0 => 1,
+        1..5 => rs1,
+        6..10 => rs2,
+        11..15 => rd,
+        16..31 => 0,
+    }
+
+    asm {
+        "{self.MNEMONIC} {rd}, {rs1}, {rs2}"
+    }
+}
+
+instruction Add for [TestIsa32, TestIsa64] : ParentInst {
+    param MNEMONIC: String = "add";
+    param OPCODE: bits<7> = 0b00001011;
+
+    behavior {
+        rd = rs1 + rs2;
     }
 }

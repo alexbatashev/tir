@@ -57,9 +57,23 @@ pub struct Isa {
 pub struct Template {
     pub name: String,
     pub for_isas: Vec<String>,
+    pub parent_template: Option<String>,
     pub params: HashMap<String, (Type, Option<Expr>)>,
     pub operands: HashMap<String, String>,
     pub encoding: Vec<EncodingArm>,
+    pub asm: Option<Expr>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Instruction {
+    pub name: String,
+    pub for_isas: Vec<String>,
+    pub parent_template: Option<String>,
+    pub params: HashMap<String, (Type, Option<Expr>)>,
+    pub operands: HashMap<String, String>,
+    pub encoding: Vec<EncodingArm>,
+    pub asm: Option<Expr>,
+    pub behavior: Expr,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -74,6 +88,7 @@ pub enum Item {
     Isa(Isa),
     RegisterClass(RegisterClass),
     Template(Template),
+    Instruction(Instruction),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -106,15 +121,61 @@ pub struct Field {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct If {
+    pub cond: Box<Expr>,
+    pub then: Box<Expr>,
+    pub else_: Option<Box<Expr>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Block {
+    pub stmts: Vec<Expr>,
+    pub last_expr_return: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Ident {
     pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct Assign {
+    pub dest: String,
+    pub value: Box<Expr>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum BinOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Binary {
+    pub lhs: Box<Expr>,
+    pub rhs: Box<Expr>,
+    pub op: BinOp,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Call {
+    pub base: Box<Expr>,
+    pub arguments: Vec<Expr>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
+    Assign(Assign),
+    Binary(Binary),
+    Call(Call),
     Lit(Lit),
     Field(Field),
     Ident(Ident),
+    If(If),
+    Block(Block),
+    Invalid,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -128,9 +189,21 @@ impl LitInt {
     }
 }
 
+impl LitStr {
+    pub fn new(value: String) -> Self {
+        Self { value }
+    }
+}
+
 impl Into<Expr> for LitInt {
     fn into(self) -> Expr {
         Expr::Lit(Lit::Int(self))
+    }
+}
+
+impl Into<Expr> for LitStr {
+    fn into(self) -> Expr {
+        Expr::Lit(Lit::Str(self))
     }
 }
 
@@ -143,5 +216,17 @@ impl Ident {
 impl Into<Expr> for Ident {
     fn into(self) -> Expr {
         Expr::Ident(self)
+    }
+}
+
+impl Into<Expr> for Block {
+    fn into(self) -> Expr {
+        Expr::Block(self)
+    }
+}
+
+impl Into<Expr> for If {
+    fn into(self) -> Expr {
+        Expr::If(self)
     }
 }

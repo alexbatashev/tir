@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use chumsky::{input::ValueInput, prelude::*};
+use chumsky::{input::ValueInput, prelude::*, recursive};
 
 use crate::{
     Span, Spanned,
@@ -27,6 +27,7 @@ where
         isa_def().map(Item::Isa),
         register_class_def().map(Item::RegisterClass),
         template_def().map(Item::Template),
+        instruction_def().map(Item::Instruction),
     ))
     .repeated()
     .at_least(0)
@@ -118,23 +119,25 @@ where
     let ident = select! { Token::Identifier(ident) => ident.to_string() };
 
     just(Token::KwTemplate)
-        .ignored()
-        .then(ident)
+        .ignore_then(ident)
         .then(for_isas().or_not())
+        .then(just(Token::Colon).ignore_then(ident.clone()).or_not())
         .then(
             choice((
-                parameter().map(TemplateBody::Param),
-                operands().map(TemplateBody::Operands),
+                parameter().map(TemplateOrInstBody::Param),
+                operands().map(TemplateOrInstBody::Operands),
+                encoding().map(TemplateOrInstBody::Encoding),
+                asm().map(TemplateOrInstBody::Asm),
             ))
             .repeated()
             .collect::<Vec<_>>()
             .delimited_by(just(Token::LBrace), just(Token::RBrace)),
         )
-        .map(|((((), name), for_isas), body)| {
+        .map(|(((name, for_isas), parent_template), body)| {
             let params = body
                 .iter()
                 .filter_map(|b| match b {
-                    TemplateBody::Param(p) => Some(p.clone()),
+                    TemplateOrInstBody::Param(p) => Some(p.clone()),
                     _ => None,
                 })
                 .collect();
@@ -142,7 +145,7 @@ where
             let operands = body
                 .iter()
                 .find_map(|b| {
-                    if let TemplateBody::Operands(o) = b {
+                    if let TemplateOrInstBody::Operands(o) = b {
                         Some(o.clone())
                     } else {
                         None
@@ -150,19 +153,204 @@ where
                 })
                 .unwrap_or_default();
 
+            let encoding = body
+                .iter()
+                .find_map(|b| {
+                    if let TemplateOrInstBody::Encoding(e) = b {
+                        Some(e.clone())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default();
+
+            let asm = body.iter().find_map(|b| {
+                if let TemplateOrInstBody::Asm(a) = b {
+                    Some(a.clone())
+                } else {
+                    None
+                }
+            });
+
             Template {
                 name,
                 for_isas: for_isas.unwrap_or_default(),
+                parent_template,
                 params,
                 operands,
-                encoding: vec![],
+                encoding,
+                asm,
             }
         })
 }
 
-enum TemplateBody {
+fn instruction_def<'src, I>()
+-> impl Parser<'src, I, Instruction, extra::Err<Rich<'src, Token, Span>>>
+where
+    I: ValueInput<'src, Token = Token, Span = Span>,
+{
+    let ident = select! { Token::Identifier(ident) => ident.to_string() };
+
+    just(Token::KwInstruction)
+        .ignore_then(ident)
+        .then(for_isas().or_not())
+        .then(just(Token::Colon).ignore_then(ident.clone()).or_not())
+        .then(
+            choice((
+                parameter().map(TemplateOrInstBody::Param),
+                operands().map(TemplateOrInstBody::Operands),
+                encoding().map(TemplateOrInstBody::Encoding),
+                asm().map(TemplateOrInstBody::Asm),
+                behavior().map(TemplateOrInstBody::Behavior),
+            ))
+            .repeated()
+            .collect::<Vec<_>>()
+            .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+        )
+        .map(|(((name, for_isas), parent_template), body)| {
+            let params = body
+                .iter()
+                .filter_map(|b| match b {
+                    TemplateOrInstBody::Param(p) => Some(p.clone()),
+                    _ => None,
+                })
+                .collect();
+
+            let operands = body
+                .iter()
+                .find_map(|b| {
+                    if let TemplateOrInstBody::Operands(o) = b {
+                        Some(o.clone())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default();
+
+            let encoding = body
+                .iter()
+                .find_map(|b| {
+                    if let TemplateOrInstBody::Encoding(e) = b {
+                        Some(e.clone())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default();
+
+            let asm = body.iter().find_map(|b| {
+                if let TemplateOrInstBody::Asm(a) = b {
+                    Some(a.clone())
+                } else {
+                    None
+                }
+            });
+
+            let behavior = body
+                .iter()
+                .find_map(|b| {
+                    if let TemplateOrInstBody::Behavior(a) = b {
+                        Some(a.clone())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap();
+
+            Instruction {
+                name,
+                for_isas: for_isas.unwrap_or_default(),
+                parent_template,
+                params,
+                operands,
+                encoding,
+                asm,
+                behavior,
+            }
+        })
+        .labelled("instruction definition")
+}
+
+enum TemplateOrInstBody {
     Param((String, (ast::Type, Option<ast::Expr>))),
     Operands(HashMap<String, String>),
+    Encoding(Vec<EncodingArm>),
+    Asm(Expr),
+    Behavior(Expr),
+}
+
+fn asm<'src, I>() -> impl Parser<'src, I, Expr, extra::Err<Rich<'src, Token, Span>>>
+where
+    I: ValueInput<'src, Token = Token, Span = Span>,
+{
+    just(Token::KwAsm).ignore_then(expr())
+}
+
+fn behavior<'src, I>() -> impl Parser<'src, I, Expr, extra::Err<Rich<'src, Token, Span>>>
+where
+    I: ValueInput<'src, Token = Token, Span = Span>,
+{
+    just(Token::KwBehavior).ignore_then(expr())
+}
+
+fn encoding<'src, I>() -> impl Parser<'src, I, Vec<EncodingArm>, extra::Err<Rich<'src, Token, Span>>>
+where
+    I: ValueInput<'src, Token = Token, Span = Span>,
+{
+    let num = select! { Token::Number(i) => i.parse::<u16>().unwrap() };
+
+    let single_bit = num
+        .clone()
+        .then_ignore(arrow())
+        .then(inline_expr())
+        .map(|(start, value)| EncodingArm {
+            start,
+            end: None,
+            value,
+        });
+    let range = num
+        .clone()
+        .then_ignore(range_op())
+        .then(num)
+        .then_ignore(arrow())
+        .then(inline_expr())
+        .map(|((start, end), value)| EncodingArm {
+            start,
+            end: Some(end),
+            value,
+        });
+    just(Token::KwEncoding)
+        .ignored()
+        .then(
+            choice((single_bit, range))
+                .separated_by(just(Token::Comma))
+                .allow_trailing()
+                .collect()
+                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+        )
+        .map(|((), arms)| arms)
+}
+
+fn arrow<'src, I>() -> impl Parser<'src, I, (), extra::Err<Rich<'src, Token, Span>>>
+where
+    I: ValueInput<'src, Token = Token, Span = Span>,
+{
+    just(Token::Equals)
+        .ignored()
+        .then_ignore(just(Token::RAngle))
+        .to(())
+        .labelled("arrow operator")
+}
+
+fn range_op<'src, I>() -> impl Parser<'src, I, (), extra::Err<Rich<'src, Token, Span>>>
+where
+    I: ValueInput<'src, Token = Token, Span = Span>,
+{
+    just(Token::Dot)
+        .ignored()
+        .then_ignore(just(Token::Dot))
+        .to(())
+        .labelled("range operator")
 }
 
 fn parameter<'src, I>()
@@ -417,8 +605,11 @@ where
         let val = select! {
             Token::Identifier(i) => Ident::new(i).into(),
             Token::Number(n) => LitInt::new(n).into(),
+            Token::StringLit(s) => LitStr::new(s).into(),
         }
         .labelled("value");
+
+        let ident = select! { Token::Identifier(i) => i.to_string() };
 
         let atom = val
             .or(expr
@@ -426,18 +617,122 @@ where
                 .delimited_by(just(Token::LParen), just(Token::RParen)))
             .boxed();
 
-        let ident = select! {Token::Identifier(i) => i};
-
         let access =
             atom.clone()
-                .foldl_with(just(Token::Dot).then(ident).repeated(), |a, (op, b), e| {
+                .foldl_with(just(Token::Dot).then(ident).repeated(), |a, (_, b), _| {
                     Expr::Field(Field {
                         base: Box::new(a),
                         member: b,
                     })
                 });
 
-        access.or(atom)
+        let items = expr
+            .clone()
+            .separated_by(just(Token::Comma))
+            .allow_trailing()
+            .collect::<Vec<_>>();
+
+        let call = atom.clone().foldl(
+            items
+                .delimited_by(just(Token::LParen), just(Token::RParen))
+                .repeated(),
+            |base, arguments| {
+                Expr::Call(Call {
+                    base: Box::new(base),
+                    arguments,
+                })
+            },
+        );
+
+        let binary_op = |a, (op, b)| {
+            Expr::Binary(Binary {
+                lhs: Box::new(a),
+                rhs: Box::new(b),
+                op,
+            })
+        };
+
+        let basic = access.or(call).or(atom);
+
+        let op = just(Token::Asterisk)
+            .to(BinOp::Mul)
+            .or(just(Token::ForwardSlash).to(BinOp::Div));
+        let product = basic.clone().foldl(op.then(expr).repeated(), binary_op);
+
+        let op = just(Token::Plus)
+            .to(BinOp::Add)
+            .or(just(Token::Dash).to(BinOp::Sub));
+        let sum = product
+            .clone()
+            .foldl(op.then(product).repeated(), binary_op);
+
+        sum
+    })
+}
+
+fn expr<'src, I>() -> impl Parser<'src, I, Expr, extra::Err<Rich<'src, Token, Span>>>
+where
+    I: ValueInput<'src, Token = Token, Span = Span>,
+{
+    let ident = select! {Token::Identifier(i) => i};
+
+    recursive(|expr| {
+        let assign = ident
+            .clone()
+            .then_ignore(just(Token::Equals))
+            .then(expr.clone().or(inline_expr()))
+            .map(|(dest, value)| {
+                Expr::Assign(Assign {
+                    dest,
+                    value: Box::new(value),
+                })
+            })
+            .labelled("assignment");
+        let stmt = expr.clone().or(assign).or(inline_expr());
+
+        let block = stmt
+            .separated_by(just(Token::Semicolon).to(()).or(empty().to(())))
+            .collect()
+            .then(just(Token::Semicolon).or_not())
+            .delimited_by(just(Token::LBrace), just(Token::RBrace))
+            .map(|(stmts, sc)| {
+                Block {
+                    stmts,
+                    last_expr_return: sc.is_none(),
+                }
+                .into()
+            })
+            .boxed()
+            .recover_with(via_parser(nested_delimiters(
+                Token::LBrace,
+                Token::RBrace,
+                [
+                    (Token::LParen, Token::RParen),
+                    (Token::LBracket, Token::RBracket),
+                ],
+                |_| Expr::Invalid,
+            )));
+
+        let if_ = recursive(|if_| {
+            just(Token::KwIf)
+                .ignore_then(inline_expr())
+                .then(block.clone())
+                .then(
+                    just(Token::KwElse)
+                        .ignore_then(block.clone().or(if_))
+                        .or_not(),
+                )
+                .map(|((cond, a), b)| {
+                    Expr::If(If {
+                        cond: Box::new(cond),
+                        then: Box::new(a),
+                        else_: b.map(Box::new),
+                    })
+                })
+                .boxed()
+        });
+
+        block.clone().or(if_)
     })
 }
 

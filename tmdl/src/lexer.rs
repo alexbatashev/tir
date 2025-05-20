@@ -76,6 +76,16 @@ pub enum Token {
     KwParam,
     /// `operands`
     KwOperands,
+    /// `encoding`
+    KwEncoding,
+    /// `if`
+    KwIf,
+    /// `else`
+    KwElse,
+    /// `asm`
+    KwAsm,
+    /// `behavior`
+    KwBehavior,
 }
 
 impl Token {
@@ -96,9 +106,13 @@ pub fn lex<'src>(source: &'src str) -> (Vec<Spanned<Token>>, Vec<Rich<'src, char
 
 pub(crate) fn lexer<'src>()
 -> impl Parser<'src, &'src str, Vec<Spanned<Token>>, extra::Err<Rich<'src, char, Span>>> {
-    let num = text::int(10)
-        .then(just('.').then(text::digits(10)).or_not())
+    let num = just("0b")
+        .then(text::int(2).repeated().at_least(1))
         .to_slice()
+        .or(just("0x")
+            .then(text::int(16).repeated().at_least(1))
+            .to_slice())
+        .or(text::int(10).repeated().at_least(1).to_slice())
         .map(|n: &str| Token::Number(n.to_owned()));
 
     let str_ = just('"')
@@ -140,6 +154,11 @@ pub(crate) fn lexer<'src>()
         "instruction" => Token::KwInstruction,
         "param" => Token::KwParam,
         "operands" => Token::KwOperands,
+        "encoding" => Token::KwEncoding,
+        "if" => Token::KwIf,
+        "else" => Token::KwElse,
+        "asm" => Token::KwAsm,
+        "behavior" => Token::KwBehavior,
         _ => Token::Identifier(ident.to_owned()),
     });
 
@@ -210,6 +229,11 @@ impl fmt::Display for Token {
             Token::KwInstruction => f.write_str("instruction"),
             Token::KwParam => f.write_str("param"),
             Token::KwOperands => f.write_str("operands"),
+            Token::KwEncoding => f.write_str("encoding"),
+            Token::KwIf => f.write_str("if"),
+            Token::KwElse => f.write_str("else"),
+            Token::KwAsm => f.write_str("asm"),
+            Token::KwBehavior => f.write_str("behavior"),
         }
     }
 }
