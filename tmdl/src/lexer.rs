@@ -13,6 +13,11 @@ pub enum Token<'a> {
     Number(&'a str),
     StringLit(&'a str),
 
+    /// `=>`
+    FatArrow,
+    /// `..`
+    Range,
+
     /// `=`
     Equals,
 
@@ -98,14 +103,14 @@ impl<'a> Token<'a> {
     }
 }
 
-pub fn lex<'src>(source: &'src str) -> (Vec<Spanned<Token<'src>>>, Vec<Rich<'src, char, Span>>) {
+pub fn lex<'src>(source: &'src str) -> (Vec<Spanned<Token<'src>>>, Vec<Cheap>) {
     let (tokens, errors) = lexer().parse(source).into_output_errors();
 
     (tokens.unwrap_or_default(), errors)
 }
 
 pub(crate) fn lexer<'src>()
--> impl Parser<'src, &'src str, Vec<Spanned<Token<'src>>>, extra::Err<Rich<'src, char, Span>>> {
+-> impl Parser<'src, &'src str, Vec<Spanned<Token<'src>>>, extra::Err<Cheap>> {
     let num = just("0b")
         .then(text::int(2).repeated().at_least(1))
         .to_slice()
@@ -135,6 +140,8 @@ pub(crate) fn lexer<'src>()
     ));
 
     let op = choice((
+        just("=>").to(Token::FatArrow),
+        just("..").to(Token::Range),
         just('=').to(Token::Equals),
         just('+').to(Token::Plus),
         just('*').to(Token::Asterisk),
@@ -210,6 +217,8 @@ impl<'a> fmt::Display for Token<'a> {
             Token::Comment(s) => write!(f, "#{}", s),
             Token::Number(n) => write!(f, "{}", n),
             Token::StringLit(s) => write!(f, "\"{}\"", s),
+            Token::FatArrow => f.write_str("=>"),
+            Token::Range => f.write_str(".."),
             Token::Equals => f.write_str("="),
             Token::Plus => f.write_str("+"),
             Token::Dash => f.write_str("-"),

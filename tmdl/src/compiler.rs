@@ -99,7 +99,7 @@ impl Compiler {
                     let (tokens, errors) = lex(&source);
 
                     if !errors.is_empty() {
-                        print_errors(input, &source, errors);
+                        // print_errors(input, &source, errors);
                         return Ok(());
                     }
 

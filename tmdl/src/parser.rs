@@ -320,7 +320,7 @@ where
 
     let single_bit = num
         .clone()
-        .then_ignore(arrow())
+        .then_ignore(just(Token::FatArrow))
         .then(inline_expr())
         .map(|(start, value)| EncodingArm {
             start,
@@ -329,9 +329,9 @@ where
         });
     let range = num
         .clone()
-        .then_ignore(range_op())
+        .then_ignore(just(Token::Range))
         .then(num)
-        .then_ignore(arrow())
+        .then_ignore(just(Token::FatArrow))
         .then(inline_expr())
         .map(|((start, end), value)| EncodingArm {
             start,
@@ -348,28 +348,6 @@ where
                 .delimited_by(just(Token::LBrace), just(Token::RBrace)),
         )
         .map(|((), arms)| arms)
-}
-
-fn arrow<'src, I>() -> impl Parser<'src, I, (), extra::Err<Rich<'src, Token<'src>, Span>>>
-where
-    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
-{
-    just(Token::Equals)
-        .ignored()
-        .then_ignore(just(Token::RAngle))
-        .to(())
-        .labelled("arrow operator")
-}
-
-fn range_op<'src, I>() -> impl Parser<'src, I, (), extra::Err<Rich<'src, Token<'src>, Span>>>
-where
-    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
-{
-    just(Token::Dot)
-        .ignored()
-        .then_ignore(just(Token::Dot))
-        .to(())
-        .labelled("range operator")
 }
 
 fn parameter<'src, I>() -> impl Parser<
@@ -458,30 +436,6 @@ where
         .map(|(_, isas)| isas)
         .or_not()
         .map(|isas_opt| isas_opt.unwrap_or_default())
-}
-
-fn register_class_parameters<'src, I>()
--> impl Parser<'src, I, HashMap<String, Expr>, extra::Err<Rich<'src, Token<'src>, Span>>>
-where
-    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
-{
-    let ident = select! { Token::Identifier(ident) => ident.to_string() };
-
-    let single_parameter = ident
-        .clone()
-        .then_ignore(just(Token::Equals))
-        .then(inline_expr());
-    just(Token::KwParameters)
-        .ignored()
-        .then(
-            single_parameter
-                .separated_by(just(Token::Comma))
-                .allow_trailing()
-                .collect::<HashMap<String, Expr>>()
-                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
-        )
-        .map(|((), v)| v)
-        .labelled("register class parameters")
 }
 
 fn register_class_registers<'src, I>()
@@ -646,7 +600,7 @@ where
             .or(atom.clone())
             .then(
                 num.clone()
-                    .then_ignore(range_op())
+                    .then_ignore(just(Token::Range))
                     .then(num.clone())
                     .delimited_by(just(Token::LBracket), just(Token::RBracket)),
             )
