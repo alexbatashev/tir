@@ -1,5 +1,5 @@
 ignore:
-  - "macros"
+  - "utils/**"
   - "fuzz"
   - "**/tests/**"
   - "xtask"
