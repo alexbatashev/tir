@@ -5,6 +5,8 @@ mod operations;
 
 pub use operations::{BlockEndOp, BlockEndOpBuilder, SectionOp, SectionOpBuilder};
 
+pub use lexer::lex;
+
 dialect! {
     AsmDialect {
         name: "asm",

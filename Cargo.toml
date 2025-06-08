@@ -10,6 +10,7 @@ members = [
     "core",
     "utils/macros",
     "backends/common",
+    "backends/riscv",
 ]
 
 [profile.bench]
