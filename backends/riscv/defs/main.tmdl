@@ -1,0 +1,195 @@
+isa RV32I {
+    param XLEN: Integer = 32;
+}
+
+isa RV64I {
+    param XLEN: Integer = 64;
+}
+
+register_class GPR for [RV32I, RV64I] {
+    param ENCODING_LEN: Integer = 5;
+    param WIDTH: Integer = self.XLEN;
+
+    registers {
+        x0("zero") => { traits = [hardwired_zero] },
+        x1("ra") => { traits = [return_address, caller_saved] },
+        x2("sp") => { traits = [stack_pointer, callee_saved] },
+        x3("gp") => { traits = [global_pointer] },
+        x4("tp") => { traits = [thread_pointer] },
+        x5..x7("t{}") => { traits = [temporary, caller_saved] },
+        x8..x9("s{}") => { traits = [saved, callee_saved] },
+        x10..x17("a{}") => { traits = [argument, return_value, caller_saved] },
+        x18..x27("s{}") => { traits = [saved, callee_saved] },
+        x28..x31("t{}") => { traits = [temporary, caller_saved] },
+    }
+}
+
+// Base R-type instruction template
+template RType for [RV32I, RV64I] {
+    param MNEMONIC: String;
+    param FUNCT7: bits<7>;
+    param FUNCT3: bits<3>;
+    param OPCODE: bits<7>;
+
+    operands {
+        rd: GPR,
+        rs1: GPR,
+        rs2: GPR,
+    }
+
+    encoding {
+        0..6 => OPCODE,
+        7..11 => rd,
+        12..14 => FUNCT3,
+        15..19 => rs1,
+        20..24 => rs2,
+        25..31 => FUNCT7,
+    }
+
+    asm {
+        "{self.MNEMONIC} {rd}, {rs1}, {rs2}"
+    }
+}
+
+// I-type instruction template
+template IType for [RV32I, RV64I] {
+    param MNEMONIC: String;
+    param FUNCT3: bits<3>;
+    param OPCODE: bits<7>;
+
+    operands {
+        rd: GPR,
+        rs1: GPR,
+        imm: bits<12>,
+    }
+
+    encoding {
+        0..6 => OPCODE,
+        7..11 => rd,
+        12..14 => FUNCT3,
+        15..19 => rs1,
+        20..31 => imm,
+    }
+
+    asm {
+        "{self.MNEMONIC} {rd}, {rs1}, {imm}"
+    }
+}
+
+// Load instruction template, inherits from IType
+template LoadInst for [RV32I, RV64I] : IType {
+    param OPCODE: bits<7> = 0b0000011;
+
+    asm {
+        "{self.MNEMONIC} {rd}, {imm}({rs1})"
+    }
+}
+
+// Store instruction template
+template SType for [RV32I, RV64I] {
+    param MNEMONIC: String;
+    param FUNCT3: bits<3>;
+    param OPCODE: bits<7>;
+
+    operands {
+        rs1: GPR,
+        rs2: GPR,
+        imm: bits<12>,
+    }
+
+    encoding {
+        0..6 => OPCODE,
+        7..11 => imm[0..4],
+        12..14 => FUNCT3,
+        15..19 => rs1,
+        20..24 => rs2,
+        25..31 => imm[5..11],
+    }
+
+    asm {
+        "{self.MNEMONIC} {rs2}, {imm}({rs1})"
+    }
+}
+
+// Store instruction template, inherits from SType
+template StoreInst for [RV32I, RV64I] : SType {
+    param OPCODE: bits<7> = 0b0100011;
+}
+
+// B-type instruction template
+template BType for [RV32I, RV64I] {
+    param MNEMONIC: String;
+    param FUNCT3: bits<3>;
+    param OPCODE: bits<7>;
+
+    operands {
+        rs1: GPR,
+        rs2: GPR,
+        imm: bits<13>,
+    }
+
+    encoding {
+        0..6 => OPCODE,
+        7 => imm[11],
+        8..11 => imm[1..4],
+        12..14 => FUNCT3,
+        15..19 => rs1,
+        20..24 => rs2,
+        25..30 => imm[5..10],
+        31 => imm[12],
+    }
+
+    asm {
+        "{self.MNEMONIC} {rs1}, {rs2}, {imm}"
+    }
+}
+
+// Branch instruction template, inherits from BType
+template BranchInst for [RV32I, RV64I] : BType {
+    param OPCODE: bits<7> = 0b1100011;
+}
+
+// U-type instruction template
+template UType for [RV32I, RV64I] {
+    param MNEMONIC: String;
+    param OPCODE: bits<7>;
+
+    operands {
+        rd: GPR,
+        imm: bits<20>,
+    }
+
+    encoding {
+        0..6 => OPCODE,
+        7..11 => rd,
+        12..31 => imm,
+    }
+
+    asm {
+        "{self.MNEMONIC} {rd}, {imm}"
+    }
+}
+
+// J-type instruction template
+template JType for [RV32I, RV64I] {
+    param MNEMONIC: String;
+    param OPCODE: bits<7>;
+
+    operands {
+        rd: GPR,
+        imm: bits<21>,
+    }
+
+    encoding {
+        0..6 => OPCODE,
+        7..11 => rd,
+        12..19 => imm[1..8],
+        20 => imm[11],
+        21..30 => imm[12..21],
+        31 => imm[20],
+    }
+
+    asm {
+        "{self.MNEMONIC} {rd}, {imm}"
+    }
+}
