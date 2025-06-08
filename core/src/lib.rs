@@ -9,6 +9,9 @@ mod operation;
 mod region;
 mod value;
 
+pub mod helpers {
+    pub use tir_macros::{dialect, operation};
+}
 pub mod parser;
 
 pub use block::{Block, BlockId};
