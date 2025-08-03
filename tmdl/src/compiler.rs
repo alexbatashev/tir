@@ -110,31 +110,29 @@ impl Compiler {
                     }
 
                     writeln!(output, "{:#?}", file)?;
-                    // let file = parse()
-                    // let tokens = lex(&source).unwrap();
-                    // let root = parse(&tokens);
-                    // let red_root = SyntaxNodeData::new(root);
-                    // let translation_unit = ast::SourceFile::new(red_root);
-                    // writeln!(output, "{:#?}", translation_unit)?;
                 }
                 Action::EmitRust => {
-                    // if self.dialect.is_none() {
-                    //     let mut cmd = Cli::command();
-                    //     cmd.error(
-                    //         clap::error::ErrorKind::ArgumentConflict,
-                    //         "--dialect must be specified with --action=emit-rust",
-                    //     )
-                    //     .exit();
-                    // }
-                    // let tokens = lex(&source).unwrap();
-                    // let root = parse(&tokens);
-                    // let red_root = SyntaxNodeData::new(root);
-                    // let translation_unit = ast::SourceFile::new(red_root);
-                    // emit_rust(
-                    //     &mut output,
-                    //     &translation_unit.unwrap(),
-                    //     self.dialect.as_ref().unwrap(),
-                    // )?;
+                    if self.dialect.is_none() {
+                        let mut cmd = Cli::command();
+                        cmd.error(
+                            clap::error::ErrorKind::ArgumentConflict,
+                            "--dialect must be specified with --action=emit-rust",
+                        )
+                        .exit();
+                    }
+                    let (tokens, errors) = lex(&source);
+
+                    if !errors.is_empty() {
+                        // print_errors(input, &source, errors);
+                        return Ok(());
+                    }
+
+                    let (file, errors) = parse(&source, &tokens);
+                    if !errors.is_empty() {
+                        print_errors(input, &source, errors);
+                        return Ok(());
+                    }
+                    // TODO: what goes here?
                 }
             }
         }

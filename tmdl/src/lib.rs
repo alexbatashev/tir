@@ -2,6 +2,7 @@ mod ast;
 mod compiler;
 mod lexer;
 mod parser;
+mod rustgen;
 
 use chumsky::prelude::*;
 

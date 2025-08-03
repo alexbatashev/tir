@@ -2,6 +2,7 @@ use tir::helpers::dialect;
 
 mod lexer;
 mod operations;
+mod parser;
 
 pub use operations::{BlockEndOp, BlockEndOpBuilder, SectionOp, SectionOpBuilder};
 
