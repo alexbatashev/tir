@@ -1,5 +1,6 @@
 mod ast;
 mod compiler;
+mod error;
 mod lexer;
 mod parser;
 mod rustgen;

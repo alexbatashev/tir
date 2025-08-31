@@ -151,6 +151,11 @@ pub enum BinOp {
     Sub,
     Mul,
     Div,
+    BitwiseAnd,
+    BitwiseOr,
+    BitwiseXor,
+    ShiftLeftLogical,
+    ShiftRightLogical,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -209,6 +214,10 @@ impl LitStr {
     pub fn new(value: String) -> Self {
         Self { value }
     }
+
+    pub fn value(&self) -> &str {
+        &self.value
+    }
 }
 
 impl Into<Expr> for LitInt {
@@ -244,5 +253,16 @@ impl Into<Expr> for Block {
 impl Into<Expr> for If {
     fn into(self) -> Expr {
         Expr::If(self)
+    }
+}
+
+impl Item {
+    pub fn name(&self) -> &str {
+        match self {
+            Item::Isa(isa) => &isa.name,
+            Item::Instruction(inst) => &inst.name,
+            Item::RegisterClass(rc) => &rc.name,
+            Item::Template(tmpl) => &tmpl.name,
+        }
     }
 }

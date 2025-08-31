@@ -474,7 +474,7 @@ where
 
     let single = ident
         .then(alias)
-        .then_ignore(just(Token::Equals).then_ignore(just(Token::RAngle)))
+        .then_ignore(just(Token::FatArrow))
         .then_ignore(just(Token::LBrace))
         .then(reg_traits)
         .then_ignore(just(Token::RBrace))
@@ -545,10 +545,10 @@ where
     let reg_traits = register_traits();
 
     ident
-        .then_ignore(just(Token::Dot).then_ignore(just(Token::Dot)))
+        .then_ignore(just(Token::Range))
         .then(ident)
         .then(alias_pattern)
-        .then_ignore(just(Token::Equals).then_ignore(just(Token::RAngle)))
+        .then_ignore(just(Token::FatArrow))
         .then_ignore(just(Token::LBrace))
         .then(reg_traits)
         .then_ignore(just(Token::RBrace))
@@ -658,14 +658,25 @@ where
             .or(just(Token::ForwardSlash).to(BinOp::Div));
         let product = basic.clone().foldl(op.then(expr).repeated(), binary_op);
 
-        let op = just(Token::Plus)
-            .to(BinOp::Add)
-            .or(just(Token::Dash).to(BinOp::Sub));
-        let sum = product
+        let op = choice((
+            just(Token::Plus).to(BinOp::Add),
+            just(Token::Dash).to(BinOp::Sub),
+            just(Token::Pipe).to(BinOp::BitwiseOr),
+            just(Token::Ampersand).to(BinOp::BitwiseAnd),
+            just(Token::Hat).to(BinOp::BitwiseXor),
+            just(Token::LAngle)
+                .then(just(Token::LAngle))
+                .to(BinOp::ShiftLeftLogical),
+            just(Token::RAngle)
+                .then(just(Token::RAngle))
+                .to(BinOp::ShiftRightLogical),
+        ));
+
+        let arith = product
             .clone()
             .foldl(op.then(product).repeated(), binary_op);
 
-        sum
+        arith
     })
 }
 
