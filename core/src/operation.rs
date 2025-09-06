@@ -2,7 +2,8 @@ use crate::{
     Context, ContextIterator, Error, GetFromContext, Value,
     context::ContextRef,
     ir_formatter::IRFormatter,
-    parser::{IRParser, Span},
+    parse::Span,
+    parse::text::Parser as IRParser,
     region::RegionId,
     value::ValueId,
 };

@@ -342,8 +342,8 @@ fn make_parser(builder_name: &Ident, regions: &[Region]) -> proc_macro2::TokenSt
     };
 
     quote! {
-        fn parse<'src>(parser: &mut tir::parser::IRParser<'src>, context: &tir::Context)
-        -> Result<Box<dyn tir::Operation>, (tir::parser::Span, tir::Error)> {
+        fn parse<'src>(parser: &mut tir::parse::text::Parser<'src>, context: &tir::Context)
+        -> Result<Box<dyn tir::Operation>, (tir::parse::Span, tir::Error)> {
            #region_parsers
 
             Ok(Box::new(#builder_name::new(context)

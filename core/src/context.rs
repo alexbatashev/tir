@@ -9,7 +9,8 @@ use crate::{
     Block, Dialect, Error, OpId, OpInstance, Operation, Region,
     block::BlockId,
     builtin::BuiltinDialect,
-    parser::{IRParser, Span},
+    parse::Span,
+    parse::text::Parser as IRParser,
     region::RegionId,
     value::{Value, ValueId},
 };

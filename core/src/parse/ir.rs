@@ -1,17 +1,13 @@
-use std::{any::Any, sync::Arc};
+use std::any::Any;
+use std::sync::Arc;
 
 use crate::{Context, Error, Operation, Region};
 
-pub struct IRParser<'src> {
-    src: &'src str,
-    position: u32,
-}
-
-#[derive(Debug, Copy, Clone)]
-pub struct Span(u32);
+use super::common::{Span, Cursor};
+use super::text::Parser as TextParser;
 
 pub fn parse_ir<'a, T: Operation>(context: &Context, src: &'a str) -> Result<T, (Span, Error)> {
-    let mut parser = IRParser::new(src);
+    let mut parser = TextParser::new(src);
 
     let op = parse_single_op(&mut parser, context)?;
     let any: Box<dyn Any> = op.into_any();
@@ -21,16 +17,16 @@ pub fn parse_ir<'a, T: Operation>(context: &Context, src: &'a str) -> Result<T, 
 }
 
 fn parse_single_op<'src>(
-    parser: &mut IRParser<'src>,
+    parser: &mut TextParser<'src>,
     context: &Context,
 ) -> Result<Box<dyn Operation>, (Span, Error)> {
     parser.skip_trivia();
     if let Some(name) = parser.parse_ident() {
-        let (dialect, name) = if parser.peek() == '.' {
+        let (dialect, name) = if parser.peek_char() == Some('.') {
             if let Some(op_name) = parser.parse_ident() {
                 (name, op_name)
             } else {
-                todo!()
+                return Err((parser.span(), Error::ExpectedOpName));
             }
         } else {
             ("builtin", name)
@@ -47,49 +43,7 @@ fn parse_single_op<'src>(
     }
 }
 
-impl<'src> IRParser<'src> {
-    pub fn new(src: &'src str) -> Self {
-        Self { src, position: 0 }
-    }
-
-    pub fn span(&self) -> Span {
-        Span(self.position)
-    }
-
-    pub fn peek(&self) -> char {
-        self.src.chars().nth(self.position as usize).unwrap()
-    }
-
-    pub fn parse_ident(&mut self) -> Option<&'src str> {
-        let start = self.position as usize;
-
-        if !self.src.chars().nth(start).unwrap().is_alphabetic() {
-            None
-        } else {
-            let mut last = start + 1;
-            while let Some(c) = self.src.chars().nth(last) {
-                if !c.is_alphanumeric() && c != '_' {
-                    break;
-                }
-                last += 1;
-            }
-
-            self.position = last as u32;
-            self.skip_trivia();
-            Some(&self.src[start..last])
-        }
-    }
-
-    pub fn parse_token(&mut self, token: &str) -> bool {
-        if self.src[self.position as usize..].starts_with(token) {
-            self.position += token.len() as u32;
-            self.skip_trivia();
-            true
-        } else {
-            false
-        }
-    }
-
+impl<'src> TextParser<'src> {
     pub fn parse_single_block_region(
         &mut self,
         context: &Context,
@@ -118,17 +72,5 @@ impl<'src> IRParser<'src> {
         }
 
         Ok(region)
-    }
-
-    pub fn skip_trivia(&mut self) {
-        let mut last = self.position as usize;
-        while let Some(c) = self.src.chars().nth(last) {
-            if !c.is_whitespace() && c != '\n' {
-                break;
-            }
-            last += 1;
-        }
-
-        self.position = last as u32;
     }
 }

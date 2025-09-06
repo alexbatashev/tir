@@ -26,7 +26,7 @@ mod tests {
     use crate::{
         Context, IRBuilder, IRFormatter, Operation,
         builtin::{ModuleOp, module::ModuleEndOpBuilder},
-        parser::parse_ir,
+        parse::ir::parse_ir,
     };
 
     use super::ModuleOpBuilder;

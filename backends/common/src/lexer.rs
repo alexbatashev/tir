@@ -28,6 +28,22 @@ pub fn lex<'src>(source: &'src str) -> Result<Vec<Token<'src>>, ()> {
     lexer.into_iter().collect()
 }
 
+impl<'src> tir::parse::tokens::TokenLike<'src> for Token<'src> {
+    fn as_ident(&self) -> Option<&'src str> {
+        match self {
+            Token::Ident(s) | Token::Label(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    fn is_symbol(&self, sym: tir::parse::tokens::Symbol) -> bool {
+        match (self, sym) {
+            (Token::Comma, tir::parse::tokens::Symbol::Comma) => true,
+            _ => false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::lexer::lex;

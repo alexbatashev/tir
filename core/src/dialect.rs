@@ -1,9 +1,8 @@
 use std::sync::Arc;
 
-use crate::{
-    Context, Error, OpInstance, Operation,
-    parser::{IRParser, Span},
-};
+use crate::{Context, Error, OpInstance, Operation};
+use crate::parse::Span;
+use crate::parse::text::Parser as IRParser;
 
 pub trait Dialect: 'static + Send + Sync {
     fn new() -> Box<dyn Dialect>
