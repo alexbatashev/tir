@@ -29,4 +29,8 @@ impl IRBuilder {
         self.insertion_point.position += 1;
         op
     }
+
+    pub fn set_insertion_point_to_start(&mut self, block: Arc<Block>) {
+        self.insertion_point = InsertionPoint { block, position: 0 };
+    }
 }

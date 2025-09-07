@@ -21,11 +21,25 @@ pub enum Token<'src> {
 
     #[regex("[a-zA-Z_][a-zA-Z0-9_\\.]+", |name| name.slice())]
     Ident(&'src str),
+
+    #[regex("-?[0-9]+", |num| num.slice())]
+    DecNumber(&'src str),
 }
 
 pub fn lex<'src>(source: &'src str) -> Result<Vec<Token<'src>>, ()> {
-    let lexer = Token::lexer(source);
-    lexer.into_iter().collect()
+    let mut lexer = Token::lexer(source);
+
+    let mut tokens = vec![];
+
+    while let Some(token) = lexer.next() {
+        match token {
+            Ok(token) => tokens.push(token),
+            // FIXME: technically, lexers are not supposed to fail. Need to decide whether to throw an error or just panic.
+            Err(_) => panic!("Error at {:?}", lexer.span()),
+        }
+    }
+
+    Ok(tokens)
 }
 
 impl<'src> tir::parse::tokens::TokenLike<'src> for Token<'src> {

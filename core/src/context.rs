@@ -1,4 +1,5 @@
 use std::{
+    any::Any,
     collections::HashMap,
     sync::{Arc, Weak, atomic::AtomicU32},
 };
@@ -43,7 +44,7 @@ use crate::{
 /// # Example
 ///
 /// ```rust
-/// let context = tir_core::Context::with_default_dialects();
+/// let context = tir::Context::with_default_dialects();
 /// ```
 ///
 /// The context is typically shared (via reference or smart pointer) throughout
@@ -78,7 +79,7 @@ struct ContextInstance {
     last_region_id: AtomicU32,
     blocks: HashMap<BlockId, Arc<Block>>,
     last_block_id: AtomicU32,
-    dialects: HashMap<&'static str, Box<dyn Dialect>>,
+    dialects: HashMap<&'static str, Arc<dyn Dialect>>,
 }
 
 impl Context {
@@ -113,8 +114,23 @@ impl Context {
     /// Register a dialect with context.
     pub fn register_dialect<D: Dialect>(&self) {
         let mut dialect = D::new();
-        dialect.register_operations(self);
+        Arc::<dyn Dialect>::get_mut(&mut dialect)
+            .unwrap()
+            .register_operations(self);
         self.0.write().dialects.insert(D::name(), dialect);
+    }
+
+    pub fn find_dialect<D: Dialect>(&self) -> Option<Arc<D>> {
+        self.0
+            .read()
+            .dialects
+            .get(D::name())
+            .cloned()
+            .map(|d| {
+                let d: Arc<dyn Any + Send + Sync> = d;
+                d.downcast::<D>().ok()
+            })
+            .flatten()
     }
 
     pub fn add_operation(&self, mut instance: OpInstance) -> Arc<OpInstance> {

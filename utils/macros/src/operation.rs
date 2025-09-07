@@ -268,7 +268,7 @@ fn make_sinle_block_region_accessor(region: &Region) -> proc_macro2::TokenStream
     let func_name = format_ident!("{}", region.name);
 
     quote! {
-        fn #func_name(&self) -> std::sync::Arc<tir::Block> {
+        pub fn #func_name(&self) -> std::sync::Arc<tir::Block> {
             use tir::Operation;
             let region = self.regions().next().unwrap();
             let context = self.0.context.upgrade();

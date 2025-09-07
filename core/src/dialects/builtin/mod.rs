@@ -4,7 +4,7 @@ use crate::dialect;
 
 use crate as tir;
 
-pub use module::{ModuleEndOp, ModuleEndOpBuilder, ModuleOp, ModuleOpBuilder};
+pub use module::*;
 
 dialect! {
     BuiltinDialect {

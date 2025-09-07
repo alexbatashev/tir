@@ -1,11 +1,12 @@
+use std::any::Any;
 use std::sync::Arc;
 
-use crate::{Context, Error, OpInstance, Operation};
 use crate::parse::Span;
 use crate::parse::text::Parser as IRParser;
+use crate::{Context, Error, OpInstance, Operation};
 
-pub trait Dialect: 'static + Send + Sync {
-    fn new() -> Box<dyn Dialect>
+pub trait Dialect: 'static + Send + Sync + Any {
+    fn new() -> Arc<dyn Dialect>
     where
         Self: Sized;
 

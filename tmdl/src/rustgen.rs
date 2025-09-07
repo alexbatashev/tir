@@ -95,6 +95,7 @@ fn emit_instructions<'ast, 'cache: 'ast>(
             });
 
     let mut instruction_defs = vec![];
+    let mut instruction_parsers: Vec<proc_macro2::TokenStream> = vec![];
 
     for inst in instructions {
         let name_ident = format_ident!("{}Op", &inst.name);
@@ -111,6 +112,13 @@ fn emit_instructions<'ast, 'cache: 'ast>(
 
     Ok(quote! {
         #(#instruction_defs)*
+
+        fn get_instruction_parsers() -> std::collections::HashMap<String, Box<tir_be_common::AsmInstructionParser>> {
+            let mut map = std::collections::HashMap::new();
+            #(#instruction_parsers)*
+
+            map
+        }
     })
 }
 

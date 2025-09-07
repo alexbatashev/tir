@@ -20,8 +20,8 @@ pub fn construct_dialect(item: TokenStream) -> TokenStream {
         }
 
         impl tir::Dialect for #struct_name {
-            fn new() -> Box<dyn tir::Dialect> {
-                Box::new(#struct_name {
+            fn new() -> std::sync::Arc<dyn tir::Dialect> {
+                std::sync::Arc::new(#struct_name {
                     dyn_converters: std::collections::HashMap::new(),
                     parsers: std::collections::HashMap::new(),
                 })
