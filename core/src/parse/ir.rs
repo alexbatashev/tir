@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::{Context, Error, Operation, Region};
 
-use super::common::{Span, Cursor};
+use super::common::{Cursor, Span};
 use super::text::Parser as TextParser;
 
 pub fn parse_ir<'a, T: Operation>(context: &Context, src: &'a str) -> Result<T, (Span, Error)> {

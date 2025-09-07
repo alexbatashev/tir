@@ -19,7 +19,10 @@ pub struct Parser<'src, Tok> {
 
 impl<'src, Tok> Parser<'src, Tok> {
     pub fn new(tokens: &'src [Tok]) -> Self {
-        Self { tokens, position: 0 }
+        Self {
+            tokens,
+            position: 0,
+        }
     }
 
     pub fn peek(&self) -> Option<&Tok> {
@@ -49,7 +52,12 @@ impl<'src, Tok: TokenLike<'src>> Parser<'src, Tok> {
             self.bump();
             Ok(())
         } else {
-            Err((self.span(), crate::Error::ExpectedToken(match sym { Symbol::Comma => "," })))
+            Err((
+                self.span(),
+                crate::Error::ExpectedToken(match sym {
+                    Symbol::Comma => ",",
+                }),
+            ))
         }
     }
 }
@@ -63,4 +71,3 @@ impl<Tok> Cursor for Parser<'_, Tok> {
         // Typically a no-op for token streams that have already skipped trivia.
     }
 }
-

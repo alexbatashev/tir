@@ -1,10 +1,6 @@
 use crate::{
-    Context, ContextIterator, Error, GetFromContext, Value,
-    context::ContextRef,
-    ir_formatter::IRFormatter,
-    parse::Span,
-    parse::text::Parser as IRParser,
-    region::RegionId,
+    Context, ContextIterator, Error, GetFromContext, Value, context::ContextRef,
+    ir_formatter::IRFormatter, parse::Span, parse::text::Parser as IRParser, region::RegionId,
     value::ValueId,
 };
 use std::{any::Any, sync::Arc, u32};

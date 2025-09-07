@@ -36,4 +36,3 @@ pub fn print_error_range(
         .finish()
         .eprint((source_name, Source::from(source)))
 }
-

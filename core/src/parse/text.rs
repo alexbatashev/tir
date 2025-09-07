@@ -17,7 +17,13 @@ impl<'src> Parser<'src> {
     pub fn parse_ident(&mut self) -> Option<&'src str> {
         let start = self.position as usize;
 
-        if self.src.chars().nth(start).map(|c| c.is_alphabetic()).unwrap_or(false) {
+        if self
+            .src
+            .chars()
+            .nth(start)
+            .map(|c| c.is_alphabetic())
+            .unwrap_or(false)
+        {
             let mut last = start + 1;
             while let Some(c) = self.src.chars().nth(last) {
                 if !c.is_alphanumeric() && c != '_' {
@@ -35,7 +41,12 @@ impl<'src> Parser<'src> {
     }
 
     pub fn parse_token(&mut self, token: &str) -> bool {
-        if self.src.get(self.position as usize..).map(|s| s.starts_with(token)).unwrap_or(false) {
+        if self
+            .src
+            .get(self.position as usize..)
+            .map(|s| s.starts_with(token))
+            .unwrap_or(false)
+        {
             self.position += token.len() as u32;
             self.skip_trivia();
             true
@@ -62,4 +73,3 @@ impl Cursor for Parser<'_> {
         self.position = last as u32;
     }
 }
-

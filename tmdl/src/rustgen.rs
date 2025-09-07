@@ -327,7 +327,9 @@ fn emit_register_parsers(ast: &[ast::File]) -> Result<proc_macro2::TokenStream, 
                     }
                 }
                 ast::RegisterDef::Range(r) => {
-                    if let (Some(s), Some(e)) = (parse_trailing_index(&r.start), parse_trailing_index(&r.end)) {
+                    if let (Some(s), Some(e)) =
+                        (parse_trailing_index(&r.start), parse_trailing_index(&r.end))
+                    {
                         for i in s..=e {
                             let isa = format!("{}{}", strip_trailing_digits(&r.start), i);
                             entries.push((i, isa, r.alias_pattern.clone()));

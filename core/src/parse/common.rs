@@ -5,4 +5,3 @@ pub trait Cursor {
     fn span(&self) -> Span;
     fn skip_trivia(&mut self);
 }
-
