@@ -9,7 +9,7 @@ use tir::{
 use crate::{SectionOpBuilder, SymbolEndOpBuilder, SymbolOpBuilder, lex, lexer::Token};
 
 pub type AsmInstructionParser =
-    for<'src> fn(&tir::Context, &mut IRBuilder, &mut Parser<'src, Token>) -> Result<(), ()>;
+    for<'src> fn(&tir::Context, &mut IRBuilder, &mut Parser<'src, Token<'src>>) -> Result<(), ()>;
 
 pub struct AsmParser {
     instruction_parsers: HashMap<String, Box<AsmInstructionParser>>,
@@ -57,7 +57,19 @@ impl AsmParser {
                 Token::Text => {
                     // FIXME set insertion point to end of text section
                 }
-                Token::Ident(ident) => {}
+                Token::Ident(ident) => {
+                    // Try to dispatch to an instruction parser by mnemonic
+                    let key = ident.to_string();
+                    if let Some(handler) = self.instruction_parsers.get(&key) {
+                        // consume mnemonic
+                        let _ = parser.bump();
+                        // parse the rest of the instruction
+                        handler(context, &mut builder, &mut parser)?;
+                    } else {
+                        // Unknown ident in text section; skip it for now
+                        let _ = parser.bump();
+                    }
+                }
                 _ => {
                     let _ = parser.bump();
                 }

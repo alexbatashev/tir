@@ -7,6 +7,7 @@ mod parser;
 pub use operations::*;
 
 pub use lexer::lex;
+pub use lexer::Token;
 pub use parser::{AsmInstructionParser, AsmParser};
 
 dialect! {

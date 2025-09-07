@@ -43,7 +43,7 @@ mod tests {
         let test = "
         .global foo
         entry:
-            addi a0, a1, 4
+            add a0, a1, a2
         ";
 
         let module = asm_parser.parse_asm(&context, test);
