@@ -69,6 +69,7 @@ pub trait Operation: 'static + Send + Sync + Any {
 
     fn regions(&self) -> ContextIterator<RegionId>;
     fn operands(&self) -> &[Value];
+    fn attributes(&self) -> &[crate::attributes::NamedAttribute];
 }
 
 #[derive(Debug, Clone)]
@@ -80,6 +81,7 @@ pub struct OpInstance {
     pub operands: Vec<ValueId>,
     pub results: Vec<ValueId>,
     pub regions: Vec<RegionId>,
+    pub attributes: Vec<crate::attributes::NamedAttribute>,
 }
 
 impl OpInstance {

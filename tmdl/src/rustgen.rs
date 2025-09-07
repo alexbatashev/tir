@@ -24,7 +24,7 @@ pub fn generate_rust(
         cache
     };
 
-    let registers = emit_register_parsers(&ast)?;
+    let registers = emit_register_parsers_and_printers(&ast)?;
     let instructions = emit_instructions(dialect, &ast, &item_cache)?;
 
     let final_rust = quote! {
@@ -100,16 +100,54 @@ fn emit_instructions<'ast, 'cache: 'ast>(
     let mut instruction_defs = vec![];
     let mut instruction_parsers_impls: Vec<proc_macro2::TokenStream> = vec![];
     let mut instruction_parser_map_inits: Vec<proc_macro2::TokenStream> = vec![];
+    let mut instruction_emitters_impls: Vec<proc_macro2::TokenStream> = vec![];
+    let mut instruction_emitter_map_inits: Vec<proc_macro2::TokenStream> = vec![];
 
     for inst in instructions {
         let name_ident = format_ident!("{}Op", &inst.name);
         let builder_ident = format_ident!("{}OpBuilder", &inst.name);
         let mnemonic = resolve_string(inst.params.get("MNEMONIC").unwrap().1.as_ref().unwrap());
+        // Build attributes schema from operands
+        let attrs_schema = {
+            let mut items = vec![];
+            let ops = resolve_operands_for_instruction(inst, item_cache);
+            for (name, ty) in ops {
+                let field_ident = format_ident!("{}", name);
+                let ty_ts = match ty {
+                    ast::Type::Struct(_) => quote! { Register },
+                    ast::Type::Integer | ast::Type::Bits(_) => quote! { Integer },
+                    ast::Type::String => quote! { String },
+                };
+                items.push(quote! { #field_ident: #ty_ts });
+            }
+            quote! { #(#items,)* }
+        };
+
+        // Build roles: heuristic — rd => Def for register types, rs* => Use
+        let roles_schema = {
+            let mut items = vec![];
+            let ops = resolve_operands_for_instruction(inst, item_cache);
+            for (name, ty) in ops {
+                if let ast::Type::Struct(_) = ty {
+                    let field_ident = format_ident!("{}", name);
+                    let role = if name == "rd" {
+                        quote! { Def }
+                    } else {
+                        quote! { Use }
+                    };
+                    items.push(quote! { #field_ident: #role });
+                }
+            }
+            quote! { #(#items,)* }
+        };
+
         instruction_defs.push(quote! {
             operation! {
                 #name_ident {
                     name: #mnemonic,
                     dialect: #dialect,
+                    attributes: A { #attrs_schema },
+                    roles: R { #roles_schema },
                 }
             }
         });
@@ -142,14 +180,30 @@ fn emit_instructions<'ast, 'cache: 'ast>(
                         match ty {
                             ast::Type::Struct(s) => {
                                 let reg_fn = format_ident!("parse_{}", s);
-                                parser_body.push(quote! { let _ = #reg_fn(parser)?; });
+                                let cls = s.clone();
+                                let attr_name = ph.clone();
+                                parser_body.push(quote! {
+                                    let idx = #reg_fn(parser)?;
+                                    op_builder = op_builder.attr(
+                                        #attr_name,
+                                        tir::attributes::AttributeValue::Register(
+                                            tir::attributes::RegisterAttr::Physical { class: #cls.to_string(), index: idx }
+                                        ),
+                                    );
+                                });
                             }
                             ast::Type::Bits(_) | ast::Type::Integer => {
+                                let attr_name = ph.clone();
                                 parser_body.push(quote! {
-                                    match parser.peek() {
-                                        Some(tir_be_common::Token::DecNumber(_)) => { let _ = parser.bump(); },
+                                    let num = match parser.bump() {
+                                        Some(tir_be_common::Token::DecNumber(s)) => s,
                                         _ => return Err(())
-                                    }
+                                    };
+                                    let val: i64 = num.parse().map_err(|_| ())?;
+                                    op_builder = op_builder.attr(
+                                        #attr_name,
+                                        tir::attributes::AttributeValue::Int(val),
+                                    );
                                 });
                             }
                             ast::Type::String => {
@@ -166,10 +220,14 @@ fn emit_instructions<'ast, 'cache: 'ast>(
                         builder: &mut tir::IRBuilder,
                         parser: &mut tir::parse::tokens::Parser<'src, tir_be_common::Token<'src>>,
                     ) -> Result<(), ()> {
-                        // Insert the instruction op
-                        let _ = builder.insert(#builder_ident::new(context).build());
-                        // Parse operands according to ASM template
+                        // Build attributes for this instruction
+                        let mut op_builder = #builder_ident::new(context);
+
+                        // Parse operands according to ASM template and attach as attributes
                         #(#parser_body)*
+
+                        // Insert the instruction op
+                        let _ = builder.insert(op_builder.build());
                         Ok(())
                     }
                 });
@@ -178,12 +236,58 @@ fn emit_instructions<'ast, 'cache: 'ast>(
                 instruction_parser_map_inits.push(quote! {
                     map.insert(#mnemonic_str.to_string(), Box::new(#func_ident as tir_be_common::AsmInstructionParser));
                 });
+
+                // Emit instruction emitter (assembly printer) for this instruction
+                let emit_ident = format_ident!("emit_{}", mn);
+                let op_ty_ident = name_ident.clone();
+
+                let emit_body = build_emitter_body(
+                    &asm_str,
+                    &resolve_operands_for_instruction(inst, item_cache),
+                );
+
+                instruction_emitters_impls.push(quote! {
+                    fn #emit_ident(op: &#op_ty_ident, prefer_abi: bool) -> String {
+                        fn get_reg_index_attr(op: & #op_ty_ident, name: &str) -> Option<u16> {
+                            for a in tir::Operation::attributes(op) {
+                                if a.name == name {
+                                    if let tir::attributes::AttributeValue::Register(tir::attributes::RegisterAttr::Physical { index: idx, .. }) = &a.value {
+                                        return Some(*idx);
+                                    }
+                                }
+                            }
+                            None
+                        }
+                        fn get_int_attr(op: & #op_ty_ident, name: &str) -> Option<i64> {
+                            for a in tir::Operation::attributes(op) {
+                                if a.name == name {
+                                    if let tir::attributes::AttributeValue::Int(v) = &a.value { return Some(*v); }
+                                }
+                            }
+                            None
+                        }
+                        fn get_str_attr(op: & #op_ty_ident, name: &str) -> Option<String> {
+                            for a in tir::Operation::attributes(op) {
+                                if a.name == name {
+                                    if let tir::attributes::AttributeValue::Str(v) = &a.value { return Some(v.clone()); }
+                                }
+                            }
+                            None
+                        }
+                        let mut out = String::new();
+                        #emit_body
+                        out
+                    }
+                });
+                instruction_emitter_map_inits.push(quote! { emit_map.insert(#mnemonic_str.to_string(), #emit_ident as fn(&#op_ty_ident, bool) -> String); });
             }
         }
     }
 
     Ok(quote! {
         #(#instruction_defs)*
+
+        #(#instruction_emitters_impls)*
 
         fn get_instruction_parsers() -> std::collections::HashMap<String, Box<tir_be_common::AsmInstructionParser>> {
             let mut map = std::collections::HashMap::new();
@@ -192,6 +296,8 @@ fn emit_instructions<'ast, 'cache: 'ast>(
 
             map
         }
+
+        // Placeholder for emitters map if needed in the future
     })
 }
 
@@ -298,7 +404,9 @@ fn parse_asm_placeholders(asm: &str) -> (Vec<String>, bool) {
     (names, has_commas)
 }
 
-fn emit_register_parsers(ast: &[ast::File]) -> Result<proc_macro2::TokenStream, TMDLError> {
+fn emit_register_parsers_and_printers(
+    ast: &[ast::File],
+) -> Result<proc_macro2::TokenStream, TMDLError> {
     let reg_classes = ast
         .iter()
         .flat_map(|f| f.items.iter())
@@ -312,6 +420,7 @@ fn emit_register_parsers(ast: &[ast::File]) -> Result<proc_macro2::TokenStream, 
     for rc in reg_classes {
         let rc_name = &rc.name;
         let fn_name = format_ident!("parse_{}", rc_name);
+        let print_fn_name = format_ident!("print_{}", rc_name);
 
         // Build mapping from textual name -> index (u16)
         // Expand ranges and assign alias numbers across ranges with same stem
@@ -343,11 +452,14 @@ fn emit_register_parsers(ast: &[ast::File]) -> Result<proc_macro2::TokenStream, 
 
         let mut next_alias_index: HashMap<String, u16> = HashMap::new();
         let mut match_arms = Vec::new();
+        let mut isa_names: Vec<(u16, String)> = Vec::new();
+        let mut abi_names: Vec<(u16, String)> = Vec::new();
 
         for (idx, isa_name, alias) in entries {
             if idx != u16::MAX {
                 let lit_isa = isa_name.clone();
                 match_arms.push(quote! { #lit_isa => Some(#idx as u16), });
+                isa_names.push((idx, lit_isa));
             }
             if let Some(a) = alias {
                 if let Some(stem) = alias_stem(&a) {
@@ -355,12 +467,31 @@ fn emit_register_parsers(ast: &[ast::File]) -> Result<proc_macro2::TokenStream, 
                     let alias_full = format!("{}{}", stem, *counter);
                     *counter += 1;
                     match_arms.push(quote! { #alias_full => Some(#idx as u16), });
+                    abi_names.push((idx, alias_full));
                 } else {
                     // fixed alias (like "zero", "ra")
                     match_arms.push(quote! { #a => Some(#idx as u16), });
+                    abi_names.push((idx, a));
                 }
             }
         }
+
+        let abi_match_arms = {
+            let mut v = Vec::new();
+            for (idx, name) in &abi_names {
+                let idx_lit = proc_macro2::Literal::u16_unsuffixed(*idx);
+                v.push(quote! { #idx_lit => return Some(#name.to_string()), });
+            }
+            quote! { #(#v)* }
+        };
+        let isa_match_arms = {
+            let mut v = Vec::new();
+            for (idx, name) in &isa_names {
+                let idx_lit = proc_macro2::Literal::u16_unsuffixed(*idx);
+                v.push(quote! { #idx_lit => return Some(#name.to_string()), });
+            }
+            quote! { #(#v)* }
+        };
 
         fns.push(quote! {
             fn #fn_name<'src>(parser: &mut tir::parse::tokens::Parser<'src, tir_be_common::Token<'src>>) -> Result<u16, ()> {
@@ -373,10 +504,82 @@ fn emit_register_parsers(ast: &[ast::File]) -> Result<proc_macro2::TokenStream, 
                 }
                 Err(())
             }
+            fn #print_fn_name(idx: u16, prefer_abi: bool) -> Option<String> {
+                if prefer_abi {
+                    match idx { #abi_match_arms _ => {} }
+                }
+                match idx { #isa_match_arms _ => None }
+            }
         });
     }
 
     Ok(quote! { #(#fns)* })
+}
+
+fn build_emitter_body(
+    asm: &str,
+    operands: &std::collections::HashMap<String, ast::Type>,
+) -> proc_macro2::TokenStream {
+    let mut tokens: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut i = 0usize;
+    let b = asm.as_bytes();
+    while i < b.len() {
+        if b[i] == b'{' {
+            // flush literal up to i
+            // find closing }
+            let mut j = i + 1;
+            while j < b.len() && b[j] != b'}' {
+                j += 1;
+            }
+            if j < b.len() {
+                let name = &asm[i + 1..j];
+                let lit = &asm[0..i];
+                if !lit.is_empty() {
+                    tokens.push(quote! { out.push_str(#lit); });
+                }
+                if name != "self.MNEMONIC" {
+                    if let Some(ty) = operands.get(name) {
+                        match ty {
+                            ast::Type::Struct(s) => {
+                                let print_fn = format_ident!("print_{}", s);
+                                let name_str = name.to_string();
+                                tokens.push(quote! {
+                                    if let Some(idx) = get_reg_index_attr(op, #name_str) {
+                                        if let Some(txt) = #print_fn(idx, prefer_abi) { out.push_str(&txt); }
+                                    }
+                                });
+                            }
+                            ast::Type::Bits(_) | ast::Type::Integer => {
+                                let name_str = name.to_string();
+                                tokens.push(quote! {
+                                    if let Some(v) = get_int_attr(op, #name_str) { out.push_str(&v.to_string()); }
+                                });
+                            }
+                            ast::Type::String => {
+                                let name_str = name.to_string();
+                                tokens.push(quote! {
+                                    if let Some(s) = get_str_attr(op, #name_str) { out.push_str(&format!("\"{}\"", s)); }
+                                });
+                            }
+                        }
+                    }
+                }
+                // shift the asm to remaining part
+                let rest = &asm[j + 1..];
+                // recurse on rest
+                let more = build_emitter_body(rest, operands);
+                tokens.push(more);
+                return quote! { #(#tokens)* };
+            } else {
+                break;
+            }
+        }
+        i += 1;
+    }
+    if !asm.is_empty() {
+        tokens.push(quote! { out.push_str(#asm); });
+    }
+    quote! { #(#tokens)* }
 }
 
 fn parse_trailing_index(s: &str) -> Option<u16> {

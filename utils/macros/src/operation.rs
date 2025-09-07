@@ -10,6 +10,8 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         name,
         dialect,
         regions,
+        attributes,
+        roles,
     } = parse_macro_input!(item as Operation);
 
     let builder_name = format_ident!("{}Builder", struct_name.to_string());
@@ -68,16 +70,21 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
 
     let parser = make_parser(&builder_name, &regions);
 
+    let verifier = make_attribute_verifier(&attributes);
+    let roles_table = make_roles_table(&struct_name, &roles);
+
     quote! {
         pub struct #struct_name(std::sync::Arc<tir::OpInstance>);
 
         pub struct #builder_name {
             context: tir::Context,
+            attributes: Vec<tir::attributes::NamedAttribute>,
             #(#region_fields,)*
         }
 
         impl #struct_name {
             #region_accessors
+            #roles_table
         }
 
         impl tir::Operation for #struct_name {
@@ -125,22 +132,34 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
             fn operands(&self) -> &[tir::Value] {
                 todo!()
             }
+
+            fn attributes(&self) -> &[tir::attributes::NamedAttribute] {
+                &self.0.attributes
+            }
         }
 
         impl #builder_name {
             pub fn new(context: &tir::Context) -> #builder_name {
                 Self {
                     context: context.clone(),
+                    attributes: vec![],
                     #(#region_defaults,)*
                 }
             }
 
             #(#region_builders)*
 
+            pub fn attr(mut self, name: &str, value: tir::attributes::AttributeValue) -> Self {
+                self.attributes.push(tir::attributes::NamedAttribute::new(name, value));
+                self
+            }
+
             pub fn build(self) -> #struct_name {
                 let mut regions = vec![];
 
                 #(#region_fills)*
+
+                #verifier
 
                 let instance = tir::OpInstance {
                     id: tir::OpId::invalid(),
@@ -150,6 +169,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
                     operands: vec![],
                     results: vec![],
                     regions,
+                    attributes: self.attributes,
                 };
 
                 let instance = self.context.add_operation(instance);
@@ -166,6 +186,8 @@ struct Operation {
     name: String,
     dialect: String,
     regions: Vec<Region>,
+    attributes: Vec<AttrSpec>,
+    roles: Vec<RoleSpec>,
 }
 
 struct Region {
@@ -224,11 +246,43 @@ impl Parse for Operation {
             })
             .unwrap_or_default();
 
+        let attributes = struct_
+            .fields
+            .iter()
+            .find_map(|f| match &f.member {
+                Member::Named(ident) => {
+                    if ident.to_string().as_str() == "attributes" {
+                        get_attributes(&f.expr)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            })
+            .unwrap_or_default();
+
+        let roles = struct_
+            .fields
+            .iter()
+            .find_map(|f| match &f.member {
+                Member::Named(ident) => {
+                    if ident.to_string().as_str() == "roles" {
+                        get_roles(&f.expr)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            })
+            .unwrap_or_default();
+
         Ok(Operation {
             struct_name,
             name,
             dialect,
             regions,
+            attributes,
+            roles,
         })
     }
 }
@@ -249,6 +303,92 @@ fn get_regions(expr: &Expr) -> Option<Vec<Region>> {
         )
     } else {
         None
+    }
+}
+
+#[derive(Clone)]
+struct AttrSpec {
+    name: String,
+    ty: String,
+}
+
+fn get_attributes(expr: &Expr) -> Option<Vec<AttrSpec>> {
+    if let Expr::Struct(s) = expr {
+        Some(
+            s.fields
+                .iter()
+                .map(|f| {
+                    let name = field_name(f);
+                    let ty = expr_as_string(&f.expr);
+                    AttrSpec { name, ty }
+                })
+                .collect(),
+        )
+    } else {
+        None
+    }
+}
+
+fn make_attribute_verifier(specs: &[AttrSpec]) -> proc_macro2::TokenStream {
+    if specs.is_empty() {
+        return quote! {};
+    }
+    let checks = specs.iter().map(|s| {
+        let n = s.name.clone();
+        quote! {
+            if !self.attributes.iter().any(|a| a.name == #n) {
+                panic!(concat!("Missing required attribute: ", #n));
+            }
+        }
+    });
+    quote! { #(#checks)* }
+}
+
+#[derive(Clone)]
+struct RoleSpec {
+    name: String,
+    role: String,
+}
+
+fn get_roles(expr: &Expr) -> Option<Vec<RoleSpec>> {
+    if let Expr::Struct(s) = expr {
+        Some(
+            s.fields
+                .iter()
+                .map(|f| {
+                    let name = field_name(f);
+                    let role = expr_as_string(&f.expr);
+                    RoleSpec { name, role }
+                })
+                .collect(),
+        )
+    } else {
+        None
+    }
+}
+
+fn make_roles_table(_op_ident: &Ident, roles: &[RoleSpec]) -> proc_macro2::TokenStream {
+    if roles.is_empty() {
+        return quote! {};
+    }
+    let mut pairs = Vec::new();
+    for r in roles {
+        let name = r.name.clone();
+        let role_ts = match r.role.as_str() {
+            "Def" => quote! { tir::attributes::AttributeRole::Def },
+            "Use" => quote! { tir::attributes::AttributeRole::Use },
+            "Clobber" => quote! { tir::attributes::AttributeRole::Clobber },
+            "ReadWrite" => quote! { tir::attributes::AttributeRole::ReadWrite },
+            _ => quote! { tir::attributes::AttributeRole::None },
+        };
+        pairs.push(quote! { ( #name, #role_ts ) });
+    }
+    let len = pairs.len();
+    quote! {
+        pub fn attribute_roles() -> &'static [(&'static str, tir::attributes::AttributeRole)] {
+            const ROLES: [(&str, tir::attributes::AttributeRole); #len] = [ #(#pairs),* ];
+            &ROLES
+        }
     }
 }
 
@@ -299,6 +439,20 @@ fn make_generic_printer(
     quote! {
         fn print<'a, 'b: 'a>(&'a self, fmt: &'a mut tir::IRFormatter<'b>) -> Result<(), std::fmt::Error> {
             fmt.write(#op_name)?;
+            // Print generic attribute dict if any
+            if !self.attributes().is_empty() {
+                fmt.write(" ")?;
+                fmt.write("{")?;
+                let mut first = true;
+                for attr in self.attributes() {
+                    if !first { fmt.write(", ")?; }
+                    first = false;
+                    fmt.write(&attr.name)?;
+                    fmt.write(" = ")?;
+                    attr.value.print(fmt)?;
+                }
+                fmt.write("}")?;
+            }
 
             if self.regions().len() == 0 {
                 fmt.write("\n")?;
@@ -344,9 +498,48 @@ fn make_parser(builder_name: &Ident, regions: &[Region]) -> proc_macro2::TokenSt
     quote! {
         fn parse<'src>(parser: &mut tir::parse::text::Parser<'src>, context: &tir::Context)
         -> Result<Box<dyn tir::Operation>, (tir::parse::Span, tir::Error)> {
+           // Parse optional generic attribute dict: { key = value, ... }
+           let mut __parsed_attrs: Vec<tir::attributes::NamedAttribute> = vec![];
+           let __mark = parser.pos();
+           if parser.parse_token("{") {
+               let mut __ok = true;
+               if !parser.parse_token("}") {
+                   loop {
+                       if let Some(__name) = parser.parse_ident() {
+                           if !parser.parse_token("=") { __ok = false; break; }
+                           let __val = if let Some(__s) = parser.parse_string() {
+                               tir::attributes::AttributeValue::Str(__s.to_string())
+                           } else if parser.parse_token("%virt") {
+                               if let Some(__id) = parser.parse_number() {
+                                   let mut __class = None;
+                                   if parser.parse_token(":") {
+                                       if let Some(__cls) = parser.parse_ident() { __class = Some(__cls.to_string()); } else { __ok = false; }
+                                   }
+                                   tir::attributes::AttributeValue::Register(tir::attributes::RegisterAttr::Virtual { id: __id as u32, class: __class })
+                               } else { __ok = false; break; }
+                           } else if let Some(__n) = parser.parse_number() {
+                               tir::attributes::AttributeValue::Int(__n)
+                           } else {
+                               __ok = false; break;
+                           };
+                           __parsed_attrs.push(tir::attributes::NamedAttribute::new(__name, __val));
+                           if parser.parse_token("}") { break; }
+                           if !parser.parse_token(",") { __ok = false; break; }
+                       } else { __ok = false; break; }
+                   }
+               }
+               if !__ok {
+                   parser.set_pos(__mark);
+                   __parsed_attrs.clear();
+               }
+           }
+
            #region_parsers
 
-            Ok(Box::new(#builder_name::new(context)
+            let mut __builder = #builder_name::new(context);
+            for __a in __parsed_attrs { __builder = __builder.attr(&__a.name, __a.value); }
+
+            Ok(Box::new(__builder
                 #region_builders
                 .build()))
         }

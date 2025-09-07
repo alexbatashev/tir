@@ -6,6 +6,7 @@ pub fn expr_as_string(expr: &Expr) -> String {
             Lit::Str(str) => str.value(),
             _ => unreachable!(),
         },
+        Expr::Path(p) => p.path.get_ident().unwrap().to_string(),
         _ => unreachable!(),
     }
 }
