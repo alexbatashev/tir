@@ -1,14 +1,16 @@
 mod ast;
 mod compiler;
+mod error;
 mod lexer;
 mod parser;
+mod rustgen;
 
 use chumsky::prelude::*;
 
 pub type Span = SimpleSpan;
 pub type Spanned<T> = (T, Span);
 
-pub use compiler::compiler_main;
+pub use compiler::{Action, Compiler, OutputKind, compiler_main};
 
 pub use lexer::lex;
 pub use parser::parse;

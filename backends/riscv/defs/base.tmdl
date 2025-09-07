@@ -1,0 +1,67 @@
+// RISC-V Base ISA instructions
+
+template ALUOp for [RV32I, RV64I] : RType {
+    param OPCODE: bits<7> = 0b0110011;
+    param FUNCT7: bits<7> = 0b0000000;
+}
+
+instruction Add for [RV32I, RV64I] : ALUOp {
+    param MNEMONIC: String = "add";
+    param FUNCT3: bits<3> = 0b000;
+    behavior {
+      rd = rs1 + rs2;
+    }
+}
+
+instruction Sub for [RV32I, RV64I] : ALUOp {
+    param MNEMONIC: String = "sub";
+    param FUNCT3: bits<3> = 0b000;
+    param FUNCT7: bits<7> = 0b0100000;
+    behavior {
+      rd = rs1 - rs2;
+    }
+}
+
+instruction ShiftLeftLogical for [RV32I, RV64I] : ALUOp {
+    param MNEMONIC: String = "sll";
+    param FUNCT3: bits<3> = 0b001;
+    behavior {
+      rd = rs1 << rs2;
+    }
+}
+
+// TODO: SLT, SLTU
+
+instruction Xor for [RV32I, RV64I] : ALUOp {
+    param MNEMONIC: String = "xor";
+    param FUNCT3: bits<3> = 0b100;
+    behavior {
+      rd = rs1 ^ rs2;
+    }
+}
+
+instruction ShiftRightLogical for [RV32I, RV64I] : ALUOp {
+    param MNEMONIC: String = "srl";
+    param FUNCT3: bits<3> = 0b101;
+    behavior {
+      rd = rs1 >> rs2;
+    }
+}
+
+// TODO: SRA
+
+instruction Or for [RV32I, RV64I] : ALUOp {
+    param MNEMONIC: String = "or";
+    param FUNCT3: bits<3> = 0b110;
+    behavior {
+      rd = rs1 | rs2;
+    }
+}
+
+instruction And for [RV32I, RV64I] : ALUOp {
+    param MNEMONIC: String = "and";
+    param FUNCT3: bits<3> = 0b111;
+    behavior {
+      rd = rs1 & rs2;
+    }
+}

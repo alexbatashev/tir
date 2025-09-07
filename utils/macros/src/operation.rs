@@ -268,7 +268,7 @@ fn make_sinle_block_region_accessor(region: &Region) -> proc_macro2::TokenStream
     let func_name = format_ident!("{}", region.name);
 
     quote! {
-        fn #func_name(&self) -> std::sync::Arc<tir::Block> {
+        pub fn #func_name(&self) -> std::sync::Arc<tir::Block> {
             use tir::Operation;
             let region = self.regions().next().unwrap();
             let context = self.0.context.upgrade();
@@ -342,8 +342,8 @@ fn make_parser(builder_name: &Ident, regions: &[Region]) -> proc_macro2::TokenSt
     };
 
     quote! {
-        fn parse<'src>(parser: &mut tir::parser::IRParser<'src>, context: &tir::Context)
-        -> Result<Box<dyn tir::Operation>, (tir::parser::Span, tir::Error)> {
+        fn parse<'src>(parser: &mut tir::parse::text::Parser<'src>, context: &tir::Context)
+        -> Result<Box<dyn tir::Operation>, (tir::parse::Span, tir::Error)> {
            #region_parsers
 
             Ok(Box::new(#builder_name::new(context)

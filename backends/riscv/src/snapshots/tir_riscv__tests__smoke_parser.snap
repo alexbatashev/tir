@@ -1,0 +1,13 @@
+---
+source: backends/riscv/src/lib.rs
+expression: "&new_buf"
+---
+module {
+  asm.section {
+    asm.symbol {
+      riscv.add
+      asm.symbol_end
+    }
+  }
+  module_end
+}

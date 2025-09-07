@@ -16,12 +16,12 @@ pub fn construct_dialect(item: TokenStream) -> TokenStream {
     quote! {
         pub struct #struct_name {
             dyn_converters: std::collections::HashMap<&'static str, fn(std::sync::Arc<tir::OpInstance>) -> Box<dyn tir::Operation>>,
-            parsers: std::collections::HashMap<&'static str, fn(&mut tir::parser::IRParser<'_>, &tir::Context) -> Result<Box<dyn tir::Operation>, (tir::parser::Span, tir::Error)>>,
+            parsers: std::collections::HashMap<&'static str, fn(&mut tir::parse::text::Parser<'_>, &tir::Context) -> Result<Box<dyn tir::Operation>, (tir::parse::Span, tir::Error)>>,
         }
 
         impl tir::Dialect for #struct_name {
-            fn new() -> Box<dyn tir::Dialect> {
-                Box::new(#struct_name {
+            fn new() -> std::sync::Arc<dyn tir::Dialect> {
+                std::sync::Arc::new(#struct_name {
                     dyn_converters: std::collections::HashMap::new(),
                     parsers: std::collections::HashMap::new(),
                 })
@@ -40,7 +40,7 @@ pub fn construct_dialect(item: TokenStream) -> TokenStream {
             }
 
             fn get_parser(&self, name: &str)
-            -> Result<fn(&mut tir::parser::IRParser<'_>, &tir::Context) -> Result<Box<dyn tir::Operation>, (tir::parser::Span, tir::Error)>, tir::Error> {
+            -> Result<fn(&mut tir::parse::text::Parser<'_>, &tir::Context) -> Result<Box<dyn tir::Operation>, (tir::parse::Span, tir::Error)>, tir::Error> {
                 self.parsers.get(name).cloned().ok_or(tir::Error::UnknownOperation(#name.to_string(), name.to_string()))
             }
         }

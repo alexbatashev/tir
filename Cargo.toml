@@ -6,7 +6,11 @@ members = [
     "utils/filecheck",
     "utils/not",
     "tmdl",
-    "xtask", "core", "utils/macros",
+    "xtask",
+    "core",
+    "utils/macros",
+    "backends/common",
+    "backends/riscv",
 ]
 
 [profile.bench]

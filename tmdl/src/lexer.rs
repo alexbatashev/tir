@@ -29,6 +29,10 @@ pub enum Token<'a> {
     ForwardSlash,
     /// `*`
     Asterisk,
+    /// `&`
+    Ampersand,
+    /// `^`
+    Hat,
 
     /// `.`
     Dot,
@@ -144,10 +148,13 @@ pub(crate) fn lexer<'src>()
         just("..").to(Token::Range),
         just('=').to(Token::Equals),
         just('+').to(Token::Plus),
+        just('-').to(Token::Dash),
         just('*').to(Token::Asterisk),
         just('/').to(Token::ForwardSlash),
         just('|').to(Token::Pipe),
         just('.').to(Token::Dot),
+        just('&').to(Token::Ampersand),
+        just('^').to(Token::Hat),
     ));
 
     let ident = text::ascii::ident().map(|ident: &str| match ident {
@@ -227,6 +234,8 @@ impl<'a> fmt::Display for Token<'a> {
             Token::ForwardSlash => f.write_str("/"),
             Token::BackSlash => f.write_str("\\"),
             Token::Comma => f.write_str(","),
+            Token::Ampersand => f.write_char('&'),
+            Token::Hat => f.write_char('^'),
             Token::LBracket => f.write_str("["),
             Token::RBracket => f.write_str("]"),
             Token::LParen => f.write_str("("),

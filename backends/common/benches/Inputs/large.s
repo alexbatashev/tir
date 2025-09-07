@@ -1,0 +1,302 @@
+.text
+.global start
+start:
+    add t0, t1, t2
+    sub t3, t4, t5
+    xor t6, t0, t1
+    or t2, t3, t4
+    and t5, t6, t0
+    sll t1, t2, t3
+test:
+    srl t4, t5, t6
+    sra t0, t1, t2
+    add t3, t4, t5
+    sub t6, t0, t1
+    xor t2, t3, t4
+    or t5, t6, t0
+    and t1, t2, t3
+    sll t4, t5, t6
+    srl t0, t1, t2
+    sra t3, t4, t5
+    add t6, t0, t1
+    sub t2, t3, t4
+    xor t5, t6, t0
+    or t1, t2, t3
+    and t4, t5, t6
+    sll t0, t1, t2
+    srl t3, t4, t5
+    sra t6, t0, t1
+    add t2, t3, t4
+    sub t5, t6, t0
+    xor t1, t2, t3
+    or t4, t5, t6
+    and t0, t1, t2
+    sll t3, t4, t5
+    srl t6, t0, t1
+    sra t2, t3, t4
+
+func1:
+    add s0, s1, s2
+    sub s3, s4, s5
+    xor s6, s0, s1
+    or s2, s3, s4
+    and s5, s6, s0
+    sll s1, s2, s3
+    srl s4, s5, s6
+    sra s0, s1, s2
+    add s3, s4, s5
+    sub s6, s0, s1
+    xor s2, s3, s4
+    or s5, s6, s0
+    and s1, s2, s3
+    sll s4, s5, s6
+    srl s0, s1, s2
+    sra s3, s4, s5
+    add s6, s0, s1
+    sub s2, s3, s4
+    xor s5, s6, s0
+    or s1, s2, s3
+    and s4, s5, s6
+    sll s0, s1, s2
+    srl s3, s4, s5
+test1:
+    sra s6, s0, s1
+    add s2, s3, s4
+    sub s5, s6, s0
+    xor s1, s2, s3
+    or s4, s5, s6
+    and s0, s1, s2
+    sll s3, s4, s5
+    srl s6, s0, s1
+    sra s2, s3, s4
+
+func2:
+    add a0, a1, a2
+    sub a3, a4, a5
+    xor a6, a0, a1
+    or a2, a3, a4
+    and a5, a6, a0
+    sll a1, a2, a3
+    srl a4, a5, a6
+    sra a0, a1, a2
+    add a3, a4, a5
+    sub a6, a0, a1
+    xor a2, a3, a4
+    or a5, a6, a0
+    and a1, a2, a3
+    sll a4, a5, a6
+    srl a0, a1, a2
+    sra a3, a4, a5
+    add a6, a0, a1
+    sub a2, a3, a4
+    xor a5, a6, a0
+    or a1, a2, a3
+    and a4, a5, a6
+    sll a0, a1, a2
+    srl a3, a4, a5
+    sra a6, a0, a1
+    add a2, a3, a4
+    sub a5, a6, a0
+    xor a1, a2, a3
+    or a4, a5, a6
+    and a0, a1, a2
+    sll a3, a4, a5
+    srl a6, a0, a1
+    sra a2, a3, a4
+
+func3:
+    add t1, s1, a1
+    sub t2, s2, a2
+    xor t3, s3, a3
+    or t4, s4, a4
+    and t5, s5, a5
+    sll t6, s6, a6
+    srl s1, t1, a1
+    sra s2, t2, a2
+    add s3, t3, a3
+    sub s4, t4, a4
+    xor s5, t5, a5
+    or s6, t6, a6
+    and t1, s1, a1
+    sll t2, s2, a2
+    srl t3, s3, a3
+    sra t4, s4, a4
+    add t5, s5, a5
+    sub t6, s6, a6
+    xor t1, t2, t3
+    or t4, t5, t6
+    and s1, s2, s3
+    sll s4, s5, s6
+    srl a1, a2, a3
+    sra a4, a5, a6
+    add t1, a1, s1
+    sub t2, a2, s2
+    xor t3, a3, s3
+    or t4, a4, s4
+    and t5, a5, s5
+    sll t6, a6, s6
+    srl t1, t2, t3
+    sra t4, t5, t6
+
+.global func4
+func4:
+    add t0, s0, a0
+    or a1, t1, s1
+    sub s2, a2, t2
+    xor t3, s3, a3
+    and s4, a4, t4
+    sll t5, s5, a5
+    sra a6, t6, s6
+    srl t1, a1, s1
+    sub s2, t2, a2
+    xor s3, a3, t3
+    or t4, s4, a4
+    and s5, t5, a5
+    sll s6, a6, t6
+    sra t1, s1, a1
+    srl a2, s2, t2
+    add t3, a3, s3
+    sub s4, t4, a4
+    xor s5, a5, t5
+    or s6, t6, a6
+    and t1, t2, t3
+    sll t4, s5, s6
+    srl a1, a2, a3
+    sra a4, a5, a6
+    add t1, a1, s1
+    or t2, a2, s2
+    sub t3, a3, s3
+    xor t4, a4, s4
+    and t5, a5, s5
+    sll t6, a6, s6
+
+func5:
+    add t0, s0, a0
+    or a1, t1, s1
+    sub s2, a2, t2
+    xor t3, s3, a3
+    and s4, a4, t4
+    sll t5, s5, a5
+    sra a6, t6, s6
+    srl t1, a1, s1
+    sub s2, t2, a2
+    xor s3, a3, t3
+    or t4, s4, a4
+    and s5, t5, a5
+    sll s6, a6, t6
+    sra t1, s1, a1
+    srl a2, s2, t2
+    add t3, a3, s3
+    sub s4, t4, a4
+    xor s5, a5, t5
+    or s6, t6, a6
+    and t1, t2, t3
+    sll t4, s5, s6
+    srl a1, a2, a3
+    sra a4, a5, a6
+    add t1, a1, s1
+    or t2, a2, s2
+    sub t3, a3, s3
+    xor t4, a4, s4
+    and t5, a5, s5
+    sll t6, a6, s6
+
+.global func6
+func6:
+    add t0, s0, a0
+    or a1, t1, s1
+    sub s2, a2, t2
+    xor t3, s3, a3
+    and s4, a4, t4
+    sll t5, s5, a5
+    sra a6, t6, s6
+    srl t1, a1, s1
+    sub s2, t2, a2
+    xor s3, a3, t3
+    or t4, s4, a4
+    and s5, t5, a5
+    sll s6, a6, t6
+    sra t1, s1, a1
+    srl a2, s2, t2
+    add t3, a3, s3
+    sub s4, t4, a4
+    xor s5, a5, t5
+    or s6, t6, a6
+    and t1, t2, t3
+    sll t4, s5, s6
+    srl a1, a2, a3
+    sra a4, a5, a6
+    add t1, a1, s1
+    or t2, a2, s2
+    sub t3, a3, s3
+    xor t4, a4, s4
+    and t5, a5, s5
+    sll t6, a6, s6
+
+.text
+func7:
+    add t0, s0, a0
+    or a1, t1, s1
+    sub s2, a2, t2
+    xor t3, s3, a3
+    and s4, a4, t4
+    sll t5, s5, a5
+    sra a6, t6, s6
+    srl t1, a1, s1
+    sub s2, t2, a2
+test7:
+    xor s3, a3, t3
+    or t4, s4, a4
+    and s5, t5, a5
+    sll s6, a6, t6
+    sra t1, s1, a1
+    srl a2, s2, t2
+    add t3, a3, s3
+    sub s4, t4, a4
+    xor s5, a5, t5
+    or s6, t6, a6
+    and t1, t2, t3
+    sll t4, s5, s6
+    srl a1, a2, a3
+    sra a4, a5, a6
+    add t1, a1, s1
+    or t2, a2, s2
+    sub t3, a3, s3
+    xor t4, a4, s4
+    and t5, a5, s5
+    sll t6, a6, s6
+
+.text
+.global func8
+func8:
+    xor s3, a3, t3
+    or t4, s4, a4
+    and s5, t5, a5
+    sll s6, a6, t6
+    sra t1, s1, a1
+    srl a2, s2, t2
+    add t3, a3, s3
+    sub s4, t4, a4
+    xor s5, a5, t5
+    or s6, t6, a6
+    and t1, t2, t3
+    sll t4, s5, s6
+    srl a1, a2, a3
+    sra a4, a5, a6
+    add t0, s0, a0
+    or a1, t1, s1
+test8:
+    sub s2, a2, t2
+    xor t3, s3, a3
+    and s4, a4, t4
+    sll t5, s5, a5
+    sra a6, t6, s6
+    srl t1, a1, s1
+    sub s2, t2, a2
+    add t1, a1, s1
+    or t2, a2, s2
+    sub t3, a3, s3
+    xor t4, a4, s4
+    and t5, a5, s5
+    sll t6, a6, s6
+    ret
