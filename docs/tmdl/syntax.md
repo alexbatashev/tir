@@ -1,3 +1,226 @@
 # TMDL Syntax Guide
 
-TBD
+This document describes the syntax of the TIR Machine Description Language (TMDL).
+It is intended as a concise, example‑driven reference. For background and goals,
+see the Motivation section of the [docs](index.md).
+
+## Lexical Elements
+
+- Whitespace and newlines are insignificant except inside string literals.
+- Line comments start with `//` and run to end of line.
+- Identifiers: ASCII identifiers (`[A-Za-z_][A-Za-z0-9_]*`).
+- String literals: double‑quoted, no escape sequences yet: `"text"`.
+- Numbers:
+  - Decimal: `0`, `42`, `1234`
+  - Hex: `0x1f`, `0XDEAD` (also supports a leading `-`)
+  - Binary: `0b1010` (decimal/hex/binary are available in expressions)
+- Punctuation and operators used across the grammar: `{ } [ ] ( ) , : ; => .. = + - * / & ^ | . < >`
+
+## Types
+
+- `Integer` — unbounded signed integer for spec‑time calculations.
+- `String` — string literal values.
+- `bits<N>` — fixed width unsigned bitvector (e.g., `bits<7>`).
+- Struct type — names a user‑defined type such as a register class: `GPR`.
+
+## Expressions
+
+Expressions are used in parameters, encodings, asm templates, and behavior.
+
+- Literals: numbers and strings as above.
+- Identifiers and field access: `self.MNEMONIC`, `imm`.
+- Indexing and slicing on bitvectors:
+  - Single bit/index: `imm[11]`
+  - Range (half‑open): `imm[0..4]` (selects bits 0–3)
+- Calls: `foo(a, b)` (reserved for future extensions).
+- Grouping: `(expr)`
+- Binary operators and precedence:
+  - Highest: `*` `/`
+  - Next: `+` `-` `|` `&` `^` `<<` `>>` (these share the same precedence tier)
+
+Blocks and if‑expressions are supported for richer constructs:
+
+```
+{
+  a = b + c;
+  a // last expression returns value if no trailing semicolon
+}
+
+if cond { { ... } } else { { ... } }
+```
+
+## Top‑Level Items
+
+TMDL files contain a sequence of items in any order:
+
+- `isa` — defines an ISA/feature and its parameters.
+- `register_class` — defines physical registers for one or more ISAs.
+- `template` — reusable instruction template with parameters/operands/encoding/asm.
+- `instruction` — concrete instruction (may inherit from a template) with behavior.
+
+### ISA Definition
+
+```
+isa RV32I {
+  param XLEN: Integer = 32;
+}
+```
+
+- Optional requirements declare dependencies on other ISAs/features:
+  - Single: `requires RV64I`
+  - Any of: `requires [RV32I | RV64I]` (pipe‑separated inside brackets)
+  - All of: `requires [Foo, Bar]` (comma‑separated inside brackets)
+
+### Register Class
+
+```
+register_class GPR for [RV32I, RV64I] {
+  param ENCODING_LEN: Integer = 5;
+  param WIDTH: Integer = self.XLEN;
+
+  registers {
+    x0("zero") => { traits = [hardwired_zero] },
+    x1("ra")   => { traits = [return_address, caller_saved] },
+    x2..x7("t{}") => { traits = [caller_saved] },
+    x8..x9("s{}")  => { traits = [callee_saved] },
+    x10..x17("a{}") => { traits = [caller_saved] },
+    x18..x27("s{}") => { traits = [callee_saved] },
+    x28..x31("t{}") => { traits = [caller_saved] },
+  }
+}
+```
+
+- `for [...]` — attach the class to multiple ISAs.
+- Single register: `name("alias") => { traits = [..] }`
+- Range: `start..end("alias{}") => { traits = [..] }` uses `{}` placeholder to number aliases sequentially.
+- Known traits currently recognized by tools: `hardwired_zero`, `return_address`, `caller_saved`, `callee_saved`, `stack_pointer`. Other identifiers parse but may be ignored by current tooling.
+
+### Instruction Template
+
+```
+template RType for [RV32I, RV64I] {
+  param MNEMONIC: String;
+  param FUNCT7: bits<7>;
+  param FUNCT3: bits<3>;
+  param OPCODE: bits<7>;
+
+  operands {
+    rd: GPR,
+    rs1: GPR,
+    rs2: GPR,
+  }
+
+  encoding {
+    0..6  => OPCODE,
+    7..11 => rd,
+    12..14 => FUNCT3,
+    15..19 => rs1,
+    20..24 => rs2,
+    25..31 => FUNCT7,
+  }
+
+  asm { "{self.MNEMONIC} {rd}, {rs1}, {rs2}" }
+}
+```
+
+- `operands` — operand name to type mapping (typically to a register class or a bitvector type).
+- `encoding` — bitfield layout using single bits `i => expr` and ranges `i..j => expr`.
+  - Right‑hand side can reference operands, parameters, slices (e.g., `imm[0..4]`).
+- `asm` — expression producing assembly syntax. Today commonly a string template with placeholders:
+  - `{self.MNEMONIC}` resolves to the instruction mnemonic (from parameters).
+  - `{name}` inserts the textual form of operand `name` (registers and immediates).
+
+Inheritance:
+
+```
+template LoadInst for [RV32I, RV64I] : IType {
+  param OPCODE: bits<7> = 0b0000011;
+  asm { "{self.MNEMONIC} {rd}, {imm}({rs1})" }
+}
+```
+
+Use `: ParentTemplate` to inherit parameters/operands/encoding; you can override/add members.
+
+### Instruction Definition
+
+```
+instruction Add for [RV32I, RV64I] : RType {
+  param MNEMONIC: String = "add";
+  param FUNCT3: bits<3> = 0b000;
+
+  behavior { rd = rs1 + rs2; }
+}
+```
+
+- Same structure as `template` with optional inheritance and `for [...]`.
+- `behavior` — required; describes semantics using the expression language. Basic assignments and arithmetic/bitwise ops are supported.
+- Optional `asm`/`encoding` sections can be provided or inherited.
+
+## Encoding Section Details
+
+- Locations use bit indices where `0` is least significant bit.
+- Range `a..b` covers bits `[a, b)`; e.g., `7..11` covers bits 7,8,9,10.
+- RHS expressions can be immediates, parameters, operand values, slices/indexes of bitvectors.
+
+Examples from `tmdl/checks/Inputs/simple.tmdl`:
+
+```
+encoding {
+  0 => 1,
+  1..5 => rs1,
+  6..10 => rs2,
+  11..15 => rd,
+  16..31 => 0,
+}
+```
+
+## ASM Templates
+
+Most current templates and instructions provide a single string literal:
+
+```
+asm { "{self.MNEMONIC} {rd}, {rs1}, {rs2}" }
+asm { "{self.MNEMONIC} {rd}, {imm}({rs1})" }
+```
+
+- Placeholders:
+  - `{self.MNEMONIC}` — mnemonic from template/instruction parameters.
+  - `{op}` — an operand placeholder by name (e.g., `rd`, `rs1`, `imm`).
+- Additional logic (e.g., Intel vs AT&T syntax selection) can be expressed with full expressions/blocks; today, simple literal templates are the norm.
+
+## Feature Scoping and Requirements
+
+- `for [A, B]` after `register_class`, `template`, or `instruction` limits applicability to those ISAs/features.
+- `requires ...` inside `isa` defines dependencies:
+  - `requires Foo` — single requirement.
+  - `requires [Foo | Bar]` — any of the listed features.
+  - `requires [Foo, Bar]` — all listed features.
+
+## Putting It Together (RISC‑V Excerpts)
+
+From `backends/riscv/defs/main.tmdl`:
+
+```
+isa RV64I { param XLEN: Integer = 64; }
+
+register_class GPR for [RV32I, RV64I] {
+  param ENCODING_LEN: Integer = 5;
+  param WIDTH: Integer = self.XLEN;
+  registers {
+    x0("zero") => { traits = [hardwired_zero] },
+    x10..x17("a{}") => { traits = [caller_saved] },
+  }
+}
+
+template RType for [RV32I, RV64I] {
+  param MNEMONIC: String;
+  ...
+  asm { "{self.MNEMONIC} {rd}, {rs1}, {rs2}" }
+}
+
+instruction And for [RV32I, RV64I] : RType {
+  param MNEMONIC: String = "and";
+  param FUNCT3: bits<3> = 0b111;
+  behavior { rd = rs1 & rs2; }
+}
+```
