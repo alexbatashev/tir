@@ -22,8 +22,4 @@ pub trait Dialect: 'static + Send + Sync + Any {
         &self,
         name: &str,
     ) -> Result<fn(&mut IRParser, &Context) -> Result<Box<dyn Operation>, (Span, Error)>, Error>;
-
-    fn parse_native(&self, _source: &str) -> Box<dyn Operation> {
-        unimplemented!("This dialect does not support native parsing")
-    }
 }

@@ -54,6 +54,58 @@ impl<'src> Parser<'src> {
             false
         }
     }
+
+    pub fn parse_string(&mut self) -> Option<&'src str> {
+        if self.src.get(self.position as usize..)?.starts_with('"') {
+            let start = self.position as usize + 1;
+            let mut i = start;
+            while let Some(c) = self.src.chars().nth(i) {
+                if c == '"' {
+                    break;
+                }
+                i += 1;
+            }
+            if self.src.chars().nth(i)? == '"' {
+                self.position = (i + 1) as u32;
+                self.skip_trivia();
+                return Some(&self.src[start..i]);
+            }
+        }
+        None
+    }
+
+    pub fn parse_number(&mut self) -> Option<i64> {
+        let mut i = self.position as usize;
+        let bytes = self.src.as_bytes();
+        if i >= bytes.len() {
+            return None;
+        }
+        let mut neg = false;
+        if bytes[i] == b'-' {
+            neg = true;
+            i += 1;
+        }
+        let start = i;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i == start {
+            return None;
+        }
+        let s = &self.src[(if neg { start - 1 } else { start })..i];
+        let val: i64 = s.parse().ok()?;
+        self.position = i as u32;
+        self.skip_trivia();
+        Some(val)
+    }
+
+    pub fn pos(&self) -> u32 {
+        self.position
+    }
+    pub fn set_pos(&mut self, pos: u32) {
+        self.position = pos;
+        self.skip_trivia();
+    }
 }
 
 impl Cursor for Parser<'_> {

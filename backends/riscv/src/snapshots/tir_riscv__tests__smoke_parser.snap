@@ -5,7 +5,7 @@ expression: "&new_buf"
 module {
   asm.section {
     asm.symbol {
-      riscv.add
+      riscv.add {rd = x10, rs1 = x11, rs2 = x12}
       asm.symbol_end
     }
   }

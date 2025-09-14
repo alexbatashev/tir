@@ -6,6 +6,10 @@ pub enum Token<'src> {
     // Punctuation
     #[token(",")]
     Comma,
+    #[token("(")]
+    LParen,
+    #[token(")")]
+    RParen,
 
     #[token(".section")]
     Section,
@@ -24,6 +28,9 @@ pub enum Token<'src> {
 
     #[regex("-?[0-9]+", |num| num.slice())]
     DecNumber(&'src str),
+
+    #[regex("-?0[xX][0-9a-fA-F]+", |num| num.slice())]
+    HexNumber(&'src str),
 }
 
 pub fn lex<'src>(source: &'src str) -> Result<Vec<Token<'src>>, ()> {
