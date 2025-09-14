@@ -100,8 +100,6 @@ fn emit_instructions<'ast, 'cache: 'ast>(
     let mut instruction_defs = vec![];
     let mut instruction_parsers_impls: Vec<proc_macro2::TokenStream> = vec![];
     let mut instruction_parser_map_inits: Vec<proc_macro2::TokenStream> = vec![];
-    let mut instruction_emitters_impls: Vec<proc_macro2::TokenStream> = vec![];
-    let mut instruction_emitter_map_inits: Vec<proc_macro2::TokenStream> = vec![];
 
     for inst in instructions {
         let name_ident = format_ident!("{}Op", &inst.name);
@@ -151,143 +149,10 @@ fn emit_instructions<'ast, 'cache: 'ast>(
                 }
             }
         });
-
-        if let Some(mn) = &mnemonic {
-            if let Some(asm_str) = resolve_asm_for_instruction(inst, item_cache) {
-                // Decide operand parse sequence by scanning placeholders in asm string
-                let (placeholders, has_commas) = parse_asm_placeholders(&asm_str);
-                let operands = resolve_operands_for_instruction(inst, item_cache);
-
-                let mut parser_body: Vec<proc_macro2::TokenStream> = vec![];
-
-                let mut first = true;
-                for ph in placeholders {
-                    if ph == "self.MNEMONIC" {
-                        // mnemonic is already consumed by dispatcher
-                        continue;
-                    }
-
-                    // Insert comma expectation if commas are present and not first operand
-                    if has_commas && !first {
-                        parser_body.push(quote! {
-                            parser.expect_symbol(tir::parse::tokens::Symbol::Comma).map_err(|_| ())?;
-                        });
-                    }
-                    first = false;
-
-                    // Determine operand type and generate appropriate parser step
-                    if let Some(ty) = operands.get(&ph) {
-                        match ty {
-                            ast::Type::Struct(s) => {
-                                let reg_fn = format_ident!("parse_{}", s);
-                                let cls = s.clone();
-                                let attr_name = ph.clone();
-                                parser_body.push(quote! {
-                                    let idx = #reg_fn(parser)?;
-                                    op_builder = op_builder.attr(
-                                        #attr_name,
-                                        tir::attributes::AttributeValue::Register(
-                                            tir::attributes::RegisterAttr::Physical { class: #cls.to_string(), index: idx }
-                                        ),
-                                    );
-                                });
-                            }
-                            ast::Type::Bits(_) | ast::Type::Integer => {
-                                let attr_name = ph.clone();
-                                parser_body.push(quote! {
-                                    let num = match parser.bump() {
-                                        Some(tir_be_common::Token::DecNumber(s)) => s,
-                                        _ => return Err(())
-                                    };
-                                    let val: i64 = num.parse().map_err(|_| ())?;
-                                    op_builder = op_builder.attr(
-                                        #attr_name,
-                                        tir::attributes::AttributeValue::Int(val),
-                                    );
-                                });
-                            }
-                            ast::Type::String => {
-                                parser_body.push(quote! { return Err(()); });
-                            }
-                        }
-                    }
-                }
-
-                let func_ident = format_ident!("parse_{}", mn);
-                instruction_parsers_impls.push(quote! {
-                    fn #func_ident<'src>(
-                        context: &tir::Context,
-                        builder: &mut tir::IRBuilder,
-                        parser: &mut tir::parse::tokens::Parser<'src, tir_be_common::Token<'src>>,
-                    ) -> Result<(), ()> {
-                        // Build attributes for this instruction
-                        let mut op_builder = #builder_ident::new(context);
-
-                        // Parse operands according to ASM template and attach as attributes
-                        #(#parser_body)*
-
-                        // Insert the instruction op
-                        let _ = builder.insert(op_builder.build());
-                        Ok(())
-                    }
-                });
-
-                let mnemonic_str = mn.clone();
-                instruction_parser_map_inits.push(quote! {
-                    map.insert(#mnemonic_str.to_string(), Box::new(#func_ident as tir_be_common::AsmInstructionParser));
-                });
-
-                // Emit instruction emitter (assembly printer) for this instruction
-                let emit_ident = format_ident!("emit_{}", mn);
-                let op_ty_ident = name_ident.clone();
-
-                let emit_body = build_emitter_body(
-                    &asm_str,
-                    &resolve_operands_for_instruction(inst, item_cache),
-                );
-
-                instruction_emitters_impls.push(quote! {
-                    fn #emit_ident(op: &#op_ty_ident, prefer_abi: bool) -> String {
-                        fn get_reg_index_attr(op: & #op_ty_ident, name: &str) -> Option<u16> {
-                            for a in tir::Operation::attributes(op) {
-                                if a.name == name {
-                                    if let tir::attributes::AttributeValue::Register(tir::attributes::RegisterAttr::Physical { index: idx, .. }) = &a.value {
-                                        return Some(*idx);
-                                    }
-                                }
-                            }
-                            None
-                        }
-                        fn get_int_attr(op: & #op_ty_ident, name: &str) -> Option<i64> {
-                            for a in tir::Operation::attributes(op) {
-                                if a.name == name {
-                                    if let tir::attributes::AttributeValue::Int(v) = &a.value { return Some(*v); }
-                                }
-                            }
-                            None
-                        }
-                        fn get_str_attr(op: & #op_ty_ident, name: &str) -> Option<String> {
-                            for a in tir::Operation::attributes(op) {
-                                if a.name == name {
-                                    if let tir::attributes::AttributeValue::Str(v) = &a.value { return Some(v.clone()); }
-                                }
-                            }
-                            None
-                        }
-                        let mut out = String::new();
-                        #emit_body
-                        out
-                    }
-                });
-                instruction_emitter_map_inits.push(quote! { emit_map.insert(#mnemonic_str.to_string(), #emit_ident as fn(&#op_ty_ident, bool) -> String); });
-            }
-        }
     }
 
     Ok(quote! {
         #(#instruction_defs)*
-
-        #(#instruction_emitters_impls)*
 
         fn get_instruction_parsers() -> std::collections::HashMap<String, Box<tir_be_common::AsmInstructionParser>> {
             let mut map = std::collections::HashMap::new();
@@ -319,32 +184,6 @@ fn resolve_string(expr: &ast::Expr) -> Option<String> {
     }
 }
 
-fn resolve_asm_for_instruction<'a>(
-    inst: &'a ast::Instruction,
-    item_cache: &HashMap<String, &'a ast::Item>,
-) -> Option<String> {
-    if let Some(a) = &inst.asm {
-        if let Some(s) = resolve_string(a) {
-            return Some(s);
-        }
-    }
-    let mut parent = inst.parent_template.clone();
-    while let Some(p) = parent {
-        match item_cache.get(&p) {
-            Some(ast::Item::Template(t)) => {
-                if let Some(a) = &t.asm {
-                    if let Some(s) = resolve_string(a) {
-                        return Some(s);
-                    }
-                }
-                parent = t.parent_template.clone();
-            }
-            _ => break,
-        }
-    }
-    None
-}
-
 fn resolve_operands_for_instruction<'a>(
     inst: &'a ast::Instruction,
     item_cache: &HashMap<String, &'a ast::Item>,
@@ -374,34 +213,6 @@ fn resolve_operands_for_instruction<'a>(
         result.insert(k.clone(), v.clone());
     }
     result
-}
-
-fn parse_asm_placeholders(asm: &str) -> (Vec<String>, bool) {
-    let mut names = Vec::new();
-    let mut i = 0usize;
-    let bytes = asm.as_bytes();
-    let mut has_commas = false;
-    while i < bytes.len() {
-        if bytes[i] == b'{' {
-            // find matching }
-            let mut j = i + 1;
-            while j < bytes.len() && bytes[j] != b'}' {
-                j += 1;
-            }
-            if j < bytes.len() && bytes[j] == b'}' {
-                let name = &asm[i + 1..j];
-                names.push(name.to_string());
-                i = j + 1;
-                continue;
-            } else {
-                break;
-            }
-        } else if bytes[i] == b',' {
-            has_commas = true;
-        }
-        i += 1;
-    }
-    (names, has_commas)
 }
 
 fn emit_register_parsers_and_printers(
@@ -514,72 +325,6 @@ fn emit_register_parsers_and_printers(
     }
 
     Ok(quote! { #(#fns)* })
-}
-
-fn build_emitter_body(
-    asm: &str,
-    operands: &std::collections::HashMap<String, ast::Type>,
-) -> proc_macro2::TokenStream {
-    let mut tokens: Vec<proc_macro2::TokenStream> = Vec::new();
-    let mut i = 0usize;
-    let b = asm.as_bytes();
-    while i < b.len() {
-        if b[i] == b'{' {
-            // flush literal up to i
-            // find closing }
-            let mut j = i + 1;
-            while j < b.len() && b[j] != b'}' {
-                j += 1;
-            }
-            if j < b.len() {
-                let name = &asm[i + 1..j];
-                let lit = &asm[0..i];
-                if !lit.is_empty() {
-                    tokens.push(quote! { out.push_str(#lit); });
-                }
-                if name != "self.MNEMONIC" {
-                    if let Some(ty) = operands.get(name) {
-                        match ty {
-                            ast::Type::Struct(s) => {
-                                let print_fn = format_ident!("print_{}", s);
-                                let name_str = name.to_string();
-                                tokens.push(quote! {
-                                    if let Some(idx) = get_reg_index_attr(op, #name_str) {
-                                        if let Some(txt) = #print_fn(idx, prefer_abi) { out.push_str(&txt); }
-                                    }
-                                });
-                            }
-                            ast::Type::Bits(_) | ast::Type::Integer => {
-                                let name_str = name.to_string();
-                                tokens.push(quote! {
-                                    if let Some(v) = get_int_attr(op, #name_str) { out.push_str(&v.to_string()); }
-                                });
-                            }
-                            ast::Type::String => {
-                                let name_str = name.to_string();
-                                tokens.push(quote! {
-                                    if let Some(s) = get_str_attr(op, #name_str) { out.push_str(&format!("\"{}\"", s)); }
-                                });
-                            }
-                        }
-                    }
-                }
-                // shift the asm to remaining part
-                let rest = &asm[j + 1..];
-                // recurse on rest
-                let more = build_emitter_body(rest, operands);
-                tokens.push(more);
-                return quote! { #(#tokens)* };
-            } else {
-                break;
-            }
-        }
-        i += 1;
-    }
-    if !asm.is_empty() {
-        tokens.push(quote! { out.push_str(#asm); });
-    }
-    quote! { #(#tokens)* }
 }
 
 fn parse_trailing_index(s: &str) -> Option<u16> {

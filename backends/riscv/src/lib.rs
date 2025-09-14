@@ -23,51 +23,6 @@ impl RiscvDialect {
         let parser = tir_be_common::AsmParser::new(get_instruction_parsers());
         parser
     }
-
-    /// Emit a single operation as assembly using generated emitters.
-    /// Returns None if op is not a RISC-V op this dialect knows how to print.
-    pub fn emit_op_asm(
-        &self,
-        inst: std::sync::Arc<tir::OpInstance>,
-        prefer_abi: bool,
-    ) -> Option<String> {
-        if inst.dialect() != "riscv" {
-            return None;
-        }
-
-        // Try each known op; cheap string match first, then typed cast.
-        match inst.name() {
-            "add" => inst
-                .clone()
-                .as_op::<AddOp>()
-                .map(|op| emit_add(&op, prefer_abi)),
-            "sub" => inst
-                .clone()
-                .as_op::<SubOp>()
-                .map(|op| emit_sub(&op, prefer_abi)),
-            "sll" => inst
-                .clone()
-                .as_op::<ShiftLeftLogicalOp>()
-                .map(|op| emit_sll(&op, prefer_abi)),
-            "srl" => inst
-                .clone()
-                .as_op::<ShiftRightLogicalOp>()
-                .map(|op| emit_srl(&op, prefer_abi)),
-            "xor" => inst
-                .clone()
-                .as_op::<XorOp>()
-                .map(|op| emit_xor(&op, prefer_abi)),
-            "or" => inst
-                .clone()
-                .as_op::<OrOp>()
-                .map(|op| emit_or(&op, prefer_abi)),
-            "and" => inst
-                .clone()
-                .as_op::<AndOp>()
-                .map(|op| emit_and(&op, prefer_abi)),
-            _ => None,
-        }
-    }
 }
 
 #[cfg(test)]
