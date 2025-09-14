@@ -499,47 +499,47 @@ fn make_parser(builder_name: &Ident, regions: &[Region]) -> proc_macro2::TokenSt
         fn parse<'src>(parser: &mut tir::parse::text::Parser<'src>, context: &tir::Context)
         -> Result<Box<dyn tir::Operation>, (tir::parse::Span, tir::Error)> {
            // Parse optional generic attribute dict: { key = value, ... }
-           let mut __parsed_attrs: Vec<tir::attributes::NamedAttribute> = vec![];
-           let __mark = parser.pos();
+           let mut parsed_attrs: Vec<tir::attributes::NamedAttribute> = vec![];
+           let mark = parser.pos();
            if parser.parse_token("{") {
-               let mut __ok = true;
+               let mut ok = true;
                if !parser.parse_token("}") {
                    loop {
-                       if let Some(__name) = parser.parse_ident() {
-                           if !parser.parse_token("=") { __ok = false; break; }
-                           let __val = if let Some(__s) = parser.parse_string() {
-                               tir::attributes::AttributeValue::Str(__s.to_string())
+                       if let Some(name) = parser.parse_ident() {
+                           if !parser.parse_token("=") { ok = false; break; }
+                           let val = if let Some(s) = parser.parse_string() {
+                               tir::attributes::AttributeValue::Str(s.to_string())
                            } else if parser.parse_token("%virt") {
-                               if let Some(__id) = parser.parse_number() {
-                                   let mut __class = None;
+                               if let Some(id) = parser.parse_number() {
+                                   let mut class = None;
                                    if parser.parse_token(":") {
-                                       if let Some(__cls) = parser.parse_ident() { __class = Some(__cls.to_string()); } else { __ok = false; }
+                                       if let Some(cls) = parser.parse_ident() { class = Some(cls.to_string()); } else { ok = false; }
                                    }
-                                   tir::attributes::AttributeValue::Register(tir::attributes::RegisterAttr::Virtual { id: __id as u32, class: __class })
-                               } else { __ok = false; break; }
-                           } else if let Some(__n) = parser.parse_number() {
-                               tir::attributes::AttributeValue::Int(__n)
+                                   tir::attributes::AttributeValue::Register(tir::attributes::RegisterAttr::Virtual { id: id as u32, class: class })
+                               } else { ok = false; break; }
+                           } else if let Some(n) = parser.parse_number() {
+                               tir::attributes::AttributeValue::Int(n)
                            } else {
-                               __ok = false; break;
+                               ok = false; break;
                            };
-                           __parsed_attrs.push(tir::attributes::NamedAttribute::new(__name, __val));
+                           parsed_attrs.push(tir::attributes::NamedAttribute::new(name, val));
                            if parser.parse_token("}") { break; }
-                           if !parser.parse_token(",") { __ok = false; break; }
-                       } else { __ok = false; break; }
+                           if !parser.parse_token(",") { ok = false; break; }
+                       } else { ok = false; break; }
                    }
                }
-               if !__ok {
-                   parser.set_pos(__mark);
-                   __parsed_attrs.clear();
+               if !ok {
+                   parser.set_pos(mark);
+                   parsed_attrs.clear();
                }
            }
 
            #region_parsers
 
-            let mut __builder = #builder_name::new(context);
-            for __a in __parsed_attrs { __builder = __builder.attr(&__a.name, __a.value); }
+            let mut builder = #builder_name::new(context);
+            for a in parsed_attrs { builder = builder.attr(&a.name, a.value); }
 
-            Ok(Box::new(__builder
+            Ok(Box::new(builder
                 #region_builders
                 .build()))
         }

@@ -105,9 +105,8 @@ fn emit_instructions<'ast, 'cache: 'ast>(
         let name_ident = format_ident!("{}Op", &inst.name);
         let builder_ident = format_ident!("{}OpBuilder", &inst.name);
         let mnemonic = resolve_string(inst.params.get("MNEMONIC").unwrap().1.as_ref().unwrap());
-        let mnemonic_lit = proc_macro2::Literal::string(
-            &mnemonic.clone().unwrap_or_else(|| "".to_string()),
-        );
+        let mnemonic_lit =
+            proc_macro2::Literal::string(&mnemonic.clone().unwrap_or_else(|| "".to_string()));
         // Build attributes schema from operands
         let attrs_schema = {
             let mut items = vec![];
@@ -178,13 +177,13 @@ fn emit_instructions<'ast, 'cache: 'ast>(
                                     let fn_ident = format_ident!("parse_{}", class_name);
                                     let class_lit = proc_macro2::Literal::string(class_name);
                                     parse_steps.push(quote! {
-                                        let __idx = #fn_ident(parser)?;
-                                        __builder = __builder.attr(
+                                        let idx = #fn_ident(parser)?;
+                                        builder = builder.attr(
                                             #op_name_lit,
                                             tir::attributes::AttributeValue::Register(
                                                 tir::attributes::RegisterAttr::Physical {
                                                     class: #class_lit.to_string(),
-                                                    index: __idx,
+                                                    index: idx,
                                                 },
                                             ),
                                         );
@@ -192,12 +191,12 @@ fn emit_instructions<'ast, 'cache: 'ast>(
                                 }
                                 ast::Type::Integer | ast::Type::Bits(_) => {
                                     parse_steps.push(quote! {
-                                        let __val: i64 = if let Some(tok) = parser.peek() {
+                                        let val: i64 = if let Some(tok) = parser.peek() {
                                             match tok {
                                                 tir_be_common::Token::DecNumber(n) => {
-                                                    let __parsed = (*n).parse::<i64>().map_err(|_| ())?;
+                                                    let parsed = (*n).parse::<i64>().map_err(|_| ())?;
                                                     let _ = parser.bump();
-                                                    __parsed
+                                                    parsed
                                                 }
                                                 tir_be_common::Token::HexNumber(h) => {
                                                     let s = *h;
@@ -213,9 +212,9 @@ fn emit_instructions<'ast, 'cache: 'ast>(
                                                 _ => { return Err(()); }
                                             }
                                         } else { return Err(()); };
-                                        __builder = __builder.attr(
+                                        builder = builder.attr(
                                             #op_name_lit,
-                                            tir::attributes::AttributeValue::Int(__val),
+                                            tir::attributes::AttributeValue::Int(val),
                                         );
                                     });
                                 }
@@ -261,10 +260,10 @@ fn emit_instructions<'ast, 'cache: 'ast>(
                     builder: &mut tir::IRBuilder,
                     parser: &mut tir::parse::tokens::Parser<'src, tir_be_common::Token<'src>>,
                 ) -> Result<(), ()> {
-                    let mut __builder = #builder_ident::new(context);
+                    let mut op_builder = #builder_ident::new(context);
                     #(#parse_steps)*
-                    let __op = __builder.build();
-                    builder.insert(__op);
+                    let op = op_builder.build();
+                    builder.insert(op);
                     Ok(())
                 }
             });
@@ -273,8 +272,8 @@ fn emit_instructions<'ast, 'cache: 'ast>(
             if let Some(mn) = &mnemonic {
                 let mn_lit = proc_macro2::Literal::string(mn);
                 instruction_parser_map_inits.push(quote! {
-                    let __f: tir_be_common::AsmInstructionParser = #parse_fn_ident;
-                    map.insert(#mn_lit.to_string(), Box::new(__f));
+                    let f: tir_be_common::AsmInstructionParser = #parse_fn_ident;
+                    map.insert(#mn_lit.to_string(), Box::new(f));
                 });
             }
         }
