@@ -2,7 +2,7 @@
 
 This document describes the syntax of the TIR Machine Description Language (TMDL).
 It is intended as a concise, example‑driven reference. For background and goals,
-see the Motivation section of the [docs](docs/tmdl/index.md).
+see the Motivation section of the [docs](index.md).
 
 ## Lexical Elements
 
