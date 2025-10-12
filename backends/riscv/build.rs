@@ -3,6 +3,7 @@ use std::error::Error;
 use tmdl::{Action, Compiler, OutputKind};
 
 fn main() -> Result<(), Box<dyn Error>> {
+    println!("cargo:rerun-if-changed=defs");
     let compiler = Compiler::builder()
         .add_input("./defs/main.tmdl")
         .add_input("./defs/base.tmdl")

@@ -178,7 +178,7 @@ fn emit_instructions<'ast, 'cache: 'ast>(
                                     let class_lit = proc_macro2::Literal::string(class_name);
                                     parse_steps.push(quote! {
                                         let idx = #fn_ident(parser)?;
-                                        builder = builder.attr(
+                                        op_builder = op_builder.attr(
                                             #op_name_lit,
                                             tir::attributes::AttributeValue::Register(
                                                 tir::attributes::RegisterAttr::Physical {
@@ -212,7 +212,7 @@ fn emit_instructions<'ast, 'cache: 'ast>(
                                                 _ => { return Err(()); }
                                             }
                                         } else { return Err(()); };
-                                        builder = builder.attr(
+                                        op_builder = op_builder.attr(
                                             #op_name_lit,
                                             tir::attributes::AttributeValue::Int(val),
                                         );
