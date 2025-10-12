@@ -11,6 +11,7 @@ members = [
     "utils/macros",
     "backends/common",
     "backends/riscv",
+    "fuzz",
 ]
 
 [profile.bench]
