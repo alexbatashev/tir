@@ -48,7 +48,14 @@ instruction ShiftRightLogical for [RV32I, RV64I] : ALUOp {
     }
 }
 
-// TODO: SRA
+instruction ShiftRightArithmetic for [RV32I, RV64I] : ALUOp {
+    param MNEMONIC: String = "sra";
+    param FUNCT3: bits<3> = 0b101;
+    param FUNCT7: bits<7> = 0b0100000;
+    behavior {
+      rd = rs1 >>> rs2;
+    }
+}
 
 instruction Or for [RV32I, RV64I] : ALUOp {
     param MNEMONIC: String = "or";

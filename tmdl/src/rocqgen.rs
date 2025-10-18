@@ -191,7 +191,11 @@ pub fn generate_rocq(ast: Vec<ast::File>, mut output: Box<dyn Write>) -> Result<
     // Emit instruction table
     if !desc_names.is_empty() {
         let table_elems = desc_names.join(", ");
-        writeln!(output, "Definition table : list InstrDesc := [{}].", table_elems)?;
+        writeln!(
+            output,
+            "Definition table : list InstrDesc := [{}].",
+            table_elems
+        )?;
     }
 
     // Helpful global lemmas and properties
@@ -566,6 +570,7 @@ fn emit_expr(e: &Expr, ops: &HashMap<String, ast::Type>) -> Result<String, TMDLE
                 BinOp::BitwiseXor => "BXor",
                 BinOp::ShiftLeftLogical => "BSll",
                 BinOp::ShiftRightLogical => "BSrl",
+                BinOp::ShiftRightArithmetic => "BSra",
             };
             Ok(format!("EBin {} ({}) ({})", op, l, r))
         }

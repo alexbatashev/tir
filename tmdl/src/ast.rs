@@ -156,6 +156,7 @@ pub enum BinOp {
     BitwiseXor,
     ShiftLeftLogical,
     ShiftRightLogical,
+    ShiftRightArithmetic,
 }
 
 #[derive(Debug, Clone, PartialEq)]
