@@ -667,6 +667,11 @@ where
             just(Token::LAngle)
                 .then(just(Token::LAngle))
                 .to(BinOp::ShiftLeftLogical),
+            // Prefer the longer operator first: >>> (arith) before >> (logical)
+            just(Token::RAngle)
+                .then(just(Token::RAngle))
+                .then(just(Token::RAngle))
+                .to(BinOp::ShiftRightArithmetic),
             just(Token::RAngle)
                 .then(just(Token::RAngle))
                 .to(BinOp::ShiftRightLogical),

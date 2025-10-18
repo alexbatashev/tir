@@ -156,6 +156,7 @@ pub enum BinOp {
     BitwiseXor,
     ShiftLeftLogical,
     ShiftRightLogical,
+    ShiftRightArithmetic,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -207,6 +208,10 @@ pub struct File {
 impl LitInt {
     pub fn new(value: String) -> Self {
         Self { value }
+    }
+
+    pub fn value(&self) -> &str {
+        &self.value
     }
 }
 
