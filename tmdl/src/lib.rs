@@ -3,6 +3,7 @@ mod compiler;
 mod error;
 mod lexer;
 mod parser;
+mod rocqgen;
 mod rustgen;
 
 use chumsky::prelude::*;

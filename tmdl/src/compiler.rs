@@ -11,6 +11,7 @@ use crate::Span;
 use crate::error::TMDLError;
 use crate::lexer::lex;
 use crate::parser::parse;
+use crate::rocqgen::generate_rocq;
 use crate::rustgen::generate_rust;
 
 pub struct Compiler {
@@ -39,11 +40,12 @@ pub enum Action {
     EmitTokens,
     EmitAst,
     EmitRust,
+    EmitRocq,
 }
 
 impl Action {
     fn needs_whole_program(&self) -> bool {
-        matches!(self, Action::EmitRust)
+        matches!(self, Action::EmitRust | Action::EmitRocq)
     }
 }
 
@@ -147,6 +149,7 @@ impl Compiler {
             Action::EmitRust => {
                 generate_rust(self.dialect.as_ref().unwrap(), parsed_files, output)?
             }
+            Action::EmitRocq => generate_rocq(parsed_files, output)?,
             _ => unreachable!("Only complex actions should use this path"),
         }
 
