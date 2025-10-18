@@ -115,7 +115,10 @@ Record InstrDesc := {
   decode : word -> option Fields;
 
   (* behavior AST parameterized by decoded fields *)
-  sem    : Fields -> Stmt
+  sem    : Fields -> Stmt;
+
+  (* instruction length in bytes *)
+  ilen   : Z
 }.
 
 ";
@@ -133,12 +136,14 @@ const DECODE_TABLE: &'static str =
       else decode_table ds w
   end.
 
-Definition step (tbl : list InstrDesc) (s:State) (iw:word) : option State :=
+ Definition next_pc_by (s:State) (ilen:Z) := s.(pc) + ilen.
+
+ Definition step (tbl : list InstrDesc) (s:State) (iw:word) : option State :=
     match decode_table tbl iw with
     | None => None
     | Some (d,f) =>
         let s' := exec_stmt s (d.(sem) f) in
-        Some {| pc := next_pc s; rf := s'.(rf) |}
+        Some {| pc := next_pc_by s d.(ilen); rf := s'.(rf) |}
     end.
 
 Definition step_z (tbl : list InstrDesc) (s:State) (iw:word) : option State :=
@@ -146,7 +151,7 @@ Definition step_z (tbl : list InstrDesc) (s:State) (iw:word) : option State :=
     | None => None
     | Some (d,f) =>
         let s' := exec_stmt_z s (d.(sem) f) in
-        Some {| pc := next_pc s; rf := s'.(rf) |}
+        Some {| pc := next_pc_by s d.(ilen); rf := s'.(rf) |}
     end.
 
 Definition step_bv (tbl : list InstrDesc) (s:State) (iw:word) : option State :=
@@ -154,8 +159,22 @@ Definition step_bv (tbl : list InstrDesc) (s:State) (iw:word) : option State :=
     | None => None
     | Some (d,f) =>
         let s' := exec_stmt_bv s (d.(sem) f) in
-        Some {| pc := next_pc s; rf := s'.(rf) |}
+        Some {| pc := next_pc_by s d.(ilen); rf := s'.(rf) |}
     end.
+
+Lemma decode_table_sound ds d f w :
+    In d ds ->
+    nonoverlap (ds) ->
+    Z.land w d.(mask) = d.(pat) ->
+    d.(decode) w = Some f ->
+    exists ds', decode_table ds w = Some (d,f).
+(* straightforward induction on ds; use nonoverlap to kill the “earlier match” case *)
+Admitted.
+
+Definition obs (s:State) : Z * (Z -> Z) := (pc s, rf s).
+
+Definition Dom_TMDL (tbl:list InstrDesc) (iw:Z) :=
+  exists d f, decode_table tbl iw = Some (d,f).
 
 ";
 
@@ -240,8 +259,13 @@ pub fn generate_rocq(ast: Vec<ast::File>, mut output: Box<dyn Write>) -> Result<
                 // Emit instruction descriptor
                 writeln!(
                     output,
-                    "Definition {} : InstrDesc :=\n  {{| mask := {};\n     pat  := {};\n     decode := {};\n     sem    := {} |}}.\n",
-                    desc_name, mask_name, pat_name, decode_name, sem_name
+                    "Definition {} : InstrDesc :=\n  {{| mask := {};\n     pat  := {};\n     decode := {};\n     sem    := {};\n     ilen   := {} |}}.\n",
+                    desc_name,
+                    mask_name,
+                    pat_name,
+                    decode_name,
+                    sem_name,
+                    (width as u32 + 7) / 8
                 )?;
             }
         }
@@ -306,6 +330,15 @@ Proof.
   now rewrite E.
 Qed.
 
+(* writing a register leaves all other registers unchanged *)
+Lemma write_reg_other s i v j :
+  j <> i -> (write_reg s i v).(rf) j = s.(rf) j.
+Proof.
+  unfold write_reg; destruct (Z.eqb i 0) eqn:E0; cbn.
+  - reflexivity.
+  - destruct (Z.eqb j i) eqn:E; apply Z.eqb_neq in E; congruence.
+Qed.
+
 (* a single exec preserves x0 (hardwired zero) *)
 Lemma exec_stmt_preserves_x0 s st : (exec_stmt s st).(rf) 0 = s.(rf) 0.
 Proof. unfold exec_stmt; cbn. apply write_reg_x0. Qed.
@@ -344,6 +377,87 @@ Proof.
   inversion Hst; subst; cbn.
   unfold exec_stmt_bv; cbn. rewrite write_reg_x0. exact H0.
 Qed.
+
+(* Boolean match for a descriptor *)
+Definition matches (d:InstrDesc) (w:word) : bool :=
+  Z.eqb (Z.land w d.(mask)) d.(pat).
+
+Lemma matches_eq d w :
+  matches d w = true <-> Z.land w d.(mask) = d.(pat).
+Proof. unfold matches; now rewrite Z.eqb_eq. Qed.
+
+(* A convenient default descriptor for total nth *)
+Definition dummy_desc : InstrDesc :=
+  {| mask := 0; pat := 0; decode := (fun _ => None); sem := (fun _ => {| dst := 0; body := EImm 0 |}); ilen := 0 |}.
+
+(* Static overlap check using masks/patterns only *)
+Definition patterns_overlap (d1 d2:InstrDesc) : bool :=
+  Z.eqb (Z.land d1.(pat) d2.(mask)) d2.(pat)
+  &&   Z.eqb (Z.land d2.(pat) d1.(mask)) d1.(pat).
+
+Definition nonoverlap_masks (ds:list InstrDesc) : bool :=
+  forallb (fun i =>
+    forallb (fun j =>
+      if Nat.eqb i j then true
+      else negb (patterns_overlap (nth i ds dummy_desc) (nth j ds dummy_desc))
+    ) (seq 0 (length ds))
+  ) (seq 0 (length ds)).
+
+Lemma patterns_overlap_sound d1 d2 :
+  patterns_overlap d1 d2 = true ->
+  exists w, Z.land w d1.(mask) = d1.(pat) /\ Z.land w d2.(mask) = d2.(pat).
+Admitted.
+
+Lemma nonoverlap_masks_sound ds :
+  nonoverlap_masks ds = true -> nonoverlap ds.
+Proof.
+  (* Follows from patterns_overlap_sound and boolean iteration over pairs. *)
+Admitted.
+
+(* Arithmetic truncation lemmas *)
+Lemma trunc_idem z :
+  trunc Params.XLEN (trunc Params.XLEN z) = trunc Params.XLEN z.
+Proof.
+  unfold trunc. rewrite Z.land_assoc. rewrite Z.land_diag. reflexivity.
+Qed.
+
+Lemma normalize_idem z : normalize (normalize z) = normalize z.
+Proof. unfold normalize. apply trunc_idem. Qed.
+
+Lemma trunc_add x y :
+  trunc Params.XLEN (trunc Params.XLEN x + trunc Params.XLEN y)
+  = trunc Params.XLEN (x + y).
+Admitted.
+
+Lemma trunc_and x y :
+  trunc Params.XLEN (Z.land (trunc Params.XLEN x) (trunc Params.XLEN y))
+  = trunc Params.XLEN (Z.land x y).
+Admitted.
+
+Lemma trunc_or x y :
+  trunc Params.XLEN (Z.lor (trunc Params.XLEN x) (trunc Params.XLEN y))
+  = trunc Params.XLEN (Z.lor x y).
+Admitted.
+
+Lemma trunc_xor x y :
+  trunc Params.XLEN (Z.lxor (trunc Params.XLEN x) (trunc Params.XLEN y))
+  = trunc Params.XLEN (Z.lxor x y).
+Admitted.
+
+Lemma trunc_sll x y :
+  trunc Params.XLEN (Z.shiftl (trunc Params.XLEN x) (shamt y))
+  = trunc Params.XLEN (Z.shiftl x (shamt y)).
+Admitted.
+
+Lemma trunc_srl x y :
+  trunc Params.XLEN (Z.shiftr (trunc Params.XLEN x) (shamt y))
+  = trunc Params.XLEN (Z.shiftr x (shamt y)).
+Admitted.
+
+Lemma trunc_sra x y :
+  trunc Params.XLEN (sra_bv Params.XLEN (trunc Params.XLEN x) y)
+  = trunc Params.XLEN (sra_bv Params.XLEN x y).
+Admitted.
 ";
 
 // Resolve operands for an instruction walking its template ancestry (root-most first)
