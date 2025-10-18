@@ -1,0 +1,39 @@
+isa RV32T {
+    param XLEN: Integer = 32;
+}
+
+register_class GPR for [RV32T] {
+    param ENCODING_LEN: Integer = 5;
+    param WIDTH: Integer = self.XLEN;
+}
+
+template RType for [RV32T] {
+    param MNEMONIC: String;
+    param FUNCT7: bits<7>;
+    param FUNCT3: bits<3>;
+    param OPCODE: bits<7>;
+
+    operands {
+        rd: GPR,
+        rs1: GPR,
+        rs2: GPR,
+    }
+
+    encoding {
+        0..6  => OPCODE,
+        7..11 => rd,
+        12..14 => FUNCT3,
+        15..19 => rs1,
+        20..24 => rs2,
+        25..31 => FUNCT7,
+    }
+}
+
+instruction Add for [RV32T] : RType {
+    param MNEMONIC: String = "add";
+    param FUNCT3: bits<3> = 0b000;
+    param OPCODE: bits<7> = 0b0110011;
+    param FUNCT7: bits<7> = 0b0000000;
+    behavior { rd = rs1 + rs2; }
+}
+
