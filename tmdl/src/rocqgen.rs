@@ -26,6 +26,9 @@ Module Params.
   Axiom XLEN_pos : 0 < XLEN.
 End Params.
 
+Definition normalize (z:Z) : Z := trunc Params.XLEN z.
+Definition shamt (z:Z) : Z := shamt_mask Params.XLEN z.
+
 Record State := { pc : Z; rf : Z -> Z }.
 
 Definition read_reg (s:State) (i:Z) : Z :=
@@ -36,28 +39,68 @@ Definition write_reg (s:State) (i v:Z) : State :=
   else {| pc := s.(pc);
           rf := fun j => if Z.eqb j i then v else s.(rf) j |}.
 
-Fixpoint eval (s:State) (e:expr) : Z :=
+(* Arithmetic right shift over XLEN-width bit-vectors *)
+Definition sra_bv (w:Z) (x sh:Z) : Z :=
+  let v  := normalize x in
+  let sa := shamt sh in
+  let srl := Z.shiftr v sa in
+  let sign := Z.land v (Z.shiftl 1 (w - 1)) in
+  if Z.eqb sign 0 then srl
+  else Z.lor srl (Z.shiftl (maskw sa) (w - sa)).
+
+(* Z-math semantics (mask once on write) *)
+Fixpoint eval_z (s:State) (e:expr) : Z :=
   match e with
   | EReg r => read_reg s r
   | EImm i => i
   | EBin op a b =>
-      let va := eval s a in
-      let vb := eval s b in
+      let va := eval_z s a in
+      let vb := eval_z s b in
       match op with
       | BAdd => Z.add va vb
       | BSub => Z.sub va vb
       | BAnd => Z.land va vb
       | BOr  => Z.lor va vb
       | BXor => Z.lxor va vb
-      | BSll => Z.shiftl va (shamt_mask Params.XLEN vb)
-      | BSrl => Z.shiftr va (shamt_mask Params.XLEN vb)
-      | BSra => Z.shiftr va (shamt_mask Params.XLEN vb) (* placeholder for arithmetic shift *)
+      | BSll => Z.shiftl va (shamt vb)
+      | BSrl => Z.shiftr va (shamt vb)
+      | BSra => sra_bv Params.XLEN va vb
       end
   end.
 
-Definition exec_stmt (s:State) (st:Stmt) : State :=
-  let v := eval s st.(body) in
+Definition exec_stmt_z (s:State) (st:Stmt) : State :=
+  let v := normalize (eval_z s st.(body)) in
   write_reg s st.(dst) v.
+
+(* Bit-vector style semantics (mask per primitive) *)
+Fixpoint eval_bv (s:State) (e:expr) : Z :=
+  match e with
+  | EReg r => normalize (read_reg s r)
+  | EImm i => normalize i
+  | EBin op a b =>
+      let va := eval_bv s a in
+      let vb := eval_bv s b in
+      let res :=
+        match op with
+        | BAdd => Z.add va vb
+        | BSub => Z.sub va vb
+        | BAnd => Z.land va vb
+        | BOr  => Z.lor va vb
+        | BXor => Z.lxor va vb
+        | BSll => Z.shiftl va (shamt vb)
+        | BSrl => Z.shiftr va (shamt vb)
+        | BSra => sra_bv Params.XLEN va vb
+        end in
+      normalize res
+  end.
+
+Definition exec_stmt_bv (s:State) (st:Stmt) : State :=
+  let v := eval_bv s st.(body) in
+  write_reg s st.(dst) v.
+
+(* Default aliases for backwards compatibility *)
+Definition eval := eval_z.
+Definition exec_stmt := exec_stmt_z.
 
 Definition next_pc (s:State) : Z := s.(pc) + 4.
 ";
@@ -95,6 +138,22 @@ Definition step (tbl : list InstrDesc) (s:State) (iw:word) : option State :=
     | None => None
     | Some (d,f) =>
         let s' := exec_stmt s (d.(sem) f) in
+        Some {| pc := next_pc s; rf := s'.(rf) |}
+    end.
+
+Definition step_z (tbl : list InstrDesc) (s:State) (iw:word) : option State :=
+    match decode_table tbl iw with
+    | None => None
+    | Some (d,f) =>
+        let s' := exec_stmt_z s (d.(sem) f) in
+        Some {| pc := next_pc s; rf := s'.(rf) |}
+    end.
+
+Definition step_bv (tbl : list InstrDesc) (s:State) (iw:word) : option State :=
+    match decode_table tbl iw with
+    | None => None
+    | Some (d,f) =>
+        let s' := exec_stmt_bv s (d.(sem) f) in
         Some {| pc := next_pc s; rf := s'.(rf) |}
     end.
 
@@ -261,6 +320,29 @@ Proof.
   destruct (decode_table tbl iw) as [[d f]|] eqn:E; try discriminate.
   inversion Hst; subst; cbn.
   unfold exec_stmt; cbn. rewrite write_reg_x0. exact H0.
+Qed.
+
+(* step variants preserve x0 as well *)
+Lemma step_z_preserves_x0 tbl s iw s' :
+  s.(rf) 0 = 0 ->
+  step_z tbl s iw = Some s' ->
+  s'.(rf) 0 = 0.
+Proof.
+  intros H0 Hst. unfold step_z in Hst.
+  destruct (decode_table tbl iw) as [[d f]|] eqn:E; try discriminate.
+  inversion Hst; subst; cbn.
+  unfold exec_stmt_z; cbn. rewrite write_reg_x0. exact H0.
+Qed.
+
+Lemma step_bv_preserves_x0 tbl s iw s' :
+  s.(rf) 0 = 0 ->
+  step_bv tbl s iw = Some s' ->
+  s'.(rf) 0 = 0.
+Proof.
+  intros H0 Hst. unfold step_bv in Hst.
+  destruct (decode_table tbl iw) as [[d f]|] eqn:E; try discriminate.
+  inversion Hst; subst; cbn.
+  unfold exec_stmt_bv; cbn. rewrite write_reg_x0. exact H0.
 Qed.
 ";
 
