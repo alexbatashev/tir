@@ -208,6 +208,10 @@ impl LitInt {
     pub fn new(value: String) -> Self {
         Self { value }
     }
+
+    pub fn value(&self) -> &str {
+        &self.value
+    }
 }
 
 impl LitStr {
