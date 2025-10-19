@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use xshell::{cmd, Shell};
+use std::fs;
 
 pub fn project_root() -> PathBuf {
     let dir = std::env::var("CARGO_MANIFEST_DIR")
@@ -11,6 +12,11 @@ pub fn git_checkout(sh: &Shell, url: &str, tag: &str, dest: &str) -> anyhow::Res
     let root = project_root();
     let target_dir = root.join("target");
     let dest_dir = target_dir.join(dest);
+
+    // Allow skipping checkout via env (for faster local iteration)
+    if std::env::var("TIR_SKIP_SAIL_FETCH").ok().as_deref() == Some("1") {
+        return Ok(());
+    }
 
     // Ensure parent exists
     if let Some(parent) = dest_dir.parent() {
@@ -63,3 +69,32 @@ pub fn emit_rocq_riscv(sh: &Shell, out_path: &Path) -> anyhow::Result<()> {
 
     Ok(())
 }
+
+pub fn find_stdpp_dir(base: &Path) -> Option<PathBuf> {
+    // Common candidates
+    let candidates = [
+        base.join("sail_stdpp"),
+        base.join("SailStdpp"),
+        base.join("stdpp"),
+    ];
+    for c in candidates {
+        if c.exists() {
+            return Some(c);
+        }
+    }
+    // Fallback: shallow scan for a directory containing Base.v directly
+    if let Ok(entries) = std::fs::read_dir(base) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                let base_v = p.join("Base.v");
+                if base_v.exists() {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    None
+}
+
+// equality proof generation moved to tmdlc emit-rocq-sail-proof

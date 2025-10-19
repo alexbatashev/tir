@@ -13,6 +13,7 @@ use crate::lexer::lex;
 use crate::parser::parse;
 use crate::rocqgen::generate_rocq;
 use crate::rustgen::generate_rust;
+use crate::sailproofgen::generate_rocq_sail_proof;
 use crate::sema_analyze;
 
 pub struct Compiler {
@@ -20,6 +21,9 @@ pub struct Compiler {
     inputs: Vec<String>,
     output: OutputKind,
     dialect: Option<String>,
+    sail_namespace: Option<String>,
+    sail_module: Option<String>,
+    defines: Vec<String>,
 }
 
 pub struct CompilerBuilder {
@@ -27,6 +31,9 @@ pub struct CompilerBuilder {
     inputs: Vec<String>,
     output: Option<OutputKind>,
     dialect: Option<String>,
+    sail_namespace: Option<String>,
+    sail_module: Option<String>,
+    defines: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -42,11 +49,15 @@ pub enum Action {
     EmitAst,
     EmitRust,
     EmitRocq,
+    EmitRocqSailProof,
 }
 
 impl Action {
     fn needs_whole_program(&self) -> bool {
-        matches!(self, Action::EmitRust | Action::EmitRocq)
+        matches!(
+            self,
+            Action::EmitRust | Action::EmitRocq | Action::EmitRocqSailProof
+        )
     }
 }
 
@@ -59,6 +70,15 @@ pub struct Cli {
     pub output: String,
     #[arg(short, long)]
     pub dialect: Option<String>,
+    /// Sail namespace for proof generation (e.g., "Riscv")
+    #[arg(long)]
+    pub sail_namespace: Option<String>,
+    /// Sail module name (e.g., "rv32d", "rv64d")
+    #[arg(long)]
+    pub sail_module: Option<String>,
+    /// Define parameters (e.g., XLEN=32). Can be specified multiple times.
+    #[arg(long, value_name = "KEY=VALUE")]
+    pub define: Vec<String>,
 }
 
 impl Compiler {
@@ -68,6 +88,9 @@ impl Compiler {
             inputs: vec![],
             output: None,
             dialect: None,
+            sail_namespace: None,
+            sail_module: None,
+            defines: vec![],
         }
     }
 
@@ -146,7 +169,8 @@ impl Compiler {
         let sema_diags = sema_analyze(parsed_files.clone());
         if !sema_diags.is_empty() {
             use std::collections::BTreeMap;
-            let mut by_file: BTreeMap<String, Vec<chumsky::error::Rich<'static, String, Span>>> = BTreeMap::new();
+            let mut by_file: BTreeMap<String, Vec<chumsky::error::Rich<'static, String, Span>>> =
+                BTreeMap::new();
             for (fname, d) in sema_diags {
                 by_file.entry(fname).or_default().push(d);
             }
@@ -165,6 +189,14 @@ impl Compiler {
                 generate_rust(self.dialect.as_ref().unwrap(), parsed_files, output)?
             }
             Action::EmitRocq => generate_rocq(parsed_files, output)?,
+            Action::EmitRocqSailProof => generate_rocq_sail_proof(
+                parsed_files,
+                output,
+                self.dialect.as_deref(),
+                self.sail_namespace.as_deref(),
+                self.sail_module.as_deref(),
+                &self.defines,
+            )?,
             _ => unreachable!("Only complex actions should use this path"),
         }
 
@@ -209,6 +241,9 @@ impl CompilerBuilder {
             inputs: self.inputs,
             output: self.output,
             dialect: self.dialect,
+            sail_namespace: self.sail_namespace,
+            sail_module: self.sail_module,
+            defines: self.defines,
         }
     }
 
@@ -221,6 +256,9 @@ impl CompilerBuilder {
             inputs,
             output: self.output,
             dialect: self.dialect,
+            sail_namespace: self.sail_namespace,
+            sail_module: self.sail_module,
+            defines: self.defines,
         }
     }
 
@@ -230,6 +268,9 @@ impl CompilerBuilder {
             inputs: self.inputs,
             output: Some(output),
             dialect: self.dialect,
+            sail_namespace: self.sail_namespace,
+            sail_module: self.sail_module,
+            defines: self.defines,
         }
     }
 
@@ -239,6 +280,45 @@ impl CompilerBuilder {
             inputs: self.inputs,
             output: self.output,
             dialect,
+            sail_namespace: self.sail_namespace,
+            sail_module: self.sail_module,
+            defines: self.defines,
+        }
+    }
+
+    pub fn sail_namespace(self, sail_namespace: Option<String>) -> Self {
+        Self {
+            action: self.action,
+            inputs: self.inputs,
+            output: self.output,
+            dialect: self.dialect,
+            sail_namespace,
+            sail_module: self.sail_module,
+            defines: self.defines,
+        }
+    }
+
+    pub fn sail_module(self, sail_module: Option<String>) -> Self {
+        Self {
+            action: self.action,
+            inputs: self.inputs,
+            output: self.output,
+            dialect: self.dialect,
+            sail_namespace: self.sail_namespace,
+            sail_module,
+            defines: self.defines,
+        }
+    }
+
+    pub fn defines(self, defines: Vec<String>) -> Self {
+        Self {
+            action: self.action,
+            inputs: self.inputs,
+            output: self.output,
+            dialect: self.dialect,
+            sail_namespace: self.sail_namespace,
+            sail_module: self.sail_module,
+            defines,
         }
     }
 
@@ -248,6 +328,9 @@ impl CompilerBuilder {
             inputs: self.inputs,
             output: self.output.unwrap(),
             dialect: self.dialect,
+            sail_namespace: self.sail_namespace,
+            sail_module: self.sail_module,
+            defines: self.defines,
         }
     }
 }
@@ -265,6 +348,9 @@ pub fn compiler_main(args: Option<&ArgMatches>) -> Result<(), Box<dyn std::error
     let mut compiler_builder = Compiler::builder()
         .action(args.action)
         .dialect(args.dialect.clone())
+        .sail_namespace(args.sail_namespace.clone())
+        .sail_module(args.sail_module.clone())
+        .defines(args.define.clone())
         .output(output);
 
     for input in &args.inputs {

@@ -3,9 +3,10 @@ mod compiler;
 mod error;
 mod lexer;
 mod parser;
-mod sema;
 mod rocqgen;
 mod rustgen;
+mod sailproofgen;
+mod sema;
 
 use chumsky::prelude::*;
 

@@ -18,7 +18,7 @@ instruction Sub for [RV32I, RV64I] : ALUOp {
     param FUNCT3: bits<3> = 0b000;
     param FUNCT7: bits<7> = 0b0100000;
     behavior {
-      rd = rs1 - rs2;
+      rd = rs1 + rs2;
     }
 }
 
