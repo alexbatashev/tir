@@ -3,6 +3,7 @@ mod compiler;
 mod error;
 mod lexer;
 mod parser;
+mod sema;
 mod rocqgen;
 mod rustgen;
 
@@ -15,3 +16,4 @@ pub use compiler::{Action, Compiler, OutputKind, compiler_main};
 
 pub use lexer::lex;
 pub use parser::parse;
+pub use sema::analyze as sema_analyze;
