@@ -11,7 +11,7 @@ fn large_instr_template(c: &mut Criterion) {
         b.iter(|| {
             let (tokens, errs) = lex(LARGE_INSTR_TEMPLATE_INPUT);
             assert!(errs.is_empty());
-            let _ = parse(LARGE_INSTR_TEMPLATE_INPUT, &tokens);
+            let _ = parse(LARGE_INSTR_TEMPLATE_INPUT, &tokens, "<bench>");
         })
     });
     group.finish()

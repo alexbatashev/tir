@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use crate::Span;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum RegisterTrait {
@@ -15,6 +16,7 @@ pub struct Register {
     pub alias: Option<String>,
     pub traits: Vec<RegisterTrait>,
     pub subregisters: Vec<Register>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -23,6 +25,7 @@ pub struct RegisterRange {
     pub end: String,
     pub alias_pattern: Option<String>,
     pub traits: Vec<RegisterTrait>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -37,6 +40,7 @@ pub struct RegisterClass {
     pub for_isas: Vec<String>,
     pub parameters: HashMap<String, (Type, Option<Expr>)>,
     pub registers: Vec<RegisterDef>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -51,6 +55,7 @@ pub struct Isa {
     pub name: String,
     pub requires: Option<IsaRequirement>,
     pub parameters: HashMap<String, (Type, Option<Expr>)>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -62,6 +67,7 @@ pub struct Template {
     pub operands: HashMap<String, Type>,
     pub encoding: Vec<EncodingArm>,
     pub asm: Option<Expr>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -74,6 +80,7 @@ pub struct Instruction {
     pub encoding: Vec<EncodingArm>,
     pub asm: Option<Expr>,
     pub behavior: Expr,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -81,6 +88,7 @@ pub struct EncodingArm {
     pub start: u16,
     pub end: Option<u16>,
     pub value: Expr,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -108,17 +116,20 @@ pub enum Lit {
 #[derive(Debug, Clone, PartialEq)]
 pub struct LitStr {
     value: String,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LitInt {
     value: String,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Field {
     pub base: Box<Expr>,
     pub member: String,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -126,23 +137,27 @@ pub struct If {
     pub cond: Box<Expr>,
     pub then: Box<Expr>,
     pub else_: Option<Box<Expr>>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Block {
     pub stmts: Vec<Expr>,
     pub last_expr_return: bool,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Ident {
     pub name: String,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Assign {
     pub dest: String,
     pub value: Box<Expr>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -164,12 +179,14 @@ pub struct Binary {
     pub lhs: Box<Expr>,
     pub rhs: Box<Expr>,
     pub op: BinOp,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Call {
     pub base: Box<Expr>,
     pub arguments: Vec<Expr>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -177,12 +194,14 @@ pub struct Slice {
     pub base: Box<Expr>,
     pub start: u16,
     pub end: u16,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct IndexAccess {
     pub base: Box<Expr>,
     pub index: u16,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -203,11 +222,12 @@ pub enum Expr {
 #[derive(Debug, Clone, PartialEq)]
 pub struct File {
     pub items: Vec<Item>,
+    pub file_name: String,
 }
 
 impl LitInt {
-    pub fn new(value: String) -> Self {
-        Self { value }
+    pub fn new(value: String, span: Span) -> Self {
+        Self { value, span }
     }
 
     pub fn value(&self) -> &str {
@@ -216,8 +236,8 @@ impl LitInt {
 }
 
 impl LitStr {
-    pub fn new(value: String) -> Self {
-        Self { value }
+    pub fn new(value: String, span: Span) -> Self {
+        Self { value, span }
     }
 
     pub fn value(&self) -> &str {
@@ -238,8 +258,8 @@ impl Into<Expr> for LitStr {
 }
 
 impl Ident {
-    pub fn new(name: String) -> Ident {
-        Ident { name }
+    pub fn new(name: String, span: Span) -> Ident {
+        Ident { name, span }
     }
 }
 
