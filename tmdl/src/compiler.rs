@@ -14,6 +14,7 @@ use crate::parser::parse;
 use crate::rocqgen::generate_rocq;
 use crate::rustgen::generate_rust;
 use crate::sailproofgen::generate_rocq_sail_proof;
+use crate::isagen::generate_isabelle;
 use crate::sema_analyze;
 
 pub struct Compiler {
@@ -50,13 +51,15 @@ pub enum Action {
     EmitRust,
     EmitRocq,
     EmitRocqSailProof,
+    EmitLean,
+    EmitIsabelle,
 }
 
 impl Action {
     fn needs_whole_program(&self) -> bool {
         matches!(
             self,
-            Action::EmitRust | Action::EmitRocq | Action::EmitRocqSailProof
+            Action::EmitRust | Action::EmitRocq | Action::EmitRocqSailProof | Action::EmitLean | Action::EmitIsabelle
         )
     }
 }
@@ -182,21 +185,42 @@ impl Compiler {
             return Ok(());
         }
 
-        let output: Box<dyn Write> = self.create_output_writer()?;
-
         match &self.action {
             Action::EmitRust => {
+                let output: Box<dyn Write> = self.create_output_writer()?;
                 generate_rust(self.dialect.as_ref().unwrap(), parsed_files, output)?
             }
-            Action::EmitRocq => generate_rocq(parsed_files, output)?,
+            Action::EmitRocq => {
+                let output: Box<dyn Write> = self.create_output_writer()?;
+                generate_rocq(parsed_files, output)?
+            }
             Action::EmitRocqSailProof => generate_rocq_sail_proof(
                 parsed_files,
-                output,
+                self.create_output_writer()?,
                 self.dialect.as_deref(),
                 self.sail_namespace.as_deref(),
                 self.sail_module.as_deref(),
                 &self.defines,
             )?,
+            Action::EmitIsabelle => {
+                // For Isabelle generation we expect an output directory. If a file path
+                // is provided, we treat its parent directory as the output directory.
+                let out_dir = match &self.output {
+                    OutputKind::Batch(dir) => dir.clone(),
+                    OutputKind::File(path) => {
+                        let p = PathBuf::from(path);
+                        if p.is_dir() {
+                            p.to_string_lossy().to_string()
+                        } else {
+                            p.parent().map(|pp| pp.to_string_lossy().to_string()).unwrap_or_else(|| ".".to_string())
+                        }
+                    }
+                    OutputKind::Stdout => {
+                        return Err(TMDLError::IO("emit-isabelle requires --output pointing to a directory".to_string()));
+                    }
+                };
+                generate_isabelle(self.dialect.as_deref(), parsed_files, &out_dir, &self.defines)?;
+            }
             _ => unreachable!("Only complex actions should use this path"),
         }
 

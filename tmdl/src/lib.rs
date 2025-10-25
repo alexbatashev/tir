@@ -6,6 +6,7 @@ mod parser;
 mod rocqgen;
 mod rustgen;
 mod sailproofgen;
+mod isagen;
 mod sema;
 
 use chumsky::prelude::*;
