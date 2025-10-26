@@ -7,6 +7,7 @@ mod rocqgen;
 mod rustgen;
 mod sailproofgen;
 mod isagen;
+mod lean;
 mod sema;
 
 use chumsky::prelude::*;

@@ -15,6 +15,7 @@ use crate::rocqgen::generate_rocq;
 use crate::rustgen::generate_rust;
 use crate::sailproofgen::generate_rocq_sail_proof;
 use crate::isagen::generate_isabelle;
+use crate::lean::generate_lean;
 use crate::sema_analyze;
 
 pub struct Compiler {
@@ -220,6 +221,56 @@ impl Compiler {
                     }
                 };
                 generate_isabelle(self.dialect.as_deref(), parsed_files, &out_dir, &self.defines)?;
+            }
+            Action::EmitLean => {
+                // For Lean generation, accept either a file path or a directory.
+                // If a directory is provided, write TMDL.lean inside it.
+                match &self.output {
+                    OutputKind::Stdout => {
+                        // Emit to stdout directly
+                        generate_lean(parsed_files, self.create_output_writer()?)?;
+                    }
+                    OutputKind::File(path) => {
+                        let p = PathBuf::from(path);
+                        let treat_as_dir = (p.exists() && p.is_dir()) || (!p.exists() && p.extension().is_none());
+                        if treat_as_dir {
+                            std::fs::create_dir_all(&p)?;
+                            let file_path = p.join("TMDL.lean");
+                            let file = std::fs::OpenOptions::new()
+                                .create(true)
+                                .write(true)
+                                .truncate(true)
+                                .open(&file_path)?;
+                            let writer: Box<dyn Write> = Box::new(std::io::BufWriter::new(file));
+                            generate_lean(parsed_files.clone(), writer)?;
+                            crate::lean::generate_lean_adapter(&parsed_files, p.to_string_lossy().as_ref())?;
+                        } else {
+                            let file = std::fs::OpenOptions::new()
+                                .create(true)
+                                .write(true)
+                                .truncate(true)
+                                .open(&p)?;
+                            let writer: Box<dyn Write> = Box::new(std::io::BufWriter::new(file));
+                            generate_lean(parsed_files, writer)?;
+                        }
+                    }
+                    OutputKind::Batch(dir) => {
+                        let mut p = PathBuf::from(dir);
+                        std::fs::create_dir_all(&p)?;
+                        p.push("TMDL.lean");
+                        let file = std::fs::OpenOptions::new()
+                            .create(true)
+                            .write(true)
+                            .truncate(true)
+                            .open(&p)?;
+                        let writer: Box<dyn Write> = Box::new(std::io::BufWriter::new(file));
+                        // Write main Lean file
+                        generate_lean(parsed_files.clone(), writer)?;
+                        // Also emit adapter into same directory
+                        let out_dir = p.parent().unwrap().to_string_lossy().to_string();
+                        crate::lean::generate_lean_adapter(&parsed_files, &out_dir)?;
+                    }
+                }
             }
             _ => unreachable!("Only complex actions should use this path"),
         }
