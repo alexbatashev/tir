@@ -157,7 +157,9 @@ fn emit_instructions<'ast, 'cache: 'ast>(
         if let Some(template) = resolve_asm_template_for_instruction(inst, item_cache) {
             // Compile template into a sequence of parse actions
             let actions = compile_asm_template(&template);
-            let ops = resolve_operands_for_instruction(inst, item_cache);
+            let ops = resolve_operands_for_instruction(inst, item_cache)
+                .into_iter()
+                .collect::<HashMap<_, _>>();
 
             // Generate parsing code for each action
             let mut parse_steps: Vec<proc_macro2::TokenStream> = Vec::new();
