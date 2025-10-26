@@ -137,6 +137,72 @@ pub fn generate_lean_adapter(files: &[ast::File], out_dir: &str) -> Result<(), T
     Ok(())
 }
 
+pub fn generate_lean_instance(files: &[ast::File], out_dir: &str) -> Result<(), TMDLError> {
+    use std::fmt::Write as _;
+    let path = std::path::Path::new(out_dir).join("TMDL_Sail_Instance.lean");
+    let mut buf = String::new();
+    // Header + imports
+    writeln!(buf, "import Std").unwrap();
+    writeln!(buf, "import TMDL").unwrap();
+    writeln!(buf, "import LeanRV64D.lean").unwrap();
+    writeln!(buf, "import LeanRV64D.LeanRV64D.Sail.Sail").unwrap();
+    writeln!(buf, "import LeanRV64D.LeanRV64D.Specialization").unwrap();
+    writeln!(buf, "import LeanRV64D.LeanRV64D.Defs").unwrap();
+    writeln!(buf, "import LeanRV64D.LeanRV64D.RiscvDecodeExt").unwrap();
+    writeln!(buf, "import LeanRV64D.LeanRV64D.RiscvInstsEnd\n").unwrap();
+    writeln!(buf, "open LeanRV64D.Functions").unwrap();
+    writeln!(buf, "open Sail").unwrap();
+    writeln!(buf, "open PreSail\n").unwrap();
+    writeln!(buf, "set_option sorryAbort true\n").unwrap();
+    writeln!(buf, "namespace TMDL\n").unwrap();
+    // Helpers
+    writeln!(buf, "def bv32OfBits (bs : List Bool) : BitVec 32 :=").unwrap();
+    writeln!(buf, "  bs.enum.foldl (fun acc (p : Nat × Bool) =>").unwrap();
+    writeln!(buf, "    let (i,b) := p; if b then acc ||| (BitVec.ofNat 32 (1 <<< i)) else acc) (0 : BitVec 32)\n").unwrap();
+    writeln!(buf, "abbrev RegState := PreSail.SequentialState RegisterType trivialChoiceSource\n").unwrap();
+    writeln!(buf, "def getPC (σ : RegState) : BitVec 64 := (σ.regs.get? Register.PC).getD 0").unwrap();
+    writeln!(buf, "def getX (σ : RegState) (i : Int) : BitVec 64 :=").unwrap();
+    writeln!(buf, "  match (Nat.toInt? i) with").unwrap();
+    writeln!(buf, "  | none => 0").unwrap();
+    writeln!(buf, "  | some n =>").unwrap();
+    writeln!(buf, "    match n.toNat with").unwrap();
+    for idx in 0..=31 {
+        if idx == 0 {
+            writeln!(buf, "    | 0  => 0").unwrap();
+        } else {
+            writeln!(buf, "    | {}  => (σ.regs.get? Register.x{}).getD 0", idx, idx).unwrap();
+        }
+    }
+    writeln!(buf, "    | _  => 0\n").unwrap();
+    writeln!(buf, "def stateRel64 (XLEN : Nat) (sT : State) (σ : RegState) : Prop :=").unwrap();
+    writeln!(buf, "  BitVec.toInt (getPC σ) = sT.pc ∧ sT.rf 0 = 0 ∧").unwrap();
+    writeln!(buf, "  (∀ (i : Int), 1 ≤ i ∧ i ≤ 31 -> BitVec.toInt (getX σ i) = sT.rf i)\n").unwrap();
+    writeln!(buf, "def run (m : SailM α) (σ : RegState) : Except (Error exception) α × RegState :=").unwrap();
+    writeln!(buf, "  let r := m.run σ; (r.result, r.state)\n").unwrap();
+
+    // Per-instruction lemmas (auto-generated)
+    let mut instructions = Vec::new();
+    for f in files { for it in &f.items { if let Item::Instruction(i) = it { instructions.push(i); }}}
+    for inst in instructions {
+        let iname = &inst.name;
+        let lname = iname.to_lowercase();
+        writeln!(buf, "theorem {}_decode_exists_64 (f : Fields) (σ : RegState) :", lname).unwrap();
+        writeln!(buf, "  ∃ i : instruction, (run (ext_decode (bv32OfBits (encode_{} f))) σ).fst = Except.ok i := by", iname).unwrap();
+        writeln!(buf, "  -- auto-generated: computation over ext_decode and encode_{}", iname).unwrap();
+        writeln!(buf, "  sorry\n").unwrap();
+
+        writeln!(buf, "theorem {}_refines_64", lname).unwrap();
+        writeln!(buf, "  (XLEN : Nat) (sT : State) (σ : RegState) (f : Fields) (i : instruction) :").unwrap();
+        writeln!(buf, "  stateRel64 XLEN sT σ -> (run (ext_decode (bv32OfBits (encode_{} f))) σ).fst = Except.ok i ->", iname).unwrap();
+        writeln!(buf, "  stateRel64 XLEN (sem_{} XLEN sT f) ((run (do let _ ← execute i; pure ()) σ).snd) := by", lname).unwrap();
+        writeln!(buf, "  -- auto-generated: relies on execute semantics matching sem_{}", lname).unwrap();
+        writeln!(buf, "  sorry\n").unwrap();
+    }
+    writeln!(buf, "end TMDL").unwrap();
+    std::fs::write(path, buf)?;
+    Ok(())
+}
+
 fn resolve_operands_for_instruction(
     inst: &ast::Instruction,
     cache: &HashMap<String, ast::Item>,

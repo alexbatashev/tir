@@ -243,7 +243,9 @@ impl Compiler {
                                 .open(&file_path)?;
                             let writer: Box<dyn Write> = Box::new(std::io::BufWriter::new(file));
                             generate_lean(parsed_files.clone(), writer)?;
-                            crate::lean::generate_lean_adapter(&parsed_files, p.to_string_lossy().as_ref())?;
+                            let out_dir = p.to_string_lossy().to_string();
+                            crate::lean::generate_lean_adapter(&parsed_files, &out_dir)?;
+                            crate::lean::generate_lean_instance(&parsed_files, &out_dir)?;
                         } else {
                             let file = std::fs::OpenOptions::new()
                                 .create(true)
@@ -266,9 +268,10 @@ impl Compiler {
                         let writer: Box<dyn Write> = Box::new(std::io::BufWriter::new(file));
                         // Write main Lean file
                         generate_lean(parsed_files.clone(), writer)?;
-                        // Also emit adapter into same directory
+                        // Also emit adapter + instance into same directory
                         let out_dir = p.parent().unwrap().to_string_lossy().to_string();
                         crate::lean::generate_lean_adapter(&parsed_files, &out_dir)?;
+                        crate::lean::generate_lean_instance(&parsed_files, &out_dir)?;
                     }
                 }
             }
