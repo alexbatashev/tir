@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use crate::Span;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum RegisterTrait {
@@ -288,6 +288,20 @@ impl Item {
             Item::Instruction(inst) => &inst.name,
             Item::RegisterClass(rc) => &rc.name,
             Item::Template(tmpl) => &tmpl.name,
+        }
+    }
+
+    pub fn as_register_class(&self) -> Option<&RegisterClass> {
+        match self {
+            Item::RegisterClass(rc) => Some(rc),
+            _ => None,
+        }
+    }
+
+    pub fn as_instruction(&self) -> Option<&Instruction> {
+        match self {
+            Item::Instruction(i) => Some(i),
+            _ => None,
         }
     }
 }

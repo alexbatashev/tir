@@ -1,152 +1,210 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 
-use crate::ast::{self, Item};
+use crate::ast::{self, Instruction, Item};
 use crate::error::TMDLError;
+use crate::utils::resolve_operands_for_instruction;
 
 pub fn generate_lean(
+    dialect: &str,
     files: Vec<ast::File>,
     mut output: Box<dyn Write>,
 ) -> Result<(), TMDLError> {
-    // Build item cache
-    let mut item_cache: HashMap<String, Item> = HashMap::new();
-    for f in &files {
-        for it in &f.items {
-            item_cache.insert(it.name().to_string(), it.clone());
-        }
-    }
-
-    // Collect union of operand names to understand Fields structure
-    let mut operand_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for f in &files {
-        for it in &f.items {
-            match it {
-                Item::Template(t) => {
-                    for (n, _) in &t.operands {
-                        operand_names.insert(n.clone());
-                    }
-                }
-                Item::Instruction(i) => {
-                    let ops = resolve_operands_for_instruction(i, &item_cache);
-                    for (n, _) in ops {
-                        operand_names.insert(n);
-                    }
-                }
-                _ => {}
+    let item_cache = {
+        let mut cache = HashMap::new();
+        for f in &files {
+            for item in &f.items {
+                cache.insert(item.name().to_string(), item);
             }
         }
+
+        cache
+    };
+
+    build_state(&files, &mut output)?;
+    build_instructions(dialect, &item_cache, &files, &mut output)?;
+    Ok(())
+}
+
+fn build_state(files: &[ast::File], output: &mut Box<dyn Write>) -> Result<(), TMDLError> {
+    let reg_classes = files
+        .iter()
+        .map(|file| {
+            file.items
+                .iter()
+                .filter_map(|item: &Item| item.as_register_class().cloned())
+        })
+        .flatten()
+        .collect::<Vec<_>>();
+
+    writeln!(output, "structure TMDLState where")?;
+    for rc in &reg_classes {
+        let name = &rc.name.to_lowercase();
+        let regcount = 32;
+        writeln!(output, "  {name} : Fin {regcount} -> BitVec 64")?;
     }
-    let mut operand_list: Vec<String> = operand_names.into_iter().collect();
-    operand_list.sort();
+    writeln!(output, "  pc : BitVec 64")?;
 
-    // Collect instructions
-    let mut instructions = Vec::new();
-    for f in &files {
-        for it in &f.items {
-            if let Item::Instruction(inst) = it {
-                instructions.push(inst);
-            }
-        }
-    }
+    for rc in &reg_classes {
+        let name = &rc.name.to_lowercase();
+        writeln!(
+            output,
+            "
+def TMDLState.read_{name}(st: TMDLState) (r : Nat) : BitVec 64 :=
+    -- TODO correctly handle hardwired_zero registers
+    if r = 0 then 0
+    else if h : r < 32 then st.{name} <r, h> else 0
+    else 0
 
-    // Generate Lean file
-    emit_header(&mut output)?;
-    emit_state_type(&mut output)?;
-    emit_fields_type(&mut output, &operand_list)?;
-
-    for inst in &instructions {
-        emit_instruction_semantics(&mut output, inst, &item_cache)?;
+def TMDLState.write_{name}(st : TMDLState) (r : Nat) (val : BitVec 64) : TMDLState :=
+    -- TODO correctly handle hardwired_zero registers
+    if r = 0 then st
+    else if h : r < 32 then
+        {{ st with {name} := Function.update st.{name} <r, h> val }}
+    else
+        st
+"
+        )?;
     }
 
     Ok(())
 }
 
-// Helper function to resolve operands (same as in rocqgen.rs)
-fn resolve_operands_for_instruction(
-    inst: &ast::Instruction,
-    cache: &HashMap<String, ast::Item>,
-) -> HashMap<String, ast::Type> {
-    let mut result = HashMap::new();
-
-    fn collect_from_template(
-        name: &str,
-        cache: &HashMap<String, ast::Item>,
-        acc: &mut HashMap<String, ast::Type>,
-    ) {
-        if let Some(Item::Template(t)) = cache.get(name) {
-            if let Some(parent) = &t.parent_template {
-                collect_from_template(parent, cache, acc);
-            }
-            for (k, v) in &t.operands {
-                acc.insert(k.clone(), v.clone());
-            }
-        }
-    }
-
-    if let Some(p) = &inst.parent_template {
-        collect_from_template(p, cache, &mut result);
-    }
-    for (k, v) in &inst.operands {
-        result.insert(k.clone(), v.clone());
-    }
-    result
-}
-
-fn emit_header(output: &mut dyn Write) -> Result<(), TMDLError> {
-    writeln!(output, "-- Generated from TMDL")?;
-    writeln!(output, "-- This file contains executable semantics and computational proofs")?;
-    writeln!(output)?;
-    writeln!(output, "import Std.Data.BitVec")?;
-    writeln!(output)?;
-    writeln!(output, "namespace TMDL")?;
-    writeln!(output)?;
-    Ok(())
-}
-
-fn emit_state_type(output: &mut dyn Write) -> Result<(), TMDLError> {
-    writeln!(output, "-- Machine state")?;
-    writeln!(output, "structure State where")?;
-    writeln!(output, "  pc : Int")?;
-    writeln!(output, "  rf : Int ’ Int  -- Register file")?;
-    writeln!(output, "  deriving Repr")?;
-    writeln!(output)?;
-    Ok(())
-}
-
-fn emit_fields_type(output: &mut dyn Write, operand_list: &[String]) -> Result<(), TMDLError> {
-    writeln!(output, "-- Instruction operand fields")?;
-    writeln!(output, "structure Fields where")?;
-    for operand in operand_list {
-        writeln!(output, "  {} : Int", operand)?;
-    }
-    writeln!(output, "  deriving Repr")?;
-    writeln!(output)?;
-    Ok(())
-}
-
-fn emit_instruction_semantics(
-    output: &mut dyn Write,
-    inst: &ast::Instruction,
-    item_cache: &HashMap<String, ast::Item>,
+fn build_instructions<'a, 'cache: 'a>(
+    dialect: &str,
+    item_cache: &HashMap<String, &'cache Item>,
+    files: &'a [ast::File],
+    output: &mut Box<dyn Write>,
 ) -> Result<(), TMDLError> {
-    let name = &inst.name;
-    let lower_name = name.to_lowercase();
+    let instructions = files
+        .iter()
+        .map(|file| {
+            file.items
+                .iter()
+                .filter_map(|item: &Item| item.as_instruction())
+        })
+        .flatten()
+        .collect::<Vec<_>>();
 
-    writeln!(output, "-- Semantics for {}", name)?;
-    writeln!(output, "def sem_{} (s : State) (f : Fields) : State :=", lower_name)?;
+    let mut instruction_variants = vec![];
+    let mut encode_arms = vec![];
+    let mut execute_arms = vec![];
 
-    // Get operands for this instruction
-    let _operands = resolve_operands_for_instruction(inst, item_cache);
+    for i in instructions {
+        let name = i.name.to_lowercase();
+        let uppercase_name = name.to_uppercase();
 
-    // Generate semantics based on the behavior
-    if let Some(behavior) = &inst.behavior {
-        writeln!(output, "  -- TODO: Translate behavior AST to Lean")?;
-        writeln!(output, "  -- Behavior: {:?}", behavior)?;
-        writeln!(output, "  s  -- Placeholder: return unchanged state")?;
-    } else {
-        writeln!(output, "  s  -- No behavior specified")?;
+        let operands = resolve_operands_for_instruction(i, item_cache);
+
+        let lean_operands = build_lean_operands(item_cache, &operands);
+        let lean_encoding = build_lean_encoding(item_cache, i);
+        let lean_behavior = build_lean_behavior(item_cache, i);
+
+        let operand_list = operands
+            .iter()
+            .map(|(k, _v)| k.to_lowercase())
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        writeln!(
+            output,
+            "
+def encode_{name} {lean_operands} : BitVec 32 :=
+    {lean_encoding}
+
+def execute_{name} (st: TMDLState) {lean_operands} : TMDLState :=
+    {lean_behavior}
+"
+        )?;
+
+        instruction_variants.push(format!("{uppercase_name} {lean_operands}"));
+        encode_arms.push(format!(
+            ".{uppercase_name} {operand_list} => encode_{name} {operand_list}"
+        ));
+        execute_arms.push(format!(
+            ".{uppercase_name} {operand_list} => execute_{name} {operand_list}"
+        ));
     }
 
-    writeln!(output)?;
+    let instruction_variants = instruction_variants.join("\n    | ");
+    let encode_arms = encode_arms.join("\n    | ");
+    let execute_arms = execute_arms.join("\n    | ");
+    writeln!(
+        output,
+        "
+inductive TMDLInstr where
+    | {instruction_variants}
+
+def encode_{dialect} (instr : TMDLInstr) : BitVec 32 :=
+    match instr with
+    | {encode_arms}
+
+def execute_{dialect} (state : TMDLState) (instr : TMDLInstr) : TMDLState :=
+    match instr with
+    | {execute_arms}
+"
+    )?;
+
     Ok(())
+}
+
+/// For a list of operands returns a string of function operands in Lean format. Examples:
+/// (rd rs1 rs2 : Nat)
+/// (rd rs1 : Nat) (imm : BitVec 12)
+fn build_lean_operands<'cache>(
+    item_cache: &HashMap<String, &'cache Item>,
+    operands: &HashMap<String, ast::Type>,
+) -> String {
+    "()".to_string()
+}
+
+/// Builds an encoding statement from encoding description.
+/// TMDL input example:
+/// ```tmdl
+///    encoding {
+///        0..6 => OPCODE,
+///        7..11 => imm[0..4],
+///        12..14 => FUNCT3,
+///        15..19 => rs1,
+///        20..24 => rs2,
+///        25..31 => imm[5..11],
+///    }
+/// ```
+///
+/// Example Lean output:
+/// ```lean
+/// (0b0000000 : BitVec 7) ++      -- funct7
+/// (BitVec.ofNat 5 rs2) ++        -- rs2
+/// (BitVec.ofNat 5 rs1) ++        -- rs1
+/// (0b000 : BitVec 3) ++          -- funct3
+/// (BitVec.ofNat 5 rd) ++         -- rd
+/// (0b0110011 : BitVec 7)         -- opcode
+/// ```
+fn build_lean_encoding<'a>(
+    item_cache: &HashMap<String, &'a Item>,
+    instruction: &'a Instruction,
+) -> String {
+    "()".to_string()
+}
+
+/// Builds a function body for TMDL behavior region.
+///
+/// Example TMDL behavior:
+/// ```tmdl
+/// behavior { rd = rs1 + rs2; }
+/// ```
+///
+/// Example corresponding Lean output:
+///
+/// ```lean
+///   let val1 := st.read_gpr rs1
+///   let val2 := st.read_gpr rs2
+///   let result := val1 + val2
+///   st.write_gpr rd result
+/// ```
+fn build_lean_behavior<'a>(
+    item_cache: &HashMap<String, &'a Item>,
+    instruction: &'a Instruction,
+) -> String {
+    "st.write_gpr x0 0".to_string()
 }
