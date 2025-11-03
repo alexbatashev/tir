@@ -10,6 +10,7 @@ use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, ValueEnum};
 use crate::Span;
 use crate::error::TMDLError;
 use crate::leangen::generate_lean;
+use crate::rocqgen::generate_rocq;
 use crate::lexer::lex;
 use crate::parser::parse;
 use crate::rustgen::generate_rust;
@@ -191,6 +192,18 @@ impl Compiler {
             Action::EmitRust => {
                 let output: Box<dyn Write> = self.create_output_writer()?;
                 generate_rust(self.dialect.as_ref().unwrap(), parsed_files, output)?
+            }
+            Action::EmitRocq => {
+                match &self.output {
+                    OutputKind::Stdout => {
+                        generate_rocq(
+                            self.dialect.as_ref().unwrap(),
+                            parsed_files,
+                            self.create_output_writer()?,
+                        )?;
+                    }
+                    _ => {}
+                }
             }
             Action::EmitLean => {
                 // For Lean generation, accept either a file path or a directory.

@@ -2,6 +2,7 @@ mod ast;
 mod compiler;
 mod error;
 mod leangen;
+mod rocqgen;
 mod lexer;
 mod parser;
 mod rustgen;

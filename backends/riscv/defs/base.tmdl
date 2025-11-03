@@ -18,7 +18,7 @@ instruction Sub for [RV32I, RV64I] : ALUOp {
     param FUNCT3: bits<3> = 0b000;
     param FUNCT7: bits<7> = 0b0100000;
     behavior {
-      rd = rs1 + rs2;
+      rd = rs1 - rs2;
     }
 }
 
@@ -40,13 +40,13 @@ instruction Xor for [RV32I, RV64I] : ALUOp {
     }
 }
 
-instruction ShiftRightLogical for [RV32I, RV64I] : ALUOp {
-    param MNEMONIC: String = "srl";
-    param FUNCT3: bits<3> = 0b101;
-    behavior {
-      rd = rs1 >> rs2;
-    }
-}
+//instruction ShiftRightLogical for [RV32I, RV64I] : ALUOp {
+//    param MNEMONIC: String = "srl";
+//    param FUNCT3: bits<3> = 0b101;
+//    behavior {
+//      rd = rs1 >> rs2;
+//    }
+//}
 
 //instruction ShiftRightArithmetic for [RV32I, RV64I] : ALUOp {
 //    param MNEMONIC: String = "sra";

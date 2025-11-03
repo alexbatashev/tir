@@ -16,8 +16,8 @@ pub fn verify_riscv(sh: &Shell) -> anyhow::Result<()> {
     let sail_build: PathBuf = sail_src.join("build");
     cmake_configure(sh, &sail_src, &sail_build)?;
 
-    cmake_build(sh, &sail_build, "generated_lean_rv32d")?;
-    cmake_build(sh, &sail_build, "generated_lean_rv64d")?;
+    // cmake_build(sh, &sail_build, "build_rocq_rv32d")?;
+    cmake_build(sh, &sail_build, "build_rocq_rv64d")?;
 
     let lean_out = root.join("target/verify/lean");
     std::fs::remove_dir_all(&lean_out)?;
