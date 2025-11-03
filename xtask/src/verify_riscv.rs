@@ -19,11 +19,11 @@ pub fn verify_riscv(sh: &Shell) -> anyhow::Result<()> {
     // cmake_build(sh, &sail_build, "build_rocq_rv32d")?;
     cmake_build(sh, &sail_build, "build_rocq_rv64d")?;
 
-    let lean_out = root.join("target/verify/lean");
-    std::fs::remove_dir_all(&lean_out)?;
-    std::fs::create_dir_all(&lean_out)?;
-    sh.change_dir(&lean_out);
-    cmd!(sh, "lake init tmdl-riscv").run()?;
+    let rocq_out = root.join("target/verify/rocq");
+    std::fs::remove_dir_all(&rocq_out)?;
+    std::fs::create_dir_all(&rocq_out)?;
+    sh.change_dir(&rocq_out);
+    // cmd!(sh, "")
     //     cmd!(sh, "cargo run -p tmdl --bin tmdlc -- --action emit-lean --dialect riscv --output {lean_out} {root}/backends/riscv/defs/main.tmdl {root}/backends/riscv/defs/base.tmdl").run()?;
 
     //     // 5) Type-check/build with Lake (preferred Lean 4 workflow)
