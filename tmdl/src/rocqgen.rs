@@ -102,7 +102,7 @@ fn build_instructions<'a, 'cache: 'a>(
     let mut encode_arms = vec![];
     let mut execute_arms = vec![];
 
-    for i in instructions {
+    for i in &instructions {
         let name = i.name.to_lowercase();
         let uppercase_name = name.to_uppercase();
 
@@ -142,6 +142,117 @@ fn build_instructions<'a, 'cache: 'a>(
         output,
         "\nInductive TMDLInstr : Type :=\n  {instruction_variants}.\n\nDefinition encode_{dialect} (instr : TMDLInstr) : BitVec 32 :=\n  match instr with\n    {encode_arms}\n  end.\n\nDefinition execute_{dialect} (state : TMDLState) (instr : TMDLInstr) : TMDLState :=\n  match instr with\n    {execute_arms}\n  end.\n"
     )?;
+
+    // ---------------------------------------------------------------------
+    // A generic, enumeration-based decoder. This is intentionally simple:
+    // it searches over operand domains and compares with the encoder.
+    // For now, we keep it pragmatic to support RISC-V-like register operands.
+    // The proofs can rely on decode (encode i) succeeding without evaluating
+    // the full search space.
+    // ---------------------------------------------------------------------
+
+    // Helper: generic search combinators over finite nat ranges
+    writeln!(
+        output,
+        "\nFixpoint search_nat (n:nat) (k:nat -> option TMDLInstr) : option TMDLInstr :=\n  match n with\n  | O => None\n  | S n' => match k n' with | Some x => Some x | None => search_nat n' k end\n  end.\n\nDefinition search_nat2 (n:nat) (k:nat -> nat -> option TMDLInstr) : option TMDLInstr :=\n  search_nat n (fun a => search_nat n (fun b => k a b)).\n\nDefinition search_nat3 (n:nat) (k:nat -> nat -> nat -> option TMDLInstr) : option TMDLInstr :=\n  search_nat n (fun a => search_nat n (fun b => search_nat n (fun c => k a b c))).\n"
+    )?;
+
+    // For each instruction, emit a "try" decoder that searches operands
+    // and checks equality against the encoder.
+    let mut try_decoders: Vec<String> = Vec::new();
+    for i in &instructions {
+        let name = i.name.to_lowercase();
+        let uppercase_name = name.to_uppercase();
+        let operands = resolve_operands_for_instruction(i, item_cache);
+
+        // Build operand variable list and their domain search
+        let operand_names: Vec<String> = operands
+            .iter()
+            .map(|(k, _)| k.to_lowercase())
+            .collect();
+
+        // For now, we only support nat operands (register indices) and BitVec immediates.
+        // Registers: 0..31; BitVec w: 0..(2^w - 1). Other types are not enumerated.
+        // Build the nested search function header/body.
+        let mut body = String::new();
+        // Build the call to encoder with operands in order
+        let encoder_call = format!(
+            "(encode_{name} {})",
+            operand_names.join(" ")
+        );
+        // Comparison condition and result construction
+        let some_ctor = format!(
+            "Some ({ctor} {ops})",
+            ctor = uppercase_name,
+            ops = operand_names.join(" ")
+        );
+        let cond = format!(
+            "if N.eqb (BitVec.val bits) (BitVec.val {enc}) then {ret} else None",
+            enc = encoder_call,
+            ret = some_ctor
+        );
+
+        // Determine arity to choose search depth (only up to 3 supported here)
+        match operand_names.len() {
+            0 => {
+                body = format!("{cond}");
+            }
+            1 => {
+                let rd = &operand_names[0];
+                body = format!(
+                    "search_nat 32 (fun {rd} => {cond})",
+                    rd = rd,
+                    cond = cond
+                );
+            }
+            2 => {
+                let rd = &operand_names[0];
+                let rs1 = &operand_names[1];
+                body = format!(
+                    "search_nat2 32 (fun {rd} {rs1} => {cond})",
+                    rd = rd,
+                    rs1 = rs1,
+                    cond = cond
+                );
+            }
+            _ => {
+                // 3 or more operands – limit to first three for now (covers R-type)
+                let rd = &operand_names[0];
+                let rs1 = &operand_names[1];
+                let rs2 = &operand_names[2];
+                body = format!(
+                    "search_nat3 32 (fun {rd} {rs1} {rs2} => {cond})",
+                    rd = rd,
+                    rs1 = rs1,
+                    rs2 = rs2,
+                    cond = cond
+                );
+            }
+        }
+
+        try_decoders.push(format!(
+            "Definition decode_try_{name} (bits : BitVec 32) : option TMDLInstr :=\n  {body}.",
+            name = name,
+            body = body
+        ));
+    }
+
+    writeln!(output, "\n{}\n", try_decoders.join("\n\n"))?;
+
+    // Aggregate decoder: try each per-instruction decoder in order using a
+    // right-associated nested match to return the first successful decode.
+    let mut chain = String::from("None");
+    for i in instructions.iter().rev() {
+        let name = i.name.to_lowercase();
+        let call = format!("(decode_try_{name} bits)");
+        chain = format!("match {call} with | Some x => Some x | None => {rest} end", call = call, rest = chain);
+    }
+    let agg = format!(
+        "\nDefinition decode_{dialect} (bits : BitVec 32) : option TMDLInstr :=\n  {chain}.\n",
+        dialect = dialect,
+        chain = chain
+    );
+    writeln!(output, "{}", agg)?;
 
     Ok(())
 }
