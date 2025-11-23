@@ -43,17 +43,17 @@ fn build_state(files: &[ast::File], output: &mut Box<dyn Write>) -> Result<(), T
     for (i, rc) in reg_classes.iter().enumerate() {
         let name = rc.name.to_lowercase();
         let sep = if i == reg_classes.len() { "" } else { ";" };
-        writeln!(output, "  {} : nat -> BitVec 64{}", name, sep)?;
+        writeln!(output, "  {} : nat -> tmdl_word 64{}", name, sep)?;
     }
     let sep = if reg_classes.is_empty() { "" } else { ";" };
-    writeln!(output, "  pc : BitVec 64{}", sep)?;
+    writeln!(output, "  pc : tmdl_word 64{}", sep)?;
     writeln!(output, "}}.")?;
 
     for rc in &reg_classes {
         let name = rc.name.to_lowercase();
         writeln!(
             output,
-            "\nDefinition read_{n} (st: TMDLState) (r : nat) : BitVec 64 :=\n  if Nat.eqb r 0 then BitVec.zero 64\n  else if Nat.ltb r 32 then st.({n}) r else BitVec.zero 64.\n",
+            "\nDefinition read_{n} (st: TMDLState) (r : nat) : tmdl_word 64 :=\n  if Nat.eqb r 0 then tmdl_word_zero 64\n  else if Nat.ltb r 32 then st.({n}) r else tmdl_word_zero 64.\n",
             n = name
         )?;
 
@@ -73,7 +73,7 @@ fn build_state(files: &[ast::File], output: &mut Box<dyn Write>) -> Result<(), T
         fields.push("pc := st.(pc)".to_string());
         writeln!(
             output,
-            "Definition write_{n}(st : TMDLState) (r : nat) (val : BitVec 64) : TMDLState :=\n  if Nat.eqb r 0 then st\n  else if Nat.ltb r 32 then\n    {{| {fields} |}}\n  else st.\n",
+            "Definition write_{n}(st : TMDLState) (r : nat) (val : tmdl_word 64) : TMDLState :=\n  if Nat.eqb r 0 then st\n  else if Nat.ltb r 32 then\n    {{| {fields} |}}\n  else st.\n",
             n = name,
             fields = fields.join("; ")
         )?;
@@ -121,7 +121,7 @@ fn build_instructions<'a, 'cache: 'a>(
 
         writeln!(
             output,
-            "\nDefinition encode_{name} {coq_operands} : BitVec 32 :=\n  {coq_encoding}.\n\nDefinition execute_{name} (st: TMDLState) {coq_operands} : TMDLState :=\n  {coq_behavior}.\n"
+            "\nDefinition encode_{name} {coq_operands} : tmdl_word 32 :=\n  {coq_encoding}.\n\nDefinition execute_{name} (st: TMDLState) {coq_operands} : TMDLState :=\n  {coq_behavior}.\n"
         )?;
 
         instruction_variants.push(format!(
@@ -140,126 +140,234 @@ fn build_instructions<'a, 'cache: 'a>(
     let execute_arms = execute_arms.join("\n    ");
     writeln!(
         output,
-        "\nInductive TMDLInstr : Type :=\n  {instruction_variants}.\n\nDefinition encode_{dialect} (instr : TMDLInstr) : BitVec 32 :=\n  match instr with\n    {encode_arms}\n  end.\n\nDefinition execute_{dialect} (state : TMDLState) (instr : TMDLInstr) : TMDLState :=\n  match instr with\n    {execute_arms}\n  end.\n"
+        "\nInductive TMDLInstr : Type :=\n  {instruction_variants}.\n\nDefinition encode_{dialect} (instr : TMDLInstr) : tmdl_word 32 :=\n  match instr with\n    {encode_arms}\n  end.\n\nDefinition execute_{dialect} (state : TMDLState) (instr : TMDLInstr) : TMDLState :=\n  match instr with\n    {execute_arms}\n  end.\n"
     )?;
 
     // ---------------------------------------------------------------------
-    // A generic, enumeration-based decoder. This is intentionally simple:
-    // it searches over operand domains and compares with the encoder.
-    // For now, we keep it pragmatic to support RISC-V-like register operands.
-    // The proofs can rely on decode (encode i) succeeding without evaluating
-    // the full search space.
+    // Structural decoder: match fixed encoding bits for each instruction
+    // and extract variable operand fields.
     // ---------------------------------------------------------------------
 
-    // Helper: generic search combinators over finite nat ranges
-    writeln!(
-        output,
-        "\nFixpoint search_nat (n:nat) (k:nat -> option TMDLInstr) : option TMDLInstr :=\n  match n with\n  | O => None\n  | S n' => match k n' with | Some x => Some x | None => search_nat n' k end\n  end.\n\nDefinition search_nat2 (n:nat) (k:nat -> nat -> option TMDLInstr) : option TMDLInstr :=\n  search_nat n (fun a => search_nat n (fun b => k a b)).\n\nDefinition search_nat3 (n:nat) (k:nat -> nat -> nat -> option TMDLInstr) : option TMDLInstr :=\n  search_nat n (fun a => search_nat n (fun b => search_nat n (fun c => k a b c))).\n"
-    )?;
+    generate_structural_decoder(output, dialect, item_cache, &instructions)?;
 
-    // For each instruction, emit a "try" decoder that searches operands
-    // and checks equality against the encoder.
-    let mut try_decoders: Vec<String> = Vec::new();
-    for i in &instructions {
-        let name = i.name.to_lowercase();
-        let uppercase_name = name.to_uppercase();
-        let operands = resolve_operands_for_instruction(i, item_cache);
+    Ok(())
+}
 
-        // Build operand variable list and their domain search
-        let operand_names: Vec<String> = operands
-            .iter()
-            .map(|(k, _)| k.to_lowercase())
-            .collect();
+#[derive(Debug)]
+struct InstructionPattern {
+    name: String,
+    // Mask with 1s for fixed bits, 0s for variable bits
+    mask: u64,
+    // Expected value (fixed bits in their positions, 0s elsewhere)
+    expected: u64,
+    // Operand extraction positions with types
+    operand_extracts: Vec<(String, u16, u16, ast::Type)>, // (operand_name, start_bit, end_bit, type)
+}
 
-        // For now, we only support nat operands (register indices) and BitVec immediates.
-        // Registers: 0..31; BitVec w: 0..(2^w - 1). Other types are not enumerated.
-        // Build the nested search function header/body.
-        let mut body = String::new();
-        // Build the call to encoder with operands in order
-        let encoder_call = format!(
-            "(encode_{name} {})",
-            operand_names.join(" ")
-        );
-        // Comparison condition and result construction
-        let some_ctor = format!(
-            "Some ({ctor} {ops})",
-            ctor = uppercase_name,
-            ops = operand_names.join(" ")
-        );
-        let cond = format!(
-            "if N.eqb (BitVec.val bits) (BitVec.val {enc}) then {ret} else None",
-            enc = encoder_call,
-            ret = some_ctor
-        );
+fn analyze_instruction_encoding<'a>(
+    instruction: &'a Instruction,
+    item_cache: &HashMap<String, &'a Item>,
+) -> InstructionPattern {
+    let encoding_arms = get_encoding_arms(instruction, item_cache);
+    let operands = resolve_operands_for_instruction(instruction, item_cache);
+    let operands_map: HashMap<_, _> = operands.iter().cloned().collect();
+    let params = resolve_params_for_instruction(instruction, item_cache);
 
-        // Determine arity to choose search depth (only up to 3 supported here)
-        match operand_names.len() {
-            0 => {
-                body = format!("{cond}");
+    let mut mask: u64 = 0;
+    let mut expected: u64 = 0;
+    let mut operand_extracts = Vec::new();
+
+    for arm in &encoding_arms {
+        let start = arm.start;
+        let end = arm.end.unwrap_or(start);
+
+        match &arm.value {
+            ast::Expr::Lit(ast::Lit::Int(li)) => {
+                // Fixed literal - add to mask and expected value
+                let value = parse_literal_value(li);
+                for bit in start..=end {
+                    mask |= 1u64 << bit;
+                    if (value >> (bit - start)) & 1 == 1 {
+                        expected |= 1u64 << bit;
+                    }
+                }
             }
-            1 => {
-                let rd = &operand_names[0];
-                body = format!(
-                    "search_nat 32 (fun {rd} => {cond})",
-                    rd = rd,
-                    cond = cond
-                );
+            ast::Expr::Ident(id) => {
+                let name = &id.name;
+                // Check if it's an operand or a fixed parameter
+                if let Some(ty) = operands_map.get(name) {
+                    // Variable operand - needs extraction, don't add to mask
+                    operand_extracts.push((name.to_lowercase(), start, end, ty.clone()));
+                } else if let Some((_, Some(ast::Expr::Lit(ast::Lit::Int(li))))) = params.get(name) {
+                    // Fixed parameter value - add to mask and expected value
+                    let value = parse_literal_value(li);
+                    for bit in start..=end {
+                        mask |= 1u64 << bit;
+                        if (value >> (bit - start)) & 1 == 1 {
+                            expected |= 1u64 << bit;
+                        }
+                    }
+                }
             }
-            2 => {
-                let rd = &operand_names[0];
-                let rs1 = &operand_names[1];
-                body = format!(
-                    "search_nat2 32 (fun {rd} {rs1} => {cond})",
-                    rd = rd,
-                    rs1 = rs1,
-                    cond = cond
-                );
-            }
-            _ => {
-                // 3 or more operands – limit to first three for now (covers R-type)
-                let rd = &operand_names[0];
-                let rs1 = &operand_names[1];
-                let rs2 = &operand_names[2];
-                body = format!(
-                    "search_nat3 32 (fun {rd} {rs1} {rs2} => {cond})",
-                    rd = rd,
-                    rs1 = rs1,
-                    rs2 = rs2,
-                    cond = cond
-                );
+            _ => {}
+        }
+    }
+
+    InstructionPattern {
+        name: instruction.name.clone(),
+        mask,
+        expected,
+        operand_extracts,
+    }
+}
+
+fn get_encoding_arms<'a>(
+    instruction: &'a Instruction,
+    item_cache: &HashMap<String, &'a Item>,
+) -> Vec<ast::EncodingArm> {
+    if !instruction.encoding.is_empty() {
+        instruction.encoding.clone()
+    } else {
+        let mut cur = instruction.parent_template.as_ref();
+        while let Some(name) = cur {
+            if let Some(ast::Item::Template(t)) = item_cache.get(name.as_str()) {
+                if !t.encoding.is_empty() {
+                    return t.encoding.clone();
+                }
+                cur = t.parent_template.as_ref();
+            } else {
+                break;
             }
         }
+        Vec::new()
+    }
+}
 
-        try_decoders.push(format!(
-            "Definition decode_try_{name} (bits : BitVec 32) : option TMDLInstr :=\n  {body}.",
-            name = name,
-            body = body
-        ));
+fn resolve_params_for_instruction<'a>(
+    inst: &'a ast::Instruction,
+    cache: &HashMap<String, &'a ast::Item>,
+) -> HashMap<String, (ast::Type, Option<ast::Expr>)> {
+    let mut result: HashMap<String, (ast::Type, Option<ast::Expr>)> = HashMap::new();
+    fn collect_from_template<'a>(
+        name: &str,
+        cache: &HashMap<String, &'a ast::Item>,
+        acc: &mut HashMap<String, (ast::Type, Option<ast::Expr>)>,
+    ) {
+        if let Some(ast::Item::Template(t)) = cache.get(name) {
+            if let Some(parent) = &t.parent_template {
+                collect_from_template(parent, cache, acc);
+            }
+            for (k, v) in &t.params {
+                acc.insert(k.clone(), v.clone());
+            }
+        }
     }
 
-    writeln!(output, "\n{}\n", try_decoders.join("\n\n"))?;
-
-    // Aggregate decoder: try each per-instruction decoder in order using a
-    // right-associated nested match to return the first successful decode.
-    let mut chain = String::from("None");
-    for i in instructions.iter().rev() {
-        let name = i.name.to_lowercase();
-        let call = format!("(decode_try_{name} bits)");
-        chain = format!("match {call} with | Some x => Some x | None => {rest} end", call = call, rest = chain);
+    if let Some(p) = &inst.parent_template {
+        collect_from_template(p, cache, &mut result);
     }
-    let agg = format!(
-        "\nDefinition decode_{dialect} (bits : BitVec 32) : option TMDLInstr :=\n  {chain}.\n",
-        dialect = dialect,
-        chain = chain
-    );
-    writeln!(output, "{}", agg)?;
+    for (k, v) in &inst.params {
+        result.insert(k.clone(), v.clone());
+    }
+    result
+}
 
+fn parse_literal_value(lit: &ast::LitInt) -> u64 {
+    let v = lit.value();
+    if v.starts_with("0b") {
+        u64::from_str_radix(&v[2..], 2).unwrap_or(0)
+    } else if v.starts_with("0x") || v.starts_with("0X") {
+        u64::from_str_radix(&v[2..], 16).unwrap_or(0)
+    } else {
+        v.parse::<u64>().unwrap_or(0)
+    }
+}
+
+fn generate_structural_decoder(
+    output: &mut Box<dyn Write>,
+    dialect: &str,
+    item_cache: &HashMap<String, &Item>,
+    instructions: &[&Instruction],
+) -> Result<(), TMDLError> {
+    writeln!(output, "\n(* Bit field extraction helper *)")?;
+    writeln!(
+        output,
+        "Definition extract_bits (w : tmdl_word 32) (start : nat) (len : nat) : Z :=\n  Z.land (Z.shiftr (tmdl_word_val w) (Z.of_nat start)) (Z.sub (Z.shiftl 1 (Z.of_nat len)) 1).\n"
+    )?;
+
+    // Analyze each instruction's encoding
+    let patterns: Vec<InstructionPattern> = instructions
+        .iter()
+        .map(|instr| analyze_instruction_encoding(instr, item_cache))
+        .collect();
+
+    // Generate decoder function using mask-and-match approach
+    writeln!(output, "(* Structural decoder using mask-and-match *)")?;
+    writeln!(
+        output,
+        "Definition decode_{} (w : tmdl_word 32) : option TMDLInstr :=",
+        dialect
+    )?;
+    writeln!(output, "  let bits := tmdl_word_val w in")?;
+
+    // Generate flat if-then-else chain for each instruction
+    let mut first = true;
+    for pattern in &patterns {
+        let uppercase_name = pattern.name.to_uppercase();
+
+        // Build operand extractions
+        let mut operand_vals = Vec::new();
+        for (op_name, start, end, ty) in &pattern.operand_extracts {
+            let width = end - start + 1;
+            let extracted = format!("(extract_bits w {} {})", start, width);
+            // Convert to appropriate type
+            let converted = match ty {
+                ast::Type::Struct(_) => {
+                    // Register index - convert Z to nat
+                    format!("(Z.to_nat {})", extracted)
+                }
+                ast::Type::Bits(_) => {
+                    // Already a bitvector, but needs wrapping
+                    extracted
+                }
+                ast::Type::Integer => extracted,
+                ast::Type::String => extracted,
+            };
+            operand_vals.push(converted);
+        }
+
+        let result = if operand_vals.is_empty() {
+            format!("Some {}", uppercase_name)
+        } else {
+            format!("Some ({} {})", uppercase_name, operand_vals.join(" "))
+        };
+
+        // Generate flat if-then-else: check (bits & mask) == expected
+        let prefix = if first {
+            first = false;
+            "  if"
+        } else {
+            "  else if"
+        };
+
+        writeln!(
+            output,
+            "{} Z.eqb (Z.land bits {}) {} then",
+            prefix, pattern.mask, pattern.expected
+        )?;
+        writeln!(output, "    {}", result)?;
+    }
+
+    // Default case
+    writeln!(output, "  else")?;
+    writeln!(output, "    None.")?;
+    writeln!(output)?;
     Ok(())
 }
 
 /// For a list of operands returns a string of function operands in Coq format. Examples:
 /// (rd rs1 rs2 : nat)
-/// (rd rs1 : nat) (imm : BitVec 12)
+/// (rd rs1 : nat) (imm : tmdl_word 12)
 fn build_coq_operands<'cache>(
     item_cache: &HashMap<String, &'cache Item>,
     operands: &Vec<(String, ast::Type)>,
@@ -267,11 +375,8 @@ fn build_coq_operands<'cache>(
     // Map a TMDL type to a Coq type string
     fn coq_ty_of(t: &ast::Type) -> String {
         match t {
-            // Registers are passed as indices
             ast::Type::Struct(_) => "nat".to_string(),
-            // Bit-precise immediates
-            ast::Type::Bits(w) => format!("BitVec {}", w),
-            // Generic integers (signed arithmetic)
+            ast::Type::Bits(w) => format!("tmdl_word {}", w),
             ast::Type::Integer => "Z".to_string(),
             ast::Type::String => "string".to_string(),
         }
@@ -312,7 +417,7 @@ fn build_coq_operands_ctor<'cache>(
     fn coq_ty_of(t: &ast::Type) -> String {
         match t {
             ast::Type::Struct(_) => "nat".to_string(),
-            ast::Type::Bits(w) => format!("BitVec {}", w),
+            ast::Type::Bits(w) => format!("tmdl_word {}", w),
             ast::Type::Integer => "Z".to_string(),
             ast::Type::String => "string".to_string(),
         }
@@ -337,73 +442,16 @@ fn build_coq_encoding<'a>(
         .into_iter()
         .collect::<HashMap<_, _>>();
 
-    // Resolve parameters for this instruction following template chain (root-most first)
-    fn resolve_params_for_instruction<'a>(
-        inst: &'a ast::Instruction,
-        cache: &HashMap<String, &'a ast::Item>,
-    ) -> HashMap<String, (ast::Type, Option<ast::Expr>)> {
-        let mut result: HashMap<String, (ast::Type, Option<ast::Expr>)> = HashMap::new();
-        fn collect_from_template<'a>(
-            name: &str,
-            cache: &HashMap<String, &'a ast::Item>,
-            acc: &mut HashMap<String, (ast::Type, Option<ast::Expr>)>,
-        ) {
-            if let Some(ast::Item::Template(t)) = cache.get(name) {
-                if let Some(parent) = &t.parent_template {
-                    collect_from_template(parent, cache, acc);
-                }
-                for (k, v) in &t.params {
-                    acc.insert(k.clone(), v.clone());
-                }
-            }
-        }
-
-        if let Some(p) = &inst.parent_template {
-            collect_from_template(p, cache, &mut result);
-        }
-        for (k, v) in &inst.params {
-            result.insert(k.clone(), v.clone());
-        }
-        result
-    }
-
     let params = resolve_params_for_instruction(instruction, item_cache);
 
-    // Helper: render integer literal as BitVec of given width
+    // Helper: render integer literal as tmdl_word of given width
     fn render_lit_bitvec(width: u16, lit: &ast::LitInt) -> String {
         let v = lit.value();
-        let decimal_value = if v.starts_with("0b") {
-            // Parse binary literal
-            u64::from_str_radix(&v[2..], 2).unwrap_or(0)
-        } else if v.starts_with("0x") || v.starts_with("0X") {
-            // Parse hex literal
-            u64::from_str_radix(&v[2..], 16).unwrap_or(0)
-        } else {
-            // Parse decimal literal
-            v.parse::<u64>().unwrap_or(0)
-        };
-        format!("(BitVec.of_nat {} {})", width, decimal_value)
+        let decimal_value = parse_literal_value(lit);
+        format!("(tmdl_word_of_nat {} {})", width, decimal_value)
     }
 
-    // Resolve encoding arms similar to Lean
-    let encoding_arms: Vec<ast::EncodingArm> = if !instruction.encoding.is_empty() {
-        instruction.encoding.clone()
-    } else {
-        let mut cur = instruction.parent_template.as_ref();
-        let mut out: Vec<ast::EncodingArm> = Vec::new();
-        while let Some(name) = cur {
-            if let Some(ast::Item::Template(t)) = item_cache.get(name.as_str()) {
-                if !t.encoding.is_empty() {
-                    out = t.encoding.clone();
-                    break;
-                }
-                cur = t.parent_template.as_ref();
-            } else {
-                break;
-            }
-        }
-        out
-    };
+    let encoding_arms = get_encoding_arms(instruction, item_cache);
 
     // Build each arm piece (high-to-low) and concatenate
     let mut pieces: Vec<(u16, String)> = Vec::new();
@@ -420,10 +468,10 @@ fn build_coq_encoding<'a>(
                 if let Some(ty) = operands.get(name) {
                     let vname = name.to_lowercase();
                     match ty {
-                        ast::Type::Struct(_) => format!("(BitVec.of_nat {} {})", width, vname),
+                        ast::Type::Struct(_) => format!("(tmdl_word_of_nat {} {})", width, vname),
                         ast::Type::Bits(_w) => format!("({})", vname),
-                        ast::Type::Integer => format!("(BitVec.of_nat {} {})", width, vname),
-                        ast::Type::String => format!("(BitVec.of_nat {} 0)", width),
+                        ast::Type::Integer => format!("(tmdl_word_of_nat {} {})", width, vname),
+                        ast::Type::String => format!("(tmdl_word_of_nat {} 0)", width),
                     }
                 } else if let Some((pty, pval)) = params.get(name) {
                     match pval {
@@ -431,21 +479,21 @@ fn build_coq_encoding<'a>(
                         _ => match pty {
                             ast::Type::Bits(_) | ast::Type::Integer => {
                                 // Fallback if not a simple literal
-                                format!("(BitVec.of_nat {} 0)", width)
+                                format!("(tmdl_word_of_nat {} 0)", width)
                             }
-                            _ => format!("(BitVec.of_nat {} 0)", width),
+                            _ => format!("(tmdl_word_of_nat {} 0)", width),
                         },
                     }
                 } else {
                     // Unknown identifier; zero-fill
-                    format!("(BitVec.of_nat {} 0)", width)
+                    format!("(tmdl_word_of_nat {} 0)", width)
                 }
             }
             ast::Expr::Slice(s) => {
                 // Simplified: treat as zero vector of that width
-                format!("(BitVec.of_nat {} 0)", width)
+                format!("(tmdl_word_of_nat {} 0)", width)
             }
-            _ => format!("(BitVec.of_nat {} 0)", width),
+            _ => format!("(tmdl_word_of_nat {} 0)", width),
         };
 
         pieces.push((high_bit, piece));
@@ -607,37 +655,68 @@ fn build_coq_behavior<'a>(
 }
 
 const HEADER: &'static str = "(* Automatically generated by TMDL compiler *)
-From Stdlib Require Import NArith.
+From Stdlib Require Import ZArith Lia.
+Local Open Scope Z_scope.
 
-Module BitVec.
-  Definition t (n:nat) := { x : N | (x < N.pow 2 (N.of_nat n))%N }.
-  Coercion val {n} (w:t n) : N := proj1_sig w.
-  Definition mod2n (n:nat) (x:N) := N.modulo x (N.pow 2 (N.of_nat n)).
-  Lemma mod2n_bound (n : nat) (x : N) : (mod2n n x < N.pow 2 (N.of_nat n))%N.
-  Proof. unfold mod2n; apply N.mod_lt; now apply N.pow_nonzero. Qed.
-  Definition mk {n} (x:N) : t n := exist _ (mod2n n x) (mod2n_bound n x).
+Definition tmdl_modulus (bits : nat) : Z := 2 ^ (Z.of_nat bits).
 
-  Definition of_nat (n k:nat) : t n := mk (N.of_nat k).
-  Definition zero (n:nat) : t n := mk 0%N.
-  Definition add {n} (a b:t n) : t n := mk (a + b).
-  Definition sub {n} (a b:t n) : t n := mk (N.sub a b).
-  Definition land {n} (a b:t n) : t n := mk (N.land a b).
-  Definition lor  {n} (a b:t n) : t n := mk (N.lor  a b).
-  Definition lxor {n} (a b:t n) : t n := mk (N.lxor a b).
-  Definition shl  {n} (a b:t n) : t n := mk (N.shiftl a b).
-  Definition concat {n m} (a:t n) (b:t m) : t (n+m) := mk (a * N.pow 2 (N.of_nat m) + b).
-End BitVec.
+Lemma tmdl_modulus_pos (bits : nat) : tmdl_modulus bits > 0.
+Proof.
+  unfold tmdl_modulus.
+  apply Z.lt_gt.
+  apply Z.pow_pos_nonneg; [lia | apply Zle_0_nat].
+Qed.
 
-Declare Scope bv_scope.
+Record tmdl_word (bits : nat) := {
+  tmdl_word_val : Z;
+  tmdl_word_range : (0 <= tmdl_word_val < tmdl_modulus bits)%Z
+}.
 
-Infix \"+\"   := BitVec.add (at level 50, left associativity) : bv_scope.
-Infix \"-\"   := BitVec.sub (at level 50, left associativity) : bv_scope.
-Infix \"^^^\" := BitVec.lxor (at level 40, left associativity) : bv_scope.
-Infix \"|||\" := BitVec.lor (at level 40, left associativity) : bv_scope.
-Infix \"&&&\" := BitVec.land (at level 40, left associativity) : bv_scope.
-Infix \"<<<\" := BitVec.shl (at level 35, no associativity) : bv_scope.
-Infix \"++\"  := BitVec.concat (at level 60, right associativity) : bv_scope.
-Open Scope bv_scope.
+Arguments tmdl_word_val {bits}.
+Arguments tmdl_word_range {bits}.
 
-Notation BitVec n := (BitVec.t n).
+Definition tmdl_word_mk (bits : nat) (x : Z) : tmdl_word bits :=
+  let m := tmdl_modulus bits in
+  {| tmdl_word_val := Z.modulo x m;
+     tmdl_word_range := Z.mod_pos_bound x m (Z.gt_lt _ _ (tmdl_modulus_pos bits)) |}.
+
+Definition tmdl_word_zero (bits : nat) : tmdl_word bits :=
+  tmdl_word_mk bits 0.
+
+Definition tmdl_word_of_nat (bits : nat) (n : nat) : tmdl_word bits :=
+  tmdl_word_mk bits (Z.of_nat n).
+
+Definition tmdl_word_add {bits} (a b : tmdl_word bits) : tmdl_word bits :=
+  tmdl_word_mk bits (tmdl_word_val a + tmdl_word_val b).
+
+Definition tmdl_word_sub {bits} (a b : tmdl_word bits) : tmdl_word bits :=
+  tmdl_word_mk bits (tmdl_word_val a - tmdl_word_val b).
+
+Definition tmdl_word_land {bits} (a b : tmdl_word bits) : tmdl_word bits :=
+  tmdl_word_mk bits (Z.land (tmdl_word_val a) (tmdl_word_val b)).
+
+Definition tmdl_word_lor {bits} (a b : tmdl_word bits) : tmdl_word bits :=
+  tmdl_word_mk bits (Z.lor (tmdl_word_val a) (tmdl_word_val b)).
+
+Definition tmdl_word_lxor {bits} (a b : tmdl_word bits) : tmdl_word bits :=
+  tmdl_word_mk bits (Z.lxor (tmdl_word_val a) (tmdl_word_val b)).
+
+Definition tmdl_word_shl {bits} (a b : tmdl_word bits) : tmdl_word bits :=
+  tmdl_word_mk bits (Z.shiftl (tmdl_word_val a) (tmdl_word_val b)).
+
+Definition tmdl_word_concat {bits1 bits2}
+  (a : tmdl_word bits1) (b : tmdl_word bits2) : tmdl_word (bits1 + bits2) :=
+  tmdl_word_mk (bits1 + bits2)
+    (tmdl_word_val a * 2 ^ Z.of_nat bits2 + tmdl_word_val b).
+
+Declare Scope tmdl_scope.
+Local Open Scope tmdl_scope.
+
+Local Infix \"+\"   := tmdl_word_add (at level 50, left associativity) : tmdl_scope.
+Local Infix \"-\"   := tmdl_word_sub (at level 50, left associativity) : tmdl_scope.
+Local Infix \"^^^\" := tmdl_word_lxor (at level 40, left associativity) : tmdl_scope.
+Local Infix \"|||\" := tmdl_word_lor (at level 40, left associativity) : tmdl_scope.
+Local Infix \"&&&\" := tmdl_word_land (at level 40, left associativity) : tmdl_scope.
+Local Infix \"<<<\" := tmdl_word_shl (at level 35, no associativity) : tmdl_scope.
+Local Infix \"++\"  := tmdl_word_concat (at level 60, right associativity) : tmdl_scope.
 ";
