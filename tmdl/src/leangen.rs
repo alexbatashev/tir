@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::Write;
 
 use crate::ast::{self, Instruction, Item};
@@ -21,6 +21,7 @@ pub fn generate_lean(
         cache
     };
 
+    writeln!(output, "{}", HEADER)?;
     build_state(&files, &mut output)?;
     build_instructions(dialect, &item_cache, &files, &mut output)?;
     Ok(())
@@ -49,21 +50,7 @@ fn build_state(files: &[ast::File], output: &mut Box<dyn Write>) -> Result<(), T
         let name = &rc.name.to_lowercase();
         writeln!(
             output,
-            "
-def TMDLState.read_{name}(st: TMDLState) (r : Nat) : BitVec 64 :=
-    -- TODO correctly handle hardwired_zero registers
-    if r = 0 then 0
-    else if h : r < 32 then st.{name} ⟨r, h⟩
-    else 0
-
-def TMDLState.write_{name}(st : TMDLState) (r : Nat) (val : BitVec 64) : TMDLState :=
-    -- TODO correctly handle hardwired_zero registers
-    if r = 0 then st
-    else if h : r < 32 then
-        {{ st with {name} := fun i => if i = ⟨r, h⟩ then val else st.{name} i }}
-    else
-        st
-"
+            "\ndef TMDLState.read_{name}(st : TMDLState) (r : Nat) : BitVec 64 :=\n  if h0 : r = 0 then\n    0\n  else if h : r < 32 then\n    st.{name} ⟨r, h⟩\n  else\n    0\n\ndef TMDLState.write_{name}(st : TMDLState) (r : Nat) (val : BitVec 64) : TMDLState :=\n  if h0 : r = 0 then\n    st\n  else if h : r < 32 then\n    {{ st with {name} := fun i => if i = ⟨r, h⟩ then val else st.{name} i }}\n  else\n    st\n"
         )?;
     }
 
@@ -90,7 +77,7 @@ fn build_instructions<'a, 'cache: 'a>(
     let mut encode_arms = vec![];
     let mut execute_arms = vec![];
 
-    for i in instructions {
+    for i in &instructions {
         let name = i.name.to_lowercase();
         let uppercase_name = name.to_uppercase();
 
@@ -108,44 +95,230 @@ fn build_instructions<'a, 'cache: 'a>(
 
         writeln!(
             output,
-            "
-def encode_{name} {lean_operands} : BitVec 32 :=
-    {lean_encoding}
-
-def execute_{name} (st: TMDLState) {lean_operands} : TMDLState :=
-    {lean_behavior}
-"
+            "\ndef encode_{name} {lean_operands} : BitVec 32 :=\n  {lean_encoding}\n\ndef execute_{name} (st : TMDLState) {lean_operands} : TMDLState :=\n  {lean_behavior}\n"
         )?;
 
-        instruction_variants.push(format!("{uppercase_name} {lean_operands}"));
+        if lean_operands.is_empty() {
+            instruction_variants.push(format!("| {uppercase_name}"));
+        } else {
+            instruction_variants.push(format!("| {uppercase_name} {lean_operands}"));
+        }
         encode_arms.push(format!(
-            ".{uppercase_name} {operand_list} => encode_{name} {operand_list}"
+            "| .{uppercase_name} {operand_list} => encode_{name} {operand_list}"
         ));
         execute_arms.push(format!(
-            ".{uppercase_name} {operand_list} => execute_{name} state {operand_list}"
+            "| .{uppercase_name} {operand_list} => execute_{name} state {operand_list}"
         ));
     }
 
-    let instruction_variants = instruction_variants.join("\n    | ");
-    let encode_arms = encode_arms.join("\n    | ");
-    let execute_arms = execute_arms.join("\n    | ");
+    let instruction_variants = instruction_variants.join("\n    ");
+    let encode_arms = encode_arms.join("\n    ");
+    let execute_arms = execute_arms.join("\n    ");
     writeln!(
         output,
-        "
-inductive TMDLInstr where
-    | {instruction_variants}
-    deriving Repr, BEq
-
-def encode_{dialect} (instr : TMDLInstr) : BitVec 32 :=
-    match instr with
-    | {encode_arms}
-
-def execute_{dialect} (state : TMDLState) (instr : TMDLInstr) : TMDLState :=
-    match instr with
-    | {execute_arms}
-"
+        "\ninductive TMDLInstr where\n    {instruction_variants}\n    deriving Repr, BEq\n\ndef encode_{dialect} (instr : TMDLInstr) : BitVec 32 :=\n  match instr with\n  {encode_arms}\n\ndef execute_{dialect} (state : TMDLState) (instr : TMDLInstr) : TMDLState :=\n  match instr with\n  {execute_arms}\n"
     )?;
 
+    generate_structural_decoder(output, dialect, item_cache, &instructions)?;
+
+    Ok(())
+}
+
+#[derive(Debug)]
+struct InstructionPattern {
+    name: String,
+    mask: u64,
+    expected: u64,
+    operand_extracts: Vec<(String, u16, u16, ast::Type)>, // (operand_name, start_bit, end_bit, type)
+}
+
+fn analyze_instruction_encoding<'a>(
+    instruction: &'a Instruction,
+    item_cache: &HashMap<String, &'a Item>,
+) -> InstructionPattern {
+    let encoding_arms = get_encoding_arms(instruction, item_cache);
+    let operands = resolve_operands_for_instruction(instruction, item_cache);
+    let operands_map: HashMap<_, _> = operands.iter().cloned().collect();
+    let params = resolve_params_for_instruction(instruction, item_cache);
+
+    let mut mask: u64 = 0;
+    let mut expected: u64 = 0;
+    let mut operand_extracts = Vec::new();
+
+    for arm in &encoding_arms {
+        let start = arm.start;
+        let end = arm.end.unwrap_or(start);
+
+        match &arm.value {
+            ast::Expr::Lit(ast::Lit::Int(li)) => {
+                let value = parse_literal_value(li);
+                for bit in start..=end {
+                    mask |= 1u64 << bit;
+                    if (value >> (bit - start)) & 1 == 1 {
+                        expected |= 1u64 << bit;
+                    }
+                }
+            }
+            ast::Expr::Ident(id) => {
+                let name = &id.name;
+                if let Some(ty) = operands_map.get(name) {
+                    operand_extracts.push((name.to_lowercase(), start, end, ty.clone()));
+                } else if let Some((_, Some(ast::Expr::Lit(ast::Lit::Int(li))))) = params.get(name)
+                {
+                    let value = parse_literal_value(li);
+                    for bit in start..=end {
+                        mask |= 1u64 << bit;
+                        if (value >> (bit - start)) & 1 == 1 {
+                            expected |= 1u64 << bit;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    InstructionPattern {
+        name: instruction.name.clone(),
+        mask,
+        expected,
+        operand_extracts,
+    }
+}
+
+fn get_encoding_arms<'a>(
+    instruction: &'a Instruction,
+    item_cache: &HashMap<String, &'a Item>,
+) -> Vec<ast::EncodingArm> {
+    if !instruction.encoding.is_empty() {
+        instruction.encoding.clone()
+    } else {
+        let mut cur = instruction.parent_template.as_ref();
+        while let Some(name) = cur {
+            if let Some(ast::Item::Template(t)) = item_cache.get(name.as_str()) {
+                if !t.encoding.is_empty() {
+                    return t.encoding.clone();
+                }
+                cur = t.parent_template.as_ref();
+            } else {
+                break;
+            }
+        }
+        Vec::new()
+    }
+}
+
+fn resolve_params_for_instruction<'a>(
+    inst: &'a ast::Instruction,
+    cache: &HashMap<String, &'a ast::Item>,
+) -> HashMap<String, (ast::Type, Option<ast::Expr>)> {
+    let mut result: HashMap<String, (ast::Type, Option<ast::Expr>)> = HashMap::new();
+    fn collect_from_template<'a>(
+        name: &str,
+        cache: &HashMap<String, &'a ast::Item>,
+        acc: &mut HashMap<String, (ast::Type, Option<ast::Expr>)>,
+    ) {
+        if let Some(ast::Item::Template(t)) = cache.get(name) {
+            if let Some(parent) = &t.parent_template {
+                collect_from_template(parent, cache, acc);
+            }
+            for (k, v) in &t.params {
+                acc.insert(k.clone(), v.clone());
+            }
+        }
+    }
+
+    if let Some(p) = &inst.parent_template {
+        collect_from_template(p, cache, &mut result);
+    }
+    for (k, v) in &inst.params {
+        result.insert(k.clone(), v.clone());
+    }
+    result
+}
+
+fn parse_literal_value(lit: &ast::LitInt) -> u64 {
+    let v = lit.value();
+    if v.starts_with("0b") {
+        u64::from_str_radix(&v[2..], 2).unwrap_or(0)
+    } else if v.starts_with("0x") || v.starts_with("0X") {
+        u64::from_str_radix(&v[2..], 16).unwrap_or(0)
+    } else {
+        v.parse::<u64>().unwrap_or(0)
+    }
+}
+
+fn generate_structural_decoder(
+    output: &mut Box<dyn Write>,
+    dialect: &str,
+    item_cache: &HashMap<String, &Item>,
+    instructions: &[&Instruction],
+) -> Result<(), TMDLError> {
+    writeln!(output, "\n-- Bit field extraction helper")?;
+    writeln!(
+        output,
+        "def extractBits (w : BitVec 32) (start : Nat) (len : Nat) : Nat :=\n  let bits := w.toNat\n  let shifted := Nat.shiftRight bits start\n  let mask := (Nat.shiftLeft 1 len) - 1\n  Nat.land shifted mask\n"
+    )?;
+
+    let patterns: Vec<InstructionPattern> = instructions
+        .iter()
+        .map(|instr| analyze_instruction_encoding(instr, item_cache))
+        .collect();
+
+    writeln!(output, "-- Structural decoder using mask-and-match")?;
+    writeln!(
+        output,
+        "def decode_{dialect} (w : BitVec 32) : Option TMDLInstr :="
+    )?;
+    writeln!(output, "  let bits := w.toNat")?;
+
+    let mut first = true;
+    for pattern in &patterns {
+        let uppercase_name = pattern.name.to_uppercase();
+
+        let mut operand_vals = Vec::new();
+        for (_op_name, start, end, ty) in &pattern.operand_extracts {
+            let width = end - start + 1;
+            let extracted = format!("(extractBits w {} {})", start, width);
+            let converted = match ty {
+                ast::Type::Struct(_) => extracted.clone(),
+                ast::Type::Bits(w) => format!("(BitVec.ofNat {} {})", w, extracted),
+                ast::Type::Integer => format!("(Int.ofNat {})", extracted),
+                ast::Type::String => format!("(toString {})", extracted),
+            };
+            operand_vals.push(converted);
+        }
+
+        let result = if operand_vals.is_empty() {
+            format!("some TMDLInstr.{}", uppercase_name)
+        } else {
+            format!(
+                "some (TMDLInstr.{} {})",
+                uppercase_name,
+                operand_vals.join(" ")
+            )
+        };
+
+        let prefix = if first {
+            first = false;
+            "  if".to_string()
+        } else {
+            "  else if".to_string()
+        };
+
+        writeln!(
+            output,
+            "{prefix} h : Nat.land bits {mask} = {expected} then",
+            prefix = prefix,
+            mask = pattern.mask,
+            expected = pattern.expected
+        )?;
+        writeln!(output, "    {result}")?;
+    }
+
+    writeln!(output, "  else")?;
+    writeln!(output, "    none")?;
+    writeln!(output)?;
     Ok(())
 }
 
@@ -156,14 +329,12 @@ fn build_lean_operands<'cache>(
     item_cache: &HashMap<String, &'cache Item>,
     operands: &Vec<(String, ast::Type)>,
 ) -> String {
-    // Map a TMDL type to a Lean type string
+    let _ = item_cache;
+
     fn lean_ty_of(t: &ast::Type) -> String {
         match t {
-            // Registers are passed as indices
             ast::Type::Struct(_) => "Nat".to_string(),
-            // Bit-precise immediates
             ast::Type::Bits(w) => format!("BitVec {}", w),
-            // Generic integers (signed arithmetic); if needed can be adjusted to Nat
             ast::Type::Integer => "Int".to_string(),
             ast::Type::String => "String".to_string(),
         }
@@ -173,7 +344,6 @@ fn build_lean_operands<'cache>(
         return String::new();
     }
 
-    // Group consecutive operands with the same Lean type
     let mut groups: Vec<(String, Vec<String>)> = Vec::new();
     for (name, ty) in operands.iter() {
         let lname = name.to_lowercase();
@@ -187,7 +357,6 @@ fn build_lean_operands<'cache>(
         groups.push((lty, vec![lname]));
     }
 
-    // Render groups as "(a b : Ty) (c : Ty2)"
     let mut parts: Vec<String> = Vec::new();
     for (ty, names) in groups {
         parts.push(format!("({} : {})", names.join(" "), ty));
@@ -197,106 +366,33 @@ fn build_lean_operands<'cache>(
 }
 
 /// Builds an encoding statement from encoding description.
-/// TMDL input example:
-/// ```tmdl
-///    encoding {
-///        0..6 => OPCODE,
-///        7..11 => imm[0..4],
-///        12..14 => FUNCT3,
-///        15..19 => rs1,
-///        20..24 => rs2,
-///        25..31 => imm[5..11],
-///    }
-/// ```
-///
-/// Example Lean output:
-/// ```lean
-/// (0b0000000 : BitVec 7) ++      -- funct7
-/// (BitVec.ofNat 5 rs2) ++        -- rs2
-/// (BitVec.ofNat 5 rs1) ++        -- rs1
-/// (0b000 : BitVec 3) ++          -- funct3
-/// (BitVec.ofNat 5 rd) ++         -- rd
-/// (0b0110011 : BitVec 7)         -- opcode
-/// ```
 fn build_lean_encoding<'a>(
     item_cache: &HashMap<String, &'a Item>,
     instruction: &'a Instruction,
 ) -> String {
-    // Resolve operands for this instruction
     let operands = resolve_operands_for_instruction(instruction, item_cache)
         .into_iter()
         .collect::<HashMap<_, _>>();
 
-    // Resolve parameters for this instruction following template chain (root-most first)
-    fn resolve_params_for_instruction<'a>(
-        inst: &'a ast::Instruction,
-        cache: &HashMap<String, &'a ast::Item>,
-    ) -> HashMap<String, (ast::Type, Option<ast::Expr>)> {
-        let mut result: HashMap<String, (ast::Type, Option<ast::Expr>)> = HashMap::new();
-        fn collect_from_template<'a>(
-            name: &str,
-            cache: &HashMap<String, &'a ast::Item>,
-            acc: &mut HashMap<String, (ast::Type, Option<ast::Expr>)>,
-        ) {
-            if let Some(ast::Item::Template(t)) = cache.get(name) {
-                if let Some(parent) = &t.parent_template {
-                    collect_from_template(parent, cache, acc);
-                }
-                for (k, v) in &t.params {
-                    acc.insert(k.clone(), v.clone());
-                }
-            }
-        }
-
-        if let Some(p) = &inst.parent_template {
-            collect_from_template(p, cache, &mut result);
-        }
-        for (k, v) in &inst.params {
-            result.insert(k.clone(), v.clone());
-        }
-        result
-    }
-
     let params = resolve_params_for_instruction(instruction, item_cache);
 
-    // Helper: render integer literal as BitVec of given width
     fn render_lit_bitvec(width: u16, lit: &ast::LitInt) -> String {
         let v = lit.value();
         if v.starts_with("0b") || v.starts_with("0x") || v.starts_with("0X") {
             format!("({} : BitVec {})", v, width)
         } else {
-            // default to natural number literal via ofNat
             format!("(BitVec.ofNat {} {})", width, v)
         }
     }
 
-    // Resolve encoding arms: prefer instruction's own; otherwise inherit first non-empty from templates
-    let encoding_arms: Vec<ast::EncodingArm> = if !instruction.encoding.is_empty() {
-        instruction.encoding.clone()
-    } else {
-        let mut cur = instruction.parent_template.as_ref();
-        let mut out: Vec<ast::EncodingArm> = Vec::new();
-        while let Some(name) = cur {
-            if let Some(ast::Item::Template(t)) = item_cache.get(name.as_str()) {
-                if !t.encoding.is_empty() {
-                    out = t.encoding.clone();
-                    break;
-                }
-                cur = t.parent_template.as_ref();
-            } else {
-                break;
-            }
-        }
-        out
-    };
+    let encoding_arms = get_encoding_arms(instruction, item_cache);
 
-    // Build each arm piece
     let mut pieces: Vec<(u16, String)> = Vec::new();
     for arm in &encoding_arms {
         let start = arm.start;
         let end = arm.end.unwrap_or(start);
         let width: u16 = end - start + 1;
-        let high_bit = end; // for sorting later
+        let high_bit = end;
 
         let piece = match &arm.value {
             ast::Expr::Lit(ast::Lit::Int(li)) => render_lit_bitvec(width, li),
@@ -315,24 +411,20 @@ fn build_lean_encoding<'a>(
                         Some(ast::Expr::Lit(ast::Lit::Int(li))) => render_lit_bitvec(width, li),
                         _ => match pty {
                             ast::Type::Bits(_) | ast::Type::Integer => {
-                                // Fallback if not a simple literal
                                 format!("(BitVec.ofNat {} 0)", width)
                             }
                             _ => format!("(BitVec.ofNat {} 0)", width),
                         },
                     }
                 } else {
-                    // Unknown identifier; zero-fill
                     format!("(BitVec.ofNat {} 0)", width)
                 }
             }
             ast::Expr::Slice(s) => {
-                // Very simple slice rendering: prefer identifiers
                 let base_str = match &*s.base {
                     ast::Expr::Ident(id) => id.name.to_lowercase(),
                     _ => "0".to_string(),
                 };
-                // Placeholder slice: assume LSB-first slice [start..end]
                 format!("(BitVec.slice {} {} {})", base_str, s.start, s.end)
             }
             ast::Expr::IndexAccess(s) => {
@@ -340,26 +432,20 @@ fn build_lean_encoding<'a>(
                     ast::Expr::Ident(id) => id.name.to_lowercase(),
                     _ => "0".to_string(),
                 };
-                // Single bit as BitVec 1
                 format!("(BitVec.slice {} {} {})", base_str, s.index, s.index)
             }
-            _ => {
-                // Unsupported expression in encoding; zero piece of proper width
-                format!("(BitVec.ofNat {} 0)", width)
-            }
+            _ => format!("(BitVec.ofNat {} 0)", width),
         };
 
         pieces.push((high_bit, piece));
     }
 
-    // Sort from highest to lowest bit-range
     pieces.sort_by(|a, b| b.0.cmp(&a.0));
 
-    // Concatenate with ++ and indent
     let mut out = String::new();
     for (idx, (_hb, p)) in pieces.iter().enumerate() {
         if idx + 1 < pieces.len() {
-            out.push_str(&format!("{} ++\n    ", p));
+            out.push_str(&format!("{} ++\n  ", p));
         } else {
             out.push_str(p);
         }
@@ -369,30 +455,14 @@ fn build_lean_encoding<'a>(
 }
 
 /// Builds a function body for TMDL behavior region.
-///
-/// Example TMDL behavior:
-/// ```tmdl
-/// behavior { rd = rs1 + rs2; }
-/// ```
-///
-/// Example corresponding Lean output:
-///
-/// ```lean
-///   let val1 := st.read_gpr rs1
-///   let val2 := st.read_gpr rs2
-///   let result := val1 + val2
-///   st.write_gpr rd result
-/// ```
 fn build_lean_behavior<'a>(
     item_cache: &HashMap<String, &'a Item>,
     instruction: &'a Instruction,
 ) -> String {
-    // Resolve operands with types
     let operands = resolve_operands_for_instruction(instruction, item_cache)
         .into_iter()
         .collect::<HashMap<_, _>>();
 
-    // Helper: map operand identifier to Lean value expression
     fn eval_expr(e: &ast::Expr, operands: &HashMap<String, ast::Type>) -> String {
         match e {
             ast::Expr::Lit(ast::Lit::Int(li)) => li.value().to_string(),
@@ -427,16 +497,9 @@ fn build_lean_behavior<'a>(
                 };
                 format!("({} {} {})", lhs, op, rhs)
             }
-            ast::Expr::Slice(s) => {
-                // Placeholder slice rendering; use base expr directly
-                eval_expr(&s.base, operands)
-            }
-            ast::Expr::IndexAccess(s) => {
-                // Placeholder index access; use base expr directly
-                eval_expr(&s.base, operands)
-            }
+            ast::Expr::Slice(s) => eval_expr(&s.base, operands),
+            ast::Expr::IndexAccess(s) => eval_expr(&s.base, operands),
             ast::Expr::Field(f) => {
-                // self.PARAM — treat as 0 for now if unknown
                 if let ast::Expr::Ident(id) = &*f.base {
                     if id.name == "self" {
                         return f.member.to_lowercase();
@@ -445,7 +508,6 @@ fn build_lean_behavior<'a>(
                 "0".to_string()
             }
             ast::Expr::Block(b) => {
-                // Evaluate last expression if marked as return; otherwise ignore
                 if b.last_expr_return {
                     if let Some(last) = b.stmts.last() {
                         eval_expr(last, operands)
@@ -456,11 +518,7 @@ fn build_lean_behavior<'a>(
                     "0".to_string()
                 }
             }
-            ast::Expr::Assign(a) => {
-                // Not an rvalue; fallback to 0
-                let _ = a;
-                "0".to_string()
-            }
+            ast::Expr::Assign(_) => "0".to_string(),
             ast::Expr::If(i) => {
                 let c = eval_expr(&i.cond, operands);
                 let t = eval_expr(&i.then, operands);
@@ -475,7 +533,6 @@ fn build_lean_behavior<'a>(
         }
     }
 
-    // Compile a statement (assignment or block) into a state-transforming Lean expr
     fn compile_to_state(
         e: &ast::Expr,
         operands: &HashMap<String, ast::Type>,
@@ -494,7 +551,6 @@ fn build_lean_behavior<'a>(
                         rhs
                     )
                 } else {
-                    // Non-register destination; no state change
                     st_name.to_string()
                 }
             }
@@ -525,6 +581,31 @@ fn build_lean_behavior<'a>(
         }
     }
 
-    // Top-level behavior
     compile_to_state(&instruction.behavior, &operands, "st")
 }
+
+const HEADER: &str = "-- Automatically generated by TMDL compiler
+import Std.Data.BitVec
+open Std
+open Nat
+open BitVec
+
+-- Basic bitvector operations and notations used by the generated semantics
+def bvAdd {n} (a b : BitVec n) : BitVec n := BitVec.ofNat n (a.toNat + b.toNat)
+def bvSub {n} (a b : BitVec n) : BitVec n := BitVec.ofNat n (a.toNat - b.toNat)
+def bvAnd {n} (a b : BitVec n) : BitVec n := BitVec.ofNat n (Nat.land (a.toNat) (b.toNat))
+def bvOr  {n} (a b : BitVec n) : BitVec n := BitVec.ofNat n (Nat.lor  (a.toNat) (b.toNat))
+def bvXor {n} (a b : BitVec n) : BitVec n := BitVec.ofNat n (Nat.xor (a.toNat) (b.toNat))
+def bvShl {n} (a b : BitVec n) : BitVec n := BitVec.ofNat n (Nat.shiftLeft (a.toNat) b.toNat)
+def bvShr {n} (a b : BitVec n) : BitVec n := BitVec.ofNat n (Nat.shiftRight (a.toNat) b.toNat)
+def bvConcat {n m} (a : BitVec n) (b : BitVec m) : BitVec (n + m) := BitVec.ofNat _ ((Nat.shiftLeft (a.toNat) m) + b.toNat)
+
+notation:50 lhs \\\" + \\\" rhs => bvAdd lhs rhs
+notation:50 lhs \\\" - \\\" rhs => bvSub lhs rhs
+notation:40 lhs \\\" ^^^ \\\" rhs => bvXor lhs rhs
+notation:40 lhs \\\" ||| \\\" rhs => bvOr lhs rhs
+notation:40 lhs \\\" &&& \\\" rhs => bvAnd lhs rhs
+notation:35 lhs \\\" <<< \\\" rhs => bvShl lhs rhs
+notation:35 lhs \\\" >>> \\\" rhs => bvShr lhs rhs
+notation:60 lhs \\\" ++ \\\" rhs => bvConcat lhs rhs
+";

@@ -198,7 +198,8 @@ fn analyze_instruction_encoding<'a>(
                 if let Some(ty) = operands_map.get(name) {
                     // Variable operand - needs extraction, don't add to mask
                     operand_extracts.push((name.to_lowercase(), start, end, ty.clone()));
-                } else if let Some((_, Some(ast::Expr::Lit(ast::Lit::Int(li))))) = params.get(name) {
+                } else if let Some((_, Some(ast::Expr::Lit(ast::Lit::Int(li))))) = params.get(name)
+                {
                     // Fixed parameter value - add to mask and expected value
                     let value = parse_literal_value(li);
                     for bit in start..=end {
