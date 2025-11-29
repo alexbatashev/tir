@@ -21,9 +21,6 @@ pub struct Compiler {
     inputs: Vec<String>,
     output: OutputKind,
     dialect: Option<String>,
-    sail_namespace: Option<String>,
-    sail_module: Option<String>,
-    defines: Vec<String>,
 }
 
 pub struct CompilerBuilder {
@@ -31,9 +28,6 @@ pub struct CompilerBuilder {
     inputs: Vec<String>,
     output: Option<OutputKind>,
     dialect: Option<String>,
-    sail_namespace: Option<String>,
-    sail_module: Option<String>,
-    defines: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -76,15 +70,6 @@ pub struct Cli {
     pub output: String,
     #[arg(short, long)]
     pub dialect: Option<String>,
-    /// Sail namespace for proof generation (e.g., "Riscv")
-    #[arg(long)]
-    pub sail_namespace: Option<String>,
-    /// Sail module name (e.g., "rv32d", "rv64d")
-    #[arg(long)]
-    pub sail_module: Option<String>,
-    /// Define parameters (e.g., XLEN=32). Can be specified multiple times.
-    #[arg(long, value_name = "KEY=VALUE")]
-    pub define: Vec<String>,
 }
 
 impl Compiler {
@@ -94,9 +79,6 @@ impl Compiler {
             inputs: vec![],
             output: None,
             dialect: None,
-            sail_namespace: None,
-            sail_module: None,
-            defines: vec![],
         }
     }
 
@@ -193,71 +175,15 @@ impl Compiler {
                 let output: Box<dyn Write> = self.create_output_writer()?;
                 generate_rust(self.dialect.as_ref().unwrap(), parsed_files, output)?
             }
-            Action::EmitRocq => match &self.output {
-                OutputKind::Stdout => {
-                    generate_rocq(
-                        self.dialect.as_ref().unwrap(),
-                        parsed_files,
-                        self.create_output_writer()?,
-                    )?;
-                }
-                _ => {}
-            },
+            Action::EmitRocq => {
+                // Support stdout or explicit single-file destination.
+                let writer: Box<dyn Write> = self.create_output_writer()?;
+                generate_rocq(self.dialect.as_ref().unwrap(), parsed_files, writer)?;
+            }
             Action::EmitLean => {
-                // For Lean generation, accept either a file path or a directory.
-                // If a directory is provided, write TMDL.lean inside it.
-                match &self.output {
-                    OutputKind::Stdout => {
-                        // Emit to stdout directly
-                        generate_lean(
-                            self.dialect.as_ref().unwrap(),
-                            parsed_files,
-                            self.create_output_writer()?,
-                        )?;
-                    }
-                    _ => {} // OutputKind::File(path) => {
-                            //     let p = PathBuf::from(path);
-                            //     let treat_as_dir =
-                            //         (p.exists() && p.is_dir()) || (!p.exists() && p.extension().is_none());
-                            //     if treat_as_dir {
-                            //         std::fs::create_dir_all(&p)?;
-                            //         let file_path = p.join("TMDL.lean");
-                            //         let file = std::fs::OpenOptions::new()
-                            //             .create(true)
-                            //             .write(true)
-                            //             .truncate(true)
-                            //             .open(&file_path)?;
-                            //         let writer: Box<dyn Write> = Box::new(std::io::BufWriter::new(file));
-                            //         generate_lean(parsed_files.clone(), writer)?;
-                            //         let out_dir = p.to_string_lossy().to_string();
-                            //     } else {
-                            //         let file = std::fs::OpenOptions::new()
-                            //             .create(true)
-                            //             .write(true)
-                            //             .truncate(true)
-                            //             .open(&p)?;
-                            //         let writer: Box<dyn Write> = Box::new(std::io::BufWriter::new(file));
-                            //         generate_lean(parsed_files, writer)?;
-                            //     }
-                            // }
-                            // OutputKind::Batch(dir) => {
-                            //     let mut p = PathBuf::from(dir);
-                            //     std::fs::create_dir_all(&p)?;
-                            //     p.push("TMDL.lean");
-                            //     let file = std::fs::OpenOptions::new()
-                            //         .create(true)
-                            //         .write(true)
-                            //         .truncate(true)
-                            //         .open(&p)?;
-                            //     let writer: Box<dyn Write> = Box::new(std::io::BufWriter::new(file));
-                            //     // Write main Lean file
-                            //     generate_lean(parsed_files.clone(), writer)?;
-                            //     // Also emit adapter + instance into same directory
-                            //     let out_dir = p.parent().unwrap().to_string_lossy().to_string();
-                            //     crate::lean::generate_lean_adapter(&parsed_files, &out_dir)?;
-                            //     crate::lean::generate_lean_instance(&parsed_files, &out_dir)?;
-                            // }
-                }
+                // Support stdout or explicit single-file destination.
+                let writer: Box<dyn Write> = self.create_output_writer()?;
+                generate_lean(self.dialect.as_ref().unwrap(), parsed_files, writer)?;
             }
             _ => unreachable!("Only complex actions should use this path"),
         }
@@ -303,9 +229,6 @@ impl CompilerBuilder {
             inputs: self.inputs,
             output: self.output,
             dialect: self.dialect,
-            sail_namespace: self.sail_namespace,
-            sail_module: self.sail_module,
-            defines: self.defines,
         }
     }
 
@@ -318,9 +241,6 @@ impl CompilerBuilder {
             inputs,
             output: self.output,
             dialect: self.dialect,
-            sail_namespace: self.sail_namespace,
-            sail_module: self.sail_module,
-            defines: self.defines,
         }
     }
 
@@ -330,9 +250,6 @@ impl CompilerBuilder {
             inputs: self.inputs,
             output: Some(output),
             dialect: self.dialect,
-            sail_namespace: self.sail_namespace,
-            sail_module: self.sail_module,
-            defines: self.defines,
         }
     }
 
@@ -342,45 +259,6 @@ impl CompilerBuilder {
             inputs: self.inputs,
             output: self.output,
             dialect,
-            sail_namespace: self.sail_namespace,
-            sail_module: self.sail_module,
-            defines: self.defines,
-        }
-    }
-
-    pub fn sail_namespace(self, sail_namespace: Option<String>) -> Self {
-        Self {
-            action: self.action,
-            inputs: self.inputs,
-            output: self.output,
-            dialect: self.dialect,
-            sail_namespace,
-            sail_module: self.sail_module,
-            defines: self.defines,
-        }
-    }
-
-    pub fn sail_module(self, sail_module: Option<String>) -> Self {
-        Self {
-            action: self.action,
-            inputs: self.inputs,
-            output: self.output,
-            dialect: self.dialect,
-            sail_namespace: self.sail_namespace,
-            sail_module,
-            defines: self.defines,
-        }
-    }
-
-    pub fn defines(self, defines: Vec<String>) -> Self {
-        Self {
-            action: self.action,
-            inputs: self.inputs,
-            output: self.output,
-            dialect: self.dialect,
-            sail_namespace: self.sail_namespace,
-            sail_module: self.sail_module,
-            defines,
         }
     }
 
@@ -390,9 +268,6 @@ impl CompilerBuilder {
             inputs: self.inputs,
             output: self.output.unwrap(),
             dialect: self.dialect,
-            sail_namespace: self.sail_namespace,
-            sail_module: self.sail_module,
-            defines: self.defines,
         }
     }
 }
@@ -410,9 +285,6 @@ pub fn compiler_main(args: Option<&ArgMatches>) -> Result<(), Box<dyn std::error
     let mut compiler_builder = Compiler::builder()
         .action(args.action)
         .dialect(args.dialect.clone())
-        .sail_namespace(args.sail_namespace.clone())
-        .sail_module(args.sail_module.clone())
-        .defines(args.define.clone())
         .output(output);
 
     for input in &args.inputs {
