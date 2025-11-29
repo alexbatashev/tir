@@ -557,13 +557,123 @@ fn check_expr(
                 _ => None,
             }
         }
+        ast::Expr::BuiltinFunction(_) => Some(ast::Type::Integer),
+        ast::Expr::Call(c) => {
+            // Only builtin functions are supported as callees for now
+            match *c.callee.clone() {
+                ast::Expr::BuiltinFunction(f) => {
+                    let mut arg_tys = Vec::new();
+                    for arg in &c.arguments {
+                        arg_tys.push(check_expr(file_name, arg, params, operands, diags));
+                    }
+                    let numeric_ok = |t: &Option<ast::Type>| {
+                        matches!(t, Some(ast::Type::Integer) | Some(ast::Type::Bits(_)))
+                    };
+                    match f {
+                        ast::BuiltinFunction::Clamp => {
+                            if c.arguments.len() != 3 {
+                                diags.push((
+                                    file_name.to_string(),
+                                    Rich::custom(
+                                        c.span,
+                                        "clamp expects 3 arguments: clamp(x, lo, hi)".to_string(),
+                                    ),
+                                ));
+                            }
+                            for t in &arg_tys {
+                                if !numeric_ok(t) {
+                                    diags.push((
+                                        file_name.to_string(),
+                                        Rich::custom(
+                                            c.span,
+                                            "clamp arguments must be numeric".to_string(),
+                                        ),
+                                    ));
+                                    break;
+                                }
+                            }
+                            // Result type follows first argument when numeric, else Integer
+                            arg_tys
+                                .get(0)
+                                .and_then(|t| t.clone())
+                                .or(Some(ast::Type::Integer))
+                        }
+                        ast::BuiltinFunction::Extract => {
+                            if c.arguments.len() != 3 {
+                                diags.push((
+                                    file_name.to_string(),
+                                    Rich::custom(
+                                        c.span,
+                                        "extract expects 3 arguments: extract(x, hi, lo)"
+                                            .to_string(),
+                                    ),
+                                ));
+                            }
+                            // hi/lo should be integers
+                            if c.arguments.len() >= 3 {
+                                if !numeric_ok(&arg_tys[0]) {
+                                    diags.push((
+                                        file_name.to_string(),
+                                        Rich::custom(
+                                            c.span,
+                                            "extract first argument must be numeric".to_string(),
+                                        ),
+                                    ));
+                                }
+                            }
+                            // If hi/lo are literal ints, compute width
+                            let width = if c.arguments.len() == 3 {
+                                if let (Some(ast::Type::Integer), Some(ast::Type::Integer)) =
+                                    (&arg_tys[1], &arg_tys[2])
+                                {
+                                    let hi = literal_u16(&c.arguments[1]);
+                                    let lo = literal_u16(&c.arguments[2]);
+                                    if let (Some(hi), Some(lo)) = (hi, lo) {
+                                        if hi >= lo {
+                                            Some(ast::Type::Bits(hi - lo + 1))
+                                        } else {
+                                            None
+                                        }
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            };
+                            width.or(Some(ast::Type::Integer))
+                        }
+                    }
+                }
+                _ => {
+                    diags.push((
+                        file_name.to_string(),
+                        Rich::custom(
+                            c.span,
+                            "Only builtin functions are supported in calls".to_string(),
+                        ),
+                    ));
+                    None
+                }
+            }
+        }
         ast::Expr::Assign(_)
         | ast::Expr::Block(_)
-        | ast::Expr::Call(_)
         | ast::Expr::If(_)
         | ast::Expr::Invalid => None,
         ast::Expr::Lit(ast::Lit::Int(_)) => Some(ast::Type::Integer),
         ast::Expr::Lit(ast::Lit::Str(_)) => Some(ast::Type::String),
+    }
+}
+
+// Helper: extract u16 literal value from an expression if it's a plain integer literal
+fn literal_u16(e: &ast::Expr) -> Option<u16> {
+    if let ast::Expr::Lit(ast::Lit::Int(li)) = e {
+        li.value().parse::<u16>().ok()
+    } else {
+        None
     }
 }
 

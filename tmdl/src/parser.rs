@@ -582,6 +582,14 @@ where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
     recursive(|expr| {
+        fn builtin_from_ident(name: &str) -> Option<BuiltinFunction> {
+            match name {
+                "clamp" => Some(BuiltinFunction::Clamp),
+                "extract" => Some(BuiltinFunction::Extract),
+                _ => None,
+            }
+        }
+
         let val = any()
             .filter(|t: &Token| {
                 matches!(
@@ -590,7 +598,13 @@ where
                 )
             })
             .map_with(|tok, e| match tok {
-                Token::Identifier(i) => Ident::new((*i).to_string(), e.span()).into(),
+                Token::Identifier(i) => {
+                    if let Some(b) = builtin_from_ident(i) {
+                        Expr::BuiltinFunction(b)
+                    } else {
+                        Ident::new((*i).to_string(), e.span()).into()
+                    }
+                }
                 Token::Number(n) => LitInt::new((*n).to_string(), e.span()).into(),
                 Token::StringLit(s) => LitStr::new((*s).to_string(), e.span()).into(),
                 _ => unreachable!(),
@@ -609,69 +623,67 @@ where
                 .delimited_by(just(Token::LParen), just(Token::RParen)))
             .boxed();
 
-        let access =
-            atom.clone()
-                .foldl_with(just(Token::Dot).then(ident).repeated(), |a, (_, b), e| {
-                    Expr::Field(Field {
-                        base: Box::new(a),
-                        member: b,
-                        span: e.span(),
-                    })
-                });
-
-        let slice = access
-            .clone()
-            .or(atom.clone())
-            .then(
-                num.clone()
-                    .then_ignore(just(Token::Range))
-                    .then(num.clone())
-                    .delimited_by(just(Token::LBracket), just(Token::RBracket)),
-            )
-            .map_with(|(base, (start, end)), e| {
-                Expr::Slice(Slice {
-                    base: Box::new(base),
-                    start,
-                    end,
-                    span: e.span(),
-                })
-            })
-            .boxed();
-
-        let index = access
-            .clone()
-            .or(atom.clone())
-            .then(num.delimited_by(just(Token::LBracket), just(Token::RBracket)))
-            .map_with(|(base, index), e| {
-                Expr::IndexAccess(IndexAccess {
-                    base: Box::new(base),
-                    index,
-                    span: e.span(),
-                })
-            })
-            .boxed();
-
         let items = expr
             .clone()
             .separated_by(just(Token::Comma))
             .allow_trailing()
             .collect::<Vec<_>>();
 
-        let call = atom.clone().foldl_with(
+        // Postfix chain: field access, slice, index, then call
+        #[derive(Clone)]
+        enum PostfixOp {
+            Field(String, Span),
+            Slice(u16, u16, Span),
+            Index(u16, Span),
+            Call(Vec<Expr>, Span),
+        }
+
+        let postfix_op = choice((
+            // field: .ident
+            just(Token::Dot)
+                .then(ident.clone())
+                .map_with(|(_, b), e| PostfixOp::Field(b, e.span())),
+            // slice: [start..end]
+            num.clone()
+                .then_ignore(just(Token::Range))
+                .then(num.clone())
+                .delimited_by(just(Token::LBracket), just(Token::RBracket))
+                .map_with(|(start, end), e| PostfixOp::Slice(start, end, e.span())),
+            // index: [idx]
+            num.clone()
+                .delimited_by(just(Token::LBracket), just(Token::RBracket))
+                .map_with(|index, e| PostfixOp::Index(index, e.span())),
+            // call: (args)
             items
                 .delimited_by(just(Token::LParen), just(Token::RParen))
-                .repeated(),
-            |base, arguments, e| {
-                let sp = e.span();
-                Expr::Call(Call {
-                    base: Box::new(base),
-                    arguments,
-                    span: sp,
-                })
-            },
-        );
+                .map_with(|arguments, e| PostfixOp::Call(arguments, e.span())),
+        ));
 
-        let basic = slice.or(index).or(access).or(call).or(atom);
+        let basic = atom
+            .clone()
+            .foldl_with(postfix_op.repeated(), |base, op, _e| match op {
+                PostfixOp::Field(member, span) => Expr::Field(Field {
+                    base: Box::new(base),
+                    member,
+                    span,
+                }),
+                PostfixOp::Slice(start, end, span) => Expr::Slice(Slice {
+                    base: Box::new(base),
+                    start,
+                    end,
+                    span,
+                }),
+                PostfixOp::Index(index, span) => Expr::IndexAccess(IndexAccess {
+                    base: Box::new(base),
+                    index,
+                    span,
+                }),
+                PostfixOp::Call(arguments, span) => Expr::Call(Call {
+                    callee: Box::new(base),
+                    arguments,
+                    span,
+                }),
+            });
 
         let op = just(Token::Asterisk)
             .to(BinOp::Mul)
@@ -719,7 +731,7 @@ where
                 })
             });
 
-        arith
+        arith.labelled("inline expression")
     })
 }
 
