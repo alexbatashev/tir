@@ -1,3 +1,6 @@
+pub mod utils;
+mod verify_riscv;
+
 use std::{env, path::PathBuf};
 use xshell::{cmd, Shell};
 
@@ -13,6 +16,13 @@ fn main() -> anyhow::Result<()> {
         }
         Some("check-only") => check(&sh)?,
         Some("docs") => build_docs(&sh)?,
+        Some("verify") => {
+            let isa = env::args().nth(2);
+            match isa.as_deref() {
+                Some(isa) => verify_isa(isa, &sh)?,
+                _ => print_help(),
+            }
+        }
         _ => print_help(),
     }
     Ok(())
@@ -55,6 +65,16 @@ fn build_docs(sh: &Shell) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn verify_isa(isa: &str, sh: &Shell) -> anyhow::Result<()> {
+    match isa {
+        "riscv" => verify_riscv::verify_riscv(sh),
+        _ => {
+            print_help();
+            Ok(())
+        }
+    }
+}
+
 fn print_help() {
     eprintln!(
         "Tasks:
@@ -62,6 +82,7 @@ fn print_help() {
 build            builds TIR project
 check            builds project and runs check tests
 check-only       only runs check tests without building the project
+verify <isa>     run formal ISA verification. Available ISAs: riscv
 docs             builds project documentation
 help             shows this message
 "

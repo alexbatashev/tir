@@ -9,6 +9,7 @@ use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, ValueEnum};
 
 use crate::Span;
 use crate::error::TMDLError;
+use crate::leangen::generate_lean;
 use crate::lexer::lex;
 use crate::parser::parse;
 use crate::rocqgen::generate_rocq;
@@ -42,11 +43,21 @@ pub enum Action {
     EmitAst,
     EmitRust,
     EmitRocq,
+    EmitRocqSailProof,
+    EmitLean,
+    EmitIsabelle,
 }
 
 impl Action {
     fn needs_whole_program(&self) -> bool {
-        matches!(self, Action::EmitRust | Action::EmitRocq)
+        matches!(
+            self,
+            Action::EmitRust
+                | Action::EmitRocq
+                | Action::EmitRocqSailProof
+                | Action::EmitLean
+                | Action::EmitIsabelle
+        )
     }
 }
 
@@ -146,7 +157,8 @@ impl Compiler {
         let sema_diags = sema_analyze(parsed_files.clone());
         if !sema_diags.is_empty() {
             use std::collections::BTreeMap;
-            let mut by_file: BTreeMap<String, Vec<chumsky::error::Rich<'static, String, Span>>> = BTreeMap::new();
+            let mut by_file: BTreeMap<String, Vec<chumsky::error::Rich<'static, String, Span>>> =
+                BTreeMap::new();
             for (fname, d) in sema_diags {
                 by_file.entry(fname).or_default().push(d);
             }
@@ -158,13 +170,21 @@ impl Compiler {
             return Ok(());
         }
 
-        let output: Box<dyn Write> = self.create_output_writer()?;
-
         match &self.action {
             Action::EmitRust => {
+                let output: Box<dyn Write> = self.create_output_writer()?;
                 generate_rust(self.dialect.as_ref().unwrap(), parsed_files, output)?
             }
-            Action::EmitRocq => generate_rocq(parsed_files, output)?,
+            Action::EmitRocq => {
+                // Support stdout or explicit single-file destination.
+                let writer: Box<dyn Write> = self.create_output_writer()?;
+                generate_rocq(self.dialect.as_ref().unwrap(), parsed_files, writer)?;
+            }
+            Action::EmitLean => {
+                // Support stdout or explicit single-file destination.
+                let writer: Box<dyn Write> = self.create_output_writer()?;
+                generate_lean(self.dialect.as_ref().unwrap(), parsed_files, writer)?;
+            }
             _ => unreachable!("Only complex actions should use this path"),
         }
 

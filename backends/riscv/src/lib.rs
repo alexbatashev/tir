@@ -10,7 +10,7 @@ dialect! {
             AddOp,
             SubOp,
             ShiftLeftLogicalOp,
-            ShiftRightLogicalOp,
+            // ShiftRightLogicalOp,
             XorOp,
             AndOp,
             OrOp

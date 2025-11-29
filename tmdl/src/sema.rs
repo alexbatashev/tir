@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use chumsky::error::Rich;
 
-use crate::{ast, Span};
+use crate::{Span, ast};
 
 type Diag = Rich<'static, String, Span>;
 
@@ -56,10 +56,16 @@ pub fn analyze(files: Vec<ast::File>) -> Vec<(String, Diag)> {
     // Detect cyclic inheritance among templates
     {
         #[derive(Copy, Clone, PartialEq, Eq)]
-        enum Mark { Unvisited, Visiting, Done }
+        enum Mark {
+            Unvisited,
+            Visiting,
+            Done,
+        }
 
         let mut mark: HashMap<String, Mark> = HashMap::new();
-        for k in templates.keys() { mark.insert(k.clone(), Mark::Unvisited); }
+        for k in templates.keys() {
+            mark.insert(k.clone(), Mark::Unvisited);
+        }
         let mut stack: Vec<String> = Vec::new();
 
         fn dfs(
@@ -83,8 +89,17 @@ pub fn analyze(files: Vec<ast::File>) -> Vec<(String, Diag)> {
                                 let mut cycle = stack[pos..].to_vec();
                                 cycle.push(parent.clone());
                                 let path = cycle.join(" -> ");
-                                let file = owner.get(name).cloned().unwrap_or_else(|| "<unknown>".to_string());
-                                diags.push((file, Rich::custom(*sp, format!("Cyclic template inheritance: {}", path))));
+                                let file = owner
+                                    .get(name)
+                                    .cloned()
+                                    .unwrap_or_else(|| "<unknown>".to_string());
+                                diags.push((
+                                    file,
+                                    Rich::custom(
+                                        *sp,
+                                        format!("Cyclic template inheritance: {}", path),
+                                    ),
+                                ));
                             }
                         }
                     }
@@ -96,7 +111,14 @@ pub fn analyze(files: Vec<ast::File>) -> Vec<(String, Diag)> {
 
         for name in templates.keys().cloned().collect::<Vec<_>>() {
             if mark.get(&name) == Some(&Mark::Unvisited) {
-                dfs(&name, &templates, &template_owner, &mut mark, &mut stack, &mut diags);
+                dfs(
+                    &name,
+                    &templates,
+                    &template_owner,
+                    &mut mark,
+                    &mut stack,
+                    &mut diags,
+                );
             }
         }
     }
@@ -212,10 +234,16 @@ pub fn analyze(files: Vec<ast::File>) -> Vec<(String, Diag)> {
                     // requires -> must refer to existing isas
                     if let Some(req) = &isa.requires {
                         match req {
-                            ast::IsaRequirement::Single(n) =>
-                                check_isas(current_file, &vec![n.clone()], isa.span, &isas, &mut diags),
-                            ast::IsaRequirement::Any(v) | ast::IsaRequirement::All(v) =>
-                                check_isas(current_file, v, isa.span, &isas, &mut diags),
+                            ast::IsaRequirement::Single(n) => check_isas(
+                                current_file,
+                                &vec![n.clone()],
+                                isa.span,
+                                &isas,
+                                &mut diags,
+                            ),
+                            ast::IsaRequirement::Any(v) | ast::IsaRequirement::All(v) => {
+                                check_isas(current_file, v, isa.span, &isas, &mut diags)
+                            }
                         }
                     }
                 }
@@ -306,10 +334,19 @@ pub fn analyze(files: Vec<ast::File>) -> Vec<(String, Diag)> {
                                 ));
                             }
                             // Type-check assignment compatibility when possible
-                            let val_ty = check_expr(current_file, &a.value, &HashMap::new(), &ops, &mut diags);
+                            let val_ty = check_expr(
+                                current_file,
+                                &a.value,
+                                &HashMap::new(),
+                                &ops,
+                                &mut diags,
+                            );
                             if let (Some(dst_ty), Some(src_ty)) = (ops.get(&a.dest), val_ty) {
                                 if let Err(msg) = assignment_compatible(dst_ty, &src_ty) {
-                                    diags.push((current_file.to_string(), Rich::custom(a.span, msg)));
+                                    diags.push((
+                                        current_file.to_string(),
+                                        Rich::custom(a.span, msg),
+                                    ));
                                 }
                             }
                         }
@@ -359,10 +396,7 @@ fn check_expr(
                             file_name.to_string(),
                             Rich::custom(
                                 f.span,
-                                format!(
-                                    "Unknown member 'self.{}' (no such parameter)",
-                                    f.member
-                                ),
+                                format!("Unknown member 'self.{}' (no such parameter)", f.member),
                             ),
                         ));
                     }
@@ -378,10 +412,7 @@ fn check_expr(
             } else {
                 diags.push((
                     file_name.to_string(),
-                    Rich::custom(
-                        f.span,
-                        "Unsupported field access expression".to_string(),
-                    ),
+                    Rich::custom(f.span, "Unsupported field access expression".to_string()),
                 ));
             }
             None
@@ -404,7 +435,11 @@ fn check_expr(
                                 ),
                             ));
                         }
-                        let width = if end_ex > s.start { end_ex - s.start } else { 0 };
+                        let width = if end_ex > s.start {
+                            end_ex - s.start
+                        } else {
+                            0
+                        };
                         Some(ast::Type::Bits(width))
                     }
                     _ => {
@@ -431,10 +466,7 @@ fn check_expr(
                                 file_name.to_string(),
                                 Rich::custom(
                                     s.span,
-                                    format!(
-                                        "Index [{}] out of bounds for bits<{}>",
-                                        s.index, w
-                                    ),
+                                    format!("Index [{}] out of bounds for bits<{}>", s.index, w),
                                 ),
                             ));
                         }
@@ -476,32 +508,48 @@ fn check_expr(
                     use ast::BinOp::*;
                     use ast::Type::*;
                     match b.op {
-                        Add | Sub | Mul | Div => {
-                            match (l, r) {
-                                (Integer, Integer) => Some(Integer),
-                                (Bits(w1), Bits(w2)) => {
-                                    if w1 == w2 { Some(Bits(w1)) } else { fail(format!("Mismatched bit widths: bits<{}> {} bits<{}>", w1, op_name(b.op.clone()), w2)) }
+                        Add | Sub | Mul | Div => match (l, r) {
+                            (Integer, Integer) => Some(Integer),
+                            (Bits(w1), Bits(w2)) => {
+                                if w1 == w2 {
+                                    Some(Bits(w1))
+                                } else {
+                                    fail(format!(
+                                        "Mismatched bit widths: bits<{}> {} bits<{}>",
+                                        w1,
+                                        op_name(b.op.clone()),
+                                        w2
+                                    ))
                                 }
-                                (Bits(w), Integer) | (Integer, Bits(w)) => Some(Bits(w)),
-                                _ => fail("Arithmetic expects numeric operands".to_string()),
                             }
-                        }
-                        BitwiseAnd | BitwiseOr | BitwiseXor => {
-                            match (l, r) {
-                                (Integer, Integer) => Some(Integer),
-                                (Bits(w1), Bits(w2)) => {
-                                    if w1 == w2 { Some(Bits(w1)) } else { fail(format!("Mismatched bit widths for bitwise op: bits<{}> {} bits<{}>", w1, op_name(b.op.clone()), w2)) }
+                            (Bits(w), Integer) | (Integer, Bits(w)) => Some(Bits(w)),
+                            _ => fail("Arithmetic expects numeric operands".to_string()),
+                        },
+                        BitwiseAnd | BitwiseOr | BitwiseXor => match (l, r) {
+                            (Integer, Integer) => Some(Integer),
+                            (Bits(w1), Bits(w2)) => {
+                                if w1 == w2 {
+                                    Some(Bits(w1))
+                                } else {
+                                    fail(format!(
+                                        "Mismatched bit widths for bitwise op: bits<{}> {} bits<{}>",
+                                        w1,
+                                        op_name(b.op.clone()),
+                                        w2
+                                    ))
                                 }
-                                (Bits(w), Integer) | (Integer, Bits(w)) => Some(Bits(w)),
-                                _ => fail("Bitwise expects integer/bits operands".to_string()),
                             }
-                        }
+                            (Bits(w), Integer) | (Integer, Bits(w)) => Some(Bits(w)),
+                            _ => fail("Bitwise expects integer/bits operands".to_string()),
+                        },
                         ShiftLeftLogical | ShiftRightLogical | ShiftRightArithmetic => {
                             match (l, r) {
                                 (Bits(w), Integer) | (Bits(w), Bits(_)) => Some(Bits(w)),
                                 (Integer, Integer) => Some(Integer),
                                 (Integer, Bits(_)) => Some(Integer),
-                                _ => fail("Shift expects lhs numeric and rhs integer/bits".to_string()),
+                                _ => fail(
+                                    "Shift expects lhs numeric and rhs integer/bits".to_string(),
+                                ),
                             }
                         }
                     }
@@ -541,7 +589,11 @@ fn assignment_compatible(dst: &ast::Type, src: &ast::Type) -> Result<(), String>
         (String, String) => Ok(()),
         (Integer, Integer) => Ok(()),
         (Bits(wd), Bits(ws)) => {
-            if wd == ws { Ok(()) } else { Err(format!("Cannot assign bits<{}> to bits<{}>", ws, wd)) }
+            if wd == ws {
+                Ok(())
+            } else {
+                Err(format!("Cannot assign bits<{}> to bits<{}>", ws, wd))
+            }
         }
         (Bits(_), Integer) => Ok(()),
         (Struct(_), Integer) | (Struct(_), Bits(_)) => Ok(()), // allow writing numeric into a register

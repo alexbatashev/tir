@@ -1,11 +1,13 @@
 mod ast;
 mod compiler;
 mod error;
+mod leangen;
 mod lexer;
 mod parser;
-mod sema;
 mod rocqgen;
 mod rustgen;
+mod sema;
+mod utils;
 
 use chumsky::prelude::*;
 

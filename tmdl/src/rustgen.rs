@@ -5,6 +5,7 @@ use quote::{format_ident, quote};
 
 use crate::ast;
 use crate::error::TMDLError;
+use crate::utils::resolve_operands_for_instruction;
 
 pub fn generate_rust(
     dialect: &str,
@@ -156,7 +157,9 @@ fn emit_instructions<'ast, 'cache: 'ast>(
         if let Some(template) = resolve_asm_template_for_instruction(inst, item_cache) {
             // Compile template into a sequence of parse actions
             let actions = compile_asm_template(&template);
-            let ops = resolve_operands_for_instruction(inst, item_cache);
+            let ops = resolve_operands_for_instruction(inst, item_cache)
+                .into_iter()
+                .collect::<HashMap<_, _>>();
 
             // Generate parsing code for each action
             let mut parse_steps: Vec<proc_macro2::TokenStream> = Vec::new();
@@ -403,37 +406,6 @@ fn compile_asm_template(template: &str) -> Vec<AsmAction> {
         }
     }
     actions
-}
-
-fn resolve_operands_for_instruction<'a>(
-    inst: &'a ast::Instruction,
-    item_cache: &HashMap<String, &'a ast::Item>,
-) -> HashMap<String, ast::Type> {
-    let mut result = HashMap::new();
-
-    // collect from root-most template first
-    fn collect_from_template<'a>(
-        name: &str,
-        cache: &HashMap<String, &'a ast::Item>,
-        acc: &mut HashMap<String, ast::Type>,
-    ) {
-        if let Some(ast::Item::Template(t)) = cache.get(name) {
-            if let Some(parent) = &t.parent_template {
-                collect_from_template(parent, cache, acc);
-            }
-            for (k, v) in &t.operands {
-                acc.insert(k.clone(), v.clone());
-            }
-        }
-    }
-
-    if let Some(p) = &inst.parent_template {
-        collect_from_template(p, item_cache, &mut result);
-    }
-    for (k, v) in &inst.operands {
-        result.insert(k.clone(), v.clone());
-    }
-    result
 }
 
 fn emit_register_parsers_and_printers(

@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use crate::Span;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum RegisterTrait {
@@ -64,7 +64,7 @@ pub struct Template {
     pub for_isas: Vec<String>,
     pub parent_template: Option<String>,
     pub params: HashMap<String, (Type, Option<Expr>)>,
-    pub operands: HashMap<String, Type>,
+    pub operands: Vec<(String, Type)>,
     pub encoding: Vec<EncodingArm>,
     pub asm: Option<Expr>,
     pub span: Span,
@@ -76,7 +76,7 @@ pub struct Instruction {
     pub for_isas: Vec<String>,
     pub parent_template: Option<String>,
     pub params: HashMap<String, (Type, Option<Expr>)>,
-    pub operands: HashMap<String, Type>,
+    pub operands: Vec<(String, Type)>,
     pub encoding: Vec<EncodingArm>,
     pub asm: Option<Expr>,
     pub behavior: Expr,
@@ -288,6 +288,20 @@ impl Item {
             Item::Instruction(inst) => &inst.name,
             Item::RegisterClass(rc) => &rc.name,
             Item::Template(tmpl) => &tmpl.name,
+        }
+    }
+
+    pub fn as_register_class(&self) -> Option<&RegisterClass> {
+        match self {
+            Item::RegisterClass(rc) => Some(rc),
+            _ => None,
+        }
+    }
+
+    pub fn as_instruction(&self) -> Option<&Instruction> {
+        match self {
+            Item::Instruction(i) => Some(i),
+            _ => None,
         }
     }
 }

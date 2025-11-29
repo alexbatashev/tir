@@ -20,7 +20,9 @@ pub fn parse<'src>(
 }
 
 /// Parse single translation unit
-fn file<'src, I>(file_name: &str) -> impl Parser<'src, I, File, extra::Err<Rich<'src, Token<'src>, Span>>>
+fn file<'src, I>(
+    file_name: &str,
+) -> impl Parser<'src, I, File, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
@@ -34,7 +36,10 @@ where
     .repeated()
     .at_least(0)
     .collect()
-    .map(move |items| File { items, file_name: fname.clone() })
+    .map(move |items| File {
+        items,
+        file_name: fname.clone(),
+    })
 }
 
 /// Parse isa definition.
@@ -297,7 +302,7 @@ where
 
 enum TemplateOrInstBody {
     Param((String, (ast::Type, Option<ast::Expr>))),
-    Operands(HashMap<String, Type>),
+    Operands(Vec<(String, Type)>),
     Encoding(Vec<EncodingArm>),
     Asm(Expr),
     Behavior(Expr),
@@ -382,7 +387,7 @@ where
 }
 
 fn instruction_operands<'src, I>()
--> impl Parser<'src, I, HashMap<String, ast::Type>, extra::Err<Rich<'src, Token<'src>, Span>>>
+-> impl Parser<'src, I, Vec<(String, ast::Type)>, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
@@ -578,7 +583,12 @@ where
 {
     recursive(|expr| {
         let val = any()
-            .filter(|t: &Token| matches!(t, Token::Identifier(_) | Token::Number(_) | Token::StringLit(_)))
+            .filter(|t: &Token| {
+                matches!(
+                    t,
+                    Token::Identifier(_) | Token::Number(_) | Token::StringLit(_)
+                )
+            })
             .map_with(|tok, e| match tok {
                 Token::Identifier(i) => Ident::new((*i).to_string(), e.span()).into(),
                 Token::Number(n) => LitInt::new((*n).to_string(), e.span()).into(),
@@ -599,12 +609,15 @@ where
                 .delimited_by(just(Token::LParen), just(Token::RParen)))
             .boxed();
 
-        let access = atom.clone().foldl_with(
-            just(Token::Dot).then(ident).repeated(),
-            |a, (_, b), e| {
-                Expr::Field(Field { base: Box::new(a), member: b, span: e.span() })
-            },
-        );
+        let access =
+            atom.clone()
+                .foldl_with(just(Token::Dot).then(ident).repeated(), |a, (_, b), e| {
+                    Expr::Field(Field {
+                        base: Box::new(a),
+                        member: b,
+                        span: e.span(),
+                    })
+                });
 
         let slice = access
             .clone()
@@ -616,7 +629,12 @@ where
                     .delimited_by(just(Token::LBracket), just(Token::RBracket)),
             )
             .map_with(|(base, (start, end)), e| {
-                Expr::Slice(Slice { base: Box::new(base), start, end, span: e.span() })
+                Expr::Slice(Slice {
+                    base: Box::new(base),
+                    start,
+                    end,
+                    span: e.span(),
+                })
             })
             .boxed();
 
@@ -625,7 +643,11 @@ where
             .or(atom.clone())
             .then(num.delimited_by(just(Token::LBracket), just(Token::RBracket)))
             .map_with(|(base, index), e| {
-                Expr::IndexAccess(IndexAccess { base: Box::new(base), index, span: e.span() })
+                Expr::IndexAccess(IndexAccess {
+                    base: Box::new(base),
+                    index,
+                    span: e.span(),
+                })
             })
             .boxed();
 
@@ -641,7 +663,11 @@ where
                 .repeated(),
             |base, arguments, e| {
                 let sp = e.span();
-                Expr::Call(Call { base: Box::new(base), arguments, span: sp })
+                Expr::Call(Call {
+                    base: Box::new(base),
+                    arguments,
+                    span: sp,
+                })
             },
         );
 
@@ -654,7 +680,12 @@ where
             .clone()
             .foldl_with(op.then(expr).repeated(), |a, (op, b), e| {
                 let sp = e.span();
-                Expr::Binary(Binary { lhs: Box::new(a), rhs: Box::new(b), op, span: sp })
+                Expr::Binary(Binary {
+                    lhs: Box::new(a),
+                    rhs: Box::new(b),
+                    op,
+                    span: sp,
+                })
             });
 
         let op = choice((
@@ -680,7 +711,12 @@ where
             .clone()
             .foldl_with(op.then(product).repeated(), |a, (op, b), e| {
                 let sp = e.span();
-                Expr::Binary(Binary { lhs: Box::new(a), rhs: Box::new(b), op, span: sp })
+                Expr::Binary(Binary {
+                    lhs: Box::new(a),
+                    rhs: Box::new(b),
+                    op,
+                    span: sp,
+                })
             });
 
         arith
@@ -699,7 +735,11 @@ where
             .then_ignore(just(Token::Equals))
             .then(expr.clone().or(inline_expr()))
             .map_with(|(dest, value), e| {
-                Expr::Assign(Assign { dest, value: Box::new(value), span: e.span() })
+                Expr::Assign(Assign {
+                    dest,
+                    value: Box::new(value),
+                    span: e.span(),
+                })
             })
             .labelled("assignment");
         let stmt = expr.clone().or(assign).or(inline_expr());
@@ -710,7 +750,12 @@ where
             .then(just(Token::Semicolon).or_not())
             .delimited_by(just(Token::LBrace), just(Token::RBrace))
             .map_with(|(stmts, sc), e| {
-                Block { stmts, last_expr_return: sc.is_none(), span: e.span() }.into()
+                Block {
+                    stmts,
+                    last_expr_return: sc.is_none(),
+                    span: e.span(),
+                }
+                .into()
             })
             .boxed()
             .recover_with(via_parser(nested_delimiters(
@@ -733,7 +778,12 @@ where
                         .or_not(),
                 )
                 .map_with(|((cond, a), b), e| {
-                    Expr::If(If { cond: Box::new(cond), then: Box::new(a), else_: b.map(Box::new), span: e.span() })
+                    Expr::If(If {
+                        cond: Box::new(cond),
+                        then: Box::new(a),
+                        else_: b.map(Box::new),
+                        span: e.span(),
+                    })
                 })
                 .boxed()
         });
