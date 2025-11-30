@@ -346,10 +346,7 @@ fn infer_expr(
             }
             diags.push((
                 file.to_string(),
-                Rich::custom(
-                    f.span,
-                    format!("[base {}] Unknown field access", base_isa),
-                ),
+                Rich::custom(f.span, format!("[base {}] Unknown field access", base_isa)),
             ));
             let ty = ctx.fresh_type_var();
             cache.insert(file, f.span, ty.clone());
@@ -357,15 +354,7 @@ fn infer_expr(
         }
         ast::Expr::Slice(slc) => {
             let base = infer_expr(
-                file,
-                &slc.base,
-                base_isa,
-                params,
-                operands,
-                consts,
-                ctx,
-                cache,
-                diags,
+                file, &slc.base, base_isa, params, operands, consts, ctx, cache, diags,
             );
             match base {
                 Type::Bits(_w) => {
@@ -379,13 +368,16 @@ fn infer_expr(
                     ty
                 }
                 other => {
-                        diags.push((
-                            file.to_string(),
-                            Rich::custom(
-                                slc.span,
-                                format!("[base {}] Cannot slice type {:?}; bits<N> required", base_isa, other),
+                    diags.push((
+                        file.to_string(),
+                        Rich::custom(
+                            slc.span,
+                            format!(
+                                "[base {}] Cannot slice type {:?}; bits<N> required",
+                                base_isa, other
                             ),
-                        ));
+                        ),
+                    ));
                     let ty = ctx.fresh_type_var();
                     cache.insert(file, slc.span, ty.clone());
                     ty
@@ -394,15 +386,7 @@ fn infer_expr(
         }
         ast::Expr::IndexAccess(idx) => {
             let base = infer_expr(
-                file,
-                &idx.base,
-                base_isa,
-                params,
-                operands,
-                consts,
-                ctx,
-                cache,
-                diags,
+                file, &idx.base, base_isa, params, operands, consts, ctx, cache, diags,
             );
             match base {
                 Type::Bits(_) => {
@@ -411,13 +395,16 @@ fn infer_expr(
                     ty
                 }
                 other => {
-                        diags.push((
-                            file.to_string(),
-                            Rich::custom(
-                                idx.span,
-                                format!("[base {}] Indexing not supported on type {:?}", base_isa, other),
+                    diags.push((
+                        file.to_string(),
+                        Rich::custom(
+                            idx.span,
+                            format!(
+                                "[base {}] Indexing not supported on type {:?}",
+                                base_isa, other
                             ),
-                        ));
+                        ),
+                    ));
                     let ty = ctx.fresh_type_var();
                     cache.insert(file, idx.span, ty.clone());
                     ty
@@ -436,31 +423,33 @@ fn infer_expr(
             let res = match b.op {
                 Add | Sub | Div | BitwiseAnd | BitwiseOr | BitwiseXor => {
                     match (lt.clone(), rt.clone()) {
-                        (Type::Bits(a), Type::Bits(bw)) => match unify_size(a, bw.clone()) {
-                            Ok(_) => Type::Bits(bw),
-                            Err(_) => {
-                                diags.push((
+                        (Type::Bits(a), Type::Bits(bw)) => {
+                            match unify_size(a, bw.clone()) {
+                                Ok(_) => Type::Bits(bw),
+                                Err(_) => {
+                                    diags.push((
                                     file.to_string(),
                                     Rich::custom(
                                         b.span,
                                         format!("[base {}] Bit widths must match for this operation", base_isa),
                                     ),
                                 ));
-                                ctx.fresh_type_var()
+                                    ctx.fresh_type_var()
+                                }
                             }
-                        },
+                        }
                         (Type::Integer, Type::Integer) => Type::Integer,
                         _ => {
                             diags.push((
                                 file.to_string(),
-                                    Rich::custom(
-                                        b.span,
-                                        format!(
-                                            "[base {}] Operands must both be bits<N> or Integer",
-                                            base_isa
-                                        ),
+                                Rich::custom(
+                                    b.span,
+                                    format!(
+                                        "[base {}] Operands must both be bits<N> or Integer",
+                                        base_isa
                                     ),
-                                ));
+                                ),
+                            ));
                             ctx.fresh_type_var()
                         }
                     }
@@ -545,15 +534,15 @@ fn infer_expr(
                 if !matches!(hi_ty, Type::Integer | Type::Bits(_))
                     || !matches!(lo_ty, Type::Integer | Type::Bits(_))
                 {
-                        ok = false;
-                        diags.push((
-                            file.to_string(),
-                            Rich::custom(
-                                c.span,
-                                format!("[base {}] hi/lo must be integers", base_isa),
-                            ),
-                        ));
-                    }
+                    ok = false;
+                    diags.push((
+                        file.to_string(),
+                        Rich::custom(
+                            c.span,
+                            format!("[base {}] hi/lo must be integers", base_isa),
+                        ),
+                    ));
+                }
 
                 let res_ty = if ok {
                     let hi = eval_int(&c.arguments[1], consts);
@@ -625,18 +614,18 @@ fn infer_expr(
 
                 let mut ok = true;
                 let res_ty = if let Type::Bits(width) = val_ty.clone() {
-                        if !matches!(lo_ty, Type::Integer | Type::Bits(_))
-                            || !matches!(hi_ty, Type::Integer | Type::Bits(_))
-                        {
-                            ok = false;
-                            diags.push((
-                                file.to_string(),
-                                Rich::custom(
-                                    c.span,
-                                    format!("[base {}] clamp bounds must be integers", base_isa),
-                                ),
-                            ));
-                        }
+                    if !matches!(lo_ty, Type::Integer | Type::Bits(_))
+                        || !matches!(hi_ty, Type::Integer | Type::Bits(_))
+                    {
+                        ok = false;
+                        diags.push((
+                            file.to_string(),
+                            Rich::custom(
+                                c.span,
+                                format!("[base {}] clamp bounds must be integers", base_isa),
+                            ),
+                        ));
+                    }
                     Type::Bits(width)
                 } else {
                     ok = false;
@@ -663,15 +652,7 @@ fn infer_expr(
         },
         ast::Expr::Assign(a) => {
             let rhs_ty = infer_expr(
-                file,
-                &a.value,
-                base_isa,
-                params,
-                operands,
-                consts,
-                ctx,
-                cache,
-                diags,
+                file, &a.value, base_isa, params, operands, consts, ctx, cache, diags,
             );
             if let Some(dst_ty) = operands
                 .get(&a.dest)
@@ -681,17 +662,17 @@ fn infer_expr(
                 match unify(dst.clone(), rhs_ty.clone()) {
                     Ok(_) => {}
                     Err(_) => {
-                                diags.push((
-                                    file.to_string(),
-                                    Rich::custom(
-                                        a.span,
-                                        format!(
-                                            "[base {}] Type mismatch in assignment: {:?} := {:?}",
-                                            base_isa, dst, rhs_ty
-                                        ),
-                                    ),
-                                ));
-                            }
+                        diags.push((
+                            file.to_string(),
+                            Rich::custom(
+                                a.span,
+                                format!(
+                                    "[base {}] Type mismatch in assignment: {:?} := {:?}",
+                                    base_isa, dst, rhs_ty
+                                ),
+                            ),
+                        ));
+                    }
                 }
             } else {
                 diags.push((
@@ -725,10 +706,11 @@ fn infer_expr(
             let then_ty = infer_expr(
                 file, &iff.then, base_isa, params, operands, consts, ctx, cache, diags,
             );
-            let else_ty = iff
-                .else_
-                .as_ref()
-                .map(|e| infer_expr(file, e, base_isa, params, operands, consts, ctx, cache, diags));
+            let else_ty = iff.else_.as_ref().map(|e| {
+                infer_expr(
+                    file, e, base_isa, params, operands, consts, ctx, cache, diags,
+                )
+            });
             let res_ty = else_ty.unwrap_or(then_ty.clone());
             cache.insert(file, iff.span, res_ty.clone());
             res_ty
