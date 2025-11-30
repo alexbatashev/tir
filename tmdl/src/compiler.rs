@@ -93,30 +93,71 @@ impl Compiler {
     fn compile_per_file(&self) -> Result<(), TMDLError> {
         let mut output: Box<dyn Write> = self.create_output_writer()?;
 
+        // EmitAst still needs whole-program type checking when multiple files are given.
+        if let Action::EmitAst = &self.action {
+            let mut parsed_files = Vec::new();
+            for input in &self.inputs {
+                let source = std::fs::read_to_string(input)?;
+
+                let (tokens, errors) = lex(&source);
+                if !errors.is_empty() {
+                    print_cheap_errors(input, &source, errors);
+                    return Ok(());
+                }
+
+                let (file, errors) = parse(&source, &tokens, input);
+                if !errors.is_empty() {
+                    print_errors(input, &source, errors);
+                    return Ok(());
+                }
+                parsed_files.push(file.unwrap());
+            }
+
+            let sema_diags = sema_analyze(parsed_files.clone());
+            if !sema_diags.is_empty() {
+                use std::collections::BTreeMap;
+                let mut by_file: BTreeMap<String, Vec<chumsky::error::Rich<'static, String, Span>>> =
+                    BTreeMap::new();
+                for (fname, d) in sema_diags {
+                    by_file.entry(fname).or_default().push(d);
+                }
+                for (fname, errors) in by_file {
+                    if let Ok(source) = std::fs::read_to_string(&fname) {
+                        print_errors(&fname, &source, errors);
+                    }
+                }
+                return Ok(());
+            }
+
+            let (_cache, tc_diags) = crate::type_check(&parsed_files);
+            if !tc_diags.is_empty() {
+                use std::collections::BTreeMap;
+                let mut by_file: BTreeMap<String, Vec<chumsky::error::Rich<'static, String, Span>>> =
+                    BTreeMap::new();
+                for (fname, d) in tc_diags {
+                    by_file.entry(fname).or_default().push(d);
+                }
+                for (fname, errors) in by_file {
+                    if let Ok(source) = std::fs::read_to_string(&fname) {
+                        print_errors(&fname, &source, errors);
+                    }
+                }
+                return Ok(());
+            }
+
+            for f in parsed_files {
+                writeln!(output, "{:#?}", f)?;
+            }
+            return Ok(());
+        }
+
         for input in &self.inputs {
             let source = std::fs::read_to_string(input)?;
 
             match &self.action {
                 Action::EmitTokens => {
-                    // TODO print errors if any
                     let (tokens, _errors) = lex(&source);
                     writeln!(output, "{:#?}", tokens)?;
-                }
-                Action::EmitAst => {
-                    let (tokens, errors) = lex(&source);
-
-                    if !errors.is_empty() {
-                        // print_errors(input, &source, errors);
-                        return Ok(());
-                    }
-
-                    let (file, errors) = parse(&source, &tokens, input);
-                    if !errors.is_empty() {
-                        print_errors(input, &source, errors);
-                        return Ok(());
-                    }
-
-                    writeln!(output, "{:#?}", file)?;
                 }
                 _ => unreachable!("Non-simple actions should use compile_with_semantic_analysis"),
             }
@@ -160,6 +201,22 @@ impl Compiler {
             let mut by_file: BTreeMap<String, Vec<chumsky::error::Rich<'static, String, Span>>> =
                 BTreeMap::new();
             for (fname, d) in sema_diags {
+                by_file.entry(fname).or_default().push(d);
+            }
+            for (fname, errors) in by_file {
+                if let Ok(source) = std::fs::read_to_string(&fname) {
+                    print_errors(&fname, &source, errors);
+                }
+            }
+            return Ok(());
+        }
+
+        let (_cache, tc_diags) = crate::type_check(&parsed_files);
+        if !tc_diags.is_empty() {
+            use std::collections::BTreeMap;
+            let mut by_file: BTreeMap<String, Vec<chumsky::error::Rich<'static, String, Span>>> =
+                BTreeMap::new();
+            for (fname, d) in tc_diags {
                 by_file.entry(fname).or_default().push(d);
             }
             for (fname, errors) in by_file {

@@ -7,6 +7,8 @@ mod parser;
 mod rocqgen;
 mod rustgen;
 mod sema;
+mod typeck;
+mod types;
 mod utils;
 
 use chumsky::prelude::*;
@@ -19,3 +21,5 @@ pub use compiler::{Action, Compiler, OutputKind, compiler_main};
 pub use lexer::lex;
 pub use parser::parse;
 pub use sema::analyze as sema_analyze;
+pub use typeck::check as type_check;
+pub use types::*;
