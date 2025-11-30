@@ -183,8 +183,14 @@ pub struct Binary {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum BuiltinFunction {
+    Clamp,
+    Extract,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Call {
-    pub base: Box<Expr>,
+    pub callee: Box<Expr>,
     pub arguments: Vec<Expr>,
     pub span: Span,
 }
@@ -216,6 +222,7 @@ pub enum Expr {
     IndexAccess(IndexAccess),
     Lit(Lit),
     Slice(Slice),
+    BuiltinFunction(BuiltinFunction),
     Invalid,
 }
 

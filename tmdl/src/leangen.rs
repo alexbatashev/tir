@@ -529,7 +529,9 @@ fn build_lean_behavior<'a>(
                 };
                 format!("(if {} then {} else {})", c, t, e)
             }
-            ast::Expr::Call(_) | ast::Expr::Invalid => "0".to_string(),
+            ast::Expr::BuiltinFunction(_) | ast::Expr::Call(_) | ast::Expr::Invalid => {
+                "0".to_string()
+            }
         }
     }
 
