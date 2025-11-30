@@ -659,10 +659,7 @@ fn check_expr(
                 }
             }
         }
-        ast::Expr::Assign(_)
-        | ast::Expr::Block(_)
-        | ast::Expr::If(_)
-        | ast::Expr::Invalid => None,
+        ast::Expr::Assign(_) | ast::Expr::Block(_) | ast::Expr::If(_) | ast::Expr::Invalid => None,
         ast::Expr::Lit(ast::Lit::Int(_)) => Some(ast::Type::Integer),
         ast::Expr::Lit(ast::Lit::Str(_)) => Some(ast::Type::String),
     }

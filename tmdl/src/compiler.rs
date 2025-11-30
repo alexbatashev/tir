@@ -6,6 +6,7 @@ use std::{fs, io};
 use ariadne::{Color, Label, Report, ReportKind, sources};
 use chumsky::error::{Cheap, Rich};
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, ValueEnum};
+use serde_json;
 
 use crate::Span;
 use crate::error::TMDLError;
@@ -41,6 +42,7 @@ pub enum OutputKind {
 pub enum Action {
     EmitTokens,
     EmitAst,
+    EmitAstJson,
     EmitRust,
     EmitRocq,
     EmitRocqSailProof,
@@ -94,7 +96,7 @@ impl Compiler {
         let mut output: Box<dyn Write> = self.create_output_writer()?;
 
         // EmitAst still needs whole-program type checking when multiple files are given.
-        if let Action::EmitAst = &self.action {
+        if matches!(self.action, Action::EmitAst | Action::EmitAstJson) {
             let mut parsed_files = Vec::new();
             for input in &self.inputs {
                 let source = std::fs::read_to_string(input)?;
@@ -116,8 +118,10 @@ impl Compiler {
             let sema_diags = sema_analyze(parsed_files.clone());
             if !sema_diags.is_empty() {
                 use std::collections::BTreeMap;
-                let mut by_file: BTreeMap<String, Vec<chumsky::error::Rich<'static, String, Span>>> =
-                    BTreeMap::new();
+                let mut by_file: BTreeMap<
+                    String,
+                    Vec<chumsky::error::Rich<'static, String, Span>>,
+                > = BTreeMap::new();
                 for (fname, d) in sema_diags {
                     by_file.entry(fname).or_default().push(d);
                 }
@@ -132,8 +136,10 @@ impl Compiler {
             let (_cache, tc_diags) = crate::type_check(&parsed_files);
             if !tc_diags.is_empty() {
                 use std::collections::BTreeMap;
-                let mut by_file: BTreeMap<String, Vec<chumsky::error::Rich<'static, String, Span>>> =
-                    BTreeMap::new();
+                let mut by_file: BTreeMap<
+                    String,
+                    Vec<chumsky::error::Rich<'static, String, Span>>,
+                > = BTreeMap::new();
                 for (fname, d) in tc_diags {
                     by_file.entry(fname).or_default().push(d);
                 }
@@ -145,8 +151,17 @@ impl Compiler {
                 return Ok(());
             }
 
-            for f in parsed_files {
-                writeln!(output, "{:#?}", f)?;
+            match self.action {
+                Action::EmitAst => {
+                    for f in parsed_files {
+                        writeln!(output, "{:#?}", f)?;
+                    }
+                }
+                Action::EmitAstJson => {
+                    serde_json::to_writer_pretty(&mut output, &parsed_files)?;
+                    writeln!(output)?;
+                }
+                _ => unreachable!(),
             }
             return Ok(());
         }
