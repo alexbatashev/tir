@@ -10,6 +10,7 @@ mod ir_formatter;
 mod operation;
 mod region;
 mod ty;
+pub mod sem_expr;
 mod value;
 
 pub mod helpers {
