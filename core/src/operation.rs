@@ -1,5 +1,5 @@
 use crate::{
-    Context, ContextIterator, Error, GetFromContext, Value, context::ContextRef,
+    Context, ContextIterator, Error, GetFromContext, context::ContextRef,
     ir_formatter::IRFormatter, parse::Span, parse::text::Parser as IRParser, region::RegionId,
     value::ValueId,
 };
@@ -68,7 +68,7 @@ pub trait Operation: 'static + Send + Sync + Any {
         Self: Sized;
 
     fn regions(&self) -> ContextIterator<RegionId>;
-    fn operands(&self) -> &[Value];
+    fn operands(&self) -> &[ValueId];
     fn attributes(&self) -> &[crate::attributes::NamedAttribute];
 }
 

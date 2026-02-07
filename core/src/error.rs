@@ -12,4 +12,12 @@ pub enum Error {
     ExpectedOpName,
     #[error("Expected '{0}.{1}'")]
     ExpectedOperation(&'static str, &'static str),
+    #[error("Expected type")]
+    ExpectedType,
+    #[error("Expected value reference")]
+    ExpectedValueRef,
+    #[error("Expected symbol name")]
+    ExpectedSymbolName,
+    #[error("Unknown value reference '%{0}'")]
+    UnknownValueRef(String),
 }

@@ -9,6 +9,7 @@ mod error;
 mod ir_formatter;
 mod operation;
 mod region;
+mod ty;
 mod value;
 
 pub mod helpers {
@@ -25,7 +26,8 @@ pub use error::Error;
 pub use ir_formatter::IRFormatter;
 pub use operation::{OpId, OpInstance, Operation};
 pub use region::{Region, RegionId};
-pub use value::{Use, Value};
+pub use ty::Type;
+pub use value::{Use, Value, ValueId};
 
 pub use dialects::builtin;
 

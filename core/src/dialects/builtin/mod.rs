@@ -1,9 +1,11 @@
+mod func;
 mod module;
 
 use crate::dialect;
 
 use crate as tir;
 
+pub use func::*;
 pub use module::*;
 
 dialect! {
@@ -12,6 +14,8 @@ dialect! {
         operations: [
             ModuleOp,
             ModuleEndOp,
+            FuncOp,
+            ReturnOp,
         ],
     }
 }

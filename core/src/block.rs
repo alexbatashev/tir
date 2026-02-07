@@ -37,6 +37,10 @@ impl Block {
         self.id
     }
 
+    pub fn arguments(&self) -> &[Value] {
+        &self.arguments
+    }
+
     pub fn len(&self) -> usize {
         self.operations.read().len()
     }

@@ -7,7 +7,7 @@ use std::{
 use parking_lot::RwLock;
 
 use crate::{
-    Block, Dialect, Error, OpId, OpInstance, Operation, Region,
+    Block, Dialect, Error, OpId, OpInstance, Operation, Region, Type,
     block::BlockId,
     builtin::BuiltinDialect,
     parse::Span,
@@ -75,6 +75,7 @@ struct ContextInstance {
     operations: HashMap<OpId, Arc<OpInstance>>,
     last_op_id: AtomicU32,
     values: HashMap<ValueId, Arc<Value>>,
+    last_value_id: AtomicU32,
     regions: HashMap<RegionId, Arc<Region>>,
     last_region_id: AtomicU32,
     blocks: HashMap<BlockId, Arc<Block>>,
@@ -90,6 +91,7 @@ impl Context {
             operations: HashMap::new(),
             last_op_id: AtomicU32::new(0),
             values: HashMap::new(),
+            last_value_id: AtomicU32::new(0),
             regions: HashMap::new(),
             last_region_id: AtomicU32::new(0),
             blocks: HashMap::new(),
@@ -153,6 +155,26 @@ impl Context {
         inner.operations.insert(op_id, instance.clone());
 
         instance
+    }
+
+    pub fn create_value(&self, ty: Type, defining_op: Option<OpId>) -> Value {
+        let mut inner = self.0.write();
+
+        let value_id = ValueId::new(
+            inner
+                .last_value_id
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+        );
+
+        let value = Value::new(value_id, ty, defining_op);
+        inner.values.insert(value_id, Arc::new(value.clone()));
+
+        value
+    }
+
+    pub fn get_value(&self, id: ValueId) -> Arc<Value> {
+        let inner = self.0.read();
+        inner.values.get(&id).unwrap().clone()
     }
 
     pub fn create_region(&self) -> Arc<Region> {
