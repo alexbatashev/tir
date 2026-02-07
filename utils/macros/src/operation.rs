@@ -13,15 +13,17 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         attributes,
         roles,
         operands,
+        results,
         custom_format,
     } = parse_macro_input!(item as Operation);
 
     let builder_name = format_ident!("{}Builder", struct_name.to_string());
+    let has_results = !results.is_empty();
 
     let printer = if custom_format {
         make_custom_printer()
     } else {
-        make_generic_printer(&dialect, &name, &operands, &regions)
+        make_generic_printer(&dialect, &name, &operands, &regions, has_results)
     };
 
     let mut region_fills = vec![];
@@ -77,7 +79,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
     let parser = if custom_format {
         make_custom_parser()
     } else {
-        make_parser(&builder_name, &regions, &operands)
+        make_parser(&builder_name, &regions, &operands, has_results)
     };
 
     let verifier = make_attribute_verifier(&attributes);
@@ -116,18 +118,51 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         })
         .collect();
 
-    let operands_impl = if custom_format {
-        // Custom format ops implement operands themselves
+    // Result support
+    let result_accessor = if has_results {
         quote! {
-            fn operands(&self) -> &[tir::ValueId] {
-                &self.0.operands
+            pub fn result(&self) -> tir::ValueId {
+                self.0.results[0]
             }
         }
     } else {
+        quote! {}
+    };
+
+    let result_builder_field = if has_results {
+        quote! { result_type: Option<tir::Type>, }
+    } else {
+        quote! {}
+    };
+
+    let result_builder_default = if has_results {
+        quote! { result_type: None, }
+    } else {
+        quote! {}
+    };
+
+    let result_builder_method = if has_results {
         quote! {
-            fn operands(&self) -> &[tir::ValueId] {
-                &self.0.operands
+            pub fn result_type(mut self, ty: tir::Type) -> Self {
+                self.result_type = Some(ty);
+                self
             }
+        }
+    } else {
+        quote! {}
+    };
+
+    let result_build = if has_results {
+        quote! {
+            let result_vec = {
+                let ty = self.result_type.expect("result_type must be set for ops with results");
+                let val = self.context.create_value(ty, None);
+                vec![val.id()]
+            };
+        }
+    } else {
+        quote! {
+            let result_vec: Vec<tir::ValueId> = vec![];
         }
     };
 
@@ -139,11 +174,13 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
             attributes: Vec<tir::attributes::NamedAttribute>,
             #(#region_fields,)*
             #(#operand_fields,)*
+            #result_builder_field
         }
 
         impl #struct_name {
             #region_accessors
             #roles_table
+            #result_accessor
         }
 
         impl tir::Operation for #struct_name {
@@ -188,7 +225,9 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
                 tir::ContextIterator::new(context, self.0.regions.clone())
             }
 
-            #operands_impl
+            fn operands(&self) -> &[tir::ValueId] {
+                &self.0.operands
+            }
 
             fn attributes(&self) -> &[tir::attributes::NamedAttribute] {
                 &self.0.attributes
@@ -202,11 +241,13 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
                     attributes: vec![],
                     #(#region_defaults,)*
                     #(#operand_defaults,)*
+                    #result_builder_default
                 }
             }
 
             #(#region_builders)*
             #(#operand_builders)*
+            #result_builder_method
 
             pub fn attr(mut self, name: &str, value: tir::attributes::AttributeValue) -> Self {
                 self.attributes.push(tir::attributes::NamedAttribute::new(name, value));
@@ -223,13 +264,15 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
                 let mut operand_vec: Vec<tir::ValueId> = vec![];
                 #(#operand_collect)*
 
+                #result_build
+
                 let instance = tir::OpInstance {
                     id: tir::OpId::invalid(),
                     name: #name,
                     dialect: #dialect,
                     context: self.context.as_context_ref(),
                     operands: operand_vec,
-                    results: vec![],
+                    results: result_vec,
                     regions,
                     attributes: self.attributes,
                 };
@@ -251,6 +294,7 @@ struct Operation {
     attributes: Vec<AttrSpec>,
     roles: Vec<RoleSpec>,
     operands: Vec<String>,
+    results: Vec<String>,
     custom_format: bool,
 }
 
@@ -360,6 +404,26 @@ impl Parse for Operation {
             })
             .unwrap_or_default();
 
+        let results = struct_
+            .fields
+            .iter()
+            .find_map(|f| match &f.member {
+                Member::Named(ident) => {
+                    if ident.to_string().as_str() == "results" {
+                        Some(
+                            expr_as_ident_vec(&f.expr)
+                                .into_iter()
+                                .map(|i| i.to_string())
+                                .collect(),
+                        )
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            })
+            .unwrap_or_default();
+
         let custom_format = struct_
             .fields
             .iter()
@@ -383,6 +447,7 @@ impl Parse for Operation {
             attributes,
             roles,
             operands,
+            results,
             custom_format,
         })
     }
@@ -541,11 +606,22 @@ fn make_generic_printer(
     name: &str,
     operands: &[String],
     regions: &[Region],
+    has_results: bool,
 ) -> proc_macro2::TokenStream {
     let op_name = if dialect == "builtin" {
         name.to_string()
     } else {
         format!("{}.{}", dialect, name)
+    };
+
+    let result_prefix = if has_results {
+        quote! {
+            if !self.0.results.is_empty() {
+                fmt.write(format!("%{} = ", self.0.results[0].number()))?;
+            }
+        }
+    } else {
+        quote! {}
     };
 
     let operand_printer = if !operands.is_empty() {
@@ -564,6 +640,18 @@ fn make_generic_printer(
         quote! {}
     };
 
+    let result_suffix = if has_results {
+        quote! {
+            if !self.0.results.is_empty() {
+                let context = self.0.context.upgrade();
+                let result_val = context.get_value(self.0.results[0]);
+                fmt.write(format!(" : {}", result_val.ty()))?;
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     let regions = if regions.len() == 1 && regions[0].single_block {
         make_single_block_region_printer(&regions[0])
     } else {
@@ -572,6 +660,7 @@ fn make_generic_printer(
 
     quote! {
         fn print<'a, 'b: 'a>(&'a self, fmt: &'a mut tir::IRFormatter<'b>) -> Result<(), std::fmt::Error> {
+            #result_prefix
             fmt.write(#op_name)?;
             #operand_printer
             // Print generic attribute dict if any
@@ -588,6 +677,8 @@ fn make_generic_printer(
                 }
                 fmt.write("}")?;
             }
+
+            #result_suffix
 
             if self.regions().len() == 0 {
                 fmt.write("\n")?;
@@ -619,6 +710,7 @@ fn make_parser(
     builder_name: &Ident,
     regions: &[Region],
     operands: &[String],
+    has_results: bool,
 ) -> proc_macro2::TokenStream {
     let (region_parsers, region_builders) = if regions.len() == 1 && regions[0].single_block {
         let region_name = format_ident!("{}", regions[0].name);
@@ -636,22 +728,43 @@ fn make_parser(
 
     let operand_parsers: Vec<_> = operands
         .iter()
-        .map(|op_name| {
+        .enumerate()
+        .map(|(i, op_name)| {
             let field = format_ident!("{}", op_name);
+            let comma = if i > 0 {
+                quote! { parser.parse_token(","); }
+            } else {
+                quote! {}
+            };
             quote! {
-                if parser.parse_token("%") {
-                    if let Some(num) = parser.parse_number() {
-                        builder = builder.#field(tir::ValueId::from_number(num as u32));
+                #comma
+                if let Some(ref_name) = parser.parse_value_ref() {
+                    if let Ok(num) = ref_name.parse::<u32>() {
+                        builder = builder.#field(tir::ValueId::from_number(num));
                     }
                 }
             }
         })
         .collect();
 
+    let result_parser = if has_results {
+        quote! {
+            if !parser.parse_token(":") {
+                return Err((parser.span(), tir::Error::ExpectedToken(":")));
+            }
+            let result_ty = parser.parse_type()
+                .ok_or_else(|| (parser.span(), tir::Error::ExpectedType))?;
+            builder = builder.result_type(result_ty);
+        }
+    } else {
+        quote! {}
+    };
+
     quote! {
         fn parse<'src>(parser: &mut tir::parse::text::Parser<'src>, context: &tir::Context)
         -> Result<Box<dyn tir::Operation>, (tir::parse::Span, tir::Error)> {
-           // Parse operands first (value references like %0, %1)
+           use tir::parse::common::Cursor;
+
            let mut parsed_attrs: Vec<tir::attributes::NamedAttribute> = vec![];
 
            let mut builder = #builder_name::new(context);
@@ -692,6 +805,8 @@ fn make_parser(
                    parsed_attrs.clear();
                }
            }
+
+           #result_parser
 
            #region_parsers
 
