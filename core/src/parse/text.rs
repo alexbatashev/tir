@@ -99,6 +99,63 @@ impl<'src> Parser<'src> {
         Some(val)
     }
 
+    pub fn parse_value_ref(&mut self) -> Option<&'src str> {
+        if self
+            .src
+            .get(self.position as usize..)
+            .map(|s| s.starts_with('%'))
+            .unwrap_or(false)
+        {
+            let start = self.position as usize + 1;
+            let mut last = start;
+            while let Some(c) = self.src.chars().nth(last) {
+                if !c.is_alphanumeric() && c != '_' {
+                    break;
+                }
+                last += 1;
+            }
+            if last > start {
+                self.position = last as u32;
+                let result = &self.src[start..last];
+                self.skip_trivia();
+                Some(result)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    pub fn parse_type(&mut self) -> Option<crate::Type> {
+        let mark = self.position;
+        if let Some(ident) = self.parse_ident() {
+            match ident.parse::<crate::Type>() {
+                Ok(ty) => Some(ty),
+                Err(_) => {
+                    self.position = mark;
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    }
+
+    pub fn parse_symbol_name(&mut self) -> Option<&'src str> {
+        if self
+            .src
+            .get(self.position as usize..)
+            .map(|s| s.starts_with('@'))
+            .unwrap_or(false)
+        {
+            self.position += 1;
+            self.parse_ident()
+        } else {
+            None
+        }
+    }
+
     pub fn pos(&self) -> u32 {
         self.position
     }

@@ -2,7 +2,7 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{Expr, ExprStruct, Ident, Member, parse::Parse, parse_macro_input};
 
-use crate::utils::{expr_as_string, field_name};
+use crate::utils::{expr_as_ident_vec, expr_as_string, field_name};
 
 pub fn construct_operation(item: TokenStream) -> TokenStream {
     let Operation {
@@ -12,11 +12,17 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         regions,
         attributes,
         roles,
+        operands,
+        custom_format,
     } = parse_macro_input!(item as Operation);
 
     let builder_name = format_ident!("{}Builder", struct_name.to_string());
 
-    let printer = make_generic_printer(&dialect, &name, &[], &regions);
+    let printer = if custom_format {
+        make_custom_printer()
+    } else {
+        make_generic_printer(&dialect, &name, &operands, &regions)
+    };
 
     let mut region_fills = vec![];
     let mut region_fields = vec![];
@@ -68,10 +74,62 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         }
     }
 
-    let parser = make_parser(&builder_name, &regions);
+    let parser = if custom_format {
+        make_custom_parser()
+    } else {
+        make_parser(&builder_name, &regions, &operands)
+    };
 
     let verifier = make_attribute_verifier(&attributes);
     let roles_table = make_roles_table(&struct_name, &roles);
+
+    // Operand support in builder
+    let mut operand_fields = vec![];
+    let mut operand_defaults = vec![];
+    let mut operand_builders = vec![];
+
+    for op_name in &operands {
+        let field = format_ident!("{}", op_name);
+        operand_fields.push(quote! {
+            #field: Option<tir::ValueId>
+        });
+        operand_defaults.push(quote! {
+            #field: None
+        });
+        operand_builders.push(quote! {
+            pub fn #field(mut self, v: tir::ValueId) -> Self {
+                self.#field = Some(v);
+                self
+            }
+        });
+    }
+
+    let operand_collect: Vec<_> = operands
+        .iter()
+        .map(|op_name| {
+            let field = format_ident!("{}", op_name);
+            quote! {
+                if let Some(v) = self.#field {
+                    operand_vec.push(v);
+                }
+            }
+        })
+        .collect();
+
+    let operands_impl = if custom_format {
+        // Custom format ops implement operands themselves
+        quote! {
+            fn operands(&self) -> &[tir::ValueId] {
+                &self.0.operands
+            }
+        }
+    } else {
+        quote! {
+            fn operands(&self) -> &[tir::ValueId] {
+                &self.0.operands
+            }
+        }
+    };
 
     quote! {
         pub struct #struct_name(std::sync::Arc<tir::OpInstance>);
@@ -80,6 +138,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
             context: tir::Context,
             attributes: Vec<tir::attributes::NamedAttribute>,
             #(#region_fields,)*
+            #(#operand_fields,)*
         }
 
         impl #struct_name {
@@ -129,9 +188,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
                 tir::ContextIterator::new(context, self.0.regions.clone())
             }
 
-            fn operands(&self) -> &[tir::Value] {
-                todo!()
-            }
+            #operands_impl
 
             fn attributes(&self) -> &[tir::attributes::NamedAttribute] {
                 &self.0.attributes
@@ -144,10 +201,12 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
                     context: context.clone(),
                     attributes: vec![],
                     #(#region_defaults,)*
+                    #(#operand_defaults,)*
                 }
             }
 
             #(#region_builders)*
+            #(#operand_builders)*
 
             pub fn attr(mut self, name: &str, value: tir::attributes::AttributeValue) -> Self {
                 self.attributes.push(tir::attributes::NamedAttribute::new(name, value));
@@ -161,12 +220,15 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
 
                 #verifier
 
+                let mut operand_vec: Vec<tir::ValueId> = vec![];
+                #(#operand_collect)*
+
                 let instance = tir::OpInstance {
                     id: tir::OpId::invalid(),
                     name: #name,
                     dialect: #dialect,
                     context: self.context.as_context_ref(),
-                    operands: vec![],
+                    operands: operand_vec,
                     results: vec![],
                     regions,
                     attributes: self.attributes,
@@ -188,6 +250,8 @@ struct Operation {
     regions: Vec<Region>,
     attributes: Vec<AttrSpec>,
     roles: Vec<RoleSpec>,
+    operands: Vec<String>,
+    custom_format: bool,
 }
 
 struct Region {
@@ -276,6 +340,41 @@ impl Parse for Operation {
             })
             .unwrap_or_default();
 
+        let operands = struct_
+            .fields
+            .iter()
+            .find_map(|f| match &f.member {
+                Member::Named(ident) => {
+                    if ident.to_string().as_str() == "operands" {
+                        Some(
+                            expr_as_ident_vec(&f.expr)
+                                .into_iter()
+                                .map(|i| i.to_string())
+                                .collect(),
+                        )
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            })
+            .unwrap_or_default();
+
+        let custom_format = struct_
+            .fields
+            .iter()
+            .find_map(|f| match &f.member {
+                Member::Named(ident) => {
+                    if ident.to_string().as_str() == "format" {
+                        Some(expr_as_string(&f.expr) == "custom")
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            })
+            .unwrap_or(false);
+
         Ok(Operation {
             struct_name,
             name,
@@ -283,6 +382,8 @@ impl Parse for Operation {
             regions,
             attributes,
             roles,
+            operands,
+            custom_format,
         })
     }
 }
@@ -418,16 +519,49 @@ fn make_sinle_block_region_accessor(region: &Region) -> proc_macro2::TokenStream
     }
 }
 
+fn make_custom_printer() -> proc_macro2::TokenStream {
+    quote! {
+        fn print<'a, 'b: 'a>(&'a self, fmt: &'a mut tir::IRFormatter<'b>) -> Result<(), std::fmt::Error> {
+            Self::custom_print(self, fmt)
+        }
+    }
+}
+
+fn make_custom_parser() -> proc_macro2::TokenStream {
+    quote! {
+        fn parse<'src>(parser: &mut tir::parse::text::Parser<'src>, context: &tir::Context)
+        -> Result<Box<dyn tir::Operation>, (tir::parse::Span, tir::Error)> {
+            Self::custom_parse(parser, context)
+        }
+    }
+}
+
 fn make_generic_printer(
     dialect: &str,
     name: &str,
-    _operands: &[()],
+    operands: &[String],
     regions: &[Region],
 ) -> proc_macro2::TokenStream {
     let op_name = if dialect == "builtin" {
-        name
+        name.to_string()
     } else {
-        &format!("{}.{}", dialect, name)
+        format!("{}.{}", dialect, name)
+    };
+
+    let operand_printer = if !operands.is_empty() {
+        quote! {
+            if !self.0.operands.is_empty() {
+                fmt.write(" ")?;
+                let mut first = true;
+                for op_id in &self.0.operands {
+                    if !first { fmt.write(", ")?; }
+                    first = false;
+                    fmt.write(format!("%{}", op_id.number()))?;
+                }
+            }
+        }
+    } else {
+        quote! {}
     };
 
     let regions = if regions.len() == 1 && regions[0].single_block {
@@ -439,6 +573,7 @@ fn make_generic_printer(
     quote! {
         fn print<'a, 'b: 'a>(&'a self, fmt: &'a mut tir::IRFormatter<'b>) -> Result<(), std::fmt::Error> {
             fmt.write(#op_name)?;
+            #operand_printer
             // Print generic attribute dict if any
             if !self.attributes().is_empty() {
                 fmt.write(" ")?;
@@ -480,7 +615,11 @@ fn make_single_block_region_printer(region: &Region) -> proc_macro2::TokenStream
     }
 }
 
-fn make_parser(builder_name: &Ident, regions: &[Region]) -> proc_macro2::TokenStream {
+fn make_parser(
+    builder_name: &Ident,
+    regions: &[Region],
+    operands: &[String],
+) -> proc_macro2::TokenStream {
     let (region_parsers, region_builders) = if regions.len() == 1 && regions[0].single_block {
         let region_name = format_ident!("{}", regions[0].name);
         (
@@ -495,11 +634,31 @@ fn make_parser(builder_name: &Ident, regions: &[Region]) -> proc_macro2::TokenSt
         (quote! {}, quote! {})
     };
 
+    let operand_parsers: Vec<_> = operands
+        .iter()
+        .map(|op_name| {
+            let field = format_ident!("{}", op_name);
+            quote! {
+                if parser.parse_token("%") {
+                    if let Some(num) = parser.parse_number() {
+                        builder = builder.#field(tir::ValueId::from_number(num as u32));
+                    }
+                }
+            }
+        })
+        .collect();
+
     quote! {
         fn parse<'src>(parser: &mut tir::parse::text::Parser<'src>, context: &tir::Context)
         -> Result<Box<dyn tir::Operation>, (tir::parse::Span, tir::Error)> {
-           // Parse optional generic attribute dict: { key = value, ... }
+           // Parse operands first (value references like %0, %1)
            let mut parsed_attrs: Vec<tir::attributes::NamedAttribute> = vec![];
+
+           let mut builder = #builder_name::new(context);
+
+           #(#operand_parsers)*
+
+           // Parse optional generic attribute dict: { key = value, ... }
            let mark = parser.pos();
            if parser.parse_token("{") {
                let mut ok = true;
@@ -536,7 +695,6 @@ fn make_parser(builder_name: &Ident, regions: &[Region]) -> proc_macro2::TokenSt
 
            #region_parsers
 
-            let mut builder = #builder_name::new(context);
             for a in parsed_attrs { builder = builder.attr(&a.name, a.value); }
 
             Ok(Box::new(builder
