@@ -7,6 +7,7 @@ mod parser;
 mod rocqgen;
 mod rustgen;
 mod sema;
+mod smtlibgen;
 mod typeck;
 mod types;
 mod utils;

@@ -16,6 +16,7 @@ use crate::parser::parse;
 use crate::rocqgen::generate_rocq;
 use crate::rustgen::generate_rust;
 use crate::sema_analyze;
+use crate::smtlibgen::generate_smtlib;
 
 pub struct Compiler {
     action: Action,
@@ -48,6 +49,7 @@ pub enum Action {
     EmitRocqSailProof,
     EmitLean,
     EmitIsabelle,
+    EmitSmtlib,
 }
 
 impl Action {
@@ -59,6 +61,7 @@ impl Action {
                 | Action::EmitRocqSailProof
                 | Action::EmitLean
                 | Action::EmitIsabelle
+                | Action::EmitSmtlib
         )
     }
 }
@@ -256,6 +259,10 @@ impl Compiler {
                 // Support stdout or explicit single-file destination.
                 let writer: Box<dyn Write> = self.create_output_writer()?;
                 generate_lean(self.dialect.as_ref().unwrap(), parsed_files, writer)?;
+            }
+            Action::EmitSmtlib => {
+                let writer: Box<dyn Write> = self.create_output_writer()?;
+                generate_smtlib(self.dialect.as_ref().unwrap(), parsed_files, writer)?;
             }
             _ => unreachable!("Only complex actions should use this path"),
         }
