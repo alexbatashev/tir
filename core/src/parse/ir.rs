@@ -23,6 +23,14 @@ pub(crate) fn parse_single_op<'src>(
     context: &Context,
 ) -> Result<Box<dyn Operation>, (Span, Error)> {
     parser.skip_trivia();
+
+    // Optional SSA result assignment prefix (e.g. "%2 =").
+    // The concrete ValueId is currently allocated by builders from context state.
+    let mark = parser.pos();
+    if parser.parse_value_ref().is_some() && !parser.parse_token("=") {
+        parser.set_pos(mark);
+    }
+
     if let Some(name) = parser.parse_ident() {
         let (dialect, name) = if parser.peek_char() == Some('.') {
             if let Some(op_name) = parser.parse_ident() {
