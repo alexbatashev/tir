@@ -2,7 +2,9 @@ mod apfloat;
 mod apint;
 mod bitvec;
 pub mod lean;
+pub mod rocq;
 mod simplification;
+pub mod smtlib;
 
 pub use apfloat::APFloat;
 pub use apint::APInt;

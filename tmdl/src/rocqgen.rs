@@ -3,7 +3,45 @@ use std::io::Write;
 
 use crate::ast::{self, Instruction, Item};
 use crate::error::TMDLError;
+use crate::sem_expr_conv::{SymbolInfo, convert_to_sem_expr};
 use crate::utils::resolve_operands_for_instruction;
+use tir::sem_expr::rocq as sem_rocq;
+
+struct RocqSymbolResolver<'a> {
+    symbols: &'a HashMap<u32, SymbolInfo>,
+    operands: &'a HashMap<String, ast::Type>,
+    state_name: &'a str,
+}
+
+impl sem_rocq::SymbolResolver for RocqSymbolResolver<'_> {
+    fn resolve(&self, symbol_id: u32) -> Result<String, String> {
+        let symbol = self
+            .symbols
+            .get(&symbol_id)
+            .ok_or_else(|| format!("Unknown symbol id {}", symbol_id))?;
+
+        match symbol {
+            SymbolInfo::Register { class, number } => Ok(format!(
+                "(read_{} {} {})",
+                class.to_lowercase(),
+                self.state_name,
+                number
+            )),
+            SymbolInfo::Variable { name } => {
+                if let Some(ast::Type::Struct(rc)) = self.operands.get(name) {
+                    Ok(format!(
+                        "(read_{} {} {})",
+                        rc.to_lowercase(),
+                        self.state_name,
+                        name.to_lowercase()
+                    ))
+                } else {
+                    Ok(name.to_lowercase())
+                }
+            }
+        }
+    }
+}
 
 pub fn generate_rocq(
     dialect: &str,
@@ -519,9 +557,32 @@ fn build_coq_behavior<'a>(
     let operands = resolve_operands_for_instruction(instruction, item_cache)
         .into_iter()
         .collect::<HashMap<_, _>>();
+    let params = resolve_params_for_instruction(instruction, item_cache);
+    let mut numeric_params = HashMap::new();
+    for (name, (_ty, val)) in params {
+        if let Some(ast::Expr::Lit(ast::Lit::Int(li))) = val {
+            numeric_params.insert(name, parse_literal_value(&li) as i64);
+        }
+    }
 
-    // Helper: map operand identifier to Coq value expression
-    fn eval_expr(e: &ast::Expr, operands: &HashMap<String, ast::Type>) -> String {
+    fn try_emit_sem_expr(
+        e: &ast::Expr,
+        operands: &HashMap<String, ast::Type>,
+        numeric_params: &HashMap<String, i64>,
+    ) -> Option<String> {
+        let converted = convert_to_sem_expr(e, numeric_params.clone()).ok()?;
+        let resolver = RocqSymbolResolver {
+            symbols: &converted.symbols,
+            operands,
+            state_name: "st",
+        };
+        let mut out = Vec::new();
+        sem_rocq::emit(&converted.expr, &mut out, &resolver).ok()?;
+        String::from_utf8(out).ok()
+    }
+
+    // Legacy renderer used as fallback when semantic conversion cannot represent the AST.
+    fn eval_expr_legacy(e: &ast::Expr, operands: &HashMap<String, ast::Type>) -> String {
         match e {
             ast::Expr::Lit(ast::Lit::Int(li)) => li.value().to_string(),
             ast::Expr::Lit(ast::Lit::Str(ls)) => format!("\"{}\"", ls.value()),
@@ -539,8 +600,8 @@ fn build_coq_behavior<'a>(
                 }
             }
             ast::Expr::Binary(b) => {
-                let lhs = eval_expr(&b.lhs, operands);
-                let rhs = eval_expr(&b.rhs, operands);
+                let lhs = eval_expr_legacy(&b.lhs, operands);
+                let rhs = eval_expr_legacy(&b.rhs, operands);
                 let op = match b.op {
                     ast::BinOp::Add => "+",
                     ast::BinOp::Sub => "-",
@@ -558,11 +619,11 @@ fn build_coq_behavior<'a>(
             }
             ast::Expr::Slice(s) => {
                 // Placeholder slice rendering; use base expr directly
-                eval_expr(&s.base, operands)
+                eval_expr_legacy(&s.base, operands)
             }
             ast::Expr::IndexAccess(s) => {
                 // Placeholder index access; use base expr directly
-                eval_expr(&s.base, operands)
+                eval_expr_legacy(&s.base, operands)
             }
             ast::Expr::Field(f) => {
                 if let ast::Expr::Ident(id) = &*f.base {
@@ -575,7 +636,7 @@ fn build_coq_behavior<'a>(
             ast::Expr::Block(b) => {
                 if b.last_expr_return {
                     if let Some(last) = b.stmts.last() {
-                        eval_expr(last, operands)
+                        eval_expr_legacy(last, operands)
                     } else {
                         "0".to_string()
                     }
@@ -588,10 +649,10 @@ fn build_coq_behavior<'a>(
                 "0".to_string()
             }
             ast::Expr::If(i) => {
-                let c = eval_expr(&i.cond, operands);
-                let t = eval_expr(&i.then, operands);
+                let c = eval_expr_legacy(&i.cond, operands);
+                let t = eval_expr_legacy(&i.then, operands);
                 let e = if let Some(e) = &i.else_ {
-                    eval_expr(e, operands)
+                    eval_expr_legacy(e, operands)
                 } else {
                     "0".to_string()
                 };
@@ -603,16 +664,29 @@ fn build_coq_behavior<'a>(
         }
     }
 
+    fn eval_expr(
+        e: &ast::Expr,
+        operands: &HashMap<String, ast::Type>,
+        numeric_params: &HashMap<String, i64>,
+    ) -> String {
+        if let Some(rendered) = try_emit_sem_expr(e, operands, numeric_params) {
+            rendered
+        } else {
+            eval_expr_legacy(e, operands)
+        }
+    }
+
     // Compile a statement (assignment or block) into a state-transforming Coq expr
     fn compile_to_state(
         e: &ast::Expr,
         operands: &HashMap<String, ast::Type>,
+        numeric_params: &HashMap<String, i64>,
         st_name: &str,
     ) -> String {
         match e {
             ast::Expr::Assign(a) => {
                 let dst_name = a.dest.to_lowercase();
-                let rhs = eval_expr(&a.value, operands);
+                let rhs = eval_expr(&a.value, operands, numeric_params);
                 if let Some(ast::Type::Struct(rc)) = operands.get(&a.dest) {
                     format!(
                         "(write_{} {} {} {})",
@@ -631,7 +705,7 @@ fn build_coq_behavior<'a>(
                 for stmt in &b.stmts {
                     match stmt {
                         ast::Expr::Assign(_) | ast::Expr::Block(_) | ast::Expr::If(_) => {
-                            let next = compile_to_state(stmt, operands, &current);
+                            let next = compile_to_state(stmt, operands, numeric_params, &current);
                             current = next;
                         }
                         _ => {}
@@ -640,10 +714,10 @@ fn build_coq_behavior<'a>(
                 current
             }
             ast::Expr::If(i) => {
-                let cond = eval_expr(&i.cond, operands);
-                let then_state = compile_to_state(&i.then, operands, st_name);
+                let cond = eval_expr(&i.cond, operands, numeric_params);
+                let then_state = compile_to_state(&i.then, operands, numeric_params, st_name);
                 let else_state = if let Some(e) = &i.else_ {
-                    compile_to_state(e, operands, st_name)
+                    compile_to_state(e, operands, numeric_params, st_name)
                 } else {
                     st_name.to_string()
                 };
@@ -654,7 +728,7 @@ fn build_coq_behavior<'a>(
     }
 
     // Top-level behavior
-    compile_to_state(&instruction.behavior, &operands, "st")
+    compile_to_state(&instruction.behavior, &operands, &numeric_params, "st")
 }
 
 const HEADER: &'static str = "(* Automatically generated by TMDL compiler *)

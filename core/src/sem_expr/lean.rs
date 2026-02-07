@@ -1,5 +1,5 @@
-use std::io::Write;
 use super::{APInt, BitVec, Expr};
+use std::io::Write;
 
 /// Trait for resolving symbols to Lean expressions
 pub trait SymbolResolver {
@@ -29,7 +29,8 @@ fn emit_expr<W: Write, R: SymbolResolver>(
         Expr::Bool(b) => write!(output, "{}", if *b { "true" } else { "false" }),
         Expr::Bits(bitvec) => emit_bitvec(bitvec, output),
         Expr::Symbol(id) => {
-            let resolved = resolver.resolve(*id)
+            let resolved = resolver
+                .resolve(*id)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
             write!(output, "{}", resolved)
         }
@@ -119,23 +120,23 @@ fn emit_expr<W: Write, R: SymbolResolver>(
         // Unsupported operations for now
         Expr::Float(_) => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "Float not yet supported in Lean emission"
+            "Float not yet supported in Lean emission",
         )),
         Expr::Sqrt(_) => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "Sqrt not yet supported in Lean emission"
+            "Sqrt not yet supported in Lean emission",
         )),
         Expr::Fma { .. } => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "Fma not yet supported in Lean emission"
+            "Fma not yet supported in Lean emission",
         )),
         Expr::FloatToBits(_) => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "FloatToBits not yet supported in Lean emission"
+            "FloatToBits not yet supported in Lean emission",
         )),
         Expr::BitsToFloat { .. } => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "BitsToFloat not yet supported in Lean emission"
+            "BitsToFloat not yet supported in Lean emission",
         )),
     }
 }
@@ -148,7 +149,12 @@ fn emit_int<W: Write>(int: &APInt, output: &mut W) -> std::io::Result<()> {
 fn emit_bitvec<W: Write>(bitvec: &BitVec, output: &mut W) -> std::io::Result<()> {
     // For BitVecs <= 128 bits, emit as BitVec.ofNat
     if bitvec.width() <= 128 {
-        write!(output, "(BitVec.ofNat {} {})", bitvec.width(), bitvec.to_u128())
+        write!(
+            output,
+            "(BitVec.ofNat {} {})",
+            bitvec.width(),
+            bitvec.to_u128()
+        )
     } else {
         // For larger BitVecs, we need to emit as a byte array or hex literal
         // For now, emit as a hex literal using the bytes representation
@@ -383,7 +389,10 @@ mod tests {
         let resolver = TestResolver;
 
         emit(&expr, &mut output, &resolver).unwrap();
-        assert_eq!(String::from_utf8(output).unwrap(), "(BitVec.ofNat 16 43981)");
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "(BitVec.ofNat 16 43981)"
+        );
     }
 
     #[test]
@@ -426,7 +435,7 @@ mod tests {
         let result = String::from_utf8(output).unwrap();
         assert!(result.starts_with("(BitVec.ofNat 256 0x"));
         assert!(result.contains("ab")); // Upper byte
-        assert!(result.ends_with("ff)"));  // Lower byte
+        assert!(result.ends_with("ff)")); // Lower byte
     }
 
     #[test]
@@ -461,5 +470,3 @@ mod tests {
         );
     }
 }
-
-

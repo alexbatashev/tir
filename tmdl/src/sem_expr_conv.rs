@@ -7,6 +7,8 @@ use tir::sem_expr::{APInt, Expr};
 pub enum SymbolInfo {
     /// A register reference: (register_class, register_number)
     Register { class: String, number: u32 },
+    /// A variable/operand reference by name
+    Variable { name: String },
 }
 
 /// Result of converting an AST expression to a semantic expression
@@ -49,12 +51,14 @@ impl ConversionContext {
     fn get_or_create_register_symbol(&mut self, class: String, number: u32) -> u32 {
         // Check if we already have this register as a symbol
         for (id, info) in &self.symbols {
-            let SymbolInfo::Register {
+            if let SymbolInfo::Register {
                 class: c,
                 number: n,
-            } = info;
-            if c == &class && n == &number {
-                return *id;
+            } = info
+            {
+                if c == &class && n == &number {
+                    return *id;
+                }
             }
         }
 
@@ -136,8 +140,11 @@ impl ConversionContext {
                 Ok(Expr::Int(APInt::new(width, abs_value)))
             }
         } else {
-            // This might be a register reference - we'll handle it in convert_field
-            Err(format!("Unresolved identifier: {}", name))
+            // Treat unknown identifiers as symbolic variables/operands.
+            let symbol_id = self.alloc_symbol(SymbolInfo::Variable {
+                name: name.to_string(),
+            });
+            Ok(Expr::Symbol(symbol_id))
         }
     }
 
@@ -224,6 +231,18 @@ impl ConversionContext {
         // Base should be an identifier (register class), member is the register name/number
 
         if let AstExpr::Ident(base_ident) = &*field.base {
+            if base_ident.name == "self" {
+                if let Some(&value) = self.params.get(&field.member) {
+                    let v = value as u64;
+                    let width = if v == 0 { 1 } else { 64 - v.leading_zeros() };
+                    return Ok(Expr::Int(APInt::new(width, v)));
+                }
+                let symbol_id = self.alloc_symbol(SymbolInfo::Variable {
+                    name: field.member.clone(),
+                });
+                return Ok(Expr::Symbol(symbol_id));
+            }
+
             let register_class = base_ident.name.clone();
 
             // Try to parse the member as a register number

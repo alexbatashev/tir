@@ -9,8 +9,8 @@ mod error;
 mod ir_formatter;
 mod operation;
 mod region;
-mod ty;
 pub mod sem_expr;
+mod ty;
 mod value;
 
 pub mod helpers {
