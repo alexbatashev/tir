@@ -6,6 +6,7 @@ mod diagnostics;
 mod dialect;
 mod dialects;
 mod error;
+mod interfaces;
 pub mod ir;
 mod ir_formatter;
 mod operation;
@@ -26,9 +27,13 @@ pub use context::{Context, ContextIterator, ContextRef, GetFromContext};
 pub use diagnostics::{print_error_range, print_parse_error};
 pub use dialect::Dialect;
 pub use error::Error;
+pub use interfaces::{Commutative, Terminator};
 pub use ir::Operand;
 pub use ir_formatter::IRFormatter;
-pub use operation::{OpId, OpInstance, Operation};
+pub use operation::{
+    ErasedOpInterface, ImplementsOpInterface, OpId, OpInstance, OpInterfaceConverter, Operation,
+    downcast_op_interface, erase_op_interface, op_interface_converter,
+};
 pub use pass::{OperationRef, Pass, PassError, PassManager, PassTarget, Rewriter};
 pub use region::{Region, RegionId};
 pub use ty::Type;

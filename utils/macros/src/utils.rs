@@ -1,5 +1,5 @@
 use quote::format_ident;
-use syn::{Expr, FieldValue, Ident, Lit, Member};
+use syn::{Expr, FieldValue, Ident, Lit, Member, Path};
 
 pub fn expr_as_string(expr: &Expr) -> String {
     match &expr {
@@ -26,6 +26,23 @@ pub fn expr_as_ident_vec(expr: &Expr) -> Vec<Ident> {
             .map(|e| {
                 if let Expr::Path(p) = e {
                     p.path.get_ident().unwrap().clone()
+                } else {
+                    unreachable!()
+                }
+            })
+            .collect()
+    } else {
+        unreachable!()
+    }
+}
+
+pub fn expr_as_path_vec(expr: &Expr) -> Vec<Path> {
+    if let Expr::Array(arr) = expr {
+        arr.elems
+            .iter()
+            .map(|e| {
+                if let Expr::Path(p) = e {
+                    p.path.clone()
                 } else {
                     unreachable!()
                 }

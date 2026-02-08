@@ -1,6 +1,7 @@
 use crate::operation;
 
 use crate as tir;
+use crate::{Commutative, ImplementsOpInterface};
 
 operation! {
     ConstantOp {
@@ -25,7 +26,15 @@ operation! {
         dialect: "builtin",
         operands: [lhs, rhs],
         results: [result],
+        interfaces: [Commutative],
         sem: "(set result (add lhs rhs))",
+    }
+}
+
+impl Commutative for AddIOp {}
+impl ImplementsOpInterface<dyn Commutative> for AddIOp {
+    fn into_interface(self: Box<Self>) -> Box<dyn Commutative> {
+        self
     }
 }
 
@@ -45,7 +54,15 @@ operation! {
         dialect: "builtin",
         operands: [lhs, rhs],
         results: [result],
+        interfaces: [Commutative],
         sem: "(set result (mul lhs rhs))",
+    }
+}
+
+impl Commutative for MulIOp {}
+impl ImplementsOpInterface<dyn Commutative> for MulIOp {
+    fn into_interface(self: Box<Self>) -> Box<dyn Commutative> {
+        self
     }
 }
 
@@ -55,7 +72,15 @@ operation! {
         dialect: "builtin",
         operands: [lhs, rhs],
         results: [result],
+        interfaces: [Commutative],
         sem: "(set result (and lhs rhs))",
+    }
+}
+
+impl Commutative for AndIOp {}
+impl ImplementsOpInterface<dyn Commutative> for AndIOp {
+    fn into_interface(self: Box<Self>) -> Box<dyn Commutative> {
+        self
     }
 }
 
@@ -65,7 +90,15 @@ operation! {
         dialect: "builtin",
         operands: [lhs, rhs],
         results: [result],
+        interfaces: [Commutative],
         sem: "(set result (or lhs rhs))",
+    }
+}
+
+impl Commutative for OrIOp {}
+impl ImplementsOpInterface<dyn Commutative> for OrIOp {
+    fn into_interface(self: Box<Self>) -> Box<dyn Commutative> {
+        self
     }
 }
 
@@ -75,7 +108,15 @@ operation! {
         dialect: "builtin",
         operands: [lhs, rhs],
         results: [result],
+        interfaces: [Commutative],
         sem: "(set result (xor lhs rhs))",
+    }
+}
+
+impl Commutative for XOrIOp {}
+impl ImplementsOpInterface<dyn Commutative> for XOrIOp {
+    fn into_interface(self: Box<Self>) -> Box<dyn Commutative> {
+        self
     }
 }
 

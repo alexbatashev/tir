@@ -106,6 +106,7 @@ fn make_register_operations(dialect_name: &str, operations: &[Ident]) -> proc_ma
                 assert_eq!(#name::dialect(), #dialect_name);
                 self.dyn_converters.insert(#name::name(), #name::from_op_instance_dyn);
                 self.parsers.insert(#name::name(), #name::parse);
+                #name::register_interfaces(context);
             }
         })
         .collect::<Vec<_>>();

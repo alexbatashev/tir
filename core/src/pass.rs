@@ -63,6 +63,10 @@ impl OperationRef {
     pub fn as_op<T: Operation>(&self) -> Option<T> {
         self.op.clone().as_op::<T>()
     }
+
+    pub fn as_interface<I: ?Sized + 'static>(&self) -> Option<Box<I>> {
+        self.op.clone().as_interface::<I>()
+    }
 }
 
 pub trait Pass: Send {

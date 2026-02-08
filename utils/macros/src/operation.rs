@@ -1,8 +1,8 @@
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
-use syn::{Expr, ExprStruct, Ident, Member, parse::Parse, parse_macro_input};
+use syn::{Expr, ExprStruct, Ident, Member, Path, parse::Parse, parse_macro_input};
 
-use crate::utils::{expr_as_ident_vec, expr_as_string, field_name, op_fn_ident};
+use crate::utils::{expr_as_ident_vec, expr_as_path_vec, expr_as_string, field_name, op_fn_ident};
 
 pub fn construct_operation(item: TokenStream) -> TokenStream {
     let Operation {
@@ -14,6 +14,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         roles,
         operands,
         results,
+        interfaces,
         custom_format,
         semantic_expr,
     } = parse_macro_input!(item as Operation);
@@ -158,6 +159,21 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         }
     } else {
         quote! {}
+    };
+
+    let interface_registration_method = if interfaces.is_empty() {
+        quote! {}
+    } else {
+        let registrations = interfaces.iter().map(|interface| {
+            quote! {
+                context.register_operation_interface::<#struct_name, dyn #interface>();
+            }
+        });
+        quote! {
+            fn register_interfaces(context: &tir::Context) {
+                #(#registrations)*
+            }
+        }
     };
 
     let result_builder_field = if has_results {
@@ -320,6 +336,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
             }
 
             #semantic_expr_method
+            #interface_registration_method
         }
 
         impl #builder_name {
@@ -398,6 +415,7 @@ struct Operation {
     roles: Vec<RoleSpec>,
     operands: Vec<String>,
     results: Vec<String>,
+    interfaces: Vec<Path>,
     custom_format: bool,
     semantic_expr: Option<proc_macro2::TokenStream>,
 }
@@ -528,6 +546,21 @@ impl Parse for Operation {
             })
             .unwrap_or_default();
 
+        let interfaces = struct_
+            .fields
+            .iter()
+            .find_map(|f| match &f.member {
+                Member::Named(ident) => {
+                    if ident.to_string().as_str() == "interfaces" {
+                        Some(expr_as_path_vec(&f.expr))
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            })
+            .unwrap_or_default();
+
         let custom_format = struct_
             .fields
             .iter()
@@ -563,6 +596,7 @@ impl Parse for Operation {
             roles,
             operands,
             results,
+            interfaces,
             custom_format,
             semantic_expr,
         })

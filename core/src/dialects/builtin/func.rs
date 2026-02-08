@@ -1,6 +1,7 @@
 use crate::operation;
 
 use crate as tir;
+use crate::{ImplementsOpInterface, Terminator};
 
 operation! {
     FuncOp {
@@ -170,6 +171,14 @@ operation! {
         name: "return",
         dialect: "builtin",
         operands: [value],
+        interfaces: [Terminator],
+    }
+}
+
+impl Terminator for ReturnOp {}
+impl ImplementsOpInterface<dyn Terminator> for ReturnOp {
+    fn into_interface(self: Box<Self>) -> Box<dyn Terminator> {
+        self
     }
 }
 

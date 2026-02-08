@@ -5,6 +5,35 @@ use crate::{
 };
 use std::{any::Any, sync::Arc, u32};
 
+pub type ErasedOpInterface = Box<dyn Any>;
+pub type OpInterfaceConverter = fn(Arc<OpInstance>) -> ErasedOpInterface;
+
+struct InterfaceValue<I: ?Sized + 'static>(Box<I>);
+
+pub trait ImplementsOpInterface<I: ?Sized + 'static>: Operation {
+    fn into_interface(self: Box<Self>) -> Box<I>;
+}
+
+pub fn erase_op_interface<I: ?Sized + 'static>(value: Box<I>) -> ErasedOpInterface {
+    Box::new(InterfaceValue::<I>(value))
+}
+
+pub fn downcast_op_interface<I: ?Sized + 'static>(erased: ErasedOpInterface) -> Option<Box<I>> {
+    erased
+        .downcast::<InterfaceValue<I>>()
+        .ok()
+        .map(|boxed| boxed.0)
+}
+
+pub fn op_interface_converter<Op, I>(instance: Arc<OpInstance>) -> ErasedOpInterface
+where
+    Op: ImplementsOpInterface<I>,
+    I: ?Sized + 'static,
+{
+    let op = Box::new(Op::from_op_instance(instance));
+    erase_op_interface(ImplementsOpInterface::<I>::into_interface(op))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OpId(u32);
 
@@ -78,6 +107,12 @@ pub trait Operation: 'static + Send + Sync + Any {
     fn semantic_expr(&self) -> Option<crate::sem_expr::Expr> {
         None
     }
+
+    fn register_interfaces(_context: &Context)
+    where
+        Self: Sized,
+    {
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -112,6 +147,11 @@ impl OpInstance {
     pub fn as_dyn_op(self: Arc<Self>) -> Box<dyn Operation> {
         let context = self.context.upgrade();
         context.get_dyn_op(self.clone())
+    }
+
+    pub fn as_interface<I: ?Sized + 'static>(self: Arc<Self>) -> Option<Box<I>> {
+        let context = self.context.upgrade();
+        context.get_op_interface::<I>(self.clone())
     }
 }
 

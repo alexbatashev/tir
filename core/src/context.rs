@@ -1,5 +1,5 @@
 use std::{
-    any::Any,
+    any::{Any, TypeId},
     collections::HashMap,
     sync::{Arc, Weak, atomic::AtomicU32},
 };
@@ -10,6 +10,9 @@ use crate::{
     Block, Dialect, Error, OpId, OpInstance, Operation, Region, Type,
     block::BlockId,
     builtin::BuiltinDialect,
+    operation::{
+        ImplementsOpInterface, OpInterfaceConverter, downcast_op_interface, op_interface_converter,
+    },
     parse::Span,
     parse::text::Parser as IRParser,
     region::RegionId,
@@ -81,6 +84,7 @@ struct ContextInstance {
     blocks: HashMap<BlockId, Arc<Block>>,
     last_block_id: AtomicU32,
     dialects: HashMap<&'static str, Arc<dyn Dialect>>,
+    op_interface_converters: HashMap<(&'static str, &'static str, TypeId), OpInterfaceConverter>,
 }
 
 impl Context {
@@ -97,6 +101,7 @@ impl Context {
             blocks: HashMap::new(),
             last_block_id: AtomicU32::new(0),
             dialects: HashMap::new(),
+            op_interface_converters: HashMap::new(),
         })))
     }
 
@@ -225,12 +230,48 @@ impl Context {
         inner.operations.get(&id).unwrap().clone()
     }
 
+    pub fn register_op_interface<I: ?Sized + 'static>(
+        &self,
+        dialect: &'static str,
+        op_name: &'static str,
+        converter: OpInterfaceConverter,
+    ) {
+        self.0
+            .write()
+            .op_interface_converters
+            .insert((dialect, op_name, TypeId::of::<I>()), converter);
+    }
+
+    pub fn register_operation_interface<Op, I>(&self)
+    where
+        Op: ImplementsOpInterface<I>,
+        I: ?Sized + 'static,
+    {
+        self.register_op_interface::<I>(Op::dialect(), Op::name(), op_interface_converter::<Op, I>);
+    }
+
     pub(crate) fn get_dyn_op(&self, op: Arc<OpInstance>) -> Box<dyn Operation> {
         let inner = self.0.read();
 
         let dialect = inner.dialects.get(op.dialect()).unwrap();
 
         dialect.get_dyn_op(op)
+    }
+
+    pub(crate) fn get_op_interface<I: ?Sized + 'static>(
+        &self,
+        op: Arc<OpInstance>,
+    ) -> Option<Box<I>> {
+        let converter = {
+            let inner = self.0.read();
+            inner
+                .op_interface_converters
+                .get(&(op.dialect(), op.name(), TypeId::of::<I>()))
+                .copied()
+        }?;
+
+        let erased = converter(op);
+        downcast_op_interface::<I>(erased)
     }
 
     pub fn get_parser(
@@ -309,9 +350,39 @@ impl<I: GetFromContext> DoubleEndedIterator for ContextIterator<I> {
 #[cfg(test)]
 mod tests {
     use super::Context;
+    use crate::{Commutative, Operation, Terminator, Type, builtin};
 
     #[test]
     fn default_context() {
         let _ = Context::with_default_dialects();
+    }
+
+    #[test]
+    fn custom_interface_for_existing_op() {
+        let context = Context::with_default_dialects();
+
+        let lhs = context.create_value(Type::Integer { width: 32 }, None);
+        let rhs = context.create_value(Type::Integer { width: 32 }, None);
+        let add =
+            builtin::ops::addi(&context, lhs.id(), rhs.id(), Type::Integer { width: 32 }).build();
+
+        let iface = context
+            .get_op(add.id())
+            .as_interface::<dyn Commutative>()
+            .expect("interface should be available");
+        assert!(iface.is_commutative());
+    }
+
+    #[test]
+    fn builtin_terminator_interface() {
+        let context = Context::with_default_dialects();
+        let value = context.create_value(Type::Integer { width: 32 }, None);
+        let ret = builtin::ops::r#return(&context, value.id()).build();
+
+        let iface = context
+            .get_op(ret.id())
+            .as_interface::<dyn Terminator>()
+            .expect("terminator interface should be available");
+        assert!(iface.is_terminator());
     }
 }
