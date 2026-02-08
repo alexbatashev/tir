@@ -25,12 +25,19 @@ impl RiscvDialect {
     }
 }
 
+pub fn create_isel_pass() -> tir_be_common::isel::InstructionSelectPass {
+    tir_be_common::isel::InstructionSelectPass::new(get_isel_rules())
+}
+
 #[cfg(test)]
 mod tests {
-    use tir::{Context, IRFormatter, Operation};
+    use tir::{
+        Context, IRBuilder, IRFormatter, Operation, PassManager, Type,
+        builtin::{AddIOpBuilder, FuncOp, FuncOpBuilder, ModuleOpBuilder, ReturnOpBuilder},
+    };
     use tir_be_common::AsmDialect;
 
-    use crate::RiscvDialect;
+    use crate::{RiscvDialect, create_isel_pass};
 
     #[test]
     fn smoke_parser() {
@@ -53,5 +60,55 @@ mod tests {
         let mut f = IRFormatter::new(&mut new_buf);
         module.print(&mut f).expect("Failed to print module");
         insta::assert_snapshot!(&new_buf);
+    }
+
+    #[test]
+    fn builtin_add_lowers_to_riscv_add() {
+        let context = Context::with_default_dialects();
+        context.register_dialect::<RiscvDialect>();
+
+        let module = ModuleOpBuilder::new(&context).build();
+
+        let param0 = context.create_value(Type::Integer { width: 32 }, None);
+        let param1 = context.create_value(Type::Integer { width: 32 }, None);
+        let region = context.create_region();
+        let block = context.create_block(vec![param0, param1]);
+        region.add_block(block.id());
+
+        let func = FuncOpBuilder::new(&context)
+            .sym_name("demo")
+            .ret_type(Type::Integer { width: 32 })
+            .body(region.id())
+            .build();
+
+        let mut fb = IRBuilder::new(func.body());
+        let add = AddIOpBuilder::new(&context)
+            .lhs(func.body().arguments()[0].id())
+            .rhs(func.body().arguments()[1].id())
+            .result_type(Type::Integer { width: 32 })
+            .build();
+        let add_result = add.result();
+        fb.insert(add);
+        fb.insert(ReturnOpBuilder::new(&context).value(add_result).build());
+
+        let mut mb = IRBuilder::new(module.body());
+        let func = mb.insert(func);
+
+        let mut pm = PassManager::new();
+        pm.nest(FuncOp::name()).add_pass(create_isel_pass());
+        pm.run(&context, context.get_op(module.id()))
+            .expect("pass pipeline should succeed");
+
+        let names: Vec<_> = context
+            .get_op(func.id())
+            .as_op::<FuncOp>()
+            .expect("func")
+            .body()
+            .op_ids()
+            .into_iter()
+            .map(|id| context.get_op(id).name)
+            .collect();
+
+        assert_eq!(names, vec!["add", "return"]);
     }
 }

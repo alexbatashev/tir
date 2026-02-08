@@ -15,6 +15,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         operands,
         results,
         custom_format,
+        semantic_expr,
     } = parse_macro_input!(item as Operation);
 
     let builder_name = format_ident!("{}Builder", struct_name.to_string());
@@ -129,6 +130,25 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         quote! {}
     };
 
+    let operand_name_literals: Vec<_> = operands
+        .iter()
+        .map(|n| {
+            let lit = proc_macro2::Literal::string(n);
+            quote! { #lit }
+        })
+        .collect();
+
+    let semantic_expr_method = if let Some(sem) = semantic_expr {
+        let sem_lit = proc_macro2::Literal::string(&sem);
+        quote! {
+            fn semantic_expr(&self) -> Option<&'static str> {
+                Some(#sem_lit)
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     let result_builder_field = if has_results {
         quote! { result_type: Option<tir::Type>, }
     } else {
@@ -232,6 +252,12 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
             fn attributes(&self) -> &[tir::attributes::NamedAttribute] {
                 &self.0.attributes
             }
+
+            fn operand_names(&self) -> &'static [&'static str] {
+                &[#(#operand_name_literals),*]
+            }
+
+            #semantic_expr_method
         }
 
         impl #builder_name {
@@ -296,6 +322,7 @@ struct Operation {
     operands: Vec<String>,
     results: Vec<String>,
     custom_format: bool,
+    semantic_expr: Option<String>,
 }
 
 struct Region {
@@ -439,6 +466,17 @@ impl Parse for Operation {
             })
             .unwrap_or(false);
 
+        let semantic_expr = struct_.fields.iter().find_map(|f| match &f.member {
+            Member::Named(ident) => {
+                if ident.to_string().as_str() == "sem" {
+                    expr_as_semantic_string(&f.expr)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        });
+
         Ok(Operation {
             struct_name,
             name,
@@ -449,7 +487,22 @@ impl Parse for Operation {
             operands,
             results,
             custom_format,
+            semantic_expr,
         })
+    }
+}
+
+fn expr_as_semantic_string(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Lit(lit) => {
+            if let syn::Lit::Str(s) = &lit.lit {
+                Some(s.value())
+            } else {
+                None
+            }
+        }
+        Expr::Macro(m) => Some(m.mac.tokens.to_string()),
+        _ => Some(quote! { #expr }.to_string()),
     }
 }
 

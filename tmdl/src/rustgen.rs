@@ -101,6 +101,8 @@ fn emit_instructions<'ast, 'cache: 'ast>(
     let mut instruction_defs = vec![];
     let mut instruction_parsers_impls: Vec<proc_macro2::TokenStream> = vec![];
     let mut instruction_parser_map_inits: Vec<proc_macro2::TokenStream> = vec![];
+    let mut isel_rule_emitters: Vec<proc_macro2::TokenStream> = vec![];
+    let mut isel_rule_inits: Vec<proc_macro2::TokenStream> = vec![];
 
     for inst in instructions {
         let name_ident = format_ident!("{}Op", &inst.name);
@@ -152,6 +154,100 @@ fn emit_instructions<'ast, 'cache: 'ast>(
                 }
             }
         });
+
+        if let Some(rhs) = resolve_behavior_rhs(inst) {
+            let params = resolve_params_for_instruction(inst, item_cache);
+            let mut numeric_params = HashMap::new();
+            for (name, (_ty, value)) in params {
+                if let Some(ast::Expr::Lit(ast::Lit::Int(li))) = value {
+                    numeric_params.insert(name, parse_literal_value(&li) as i64);
+                }
+            }
+            if let Ok(converted) = crate::sem_expr_conv::convert_to_sem_expr(rhs, numeric_params) {
+                let pattern = emit_sem_expr(&converted.expr);
+                let mut var_symbols: HashMap<String, u32> = HashMap::new();
+                for (sym, info) in &converted.symbols {
+                    if let crate::sem_expr_conv::SymbolInfo::Variable { name } = info {
+                        var_symbols.insert(name.clone(), *sym);
+                    }
+                }
+
+                let emit_fn_ident = format_ident!("emit_isel_{}", inst.name.to_lowercase());
+                let rule_name_lit = proc_macro2::Literal::string(&inst.name.to_lowercase());
+                let mut emit_attr_steps = Vec::new();
+                let ops = resolve_operands_for_instruction(inst, item_cache);
+                for (op_name, op_ty) in ops {
+                    let op_name_lit = proc_macro2::Literal::string(&op_name);
+                    match op_ty {
+                        ast::Type::Struct(class_name) => {
+                            let class_lit = proc_macro2::Literal::string(&class_name);
+                            if op_name == "rd" {
+                                emit_attr_steps.push(quote! {
+                                    let dst = op.op().results[0].number();
+                                    builder = builder.attr(
+                                        #op_name_lit,
+                                        tir::attributes::AttributeValue::Register(
+                                            tir::attributes::RegisterAttr::Virtual {
+                                                id: dst,
+                                                class: Some(#class_lit.to_string()),
+                                            },
+                                        ),
+                                    );
+                                });
+                            } else if let Some(sym) = var_symbols.get(&op_name) {
+                                let sym_lit = proc_macro2::Literal::u32_unsuffixed(*sym);
+                                emit_attr_steps.push(quote! {
+                                    let src = m.value_binding(#sym_lit).ok_or(tir::PassError::RewriteFailed(op.op().id))?;
+                                    builder = builder.attr(
+                                        #op_name_lit,
+                                        tir::attributes::AttributeValue::Register(
+                                            tir::attributes::RegisterAttr::Virtual {
+                                                id: src.number(),
+                                                class: Some(#class_lit.to_string()),
+                                            },
+                                        ),
+                                    );
+                                });
+                            }
+                        }
+                        ast::Type::Integer | ast::Type::Bits(_) => {
+                            if let Some(sym) = var_symbols.get(&op_name) {
+                                let sym_lit = proc_macro2::Literal::u32_unsuffixed(*sym);
+                                emit_attr_steps.push(quote! {
+                                    let v = m.int_binding(#sym_lit).ok_or(tir::PassError::RewriteFailed(op.op().id))?;
+                                    builder = builder.attr(
+                                        #op_name_lit,
+                                        tir::attributes::AttributeValue::Int(v),
+                                    );
+                                });
+                            }
+                        }
+                        ast::Type::String => {}
+                    }
+                }
+
+                isel_rule_emitters.push(quote! {
+                    fn #emit_fn_ident(
+                        context: &tir::Context,
+                        op: &tir::OperationRef,
+                        m: &tir_be_common::isel::RuleMatch,
+                    ) -> Result<Box<dyn tir::Operation>, tir::PassError> {
+                        let mut builder = #builder_ident::new(context);
+                        #(#emit_attr_steps)*
+                        Ok(Box::new(builder.build()))
+                    }
+                });
+
+                isel_rule_inits.push(quote! {
+                    rules.push(tir_be_common::isel::Rule {
+                        name: #rule_name_lit,
+                        pattern: #pattern,
+                        cost: 1,
+                        emit: #emit_fn_ident,
+                    });
+                });
+            }
+        }
 
         // Emit parser implementations based on asm template (simple template support)
         if let Some(template) = resolve_asm_template_for_instruction(inst, item_cache) {
@@ -293,7 +389,13 @@ fn emit_instructions<'ast, 'cache: 'ast>(
             map
         }
 
-        // Placeholder for emitters map if needed in the future
+        #(#isel_rule_emitters)*
+
+        pub fn get_isel_rules() -> Vec<tir_be_common::isel::Rule> {
+            let mut rules = Vec::new();
+            #(#isel_rule_inits)*
+            rules
+        }
     })
 }
 
@@ -340,6 +442,144 @@ fn resolve_asm_template_for_instruction<'a>(
         }
     }
     None
+}
+
+fn resolve_params_for_instruction<'a>(
+    inst: &'a ast::Instruction,
+    item_cache: &HashMap<String, &'a ast::Item>,
+) -> HashMap<String, (ast::Type, Option<ast::Expr>)> {
+    let mut result = HashMap::new();
+
+    fn collect_from_template<'a>(
+        name: &str,
+        cache: &HashMap<String, &'a ast::Item>,
+        acc: &mut HashMap<String, (ast::Type, Option<ast::Expr>)>,
+    ) {
+        if let Some(ast::Item::Template(t)) = cache.get(name) {
+            if let Some(parent) = &t.parent_template {
+                collect_from_template(parent, cache, acc);
+            }
+            for (k, v) in &t.params {
+                acc.insert(k.clone(), v.clone());
+            }
+        }
+    }
+
+    if let Some(p) = &inst.parent_template {
+        collect_from_template(p, item_cache, &mut result);
+    }
+    for (k, v) in &inst.params {
+        result.insert(k.clone(), v.clone());
+    }
+
+    result
+}
+
+fn parse_literal_value(lit: &ast::LitInt) -> u64 {
+    let v = lit.value();
+    if v.starts_with("0b") {
+        u64::from_str_radix(&v[2..], 2).unwrap_or(0)
+    } else if v.starts_with("0x") || v.starts_with("0X") {
+        u64::from_str_radix(&v[2..], 16).unwrap_or(0)
+    } else {
+        v.parse::<u64>().unwrap_or(0)
+    }
+}
+
+fn resolve_behavior_rhs(inst: &ast::Instruction) -> Option<&ast::Expr> {
+    match &inst.behavior {
+        ast::Expr::Assign(a) => Some(a.value.as_ref()),
+        ast::Expr::Block(b) => {
+            for stmt in b.stmts.iter().rev() {
+                if let ast::Expr::Assign(a) = stmt {
+                    if a.dest == "rd" {
+                        return Some(a.value.as_ref());
+                    }
+                }
+            }
+            for stmt in b.stmts.iter().rev() {
+                if let ast::Expr::Assign(a) = stmt {
+                    return Some(a.value.as_ref());
+                }
+            }
+            None
+        }
+        other => Some(other),
+    }
+}
+
+fn emit_sem_expr(expr: &tir::sem_expr::Expr) -> proc_macro2::TokenStream {
+    use tir::sem_expr::Expr;
+    match expr {
+        Expr::Int(v) => {
+            let width = proc_macro2::Literal::u32_unsuffixed(v.width());
+            if v.is_signed() {
+                let value = proc_macro2::Literal::i64_unsuffixed(v.to_i64());
+                quote! { tir::sem_expr::Expr::Int(tir::sem_expr::APInt::new_signed(#width, #value)) }
+            } else {
+                let value = proc_macro2::Literal::u64_unsuffixed(v.to_u64());
+                quote! { tir::sem_expr::Expr::Int(tir::sem_expr::APInt::new(#width, #value)) }
+            }
+        }
+        Expr::Bool(v) => {
+            quote! { tir::sem_expr::Expr::Bool(#v) }
+        }
+        Expr::Symbol(id) => {
+            let id_lit = proc_macro2::Literal::u32_unsuffixed(*id);
+            quote! { tir::sem_expr::Expr::Symbol(#id_lit) }
+        }
+        Expr::Add(lhs, rhs) => {
+            let lhs = emit_sem_expr(lhs);
+            let rhs = emit_sem_expr(rhs);
+            quote! { tir::sem_expr::Expr::Add(Box::new(#lhs), Box::new(#rhs)) }
+        }
+        Expr::Sub(lhs, rhs) => {
+            let lhs = emit_sem_expr(lhs);
+            let rhs = emit_sem_expr(rhs);
+            quote! { tir::sem_expr::Expr::Sub(Box::new(#lhs), Box::new(#rhs)) }
+        }
+        Expr::Mul(lhs, rhs) => {
+            let lhs = emit_sem_expr(lhs);
+            let rhs = emit_sem_expr(rhs);
+            quote! { tir::sem_expr::Expr::Mul(Box::new(#lhs), Box::new(#rhs)) }
+        }
+        Expr::Div(lhs, rhs) => {
+            let lhs = emit_sem_expr(lhs);
+            let rhs = emit_sem_expr(rhs);
+            quote! { tir::sem_expr::Expr::Div(Box::new(#lhs), Box::new(#rhs)) }
+        }
+        Expr::ShiftLeft(lhs, rhs) => {
+            let lhs = emit_sem_expr(lhs);
+            let rhs = emit_sem_expr(rhs);
+            quote! { tir::sem_expr::Expr::ShiftLeft(Box::new(#lhs), Box::new(#rhs)) }
+        }
+        Expr::ShiftRightLogic(lhs, rhs) => {
+            let lhs = emit_sem_expr(lhs);
+            let rhs = emit_sem_expr(rhs);
+            quote! { tir::sem_expr::Expr::ShiftRightLogic(Box::new(#lhs), Box::new(#rhs)) }
+        }
+        Expr::ShiftRightArithmetic(lhs, rhs) => {
+            let lhs = emit_sem_expr(lhs);
+            let rhs = emit_sem_expr(rhs);
+            quote! { tir::sem_expr::Expr::ShiftRightArithmetic(Box::new(#lhs), Box::new(#rhs)) }
+        }
+        Expr::And(lhs, rhs) => {
+            let lhs = emit_sem_expr(lhs);
+            let rhs = emit_sem_expr(rhs);
+            quote! { tir::sem_expr::Expr::And(Box::new(#lhs), Box::new(#rhs)) }
+        }
+        Expr::Or(lhs, rhs) => {
+            let lhs = emit_sem_expr(lhs);
+            let rhs = emit_sem_expr(rhs);
+            quote! { tir::sem_expr::Expr::Or(Box::new(#lhs), Box::new(#rhs)) }
+        }
+        Expr::Xor(lhs, rhs) => {
+            let lhs = emit_sem_expr(lhs);
+            let rhs = emit_sem_expr(rhs);
+            quote! { tir::sem_expr::Expr::Xor(Box::new(#lhs), Box::new(#rhs)) }
+        }
+        _ => quote! { tir::sem_expr::Expr::Bool(false) },
+    }
 }
 
 // Actions derived from a simple asm template string. We only support commas and operands now.

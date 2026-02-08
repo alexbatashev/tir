@@ -123,7 +123,10 @@ impl Rewriter {
 
 enum PassNode {
     Pass(Box<dyn Pass>),
-    Nested { op_name: &'static str, manager: PassManager },
+    Nested {
+        op_name: &'static str,
+        manager: PassManager,
+    },
 }
 
 pub struct PassManager {
@@ -141,20 +144,22 @@ impl PassManager {
     }
 
     pub fn nest(&mut self, op_name: &'static str) -> &mut PassManager {
-        self.passes
-            .push(PassNode::Nested { op_name, manager: PassManager::new() });
+        self.passes.push(PassNode::Nested {
+            op_name,
+            manager: PassManager::new(),
+        });
         match self.passes.last_mut() {
             Some(PassNode::Nested { manager, .. }) => manager,
             _ => unreachable!("nested pass manager entry just added"),
         }
     }
 
-    pub fn run(
-        &mut self,
-        context: &Context,
-        op: Arc<OpInstance>,
-    ) -> Result<(), PassError> {
-        let root = OperationRef { op, block: None, position: None };
+    pub fn run(&mut self, context: &Context, op: Arc<OpInstance>) -> Result<(), PassError> {
+        let root = OperationRef {
+            op,
+            block: None,
+            position: None,
+        };
         self.run_on_op_ref(context, root)
     }
 
@@ -177,14 +182,12 @@ impl PassManager {
         rewriter: &mut Rewriter,
     ) -> Result<(), PassError> {
         match entry {
-            PassNode::Pass(pass) => {
-                PassManager::walk_ops(context, root, &mut |op_ref| {
-                    if pass.target().matches(op_ref.op()) {
-                        pass.run(&op_ref, context, rewriter)?;
-                    }
-                    Ok(())
-                })
-            }
+            PassNode::Pass(pass) => PassManager::walk_ops(context, root, &mut |op_ref| {
+                if pass.target().matches(op_ref.op()) {
+                    pass.run(&op_ref, context, rewriter)?;
+                }
+                Ok(())
+            }),
             PassNode::Nested { op_name, manager } => {
                 PassManager::walk_ops(context, root, &mut |op_ref| {
                     if op_ref.name() == *op_name {
@@ -196,11 +199,7 @@ impl PassManager {
         }
     }
 
-    fn walk_ops<F>(
-        context: &Context,
-        root: &OperationRef,
-        f: &mut F,
-    ) -> Result<(), PassError>
+    fn walk_ops<F>(context: &Context, root: &OperationRef, f: &mut F) -> Result<(), PassError>
     where
         F: FnMut(OperationRef) -> Result<(), PassError>,
     {
@@ -259,9 +258,7 @@ mod tests {
             context: &Context,
             rewriter: &mut super::Rewriter,
         ) -> Result<(), PassError> {
-            let add = op
-                .as_op::<AddIOp>()
-                .expect("target guarantees AddIOp");
+            let add = op.as_op::<AddIOp>().expect("target guarantees AddIOp");
             let operands = add.operands();
             let result_ty = context.get_value(add.result()).ty().clone();
             let new_op = SubIOpBuilder::new(context)
