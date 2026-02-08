@@ -333,18 +333,27 @@ fn build_sem_expr_for_op(
 pub struct InstructionSelectPass {
     rules: Vec<Rule>,
     algorithm: Box<dyn IselAlgorithm>,
+    op_lowerings: Vec<OpLowering>,
 }
+
+pub type OpLowering = fn(&Context, &OperationRef, &mut Rewriter) -> Result<bool, PassError>;
 
 impl InstructionSelectPass {
     pub fn new(rules: Vec<Rule>) -> Self {
         Self {
             rules,
             algorithm: Box::new(GreedyBottomUp),
+            op_lowerings: vec![],
         }
     }
 
     pub fn with_algorithm(mut self, algorithm: Box<dyn IselAlgorithm>) -> Self {
         self.algorithm = algorithm;
+        self
+    }
+
+    pub fn with_op_lowering(mut self, lowering: OpLowering) -> Self {
+        self.op_lowerings.push(lowering);
         self
     }
 }
@@ -364,6 +373,12 @@ impl Pass for InstructionSelectPass {
         context: &Context,
         rewriter: &mut Rewriter,
     ) -> Result<(), PassError> {
+        for lowering in &self.op_lowerings {
+            if lowering(context, op, rewriter)? {
+                return Ok(());
+            }
+        }
+
         if op.op().results.is_empty() {
             return Ok(());
         }

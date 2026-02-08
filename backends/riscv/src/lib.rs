@@ -2,6 +2,14 @@ use tir::helpers::{dialect, operation};
 
 include!(concat!(env!("OUT_DIR"), "/riscv.rs"));
 
+operation! {
+    VirtualReturnOp {
+        name: "vret",
+        dialect: "riscv",
+        operands: [value],
+    }
+}
+
 dialect! {
     RiscvDialect {
         name: "riscv",
@@ -13,7 +21,8 @@ dialect! {
             // ShiftRightLogicalOp,
             XorOp,
             AndOp,
-            OrOp
+            OrOp,
+            VirtualReturnOp
         ],
     }
 }
@@ -25,8 +34,78 @@ impl RiscvDialect {
     }
 }
 
+fn lower_func_and_return_to_asm_symbol(
+    context: &tir::Context,
+    op: &tir::OperationRef,
+    rewriter: &mut tir::Rewriter,
+) -> Result<bool, tir::PassError> {
+    use tir::Operation;
+    use tir::attributes::{AttributeValue, RegisterAttr};
+    use tir::builtin::{FuncOp, ReturnOp};
+
+    if op.name() == FuncOp::name() {
+        let func = op.as_op::<FuncOp>().expect("name checked");
+
+        // asm.symbol regions require an explicit symbol_end terminator.
+        let body = func.body();
+        let has_symbol_end = body
+            .op_ids()
+            .last()
+            .map(|id| context.get_op(*id).name == tir_be_common::SymbolEndOp::name())
+            .unwrap_or(false);
+        if !has_symbol_end {
+            let mut b = tir::IRBuilder::new(body);
+            b.insert(tir_be_common::SymbolEndOpBuilder::new(context).build());
+        }
+
+        let sym_name = func
+            .attributes()
+            .iter()
+            .find(|a| a.name == "sym_name")
+            .and_then(|a| match &a.value {
+                AttributeValue::Str(s) => Some(s.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let arg_regs = func
+            .body()
+            .arguments()
+            .iter()
+            .map(|arg| {
+                AttributeValue::Register(RegisterAttr::Virtual {
+                    id: arg.id().number(),
+                    class: Some("GPR".to_string()),
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let lowered = tir_be_common::SymbolOpBuilder::new(context)
+            .body(op.op().regions[0])
+            .attr("name", AttributeValue::Str(sym_name))
+            .attr("arg_regs", AttributeValue::Array(arg_regs))
+            .build();
+        rewriter.replace_op(op, &lowered)?;
+        return Ok(true);
+    }
+
+    if op.name() == ReturnOp::name() {
+        let ret = op.as_op::<ReturnOp>().expect("name checked");
+        let mut builder = VirtualReturnOpBuilder::new(context);
+        if let Some(value) = ret.operands().first().copied() {
+            builder = builder.value(value);
+        }
+        let lowered = builder.build();
+        rewriter.replace_op(op, &lowered)?;
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
 pub fn create_isel_pass() -> tir_be_common::isel::InstructionSelectPass {
     tir_be_common::isel::InstructionSelectPass::new(get_isel_rules())
+        .with_op_lowering(lower_func_and_return_to_asm_symbol)
 }
 
 #[cfg(test)]
@@ -65,6 +144,7 @@ mod tests {
     #[test]
     fn builtin_add_lowers_to_riscv_add() {
         let context = Context::with_default_dialects();
+        context.register_dialect::<AsmDialect>();
         context.register_dialect::<RiscvDialect>();
 
         let module = ModuleOpBuilder::new(&context).build();
@@ -92,17 +172,16 @@ mod tests {
         fb.insert(ReturnOpBuilder::new(&context).value(add_result).build());
 
         let mut mb = IRBuilder::new(module.body());
-        let func = mb.insert(func);
+        let _func = mb.insert(func);
 
         let mut pm = PassManager::new();
         pm.nest(FuncOp::name()).add_pass(create_isel_pass());
         pm.run(&context, context.get_op(module.id()))
             .expect("pass pipeline should succeed");
 
-        let lowered = context.get_op(func.id()).as_op::<FuncOp>().expect("func");
         let mut buf = String::new();
         let mut fmt = IRFormatter::new(&mut buf);
-        lowered.print(&mut fmt).expect("print lowered func");
+        module.print(&mut fmt).expect("print lowered module");
         insta::assert_snapshot!("builtin_add_lowers_to_riscv_add_ir", &buf);
     }
 }
