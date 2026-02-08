@@ -7,6 +7,10 @@ operation! {
         name: "func",
         dialect: "builtin",
         format: "custom",
+        attributes: A {
+            sym_name: "Str",
+            ret_type: "Str",
+        },
         regions: R {
             body: Region {
                 single_block: true,
@@ -173,10 +177,7 @@ operation! {
 mod tests {
     use crate::{
         Context, IRBuilder, IRFormatter, Operation, Type,
-        builtin::{
-            FuncOp,
-            func::{FuncOpBuilder, ReturnOpBuilder},
-        },
+        builtin::{FuncOp, ops},
         parse::ir::parse_ir,
     };
 
@@ -195,15 +196,17 @@ mod tests {
         region.add_block(block.id());
 
         // Build function op
-        let func = FuncOpBuilder::new(&context)
-            .sym_name("add")
-            .ret_type(Type::Integer { width: 32 })
-            .body(region.id())
-            .build();
+        let func = ops::func(
+            &context,
+            "add",
+            Type::Integer { width: 32 },
+            Some(region.id()),
+        )
+        .build();
 
         // Insert return op into body
         let mut builder = IRBuilder::new(func.body());
-        builder.insert(ReturnOpBuilder::new(&context).value(param0_id).build());
+        builder.insert(ops::r#return(&context, param0_id).build());
 
         assert_eq!(func.regions().len(), 1);
         assert_eq!(func.body().arguments().len(), 2);
@@ -223,14 +226,16 @@ mod tests {
         let block = context.create_block(vec![param0, param1]);
         region.add_block(block.id());
 
-        let func = FuncOpBuilder::new(&context)
-            .sym_name("add")
-            .ret_type(Type::Integer { width: 32 })
-            .body(region.id())
-            .build();
+        let func = ops::func(
+            &context,
+            "add",
+            Type::Integer { width: 32 },
+            Some(region.id()),
+        )
+        .build();
 
         let mut builder = IRBuilder::new(func.body());
-        builder.insert(ReturnOpBuilder::new(&context).value(param0_id).build());
+        builder.insert(ops::r#return(&context, param0_id).build());
 
         // Print
         let mut buf = String::new();
@@ -255,14 +260,11 @@ mod tests {
         let context = Context::with_default_dialects();
 
         // Build void function with no parameters and no return value
-        let func = FuncOpBuilder::new(&context)
-            .sym_name("nop")
-            .ret_type(Type::None)
-            .build();
+        let func = ops::func(&context, "nop", Type::None, None).build();
 
         // Insert return with no operand
         let mut builder = IRBuilder::new(func.body());
-        builder.insert(ReturnOpBuilder::new(&context).build());
+        builder.insert(ops::r#return(&context, crate::ir::Operand::none()).build());
 
         // Print
         let mut buf = String::new();

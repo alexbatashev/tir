@@ -25,19 +25,17 @@ operation! {
 mod tests {
     use crate::{
         Context, IRBuilder, IRFormatter, Operation,
-        builtin::{ModuleOp, module::ModuleEndOpBuilder},
+        builtin::{ModuleOp, ops},
         parse::ir::parse_ir,
     };
-
-    use super::ModuleOpBuilder;
 
     #[test]
     fn module_creation() {
         let context = Context::with_default_dialects();
-        let m = ModuleOpBuilder::new(&context).build();
+        let m = ops::module(&context, None).build();
 
         let mut builder = IRBuilder::new(m.body());
-        builder.insert(ModuleEndOpBuilder::new(&context).build());
+        builder.insert(ops::module_end(&context).build());
 
         assert_eq!(m.regions().len(), 1);
         assert_eq!(m.body().iter(context.clone()).len(), 1);

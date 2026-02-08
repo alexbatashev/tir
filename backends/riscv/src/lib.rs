@@ -27,6 +27,10 @@ dialect! {
     }
 }
 
+pub mod ops {
+    pub use super::*;
+}
+
 impl RiscvDialect {
     pub fn get_asm_parser(&self) -> tir_be_common::AsmParser {
         let parser = tir_be_common::AsmParser::new(get_instruction_parsers());
@@ -112,7 +116,7 @@ pub fn create_isel_pass() -> tir_be_common::isel::InstructionSelectPass {
 mod tests {
     use tir::{
         Context, IRBuilder, IRFormatter, Operation, PassManager, Type,
-        builtin::{AddIOpBuilder, FuncOp, FuncOpBuilder, ModuleOpBuilder, ReturnOpBuilder},
+        builtin::{FuncOp, ops},
     };
     use tir_be_common::AsmDialect;
 
@@ -147,7 +151,7 @@ mod tests {
         context.register_dialect::<AsmDialect>();
         context.register_dialect::<RiscvDialect>();
 
-        let module = ModuleOpBuilder::new(&context).build();
+        let module = ops::module(&context, None).build();
 
         let param0 = context.create_value(Type::Integer { width: 32 }, None);
         let param1 = context.create_value(Type::Integer { width: 32 }, None);
@@ -155,21 +159,25 @@ mod tests {
         let block = context.create_block(vec![param0, param1]);
         region.add_block(block.id());
 
-        let func = FuncOpBuilder::new(&context)
-            .sym_name("demo")
-            .ret_type(Type::Integer { width: 32 })
-            .body(region.id())
-            .build();
+        let func = ops::func(
+            &context,
+            "demo",
+            Type::Integer { width: 32 },
+            Some(region.id()),
+        )
+        .build();
 
         let mut fb = IRBuilder::new(func.body());
-        let add = AddIOpBuilder::new(&context)
-            .lhs(func.body().arguments()[0].id())
-            .rhs(func.body().arguments()[1].id())
-            .result_type(Type::Integer { width: 32 })
-            .build();
+        let add = ops::addi(
+            &context,
+            func.body().arguments()[0].id(),
+            func.body().arguments()[1].id(),
+            Type::Integer { width: 32 },
+        )
+        .build();
         let add_result = add.result();
         fb.insert(add);
-        fb.insert(ReturnOpBuilder::new(&context).value(add_result).build());
+        fb.insert(ops::r#return(&context, add_result).build());
 
         let mut mb = IRBuilder::new(module.body());
         let _func = mb.insert(func);

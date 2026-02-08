@@ -161,11 +161,7 @@ operation! {
 mod tests {
     use crate::{
         Context, IRBuilder, IRFormatter, Operation, Type,
-        builtin::{
-            AddIOp, FuncOp,
-            arith::{AddIOpBuilder, ConstantOpBuilder, MulIOpBuilder},
-            func::{FuncOpBuilder, ReturnOpBuilder},
-        },
+        builtin::{AddIOp, FuncOp, ops},
         parse::ir::parse_ir,
     };
 
@@ -175,11 +171,7 @@ mod tests {
         let lhs = context.create_value(Type::Integer { width: 32 }, None);
         let rhs = context.create_value(Type::Integer { width: 32 }, None);
 
-        let op = AddIOpBuilder::new(&context)
-            .lhs(lhs.id())
-            .rhs(rhs.id())
-            .result_type(Type::Integer { width: 32 })
-            .build();
+        let op = ops::addi(&context, lhs.id(), rhs.id(), Type::Integer { width: 32 }).build();
 
         assert_eq!(op.operands().len(), 2);
         assert_eq!(
@@ -198,39 +190,39 @@ mod tests {
         let block = context.create_block(vec![param0, param1]);
         region.add_block(block.id());
 
-        let func = FuncOpBuilder::new(&context)
-            .sym_name("arith_demo")
-            .ret_type(Type::Integer { width: 32 })
-            .body(region.id())
-            .build();
+        let func = ops::func(
+            &context,
+            "arith_demo",
+            Type::Integer { width: 32 },
+            Some(region.id()),
+        )
+        .build();
 
         let mut builder = IRBuilder::new(func.body());
 
-        let c1 = ConstantOpBuilder::new(&context)
-            .value(7)
-            .result_type(Type::Integer { width: 32 })
-            .build();
-        let c2 = ConstantOpBuilder::new(&context)
-            .value(6)
-            .result_type(Type::Integer { width: 32 })
-            .build();
-        let mul = MulIOpBuilder::new(&context)
-            .lhs(c1.result())
-            .rhs(c2.result())
-            .result_type(Type::Integer { width: 32 })
-            .build();
-        let add = AddIOpBuilder::new(&context)
-            .lhs(mul.result())
-            .rhs(block.arguments()[0].id())
-            .result_type(Type::Integer { width: 32 })
-            .build();
+        let c1 = ops::constant(&context, 7, Type::Integer { width: 32 }).build();
+        let c2 = ops::constant(&context, 6, Type::Integer { width: 32 }).build();
+        let mul = ops::muli(
+            &context,
+            c1.result(),
+            c2.result(),
+            Type::Integer { width: 32 },
+        )
+        .build();
+        let add = ops::addi(
+            &context,
+            mul.result(),
+            block.arguments()[0].id(),
+            Type::Integer { width: 32 },
+        )
+        .build();
         let add_result = add.result();
 
         builder.insert(c1);
         builder.insert(c2);
         builder.insert(mul);
         builder.insert(add);
-        builder.insert(ReturnOpBuilder::new(&context).value(add_result).build());
+        builder.insert(ops::r#return(&context, add_result).build());
 
         let mut buf = String::new();
         let mut f = IRFormatter::new(&mut buf);
