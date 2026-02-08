@@ -49,6 +49,30 @@ impl Block {
         self.operations.write().insert(index, id);
     }
 
+    pub fn op_ids(&self) -> Vec<OpId> {
+        self.operations.read().clone()
+    }
+
+    pub fn replace_op(&self, old: OpId, new: OpId) -> bool {
+        let mut ops = self.operations.write();
+        if let Some(position) = ops.iter().position(|id| *id == old) {
+            ops[position] = new;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn remove_op(&self, id: OpId) -> bool {
+        let mut ops = self.operations.write();
+        if let Some(position) = ops.iter().position(|op_id| *op_id == id) {
+            ops.remove(position);
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn iter(&self, context: Context) -> ContextIterator<OpId> {
         ContextIterator::new(context, self.operations.read().clone())
     }
