@@ -70,6 +70,14 @@ pub trait Operation: 'static + Send + Sync + Any {
     fn regions(&self) -> ContextIterator<RegionId>;
     fn operands(&self) -> &[ValueId];
     fn attributes(&self) -> &[crate::attributes::NamedAttribute];
+
+    fn operand_names(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    fn semantic_expr(&self) -> Option<crate::sem_expr::Expr> {
+        None
+    }
 }
 
 #[derive(Debug, Clone)]

@@ -1,5 +1,6 @@
 use tir::helpers::dialect;
 
+pub mod isel;
 mod lexer;
 mod operations;
 mod parser;

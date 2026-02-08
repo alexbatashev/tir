@@ -25,6 +25,7 @@ operation! {
         dialect: "builtin",
         operands: [lhs, rhs],
         results: [result],
+        sem: "(set result (add lhs rhs))",
     }
 }
 
@@ -34,6 +35,7 @@ operation! {
         dialect: "builtin",
         operands: [lhs, rhs],
         results: [result],
+        sem: "(set result (sub lhs rhs))",
     }
 }
 
@@ -43,6 +45,7 @@ operation! {
         dialect: "builtin",
         operands: [lhs, rhs],
         results: [result],
+        sem: "(set result (mul lhs rhs))",
     }
 }
 
@@ -52,6 +55,7 @@ operation! {
         dialect: "builtin",
         operands: [lhs, rhs],
         results: [result],
+        sem: "(set result (and lhs rhs))",
     }
 }
 
@@ -61,6 +65,7 @@ operation! {
         dialect: "builtin",
         operands: [lhs, rhs],
         results: [result],
+        sem: "(set result (or lhs rhs))",
     }
 }
 
@@ -70,6 +75,7 @@ operation! {
         dialect: "builtin",
         operands: [lhs, rhs],
         results: [result],
+        sem: "(set result (xor lhs rhs))",
     }
 }
 
@@ -79,6 +85,7 @@ operation! {
         dialect: "builtin",
         operands: [lhs, rhs],
         results: [result],
+        sem: "(set result (shl lhs rhs))",
     }
 }
 
@@ -88,6 +95,7 @@ operation! {
         dialect: "builtin",
         operands: [lhs, rhs],
         results: [result],
+        sem: "(set result (lshr lhs rhs))",
     }
 }
 
@@ -97,6 +105,7 @@ operation! {
         dialect: "builtin",
         operands: [lhs, rhs],
         results: [result],
+        sem: "(set result (ashr lhs rhs))",
     }
 }
 
