@@ -11,6 +11,10 @@ pub use lexer::Token;
 pub use lexer::lex;
 pub use parser::{AsmInstructionParser, AsmParser};
 
+pub mod ops {
+    pub use crate::operations::*;
+}
+
 dialect! {
     AsmDialect {
         name: "asm",

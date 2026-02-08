@@ -2,7 +2,7 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{Expr, ExprStruct, Ident, Member, parse::Parse, parse_macro_input};
 
-use crate::utils::{expr_as_ident_vec, expr_as_string, field_name};
+use crate::utils::{expr_as_ident_vec, expr_as_string, field_name, op_fn_ident};
 
 pub fn construct_operation(item: TokenStream) -> TokenStream {
     let Operation {
@@ -20,6 +20,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
 
     let builder_name = format_ident!("{}Builder", struct_name.to_string());
     let has_results = !results.is_empty();
+    let op_fn_name = op_fn_ident(&name);
 
     let printer = if custom_format {
         make_custom_printer()
@@ -90,6 +91,8 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
     let mut operand_fields = vec![];
     let mut operand_defaults = vec![];
     let mut operand_builders = vec![];
+    let mut operand_fn_params = vec![];
+    let mut operand_fn_builders = vec![];
 
     for op_name in &operands {
         let field = format_ident!("{}", op_name);
@@ -103,6 +106,15 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
             pub fn #field(mut self, v: tir::ValueId) -> Self {
                 self.#field = Some(v);
                 self
+            }
+        });
+        operand_fn_params.push(quote! {
+            #field: impl Into<tir::ir::Operand>
+        });
+        operand_fn_builders.push(quote! {
+            let #field = #field.into();
+            if let Some(value) = #field.into_option() {
+                builder = builder.#field(value);
             }
         });
     }
@@ -170,6 +182,57 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
     } else {
         quote! {}
     };
+
+    let result_fn_param = if has_results {
+        quote! { result_type: tir::Type, }
+    } else {
+        quote! {}
+    };
+
+    let result_fn_builder = if has_results {
+        quote! { builder = builder.result_type(result_type); }
+    } else {
+        quote! {}
+    };
+
+    let attr_fn_params: Vec<_> = attributes
+        .iter()
+        .map(|attr| {
+            let name = op_fn_ident(&attr.name);
+            quote! { #name: impl Into<tir::attributes::AttributeValue> }
+        })
+        .collect();
+
+    let attr_fn_builders: Vec<_> = attributes
+        .iter()
+        .map(|attr| {
+            let name_ident = op_fn_ident(&attr.name);
+            let name_str = attr.name.clone();
+            quote! {
+                builder = builder.attr(#name_str, #name_ident.into());
+            }
+        })
+        .collect();
+
+    let region_fn_params: Vec<_> = regions
+        .iter()
+        .map(|region| {
+            let name = format_ident!("{}", region.name);
+            quote! { #name: Option<tir::RegionId> }
+        })
+        .collect();
+
+    let region_fn_builders: Vec<_> = regions
+        .iter()
+        .map(|region| {
+            let name = format_ident!("{}", region.name);
+            quote! {
+                if let Some(region) = #name {
+                    builder = builder.#name(region);
+                }
+            }
+        })
+        .collect();
 
     let result_build = if has_results {
         quote! {
@@ -306,6 +369,21 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
 
                 #struct_name(instance)
             }
+        }
+
+        pub fn #op_fn_name(
+            context: &tir::Context,
+            #(#operand_fn_params,)*
+            #(#attr_fn_params,)*
+            #result_fn_param
+            #(#region_fn_params,)*
+        ) -> #builder_name {
+            let mut builder = #builder_name::new(context);
+            #(#operand_fn_builders)*
+            #(#attr_fn_builders)*
+            #result_fn_builder
+            #(#region_fn_builders)*
+            builder
         }
     }
     .into()

@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+use crate::Type;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum AttributeValue {
     Str(String),
@@ -96,5 +98,107 @@ impl AttributeValue {
                 }
             },
         }
+    }
+}
+
+impl From<String> for AttributeValue {
+    fn from(value: String) -> Self {
+        AttributeValue::Str(value)
+    }
+}
+
+impl From<&str> for AttributeValue {
+    fn from(value: &str) -> Self {
+        AttributeValue::Str(value.to_string())
+    }
+}
+
+impl From<i64> for AttributeValue {
+    fn from(value: i64) -> Self {
+        AttributeValue::Int(value)
+    }
+}
+
+impl From<i32> for AttributeValue {
+    fn from(value: i32) -> Self {
+        AttributeValue::Int(value as i64)
+    }
+}
+
+impl From<i16> for AttributeValue {
+    fn from(value: i16) -> Self {
+        AttributeValue::Int(value as i64)
+    }
+}
+
+impl From<i8> for AttributeValue {
+    fn from(value: i8) -> Self {
+        AttributeValue::Int(value as i64)
+    }
+}
+
+impl From<u64> for AttributeValue {
+    fn from(value: u64) -> Self {
+        AttributeValue::UInt(value)
+    }
+}
+
+impl From<u32> for AttributeValue {
+    fn from(value: u32) -> Self {
+        AttributeValue::UInt(value as u64)
+    }
+}
+
+impl From<u16> for AttributeValue {
+    fn from(value: u16) -> Self {
+        AttributeValue::UInt(value as u64)
+    }
+}
+
+impl From<u8> for AttributeValue {
+    fn from(value: u8) -> Self {
+        AttributeValue::UInt(value as u64)
+    }
+}
+
+impl From<f32> for AttributeValue {
+    fn from(value: f32) -> Self {
+        AttributeValue::F32(value)
+    }
+}
+
+impl From<f64> for AttributeValue {
+    fn from(value: f64) -> Self {
+        AttributeValue::F64(value)
+    }
+}
+
+impl From<bool> for AttributeValue {
+    fn from(value: bool) -> Self {
+        AttributeValue::Bool(value)
+    }
+}
+
+impl From<Vec<AttributeValue>> for AttributeValue {
+    fn from(value: Vec<AttributeValue>) -> Self {
+        AttributeValue::Array(value)
+    }
+}
+
+impl From<BTreeMap<String, AttributeValue>> for AttributeValue {
+    fn from(value: BTreeMap<String, AttributeValue>) -> Self {
+        AttributeValue::Dict(value)
+    }
+}
+
+impl From<RegisterAttr> for AttributeValue {
+    fn from(value: RegisterAttr) -> Self {
+        AttributeValue::Register(value)
+    }
+}
+
+impl From<Type> for AttributeValue {
+    fn from(value: Type) -> Self {
+        AttributeValue::Str(value.to_string())
     }
 }

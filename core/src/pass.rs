@@ -233,10 +233,7 @@ impl Default for PassManager {
 mod tests {
     use crate::{
         Context, IRBuilder, Operation, Type,
-        builtin::{
-            AddIOp, AddIOpBuilder, FuncOp, FuncOpBuilder, ModuleOpBuilder, ReturnOpBuilder,
-            SubIOpBuilder,
-        },
+        builtin::{AddIOp, FuncOp, ops},
     };
 
     use super::{Pass, PassError, PassManager, PassTarget};
@@ -261,11 +258,7 @@ mod tests {
             let add = op.as_op::<AddIOp>().expect("target guarantees AddIOp");
             let operands = add.operands();
             let result_ty = context.get_value(add.result()).ty().clone();
-            let new_op = SubIOpBuilder::new(context)
-                .lhs(operands[0])
-                .rhs(operands[1])
-                .result_type(result_ty)
-                .build();
+            let new_op = ops::subi(context, operands[0], operands[1], result_ty).build();
             rewriter.replace_op(op, &new_op)
         }
     }
@@ -273,7 +266,7 @@ mod tests {
     #[test]
     fn nested_pass_manager_rewrites_ops() {
         let context = Context::with_default_dialects();
-        let module = ModuleOpBuilder::new(&context).build();
+        let module = ops::module(&context, None).build();
 
         let param0 = context.create_value(Type::Integer { width: 32 }, None);
         let param1 = context.create_value(Type::Integer { width: 32 }, None);
@@ -282,22 +275,26 @@ mod tests {
         let block = context.create_block(vec![param0, param1]);
         region.add_block(block.id());
 
-        let func = FuncOpBuilder::new(&context)
-            .sym_name("demo")
-            .ret_type(Type::Integer { width: 32 })
-            .body(region.id())
-            .build();
+        let func = ops::func(
+            &context,
+            "demo",
+            Type::Integer { width: 32 },
+            Some(region.id()),
+        )
+        .build();
         let func_body = func.body();
 
         let mut func_builder = IRBuilder::new(func_body.clone());
-        let add = AddIOpBuilder::new(&context)
-            .lhs(func_body.arguments()[0].id())
-            .rhs(func_body.arguments()[1].id())
-            .result_type(Type::Integer { width: 32 })
-            .build();
+        let add = ops::addi(
+            &context,
+            func_body.arguments()[0].id(),
+            func_body.arguments()[1].id(),
+            Type::Integer { width: 32 },
+        )
+        .build();
         let add_result = add.result();
         func_builder.insert(add);
-        func_builder.insert(ReturnOpBuilder::new(&context).value(add_result).build());
+        func_builder.insert(ops::r#return(&context, add_result).build());
 
         let mut module_builder = IRBuilder::new(module.body());
         module_builder.insert(func);

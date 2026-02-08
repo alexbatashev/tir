@@ -10,6 +10,12 @@ pub use arith::*;
 pub use func::*;
 pub use module::*;
 
+pub mod ops {
+    pub use super::arith::*;
+    pub use super::func::*;
+    pub use super::module::*;
+}
+
 dialect! {
     BuiltinDialect {
         name: "builtin",
