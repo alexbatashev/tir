@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 
 use quote::{format_ident, quote};
@@ -6,6 +6,12 @@ use quote::{format_ident, quote};
 use crate::ast;
 use crate::error::TMDLError;
 use crate::utils::resolve_operands_for_instruction;
+
+struct InstructionSemantics {
+    pattern: proc_macro2::TokenStream,
+    variable_symbols: HashMap<String, u32>,
+    fixed_register_by_class: HashMap<String, Option<u16>>,
+}
 
 pub fn generate_rust(
     dialect: &str,
@@ -110,11 +116,13 @@ fn emit_instructions<'ast, 'cache: 'ast>(
         let mnemonic = resolve_string(inst.params.get("MNEMONIC").unwrap().1.as_ref().unwrap());
         let mnemonic_lit =
             proc_macro2::Literal::string(&mnemonic.clone().unwrap_or_else(|| "".to_string()));
+        let ops = resolve_operands_for_instruction(inst, item_cache);
+        let ops_map = ops.clone().into_iter().collect::<HashMap<_, _>>();
+        let defined_register_operands = infer_defined_register_operands(&inst.behavior, &ops);
         // Build attributes schema from operands
         let attrs_schema = {
             let mut items = vec![];
-            let ops = resolve_operands_for_instruction(inst, item_cache);
-            for (name, ty) in ops {
+            for (name, ty) in &ops {
                 let field_ident = format_ident!("{}", name);
                 let ty_ts = match ty {
                     ast::Type::Struct(_) => quote! { Register },
@@ -126,14 +134,13 @@ fn emit_instructions<'ast, 'cache: 'ast>(
             quote! { #(#items,)* }
         };
 
-        // Build roles: heuristic — rd => Def for register types, rs* => Use
+        // Build roles from behavior assignments so we don't depend on naming conventions.
         let roles_schema = {
             let mut items = vec![];
-            let ops = resolve_operands_for_instruction(inst, item_cache);
-            for (name, ty) in ops {
+            for (name, ty) in &ops {
                 if let ast::Type::Struct(_) = ty {
                     let field_ident = format_ident!("{}", name);
-                    let role = if name == "rd" {
+                    let role = if defined_register_operands.contains(name) {
                         quote! { Def }
                     } else {
                         quote! { Use }
@@ -155,107 +162,113 @@ fn emit_instructions<'ast, 'cache: 'ast>(
             }
         });
 
-        if let Some(rhs) = resolve_behavior_rhs(inst) {
-            let params = resolve_params_for_instruction(inst, item_cache);
-            let mut numeric_params = HashMap::new();
-            for (name, (_ty, value)) in params {
-                if let Some(ast::Expr::Lit(ast::Lit::Int(li))) = value {
-                    numeric_params.insert(name, parse_literal_value(&li) as i64);
+        if let Some(semantics) =
+            analyze_instruction_semantics(inst, item_cache, &ops, &defined_register_operands)
+        {
+            let emit_fn_ident = format_ident!("emit_isel_{}", inst.name.to_lowercase());
+            let rule_name_lit = proc_macro2::Literal::string(&inst.name.to_lowercase());
+            let mut emit_attr_steps = Vec::new();
+            for (op_name, op_ty) in &ops {
+                let op_name_lit = proc_macro2::Literal::string(&op_name);
+                match op_ty {
+                    ast::Type::Struct(class_name) => {
+                        let class_lit = proc_macro2::Literal::string(&class_name);
+                        if let Some(def_pos) = defined_register_operands
+                            .iter()
+                            .position(|name| name == op_name)
+                        {
+                            let def_pos_lit = proc_macro2::Literal::usize_unsuffixed(def_pos);
+                            emit_attr_steps.push(quote! {
+                                let dst = op
+                                    .op()
+                                    .results
+                                    .get(#def_pos_lit)
+                                    .ok_or(tir::PassError::RewriteFailed(op.op().id))?
+                                    .number();
+                                builder = builder.attr(
+                                    #op_name_lit,
+                                    tir::attributes::AttributeValue::Register(
+                                        tir::attributes::RegisterAttr::Virtual {
+                                            id: dst,
+                                            class: Some(#class_lit.to_string()),
+                                        },
+                                    ),
+                                );
+                            });
+                        } else if let Some(sym) = semantics.variable_symbols.get(op_name) {
+                            let sym_lit = proc_macro2::Literal::u32_unsuffixed(*sym);
+                            emit_attr_steps.push(quote! {
+                                let src = m.value_binding(#sym_lit).ok_or(tir::PassError::RewriteFailed(op.op().id))?;
+                                builder = builder.attr(
+                                    #op_name_lit,
+                                    tir::attributes::AttributeValue::Register(
+                                        tir::attributes::RegisterAttr::Virtual {
+                                            id: src.number(),
+                                            class: Some(#class_lit.to_string()),
+                                        },
+                                    ),
+                                );
+                            });
+                        } else if let Some(Some(reg_idx)) =
+                            semantics.fixed_register_by_class.get(class_name)
+                        {
+                            let idx_lit = proc_macro2::Literal::u16_unsuffixed(*reg_idx);
+                            emit_attr_steps.push(quote! {
+                                builder = builder.attr(
+                                    #op_name_lit,
+                                    tir::attributes::AttributeValue::Register(
+                                        tir::attributes::RegisterAttr::Physical {
+                                            class: #class_lit.to_string(),
+                                            index: #idx_lit,
+                                        },
+                                    ),
+                                );
+                            });
+                        }
+                    }
+                    ast::Type::Integer | ast::Type::Bits(_) => {
+                        if let Some(sym) = semantics.variable_symbols.get(op_name) {
+                            let sym_lit = proc_macro2::Literal::u32_unsuffixed(*sym);
+                            emit_attr_steps.push(quote! {
+                                let v = m.int_binding(#sym_lit).ok_or(tir::PassError::RewriteFailed(op.op().id))?;
+                                builder = builder.attr(
+                                    #op_name_lit,
+                                    tir::attributes::AttributeValue::Int(v),
+                                );
+                            });
+                        }
+                    }
+                    ast::Type::String => {}
                 }
             }
-            if let Ok(converted) = crate::sem_expr_conv::convert_to_sem_expr(rhs, numeric_params) {
-                let pattern = emit_sem_expr(&converted.expr);
-                let mut var_symbols: HashMap<String, u32> = HashMap::new();
-                for (sym, info) in &converted.symbols {
-                    if let crate::sem_expr_conv::SymbolInfo::Variable { name } = info {
-                        var_symbols.insert(name.clone(), *sym);
-                    }
+
+            let pattern = semantics.pattern;
+            isel_rule_emitters.push(quote! {
+                fn #emit_fn_ident(
+                    context: &tir::Context,
+                    op: &tir::OperationRef,
+                    m: &tir_be_common::isel::RuleMatch,
+                ) -> Result<Box<dyn tir::Operation>, tir::PassError> {
+                    let mut builder = #builder_ident::new(context);
+                    #(#emit_attr_steps)*
+                    Ok(Box::new(builder.build()))
                 }
+            });
 
-                let emit_fn_ident = format_ident!("emit_isel_{}", inst.name.to_lowercase());
-                let rule_name_lit = proc_macro2::Literal::string(&inst.name.to_lowercase());
-                let mut emit_attr_steps = Vec::new();
-                let ops = resolve_operands_for_instruction(inst, item_cache);
-                for (op_name, op_ty) in ops {
-                    let op_name_lit = proc_macro2::Literal::string(&op_name);
-                    match op_ty {
-                        ast::Type::Struct(class_name) => {
-                            let class_lit = proc_macro2::Literal::string(&class_name);
-                            if op_name == "rd" {
-                                emit_attr_steps.push(quote! {
-                                    let dst = op.op().results[0].number();
-                                    builder = builder.attr(
-                                        #op_name_lit,
-                                        tir::attributes::AttributeValue::Register(
-                                            tir::attributes::RegisterAttr::Virtual {
-                                                id: dst,
-                                                class: Some(#class_lit.to_string()),
-                                            },
-                                        ),
-                                    );
-                                });
-                            } else if let Some(sym) = var_symbols.get(&op_name) {
-                                let sym_lit = proc_macro2::Literal::u32_unsuffixed(*sym);
-                                emit_attr_steps.push(quote! {
-                                    let src = m.value_binding(#sym_lit).ok_or(tir::PassError::RewriteFailed(op.op().id))?;
-                                    builder = builder.attr(
-                                        #op_name_lit,
-                                        tir::attributes::AttributeValue::Register(
-                                            tir::attributes::RegisterAttr::Virtual {
-                                                id: src.number(),
-                                                class: Some(#class_lit.to_string()),
-                                            },
-                                        ),
-                                    );
-                                });
-                            }
-                        }
-                        ast::Type::Integer | ast::Type::Bits(_) => {
-                            if let Some(sym) = var_symbols.get(&op_name) {
-                                let sym_lit = proc_macro2::Literal::u32_unsuffixed(*sym);
-                                emit_attr_steps.push(quote! {
-                                    let v = m.int_binding(#sym_lit).ok_or(tir::PassError::RewriteFailed(op.op().id))?;
-                                    builder = builder.attr(
-                                        #op_name_lit,
-                                        tir::attributes::AttributeValue::Int(v),
-                                    );
-                                });
-                            }
-                        }
-                        ast::Type::String => {}
-                    }
-                }
-
-                isel_rule_emitters.push(quote! {
-                    fn #emit_fn_ident(
-                        context: &tir::Context,
-                        op: &tir::OperationRef,
-                        m: &tir_be_common::isel::RuleMatch,
-                    ) -> Result<Box<dyn tir::Operation>, tir::PassError> {
-                        let mut builder = #builder_ident::new(context);
-                        #(#emit_attr_steps)*
-                        Ok(Box::new(builder.build()))
-                    }
+            isel_rule_inits.push(quote! {
+                rules.push(tir_be_common::isel::Rule {
+                    name: #rule_name_lit,
+                    pattern: #pattern,
+                    cost: 1,
+                    emit: #emit_fn_ident,
                 });
-
-                isel_rule_inits.push(quote! {
-                    rules.push(tir_be_common::isel::Rule {
-                        name: #rule_name_lit,
-                        pattern: #pattern,
-                        cost: 1,
-                        emit: #emit_fn_ident,
-                    });
-                });
-            }
+            });
         }
 
         // Emit parser implementations based on asm template (simple template support)
         if let Some(template) = resolve_asm_template_for_instruction(inst, item_cache) {
             // Compile template into a sequence of parse actions
             let actions = compile_asm_template(&template);
-            let ops = resolve_operands_for_instruction(inst, item_cache)
-                .into_iter()
-                .collect::<HashMap<_, _>>();
 
             // Generate parsing code for each action
             let mut parse_steps: Vec<proc_macro2::TokenStream> = Vec::new();
@@ -269,7 +282,7 @@ fn emit_instructions<'ast, 'cache: 'ast>(
                         });
                     }
                     AsmAction::Operand(op_name) => {
-                        if let Some(ty) = ops.get(&op_name) {
+                        if let Some(ty) = ops_map.get(&op_name) {
                             let op_name_lit = proc_macro2::Literal::string(&op_name);
                             match ty {
                                 ast::Type::Struct(class_name) => {
@@ -486,24 +499,129 @@ fn parse_literal_value(lit: &ast::LitInt) -> u64 {
     }
 }
 
-fn resolve_behavior_rhs(inst: &ast::Instruction) -> Option<&ast::Expr> {
+fn analyze_instruction_semantics(
+    inst: &ast::Instruction,
+    item_cache: &HashMap<String, &ast::Item>,
+    operands: &[(String, ast::Type)],
+    defined_register_operands: &[String],
+) -> Option<InstructionSemantics> {
+    let rhs = resolve_behavior_rhs(inst, operands, defined_register_operands)?;
+
+    let params = resolve_params_for_instruction(inst, item_cache);
+    let mut numeric_params = HashMap::new();
+    for (name, (_ty, value)) in params {
+        if let Some(ast::Expr::Lit(ast::Lit::Int(li))) = value {
+            numeric_params.insert(name, parse_literal_value(&li) as i64);
+        }
+    }
+
+    let converted = crate::sem_expr_conv::convert_to_sem_expr(rhs, numeric_params).ok()?;
+    let pattern = emit_sem_expr(&converted.expr);
+    let (variable_symbols, fixed_register_by_class) = split_symbols(&converted.symbols);
+
+    Some(InstructionSemantics {
+        pattern,
+        variable_symbols,
+        fixed_register_by_class,
+    })
+}
+
+fn split_symbols(
+    symbols: &HashMap<u32, crate::sem_expr_conv::SymbolInfo>,
+) -> (HashMap<String, u32>, HashMap<String, Option<u16>>) {
+    let mut variable_symbols: HashMap<String, u32> = HashMap::new();
+    let mut fixed_register_by_class: HashMap<String, Option<u16>> = HashMap::new();
+
+    for (sym, info) in symbols {
+        match info {
+            crate::sem_expr_conv::SymbolInfo::Variable { name } => {
+                variable_symbols.insert(name.clone(), *sym);
+            }
+            crate::sem_expr_conv::SymbolInfo::Register { class, number } => {
+                let entry = fixed_register_by_class.entry(class.clone()).or_insert(None);
+                if let Ok(number_u16) = u16::try_from(*number) {
+                    match entry {
+                        None => *entry = Some(number_u16),
+                        Some(existing) if *existing == number_u16 => {}
+                        Some(_) => *entry = None,
+                    }
+                } else {
+                    *entry = None;
+                }
+            }
+        }
+    }
+
+    (variable_symbols, fixed_register_by_class)
+}
+
+fn register_operand_names(operands: &[(String, ast::Type)]) -> HashSet<&str> {
+    operands
+        .iter()
+        .filter_map(|(name, ty)| match ty {
+            ast::Type::Struct(_) => Some(name.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn collect_behavior_assignments<'a>(expr: &'a ast::Expr, out: &mut Vec<(&'a str, &'a ast::Expr)>) {
+    match expr {
+        ast::Expr::Assign(a) => out.push((a.dest.as_str(), a.value.as_ref())),
+        ast::Expr::Block(b) => {
+            for stmt in &b.stmts {
+                collect_behavior_assignments(stmt, out);
+            }
+        }
+        ast::Expr::If(i) => {
+            collect_behavior_assignments(i.then.as_ref(), out);
+            if let Some(else_expr) = &i.else_ {
+                collect_behavior_assignments(else_expr.as_ref(), out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn infer_defined_register_operands(
+    behavior: &ast::Expr,
+    operands: &[(String, ast::Type)],
+) -> Vec<String> {
+    let register_operands = register_operand_names(operands);
+
+    let mut defs = Vec::new();
+    let mut assignments = Vec::new();
+    collect_behavior_assignments(behavior, &mut assignments);
+    for (dst, _) in assignments {
+        if register_operands.contains(dst) && !defs.iter().any(|existing| existing == dst) {
+            defs.push(dst.to_string());
+        }
+    }
+    defs
+}
+
+fn resolve_behavior_rhs<'a>(
+    inst: &'a ast::Instruction,
+    operands: &[(String, ast::Type)],
+    defined_register_operands: &[String],
+) -> Option<&'a ast::Expr> {
+    let register_operands = register_operand_names(operands);
+
+    let mut assignments = Vec::new();
+    collect_behavior_assignments(&inst.behavior, &mut assignments);
+    for (dst, rhs) in assignments.iter().rev() {
+        if defined_register_operands.iter().any(|d| d == dst) {
+            return Some(*rhs);
+        }
+    }
+    for (dst, rhs) in assignments.iter().rev() {
+        if register_operands.contains(*dst) {
+            return Some(*rhs);
+        }
+    }
     match &inst.behavior {
         ast::Expr::Assign(a) => Some(a.value.as_ref()),
-        ast::Expr::Block(b) => {
-            for stmt in b.stmts.iter().rev() {
-                if let ast::Expr::Assign(a) = stmt {
-                    if a.dest == "rd" {
-                        return Some(a.value.as_ref());
-                    }
-                }
-            }
-            for stmt in b.stmts.iter().rev() {
-                if let ast::Expr::Assign(a) = stmt {
-                    return Some(a.value.as_ref());
-                }
-            }
-            None
-        }
+        ast::Expr::Block(_) | ast::Expr::If(_) => None,
         other => Some(other),
     }
 }

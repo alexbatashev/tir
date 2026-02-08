@@ -138,11 +138,10 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         })
         .collect();
 
-    let semantic_expr_method = if let Some(sem) = semantic_expr {
-        let sem_lit = proc_macro2::Literal::string(&sem);
+    let semantic_expr_method = if let Some(sem_expr) = semantic_expr {
         quote! {
-            fn semantic_expr(&self) -> Option<&'static str> {
-                Some(#sem_lit)
+            fn semantic_expr(&self) -> Option<tir::sem_expr::Expr> {
+                Some(#sem_expr)
             }
         }
     } else {
@@ -322,7 +321,7 @@ struct Operation {
     operands: Vec<String>,
     results: Vec<String>,
     custom_format: bool,
-    semantic_expr: Option<String>,
+    semantic_expr: Option<proc_macro2::TokenStream>,
 }
 
 struct Region {
@@ -421,7 +420,7 @@ impl Parse for Operation {
                             expr_as_ident_vec(&f.expr)
                                 .into_iter()
                                 .map(|i| i.to_string())
-                                .collect(),
+                                .collect::<Vec<String>>(),
                         )
                     } else {
                         None
@@ -441,7 +440,7 @@ impl Parse for Operation {
                             expr_as_ident_vec(&f.expr)
                                 .into_iter()
                                 .map(|i| i.to_string())
-                                .collect(),
+                                .collect::<Vec<String>>(),
                         )
                     } else {
                         None
@@ -469,7 +468,7 @@ impl Parse for Operation {
         let semantic_expr = struct_.fields.iter().find_map(|f| match &f.member {
             Member::Named(ident) => {
                 if ident.to_string().as_str() == "sem" {
-                    expr_as_semantic_string(&f.expr)
+                    expr_as_semantic_expr(&f.expr, &operands)
                 } else {
                     None
                 }
@@ -492,18 +491,141 @@ impl Parse for Operation {
     }
 }
 
-fn expr_as_semantic_string(expr: &Expr) -> Option<String> {
-    match expr {
+#[derive(Clone)]
+enum SemNode {
+    Atom(String),
+    List(Vec<SemNode>),
+}
+
+fn parse_sem_expr(input: &str) -> Option<SemNode> {
+    fn parse_list(chars: &[char], pos: &mut usize) -> Option<SemNode> {
+        if *pos >= chars.len() || chars[*pos] != '(' {
+            return None;
+        }
+        *pos += 1;
+        let mut items = Vec::new();
+        loop {
+            while *pos < chars.len() && chars[*pos].is_whitespace() {
+                *pos += 1;
+            }
+            if *pos >= chars.len() {
+                return None;
+            }
+            if chars[*pos] == ')' {
+                *pos += 1;
+                break;
+            }
+            if chars[*pos] == '(' {
+                items.push(parse_list(chars, pos)?);
+                continue;
+            }
+            let start = *pos;
+            while *pos < chars.len()
+                && !chars[*pos].is_whitespace()
+                && chars[*pos] != '('
+                && chars[*pos] != ')'
+            {
+                *pos += 1;
+            }
+            items.push(SemNode::Atom(chars[start..*pos].iter().collect()));
+        }
+        Some(SemNode::List(items))
+    }
+
+    let chars: Vec<char> = input.chars().collect();
+    let mut pos = 0usize;
+    while pos < chars.len() && chars[pos].is_whitespace() {
+        pos += 1;
+    }
+    let expr = parse_list(&chars, &mut pos)?;
+    while pos < chars.len() && chars[pos].is_whitespace() {
+        pos += 1;
+    }
+    if pos == chars.len() { Some(expr) } else { None }
+}
+
+fn sem_atom_to_expr(
+    atom: &str,
+    operand_symbols: &std::collections::HashMap<String, u32>,
+) -> Option<proc_macro2::TokenStream> {
+    if let Some(sym) = operand_symbols.get(atom) {
+        let sym_lit = proc_macro2::Literal::u32_unsuffixed(*sym);
+        return Some(quote! { tir::sem_expr::Expr::Symbol(#sym_lit) });
+    }
+    if let Ok(i) = atom.parse::<i64>() {
+        let width = proc_macro2::Literal::u32_unsuffixed(64);
+        let value = proc_macro2::Literal::i64_unsuffixed(i);
+        return Some(
+            quote! { tir::sem_expr::Expr::Int(tir::sem_expr::APInt::new_signed(#width, #value)) },
+        );
+    }
+    None
+}
+
+fn sem_node_to_expr(
+    node: &SemNode,
+    operand_symbols: &std::collections::HashMap<String, u32>,
+) -> Option<proc_macro2::TokenStream> {
+    match node {
+        SemNode::Atom(a) => sem_atom_to_expr(a, operand_symbols),
+        SemNode::List(items) => {
+            let [SemNode::Atom(op), lhs, rhs] = items.as_slice() else {
+                return None;
+            };
+            let lhs_ts = sem_node_to_expr(lhs, operand_symbols)?;
+            let rhs_ts = sem_node_to_expr(rhs, operand_symbols)?;
+            Some(match op.as_str() {
+                "add" => quote! { tir::sem_expr::Expr::Add(Box::new(#lhs_ts), Box::new(#rhs_ts)) },
+                "sub" => quote! { tir::sem_expr::Expr::Sub(Box::new(#lhs_ts), Box::new(#rhs_ts)) },
+                "mul" => quote! { tir::sem_expr::Expr::Mul(Box::new(#lhs_ts), Box::new(#rhs_ts)) },
+                "div" => quote! { tir::sem_expr::Expr::Div(Box::new(#lhs_ts), Box::new(#rhs_ts)) },
+                "and" => quote! { tir::sem_expr::Expr::And(Box::new(#lhs_ts), Box::new(#rhs_ts)) },
+                "or" => quote! { tir::sem_expr::Expr::Or(Box::new(#lhs_ts), Box::new(#rhs_ts)) },
+                "xor" => quote! { tir::sem_expr::Expr::Xor(Box::new(#lhs_ts), Box::new(#rhs_ts)) },
+                "shl" => {
+                    quote! { tir::sem_expr::Expr::ShiftLeft(Box::new(#lhs_ts), Box::new(#rhs_ts)) }
+                }
+                "lshr" => {
+                    quote! { tir::sem_expr::Expr::ShiftRightLogic(Box::new(#lhs_ts), Box::new(#rhs_ts)) }
+                }
+                "ashr" => {
+                    quote! { tir::sem_expr::Expr::ShiftRightArithmetic(Box::new(#lhs_ts), Box::new(#rhs_ts)) }
+                }
+                _ => return None,
+            })
+        }
+    }
+}
+
+fn expr_as_semantic_expr(expr: &Expr, operands: &[String]) -> Option<proc_macro2::TokenStream> {
+    let sem_src = match expr {
         Expr::Lit(lit) => {
             if let syn::Lit::Str(s) = &lit.lit {
-                Some(s.value())
+                s.value()
             } else {
-                None
+                return None;
             }
         }
-        Expr::Macro(m) => Some(m.mac.tokens.to_string()),
-        _ => Some(quote! { #expr }.to_string()),
+        _ => return None,
+    };
+
+    let mut symbols = std::collections::HashMap::new();
+    for (idx, name) in operands.iter().enumerate() {
+        symbols.insert(name.clone(), idx as u32);
     }
+
+    let parsed = parse_sem_expr(&sem_src)?;
+    let SemNode::List(items) = parsed else {
+        return None;
+    };
+    let [SemNode::Atom(set_kw), SemNode::Atom(_dst), rhs] = items.as_slice() else {
+        return None;
+    };
+    if set_kw != "set" {
+        return None;
+    }
+
+    sem_node_to_expr(rhs, &symbols)
 }
 
 fn get_regions(expr: &Expr) -> Option<Vec<Region>> {

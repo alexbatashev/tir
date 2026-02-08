@@ -75,7 +75,7 @@ pub trait Operation: 'static + Send + Sync + Any {
         &[]
     }
 
-    fn semantic_expr(&self) -> Option<&'static str> {
+    fn semantic_expr(&self) -> Option<crate::sem_expr::Expr> {
         None
     }
 }

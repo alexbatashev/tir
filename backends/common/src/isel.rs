@@ -214,102 +214,51 @@ where
     false
 }
 
-#[derive(Clone)]
-enum SExpr {
-    Atom(String),
-    List(Vec<SExpr>),
-}
-
-fn parse_sexpr(input: &str) -> Option<SExpr> {
-    fn parse_list(tokens: &[char], pos: &mut usize) -> Option<SExpr> {
-        if *pos >= tokens.len() || tokens[*pos] != '(' {
-            return None;
-        }
-        *pos += 1;
-        let mut items = Vec::new();
-        loop {
-            while *pos < tokens.len() && tokens[*pos].is_whitespace() {
-                *pos += 1;
-            }
-            if *pos >= tokens.len() {
-                return None;
-            }
-            if tokens[*pos] == ')' {
-                *pos += 1;
-                break;
-            }
-            if tokens[*pos] == '(' {
-                items.push(parse_list(tokens, pos)?);
-                continue;
-            }
-            let start = *pos;
-            while *pos < tokens.len()
-                && !tokens[*pos].is_whitespace()
-                && tokens[*pos] != '('
-                && tokens[*pos] != ')'
-            {
-                *pos += 1;
-            }
-            items.push(SExpr::Atom(tokens[start..*pos].iter().collect()));
-        }
-        Some(SExpr::List(items))
-    }
-
-    let chars: Vec<char> = input.chars().collect();
-    let mut pos = 0;
-    while pos < chars.len() && chars[pos].is_whitespace() {
-        pos += 1;
-    }
-    let expr = parse_list(&chars, &mut pos)?;
-    while pos < chars.len() && chars[pos].is_whitespace() {
-        pos += 1;
-    }
-    if pos == chars.len() { Some(expr) } else { None }
-}
-
-fn sexpr_to_sem_expr(expr: &SExpr, operand_bindings: &HashMap<String, Expr>) -> Option<Expr> {
+fn substitute_symbols(expr: &Expr, bindings: &HashMap<u32, Expr>) -> Expr {
     match expr {
-        SExpr::Atom(a) => {
-            if let Some(v) = operand_bindings.get(a) {
-                return Some(v.clone());
-            }
-            if let Ok(i) = a.parse::<i64>() {
-                return Some(Expr::Int(APInt::new_signed(64, i)));
-            }
-            None
-        }
-        SExpr::List(items) => {
-            let [SExpr::Atom(op), a, b] = items.as_slice() else {
-                return None;
-            };
-            let lhs = sexpr_to_sem_expr(a, operand_bindings)?;
-            let rhs = sexpr_to_sem_expr(b, operand_bindings)?;
-            Some(match op.as_str() {
-                "add" => Expr::Add(Box::new(lhs), Box::new(rhs)),
-                "sub" => Expr::Sub(Box::new(lhs), Box::new(rhs)),
-                "mul" => Expr::Mul(Box::new(lhs), Box::new(rhs)),
-                "div" => Expr::Div(Box::new(lhs), Box::new(rhs)),
-                "and" => Expr::And(Box::new(lhs), Box::new(rhs)),
-                "or" => Expr::Or(Box::new(lhs), Box::new(rhs)),
-                "xor" => Expr::Xor(Box::new(lhs), Box::new(rhs)),
-                "shl" => Expr::ShiftLeft(Box::new(lhs), Box::new(rhs)),
-                "lshr" => Expr::ShiftRightLogic(Box::new(lhs), Box::new(rhs)),
-                "ashr" => Expr::ShiftRightArithmetic(Box::new(lhs), Box::new(rhs)),
-                _ => return None,
-            })
-        }
+        Expr::Symbol(id) => bindings.get(id).cloned().unwrap_or(Expr::Symbol(*id)),
+        Expr::Add(lhs, rhs) => Expr::Add(
+            Box::new(substitute_symbols(lhs, bindings)),
+            Box::new(substitute_symbols(rhs, bindings)),
+        ),
+        Expr::Sub(lhs, rhs) => Expr::Sub(
+            Box::new(substitute_symbols(lhs, bindings)),
+            Box::new(substitute_symbols(rhs, bindings)),
+        ),
+        Expr::Mul(lhs, rhs) => Expr::Mul(
+            Box::new(substitute_symbols(lhs, bindings)),
+            Box::new(substitute_symbols(rhs, bindings)),
+        ),
+        Expr::Div(lhs, rhs) => Expr::Div(
+            Box::new(substitute_symbols(lhs, bindings)),
+            Box::new(substitute_symbols(rhs, bindings)),
+        ),
+        Expr::ShiftLeft(lhs, rhs) => Expr::ShiftLeft(
+            Box::new(substitute_symbols(lhs, bindings)),
+            Box::new(substitute_symbols(rhs, bindings)),
+        ),
+        Expr::ShiftRightLogic(lhs, rhs) => Expr::ShiftRightLogic(
+            Box::new(substitute_symbols(lhs, bindings)),
+            Box::new(substitute_symbols(rhs, bindings)),
+        ),
+        Expr::ShiftRightArithmetic(lhs, rhs) => Expr::ShiftRightArithmetic(
+            Box::new(substitute_symbols(lhs, bindings)),
+            Box::new(substitute_symbols(rhs, bindings)),
+        ),
+        Expr::And(lhs, rhs) => Expr::And(
+            Box::new(substitute_symbols(lhs, bindings)),
+            Box::new(substitute_symbols(rhs, bindings)),
+        ),
+        Expr::Or(lhs, rhs) => Expr::Or(
+            Box::new(substitute_symbols(lhs, bindings)),
+            Box::new(substitute_symbols(rhs, bindings)),
+        ),
+        Expr::Xor(lhs, rhs) => Expr::Xor(
+            Box::new(substitute_symbols(lhs, bindings)),
+            Box::new(substitute_symbols(rhs, bindings)),
+        ),
+        _ => expr.clone(),
     }
-}
-
-fn extract_sem_rhs<'a>(sem: &'a SExpr) -> Option<&'a SExpr> {
-    // Expected: (set result <expr>)
-    let SExpr::List(items) = sem else {
-        return None;
-    };
-    let [SExpr::Atom(set_kw), SExpr::Atom(_dst), rhs] = items.as_slice() else {
-        return None;
-    };
-    if set_kw == "set" { Some(rhs) } else { None }
 }
 
 fn build_sem_expr_for_op(
@@ -317,8 +266,6 @@ fn build_sem_expr_for_op(
     op_ref: &OperationRef,
 ) -> Option<(Expr, HashMap<u32, ValueId>)> {
     let sem = op_ref.op().clone().as_dyn_op().semantic_expr()?;
-    let sexpr = parse_sexpr(sem)?;
-    let rhs = extract_sem_rhs(&sexpr)?;
 
     let mut value_to_def: HashMap<ValueId, OpId> = HashMap::new();
     if let Some(block) = op_ref.block() {
@@ -350,28 +297,14 @@ fn build_sem_expr_for_op(
                 }
             }
             let dyn_op = def.clone().as_dyn_op();
-            if let Some(sem) = dyn_op.semantic_expr() {
-                let operand_names = dyn_op.operand_names();
-                let mut op_bindings: HashMap<String, Expr> = HashMap::new();
-                for (idx, name) in operand_names.iter().enumerate() {
-                    if idx < def.operands.len() {
-                        let sub = build_from_value(
-                            context,
-                            def.operands[idx],
-                            value_to_def,
-                            next_symbol,
-                            leaf_values,
-                        );
-                        op_bindings.insert((*name).to_string(), sub);
-                    }
+            if let Some(sem_expr) = dyn_op.semantic_expr() {
+                let mut op_bindings: HashMap<u32, Expr> = HashMap::new();
+                for (idx, operand) in def.operands.iter().enumerate() {
+                    let sub =
+                        build_from_value(context, *operand, value_to_def, next_symbol, leaf_values);
+                    op_bindings.insert(idx as u32, sub);
                 }
-                if let Some(sexpr) = parse_sexpr(sem) {
-                    if let Some(rhs) = extract_sem_rhs(&sexpr) {
-                        if let Some(expr) = sexpr_to_sem_expr(rhs, &op_bindings) {
-                            return simplify(expr);
-                        }
-                    }
-                }
+                return simplify(substitute_symbols(&sem_expr, &op_bindings));
             }
         }
 
@@ -381,24 +314,19 @@ fn build_sem_expr_for_op(
         Expr::Symbol(sym)
     }
 
-    let dyn_op = op_ref.op().clone().as_dyn_op();
-    let operand_names = dyn_op.operand_names();
-    let mut op_bindings: HashMap<String, Expr> = HashMap::new();
-    for (idx, name) in operand_names.iter().enumerate() {
-        if idx < op_ref.op().operands.len() {
-            let v = op_ref.op().operands[idx];
-            let expr = build_from_value(
-                context,
-                v,
-                &value_to_def,
-                &mut next_symbol,
-                &mut leaf_values,
-            );
-            op_bindings.insert((*name).to_string(), expr);
-        }
+    let mut op_bindings: HashMap<u32, Expr> = HashMap::new();
+    for (idx, operand) in op_ref.op().operands.iter().enumerate() {
+        let expr = build_from_value(
+            context,
+            *operand,
+            &value_to_def,
+            &mut next_symbol,
+            &mut leaf_values,
+        );
+        op_bindings.insert(idx as u32, expr);
     }
 
-    let expr = simplify(sexpr_to_sem_expr(rhs, &op_bindings)?);
+    let expr = simplify(substitute_symbols(&sem, &op_bindings));
     Some((expr, leaf_values))
 }
 

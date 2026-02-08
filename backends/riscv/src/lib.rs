@@ -99,16 +99,10 @@ mod tests {
         pm.run(&context, context.get_op(module.id()))
             .expect("pass pipeline should succeed");
 
-        let names: Vec<_> = context
-            .get_op(func.id())
-            .as_op::<FuncOp>()
-            .expect("func")
-            .body()
-            .op_ids()
-            .into_iter()
-            .map(|id| context.get_op(id).name)
-            .collect();
-
-        assert_eq!(names, vec!["add", "return"]);
+        let lowered = context.get_op(func.id()).as_op::<FuncOp>().expect("func");
+        let mut buf = String::new();
+        let mut fmt = IRFormatter::new(&mut buf);
+        lowered.print(&mut fmt).expect("print lowered func");
+        insta::assert_snapshot!("builtin_add_lowers_to_riscv_add_ir", &buf);
     }
 }
