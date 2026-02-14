@@ -3,7 +3,7 @@ use std::fmt::Write;
 
 use chumsky::prelude::*;
 
-use crate::{Span, Spanned};
+use crate::Spanned;
 
 // Token definition
 #[derive(Debug, Clone, PartialEq)]

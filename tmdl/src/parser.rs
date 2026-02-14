@@ -1,6 +1,4 @@
-use std::collections::HashMap;
-
-use chumsky::{input::ValueInput, prelude::*, recursive};
+use chumsky::{input::ValueInput, prelude::*};
 
 use crate::{
     Span, Spanned,

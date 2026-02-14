@@ -1,10 +1,13 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::Write;
 
 use crate::ast::{self, Instruction, Item};
 use crate::error::TMDLError;
 use crate::sem_expr_conv::{SymbolInfo, convert_to_sem_expr};
-use crate::utils::resolve_operands_for_instruction;
+use crate::utils::{
+    get_encoding_arms, parse_literal_value, resolve_operands_for_instruction,
+    resolve_params_for_instruction,
+};
 use tir::sem_expr::rocq as sem_rocq;
 
 struct RocqSymbolResolver<'a> {
@@ -146,8 +149,8 @@ fn build_instructions<'a, 'cache: 'a>(
 
         let operands = resolve_operands_for_instruction(i, item_cache);
 
-        let coq_operands = build_coq_operands(item_cache, &operands);
-        let coq_operands_ctor = build_coq_operands_ctor(item_cache, &operands);
+        let coq_operands = build_coq_operands(&operands);
+        let coq_operands_ctor = build_coq_operands_ctor(&operands);
         let coq_encoding = build_coq_encoding(item_cache, i);
         let coq_behavior = build_coq_behavior(item_cache, i);
 
@@ -260,68 +263,6 @@ fn analyze_instruction_encoding<'a>(
     }
 }
 
-fn get_encoding_arms<'a>(
-    instruction: &'a Instruction,
-    item_cache: &HashMap<String, &'a Item>,
-) -> Vec<ast::EncodingArm> {
-    if !instruction.encoding.is_empty() {
-        instruction.encoding.clone()
-    } else {
-        let mut cur = instruction.parent_template.as_ref();
-        while let Some(name) = cur {
-            if let Some(ast::Item::Template(t)) = item_cache.get(name.as_str()) {
-                if !t.encoding.is_empty() {
-                    return t.encoding.clone();
-                }
-                cur = t.parent_template.as_ref();
-            } else {
-                break;
-            }
-        }
-        Vec::new()
-    }
-}
-
-fn resolve_params_for_instruction<'a>(
-    inst: &'a ast::Instruction,
-    cache: &HashMap<String, &'a ast::Item>,
-) -> HashMap<String, (ast::Type, Option<ast::Expr>)> {
-    let mut result: HashMap<String, (ast::Type, Option<ast::Expr>)> = HashMap::new();
-    fn collect_from_template<'a>(
-        name: &str,
-        cache: &HashMap<String, &'a ast::Item>,
-        acc: &mut HashMap<String, (ast::Type, Option<ast::Expr>)>,
-    ) {
-        if let Some(ast::Item::Template(t)) = cache.get(name) {
-            if let Some(parent) = &t.parent_template {
-                collect_from_template(parent, cache, acc);
-            }
-            for (k, v) in &t.params {
-                acc.insert(k.clone(), v.clone());
-            }
-        }
-    }
-
-    if let Some(p) = &inst.parent_template {
-        collect_from_template(p, cache, &mut result);
-    }
-    for (k, v) in &inst.params {
-        result.insert(k.clone(), v.clone());
-    }
-    result
-}
-
-fn parse_literal_value(lit: &ast::LitInt) -> u64 {
-    let v = lit.value();
-    if v.starts_with("0b") {
-        u64::from_str_radix(&v[2..], 2).unwrap_or(0)
-    } else if v.starts_with("0x") || v.starts_with("0X") {
-        u64::from_str_radix(&v[2..], 16).unwrap_or(0)
-    } else {
-        v.parse::<u64>().unwrap_or(0)
-    }
-}
-
 fn generate_structural_decoder(
     output: &mut Box<dyn Write>,
     dialect: &str,
@@ -407,10 +348,7 @@ fn generate_structural_decoder(
 /// For a list of operands returns a string of function operands in Coq format. Examples:
 /// (rd rs1 rs2 : nat)
 /// (rd rs1 : nat) (imm : tmdl_word 12)
-fn build_coq_operands<'cache>(
-    item_cache: &HashMap<String, &'cache Item>,
-    operands: &Vec<(String, ast::Type)>,
-) -> String {
+fn build_coq_operands(operands: &Vec<(String, ast::Type)>) -> String {
     // Map a TMDL type to a Coq type string
     fn coq_ty_of(t: &ast::Type) -> String {
         match t {
@@ -449,10 +387,7 @@ fn build_coq_operands<'cache>(
 }
 
 /// Build a constructor argument list for Coq inductive: "T1 -> T2 ->"
-fn build_coq_operands_ctor<'cache>(
-    _item_cache: &HashMap<String, &'cache Item>,
-    operands: &Vec<(String, ast::Type)>,
-) -> String {
+fn build_coq_operands_ctor(operands: &Vec<(String, ast::Type)>) -> String {
     fn coq_ty_of(t: &ast::Type) -> String {
         match t {
             ast::Type::Struct(_) => "nat".to_string(),
@@ -485,7 +420,6 @@ fn build_coq_encoding<'a>(
 
     // Helper: render integer literal as tmdl_word of given width
     fn render_lit_bitvec(width: u16, lit: &ast::LitInt) -> String {
-        let v = lit.value();
         let decimal_value = parse_literal_value(lit);
         format!("(tmdl_word_of_nat {} {})", width, decimal_value)
     }
@@ -528,7 +462,7 @@ fn build_coq_encoding<'a>(
                     format!("(tmdl_word_of_nat {} 0)", width)
                 }
             }
-            ast::Expr::Slice(s) => {
+            ast::Expr::Slice(_s) => {
                 // Simplified: treat as zero vector of that width
                 format!("(tmdl_word_of_nat {} 0)", width)
             }
@@ -581,99 +515,12 @@ fn build_coq_behavior<'a>(
         String::from_utf8(out).ok()
     }
 
-    // Legacy renderer used as fallback when semantic conversion cannot represent the AST.
-    fn eval_expr_legacy(e: &ast::Expr, operands: &HashMap<String, ast::Type>) -> String {
-        match e {
-            ast::Expr::Lit(ast::Lit::Int(li)) => li.value().to_string(),
-            ast::Expr::Lit(ast::Lit::Str(ls)) => format!("\"{}\"", ls.value()),
-            ast::Expr::Ident(id) => {
-                let name = id.name.to_lowercase();
-                if let Some(ty) = operands.get(&id.name) {
-                    match ty {
-                        ast::Type::Struct(rc) => {
-                            format!("(read_{} st {})", rc.to_lowercase(), name)
-                        }
-                        _ => name,
-                    }
-                } else {
-                    name
-                }
-            }
-            ast::Expr::Binary(b) => {
-                let lhs = eval_expr_legacy(&b.lhs, operands);
-                let rhs = eval_expr_legacy(&b.rhs, operands);
-                let op = match b.op {
-                    ast::BinOp::Add => "+",
-                    ast::BinOp::Sub => "-",
-                    ast::BinOp::Mul => "*",
-                    ast::BinOp::Div => "/",
-                    // Keep Lean-like bitwise ops as placeholders
-                    ast::BinOp::BitwiseAnd => "&&&",
-                    ast::BinOp::BitwiseOr => "|||",
-                    ast::BinOp::BitwiseXor => "^^^",
-                    ast::BinOp::ShiftLeftLogical => "<<<",
-                    ast::BinOp::ShiftRightLogical => ">>>",
-                    ast::BinOp::ShiftRightArithmetic => ">>>",
-                };
-                format!("({} {} {})", lhs, op, rhs)
-            }
-            ast::Expr::Slice(s) => {
-                // Placeholder slice rendering; use base expr directly
-                eval_expr_legacy(&s.base, operands)
-            }
-            ast::Expr::IndexAccess(s) => {
-                // Placeholder index access; use base expr directly
-                eval_expr_legacy(&s.base, operands)
-            }
-            ast::Expr::Field(f) => {
-                if let ast::Expr::Ident(id) = &*f.base {
-                    if id.name == "self" {
-                        return f.member.to_lowercase();
-                    }
-                }
-                "0".to_string()
-            }
-            ast::Expr::Block(b) => {
-                if b.last_expr_return {
-                    if let Some(last) = b.stmts.last() {
-                        eval_expr_legacy(last, operands)
-                    } else {
-                        "0".to_string()
-                    }
-                } else {
-                    "0".to_string()
-                }
-            }
-            ast::Expr::Assign(_a) => {
-                // Not an rvalue; fallback to 0
-                "0".to_string()
-            }
-            ast::Expr::If(i) => {
-                let c = eval_expr_legacy(&i.cond, operands);
-                let t = eval_expr_legacy(&i.then, operands);
-                let e = if let Some(e) = &i.else_ {
-                    eval_expr_legacy(e, operands)
-                } else {
-                    "0".to_string()
-                };
-                format!("(if {} then {} else {})", c, t, e)
-            }
-            ast::Expr::BuiltinFunction(_) | ast::Expr::Call(_) | ast::Expr::Invalid => {
-                "0".to_string()
-            }
-        }
-    }
-
     fn eval_expr(
         e: &ast::Expr,
         operands: &HashMap<String, ast::Type>,
         numeric_params: &HashMap<String, i64>,
     ) -> String {
-        if let Some(rendered) = try_emit_sem_expr(e, operands, numeric_params) {
-            rendered
-        } else {
-            eval_expr_legacy(e, operands)
-        }
+        try_emit_sem_expr(e, operands, numeric_params).unwrap()
     }
 
     // Compile a statement (assignment or block) into a state-transforming Coq expr

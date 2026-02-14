@@ -4,7 +4,9 @@ use std::io::Write;
 use crate::ast::{self, Instruction, Item};
 use crate::error::TMDLError;
 use crate::sem_expr_conv::{SymbolInfo, convert_to_sem_expr};
-use crate::utils::resolve_operands_for_instruction;
+use crate::utils::{
+    get_encoding_arms, resolve_operands_for_instruction, resolve_params_for_instruction,
+};
 use tir::sem_expr::smtlib as sem_smtlib;
 
 const REG_INDEX_WIDTH: u16 = 5;
@@ -495,59 +497,6 @@ fn build_smt_behavior<'a>(
     }
 
     compile_to_state(&instruction.behavior, &operands, &numeric_params, "st")
-}
-
-fn get_encoding_arms<'a>(
-    instruction: &'a Instruction,
-    item_cache: &HashMap<String, &'a Item>,
-) -> Vec<ast::EncodingArm> {
-    if !instruction.encoding.is_empty() {
-        instruction.encoding.clone()
-    } else {
-        let mut cur = instruction.parent_template.as_ref();
-        while let Some(name) = cur {
-            if let Some(ast::Item::Template(t)) = item_cache.get(name.as_str()) {
-                if !t.encoding.is_empty() {
-                    return t.encoding.clone();
-                }
-                cur = t.parent_template.as_ref();
-            } else {
-                break;
-            }
-        }
-        Vec::new()
-    }
-}
-
-fn resolve_params_for_instruction<'a>(
-    inst: &'a ast::Instruction,
-    cache: &HashMap<String, &'a ast::Item>,
-) -> HashMap<String, (ast::Type, Option<ast::Expr>)> {
-    let mut result: HashMap<String, (ast::Type, Option<ast::Expr>)> = HashMap::new();
-    fn collect_from_template<'a>(
-        name: &str,
-        cache: &HashMap<String, &'a ast::Item>,
-        acc: &mut HashMap<String, (ast::Type, Option<ast::Expr>)>,
-    ) {
-        if let Some(ast::Item::Template(t)) = cache.get(name) {
-            if let Some(parent) = &t.parent_template {
-                collect_from_template(parent, cache, acc);
-            }
-            for (k, v) in &t.params {
-                acc.entry(k.clone()).or_insert(v.clone());
-            }
-        }
-    }
-
-    if let Some(p) = &inst.parent_template {
-        collect_from_template(p, cache, &mut result);
-    }
-
-    for (k, v) in &inst.params {
-        result.insert(k.clone(), v.clone());
-    }
-
-    result
 }
 
 fn render_lit_bitvec(width: u16, lit: &ast::LitInt) -> String {
