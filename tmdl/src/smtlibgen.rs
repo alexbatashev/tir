@@ -4,7 +4,10 @@ use std::io::Write;
 use crate::ast::{self, Instruction, Item};
 use crate::error::TMDLError;
 use crate::sem_expr_conv::{SymbolInfo, convert_to_sem_expr};
-use crate::utils::resolve_operands_for_instruction;
+use crate::sem_expr_state;
+use crate::utils::{
+    get_encoding_arms, resolve_operands_for_instruction, resolve_params_for_instruction,
+};
 use tir::sem_expr::smtlib as sem_smtlib;
 
 const REG_INDEX_WIDTH: u16 = 5;
@@ -440,114 +443,36 @@ fn build_smt_behavior<'a>(
         }
     }
 
-    fn compile_to_state(
-        e: &ast::Expr,
-        operands: &HashMap<String, ast::Type>,
-        numeric_params: &HashMap<String, i64>,
-        st_name: &str,
-    ) -> String {
-        match e {
-            ast::Expr::Assign(a) => {
-                let dst_name = a.dest.to_lowercase();
-                let rhs = eval_expr(&a.value, operands, numeric_params);
-                if a.dest == "pc" {
-                    format!("(write_pc {} {})", st_name, rhs)
-                } else if let Some(ast::Type::Struct(rc)) = operands.get(&a.dest) {
-                    format!(
-                        "(write_{} {} {} {})",
-                        rc.to_lowercase(),
-                        st_name,
-                        dst_name,
-                        rhs
-                    )
-                } else {
-                    st_name.to_string()
-                }
-            }
-            ast::Expr::Block(b) => {
-                let mut current = st_name.to_string();
-                for stmt in &b.stmts {
-                    match stmt {
-                        ast::Expr::Assign(_) | ast::Expr::Block(_) | ast::Expr::If(_) => {
-                            let next = compile_to_state(stmt, operands, numeric_params, &current);
-                            current = next;
-                        }
-                        _ => {}
-                    }
-                }
-                current
-            }
-            ast::Expr::If(i) => {
-                let cond = eval_expr(&i.cond, operands, numeric_params);
-                let then_state = compile_to_state(&i.then, operands, numeric_params, st_name);
-                let else_state = if let Some(e) = &i.else_ {
-                    compile_to_state(e, operands, numeric_params, st_name)
-                } else {
-                    st_name.to_string()
-                };
-                format!(
-                    "(ite (not (= {} (_ bv0 64))) {} {})",
-                    cond, then_state, else_state
-                )
-            }
-            _ => st_name.to_string(),
+    let emit_expr = |e: &ast::Expr| eval_expr(e, &operands, &numeric_params);
+    let emit_assign = |a: &ast::Assign, st_name: &str| {
+        let rhs = emit_expr(&a.value);
+        if a.dest == "pc" {
+            Some(format!("(write_pc {} {})", st_name, rhs))
+        } else if let Some(ast::Type::Struct(rc)) = operands.get(&a.dest) {
+            Some(format!(
+                "(write_{} {} {} {})",
+                rc.to_lowercase(),
+                st_name,
+                a.dest.to_lowercase(),
+                rhs
+            ))
+        } else {
+            None
         }
-    }
-
-    compile_to_state(&instruction.behavior, &operands, &numeric_params, "st")
-}
-
-fn get_encoding_arms<'a>(
-    instruction: &'a Instruction,
-    item_cache: &HashMap<String, &'a Item>,
-) -> Vec<ast::EncodingArm> {
-    if !instruction.encoding.is_empty() {
-        instruction.encoding.clone()
-    } else {
-        let mut cur = instruction.parent_template.as_ref();
-        while let Some(name) = cur {
-            if let Some(ast::Item::Template(t)) = item_cache.get(name.as_str()) {
-                if !t.encoding.is_empty() {
-                    return t.encoding.clone();
-                }
-                cur = t.parent_template.as_ref();
-            } else {
-                break;
-            }
-        }
-        Vec::new()
-    }
-}
-
-fn resolve_params_for_instruction<'a>(
-    inst: &'a ast::Instruction,
-    cache: &HashMap<String, &'a ast::Item>,
-) -> HashMap<String, (ast::Type, Option<ast::Expr>)> {
-    let mut result: HashMap<String, (ast::Type, Option<ast::Expr>)> = HashMap::new();
-    fn collect_from_template<'a>(
-        name: &str,
-        cache: &HashMap<String, &'a ast::Item>,
-        acc: &mut HashMap<String, (ast::Type, Option<ast::Expr>)>,
-    ) {
-        if let Some(ast::Item::Template(t)) = cache.get(name) {
-            if let Some(parent) = &t.parent_template {
-                collect_from_template(parent, cache, acc);
-            }
-            for (k, v) in &t.params {
-                acc.entry(k.clone()).or_insert(v.clone());
-            }
-        }
-    }
-
-    if let Some(p) = &inst.parent_template {
-        collect_from_template(p, cache, &mut result);
-    }
-
-    for (k, v) in &inst.params {
-        result.insert(k.clone(), v.clone());
-    }
-
-    result
+    };
+    let emit_if = |cond: &str, then_state: &str, else_state: &str| {
+        format!(
+            "(ite (not (= {} (_ bv0 64))) {} {})",
+            cond, then_state, else_state
+        )
+    };
+    sem_expr_state::compile_to_state(
+        &instruction.behavior,
+        "st",
+        &emit_expr,
+        &emit_assign,
+        &emit_if,
+    )
 }
 
 fn render_lit_bitvec(width: u16, lit: &ast::LitInt) -> String {
