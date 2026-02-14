@@ -153,7 +153,9 @@ pub fn main() -> Result<(), String> {
             .filter_map(|test| test.ok())
             .filter(|test| {
                 let test = test.strip_prefix(path).unwrap_or(test.as_path());
-                !exclude_patterns.iter().any(|pattern| pattern.matches_path(test))
+                !exclude_patterns
+                    .iter()
+                    .any(|pattern| pattern.matches_path(test))
             })
             .collect::<Vec<_>>();
 
