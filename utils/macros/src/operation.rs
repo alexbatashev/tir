@@ -2,7 +2,7 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{Expr, ExprStruct, Ident, Member, Path, parse::Parse, parse_macro_input};
 
-use crate::utils::{expr_as_ident_vec, expr_as_path_vec, expr_as_string, field_name, op_fn_ident};
+use crate::utils::{expr_as_path_vec, expr_as_string, field_name, op_fn_ident};
 
 pub fn construct_operation(item: TokenStream) -> TokenStream {
     let Operation {
@@ -17,16 +17,18 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         interfaces,
         custom_format,
         semantic_expr,
+        custom_verifier,
     } = parse_macro_input!(item as Operation);
 
     let builder_name = format_ident!("{}Builder", struct_name.to_string());
     let has_results = !results.is_empty();
     let op_fn_name = op_fn_ident(&name);
+    let operand_names: Vec<String> = operands.iter().map(|o| o.name.clone()).collect();
 
     let printer = if custom_format {
         make_custom_printer()
     } else {
-        make_generic_printer(&dialect, &name, &operands, &regions, has_results)
+        make_generic_printer(&dialect, &name, &operand_names, &regions, has_results)
     };
 
     let mut region_fills = vec![];
@@ -82,10 +84,10 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
     let parser = if custom_format {
         make_custom_parser()
     } else {
-        make_parser(&builder_name, &regions, &operands, has_results)
+        make_parser(&builder_name, &regions, &operand_names, has_results)
     };
 
-    let verifier = make_attribute_verifier(&attributes);
+    let attribute_verifier = make_attribute_verifier(&attributes);
     let roles_table = make_roles_table(&struct_name, &roles);
 
     // Operand support in builder
@@ -95,8 +97,8 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
     let mut operand_fn_params = vec![];
     let mut operand_fn_builders = vec![];
 
-    for op_name in &operands {
-        let field = format_ident!("{}", op_name);
+    for operand in &operands {
+        let field = format_ident!("{}", operand.name);
         operand_fields.push(quote! {
             #field: Option<tir::ValueId>
         });
@@ -122,8 +124,8 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
 
     let operand_collect: Vec<_> = operands
         .iter()
-        .map(|op_name| {
-            let field = format_ident!("{}", op_name);
+        .map(|operand| {
+            let field = format_ident!("{}", operand.name);
             quote! {
                 if let Some(v) = self.#field {
                     operand_vec.push(v);
@@ -145,9 +147,36 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
 
     let operand_name_literals: Vec<_> = operands
         .iter()
-        .map(|n| {
-            let lit = proc_macro2::Literal::string(n);
+        .map(|operand| {
+            let lit = proc_macro2::Literal::string(&operand.name);
             quote! { #lit }
+        })
+        .collect();
+
+    let operand_spec_literals: Vec<_> = operands
+        .iter()
+        .map(|operand| {
+            let name = proc_macro2::Literal::string(&operand.name);
+            let ty = proc_macro2::Literal::string(&operand.ty);
+            quote! { (#name, #ty) }
+        })
+        .collect();
+
+    let result_spec_literals: Vec<_> = results
+        .iter()
+        .map(|result| {
+            let name = proc_macro2::Literal::string(&result.name);
+            let ty = proc_macro2::Literal::string(&result.ty);
+            quote! { (#name, #ty) }
+        })
+        .collect();
+
+    let attr_spec_literals: Vec<_> = attributes
+        .iter()
+        .map(|attr| {
+            let name = proc_macro2::Literal::string(&attr.name);
+            let ty = proc_macro2::Literal::string(&attr.ty);
+            quote! { (#name, #ty) }
         })
         .collect();
 
@@ -175,6 +204,28 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
             }
         }
     };
+
+    let interface_impls = interfaces.iter().map(|interface| {
+        quote! {
+            impl tir::ImplementsOpInterface<dyn #interface> for #struct_name {
+                fn into_interface(self: Box<Self>) -> Box<dyn #interface> {
+                    self
+                }
+            }
+        }
+    });
+
+    let interface_verifiers: Vec<_> = interfaces
+        .iter()
+        .map(|interface| {
+            quote! {
+                {
+                    let iface: &dyn #interface = self;
+                    iface.verify_interface(self, context)?;
+                }
+            }
+        })
+        .collect();
 
     let result_builder_field = if has_results {
         quote! { result_type: Option<tir::Type>, }
@@ -264,8 +315,269 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         }
     };
 
+    let verifiable_impl = if custom_verifier {
+        quote! {}
+    } else {
+        quote! { impl tir::Verifiable for #struct_name {} }
+    };
+
     quote! {
         pub struct #struct_name(std::sync::Arc<tir::OpInstance>);
+
+        #(#interface_impls)*
+        #verifiable_impl
+
+        impl tir::OpDefVerifiable for #struct_name {
+            fn verify_operands(&self, context: &tir::Context) -> Result<(), tir::Error> {
+                let operand_specs: &[(&str, &str)] = &[#(#operand_spec_literals),*];
+                let result_specs: &[(&str, &str)] = &[#(#result_spec_literals),*];
+                let operands = <Self as tir::Operation>::operands(self);
+
+                if operands.len() > operand_specs.len() {
+                    return Err(tir::Error::VerificationError(format!(
+                        "{} expects at most {} operands, got {}",
+                        <Self as tir::Operation>::name(),
+                        operand_specs.len(),
+                        operands.len()
+                    )));
+                }
+
+                for (idx, (operand_name, type_spec)) in operand_specs.iter().enumerate() {
+                    let is_optional = type_spec.starts_with('?');
+                    let normalized = if is_optional {
+                        &type_spec[1..]
+                    } else {
+                        type_spec
+                    };
+
+                    let Some(value_id) = operands.get(idx).copied() else {
+                        if is_optional {
+                            continue;
+                        }
+                        return Err(tir::Error::VerificationError(format!(
+                            "{} missing required operand '{}'",
+                            <Self as tir::Operation>::name(),
+                            operand_name
+                        )));
+                    };
+
+                    if !context.has_value(value_id) {
+                        return Err(tir::Error::VerificationError(format!(
+                            "{} operand '{}' references unknown value %{id}",
+                            <Self as tir::Operation>::name(),
+                            operand_name,
+                            id = value_id.number()
+                        )));
+                    }
+
+                    let value = context.get_value(value_id);
+                    match value.defining_op() {
+                        Some(def_op) => {
+                            if !context.has_operation(def_op) {
+                                return Err(tir::Error::VerificationError(format!(
+                                    "{} operand '{}' value %{id} references missing defining op",
+                                    <Self as tir::Operation>::name(),
+                                    operand_name,
+                                    id = value_id.number()
+                                )));
+                            }
+                        }
+                        None => {
+                            if !context.is_block_argument(value_id) {
+                                return Err(tir::Error::VerificationError(format!(
+                                    "{} operand '{}' value %{id} has no defining op and is not a block argument",
+                                    <Self as tir::Operation>::name(),
+                                    operand_name,
+                                    id = value_id.number()
+                                )));
+                            }
+                        }
+                    }
+
+                    let actual_ty = value.ty().clone();
+                    match normalized {
+                        "Any" | "any" => {}
+                        "Integer" => {
+                            if !matches!(actual_ty, tir::Type::Integer { .. }) {
+                                return Err(tir::Error::VerificationError(format!(
+                                    "{} operand '{}' expected Integer, got {}",
+                                    <Self as tir::Operation>::name(),
+                                    operand_name,
+                                    actual_ty
+                                )));
+                            }
+                        }
+                        "Float" => {
+                            if !matches!(actual_ty, tir::Type::Float32 | tir::Type::Float64) {
+                                return Err(tir::Error::VerificationError(format!(
+                                    "{} operand '{}' expected Float, got {}",
+                                    <Self as tir::Operation>::name(),
+                                    operand_name,
+                                    actual_ty
+                                )));
+                            }
+                        }
+                        _ => {
+                            let expected_ty = normalized.parse::<tir::Type>().map_err(|_| {
+                                tir::Error::VerificationError(format!(
+                                    "{} operand '{}' has invalid type spec '{}' (allowed: concrete types, Any, Integer, Float)",
+                                    <Self as tir::Operation>::name(),
+                                    operand_name,
+                                    normalized
+                                ))
+                            })?;
+
+                            if actual_ty != expected_ty {
+                                return Err(tir::Error::VerificationError(format!(
+                                    "{} operand '{}' expected type {}, got {}",
+                                    <Self as tir::Operation>::name(),
+                                    operand_name,
+                                    expected_ty,
+                                    actual_ty
+                                )));
+                            }
+                        }
+                    }
+                }
+
+                if self.0.results.len() != result_specs.len() {
+                    return Err(tir::Error::VerificationError(format!(
+                        "{} expects {} results, got {}",
+                        <Self as tir::Operation>::name(),
+                        result_specs.len(),
+                        self.0.results.len()
+                    )));
+                }
+
+                for (idx, (result_name, type_spec)) in result_specs.iter().enumerate() {
+                    let value_id = self.0.results[idx];
+                    if !context.has_value(value_id) {
+                        return Err(tir::Error::VerificationError(format!(
+                            "{} result '{}' references unknown value %{id}",
+                            <Self as tir::Operation>::name(),
+                            result_name,
+                            id = value_id.number()
+                        )));
+                    }
+
+                    let value = context.get_value(value_id);
+                    match value.defining_op() {
+                        Some(def_op) => {
+                            if !context.has_operation(def_op) {
+                                return Err(tir::Error::VerificationError(format!(
+                                    "{} result '{}' value %{id} references missing defining op",
+                                    <Self as tir::Operation>::name(),
+                                    result_name,
+                                    id = value_id.number()
+                                )));
+                            }
+                        }
+                        None => {
+                            return Err(tir::Error::VerificationError(format!(
+                                "{} result '{}' value %{id} has no defining op",
+                                <Self as tir::Operation>::name(),
+                                result_name,
+                                id = value_id.number()
+                            )));
+                        }
+                    }
+
+                    let actual_ty = value.ty().clone();
+                    match *type_spec {
+                        "Any" | "any" => {}
+                        "Integer" => {
+                            if !matches!(actual_ty, tir::Type::Integer { .. }) {
+                                return Err(tir::Error::VerificationError(format!(
+                                    "{} result '{}' expected Integer, got {}",
+                                    <Self as tir::Operation>::name(),
+                                    result_name,
+                                    actual_ty
+                                )));
+                            }
+                        }
+                        "Float" => {
+                            if !matches!(actual_ty, tir::Type::Float32 | tir::Type::Float64) {
+                                return Err(tir::Error::VerificationError(format!(
+                                    "{} result '{}' expected Float, got {}",
+                                    <Self as tir::Operation>::name(),
+                                    result_name,
+                                    actual_ty
+                                )));
+                            }
+                        }
+                        _ => {
+                            let expected_ty = type_spec.parse::<tir::Type>().map_err(|_| {
+                                tir::Error::VerificationError(format!(
+                                    "{} result '{}' has invalid type spec '{}' (allowed: concrete types, Any, Integer, Float)",
+                                    <Self as tir::Operation>::name(),
+                                    result_name,
+                                    type_spec
+                                ))
+                            })?;
+
+                            if actual_ty != expected_ty {
+                                return Err(tir::Error::VerificationError(format!(
+                                    "{} result '{}' expected type {}, got {}",
+                                    <Self as tir::Operation>::name(),
+                                    result_name,
+                                    expected_ty,
+                                    actual_ty
+                                )));
+                            }
+                        }
+                    }
+                }
+
+                Ok(())
+            }
+            fn verify_attributes(&self, _context: &tir::Context) -> Result<(), tir::Error> {
+                let attr_specs: &[(&str, &str)] = &[#(#attr_spec_literals),*];
+
+                for (attr_name, attr_type) in attr_specs {
+                    let Some(attr) = <Self as tir::Operation>::attributes(self).iter().find(|a| a.name == *attr_name) else {
+                        return Err(tir::Error::VerificationError(format!(
+                            "{} missing required attribute '{}'",
+                            <Self as tir::Operation>::name(),
+                            attr_name
+                        )));
+                    };
+
+                    let matches = match *attr_type {
+                        "any" => true,
+                        "Str" => matches!(attr.value, tir::attributes::AttributeValue::Str(_)),
+                        "Int" => matches!(attr.value, tir::attributes::AttributeValue::Int(_)),
+                        "UInt" => matches!(attr.value, tir::attributes::AttributeValue::UInt(_)),
+                        "F32" => matches!(attr.value, tir::attributes::AttributeValue::F32(_)),
+                        "F64" => matches!(attr.value, tir::attributes::AttributeValue::F64(_)),
+                        "Bool" => matches!(attr.value, tir::attributes::AttributeValue::Bool(_)),
+                        "Array" => matches!(attr.value, tir::attributes::AttributeValue::Array(_)),
+                        "Dict" => matches!(attr.value, tir::attributes::AttributeValue::Dict(_)),
+                        "Register" => matches!(attr.value, tir::attributes::AttributeValue::Register(_)),
+                        "Type" => match &attr.value {
+                            tir::attributes::AttributeValue::Str(s) => s.parse::<tir::Type>().is_ok(),
+                            _ => false,
+                        },
+                        _ => false,
+                    };
+
+                    if !matches {
+                        return Err(tir::Error::VerificationError(format!(
+                            "{} attribute '{}' expected type '{}'",
+                            <Self as tir::Operation>::name(),
+                            attr_name,
+                            attr_type
+                        )));
+                    }
+                }
+
+                Ok(())
+            }
+
+            fn verify_interfaces(&self, context: &tir::Context) -> Result<(), tir::Error> {
+                #(#interface_verifiers)*
+                Ok(())
+            }
+        }
 
         pub struct #builder_name {
             context: tir::Context,
@@ -364,7 +676,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
 
                 #(#region_fills)*
 
-                #verifier
+                #attribute_verifier
 
                 let mut operand_vec: Vec<tir::ValueId> = vec![];
                 #(#operand_collect)*
@@ -413,16 +725,23 @@ struct Operation {
     regions: Vec<Region>,
     attributes: Vec<AttrSpec>,
     roles: Vec<RoleSpec>,
-    operands: Vec<String>,
-    results: Vec<String>,
+    operands: Vec<ValueSpec>,
+    results: Vec<ValueSpec>,
     interfaces: Vec<Path>,
     custom_format: bool,
     semantic_expr: Option<proc_macro2::TokenStream>,
+    custom_verifier: bool,
 }
 
 struct Region {
     name: String,
     single_block: bool,
+}
+
+#[derive(Clone)]
+struct ValueSpec {
+    name: String,
+    ty: String,
 }
 
 impl Parse for Operation {
@@ -512,12 +831,7 @@ impl Parse for Operation {
             .find_map(|f| match &f.member {
                 Member::Named(ident) => {
                     if ident.to_string().as_str() == "operands" {
-                        Some(
-                            expr_as_ident_vec(&f.expr)
-                                .into_iter()
-                                .map(|i| i.to_string())
-                                .collect::<Vec<String>>(),
-                        )
+                        get_value_specs(&f.expr)
                     } else {
                         None
                     }
@@ -532,12 +846,7 @@ impl Parse for Operation {
             .find_map(|f| match &f.member {
                 Member::Named(ident) => {
                     if ident.to_string().as_str() == "results" {
-                        Some(
-                            expr_as_ident_vec(&f.expr)
-                                .into_iter()
-                                .map(|i| i.to_string())
-                                .collect::<Vec<String>>(),
-                        )
+                        get_value_specs(&f.expr)
                     } else {
                         None
                     }
@@ -576,6 +885,21 @@ impl Parse for Operation {
             })
             .unwrap_or(false);
 
+        let custom_verifier = struct_
+            .fields
+            .iter()
+            .find_map(|f| match &f.member {
+                Member::Named(ident) => {
+                    if ident.to_string().as_str() == "verifier" {
+                        Some(expr_as_string(&f.expr) == "true")
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            })
+            .unwrap_or(false);
+
         let semantic_expr = struct_.fields.iter().find_map(|f| match &f.member {
             Member::Named(ident) => {
                 if ident.to_string().as_str() == "sem" {
@@ -599,6 +923,7 @@ impl Parse for Operation {
             interfaces,
             custom_format,
             semantic_expr,
+            custom_verifier,
         })
     }
 }
@@ -709,7 +1034,7 @@ fn sem_node_to_expr(
     }
 }
 
-fn expr_as_semantic_expr(expr: &Expr, operands: &[String]) -> Option<proc_macro2::TokenStream> {
+fn expr_as_semantic_expr(expr: &Expr, operands: &[ValueSpec]) -> Option<proc_macro2::TokenStream> {
     let sem_src = match expr {
         Expr::Lit(lit) => {
             if let syn::Lit::Str(s) = &lit.lit {
@@ -722,8 +1047,8 @@ fn expr_as_semantic_expr(expr: &Expr, operands: &[String]) -> Option<proc_macro2
     };
 
     let mut symbols = std::collections::HashMap::new();
-    for (idx, name) in operands.iter().enumerate() {
-        symbols.insert(name.clone(), idx as u32);
+    for (idx, operand) in operands.iter().enumerate() {
+        symbols.insert(operand.name.clone(), idx as u32);
     }
 
     let parsed = parse_sem_expr(&sem_src)?;
@@ -779,6 +1104,36 @@ fn get_attributes(expr: &Expr) -> Option<Vec<AttrSpec>> {
         )
     } else {
         None
+    }
+}
+
+fn get_value_specs(expr: &Expr) -> Option<Vec<ValueSpec>> {
+    match expr {
+        Expr::Struct(s) => Some(
+            s.fields
+                .iter()
+                .map(|f| ValueSpec {
+                    name: field_name(f),
+                    ty: expr_as_string(&f.expr),
+                })
+                .collect(),
+        ),
+        // Backward-compatible form: operands/results: [lhs, rhs]
+        Expr::Array(arr) => Some(
+            arr.elems
+                .iter()
+                .map(|e| {
+                    let Expr::Path(p) = e else {
+                        unreachable!();
+                    };
+                    ValueSpec {
+                        name: p.path.get_ident().unwrap().to_string(),
+                        ty: "any".to_string(),
+                    }
+                })
+                .collect(),
+        ),
+        _ => None,
     }
 }
 

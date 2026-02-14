@@ -1,3 +1,4 @@
+use tir::Terminator;
 use tir::helpers::operation;
 
 operation! {
@@ -14,8 +15,11 @@ operation! {
     SectionEndOp {
         name: "section_end",
         dialect: "asm",
+        interfaces: [Terminator],
     }
 }
+
+impl Terminator for SectionEndOp {}
 
 operation! {
     SymbolOp {
@@ -31,12 +35,18 @@ operation! {
     SymbolEndOp {
         name: "symbol_end",
         dialect: "asm",
+        interfaces: [Terminator],
     }
 }
+
+impl Terminator for SymbolEndOp {}
 
 operation! {
     BlockEndOp {
         name: "block_end",
         dialect: "asm",
+        interfaces: [Terminator],
     }
 }
+
+impl Terminator for BlockEndOp {}

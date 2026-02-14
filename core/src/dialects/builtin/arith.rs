@@ -1,7 +1,7 @@
 use crate::operation;
 
 use crate as tir;
-use crate::{Commutative, ImplementsOpInterface};
+use crate::{Commutative, SameOperandType};
 
 operation! {
     ConstantOp {
@@ -10,7 +10,9 @@ operation! {
         attributes: A {
             value: "Int",
         },
-        results: [result],
+        results: R {
+            result: "Integer",
+        },
     }
 }
 
@@ -24,108 +26,125 @@ operation! {
     AddIOp {
         name: "addi",
         dialect: "builtin",
-        operands: [lhs, rhs],
-        results: [result],
-        interfaces: [Commutative],
+        operands: O {
+            lhs: "Integer",
+            rhs: "Integer",
+        },
+        results: R {
+            result: "Integer",
+        },
+        interfaces: [Commutative, SameOperandType],
         sem: "(set result (add lhs rhs))",
     }
 }
 
 impl Commutative for AddIOp {}
-impl ImplementsOpInterface<dyn Commutative> for AddIOp {
-    fn into_interface(self: Box<Self>) -> Box<dyn Commutative> {
-        self
-    }
-}
+impl SameOperandType for AddIOp {}
 
 operation! {
     SubIOp {
         name: "subi",
         dialect: "builtin",
-        operands: [lhs, rhs],
-        results: [result],
+        operands: O {
+            lhs: "Integer",
+            rhs: "Integer",
+        },
+        results: R {
+            result: "Integer",
+        },
+        interfaces: [SameOperandType],
         sem: "(set result (sub lhs rhs))",
     }
 }
+
+impl SameOperandType for SubIOp {}
 
 operation! {
     MulIOp {
         name: "muli",
         dialect: "builtin",
-        operands: [lhs, rhs],
-        results: [result],
-        interfaces: [Commutative],
+        operands: O {
+            lhs: "Integer",
+            rhs: "Integer",
+        },
+        results: R {
+            result: "Integer",
+        },
+        interfaces: [Commutative, SameOperandType],
         sem: "(set result (mul lhs rhs))",
     }
 }
 
 impl Commutative for MulIOp {}
-impl ImplementsOpInterface<dyn Commutative> for MulIOp {
-    fn into_interface(self: Box<Self>) -> Box<dyn Commutative> {
-        self
-    }
-}
+impl SameOperandType for MulIOp {}
 
 operation! {
     AndIOp {
         name: "andi",
         dialect: "builtin",
-        operands: [lhs, rhs],
-        results: [result],
+        operands: O {
+            lhs: "Integer",
+            rhs: "Integer",
+        },
+        results: R {
+            result: "Integer",
+        },
         interfaces: [Commutative],
         sem: "(set result (and lhs rhs))",
     }
 }
 
 impl Commutative for AndIOp {}
-impl ImplementsOpInterface<dyn Commutative> for AndIOp {
-    fn into_interface(self: Box<Self>) -> Box<dyn Commutative> {
-        self
-    }
-}
 
 operation! {
     OrIOp {
         name: "ori",
         dialect: "builtin",
-        operands: [lhs, rhs],
-        results: [result],
-        interfaces: [Commutative],
+        operands: O {
+            lhs: "Integer",
+            rhs: "Integer",
+        },
+        results: R {
+            result: "Integer",
+        },
+        interfaces: [Commutative, SameOperandType],
         sem: "(set result (or lhs rhs))",
     }
 }
 
 impl Commutative for OrIOp {}
-impl ImplementsOpInterface<dyn Commutative> for OrIOp {
-    fn into_interface(self: Box<Self>) -> Box<dyn Commutative> {
-        self
-    }
-}
+impl SameOperandType for OrIOp {}
 
 operation! {
     XOrIOp {
         name: "xori",
         dialect: "builtin",
-        operands: [lhs, rhs],
-        results: [result],
-        interfaces: [Commutative],
+        operands: O {
+            lhs: "Integer",
+            rhs: "Integer",
+        },
+        results: R {
+            result: "Integer",
+        },
+        interfaces: [Commutative, SameOperandType],
         sem: "(set result (xor lhs rhs))",
     }
 }
 
 impl Commutative for XOrIOp {}
-impl ImplementsOpInterface<dyn Commutative> for XOrIOp {
-    fn into_interface(self: Box<Self>) -> Box<dyn Commutative> {
-        self
-    }
-}
+impl SameOperandType for XOrIOp {}
 
 operation! {
     ShlIOp {
         name: "shli",
         dialect: "builtin",
-        operands: [lhs, rhs],
-        results: [result],
+        operands: O {
+            lhs: "Integer",
+            rhs: "Integer",
+        },
+        results: R {
+            result: "Integer",
+        },
         sem: "(set result (shl lhs rhs))",
     }
 }
@@ -134,8 +153,13 @@ operation! {
     ShrUIOp {
         name: "shrui",
         dialect: "builtin",
-        operands: [lhs, rhs],
-        results: [result],
+        operands: O {
+            lhs: "Integer",
+            rhs: "Integer",
+        },
+        results: R {
+            result: "Integer",
+        },
         sem: "(set result (lshr lhs rhs))",
     }
 }
@@ -144,8 +168,13 @@ operation! {
     ShrSIOp {
         name: "shrsi",
         dialect: "builtin",
-        operands: [lhs, rhs],
-        results: [result],
+        operands: O {
+            lhs: "Integer",
+            rhs: "Integer",
+        },
+        results: R {
+            result: "Integer",
+        },
         sem: "(set result (ashr lhs rhs))",
     }
 }
@@ -157,8 +186,13 @@ operation! {
         attributes: A {
             predicate: "Str",
         },
-        operands: [lhs, rhs],
-        results: [result],
+        operands: O {
+            lhs: "Integer",
+            rhs: "Integer",
+        },
+        results: R {
+            result: "i1",
+        },
     }
 }
 
@@ -175,8 +209,12 @@ operation! {
     ExtSIOp {
         name: "extsi",
         dialect: "builtin",
-        operands: [input],
-        results: [result],
+        operands: O {
+            input: "Integer",
+        },
+        results: R {
+            result: "Integer",
+        },
     }
 }
 
@@ -184,8 +222,12 @@ operation! {
     ExtUIOp {
         name: "extui",
         dialect: "builtin",
-        operands: [input],
-        results: [result],
+        operands: O {
+            input: "Integer",
+        },
+        results: R {
+            result: "Integer",
+        },
     }
 }
 
@@ -193,8 +235,12 @@ operation! {
     TruncIOp {
         name: "trunci",
         dialect: "builtin",
-        operands: [input],
-        results: [result],
+        operands: O {
+            input: "Integer",
+        },
+        results: R {
+            result: "Integer",
+        },
     }
 }
 
@@ -265,6 +311,8 @@ mod tests {
         builder.insert(add);
         builder.insert(ops::r#return(&context, add_result).build());
 
+        assert!(func.verify(&context).is_ok());
+
         let mut buf = String::new();
         let mut f = IRFormatter::new(&mut buf);
         func.print(&mut f).expect("print ok");
@@ -286,13 +334,40 @@ mod tests {
     #[test]
     fn parse_single_addi_with_result_prefix() {
         let context = Context::with_default_dialects();
-        let src = "%2 = addi %0, %1 : i32\n";
+        let c0 = ops::constant(&context, 1, Type::Integer { width: 32 }).build();
+        let c1 = ops::constant(&context, 2, Type::Integer { width: 32 }).build();
+        let src = format!(
+            "%2 = addi %{}, %{} : i32\n",
+            c0.result().number(),
+            c1.result().number()
+        );
 
-        let op = parse_ir::<AddIOp>(&context, src).expect("Failed to parse addi");
+        let op = parse_ir::<AddIOp>(&context, &src).expect("Failed to parse addi");
+        assert!(op.verify(&context).is_ok());
         assert_eq!(op.operands().len(), 2);
         assert_eq!(
             context.get_value(op.result()).ty(),
             &Type::Integer { width: 32 }
         );
+    }
+
+    #[test]
+    fn addi_verify_fails_for_mismatched_operand_types() {
+        let context = Context::with_default_dialects();
+        let lhs = ops::constant(&context, 1, Type::Integer { width: 32 }).build();
+        let rhs = ops::constant(&context, 2, Type::Integer { width: 64 }).build();
+
+        let op = ops::addi(
+            &context,
+            lhs.result(),
+            rhs.result(),
+            Type::Integer { width: 32 },
+        )
+        .build();
+
+        let err = op
+            .verify(&context)
+            .expect_err("expected SameOperandType verification to fail");
+        assert!(err.to_string().contains("operand types must be the same"));
     }
 }

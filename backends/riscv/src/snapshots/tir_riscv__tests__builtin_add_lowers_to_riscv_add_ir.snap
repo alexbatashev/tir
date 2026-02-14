@@ -8,4 +8,5 @@ module {
     riscv.vret %2
     asm.symbol_end
   }
+  module_end
 }

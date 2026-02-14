@@ -181,11 +181,15 @@ mod tests {
 
         let mut mb = IRBuilder::new(module.body());
         let _func = mb.insert(func);
+        mb.insert(ops::module_end(&context).build());
 
+        module.verify(&context).expect("Invalid module");
+        // assert!(module.verify(&context).is_ok());
         let mut pm = PassManager::new();
         pm.nest(FuncOp::name()).add_pass(create_isel_pass());
         pm.run(&context, context.get_op(module.id()))
             .expect("pass pipeline should succeed");
+        assert!(module.verify(&context).is_ok());
 
         let mut buf = String::new();
         let mut fmt = IRFormatter::new(&mut buf);

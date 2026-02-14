@@ -1,3 +1,4 @@
+use crate::Terminator;
 use crate::operation;
 
 use crate as tir;
@@ -18,8 +19,11 @@ operation! {
     ModuleEndOp {
         name: "module_end",
         dialect: "builtin",
+        interfaces: [Terminator],
     }
 }
+
+impl Terminator for ModuleEndOp {}
 
 #[cfg(test)]
 mod tests {

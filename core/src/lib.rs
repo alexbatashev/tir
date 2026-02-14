@@ -27,12 +27,13 @@ pub use context::{Context, ContextIterator, ContextRef, GetFromContext};
 pub use diagnostics::{print_error_range, print_parse_error};
 pub use dialect::Dialect;
 pub use error::Error;
-pub use interfaces::{Commutative, Terminator};
+pub use interfaces::{Commutative, SameOperandType, Terminator};
 pub use ir_formatter::IRFormatter;
 pub use operand::Operand;
 pub use operation::{
-    ErasedOpInterface, ImplementsOpInterface, OpId, OpInstance, OpInterfaceConverter, Operation,
-    downcast_op_interface, erase_op_interface, op_interface_converter,
+    ErasedOpInterface, ImplementsOpInterface, OpDefVerifiable, OpId, OpInstance,
+    OpInterfaceConverter, Operation, Verifiable, downcast_op_interface, erase_op_interface,
+    op_interface_converter,
 };
 pub use pass::{OperationRef, Pass, PassError, PassManager, PassTarget, Rewriter};
 pub use region::{Region, RegionId};

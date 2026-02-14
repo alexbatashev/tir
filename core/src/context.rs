@@ -151,6 +151,16 @@ impl Context {
 
         instance.id = op_id;
 
+        // Results are created before op id assignment in builders; patch their def-site now.
+        for result_id in &instance.results {
+            if let Some(value) = inner.values.get(result_id).cloned() {
+                inner.values.insert(
+                    *result_id,
+                    Arc::new((*value).clone().with_defining_op(op_id)),
+                );
+            }
+        }
+
         for r in &instance.regions {
             inner.regions.get(&r).unwrap().set_parent_op(op_id);
         }
@@ -160,6 +170,10 @@ impl Context {
         inner.operations.insert(op_id, instance.clone());
 
         instance
+    }
+
+    pub fn has_operation(&self, id: OpId) -> bool {
+        self.0.read().operations.contains_key(&id)
     }
 
     pub fn create_value(&self, ty: Type, defining_op: Option<OpId>) -> Value {
@@ -180,6 +194,18 @@ impl Context {
     pub fn get_value(&self, id: ValueId) -> Arc<Value> {
         let inner = self.0.read();
         inner.values.get(&id).unwrap().clone()
+    }
+
+    pub fn has_value(&self, id: ValueId) -> bool {
+        self.0.read().values.contains_key(&id)
+    }
+
+    pub fn is_block_argument(&self, id: ValueId) -> bool {
+        let inner = self.0.read();
+        inner
+            .blocks
+            .values()
+            .any(|block| block.arguments().iter().any(|arg| arg.id() == id))
     }
 
     pub fn create_region(&self) -> Arc<Region> {

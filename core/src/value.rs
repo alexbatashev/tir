@@ -47,6 +47,11 @@ impl Value {
     pub fn defining_op(&self) -> Option<OpId> {
         self.defining_op
     }
+
+    pub fn with_defining_op(mut self, op: OpId) -> Self {
+        self.defining_op = Some(op);
+        self
+    }
 }
 
 #[derive(Debug, Clone)]

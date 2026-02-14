@@ -68,7 +68,7 @@ pub struct OpId(u32);
 ///
 /// Because all operations implement this trait, generic IR passes can inspect,
 /// transform, or analyze any construct in the IR using the same programming model.
-pub trait Operation: 'static + Send + Sync + Any {
+pub trait Operation: 'static + Send + Sync + Any + Verifiable + OpDefVerifiable {
     fn name() -> &'static str
     where
         Self: Sized;
@@ -112,6 +112,51 @@ pub trait Operation: 'static + Send + Sync + Any {
     where
         Self: Sized,
     {
+    }
+
+    /// Verifies that operation is valid.
+    ///
+    /// Order of verification:
+    /// 1. Operands verification - all operands must exist and value types must match.
+    /// 2. Attributes verification - all DSL-defined attributes must have a value and types must match.
+    /// 3. Interface verification - same operand types, etc...
+    /// 4. Region verification - all basic blocks must end with a terminator, there must be at least one basic block.
+    /// 5. Custom verification - additional constraints imposed by dialect authors.
+    fn verify(&self, context: &Context) -> Result<(), crate::Error> {
+        self.verify_operands(context)?;
+        self.verify_attributes(context)?;
+        self.verify_interfaces(context)?;
+
+        for r in self.regions() {
+            r.verify(context)?;
+        }
+
+        self.verify_impl(context)?;
+
+        Ok(())
+    }
+}
+
+pub trait Verifiable {
+    fn verify_impl(&self, _context: &Context) -> Result<(), crate::Error> {
+        Ok(())
+    }
+}
+
+/// Common functions for verifying basic operation properties, that can be inferred
+/// from DSL operation definition. Users are discouraged from implemnting this trait
+/// manually. Prefer auto-generated DSL implementation instead.
+pub trait OpDefVerifiable {
+    /// Verify operands are correct. That is, values exist in the context and have the
+    /// same type as described in DSL.
+    fn verify_operands(&self, context: &Context) -> Result<(), crate::Error>;
+    /// Verify attributes are correct. For each attribute that is defined in the DSL
+    /// a value must exist and its types must match.
+    fn verify_attributes(&self, context: &Context) -> Result<(), crate::Error>;
+    /// Verify interfaces. For each implemented interface a verify_interface
+    /// function is called.
+    fn verify_interfaces(&self, _context: &Context) -> Result<(), crate::Error> {
+        Ok(())
     }
 }
 

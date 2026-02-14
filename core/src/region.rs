@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use crate::{BlockId, Context, ContextIterator, GetFromContext, OpId};
+use crate::{BlockId, Context, ContextIterator, GetFromContext, OpId, Terminator};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RegionId(u32);
@@ -37,6 +37,31 @@ impl Region {
 
     pub fn iter(&self, context: Context) -> ContextIterator<BlockId> {
         ContextIterator::new(context, self.blocks.read().clone())
+    }
+
+    pub fn verify(&self, context: &Context) -> Result<(), crate::Error> {
+        let blocks = self.blocks.read();
+
+        for block_id in &*blocks {
+            let block = context.get_block(*block_id);
+            if block.op_ids().is_empty() {
+                return Err(crate::Error::VerificationError(
+                    "basic blocks must have at least one operation".to_string(),
+                ));
+            }
+
+            let last_op = *block.op_ids().last().unwrap();
+
+            let op = last_op.get_from_context(context);
+            let terminator = op.as_interface::<dyn Terminator>();
+            if terminator.is_none() {
+                return Err(crate::Error::VerificationError(
+                    "basic blocks must end with a terminator".to_string(),
+                ));
+            }
+        }
+
+        Ok(())
     }
 }
 

@@ -20,4 +20,6 @@ pub enum Error {
     ExpectedSymbolName,
     #[error("Unknown value reference '%{0}'")]
     UnknownValueRef(String),
+    #[error("Operation verification failed: {0}")]
+    VerificationError(String),
 }
