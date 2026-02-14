@@ -4,6 +4,7 @@ use std::io::Write;
 use crate::ast::{self, Instruction, Item};
 use crate::error::TMDLError;
 use crate::sem_expr_conv::{SymbolInfo, convert_to_sem_expr};
+use crate::sem_expr_state;
 use crate::utils::{
     get_encoding_arms, parse_literal_value, resolve_operands_for_instruction,
     resolve_params_for_instruction,
@@ -205,6 +206,15 @@ struct InstructionPattern {
     operand_extracts: Vec<(String, u16, u16, ast::Type)>, // (operand_name, start_bit, end_bit, type)
 }
 
+fn apply_fixed_bits(mask: &mut u64, expected: &mut u64, start: u16, end: u16, value: u64) {
+    for bit in start..=end {
+        *mask |= 1u64 << bit;
+        if (value >> (bit - start)) & 1 == 1 {
+            *expected |= 1u64 << bit;
+        }
+    }
+}
+
 fn analyze_instruction_encoding<'a>(
     instruction: &'a Instruction,
     item_cache: &HashMap<String, &'a Item>,
@@ -224,14 +234,13 @@ fn analyze_instruction_encoding<'a>(
 
         match &arm.value {
             ast::Expr::Lit(ast::Lit::Int(li)) => {
-                // Fixed literal - add to mask and expected value
-                let value = parse_literal_value(li);
-                for bit in start..=end {
-                    mask |= 1u64 << bit;
-                    if (value >> (bit - start)) & 1 == 1 {
-                        expected |= 1u64 << bit;
-                    }
-                }
+                apply_fixed_bits(
+                    &mut mask,
+                    &mut expected,
+                    start,
+                    end,
+                    parse_literal_value(li),
+                );
             }
             ast::Expr::Ident(id) => {
                 let name = &id.name;
@@ -241,14 +250,13 @@ fn analyze_instruction_encoding<'a>(
                     operand_extracts.push((name.to_lowercase(), start, end, ty.clone()));
                 } else if let Some((_, Some(ast::Expr::Lit(ast::Lit::Int(li))))) = params.get(name)
                 {
-                    // Fixed parameter value - add to mask and expected value
-                    let value = parse_literal_value(li);
-                    for bit in start..=end {
-                        mask |= 1u64 << bit;
-                        if (value >> (bit - start)) & 1 == 1 {
-                            expected |= 1u64 << bit;
-                        }
-                    }
+                    apply_fixed_bits(
+                        &mut mask,
+                        &mut expected,
+                        start,
+                        end,
+                        parse_literal_value(li),
+                    );
                 }
             }
             _ => {}
@@ -297,21 +305,12 @@ fn generate_structural_decoder(
 
         // Build operand extractions
         let mut operand_vals = Vec::new();
-        for (op_name, start, end, ty) in &pattern.operand_extracts {
+        for (_op_name, start, end, ty) in &pattern.operand_extracts {
             let width = end - start + 1;
             let extracted = format!("(extract_bits w {} {})", start, width);
-            // Convert to appropriate type
             let converted = match ty {
-                ast::Type::Struct(_) => {
-                    // Register index - convert Z to nat
-                    format!("(Z.to_nat {})", extracted)
-                }
-                ast::Type::Bits(_) => {
-                    // Already a bitvector, but needs wrapping
-                    extracted
-                }
-                ast::Type::Integer => extracted,
-                ast::Type::String => extracted,
+                ast::Type::Struct(_) => format!("(Z.to_nat {})", extracted),
+                _ => extracted,
             };
             operand_vals.push(converted);
         }
@@ -348,17 +347,16 @@ fn generate_structural_decoder(
 /// For a list of operands returns a string of function operands in Coq format. Examples:
 /// (rd rs1 rs2 : nat)
 /// (rd rs1 : nat) (imm : tmdl_word 12)
-fn build_coq_operands(operands: &Vec<(String, ast::Type)>) -> String {
-    // Map a TMDL type to a Coq type string
-    fn coq_ty_of(t: &ast::Type) -> String {
-        match t {
-            ast::Type::Struct(_) => "nat".to_string(),
-            ast::Type::Bits(w) => format!("tmdl_word {}", w),
-            ast::Type::Integer => "Z".to_string(),
-            ast::Type::String => "string".to_string(),
-        }
+fn coq_ty_of(t: &ast::Type) -> String {
+    match t {
+        ast::Type::Struct(_) => "nat".to_string(),
+        ast::Type::Bits(w) => format!("tmdl_word {}", w),
+        ast::Type::Integer => "Z".to_string(),
+        ast::Type::String => "string".to_string(),
     }
+}
 
+fn build_coq_operands(operands: &[(String, ast::Type)]) -> String {
     if operands.is_empty() {
         return String::new();
     }
@@ -387,19 +385,11 @@ fn build_coq_operands(operands: &Vec<(String, ast::Type)>) -> String {
 }
 
 /// Build a constructor argument list for Coq inductive: "T1 -> T2 ->"
-fn build_coq_operands_ctor(operands: &Vec<(String, ast::Type)>) -> String {
-    fn coq_ty_of(t: &ast::Type) -> String {
-        match t {
-            ast::Type::Struct(_) => "nat".to_string(),
-            ast::Type::Bits(w) => format!("tmdl_word {}", w),
-            ast::Type::Integer => "Z".to_string(),
-            ast::Type::String => "string".to_string(),
-        }
-    }
-    let mut parts: Vec<String> = Vec::new();
-    for (_name, ty) in operands.iter() {
-        parts.push(format!("{} ->", coq_ty_of(ty)));
-    }
+fn build_coq_operands_ctor(operands: &[(String, ast::Type)]) -> String {
+    let parts: Vec<String> = operands
+        .iter()
+        .map(|(_name, ty)| format!("{} ->", coq_ty_of(ty)))
+        .collect();
     if parts.is_empty() {
         String::new()
     } else {
@@ -420,8 +410,10 @@ fn build_coq_encoding<'a>(
 
     // Helper: render integer literal as tmdl_word of given width
     fn render_lit_bitvec(width: u16, lit: &ast::LitInt) -> String {
-        let decimal_value = parse_literal_value(lit);
-        format!("(tmdl_word_of_nat {} {})", width, decimal_value)
+        format!("(tmdl_word_of_nat {} {})", width, parse_literal_value(lit))
+    }
+    fn render_zero(width: u16) -> String {
+        format!("(tmdl_word_of_nat {} 0)", width)
     }
 
     let encoding_arms = get_encoding_arms(instruction, item_cache);
@@ -444,29 +436,17 @@ fn build_coq_encoding<'a>(
                         ast::Type::Struct(_) => format!("(tmdl_word_of_nat {} {})", width, vname),
                         ast::Type::Bits(_w) => format!("({})", vname),
                         ast::Type::Integer => format!("(tmdl_word_of_nat {} {})", width, vname),
-                        ast::Type::String => format!("(tmdl_word_of_nat {} 0)", width),
+                        ast::Type::String => render_zero(width),
                     }
-                } else if let Some((pty, pval)) = params.get(name) {
-                    match pval {
-                        Some(ast::Expr::Lit(ast::Lit::Int(li))) => render_lit_bitvec(width, li),
-                        _ => match pty {
-                            ast::Type::Bits(_) | ast::Type::Integer => {
-                                // Fallback if not a simple literal
-                                format!("(tmdl_word_of_nat {} 0)", width)
-                            }
-                            _ => format!("(tmdl_word_of_nat {} 0)", width),
-                        },
-                    }
+                } else if let Some((_, Some(ast::Expr::Lit(ast::Lit::Int(li))))) = params.get(name)
+                {
+                    render_lit_bitvec(width, li)
                 } else {
-                    // Unknown identifier; zero-fill
-                    format!("(tmdl_word_of_nat {} 0)", width)
+                    render_zero(width)
                 }
             }
-            ast::Expr::Slice(_s) => {
-                // Simplified: treat as zero vector of that width
-                format!("(tmdl_word_of_nat {} 0)", width)
-            }
-            _ => format!("(tmdl_word_of_nat {} 0)", width),
+            ast::Expr::Slice(_s) => render_zero(width),
+            _ => render_zero(width),
         };
 
         pieces.push((high_bit, piece));
@@ -492,90 +472,57 @@ fn build_coq_behavior<'a>(
         .into_iter()
         .collect::<HashMap<_, _>>();
     let params = resolve_params_for_instruction(instruction, item_cache);
-    let mut numeric_params = HashMap::new();
-    for (name, (_ty, val)) in params {
-        if let Some(ast::Expr::Lit(ast::Lit::Int(li))) = val {
-            numeric_params.insert(name, parse_literal_value(&li) as i64);
-        }
-    }
+    let numeric_params: HashMap<_, _> = params
+        .into_iter()
+        .filter_map(|(name, (_ty, val))| match val {
+            Some(ast::Expr::Lit(ast::Lit::Int(li))) => {
+                Some((name, parse_literal_value(&li) as i64))
+            }
+            _ => None,
+        })
+        .collect();
 
-    fn try_emit_sem_expr(
+    fn emit_sem_expr(
         e: &ast::Expr,
         operands: &HashMap<String, ast::Type>,
         numeric_params: &HashMap<String, i64>,
-    ) -> Option<String> {
-        let converted = convert_to_sem_expr(e, numeric_params.clone()).ok()?;
+    ) -> String {
+        let converted = convert_to_sem_expr(e, numeric_params.clone()).unwrap();
         let resolver = RocqSymbolResolver {
             symbols: &converted.symbols,
             operands,
             state_name: "st",
         };
         let mut out = Vec::new();
-        sem_rocq::emit(&converted.expr, &mut out, &resolver).ok()?;
-        String::from_utf8(out).ok()
+        sem_rocq::emit(&converted.expr, &mut out, &resolver).unwrap();
+        String::from_utf8(out).unwrap()
     }
 
-    fn eval_expr(
-        e: &ast::Expr,
-        operands: &HashMap<String, ast::Type>,
-        numeric_params: &HashMap<String, i64>,
-    ) -> String {
-        try_emit_sem_expr(e, operands, numeric_params).unwrap()
-    }
-
-    // Compile a statement (assignment or block) into a state-transforming Coq expr
-    fn compile_to_state(
-        e: &ast::Expr,
-        operands: &HashMap<String, ast::Type>,
-        numeric_params: &HashMap<String, i64>,
-        st_name: &str,
-    ) -> String {
-        match e {
-            ast::Expr::Assign(a) => {
-                let dst_name = a.dest.to_lowercase();
-                let rhs = eval_expr(&a.value, operands, numeric_params);
-                if let Some(ast::Type::Struct(rc)) = operands.get(&a.dest) {
-                    format!(
-                        "(write_{} {} {} {})",
-                        rc.to_lowercase(),
-                        st_name,
-                        dst_name,
-                        rhs
-                    )
-                } else {
-                    // Non-register destination; no state change
-                    st_name.to_string()
-                }
-            }
-            ast::Expr::Block(b) => {
-                let mut current = st_name.to_string();
-                for stmt in &b.stmts {
-                    match stmt {
-                        ast::Expr::Assign(_) | ast::Expr::Block(_) | ast::Expr::If(_) => {
-                            let next = compile_to_state(stmt, operands, numeric_params, &current);
-                            current = next;
-                        }
-                        _ => {}
-                    }
-                }
-                current
-            }
-            ast::Expr::If(i) => {
-                let cond = eval_expr(&i.cond, operands, numeric_params);
-                let then_state = compile_to_state(&i.then, operands, numeric_params, st_name);
-                let else_state = if let Some(e) = &i.else_ {
-                    compile_to_state(e, operands, numeric_params, st_name)
-                } else {
-                    st_name.to_string()
-                };
-                format!("(if {} then {} else {})", cond, then_state, else_state)
-            }
-            _ => st_name.to_string(),
+    let eval_expr = |e: &ast::Expr| emit_sem_expr(e, &operands, &numeric_params);
+    let emit_assign = |a: &ast::Assign, st_name: &str| {
+        if let Some(ast::Type::Struct(rc)) = operands.get(&a.dest) {
+            let rhs = emit_sem_expr(&a.value, &operands, &numeric_params);
+            Some(format!(
+                "(write_{} {} {} {})",
+                rc.to_lowercase(),
+                st_name,
+                a.dest.to_lowercase(),
+                rhs
+            ))
+        } else {
+            None
         }
-    }
-
-    // Top-level behavior
-    compile_to_state(&instruction.behavior, &operands, &numeric_params, "st")
+    };
+    let emit_if = |cond: &str, then_state: &str, else_state: &str| {
+        format!("(if {} then {} else {})", cond, then_state, else_state)
+    };
+    sem_expr_state::compile_to_state(
+        &instruction.behavior,
+        "st",
+        &eval_expr,
+        &emit_assign,
+        &emit_if,
+    )
 }
 
 const HEADER: &'static str = "(* Automatically generated by TMDL compiler *)
