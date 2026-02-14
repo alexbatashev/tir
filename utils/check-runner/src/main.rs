@@ -16,6 +16,7 @@ struct GlobalConfig {
 #[derive(Debug, Deserialize)]
 struct Suite {
     name: String,
+    enabled: Option<bool>,
     glob: Vec<String>,
 }
 
@@ -128,6 +129,10 @@ pub fn main() -> Result<(), String> {
 
     let mut has_failures = false;
     for (path, suite) in configs {
+        if !&suite.enabled.unwrap_or(true) {
+            eprintln!("Skipping {} as disabled", &suite.name);
+            continue;
+        }
         eprintln!("Running {}", &suite.name);
 
         let path = path.parent().unwrap().to_str().unwrap();

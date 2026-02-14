@@ -273,7 +273,7 @@ mod tests {
 
         // Insert return with no operand
         let mut builder = IRBuilder::new(func.body());
-        builder.insert(ops::r#return(&context, crate::ir::Operand::none()).build());
+        builder.insert(ops::r#return(&context, crate::operand::Operand::none()).build());
 
         // Print
         let mut buf = String::new();

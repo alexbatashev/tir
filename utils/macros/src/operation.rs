@@ -110,7 +110,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
             }
         });
         operand_fn_params.push(quote! {
-            #field: impl Into<tir::ir::Operand>
+            #field: impl Into<tir::Operand>
         });
         operand_fn_builders.push(quote! {
             let #field = #field.into();

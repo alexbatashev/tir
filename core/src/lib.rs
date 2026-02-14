@@ -7,8 +7,8 @@ mod dialect;
 mod dialects;
 mod error;
 mod interfaces;
-pub mod ir;
 mod ir_formatter;
+mod operand;
 mod operation;
 mod pass;
 mod region;
@@ -28,8 +28,8 @@ pub use diagnostics::{print_error_range, print_parse_error};
 pub use dialect::Dialect;
 pub use error::Error;
 pub use interfaces::{Commutative, Terminator};
-pub use ir::Operand;
 pub use ir_formatter::IRFormatter;
+pub use operand::Operand;
 pub use operation::{
     ErasedOpInterface, ImplementsOpInterface, OpId, OpInstance, OpInterfaceConverter, Operation,
     downcast_op_interface, erase_op_interface, op_interface_converter,
