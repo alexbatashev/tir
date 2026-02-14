@@ -47,9 +47,7 @@ fn lower_func_and_return_to_asm_symbol(
     use tir::attributes::{AttributeValue, RegisterAttr};
     use tir::builtin::{FuncOp, ReturnOp};
 
-    if op.name() == FuncOp::name() {
-        let func = op.as_op::<FuncOp>().expect("name checked");
-
+    if let Some(func) = op.as_op::<FuncOp>() {
         // asm.symbol regions require an explicit symbol_end terminator.
         let body = func.body();
         let has_symbol_end = body
@@ -93,8 +91,7 @@ fn lower_func_and_return_to_asm_symbol(
         return Ok(true);
     }
 
-    if op.name() == ReturnOp::name() {
-        let ret = op.as_op::<ReturnOp>().expect("name checked");
+    if let Some(ret) = op.as_op::<ReturnOp>() {
         let mut builder = VirtualReturnOpBuilder::new(context);
         if let Some(value) = ret.operands().first().copied() {
             builder = builder.value(value);

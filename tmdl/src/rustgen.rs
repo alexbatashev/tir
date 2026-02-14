@@ -9,6 +9,7 @@ use crate::utils::resolve_operands_for_instruction;
 
 struct InstructionSemantics {
     pattern: proc_macro2::TokenStream,
+    base_cost: u32,
     variable_symbols: HashMap<String, u32>,
     fixed_register_by_class: HashMap<String, Option<u16>>,
 }
@@ -243,25 +244,26 @@ fn emit_instructions<'ast, 'cache: 'ast>(
             }
 
             let pattern = semantics.pattern;
+            let base_cost_lit = proc_macro2::Literal::u32_unsuffixed(semantics.base_cost);
             isel_rule_emitters.push(quote! {
                 fn #emit_fn_ident(
                     context: &tir::Context,
                     op: &tir::OperationRef,
                     m: &tir_be_common::isel::RuleMatch,
-                ) -> Result<Box<dyn tir::Operation>, tir::PassError> {
+                ) -> Result<tir_be_common::isel::EmitPlan, tir::PassError> {
                     let mut builder = #builder_ident::new(context);
                     #(#emit_attr_steps)*
-                    Ok(Box::new(builder.build()))
+                    Ok(tir_be_common::isel::EmitPlan::single(Box::new(builder.build())))
                 }
             });
 
             isel_rule_inits.push(quote! {
-                rules.push(tir_be_common::isel::Rule {
-                    name: #rule_name_lit,
-                    pattern: #pattern,
-                    cost: 1,
-                    emit: #emit_fn_ident,
-                });
+                rules.push(tir_be_common::isel::Rule::new(
+                    #rule_name_lit,
+                    #pattern,
+                    #base_cost_lit,
+                    #emit_fn_ident,
+                ));
             });
         }
 
@@ -517,10 +519,12 @@ fn analyze_instruction_semantics(
 
     let converted = crate::sem_expr_conv::convert_to_sem_expr(rhs, numeric_params).ok()?;
     let pattern = emit_sem_expr(&converted.expr);
+    let base_cost = sem_expr_complexity(&converted.expr).max(1);
     let (variable_symbols, fixed_register_by_class) = split_symbols(&converted.symbols);
 
     Some(InstructionSemantics {
         pattern,
+        base_cost,
         variable_symbols,
         fixed_register_by_class,
     })
@@ -697,6 +701,24 @@ fn emit_sem_expr(expr: &tir::sem_expr::Expr) -> proc_macro2::TokenStream {
             quote! { tir::sem_expr::Expr::Xor(Box::new(#lhs), Box::new(#rhs)) }
         }
         _ => quote! { tir::sem_expr::Expr::Bool(false) },
+    }
+}
+
+fn sem_expr_complexity(expr: &tir::sem_expr::Expr) -> u32 {
+    use tir::sem_expr::Expr;
+    match expr {
+        Expr::Int(_) | Expr::Bool(_) | Expr::Symbol(_) => 1,
+        Expr::Add(lhs, rhs)
+        | Expr::Sub(lhs, rhs)
+        | Expr::Mul(lhs, rhs)
+        | Expr::Div(lhs, rhs)
+        | Expr::ShiftLeft(lhs, rhs)
+        | Expr::ShiftRightLogic(lhs, rhs)
+        | Expr::ShiftRightArithmetic(lhs, rhs)
+        | Expr::And(lhs, rhs)
+        | Expr::Or(lhs, rhs)
+        | Expr::Xor(lhs, rhs) => 1 + sem_expr_complexity(lhs) + sem_expr_complexity(rhs),
+        _ => 2,
     }
 }
 
