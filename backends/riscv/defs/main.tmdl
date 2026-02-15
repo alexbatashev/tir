@@ -6,6 +6,15 @@ isa RV64I {
     param XLEN: Integer = 64;
 }
 
+register_class PC for [RV32I, RV64I] {
+    param ENCODING_LEN: Integer = 0;
+    param WIDTH: Integer = self.XLEN;
+
+    registers {
+        pc => { traits = [program_counter] },
+    }
+}
+
 register_class GPR for [RV32I, RV64I] {
     param ENCODING_LEN: Integer = 5;
     param WIDTH: Integer = self.XLEN;

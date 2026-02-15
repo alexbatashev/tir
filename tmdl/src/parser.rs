@@ -534,6 +534,7 @@ where
                     "caller_saved" => Some(RegisterTrait::CallerSaved),
                     "callee_saved" => Some(RegisterTrait::CalleeSaved),
                     "stack_pointer" => Some(RegisterTrait::StackPointer),
+                    "program_counter" => Some(RegisterTrait::ProgramCounter),
                     _ => None,
                 })
                 .collect()

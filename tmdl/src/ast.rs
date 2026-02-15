@@ -10,6 +10,7 @@ pub enum RegisterTrait {
     CallerSaved,
     CalleeSaved,
     StackPointer,
+    ProgramCounter,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
