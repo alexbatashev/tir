@@ -1,0 +1,10 @@
+[package]
+name = "tir-isasim"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tir = { path = "../../core" }
+tir-sim = { path = "../simcore" }
+tir-riscv = { path = "../../backends/riscv" }
+clap = { version = "4.5.58", features = ["derive"] }

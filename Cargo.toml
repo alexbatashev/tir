@@ -12,6 +12,8 @@ members = [
     "backends/common",
     "backends/riscv",
     "fuzz",
+    "simulator/isasim",
+    "simulator/simcore",
 ]
 
 [profile.bench]
