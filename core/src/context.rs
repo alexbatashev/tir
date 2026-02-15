@@ -1,5 +1,5 @@
 use std::{
-    any::{Any, TypeId},
+    any::Any,
     collections::HashMap,
     sync::{Arc, Weak, atomic::AtomicU32},
 };
@@ -7,15 +7,16 @@ use std::{
 use parking_lot::RwLock;
 
 use crate::{
-    Block, Dialect, Error, OpId, OpInstance, Operation, Region, Type,
+    Block, Dialect, Error, OpId, OpInstance, Operation, Region, TypeId,
     block::BlockId,
     builtin::BuiltinDialect,
+    ir_formatter::IRFormatter,
     operation::{
         ImplementsOpInterface, OpInterfaceConverter, downcast_op_interface, op_interface_converter,
     },
-    parse::Span,
-    parse::text::Parser as IRParser,
+    parse::{Span, text::Parser as IRParser},
     region::RegionId,
+    ty::{Type, TypeParser},
     value::{Value, ValueId},
 };
 
@@ -84,7 +85,9 @@ struct ContextInstance {
     blocks: HashMap<BlockId, Arc<Block>>,
     last_block_id: AtomicU32,
     dialects: HashMap<&'static str, Arc<dyn Dialect>>,
-    op_interface_converters: HashMap<(&'static str, &'static str, TypeId), OpInterfaceConverter>,
+    op_interface_converters:
+        HashMap<(&'static str, &'static str, std::any::TypeId), OpInterfaceConverter>,
+    type_cache: Vec<Arc<dyn Type>>,
 }
 
 impl Context {
@@ -102,6 +105,7 @@ impl Context {
             last_block_id: AtomicU32::new(0),
             dialects: HashMap::new(),
             op_interface_converters: HashMap::new(),
+            type_cache: vec![],
         })))
     }
 
@@ -124,6 +128,9 @@ impl Context {
         Arc::<dyn Dialect>::get_mut(&mut dialect)
             .unwrap()
             .register_operations(self);
+        Arc::<dyn Dialect>::get_mut(&mut dialect)
+            .unwrap()
+            .register_types(self);
         self.0.write().dialects.insert(D::name(), dialect);
     }
 
@@ -176,7 +183,7 @@ impl Context {
         self.0.read().operations.contains_key(&id)
     }
 
-    pub fn create_value(&self, ty: Type, defining_op: Option<OpId>) -> Value {
+    pub fn create_value(&self, ty: TypeId, defining_op: Option<OpId>) -> Value {
         let mut inner = self.0.write();
 
         let value_id = ValueId::new(
@@ -265,7 +272,7 @@ impl Context {
         self.0
             .write()
             .op_interface_converters
-            .insert((dialect, op_name, TypeId::of::<I>()), converter);
+            .insert((dialect, op_name, std::any::TypeId::of::<I>()), converter);
     }
 
     pub fn register_operation_interface<Op, I>(&self)
@@ -292,7 +299,7 @@ impl Context {
             let inner = self.0.read();
             inner
                 .op_interface_converters
-                .get(&(op.dialect(), op.name(), TypeId::of::<I>()))
+                .get(&(op.dialect(), op.name(), std::any::TypeId::of::<I>()))
                 .copied()
         }?;
 
@@ -314,6 +321,93 @@ impl Context {
             .ok_or(Error::UnknownDialect(dialect.to_string()))?;
 
         dialect.get_parser(name)
+    }
+
+    pub fn get_type_parser(&self, dialect: &str, name: &str) -> Result<TypeParser, Error> {
+        let inner = self.0.read();
+
+        let dialect_impl = inner
+            .dialects
+            .get(dialect)
+            .ok_or(Error::UnknownDialect(dialect.to_string()))?;
+
+        if let Ok(parser) = dialect_impl.get_type_parser(name) {
+            return Ok(parser);
+        }
+
+        let prefix: String = name
+            .chars()
+            .take_while(|c| c.is_ascii_alphabetic() || *c == '_')
+            .collect();
+
+        if prefix.is_empty() || prefix == name {
+            return Err(Error::UnknownType(dialect.to_string(), name.to_string()));
+        }
+
+        dialect_impl.get_type_parser(&prefix)
+    }
+
+    pub fn parse_type_mnemonic(&self, dialect: &str, name: &str) -> Result<TypeId, Error> {
+        let parser = self.get_type_parser(dialect, name)?;
+        let mut p = IRParser::new("");
+        parser(name, &mut p, self).map_err(|(_, err)| err)
+    }
+
+    pub fn parse_type_spec(&self, spec: &str) -> Result<TypeId, Error> {
+        let spec = spec.strip_prefix('!').unwrap_or(spec);
+        if let Some((dialect, name)) = spec.split_once('.') {
+            self.parse_type_mnemonic(dialect, name)
+        } else {
+            self.parse_type_mnemonic("builtin", spec)
+        }
+    }
+
+    pub fn get_type_id(&self, ty: Arc<dyn Type>) -> TypeId {
+        let mut inner = self.0.upgradable_read();
+        let id = inner
+            .type_cache
+            .iter()
+            .enumerate()
+            .find_map(|(id, item)| if item.eq(&*ty) { Some(id) } else { None });
+
+        if let Some(id) = id {
+            (id as u32).into()
+        } else {
+            let id = inner.with_upgraded(|inner| {
+                let id = inner.type_cache.len() as u32;
+                inner.type_cache.push(ty);
+                id
+            });
+            id.into()
+        }
+    }
+
+    pub fn get_type_data(&self, ty: TypeId) -> Arc<dyn Type> {
+        self.0
+            .read()
+            .type_cache
+            .get(ty.as_index())
+            .cloned()
+            .expect("unknown type id")
+    }
+
+    pub fn type_to_string(&self, ty: TypeId) -> String {
+        let mut out = String::new();
+        {
+            let mut fmt = IRFormatter::new(&mut out);
+            self.print_type(ty, &mut fmt)
+                .expect("type print must succeed");
+        }
+        out
+    }
+
+    pub fn print_type(&self, ty: TypeId, fmt: &mut IRFormatter<'_>) -> Result<(), std::fmt::Error> {
+        let ty_data = self.get_type_data(ty);
+        fmt.write("!")?;
+        if ty_data.dialect() != "builtin" {
+            fmt.write(format!("{}.", ty_data.dialect()))?;
+        }
+        ty_data.print(fmt)
     }
 }
 
@@ -376,7 +470,7 @@ impl<I: GetFromContext> DoubleEndedIterator for ContextIterator<I> {
 #[cfg(test)]
 mod tests {
     use super::Context;
-    use crate::{Commutative, Operation, Terminator, Type, builtin};
+    use crate::{Commutative, Operation, Terminator, builtin};
 
     #[test]
     fn default_context() {
@@ -387,10 +481,15 @@ mod tests {
     fn custom_interface_for_existing_op() {
         let context = Context::with_default_dialects();
 
-        let lhs = context.create_value(Type::Integer { width: 32 }, None);
-        let rhs = context.create_value(Type::Integer { width: 32 }, None);
-        let add =
-            builtin::ops::addi(&context, lhs.id(), rhs.id(), Type::Integer { width: 32 }).build();
+        let lhs = context.create_value(builtin::IntegerType::new(&context, 32), None);
+        let rhs = context.create_value(builtin::IntegerType::new(&context, 32), None);
+        let add = builtin::ops::addi(
+            &context,
+            lhs.id(),
+            rhs.id(),
+            builtin::IntegerType::new(&context, 32),
+        )
+        .build();
 
         let iface = context
             .get_op(add.id())
@@ -402,7 +501,7 @@ mod tests {
     #[test]
     fn builtin_terminator_interface() {
         let context = Context::with_default_dialects();
-        let value = context.create_value(Type::Integer { width: 32 }, None);
+        let value = context.create_value(builtin::IntegerType::new(&context, 32), None);
         let ret = builtin::ops::r#return(&context, value.id()).build();
 
         let iface = context

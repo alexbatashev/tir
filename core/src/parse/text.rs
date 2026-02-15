@@ -127,18 +127,38 @@ impl<'src> Parser<'src> {
         }
     }
 
-    pub fn parse_type(&mut self) -> Option<crate::Type> {
+    pub fn parse_type(
+        &mut self,
+        context: &crate::Context,
+    ) -> Result<Option<crate::TypeId>, (Span, crate::Error)> {
         let mark = self.position;
-        if let Some(ident) = self.parse_ident() {
-            match ident.parse::<crate::Type>() {
-                Ok(ty) => Some(ty),
-                Err(_) => {
-                    self.position = mark;
-                    None
-                }
-            }
+        if !self.parse_token("!") {
+            return Ok(None);
+        }
+
+        let dialect_or_name = self
+            .parse_ident()
+            .ok_or_else(|| (self.span(), crate::Error::ExpectedType))?;
+
+        let (dialect, name) = if self.peek_char() == Some('.') {
+            let Some(name) = self.parse_ident() else {
+                return Err((self.span(), crate::Error::ExpectedType));
+            };
+            (dialect_or_name, name)
         } else {
-            None
+            ("builtin", dialect_or_name)
+        };
+
+        let type_parser = context
+            .get_type_parser(dialect, name)
+            .map_err(|err| (self.span(), err))?;
+
+        match type_parser(name, self, context) {
+            Ok(ty) => Ok(Some(ty)),
+            Err(err) => {
+                self.position = mark;
+                Err(err)
+            }
         }
     }
 

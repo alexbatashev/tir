@@ -6,6 +6,8 @@ pub enum Error {
     UnknownDialect(String),
     #[error("Unknown operation '{1}' in dialect '{0}'")]
     UnknownOperation(String, String),
+    #[error("Unknown type '{1}' in dialect '{0}'")]
+    UnknownType(String, String),
     #[error("Expected '{0}'")]
     ExpectedToken(&'static str),
     #[error("Expected operation name in format 'op_name' or 'dialect_name.op_name'")]

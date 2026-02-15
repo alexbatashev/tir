@@ -236,8 +236,8 @@ impl Default for PassManager {
 #[cfg(test)]
 mod tests {
     use crate::{
-        Context, IRBuilder, Operation, Type,
-        builtin::{AddIOp, FuncOp, ops},
+        Context, IRBuilder, Operation,
+        builtin::{AddIOp, FuncOp, IntegerType, ops},
     };
 
     use super::{Pass, PassError, PassManager, PassTarget};
@@ -261,7 +261,7 @@ mod tests {
         ) -> Result<(), PassError> {
             let add = op.as_op::<AddIOp>().expect("target guarantees AddIOp");
             let operands = add.operands();
-            let result_ty = context.get_value(add.result()).ty().clone();
+            let result_ty = context.get_value(add.result()).ty();
             let new_op = ops::subi(context, operands[0], operands[1], result_ty).build();
             rewriter.replace_op(op, &new_op)
         }
@@ -272,8 +272,8 @@ mod tests {
         let context = Context::with_default_dialects();
         let module = ops::module(&context, None).build();
 
-        let param0 = context.create_value(Type::Integer { width: 32 }, None);
-        let param1 = context.create_value(Type::Integer { width: 32 }, None);
+        let param0 = context.create_value(IntegerType::new(&context, 32), None);
+        let param1 = context.create_value(IntegerType::new(&context, 32), None);
 
         let region = context.create_region();
         let block = context.create_block(vec![param0, param1]);
@@ -282,7 +282,7 @@ mod tests {
         let func = ops::func(
             &context,
             "demo",
-            Type::Integer { width: 32 },
+            IntegerType::new(&context, 32),
             Some(region.id()),
         )
         .build();
@@ -293,7 +293,7 @@ mod tests {
             &context,
             func_body.arguments()[0].id(),
             func_body.arguments()[1].id(),
-            Type::Integer { width: 32 },
+            IntegerType::new(&context, 32),
         )
         .build();
         let add_result = add.result();

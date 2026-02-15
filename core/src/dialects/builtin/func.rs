@@ -1,3 +1,5 @@
+use crate::Any;
+use crate::builtin::UnitType;
 use crate::operation;
 
 use crate as tir;
@@ -28,11 +30,8 @@ impl FuncOpBuilder {
         )
     }
 
-    pub fn ret_type(self, ty: tir::Type) -> Self {
-        self.attr(
-            "ret_type",
-            tir::attributes::AttributeValue::Str(ty.to_string()),
-        )
+    pub fn ret_type(self, ty: tir::TypeId) -> Self {
+        self.attr("ret_type", tir::attributes::AttributeValue::Type(ty))
     }
 }
 
@@ -66,7 +65,8 @@ impl FuncOp {
             if i > 0 {
                 fmt.write(", ")?;
             }
-            fmt.write(format!("%{}: {}", arg.id().number(), arg.ty()))?;
+            fmt.write(format!("%{}: ", arg.id().number()))?;
+            context.print_type(arg.ty(), fmt)?;
         }
         fmt.write(")")?;
 
@@ -76,13 +76,14 @@ impl FuncOp {
             .iter()
             .find(|a| a.name == "ret_type")
             .map(|a| match &a.value {
-                tir::attributes::AttributeValue::Str(s) => s.clone(),
-                _ => panic!("ret_type must be a string"),
+                tir::attributes::AttributeValue::Type(ty) => *ty,
+                _ => panic!("ret_type must be a type"),
             })
-            .unwrap_or_else(|| "none".to_string());
+            .unwrap_or_else(|| UnitType::new(&context));
 
-        if ret_type != "none" {
-            fmt.write(format!(" -> {}", ret_type))?;
+        if ret_type != UnitType::new(&context) {
+            fmt.write(" -> ")?;
+            context.print_type(ret_type, fmt)?;
         }
 
         // Print body region
@@ -129,7 +130,7 @@ impl FuncOp {
                 }
 
                 let ty = parser
-                    .parse_type()
+                    .parse_type(context)?
                     .ok_or_else(|| (parser.span(), tir::Error::ExpectedType))?;
 
                 // Create a value in context with the parsed type
@@ -148,10 +149,10 @@ impl FuncOp {
         // Parse optional -> return_type
         let ret_type = if parser.parse_token("->") {
             parser
-                .parse_type()
+                .parse_type(context)?
                 .ok_or_else(|| (parser.span(), tir::Error::ExpectedType))?
         } else {
-            tir::Type::None
+            UnitType::new(context)
         };
 
         // Parse body region { ... }
@@ -182,8 +183,8 @@ impl Terminator for ReturnOp {}
 #[cfg(test)]
 mod tests {
     use crate::{
-        Context, IRBuilder, IRFormatter, Operation, Type,
-        builtin::{FuncOp, ops},
+        Context, IRBuilder, IRFormatter, Operation,
+        builtin::{FuncOp, IntegerType, UnitType, ops},
         parse::ir::parse_ir,
     };
 
@@ -192,8 +193,8 @@ mod tests {
         let context = Context::with_default_dialects();
 
         // Create function parameters
-        let param0 = context.create_value(Type::Integer { width: 32 }, None);
-        let param1 = context.create_value(Type::Integer { width: 32 }, None);
+        let param0 = context.create_value(IntegerType::new(&context, 32), None);
+        let param1 = context.create_value(IntegerType::new(&context, 32), None);
         let param0_id = param0.id();
 
         // Create the body region with block arguments
@@ -205,7 +206,7 @@ mod tests {
         let func = ops::func(
             &context,
             "add",
-            Type::Integer { width: 32 },
+            IntegerType::new(&context, 32),
             Some(region.id()),
         )
         .build();
@@ -224,8 +225,8 @@ mod tests {
         let context = Context::with_default_dialects();
 
         // Build function
-        let param0 = context.create_value(Type::Integer { width: 32 }, None);
-        let param1 = context.create_value(Type::Integer { width: 32 }, None);
+        let param0 = context.create_value(IntegerType::new(&context, 32), None);
+        let param1 = context.create_value(IntegerType::new(&context, 32), None);
         let param0_id = param0.id();
 
         let region = context.create_region();
@@ -235,7 +236,7 @@ mod tests {
         let func = ops::func(
             &context,
             "add",
-            Type::Integer { width: 32 },
+            IntegerType::new(&context, 32),
             Some(region.id()),
         )
         .build();
@@ -266,7 +267,7 @@ mod tests {
         let context = Context::with_default_dialects();
 
         // Build void function with no parameters and no return value
-        let func = ops::func(&context, "nop", Type::None, None).build();
+        let func = ops::func(&context, "nop", UnitType::new(&context), None).build();
 
         // Insert return with no operand
         let mut builder = IRBuilder::new(func.body());

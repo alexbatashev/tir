@@ -1,5 +1,5 @@
 use crate::OpId;
-use crate::ty::Type;
+use crate::TypeId;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ValueId(u32);
@@ -21,13 +21,13 @@ impl ValueId {
 #[derive(Debug, Clone)]
 pub struct Value {
     id: ValueId,
-    ty: Type,
+    ty: TypeId,
     defining_op: Option<OpId>,
     uses: Vec<Use>,
 }
 
 impl Value {
-    pub fn new(id: ValueId, ty: Type, defining_op: Option<OpId>) -> Self {
+    pub fn new(id: ValueId, ty: TypeId, defining_op: Option<OpId>) -> Self {
         Self {
             id,
             ty,
@@ -40,8 +40,8 @@ impl Value {
         self.id
     }
 
-    pub fn ty(&self) -> &Type {
-        &self.ty
+    pub fn ty(&self) -> TypeId {
+        self.ty
     }
 
     pub fn defining_op(&self) -> Option<OpId> {

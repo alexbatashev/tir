@@ -11,7 +11,7 @@ operation! {
             value: "Int",
         },
         results: R {
-            result: "Integer",
+            result: "crate::builtin::IntegerType",
         },
     }
 }
@@ -27,11 +27,11 @@ operation! {
         name: "addi",
         dialect: "builtin",
         operands: O {
-            lhs: "Integer",
-            rhs: "Integer",
+            lhs: "crate::builtin::IntegerType",
+            rhs: "crate::builtin::IntegerType",
         },
         results: R {
-            result: "Integer",
+            result: "crate::builtin::IntegerType",
         },
         interfaces: [Commutative, SameOperandType],
         sem: "(set result (add lhs rhs))",
@@ -46,11 +46,11 @@ operation! {
         name: "subi",
         dialect: "builtin",
         operands: O {
-            lhs: "Integer",
-            rhs: "Integer",
+            lhs: "crate::builtin::IntegerType",
+            rhs: "crate::builtin::IntegerType",
         },
         results: R {
-            result: "Integer",
+            result: "crate::builtin::IntegerType",
         },
         interfaces: [SameOperandType],
         sem: "(set result (sub lhs rhs))",
@@ -64,11 +64,11 @@ operation! {
         name: "muli",
         dialect: "builtin",
         operands: O {
-            lhs: "Integer",
-            rhs: "Integer",
+            lhs: "crate::builtin::IntegerType",
+            rhs: "crate::builtin::IntegerType",
         },
         results: R {
-            result: "Integer",
+            result: "crate::builtin::IntegerType",
         },
         interfaces: [Commutative, SameOperandType],
         sem: "(set result (mul lhs rhs))",
@@ -83,11 +83,11 @@ operation! {
         name: "andi",
         dialect: "builtin",
         operands: O {
-            lhs: "Integer",
-            rhs: "Integer",
+            lhs: "crate::builtin::IntegerType",
+            rhs: "crate::builtin::IntegerType",
         },
         results: R {
-            result: "Integer",
+            result: "crate::builtin::IntegerType",
         },
         interfaces: [Commutative],
         sem: "(set result (and lhs rhs))",
@@ -101,11 +101,11 @@ operation! {
         name: "ori",
         dialect: "builtin",
         operands: O {
-            lhs: "Integer",
-            rhs: "Integer",
+            lhs: "crate::builtin::IntegerType",
+            rhs: "crate::builtin::IntegerType",
         },
         results: R {
-            result: "Integer",
+            result: "crate::builtin::IntegerType",
         },
         interfaces: [Commutative, SameOperandType],
         sem: "(set result (or lhs rhs))",
@@ -120,11 +120,11 @@ operation! {
         name: "xori",
         dialect: "builtin",
         operands: O {
-            lhs: "Integer",
-            rhs: "Integer",
+            lhs: "crate::builtin::IntegerType",
+            rhs: "crate::builtin::IntegerType",
         },
         results: R {
-            result: "Integer",
+            result: "crate::builtin::IntegerType",
         },
         interfaces: [Commutative, SameOperandType],
         sem: "(set result (xor lhs rhs))",
@@ -139,11 +139,11 @@ operation! {
         name: "shli",
         dialect: "builtin",
         operands: O {
-            lhs: "Integer",
-            rhs: "Integer",
+            lhs: "crate::builtin::IntegerType",
+            rhs: "crate::builtin::IntegerType",
         },
         results: R {
-            result: "Integer",
+            result: "crate::builtin::IntegerType",
         },
         sem: "(set result (shl lhs rhs))",
     }
@@ -154,11 +154,11 @@ operation! {
         name: "shrui",
         dialect: "builtin",
         operands: O {
-            lhs: "Integer",
-            rhs: "Integer",
+            lhs: "crate::builtin::IntegerType",
+            rhs: "crate::builtin::IntegerType",
         },
         results: R {
-            result: "Integer",
+            result: "crate::builtin::IntegerType",
         },
         sem: "(set result (lshr lhs rhs))",
     }
@@ -169,11 +169,11 @@ operation! {
         name: "shrsi",
         dialect: "builtin",
         operands: O {
-            lhs: "Integer",
-            rhs: "Integer",
+            lhs: "crate::builtin::IntegerType",
+            rhs: "crate::builtin::IntegerType",
         },
         results: R {
-            result: "Integer",
+            result: "crate::builtin::IntegerType",
         },
         sem: "(set result (ashr lhs rhs))",
     }
@@ -187,11 +187,11 @@ operation! {
             predicate: "Str",
         },
         operands: O {
-            lhs: "Integer",
-            rhs: "Integer",
+            lhs: "crate::builtin::IntegerType",
+            rhs: "crate::builtin::IntegerType",
         },
         results: R {
-            result: "i1",
+            result: "crate::Integer<1>",
         },
     }
 }
@@ -210,10 +210,10 @@ operation! {
         name: "extsi",
         dialect: "builtin",
         operands: O {
-            input: "Integer",
+            input: "crate::builtin::IntegerType",
         },
         results: R {
-            result: "Integer",
+            result: "crate::builtin::IntegerType",
         },
     }
 }
@@ -223,10 +223,10 @@ operation! {
         name: "extui",
         dialect: "builtin",
         operands: O {
-            input: "Integer",
+            input: "crate::builtin::IntegerType",
         },
         results: R {
-            result: "Integer",
+            result: "crate::builtin::IntegerType",
         },
     }
 }
@@ -236,10 +236,10 @@ operation! {
         name: "trunci",
         dialect: "builtin",
         operands: O {
-            input: "Integer",
+            input: "crate::builtin::IntegerType",
         },
         results: R {
-            result: "Integer",
+            result: "crate::builtin::IntegerType",
         },
     }
 }
@@ -247,31 +247,31 @@ operation! {
 #[cfg(test)]
 mod tests {
     use crate::{
-        Context, IRBuilder, IRFormatter, Operation, Type,
-        builtin::{AddIOp, FuncOp, ops},
+        Context, IRBuilder, IRFormatter, Operation,
+        builtin::{AddIOp, FuncOp, IntegerType, ops},
         parse::ir::parse_ir,
     };
 
     #[test]
     fn addi_construction() {
         let context = Context::with_default_dialects();
-        let lhs = context.create_value(Type::Integer { width: 32 }, None);
-        let rhs = context.create_value(Type::Integer { width: 32 }, None);
+        let lhs = context.create_value(IntegerType::new(&context, 32), None);
+        let rhs = context.create_value(IntegerType::new(&context, 32), None);
 
-        let op = ops::addi(&context, lhs.id(), rhs.id(), Type::Integer { width: 32 }).build();
+        let op = ops::addi(&context, lhs.id(), rhs.id(), IntegerType::new(&context, 32)).build();
 
         assert_eq!(op.operands().len(), 2);
         assert_eq!(
             context.get_value(op.result()).ty(),
-            &Type::Integer { width: 32 }
+            IntegerType::new(&context, 32)
         );
     }
 
     #[test]
     fn arith_roundtrip_in_func() {
         let context = Context::with_default_dialects();
-        let param0 = context.create_value(Type::Integer { width: 32 }, None);
-        let param1 = context.create_value(Type::Integer { width: 32 }, None);
+        let param0 = context.create_value(IntegerType::new(&context, 32), None);
+        let param1 = context.create_value(IntegerType::new(&context, 32), None);
 
         let region = context.create_region();
         let block = context.create_block(vec![param0, param1]);
@@ -280,27 +280,27 @@ mod tests {
         let func = ops::func(
             &context,
             "arith_demo",
-            Type::Integer { width: 32 },
+            IntegerType::new(&context, 32),
             Some(region.id()),
         )
         .build();
 
         let mut builder = IRBuilder::new(func.body());
 
-        let c1 = ops::constant(&context, 7, Type::Integer { width: 32 }).build();
-        let c2 = ops::constant(&context, 6, Type::Integer { width: 32 }).build();
+        let c1 = ops::constant(&context, 7, IntegerType::new(&context, 32)).build();
+        let c2 = ops::constant(&context, 6, IntegerType::new(&context, 32)).build();
         let mul = ops::muli(
             &context,
             c1.result(),
             c2.result(),
-            Type::Integer { width: 32 },
+            IntegerType::new(&context, 32),
         )
         .build();
         let add = ops::addi(
             &context,
             mul.result(),
             block.arguments()[0].id(),
-            Type::Integer { width: 32 },
+            IntegerType::new(&context, 32),
         )
         .build();
         let add_result = add.result();
@@ -334,10 +334,10 @@ mod tests {
     #[test]
     fn parse_single_addi_with_result_prefix() {
         let context = Context::with_default_dialects();
-        let c0 = ops::constant(&context, 1, Type::Integer { width: 32 }).build();
-        let c1 = ops::constant(&context, 2, Type::Integer { width: 32 }).build();
+        let c0 = ops::constant(&context, 1, IntegerType::new(&context, 32)).build();
+        let c1 = ops::constant(&context, 2, IntegerType::new(&context, 32)).build();
         let src = format!(
-            "%2 = addi %{}, %{} : i32\n",
+            "%2 = addi %{}, %{} : !i32\n",
             c0.result().number(),
             c1.result().number()
         );
@@ -347,21 +347,21 @@ mod tests {
         assert_eq!(op.operands().len(), 2);
         assert_eq!(
             context.get_value(op.result()).ty(),
-            &Type::Integer { width: 32 }
+            IntegerType::new(&context, 32)
         );
     }
 
     #[test]
     fn addi_verify_fails_for_mismatched_operand_types() {
         let context = Context::with_default_dialects();
-        let lhs = ops::constant(&context, 1, Type::Integer { width: 32 }).build();
-        let rhs = ops::constant(&context, 2, Type::Integer { width: 64 }).build();
+        let lhs = ops::constant(&context, 1, IntegerType::new(&context, 32)).build();
+        let rhs = ops::constant(&context, 2, IntegerType::new(&context, 64)).build();
 
         let op = ops::addi(
             &context,
             lhs.result(),
             rhs.result(),
-            Type::Integer { width: 32 },
+            IntegerType::new(&context, 32),
         )
         .build();
 

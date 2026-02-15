@@ -37,12 +37,12 @@ pub trait SameOperandType {
         }
 
         let first_operand = *this.operands().first().unwrap();
-        let first_type = context.get_value(first_operand).ty().clone();
+        let first_type = context.get_value(first_operand).ty();
 
         let result = this
             .operands()
             .iter()
-            .all(|&operand| *context.get_value(operand).ty() == first_type);
+            .all(|&operand| context.get_value(operand).ty() == first_type);
 
         if !result {
             return Err(crate::Error::VerificationError(

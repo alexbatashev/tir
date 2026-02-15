@@ -37,9 +37,10 @@ pub use operation::{
 };
 pub use pass::{OperationRef, Pass, PassError, PassManager, PassTarget, Rewriter};
 pub use region::{Region, RegionId};
-pub use ty::Type;
+pub use ty::{Any, Type, TypeConstraint, TypeId, TypeParser};
 pub use value::{Use, Value, ValueId};
 
 pub use dialects::builtin;
+pub use dialects::builtin::Integer;
 
 pub use tir_macros::{dialect, operation};

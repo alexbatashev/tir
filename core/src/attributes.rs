@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::Type;
+use crate::{Context, TypeId};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AttributeValue {
@@ -13,6 +13,7 @@ pub enum AttributeValue {
     Array(Vec<AttributeValue>),
     Dict(BTreeMap<String, AttributeValue>),
     Register(RegisterAttr),
+    Type(TypeId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,7 +47,11 @@ impl NamedAttribute {
 }
 
 impl AttributeValue {
-    pub fn print(&self, fmt: &mut crate::IRFormatter) -> Result<(), std::fmt::Error> {
+    pub fn print(
+        &self,
+        fmt: &mut crate::IRFormatter,
+        context: &Context,
+    ) -> Result<(), std::fmt::Error> {
         match self {
             AttributeValue::Str(s) => fmt.write(format!("\"{}\"", s)),
             AttributeValue::Int(i) => fmt.write(i.to_string()),
@@ -62,7 +67,7 @@ impl AttributeValue {
                         fmt.write(", ")?;
                     }
                     first = false;
-                    v.print(fmt)?;
+                    v.print(fmt, context)?;
                 }
                 fmt.write("]")
             }
@@ -76,7 +81,7 @@ impl AttributeValue {
                     first = false;
                     fmt.write(k)?;
                     fmt.write(" = ")?;
-                    v.print(fmt)?;
+                    v.print(fmt, context)?;
                 }
                 fmt.write("}")
             }
@@ -97,6 +102,7 @@ impl AttributeValue {
                     }
                 }
             },
+            AttributeValue::Type(ty) => context.print_type(*ty, fmt),
         }
     }
 }
@@ -197,8 +203,8 @@ impl From<RegisterAttr> for AttributeValue {
     }
 }
 
-impl From<Type> for AttributeValue {
-    fn from(value: Type) -> Self {
-        AttributeValue::Str(value.to_string())
+impl From<TypeId> for AttributeValue {
+    fn from(value: TypeId) -> Self {
+        AttributeValue::Type(value)
     }
 }

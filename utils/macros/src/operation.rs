@@ -1,6 +1,6 @@
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
-use syn::{Expr, ExprStruct, Ident, Member, Path, parse::Parse, parse_macro_input};
+use syn::{Expr, ExprStruct, Ident, Member, Path, TypePath, parse::Parse, parse_macro_input};
 
 use crate::utils::{expr_as_path_vec, expr_as_string, field_name, op_fn_ident};
 
@@ -171,6 +171,30 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         })
         .collect();
 
+    let operand_constraint_name_literals: Vec<_> = operands
+        .iter()
+        .map(|operand| normalize_constraint_name(&operand.ty))
+        .map(|name| proc_macro2::Literal::string(&name))
+        .collect();
+
+    let operand_constraint_checkers: Vec<_> = operands
+        .iter()
+        .map(|operand| normalize_constraint_name(&operand.ty))
+        .map(|name| parse_constraint_tokens(&name))
+        .collect();
+
+    let result_constraint_name_literals: Vec<_> = results
+        .iter()
+        .map(|result| normalize_constraint_name(&result.ty))
+        .map(|name| proc_macro2::Literal::string(&name))
+        .collect();
+
+    let result_constraint_checkers: Vec<_> = results
+        .iter()
+        .map(|result| normalize_constraint_name(&result.ty))
+        .map(|name| parse_constraint_tokens(&name))
+        .collect();
+
     let attr_spec_literals: Vec<_> = attributes
         .iter()
         .map(|attr| {
@@ -228,7 +252,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         .collect();
 
     let result_builder_field = if has_results {
-        quote! { result_type: Option<tir::Type>, }
+        quote! { result_type: Option<tir::TypeId>, }
     } else {
         quote! {}
     };
@@ -241,7 +265,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
 
     let result_builder_method = if has_results {
         quote! {
-            pub fn result_type(mut self, ty: tir::Type) -> Self {
+            pub fn result_type(mut self, ty: tir::TypeId) -> Self {
                 self.result_type = Some(ty);
                 self
             }
@@ -251,7 +275,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
     };
 
     let result_fn_param = if has_results {
-        quote! { result_type: tir::Type, }
+        quote! { result_type: tir::TypeId, }
     } else {
         quote! {}
     };
@@ -331,6 +355,17 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
             fn verify_operands(&self, context: &tir::Context) -> Result<(), tir::Error> {
                 let operand_specs: &[(&str, &str)] = &[#(#operand_spec_literals),*];
                 let result_specs: &[(&str, &str)] = &[#(#result_spec_literals),*];
+                let operand_constraint_names: &[&str] = &[#(#operand_constraint_name_literals),*];
+                let result_constraint_names: &[&str] = &[#(#result_constraint_name_literals),*];
+                fn __satisfies_constraint<C: tir::TypeConstraint + 'static>(ty: &dyn tir::Type) -> bool {
+                    C::satisfies(ty)
+                }
+                let operand_constraint_checkers: &[fn(&dyn tir::Type) -> bool] = &[
+                    #(__satisfies_constraint::<#operand_constraint_checkers>),*
+                ];
+                let result_constraint_checkers: &[fn(&dyn tir::Type) -> bool] = &[
+                    #(__satisfies_constraint::<#result_constraint_checkers>),*
+                ];
                 let operands = <Self as tir::Operation>::operands(self);
 
                 if operands.len() > operand_specs.len() {
@@ -344,11 +379,6 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
 
                 for (idx, (operand_name, type_spec)) in operand_specs.iter().enumerate() {
                     let is_optional = type_spec.starts_with('?');
-                    let normalized = if is_optional {
-                        &type_spec[1..]
-                    } else {
-                        type_spec
-                    };
 
                     let Some(value_id) = operands.get(idx).copied() else {
                         if is_optional {
@@ -394,49 +424,16 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
                         }
                     }
 
-                    let actual_ty = value.ty().clone();
-                    match normalized {
-                        "Any" | "any" => {}
-                        "Integer" => {
-                            if !matches!(actual_ty, tir::Type::Integer { .. }) {
-                                return Err(tir::Error::VerificationError(format!(
-                                    "{} operand '{}' expected Integer, got {}",
-                                    <Self as tir::Operation>::name(),
-                                    operand_name,
-                                    actual_ty
-                                )));
-                            }
-                        }
-                        "Float" => {
-                            if !matches!(actual_ty, tir::Type::Float32 | tir::Type::Float64) {
-                                return Err(tir::Error::VerificationError(format!(
-                                    "{} operand '{}' expected Float, got {}",
-                                    <Self as tir::Operation>::name(),
-                                    operand_name,
-                                    actual_ty
-                                )));
-                            }
-                        }
-                        _ => {
-                            let expected_ty = normalized.parse::<tir::Type>().map_err(|_| {
-                                tir::Error::VerificationError(format!(
-                                    "{} operand '{}' has invalid type spec '{}' (allowed: concrete types, Any, Integer, Float)",
-                                    <Self as tir::Operation>::name(),
-                                    operand_name,
-                                    normalized
-                                ))
-                            })?;
-
-                            if actual_ty != expected_ty {
-                                return Err(tir::Error::VerificationError(format!(
-                                    "{} operand '{}' expected type {}, got {}",
-                                    <Self as tir::Operation>::name(),
-                                    operand_name,
-                                    expected_ty,
-                                    actual_ty
-                                )));
-                            }
-                        }
+                    let actual_ty = value.ty();
+                    let actual_ty_data = context.get_type_data(actual_ty);
+                    if !operand_constraint_checkers[idx](actual_ty_data.as_ref()) {
+                        return Err(tir::Error::VerificationError(format!(
+                            "{} operand '{}' expected constraint {}, got {}",
+                            <Self as tir::Operation>::name(),
+                            operand_name,
+                            operand_constraint_names[idx],
+                            context.type_to_string(actual_ty)
+                        )));
                     }
                 }
 
@@ -449,7 +446,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
                     )));
                 }
 
-                for (idx, (result_name, type_spec)) in result_specs.iter().enumerate() {
+                for (idx, (result_name, _type_spec)) in result_specs.iter().enumerate() {
                     let value_id = self.0.results[idx];
                     if !context.has_value(value_id) {
                         return Err(tir::Error::VerificationError(format!(
@@ -482,55 +479,22 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
                         }
                     }
 
-                    let actual_ty = value.ty().clone();
-                    match *type_spec {
-                        "Any" | "any" => {}
-                        "Integer" => {
-                            if !matches!(actual_ty, tir::Type::Integer { .. }) {
-                                return Err(tir::Error::VerificationError(format!(
-                                    "{} result '{}' expected Integer, got {}",
-                                    <Self as tir::Operation>::name(),
-                                    result_name,
-                                    actual_ty
-                                )));
-                            }
-                        }
-                        "Float" => {
-                            if !matches!(actual_ty, tir::Type::Float32 | tir::Type::Float64) {
-                                return Err(tir::Error::VerificationError(format!(
-                                    "{} result '{}' expected Float, got {}",
-                                    <Self as tir::Operation>::name(),
-                                    result_name,
-                                    actual_ty
-                                )));
-                            }
-                        }
-                        _ => {
-                            let expected_ty = type_spec.parse::<tir::Type>().map_err(|_| {
-                                tir::Error::VerificationError(format!(
-                                    "{} result '{}' has invalid type spec '{}' (allowed: concrete types, Any, Integer, Float)",
-                                    <Self as tir::Operation>::name(),
-                                    result_name,
-                                    type_spec
-                                ))
-                            })?;
-
-                            if actual_ty != expected_ty {
-                                return Err(tir::Error::VerificationError(format!(
-                                    "{} result '{}' expected type {}, got {}",
-                                    <Self as tir::Operation>::name(),
-                                    result_name,
-                                    expected_ty,
-                                    actual_ty
-                                )));
-                            }
-                        }
+                    let actual_ty = value.ty();
+                    let actual_ty_data = context.get_type_data(actual_ty);
+                    if !result_constraint_checkers[idx](actual_ty_data.as_ref()) {
+                        return Err(tir::Error::VerificationError(format!(
+                            "{} result '{}' expected constraint {}, got {}",
+                            <Self as tir::Operation>::name(),
+                            result_name,
+                            result_constraint_names[idx],
+                            context.type_to_string(actual_ty)
+                        )));
                     }
                 }
 
                 Ok(())
             }
-            fn verify_attributes(&self, _context: &tir::Context) -> Result<(), tir::Error> {
+            fn verify_attributes(&self, context: &tir::Context) -> Result<(), tir::Error> {
                 let attr_specs: &[(&str, &str)] = &[#(#attr_spec_literals),*];
 
                 for (attr_name, attr_type) in attr_specs {
@@ -553,10 +517,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
                         "Array" => matches!(attr.value, tir::attributes::AttributeValue::Array(_)),
                         "Dict" => matches!(attr.value, tir::attributes::AttributeValue::Dict(_)),
                         "Register" => matches!(attr.value, tir::attributes::AttributeValue::Register(_)),
-                        "Type" => match &attr.value {
-                            tir::attributes::AttributeValue::Str(s) => s.parse::<tir::Type>().is_ok(),
-                            _ => false,
-                        },
+                        "Type" => matches!(attr.value, tir::attributes::AttributeValue::Type(_)),
                         _ => false,
                     };
 
@@ -1128,13 +1089,24 @@ fn get_value_specs(expr: &Expr) -> Option<Vec<ValueSpec>> {
                     };
                     ValueSpec {
                         name: p.path.get_ident().unwrap().to_string(),
-                        ty: "any".to_string(),
+                        ty: "Any".to_string(),
                     }
                 })
                 .collect(),
         ),
         _ => None,
     }
+}
+
+fn normalize_constraint_name(spec: &str) -> String {
+    spec.strip_prefix('?').unwrap_or(spec).to_string()
+}
+
+fn parse_constraint_tokens(spec: &str) -> proc_macro2::TokenStream {
+    let path: TypePath =
+        syn::parse_str(spec).unwrap_or_else(|_| panic!("Invalid type constraint '{}'", spec));
+    let path = path.path;
+    quote! { #path }
 }
 
 fn make_attribute_verifier(specs: &[AttrSpec]) -> proc_macro2::TokenStream {
@@ -1287,7 +1259,8 @@ fn make_generic_printer(
             if !self.0.results.is_empty() {
                 let context = self.0.context.upgrade();
                 let result_val = context.get_value(self.0.results[0]);
-                fmt.write(format!(" : {}", result_val.ty()))?;
+                fmt.write(" : ")?;
+                context.print_type(result_val.ty(), fmt)?;
             }
         }
     } else {
@@ -1315,7 +1288,8 @@ fn make_generic_printer(
                     first = false;
                     fmt.write(&attr.name)?;
                     fmt.write(" = ")?;
-                    attr.value.print(fmt)?;
+                    let context = self.0.context.upgrade();
+                    attr.value.print(fmt, &context)?;
                 }
                 fmt.write("}")?;
             }
@@ -1394,7 +1368,8 @@ fn make_parser(
             if !parser.parse_token(":") {
                 return Err((parser.span(), tir::Error::ExpectedToken(":")));
             }
-            let result_ty = parser.parse_type()
+            let result_ty = parser.parse_type(context)
+                ?
                 .ok_or_else(|| (parser.span(), tir::Error::ExpectedType))?;
             builder = builder.result_type(result_ty);
         }
@@ -1423,6 +1398,8 @@ fn make_parser(
                            if !parser.parse_token("=") { ok = false; break; }
                            let val = if let Some(s) = parser.parse_string() {
                                tir::attributes::AttributeValue::Str(s.to_string())
+                           } else if let Some(ty) = parser.parse_type(context)? {
+                               tir::attributes::AttributeValue::Type(ty)
                            } else if parser.parse_token("%virt") {
                                if let Some(id) = parser.parse_number() {
                                    let mut class = None;

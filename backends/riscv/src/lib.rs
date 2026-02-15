@@ -1,3 +1,4 @@
+use tir::Any;
 use tir::helpers::{dialect, operation};
 
 include!(concat!(env!("OUT_DIR"), "/riscv.rs"));
@@ -112,8 +113,8 @@ pub fn create_isel_pass() -> tir_be_common::isel::InstructionSelectPass {
 #[cfg(test)]
 mod tests {
     use tir::{
-        Context, IRBuilder, IRFormatter, Operation, PassManager, Type,
-        builtin::{FuncOp, ops},
+        Context, IRBuilder, IRFormatter, Operation, PassManager,
+        builtin::{FuncOp, IntegerType, ops},
     };
     use tir_be_common::AsmDialect;
 
@@ -150,8 +151,8 @@ mod tests {
 
         let module = ops::module(&context, None).build();
 
-        let param0 = context.create_value(Type::Integer { width: 32 }, None);
-        let param1 = context.create_value(Type::Integer { width: 32 }, None);
+        let param0 = context.create_value(IntegerType::new(&context, 32), None);
+        let param1 = context.create_value(IntegerType::new(&context, 32), None);
         let region = context.create_region();
         let block = context.create_block(vec![param0, param1]);
         region.add_block(block.id());
@@ -159,7 +160,7 @@ mod tests {
         let func = ops::func(
             &context,
             "demo",
-            Type::Integer { width: 32 },
+            IntegerType::new(&context, 32),
             Some(region.id()),
         )
         .build();
@@ -169,7 +170,7 @@ mod tests {
             &context,
             func.body().arguments()[0].id(),
             func.body().arguments()[1].id(),
-            Type::Integer { width: 32 },
+            IntegerType::new(&context, 32),
         )
         .build();
         let add_result = add.result();

@@ -1,43 +1,60 @@
-use std::fmt;
-use std::str::FromStr;
+use std::any::Any as StdAny;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum Type {
-    Integer { width: u32 },
-    Float32,
-    Float64,
-    Index,
-    None,
+use crate::{
+    Context, Error, IRFormatter,
+    parse::{Span, text::Parser as IRParser},
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TypeId(u32);
+
+pub type TypeParser =
+    for<'src> fn(&str, &mut IRParser<'src>, &Context) -> Result<TypeId, (Span, Error)>;
+
+pub trait Type: StdAny + Sync + Send + TypeConstraint {
+    fn dialect(&self) -> &'static str;
+    fn parse_key() -> &'static str
+    where
+        Self: Sized;
+    fn parse<'src>(
+        mnemonic: &str,
+        parser: &mut IRParser<'src>,
+        context: &Context,
+    ) -> Result<TypeId, (Span, Error)>
+    where
+        Self: Sized;
+    fn print(&self, fmt: &mut IRFormatter<'_>) -> Result<(), std::fmt::Error>;
+    fn eq(&self, other: &dyn Type) -> bool;
 }
 
-impl fmt::Display for Type {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Type::Integer { width } => write!(f, "i{}", width),
-            Type::Float32 => write!(f, "f32"),
-            Type::Float64 => write!(f, "f64"),
-            Type::Index => write!(f, "index"),
-            Type::None => write!(f, "none"),
-        }
+pub trait TypeConstraint {
+    fn satisfies(ty: &dyn Type) -> bool
+    where
+        Self: Sized + 'static,
+    {
+        (ty as &dyn StdAny).downcast_ref::<Self>().is_some()
     }
 }
 
-impl FromStr for Type {
-    type Err = String;
+pub struct Any;
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "f32" => Ok(Type::Float32),
-            "f64" => Ok(Type::Float64),
-            "index" => Ok(Type::Index),
-            "none" => Ok(Type::None),
-            _ if s.starts_with('i') => {
-                let width: u32 = s[1..]
-                    .parse()
-                    .map_err(|_| format!("Invalid integer type: {}", s))?;
-                Ok(Type::Integer { width })
-            }
-            _ => Err(format!("Unknown type: {}", s)),
-        }
+impl TypeConstraint for Any {
+    fn satisfies(_ty: &dyn Type) -> bool
+    where
+        Self: Sized + 'static,
+    {
+        true
+    }
+}
+
+impl TypeId {
+    pub(crate) fn as_index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl From<u32> for TypeId {
+    fn from(value: u32) -> Self {
+        Self(value)
     }
 }
