@@ -1,7 +1,7 @@
 use clap::Parser;
 use tir_be_common::AsmDialect;
 use tir_riscv::RiscvDialect;
-use tir_sim::{Executor, ProgramBuilder};
+use tir_sim::{Executor, ProgramBuilder, TraceOptions};
 
 #[derive(Parser)]
 struct Cli {
@@ -19,11 +19,18 @@ struct Cli {
     until_pc: String,
     #[arg(long, default_value_t = 100000)]
     max_cycles: u64,
+    #[arg(long, default_value_t = false)]
+    trace_instructions: bool,
+    #[arg(long, default_value_t = false)]
+    trace_registers_each: bool,
+    #[arg(long, default_value_t = false)]
+    trace_registers_end: bool,
+    program: String,
 }
 
 fn main() {
     let args = Cli::parse();
-    let src = std::fs::read_to_string(&args.target).expect("failed to read --target path");
+    let src = std::fs::read_to_string(&args.program).expect("failed to read program path");
 
     let context = tir::Context::with_default_dialects();
     context.register_dialect::<AsmDialect>();
@@ -47,8 +54,14 @@ fn main() {
     let until_pc = parse_addr(&args.until_pc);
     let mut executor = Executor::new(args.mem_size);
     executor.load(program).expect("failed to load program");
+    let trace = TraceOptions {
+        instructions: args.trace_instructions,
+        registers_after_each_instruction: args.trace_registers_each,
+        registers_at_end: args.trace_registers_end,
+    };
+    let mut stdout = std::io::stdout();
     executor
-        .run(until_pc, args.max_cycles)
+        .run_with_trace(until_pc, args.max_cycles, trace, &mut stdout)
         .expect("program execution failed");
 }
 

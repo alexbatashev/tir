@@ -20,6 +20,7 @@ pub fn generate_rust(
     mut output: Box<dyn Write>,
 ) -> Result<(), TMDLError> {
     let features = emit_feautres(&ast)?;
+    let register_traits = emit_register_trait_helpers(&ast)?;
 
     let item_cache = {
         let mut cache = HashMap::new();
@@ -37,6 +38,7 @@ pub fn generate_rust(
 
     let final_rust = quote! {
         #features
+        #register_traits
 
         #registers
 
@@ -369,7 +371,9 @@ fn emit_instructions<'ast, 'cache: 'ast>(
                                 attribute: #dst_lit,
                             },
                         )?;
-                        machine.write_register(&dst_class, dst_idx, value)?;
+                        if !register_has_trait_hardwired_zero(&dst_class, dst_idx) {
+                            machine.write_register(&dst_class, dst_idx, value)?;
+                        }
                     }
                 } else {
                     quote! {}
@@ -1089,4 +1093,59 @@ fn alias_stem(pat: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+fn emit_register_trait_helpers(ast: &[ast::File]) -> Result<proc_macro2::TokenStream, TMDLError> {
+    let mut hardwired_arms = Vec::new();
+
+    for file in ast {
+        for item in &file.items {
+            let ast::Item::RegisterClass(reg_class) = item else {
+                continue;
+            };
+            let class_lit = proc_macro2::Literal::string(&reg_class.name);
+            for reg_def in &reg_class.registers {
+                match reg_def {
+                    ast::RegisterDef::Single(reg) => {
+                        if reg
+                            .traits
+                            .iter()
+                            .any(|trait_| matches!(trait_, ast::RegisterTrait::HardwiredZero))
+                        {
+                            let idx = parse_trailing_index(&reg.name).unwrap_or(u16::MAX);
+                            let idx_lit = proc_macro2::Literal::u16_unsuffixed(idx);
+                            hardwired_arms.push(quote! { (#class_lit, #idx_lit) => true, });
+                        }
+                    }
+                    ast::RegisterDef::Range(range) => {
+                        if range
+                            .traits
+                            .iter()
+                            .any(|trait_| matches!(trait_, ast::RegisterTrait::HardwiredZero))
+                        {
+                            if let (Some(start), Some(end)) = (
+                                parse_trailing_index(&range.start),
+                                parse_trailing_index(&range.end),
+                            ) {
+                                for idx in start..=end {
+                                    let idx_lit = proc_macro2::Literal::u16_unsuffixed(idx);
+                                    hardwired_arms
+                                        .push(quote! { (#class_lit, #idx_lit) => true, });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(quote! {
+        pub fn register_has_trait_hardwired_zero(class: &str, index: u16) -> bool {
+            match (class, index) {
+                #(#hardwired_arms)*
+                _ => false,
+            }
+        }
+    })
 }

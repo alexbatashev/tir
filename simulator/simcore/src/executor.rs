@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
+use std::io::Write;
 
 use tir::attributes::AttributeValue;
 use tir::builtin::ModuleOp;
@@ -129,10 +130,17 @@ impl ProgramBuilder {
 #[derive(Default)]
 pub struct Executor {
     program: Option<ProgramImage>,
-    registers: HashMap<(String, u16), u64>,
+    registers: HashMap<(String, u16), tir::sem_expr::APInt>,
     memory: Vec<u8>,
     pc: u64,
     pc_explicitly_written: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TraceOptions {
+    pub instructions: bool,
+    pub registers_after_each_instruction: bool,
+    pub registers_at_end: bool,
 }
 
 impl Executor {
@@ -153,8 +161,22 @@ impl Executor {
     }
 
     pub fn run(&mut self, until_pc: u64, max_cycles: u64) -> Result<(), Error> {
+        let mut sink = std::io::sink();
+        self.run_with_trace(until_pc, max_cycles, TraceOptions::default(), &mut sink)
+    }
+
+    pub fn run_with_trace(
+        &mut self,
+        until_pc: u64,
+        max_cycles: u64,
+        trace: TraceOptions,
+        out: &mut dyn Write,
+    ) -> Result<(), Error> {
         for _cycle in 0..max_cycles {
             if self.pc == until_pc {
+                if trace.registers_at_end {
+                    self.emit_register_dump(out, "final registers");
+                }
                 return Ok(());
             }
 
@@ -173,7 +195,15 @@ impl Executor {
             };
 
             self.pc_explicitly_written = false;
+            let mut inst_pc = self.pc;
             for op_id in instructions {
+                if inst_pc == until_pc {
+                    self.pc = inst_pc;
+                    if trace.registers_at_end {
+                        self.emit_register_dump(out, "final registers");
+                    }
+                    return Ok(());
+                }
                 let op = context.get_op(op_id);
                 let machine_inst = op
                     .clone()
@@ -182,30 +212,111 @@ impl Executor {
                         op: op.name,
                         reason: "operation does not implement MachineInstruction".to_string(),
                     })?;
+                if trace.instructions {
+                    let line = format!(
+                        "pc=0x{inst_pc:016x}  {}",
+                        Self::format_instruction_line(&context, &op, machine_inst.as_ref())
+                    );
+                    Self::emit_trace_line(out, &line);
+                }
                 machine_inst.execute(self)?;
+                if trace.registers_after_each_instruction {
+                    self.emit_register_dump(out, "registers");
+                }
+                if !self.pc_explicitly_written {
+                    inst_pc = inst_pc.wrapping_add(u64::from(machine_inst.width_bytes()));
+                } else {
+                    inst_pc = self.pc;
+                }
             }
 
             if !self.pc_explicitly_written {
-                self.pc = fallthrough_pc.ok_or(Error::MissingFallthrough { pc: self.pc })?;
+                if let Some(next_pc) = fallthrough_pc {
+                    self.pc = next_pc;
+                } else {
+                    if trace.registers_at_end {
+                        self.emit_register_dump(out, "final registers");
+                    }
+                    return Err(Error::MissingFallthrough { pc: self.pc });
+                }
             }
         }
 
+        if trace.registers_at_end {
+            self.emit_register_dump(out, "final registers");
+        }
         Err(SimTrap::MaxCyclesExceeded {
             max_cycles,
             until_pc,
         }
         .into())
     }
+
+    pub fn register_snapshot(&self) -> Vec<(String, u16, tir::sem_expr::APInt)> {
+        let mut regs = self
+            .registers
+            .iter()
+            .map(|((class, idx), value)| (class.clone(), *idx, value.clone()))
+            .collect::<Vec<_>>();
+        regs.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
+        regs
+    }
+
+    fn format_instruction_line(
+        context: &Context,
+        op: &std::sync::Arc<tir::OpInstance>,
+        machine_inst: &dyn MachineInstruction,
+    ) -> String {
+        let mut pieces = Vec::new();
+        for attr in &op.attributes {
+            let mut value_buf = String::new();
+            let mut formatter = tir::IRFormatter::new(&mut value_buf);
+            if attr.value.print(&mut formatter, context).is_ok() {
+                pieces.push(format!("{}={}", attr.name, value_buf));
+            } else {
+                pieces.push(format!("{}=<print-error>", attr.name));
+            }
+        }
+        if pieces.is_empty() {
+            machine_inst.mnemonic().to_string()
+        } else {
+            format!("{} {}", machine_inst.mnemonic(), pieces.join(", "))
+        }
+    }
+
+    fn emit_register_dump(&self, out: &mut dyn Write, label: &str) {
+        let snapshot = self.register_snapshot();
+        Self::emit_trace_line(out, &format!("{label}:"));
+        if snapshot.is_empty() {
+            Self::emit_trace_line(out, "  <none>");
+            return;
+        }
+        for (class, index, value) in snapshot {
+            Self::emit_trace_line(
+                out,
+                &format!(
+                    "  {}[{}] = 0x{:x} (width={})",
+                    class,
+                    index,
+                    value.to_u64(),
+                    value.width()
+                ),
+            );
+        }
+    }
+
+    fn emit_trace_line(out: &mut dyn Write, line: &str) {
+        let _ = writeln!(out, "{line}");
+    }
 }
 
 impl MachineContext for Executor {
     fn read_register(&self, class: &str, index: u16) -> Result<tir::sem_expr::APInt, SimTrap> {
-        if class == "GPR" && index == 0 {
-            return Ok(tir::sem_expr::APInt::new(64, 0));
-        }
         let key = (class.to_string(), index);
-        let value = *self.registers.get(&key).unwrap_or(&0);
-        Ok(tir::sem_expr::APInt::new(64, value))
+        if let Some(value) = self.registers.get(&key) {
+            return Ok(value.clone());
+        }
+        Ok(tir::sem_expr::APInt::new(64, 0))
     }
 
     fn write_register(
@@ -214,11 +325,7 @@ impl MachineContext for Executor {
         index: u16,
         value: tir::sem_expr::APInt,
     ) -> Result<(), SimTrap> {
-        if class == "GPR" && index == 0 {
-            return Ok(());
-        }
-        self.registers
-            .insert((class.to_string(), index), value.to_u64());
+        self.registers.insert((class.to_string(), index), value);
         Ok(())
     }
 
@@ -265,10 +372,10 @@ impl MachineContext for Executor {
 mod tests {
     use tir::Context;
     use tir::sem_expr::APInt;
-    use tir_be_common::AsmDialect;
+    use tir_be_common::{AsmDialect, MachineInstruction};
     use tir_riscv::RiscvDialect;
 
-    use crate::{Executor, ProgramBuilder, error::Error};
+    use crate::{Executor, ProgramBuilder, TraceOptions, error::Error};
 
     #[test]
     fn run_stops_before_until_pc() {
@@ -326,5 +433,89 @@ mod tests {
             Error::Trap(tir_be_common::SimTrap::MaxCyclesExceeded { .. }) => {}
             other => panic!("unexpected error: {:?}", other),
         }
+    }
+
+    #[test]
+    fn run_keeps_hardwired_zero_register_immutable() {
+        let context = Context::with_default_dialects();
+        context.register_dialect::<AsmDialect>();
+        context.register_dialect::<RiscvDialect>();
+
+        let dialect = context.find_dialect::<RiscvDialect>().unwrap();
+        let asm = "
+            .global first
+            first:
+              add x0, x1, x1
+        ";
+        let module = dialect.get_asm_parser().parse_asm(&context, asm).unwrap();
+        let program = ProgramBuilder::from_module(&context, module, 0x8000_0000, Some("first"))
+            .expect("program builder must succeed");
+        let mut executor = Executor::new(4096);
+        tir_be_common::MachineContext::write_register(&mut executor, "GPR", 1, APInt::new(64, 7))
+            .unwrap();
+
+        let inst_id = *program
+            .blocks
+            .first()
+            .and_then(|block| block.instructions.first())
+            .expect("program should contain one machine instruction");
+        let inst_op = context.get_op(inst_id);
+        let machine_inst = inst_op
+            .clone()
+            .as_interface::<dyn MachineInstruction>()
+            .expect("expected machine instruction in symbol body");
+        machine_inst.execute(&mut executor).unwrap();
+
+        let x0 = tir_be_common::MachineContext::read_register(&executor, "GPR", 0).unwrap();
+        assert_eq!(x0.to_u64(), 0);
+    }
+
+    #[test]
+    fn run_with_trace_emits_instruction_and_registers() {
+        let context = Context::with_default_dialects();
+        context.register_dialect::<AsmDialect>();
+        context.register_dialect::<RiscvDialect>();
+
+        let dialect = context.find_dialect::<RiscvDialect>().unwrap();
+        let asm = "
+            .global first
+            first:
+              add x1, x1, x1
+            .global second
+            second:
+              add x2, x2, x2
+        ";
+        let module = dialect.get_asm_parser().parse_asm(&context, asm).unwrap();
+        let program = ProgramBuilder::from_module(&context, module, 0x8000_0000, Some("first"))
+            .expect("program builder must succeed");
+        let mut executor = Executor::new(4096);
+        tir_be_common::MachineContext::write_register(&mut executor, "GPR", 1, APInt::new(64, 2))
+            .unwrap();
+        executor.load(program).unwrap();
+
+        let mut trace_output = Vec::new();
+        let err = executor
+            .run_with_trace(
+                u64::MAX,
+                1,
+                TraceOptions {
+                    instructions: true,
+                    registers_after_each_instruction: true,
+                    registers_at_end: true,
+                },
+                &mut trace_output,
+            )
+            .unwrap_err();
+        match err {
+            Error::Trap(tir_be_common::SimTrap::MaxCyclesExceeded { .. }) => {}
+            Error::MissingFallthrough { .. } => {}
+            other => panic!("unexpected error: {:?}", other),
+        }
+
+        let trace_text = String::from_utf8(trace_output).unwrap();
+        assert!(trace_text.contains("pc=0x"));
+        assert!(trace_text.contains("add"));
+        assert!(trace_text.contains("registers:"));
+        assert!(trace_text.contains("final registers:"));
     }
 }

@@ -87,12 +87,7 @@ impl AttributeValue {
             }
             AttributeValue::Register(r) => match r {
                 RegisterAttr::Physical { class, index } => {
-                    // Prefer a readable ISA-like form when possible; otherwise class[index]
-                    if class == "GPR" {
-                        fmt.write(format!("x{}", index))
-                    } else {
-                        fmt.write(format!("{}[{}]", class, index))
-                    }
+                    fmt.write(format!("{}[{}]", class, index))
                 }
                 RegisterAttr::Virtual { id, class } => {
                     if let Some(cls) = class {

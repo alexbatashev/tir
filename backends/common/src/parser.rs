@@ -64,6 +64,7 @@ impl AsmParser {
                 }
                 Token::Text => {
                     // FIXME set insertion point to end of text section
+                    let _ = parser.bump();
                 }
                 Token::Ident(ident) => {
                     // Try to dispatch to an instruction parser by mnemonic
