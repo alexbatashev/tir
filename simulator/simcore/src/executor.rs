@@ -38,17 +38,19 @@ impl ProgramBuilder {
             for op_id in block.op_ids() {
                 let op = context.get_op(op_id);
 
-                if op.name == SectionOp::name() {
-                    let section = op.clone().as_op::<SectionOp>().unwrap();
+                if let Some(section) = op.clone().as_op::<SectionOp>() {
                     blocks_to_visit.push(section.body());
                     continue;
                 }
 
-                if op.name != SymbolOp::name() {
+                let symbol = op.as_op::<SymbolOp>();
+
+                if symbol.is_none() {
                     continue;
                 }
 
-                let symbol = op.clone().as_op::<SymbolOp>().unwrap();
+                let symbol = symbol.unwrap();
+
                 let symbol_name = symbol
                     .attributes()
                     .iter()
