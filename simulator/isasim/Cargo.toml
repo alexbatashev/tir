@@ -7,4 +7,5 @@ edition = "2024"
 tir = { path = "../../core" }
 tir-sim = { path = "../simcore" }
 tir-riscv = { path = "../../backends/riscv" }
+tir-be-common = { path = "../../backends/common" }
 clap = { version = "4.5.58", features = ["derive"] }

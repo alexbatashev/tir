@@ -5,7 +5,7 @@ use quote::{format_ident, quote};
 
 use crate::ast;
 use crate::error::TMDLError;
-use crate::utils::resolve_operands_for_instruction;
+use crate::utils::{get_encoding_arms, resolve_operands_for_instruction};
 
 struct InstructionSemantics {
     pattern: proc_macro2::TokenStream,
@@ -110,6 +110,7 @@ fn emit_instructions<'ast, 'cache: 'ast>(
     let mut instruction_parser_map_inits: Vec<proc_macro2::TokenStream> = vec![];
     let mut isel_rule_emitters: Vec<proc_macro2::TokenStream> = vec![];
     let mut isel_rule_inits: Vec<proc_macro2::TokenStream> = vec![];
+    let mut machine_instruction_impls: Vec<proc_macro2::TokenStream> = vec![];
 
     for inst in instructions {
         let name_ident = format_ident!("{}Op", &inst.name);
@@ -159,6 +160,7 @@ fn emit_instructions<'ast, 'cache: 'ast>(
                     dialect: #dialect,
                     attributes: A { #attrs_schema },
                     roles: R { #roles_schema },
+                    interfaces: [tir_be_common::MachineInstruction],
                 }
             }
         });
@@ -266,6 +268,166 @@ fn emit_instructions<'ast, 'cache: 'ast>(
                 ));
             });
         }
+
+        let encoding_arms = get_encoding_arms(inst, item_cache);
+        let encoding_bits = encoding_arms
+            .iter()
+            .map(|arm| arm.end.unwrap_or(arm.start))
+            .max()
+            .map(|max_end| max_end + 1)
+            .unwrap_or(32);
+        let width_bytes_lit =
+            proc_macro2::Literal::u8_unsuffixed(((encoding_bits as u32 + 7) / 8) as u8);
+        let op_name_lit = proc_macro2::Literal::string(
+            &mnemonic.clone().unwrap_or_else(|| inst.name.to_lowercase()),
+        );
+
+        let execute_body = if let Some(rhs) =
+            resolve_behavior_rhs(inst, &ops, &defined_register_operands)
+        {
+            let params = resolve_params_for_instruction(inst, item_cache);
+            let numeric_params: HashMap<_, _> = params
+                .into_iter()
+                .filter_map(|(name, (_ty, value))| match value {
+                    Some(ast::Expr::Lit(ast::Lit::Int(li))) => {
+                        Some((name, parse_literal_value(&li) as i64))
+                    }
+                    _ => None,
+                })
+                .collect();
+
+            if let Ok(converted) = crate::sem_expr_conv::convert_to_sem_expr(rhs, numeric_params) {
+                let expr_tokens = emit_sem_expr(&converted.expr);
+                let mut symbol_arms = Vec::new();
+                for (symbol_id, info) in converted.symbols {
+                    let sym_lit = proc_macro2::Literal::u32_unsuffixed(symbol_id);
+                    match info {
+                        crate::sem_expr_conv::SymbolInfo::Variable { name } => {
+                            let name_lit = proc_macro2::Literal::string(&name);
+                            if let Some((_, ty)) = ops.iter().find(|(n, _)| n == &name) {
+                                match ty {
+                                    ast::Type::Struct(_) => {
+                                        symbol_arms.push(quote! {
+                                            #sym_lit => {
+                                                let (class, index) = tir_be_common::register_attr(self.attributes(), #name_lit)
+                                                    .ok_or(tir_be_common::SimTrap::MissingAttribute {
+                                                        op: #op_name_lit,
+                                                        attribute: #name_lit,
+                                                    })?;
+                                                Ok(Some(machine.read_register(&class, index)?))
+                                            }
+                                        });
+                                    }
+                                    ast::Type::Integer => {
+                                        symbol_arms.push(quote! {
+                                            #sym_lit => {
+                                                let value = tir_be_common::int_attr(self.attributes(), #name_lit).ok_or(
+                                                    tir_be_common::SimTrap::MissingAttribute {
+                                                        op: #op_name_lit,
+                                                        attribute: #name_lit,
+                                                    },
+                                                )?;
+                                                Ok(Some(tir::sem_expr::APInt::new_signed(64, value)))
+                                            }
+                                        });
+                                    }
+                                    ast::Type::Bits(width) => {
+                                        let width_lit =
+                                            proc_macro2::Literal::u32_unsuffixed(*width as u32);
+                                        symbol_arms.push(quote! {
+                                            #sym_lit => {
+                                                let value = tir_be_common::int_attr(self.attributes(), #name_lit).ok_or(
+                                                    tir_be_common::SimTrap::MissingAttribute {
+                                                        op: #op_name_lit,
+                                                        attribute: #name_lit,
+                                                    },
+                                                )?;
+                                                Ok(Some(tir::sem_expr::APInt::new_signed(#width_lit, value)))
+                                            }
+                                        });
+                                    }
+                                    ast::Type::String => {}
+                                }
+                            }
+                        }
+                        crate::sem_expr_conv::SymbolInfo::Register { class, number } => {
+                            let class_lit = proc_macro2::Literal::string(&class);
+                            let number_lit = proc_macro2::Literal::u16_unsuffixed(number as u16);
+                            symbol_arms.push(quote! {
+                                #sym_lit => Ok(Some(machine.read_register(#class_lit, #number_lit)?))
+                            });
+                        }
+                    }
+                }
+
+                let dst_write = if let Some(dst_name) = defined_register_operands.last() {
+                    let dst_lit = proc_macro2::Literal::string(dst_name);
+                    quote! {
+                        let (dst_class, dst_idx) = tir_be_common::register_attr(self.attributes(), #dst_lit).ok_or(
+                            tir_be_common::SimTrap::MissingAttribute {
+                                op: #op_name_lit,
+                                attribute: #dst_lit,
+                            },
+                        )?;
+                        machine.write_register(&dst_class, dst_idx, value)?;
+                    }
+                } else {
+                    quote! {}
+                };
+
+                quote! {
+                    let expr = #expr_tokens;
+                    let resolved = tir_be_common::resolve_expr_symbols(&expr, |symbol| {
+                        match symbol {
+                            #(#symbol_arms,)*
+                            _ => Ok(None),
+                        }
+                    })?;
+                    let evaluated = tir::sem_expr::evaluate(resolved);
+                    let value = match evaluated {
+                        tir::sem_expr::Expr::Int(i) => i,
+                        _ => {
+                            return Err(tir_be_common::SimTrap::InvalidInstruction {
+                                op: #op_name_lit,
+                                reason: "instruction semantic expression did not evaluate to integer".to_string(),
+                            });
+                        }
+                    };
+                    #dst_write
+                    Ok(())
+                }
+            } else {
+                quote! {
+                    Err(tir_be_common::SimTrap::InvalidInstruction {
+                        op: #op_name_lit,
+                        reason: "failed to convert behavior to executable expression".to_string(),
+                    })
+                }
+            }
+        } else {
+            quote! {
+                Ok(())
+            }
+        };
+
+        machine_instruction_impls.push(quote! {
+            impl tir_be_common::MachineInstruction for #name_ident {
+                fn mnemonic(&self) -> &'static str {
+                    #op_name_lit
+                }
+
+                fn width_bytes(&self) -> u8 {
+                    #width_bytes_lit
+                }
+
+                fn execute(
+                    &self,
+                    machine: &mut dyn tir_be_common::MachineContext,
+                ) -> Result<(), tir_be_common::SimTrap> {
+                    #execute_body
+                }
+            }
+        });
 
         // Emit parser implementations based on asm template (simple template support)
         if let Some(template) = resolve_asm_template_for_instruction(inst, item_cache) {
@@ -395,6 +557,7 @@ fn emit_instructions<'ast, 'cache: 'ast>(
 
     Ok(quote! {
         #(#instruction_defs)*
+        #(#machine_instruction_impls)*
 
         fn get_instruction_parsers() -> std::collections::HashMap<String, Box<tir_be_common::AsmInstructionParser>> {
             let mut map = std::collections::HashMap::new();

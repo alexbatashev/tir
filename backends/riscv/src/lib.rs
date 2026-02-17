@@ -1,5 +1,5 @@
-use tir::Any;
 use tir::helpers::{dialect, operation};
+use tir::{Any, Operation};
 
 include!(concat!(env!("OUT_DIR"), "/riscv.rs"));
 
@@ -19,7 +19,8 @@ dialect! {
             AddOp,
             SubOp,
             ShiftLeftLogicalOp,
-            // ShiftRightLogicalOp,
+            ShiftRightLogicalOp,
+            ShiftRightArithmeticOp,
             XorOp,
             AndOp,
             OrOp,
