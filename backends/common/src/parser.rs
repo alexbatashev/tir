@@ -32,7 +32,8 @@ impl AsmParser {
         let mut builder = IRBuilder::new(module.body());
         let section_op = builder.insert(SectionOpBuilder::new(context).build());
         builder.insert(ModuleEndOpBuilder::new(context).build());
-        builder.set_insertion_point_to_start(section_op.body());
+        let section_body = section_op.body();
+        builder.set_insertion_point_to_start(section_body.clone());
 
         while let Some(token) = parser.peek() {
             match token {
@@ -40,9 +41,16 @@ impl AsmParser {
                     let _ = parser.bump();
                     let name = parser.bump();
                     match name {
-                        Some(Token::Ident(_name)) => {
-                            // FIXME use name once attributes are supported properly
-                            let global_op = builder.insert(SymbolOpBuilder::new(context).build());
+                        Some(Token::Ident(name)) => {
+                            builder.set_insertion_point_to_start(section_body.clone());
+                            let global_op = builder.insert(
+                                SymbolOpBuilder::new(context)
+                                    .attr(
+                                        "name",
+                                        tir::attributes::AttributeValue::Str((*name).to_string()),
+                                    )
+                                    .build(),
+                            );
                             builder.set_insertion_point_to_start(global_op.body());
                             builder.insert(SymbolEndOpBuilder::new(context).build());
                             builder.set_insertion_point_to_start(global_op.body());
@@ -56,6 +64,7 @@ impl AsmParser {
                 }
                 Token::Text => {
                     // FIXME set insertion point to end of text section
+                    let _ = parser.bump();
                 }
                 Token::Ident(ident) => {
                     // Try to dispatch to an instruction parser by mnemonic

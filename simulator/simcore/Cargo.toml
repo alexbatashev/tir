@@ -1,0 +1,11 @@
+[package]
+name = "tir-sim"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tir = { path = "../../core" }
+tir-be-common = { path = "../../backends/common" }
+
+[dev-dependencies]
+tir-riscv = { path = "../../backends/riscv" }

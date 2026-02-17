@@ -1,4 +1,5 @@
     .section .text
+    .global logic_test
 logic_test:
     addi x1, x0, 0xF0
     srli x2, x1, 2
