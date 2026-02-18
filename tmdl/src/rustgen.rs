@@ -1129,8 +1129,7 @@ fn emit_register_trait_helpers(ast: &[ast::File]) -> Result<proc_macro2::TokenSt
                             ) {
                                 for idx in start..=end {
                                     let idx_lit = proc_macro2::Literal::u16_unsuffixed(idx);
-                                    hardwired_arms
-                                        .push(quote! { (#class_lit, #idx_lit) => true, });
+                                    hardwired_arms.push(quote! { (#class_lit, #idx_lit) => true, });
                                 }
                             }
                         }

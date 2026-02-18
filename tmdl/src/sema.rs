@@ -6,397 +6,497 @@ use crate::{Span, ast};
 
 type Diag = Rich<'static, String, Span>;
 
-fn check_isas(
-    file_name: &str,
-    names: &[String],
-    span: Span,
-    isas: &HashMap<String, Span>,
-    diags: &mut Vec<(String, Diag)>,
-) {
-    for n in names {
-        if !isas.contains_key(n) {
-            diags.push((
-                file_name.to_string(),
-                Rich::custom(span, format!("Unknown ISA '{}': not defined", n)),
-            ));
-        }
-    }
+// TODO path strings must be interned
+pub fn analyze(files: &[ast::File]) -> Vec<(String, Diag)> {
+    let mut diags = vec![];
+
+    let cache = build_item_cache(files);
+
+    // TODO check item names are unique
+    diags.extend(check_isas(files, &cache));
+    diags.extend(check_templates(files, &cache));
+    diags.extend(check_instructions(files, &cache));
+
+    diags
 }
 
-pub fn analyze(files: Vec<ast::File>) -> Vec<(String, Diag)> {
-    let mut diags: Vec<(String, Diag)> = Vec::new();
+fn build_item_cache<'a>(files: &'a [ast::File]) -> HashMap<&'a str, &'a ast::Item> {
+    files
+        .iter()
+        .flat_map(|f| f.items.iter().map(|i| (i.name(), i)))
+        .collect::<HashMap<_, _>>()
+}
 
-    // Index items by name
-    let mut isas: HashMap<String, Span> = HashMap::new();
-    let mut reg_classes: HashMap<String, Span> = HashMap::new();
-    let mut templates: HashMap<String, (ast::Template, Span)> = HashMap::new();
-    let mut template_owner: HashMap<String, String> = HashMap::new();
-    let mut instructions: Vec<ast::Instruction> = Vec::new();
-
-    for f in &files {
-        for it in &f.items {
-            match it {
-                ast::Item::Isa(isa) => {
-                    isas.insert(isa.name.clone(), isa.span);
-                }
-                ast::Item::RegisterClass(rc) => {
-                    reg_classes.insert(rc.name.clone(), rc.span);
-                }
-                ast::Item::Template(t) => {
-                    templates.insert(t.name.clone(), (t.clone(), t.span));
-                    template_owner.insert(t.name.clone(), f.file_name.clone());
-                }
-                ast::Item::Instruction(i) => {
-                    instructions.push(i.clone());
-                }
+// Checks that all ISA parents are defined and are also ISAs.
+fn check_isas(files: &[ast::File], item_cache: &HashMap<&str, &ast::Item>) -> Vec<(String, Diag)> {
+    fn check_isa_exists(
+        parent: &str,
+        file_name: String,
+        child: &ast::Isa,
+        item_cache: &HashMap<&str, &ast::Item>,
+    ) -> Option<(String, Diag)> {
+        let parent_item = item_cache.get(parent);
+        if let Some(parent_item) = parent_item {
+            if !matches!(parent_item, ast::Item::Isa(_)) {
+                Some((
+                    file_name,
+                    Rich::custom(
+                        child.span,
+                        format!(
+                            "Parent '{}' for ISA '{}' must also be an ISA",
+                            parent, child.name
+                        ),
+                    ),
+                ))
+            } else {
+                None
             }
+        } else {
+            Some((
+                file_name,
+                Rich::custom(
+                    child.span,
+                    format!("Unknown parent '{}' for ISA '{}'", parent, child.name),
+                ),
+            ))
         }
     }
 
-    // Detect cyclic inheritance among templates
-    {
-        #[derive(Copy, Clone, PartialEq, Eq)]
-        enum Mark {
-            Unvisited,
-            Visiting,
-            Done,
-        }
-
-        let mut mark: HashMap<String, Mark> = HashMap::new();
-        for k in templates.keys() {
-            mark.insert(k.clone(), Mark::Unvisited);
-        }
-        let mut stack: Vec<String> = Vec::new();
-
-        fn dfs(
-            name: &str,
-            templates: &HashMap<String, (ast::Template, Span)>,
-            owner: &HashMap<String, String>,
-            mark: &mut HashMap<String, Mark>,
-            stack: &mut Vec<String>,
-            diags: &mut Vec<(String, Rich<'static, String, Span>)>,
-        ) {
-            mark.insert(name.to_string(), Mark::Visiting);
-            stack.push(name.to_string());
-            if let Some((t, sp)) = templates.get(name) {
-                if let Some(parent) = &t.parent_template {
-                    if let Some(m) = mark.get(parent) {
-                        if *m == Mark::Unvisited {
-                            dfs(parent, templates, owner, mark, stack, diags);
-                        } else if *m == Mark::Visiting {
-                            // cycle detected: find parent in stack
-                            if let Some(pos) = stack.iter().position(|n| n == parent) {
-                                let mut cycle = stack[pos..].to_vec();
-                                cycle.push(parent.clone());
-                                let path = cycle.join(" -> ");
-                                let file = owner
-                                    .get(name)
-                                    .cloned()
-                                    .unwrap_or_else(|| "<unknown>".to_string());
-                                diags.push((
-                                    file,
-                                    Rich::custom(
-                                        *sp,
-                                        format!("Cyclic template inheritance: {}", path),
-                                    ),
-                                ));
+    files
+        .iter()
+        .flat_map(|file| {
+            file.items
+                .iter()
+                .filter_map(|item| match item {
+                    ast::Item::Isa(isa) => {
+                        if let Some(reqs) = &isa.requires {
+                            match reqs {
+                                ast::IsaRequirement::Single(parent) => Some(
+                                    vec![check_isa_exists(
+                                        parent.as_str(),
+                                        file.file_name.clone(),
+                                        isa,
+                                        item_cache,
+                                    )]
+                                    .into_iter(),
+                                ),
+                                ast::IsaRequirement::All(isas) => Some(
+                                    isas.iter()
+                                        .map(|parent| {
+                                            check_isa_exists(
+                                                parent.as_str(),
+                                                file.file_name.clone(),
+                                                isa,
+                                                item_cache,
+                                            )
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .into_iter(),
+                                ),
+                                ast::IsaRequirement::Any(isas) => Some(
+                                    isas.iter()
+                                        .map(|parent| {
+                                            check_isa_exists(
+                                                parent.as_str(),
+                                                file.file_name.clone(),
+                                                isa,
+                                                item_cache,
+                                            )
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .into_iter(),
+                                ),
                             }
+                        } else {
+                            None
                         }
                     }
-                }
-            }
-            stack.pop();
-            mark.insert(name.to_string(), Mark::Done);
-        }
+                    _ => None,
+                })
+                .flatten()
+                .flatten()
+        })
+        .collect()
+}
 
-        for name in templates.keys().cloned().collect::<Vec<_>>() {
-            if mark.get(&name) == Some(&Mark::Unvisited) {
-                dfs(
-                    &name,
-                    &templates,
-                    &template_owner,
-                    &mut mark,
-                    &mut stack,
-                    &mut diags,
-                );
+fn check_templates(
+    files: &[ast::File],
+    item_cache: &HashMap<&str, &ast::Item>,
+) -> Vec<(String, Diag)> {
+    let mut diags = vec![];
+
+    diags.extend(files.iter().flat_map(|f| {
+        f.templates()
+            .flat_map(|t| check_template_parents(t, item_cache, &f.file_name).into_iter())
+    }));
+
+    diags
+}
+
+fn check_instructions(
+    files: &[ast::File],
+    item_cache: &HashMap<&str, &ast::Item>,
+) -> Vec<(String, Diag)> {
+    let mut diags = vec![];
+
+    diags.extend(files.iter().flat_map(|f| {
+        f.instructions()
+            .flat_map(|i| check_instruction_consistent(i, item_cache, &f.file_name).into_iter())
+    }));
+
+    diags
+}
+
+// Checks that all parent templates exist and are also templates.
+fn check_template_parents(
+    template: &ast::Template,
+    item_cache: &HashMap<&str, &ast::Item>,
+    file_name: &str,
+) -> Vec<(String, Diag)> {
+    let mut diags = vec![];
+    let mut visited: HashSet<String> = HashSet::new();
+    visited.insert(template.name.clone());
+    let mut ancestor_params: HashSet<String> = HashSet::new();
+
+    let mut current = template;
+
+    loop {
+        let Some(parent_name) = &current.parent_template else {
+            break;
+        };
+
+        match item_cache.get(parent_name.as_str()).copied() {
+            None => {
+                diags.push((
+                    file_name.to_string(),
+                    Rich::custom(
+                        current.span,
+                        format!(
+                            "Unknown parent template '{}' for template '{}'",
+                            parent_name, &current.name
+                        ),
+                    ),
+                ));
+                break;
+            }
+            Some(ast::Item::Template(parent_tmpl)) => {
+                if !visited.insert(parent_name.clone()) {
+                    diags.push((
+                        file_name.to_string(),
+                        Rich::custom(
+                            current.span,
+                            format!("Cyclic template inheritance involving '{}'", parent_name),
+                        ),
+                    ));
+                    break;
+                }
+                for param_name in parent_tmpl.params.keys() {
+                    ancestor_params.insert(param_name.clone());
+                }
+                current = parent_tmpl;
+            }
+            Some(_) => {
+                diags.push((
+                    file_name.to_string(),
+                    Rich::custom(
+                        current.span,
+                        format!(
+                            "Parent '{}' of template '{}' must also be a template",
+                            parent_name, current.name
+                        ),
+                    ),
+                ));
+                break;
             }
         }
     }
 
-    // Helper: resolve template lineage (root -> leaf)
-    fn collect_template_chain<'a>(
-        name: &str,
-        templates: &'a HashMap<String, (ast::Template, Span)>,
-        chain: &mut Vec<&'a ast::Template>,
-        seen: &mut HashSet<String>,
-    ) {
-        if let Some((t, _)) = templates.get(name) {
-            if let Some(parent) = &t.parent_template {
-                if seen.insert(parent.clone()) {
-                    collect_template_chain(parent, templates, chain, seen);
-                }
-            }
-            chain.push(t);
-        }
-    }
-
-    // Helper: operands and params for template/instruction
-    fn resolve_operands_for_instruction(
-        inst: &ast::Instruction,
-        templates: &HashMap<String, (ast::Template, Span)>,
-    ) -> HashMap<String, ast::Type> {
-        let mut result = HashMap::new();
-        if let Some(parent) = &inst.parent_template {
-            let mut chain = Vec::new();
-            let mut seen = HashSet::new();
-            collect_template_chain(parent, templates, &mut chain, &mut seen);
-            for t in chain {
-                for (k, v) in &t.operands {
-                    result.insert(k.clone(), v.clone());
-                }
-            }
-        }
-        for (k, v) in &inst.operands {
-            result.insert(k.clone(), v.clone());
-        }
-        result
-    }
-
-    fn resolve_params_for_template(
-        tmpl: &ast::Template,
-        templates: &HashMap<String, (ast::Template, Span)>,
-    ) -> HashMap<String, (ast::Type, Option<ast::Expr>)> {
-        let mut out = HashMap::new();
-        if let Some(parent) = &tmpl.parent_template {
-            let mut chain = Vec::new();
-            let mut seen = HashSet::new();
-            collect_template_chain(parent, templates, &mut chain, &mut seen);
-            for t in chain {
-                for (k, v) in &t.params {
-                    out.insert(k.clone(), v.clone());
-                }
-            }
-        }
-        for (k, v) in &tmpl.params {
-            out.insert(k.clone(), v.clone());
-        }
-        out
-    }
-
-    fn resolve_operands_for_template(
-        tmpl: &ast::Template,
-        templates: &HashMap<String, (ast::Template, Span)>,
-    ) -> HashMap<String, ast::Type> {
-        let mut out = HashMap::new();
-        if let Some(parent) = &tmpl.parent_template {
-            let mut chain = Vec::new();
-            let mut seen = HashSet::new();
-            collect_template_chain(parent, templates, &mut chain, &mut seen);
-            for t in chain {
-                for (k, v) in &t.operands {
-                    out.insert(k.clone(), v.clone());
-                }
-            }
-        }
-        for (k, v) in &tmpl.operands {
-            out.insert(k.clone(), v.clone());
-        }
-        out
-    }
-
-    fn resolve_params_for_instruction(
-        inst: &ast::Instruction,
-        templates: &HashMap<String, (ast::Template, Span)>,
-    ) -> HashMap<String, (ast::Type, Option<ast::Expr>)> {
-        let mut out = HashMap::new();
-        if let Some(parent) = &inst.parent_template {
-            let mut chain = Vec::new();
-            let mut seen = HashSet::new();
-            collect_template_chain(parent, templates, &mut chain, &mut seen);
-            for t in chain {
-                for (k, v) in &t.params {
-                    out.insert(k.clone(), v.clone());
-                }
-            }
-        }
-        for (k, v) in &inst.params {
-            out.insert(k.clone(), v.clone());
-        }
-        out
-    }
-
-    // Validate RegisterClass, Template, Isa references
-    for f in &files {
-        let current_file = &f.file_name;
-        for it in &f.items {
-            match it {
-                ast::Item::Isa(isa) => {
-                    // requires -> must refer to existing isas
-                    if let Some(req) = &isa.requires {
-                        match req {
-                            ast::IsaRequirement::Single(n) => check_isas(
-                                current_file,
-                                &vec![n.clone()],
-                                isa.span,
-                                &isas,
-                                &mut diags,
-                            ),
-                            ast::IsaRequirement::Any(v) | ast::IsaRequirement::All(v) => {
-                                check_isas(current_file, v, isa.span, &isas, &mut diags)
-                            }
-                        }
-                    }
-                }
-                ast::Item::RegisterClass(rc) => {
-                    check_isas(current_file, &rc.for_isas, rc.span, &isas, &mut diags);
-                }
-                ast::Item::Template(t) => {
-                    // parent template
-                    if let Some(p) = &t.parent_template {
-                        if !templates.contains_key(p) {
-                            diags.push((
-                                current_file.to_string(),
-                                Rich::custom(t.span, format!("Unknown parent template '{}'", p)),
-                            ));
-                        }
-                    }
-                    check_isas(current_file, &t.for_isas, t.span, &isas, &mut diags);
-
-                    // operand types must be valid; Struct name must be an existing RegisterClass
-                    for (_name, ty) in &t.operands {
-                        if let ast::Type::Struct(s) = ty {
-                            if !reg_classes.contains_key(s) {
-                                diags.push((
-                                    current_file.to_string(),
-                                    Rich::custom(
-                                        t.span,
-                                        format!("Unknown register class '{}' in operands", s),
-                                    ),
-                                ));
-                            }
-                        }
-                    }
-
-                    // encoding expressions name resolution
-                    let params = resolve_params_for_template(t, &templates);
-                    let ops = resolve_operands_for_template(t, &templates);
-                    for arm in &t.encoding {
-                        check_expr(current_file, &arm.value, &params, &ops, &mut diags);
-                    }
-                }
-                ast::Item::Instruction(inst) => {
-                    // parent template
-                    if let Some(p) = &inst.parent_template {
-                        if !templates.contains_key(p) {
-                            diags.push((
-                                current_file.to_string(),
-                                Rich::custom(inst.span, format!("Unknown parent template '{}'", p)),
-                            ));
-                        }
-                    }
-                    check_isas(current_file, &inst.for_isas, inst.span, &isas, &mut diags);
-
-                    // operand types must be valid
-                    for (_name, ty) in &inst.operands {
-                        if let ast::Type::Struct(s) = ty {
-                            if !reg_classes.contains_key(s) {
-                                diags.push((
-                                    current_file.to_string(),
-                                    Rich::custom(
-                                        inst.span,
-                                        format!("Unknown register class '{}' in operands", s),
-                                    ),
-                                ));
-                            }
-                        }
-                    }
-
-                    // encoding expressions name resolution
-                    let params = resolve_params_for_instruction(inst, &templates);
-                    let ops = resolve_operands_for_instruction(inst, &templates);
-                    for arm in &inst.encoding {
-                        check_expr(current_file, &arm.value, &params, &ops, &mut diags);
-                    }
-
-                    // behavior must assign to a known operand and reference only known operands
-                    match &inst.behavior {
-                        ast::Expr::Assign(a) => {
-                            if !ops.contains_key(&a.dest) {
-                                diags.push((
-                                    current_file.to_string(),
-                                    Rich::custom(
-                                        a.span,
-                                        format!(
-                                            "Unknown assignment destination '{}' in behavior",
-                                            a.dest
-                                        ),
-                                    ),
-                                ));
-                            }
-                            // Type-check assignment compatibility when possible
-                            let val_ty = check_expr(
-                                current_file,
-                                &a.value,
-                                &HashMap::new(),
-                                &ops,
-                                &mut diags,
-                            );
-                            if let (Some(dst_ty), Some(src_ty)) = (ops.get(&a.dest), val_ty) {
-                                if let Err(msg) = assignment_compatible(dst_ty, &src_ty) {
-                                    diags.push((
-                                        current_file.to_string(),
-                                        Rich::custom(a.span, msg),
-                                    ));
-                                }
-                            }
-                        }
-                        other => {
-                            // For now only single assignment or block of assignments supported by generators
-                            // Check identifiers inside anyway
-                            check_expr(current_file, other, &HashMap::new(), &ops, &mut diags);
-                        }
-                    }
-                }
-            }
+    for (param_name, (_ty, value)) in &template.params {
+        if ancestor_params.contains(param_name) && value.is_none() {
+            diags.push((
+                file_name.to_string(),
+                Rich::custom(
+                    template.span,
+                    format!(
+                        "Parameter '{}' in template '{}' is already defined by an ancestor; \
+                         provide a value to override it",
+                        param_name, template.name
+                    ),
+                ),
+            ));
         }
     }
 
     diags
 }
 
-fn check_expr(
+fn check_instruction_consistent(
+    instruction: &ast::Instruction,
+    item_cache: &HashMap<&str, &ast::Item>,
     file_name: &str,
-    e: &ast::Expr,
-    params: &HashMap<String, (ast::Type, Option<ast::Expr>)>,
-    operands: &HashMap<String, ast::Type>,
-    diags: &mut Vec<(String, Rich<'static, String, Span>)>,
-) -> Option<ast::Type> {
-    match e {
-        ast::Expr::Ident(id) => {
-            if let Some((t, _)) = params.get(&id.name) {
-                Some(t.clone())
-            } else if let Some(t) = operands.get(&id.name) {
-                Some(t.clone())
-            } else {
+) -> Vec<(String, Diag)> {
+    let mut diags = vec![];
+
+    // Check parent template exists and is a template.
+    if let Some(parent_name) = instruction.parent_template.as_ref().map(|n| n.as_str()) {
+        let parent_template = item_cache.get(parent_name);
+        if parent_template.is_none() {
+            diags.push((
+                file_name.to_string(),
+                Rich::custom(
+                    instruction.span,
+                    format!(
+                        "Unknown parent template '{}' for instruction '{}'",
+                        parent_name, instruction.name
+                    ),
+                ),
+            ));
+        }
+        if let Some(item) = parent_template
+            && !matches!(item, ast::Item::Template(_))
+        {
+            diags.push((
+                file_name.to_string(),
+                Rich::custom(
+                    instruction.span,
+                    format!(
+                        "Parent '{}' for instruction '{}' must be a template",
+                        parent_name, instruction.name
+                    ),
+                ),
+            ));
+        }
+    }
+
+    // Check ISAs exist and are ISAs.
+    for isa_name in &instruction.for_isas {
+        match item_cache.get(isa_name.as_str()).copied() {
+            None => {
                 diags.push((
                     file_name.to_string(),
-                    Rich::custom(id.span, format!("Unknown identifier '{}'", id.name)),
+                    Rich::custom(
+                        instruction.span,
+                        format!(
+                            "Unknown ISA '{}' in instruction '{}'",
+                            isa_name, instruction.name
+                        ),
+                    ),
                 ));
-                None
+            }
+            Some(item) if !matches!(item, ast::Item::Isa(_)) => {
+                diags.push((
+                    file_name.to_string(),
+                    Rich::custom(
+                        instruction.span,
+                        format!(
+                            "'{}' referenced in instruction '{}' is not an ISA",
+                            isa_name, instruction.name
+                        ),
+                    ),
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    // Collect the template chain (root-first), guarding against cycles already reported.
+    let mut chain: Vec<&ast::Template> = Vec::new();
+    {
+        let mut visited: HashSet<&str> = HashSet::new();
+        let mut current_parent = instruction.parent_template.as_deref();
+        while let Some(parent_name) = current_parent {
+            if !visited.insert(parent_name) {
+                break;
+            }
+            match item_cache.get(parent_name).copied() {
+                Some(ast::Item::Template(t)) => {
+                    chain.push(t);
+                    current_parent = t.parent_template.as_deref();
+                }
+                _ => break,
             }
         }
-        ast::Expr::Field(f) => {
-            // only support self.<param>
-            if let ast::Expr::Ident(base) = &*f.base {
-                if base.name == "self" {
-                    if let Some((t, _)) = params.get(&f.member) {
-                        return Some(t.clone());
-                    } else {
+        chain.reverse(); // Root-first.
+    }
+
+    // Build params_cache: root-first insertion means later (closer) definitions win.
+    let mut params_cache: HashMap<&str, (ast::Type, Option<ast::Expr>)> = HashMap::new();
+    for tmpl in &chain {
+        for (name, (ty, value)) in &tmpl.params {
+            params_cache.insert(name.as_str(), (ty.clone(), value.clone()));
+        }
+    }
+    for (name, (ty, value)) in &instruction.params {
+        params_cache.insert(name.as_str(), (ty.clone(), value.clone()));
+    }
+
+    // Build operands_cache from chain + instruction.
+    let mut operands_cache: HashMap<&str, ast::Type> = HashMap::new();
+    for tmpl in &chain {
+        for (name, ty) in &tmpl.operands {
+            operands_cache.insert(name.as_str(), ty.clone());
+        }
+    }
+    for (name, ty) in &instruction.operands {
+        operands_cache.insert(name.as_str(), ty.clone());
+    }
+
+    for (name, (_ty, value)) in &params_cache {
+        if value.is_none() {
+            diags.push((
+                file_name.to_string(),
+                Rich::custom(
+                    instruction.span,
+                    format!(
+                        "Parameter '{}' in instruction '{}' has no bound value",
+                        name, instruction.name
+                    ),
+                ),
+            ));
+        }
+    }
+
+    // Encoding must exist somewhere in the chain or instruction.
+    let effective_encoding: &[ast::EncodingArm] = if !instruction.encoding.is_empty() {
+        &instruction.encoding
+    } else {
+        chain
+            .iter()
+            .rev()
+            .find(|t| !t.encoding.is_empty())
+            .map(|t| t.encoding.as_slice())
+            .unwrap_or(&[])
+    };
+    if effective_encoding.is_empty() {
+        diags.push((
+            file_name.to_string(),
+            Rich::custom(
+                instruction.span,
+                format!("Instruction '{}' has no encoding defined", instruction.name),
+            ),
+        ));
+    } else {
+        diags.extend(check_encoding(
+            instruction,
+            effective_encoding,
+            &params_cache,
+            &operands_cache,
+            file_name,
+        ));
+    }
+
+    // Asm must exist somewhere in the chain or instruction.
+    let effective_asm = instruction
+        .asm
+        .as_ref()
+        .or_else(|| chain.iter().rev().find_map(|t| t.asm.as_ref()));
+    if effective_asm.is_none() {
+        diags.push((
+            file_name.to_string(),
+            Rich::custom(
+                instruction.span,
+                format!(
+                    "Instruction '{}' has no asm block defined",
+                    instruction.name
+                ),
+            ),
+        ));
+    } else {
+        diags.extend(check_asm(
+            instruction,
+            effective_asm.unwrap(),
+            &params_cache,
+            file_name,
+        ));
+    }
+
+    diags.extend(check_behavior(
+        instruction,
+        &instruction.behavior,
+        &params_cache,
+        file_name,
+    ));
+
+    diags
+}
+
+fn check_asm(
+    instruction: &ast::Instruction,
+    asm_: &ast::Expr,
+    _params_cache: &HashMap<&str, (ast::Type, Option<ast::Expr>)>,
+    file_name: &str,
+) -> Vec<(String, Diag)> {
+    // Asm may be wrapped in a block (`asm { "..." }`); unwrap a single-expression block.
+    let inner = match asm_ {
+        ast::Expr::Block(b) if b.stmts.len() == 1 => &b.stmts[0],
+        other => other,
+    };
+    match inner {
+        ast::Expr::Lit(ast::Lit::Str(_)) => vec![],
+        _ => vec![(
+            file_name.to_string(),
+            Rich::custom(
+                instruction.span,
+                format!(
+                    "Asm block must be a single literal string for instruction '{}'",
+                    instruction.name
+                ),
+            ),
+        )],
+    }
+}
+
+fn check_behavior(
+    _instruction: &ast::Instruction,
+    _behavior: &ast::Expr,
+    _params_cache: &HashMap<&str, (ast::Type, Option<ast::Expr>)>,
+    _file_name: &str,
+) -> Vec<(String, Diag)> {
+    // Always fine for now
+    vec![]
+}
+
+fn check_encoding(
+    instruction: &ast::Instruction,
+    encoding: &[ast::EncodingArm],
+    params_cache: &HashMap<&str, (ast::Type, Option<ast::Expr>)>,
+    operands_cache: &HashMap<&str, ast::Type>,
+    file_name: &str,
+) -> Vec<(String, Diag)> {
+    let mut diags = vec![];
+
+    let known = |name: &str| params_cache.contains_key(name) || operands_cache.contains_key(name);
+
+    for arm in encoding {
+        match &arm.value {
+            ast::Expr::Lit(_) => {}
+            ast::Expr::Ident(id) => {
+                if !known(&id.name) {
+                    diags.push((
+                        file_name.to_string(),
+                        Rich::custom(
+                            arm.span,
+                            format!(
+                                "Unknown '{}' in encoding of instruction '{}': \
+                                 not a parameter or operand",
+                                id.name, instruction.name
+                            ),
+                        ),
+                    ));
+                }
+            }
+            ast::Expr::Slice(slc) => {
+                if let ast::Expr::Ident(base) = &*slc.base {
+                    if !known(&base.name) {
                         diags.push((
                             file_name.to_string(),
                             Rich::custom(
-                                f.span,
-                                format!("Unknown member 'self.{}' (no such parameter)", f.member),
+                                arm.span,
+                                format!(
+                                    "Unknown '{}' in encoding of instruction '{}': \
+                                     not a parameter or operand",
+                                    base.name, instruction.name
+                                ),
                             ),
                         ));
                     }
@@ -404,306 +504,60 @@ fn check_expr(
                     diags.push((
                         file_name.to_string(),
                         Rich::custom(
-                            f.span,
-                            "Only 'self.<param>' field access is supported".to_string(),
+                            arm.span,
+                            format!(
+                                "Encoding value in instruction '{}' must be a literal, \
+                                 parameter, or operand reference",
+                                instruction.name
+                            ),
                         ),
                     ));
                 }
-            } else {
-                diags.push((
-                    file_name.to_string(),
-                    Rich::custom(f.span, "Unsupported field access expression".to_string()),
-                ));
             }
-            None
-        }
-        ast::Expr::Slice(s) => {
-            if let Some(base_ty) = check_expr(file_name, &s.base, params, operands, diags) {
-                match base_ty {
-                    ast::Type::Bits(w) => {
-                        // treat end as exclusive upper bound
-                        let end_ex = s.end;
-                        if end_ex > w || s.start >= w || s.start > end_ex {
-                            diags.push((
-                                file_name.to_string(),
-                                Rich::custom(
-                                    s.span,
-                                    format!(
-                                        "Slice [{}..{}] out of bounds for bits<{}>",
-                                        s.start, s.end, w
-                                    ),
-                                ),
-                            ));
-                        }
-                        let width = if end_ex > s.start {
-                            end_ex - s.start
-                        } else {
-                            0
-                        };
-                        Some(ast::Type::Bits(width))
-                    }
-                    _ => {
+            ast::Expr::IndexAccess(idx) => {
+                if let ast::Expr::Ident(base) = &*idx.base {
+                    if !known(&base.name) {
                         diags.push((
                             file_name.to_string(),
                             Rich::custom(
-                                s.span,
-                                "Slice/index only supported on bits<N>".to_string(),
+                                arm.span,
+                                format!(
+                                    "Unknown '{}' in encoding of instruction '{}': \
+                                     not a parameter or operand",
+                                    base.name, instruction.name
+                                ),
                             ),
                         ));
-                        None
                     }
-                }
-            } else {
-                None
-            }
-        }
-        ast::Expr::IndexAccess(s) => {
-            if let Some(base_ty) = check_expr(file_name, &s.base, params, operands, diags) {
-                match base_ty {
-                    ast::Type::Bits(w) => {
-                        if s.index >= w {
-                            diags.push((
-                                file_name.to_string(),
-                                Rich::custom(
-                                    s.span,
-                                    format!("Index [{}] out of bounds for bits<{}>", s.index, w),
-                                ),
-                            ));
-                        }
-                        Some(ast::Type::Bits(1))
-                    }
-                    _ => {
-                        diags.push((
-                            file_name.to_string(),
-                            Rich::custom(
-                                s.span,
-                                "Slice/index only supported on bits<N>".to_string(),
-                            ),
-                        ));
-                        None
-                    }
-                }
-            } else {
-                None
-            }
-        }
-        ast::Expr::Binary(b) => {
-            let lt = check_expr(file_name, &b.lhs, params, operands, diags);
-            let rt = check_expr(file_name, &b.rhs, params, operands, diags);
-
-            // Helper to report and return None
-            let mut fail = |msg: String| {
-                diags.push((file_name.to_string(), Rich::custom(b.span, msg)));
-                None
-            };
-
-            match (lt, rt) {
-                (Some(ast::Type::String), _) | (_, Some(ast::Type::String)) => {
-                    fail("String type is not supported in binary operations".to_string())
-                }
-                (Some(ast::Type::Struct(_)), _) | (_, Some(ast::Type::Struct(_))) => {
-                    fail("Register values not supported in binary operations".to_string())
-                }
-                (Some(l), Some(r)) => {
-                    use ast::BinOp::*;
-                    use ast::Type::*;
-                    match b.op {
-                        Add | Sub | Mul | Div => match (l, r) {
-                            (Integer, Integer) => Some(Integer),
-                            (Bits(w1), Bits(w2)) => {
-                                if w1 == w2 {
-                                    Some(Bits(w1))
-                                } else {
-                                    fail(format!(
-                                        "Mismatched bit widths: bits<{}> {} bits<{}>",
-                                        w1,
-                                        op_name(b.op.clone()),
-                                        w2
-                                    ))
-                                }
-                            }
-                            (Bits(w), Integer) | (Integer, Bits(w)) => Some(Bits(w)),
-                            _ => fail("Arithmetic expects numeric operands".to_string()),
-                        },
-                        BitwiseAnd | BitwiseOr | BitwiseXor => match (l, r) {
-                            (Integer, Integer) => Some(Integer),
-                            (Bits(w1), Bits(w2)) => {
-                                if w1 == w2 {
-                                    Some(Bits(w1))
-                                } else {
-                                    fail(format!(
-                                        "Mismatched bit widths for bitwise op: bits<{}> {} bits<{}>",
-                                        w1,
-                                        op_name(b.op.clone()),
-                                        w2
-                                    ))
-                                }
-                            }
-                            (Bits(w), Integer) | (Integer, Bits(w)) => Some(Bits(w)),
-                            _ => fail("Bitwise expects integer/bits operands".to_string()),
-                        },
-                        ShiftLeftLogical | ShiftRightLogical | ShiftRightArithmetic => {
-                            match (l, r) {
-                                (Bits(w), Integer) | (Bits(w), Bits(_)) => Some(Bits(w)),
-                                (Integer, Integer) => Some(Integer),
-                                (Integer, Bits(_)) => Some(Integer),
-                                _ => fail(
-                                    "Shift expects lhs numeric and rhs integer/bits".to_string(),
-                                ),
-                            }
-                        }
-                    }
-                }
-                _ => None,
-            }
-        }
-        ast::Expr::BuiltinFunction(_) => Some(ast::Type::Integer),
-        ast::Expr::Call(c) => {
-            // Only builtin functions are supported as callees for now
-            match *c.callee.clone() {
-                ast::Expr::BuiltinFunction(f) => {
-                    let mut arg_tys = Vec::new();
-                    for arg in &c.arguments {
-                        arg_tys.push(check_expr(file_name, arg, params, operands, diags));
-                    }
-                    let numeric_ok = |t: &Option<ast::Type>| {
-                        matches!(t, Some(ast::Type::Integer) | Some(ast::Type::Bits(_)))
-                    };
-                    match f {
-                        ast::BuiltinFunction::Clamp => {
-                            if c.arguments.len() != 3 {
-                                diags.push((
-                                    file_name.to_string(),
-                                    Rich::custom(
-                                        c.span,
-                                        "clamp expects 3 arguments: clamp(x, lo, hi)".to_string(),
-                                    ),
-                                ));
-                            }
-                            for t in &arg_tys {
-                                if !numeric_ok(t) {
-                                    diags.push((
-                                        file_name.to_string(),
-                                        Rich::custom(
-                                            c.span,
-                                            "clamp arguments must be numeric".to_string(),
-                                        ),
-                                    ));
-                                    break;
-                                }
-                            }
-                            // Result type follows first argument when numeric, else Integer
-                            arg_tys
-                                .get(0)
-                                .and_then(|t| t.clone())
-                                .or(Some(ast::Type::Integer))
-                        }
-                        ast::BuiltinFunction::Extract => {
-                            if c.arguments.len() != 3 {
-                                diags.push((
-                                    file_name.to_string(),
-                                    Rich::custom(
-                                        c.span,
-                                        "extract expects 3 arguments: extract(x, hi, lo)"
-                                            .to_string(),
-                                    ),
-                                ));
-                            }
-                            // hi/lo should be integers
-                            if c.arguments.len() >= 3 {
-                                if !numeric_ok(&arg_tys[0]) {
-                                    diags.push((
-                                        file_name.to_string(),
-                                        Rich::custom(
-                                            c.span,
-                                            "extract first argument must be numeric".to_string(),
-                                        ),
-                                    ));
-                                }
-                            }
-                            // If hi/lo are literal ints, compute width
-                            let width = if c.arguments.len() == 3 {
-                                if let (Some(ast::Type::Integer), Some(ast::Type::Integer)) =
-                                    (&arg_tys[1], &arg_tys[2])
-                                {
-                                    let hi = literal_u16(&c.arguments[1]);
-                                    let lo = literal_u16(&c.arguments[2]);
-                                    if let (Some(hi), Some(lo)) = (hi, lo) {
-                                        if hi >= lo {
-                                            Some(ast::Type::Bits(hi - lo + 1))
-                                        } else {
-                                            None
-                                        }
-                                    } else {
-                                        None
-                                    }
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            };
-                            width.or(Some(ast::Type::Integer))
-                        }
-                    }
-                }
-                _ => {
+                } else {
                     diags.push((
                         file_name.to_string(),
                         Rich::custom(
-                            c.span,
-                            "Only builtin functions are supported in calls".to_string(),
+                            arm.span,
+                            format!(
+                                "Encoding value in instruction '{}' must be a literal, \
+                                 parameter, or operand reference",
+                                instruction.name
+                            ),
                         ),
                     ));
-                    None
                 }
             }
-        }
-        ast::Expr::Assign(_) | ast::Expr::Block(_) | ast::Expr::If(_) | ast::Expr::Invalid => None,
-        ast::Expr::Lit(ast::Lit::Int(_)) => Some(ast::Type::Integer),
-        ast::Expr::Lit(ast::Lit::Str(_)) => Some(ast::Type::String),
-    }
-}
-
-// Helper: extract u16 literal value from an expression if it's a plain integer literal
-fn literal_u16(e: &ast::Expr) -> Option<u16> {
-    if let ast::Expr::Lit(ast::Lit::Int(li)) = e {
-        li.value().parse::<u16>().ok()
-    } else {
-        None
-    }
-}
-
-fn op_name(op: ast::BinOp) -> &'static str {
-    use ast::BinOp::*;
-    match op {
-        Add => "+",
-        Sub => "-",
-        Mul => "*",
-        Div => "/",
-        BitwiseAnd => "&",
-        BitwiseOr => "|",
-        BitwiseXor => "^",
-        ShiftLeftLogical => "<<",
-        ShiftRightLogical => ">>",
-        ShiftRightArithmetic => ">>>",
-    }
-}
-
-fn assignment_compatible(dst: &ast::Type, src: &ast::Type) -> Result<(), String> {
-    use ast::Type::*;
-    match (dst, src) {
-        (String, String) => Ok(()),
-        (Integer, Integer) => Ok(()),
-        (Bits(wd), Bits(ws)) => {
-            if wd == ws {
-                Ok(())
-            } else {
-                Err(format!("Cannot assign bits<{}> to bits<{}>", ws, wd))
+            _ => {
+                diags.push((
+                    file_name.to_string(),
+                    Rich::custom(
+                        arm.span,
+                        format!(
+                            "Encoding value in instruction '{}' must be a literal, \
+                             parameter, or operand reference",
+                            instruction.name
+                        ),
+                    ),
+                ));
             }
         }
-        (Bits(_), Integer) => Ok(()),
-        (Struct(_), Integer) | (Struct(_), Bits(_)) => Ok(()), // allow writing numeric into a register
-        _ => Err(format!("Incompatible assignment: {:?} := {:?}", dst, src)),
     }
+
+    diags
 }

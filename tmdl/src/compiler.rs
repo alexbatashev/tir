@@ -118,7 +118,7 @@ impl Compiler {
                 parsed_files.push(file.unwrap());
             }
 
-            let sema_diags = sema_analyze(parsed_files.clone());
+            let sema_diags = sema_analyze(&parsed_files);
             if !sema_diags.is_empty() {
                 use std::collections::BTreeMap;
                 let mut by_file: BTreeMap<
@@ -213,7 +213,7 @@ impl Compiler {
         }
 
         // Semantic analysis for whole-program actions
-        let sema_diags = sema_analyze(parsed_files.clone());
+        let sema_diags = sema_analyze(&parsed_files);
         if !sema_diags.is_empty() {
             use std::collections::BTreeMap;
             let mut by_file: BTreeMap<String, Vec<chumsky::error::Rich<'static, String, Span>>> =

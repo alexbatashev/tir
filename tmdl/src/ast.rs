@@ -364,6 +364,22 @@ impl Serialize for Type {
     }
 }
 
+impl File {
+    pub fn templates(&self) -> impl Iterator<Item = &Template> {
+        self.items.iter().filter_map(|f| match f {
+            Item::Template(t) => Some(t),
+            _ => None,
+        })
+    }
+
+    pub fn instructions(&self) -> impl Iterator<Item = &Instruction> {
+        self.items.iter().filter_map(|f| match f {
+            Item::Instruction(i) => Some(i),
+            _ => None,
+        })
+    }
+}
+
 #[derive(Serialize)]
 struct ParamRef<'a> {
     name: &'a str,
