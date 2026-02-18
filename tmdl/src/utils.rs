@@ -1,18 +1,19 @@
 use std::collections::HashMap;
 
+use crate::Type;
 use crate::ast::{self, Instruction, Item};
 
 pub fn resolve_operands_for_instruction<'a>(
     inst: &'a ast::Instruction,
     item_cache: &HashMap<String, &'a ast::Item>,
-) -> Vec<(String, ast::Type)> {
+) -> Vec<(String, Type)> {
     let mut result = Vec::new();
 
     // collect from root-most template first
     fn collect_from_template<'a>(
         name: &str,
         cache: &HashMap<String, &'a ast::Item>,
-        acc: &mut Vec<(String, ast::Type)>,
+        acc: &mut Vec<(String, Type)>,
     ) {
         if let Some(ast::Item::Template(t)) = cache.get(name) {
             if let Some(parent) = &t.parent_template {
@@ -58,12 +59,12 @@ pub fn get_encoding_arms<'a>(
 pub fn resolve_params_for_instruction<'a>(
     inst: &'a ast::Instruction,
     cache: &HashMap<String, &'a ast::Item>,
-) -> HashMap<String, (ast::Type, Option<ast::Expr>)> {
-    let mut result: HashMap<String, (ast::Type, Option<ast::Expr>)> = HashMap::new();
+) -> HashMap<String, (Type, Option<ast::Expr>)> {
+    let mut result: HashMap<String, (Type, Option<ast::Expr>)> = HashMap::new();
     fn collect_from_template<'a>(
         name: &str,
         cache: &HashMap<String, &'a ast::Item>,
-        acc: &mut HashMap<String, (ast::Type, Option<ast::Expr>)>,
+        acc: &mut HashMap<String, (Type, Option<ast::Expr>)>,
     ) {
         if let Some(ast::Item::Template(t)) = cache.get(name) {
             if let Some(parent) = &t.parent_template {

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::io::Write;
 
+use crate::Type;
 use crate::ast::{self, Instruction, Item};
 use crate::error::TMDLError;
 use crate::sem_expr_conv::{SymbolInfo, convert_to_sem_expr};
@@ -13,7 +14,7 @@ use tir::sem_expr::rocq as sem_rocq;
 
 struct RocqSymbolResolver<'a> {
     symbols: &'a HashMap<u32, SymbolInfo>,
-    operands: &'a HashMap<String, ast::Type>,
+    operands: &'a HashMap<String, Type>,
     state_name: &'a str,
 }
 
@@ -32,7 +33,7 @@ impl sem_rocq::SymbolResolver for RocqSymbolResolver<'_> {
                 number
             )),
             SymbolInfo::Variable { name } => {
-                if let Some(ast::Type::Struct(rc)) = self.operands.get(name) {
+                if let Some(Type::Struct(rc)) = self.operands.get(name) {
                     Ok(format!(
                         "(read_{} {} {})",
                         rc.to_lowercase(),
@@ -203,7 +204,7 @@ struct InstructionPattern {
     // Expected value (fixed bits in their positions, 0s elsewhere)
     expected: u64,
     // Operand extraction positions with types
-    operand_extracts: Vec<(String, u16, u16, ast::Type)>, // (operand_name, start_bit, end_bit, type)
+    operand_extracts: Vec<(String, u16, u16, Type)>, // (operand_name, start_bit, end_bit, type)
 }
 
 fn apply_fixed_bits(mask: &mut u64, expected: &mut u64, start: u16, end: u16, value: u64) {
@@ -309,7 +310,7 @@ fn generate_structural_decoder(
             let width = end - start + 1;
             let extracted = format!("(extract_bits w {} {})", start, width);
             let converted = match ty {
-                ast::Type::Struct(_) => format!("(Z.to_nat {})", extracted),
+                Type::Struct(_) => format!("(Z.to_nat {})", extracted),
                 _ => extracted,
             };
             operand_vals.push(converted);
@@ -347,16 +348,16 @@ fn generate_structural_decoder(
 /// For a list of operands returns a string of function operands in Coq format. Examples:
 /// (rd rs1 rs2 : nat)
 /// (rd rs1 : nat) (imm : tmdl_word 12)
-fn coq_ty_of(t: &ast::Type) -> String {
+fn coq_ty_of(t: &Type) -> String {
     match t {
-        ast::Type::Struct(_) => "nat".to_string(),
-        ast::Type::Bits(w) => format!("tmdl_word {}", w),
-        ast::Type::Integer => "Z".to_string(),
-        ast::Type::String => "string".to_string(),
+        Type::Struct(_) => "nat".to_string(),
+        Type::Bits(w) => format!("tmdl_word {}", w),
+        Type::Integer => "Z".to_string(),
+        Type::String => "string".to_string(),
     }
 }
 
-fn build_coq_operands(operands: &[(String, ast::Type)]) -> String {
+fn build_coq_operands(operands: &[(String, Type)]) -> String {
     if operands.is_empty() {
         return String::new();
     }
@@ -385,7 +386,7 @@ fn build_coq_operands(operands: &[(String, ast::Type)]) -> String {
 }
 
 /// Build a constructor argument list for Coq inductive: "T1 -> T2 ->"
-fn build_coq_operands_ctor(operands: &[(String, ast::Type)]) -> String {
+fn build_coq_operands_ctor(operands: &[(String, Type)]) -> String {
     let parts: Vec<String> = operands
         .iter()
         .map(|(_name, ty)| format!("{} ->", coq_ty_of(ty)))
@@ -433,10 +434,10 @@ fn build_coq_encoding<'a>(
                 if let Some(ty) = operands.get(name) {
                     let vname = name.to_lowercase();
                     match ty {
-                        ast::Type::Struct(_) => format!("(tmdl_word_of_nat {} {})", width, vname),
-                        ast::Type::Bits(_w) => format!("({})", vname),
-                        ast::Type::Integer => format!("(tmdl_word_of_nat {} {})", width, vname),
-                        ast::Type::String => render_zero(width),
+                        Type::Struct(_) => format!("(tmdl_word_of_nat {} {})", width, vname),
+                        Type::Bits(_w) => format!("({})", vname),
+                        Type::Integer => format!("(tmdl_word_of_nat {} {})", width, vname),
+                        Type::String => render_zero(width),
                     }
                 } else if let Some((_, Some(ast::Expr::Lit(ast::Lit::Int(li))))) = params.get(name)
                 {
@@ -484,7 +485,7 @@ fn build_coq_behavior<'a>(
 
     fn emit_sem_expr(
         e: &ast::Expr,
-        operands: &HashMap<String, ast::Type>,
+        operands: &HashMap<String, Type>,
         numeric_params: &HashMap<String, i64>,
     ) -> String {
         let converted = convert_to_sem_expr(e, numeric_params.clone()).unwrap();
@@ -500,7 +501,7 @@ fn build_coq_behavior<'a>(
 
     let eval_expr = |e: &ast::Expr| emit_sem_expr(e, &operands, &numeric_params);
     let emit_assign = |a: &ast::Assign, st_name: &str| {
-        if let Some(ast::Type::Struct(rc)) = operands.get(&a.dest) {
+        if let Some(Type::Struct(rc)) = operands.get(&a.dest) {
             let rhs = emit_sem_expr(&a.value, &operands, &numeric_params);
             Some(format!(
                 "(write_{} {} {} {})",

@@ -1,4 +1,4 @@
-use crate::Span;
+use crate::{Span, Type};
 use serde::Serialize;
 use serde::ser::{SerializeStruct, Serializer};
 use std::collections::HashMap;
@@ -111,14 +111,6 @@ pub enum Item {
     RegisterClass(RegisterClass),
     Template(Template),
     Instruction(Instruction),
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum Type {
-    String,
-    Integer,
-    Bits(u16),
-    Struct(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -359,6 +351,7 @@ impl Serialize for Type {
                 state.serialize_field("name", "Struct")?;
                 state.serialize_field("struct", name)?;
             }
+            _ => unreachable!("Other types should not be part of AST"),
         }
         state.end()
     }
@@ -375,6 +368,13 @@ impl File {
     pub fn instructions(&self) -> impl Iterator<Item = &Instruction> {
         self.items.iter().filter_map(|f| match f {
             Item::Instruction(i) => Some(i),
+            _ => None,
+        })
+    }
+
+    pub fn register_classes(&self) -> impl Iterator<Item = &RegisterClass> {
+        self.items.iter().filter_map(|f| match f {
+            Item::RegisterClass(rc) => Some(rc),
             _ => None,
         })
     }

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use chumsky::error::Rich;
 
-use crate::{Span, ast};
+use crate::{Span, Type, ast};
 
 type Diag = Rich<'static, String, Span>;
 
@@ -320,7 +320,7 @@ fn check_instruction_consistent(
     }
 
     // Build params_cache: root-first insertion means later (closer) definitions win.
-    let mut params_cache: HashMap<&str, (ast::Type, Option<ast::Expr>)> = HashMap::new();
+    let mut params_cache: HashMap<&str, (Type, Option<ast::Expr>)> = HashMap::new();
     for tmpl in &chain {
         for (name, (ty, value)) in &tmpl.params {
             params_cache.insert(name.as_str(), (ty.clone(), value.clone()));
@@ -331,7 +331,7 @@ fn check_instruction_consistent(
     }
 
     // Build operands_cache from chain + instruction.
-    let mut operands_cache: HashMap<&str, ast::Type> = HashMap::new();
+    let mut operands_cache: HashMap<&str, Type> = HashMap::new();
     for tmpl in &chain {
         for (name, ty) in &tmpl.operands {
             operands_cache.insert(name.as_str(), ty.clone());
@@ -423,7 +423,7 @@ fn check_instruction_consistent(
 fn check_asm(
     instruction: &ast::Instruction,
     asm_: &ast::Expr,
-    _params_cache: &HashMap<&str, (ast::Type, Option<ast::Expr>)>,
+    _params_cache: &HashMap<&str, (Type, Option<ast::Expr>)>,
     file_name: &str,
 ) -> Vec<(String, Diag)> {
     // Asm may be wrapped in a block (`asm { "..." }`); unwrap a single-expression block.
@@ -449,7 +449,7 @@ fn check_asm(
 fn check_behavior(
     _instruction: &ast::Instruction,
     _behavior: &ast::Expr,
-    _params_cache: &HashMap<&str, (ast::Type, Option<ast::Expr>)>,
+    _params_cache: &HashMap<&str, (Type, Option<ast::Expr>)>,
     _file_name: &str,
 ) -> Vec<(String, Diag)> {
     // Always fine for now
@@ -459,8 +459,8 @@ fn check_behavior(
 fn check_encoding(
     instruction: &ast::Instruction,
     encoding: &[ast::EncodingArm],
-    params_cache: &HashMap<&str, (ast::Type, Option<ast::Expr>)>,
-    operands_cache: &HashMap<&str, ast::Type>,
+    params_cache: &HashMap<&str, (Type, Option<ast::Expr>)>,
+    operands_cache: &HashMap<&str, Type>,
     file_name: &str,
 ) -> Vec<(String, Diag)> {
     let mut diags = vec![];

@@ -3,6 +3,7 @@ use std::io::Write;
 
 use quote::{format_ident, quote};
 
+use crate::Type;
 use crate::ast;
 use crate::error::TMDLError;
 use crate::utils::{get_encoding_arms, resolve_operands_for_instruction};
@@ -129,9 +130,9 @@ fn emit_instructions<'ast, 'cache: 'ast>(
             for (name, ty) in &ops {
                 let field_ident = format_ident!("{}", name);
                 let ty_ts = match ty {
-                    ast::Type::Struct(_) => quote! { Register },
-                    ast::Type::Integer | ast::Type::Bits(_) => quote! { Integer },
-                    ast::Type::String => quote! { String },
+                    Type::Struct(_) => quote! { Register },
+                    Type::Integer | Type::Bits(_) => quote! { Integer },
+                    Type::String => quote! { String },
                 };
                 items.push(quote! { #field_ident: #ty_ts });
             }
@@ -142,7 +143,7 @@ fn emit_instructions<'ast, 'cache: 'ast>(
         let roles_schema = {
             let mut items = vec![];
             for (name, ty) in &ops {
-                if let ast::Type::Struct(_) = ty {
+                if let Type::Struct(_) = ty {
                     let field_ident = format_ident!("{}", name);
                     let role = if defined_register_operands.contains(name) {
                         quote! { Def }
@@ -176,7 +177,7 @@ fn emit_instructions<'ast, 'cache: 'ast>(
             for (op_name, op_ty) in &ops {
                 let op_name_lit = proc_macro2::Literal::string(&op_name);
                 match op_ty {
-                    ast::Type::Struct(class_name) => {
+                    Type::Struct(class_name) => {
                         let class_lit = proc_macro2::Literal::string(&class_name);
                         if let Some(def_pos) = defined_register_operands
                             .iter()
@@ -231,7 +232,7 @@ fn emit_instructions<'ast, 'cache: 'ast>(
                             });
                         }
                     }
-                    ast::Type::Integer | ast::Type::Bits(_) => {
+                    Type::Integer | Type::Bits(_) => {
                         if let Some(sym) = semantics.variable_symbols.get(op_name) {
                             let sym_lit = proc_macro2::Literal::u32_unsuffixed(*sym);
                             emit_attr_steps.push(quote! {
@@ -243,7 +244,7 @@ fn emit_instructions<'ast, 'cache: 'ast>(
                             });
                         }
                     }
-                    ast::Type::String => {}
+                    Type::String => {}
                 }
             }
 
@@ -308,7 +309,7 @@ fn emit_instructions<'ast, 'cache: 'ast>(
                             let name_lit = proc_macro2::Literal::string(&name);
                             if let Some((_, ty)) = ops.iter().find(|(n, _)| n == &name) {
                                 match ty {
-                                    ast::Type::Struct(_) => {
+                                    Type::Struct(_) => {
                                         symbol_arms.push(quote! {
                                             #sym_lit => {
                                                 let (class, index) = tir_be_common::register_attr(self.attributes(), #name_lit)
@@ -320,7 +321,7 @@ fn emit_instructions<'ast, 'cache: 'ast>(
                                             }
                                         });
                                     }
-                                    ast::Type::Integer => {
+                                    Type::Integer => {
                                         symbol_arms.push(quote! {
                                             #sym_lit => {
                                                 let value = tir_be_common::int_attr(self.attributes(), #name_lit).ok_or(
@@ -333,7 +334,7 @@ fn emit_instructions<'ast, 'cache: 'ast>(
                                             }
                                         });
                                     }
-                                    ast::Type::Bits(width) => {
+                                    Type::Bits(width) => {
                                         let width_lit =
                                             proc_macro2::Literal::u32_unsuffixed(*width as u32);
                                         symbol_arms.push(quote! {
@@ -348,7 +349,7 @@ fn emit_instructions<'ast, 'cache: 'ast>(
                                             }
                                         });
                                     }
-                                    ast::Type::String => {}
+                                    Type::String => {}
                                 }
                             }
                         }
@@ -453,7 +454,7 @@ fn emit_instructions<'ast, 'cache: 'ast>(
                         if let Some(ty) = ops_map.get(&op_name) {
                             let op_name_lit = proc_macro2::Literal::string(&op_name);
                             match ty {
-                                ast::Type::Struct(class_name) => {
+                                Type::Struct(class_name) => {
                                     let fn_ident = format_ident!("parse_{}", class_name);
                                     let class_lit = proc_macro2::Literal::string(class_name);
                                     parse_steps.push(quote! {
@@ -469,7 +470,7 @@ fn emit_instructions<'ast, 'cache: 'ast>(
                                         );
                                     });
                                 }
-                                ast::Type::Integer | ast::Type::Bits(_) => {
+                                Type::Integer | Type::Bits(_) => {
                                     parse_steps.push(quote! {
                                         let val: i64 = if let Some(tok) = parser.peek() {
                                             match tok {
@@ -498,7 +499,7 @@ fn emit_instructions<'ast, 'cache: 'ast>(
                                         );
                                     });
                                 }
-                                ast::Type::String => {
+                                Type::String => {
                                     // Strings in asm templates aren't currently used as operands; skip for now.
                                     parse_steps.push(quote! { let _ = parser.peek(); });
                                 }
@@ -629,13 +630,13 @@ fn resolve_asm_template_for_instruction<'a>(
 fn resolve_params_for_instruction<'a>(
     inst: &'a ast::Instruction,
     item_cache: &HashMap<String, &'a ast::Item>,
-) -> HashMap<String, (ast::Type, Option<ast::Expr>)> {
+) -> HashMap<String, (Type, Option<ast::Expr>)> {
     let mut result = HashMap::new();
 
     fn collect_from_template<'a>(
         name: &str,
         cache: &HashMap<String, &'a ast::Item>,
-        acc: &mut HashMap<String, (ast::Type, Option<ast::Expr>)>,
+        acc: &mut HashMap<String, (Type, Option<ast::Expr>)>,
     ) {
         if let Some(ast::Item::Template(t)) = cache.get(name) {
             if let Some(parent) = &t.parent_template {
@@ -671,7 +672,7 @@ fn parse_literal_value(lit: &ast::LitInt) -> u64 {
 fn analyze_instruction_semantics(
     inst: &ast::Instruction,
     item_cache: &HashMap<String, &ast::Item>,
-    operands: &[(String, ast::Type)],
+    operands: &[(String, Type)],
     defined_register_operands: &[String],
 ) -> Option<InstructionSemantics> {
     let rhs = resolve_behavior_rhs(inst, operands, defined_register_operands)?;
@@ -726,11 +727,11 @@ fn split_symbols(
     (variable_symbols, fixed_register_by_class)
 }
 
-fn register_operand_names(operands: &[(String, ast::Type)]) -> HashSet<&str> {
+fn register_operand_names(operands: &[(String, Type)]) -> HashSet<&str> {
     operands
         .iter()
         .filter_map(|(name, ty)| match ty {
-            ast::Type::Struct(_) => Some(name.as_str()),
+            Type::Struct(_) => Some(name.as_str()),
             _ => None,
         })
         .collect()
@@ -756,7 +757,7 @@ fn collect_behavior_assignments<'a>(expr: &'a ast::Expr, out: &mut Vec<(&'a str,
 
 fn infer_defined_register_operands(
     behavior: &ast::Expr,
-    operands: &[(String, ast::Type)],
+    operands: &[(String, Type)],
 ) -> Vec<String> {
     let register_operands = register_operand_names(operands);
 
@@ -773,7 +774,7 @@ fn infer_defined_register_operands(
 
 fn resolve_behavior_rhs<'a>(
     inst: &'a ast::Instruction,
-    operands: &[(String, ast::Type)],
+    operands: &[(String, Type)],
     defined_register_operands: &[String],
 ) -> Option<&'a ast::Expr> {
     let register_operands = register_operand_names(operands);

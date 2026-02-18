@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::io::Write;
 
+use crate::Type;
 use crate::ast::{self, Instruction, Item};
 use crate::error::TMDLError;
 use crate::sem_expr_state;
@@ -130,7 +131,7 @@ struct InstructionPattern {
     name: String,
     mask: u64,
     expected: u64,
-    operand_extracts: Vec<(String, u16, u16, ast::Type)>, // (operand_name, start_bit, end_bit, type)
+    operand_extracts: Vec<(String, u16, u16, Type)>, // (operand_name, start_bit, end_bit, type)
 }
 
 fn analyze_instruction_encoding<'a>(
@@ -212,12 +213,12 @@ fn get_encoding_arms<'a>(
 fn resolve_params_for_instruction<'a>(
     inst: &'a ast::Instruction,
     cache: &HashMap<String, &'a ast::Item>,
-) -> HashMap<String, (ast::Type, Option<ast::Expr>)> {
-    let mut result: HashMap<String, (ast::Type, Option<ast::Expr>)> = HashMap::new();
+) -> HashMap<String, (Type, Option<ast::Expr>)> {
+    let mut result: HashMap<String, (Type, Option<ast::Expr>)> = HashMap::new();
     fn collect_from_template<'a>(
         name: &str,
         cache: &HashMap<String, &'a ast::Item>,
-        acc: &mut HashMap<String, (ast::Type, Option<ast::Expr>)>,
+        acc: &mut HashMap<String, (Type, Option<ast::Expr>)>,
     ) {
         if let Some(ast::Item::Template(t)) = cache.get(name) {
             if let Some(parent) = &t.parent_template {
@@ -282,10 +283,10 @@ fn generate_structural_decoder(
             let width = end - start + 1;
             let extracted = format!("(extractBits w {} {})", start, width);
             let converted = match ty {
-                ast::Type::Struct(_) => extracted.clone(),
-                ast::Type::Bits(w) => format!("(BitVec.ofNat {} {})", w, extracted),
-                ast::Type::Integer => format!("(Int.ofNat {})", extracted),
-                ast::Type::String => format!("(toString {})", extracted),
+                Type::Struct(_) => extracted.clone(),
+                Type::Bits(w) => format!("(BitVec.ofNat {} {})", w, extracted),
+                Type::Integer => format!("(Int.ofNat {})", extracted),
+                Type::String => format!("(toString {})", extracted),
             };
             operand_vals.push(converted);
         }
@@ -328,16 +329,16 @@ fn generate_structural_decoder(
 /// (rd rs1 : Nat) (imm : BitVec 12)
 fn build_lean_operands<'cache>(
     item_cache: &HashMap<String, &'cache Item>,
-    operands: &Vec<(String, ast::Type)>,
+    operands: &Vec<(String, Type)>,
 ) -> String {
     let _ = item_cache;
 
-    fn lean_ty_of(t: &ast::Type) -> String {
+    fn lean_ty_of(t: &Type) -> String {
         match t {
-            ast::Type::Struct(_) => "Nat".to_string(),
-            ast::Type::Bits(w) => format!("BitVec {}", w),
-            ast::Type::Integer => "Int".to_string(),
-            ast::Type::String => "String".to_string(),
+            Type::Struct(_) => "Nat".to_string(),
+            Type::Bits(w) => format!("BitVec {}", w),
+            Type::Integer => "Int".to_string(),
+            Type::String => "String".to_string(),
         }
     }
 
@@ -402,16 +403,16 @@ fn build_lean_encoding<'a>(
                 if let Some(ty) = operands.get(name) {
                     let vname = name.to_lowercase();
                     match ty {
-                        ast::Type::Struct(_) => format!("(BitVec.ofNat {} {})", width, vname),
-                        ast::Type::Bits(_w) => format!("({})", vname),
-                        ast::Type::Integer => format!("(BitVec.ofNat {} {})", width, vname),
-                        ast::Type::String => format!("(BitVec.ofNat {} 0)", width),
+                        Type::Struct(_) => format!("(BitVec.ofNat {} {})", width, vname),
+                        Type::Bits(_w) => format!("({})", vname),
+                        Type::Integer => format!("(BitVec.ofNat {} {})", width, vname),
+                        Type::String => format!("(BitVec.ofNat {} 0)", width),
                     }
                 } else if let Some((pty, pval)) = params.get(name) {
                     match pval {
                         Some(ast::Expr::Lit(ast::Lit::Int(li))) => render_lit_bitvec(width, li),
                         _ => match pty {
-                            ast::Type::Bits(_) | ast::Type::Integer => {
+                            Type::Bits(_) | Type::Integer => {
                                 format!("(BitVec.ofNat {} 0)", width)
                             }
                             _ => format!("(BitVec.ofNat {} 0)", width),
@@ -464,7 +465,7 @@ fn build_lean_behavior<'a>(
         .into_iter()
         .collect::<HashMap<_, _>>();
 
-    fn eval_expr(e: &ast::Expr, operands: &HashMap<String, ast::Type>) -> String {
+    fn eval_expr(e: &ast::Expr, operands: &HashMap<String, Type>) -> String {
         match e {
             ast::Expr::Lit(ast::Lit::Int(li)) => li.value().to_string(),
             ast::Expr::Lit(ast::Lit::Str(ls)) => format!("\"{}\"", ls.value()),
@@ -472,7 +473,7 @@ fn build_lean_behavior<'a>(
                 let name = id.name.to_lowercase();
                 if let Some(ty) = operands.get(&id.name) {
                     match ty {
-                        ast::Type::Struct(rc) => {
+                        Type::Struct(rc) => {
                             format!("(st.read_{} {})", rc.to_lowercase(), name)
                         }
                         _ => name,
@@ -538,7 +539,7 @@ fn build_lean_behavior<'a>(
 
     let emit_expr = |e: &ast::Expr| eval_expr(e, &operands);
     let emit_assign = |a: &ast::Assign, st_name: &str| {
-        if let Some(ast::Type::Struct(rc)) = operands.get(&a.dest) {
+        if let Some(Type::Struct(rc)) = operands.get(&a.dest) {
             Some(format!(
                 "({}.write_{} {} {})",
                 st_name,
