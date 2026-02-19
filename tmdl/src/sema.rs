@@ -3,6 +3,10 @@ use std::collections::{HashMap, HashSet};
 use chumsky::error::Rich;
 
 use crate::{Span, Type, ast};
+use crate::utils::{
+    resolve_effective_asm_for_instruction, resolve_effective_encoding_for_instruction,
+    resolve_template_chain,
+};
 
 type Diag = Rich<'static, String, Span>;
 
@@ -27,94 +31,63 @@ fn build_item_cache<'a>(files: &'a [ast::File]) -> HashMap<&'a str, &'a ast::Ite
         .collect::<HashMap<_, _>>()
 }
 
-// Checks that all ISA parents are defined and are also ISAs.
-fn check_isas(files: &[ast::File], item_cache: &HashMap<&str, &ast::Item>) -> Vec<(String, Diag)> {
-    fn check_isa_exists(
-        parent: &str,
-        file_name: String,
-        child: &ast::Isa,
-        item_cache: &HashMap<&str, &ast::Item>,
-    ) -> Option<(String, Diag)> {
-        let parent_item = item_cache.get(parent);
-        if let Some(parent_item) = parent_item {
-            if !matches!(parent_item, ast::Item::Isa(_)) {
-                Some((
-                    file_name,
-                    Rich::custom(
-                        child.span,
-                        format!(
-                            "Parent '{}' for ISA '{}' must also be an ISA",
-                            parent, child.name
-                        ),
-                    ),
-                ))
-            } else {
-                None
-            }
-        } else {
-            Some((
-                file_name,
-                Rich::custom(
-                    child.span,
-                    format!("Unknown parent '{}' for ISA '{}'", parent, child.name),
-                ),
-            ))
+fn isa_parents(requirement: &ast::IsaRequirement) -> Vec<&str> {
+    match requirement {
+        ast::IsaRequirement::Single(parent) => vec![parent.as_str()],
+        ast::IsaRequirement::All(parents) | ast::IsaRequirement::Any(parents) => {
+            parents.iter().map(String::as_str).collect()
         }
     }
+}
 
+fn encoding_value_name(expr: &ast::Expr) -> Option<&str> {
+    match expr {
+        ast::Expr::Ident(id) => Some(id.name.as_str()),
+        ast::Expr::Slice(slc) => match &*slc.base {
+            ast::Expr::Ident(id) => Some(id.name.as_str()),
+            _ => None,
+        },
+        ast::Expr::IndexAccess(idx) => match &*idx.base {
+            ast::Expr::Ident(id) => Some(id.name.as_str()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+// Checks that all ISA parents are defined and are also ISAs.
+fn check_isas(files: &[ast::File], item_cache: &HashMap<&str, &ast::Item>) -> Vec<(String, Diag)> {
     files
         .iter()
         .flat_map(|file| {
-            file.items
-                .iter()
-                .filter_map(|item| match item {
-                    ast::Item::Isa(isa) => {
-                        if let Some(reqs) = &isa.requires {
-                            match reqs {
-                                ast::IsaRequirement::Single(parent) => Some(
-                                    vec![check_isa_exists(
-                                        parent.as_str(),
-                                        file.file_name.clone(),
-                                        isa,
-                                        item_cache,
-                                    )]
-                                    .into_iter(),
+            file.isas()
+                .flat_map(|isa| {
+                    isa.requires
+                        .as_ref()
+                        .map(isa_parents)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter_map(|parent| match item_cache.get(parent) {
+                            None => Some((
+                                file.file_name.clone(),
+                                Rich::custom(
+                                    isa.span,
+                                    format!("Unknown parent '{}' for ISA '{}'", parent, isa.name),
                                 ),
-                                ast::IsaRequirement::All(isas) => Some(
-                                    isas.iter()
-                                        .map(|parent| {
-                                            check_isa_exists(
-                                                parent.as_str(),
-                                                file.file_name.clone(),
-                                                isa,
-                                                item_cache,
-                                            )
-                                        })
-                                        .collect::<Vec<_>>()
-                                        .into_iter(),
+                            )),
+                            Some(item) if !matches!(item, ast::Item::Isa(_)) => Some((
+                                file.file_name.clone(),
+                                Rich::custom(
+                                    isa.span,
+                                    format!(
+                                        "Parent '{}' for ISA '{}' must also be an ISA",
+                                        parent, isa.name
+                                    ),
                                 ),
-                                ast::IsaRequirement::Any(isas) => Some(
-                                    isas.iter()
-                                        .map(|parent| {
-                                            check_isa_exists(
-                                                parent.as_str(),
-                                                file.file_name.clone(),
-                                                isa,
-                                                item_cache,
-                                            )
-                                        })
-                                        .collect::<Vec<_>>()
-                                        .into_iter(),
-                                ),
-                            }
-                        } else {
-                            None
-                        }
-                    }
-                    _ => None,
+                            )),
+                            _ => None,
+                        })
                 })
-                .flatten()
-                .flatten()
         })
         .collect()
 }
@@ -123,28 +96,26 @@ fn check_templates(
     files: &[ast::File],
     item_cache: &HashMap<&str, &ast::Item>,
 ) -> Vec<(String, Diag)> {
-    let mut diags = vec![];
-
-    diags.extend(files.iter().flat_map(|f| {
-        f.templates()
-            .flat_map(|t| check_template_parents(t, item_cache, &f.file_name).into_iter())
-    }));
-
-    diags
+    files
+        .iter()
+        .flat_map(|f| {
+            f.templates()
+                .flat_map(|t| check_template_parents(t, item_cache, &f.file_name).into_iter())
+        })
+        .collect()
 }
 
 fn check_instructions(
     files: &[ast::File],
     item_cache: &HashMap<&str, &ast::Item>,
 ) -> Vec<(String, Diag)> {
-    let mut diags = vec![];
-
-    diags.extend(files.iter().flat_map(|f| {
-        f.instructions()
-            .flat_map(|i| check_instruction_consistent(i, item_cache, &f.file_name).into_iter())
-    }));
-
-    diags
+    files
+        .iter()
+        .flat_map(|f| {
+            f.instructions()
+                .flat_map(|i| check_instruction_consistent(i, item_cache, &f.file_name).into_iter())
+        })
+        .collect()
 }
 
 // Checks that all parent templates exist and are also templates.
@@ -154,18 +125,18 @@ fn check_template_parents(
     file_name: &str,
 ) -> Vec<(String, Diag)> {
     let mut diags = vec![];
-    let mut visited: HashSet<String> = HashSet::new();
-    visited.insert(template.name.clone());
-    let mut ancestor_params: HashSet<String> = HashSet::new();
+    let mut visited: HashSet<&str> = HashSet::new();
+    visited.insert(template.name.as_str());
+    let mut ancestor_params: HashSet<&str> = HashSet::new();
 
     let mut current = template;
 
     loop {
-        let Some(parent_name) = &current.parent_template else {
+        let Some(parent_name) = current.parent_template.as_deref() else {
             break;
         };
 
-        match item_cache.get(parent_name.as_str()).copied() {
+        match item_cache.get(parent_name).copied() {
             None => {
                 diags.push((
                     file_name.to_string(),
@@ -180,7 +151,7 @@ fn check_template_parents(
                 break;
             }
             Some(ast::Item::Template(parent_tmpl)) => {
-                if !visited.insert(parent_name.clone()) {
+                if !visited.insert(parent_name) {
                     diags.push((
                         file_name.to_string(),
                         Rich::custom(
@@ -190,9 +161,7 @@ fn check_template_parents(
                     ));
                     break;
                 }
-                for param_name in parent_tmpl.params.keys() {
-                    ancestor_params.insert(param_name.clone());
-                }
+                ancestor_params.extend(parent_tmpl.params.keys().map(String::as_str));
                 current = parent_tmpl;
             }
             Some(_) => {
@@ -212,7 +181,7 @@ fn check_template_parents(
     }
 
     for (param_name, (_ty, value)) in &template.params {
-        if ancestor_params.contains(param_name) && value.is_none() {
+        if ancestor_params.contains(param_name.as_str()) && value.is_none() {
             diags.push((
                 file_name.to_string(),
                 Rich::custom(
@@ -239,9 +208,8 @@ fn check_instruction_consistent(
 
     // Check parent template exists and is a template.
     if let Some(parent_name) = instruction.parent_template.as_ref().map(|n| n.as_str()) {
-        let parent_template = item_cache.get(parent_name);
-        if parent_template.is_none() {
-            diags.push((
+        match item_cache.get(parent_name).copied() {
+            None => diags.push((
                 file_name.to_string(),
                 Rich::custom(
                     instruction.span,
@@ -250,12 +218,8 @@ fn check_instruction_consistent(
                         parent_name, instruction.name
                     ),
                 ),
-            ));
-        }
-        if let Some(item) = parent_template
-            && !matches!(item, ast::Item::Template(_))
-        {
-            diags.push((
+            )),
+            Some(item) if !matches!(item, ast::Item::Template(_)) => diags.push((
                 file_name.to_string(),
                 Rich::custom(
                     instruction.span,
@@ -264,7 +228,8 @@ fn check_instruction_consistent(
                         parent_name, instruction.name
                     ),
                 ),
-            ));
+            )),
+            _ => {}
         }
     }
 
@@ -299,25 +264,7 @@ fn check_instruction_consistent(
         }
     }
 
-    // Collect the template chain (root-first), guarding against cycles already reported.
-    let mut chain: Vec<&ast::Template> = Vec::new();
-    {
-        let mut visited: HashSet<&str> = HashSet::new();
-        let mut current_parent = instruction.parent_template.as_deref();
-        while let Some(parent_name) = current_parent {
-            if !visited.insert(parent_name) {
-                break;
-            }
-            match item_cache.get(parent_name).copied() {
-                Some(ast::Item::Template(t)) => {
-                    chain.push(t);
-                    current_parent = t.parent_template.as_deref();
-                }
-                _ => break,
-            }
-        }
-        chain.reverse(); // Root-first.
-    }
+    let chain = resolve_template_chain(instruction, item_cache);
 
     // Build params_cache: root-first insertion means later (closer) definitions win.
     let mut params_cache: HashMap<&str, (Type, Option<ast::Expr>)> = HashMap::new();
@@ -357,16 +304,7 @@ fn check_instruction_consistent(
     }
 
     // Encoding must exist somewhere in the chain or instruction.
-    let effective_encoding: &[ast::EncodingArm] = if !instruction.encoding.is_empty() {
-        &instruction.encoding
-    } else {
-        chain
-            .iter()
-            .rev()
-            .find(|t| !t.encoding.is_empty())
-            .map(|t| t.encoding.as_slice())
-            .unwrap_or(&[])
-    };
+    let effective_encoding = resolve_effective_encoding_for_instruction(instruction, item_cache);
     if effective_encoding.is_empty() {
         diags.push((
             file_name.to_string(),
@@ -386,10 +324,7 @@ fn check_instruction_consistent(
     }
 
     // Asm must exist somewhere in the chain or instruction.
-    let effective_asm = instruction
-        .asm
-        .as_ref()
-        .or_else(|| chain.iter().rev().find_map(|t| t.asm.as_ref()));
+    let effective_asm = resolve_effective_asm_for_instruction(instruction, item_cache);
     if effective_asm.is_none() {
         diags.push((
             file_name.to_string(),
@@ -466,95 +401,43 @@ fn check_encoding(
     let mut diags = vec![];
 
     let known = |name: &str| params_cache.contains_key(name) || operands_cache.contains_key(name);
+    let invalid_value = |span: Span| {
+        (
+            file_name.to_string(),
+            Rich::custom(
+                span,
+                format!(
+                    "Encoding value in instruction '{}' must be a literal, \
+                     parameter, or operand reference",
+                    instruction.name
+                ),
+            ),
+        )
+    };
+    let unknown_value = |name: &str, span: Span| {
+        (
+            file_name.to_string(),
+            Rich::custom(
+                span,
+                format!(
+                    "Unknown '{}' in encoding of instruction '{}': \
+                     not a parameter or operand",
+                    name, instruction.name
+                ),
+            ),
+        )
+    };
 
     for arm in encoding {
-        match &arm.value {
-            ast::Expr::Lit(_) => {}
-            ast::Expr::Ident(id) => {
-                if !known(&id.name) {
-                    diags.push((
-                        file_name.to_string(),
-                        Rich::custom(
-                            arm.span,
-                            format!(
-                                "Unknown '{}' in encoding of instruction '{}': \
-                                 not a parameter or operand",
-                                id.name, instruction.name
-                            ),
-                        ),
-                    ));
-                }
-            }
-            ast::Expr::Slice(slc) => {
-                if let ast::Expr::Ident(base) = &*slc.base {
-                    if !known(&base.name) {
-                        diags.push((
-                            file_name.to_string(),
-                            Rich::custom(
-                                arm.span,
-                                format!(
-                                    "Unknown '{}' in encoding of instruction '{}': \
-                                     not a parameter or operand",
-                                    base.name, instruction.name
-                                ),
-                            ),
-                        ));
-                    }
-                } else {
-                    diags.push((
-                        file_name.to_string(),
-                        Rich::custom(
-                            arm.span,
-                            format!(
-                                "Encoding value in instruction '{}' must be a literal, \
-                                 parameter, or operand reference",
-                                instruction.name
-                            ),
-                        ),
-                    ));
-                }
-            }
-            ast::Expr::IndexAccess(idx) => {
-                if let ast::Expr::Ident(base) = &*idx.base {
-                    if !known(&base.name) {
-                        diags.push((
-                            file_name.to_string(),
-                            Rich::custom(
-                                arm.span,
-                                format!(
-                                    "Unknown '{}' in encoding of instruction '{}': \
-                                     not a parameter or operand",
-                                    base.name, instruction.name
-                                ),
-                            ),
-                        ));
-                    }
-                } else {
-                    diags.push((
-                        file_name.to_string(),
-                        Rich::custom(
-                            arm.span,
-                            format!(
-                                "Encoding value in instruction '{}' must be a literal, \
-                                 parameter, or operand reference",
-                                instruction.name
-                            ),
-                        ),
-                    ));
-                }
-            }
-            _ => {
-                diags.push((
-                    file_name.to_string(),
-                    Rich::custom(
-                        arm.span,
-                        format!(
-                            "Encoding value in instruction '{}' must be a literal, \
-                             parameter, or operand reference",
-                            instruction.name
-                        ),
-                    ),
-                ));
+        if let ast::Expr::Lit(_) = arm.value {
+            continue;
+        }
+
+        match encoding_value_name(&arm.value) {
+            Some(name) if !known(name) => diags.push(unknown_value(name, arm.span)),
+            Some(_) => {}
+            None => {
+                diags.push(invalid_value(arm.span));
             }
         }
     }

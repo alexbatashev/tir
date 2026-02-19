@@ -1,5 +1,5 @@
 use core::fmt;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::collections::hash_map::{
     IntoIter as HashMapIntoIter, Iter as HashMapIter, IterMut as HashMapIterMut,
 };
@@ -102,82 +102,83 @@ pub fn resolve_operands_for_instruction<'a>(
     inst: &'a ast::Instruction,
     item_cache: &HashMap<&'a str, &'a ast::Item>,
 ) -> Vec<(String, Type)> {
-    let mut result = Vec::new();
+    resolve_template_chain(inst, item_cache)
+        .into_iter()
+        .flat_map(|t| t.operands.iter())
+        .map(|(name, ty)| (name.clone(), ty.clone()))
+        .chain(inst.operands.iter().map(|(name, ty)| (name.clone(), ty.clone())))
+        .collect()
+}
 
-    fn collect_from_template<'a>(
-        name: &str,
-        cache: &HashMap<&'a str, &'a ast::Item>,
-        acc: &mut Vec<(String, Type)>,
-    ) {
-        if let Some(ast::Item::Template(t)) = cache.get(name) {
-            if let Some(parent) = &t.parent_template {
-                collect_from_template(parent, cache, acc);
+pub fn resolve_template_chain<'a>(
+    inst: &'a ast::Instruction,
+    item_cache: &HashMap<&'a str, &'a ast::Item>,
+) -> Vec<&'a ast::Template> {
+    let mut chain = Vec::new();
+    let mut visited = HashSet::new();
+    let mut current_parent = inst.parent_template.as_deref();
+
+    while let Some(parent_name) = current_parent {
+        if !visited.insert(parent_name) {
+            break;
+        }
+        match item_cache.get(parent_name).copied() {
+            Some(ast::Item::Template(t)) => {
+                chain.push(t);
+                current_parent = t.parent_template.as_deref();
             }
-            for (k, v) in &t.operands {
-                acc.push((k.clone(), v.clone()));
-            }
+            _ => break,
         }
     }
 
-    if let Some(p) = &inst.parent_template {
-        collect_from_template(p, item_cache, &mut result);
+    chain.reverse();
+    chain
+}
+
+pub fn resolve_effective_encoding_for_instruction<'a>(
+    inst: &'a ast::Instruction,
+    item_cache: &HashMap<&'a str, &'a ast::Item>,
+) -> &'a [ast::EncodingArm] {
+    if !inst.encoding.is_empty() {
+        return &inst.encoding;
     }
-    for (k, v) in &inst.operands {
-        result.push((k.clone(), v.clone()));
-    }
-    result
+    resolve_template_chain(inst, item_cache)
+        .into_iter()
+        .rev()
+        .find(|t| !t.encoding.is_empty())
+        .map(|t| t.encoding.as_slice())
+        .unwrap_or(&[])
+}
+
+pub fn resolve_effective_asm_for_instruction<'a>(
+    inst: &'a ast::Instruction,
+    item_cache: &HashMap<&'a str, &'a ast::Item>,
+) -> Option<&'a ast::Expr> {
+    inst.asm.as_ref().or_else(|| {
+        resolve_template_chain(inst, item_cache)
+            .into_iter()
+            .rev()
+            .find_map(|t| t.asm.as_ref())
+    })
 }
 
 pub fn get_encoding_arms<'a>(
     instruction: &'a Instruction,
     item_cache: &HashMap<&'a str, &'a Item>,
 ) -> Vec<ast::EncodingArm> {
-    if !instruction.encoding.is_empty() {
-        instruction.encoding.clone()
-    } else {
-        let mut cur = instruction.parent_template.as_ref();
-        while let Some(name) = cur {
-            if let Some(ast::Item::Template(t)) = item_cache.get(name.as_str()) {
-                if !t.encoding.is_empty() {
-                    return t.encoding.clone();
-                }
-                cur = t.parent_template.as_ref();
-            } else {
-                break;
-            }
-        }
-        Vec::new()
-    }
+    resolve_effective_encoding_for_instruction(instruction, item_cache).to_vec()
 }
 
 pub fn resolve_params_for_instruction<'a>(
     inst: &'a ast::Instruction,
     cache: &HashMap<&'a str, &'a ast::Item>,
 ) -> HashMap<String, (Type, Option<ast::Expr>)> {
-    let mut result: HashMap<String, (Type, Option<ast::Expr>)> = HashMap::new();
-
-    fn collect_from_template<'a>(
-        name: &str,
-        cache: &HashMap<&'a str, &'a ast::Item>,
-        acc: &mut HashMap<String, (Type, Option<ast::Expr>)>,
-    ) {
-        if let Some(ast::Item::Template(t)) = cache.get(name) {
-            if let Some(parent) = &t.parent_template {
-                collect_from_template(parent, cache, acc);
-            }
-            for (k, v) in &t.params {
-                acc.insert(k.clone(), v.clone());
-            }
-        }
-    }
-
-    if let Some(p) = &inst.parent_template {
-        collect_from_template(p, cache, &mut result);
-    }
-    for (k, v) in &inst.params {
-        result.insert(k.clone(), v.clone());
-    }
-    result
+    resolve_template_chain(inst, cache)
+        .into_iter()
+        .flat_map(|t| t.params.iter())
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .chain(inst.params.iter().map(|(name, value)| (name.clone(), value.clone())))
+        .collect()
 }
 
 pub fn parse_literal_value(lit: &ast::LitInt) -> u64 {

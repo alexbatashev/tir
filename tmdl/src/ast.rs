@@ -51,6 +51,13 @@ pub struct RegisterClass {
     pub span: Span,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisterNameTables {
+    pub parse_names: Vec<(String, u16)>,
+    pub isa_names: Vec<(u16, String)>,
+    pub abi_names: Vec<(u16, String)>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum IsaRequirement {
     Single(String),
@@ -359,6 +366,61 @@ impl Serialize for Type {
 }
 
 impl RegisterClass {
+    pub fn register_name_tables(&self) -> RegisterNameTables {
+        let mut entries = self
+            .resolve_registers()
+            .map(|reg| {
+                (
+                    parse_trailing_index(&reg.name).unwrap_or(u16::MAX),
+                    reg.name,
+                    reg.alias,
+                )
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|(idx, _, _)| *idx);
+
+        let mut next_alias_index = HashMap::new();
+        entries.into_iter().fold(
+            RegisterNameTables {
+                parse_names: Vec::new(),
+                isa_names: Vec::new(),
+                abi_names: Vec::new(),
+            },
+            |mut out, (idx, isa_name, alias)| {
+                if idx != u16::MAX {
+                    out.parse_names.push((isa_name.clone(), idx));
+                    out.isa_names.push((idx, isa_name));
+                }
+
+                if let Some(alias_name) = alias {
+                    let full_alias = if alias_name.contains("{}") {
+                        let stem = alias_name.replace("{}", "");
+                        let counter = next_alias_index.entry(stem.clone()).or_insert(0);
+                        let alias = format!("{}{}", stem, *counter);
+                        *counter += 1;
+                        alias
+                    } else {
+                        alias_name
+                    };
+                    out.parse_names.push((full_alias.clone(), idx));
+                    out.abi_names.push((idx, full_alias));
+                }
+
+                out
+            },
+        )
+    }
+
+    pub fn hardwired_zero_register_index(&self) -> Option<u16> {
+        self.resolve_registers()
+            .find_map(|reg| {
+                reg.traits
+                    .iter()
+                    .any(|t| matches!(t, RegisterTrait::HardwiredZero))
+                    .then(|| parse_trailing_index(&reg.name).unwrap_or(u16::MAX))
+            })
+    }
+
     pub fn resolve_registers(&self) -> impl Iterator<Item = Register> {
         let mut registers = Vec::new();
 

@@ -7,8 +7,8 @@ use crate::Type;
 use crate::ast;
 use crate::error::TMDLError;
 use crate::utils::{
-    get_encoding_arms, parse_literal_value, resolve_operands_for_instruction,
-    resolve_params_for_instruction,
+    get_encoding_arms, parse_literal_value, resolve_effective_asm_for_instruction,
+    resolve_operands_for_instruction, resolve_params_for_instruction,
 };
 
 struct InstructionSemantics {
@@ -95,8 +95,9 @@ fn emit_instructions<'a>(
         let name_ident = format_ident!("{}Op", &inst.name);
         let builder_ident = format_ident!("{}OpBuilder", &inst.name);
         let mnemonic = resolve_string(inst.params.get("MNEMONIC").unwrap().1.as_ref().unwrap());
-        let mnemonic_lit =
-            proc_macro2::Literal::string(&mnemonic.clone().unwrap_or_else(|| "".to_string()));
+        let fallback_name = inst.name.to_lowercase();
+        let mnemonic_name = mnemonic.as_deref().unwrap_or(&fallback_name);
+        let mnemonic_lit = proc_macro2::Literal::string(mnemonic.as_deref().unwrap_or(""));
         let ops = resolve_operands_for_instruction(inst, item_cache);
         let ops_map = ops.clone().into_iter().collect::<HashMap<_, _>>();
         let defined_register_operands = infer_defined_register_operands(&inst.behavior, &ops);
@@ -147,11 +148,7 @@ fn emit_instructions<'a>(
             }
         });
 
-        let op_display_name = format!(
-            "{}.{}",
-            dialect,
-            mnemonic.clone().unwrap_or_else(|| inst.name.to_lowercase())
-        );
+        let op_display_name = format!("{}.{}", dialect, mnemonic_name);
         let op_display_name_lit = proc_macro2::Literal::string(&op_display_name);
         let mut register_attr_print_arms = Vec::new();
         for (op_name, op_ty) in &ops {
@@ -333,9 +330,7 @@ fn emit_instructions<'a>(
             .unwrap_or(32);
         let width_bytes_lit =
             proc_macro2::Literal::u8_unsuffixed(((encoding_bits as u32 + 7) / 8) as u8);
-        let op_name_lit = proc_macro2::Literal::string(
-            &mnemonic.clone().unwrap_or_else(|| inst.name.to_lowercase()),
-        );
+        let op_name_lit = proc_macro2::Literal::string(mnemonic_name);
 
         let execute_body = if let Some(rhs) =
             resolve_behavior_rhs(inst, &ops, &defined_register_operands)
@@ -639,58 +634,29 @@ fn emit_register_parsers_and_printers(
         let rc_name = &rc.name;
         let fn_name = format_ident!("parse_{}", rc_name.to_lowercase());
         let print_fn_name = format_ident!("print_{}", rc_name.to_lowercase());
+        let tables = rc.register_name_tables();
 
-        let mut entries: Vec<(u16, String, Option<String>)> = Vec::new();
-        for reg in rc.resolve_registers() {
-            if let Some(idx) = parse_trailing_index(&reg.name) {
-                entries.push((idx, reg.name, reg.alias));
-            } else {
-                entries.push((u16::MAX, reg.name, reg.alias));
-            }
-        }
-        entries.sort_by_key(|(i, _, _)| *i);
-
-        let mut next_alias_index: HashMap<String, u16> = HashMap::new();
-        let mut match_arms = Vec::new();
-        let mut isa_names: Vec<(u16, String)> = Vec::new();
-        let mut abi_names: Vec<(u16, String)> = Vec::new();
-
-        for (idx, isa_name, alias) in entries {
-            if idx != u16::MAX {
-                let lit_isa = isa_name.clone();
-                match_arms.push(quote! { #lit_isa => Some(#idx as u16), });
-                isa_names.push((idx, lit_isa));
-            }
-            if let Some(a) = alias {
-                if let Some(stem) = alias_stem(&a) {
-                    let counter = next_alias_index.entry(stem.clone()).or_insert(0);
-                    let alias_full = format!("{}{}", stem, *counter);
-                    *counter += 1;
-                    match_arms.push(quote! { #alias_full => Some(#idx as u16), });
-                    abi_names.push((idx, alias_full));
-                } else {
-                    match_arms.push(quote! { #a => Some(#idx as u16), });
-                    abi_names.push((idx, a));
-                }
-            }
-        }
-
-        let abi_match_arms = {
-            let mut v = Vec::new();
-            for (idx, name) in &abi_names {
+        let match_arms = tables
+            .parse_names
+            .iter()
+            .map(|(name, idx)| quote! { #name => Some(#idx as u16), })
+            .collect::<Vec<_>>();
+        let abi_match_arms = tables
+            .abi_names
+            .iter()
+            .map(|(idx, name)| {
                 let idx_lit = proc_macro2::Literal::u16_unsuffixed(*idx);
-                v.push(quote! { #idx_lit => return Some(#name.to_string()), });
-            }
-            quote! { #(#v)* }
-        };
-        let isa_match_arms = {
-            let mut v = Vec::new();
-            for (idx, name) in &isa_names {
+                quote! { #idx_lit => return Some(#name.to_string()), }
+            })
+            .collect::<Vec<_>>();
+        let isa_match_arms = tables
+            .isa_names
+            .iter()
+            .map(|(idx, name)| {
                 let idx_lit = proc_macro2::Literal::u16_unsuffixed(*idx);
-                v.push(quote! { #idx_lit => return Some(#name.to_string()), });
-            }
-            quote! { #(#v)* }
-        };
+                quote! { #idx_lit => return Some(#name.to_string()), }
+            })
+            .collect::<Vec<_>>();
 
         fns.push(quote! {
             fn #fn_name<'src>(parser: &mut tir::parse::tokens::Parser<'src, tir_be_common::Token<'src>>) -> Result<u16, ()> {
@@ -705,9 +671,9 @@ fn emit_register_parsers_and_printers(
             }
             fn #print_fn_name(idx: u16, prefer_abi: bool) -> Option<String> {
                 if prefer_abi {
-                    match idx { #abi_match_arms _ => {} }
+                    match idx { #(#abi_match_arms)* _ => {} }
                 }
-                match idx { #isa_match_arms _ => None }
+                match idx { #(#isa_match_arms)* _ => None }
             }
         });
     }
@@ -718,20 +684,11 @@ fn emit_register_parsers_and_printers(
 fn emit_register_trait_helpers(files: &[ast::File]) -> Result<proc_macro2::TokenStream, TMDLError> {
     let mut hardwired_arms = Vec::new();
 
-    for file in files {
-        for rc in file.register_classes() {
-            let class_lit = proc_macro2::Literal::string(&rc.name);
-            for reg in rc.resolve_registers() {
-                if reg
-                    .traits
-                    .iter()
-                    .any(|t| matches!(t, ast::RegisterTrait::HardwiredZero))
-                {
-                    let idx = parse_trailing_index(&reg.name).unwrap_or(u16::MAX);
-                    let idx_lit = proc_macro2::Literal::u16_unsuffixed(idx);
-                    hardwired_arms.push(quote! { (#class_lit, #idx_lit) => true, });
-                }
-            }
+    for rc in files.iter().flat_map(|f| f.register_classes()) {
+        let class_lit = proc_macro2::Literal::string(&rc.name);
+        if let Some(idx) = rc.hardwired_zero_register_index() {
+            let idx_lit = proc_macro2::Literal::u16_unsuffixed(idx);
+            hardwired_arms.push(quote! { (#class_lit, #idx_lit) => true, });
         }
     }
 
@@ -906,25 +863,7 @@ fn resolve_asm_template_for_instruction<'a>(
     inst: &'a ast::Instruction,
     item_cache: &HashMap<&'a str, &'a ast::Item>,
 ) -> Option<String> {
-    if let Some(expr) = &inst.asm {
-        if let Some(s) = resolve_string(expr) {
-            return Some(s);
-        }
-    }
-    let mut cur = inst.parent_template.as_ref();
-    while let Some(name) = cur {
-        if let Some(ast::Item::Template(t)) = item_cache.get(name.as_str()) {
-            if let Some(expr) = &t.asm {
-                if let Some(s) = resolve_string(expr) {
-                    return Some(s);
-                }
-            }
-            cur = t.parent_template.as_ref();
-        } else {
-            break;
-        }
-    }
-    None
+    resolve_effective_asm_for_instruction(inst, item_cache).and_then(resolve_string)
 }
 
 // Actions derived from a simple asm template string.
@@ -1075,29 +1014,5 @@ fn sem_expr_complexity(expr: &tir::sem_expr::Expr) -> u32 {
         | Expr::Or(lhs, rhs)
         | Expr::Xor(lhs, rhs) => 1 + sem_expr_complexity(lhs) + sem_expr_complexity(rhs),
         _ => 2,
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Register name parsing helpers
-// ---------------------------------------------------------------------------
-
-fn parse_trailing_index(s: &str) -> Option<u16> {
-    let mut i = s.len();
-    while i > 0 && s.as_bytes()[i - 1].is_ascii_digit() {
-        i -= 1;
-    }
-    if i < s.len() {
-        s[i..].parse::<u16>().ok()
-    } else {
-        None
-    }
-}
-
-fn alias_stem(pat: &str) -> Option<String> {
-    if pat.contains("{}") {
-        Some(pat.replace("{}", ""))
-    } else {
-        None
     }
 }

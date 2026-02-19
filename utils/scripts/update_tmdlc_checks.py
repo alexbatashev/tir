@@ -1,6 +1,27 @@
 import subprocess
 import argparse
 import os
+import re
+
+
+ABS_TMDL_PATH_RE = re.compile(r"/[^\s,\"']*\.tmdl")
+
+
+def _stable_path_regex(path):
+    candidate = path.replace("\\", "/")
+    script_abs = os.path.abspath(__file__).replace("\\", "/")
+    common = os.path.commonpath([os.path.abspath(path), script_abs]).replace("\\", "/")
+
+    if common and common != "/" and candidate.startswith(common):
+        suffix = candidate[len(common):]
+        if suffix.startswith("/"):
+            return "{{.*}}" + suffix
+
+    return candidate
+
+
+def _normalize_paths_for_check(line):
+    return ABS_TMDL_PATH_RE.sub(lambda m: _stable_path_regex(m.group(0)), line)
 
 
 def process_file(input_filename):
@@ -32,6 +53,7 @@ def process_file(input_filename):
 
     for line in output.splitlines():
         string = line.decode("utf-8")
+        string = _normalize_paths_for_check(string)
         if string.startswith("#"):
             string = string[1:]
         if string.strip() == '' or "#" in string:

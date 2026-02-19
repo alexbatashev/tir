@@ -35,19 +35,21 @@ pub fn generate_smtlib<'a>(
 // ---------------------------------------------------------------------------
 
 fn build_state(files: &[ast::File], output: &mut Box<dyn Write>) -> Result<(), TMDLError> {
-    let reg_classes = files
+    let reg_class_names = files
         .iter()
-        .flat_map(|f| f.register_classes().cloned())
+        .flat_map(|f| f.register_classes())
+        .map(|rc| rc.name.to_lowercase())
         .collect::<Vec<_>>();
 
-    let mut fields = Vec::new();
-    for rc in &reg_classes {
-        let name = rc.name.to_lowercase();
-        fields.push(format!(
+    let mut fields = reg_class_names
+        .iter()
+        .map(|name| {
+            format!(
             "({} (Array (_ BitVec {}) (_ BitVec {})))",
             name, REG_INDEX_WIDTH, REG_VALUE_WIDTH
-        ));
-    }
+            )
+        })
+        .collect::<Vec<_>>();
     fields.push(format!("(pc (_ BitVec {}))", REG_VALUE_WIDTH));
 
     writeln!(
@@ -56,8 +58,7 @@ fn build_state(files: &[ast::File], output: &mut Box<dyn Write>) -> Result<(), T
         fields.join(" ")
     )?;
 
-    for rc in &reg_classes {
-        let name = rc.name.to_lowercase();
+    for name in &reg_class_names {
         writeln!(
             output,
             "\n(define-fun read_{name} ((st TMDLState) (r (_ BitVec {idx_width}))) (_ BitVec {val_width})\n  (ite (= r (_ bv0 {idx_width}))\n    (_ bv0 {val_width})\n    (select ({name} st) r)))",
@@ -65,9 +66,8 @@ fn build_state(files: &[ast::File], output: &mut Box<dyn Write>) -> Result<(), T
             val_width = REG_VALUE_WIDTH
         )?;
 
-        let mut fields: Vec<String> = Vec::new();
-        for rc2 in &reg_classes {
-            let n2 = rc2.name.to_lowercase();
+        let mut fields = Vec::new();
+        for n2 in &reg_class_names {
             if n2 == name {
                 fields.push(format!("(store ({} st) r val)", n2,));
             } else {
@@ -84,11 +84,10 @@ fn build_state(files: &[ast::File], output: &mut Box<dyn Write>) -> Result<(), T
         )?;
     }
 
-    let mut fields: Vec<String> = Vec::new();
-    for rc in &reg_classes {
-        let name = rc.name.to_lowercase();
-        fields.push(format!("({} st)", name));
-    }
+    let mut fields = reg_class_names
+        .iter()
+        .map(|name| format!("({} st)", name))
+        .collect::<Vec<_>>();
     fields.push("val".to_string());
     writeln!(
         output,
@@ -110,50 +109,45 @@ fn build_instructions<'a>(
     files: &'a [ast::File],
     output: &mut Box<dyn Write>,
 ) -> Result<(), TMDLError> {
-    let instructions = files
-        .iter()
-        .flat_map(|f| f.instructions())
-        .collect::<Vec<_>>();
-
     let mut instruction_variants = vec![];
     let mut encode_arms = vec![];
     let mut execute_arms = vec![];
 
-    for i in &instructions {
+    for i in files.iter().flat_map(|f| f.instructions()) {
         let name = i.name.to_lowercase();
         let uppercase_name = name.to_uppercase();
 
         let operands = resolve_operands_for_instruction(i, item_cache);
         let smt_operands = build_smt_operands(&operands);
-        let smt_operands_ctor = smt_operands.join(" ");
-        let operand_params = if smt_operands.is_empty() {
+        let smt_operands_joined = smt_operands.join(" ");
+        let operand_params = if smt_operands_joined.is_empty() {
             "()".to_string()
         } else {
-            format!("({})", smt_operands.join(" "))
+            format!("({smt_operands_joined})")
         };
-        let execute_params = if smt_operands.is_empty() {
+        let execute_params = if smt_operands_joined.is_empty() {
             "((st TMDLState))".to_string()
         } else {
-            format!("((st TMDLState) {})", smt_operands.join(" "))
+            format!("((st TMDLState) {smt_operands_joined})")
         };
         let smt_encoding = build_smt_encoding(item_cache, i, &operands);
         let smt_behavior = build_smt_behavior(item_cache, i, &operands);
 
-        let operand_list = operands
+        let operand_names = operands
             .iter()
             .map(|(k, _v)| k.to_lowercase())
-            .collect::<Vec<_>>()
-            .join(" ");
+            .collect::<Vec<_>>();
+        let operand_list = operand_names.join(" ");
 
         writeln!(
             output,
             "\n(define-fun encode_{name} {operand_params} (_ BitVec 32)\n  {smt_encoding})\n\n(define-fun execute_{name} {execute_params} TMDLState\n  {smt_behavior})"
         )?;
 
-        if smt_operands_ctor.is_empty() {
+        if smt_operands_joined.is_empty() {
             instruction_variants.push(format!("({uppercase_name})"));
         } else {
-            instruction_variants.push(format!("({uppercase_name} {smt_operands_ctor})"));
+            instruction_variants.push(format!("({uppercase_name} {smt_operands_joined})"));
         }
 
         if operand_list.is_empty() {
@@ -272,13 +266,10 @@ fn build_smt_encoding<'a>(
 
     pieces.sort_by(|a, b| b.0.cmp(&a.0));
 
-    let mut iter = pieces.iter().map(|(_, p)| p.clone());
-    let mut out = iter.next().unwrap_or_else(|| "(_ bv0 32)".to_string());
-    for p in iter {
-        out = format!("(concat {} {})", out, p);
-    }
-
-    out
+    let mut iter = pieces.into_iter().map(|(_, piece)| piece);
+    iter.next()
+        .map(|first| iter.fold(first, |acc, piece| format!("(concat {} {})", acc, piece)))
+        .unwrap_or_else(|| "(_ bv0 32)".to_string())
 }
 
 // ---------------------------------------------------------------------------

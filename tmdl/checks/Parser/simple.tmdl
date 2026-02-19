@@ -367,5 +367,5 @@
 // CHECK-NEXT:             },
 // CHECK-NEXT:         ),
 // CHECK-NEXT:     ],
-// CHECK-NEXT:     file_name: "/home/alex/Projects/frontiers/tir/tmdl/checks/Parser/../Inputs/simple.tmdl",
+// CHECK-NEXT:     file_name: "{{.*}}/tmdl/checks/Parser/../Inputs/simple.tmdl",
 // CHECK-NEXT: }
