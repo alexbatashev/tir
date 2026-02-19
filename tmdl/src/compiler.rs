@@ -240,11 +240,21 @@ impl Compiler {
         match &self.action {
             Action::EmitRust => {
                 let output: Box<dyn Write> = self.create_output_writer()?;
-                generate_rust(self.dialect.as_ref().unwrap(), &parsed_files, &item_cache, output)?
+                generate_rust(
+                    self.dialect.as_ref().unwrap(),
+                    &parsed_files,
+                    &item_cache,
+                    output,
+                )?
             }
             Action::EmitSmtlib => {
                 let writer: Box<dyn Write> = self.create_output_writer()?;
-                generate_smtlib(self.dialect.as_ref().unwrap(), &parsed_files, &item_cache, writer)?;
+                generate_smtlib(
+                    self.dialect.as_ref().unwrap(),
+                    &parsed_files,
+                    &item_cache,
+                    writer,
+                )?;
             }
             _ => unreachable!("Only complex actions should use this path"),
         }

@@ -1,4 +1,3 @@
 [suite]
 name = "TMDL Compiler checks"
-enabled = false
 glob = ["**/*.tmdl", "!Inputs/**/*"]

@@ -1,3 +1,4 @@
+use crate::utils::StableHashMap;
 use crate::{Span, Type};
 use serde::Serialize;
 use serde::ser::{SerializeStruct, Serializer};
@@ -44,7 +45,7 @@ pub struct RegisterClass {
     pub name: String,
     pub for_isas: Vec<String>,
     #[serde(serialize_with = "serialize_params")]
-    pub parameters: HashMap<String, (Type, Option<Expr>)>,
+    pub parameters: StableHashMap<String, (Type, Option<Expr>)>,
     pub registers: Vec<RegisterDef>,
     #[serde(skip_serializing)]
     pub span: Span,
@@ -62,7 +63,7 @@ pub struct Isa {
     pub name: String,
     pub requires: Option<IsaRequirement>,
     #[serde(serialize_with = "serialize_params")]
-    pub parameters: HashMap<String, (Type, Option<Expr>)>,
+    pub parameters: StableHashMap<String, (Type, Option<Expr>)>,
     #[serde(skip_serializing)]
     pub span: Span,
 }
@@ -73,7 +74,7 @@ pub struct Template {
     pub for_isas: Vec<String>,
     pub parent_template: Option<String>,
     #[serde(serialize_with = "serialize_params")]
-    pub params: HashMap<String, (Type, Option<Expr>)>,
+    pub params: StableHashMap<String, (Type, Option<Expr>)>,
     pub operands: Vec<(String, Type)>,
     pub encoding: Vec<EncodingArm>,
     pub asm: Option<Expr>,
@@ -87,7 +88,7 @@ pub struct Instruction {
     pub for_isas: Vec<String>,
     pub parent_template: Option<String>,
     #[serde(serialize_with = "serialize_params")]
-    pub params: HashMap<String, (Type, Option<Expr>)>,
+    pub params: StableHashMap<String, (Type, Option<Expr>)>,
     pub operands: Vec<(String, Type)>,
     pub encoding: Vec<EncodingArm>,
     pub asm: Option<Expr>,
@@ -403,18 +404,15 @@ fn serialize_params<S>(
 where
     S: Serializer,
 {
-    // Make output deterministic for tests by sorting keys.
-    let mut entries: Vec<_> = params.iter().collect();
-    entries.sort_by(|a, b| a.0.cmp(b.0));
-
-    let mapped: Vec<ParamRef<'_>> = entries
-        .into_iter()
+    let mut mapped: Vec<ParamRef<'_>> = params
+        .iter()
         .map(|(name, (ty, val))| ParamRef {
             name,
             ty,
             value: val.as_ref(),
         })
         .collect();
+    mapped.sort_by_key(|x| x.name);
 
     mapped.serialize(serializer)
 }

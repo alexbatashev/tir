@@ -1,7 +1,102 @@
+use core::fmt;
 use std::collections::HashMap;
+use std::collections::hash_map::{
+    IntoIter as HashMapIntoIter, Iter as HashMapIter, IterMut as HashMapIterMut,
+};
+use std::hash::Hash;
+use std::ops::{Deref, DerefMut};
+
+use chumsky::container::Container;
 
 use crate::Type;
 use crate::ast::{self, Instruction, Item};
+
+#[derive(PartialEq, Clone)]
+pub struct StableHashMap<K: Eq + Hash, V: PartialEq>(HashMap<K, V>);
+
+impl<K: Eq + Hash, V: PartialEq> Default for StableHashMap<K, V> {
+    fn default() -> Self {
+        Self(HashMap::new())
+    }
+}
+
+impl<K: Eq + Hash, V: PartialEq> Deref for StableHashMap<K, V> {
+    type Target = HashMap<K, V>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<K: Eq + Hash, V: PartialEq> DerefMut for StableHashMap<K, V> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl<K: Eq + Hash, V: PartialEq> fmt::Debug for StableHashMap<K, V>
+where
+    K: Ord + fmt::Debug,
+    V: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut entries: Vec<_> = self.0.iter().collect();
+        entries.sort_by_key(|(k, _)| *k);
+        f.debug_map().entries(entries).finish()
+    }
+}
+
+impl<K: Eq + Hash, V: PartialEq> Into<StableHashMap<K, V>> for HashMap<K, V> {
+    fn into(self) -> StableHashMap<K, V> {
+        StableHashMap(self)
+    }
+}
+
+impl<K: Eq + Hash, V: PartialEq> FromIterator<(K, V)> for StableHashMap<K, V>
+where
+    K: Eq + Hash,
+{
+    fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
+        Self(HashMap::from_iter(iter))
+    }
+}
+
+impl<K: Eq + Hash, V: PartialEq> Container<(K, V)> for StableHashMap<K, V> {
+    fn push(&mut self, item: (K, V)) {
+        self.0.push(item)
+    }
+
+    fn with_capacity(n: usize) -> Self {
+        Self(HashMap::with_capacity(n))
+    }
+}
+
+impl<K: Eq + Hash, V: PartialEq> IntoIterator for StableHashMap<K, V> {
+    type Item = (K, V);
+    type IntoIter = HashMapIntoIter<K, V>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl<'a, K: Eq + Hash, V: PartialEq> IntoIterator for &'a StableHashMap<K, V> {
+    type Item = (&'a K, &'a V);
+    type IntoIter = HashMapIter<'a, K, V>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl<'a, K: Eq + Hash, V: PartialEq> IntoIterator for &'a mut StableHashMap<K, V> {
+    type Item = (&'a K, &'a mut V);
+    type IntoIter = HashMapIterMut<'a, K, V>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter_mut()
+    }
+}
 
 pub fn resolve_operands_for_instruction<'a>(
     inst: &'a ast::Instruction,

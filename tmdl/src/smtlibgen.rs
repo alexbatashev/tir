@@ -7,8 +7,7 @@ use crate::error::TMDLError;
 use crate::sem_expr_conv::{SymbolInfo, convert_to_sem_expr};
 use crate::sem_expr_state;
 use crate::utils::{
-    get_encoding_arms, parse_literal_value, resolve_operands_for_instruction,
-    resolve_params_for_instruction,
+    get_encoding_arms, resolve_operands_for_instruction, resolve_params_for_instruction,
 };
 use tir::sem_expr::smtlib as sem_smtlib;
 
@@ -111,7 +110,10 @@ fn build_instructions<'a>(
     files: &'a [ast::File],
     output: &mut Box<dyn Write>,
 ) -> Result<(), TMDLError> {
-    let instructions = files.iter().flat_map(|f| f.instructions()).collect::<Vec<_>>();
+    let instructions = files
+        .iter()
+        .flat_map(|f| f.instructions())
+        .collect::<Vec<_>>();
 
     let mut instruction_variants = vec![];
     let mut encode_arms = vec![];

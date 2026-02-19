@@ -720,7 +720,9 @@ fn analyze_instruction_semantics<'a>(
     let numeric_params: HashMap<_, _> = resolve_params_for_instruction(inst, item_cache)
         .into_iter()
         .filter_map(|(name, (_ty, value))| match value {
-            Some(ast::Expr::Lit(ast::Lit::Int(li))) => Some((name, parse_literal_value(&li) as i64)),
+            Some(ast::Expr::Lit(ast::Lit::Int(li))) => {
+                Some((name, parse_literal_value(&li) as i64))
+            }
             _ => None,
         })
         .collect();
