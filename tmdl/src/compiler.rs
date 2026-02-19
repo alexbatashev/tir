@@ -1,4 +1,5 @@
 use core::fmt;
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
 use std::{fs, io};
@@ -10,10 +11,8 @@ use serde_json;
 
 use crate::Span;
 use crate::error::TMDLError;
-use crate::leangen::generate_lean;
 use crate::lexer::lex;
 use crate::parser::parse;
-use crate::rocqgen::generate_rocq;
 use crate::rustgen::generate_rust;
 use crate::sema_analyze;
 use crate::smtlibgen::generate_smtlib;
@@ -45,24 +44,12 @@ pub enum Action {
     EmitAst,
     EmitAstJson,
     EmitRust,
-    EmitRocq,
-    EmitRocqSailProof,
-    EmitLean,
-    EmitIsabelle,
     EmitSmtlib,
 }
 
 impl Action {
     fn needs_whole_program(&self) -> bool {
-        matches!(
-            self,
-            Action::EmitRust
-                | Action::EmitRocq
-                | Action::EmitRocqSailProof
-                | Action::EmitLean
-                | Action::EmitIsabelle
-                | Action::EmitSmtlib
-        )
+        matches!(self, Action::EmitRust | Action::EmitSmtlib)
     }
 }
 
@@ -245,24 +232,19 @@ impl Compiler {
             return Ok(());
         }
 
+        let item_cache: HashMap<&str, _> = parsed_files
+            .iter()
+            .flat_map(|f| f.items.iter().map(|i| (i.name(), i)))
+            .collect();
+
         match &self.action {
             Action::EmitRust => {
                 let output: Box<dyn Write> = self.create_output_writer()?;
-                generate_rust(self.dialect.as_ref().unwrap(), parsed_files, output)?
-            }
-            Action::EmitRocq => {
-                // Support stdout or explicit single-file destination.
-                let writer: Box<dyn Write> = self.create_output_writer()?;
-                generate_rocq(self.dialect.as_ref().unwrap(), parsed_files, writer)?;
-            }
-            Action::EmitLean => {
-                // Support stdout or explicit single-file destination.
-                let writer: Box<dyn Write> = self.create_output_writer()?;
-                generate_lean(self.dialect.as_ref().unwrap(), parsed_files, writer)?;
+                generate_rust(self.dialect.as_ref().unwrap(), &parsed_files, &item_cache, output)?
             }
             Action::EmitSmtlib => {
                 let writer: Box<dyn Write> = self.create_output_writer()?;
-                generate_smtlib(self.dialect.as_ref().unwrap(), parsed_files, writer)?;
+                generate_smtlib(self.dialect.as_ref().unwrap(), &parsed_files, &item_cache, writer)?;
             }
             _ => unreachable!("Only complex actions should use this path"),
         }

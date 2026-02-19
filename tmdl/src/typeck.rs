@@ -25,9 +25,9 @@ pub fn check<'a>(files: &'a [ast::File]) -> (TypeCache<'a>, Vec<(String, Diag)>)
     let isa_param_vars = build_isa_param_vars(files, &mut tvg);
     let synonyms = build_synonym_table(files, &isa_param_vars);
 
-    let item_cache: HashMap<String, &ast::Item> = files
+    let item_cache: HashMap<&str, &ast::Item> = files
         .iter()
-        .flat_map(|f| f.items.iter().map(|i| (i.name().to_string(), i)))
+        .flat_map(|f| f.items.iter().map(|i| (i.name(), i)))
         .collect();
 
     for file in files {
@@ -99,9 +99,9 @@ fn normalize(ty: &Type, synonyms: &SynonymTable) -> Type {
     }
 }
 
-fn build_instr_env(
-    instr: &ast::Instruction,
-    item_cache: &HashMap<String, &ast::Item>,
+fn build_instr_env<'a>(
+    instr: &'a ast::Instruction,
+    item_cache: &HashMap<&'a str, &'a ast::Item>,
     synonyms: &SynonymTable,
     isa_param_vars: &HashMap<String, TypeVar>,
 ) -> TypeEnv {

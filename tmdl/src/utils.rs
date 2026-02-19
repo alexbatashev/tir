@@ -5,14 +5,13 @@ use crate::ast::{self, Instruction, Item};
 
 pub fn resolve_operands_for_instruction<'a>(
     inst: &'a ast::Instruction,
-    item_cache: &HashMap<String, &'a ast::Item>,
+    item_cache: &HashMap<&'a str, &'a ast::Item>,
 ) -> Vec<(String, Type)> {
     let mut result = Vec::new();
 
-    // collect from root-most template first
     fn collect_from_template<'a>(
         name: &str,
-        cache: &HashMap<String, &'a ast::Item>,
+        cache: &HashMap<&'a str, &'a ast::Item>,
         acc: &mut Vec<(String, Type)>,
     ) {
         if let Some(ast::Item::Template(t)) = cache.get(name) {
@@ -36,7 +35,7 @@ pub fn resolve_operands_for_instruction<'a>(
 
 pub fn get_encoding_arms<'a>(
     instruction: &'a Instruction,
-    item_cache: &HashMap<String, &'a Item>,
+    item_cache: &HashMap<&'a str, &'a Item>,
 ) -> Vec<ast::EncodingArm> {
     if !instruction.encoding.is_empty() {
         instruction.encoding.clone()
@@ -58,12 +57,13 @@ pub fn get_encoding_arms<'a>(
 
 pub fn resolve_params_for_instruction<'a>(
     inst: &'a ast::Instruction,
-    cache: &HashMap<String, &'a ast::Item>,
+    cache: &HashMap<&'a str, &'a ast::Item>,
 ) -> HashMap<String, (Type, Option<ast::Expr>)> {
     let mut result: HashMap<String, (Type, Option<ast::Expr>)> = HashMap::new();
+
     fn collect_from_template<'a>(
         name: &str,
-        cache: &HashMap<String, &'a ast::Item>,
+        cache: &HashMap<&'a str, &'a ast::Item>,
         acc: &mut HashMap<String, (Type, Option<ast::Expr>)>,
     ) {
         if let Some(ast::Item::Template(t)) = cache.get(name) {
@@ -71,7 +71,7 @@ pub fn resolve_params_for_instruction<'a>(
                 collect_from_template(parent, cache, acc);
             }
             for (k, v) in &t.params {
-                acc.entry(k.clone()).or_insert(v.clone());
+                acc.insert(k.clone(), v.clone());
             }
         }
     }
@@ -79,11 +79,9 @@ pub fn resolve_params_for_instruction<'a>(
     if let Some(p) = &inst.parent_template {
         collect_from_template(p, cache, &mut result);
     }
-
     for (k, v) in &inst.params {
         result.insert(k.clone(), v.clone());
     }
-
     result
 }
 

@@ -1,10 +1,8 @@
 mod ast;
 mod compiler;
 mod error;
-mod leangen;
 mod lexer;
 mod parser;
-mod rocqgen;
 mod rustgen;
 mod sem_expr_conv;
 mod sem_expr_state;

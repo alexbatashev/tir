@@ -358,6 +358,13 @@ impl Serialize for Type {
 }
 
 impl File {
+    pub fn isas(&self) -> impl Iterator<Item = &Isa> {
+        self.items.iter().filter_map(|f| match f {
+            Item::Isa(isa) => Some(isa),
+            _ => None,
+        })
+    }
+
     pub fn templates(&self) -> impl Iterator<Item = &Template> {
         self.items.iter().filter_map(|f| match f {
             Item::Template(t) => Some(t),

@@ -2,84 +2,43 @@ use std::collections::HashMap;
 use std::io::Write;
 
 use crate::Type;
-use crate::ast::{self, Instruction, Item};
+use crate::ast;
 use crate::error::TMDLError;
 use crate::sem_expr_conv::{SymbolInfo, convert_to_sem_expr};
 use crate::sem_expr_state;
 use crate::utils::{
-    get_encoding_arms, resolve_operands_for_instruction, resolve_params_for_instruction,
+    get_encoding_arms, parse_literal_value, resolve_operands_for_instruction,
+    resolve_params_for_instruction,
 };
 use tir::sem_expr::smtlib as sem_smtlib;
 
 const REG_INDEX_WIDTH: u16 = 5;
 const REG_VALUE_WIDTH: u16 = 64;
 
-struct SmtSymbolResolver<'a> {
-    symbols: &'a HashMap<u32, SymbolInfo>,
-    operands: &'a HashMap<String, Type>,
-    state_name: &'a str,
-}
+// ---------------------------------------------------------------------------
+// Public entry point
+// ---------------------------------------------------------------------------
 
-impl sem_smtlib::SymbolResolver for SmtSymbolResolver<'_> {
-    fn resolve(&self, symbol_id: u32) -> Result<String, String> {
-        let symbol = self
-            .symbols
-            .get(&symbol_id)
-            .ok_or_else(|| format!("Unknown symbol id {}", symbol_id))?;
-
-        match symbol {
-            SymbolInfo::Register { class, number } => Ok(format!(
-                "(read_{} {} (_ bv{} {}))",
-                class.to_lowercase(),
-                self.state_name,
-                number,
-                REG_INDEX_WIDTH
-            )),
-            SymbolInfo::Variable { name } => {
-                if let Some(Type::Struct(rc)) = self.operands.get(name) {
-                    Ok(format!(
-                        "(read_{} {} {})",
-                        rc.to_lowercase(),
-                        self.state_name,
-                        name.to_lowercase()
-                    ))
-                } else {
-                    Ok(name.to_lowercase())
-                }
-            }
-        }
-    }
-}
-
-pub fn generate_smtlib(
+pub fn generate_smtlib<'a>(
     dialect: &str,
-    files: Vec<ast::File>,
+    files: &'a [ast::File],
+    item_cache: &HashMap<&'a str, &'a ast::Item>,
     mut output: Box<dyn Write>,
 ) -> Result<(), TMDLError> {
-    let item_cache = {
-        let mut cache = HashMap::new();
-        for f in &files {
-            for item in &f.items {
-                cache.insert(item.name().to_string(), item);
-            }
-        }
-        cache
-    };
-
     writeln!(output, "{}", HEADER)?;
-    build_state(&files, &mut output)?;
-    build_instructions(dialect, &item_cache, &files, &mut output)?;
+    build_state(files, &mut output)?;
+    build_instructions(dialect, item_cache, files, &mut output)?;
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// State (register file) declaration
+// ---------------------------------------------------------------------------
 
 fn build_state(files: &[ast::File], output: &mut Box<dyn Write>) -> Result<(), TMDLError> {
     let reg_classes = files
         .iter()
-        .flat_map(|file| {
-            file.items
-                .iter()
-                .filter_map(|item: &Item| item.as_register_class().cloned())
-        })
+        .flat_map(|f| f.register_classes().cloned())
         .collect::<Vec<_>>();
 
     let mut fields = Vec::new();
@@ -142,20 +101,17 @@ fn build_state(files: &[ast::File], output: &mut Box<dyn Write>) -> Result<(), T
     Ok(())
 }
 
-fn build_instructions<'a, 'cache: 'a>(
+// ---------------------------------------------------------------------------
+// Instruction encoding and execution
+// ---------------------------------------------------------------------------
+
+fn build_instructions<'a>(
     dialect: &str,
-    item_cache: &HashMap<String, &'cache Item>,
+    item_cache: &HashMap<&'a str, &'a ast::Item>,
     files: &'a [ast::File],
     output: &mut Box<dyn Write>,
 ) -> Result<(), TMDLError> {
-    let instructions = files
-        .iter()
-        .flat_map(|file| {
-            file.items
-                .iter()
-                .filter_map(|item: &Item| item.as_instruction())
-        })
-        .collect::<Vec<_>>();
+    let instructions = files.iter().flat_map(|f| f.instructions()).collect::<Vec<_>>();
 
     let mut instruction_variants = vec![];
     let mut encode_arms = vec![];
@@ -167,7 +123,7 @@ fn build_instructions<'a, 'cache: 'a>(
 
         let operands = resolve_operands_for_instruction(i, item_cache);
         let smt_operands = build_smt_operands(&operands);
-        let smt_operands_ctor = build_smt_operands_ctor(&operands);
+        let smt_operands_ctor = smt_operands.join(" ");
         let operand_params = if smt_operands.is_empty() {
             "()".to_string()
         } else {
@@ -232,19 +188,15 @@ fn build_instructions<'a, 'cache: 'a>(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Encoding helpers
+// ---------------------------------------------------------------------------
+
 fn build_smt_operands(operands: &[(String, Type)]) -> Vec<String> {
     operands
         .iter()
         .map(|(name, ty)| format!("({} {})", name.to_lowercase(), smt_ty_of(ty)))
-        .collect::<Vec<_>>()
-}
-
-fn build_smt_operands_ctor(operands: &[(String, Type)]) -> String {
-    operands
-        .iter()
-        .map(|(name, ty)| format!("({} {})", name.to_lowercase(), smt_ty_of(ty)))
-        .collect::<Vec<_>>()
-        .join(" ")
+        .collect()
 }
 
 fn smt_ty_of(ty: &Type) -> String {
@@ -252,18 +204,17 @@ fn smt_ty_of(ty: &Type) -> String {
         Type::Struct(_) => format!("(_ BitVec {REG_INDEX_WIDTH})"),
         Type::Bits(_) | Type::Integer => format!("(_ BitVec {REG_VALUE_WIDTH})"),
         Type::String => "String".to_string(),
+        _ => unreachable!("HM type vars should not appear as operand types"),
     }
 }
 
 fn build_smt_encoding<'a>(
-    item_cache: &HashMap<String, &'a Item>,
-    instruction: &'a Instruction,
+    item_cache: &HashMap<&'a str, &'a ast::Item>,
+    instruction: &'a ast::Instruction,
     operands: &[(String, Type)],
 ) -> String {
     let operands = operands.iter().cloned().collect::<HashMap<_, _>>();
-
     let params = resolve_params_for_instruction(instruction, item_cache);
-
     let encoding_arms = get_encoding_arms(instruction, item_cache);
 
     let mut pieces: Vec<(u16, String)> = Vec::new();
@@ -283,6 +234,7 @@ fn build_smt_encoding<'a>(
                         Type::Struct(_) => cast_bv(&vname, REG_INDEX_WIDTH, width),
                         Type::Bits(_) | Type::Integer => cast_bv(&vname, REG_VALUE_WIDTH, width),
                         Type::String => zero_bv(width),
+                        _ => unreachable!("HM type vars should not appear as operand types"),
                     }
                 } else if let Some((pty, pval)) = params.get(name) {
                     match pval {
@@ -327,19 +279,62 @@ fn build_smt_encoding<'a>(
     out
 }
 
+// ---------------------------------------------------------------------------
+// Behavior (execution semantics)
+// ---------------------------------------------------------------------------
+
+struct SmtSymbolResolver<'a> {
+    symbols: &'a HashMap<u32, SymbolInfo>,
+    operands: &'a HashMap<String, Type>,
+    state_name: &'a str,
+}
+
+impl sem_smtlib::SymbolResolver for SmtSymbolResolver<'_> {
+    fn resolve(&self, symbol_id: u32) -> Result<String, String> {
+        let symbol = self
+            .symbols
+            .get(&symbol_id)
+            .ok_or_else(|| format!("Unknown symbol id {}", symbol_id))?;
+
+        match symbol {
+            SymbolInfo::Register { class, number } => Ok(format!(
+                "(read_{} {} (_ bv{} {}))",
+                class.to_lowercase(),
+                self.state_name,
+                number,
+                REG_INDEX_WIDTH
+            )),
+            SymbolInfo::Variable { name } => {
+                if let Some(Type::Struct(rc)) = self.operands.get(name) {
+                    Ok(format!(
+                        "(read_{} {} {})",
+                        rc.to_lowercase(),
+                        self.state_name,
+                        name.to_lowercase()
+                    ))
+                } else {
+                    Ok(name.to_lowercase())
+                }
+            }
+        }
+    }
+}
+
 fn build_smt_behavior<'a>(
-    item_cache: &HashMap<String, &'a Item>,
-    instruction: &'a Instruction,
+    item_cache: &HashMap<&'a str, &'a ast::Item>,
+    instruction: &'a ast::Instruction,
     operands: &[(String, Type)],
 ) -> String {
     let operands = operands.iter().cloned().collect::<HashMap<_, _>>();
-    let params = resolve_params_for_instruction(instruction, item_cache);
-    let mut numeric_params = HashMap::new();
-    for (name, (_ty, val)) in params {
-        if let Some(ast::Expr::Lit(ast::Lit::Int(li))) = val {
-            numeric_params.insert(name, parse_literal_value(&li) as i64);
-        }
-    }
+    let numeric_params: HashMap<_, _> = resolve_params_for_instruction(instruction, item_cache)
+        .into_iter()
+        .filter_map(|(name, (_ty, val))| match val {
+            Some(ast::Expr::Lit(ast::Lit::Int(li))) => {
+                Some((name, parse_literal_value_u128(&li) as i64))
+            }
+            _ => None,
+        })
+        .collect();
 
     fn try_emit_sem_expr(
         e: &ast::Expr,
@@ -474,8 +469,12 @@ fn build_smt_behavior<'a>(
     )
 }
 
+// ---------------------------------------------------------------------------
+// Bitvector rendering helpers
+// ---------------------------------------------------------------------------
+
 fn render_lit_bitvec(width: u16, lit: &ast::LitInt) -> String {
-    let value = parse_literal_value(lit);
+    let value = parse_literal_value_u128(lit);
     format!("(_ bv{} {})", value, width)
 }
 
@@ -484,11 +483,12 @@ fn zero_bv(width: u16) -> String {
 }
 
 fn render_bv64_literal(lit: &ast::LitInt) -> String {
-    let value = parse_literal_value(lit);
+    let value = parse_literal_value_u128(lit);
     format!("(_ bv{} 64)", value)
 }
 
-fn parse_literal_value(lit: &ast::LitInt) -> u128 {
+/// SMT-lib needs the full u128 range for large bitvector literals.
+fn parse_literal_value_u128(lit: &ast::LitInt) -> u128 {
     let v = lit.value();
     if let Some(hex) = v.strip_prefix("0x").or_else(|| v.strip_prefix("0X")) {
         u128::from_str_radix(hex, 16).unwrap_or(0)
