@@ -358,6 +358,59 @@ impl Serialize for Type {
     }
 }
 
+impl RegisterClass {
+    pub fn resolve_registers(&self) -> impl Iterator<Item = Register> {
+        let mut registers = Vec::new();
+
+        for def in &self.registers {
+            match def {
+                RegisterDef::Single(register) => registers.push(register.clone()),
+                RegisterDef::Range(range) => {
+                    let (Some(start_idx), Some(end_idx)) = (
+                        parse_trailing_index(&range.start),
+                        parse_trailing_index(&range.end),
+                    ) else {
+                        continue;
+                    };
+
+                    let prefix = strip_trailing_digits(&range.start);
+                    for idx in start_idx..=end_idx {
+                        registers.push(Register {
+                            name: format!("{prefix}{idx}"),
+                            alias: range.alias_pattern.clone(),
+                            traits: range.traits.clone(),
+                            subregisters: Vec::new(),
+                            span: range.span,
+                        });
+                    }
+                }
+            }
+        }
+
+        registers.into_iter()
+    }
+}
+
+fn parse_trailing_index(s: &str) -> Option<u16> {
+    let mut i = s.len();
+    while i > 0 && s.as_bytes()[i - 1].is_ascii_digit() {
+        i -= 1;
+    }
+    if i < s.len() {
+        s[i..].parse::<u16>().ok()
+    } else {
+        None
+    }
+}
+
+fn strip_trailing_digits(s: &str) -> &str {
+    let mut i = s.len();
+    while i > 0 && s.as_bytes()[i - 1].is_ascii_digit() {
+        i -= 1;
+    }
+    &s[..i]
+}
+
 impl File {
     pub fn isas(&self) -> impl Iterator<Item = &Isa> {
         self.items.iter().filter_map(|f| match f {

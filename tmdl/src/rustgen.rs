@@ -431,7 +431,8 @@ fn emit_instructions<'a>(
                             let op_name_lit = proc_macro2::Literal::string(&op_name);
                             match ty {
                                 Type::Struct(class_name) => {
-                                    let fn_ident = format_ident!("parse_{}", class_name);
+                                    let fn_ident =
+                                        format_ident!("parse_{}", class_name.to_lowercase());
                                     let class_lit = proc_macro2::Literal::string(class_name);
                                     parse_steps.push(quote! {
                                         let idx = #fn_ident(parser)?;
@@ -562,29 +563,15 @@ fn emit_register_parsers_and_printers(
 
     for rc in files.iter().flat_map(|f| f.register_classes()) {
         let rc_name = &rc.name;
-        let fn_name = format_ident!("parse_{}", rc_name);
-        let print_fn_name = format_ident!("print_{}", rc_name);
+        let fn_name = format_ident!("parse_{}", rc_name.to_lowercase());
+        let print_fn_name = format_ident!("print_{}", rc_name.to_lowercase());
 
         let mut entries: Vec<(u16, String, Option<String>)> = Vec::new();
-        for def in &rc.registers {
-            match def {
-                ast::RegisterDef::Single(s) => {
-                    if let Some(idx) = parse_trailing_index(&s.name) {
-                        entries.push((idx, s.name.clone(), s.alias.clone()));
-                    } else {
-                        entries.push((u16::MAX, s.name.clone(), s.alias.clone()));
-                    }
-                }
-                ast::RegisterDef::Range(r) => {
-                    if let (Some(s), Some(e)) =
-                        (parse_trailing_index(&r.start), parse_trailing_index(&r.end))
-                    {
-                        for i in s..=e {
-                            let isa = format!("{}{}", strip_trailing_digits(&r.start), i);
-                            entries.push((i, isa, r.alias_pattern.clone()));
-                        }
-                    }
-                }
+        for reg in rc.resolve_registers() {
+            if let Some(idx) = parse_trailing_index(&reg.name) {
+                entries.push((idx, reg.name, reg.alias));
+            } else {
+                entries.push((u16::MAX, reg.name, reg.alias));
             }
         }
         entries.sort_by_key(|(i, _, _)| *i);
@@ -660,36 +647,15 @@ fn emit_register_trait_helpers(files: &[ast::File]) -> Result<proc_macro2::Token
     for file in files {
         for rc in file.register_classes() {
             let class_lit = proc_macro2::Literal::string(&rc.name);
-            for reg_def in &rc.registers {
-                match reg_def {
-                    ast::RegisterDef::Single(reg) => {
-                        if reg
-                            .traits
-                            .iter()
-                            .any(|t| matches!(t, ast::RegisterTrait::HardwiredZero))
-                        {
-                            let idx = parse_trailing_index(&reg.name).unwrap_or(u16::MAX);
-                            let idx_lit = proc_macro2::Literal::u16_unsuffixed(idx);
-                            hardwired_arms.push(quote! { (#class_lit, #idx_lit) => true, });
-                        }
-                    }
-                    ast::RegisterDef::Range(range) => {
-                        if range
-                            .traits
-                            .iter()
-                            .any(|t| matches!(t, ast::RegisterTrait::HardwiredZero))
-                        {
-                            if let (Some(start), Some(end)) = (
-                                parse_trailing_index(&range.start),
-                                parse_trailing_index(&range.end),
-                            ) {
-                                for idx in start..=end {
-                                    let idx_lit = proc_macro2::Literal::u16_unsuffixed(idx);
-                                    hardwired_arms.push(quote! { (#class_lit, #idx_lit) => true, });
-                                }
-                            }
-                        }
-                    }
+            for reg in rc.resolve_registers() {
+                if reg
+                    .traits
+                    .iter()
+                    .any(|t| matches!(t, ast::RegisterTrait::HardwiredZero))
+                {
+                    let idx = parse_trailing_index(&reg.name).unwrap_or(u16::MAX);
+                    let idx_lit = proc_macro2::Literal::u16_unsuffixed(idx);
+                    hardwired_arms.push(quote! { (#class_lit, #idx_lit) => true, });
                 }
             }
         }
@@ -1052,14 +1018,6 @@ fn parse_trailing_index(s: &str) -> Option<u16> {
     } else {
         None
     }
-}
-
-fn strip_trailing_digits(s: &str) -> &str {
-    let mut i = s.len();
-    while i > 0 && s.as_bytes()[i - 1].is_ascii_digit() {
-        i -= 1;
-    }
-    &s[..i]
 }
 
 fn alias_stem(pat: &str) -> Option<String> {
