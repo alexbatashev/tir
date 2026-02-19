@@ -2,11 +2,11 @@ use std::collections::{HashMap, HashSet};
 
 use chumsky::error::Rich;
 
-use crate::{Span, Type, ast};
 use crate::utils::{
     resolve_effective_asm_for_instruction, resolve_effective_encoding_for_instruction,
     resolve_template_chain,
 };
+use crate::{Span, Type, ast};
 
 type Diag = Rich<'static, String, Span>;
 
@@ -60,34 +60,33 @@ fn check_isas(files: &[ast::File], item_cache: &HashMap<&str, &ast::Item>) -> Ve
     files
         .iter()
         .flat_map(|file| {
-            file.isas()
-                .flat_map(|isa| {
-                    isa.requires
-                        .as_ref()
-                        .map(isa_parents)
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter_map(|parent| match item_cache.get(parent) {
-                            None => Some((
-                                file.file_name.clone(),
-                                Rich::custom(
-                                    isa.span,
-                                    format!("Unknown parent '{}' for ISA '{}'", parent, isa.name),
+            file.isas().flat_map(|isa| {
+                isa.requires
+                    .as_ref()
+                    .map(isa_parents)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|parent| match item_cache.get(parent) {
+                        None => Some((
+                            file.file_name.clone(),
+                            Rich::custom(
+                                isa.span,
+                                format!("Unknown parent '{}' for ISA '{}'", parent, isa.name),
+                            ),
+                        )),
+                        Some(item) if !matches!(item, ast::Item::Isa(_)) => Some((
+                            file.file_name.clone(),
+                            Rich::custom(
+                                isa.span,
+                                format!(
+                                    "Parent '{}' for ISA '{}' must also be an ISA",
+                                    parent, isa.name
                                 ),
-                            )),
-                            Some(item) if !matches!(item, ast::Item::Isa(_)) => Some((
-                                file.file_name.clone(),
-                                Rich::custom(
-                                    isa.span,
-                                    format!(
-                                        "Parent '{}' for ISA '{}' must also be an ISA",
-                                        parent, isa.name
-                                    ),
-                                ),
-                            )),
-                            _ => None,
-                        })
-                })
+                            ),
+                        )),
+                        _ => None,
+                    })
+            })
         })
         .collect()
 }

@@ -1,8 +1,8 @@
 use core::fmt;
-use std::collections::{HashMap, HashSet};
 use std::collections::hash_map::{
     IntoIter as HashMapIntoIter, Iter as HashMapIter, IterMut as HashMapIterMut,
 };
+use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::ops::{Deref, DerefMut};
 
@@ -106,7 +106,11 @@ pub fn resolve_operands_for_instruction<'a>(
         .into_iter()
         .flat_map(|t| t.operands.iter())
         .map(|(name, ty)| (name.clone(), ty.clone()))
-        .chain(inst.operands.iter().map(|(name, ty)| (name.clone(), ty.clone())))
+        .chain(
+            inst.operands
+                .iter()
+                .map(|(name, ty)| (name.clone(), ty.clone())),
+        )
         .collect()
 }
 
@@ -177,7 +181,11 @@ pub fn resolve_params_for_instruction<'a>(
         .into_iter()
         .flat_map(|t| t.params.iter())
         .map(|(name, value)| (name.clone(), value.clone()))
-        .chain(inst.params.iter().map(|(name, value)| (name.clone(), value.clone())))
+        .chain(
+            inst.params
+                .iter()
+                .map(|(name, value)| (name.clone(), value.clone())),
+        )
         .collect()
 }
 

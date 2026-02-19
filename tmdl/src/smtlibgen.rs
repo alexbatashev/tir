@@ -45,8 +45,8 @@ fn build_state(files: &[ast::File], output: &mut Box<dyn Write>) -> Result<(), T
         .iter()
         .map(|name| {
             format!(
-            "({} (Array (_ BitVec {}) (_ BitVec {})))",
-            name, REG_INDEX_WIDTH, REG_VALUE_WIDTH
+                "({} (Array (_ BitVec {}) (_ BitVec {})))",
+                name, REG_INDEX_WIDTH, REG_VALUE_WIDTH
             )
         })
         .collect::<Vec<_>>();

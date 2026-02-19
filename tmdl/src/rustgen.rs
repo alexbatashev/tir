@@ -500,7 +500,8 @@ fn emit_instructions<'a>(
                             let op_name_lit = proc_macro2::Literal::string(&op_name);
                             match ty {
                                 Type::Struct(class_name) => {
-                                    let fn_ident = format_ident!("parse_{}", class_name.to_lowercase());
+                                    let fn_ident =
+                                        format_ident!("parse_{}", class_name.to_lowercase());
                                     let class_lit = proc_macro2::Literal::string(class_name);
                                     parse_steps.push(quote! {
                                         let idx = #fn_ident(parser)?;

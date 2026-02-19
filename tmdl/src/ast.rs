@@ -412,13 +412,12 @@ impl RegisterClass {
     }
 
     pub fn hardwired_zero_register_index(&self) -> Option<u16> {
-        self.resolve_registers()
-            .find_map(|reg| {
-                reg.traits
-                    .iter()
-                    .any(|t| matches!(t, RegisterTrait::HardwiredZero))
-                    .then(|| parse_trailing_index(&reg.name).unwrap_or(u16::MAX))
-            })
+        self.resolve_registers().find_map(|reg| {
+            reg.traits
+                .iter()
+                .any(|t| matches!(t, RegisterTrait::HardwiredZero))
+                .then(|| parse_trailing_index(&reg.name).unwrap_or(u16::MAX))
+        })
     }
 
     pub fn resolve_registers(&self) -> impl Iterator<Item = Register> {
