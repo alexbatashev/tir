@@ -113,27 +113,27 @@ pub enum Item {
     Instruction(Instruction),
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub enum Lit {
     Str(LitStr),
     Int(LitInt),
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct LitStr {
     value: String,
     #[serde(skip_serializing)]
     pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct LitInt {
     value: String,
     #[serde(skip_serializing)]
     pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct Field {
     pub base: Box<Expr>,
     pub member: String,
@@ -141,7 +141,7 @@ pub struct Field {
     pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct If {
     pub cond: Box<Expr>,
     pub then: Box<Expr>,
@@ -150,7 +150,7 @@ pub struct If {
     pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct Block {
     pub stmts: Vec<Expr>,
     pub last_expr_return: bool,
@@ -158,14 +158,14 @@ pub struct Block {
     pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct Ident {
     pub name: String,
     #[serde(skip_serializing)]
     pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct Assign {
     pub dest: String,
     pub value: Box<Expr>,
@@ -173,7 +173,7 @@ pub struct Assign {
     pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub enum BinOp {
     Add,
     Sub,
@@ -187,7 +187,7 @@ pub enum BinOp {
     ShiftRightArithmetic,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct Binary {
     pub lhs: Box<Expr>,
     pub rhs: Box<Expr>,
@@ -196,13 +196,13 @@ pub struct Binary {
     pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub enum BuiltinFunction {
     Clamp,
     Extract,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct Call {
     pub callee: Box<Expr>,
     pub arguments: Vec<Expr>,
@@ -210,7 +210,7 @@ pub struct Call {
     pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct Slice {
     pub base: Box<Expr>,
     pub start: u16,
@@ -219,7 +219,7 @@ pub struct Slice {
     pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct IndexAccess {
     pub base: Box<Expr>,
     pub index: u16,
@@ -227,7 +227,7 @@ pub struct IndexAccess {
     pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub enum Expr {
     Assign(Assign),
     Binary(Binary),
