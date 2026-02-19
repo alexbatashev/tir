@@ -89,6 +89,7 @@ fn emit_instructions<'a>(
     let mut isel_rule_emitters: Vec<proc_macro2::TokenStream> = vec![];
     let mut isel_rule_inits: Vec<proc_macro2::TokenStream> = vec![];
     let mut machine_instruction_impls: Vec<proc_macro2::TokenStream> = vec![];
+    let mut instruction_custom_format_impls: Vec<proc_macro2::TokenStream> = vec![];
 
     for inst in files.iter().flat_map(|f| f.instructions()) {
         let name_ident = format_ident!("{}Op", &inst.name);
@@ -141,6 +142,79 @@ fn emit_instructions<'a>(
                     attributes: A { #attrs_schema },
                     roles: R { #roles_schema },
                     interfaces: [tir_be_common::MachineInstruction],
+                    format: custom,
+                }
+            }
+        });
+
+        let op_display_name = format!(
+            "{}.{}",
+            dialect,
+            mnemonic.clone().unwrap_or_else(|| inst.name.to_lowercase())
+        );
+        let op_display_name_lit = proc_macro2::Literal::string(&op_display_name);
+        let mut register_attr_print_arms = Vec::new();
+        for (op_name, op_ty) in &ops {
+            if let Type::Struct(class_name) = op_ty {
+                let attr_name_lit = proc_macro2::Literal::string(op_name);
+                let class_lit = proc_macro2::Literal::string(class_name);
+                let print_fn_ident = format_ident!("print_{}", class_name.to_lowercase());
+                register_attr_print_arms.push(quote! {
+                    #attr_name_lit => {
+                        if let tir::attributes::AttributeValue::Register(tir::attributes::RegisterAttr::Physical { class, index }) = &attr.value {
+                            if class == #class_lit {
+                                if let Some(name) = #print_fn_ident(*index, false) {
+                                    fmt.write(name)?;
+                                } else {
+                                    attr.value.print(fmt, &context)?;
+                                }
+                            } else {
+                                attr.value.print(fmt, &context)?;
+                            }
+                        } else {
+                            attr.value.print(fmt, &context)?;
+                        }
+                    }
+                });
+            }
+        }
+        instruction_custom_format_impls.push(quote! {
+            impl #name_ident {
+                fn custom_print<'a, 'b: 'a>(
+                    &'a self,
+                    fmt: &'a mut tir::IRFormatter<'b>,
+                ) -> Result<(), std::fmt::Error> {
+                    use tir::Operation;
+
+                    fmt.write(#op_display_name_lit)?;
+                    if !self.attributes().is_empty() {
+                        fmt.write(" ")?;
+                        fmt.write("{")?;
+                        let mut first = true;
+                        let context = self.0.context.upgrade();
+                        for attr in self.attributes() {
+                            if !first {
+                                fmt.write(", ")?;
+                            }
+                            first = false;
+                            fmt.write(&attr.name)?;
+                            fmt.write(" = ")?;
+                            match attr.name.as_str() {
+                                #(#register_attr_print_arms,)*
+                                _ => attr.value.print(fmt, &context)?,
+                            }
+                        }
+                        fmt.write("}")?;
+                    }
+                    fmt.write("\n")?;
+                    Ok(())
+                }
+
+                fn custom_parse<'src>(
+                    parser: &mut tir::parse::text::Parser<'src>,
+                    _context: &tir::Context,
+                ) -> Result<Box<dyn tir::Operation>, (tir::parse::Span, tir::Error)> {
+                    Err((tir::parse::Span(parser.pos()), tir::Error::ExpectedOpName))
                 }
             }
         });
@@ -431,8 +505,7 @@ fn emit_instructions<'a>(
                             let op_name_lit = proc_macro2::Literal::string(&op_name);
                             match ty {
                                 Type::Struct(class_name) => {
-                                    let fn_ident =
-                                        format_ident!("parse_{}", class_name.to_lowercase());
+                                    let fn_ident = format_ident!("parse_{}", class_name.to_lowercase());
                                     let class_lit = proc_macro2::Literal::string(class_name);
                                     parse_steps.push(quote! {
                                         let idx = #fn_ident(parser)?;
@@ -536,6 +609,7 @@ fn emit_instructions<'a>(
 
     Ok(quote! {
         #(#instruction_defs)*
+        #(#instruction_custom_format_impls)*
         #(#machine_instruction_impls)*
 
         fn get_instruction_parsers() -> std::collections::HashMap<String, Box<tir_be_common::AsmInstructionParser>> {
