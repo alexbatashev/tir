@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::io::Write;
 
-use crate::ast::{self, Instruction, Item};
+use crate::Type;
+use crate::ast;
 use crate::error::TMDLError;
 use crate::sem_expr_conv::{SymbolInfo, convert_to_sem_expr};
 use crate::sem_expr_state;
@@ -13,82 +14,42 @@ use tir::sem_expr::smtlib as sem_smtlib;
 const REG_INDEX_WIDTH: u16 = 5;
 const REG_VALUE_WIDTH: u16 = 64;
 
-struct SmtSymbolResolver<'a> {
-    symbols: &'a HashMap<u32, SymbolInfo>,
-    operands: &'a HashMap<String, ast::Type>,
-    state_name: &'a str,
-}
+// ---------------------------------------------------------------------------
+// Public entry point
+// ---------------------------------------------------------------------------
 
-impl sem_smtlib::SymbolResolver for SmtSymbolResolver<'_> {
-    fn resolve(&self, symbol_id: u32) -> Result<String, String> {
-        let symbol = self
-            .symbols
-            .get(&symbol_id)
-            .ok_or_else(|| format!("Unknown symbol id {}", symbol_id))?;
-
-        match symbol {
-            SymbolInfo::Register { class, number } => Ok(format!(
-                "(read_{} {} (_ bv{} {}))",
-                class.to_lowercase(),
-                self.state_name,
-                number,
-                REG_INDEX_WIDTH
-            )),
-            SymbolInfo::Variable { name } => {
-                if let Some(ast::Type::Struct(rc)) = self.operands.get(name) {
-                    Ok(format!(
-                        "(read_{} {} {})",
-                        rc.to_lowercase(),
-                        self.state_name,
-                        name.to_lowercase()
-                    ))
-                } else {
-                    Ok(name.to_lowercase())
-                }
-            }
-        }
-    }
-}
-
-pub fn generate_smtlib(
+pub fn generate_smtlib<'a>(
     dialect: &str,
-    files: Vec<ast::File>,
+    files: &'a [ast::File],
+    item_cache: &HashMap<&'a str, &'a ast::Item>,
     mut output: Box<dyn Write>,
 ) -> Result<(), TMDLError> {
-    let item_cache = {
-        let mut cache = HashMap::new();
-        for f in &files {
-            for item in &f.items {
-                cache.insert(item.name().to_string(), item);
-            }
-        }
-        cache
-    };
-
     writeln!(output, "{}", HEADER)?;
-    build_state(&files, &mut output)?;
-    build_instructions(dialect, &item_cache, &files, &mut output)?;
+    build_state(files, &mut output)?;
+    build_instructions(dialect, item_cache, files, &mut output)?;
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// State (register file) declaration
+// ---------------------------------------------------------------------------
+
 fn build_state(files: &[ast::File], output: &mut Box<dyn Write>) -> Result<(), TMDLError> {
-    let reg_classes = files
+    let reg_class_names = files
         .iter()
-        .flat_map(|file| {
-            file.items
-                .iter()
-                .filter_map(|item: &Item| item.as_register_class().cloned())
-        })
+        .flat_map(|f| f.register_classes())
+        .map(|rc| rc.name.to_lowercase())
         .collect::<Vec<_>>();
 
-    let mut fields = Vec::new();
-    for rc in &reg_classes {
-        let name = rc.name.to_lowercase();
-        fields.push(format!(
-            "({} (Array (_ BitVec {}) (_ BitVec {})))",
-            name, REG_INDEX_WIDTH, REG_VALUE_WIDTH
-        ));
-    }
+    let mut fields = reg_class_names
+        .iter()
+        .map(|name| {
+            format!(
+                "({} (Array (_ BitVec {}) (_ BitVec {})))",
+                name, REG_INDEX_WIDTH, REG_VALUE_WIDTH
+            )
+        })
+        .collect::<Vec<_>>();
     fields.push(format!("(pc (_ BitVec {}))", REG_VALUE_WIDTH));
 
     writeln!(
@@ -97,8 +58,7 @@ fn build_state(files: &[ast::File], output: &mut Box<dyn Write>) -> Result<(), T
         fields.join(" ")
     )?;
 
-    for rc in &reg_classes {
-        let name = rc.name.to_lowercase();
+    for name in &reg_class_names {
         writeln!(
             output,
             "\n(define-fun read_{name} ((st TMDLState) (r (_ BitVec {idx_width}))) (_ BitVec {val_width})\n  (ite (= r (_ bv0 {idx_width}))\n    (_ bv0 {val_width})\n    (select ({name} st) r)))",
@@ -106,9 +66,8 @@ fn build_state(files: &[ast::File], output: &mut Box<dyn Write>) -> Result<(), T
             val_width = REG_VALUE_WIDTH
         )?;
 
-        let mut fields: Vec<String> = Vec::new();
-        for rc2 in &reg_classes {
-            let n2 = rc2.name.to_lowercase();
+        let mut fields = Vec::new();
+        for n2 in &reg_class_names {
             if n2 == name {
                 fields.push(format!("(store ({} st) r val)", n2,));
             } else {
@@ -125,11 +84,10 @@ fn build_state(files: &[ast::File], output: &mut Box<dyn Write>) -> Result<(), T
         )?;
     }
 
-    let mut fields: Vec<String> = Vec::new();
-    for rc in &reg_classes {
-        let name = rc.name.to_lowercase();
-        fields.push(format!("({} st)", name));
-    }
+    let mut fields = reg_class_names
+        .iter()
+        .map(|name| format!("({} st)", name))
+        .collect::<Vec<_>>();
     fields.push("val".to_string());
     writeln!(
         output,
@@ -141,60 +99,55 @@ fn build_state(files: &[ast::File], output: &mut Box<dyn Write>) -> Result<(), T
     Ok(())
 }
 
-fn build_instructions<'a, 'cache: 'a>(
+// ---------------------------------------------------------------------------
+// Instruction encoding and execution
+// ---------------------------------------------------------------------------
+
+fn build_instructions<'a>(
     dialect: &str,
-    item_cache: &HashMap<String, &'cache Item>,
+    item_cache: &HashMap<&'a str, &'a ast::Item>,
     files: &'a [ast::File],
     output: &mut Box<dyn Write>,
 ) -> Result<(), TMDLError> {
-    let instructions = files
-        .iter()
-        .flat_map(|file| {
-            file.items
-                .iter()
-                .filter_map(|item: &Item| item.as_instruction())
-        })
-        .collect::<Vec<_>>();
-
     let mut instruction_variants = vec![];
     let mut encode_arms = vec![];
     let mut execute_arms = vec![];
 
-    for i in &instructions {
+    for i in files.iter().flat_map(|f| f.instructions()) {
         let name = i.name.to_lowercase();
         let uppercase_name = name.to_uppercase();
 
         let operands = resolve_operands_for_instruction(i, item_cache);
         let smt_operands = build_smt_operands(&operands);
-        let smt_operands_ctor = build_smt_operands_ctor(&operands);
-        let operand_params = if smt_operands.is_empty() {
+        let smt_operands_joined = smt_operands.join(" ");
+        let operand_params = if smt_operands_joined.is_empty() {
             "()".to_string()
         } else {
-            format!("({})", smt_operands.join(" "))
+            format!("({smt_operands_joined})")
         };
-        let execute_params = if smt_operands.is_empty() {
+        let execute_params = if smt_operands_joined.is_empty() {
             "((st TMDLState))".to_string()
         } else {
-            format!("((st TMDLState) {})", smt_operands.join(" "))
+            format!("((st TMDLState) {smt_operands_joined})")
         };
         let smt_encoding = build_smt_encoding(item_cache, i, &operands);
         let smt_behavior = build_smt_behavior(item_cache, i, &operands);
 
-        let operand_list = operands
+        let operand_names = operands
             .iter()
             .map(|(k, _v)| k.to_lowercase())
-            .collect::<Vec<_>>()
-            .join(" ");
+            .collect::<Vec<_>>();
+        let operand_list = operand_names.join(" ");
 
         writeln!(
             output,
             "\n(define-fun encode_{name} {operand_params} (_ BitVec 32)\n  {smt_encoding})\n\n(define-fun execute_{name} {execute_params} TMDLState\n  {smt_behavior})"
         )?;
 
-        if smt_operands_ctor.is_empty() {
+        if smt_operands_joined.is_empty() {
             instruction_variants.push(format!("({uppercase_name})"));
         } else {
-            instruction_variants.push(format!("({uppercase_name} {smt_operands_ctor})"));
+            instruction_variants.push(format!("({uppercase_name} {smt_operands_joined})"));
         }
 
         if operand_list.is_empty() {
@@ -231,38 +184,33 @@ fn build_instructions<'a, 'cache: 'a>(
     Ok(())
 }
 
-fn build_smt_operands(operands: &[(String, ast::Type)]) -> Vec<String> {
+// ---------------------------------------------------------------------------
+// Encoding helpers
+// ---------------------------------------------------------------------------
+
+fn build_smt_operands(operands: &[(String, Type)]) -> Vec<String> {
     operands
         .iter()
         .map(|(name, ty)| format!("({} {})", name.to_lowercase(), smt_ty_of(ty)))
-        .collect::<Vec<_>>()
+        .collect()
 }
 
-fn build_smt_operands_ctor(operands: &[(String, ast::Type)]) -> String {
-    operands
-        .iter()
-        .map(|(name, ty)| format!("({} {})", name.to_lowercase(), smt_ty_of(ty)))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn smt_ty_of(ty: &ast::Type) -> String {
+fn smt_ty_of(ty: &Type) -> String {
     match ty {
-        ast::Type::Struct(_) => format!("(_ BitVec {REG_INDEX_WIDTH})"),
-        ast::Type::Bits(_) | ast::Type::Integer => format!("(_ BitVec {REG_VALUE_WIDTH})"),
-        ast::Type::String => "String".to_string(),
+        Type::Struct(_) => format!("(_ BitVec {REG_INDEX_WIDTH})"),
+        Type::Bits(_) | Type::Integer => format!("(_ BitVec {REG_VALUE_WIDTH})"),
+        Type::String => "String".to_string(),
+        _ => unreachable!("HM type vars should not appear as operand types"),
     }
 }
 
 fn build_smt_encoding<'a>(
-    item_cache: &HashMap<String, &'a Item>,
-    instruction: &'a Instruction,
-    operands: &[(String, ast::Type)],
+    item_cache: &HashMap<&'a str, &'a ast::Item>,
+    instruction: &'a ast::Instruction,
+    operands: &[(String, Type)],
 ) -> String {
     let operands = operands.iter().cloned().collect::<HashMap<_, _>>();
-
     let params = resolve_params_for_instruction(instruction, item_cache);
-
     let encoding_arms = get_encoding_arms(instruction, item_cache);
 
     let mut pieces: Vec<(u16, String)> = Vec::new();
@@ -279,17 +227,16 @@ fn build_smt_encoding<'a>(
                 if let Some(ty) = operands.get(name) {
                     let vname = name.to_lowercase();
                     match ty {
-                        ast::Type::Struct(_) => cast_bv(&vname, REG_INDEX_WIDTH, width),
-                        ast::Type::Bits(_) | ast::Type::Integer => {
-                            cast_bv(&vname, REG_VALUE_WIDTH, width)
-                        }
-                        ast::Type::String => zero_bv(width),
+                        Type::Struct(_) => cast_bv(&vname, REG_INDEX_WIDTH, width),
+                        Type::Bits(_) | Type::Integer => cast_bv(&vname, REG_VALUE_WIDTH, width),
+                        Type::String => zero_bv(width),
+                        _ => unreachable!("HM type vars should not appear as operand types"),
                     }
                 } else if let Some((pty, pval)) = params.get(name) {
                     match pval {
                         Some(ast::Expr::Lit(ast::Lit::Int(li))) => render_lit_bitvec(width, li),
                         _ => match pty {
-                            ast::Type::Bits(_) | ast::Type::Integer => zero_bv(width),
+                            Type::Bits(_) | Type::Integer => zero_bv(width),
                             _ => zero_bv(width),
                         },
                     }
@@ -319,32 +266,72 @@ fn build_smt_encoding<'a>(
 
     pieces.sort_by(|a, b| b.0.cmp(&a.0));
 
-    let mut iter = pieces.iter().map(|(_, p)| p.clone());
-    let mut out = iter.next().unwrap_or_else(|| "(_ bv0 32)".to_string());
-    for p in iter {
-        out = format!("(concat {} {})", out, p);
-    }
+    let mut iter = pieces.into_iter().map(|(_, piece)| piece);
+    iter.next()
+        .map(|first| iter.fold(first, |acc, piece| format!("(concat {} {})", acc, piece)))
+        .unwrap_or_else(|| "(_ bv0 32)".to_string())
+}
 
-    out
+// ---------------------------------------------------------------------------
+// Behavior (execution semantics)
+// ---------------------------------------------------------------------------
+
+struct SmtSymbolResolver<'a> {
+    symbols: &'a HashMap<u32, SymbolInfo>,
+    operands: &'a HashMap<String, Type>,
+    state_name: &'a str,
+}
+
+impl sem_smtlib::SymbolResolver for SmtSymbolResolver<'_> {
+    fn resolve(&self, symbol_id: u32) -> Result<String, String> {
+        let symbol = self
+            .symbols
+            .get(&symbol_id)
+            .ok_or_else(|| format!("Unknown symbol id {}", symbol_id))?;
+
+        match symbol {
+            SymbolInfo::Register { class, number } => Ok(format!(
+                "(read_{} {} (_ bv{} {}))",
+                class.to_lowercase(),
+                self.state_name,
+                number,
+                REG_INDEX_WIDTH
+            )),
+            SymbolInfo::Variable { name } => {
+                if let Some(Type::Struct(rc)) = self.operands.get(name) {
+                    Ok(format!(
+                        "(read_{} {} {})",
+                        rc.to_lowercase(),
+                        self.state_name,
+                        name.to_lowercase()
+                    ))
+                } else {
+                    Ok(name.to_lowercase())
+                }
+            }
+        }
+    }
 }
 
 fn build_smt_behavior<'a>(
-    item_cache: &HashMap<String, &'a Item>,
-    instruction: &'a Instruction,
-    operands: &[(String, ast::Type)],
+    item_cache: &HashMap<&'a str, &'a ast::Item>,
+    instruction: &'a ast::Instruction,
+    operands: &[(String, Type)],
 ) -> String {
     let operands = operands.iter().cloned().collect::<HashMap<_, _>>();
-    let params = resolve_params_for_instruction(instruction, item_cache);
-    let mut numeric_params = HashMap::new();
-    for (name, (_ty, val)) in params {
-        if let Some(ast::Expr::Lit(ast::Lit::Int(li))) = val {
-            numeric_params.insert(name, parse_literal_value(&li) as i64);
-        }
-    }
+    let numeric_params: HashMap<_, _> = resolve_params_for_instruction(instruction, item_cache)
+        .into_iter()
+        .filter_map(|(name, (_ty, val))| match val {
+            Some(ast::Expr::Lit(ast::Lit::Int(li))) => {
+                Some((name, parse_literal_value_u128(&li) as i64))
+            }
+            _ => None,
+        })
+        .collect();
 
     fn try_emit_sem_expr(
         e: &ast::Expr,
-        operands: &HashMap<String, ast::Type>,
+        operands: &HashMap<String, Type>,
         numeric_params: &HashMap<String, i64>,
         state_name: &str,
     ) -> Option<String> {
@@ -359,7 +346,7 @@ fn build_smt_behavior<'a>(
         String::from_utf8(out).ok()
     }
 
-    fn eval_expr_legacy(e: &ast::Expr, operands: &HashMap<String, ast::Type>) -> String {
+    fn eval_expr_legacy(e: &ast::Expr, operands: &HashMap<String, Type>) -> String {
         match e {
             ast::Expr::Lit(ast::Lit::Int(li)) => render_bv64_literal(li),
             ast::Expr::Lit(ast::Lit::Str(ls)) => format!("\"{}\"", ls.value()),
@@ -367,7 +354,7 @@ fn build_smt_behavior<'a>(
                 let name = id.name.to_lowercase();
                 if let Some(ty) = operands.get(&id.name) {
                     match ty {
-                        ast::Type::Struct(rc) => {
+                        Type::Struct(rc) => {
                             format!("(read_{} st {})", rc.to_lowercase(), name)
                         }
                         _ => name,
@@ -433,7 +420,7 @@ fn build_smt_behavior<'a>(
 
     fn eval_expr(
         e: &ast::Expr,
-        operands: &HashMap<String, ast::Type>,
+        operands: &HashMap<String, Type>,
         numeric_params: &HashMap<String, i64>,
     ) -> String {
         if let Some(rendered) = try_emit_sem_expr(e, operands, numeric_params, "st") {
@@ -448,7 +435,7 @@ fn build_smt_behavior<'a>(
         let rhs = emit_expr(&a.value);
         if a.dest == "pc" {
             Some(format!("(write_pc {} {})", st_name, rhs))
-        } else if let Some(ast::Type::Struct(rc)) = operands.get(&a.dest) {
+        } else if let Some(Type::Struct(rc)) = operands.get(&a.dest) {
             Some(format!(
                 "(write_{} {} {} {})",
                 rc.to_lowercase(),
@@ -475,8 +462,12 @@ fn build_smt_behavior<'a>(
     )
 }
 
+// ---------------------------------------------------------------------------
+// Bitvector rendering helpers
+// ---------------------------------------------------------------------------
+
 fn render_lit_bitvec(width: u16, lit: &ast::LitInt) -> String {
-    let value = parse_literal_value(lit);
+    let value = parse_literal_value_u128(lit);
     format!("(_ bv{} {})", value, width)
 }
 
@@ -485,11 +476,12 @@ fn zero_bv(width: u16) -> String {
 }
 
 fn render_bv64_literal(lit: &ast::LitInt) -> String {
-    let value = parse_literal_value(lit);
+    let value = parse_literal_value_u128(lit);
     format!("(_ bv{} 64)", value)
 }
 
-fn parse_literal_value(lit: &ast::LitInt) -> u128 {
+/// SMT-lib needs the full u128 range for large bitvector literals.
+fn parse_literal_value_u128(lit: &ast::LitInt) -> u128 {
     let v = lit.value();
     if let Some(hex) = v.strip_prefix("0x").or_else(|| v.strip_prefix("0X")) {
         u128::from_str_radix(hex, 16).unwrap_or(0)

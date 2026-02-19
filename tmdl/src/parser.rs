@@ -1,7 +1,7 @@
 use chumsky::{input::ValueInput, prelude::*};
 
 use crate::{
-    Span, Spanned,
+    Span, Spanned, Type,
     ast::{self, *},
     lexer::Token,
 };
@@ -132,7 +132,7 @@ where
 }
 
 enum RegClassBody {
-    Param((String, (ast::Type, Option<ast::Expr>))),
+    Param((String, (Type, Option<ast::Expr>))),
     Registers(Vec<RegisterDef>),
 }
 
@@ -299,7 +299,7 @@ where
 }
 
 enum TemplateOrInstBody {
-    Param((String, (ast::Type, Option<ast::Expr>))),
+    Param((String, (Type, Option<ast::Expr>))),
     Operands(Vec<(String, Type)>),
     Encoding(Vec<EncodingArm>),
     Asm(Expr),
@@ -361,12 +361,8 @@ where
         .map(|((), arms)| arms)
 }
 
-fn parameter<'src, I>() -> impl Parser<
-    'src,
-    I,
-    (String, (ast::Type, Option<ast::Expr>)),
-    extra::Err<Rich<'src, Token<'src>, Span>>,
->
+fn parameter<'src, I>()
+-> impl Parser<'src, I, (String, (Type, Option<ast::Expr>)), extra::Err<Rich<'src, Token<'src>, Span>>>
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
@@ -385,7 +381,7 @@ where
 }
 
 fn instruction_operands<'src, I>()
--> impl Parser<'src, I, Vec<(String, ast::Type)>, extra::Err<Rich<'src, Token<'src>, Span>>>
+-> impl Parser<'src, I, Vec<(String, Type)>, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
@@ -803,7 +799,7 @@ where
     })
 }
 
-fn type_<'src, I>() -> impl Parser<'src, I, ast::Type, extra::Err<Rich<'src, Token<'src>, Span>>>
+fn type_<'src, I>() -> impl Parser<'src, I, Type, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
@@ -821,10 +817,10 @@ where
         .then_ignore(just(Token::RAngle))
         .map(|((), bits)| Type::Bits(bits));
     choice((
-        just(Token::Identifier("String")).to(ast::Type::String),
-        just(Token::Identifier("Integer")).to(ast::Type::Integer),
+        just(Token::Identifier("String")).to(Type::String),
+        just(Token::Identifier("Integer")).to(Type::Integer),
         bits,
-        ident.map(ast::Type::Struct),
+        ident.map(Type::Struct),
     ))
 }
 

@@ -1,4 +1,5 @@
-use crate::Span;
+use crate::utils::StableHashMap;
+use crate::{Span, Type};
 use serde::Serialize;
 use serde::ser::{SerializeStruct, Serializer};
 use std::collections::HashMap;
@@ -44,10 +45,17 @@ pub struct RegisterClass {
     pub name: String,
     pub for_isas: Vec<String>,
     #[serde(serialize_with = "serialize_params")]
-    pub parameters: HashMap<String, (Type, Option<Expr>)>,
+    pub parameters: StableHashMap<String, (Type, Option<Expr>)>,
     pub registers: Vec<RegisterDef>,
     #[serde(skip_serializing)]
     pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisterNameTables {
+    pub parse_names: Vec<(String, u16)>,
+    pub isa_names: Vec<(u16, String)>,
+    pub abi_names: Vec<(u16, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -62,7 +70,7 @@ pub struct Isa {
     pub name: String,
     pub requires: Option<IsaRequirement>,
     #[serde(serialize_with = "serialize_params")]
-    pub parameters: HashMap<String, (Type, Option<Expr>)>,
+    pub parameters: StableHashMap<String, (Type, Option<Expr>)>,
     #[serde(skip_serializing)]
     pub span: Span,
 }
@@ -73,7 +81,7 @@ pub struct Template {
     pub for_isas: Vec<String>,
     pub parent_template: Option<String>,
     #[serde(serialize_with = "serialize_params")]
-    pub params: HashMap<String, (Type, Option<Expr>)>,
+    pub params: StableHashMap<String, (Type, Option<Expr>)>,
     pub operands: Vec<(String, Type)>,
     pub encoding: Vec<EncodingArm>,
     pub asm: Option<Expr>,
@@ -87,7 +95,7 @@ pub struct Instruction {
     pub for_isas: Vec<String>,
     pub parent_template: Option<String>,
     #[serde(serialize_with = "serialize_params")]
-    pub params: HashMap<String, (Type, Option<Expr>)>,
+    pub params: StableHashMap<String, (Type, Option<Expr>)>,
     pub operands: Vec<(String, Type)>,
     pub encoding: Vec<EncodingArm>,
     pub asm: Option<Expr>,
@@ -113,35 +121,27 @@ pub enum Item {
     Instruction(Instruction),
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum Type {
-    String,
-    Integer,
-    Bits(u16),
-    Struct(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub enum Lit {
     Str(LitStr),
     Int(LitInt),
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct LitStr {
     value: String,
     #[serde(skip_serializing)]
     pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct LitInt {
     value: String,
     #[serde(skip_serializing)]
     pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct Field {
     pub base: Box<Expr>,
     pub member: String,
@@ -149,7 +149,7 @@ pub struct Field {
     pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct If {
     pub cond: Box<Expr>,
     pub then: Box<Expr>,
@@ -158,7 +158,7 @@ pub struct If {
     pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct Block {
     pub stmts: Vec<Expr>,
     pub last_expr_return: bool,
@@ -166,14 +166,14 @@ pub struct Block {
     pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct Ident {
     pub name: String,
     #[serde(skip_serializing)]
     pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct Assign {
     pub dest: String,
     pub value: Box<Expr>,
@@ -181,7 +181,7 @@ pub struct Assign {
     pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub enum BinOp {
     Add,
     Sub,
@@ -195,7 +195,7 @@ pub enum BinOp {
     ShiftRightArithmetic,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct Binary {
     pub lhs: Box<Expr>,
     pub rhs: Box<Expr>,
@@ -204,13 +204,13 @@ pub struct Binary {
     pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub enum BuiltinFunction {
     Clamp,
     Extract,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct Call {
     pub callee: Box<Expr>,
     pub arguments: Vec<Expr>,
@@ -218,7 +218,7 @@ pub struct Call {
     pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct Slice {
     pub base: Box<Expr>,
     pub start: u16,
@@ -227,7 +227,7 @@ pub struct Slice {
     pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct IndexAccess {
     pub base: Box<Expr>,
     pub index: u16,
@@ -235,7 +235,7 @@ pub struct IndexAccess {
     pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub enum Expr {
     Assign(Assign),
     Binary(Binary),
@@ -359,8 +359,146 @@ impl Serialize for Type {
                 state.serialize_field("name", "Struct")?;
                 state.serialize_field("struct", name)?;
             }
+            _ => unreachable!("Other types should not be part of AST"),
         }
         state.end()
+    }
+}
+
+impl RegisterClass {
+    pub fn register_name_tables(&self) -> RegisterNameTables {
+        let mut entries = self
+            .resolve_registers()
+            .map(|reg| {
+                (
+                    parse_trailing_index(&reg.name).unwrap_or(u16::MAX),
+                    reg.name,
+                    reg.alias,
+                )
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|(idx, _, _)| *idx);
+
+        let mut next_alias_index = HashMap::new();
+        entries.into_iter().fold(
+            RegisterNameTables {
+                parse_names: Vec::new(),
+                isa_names: Vec::new(),
+                abi_names: Vec::new(),
+            },
+            |mut out, (idx, isa_name, alias)| {
+                if idx != u16::MAX {
+                    out.parse_names.push((isa_name.clone(), idx));
+                    out.isa_names.push((idx, isa_name));
+                }
+
+                if let Some(alias_name) = alias {
+                    let full_alias = if alias_name.contains("{}") {
+                        let stem = alias_name.replace("{}", "");
+                        let counter = next_alias_index.entry(stem.clone()).or_insert(0);
+                        let alias = format!("{}{}", stem, *counter);
+                        *counter += 1;
+                        alias
+                    } else {
+                        alias_name
+                    };
+                    out.parse_names.push((full_alias.clone(), idx));
+                    out.abi_names.push((idx, full_alias));
+                }
+
+                out
+            },
+        )
+    }
+
+    pub fn hardwired_zero_register_index(&self) -> Option<u16> {
+        self.resolve_registers().find_map(|reg| {
+            reg.traits
+                .iter()
+                .any(|t| matches!(t, RegisterTrait::HardwiredZero))
+                .then(|| parse_trailing_index(&reg.name).unwrap_or(u16::MAX))
+        })
+    }
+
+    pub fn resolve_registers(&self) -> impl Iterator<Item = Register> {
+        let mut registers = Vec::new();
+
+        for def in &self.registers {
+            match def {
+                RegisterDef::Single(register) => registers.push(register.clone()),
+                RegisterDef::Range(range) => {
+                    let (Some(start_idx), Some(end_idx)) = (
+                        parse_trailing_index(&range.start),
+                        parse_trailing_index(&range.end),
+                    ) else {
+                        continue;
+                    };
+
+                    let prefix = strip_trailing_digits(&range.start);
+                    for idx in start_idx..=end_idx {
+                        registers.push(Register {
+                            name: format!("{prefix}{idx}"),
+                            alias: range.alias_pattern.clone(),
+                            traits: range.traits.clone(),
+                            subregisters: Vec::new(),
+                            span: range.span,
+                        });
+                    }
+                }
+            }
+        }
+
+        registers.into_iter()
+    }
+}
+
+fn parse_trailing_index(s: &str) -> Option<u16> {
+    let mut i = s.len();
+    while i > 0 && s.as_bytes()[i - 1].is_ascii_digit() {
+        i -= 1;
+    }
+    if i < s.len() {
+        s[i..].parse::<u16>().ok()
+    } else {
+        None
+    }
+}
+
+fn strip_trailing_digits(s: &str) -> &str {
+    let mut i = s.len();
+    while i > 0 && s.as_bytes()[i - 1].is_ascii_digit() {
+        i -= 1;
+    }
+    &s[..i]
+}
+
+impl File {
+    pub fn isas(&self) -> impl Iterator<Item = &Isa> {
+        self.items.iter().filter_map(|f| match f {
+            Item::Isa(isa) => Some(isa),
+            _ => None,
+        })
+    }
+
+    pub fn templates(&self) -> impl Iterator<Item = &Template> {
+        self.items.iter().filter_map(|f| match f {
+            Item::Template(t) => Some(t),
+            _ => None,
+        })
+    }
+
+    pub fn instructions(&self) -> impl Iterator<Item = &Instruction> {
+        self.items.iter().filter_map(|f| match f {
+            Item::Instruction(i) => Some(i),
+            _ => None,
+        })
+    }
+
+    pub fn register_classes(&self) -> impl Iterator<Item = &RegisterClass> {
+        self.items.iter().filter_map(|f| match f {
+            Item::RegisterClass(rc) => Some(rc),
+            _ => None,
+        })
     }
 }
 
@@ -380,18 +518,15 @@ fn serialize_params<S>(
 where
     S: Serializer,
 {
-    // Make output deterministic for tests by sorting keys.
-    let mut entries: Vec<_> = params.iter().collect();
-    entries.sort_by(|a, b| a.0.cmp(b.0));
-
-    let mapped: Vec<ParamRef<'_>> = entries
-        .into_iter()
+    let mut mapped: Vec<ParamRef<'_>> = params
+        .iter()
         .map(|(name, (ty, val))| ParamRef {
             name,
             ty,
             value: val.as_ref(),
         })
         .collect();
+    mapped.sort_by_key(|x| x.name);
 
     mapped.serialize(serializer)
 }

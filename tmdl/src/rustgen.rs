@@ -3,9 +3,13 @@ use std::io::Write;
 
 use quote::{format_ident, quote};
 
+use crate::Type;
 use crate::ast;
 use crate::error::TMDLError;
-use crate::utils::{get_encoding_arms, resolve_operands_for_instruction};
+use crate::utils::{
+    get_encoding_arms, parse_literal_value, resolve_effective_asm_for_instruction,
+    resolve_operands_for_instruction, resolve_params_for_instruction,
+};
 
 struct InstructionSemantics {
     pattern: proc_macro2::TokenStream,
@@ -14,27 +18,16 @@ struct InstructionSemantics {
     fixed_register_by_class: HashMap<String, Option<u16>>,
 }
 
-pub fn generate_rust(
+pub fn generate_rust<'a>(
     dialect: &str,
-    ast: Vec<ast::File>,
+    files: &'a [ast::File],
+    item_cache: &HashMap<&'a str, &'a ast::Item>,
     mut output: Box<dyn Write>,
 ) -> Result<(), TMDLError> {
-    let features = emit_feautres(&ast)?;
-    let register_traits = emit_register_trait_helpers(&ast)?;
-
-    let item_cache = {
-        let mut cache = HashMap::new();
-        for f in &ast {
-            for item in &f.items {
-                cache.insert(item.name().to_string(), item);
-            }
-        }
-
-        cache
-    };
-
-    let registers = emit_register_parsers_and_printers(&ast)?;
-    let instructions = emit_instructions(dialect, &ast, &item_cache)?;
+    let features = emit_features(files)?;
+    let register_traits = emit_register_trait_helpers(files)?;
+    let registers = emit_register_parsers_and_printers(files)?;
+    let instructions = emit_instructions(dialect, files, item_cache)?;
 
     let final_rust = quote! {
         #features
@@ -53,28 +46,19 @@ pub fn generate_rust(
     Ok(())
 }
 
-fn emit_feautres(ast: &[ast::File]) -> Result<proc_macro2::TokenStream, TMDLError> {
-    let features = ast
-        .iter()
-        .flat_map(|file| file.items.iter())
-        .filter_map(|item| match item {
-            ast::Item::Isa(isa) => Some(isa),
-            _ => None,
-        });
+// ---------------------------------------------------------------------------
+// Top-level emitters
+// ---------------------------------------------------------------------------
 
+fn emit_features(files: &[ast::File]) -> Result<proc_macro2::TokenStream, TMDLError> {
     let mut enum_variants = vec![];
     let mut name_arms = vec![];
 
-    for feature in features {
-        let ident = format_ident!("{}", &feature.name);
-        let name = feature.name.clone();
-        enum_variants.push(quote! {
-            #ident
-        });
-
-        name_arms.push(quote! {
-            Self::#ident => #name
-        })
+    for isa in files.iter().flat_map(|f| f.isas()) {
+        let ident = format_ident!("{}", &isa.name);
+        let name = isa.name.clone();
+        enum_variants.push(quote! { #ident });
+        name_arms.push(quote! { Self::#ident => #name });
     }
 
     Ok(quote! {
@@ -94,44 +78,40 @@ fn emit_feautres(ast: &[ast::File]) -> Result<proc_macro2::TokenStream, TMDLErro
     })
 }
 
-fn emit_instructions<'ast, 'cache: 'ast>(
+fn emit_instructions<'a>(
     dialect: &str,
-    ast: &'ast [ast::File],
-    item_cache: &HashMap<String, &'cache ast::Item>,
+    files: &'a [ast::File],
+    item_cache: &HashMap<&'a str, &'a ast::Item>,
 ) -> Result<proc_macro2::TokenStream, TMDLError> {
-    let instructions =
-        ast.iter()
-            .flat_map(|file| file.items.iter())
-            .filter_map(|item| match item {
-                ast::Item::Instruction(inst) => Some(inst),
-                _ => None,
-            });
-
     let mut instruction_defs = vec![];
     let mut instruction_parsers_impls: Vec<proc_macro2::TokenStream> = vec![];
     let mut instruction_parser_map_inits: Vec<proc_macro2::TokenStream> = vec![];
     let mut isel_rule_emitters: Vec<proc_macro2::TokenStream> = vec![];
     let mut isel_rule_inits: Vec<proc_macro2::TokenStream> = vec![];
     let mut machine_instruction_impls: Vec<proc_macro2::TokenStream> = vec![];
+    let mut instruction_custom_format_impls: Vec<proc_macro2::TokenStream> = vec![];
 
-    for inst in instructions {
+    for inst in files.iter().flat_map(|f| f.instructions()) {
         let name_ident = format_ident!("{}Op", &inst.name);
         let builder_ident = format_ident!("{}OpBuilder", &inst.name);
         let mnemonic = resolve_string(inst.params.get("MNEMONIC").unwrap().1.as_ref().unwrap());
-        let mnemonic_lit =
-            proc_macro2::Literal::string(&mnemonic.clone().unwrap_or_else(|| "".to_string()));
+        let fallback_name = inst.name.to_lowercase();
+        let mnemonic_name = mnemonic.as_deref().unwrap_or(&fallback_name);
+        let mnemonic_lit = proc_macro2::Literal::string(mnemonic.as_deref().unwrap_or(""));
         let ops = resolve_operands_for_instruction(inst, item_cache);
         let ops_map = ops.clone().into_iter().collect::<HashMap<_, _>>();
         let defined_register_operands = infer_defined_register_operands(&inst.behavior, &ops);
+
         // Build attributes schema from operands
         let attrs_schema = {
             let mut items = vec![];
             for (name, ty) in &ops {
                 let field_ident = format_ident!("{}", name);
                 let ty_ts = match ty {
-                    ast::Type::Struct(_) => quote! { Register },
-                    ast::Type::Integer | ast::Type::Bits(_) => quote! { Integer },
-                    ast::Type::String => quote! { String },
+                    Type::Struct(_) => quote! { Register },
+                    Type::Integer | Type::Bits(_) => quote! { Integer },
+                    Type::String => quote! { String },
+                    _ => unreachable!("HM type vars should not appear as operand types"),
                 };
                 items.push(quote! { #field_ident: #ty_ts });
             }
@@ -142,7 +122,7 @@ fn emit_instructions<'ast, 'cache: 'ast>(
         let roles_schema = {
             let mut items = vec![];
             for (name, ty) in &ops {
-                if let ast::Type::Struct(_) = ty {
+                if let Type::Struct(_) = ty {
                     let field_ident = format_ident!("{}", name);
                     let role = if defined_register_operands.contains(name) {
                         quote! { Def }
@@ -163,6 +143,75 @@ fn emit_instructions<'ast, 'cache: 'ast>(
                     attributes: A { #attrs_schema },
                     roles: R { #roles_schema },
                     interfaces: [tir_be_common::MachineInstruction],
+                    format: custom,
+                }
+            }
+        });
+
+        let op_display_name = format!("{}.{}", dialect, mnemonic_name);
+        let op_display_name_lit = proc_macro2::Literal::string(&op_display_name);
+        let mut register_attr_print_arms = Vec::new();
+        for (op_name, op_ty) in &ops {
+            if let Type::Struct(class_name) = op_ty {
+                let attr_name_lit = proc_macro2::Literal::string(op_name);
+                let class_lit = proc_macro2::Literal::string(class_name);
+                let print_fn_ident = format_ident!("print_{}", class_name.to_lowercase());
+                register_attr_print_arms.push(quote! {
+                    #attr_name_lit => {
+                        if let tir::attributes::AttributeValue::Register(tir::attributes::RegisterAttr::Physical { class, index }) = &attr.value {
+                            if class == #class_lit {
+                                if let Some(name) = #print_fn_ident(*index, false) {
+                                    fmt.write(name)?;
+                                } else {
+                                    attr.value.print(fmt, &context)?;
+                                }
+                            } else {
+                                attr.value.print(fmt, &context)?;
+                            }
+                        } else {
+                            attr.value.print(fmt, &context)?;
+                        }
+                    }
+                });
+            }
+        }
+        instruction_custom_format_impls.push(quote! {
+            impl #name_ident {
+                fn custom_print<'a, 'b: 'a>(
+                    &'a self,
+                    fmt: &'a mut tir::IRFormatter<'b>,
+                ) -> Result<(), std::fmt::Error> {
+                    use tir::Operation;
+
+                    fmt.write(#op_display_name_lit)?;
+                    if !self.attributes().is_empty() {
+                        fmt.write(" ")?;
+                        fmt.write("{")?;
+                        let mut first = true;
+                        let context = self.0.context.upgrade();
+                        for attr in self.attributes() {
+                            if !first {
+                                fmt.write(", ")?;
+                            }
+                            first = false;
+                            fmt.write(&attr.name)?;
+                            fmt.write(" = ")?;
+                            match attr.name.as_str() {
+                                #(#register_attr_print_arms,)*
+                                _ => attr.value.print(fmt, &context)?,
+                            }
+                        }
+                        fmt.write("}")?;
+                    }
+                    fmt.write("\n")?;
+                    Ok(())
+                }
+
+                fn custom_parse<'src>(
+                    parser: &mut tir::parse::text::Parser<'src>,
+                    _context: &tir::Context,
+                ) -> Result<Box<dyn tir::Operation>, (tir::parse::Span, tir::Error)> {
+                    Err((tir::parse::Span(parser.pos()), tir::Error::ExpectedOpName))
                 }
             }
         });
@@ -176,7 +225,7 @@ fn emit_instructions<'ast, 'cache: 'ast>(
             for (op_name, op_ty) in &ops {
                 let op_name_lit = proc_macro2::Literal::string(&op_name);
                 match op_ty {
-                    ast::Type::Struct(class_name) => {
+                    Type::Struct(class_name) => {
                         let class_lit = proc_macro2::Literal::string(&class_name);
                         if let Some(def_pos) = defined_register_operands
                             .iter()
@@ -231,7 +280,7 @@ fn emit_instructions<'ast, 'cache: 'ast>(
                             });
                         }
                     }
-                    ast::Type::Integer | ast::Type::Bits(_) => {
+                    Type::Integer | Type::Bits(_) => {
                         if let Some(sym) = semantics.variable_symbols.get(op_name) {
                             let sym_lit = proc_macro2::Literal::u32_unsuffixed(*sym);
                             emit_attr_steps.push(quote! {
@@ -243,7 +292,8 @@ fn emit_instructions<'ast, 'cache: 'ast>(
                             });
                         }
                     }
-                    ast::Type::String => {}
+                    Type::String => {}
+                    _ => {}
                 }
             }
 
@@ -280,15 +330,12 @@ fn emit_instructions<'ast, 'cache: 'ast>(
             .unwrap_or(32);
         let width_bytes_lit =
             proc_macro2::Literal::u8_unsuffixed(((encoding_bits as u32 + 7) / 8) as u8);
-        let op_name_lit = proc_macro2::Literal::string(
-            &mnemonic.clone().unwrap_or_else(|| inst.name.to_lowercase()),
-        );
+        let op_name_lit = proc_macro2::Literal::string(mnemonic_name);
 
         let execute_body = if let Some(rhs) =
             resolve_behavior_rhs(inst, &ops, &defined_register_operands)
         {
-            let params = resolve_params_for_instruction(inst, item_cache);
-            let numeric_params: HashMap<_, _> = params
+            let numeric_params: HashMap<_, _> = resolve_params_for_instruction(inst, item_cache)
                 .into_iter()
                 .filter_map(|(name, (_ty, value))| match value {
                     Some(ast::Expr::Lit(ast::Lit::Int(li))) => {
@@ -308,7 +355,7 @@ fn emit_instructions<'ast, 'cache: 'ast>(
                             let name_lit = proc_macro2::Literal::string(&name);
                             if let Some((_, ty)) = ops.iter().find(|(n, _)| n == &name) {
                                 match ty {
-                                    ast::Type::Struct(_) => {
+                                    Type::Struct(_) => {
                                         symbol_arms.push(quote! {
                                             #sym_lit => {
                                                 let (class, index) = tir_be_common::register_attr(self.attributes(), #name_lit)
@@ -320,7 +367,7 @@ fn emit_instructions<'ast, 'cache: 'ast>(
                                             }
                                         });
                                     }
-                                    ast::Type::Integer => {
+                                    Type::Integer => {
                                         symbol_arms.push(quote! {
                                             #sym_lit => {
                                                 let value = tir_be_common::int_attr(self.attributes(), #name_lit).ok_or(
@@ -333,7 +380,7 @@ fn emit_instructions<'ast, 'cache: 'ast>(
                                             }
                                         });
                                     }
-                                    ast::Type::Bits(width) => {
+                                    Type::Bits(width) => {
                                         let width_lit =
                                             proc_macro2::Literal::u32_unsuffixed(*width as u32);
                                         symbol_arms.push(quote! {
@@ -348,7 +395,8 @@ fn emit_instructions<'ast, 'cache: 'ast>(
                                             }
                                         });
                                     }
-                                    ast::Type::String => {}
+                                    Type::String => {}
+                                    _ => {}
                                 }
                             }
                         }
@@ -435,10 +483,8 @@ fn emit_instructions<'ast, 'cache: 'ast>(
 
         // Emit parser implementations based on asm template (simple template support)
         if let Some(template) = resolve_asm_template_for_instruction(inst, item_cache) {
-            // Compile template into a sequence of parse actions
             let actions = compile_asm_template(&template);
 
-            // Generate parsing code for each action
             let mut parse_steps: Vec<proc_macro2::TokenStream> = Vec::new();
             for act in actions {
                 match act {
@@ -453,8 +499,9 @@ fn emit_instructions<'ast, 'cache: 'ast>(
                         if let Some(ty) = ops_map.get(&op_name) {
                             let op_name_lit = proc_macro2::Literal::string(&op_name);
                             match ty {
-                                ast::Type::Struct(class_name) => {
-                                    let fn_ident = format_ident!("parse_{}", class_name);
+                                Type::Struct(class_name) => {
+                                    let fn_ident =
+                                        format_ident!("parse_{}", class_name.to_lowercase());
                                     let class_lit = proc_macro2::Literal::string(class_name);
                                     parse_steps.push(quote! {
                                         let idx = #fn_ident(parser)?;
@@ -469,7 +516,7 @@ fn emit_instructions<'ast, 'cache: 'ast>(
                                         );
                                     });
                                 }
-                                ast::Type::Integer | ast::Type::Bits(_) => {
+                                Type::Integer | Type::Bits(_) => {
                                     parse_steps.push(quote! {
                                         let val: i64 = if let Some(tok) = parser.peek() {
                                             match tok {
@@ -498,19 +545,18 @@ fn emit_instructions<'ast, 'cache: 'ast>(
                                         );
                                     });
                                 }
-                                ast::Type::String => {
+                                Type::String => {
                                     // Strings in asm templates aren't currently used as operands; skip for now.
                                     parse_steps.push(quote! { let _ = parser.peek(); });
                                 }
+                                _ => {}
                             }
                         }
                     }
                     AsmAction::Skip => {
-                        // No-op for spaces or unsupported punctuation in simple templates
                         parse_steps.push(quote! {});
                     }
                     AsmAction::SkipMnemonic => {
-                        // Mnemonic already consumed by dispatcher; ensure no-op
                         parse_steps.push(quote! {});
                     }
                     AsmAction::LParen => {
@@ -532,7 +578,6 @@ fn emit_instructions<'ast, 'cache: 'ast>(
                 }
             }
 
-            // Build the parser function for this instruction
             let parse_fn_ident = format_ident!("parse_{}_inst", &inst.name.to_lowercase());
             instruction_parsers_impls.push(quote! {
                 fn #parse_fn_ident<'src>(
@@ -548,7 +593,6 @@ fn emit_instructions<'ast, 'cache: 'ast>(
                 }
             });
 
-            // Insert into map by mnemonic
             if let Some(mn) = &mnemonic {
                 let mn_lit = proc_macro2::Literal::string(mn);
                 instruction_parser_map_inits.push(quote! {
@@ -561,6 +605,7 @@ fn emit_instructions<'ast, 'cache: 'ast>(
 
     Ok(quote! {
         #(#instruction_defs)*
+        #(#instruction_custom_format_impls)*
         #(#machine_instruction_impls)*
 
         fn get_instruction_parsers() -> std::collections::HashMap<String, Box<tir_be_common::AsmInstructionParser>> {
@@ -581,108 +626,104 @@ fn emit_instructions<'ast, 'cache: 'ast>(
     })
 }
 
-fn resolve_string(expr: &ast::Expr) -> Option<String> {
-    match &expr {
-        ast::Expr::Lit(lit) => match lit {
-            ast::Lit::Str(lstr) => Some(lstr.value().to_owned()),
-            _ => None,
-        },
-        ast::Expr::Block(b) => {
-            if b.last_expr_return {
-                if let Some(ast::Expr::Lit(ast::Lit::Str(s))) = b.stmts.last() {
-                    return Some(s.value().to_owned());
+fn emit_register_parsers_and_printers(
+    files: &[ast::File],
+) -> Result<proc_macro2::TokenStream, TMDLError> {
+    let mut fns = Vec::new();
+
+    for rc in files.iter().flat_map(|f| f.register_classes()) {
+        let rc_name = &rc.name;
+        let fn_name = format_ident!("parse_{}", rc_name.to_lowercase());
+        let print_fn_name = format_ident!("print_{}", rc_name.to_lowercase());
+        let tables = rc.register_name_tables();
+
+        let match_arms = tables
+            .parse_names
+            .iter()
+            .map(|(name, idx)| quote! { #name => Some(#idx as u16), })
+            .collect::<Vec<_>>();
+        let abi_match_arms = tables
+            .abi_names
+            .iter()
+            .map(|(idx, name)| {
+                let idx_lit = proc_macro2::Literal::u16_unsuffixed(*idx);
+                quote! { #idx_lit => return Some(#name.to_string()), }
+            })
+            .collect::<Vec<_>>();
+        let isa_match_arms = tables
+            .isa_names
+            .iter()
+            .map(|(idx, name)| {
+                let idx_lit = proc_macro2::Literal::u16_unsuffixed(*idx);
+                quote! { #idx_lit => return Some(#name.to_string()), }
+            })
+            .collect::<Vec<_>>();
+
+        fns.push(quote! {
+            fn #fn_name<'src>(parser: &mut tir::parse::tokens::Parser<'src, tir_be_common::Token<'src>>) -> Result<u16, ()> {
+                if let Some(name) = parser.parse_ident() {
+                    let idx = match name {
+                        #(#match_arms)*
+                        _ => None,
+                    };
+                    if let Some(i) = idx { return Ok(i); }
                 }
+                Err(())
             }
-            None
-        }
-        _ => None,
-    }
-}
-
-// Resolve asm template for an instruction, following parent templates if needed
-fn resolve_asm_template_for_instruction<'a>(
-    inst: &'a ast::Instruction,
-    item_cache: &HashMap<String, &'a ast::Item>,
-) -> Option<String> {
-    if let Some(expr) = &inst.asm {
-        if let Some(s) = resolve_string(expr) {
-            return Some(s);
-        }
-    }
-    // Walk up templates
-    let mut cur = inst.parent_template.as_ref();
-    while let Some(name) = cur {
-        if let Some(ast::Item::Template(t)) = item_cache.get(name.as_str()) {
-            if let Some(expr) = &t.asm {
-                if let Some(s) = resolve_string(expr) {
-                    return Some(s);
+            fn #print_fn_name(idx: u16, prefer_abi: bool) -> Option<String> {
+                if prefer_abi {
+                    match idx { #(#abi_match_arms)* _ => {} }
                 }
+                match idx { #(#isa_match_arms)* _ => None }
             }
-            cur = t.parent_template.as_ref();
-        } else {
-            break;
-        }
+        });
     }
-    None
+
+    Ok(quote! { #(#fns)* })
 }
 
-fn resolve_params_for_instruction<'a>(
+fn emit_register_trait_helpers(files: &[ast::File]) -> Result<proc_macro2::TokenStream, TMDLError> {
+    let mut hardwired_arms = Vec::new();
+
+    for rc in files.iter().flat_map(|f| f.register_classes()) {
+        let class_lit = proc_macro2::Literal::string(&rc.name);
+        if let Some(idx) = rc.hardwired_zero_register_index() {
+            let idx_lit = proc_macro2::Literal::u16_unsuffixed(idx);
+            hardwired_arms.push(quote! { (#class_lit, #idx_lit) => true, });
+        }
+    }
+
+    Ok(quote! {
+        pub fn register_has_trait_hardwired_zero(class: &str, index: u16) -> bool {
+            match (class, index) {
+                #(#hardwired_arms)*
+                _ => false,
+            }
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Instruction analysis helpers
+// ---------------------------------------------------------------------------
+
+fn analyze_instruction_semantics<'a>(
     inst: &'a ast::Instruction,
-    item_cache: &HashMap<String, &'a ast::Item>,
-) -> HashMap<String, (ast::Type, Option<ast::Expr>)> {
-    let mut result = HashMap::new();
-
-    fn collect_from_template<'a>(
-        name: &str,
-        cache: &HashMap<String, &'a ast::Item>,
-        acc: &mut HashMap<String, (ast::Type, Option<ast::Expr>)>,
-    ) {
-        if let Some(ast::Item::Template(t)) = cache.get(name) {
-            if let Some(parent) = &t.parent_template {
-                collect_from_template(parent, cache, acc);
-            }
-            for (k, v) in &t.params {
-                acc.insert(k.clone(), v.clone());
-            }
-        }
-    }
-
-    if let Some(p) = &inst.parent_template {
-        collect_from_template(p, item_cache, &mut result);
-    }
-    for (k, v) in &inst.params {
-        result.insert(k.clone(), v.clone());
-    }
-
-    result
-}
-
-fn parse_literal_value(lit: &ast::LitInt) -> u64 {
-    let v = lit.value();
-    if v.starts_with("0b") {
-        u64::from_str_radix(&v[2..], 2).unwrap_or(0)
-    } else if v.starts_with("0x") || v.starts_with("0X") {
-        u64::from_str_radix(&v[2..], 16).unwrap_or(0)
-    } else {
-        v.parse::<u64>().unwrap_or(0)
-    }
-}
-
-fn analyze_instruction_semantics(
-    inst: &ast::Instruction,
-    item_cache: &HashMap<String, &ast::Item>,
-    operands: &[(String, ast::Type)],
+    item_cache: &HashMap<&'a str, &'a ast::Item>,
+    operands: &[(String, Type)],
     defined_register_operands: &[String],
 ) -> Option<InstructionSemantics> {
     let rhs = resolve_behavior_rhs(inst, operands, defined_register_operands)?;
 
-    let params = resolve_params_for_instruction(inst, item_cache);
-    let mut numeric_params = HashMap::new();
-    for (name, (_ty, value)) in params {
-        if let Some(ast::Expr::Lit(ast::Lit::Int(li))) = value {
-            numeric_params.insert(name, parse_literal_value(&li) as i64);
-        }
-    }
+    let numeric_params: HashMap<_, _> = resolve_params_for_instruction(inst, item_cache)
+        .into_iter()
+        .filter_map(|(name, (_ty, value))| match value {
+            Some(ast::Expr::Lit(ast::Lit::Int(li))) => {
+                Some((name, parse_literal_value(&li) as i64))
+            }
+            _ => None,
+        })
+        .collect();
 
     let converted = crate::sem_expr_conv::convert_to_sem_expr(rhs, numeric_params).ok()?;
     let pattern = emit_sem_expr(&converted.expr);
@@ -726,11 +767,11 @@ fn split_symbols(
     (variable_symbols, fixed_register_by_class)
 }
 
-fn register_operand_names(operands: &[(String, ast::Type)]) -> HashSet<&str> {
+fn register_operand_names(operands: &[(String, Type)]) -> HashSet<&str> {
     operands
         .iter()
         .filter_map(|(name, ty)| match ty {
-            ast::Type::Struct(_) => Some(name.as_str()),
+            Type::Struct(_) => Some(name.as_str()),
             _ => None,
         })
         .collect()
@@ -756,7 +797,7 @@ fn collect_behavior_assignments<'a>(expr: &'a ast::Expr, out: &mut Vec<(&'a str,
 
 fn infer_defined_register_operands(
     behavior: &ast::Expr,
-    operands: &[(String, ast::Type)],
+    operands: &[(String, Type)],
 ) -> Vec<String> {
     let register_operands = register_operand_names(operands);
 
@@ -773,7 +814,7 @@ fn infer_defined_register_operands(
 
 fn resolve_behavior_rhs<'a>(
     inst: &'a ast::Instruction,
-    operands: &[(String, ast::Type)],
+    operands: &[(String, Type)],
     defined_register_operands: &[String],
 ) -> Option<&'a ast::Expr> {
     let register_operands = register_operand_names(operands);
@@ -796,6 +837,94 @@ fn resolve_behavior_rhs<'a>(
         other => Some(other),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Template / asm helpers
+// ---------------------------------------------------------------------------
+
+fn resolve_string(expr: &ast::Expr) -> Option<String> {
+    match &expr {
+        ast::Expr::Lit(lit) => match lit {
+            ast::Lit::Str(lstr) => Some(lstr.value().to_owned()),
+            _ => None,
+        },
+        ast::Expr::Block(b) => {
+            if b.last_expr_return {
+                if let Some(ast::Expr::Lit(ast::Lit::Str(s))) = b.stmts.last() {
+                    return Some(s.value().to_owned());
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn resolve_asm_template_for_instruction<'a>(
+    inst: &'a ast::Instruction,
+    item_cache: &HashMap<&'a str, &'a ast::Item>,
+) -> Option<String> {
+    resolve_effective_asm_for_instruction(inst, item_cache).and_then(resolve_string)
+}
+
+// Actions derived from a simple asm template string.
+enum AsmAction {
+    SkipMnemonic,
+    Comma,
+    Operand(String),
+    Skip,
+    LParen,
+    RParen,
+}
+
+fn compile_asm_template(template: &str) -> Vec<AsmAction> {
+    let mut actions = Vec::new();
+    let mut i = 0;
+    let bytes = template.as_bytes();
+    while i < bytes.len() {
+        match bytes[i] as char {
+            '{' => {
+                if let Some(end) = template[i + 1..].find('}') {
+                    let content = &template[i + 1..i + 1 + end];
+                    i = i + 1 + end + 1;
+                    if content.starts_with("self.") {
+                        if content.ends_with("MNEMONIC") {
+                            actions.push(AsmAction::SkipMnemonic);
+                        } else {
+                            actions.push(AsmAction::Skip);
+                        }
+                    } else {
+                        actions.push(AsmAction::Operand(content.to_string()));
+                    }
+                    continue;
+                } else {
+                    i += 1;
+                    continue;
+                }
+            }
+            ',' => {
+                actions.push(AsmAction::Comma);
+                i += 1;
+            }
+            '(' => {
+                actions.push(AsmAction::LParen);
+                i += 1;
+            }
+            ')' => {
+                actions.push(AsmAction::RParen);
+                i += 1;
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+    actions
+}
+
+// ---------------------------------------------------------------------------
+// sem_expr code emission
+// ---------------------------------------------------------------------------
 
 fn emit_sem_expr(expr: &tir::sem_expr::Expr) -> proc_macro2::TokenStream {
     use tir::sem_expr::Expr;
@@ -887,265 +1016,4 @@ fn sem_expr_complexity(expr: &tir::sem_expr::Expr) -> u32 {
         | Expr::Xor(lhs, rhs) => 1 + sem_expr_complexity(lhs) + sem_expr_complexity(rhs),
         _ => 2,
     }
-}
-
-// Actions derived from a simple asm template string. We only support commas and operands now.
-enum AsmAction {
-    // Placeholder for {self.MNEMONIC}
-    SkipMnemonic,
-    // A comma token between operands
-    Comma,
-    // An operand placeholder like {rd}, {rs1}, {imm}
-    Operand(String),
-    // Skip anything else (spaces or unsupported punctuation)
-    Skip,
-    // Parentheses
-    LParen,
-    RParen,
-}
-
-// Very simple template compiler: extracts operand sequence and commas.
-fn compile_asm_template(template: &str) -> Vec<AsmAction> {
-    let mut actions = Vec::new();
-    let mut i = 0;
-    let bytes = template.as_bytes();
-    while i < bytes.len() {
-        match bytes[i] as char {
-            '{' => {
-                if let Some(end) = template[i + 1..].find('}') {
-                    let content = &template[i + 1..i + 1 + end];
-                    // Advance past '}'
-                    i = i + 1 + end + 1;
-                    // Handle placeholders
-                    if content.starts_with("self.") {
-                        // If it's the mnemonic, we skip as dispatcher consumed it
-                        if content.ends_with("MNEMONIC") {
-                            actions.push(AsmAction::SkipMnemonic);
-                        } else {
-                            actions.push(AsmAction::Skip);
-                        }
-                    } else {
-                        actions.push(AsmAction::Operand(content.to_string()));
-                    }
-                    continue;
-                } else {
-                    // malformed; skip
-                    i += 1;
-                    continue;
-                }
-            }
-            ',' => {
-                actions.push(AsmAction::Comma);
-                i += 1;
-            }
-            '(' => {
-                actions.push(AsmAction::LParen);
-                i += 1;
-            }
-            ')' => {
-                actions.push(AsmAction::RParen);
-                i += 1;
-            }
-            _ => {
-                // skip whitespace and other symbols for now
-                i += 1;
-            }
-        }
-    }
-    actions
-}
-
-fn emit_register_parsers_and_printers(
-    ast: &[ast::File],
-) -> Result<proc_macro2::TokenStream, TMDLError> {
-    let reg_classes = ast
-        .iter()
-        .flat_map(|f| f.items.iter())
-        .filter_map(|it| match it {
-            ast::Item::RegisterClass(rc) => Some(rc),
-            _ => None,
-        });
-
-    let mut fns = Vec::new();
-
-    for rc in reg_classes {
-        let rc_name = &rc.name;
-        let fn_name = format_ident!("parse_{}", rc_name);
-        let print_fn_name = format_ident!("print_{}", rc_name);
-
-        // Build mapping from textual name -> index (u16)
-        // Expand ranges and assign alias numbers across ranges with same stem
-        let mut entries: Vec<(u16, String, Option<String>)> = Vec::new();
-        for def in &rc.registers {
-            match def {
-                ast::RegisterDef::Single(s) => {
-                    if let Some(idx) = parse_trailing_index(&s.name) {
-                        entries.push((idx, s.name.clone(), s.alias.clone()));
-                    } else {
-                        // no numeric id; skip for matching by index
-                        entries.push((u16::MAX, s.name.clone(), s.alias.clone()));
-                    }
-                }
-                ast::RegisterDef::Range(r) => {
-                    if let (Some(s), Some(e)) =
-                        (parse_trailing_index(&r.start), parse_trailing_index(&r.end))
-                    {
-                        for i in s..=e {
-                            let isa = format!("{}{}", strip_trailing_digits(&r.start), i);
-                            entries.push((i, isa, r.alias_pattern.clone()));
-                        }
-                    }
-                }
-            }
-        }
-        // sort by idx to ensure alias numbering continues across ranges
-        entries.sort_by_key(|(i, _, _)| *i);
-
-        let mut next_alias_index: HashMap<String, u16> = HashMap::new();
-        let mut match_arms = Vec::new();
-        let mut isa_names: Vec<(u16, String)> = Vec::new();
-        let mut abi_names: Vec<(u16, String)> = Vec::new();
-
-        for (idx, isa_name, alias) in entries {
-            if idx != u16::MAX {
-                let lit_isa = isa_name.clone();
-                match_arms.push(quote! { #lit_isa => Some(#idx as u16), });
-                isa_names.push((idx, lit_isa));
-            }
-            if let Some(a) = alias {
-                if let Some(stem) = alias_stem(&a) {
-                    let counter = next_alias_index.entry(stem.clone()).or_insert(0);
-                    let alias_full = format!("{}{}", stem, *counter);
-                    *counter += 1;
-                    match_arms.push(quote! { #alias_full => Some(#idx as u16), });
-                    abi_names.push((idx, alias_full));
-                } else {
-                    // fixed alias (like "zero", "ra")
-                    match_arms.push(quote! { #a => Some(#idx as u16), });
-                    abi_names.push((idx, a));
-                }
-            }
-        }
-
-        let abi_match_arms = {
-            let mut v = Vec::new();
-            for (idx, name) in &abi_names {
-                let idx_lit = proc_macro2::Literal::u16_unsuffixed(*idx);
-                v.push(quote! { #idx_lit => return Some(#name.to_string()), });
-            }
-            quote! { #(#v)* }
-        };
-        let isa_match_arms = {
-            let mut v = Vec::new();
-            for (idx, name) in &isa_names {
-                let idx_lit = proc_macro2::Literal::u16_unsuffixed(*idx);
-                v.push(quote! { #idx_lit => return Some(#name.to_string()), });
-            }
-            quote! { #(#v)* }
-        };
-
-        fns.push(quote! {
-            fn #fn_name<'src>(parser: &mut tir::parse::tokens::Parser<'src, tir_be_common::Token<'src>>) -> Result<u16, ()> {
-                if let Some(name) = parser.parse_ident() {
-                    let idx = match name {
-                        #(#match_arms)*
-                        _ => None,
-                    };
-                    if let Some(i) = idx { return Ok(i); }
-                }
-                Err(())
-            }
-            fn #print_fn_name(idx: u16, prefer_abi: bool) -> Option<String> {
-                if prefer_abi {
-                    match idx { #abi_match_arms _ => {} }
-                }
-                match idx { #isa_match_arms _ => None }
-            }
-        });
-    }
-
-    Ok(quote! { #(#fns)* })
-}
-
-fn parse_trailing_index(s: &str) -> Option<u16> {
-    let mut i = s.len();
-    while i > 0 && s.as_bytes()[i - 1].is_ascii_digit() {
-        i -= 1;
-    }
-    if i < s.len() {
-        s[i..].parse::<u16>().ok()
-    } else {
-        None
-    }
-}
-
-fn strip_trailing_digits(s: &str) -> &str {
-    let mut i = s.len();
-    while i > 0 && s.as_bytes()[i - 1].is_ascii_digit() {
-        i -= 1;
-    }
-    &s[..i]
-}
-
-fn alias_stem(pat: &str) -> Option<String> {
-    if pat.contains("{}") {
-        Some(pat.replace("{}", ""))
-    } else {
-        None
-    }
-}
-
-fn emit_register_trait_helpers(ast: &[ast::File]) -> Result<proc_macro2::TokenStream, TMDLError> {
-    let mut hardwired_arms = Vec::new();
-
-    for file in ast {
-        for item in &file.items {
-            let ast::Item::RegisterClass(reg_class) = item else {
-                continue;
-            };
-            let class_lit = proc_macro2::Literal::string(&reg_class.name);
-            for reg_def in &reg_class.registers {
-                match reg_def {
-                    ast::RegisterDef::Single(reg) => {
-                        if reg
-                            .traits
-                            .iter()
-                            .any(|trait_| matches!(trait_, ast::RegisterTrait::HardwiredZero))
-                        {
-                            let idx = parse_trailing_index(&reg.name).unwrap_or(u16::MAX);
-                            let idx_lit = proc_macro2::Literal::u16_unsuffixed(idx);
-                            hardwired_arms.push(quote! { (#class_lit, #idx_lit) => true, });
-                        }
-                    }
-                    ast::RegisterDef::Range(range) => {
-                        if range
-                            .traits
-                            .iter()
-                            .any(|trait_| matches!(trait_, ast::RegisterTrait::HardwiredZero))
-                        {
-                            if let (Some(start), Some(end)) = (
-                                parse_trailing_index(&range.start),
-                                parse_trailing_index(&range.end),
-                            ) {
-                                for idx in start..=end {
-                                    let idx_lit = proc_macro2::Literal::u16_unsuffixed(idx);
-                                    hardwired_arms
-                                        .push(quote! { (#class_lit, #idx_lit) => true, });
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(quote! {
-        pub fn register_has_trait_hardwired_zero(class: &str, index: u16) -> bool {
-            match (class, index) {
-                #(#hardwired_arms)*
-                _ => false,
-            }
-        }
-    })
 }
