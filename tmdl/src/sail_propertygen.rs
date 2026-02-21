@@ -63,12 +63,12 @@ fn emit_instruction_properties<'a>(
 
     writeln!(
         output,
-        "$property tmdl_prop_{dialect}_{name}_encoding_valid\n  forall ({quant_sig}pre : bits(0)).\n    let enc = {encoding_expr};\n    tmdl_decode_accepts(enc)"
+        "$property tmdl_prop_{dialect}_{name}_encoding_valid =\n  forall ({quant_sig}pre : bits(0)).\n    let enc = {encoding_expr};\n    tmdl_decode_accepts(enc)"
     )?;
 
     writeln!(
         output,
-        "$property tmdl_prop_{dialect}_{name}_state_equiv\n  forall ({quant_sig}pre : bits(0)).\n    let enc = {encoding_expr};\n    let post_tmdl = tmdl_step_from_name((pre, \"{name}\", enc));\n    let post_sail = tmdl_step_from_encoding((pre, enc));\n    tmdl_state_equiv((post_tmdl, post_sail))"
+        "$property tmdl_prop_{dialect}_{name}_state_equiv =\n  forall ({quant_sig}pre : bits(0)).\n    let enc = {encoding_expr};\n    let post_tmdl = tmdl_step_from_name((pre, \"{name}\", enc));\n    let post_sail = tmdl_step_from_encoding((pre, enc));\n    tmdl_state_equiv((post_tmdl, post_sail))"
     )?;
 
     let updated_regs = collect_updated_register_operands(instruction, &operands);
@@ -76,7 +76,7 @@ fn emit_instruction_properties<'a>(
         let class_name = register_class_name(&ty);
         writeln!(
             output,
-            "$property tmdl_prop_{dialect}_{name}_reg_{op_name}_equiv\n  forall ({quant_sig}pre : bits(0)).\n    let enc = {encoding_expr};\n    let post_tmdl = tmdl_step_from_name((pre, \"{name}\", enc));\n    let post_sail = tmdl_step_from_encoding((pre, enc));\n    tmdl_reg_update_equiv((pre, post_tmdl, post_sail, \"{class_name}\", int({op_name})))"
+            "$property tmdl_prop_{dialect}_{name}_reg_{op_name}_equiv =\n  forall ({quant_sig}pre : bits(0)).\n    let enc = {encoding_expr};\n    let post_tmdl = tmdl_step_from_name((pre, \"{name}\", enc));\n    let post_sail = tmdl_step_from_encoding((pre, enc));\n    tmdl_reg_update_equiv((pre, post_tmdl, post_sail, \"{class_name}\", int({op_name})))"
         )?;
     }
 
@@ -122,7 +122,7 @@ fn sail_operand_call_list(operands: &[(String, Type)]) -> String {
             .map(|(name, _)| name.to_lowercase())
             .collect::<Vec<_>>()
             .join(", ");
-        format!("({args})")
+        format!("(({args}))")
     }
 }
 
