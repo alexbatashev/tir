@@ -161,9 +161,7 @@ fn build_instructions<'a>(
         // pattern binding, so they are unaffected by this renaming.
         let variant_operands = operands
             .iter()
-            .map(|(op_name, ty)| {
-                format!("({}_{} {})", name, op_name.to_lowercase(), smt_ty_of(ty))
-            })
+            .map(|(op_name, ty)| format!("({}_{} {})", name, op_name.to_lowercase(), smt_ty_of(ty)))
             .collect::<Vec<_>>()
             .join(" ");
 
@@ -183,9 +181,7 @@ fn build_instructions<'a>(
             .join(" ");
 
         if operand_list.is_empty() {
-            encode_arms.push(format!(
-                "((_ is {uppercase_name}) instr) (encode_{name})"
-            ));
+            encode_arms.push(format!("((_ is {uppercase_name}) instr) (encode_{name})"));
             execute_arms.push(format!(
                 "((_ is {uppercase_name}) instr) (execute_{name} state)"
             ));
@@ -556,10 +552,12 @@ fn build_decoder<'a>(
                     let name = &id.name;
                     if operands.contains_key(name) {
                         // The entire word field holds bits [0..word_width-1] of the operand.
-                        operand_pieces
-                            .entry(name.clone())
-                            .or_default()
-                            .push((0, word_width - 1, word_lo, word_hi));
+                        operand_pieces.entry(name.clone()).or_default().push((
+                            0,
+                            word_width - 1,
+                            word_lo,
+                            word_hi,
+                        ));
                     } else if let Some((_, Some(ast::Expr::Lit(ast::Lit::Int(li))))) =
                         params.get(name)
                     {

@@ -14,6 +14,7 @@ use crate::error::TMDLError;
 use crate::lexer::lex;
 use crate::parser::parse;
 use crate::rustgen::generate_rust;
+use crate::sail_propertygen::generate_sail_properties;
 use crate::sema_analyze;
 use crate::smtlibgen::generate_smtlib;
 
@@ -45,11 +46,15 @@ pub enum Action {
     EmitAstJson,
     EmitRust,
     EmitSmtlib,
+    EmitSailProperty,
 }
 
 impl Action {
     fn needs_whole_program(&self) -> bool {
-        matches!(self, Action::EmitRust | Action::EmitSmtlib)
+        matches!(
+            self,
+            Action::EmitRust | Action::EmitSmtlib | Action::EmitSailProperty
+        )
     }
 }
 
@@ -171,11 +176,15 @@ impl Compiler {
     }
 
     fn compile_whole_program(&self) -> Result<(), TMDLError> {
-        if matches!(self.action, Action::EmitRust) && self.dialect.is_none() {
+        if matches!(
+            self.action,
+            Action::EmitRust | Action::EmitSmtlib | Action::EmitSailProperty
+        ) && self.dialect.is_none()
+        {
             let mut cmd = Cli::command();
             cmd.error(
                 clap::error::ErrorKind::ArgumentConflict,
-                "--dialect must be specified with --action=emit-rust",
+                "--dialect must be specified with --action requiring ISA selection",
             )
             .exit();
         }
@@ -250,6 +259,15 @@ impl Compiler {
             Action::EmitSmtlib => {
                 let writer: Box<dyn Write> = self.create_output_writer()?;
                 generate_smtlib(
+                    self.dialect.as_ref().unwrap(),
+                    &parsed_files,
+                    &item_cache,
+                    writer,
+                )?;
+            }
+            Action::EmitSailProperty => {
+                let writer: Box<dyn Write> = self.create_output_writer()?;
+                generate_sail_properties(
                     self.dialect.as_ref().unwrap(),
                     &parsed_files,
                     &item_cache,

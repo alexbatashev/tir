@@ -4,6 +4,7 @@ mod error;
 mod lexer;
 mod parser;
 mod rustgen;
+mod sail_propertygen;
 mod sem_expr_conv;
 mod sem_expr_state;
 mod sema;
