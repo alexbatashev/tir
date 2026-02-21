@@ -27,6 +27,7 @@ pub fn generate_smtlib<'a>(
     writeln!(output, "{}", HEADER)?;
     build_state(files, &mut output)?;
     build_instructions(dialect, item_cache, files, &mut output)?;
+    build_decoder(dialect, item_cache, files, &mut output)?;
     Ok(())
 }
 
@@ -34,14 +35,24 @@ pub fn generate_smtlib<'a>(
 // State (register file) declaration
 // ---------------------------------------------------------------------------
 
+fn is_pc_class(rc: &ast::RegisterClass) -> bool {
+    rc.resolve_registers()
+        .any(|r| r.traits.contains(&ast::RegisterTrait::ProgramCounter))
+}
+
 fn build_state(files: &[ast::File], output: &mut Box<dyn Write>) -> Result<(), TMDLError> {
-    let reg_class_names = files
+    let all_classes = files
         .iter()
         .flat_map(|f| f.register_classes())
+        .collect::<Vec<_>>();
+
+    let array_class_names = all_classes
+        .iter()
+        .filter(|rc| !is_pc_class(rc))
         .map(|rc| rc.name.to_lowercase())
         .collect::<Vec<_>>();
 
-    let mut fields = reg_class_names
+    let mut fields = array_class_names
         .iter()
         .map(|name| {
             format!(
@@ -58,7 +69,7 @@ fn build_state(files: &[ast::File], output: &mut Box<dyn Write>) -> Result<(), T
         fields.join(" ")
     )?;
 
-    for name in &reg_class_names {
+    for name in &array_class_names {
         writeln!(
             output,
             "\n(define-fun read_{name} ((st TMDLState) (r (_ BitVec {idx_width}))) (_ BitVec {val_width})\n  (ite (= r (_ bv0 {idx_width}))\n    (_ bv0 {val_width})\n    (select ({name} st) r)))",
@@ -67,9 +78,9 @@ fn build_state(files: &[ast::File], output: &mut Box<dyn Write>) -> Result<(), T
         )?;
 
         let mut fields = Vec::new();
-        for n2 in &reg_class_names {
+        for n2 in &array_class_names {
             if n2 == name {
-                fields.push(format!("(store ({} st) r val)", n2,));
+                fields.push(format!("(store ({} st) r val)", n2));
             } else {
                 fields.push(format!("({} st)", n2));
             }
@@ -84,7 +95,7 @@ fn build_state(files: &[ast::File], output: &mut Box<dyn Write>) -> Result<(), T
         )?;
     }
 
-    let mut fields = reg_class_names
+    let mut fields = array_class_names
         .iter()
         .map(|name| format!("({} st)", name))
         .collect::<Vec<_>>();
@@ -144,21 +155,46 @@ fn build_instructions<'a>(
             "\n(define-fun encode_{name} {operand_params} (_ BitVec 32)\n  {smt_encoding})\n\n(define-fun execute_{name} {execute_params} TMDLState\n  {smt_behavior})"
         )?;
 
-        if smt_operands_joined.is_empty() {
+        // SMT-LIB requires datatype accessor names to be unique within the
+        // whole datatype.  Prefix each accessor with the instruction name so
+        // that `ADD_rd` and `SUB_rd` don't collide.  Match arms use positional
+        // pattern binding, so they are unaffected by this renaming.
+        let variant_operands = operands
+            .iter()
+            .map(|(op_name, ty)| {
+                format!("({}_{} {})", name, op_name.to_lowercase(), smt_ty_of(ty))
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        if variant_operands.is_empty() {
             instruction_variants.push(format!("({uppercase_name})"));
         } else {
-            instruction_variants.push(format!("({uppercase_name} {smt_operands_joined})"));
+            instruction_variants.push(format!("({uppercase_name} {variant_operands})"));
         }
 
+        // Build ite-based dispatch arms using the prefixed accessor names.
+        // Z3's SMT-LIB `match` does not support pattern variable binding, so
+        // we use `(_ is VARIANT)` discriminators and named accessors instead.
+        let accessor_args = operand_names
+            .iter()
+            .map(|op| format!("({name}_{op} instr)"))
+            .collect::<Vec<_>>()
+            .join(" ");
+
         if operand_list.is_empty() {
-            encode_arms.push(format!("(({uppercase_name}) (encode_{name}))"));
-            execute_arms.push(format!("(({uppercase_name}) (execute_{name} state))"));
-        } else {
             encode_arms.push(format!(
-                "(({uppercase_name} {operand_list}) (encode_{name} {operand_list}))"
+                "((_ is {uppercase_name}) instr) (encode_{name})"
             ));
             execute_arms.push(format!(
-                "(({uppercase_name} {operand_list}) (execute_{name} state {operand_list}))"
+                "((_ is {uppercase_name}) instr) (execute_{name} state)"
+            ));
+        } else {
+            encode_arms.push(format!(
+                "((_ is {uppercase_name}) instr) (encode_{name} {accessor_args})"
+            ));
+            execute_arms.push(format!(
+                "((_ is {uppercase_name}) instr) (execute_{name} state {accessor_args})"
             ));
         }
     }
@@ -169,16 +205,28 @@ fn build_instructions<'a>(
         instruction_variants.join(" ")
     )?;
 
+    // Fold arms into nested ites; the last instruction is the fallback.
+    // encode_* and execute_* already exist at this point so the ite can call them.
+    let encode_body = encode_arms
+        .iter()
+        .rev()
+        .fold("(_ bv0 32)".to_string(), |else_branch, arm| {
+            format!("(ite {} {})", arm, else_branch)
+        });
     writeln!(
         output,
-        "\n(define-fun encode_{dialect} ((instr TMDLInstr)) (_ BitVec 32)\n  (match instr\n    {encode_arms}))",
-        encode_arms = encode_arms.join("\n    ")
+        "\n(define-fun encode_{dialect} ((instr TMDLInstr)) (_ BitVec 32)\n  {encode_body})"
     )?;
 
+    let execute_body = execute_arms
+        .iter()
+        .rev()
+        .fold("state".to_string(), |else_branch, arm| {
+            format!("(ite {} {})", arm, else_branch)
+        });
     writeln!(
         output,
-        "\n(define-fun execute_{dialect} ((state TMDLState) (instr TMDLInstr)) TMDLState\n  (match instr\n    {execute_arms}))",
-        execute_arms = execute_arms.join("\n    ")
+        "\n(define-fun execute_{dialect} ((state TMDLState) (instr TMDLInstr)) TMDLState\n  {execute_body})"
     )?;
 
     Ok(())
@@ -463,6 +511,198 @@ fn build_smt_behavior<'a>(
 }
 
 // ---------------------------------------------------------------------------
+// Decoder (instruction word → TMDLInstr)
+// ---------------------------------------------------------------------------
+
+fn build_decoder<'a>(
+    dialect: &str,
+    item_cache: &HashMap<&'a str, &'a ast::Item>,
+    files: &'a [ast::File],
+    output: &mut Box<dyn Write>,
+) -> Result<(), TMDLError> {
+    let instructions: Vec<&ast::Instruction> =
+        files.iter().flat_map(|f| f.instructions()).collect();
+    if instructions.is_empty() {
+        return Ok(());
+    }
+
+    let mut arms: Vec<(String, String)> = vec![];
+
+    for i in &instructions {
+        let name_upper = i.name.to_uppercase();
+        let operand_list = resolve_operands_for_instruction(i, item_cache);
+        let operands: HashMap<String, Type> = operand_list.iter().cloned().collect();
+        let params = resolve_params_for_instruction(i, item_cache);
+        let encoding_arms = get_encoding_arms(i, item_cache);
+
+        // For each operand: collect (op_lo, op_hi, word_lo, word_hi) pieces.
+        let mut operand_pieces: HashMap<String, Vec<(u16, u16, u16, u16)>> = HashMap::new();
+        let mut guards: Vec<String> = vec![];
+
+        for arm in &encoding_arms {
+            let word_lo = arm.start;
+            let word_hi = arm.end.unwrap_or(arm.start);
+            let word_width = word_hi - word_lo + 1;
+
+            match &arm.value {
+                ast::Expr::Lit(ast::Lit::Int(li)) => {
+                    let val = parse_literal_value_u128(li);
+                    guards.push(format!(
+                        "(= ((_ extract {} {}) word) (_ bv{} {}))",
+                        word_hi, word_lo, val, word_width
+                    ));
+                }
+                ast::Expr::Ident(id) => {
+                    let name = &id.name;
+                    if operands.contains_key(name) {
+                        // The entire word field holds bits [0..word_width-1] of the operand.
+                        operand_pieces
+                            .entry(name.clone())
+                            .or_default()
+                            .push((0, word_width - 1, word_lo, word_hi));
+                    } else if let Some((_, Some(ast::Expr::Lit(ast::Lit::Int(li))))) =
+                        params.get(name)
+                    {
+                        let val = parse_literal_value_u128(li);
+                        guards.push(format!(
+                            "(= ((_ extract {} {}) word) (_ bv{} {}))",
+                            word_hi, word_lo, val, word_width
+                        ));
+                    }
+                    // Unresolved param: no guard emitted (treated as don't-care).
+                }
+                ast::Expr::Slice(s) => {
+                    if let ast::Expr::Ident(id) = &*s.base {
+                        if operands.contains_key(&id.name) {
+                            operand_pieces
+                                .entry(id.name.clone())
+                                .or_default()
+                                .push((s.start, s.end, word_lo, word_hi));
+                        }
+                    }
+                }
+                ast::Expr::IndexAccess(s) => {
+                    if let ast::Expr::Ident(id) = &*s.base {
+                        if operands.contains_key(&id.name) {
+                            operand_pieces
+                                .entry(id.name.clone())
+                                .or_default()
+                                .push((s.index, s.index, word_lo, word_hi));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let guard = match guards.len() {
+            0 => "true".to_string(),
+            1 => guards.remove(0),
+            _ => format!("(and {})", guards.join(" ")),
+        };
+
+        // Build the constructor arguments in operand declaration order.
+        let constructor_args: Vec<String> = operand_list
+            .iter()
+            .map(|(op_name, op_ty)| {
+                let target_width = match op_ty {
+                    Type::Struct(_) => REG_INDEX_WIDTH,
+                    _ => REG_VALUE_WIDTH,
+                };
+
+                let Some(mut pieces) = operand_pieces.remove(op_name) else {
+                    return zero_bv(target_width);
+                };
+
+                // Sort pieces by op_hi descending so the concat builds high→low.
+                pieces.sort_by(|a, b| b.1.cmp(&a.1));
+
+                // Reconstruct the operand from its pieces, filling any gaps
+                // between non-contiguous slices with zero bits.
+                // `expected_hi` tracks the next op bit we expect; it starts at
+                // the top bit of the highest piece and steps downward.
+                let mut fragments: Vec<String> = vec![];
+                let mut raw_width: u16 = 0;
+                let mut expected_hi = pieces[0].1;
+
+                for (op_lo, op_hi, word_lo, word_hi) in &pieces {
+                    // Fill any gap between the previous piece and this one.
+                    if *op_hi < expected_hi {
+                        let gap = expected_hi - op_hi; // bits [expected_hi..op_hi+1]
+                        fragments.push(zero_bv(gap));
+                        raw_width += gap;
+                    }
+                    fragments.push(format!("((_ extract {} {}) word)", word_hi, word_lo));
+                    raw_width += op_hi - op_lo + 1;
+                    expected_hi = op_lo.saturating_sub(1);
+                }
+                // Fill any gap below the lowest piece (bits [op_lo-1..0]).
+                let lowest_op_lo = pieces.last().map(|(lo, _, _, _)| *lo).unwrap_or(0);
+                if lowest_op_lo > 0 {
+                    fragments.push(zero_bv(lowest_op_lo));
+                    raw_width += lowest_op_lo;
+                }
+
+                let raw = fragments
+                    .into_iter()
+                    .reduce(|acc, f| format!("(concat {} {})", acc, f))
+                    .unwrap_or_else(|| zero_bv(target_width));
+
+                cast_bv_smt(&raw, raw_width, target_width)
+            })
+            .collect();
+
+        let constructor = if constructor_args.is_empty() {
+            format!("({name_upper})")
+        } else {
+            format!("({name_upper} {})", constructor_args.join(" "))
+        };
+        arms.push((guard, constructor));
+    }
+
+    // Build a fallback: the first instruction with all-zero operands.
+    let first = &instructions[0];
+    let first_ops = resolve_operands_for_instruction(first, item_cache);
+    let fallback = {
+        let zeros: Vec<String> = first_ops
+            .iter()
+            .map(|(_, ty)| {
+                zero_bv(match ty {
+                    Type::Struct(_) => REG_INDEX_WIDTH,
+                    _ => REG_VALUE_WIDTH,
+                })
+            })
+            .collect();
+        if zeros.is_empty() {
+            format!("({})", first.name.to_uppercase())
+        } else {
+            format!("({} {})", first.name.to_uppercase(), zeros.join(" "))
+        }
+    };
+
+    // Fold arms into nested ites, first arm wins.
+    let body = arms
+        .iter()
+        .rev()
+        .fold(fallback, |else_branch, (guard, then_branch)| {
+            format!("(ite {}\n    {}\n    {})", guard, then_branch, else_branch)
+        });
+
+    writeln!(
+        output,
+        "\n(define-fun decode_{dialect} ((word (_ BitVec 32))) TMDLInstr\n  {})",
+        body
+    )?;
+
+    writeln!(
+        output,
+        "\n(define-fun execute_by_word_{dialect} ((state TMDLState) (word (_ BitVec 32))) TMDLState\n  (execute_{dialect} state (decode_{dialect} word)))"
+    )?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Bitvector rendering helpers
 // ---------------------------------------------------------------------------
 
@@ -493,15 +733,24 @@ fn parse_literal_value_u128(lit: &ast::LitInt) -> u128 {
 }
 
 fn cast_bv(name: &str, from_width: u16, to_width: u16) -> String {
+    cast_bv_smt(name, from_width, to_width)
+}
+
+/// Like `cast_bv` but accepts an arbitrary SMT-LIB expression instead of a
+/// plain identifier.  When `from_width == to_width` the expression is returned
+/// as-is; otherwise it is wrapped in `zero_extend` or `extract`.
+fn cast_bv_smt(expr: &str, from_width: u16, to_width: u16) -> String {
     match from_width.cmp(&to_width) {
-        std::cmp::Ordering::Equal => name.to_string(),
+        std::cmp::Ordering::Equal => expr.to_string(),
         std::cmp::Ordering::Less => {
-            format!("((_ zero_extend {}) {})", to_width - from_width, name)
+            format!("((_ zero_extend {}) {})", to_width - from_width, expr)
         }
         std::cmp::Ordering::Greater => {
-            format!("((_ extract {} 0) {})", to_width - 1, name)
+            format!("((_ extract {} 0) {})", to_width - 1, expr)
         }
     }
 }
 
-const HEADER: &str = "; Automatically generated by TMDL compiler\n(set-logic AUFBV)\n";
+// AUFDTBV: Arrays, Uninterpreted Functions, Datatypes (for TMDLInstr),
+// BitVectors.  Use ALL as an alias that Z3 and CVC5 both accept.
+const HEADER: &str = "; Automatically generated by TMDL compiler\n(set-logic ALL)\n";
