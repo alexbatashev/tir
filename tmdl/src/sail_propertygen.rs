@@ -108,8 +108,8 @@ fn sail_encode_type_signature(operands: &[(String, Type)]) -> String {
             .iter()
             .map(|(_, ty)| sail_ty_of_operand(ty))
             .collect::<Vec<_>>()
-            .join(" -> ");
-        format!("{args} -> bits(32)")
+            .join(", ");
+        format!("({args}) -> bits(32)")
     }
 }
 
