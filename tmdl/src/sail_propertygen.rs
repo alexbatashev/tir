@@ -25,16 +25,16 @@ pub fn generate_sail_properties<'a>(
     writeln!(output, "val tmdl_decode_accepts : bits(32) -> bool")?;
     writeln!(
         output,
-        "val tmdl_step_from_encoding : bits(0) -> bits(32) -> bits(0)"
+        "val tmdl_step_from_encoding : (bits(0), bits(32)) -> bits(0)"
     )?;
     writeln!(
         output,
-        "val tmdl_step_from_name : bits(0) -> string -> bits(32) -> bits(0)"
+        "val tmdl_step_from_name : (bits(0), string, bits(32)) -> bits(0)"
     )?;
-    writeln!(output, "val tmdl_state_equiv : bits(0) -> bits(0) -> bool")?;
+    writeln!(output, "val tmdl_state_equiv : (bits(0), bits(0)) -> bool")?;
     writeln!(
         output,
-        "val tmdl_reg_update_equiv : bits(0) -> bits(0) -> bits(0) -> string -> int -> bool"
+        "val tmdl_reg_update_equiv : (bits(0), bits(0), bits(0), string, int) -> bool"
     )?;
 
     for inst in files.iter().flat_map(|f| f.instructions()) {
@@ -68,7 +68,7 @@ fn emit_instruction_properties<'a>(
 
     writeln!(
         output,
-        "$property tmdl_prop_{dialect}_{name}_state_equiv\n  forall ({quant_sig}pre : bits(0)).\n    let enc = {encoding_expr};\n    let post_tmdl = tmdl_step_from_name(pre, \"{name}\", enc);\n    let post_sail = tmdl_step_from_encoding(pre, enc);\n    tmdl_state_equiv(post_tmdl, post_sail)"
+        "$property tmdl_prop_{dialect}_{name}_state_equiv\n  forall ({quant_sig}pre : bits(0)).\n    let enc = {encoding_expr};\n    let post_tmdl = tmdl_step_from_name((pre, \"{name}\", enc));\n    let post_sail = tmdl_step_from_encoding((pre, enc));\n    tmdl_state_equiv((post_tmdl, post_sail))"
     )?;
 
     let updated_regs = collect_updated_register_operands(instruction, &operands);
@@ -76,7 +76,7 @@ fn emit_instruction_properties<'a>(
         let class_name = register_class_name(&ty);
         writeln!(
             output,
-            "$property tmdl_prop_{dialect}_{name}_reg_{op_name}_equiv\n  forall ({quant_sig}pre : bits(0)).\n    let enc = {encoding_expr};\n    let post_tmdl = tmdl_step_from_name(pre, \"{name}\", enc);\n    let post_sail = tmdl_step_from_encoding(pre, enc);\n    tmdl_reg_update_equiv(pre, post_tmdl, post_sail, \"{class_name}\", int({op_name}))"
+            "$property tmdl_prop_{dialect}_{name}_reg_{op_name}_equiv\n  forall ({quant_sig}pre : bits(0)).\n    let enc = {encoding_expr};\n    let post_tmdl = tmdl_step_from_name((pre, \"{name}\", enc));\n    let post_sail = tmdl_step_from_encoding((pre, enc));\n    tmdl_reg_update_equiv((pre, post_tmdl, post_sail, \"{class_name}\", int({op_name})))"
         )?;
     }
 
