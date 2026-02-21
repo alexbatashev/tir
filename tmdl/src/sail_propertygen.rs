@@ -72,7 +72,7 @@ fn emit_instruction_properties<'a>(
         &format!("tmdl_prop_{dialect}_{name}_state_equiv"),
         &operands,
         &format!(
-            "let enc = {encoding_expr};\n    let post_tmdl = tmdl_step_from_name((pre, \"{name}\", enc));\n    let post_sail = tmdl_step_from_encoding((pre, enc));\n    tmdl_state_equiv((post_tmdl, post_sail))"
+            "let enc = {encoding_expr};\n    let post_tmdl = tmdl_step_from_name(pre, \"{name}\", enc);\n    let post_sail = tmdl_step_from_encoding(pre, enc);\n    tmdl_state_equiv(post_tmdl, post_sail)"
         ),
     )?;
 
@@ -84,7 +84,7 @@ fn emit_instruction_properties<'a>(
             &format!("tmdl_prop_{dialect}_{name}_reg_{op_name}_equiv"),
             &operands,
             &format!(
-                "let enc = {encoding_expr};\n    let post_tmdl = tmdl_step_from_name((pre, \"{name}\", enc));\n    let post_sail = tmdl_step_from_encoding((pre, enc));\n    tmdl_reg_update_equiv((pre, post_tmdl, post_sail, \"{class_name}\", int({op_name})))"
+                "let enc = {encoding_expr};\n    let post_tmdl = tmdl_step_from_name(pre, \"{name}\", enc);\n    let post_sail = tmdl_step_from_encoding(pre, enc);\n    tmdl_reg_update_equiv(pre, post_tmdl, post_sail, \"{class_name}\", int({op_name}))"
             ),
         )?;
     }
@@ -159,7 +159,7 @@ fn sail_operand_call_list(operands: &[(String, Type)]) -> String {
             .map(|(name, _)| name.to_lowercase())
             .collect::<Vec<_>>()
             .join(", ");
-        format!("(({args}))")
+        format!("({args})")
     }
 }
 
