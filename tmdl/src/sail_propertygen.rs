@@ -53,7 +53,6 @@ fn emit_instruction_properties<'a>(
 ) -> Result<(), TMDLError> {
     let name = instruction.name.to_lowercase();
     let operands = resolve_operands_for_instruction(instruction, item_cache);
-    let quant_sig = sail_quantified_operands(&operands);
     let encode_ty_sig = sail_encode_type_signature(&operands);
     let operand_call = sail_operand_call_list(&operands);
     let encoding_expr = format!("tmdl_encode_{dialect}_{name}{operand_call}");
@@ -61,42 +60,80 @@ fn emit_instruction_properties<'a>(
     writeln!(output, "\n/* ---- {dialect}.{name} ---- */")?;
     writeln!(output, "val tmdl_encode_{dialect}_{name} : {encode_ty_sig}")?;
 
-    writeln!(
+    emit_property_decl_and_def(
         output,
-        "$property tmdl_prop_{dialect}_{name}_encoding_valid =\n  forall ({quant_sig}pre : bits(0)).\n    let enc = {encoding_expr};\n    tmdl_decode_accepts(enc)"
+        &format!("tmdl_prop_{dialect}_{name}_encoding_valid"),
+        &operands,
+        &format!("let enc = {encoding_expr};\n    tmdl_decode_accepts(enc)"),
     )?;
 
-    writeln!(
+    emit_property_decl_and_def(
         output,
-        "$property tmdl_prop_{dialect}_{name}_state_equiv =\n  forall ({quant_sig}pre : bits(0)).\n    let enc = {encoding_expr};\n    let post_tmdl = tmdl_step_from_name((pre, \"{name}\", enc));\n    let post_sail = tmdl_step_from_encoding((pre, enc));\n    tmdl_state_equiv((post_tmdl, post_sail))"
+        &format!("tmdl_prop_{dialect}_{name}_state_equiv"),
+        &operands,
+        &format!(
+            "let enc = {encoding_expr};\n    let post_tmdl = tmdl_step_from_name((pre, \"{name}\", enc));\n    let post_sail = tmdl_step_from_encoding((pre, enc));\n    tmdl_state_equiv((post_tmdl, post_sail))"
+        ),
     )?;
 
     let updated_regs = collect_updated_register_operands(instruction, &operands);
     for (op_name, ty) in updated_regs {
         let class_name = register_class_name(&ty);
-        writeln!(
+        emit_property_decl_and_def(
             output,
-            "$property tmdl_prop_{dialect}_{name}_reg_{op_name}_equiv =\n  forall ({quant_sig}pre : bits(0)).\n    let enc = {encoding_expr};\n    let post_tmdl = tmdl_step_from_name((pre, \"{name}\", enc));\n    let post_sail = tmdl_step_from_encoding((pre, enc));\n    tmdl_reg_update_equiv((pre, post_tmdl, post_sail, \"{class_name}\", int({op_name})))"
+            &format!("tmdl_prop_{dialect}_{name}_reg_{op_name}_equiv"),
+            &operands,
+            &format!(
+                "let enc = {encoding_expr};\n    let post_tmdl = tmdl_step_from_name((pre, \"{name}\", enc));\n    let post_sail = tmdl_step_from_encoding((pre, enc));\n    tmdl_reg_update_equiv((pre, post_tmdl, post_sail, \"{class_name}\", int({op_name})))"
+            ),
         )?;
     }
 
     Ok(())
 }
 
-fn sail_quantified_operands(operands: &[(String, Type)]) -> String {
-    let mut parts = Vec::with_capacity(operands.len());
-    for (name, ty) in operands {
-        parts.push(format!(
-            "{} : {}",
-            name.to_lowercase(),
-            sail_ty_of_operand(ty)
-        ));
-    }
+fn emit_property_decl_and_def(
+    output: &mut Box<dyn Write>,
+    property_name: &str,
+    operands: &[(String, Type)],
+    body_expr: &str,
+) -> Result<(), TMDLError> {
+    let prop_ty = sail_property_type_signature(operands);
+    let params = sail_property_function_params(operands);
 
-    if parts.is_empty() {
-        String::new()
+    writeln!(output, "$property")?;
+    writeln!(output, "val {property_name} : {prop_ty}")?;
+    writeln!(
+        output,
+        "function {property_name} {params} = {{\n    {body_expr}\n}}"
+    )?;
+
+    Ok(())
+}
+
+fn sail_property_type_signature(operands: &[(String, Type)]) -> String {
+    if operands.is_empty() {
+        "bits(0) -> bool".to_string()
     } else {
-        format!("{}, ", parts.join(", "))
+        let mut args = operands
+            .iter()
+            .map(|(_, ty)| sail_ty_of_operand(ty))
+            .collect::<Vec<_>>();
+        args.push("bits(0)");
+        format!("({}) -> bool", args.join(", "))
+    }
+}
+
+fn sail_property_function_params(operands: &[(String, Type)]) -> String {
+    if operands.is_empty() {
+        "pre".to_string()
+    } else {
+        let mut args = operands
+            .iter()
+            .map(|(name, _)| name.to_lowercase())
+            .collect::<Vec<_>>();
+        args.push("pre".to_string());
+        format!("({})", args.join(", "))
     }
 }
 
