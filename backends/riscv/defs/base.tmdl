@@ -200,3 +200,25 @@ instruction ShiftRightArithmeticImm32 for [RV32I] : ShiftImm32 {
       rd = rs1 >>> imm;
     }
 }
+
+instruction JumpAndLink for [RV32I, RV64I] : JType {
+    param MNEMONIC: String = "jal";
+    param OPCODE: bits<7> = 0b1101111;
+
+    behavior {
+        rd = pc + zext(0b100, self.XLEN);
+        pc = pc + sext(imm, self.XLEN);
+    }
+}
+
+// TODO support implicit register arguments
+// instruction JumpAndLinkReg for [RV32I, RV64I] : IType {
+//    param MNEMONIC: String = "jal";
+//    param OPCODE: bits<7> = 0b1100111;
+//    param FUNCT3: bits<3> = 0b000;
+//
+//    behavior {
+//        rd = pc + zext(0b100, self.XLEN);
+//        pc = pc + (rs1 + sext(imm, self.XLEN));
+//    }
+// }
