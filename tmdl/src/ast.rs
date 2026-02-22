@@ -187,6 +187,17 @@ pub enum BinOp {
     Sub,
     Mul,
     Div,
+    UnsignedDiv,
+    Equal,
+    NotEqual,
+    LessThan,
+    GreaterThan,
+    LessThenEqual,
+    GreaterThanEqual,
+    UnsignedLessThan,
+    UnsignedGreaterThan,
+    UnsignedLessThenEqual,
+    UnsignedGreaterThanEqual,
     BitwiseAnd,
     BitwiseOr,
     BitwiseXor,
@@ -208,6 +219,8 @@ pub struct Binary {
 pub enum BuiltinFunction {
     Clamp,
     Extract,
+    SExt,
+    ZExt,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]

@@ -5,6 +5,10 @@ template ALUOp for [RV32I, RV64I] : RType {
     param FUNCT7: bits<7> = 0b0000000;
 }
 
+template IALUOp for [RV32I, RV64I] : IType {
+    param OPCODE: bits<7> = 0b0010011;
+}
+
 instruction Add for [RV32I, RV64I] : ALUOp {
     param MNEMONIC: String = "add";
     param FUNCT3: bits<3> = 0b000;
@@ -30,7 +34,29 @@ instruction ShiftLeftLogical for [RV32I, RV64I] : ALUOp {
     }
 }
 
-// TODO: SLT, SLTU
+instruction SetLessThan for [RV32I, RV64I] : ALUOp {
+    param MNEMONIC: String = "slt";
+    param FUNCT3: bits<3> = 0b010;
+    behavior {
+      rd = if rs1 < rs2 {
+        zext(0b1, self.XLEN)
+      } else {
+        zext(0b0, self.XLEN)
+      }
+    }
+}
+
+instruction SetLessThanUnsigned for [RV32I, RV64I] : ALUOp {
+    param MNEMONIC: String = "sltu";
+    param FUNCT3: bits<3> = 0b010;
+    behavior {
+      rd = if rs1 ~< rs2 {
+        zext(0b1, self.XLEN)
+      } else {
+        zext(0b0, self.XLEN)
+      }
+    }
+}
 
 instruction Xor for [RV32I, RV64I] : ALUOp {
     param MNEMONIC: String = "xor";
@@ -70,5 +96,107 @@ instruction And for [RV32I, RV64I] : ALUOp {
     param FUNCT3: bits<3> = 0b111;
     behavior {
       rd = rs1 & rs2;
+    }
+}
+
+instruction AddImm for [RV32I, RV64I] : IALUOp {
+    param MNEMONIC: String = "addi";
+    param FUNCT3: bits<3> = 0b000;
+    behavior {
+      rd = rs1 + sext(imm, self.XLEN);
+    }
+}
+
+instruction SetLessThanImm for [RV32I, RV64I] : IALUOp {
+    param MNEMONIC: String = "slti";
+    param FUNCT3: bits<3> = 0b010;
+    behavior {
+      rd = if rs1 < sext(imm, self.XLEN) {
+        zext(0b1, self.XLEN)
+      } else {
+        zext(0b0, self.XLEN)
+      }
+    }
+}
+
+instruction SetLessThanUnsignedImm for [RV32I, RV64I] : IALUOp {
+    param MNEMONIC: String = "sltiu";
+    param FUNCT3: bits<3> = 0b010;
+    behavior {
+      rd = if rs1 ~< zext(imm, self.XLEN) {
+        zext(0b1, self.XLEN)
+      } else {
+        zext(0b0, self.XLEN)
+      }
+    }
+}
+
+instruction XorImm for [RV32I, RV64I] : IALUOp {
+    param MNEMONIC: String = "xori";
+    param FUNCT3: bits<3> = 0b100;
+    behavior {
+      rd = rs1 ^ sext(imm, self.XLEN);
+    }
+}
+
+instruction OrImm for [RV32I, RV64I] : IALUOp {
+    param MNEMONIC: String = "ori";
+    param FUNCT3: bits<3> = 0b110;
+    behavior {
+      rd = rs1 | sext(imm, self.XLEN);
+    }
+}
+
+instruction AndImm for [RV32I, RV64I] : IALUOp {
+    param MNEMONIC: String = "andi";
+    param FUNCT3: bits<3> = 0b111;
+    behavior {
+      rd = rs1 & sext(imm, self.XLEN);
+    }
+}
+
+// Shift immediate
+
+template ShiftImm32 for [RV32I] {
+    param OPCODE: bits<7> = 0b0010011;
+    param MNEMONIC: String;
+    param FUNCT3: bits<3>;
+    param FUNCT7: bits<7>;
+
+    operands {
+        rd: GPR,
+        rs1: GPR,
+        imm: bits<5>,
+    }
+
+    encoding {
+        0..6 => OPCODE,
+        7..11 => rd,
+        12..14 => FUNCT3,
+        15..19 => rs1,
+        20..24 => imm,
+        25..31 => FUNCT7,
+    }
+
+    asm {
+        "{self.MNEMONIC} {rd}, {rs1}, {imm}"
+    }
+}
+
+instruction ShiftRightLogicalImm32 for [RV32I] : ShiftImm32 {
+    param MNEMONIC: String = "srli";
+    param FUNCT3: bits<3> = 0b101;
+    param FUNCT7: bits<7> = 0b0000000;
+    behavior {
+      rd = rs1 >> imm;
+    }
+}
+
+instruction ShiftRightArithmeticImm32 for [RV32I] : ShiftImm32 {
+    param MNEMONIC: String = "srai";
+    param FUNCT3: bits<3> = 0b101;
+    param FUNCT7: bits<7> = 0b0100000;
+    behavior {
+      rd = rs1 >>> imm;
     }
 }

@@ -107,13 +107,7 @@ pub fn simplify(expr: Expr) -> Expr {
 
             match (&lhs, &rhs) {
                 // Constant folding: a / b -> c
-                (Expr::Int(a), Expr::Int(b)) if !b.is_zero() => {
-                    if a.is_signed() && b.is_signed() {
-                        Expr::Int(a.sdiv(b))
-                    } else {
-                        Expr::Int(a.udiv(b))
-                    }
-                }
+                (Expr::Int(a), Expr::Int(b)) if !b.is_zero() => Expr::Int(a.sdiv(b)),
                 (Expr::Float(a), Expr::Float(b)) if !b.is_zero() => Expr::Float(a.div(b)),
                 // Identity: x / 1 -> x
                 (_, Expr::Int(b)) if b.is_one() => lhs,
@@ -123,6 +117,128 @@ pub fn simplify(expr: Expr) -> Expr {
                     _ => Expr::Div(Box::new(lhs), Box::new(rhs)),
                 },
                 _ => Expr::Div(Box::new(lhs), Box::new(rhs)),
+            }
+        }
+
+        Expr::UDiv(lhs, rhs) => {
+            let lhs = simplify(*lhs);
+            let rhs = simplify(*rhs);
+
+            match (&lhs, &rhs) {
+                (Expr::Int(a), Expr::Int(b)) if !b.is_zero() => Expr::Int(a.udiv(b)),
+                (_, Expr::Int(b)) if b.is_one() => lhs,
+                _ if lhs == rhs => match &lhs {
+                    Expr::Int(a) => Expr::Int(APInt::one(a.width())),
+                    _ => Expr::UDiv(Box::new(lhs), Box::new(rhs)),
+                },
+                _ => Expr::UDiv(Box::new(lhs), Box::new(rhs)),
+            }
+        }
+
+        // Comparison simplifications
+        Expr::Eq(lhs, rhs) => {
+            let lhs = simplify(*lhs);
+            let rhs = simplify(*rhs);
+
+            match (&lhs, &rhs) {
+                (Expr::Int(a), Expr::Int(b)) => Expr::Bool(a == b),
+                (Expr::Float(a), Expr::Float(b)) => Expr::Bool(a.eq(b)),
+                (Expr::Bool(a), Expr::Bool(b)) => Expr::Bool(*a == *b),
+                _ if lhs == rhs => Expr::Bool(true),
+                _ => Expr::Eq(Box::new(lhs), Box::new(rhs)),
+            }
+        }
+
+        Expr::Ne(lhs, rhs) => {
+            let lhs = simplify(*lhs);
+            let rhs = simplify(*rhs);
+
+            match (&lhs, &rhs) {
+                (Expr::Int(a), Expr::Int(b)) => Expr::Bool(a != b),
+                (Expr::Float(a), Expr::Float(b)) => Expr::Bool(!a.eq(b)),
+                (Expr::Bool(a), Expr::Bool(b)) => Expr::Bool(*a != *b),
+                _ if lhs == rhs => Expr::Bool(false),
+                _ => Expr::Ne(Box::new(lhs), Box::new(rhs)),
+            }
+        }
+
+        Expr::Lt(lhs, rhs) => {
+            let lhs = simplify(*lhs);
+            let rhs = simplify(*rhs);
+
+            match (&lhs, &rhs) {
+                (Expr::Int(a), Expr::Int(b)) => Expr::Bool(a.slt(b)),
+                (Expr::Float(a), Expr::Float(b)) => Expr::Bool(a.lt(b)),
+                _ => Expr::Lt(Box::new(lhs), Box::new(rhs)),
+            }
+        }
+
+        Expr::Le(lhs, rhs) => {
+            let lhs = simplify(*lhs);
+            let rhs = simplify(*rhs);
+
+            match (&lhs, &rhs) {
+                (Expr::Int(a), Expr::Int(b)) => Expr::Bool(a.sle(b)),
+                (Expr::Float(a), Expr::Float(b)) => Expr::Bool(a.le(b)),
+                _ => Expr::Le(Box::new(lhs), Box::new(rhs)),
+            }
+        }
+
+        Expr::Gt(lhs, rhs) => {
+            let lhs = simplify(*lhs);
+            let rhs = simplify(*rhs);
+
+            match (&lhs, &rhs) {
+                (Expr::Int(a), Expr::Int(b)) => Expr::Bool(a.sgt(b)),
+                (Expr::Float(a), Expr::Float(b)) => Expr::Bool(a.gt(b)),
+                _ => Expr::Gt(Box::new(lhs), Box::new(rhs)),
+            }
+        }
+
+        Expr::Ge(lhs, rhs) => {
+            let lhs = simplify(*lhs);
+            let rhs = simplify(*rhs);
+
+            match (&lhs, &rhs) {
+                (Expr::Int(a), Expr::Int(b)) => Expr::Bool(a.sge(b)),
+                (Expr::Float(a), Expr::Float(b)) => Expr::Bool(a.ge(b)),
+                _ => Expr::Ge(Box::new(lhs), Box::new(rhs)),
+            }
+        }
+
+        Expr::ULt(lhs, rhs) => {
+            let lhs = simplify(*lhs);
+            let rhs = simplify(*rhs);
+            match (&lhs, &rhs) {
+                (Expr::Int(a), Expr::Int(b)) => Expr::Bool(a.ult(b)),
+                _ => Expr::ULt(Box::new(lhs), Box::new(rhs)),
+            }
+        }
+
+        Expr::ULe(lhs, rhs) => {
+            let lhs = simplify(*lhs);
+            let rhs = simplify(*rhs);
+            match (&lhs, &rhs) {
+                (Expr::Int(a), Expr::Int(b)) => Expr::Bool(a.ule(b)),
+                _ => Expr::ULe(Box::new(lhs), Box::new(rhs)),
+            }
+        }
+
+        Expr::UGt(lhs, rhs) => {
+            let lhs = simplify(*lhs);
+            let rhs = simplify(*rhs);
+            match (&lhs, &rhs) {
+                (Expr::Int(a), Expr::Int(b)) => Expr::Bool(a.ugt(b)),
+                _ => Expr::UGt(Box::new(lhs), Box::new(rhs)),
+            }
+        }
+
+        Expr::UGe(lhs, rhs) => {
+            let lhs = simplify(*lhs);
+            let rhs = simplify(*rhs);
+            match (&lhs, &rhs) {
+                (Expr::Int(a), Expr::Int(b)) => Expr::Bool(a.uge(b)),
+                _ => Expr::UGe(Box::new(lhs), Box::new(rhs)),
             }
         }
 
@@ -317,28 +433,30 @@ pub fn simplify(expr: Expr) -> Expr {
         // Extension simplifications
         Expr::ZExt { input, width } => {
             let input = simplify(*input);
-            match &input {
+            let width = simplify(*width);
+            match (&input, &width) {
                 // Identity: extending to the same width is a no-op
-                Expr::Int(i) if i.width() == width => input,
+                (Expr::Int(i), Expr::Int(w)) if i.width() == w.to_u64() as u32 => input,
                 // Constant folding
-                Expr::Int(i) => Expr::Int(i.zero_extend(width)),
+                (Expr::Int(i), Expr::Int(w)) => Expr::Int(i.zero_extend(w.to_u64() as u32)),
                 _ => Expr::ZExt {
                     input: Box::new(input),
-                    width,
+                    width: Box::new(width),
                 },
             }
         }
 
         Expr::SExt { input, width } => {
             let input = simplify(*input);
-            match &input {
+            let width = simplify(*width);
+            match (&input, &width) {
                 // Identity: extending to the same width is a no-op
-                Expr::Int(i) if i.width() == width => input,
+                (Expr::Int(i), Expr::Int(w)) if i.width() == w.to_u64() as u32 => input,
                 // Constant folding
-                Expr::Int(i) => Expr::Int(i.sign_extend(width)),
+                (Expr::Int(i), Expr::Int(w)) => Expr::Int(i.sign_extend(w.to_u64() as u32)),
                 _ => Expr::SExt {
                     input: Box::new(input),
-                    width,
+                    width: Box::new(width),
                 },
             }
         }

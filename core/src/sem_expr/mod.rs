@@ -27,6 +27,17 @@ pub enum Expr {
     Sub(Box<Expr>, Box<Expr>),
     Mul(Box<Expr>, Box<Expr>),
     Div(Box<Expr>, Box<Expr>),
+    UDiv(Box<Expr>, Box<Expr>),
+    Eq(Box<Expr>, Box<Expr>),
+    Ne(Box<Expr>, Box<Expr>),
+    Lt(Box<Expr>, Box<Expr>),
+    Le(Box<Expr>, Box<Expr>),
+    Gt(Box<Expr>, Box<Expr>),
+    Ge(Box<Expr>, Box<Expr>),
+    ULt(Box<Expr>, Box<Expr>),
+    ULe(Box<Expr>, Box<Expr>),
+    UGt(Box<Expr>, Box<Expr>),
+    UGe(Box<Expr>, Box<Expr>),
     ShiftLeft(Box<Expr>, Box<Expr>),
     ShiftRightLogic(Box<Expr>, Box<Expr>),
     ShiftRightArithmetic(Box<Expr>, Box<Expr>),
@@ -46,11 +57,11 @@ pub enum Expr {
     // Extension operations
     ZExt {
         input: Box<Expr>,
-        width: u32,
+        width: Box<Expr>,
     },
     SExt {
         input: Box<Expr>,
-        width: u32,
+        width: Box<Expr>,
     },
     // Float-specific operations
     Sqrt(Box<Expr>),
@@ -140,15 +151,119 @@ pub fn evaluate(expr: Expr) -> Expr {
             let rhs_val = evaluate(*rhs);
             match (lhs_val, rhs_val) {
                 (Expr::Int(a), Expr::Int(b)) => {
-                    // Use signed or unsigned division based on operand signedness
-                    if a.is_signed() && b.is_signed() {
-                        Expr::Int(a.sdiv(&b))
-                    } else {
-                        Expr::Int(a.udiv(&b))
-                    }
+                    // Default integer division is signed.
+                    Expr::Int(a.sdiv(&b))
                 }
                 (Expr::Float(a), Expr::Float(b)) => Expr::Float(a.div(&b)),
                 _ => panic!("Div requires two Int or two Float operands"),
+            }
+        }
+
+        Expr::UDiv(lhs, rhs) => {
+            let lhs_val = evaluate(*lhs);
+            let rhs_val = evaluate(*rhs);
+            match (lhs_val, rhs_val) {
+                (Expr::Int(a), Expr::Int(b)) => Expr::Int(a.udiv(&b)),
+                _ => panic!("UDiv requires two Int operands"),
+            }
+        }
+
+        // Comparison operations
+        Expr::Eq(lhs, rhs) => {
+            let lhs_val = evaluate(*lhs);
+            let rhs_val = evaluate(*rhs);
+            match (lhs_val, rhs_val) {
+                (Expr::Int(a), Expr::Int(b)) => Expr::Bool(a == b),
+                (Expr::Float(a), Expr::Float(b)) => Expr::Bool(a.eq(&b)),
+                (Expr::Bool(a), Expr::Bool(b)) => Expr::Bool(a == b),
+                _ => panic!("Eq requires matching operand types"),
+            }
+        }
+
+        Expr::Ne(lhs, rhs) => {
+            let lhs_val = evaluate(*lhs);
+            let rhs_val = evaluate(*rhs);
+            match (lhs_val, rhs_val) {
+                (Expr::Int(a), Expr::Int(b)) => Expr::Bool(a != b),
+                (Expr::Float(a), Expr::Float(b)) => Expr::Bool(!a.eq(&b)),
+                (Expr::Bool(a), Expr::Bool(b)) => Expr::Bool(a != b),
+                _ => panic!("Ne requires matching operand types"),
+            }
+        }
+
+        Expr::Lt(lhs, rhs) => {
+            let lhs_val = evaluate(*lhs);
+            let rhs_val = evaluate(*rhs);
+            match (lhs_val, rhs_val) {
+                (Expr::Int(a), Expr::Int(b)) => Expr::Bool(a.slt(&b)),
+                (Expr::Float(a), Expr::Float(b)) => Expr::Bool(a.lt(&b)),
+                _ => panic!("Lt requires two Int or two Float operands"),
+            }
+        }
+
+        Expr::Le(lhs, rhs) => {
+            let lhs_val = evaluate(*lhs);
+            let rhs_val = evaluate(*rhs);
+            match (lhs_val, rhs_val) {
+                (Expr::Int(a), Expr::Int(b)) => Expr::Bool(a.sle(&b)),
+                (Expr::Float(a), Expr::Float(b)) => Expr::Bool(a.le(&b)),
+                _ => panic!("Le requires two Int or two Float operands"),
+            }
+        }
+
+        Expr::Gt(lhs, rhs) => {
+            let lhs_val = evaluate(*lhs);
+            let rhs_val = evaluate(*rhs);
+            match (lhs_val, rhs_val) {
+                (Expr::Int(a), Expr::Int(b)) => Expr::Bool(a.sgt(&b)),
+                (Expr::Float(a), Expr::Float(b)) => Expr::Bool(a.gt(&b)),
+                _ => panic!("Gt requires two Int or two Float operands"),
+            }
+        }
+
+        Expr::Ge(lhs, rhs) => {
+            let lhs_val = evaluate(*lhs);
+            let rhs_val = evaluate(*rhs);
+            match (lhs_val, rhs_val) {
+                (Expr::Int(a), Expr::Int(b)) => Expr::Bool(a.sge(&b)),
+                (Expr::Float(a), Expr::Float(b)) => Expr::Bool(a.ge(&b)),
+                _ => panic!("Ge requires two Int or two Float operands"),
+            }
+        }
+
+        Expr::ULt(lhs, rhs) => {
+            let lhs_val = evaluate(*lhs);
+            let rhs_val = evaluate(*rhs);
+            match (lhs_val, rhs_val) {
+                (Expr::Int(a), Expr::Int(b)) => Expr::Bool(a.ult(&b)),
+                _ => panic!("ULt requires two Int operands"),
+            }
+        }
+
+        Expr::ULe(lhs, rhs) => {
+            let lhs_val = evaluate(*lhs);
+            let rhs_val = evaluate(*rhs);
+            match (lhs_val, rhs_val) {
+                (Expr::Int(a), Expr::Int(b)) => Expr::Bool(a.ule(&b)),
+                _ => panic!("ULe requires two Int operands"),
+            }
+        }
+
+        Expr::UGt(lhs, rhs) => {
+            let lhs_val = evaluate(*lhs);
+            let rhs_val = evaluate(*rhs);
+            match (lhs_val, rhs_val) {
+                (Expr::Int(a), Expr::Int(b)) => Expr::Bool(a.ugt(&b)),
+                _ => panic!("UGt requires two Int operands"),
+            }
+        }
+
+        Expr::UGe(lhs, rhs) => {
+            let lhs_val = evaluate(*lhs);
+            let rhs_val = evaluate(*rhs);
+            match (lhs_val, rhs_val) {
+                (Expr::Int(a), Expr::Int(b)) => Expr::Bool(a.uge(&b)),
+                _ => panic!("UGe requires two Int operands"),
             }
         }
 
@@ -269,16 +384,20 @@ pub fn evaluate(expr: Expr) -> Expr {
         // Extension operations
         Expr::ZExt { input, width } => {
             let input_val = evaluate(*input);
-            match input_val {
-                Expr::Int(i) => Expr::Int(i.zero_extend(width)),
+            let width_val = evaluate(*width);
+            match (input_val, width_val) {
+                (Expr::Int(i), Expr::Int(w)) => Expr::Int(i.zero_extend(w.to_u64() as u32)),
+                (Expr::Int(_), _) => panic!("ZExt width must evaluate to Int"),
                 _ => panic!("ZExt requires an Int operand"),
             }
         }
 
         Expr::SExt { input, width } => {
             let input_val = evaluate(*input);
-            match input_val {
-                Expr::Int(i) => Expr::Int(i.sign_extend(width)),
+            let width_val = evaluate(*width);
+            match (input_val, width_val) {
+                (Expr::Int(i), Expr::Int(w)) => Expr::Int(i.sign_extend(w.to_u64() as u32)),
+                (Expr::Int(_), _) => panic!("SExt width must evaluate to Int"),
                 _ => panic!("SExt requires an Int operand"),
             }
         }
@@ -487,6 +606,68 @@ mod tests {
         match result {
             Expr::Int(i) => assert_eq!(i.to_i64(), -20),
             _ => panic!("Expected Int"),
+        }
+    }
+
+    #[test]
+    fn test_evaluate_lt() {
+        let expr = Expr::Lt(
+            Box::new(Expr::Int(APInt::new(8, 3))),
+            Box::new(Expr::Int(APInt::new(8, 7))),
+        );
+        let result = evaluate(expr);
+        match result {
+            Expr::Bool(b) => assert!(b),
+            _ => panic!("Expected Bool"),
+        }
+    }
+
+    #[test]
+    fn test_evaluate_ge() {
+        let expr = Expr::Ge(
+            Box::new(Expr::Int(APInt::new(8, 7))),
+            Box::new(Expr::Int(APInt::new(8, 7))),
+        );
+        let result = evaluate(expr);
+        match result {
+            Expr::Bool(b) => assert!(b),
+            _ => panic!("Expected Bool"),
+        }
+    }
+
+    #[test]
+    fn test_evaluate_eq_bool() {
+        let expr = Expr::Eq(Box::new(Expr::Bool(true)), Box::new(Expr::Bool(true)));
+        let result = evaluate(expr);
+        match result {
+            Expr::Bool(b) => assert!(b),
+            _ => panic!("Expected Bool"),
+        }
+    }
+
+    #[test]
+    fn test_evaluate_unsigned_div() {
+        let expr = Expr::UDiv(
+            Box::new(Expr::Int(APInt::new(8, 0xFF))),
+            Box::new(Expr::Int(APInt::new(8, 2))),
+        );
+        let result = evaluate(expr);
+        match result {
+            Expr::Int(i) => assert_eq!(i.to_u64(), 127),
+            _ => panic!("Expected Int"),
+        }
+    }
+
+    #[test]
+    fn test_evaluate_unsigned_lt() {
+        let expr = Expr::ULt(
+            Box::new(Expr::Int(APInt::new_signed(8, -1))),
+            Box::new(Expr::Int(APInt::new(8, 1))),
+        );
+        let result = evaluate(expr);
+        match result {
+            Expr::Bool(b) => assert!(!b),
+            _ => panic!("Expected Bool"),
         }
     }
 
@@ -847,7 +1028,7 @@ mod tests {
         // Zero-extend 8-bit to 16-bit
         let expr = Expr::ZExt {
             input: Box::new(Expr::Int(APInt::new(8, 0xFF))),
-            width: 16,
+            width: Box::new(Expr::Int(APInt::new(8, 16))),
         };
         let result = evaluate(expr);
         match result {
@@ -864,7 +1045,7 @@ mod tests {
         // Sign-extend positive 8-bit to 16-bit
         let expr = Expr::SExt {
             input: Box::new(Expr::Int(APInt::new_signed(8, 42))),
-            width: 16,
+            width: Box::new(Expr::Int(APInt::new(8, 16))),
         };
         let result = evaluate(expr);
         match result {
@@ -882,7 +1063,7 @@ mod tests {
         // -1 in 8-bit is 0xFF, in 16-bit should be 0xFFFF
         let expr = Expr::SExt {
             input: Box::new(Expr::Int(APInt::new_signed(8, -1))),
-            width: 16,
+            width: Box::new(Expr::Int(APInt::new(8, 16))),
         };
         let result = evaluate(expr);
         match result {

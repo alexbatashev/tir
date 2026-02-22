@@ -966,6 +966,61 @@ fn emit_sem_expr(expr: &tir::sem_expr::Expr) -> proc_macro2::TokenStream {
             let rhs = emit_sem_expr(rhs);
             quote! { tir::sem_expr::Expr::Div(Box::new(#lhs), Box::new(#rhs)) }
         }
+        Expr::UDiv(lhs, rhs) => {
+            let lhs = emit_sem_expr(lhs);
+            let rhs = emit_sem_expr(rhs);
+            quote! { tir::sem_expr::Expr::UDiv(Box::new(#lhs), Box::new(#rhs)) }
+        }
+        Expr::Eq(lhs, rhs) => {
+            let lhs = emit_sem_expr(lhs);
+            let rhs = emit_sem_expr(rhs);
+            quote! { tir::sem_expr::Expr::Eq(Box::new(#lhs), Box::new(#rhs)) }
+        }
+        Expr::Ne(lhs, rhs) => {
+            let lhs = emit_sem_expr(lhs);
+            let rhs = emit_sem_expr(rhs);
+            quote! { tir::sem_expr::Expr::Ne(Box::new(#lhs), Box::new(#rhs)) }
+        }
+        Expr::Lt(lhs, rhs) => {
+            let lhs = emit_sem_expr(lhs);
+            let rhs = emit_sem_expr(rhs);
+            quote! { tir::sem_expr::Expr::Lt(Box::new(#lhs), Box::new(#rhs)) }
+        }
+        Expr::Le(lhs, rhs) => {
+            let lhs = emit_sem_expr(lhs);
+            let rhs = emit_sem_expr(rhs);
+            quote! { tir::sem_expr::Expr::Le(Box::new(#lhs), Box::new(#rhs)) }
+        }
+        Expr::Gt(lhs, rhs) => {
+            let lhs = emit_sem_expr(lhs);
+            let rhs = emit_sem_expr(rhs);
+            quote! { tir::sem_expr::Expr::Gt(Box::new(#lhs), Box::new(#rhs)) }
+        }
+        Expr::Ge(lhs, rhs) => {
+            let lhs = emit_sem_expr(lhs);
+            let rhs = emit_sem_expr(rhs);
+            quote! { tir::sem_expr::Expr::Ge(Box::new(#lhs), Box::new(#rhs)) }
+        }
+        Expr::ULt(lhs, rhs) => {
+            let lhs = emit_sem_expr(lhs);
+            let rhs = emit_sem_expr(rhs);
+            quote! { tir::sem_expr::Expr::ULt(Box::new(#lhs), Box::new(#rhs)) }
+        }
+        Expr::ULe(lhs, rhs) => {
+            let lhs = emit_sem_expr(lhs);
+            let rhs = emit_sem_expr(rhs);
+            quote! { tir::sem_expr::Expr::ULe(Box::new(#lhs), Box::new(#rhs)) }
+        }
+        Expr::UGt(lhs, rhs) => {
+            let lhs = emit_sem_expr(lhs);
+            let rhs = emit_sem_expr(rhs);
+            quote! { tir::sem_expr::Expr::UGt(Box::new(#lhs), Box::new(#rhs)) }
+        }
+        Expr::UGe(lhs, rhs) => {
+            let lhs = emit_sem_expr(lhs);
+            let rhs = emit_sem_expr(rhs);
+            quote! { tir::sem_expr::Expr::UGe(Box::new(#lhs), Box::new(#rhs)) }
+        }
         Expr::ShiftLeft(lhs, rhs) => {
             let lhs = emit_sem_expr(lhs);
             let rhs = emit_sem_expr(rhs);
@@ -1008,6 +1063,17 @@ fn sem_expr_complexity(expr: &tir::sem_expr::Expr) -> u32 {
         | Expr::Sub(lhs, rhs)
         | Expr::Mul(lhs, rhs)
         | Expr::Div(lhs, rhs)
+        | Expr::UDiv(lhs, rhs)
+        | Expr::Eq(lhs, rhs)
+        | Expr::Ne(lhs, rhs)
+        | Expr::Lt(lhs, rhs)
+        | Expr::Le(lhs, rhs)
+        | Expr::Gt(lhs, rhs)
+        | Expr::Ge(lhs, rhs)
+        | Expr::ULt(lhs, rhs)
+        | Expr::ULe(lhs, rhs)
+        | Expr::UGt(lhs, rhs)
+        | Expr::UGe(lhs, rhs)
         | Expr::ShiftLeft(lhs, rhs)
         | Expr::ShiftRightLogic(lhs, rhs)
         | Expr::ShiftRightArithmetic(lhs, rhs)

@@ -157,6 +157,17 @@ impl ConversionContext {
             BinOp::Sub => Expr::Sub(Box::new(lhs), Box::new(rhs)),
             BinOp::Mul => Expr::Mul(Box::new(lhs), Box::new(rhs)),
             BinOp::Div => Expr::Div(Box::new(lhs), Box::new(rhs)),
+            BinOp::UnsignedDiv => Expr::UDiv(Box::new(lhs), Box::new(rhs)),
+            BinOp::Equal => Expr::Eq(Box::new(lhs), Box::new(rhs)),
+            BinOp::NotEqual => Expr::Ne(Box::new(lhs), Box::new(rhs)),
+            BinOp::LessThan => Expr::Lt(Box::new(lhs), Box::new(rhs)),
+            BinOp::GreaterThan => Expr::Gt(Box::new(lhs), Box::new(rhs)),
+            BinOp::LessThenEqual => Expr::Le(Box::new(lhs), Box::new(rhs)),
+            BinOp::GreaterThanEqual => Expr::Ge(Box::new(lhs), Box::new(rhs)),
+            BinOp::UnsignedLessThan => Expr::ULt(Box::new(lhs), Box::new(rhs)),
+            BinOp::UnsignedGreaterThan => Expr::UGt(Box::new(lhs), Box::new(rhs)),
+            BinOp::UnsignedLessThenEqual => Expr::ULe(Box::new(lhs), Box::new(rhs)),
+            BinOp::UnsignedGreaterThanEqual => Expr::UGe(Box::new(lhs), Box::new(rhs)),
             BinOp::BitwiseAnd => Expr::And(Box::new(lhs), Box::new(rhs)),
             BinOp::BitwiseOr => Expr::Or(Box::new(lhs), Box::new(rhs)),
             BinOp::BitwiseXor => Expr::Xor(Box::new(lhs), Box::new(rhs)),
@@ -194,6 +205,28 @@ impl ConversionContext {
                         input: Box::new(input),
                         high: Box::new(high),
                         low: Box::new(low),
+                    })
+                }
+                BuiltinFunction::SExt => {
+                    if call.arguments.len() != 2 {
+                        return Err("sext requires 2 arguments".to_string());
+                    }
+                    let input = self.convert(&call.arguments[0])?;
+                    let width = self.convert(&call.arguments[1])?;
+                    Ok(Expr::SExt {
+                        input: Box::new(input),
+                        width: Box::new(width),
+                    })
+                }
+                BuiltinFunction::ZExt => {
+                    if call.arguments.len() != 2 {
+                        return Err("zext requires 2 arguments".to_string());
+                    }
+                    let input = self.convert(&call.arguments[0])?;
+                    let width = self.convert(&call.arguments[1])?;
+                    Ok(Expr::ZExt {
+                        input: Box::new(input),
+                        width: Box::new(width),
                     })
                 }
             }
@@ -373,6 +406,52 @@ mod tests {
         match result.expr {
             Expr::Add(_, _) => {}
             _ => panic!("Expected Add"),
+        }
+    }
+
+    #[test]
+    fn test_convert_binary_lt() {
+        let ast = AstExpr::Binary(Binary {
+            lhs: Box::new(AstExpr::Lit(Lit::Int(LitInt::new(
+                "10".to_string(),
+                make_span(),
+            )))),
+            rhs: Box::new(AstExpr::Lit(Lit::Int(LitInt::new(
+                "20".to_string(),
+                make_span(),
+            )))),
+            op: BinOp::LessThan,
+            span: make_span(),
+        });
+
+        let result = convert_to_sem_expr(&ast, HashMap::new()).unwrap();
+
+        match result.expr {
+            Expr::Lt(_, _) => {}
+            _ => panic!("Expected Lt"),
+        }
+    }
+
+    #[test]
+    fn test_convert_binary_unsigned_lt() {
+        let ast = AstExpr::Binary(Binary {
+            lhs: Box::new(AstExpr::Lit(Lit::Int(LitInt::new(
+                "10".to_string(),
+                make_span(),
+            )))),
+            rhs: Box::new(AstExpr::Lit(Lit::Int(LitInt::new(
+                "20".to_string(),
+                make_span(),
+            )))),
+            op: BinOp::UnsignedLessThan,
+            span: make_span(),
+        });
+
+        let result = convert_to_sem_expr(&ast, HashMap::new()).unwrap();
+
+        match result.expr {
+            Expr::ULt(_, _) => {}
+            _ => panic!("Expected ULt"),
         }
     }
 

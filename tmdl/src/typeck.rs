@@ -170,6 +170,7 @@ fn infer<'a>(
                 | ast::BinOp::Sub
                 | ast::BinOp::Mul
                 | ast::BinOp::Div
+                | ast::BinOp::UnsignedDiv
                 | ast::BinOp::BitwiseAnd
                 | ast::BinOp::BitwiseOr
                 | ast::BinOp::BitwiseXor => {
@@ -181,6 +182,19 @@ fn infer<'a>(
                 ast::BinOp::ShiftLeftLogical
                 | ast::BinOp::ShiftRightLogical
                 | ast::BinOp::ShiftRightArithmetic => lhs_ty.apply(subst),
+                ast::BinOp::Equal
+                | ast::BinOp::NotEqual
+                | ast::BinOp::LessThan
+                | ast::BinOp::GreaterThan
+                | ast::BinOp::LessThenEqual
+                | ast::BinOp::GreaterThanEqual
+                | ast::BinOp::UnsignedLessThan
+                | ast::BinOp::UnsignedGreaterThan
+                | ast::BinOp::UnsignedLessThenEqual
+                | ast::BinOp::UnsignedGreaterThanEqual => {
+                    constrain(&lhs_ty, &rhs_ty, subst, bin.span, diags, file_name);
+                    Type::Bits(1)
+                }
             }
         }
 

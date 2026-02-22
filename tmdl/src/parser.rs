@@ -581,6 +581,8 @@ where
             match name {
                 "clamp" => Some(BuiltinFunction::Clamp),
                 "extract" => Some(BuiltinFunction::Extract),
+                "sext" => Some(BuiltinFunction::SExt),
+                "zext" => Some(BuiltinFunction::ZExt),
                 _ => None,
             }
         }
@@ -682,6 +684,9 @@ where
 
         let op = just(Token::Asterisk)
             .to(BinOp::Mul)
+            .or(just(Token::Tilde)
+                .then(just(Token::ForwardSlash))
+                .to(BinOp::UnsignedDiv))
             .or(just(Token::ForwardSlash).to(BinOp::Div));
         let product = basic
             .clone()
@@ -726,7 +731,49 @@ where
                 })
             });
 
-        arith.labelled("inline expression")
+        let cmp_op = choice((
+            just(Token::Equals)
+                .then(just(Token::Equals))
+                .to(BinOp::Equal),
+            just(Token::Bang)
+                .then(just(Token::Equals))
+                .to(BinOp::NotEqual),
+            just(Token::Tilde)
+                .then(just(Token::LAngle))
+                .then(just(Token::Equals))
+                .to(BinOp::UnsignedLessThenEqual),
+            just(Token::Tilde)
+                .then(just(Token::RAngle))
+                .then(just(Token::Equals))
+                .to(BinOp::UnsignedGreaterThanEqual),
+            just(Token::Tilde)
+                .then(just(Token::LAngle))
+                .to(BinOp::UnsignedLessThan),
+            just(Token::Tilde)
+                .then(just(Token::RAngle))
+                .to(BinOp::UnsignedGreaterThan),
+            just(Token::LAngle)
+                .then(just(Token::Equals))
+                .to(BinOp::LessThenEqual),
+            just(Token::RAngle)
+                .then(just(Token::Equals))
+                .to(BinOp::GreaterThanEqual),
+            just(Token::LAngle).to(BinOp::LessThan),
+            just(Token::RAngle).to(BinOp::GreaterThan),
+        ));
+
+        arith
+            .clone()
+            .foldl_with(cmp_op.then(arith).repeated(), |a, (op, b), e| {
+                let sp = e.span();
+                Expr::Binary(Binary {
+                    lhs: Box::new(a),
+                    rhs: Box::new(b),
+                    op,
+                    span: sp,
+                })
+            })
+            .labelled("inline expression")
     })
 }
 
@@ -837,9 +884,12 @@ mod tests {
     use chumsky::Parser;
     use chumsky::prelude::*;
 
-    use crate::lexer::lexer;
+    use crate::{
+        ast::{BinOp, Expr},
+        lexer::lexer,
+    };
 
-    use super::isa_def;
+    use super::{inline_expr, isa_def};
 
     #[test]
     fn smoke_isa() {
@@ -855,5 +905,56 @@ mod tests {
 
         println!("{:?}", isa);
         assert!(isa.has_output());
+    }
+
+    #[test]
+    fn inline_expr_parses_less_equal() {
+        let code = "a <= b";
+        let (tokens, mut _errors) = lexer().parse(code).into_output_errors();
+        let tokens = tokens.unwrap();
+        let parsed = inline_expr().then(end()).parse(
+            tokens
+                .as_slice()
+                .map((code.len()..code.len()).into(), |(t, s)| (t, s)),
+        );
+        let expr = parsed.output().unwrap().0.clone();
+        match expr {
+            Expr::Binary(bin) => assert_eq!(bin.op, BinOp::LessThenEqual),
+            _ => panic!("Expected binary expression"),
+        }
+    }
+
+    #[test]
+    fn inline_expr_parses_not_equal() {
+        let code = "a != b";
+        let (tokens, mut _errors) = lexer().parse(code).into_output_errors();
+        let tokens = tokens.unwrap();
+        let parsed = inline_expr().then(end()).parse(
+            tokens
+                .as_slice()
+                .map((code.len()..code.len()).into(), |(t, s)| (t, s)),
+        );
+        let expr = parsed.output().unwrap().0.clone();
+        match expr {
+            Expr::Binary(bin) => assert_eq!(bin.op, BinOp::NotEqual),
+            _ => panic!("Expected binary expression"),
+        }
+    }
+
+    #[test]
+    fn inline_expr_parses_unsigned_less_equal() {
+        let code = "a ~<= b";
+        let (tokens, mut _errors) = lexer().parse(code).into_output_errors();
+        let tokens = tokens.unwrap();
+        let parsed = inline_expr().then(end()).parse(
+            tokens
+                .as_slice()
+                .map((code.len()..code.len()).into(), |(t, s)| (t, s)),
+        );
+        let expr = parsed.output().unwrap().0.clone();
+        match expr {
+            Expr::Binary(bin) => assert_eq!(bin.op, BinOp::UnsignedLessThenEqual),
+            _ => panic!("Expected binary expression"),
+        }
     }
 }
