@@ -4,7 +4,7 @@ use chumsky::error::Rich;
 
 use crate::utils::{
     resolve_effective_asm_for_instruction, resolve_effective_encoding_for_instruction,
-    resolve_template_chain,
+    resolve_params_for_instruction, resolve_template_chain,
 };
 use crate::{Span, Type, ast};
 
@@ -108,13 +108,66 @@ fn check_instructions(
     files: &[ast::File],
     item_cache: &HashMap<&str, &ast::Item>,
 ) -> Vec<(String, Diag)> {
-    files
+    let mut diags: Vec<(String, Diag)> = files
         .iter()
         .flat_map(|f| {
             f.instructions()
                 .flat_map(|i| check_instruction_consistent(i, item_cache, &f.file_name).into_iter())
         })
-        .collect()
+        .collect();
+
+    let mut first_by_opname: HashMap<String, (&str, Span, &str)> = HashMap::new();
+    for file in files {
+        for instruction in file.instructions() {
+            let params = resolve_params_for_instruction(instruction, item_cache);
+            let opname = params
+                .get("OPNAME")
+                .and_then(|(_, value)| value.as_ref())
+                .and_then(as_string_literal)
+                .or_else(|| {
+                    params
+                        .get("MNEMONIC")
+                        .and_then(|(_, value)| value.as_ref())
+                        .and_then(as_string_literal)
+                });
+
+            let Some(opname) = opname else {
+                continue;
+            };
+
+            if let Some((first_file, _first_span, first_inst_name)) = first_by_opname.get(&opname) {
+                diags.push((
+                    file.file_name.clone(),
+                    Rich::custom(
+                        instruction.span,
+                        format!(
+                            "Instruction '{}' resolves operation name '{}' that duplicates instruction '{}' in file '{}'",
+                            instruction.name, opname, first_inst_name, first_file
+                        ),
+                    ),
+                ));
+            } else {
+                first_by_opname.insert(
+                    opname,
+                    (
+                        file.file_name.as_str(),
+                        instruction.span,
+                        instruction.name.as_str(),
+                    ),
+                );
+            }
+        }
+    }
+
+    diags
+}
+
+fn as_string_literal(expr: &ast::Expr) -> Option<String> {
+    match expr {
+        ast::Expr::Lit(ast::Lit::Str(s)) => Some(s.value().to_string()),
+        ast::Expr::Block(b) if b.last_expr_return => b.stmts.last().and_then(as_string_literal),
+        _ => None,
+    }
 }
 
 // Checks that all parent templates exist and are also templates.
@@ -300,6 +353,19 @@ fn check_instruction_consistent(
                 ),
             ));
         }
+    }
+
+    if !params_cache.contains_key("OPNAME") && !params_cache.contains_key("MNEMONIC") {
+        diags.push((
+            file_name.to_string(),
+            Rich::custom(
+                instruction.span,
+                format!(
+                    "Instruction '{}' must define OPNAME or MNEMONIC",
+                    instruction.name
+                ),
+            ),
+        ));
     }
 
     // Encoding must exist somewhere in the chain or instruction.

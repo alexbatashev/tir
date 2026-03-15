@@ -94,10 +94,29 @@ fn emit_instructions<'a>(
     for inst in files.iter().flat_map(|f| f.instructions()) {
         let name_ident = format_ident!("{}Op", &inst.name);
         let builder_ident = format_ident!("{}OpBuilder", &inst.name);
-        let mnemonic = resolve_string(inst.params.get("MNEMONIC").unwrap().1.as_ref().unwrap());
-        let fallback_name = inst.name.to_lowercase();
-        let mnemonic_name = mnemonic.as_deref().unwrap_or(&fallback_name);
-        let mnemonic_lit = proc_macro2::Literal::string(mnemonic.as_deref().unwrap_or(""));
+        let resolved_params = resolve_params_for_instruction(inst, item_cache);
+        let mnemonic = resolved_params
+            .get("MNEMONIC")
+            .and_then(|(_, value)| value.as_ref())
+            .and_then(resolve_string);
+        let opname = resolved_params
+            .get("OPNAME")
+            .and_then(|(_, value)| value.as_ref())
+            .and_then(resolve_string);
+
+        let op_name = if let Some(opname) = opname.as_deref() {
+            opname
+        } else if let Some(mnemonic) = mnemonic.as_deref() {
+            mnemonic
+        } else {
+            return Err(TMDLError::Codegen(format!(
+                "Instruction '{}' must define OPNAME or MNEMONIC",
+                inst.name
+            )));
+        };
+
+        let mnemonic_name = mnemonic.as_deref().unwrap_or(op_name);
+        let op_name_lit = proc_macro2::Literal::string(op_name);
         let ops = resolve_operands_for_instruction(inst, item_cache);
         let ops_map = ops.clone().into_iter().collect::<HashMap<_, _>>();
         let defined_register_operands = infer_defined_register_operands(&inst.behavior, &ops);
@@ -138,7 +157,7 @@ fn emit_instructions<'a>(
         instruction_defs.push(quote! {
             operation! {
                 #name_ident {
-                    name: #mnemonic_lit,
+                    name: #op_name_lit,
                     dialect: #dialect,
                     attributes: A { #attrs_schema },
                     roles: R { #roles_schema },
@@ -148,7 +167,7 @@ fn emit_instructions<'a>(
             }
         });
 
-        let op_display_name = format!("{}.{}", dialect, mnemonic_name);
+        let op_display_name = format!("{}.{}", dialect, op_name);
         let op_display_name_lit = proc_macro2::Literal::string(&op_display_name);
         let mut register_attr_print_arms = Vec::new();
         for (op_name, op_ty) in &ops {
@@ -330,7 +349,7 @@ fn emit_instructions<'a>(
             .unwrap_or(32);
         let width_bytes_lit =
             proc_macro2::Literal::u8_unsuffixed(((encoding_bits as u32 + 7) / 8) as u8);
-        let op_name_lit = proc_macro2::Literal::string(mnemonic_name);
+        let mnemonic_lit = proc_macro2::Literal::string(mnemonic_name);
 
         let execute_body = if let Some(rhs) =
             resolve_behavior_rhs(inst, &ops, &defined_register_operands)
@@ -360,7 +379,7 @@ fn emit_instructions<'a>(
                                             #sym_lit => {
                                                 let (class, index) = tir_be_common::register_attr(self.attributes(), #name_lit)
                                                     .ok_or(tir_be_common::SimTrap::MissingAttribute {
-                                                        op: #op_name_lit,
+                                                        op: #mnemonic_lit,
                                                         attribute: #name_lit,
                                                     })?;
                                                 Ok(Some(machine.read_register(&class, index)?))
@@ -372,7 +391,7 @@ fn emit_instructions<'a>(
                                             #sym_lit => {
                                                 let value = tir_be_common::int_attr(self.attributes(), #name_lit).ok_or(
                                                     tir_be_common::SimTrap::MissingAttribute {
-                                                        op: #op_name_lit,
+                                                        op: #mnemonic_lit,
                                                         attribute: #name_lit,
                                                     },
                                                 )?;
@@ -387,7 +406,7 @@ fn emit_instructions<'a>(
                                             #sym_lit => {
                                                 let value = tir_be_common::int_attr(self.attributes(), #name_lit).ok_or(
                                                     tir_be_common::SimTrap::MissingAttribute {
-                                                        op: #op_name_lit,
+                                                        op: #mnemonic_lit,
                                                         attribute: #name_lit,
                                                     },
                                                 )?;
@@ -415,7 +434,7 @@ fn emit_instructions<'a>(
                     quote! {
                         let (dst_class, dst_idx) = tir_be_common::register_attr(self.attributes(), #dst_lit).ok_or(
                             tir_be_common::SimTrap::MissingAttribute {
-                                op: #op_name_lit,
+                                op: #mnemonic_lit,
                                 attribute: #dst_lit,
                             },
                         )?;
@@ -440,7 +459,7 @@ fn emit_instructions<'a>(
                         tir::sem_expr::Expr::Int(i) => i,
                         _ => {
                             return Err(tir_be_common::SimTrap::InvalidInstruction {
-                                op: #op_name_lit,
+                                op: #mnemonic_lit,
                                 reason: "instruction semantic expression did not evaluate to integer".to_string(),
                             });
                         }
@@ -451,7 +470,7 @@ fn emit_instructions<'a>(
             } else {
                 quote! {
                     Err(tir_be_common::SimTrap::InvalidInstruction {
-                        op: #op_name_lit,
+                        op: #mnemonic_lit,
                         reason: "failed to convert behavior to executable expression".to_string(),
                     })
                 }
@@ -465,7 +484,7 @@ fn emit_instructions<'a>(
         machine_instruction_impls.push(quote! {
             impl tir_be_common::MachineInstruction for #name_ident {
                 fn mnemonic(&self) -> &'static str {
-                    #op_name_lit
+                    #mnemonic_lit
                 }
 
                 fn width_bytes(&self) -> u8 {
@@ -593,7 +612,7 @@ fn emit_instructions<'a>(
                 }
             });
 
-            if let Some(mn) = &mnemonic {
+            if let Some(mn) = mnemonic.as_deref().or(Some(op_name)) {
                 let mn_lit = proc_macro2::Literal::string(mn);
                 instruction_parser_map_inits.push(quote! {
                     let f: tir_be_common::AsmInstructionParser = #parse_fn_ident;

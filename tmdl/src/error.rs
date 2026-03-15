@@ -10,6 +10,8 @@ pub enum TMDLError {
     Serialization(String),
     #[error("Unexpected expression")]
     UnexpectedExpression,
+    #[error("Code generation error: {0}")]
+    Codegen(String),
 }
 
 impl From<std::io::Error> for TMDLError {

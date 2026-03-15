@@ -1,0 +1,112 @@
+// ARMv8-A A64 branch, call, and return instructions
+
+instruction BranchImmediate for [ARMv8A64] : BranchImm {
+    param MNEMONIC: String = "b";
+
+    behavior {
+        PC::pc = PC::pc + (sext(imm, self.XLEN) << 2);
+    }
+}
+
+instruction BranchLink for [ARMv8A64] : BranchLinkImm {
+    param MNEMONIC: String = "bl";
+
+    behavior {
+        GPR::x30 = PC::pc + zext(0b100, self.XLEN);
+        PC::pc = PC::pc + (sext(imm, self.XLEN) << 2);
+    }
+}
+
+instruction BranchRegister for [ARMv8A64] : BranchReg {
+    param MNEMONIC: String = "br";
+    param OPCODE: bits<4> = 0b0000;
+
+    behavior {
+        PC::pc = rn;
+    }
+}
+
+instruction BranchLinkReg for [ARMv8A64] : BranchReg {
+    param MNEMONIC: String = "blr";
+    param OPCODE: bits<4> = 0b0001;
+
+    behavior {
+        GPR::x30 = PC::pc + zext(0b100, self.XLEN);
+        PC::pc = rn;
+    }
+}
+
+instruction Return for [ARMv8A64] : BranchReg {
+    param MNEMONIC: String = "ret";
+    param OPCODE: bits<4> = 0b0010;
+
+    behavior {
+        PC::pc = rn;
+    }
+}
+
+instruction BranchEq for [ARMv8A64] : CondBranchImm {
+    param MNEMONIC: String = "b.eq";
+    param COND: bits<4> = 0b0000;
+
+    behavior {
+        if PSTATE::z == zext(0b1, 1) {
+            PC::pc = PC::pc + (sext(imm, self.XLEN) << 2);
+        }
+    }
+}
+
+instruction BranchNotEq for [ARMv8A64] : CondBranchImm {
+    param MNEMONIC: String = "b.ne";
+    param COND: bits<4> = 0b0001;
+
+    behavior {
+        if PSTATE::z == zext(0b0, 1) {
+            PC::pc = PC::pc + (sext(imm, self.XLEN) << 2);
+        }
+    }
+}
+
+instruction BranchLessThan for [ARMv8A64] : CondBranchImm {
+    param MNEMONIC: String = "b.lt";
+    param COND: bits<4> = 0b1011;
+
+    behavior {
+        if PSTATE::n != PSTATE::v {
+            PC::pc = PC::pc + (sext(imm, self.XLEN) << 2);
+        }
+    }
+}
+
+instruction BranchGreaterEq for [ARMv8A64] : CondBranchImm {
+    param MNEMONIC: String = "b.ge";
+    param COND: bits<4> = 0b1010;
+
+    behavior {
+        if PSTATE::n == PSTATE::v {
+            PC::pc = PC::pc + (sext(imm, self.XLEN) << 2);
+        }
+    }
+}
+
+instruction BranchLowerUnsigned for [ARMv8A64] : CondBranchImm {
+    param MNEMONIC: String = "b.lo";
+    param COND: bits<4> = 0b0011;
+
+    behavior {
+        if PSTATE::c == zext(0b0, 1) {
+            PC::pc = PC::pc + (sext(imm, self.XLEN) << 2);
+        }
+    }
+}
+
+instruction BranchHigherOrSameUnsigned for [ARMv8A64] : CondBranchImm {
+    param MNEMONIC: String = "b.hs";
+    param COND: bits<4> = 0b0010;
+
+    behavior {
+        if PSTATE::c == zext(0b1, 1) {
+            PC::pc = PC::pc + (sext(imm, self.XLEN) << 2);
+        }
+    }
+}
