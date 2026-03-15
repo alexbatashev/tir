@@ -581,8 +581,11 @@ where
             match name {
                 "clamp" => Some(BuiltinFunction::Clamp),
                 "extract" => Some(BuiltinFunction::Extract),
+                "log2Ceil" => Some(BuiltinFunction::Log2Ceil),
                 "sext" => Some(BuiltinFunction::SExt),
                 "zext" => Some(BuiltinFunction::ZExt),
+                "load" => Some(BuiltinFunction::Load),
+                "store" => Some(BuiltinFunction::Store),
                 _ => None,
             }
         }

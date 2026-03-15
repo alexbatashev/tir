@@ -156,6 +156,7 @@ where
                 min: Box::new(go(min, resolver)?),
                 max: Box::new(go(max, resolver)?),
             },
+            Expr::Log2Ceil(input) => Expr::Log2Ceil(Box::new(go(input, resolver)?)),
             Expr::Extract { input, high, low } => Expr::Extract {
                 input: Box::new(go(input, resolver)?),
                 high: Box::new(go(high, resolver)?),
@@ -168,6 +169,20 @@ where
             Expr::SExt { input, width } => Expr::SExt {
                 input: Box::new(go(input, resolver)?),
                 width: Box::new(go(width, resolver)?),
+            },
+            Expr::Load {
+                addr,
+                bytes,
+                signed,
+            } => Expr::Load {
+                addr: Box::new(go(addr, resolver)?),
+                bytes: Box::new(go(bytes, resolver)?),
+                signed: Box::new(go(signed, resolver)?),
+            },
+            Expr::Store { addr, bytes, value } => Expr::Store {
+                addr: Box::new(go(addr, resolver)?),
+                bytes: Box::new(go(bytes, resolver)?),
+                value: Box::new(go(value, resolver)?),
             },
             Expr::Sqrt(a) => Expr::Sqrt(Box::new(go(a, resolver)?)),
             Expr::Fma { a, b, c } => Expr::Fma {

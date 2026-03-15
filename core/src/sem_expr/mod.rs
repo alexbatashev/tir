@@ -49,6 +49,7 @@ pub enum Expr {
         min: Box<Expr>,
         max: Box<Expr>,
     },
+    Log2Ceil(Box<Expr>),
     Extract {
         input: Box<Expr>,
         high: Box<Expr>,
@@ -62,6 +63,16 @@ pub enum Expr {
     SExt {
         input: Box<Expr>,
         width: Box<Expr>,
+    },
+    Load {
+        addr: Box<Expr>,
+        bytes: Box<Expr>,
+        signed: Box<Expr>,
+    },
+    Store {
+        addr: Box<Expr>,
+        bytes: Box<Expr>,
+        value: Box<Expr>,
     },
     // Float-specific operations
     Sqrt(Box<Expr>),
@@ -366,6 +377,23 @@ pub fn evaluate(expr: Expr) -> Expr {
             }
         }
 
+        Expr::Log2Ceil(input) => {
+            let input_val = evaluate(*input);
+            match input_val {
+                Expr::Int(i) => {
+                    let n = i.to_u64();
+                    assert!(n != 0, "Log2Ceil is undefined for zero");
+                    let v = if n <= 1 {
+                        0
+                    } else {
+                        (64 - (n - 1).leading_zeros()) as u64
+                    };
+                    Expr::Int(APInt::new(32, v))
+                }
+                _ => panic!("Log2Ceil requires an Int operand"),
+            }
+        }
+
         // Extract bits operation
         Expr::Extract { input, high, low } => {
             let input_val = evaluate(*input);
@@ -400,6 +428,14 @@ pub fn evaluate(expr: Expr) -> Expr {
                 (Expr::Int(_), _) => panic!("SExt width must evaluate to Int"),
                 _ => panic!("SExt requires an Int operand"),
             }
+        }
+
+        Expr::Load { .. } => {
+            panic!("Load requires a machine context and cannot be evaluated directly")
+        }
+
+        Expr::Store { .. } => {
+            panic!("Store requires a machine context and cannot be evaluated directly")
         }
 
         // Float-specific operations

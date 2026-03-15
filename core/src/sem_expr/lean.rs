@@ -119,6 +119,11 @@ fn emit_expr<W: Write, R: SymbolResolver>(
             write!(output, " else x)")
         }
 
+        Expr::Log2Ceil(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "log2Ceil is not yet supported in Lean emission",
+        )),
+
         // Conversion operations
         Expr::IntToBits(int_expr) => {
             // IntToBits is a no-op in Lean since Int is already BitVec
@@ -128,6 +133,11 @@ fn emit_expr<W: Write, R: SymbolResolver>(
             // BitsToInt is a no-op in Lean since BitVec is the representation
             emit_expr(bits, output, resolver)
         }
+
+        Expr::Load { .. } | Expr::Store { .. } => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Memory operations are not yet supported in Lean emission",
+        )),
 
         // Unsupported operations for now
         Expr::Float(_) => Err(std::io::Error::new(

@@ -89,11 +89,21 @@ fn emit_expr<W: Write, R: SymbolResolver>(
             write!(output, " else x)")
         }
 
+        Expr::Log2Ceil(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "log2Ceil is not yet supported for Rocq",
+        )),
+
         Expr::IntToBits(inner) | Expr::FloatToBits(inner) | Expr::Sqrt(inner) => {
             emit_expr(inner, output, resolver)
         }
         Expr::BitsToInt { bits, .. } => emit_expr(bits, output, resolver),
         Expr::BitsToFloat { bits, .. } => emit_expr(bits, output, resolver),
+
+        Expr::Load { .. } | Expr::Store { .. } => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Memory operations are not yet supported for Rocq",
+        )),
 
         Expr::Float(_) | Expr::Fma { .. } => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,

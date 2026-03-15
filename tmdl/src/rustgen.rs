@@ -1051,6 +1051,38 @@ fn emit_sem_expr(expr: &tir::sem_expr::Expr) -> proc_macro2::TokenStream {
             let rhs = emit_sem_expr(rhs);
             quote! { tir::sem_expr::Expr::Xor(Box::new(#lhs), Box::new(#rhs)) }
         }
+        Expr::Log2Ceil(input) => {
+            let input = emit_sem_expr(input);
+            quote! { tir::sem_expr::Expr::Log2Ceil(Box::new(#input)) }
+        }
+        Expr::Load {
+            addr,
+            bytes,
+            signed,
+        } => {
+            let addr = emit_sem_expr(addr);
+            let bytes = emit_sem_expr(bytes);
+            let signed = emit_sem_expr(signed);
+            quote! {
+                tir::sem_expr::Expr::Load {
+                    addr: Box::new(#addr),
+                    bytes: Box::new(#bytes),
+                    signed: Box::new(#signed),
+                }
+            }
+        }
+        Expr::Store { addr, bytes, value } => {
+            let addr = emit_sem_expr(addr);
+            let bytes = emit_sem_expr(bytes);
+            let value = emit_sem_expr(value);
+            quote! {
+                tir::sem_expr::Expr::Store {
+                    addr: Box::new(#addr),
+                    bytes: Box::new(#bytes),
+                    value: Box::new(#value),
+                }
+            }
+        }
         _ => quote! { tir::sem_expr::Expr::Bool(false) },
     }
 }
@@ -1080,6 +1112,17 @@ fn sem_expr_complexity(expr: &tir::sem_expr::Expr) -> u32 {
         | Expr::And(lhs, rhs)
         | Expr::Or(lhs, rhs)
         | Expr::Xor(lhs, rhs) => 1 + sem_expr_complexity(lhs) + sem_expr_complexity(rhs),
+        Expr::Log2Ceil(input) => 1 + sem_expr_complexity(input),
+        Expr::Load {
+            addr,
+            bytes,
+            signed,
+        } => {
+            1 + sem_expr_complexity(addr) + sem_expr_complexity(bytes) + sem_expr_complexity(signed)
+        }
+        Expr::Store { addr, bytes, value } => {
+            1 + sem_expr_complexity(addr) + sem_expr_complexity(bytes) + sem_expr_complexity(value)
+        }
         _ => 2,
     }
 }

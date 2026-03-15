@@ -207,6 +207,13 @@ impl ConversionContext {
                         low: Box::new(low),
                     })
                 }
+                BuiltinFunction::Log2Ceil => {
+                    if call.arguments.len() != 1 {
+                        return Err("log2Ceil requires 1 argument".to_string());
+                    }
+                    let input = self.convert(&call.arguments[0])?;
+                    Ok(Expr::Log2Ceil(Box::new(input)))
+                }
                 BuiltinFunction::SExt => {
                     if call.arguments.len() != 2 {
                         return Err("sext requires 2 arguments".to_string());
@@ -227,6 +234,32 @@ impl ConversionContext {
                     Ok(Expr::ZExt {
                         input: Box::new(input),
                         width: Box::new(width),
+                    })
+                }
+                BuiltinFunction::Load => {
+                    if call.arguments.len() != 3 {
+                        return Err("load requires 3 arguments".to_string());
+                    }
+                    let addr = self.convert(&call.arguments[0])?;
+                    let bytes = self.convert(&call.arguments[1])?;
+                    let signed = self.convert(&call.arguments[2])?;
+                    Ok(Expr::Load {
+                        addr: Box::new(addr),
+                        bytes: Box::new(bytes),
+                        signed: Box::new(signed),
+                    })
+                }
+                BuiltinFunction::Store => {
+                    if call.arguments.len() != 3 {
+                        return Err("store requires 3 arguments".to_string());
+                    }
+                    let addr = self.convert(&call.arguments[0])?;
+                    let bytes = self.convert(&call.arguments[1])?;
+                    let value = self.convert(&call.arguments[2])?;
+                    Ok(Expr::Store {
+                        addr: Box::new(addr),
+                        bytes: Box::new(bytes),
+                        value: Box::new(value),
                     })
                 }
             }

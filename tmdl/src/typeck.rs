@@ -268,6 +268,26 @@ fn infer<'a>(
                 }
                 Type::Var(tvg.fresh())
             }
+            ast::Expr::BuiltinFunction(ast::BuiltinFunction::Log2Ceil) => {
+                for arg in &call.arguments {
+                    infer(arg, env, tvg, subst, cache, diags, file_name);
+                }
+                Type::Integer
+            }
+            ast::Expr::BuiltinFunction(ast::BuiltinFunction::SExt)
+            | ast::Expr::BuiltinFunction(ast::BuiltinFunction::ZExt)
+            | ast::Expr::BuiltinFunction(ast::BuiltinFunction::Load) => {
+                for arg in &call.arguments {
+                    infer(arg, env, tvg, subst, cache, diags, file_name);
+                }
+                Type::Var(tvg.fresh())
+            }
+            ast::Expr::BuiltinFunction(ast::BuiltinFunction::Store) => {
+                for arg in &call.arguments {
+                    infer(arg, env, tvg, subst, cache, diags, file_name);
+                }
+                Type::Integer
+            }
             callee => {
                 let callee_ty = infer(callee, env, tvg, subst, cache, diags, file_name);
                 for arg in &call.arguments {

@@ -409,6 +409,23 @@ pub fn simplify(expr: Expr) -> Expr {
             }
         }
 
+        Expr::Log2Ceil(input) => {
+            let input = simplify(*input);
+            match &input {
+                Expr::Int(i) => {
+                    let n = i.to_u64();
+                    assert!(n != 0, "Log2Ceil is undefined for zero");
+                    let v = if n <= 1 {
+                        0
+                    } else {
+                        (64 - (n - 1).leading_zeros()) as u64
+                    };
+                    Expr::Int(APInt::new(32, v))
+                }
+                _ => Expr::Log2Ceil(Box::new(input)),
+            }
+        }
+
         // Extract simplifications
         Expr::Extract { input, high, low } => {
             let input = simplify(*input);
@@ -460,6 +477,22 @@ pub fn simplify(expr: Expr) -> Expr {
                 },
             }
         }
+
+        Expr::Load {
+            addr,
+            bytes,
+            signed,
+        } => Expr::Load {
+            addr: Box::new(simplify(*addr)),
+            bytes: Box::new(simplify(*bytes)),
+            signed: Box::new(simplify(*signed)),
+        },
+
+        Expr::Store { addr, bytes, value } => Expr::Store {
+            addr: Box::new(simplify(*addr)),
+            bytes: Box::new(simplify(*bytes)),
+            value: Box::new(simplify(*value)),
+        },
 
         // Float-specific operations
         Expr::Sqrt(operand) => {

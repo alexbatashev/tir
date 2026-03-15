@@ -219,8 +219,11 @@ pub struct Binary {
 pub enum BuiltinFunction {
     Clamp,
     Extract,
+    Log2Ceil,
     SExt,
     ZExt,
+    Load,
+    Store,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]

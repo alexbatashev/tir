@@ -101,11 +101,21 @@ fn emit_expr<W: Write, R: SymbolResolver>(
             write!(output, " x)))")
         }
 
+        Expr::Log2Ceil(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "log2Ceil is not yet supported for SMT-LIB emission",
+        )),
+
         Expr::IntToBits(inner) | Expr::FloatToBits(inner) | Expr::Sqrt(inner) => {
             emit_expr(inner, output, resolver)
         }
         Expr::BitsToInt { bits, .. } => emit_expr(bits, output, resolver),
         Expr::BitsToFloat { bits, .. } => emit_expr(bits, output, resolver),
+
+        Expr::Load { .. } | Expr::Store { .. } => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Memory operations are not yet supported for SMT-LIB emission",
+        )),
 
         Expr::Float(_) | Expr::Fma { .. } => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -205,6 +215,7 @@ fn infer_width(expr: &Expr) -> Option<u32> {
         }
         Expr::ZExt { width, .. } | Expr::SExt { width, .. } => extract_const_u32(width).ok(),
         Expr::Clamp { input, .. } => infer_width(input),
+        Expr::Log2Ceil(_) => Some(32),
         Expr::BitsToInt { width, .. } => Some(*width),
         Expr::BitsToFloat {
             exp_width,
@@ -212,7 +223,7 @@ fn infer_width(expr: &Expr) -> Option<u32> {
             explicit_leading_bit,
             ..
         } => Some(exp_width + mant_width + if *explicit_leading_bit { 1 } else { 0 }),
-        Expr::Float(_) | Expr::Fma { .. } => None,
+        Expr::Load { .. } | Expr::Store { .. } | Expr::Float(_) | Expr::Fma { .. } => None,
     }
 }
 

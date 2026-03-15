@@ -60,8 +60,86 @@ template RType for [RV32I, RV64I] {
     }
 }
 
+// RV64I word-sized R-type instruction template
+template RTypeWord for [RV64I] {
+    param MNEMONIC: String;
+    param FUNCT7: bits<7>;
+    param FUNCT3: bits<3>;
+    param OPCODE: bits<7>;
+
+    operands {
+        rd: GPR,
+        rs1: GPR,
+        rs2: GPR,
+    }
+
+    encoding {
+        0..6 => OPCODE,
+        7..11 => rd,
+        12..14 => FUNCT3,
+        15..19 => rs1,
+        20..24 => rs2,
+        25..31 => FUNCT7,
+    }
+
+    asm {
+        "{self.MNEMONIC} {rd}, {rs1}, {rs2}"
+    }
+}
+
 // I-type instruction template
 template IType for [RV32I, RV64I] {
+    param MNEMONIC: String;
+    param FUNCT3: bits<3>;
+    param OPCODE: bits<7>;
+
+    operands {
+        rd: GPR,
+        rs1: GPR,
+        imm: bits<12>,
+    }
+
+    encoding {
+        0..6 => OPCODE,
+        7..11 => rd,
+        12..14 => FUNCT3,
+        15..19 => rs1,
+        20..31 => imm,
+    }
+
+    asm {
+        "{self.MNEMONIC} {rd}, {rs1}, {imm}"
+    }
+}
+
+// I-type instruction template with explicit PC operand for behavior.
+template ITypePC for [RV32I, RV64I] {
+    param MNEMONIC: String;
+    param FUNCT3: bits<3>;
+    param OPCODE: bits<7>;
+
+    operands {
+        rd: GPR,
+        rs1: GPR,
+        imm: bits<12>,
+        pc: PC,
+    }
+
+    encoding {
+        0..6 => OPCODE,
+        7..11 => rd,
+        12..14 => FUNCT3,
+        15..19 => rs1,
+        20..31 => imm,
+    }
+
+    asm {
+        "{self.MNEMONIC} {rd}, {rs1}, {imm}"
+    }
+}
+
+// RV64I word-sized I-type instruction template.
+template ITypeWord for [RV64I] {
     param MNEMONIC: String;
     param FUNCT3: bits<3>;
     param OPCODE: bits<7>;
@@ -153,6 +231,35 @@ template BType for [RV32I, RV64I] {
     }
 }
 
+// B-type instruction template with explicit PC operand for behavior.
+template BTypePC for [RV32I, RV64I] {
+    param MNEMONIC: String;
+    param FUNCT3: bits<3>;
+    param OPCODE: bits<7>;
+
+    operands {
+        rs1: GPR,
+        rs2: GPR,
+        imm: bits<13>,
+        pc: PC,
+    }
+
+    encoding {
+        0..6 => OPCODE,
+        7 => imm[11],
+        8..11 => imm[1..4],
+        12..14 => FUNCT3,
+        15..19 => rs1,
+        20..24 => rs2,
+        25..30 => imm[5..10],
+        31 => imm[12],
+    }
+
+    asm {
+        "{self.MNEMONIC} {rs1}, {rs2}, {imm}"
+    }
+}
+
 // Branch instruction template, inherits from BType
 template BranchInst for [RV32I, RV64I] : BType {
     param OPCODE: bits<7> = 0b1100011;
@@ -166,6 +273,28 @@ template UType for [RV32I, RV64I] {
     operands {
         rd: GPR,
         imm: bits<20>,
+    }
+
+    encoding {
+        0..6 => OPCODE,
+        7..11 => rd,
+        12..31 => imm,
+    }
+
+    asm {
+        "{self.MNEMONIC} {rd}, {imm}"
+    }
+}
+
+// U-type instruction template with explicit PC operand for behavior.
+template UTypePC for [RV32I, RV64I] {
+    param MNEMONIC: String;
+    param OPCODE: bits<7>;
+
+    operands {
+        rd: GPR,
+        imm: bits<20>,
+        pc: PC,
     }
 
     encoding {
