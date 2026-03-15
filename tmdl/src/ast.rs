@@ -1,7 +1,7 @@
 use crate::utils::StableHashMap;
 use crate::{Span, Type};
-use serde::ser::{SerializeStruct, Serializer};
 use serde::Serialize;
+use serde::ser::{SerializeStruct, Serializer};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

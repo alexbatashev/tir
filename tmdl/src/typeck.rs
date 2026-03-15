@@ -4,7 +4,7 @@ use std::mem;
 use chumsky::error::Rich;
 
 use crate::{
-    ast, unify, utils, Span, Substitution, Type, TypeEnv, TypeScheme, TypeVar, TypeVarGen,
+    Span, Substitution, Type, TypeEnv, TypeScheme, TypeVar, TypeVarGen, ast, unify, utils,
 };
 
 type Diag = Rich<'static, String, Span>;

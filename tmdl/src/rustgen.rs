@@ -3,13 +3,13 @@ use std::io::Write;
 
 use quote::{format_ident, quote};
 
+use crate::Type;
 use crate::ast;
 use crate::error::TMDLError;
 use crate::utils::{
     get_encoding_arms, parse_literal_value, resolve_effective_asm_for_instruction,
     resolve_operands_for_instruction, resolve_params_for_instruction,
 };
-use crate::Type;
 
 struct InstructionSemantics {
     pattern: proc_macro2::TokenStream,

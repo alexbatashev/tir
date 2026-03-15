@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 use std::io::Write;
 
+use crate::Type;
 use crate::ast;
 use crate::error::TMDLError;
-use crate::sem_expr_conv::{convert_to_sem_expr, SymbolInfo};
+use crate::sem_expr_conv::{SymbolInfo, convert_to_sem_expr};
 use crate::sem_expr_state;
 use crate::utils::{
     get_encoding_arms, resolve_operands_for_instruction, resolve_params_for_instruction,
 };
-use crate::Type;
 use tir::sem_expr::smtlib as sem_smtlib;
 
 const REG_INDEX_WIDTH: u16 = 5;

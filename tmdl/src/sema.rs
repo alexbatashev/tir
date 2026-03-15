@@ -6,7 +6,7 @@ use crate::utils::{
     resolve_effective_asm_for_instruction, resolve_effective_encoding_for_instruction,
     resolve_template_chain,
 };
-use crate::{ast, Span, Type};
+use crate::{Span, Type, ast};
 
 type Diag = Rich<'static, String, Span>;
 
