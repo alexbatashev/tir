@@ -316,7 +316,6 @@ template JType for [RV32I, RV64I] {
     operands {
         rd: GPR,
         imm: bits<21>,
-        pc: PC,
     }
 
     encoding {

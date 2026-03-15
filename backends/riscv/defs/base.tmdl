@@ -27,12 +27,12 @@ instruction LoadUpperImm for [RV32I, RV64I] : UType {
     }
 }
 
-instruction AddUpperImmToPC for [RV32I, RV64I] : UTypePC {
+instruction AddUpperImmToPC for [RV32I, RV64I] : UType {
     param MNEMONIC: String = "auipc";
     param OPCODE: bits<7> = 0b0010111;
 
     behavior {
-        rd = pc + (sext(imm, self.XLEN) << 12);
+        rd = PC::pc + (sext(imm, self.XLEN) << 12);
     }
 }
 
@@ -41,12 +41,12 @@ instruction JumpAndLink for [RV32I, RV64I] : JType {
     param OPCODE: bits<7> = 0b1101111;
 
     behavior {
-        rd = pc + zext(0b100, self.XLEN);
-        pc = pc + sext(imm, self.XLEN);
+        rd = PC::pc + zext(0b100, self.XLEN);
+        PC::pc = PC::pc + sext(imm, self.XLEN);
     }
 }
 
-instruction JumpAndLinkReg for [RV32I, RV64I] : ITypePC {
+instruction JumpAndLinkReg for [RV32I, RV64I] : IType {
     param MNEMONIC: String = "jalr";
     param OPCODE: bits<7> = 0b1100111;
     param FUNCT3: bits<3> = 0b000;
@@ -56,12 +56,12 @@ instruction JumpAndLinkReg for [RV32I, RV64I] : ITypePC {
     }
 
     behavior {
-        rd = pc + zext(0b100, self.XLEN);
-        pc = rs1 + sext(imm, self.XLEN);
+        rd = PC::pc + zext(0b100, self.XLEN);
+        PC::pc = rs1 + sext(imm, self.XLEN);
     }
 }
 
-template BranchOp for [RV32I, RV64I] : BTypePC {
+template BranchOp for [RV32I, RV64I] : BType {
     param OPCODE: bits<7> = 0b1100011;
 }
 
@@ -71,7 +71,7 @@ instruction BranchEq for [RV32I, RV64I] : BranchOp {
 
     behavior {
         if rs1 == rs2 {
-            pc = pc + sext(imm, self.XLEN);
+            PC::pc = PC::pc + sext(imm, self.XLEN);
         }
     }
 }
@@ -82,7 +82,7 @@ instruction BranchNotEq for [RV32I, RV64I] : BranchOp {
 
     behavior {
         if rs1 != rs2 {
-            pc = pc + sext(imm, self.XLEN);
+            PC::pc = PC::pc + sext(imm, self.XLEN);
         }
     }
 }
@@ -93,7 +93,7 @@ instruction BranchLt for [RV32I, RV64I] : BranchOp {
 
     behavior {
         if rs1 < rs2 {
-            pc = pc + sext(imm, self.XLEN);
+            PC::pc = PC::pc + sext(imm, self.XLEN);
         }
     }
 }
@@ -104,7 +104,7 @@ instruction BranchGe for [RV32I, RV64I] : BranchOp {
 
     behavior {
         if rs1 >= rs2 {
-            pc = pc + sext(imm, self.XLEN);
+            PC::pc = PC::pc + sext(imm, self.XLEN);
         }
     }
 }
@@ -115,7 +115,7 @@ instruction BranchLtUnsigned for [RV32I, RV64I] : BranchOp {
 
     behavior {
         if rs1 ~< rs2 {
-            pc = pc + sext(imm, self.XLEN);
+            PC::pc = PC::pc + sext(imm, self.XLEN);
         }
     }
 }
@@ -126,7 +126,7 @@ instruction BranchGeUnsigned for [RV32I, RV64I] : BranchOp {
 
     behavior {
         if rs1 ~>= rs2 {
-            pc = pc + sext(imm, self.XLEN);
+            PC::pc = PC::pc + sext(imm, self.XLEN);
         }
     }
 }

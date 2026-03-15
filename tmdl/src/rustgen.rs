@@ -3,13 +3,13 @@ use std::io::Write;
 
 use quote::{format_ident, quote};
 
-use crate::Type;
 use crate::ast;
 use crate::error::TMDLError;
 use crate::utils::{
     get_encoding_arms, parse_literal_value, resolve_effective_asm_for_instruction,
     resolve_operands_for_instruction, resolve_params_for_instruction,
 };
+use crate::Type;
 
 struct InstructionSemantics {
     pattern: proc_macro2::TokenStream,
@@ -777,9 +777,21 @@ fn register_operand_names(operands: &[(String, Type)]) -> HashSet<&str> {
         .collect()
 }
 
-fn collect_behavior_assignments<'a>(expr: &'a ast::Expr, out: &mut Vec<(&'a str, &'a ast::Expr)>) {
+fn assignment_dest_name(dest: &ast::Expr) -> Option<String> {
+    match dest {
+        ast::Expr::Ident(id) => Some(id.name.clone()),
+        ast::Expr::Path(path) if path.remainder.len() == 1 => Some(path.remainder[0].clone()),
+        _ => None,
+    }
+}
+
+fn collect_behavior_assignments<'a>(expr: &'a ast::Expr, out: &mut Vec<(String, &'a ast::Expr)>) {
     match expr {
-        ast::Expr::Assign(a) => out.push((a.dest.as_str(), a.value.as_ref())),
+        ast::Expr::Assign(a) => {
+            if let Some(dst) = assignment_dest_name(&a.dest) {
+                out.push((dst, a.value.as_ref()));
+            }
+        }
         ast::Expr::Block(b) => {
             for stmt in &b.stmts {
                 collect_behavior_assignments(stmt, out);
@@ -805,8 +817,9 @@ fn infer_defined_register_operands(
     let mut assignments = Vec::new();
     collect_behavior_assignments(behavior, &mut assignments);
     for (dst, _) in assignments {
-        if register_operands.contains(dst) && !defs.iter().any(|existing| existing == dst) {
-            defs.push(dst.to_string());
+        if register_operands.contains(dst.as_str()) && !defs.iter().any(|existing| existing == &dst)
+        {
+            defs.push(dst);
         }
     }
     defs
@@ -827,7 +840,7 @@ fn resolve_behavior_rhs<'a>(
         }
     }
     for (dst, rhs) in assignments.iter().rev() {
-        if register_operands.contains(*dst) {
+        if register_operands.contains(dst.as_str()) {
             return Some(*rhs);
         }
     }

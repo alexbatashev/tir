@@ -76,6 +76,7 @@ impl ConversionContext {
             AstExpr::Slice(slice) => self.convert_slice(slice),
             AstExpr::IndexAccess(index) => self.convert_index_access(index),
             AstExpr::Field(field) => self.convert_field(field),
+            AstExpr::Path(path) => self.convert_path(path),
             AstExpr::If(if_expr) => self.convert_if(if_expr),
             AstExpr::Block(block) => self.convert_block(block),
             AstExpr::Assign(_) => {
@@ -146,6 +147,31 @@ impl ConversionContext {
             });
             Ok(Expr::Symbol(symbol_id))
         }
+    }
+
+    fn convert_path(&mut self, path: &crate::ast::Path) -> Result<Expr, String> {
+        if path.remainder.len() != 1 {
+            return Err("path expressions must have exactly one register component".to_string());
+        }
+        let reg_name = &path.remainder[0];
+        let number = if path.base == "PC" && reg_name == "pc" {
+            0
+        } else {
+            let digits_start = reg_name.find(|c: char| c.is_ascii_digit()).ok_or_else(|| {
+                format!(
+                    "could not infer register index from path '{}::{}'",
+                    path.base, reg_name
+                )
+            })?;
+            reg_name[digits_start..].parse::<u32>().map_err(|_| {
+                format!(
+                    "invalid register index in path '{}::{}'",
+                    path.base, reg_name
+                )
+            })?
+        };
+        let symbol_id = self.get_or_create_register_symbol(path.base.clone(), number);
+        Ok(Expr::Symbol(symbol_id))
     }
 
     fn convert_binary(&mut self, binary: &crate::ast::Binary) -> Result<Expr, String> {

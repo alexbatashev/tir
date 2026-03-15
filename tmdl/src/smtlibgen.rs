@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 use std::io::Write;
 
-use crate::Type;
 use crate::ast;
 use crate::error::TMDLError;
-use crate::sem_expr_conv::{SymbolInfo, convert_to_sem_expr};
+use crate::sem_expr_conv::{convert_to_sem_expr, SymbolInfo};
 use crate::sem_expr_state;
 use crate::utils::{
     get_encoding_arms, resolve_operands_for_instruction, resolve_params_for_instruction,
 };
+use crate::Type;
 use tir::sem_expr::smtlib as sem_smtlib;
 
 const REG_INDEX_WIDTH: u16 = 5;
@@ -407,6 +407,14 @@ fn build_smt_behavior<'a>(
                     name
                 }
             }
+            ast::Expr::Path(p) => {
+                if p.remainder.len() == 1 {
+                    let reg = p.remainder[0].to_lowercase();
+                    format!("(read_{} st {})", p.base.to_lowercase(), reg)
+                } else {
+                    "(_ bv0 64)".to_string()
+                }
+            }
             ast::Expr::Binary(b) => {
                 let lhs = eval_expr_legacy(&b.lhs, operands);
                 let rhs = eval_expr_legacy(&b.rhs, operands);
@@ -488,16 +496,25 @@ fn build_smt_behavior<'a>(
     let emit_expr = |e: &ast::Expr| eval_expr(e, &operands, &numeric_params);
     let emit_assign = |a: &ast::Assign, st_name: &str| {
         let rhs = emit_expr(&a.value);
-        if a.dest == "pc" {
+        let dest_name = match &*a.dest {
+            ast::Expr::Ident(id) => Some(id.name.as_str()),
+            ast::Expr::Path(p) if p.remainder.len() == 1 => Some(p.remainder[0].as_str()),
+            _ => None,
+        };
+        if dest_name == Some("pc") {
             Some(format!("(write_pc {} {})", st_name, rhs))
-        } else if let Some(Type::Struct(rc)) = operands.get(&a.dest) {
-            Some(format!(
-                "(write_{} {} {} {})",
-                rc.to_lowercase(),
-                st_name,
-                a.dest.to_lowercase(),
-                rhs
-            ))
+        } else if let Some(name) = dest_name {
+            if let Some(Type::Struct(rc)) = operands.get(name) {
+                Some(format!(
+                    "(write_{} {} {} {})",
+                    rc.to_lowercase(),
+                    st_name,
+                    name.to_lowercase(),
+                    rhs
+                ))
+            } else {
+                None
+            }
         } else {
             None
         }

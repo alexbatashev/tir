@@ -1,7 +1,7 @@
 use crate::utils::StableHashMap;
 use crate::{Span, Type};
-use serde::Serialize;
 use serde::ser::{SerializeStruct, Serializer};
+use serde::Serialize;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -175,8 +175,16 @@ pub struct Ident {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct Assign {
-    pub dest: String,
+    pub dest: Box<Expr>,
     pub value: Box<Expr>,
+    #[serde(skip_serializing)]
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub struct Path {
+    pub base: String,
+    pub remainder: Vec<String>,
     #[serde(skip_serializing)]
     pub span: Span,
 }
@@ -261,6 +269,7 @@ pub enum Expr {
     Ident(Ident),
     If(If),
     IndexAccess(IndexAccess),
+    Path(Path),
     Lit(Lit),
     Slice(Slice),
     BuiltinFunction(BuiltinFunction),

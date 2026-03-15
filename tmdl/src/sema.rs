@@ -6,7 +6,7 @@ use crate::utils::{
     resolve_effective_asm_for_instruction, resolve_effective_encoding_for_instruction,
     resolve_template_chain,
 };
-use crate::{Span, Type, ast};
+use crate::{ast, Span, Type};
 
 type Diag = Rich<'static, String, Span>;
 
@@ -348,6 +348,7 @@ fn check_instruction_consistent(
         instruction,
         &instruction.behavior,
         &params_cache,
+        item_cache,
         file_name,
     ));
 
@@ -381,13 +382,107 @@ fn check_asm(
 }
 
 fn check_behavior(
-    _instruction: &ast::Instruction,
-    _behavior: &ast::Expr,
+    instruction: &ast::Instruction,
+    behavior: &ast::Expr,
     _params_cache: &HashMap<&str, (Type, Option<ast::Expr>)>,
-    _file_name: &str,
+    item_cache: &HashMap<&str, &ast::Item>,
+    file_name: &str,
 ) -> Vec<(String, Diag)> {
-    // Always fine for now
-    vec![]
+    fn walk_paths<'a>(expr: &'a ast::Expr, out: &mut Vec<&'a ast::Path>) {
+        match expr {
+            ast::Expr::Path(p) => out.push(p),
+            ast::Expr::Assign(a) => {
+                walk_paths(&a.dest, out);
+                walk_paths(&a.value, out);
+            }
+            ast::Expr::Binary(b) => {
+                walk_paths(&b.lhs, out);
+                walk_paths(&b.rhs, out);
+            }
+            ast::Expr::Block(b) => {
+                for stmt in &b.stmts {
+                    walk_paths(stmt, out);
+                }
+            }
+            ast::Expr::Call(c) => {
+                walk_paths(&c.callee, out);
+                for arg in &c.arguments {
+                    walk_paths(arg, out);
+                }
+            }
+            ast::Expr::Field(f) => walk_paths(&f.base, out),
+            ast::Expr::If(i) => {
+                walk_paths(&i.cond, out);
+                walk_paths(&i.then, out);
+                if let Some(e) = &i.else_ {
+                    walk_paths(e, out);
+                }
+            }
+            ast::Expr::IndexAccess(i) => walk_paths(&i.base, out),
+            ast::Expr::Slice(s) => walk_paths(&s.base, out),
+            ast::Expr::Ident(_)
+            | ast::Expr::Lit(_)
+            | ast::Expr::BuiltinFunction(_)
+            | ast::Expr::Invalid => {}
+        }
+    }
+
+    let mut diags = Vec::new();
+    let mut paths = Vec::new();
+    walk_paths(behavior, &mut paths);
+
+    for path in paths {
+        let reg_class = match item_cache.get(path.base.as_str()) {
+            Some(ast::Item::RegisterClass(rc)) => rc,
+            Some(_) | None => {
+                diags.push((
+                    file_name.to_string(),
+                    Rich::custom(
+                        path.span,
+                        format!(
+                            "unknown register class '{}' in behavior for instruction '{}'",
+                            path.base, instruction.name
+                        ),
+                    ),
+                ));
+                continue;
+            }
+        };
+
+        if path.remainder.len() != 1 {
+            diags.push((
+                file_name.to_string(),
+                Rich::custom(
+                    path.span,
+                    format!(
+                        "path '{}::{}' must have exactly one register component",
+                        path.base,
+                        path.remainder.join("::")
+                    ),
+                ),
+            ));
+            continue;
+        }
+
+        let reg_name = &path.remainder[0];
+        let exists = reg_class.resolve_registers().any(|r| {
+            r.name == *reg_name || r.alias.as_ref().is_some_and(|alias| alias == reg_name)
+        });
+        if !exists {
+            diags.push((
+                file_name.to_string(),
+                Rich::custom(
+                    path.span,
+                    format!(
+                        "unknown register '{}' in path '{}::{}' for instruction '{}'",
+                        reg_name, path.base, reg_name, instruction.name
+                    ),
+                ),
+            ));
+        }
+    }
+
+    diags
 }
 
 fn check_encoding(
