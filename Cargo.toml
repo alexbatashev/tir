@@ -13,7 +13,7 @@ members = [
     "backends/riscv",
     "fuzz",
     "simulator/isasim",
-    "simulator/simcore",
+    "simulator/simcore", "backends/arm64",
 ]
 
 [profile.bench]
