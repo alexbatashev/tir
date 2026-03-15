@@ -128,6 +128,17 @@ where
             Expr::Sub(a, b) => Expr::Sub(Box::new(go(a, resolver)?), Box::new(go(b, resolver)?)),
             Expr::Mul(a, b) => Expr::Mul(Box::new(go(a, resolver)?), Box::new(go(b, resolver)?)),
             Expr::Div(a, b) => Expr::Div(Box::new(go(a, resolver)?), Box::new(go(b, resolver)?)),
+            Expr::UDiv(a, b) => Expr::UDiv(Box::new(go(a, resolver)?), Box::new(go(b, resolver)?)),
+            Expr::Eq(a, b) => Expr::Eq(Box::new(go(a, resolver)?), Box::new(go(b, resolver)?)),
+            Expr::Ne(a, b) => Expr::Ne(Box::new(go(a, resolver)?), Box::new(go(b, resolver)?)),
+            Expr::Lt(a, b) => Expr::Lt(Box::new(go(a, resolver)?), Box::new(go(b, resolver)?)),
+            Expr::Le(a, b) => Expr::Le(Box::new(go(a, resolver)?), Box::new(go(b, resolver)?)),
+            Expr::Gt(a, b) => Expr::Gt(Box::new(go(a, resolver)?), Box::new(go(b, resolver)?)),
+            Expr::Ge(a, b) => Expr::Ge(Box::new(go(a, resolver)?), Box::new(go(b, resolver)?)),
+            Expr::ULt(a, b) => Expr::ULt(Box::new(go(a, resolver)?), Box::new(go(b, resolver)?)),
+            Expr::ULe(a, b) => Expr::ULe(Box::new(go(a, resolver)?), Box::new(go(b, resolver)?)),
+            Expr::UGt(a, b) => Expr::UGt(Box::new(go(a, resolver)?), Box::new(go(b, resolver)?)),
+            Expr::UGe(a, b) => Expr::UGe(Box::new(go(a, resolver)?), Box::new(go(b, resolver)?)),
             Expr::ShiftLeft(a, b) => {
                 Expr::ShiftLeft(Box::new(go(a, resolver)?), Box::new(go(b, resolver)?))
             }
@@ -145,6 +156,7 @@ where
                 min: Box::new(go(min, resolver)?),
                 max: Box::new(go(max, resolver)?),
             },
+            Expr::Log2Ceil(input) => Expr::Log2Ceil(Box::new(go(input, resolver)?)),
             Expr::Extract { input, high, low } => Expr::Extract {
                 input: Box::new(go(input, resolver)?),
                 high: Box::new(go(high, resolver)?),
@@ -152,11 +164,25 @@ where
             },
             Expr::ZExt { input, width } => Expr::ZExt {
                 input: Box::new(go(input, resolver)?),
-                width: *width,
+                width: Box::new(go(width, resolver)?),
             },
             Expr::SExt { input, width } => Expr::SExt {
                 input: Box::new(go(input, resolver)?),
-                width: *width,
+                width: Box::new(go(width, resolver)?),
+            },
+            Expr::Load {
+                addr,
+                bytes,
+                signed,
+            } => Expr::Load {
+                addr: Box::new(go(addr, resolver)?),
+                bytes: Box::new(go(bytes, resolver)?),
+                signed: Box::new(go(signed, resolver)?),
+            },
+            Expr::Store { addr, bytes, value } => Expr::Store {
+                addr: Box::new(go(addr, resolver)?),
+                bytes: Box::new(go(bytes, resolver)?),
+                value: Box::new(go(value, resolver)?),
             },
             Expr::Sqrt(a) => Expr::Sqrt(Box::new(go(a, resolver)?)),
             Expr::Fma { a, b, c } => Expr::Fma {

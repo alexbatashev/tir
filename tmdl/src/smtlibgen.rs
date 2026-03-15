@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 use std::io::Write;
 
-use crate::Type;
 use crate::ast;
 use crate::error::TMDLError;
-use crate::sem_expr_conv::{SymbolInfo, convert_to_sem_expr};
+use crate::sem_expr_conv::{convert_to_sem_expr, SymbolInfo};
 use crate::sem_expr_state;
 use crate::utils::{
     get_encoding_arms, resolve_operands_for_instruction, resolve_params_for_instruction,
 };
+use crate::Type;
 use tir::sem_expr::smtlib as sem_smtlib;
 
 const REG_INDEX_WIDTH: u16 = 5;
@@ -161,9 +161,7 @@ fn build_instructions<'a>(
         // pattern binding, so they are unaffected by this renaming.
         let variant_operands = operands
             .iter()
-            .map(|(op_name, ty)| {
-                format!("({}_{} {})", name, op_name.to_lowercase(), smt_ty_of(ty))
-            })
+            .map(|(op_name, ty)| format!("({}_{} {})", name, op_name.to_lowercase(), smt_ty_of(ty)))
             .collect::<Vec<_>>()
             .join(" ");
 
@@ -183,9 +181,7 @@ fn build_instructions<'a>(
             .join(" ");
 
         if operand_list.is_empty() {
-            encode_arms.push(format!(
-                "((_ is {uppercase_name}) instr) (encode_{name})"
-            ));
+            encode_arms.push(format!("((_ is {uppercase_name}) instr) (encode_{name})"));
             execute_arms.push(format!(
                 "((_ is {uppercase_name}) instr) (execute_{name} state)"
             ));
@@ -411,6 +407,14 @@ fn build_smt_behavior<'a>(
                     name
                 }
             }
+            ast::Expr::Path(p) => {
+                if p.remainder.len() == 1 {
+                    let reg = p.remainder[0].to_lowercase();
+                    format!("(read_{} st {})", p.base.to_lowercase(), reg)
+                } else {
+                    "(_ bv0 64)".to_string()
+                }
+            }
             ast::Expr::Binary(b) => {
                 let lhs = eval_expr_legacy(&b.lhs, operands);
                 let rhs = eval_expr_legacy(&b.rhs, operands);
@@ -418,7 +422,18 @@ fn build_smt_behavior<'a>(
                     ast::BinOp::Add => "bvadd",
                     ast::BinOp::Sub => "bvsub",
                     ast::BinOp::Mul => "bvmul",
-                    ast::BinOp::Div => "bvudiv",
+                    ast::BinOp::Div => "bvsdiv",
+                    ast::BinOp::UnsignedDiv => "bvudiv",
+                    ast::BinOp::Equal => "=",
+                    ast::BinOp::NotEqual => "distinct",
+                    ast::BinOp::LessThan => "bvslt",
+                    ast::BinOp::GreaterThan => "bvsgt",
+                    ast::BinOp::LessThenEqual => "bvsle",
+                    ast::BinOp::GreaterThanEqual => "bvsge",
+                    ast::BinOp::UnsignedLessThan => "bvult",
+                    ast::BinOp::UnsignedGreaterThan => "bvugt",
+                    ast::BinOp::UnsignedLessThenEqual => "bvule",
+                    ast::BinOp::UnsignedGreaterThanEqual => "bvuge",
                     ast::BinOp::BitwiseAnd => "bvand",
                     ast::BinOp::BitwiseOr => "bvor",
                     ast::BinOp::BitwiseXor => "bvxor",
@@ -481,16 +496,25 @@ fn build_smt_behavior<'a>(
     let emit_expr = |e: &ast::Expr| eval_expr(e, &operands, &numeric_params);
     let emit_assign = |a: &ast::Assign, st_name: &str| {
         let rhs = emit_expr(&a.value);
-        if a.dest == "pc" {
+        let dest_name = match &*a.dest {
+            ast::Expr::Ident(id) => Some(id.name.as_str()),
+            ast::Expr::Path(p) if p.remainder.len() == 1 => Some(p.remainder[0].as_str()),
+            _ => None,
+        };
+        if dest_name == Some("pc") {
             Some(format!("(write_pc {} {})", st_name, rhs))
-        } else if let Some(Type::Struct(rc)) = operands.get(&a.dest) {
-            Some(format!(
-                "(write_{} {} {} {})",
-                rc.to_lowercase(),
-                st_name,
-                a.dest.to_lowercase(),
-                rhs
-            ))
+        } else if let Some(name) = dest_name {
+            if let Some(Type::Struct(rc)) = operands.get(name) {
+                Some(format!(
+                    "(write_{} {} {} {})",
+                    rc.to_lowercase(),
+                    st_name,
+                    name.to_lowercase(),
+                    rhs
+                ))
+            } else {
+                None
+            }
         } else {
             None
         }
@@ -556,10 +580,12 @@ fn build_decoder<'a>(
                     let name = &id.name;
                     if operands.contains_key(name) {
                         // The entire word field holds bits [0..word_width-1] of the operand.
-                        operand_pieces
-                            .entry(name.clone())
-                            .or_default()
-                            .push((0, word_width - 1, word_lo, word_hi));
+                        operand_pieces.entry(name.clone()).or_default().push((
+                            0,
+                            word_width - 1,
+                            word_lo,
+                            word_hi,
+                        ));
                     } else if let Some((_, Some(ast::Expr::Lit(ast::Lit::Int(li))))) =
                         params.get(name)
                     {

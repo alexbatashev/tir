@@ -4,7 +4,7 @@ use std::mem;
 use chumsky::error::Rich;
 
 use crate::{
-    Span, Substitution, Type, TypeEnv, TypeScheme, TypeVar, TypeVarGen, ast, unify, utils,
+    ast, unify, utils, Span, Substitution, Type, TypeEnv, TypeScheme, TypeVar, TypeVarGen,
 };
 
 type Diag = Rich<'static, String, Span>;
@@ -109,6 +109,9 @@ fn build_instr_env<'a>(
     for (name, ty) in utils::resolve_operands_for_instruction(instr, item_cache) {
         env.bind(name, TypeScheme::mono(normalize(&ty, synonyms)));
     }
+    for (name, ty) in synonyms {
+        env.bind(name.clone(), TypeScheme::mono(ty.clone()));
+    }
     for name in isa_param_vars.keys() {
         env.bind(name.clone(), TypeScheme::mono(Type::Integer));
     }
@@ -170,6 +173,7 @@ fn infer<'a>(
                 | ast::BinOp::Sub
                 | ast::BinOp::Mul
                 | ast::BinOp::Div
+                | ast::BinOp::UnsignedDiv
                 | ast::BinOp::BitwiseAnd
                 | ast::BinOp::BitwiseOr
                 | ast::BinOp::BitwiseXor => {
@@ -181,26 +185,57 @@ fn infer<'a>(
                 ast::BinOp::ShiftLeftLogical
                 | ast::BinOp::ShiftRightLogical
                 | ast::BinOp::ShiftRightArithmetic => lhs_ty.apply(subst),
+                ast::BinOp::Equal
+                | ast::BinOp::NotEqual
+                | ast::BinOp::LessThan
+                | ast::BinOp::GreaterThan
+                | ast::BinOp::LessThenEqual
+                | ast::BinOp::GreaterThanEqual
+                | ast::BinOp::UnsignedLessThan
+                | ast::BinOp::UnsignedGreaterThan
+                | ast::BinOp::UnsignedLessThenEqual
+                | ast::BinOp::UnsignedGreaterThanEqual => {
+                    constrain(&lhs_ty, &rhs_ty, subst, bin.span, diags, file_name);
+                    Type::Bits(1)
+                }
             }
         }
 
         ast::Expr::Assign(asgn) => {
-            let dest_ty = match env.get(&asgn.dest) {
-                Some(scheme) => scheme.ty.apply(subst),
-                None => {
-                    diags.push((
-                        file_name.to_string(),
-                        Rich::custom(
-                            asgn.span,
-                            format!("assignment to unknown variable '{}'", asgn.dest),
-                        ),
-                    ));
-                    Type::Var(tvg.fresh())
-                }
-            };
+            let dest_ty = infer(&asgn.dest, env, tvg, subst, cache, diags, file_name);
             let val_ty = infer(&asgn.value, env, tvg, subst, cache, diags, file_name);
             constrain(&dest_ty, &val_ty, subst, asgn.span, diags, file_name);
             val_ty.apply(subst)
+        }
+
+        ast::Expr::Path(path) => {
+            if path.remainder.len() != 1 {
+                diags.push((
+                    file_name.to_string(),
+                    Rich::custom(
+                        path.span,
+                        format!(
+                            "path '{}' must have exactly one register component",
+                            format!("{}::{}", path.base, path.remainder.join("::"))
+                        ),
+                    ),
+                ));
+                Type::Var(tvg.fresh())
+            } else {
+                match env.get(&path.base) {
+                    Some(scheme) => scheme.ty.apply(subst),
+                    None => {
+                        diags.push((
+                            file_name.to_string(),
+                            Rich::custom(
+                                path.span,
+                                format!("unknown register class '{}'", path.base),
+                            ),
+                        ));
+                        Type::Var(tvg.fresh())
+                    }
+                }
+            }
         }
 
         ast::Expr::Block(block) => {
@@ -253,6 +288,26 @@ fn infer<'a>(
                     infer(arg, env, tvg, subst, cache, diags, file_name);
                 }
                 Type::Var(tvg.fresh())
+            }
+            ast::Expr::BuiltinFunction(ast::BuiltinFunction::Log2Ceil) => {
+                for arg in &call.arguments {
+                    infer(arg, env, tvg, subst, cache, diags, file_name);
+                }
+                Type::Integer
+            }
+            ast::Expr::BuiltinFunction(ast::BuiltinFunction::SExt)
+            | ast::Expr::BuiltinFunction(ast::BuiltinFunction::ZExt)
+            | ast::Expr::BuiltinFunction(ast::BuiltinFunction::Load) => {
+                for arg in &call.arguments {
+                    infer(arg, env, tvg, subst, cache, diags, file_name);
+                }
+                Type::Var(tvg.fresh())
+            }
+            ast::Expr::BuiltinFunction(ast::BuiltinFunction::Store) => {
+                for arg in &call.arguments {
+                    infer(arg, env, tvg, subst, cache, diags, file_name);
+                }
+                Type::Integer
             }
             callee => {
                 let callee_ty = infer(callee, env, tvg, subst, cache, diags, file_name);

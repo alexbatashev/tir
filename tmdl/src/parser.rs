@@ -1,9 +1,9 @@
 use chumsky::{input::ValueInput, prelude::*};
 
 use crate::{
-    Span, Spanned, Type,
     ast::{self, *},
     lexer::Token,
+    Span, Spanned, Type,
 };
 
 pub fn parse<'src>(
@@ -83,8 +83,8 @@ where
 ///   }
 /// }
 /// ```
-fn register_class_def<'src, I>()
--> impl Parser<'src, I, RegisterClass, extra::Err<Rich<'src, Token<'src>, Span>>>
+fn register_class_def<'src, I>(
+) -> impl Parser<'src, I, RegisterClass, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
@@ -136,8 +136,8 @@ enum RegClassBody {
     Registers(Vec<RegisterDef>),
 }
 
-fn template_def<'src, I>()
--> impl Parser<'src, I, Template, extra::Err<Rich<'src, Token<'src>, Span>>>
+fn template_def<'src, I>(
+) -> impl Parser<'src, I, Template, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
@@ -210,8 +210,8 @@ where
         })
 }
 
-fn instruction_def<'src, I>()
--> impl Parser<'src, I, Instruction, extra::Err<Rich<'src, Token<'src>, Span>>>
+fn instruction_def<'src, I>(
+) -> impl Parser<'src, I, Instruction, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
@@ -320,8 +320,8 @@ where
     just(Token::KwBehavior).ignore_then(expr())
 }
 
-fn encoding<'src, I>()
--> impl Parser<'src, I, Vec<EncodingArm>, extra::Err<Rich<'src, Token<'src>, Span>>>
+fn encoding<'src, I>(
+) -> impl Parser<'src, I, Vec<EncodingArm>, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
@@ -361,8 +361,8 @@ where
         .map(|((), arms)| arms)
 }
 
-fn parameter<'src, I>()
--> impl Parser<'src, I, (String, (Type, Option<ast::Expr>)), extra::Err<Rich<'src, Token<'src>, Span>>>
+fn parameter<'src, I>(
+) -> impl Parser<'src, I, (String, (Type, Option<ast::Expr>)), extra::Err<Rich<'src, Token<'src>, Span>>>
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
@@ -380,8 +380,8 @@ where
         })
 }
 
-fn instruction_operands<'src, I>()
--> impl Parser<'src, I, Vec<(String, Type)>, extra::Err<Rich<'src, Token<'src>, Span>>>
+fn instruction_operands<'src, I>(
+) -> impl Parser<'src, I, Vec<(String, Type)>, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
@@ -399,8 +399,8 @@ where
         .map(|((), operands)| operands)
 }
 
-fn isa_requirements<'src, I>()
--> impl Parser<'src, I, Option<IsaRequirement>, extra::Err<Rich<'src, Token<'src>, Span>>>
+fn isa_requirements<'src, I>(
+) -> impl Parser<'src, I, Option<IsaRequirement>, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
@@ -426,8 +426,8 @@ where
         .map(|isa| isa.map(|(_, isa)| isa))
 }
 
-fn for_isas<'src, I>()
--> impl Parser<'src, I, Vec<String>, extra::Err<Rich<'src, Token<'src>, Span>>>
+fn for_isas<'src, I>(
+) -> impl Parser<'src, I, Vec<String>, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
@@ -445,8 +445,8 @@ where
         .map(|isas_opt| isas_opt.unwrap_or_default())
 }
 
-fn register_class_registers<'src, I>()
--> impl Parser<'src, I, Vec<RegisterDef>, extra::Err<Rich<'src, Token<'src>, Span>>>
+fn register_class_registers<'src, I>(
+) -> impl Parser<'src, I, Vec<RegisterDef>, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
@@ -463,8 +463,8 @@ where
         .labelled("register class registers")
 }
 
-fn single_register<'src, I>()
--> impl Parser<'src, I, RegisterDef, extra::Err<Rich<'src, Token<'src>, Span>>>
+fn single_register<'src, I>(
+) -> impl Parser<'src, I, RegisterDef, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
@@ -507,8 +507,8 @@ where
     any().filter(is_ident).map(|t| t.as_ident().to_string())
 }
 
-fn register_traits<'src, I>()
--> impl Parser<'src, I, Vec<RegisterTrait>, extra::Err<Rich<'src, Token<'src>, Span>>>
+fn register_traits<'src, I>(
+) -> impl Parser<'src, I, Vec<RegisterTrait>, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
@@ -537,8 +537,8 @@ where
         })
 }
 
-fn register_range<'src, I>()
--> impl Parser<'src, I, RegisterDef, extra::Err<Rich<'src, Token<'src>, Span>>>
+fn register_range<'src, I>(
+) -> impl Parser<'src, I, RegisterDef, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
@@ -581,30 +581,43 @@ where
             match name {
                 "clamp" => Some(BuiltinFunction::Clamp),
                 "extract" => Some(BuiltinFunction::Extract),
+                "log2Ceil" => Some(BuiltinFunction::Log2Ceil),
+                "sext" => Some(BuiltinFunction::SExt),
+                "zext" => Some(BuiltinFunction::ZExt),
+                "load" => Some(BuiltinFunction::Load),
+                "store" => Some(BuiltinFunction::Store),
                 _ => None,
             }
         }
 
-        let val = any()
-            .filter(|t: &Token| {
-                matches!(
-                    t,
-                    Token::Identifier(_) | Token::Number(_) | Token::StringLit(_)
-                )
-            })
-            .map_with(|tok, e| match tok {
-                Token::Identifier(i) => {
-                    if let Some(b) = builtin_from_ident(i) {
-                        Expr::BuiltinFunction(b)
-                    } else {
-                        Ident::new((*i).to_string(), e.span()).into()
-                    }
+        let ident = select! { Token::Identifier(i) => i.to_string() };
+        let scope = just(Token::Colon).then(just(Token::Colon));
+
+        let ident_or_path = ident
+            .clone()
+            .then(scope.ignore_then(ident.clone()).or_not())
+            .map_with(|(base, member), e| {
+                if let Some(member) = member {
+                    Expr::Path(Path {
+                        base,
+                        remainder: vec![member],
+                        span: e.span(),
+                    })
+                } else if let Some(b) = builtin_from_ident(&base) {
+                    Expr::BuiltinFunction(b)
+                } else {
+                    Ident::new(base, e.span()).into()
                 }
-                Token::Number(n) => LitInt::new((*n).to_string(), e.span()).into(),
-                Token::StringLit(s) => LitStr::new((*s).to_string(), e.span()).into(),
-                _ => unreachable!(),
-            })
-            .labelled("value");
+            });
+
+        let literal_or_ident = choice((
+            ident_or_path,
+            select! { Token::Number(n) => n.to_string() }
+                .map_with(|n, e| LitInt::new(n, e.span()).into()),
+            select! { Token::StringLit(s) => s.to_string() }
+                .map_with(|s, e| LitStr::new(s, e.span()).into()),
+        ))
+        .labelled("value");
 
         let num = select! {
           Token::Number(n) => n.parse::<u16>().unwrap(),
@@ -612,7 +625,7 @@ where
 
         let ident = select! { Token::Identifier(i) => i.to_string() };
 
-        let atom = val
+        let atom = literal_or_ident
             .or(expr
                 .clone()
                 .delimited_by(just(Token::LParen), just(Token::RParen)))
@@ -682,6 +695,9 @@ where
 
         let op = just(Token::Asterisk)
             .to(BinOp::Mul)
+            .or(just(Token::Tilde)
+                .then(just(Token::ForwardSlash))
+                .to(BinOp::UnsignedDiv))
             .or(just(Token::ForwardSlash).to(BinOp::Div));
         let product = basic
             .clone()
@@ -726,7 +742,49 @@ where
                 })
             });
 
-        arith.labelled("inline expression")
+        let cmp_op = choice((
+            just(Token::Equals)
+                .then(just(Token::Equals))
+                .to(BinOp::Equal),
+            just(Token::Bang)
+                .then(just(Token::Equals))
+                .to(BinOp::NotEqual),
+            just(Token::Tilde)
+                .then(just(Token::LAngle))
+                .then(just(Token::Equals))
+                .to(BinOp::UnsignedLessThenEqual),
+            just(Token::Tilde)
+                .then(just(Token::RAngle))
+                .then(just(Token::Equals))
+                .to(BinOp::UnsignedGreaterThanEqual),
+            just(Token::Tilde)
+                .then(just(Token::LAngle))
+                .to(BinOp::UnsignedLessThan),
+            just(Token::Tilde)
+                .then(just(Token::RAngle))
+                .to(BinOp::UnsignedGreaterThan),
+            just(Token::LAngle)
+                .then(just(Token::Equals))
+                .to(BinOp::LessThenEqual),
+            just(Token::RAngle)
+                .then(just(Token::Equals))
+                .to(BinOp::GreaterThanEqual),
+            just(Token::LAngle).to(BinOp::LessThan),
+            just(Token::RAngle).to(BinOp::GreaterThan),
+        ));
+
+        arith
+            .clone()
+            .foldl_with(cmp_op.then(arith).repeated(), |a, (op, b), e| {
+                let sp = e.span();
+                Expr::Binary(Binary {
+                    lhs: Box::new(a),
+                    rhs: Box::new(b),
+                    op,
+                    span: sp,
+                })
+            })
+            .labelled("inline expression")
     })
 }
 
@@ -734,32 +792,49 @@ fn expr<'src, I>() -> impl Parser<'src, I, Expr, extra::Err<Rich<'src, Token<'sr
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
-    let ident = select! {Token::Identifier(i) => i.to_string()};
+    let ident = select! { Token::Identifier(i) => i.to_string() };
+    let scope = just(Token::Colon).then(just(Token::Colon));
+    let assign_target = ident
+        .clone()
+        .then(scope.ignore_then(ident).or_not())
+        .map_with(|(base, member), e| {
+            if let Some(member) = member {
+                Expr::Path(Path {
+                    base,
+                    remainder: vec![member],
+                    span: e.span(),
+                })
+            } else {
+                Expr::Ident(Ident::new(base, e.span()))
+            }
+        })
+        .boxed();
 
     recursive(|expr| {
-        let assign = ident
+        let assign = assign_target
             .clone()
             .then_ignore(just(Token::Equals))
             .then(expr.clone().or(inline_expr()))
             .map_with(|(dest, value), e| {
                 Expr::Assign(Assign {
-                    dest,
+                    dest: Box::new(dest),
                     value: Box::new(value),
                     span: e.span(),
                 })
             })
             .labelled("assignment");
-        let stmt = expr.clone().or(assign).or(inline_expr());
+        let stmt = expr.clone().or(assign).or(inline_expr()).boxed();
 
         let block = stmt
-            .separated_by(just(Token::Semicolon).to(()).or(empty().to(())))
-            .collect()
+            .separated_by(just(Token::Semicolon))
+            .collect::<Vec<_>>()
             .then(just(Token::Semicolon).or_not())
             .delimited_by(just(Token::LBrace), just(Token::RBrace))
-            .map_with(|(stmts, sc), e| {
+            .map_with(|(stmts, trailing_semicolon), e| {
+                let last_expr_return = trailing_semicolon.is_none() && !stmts.is_empty();
                 Block {
                     stmts,
-                    last_expr_return: sc.is_none(),
+                    last_expr_return,
                     span: e.span(),
                 }
                 .into()
@@ -834,12 +909,15 @@ fn is_ident(token: &Token) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use chumsky::Parser;
     use chumsky::prelude::*;
+    use chumsky::Parser;
 
-    use crate::lexer::lexer;
+    use crate::{
+        ast::{BinOp, Expr},
+        lexer::lexer,
+    };
 
-    use super::isa_def;
+    use super::{inline_expr, isa_def};
 
     #[test]
     fn smoke_isa() {
@@ -855,5 +933,56 @@ mod tests {
 
         println!("{:?}", isa);
         assert!(isa.has_output());
+    }
+
+    #[test]
+    fn inline_expr_parses_less_equal() {
+        let code = "a <= b";
+        let (tokens, mut _errors) = lexer().parse(code).into_output_errors();
+        let tokens = tokens.unwrap();
+        let parsed = inline_expr().then(end()).parse(
+            tokens
+                .as_slice()
+                .map((code.len()..code.len()).into(), |(t, s)| (t, s)),
+        );
+        let expr = parsed.output().unwrap().0.clone();
+        match expr {
+            Expr::Binary(bin) => assert_eq!(bin.op, BinOp::LessThenEqual),
+            _ => panic!("Expected binary expression"),
+        }
+    }
+
+    #[test]
+    fn inline_expr_parses_not_equal() {
+        let code = "a != b";
+        let (tokens, mut _errors) = lexer().parse(code).into_output_errors();
+        let tokens = tokens.unwrap();
+        let parsed = inline_expr().then(end()).parse(
+            tokens
+                .as_slice()
+                .map((code.len()..code.len()).into(), |(t, s)| (t, s)),
+        );
+        let expr = parsed.output().unwrap().0.clone();
+        match expr {
+            Expr::Binary(bin) => assert_eq!(bin.op, BinOp::NotEqual),
+            _ => panic!("Expected binary expression"),
+        }
+    }
+
+    #[test]
+    fn inline_expr_parses_unsigned_less_equal() {
+        let code = "a ~<= b";
+        let (tokens, mut _errors) = lexer().parse(code).into_output_errors();
+        let tokens = tokens.unwrap();
+        let parsed = inline_expr().then(end()).parse(
+            tokens
+                .as_slice()
+                .map((code.len()..code.len()).into(), |(t, s)| (t, s)),
+        );
+        let expr = parsed.output().unwrap().0.clone();
+        match expr {
+            Expr::Binary(bin) => assert_eq!(bin.op, BinOp::UnsignedLessThenEqual),
+            _ => panic!("Expected binary expression"),
+        }
     }
 }

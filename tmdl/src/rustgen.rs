@@ -3,13 +3,13 @@ use std::io::Write;
 
 use quote::{format_ident, quote};
 
-use crate::Type;
 use crate::ast;
 use crate::error::TMDLError;
 use crate::utils::{
     get_encoding_arms, parse_literal_value, resolve_effective_asm_for_instruction,
     resolve_operands_for_instruction, resolve_params_for_instruction,
 };
+use crate::Type;
 
 struct InstructionSemantics {
     pattern: proc_macro2::TokenStream,
@@ -777,9 +777,21 @@ fn register_operand_names(operands: &[(String, Type)]) -> HashSet<&str> {
         .collect()
 }
 
-fn collect_behavior_assignments<'a>(expr: &'a ast::Expr, out: &mut Vec<(&'a str, &'a ast::Expr)>) {
+fn assignment_dest_name(dest: &ast::Expr) -> Option<String> {
+    match dest {
+        ast::Expr::Ident(id) => Some(id.name.clone()),
+        ast::Expr::Path(path) if path.remainder.len() == 1 => Some(path.remainder[0].clone()),
+        _ => None,
+    }
+}
+
+fn collect_behavior_assignments<'a>(expr: &'a ast::Expr, out: &mut Vec<(String, &'a ast::Expr)>) {
     match expr {
-        ast::Expr::Assign(a) => out.push((a.dest.as_str(), a.value.as_ref())),
+        ast::Expr::Assign(a) => {
+            if let Some(dst) = assignment_dest_name(&a.dest) {
+                out.push((dst, a.value.as_ref()));
+            }
+        }
         ast::Expr::Block(b) => {
             for stmt in &b.stmts {
                 collect_behavior_assignments(stmt, out);
@@ -805,8 +817,9 @@ fn infer_defined_register_operands(
     let mut assignments = Vec::new();
     collect_behavior_assignments(behavior, &mut assignments);
     for (dst, _) in assignments {
-        if register_operands.contains(dst) && !defs.iter().any(|existing| existing == dst) {
-            defs.push(dst.to_string());
+        if register_operands.contains(dst.as_str()) && !defs.iter().any(|existing| existing == &dst)
+        {
+            defs.push(dst);
         }
     }
     defs
@@ -827,7 +840,7 @@ fn resolve_behavior_rhs<'a>(
         }
     }
     for (dst, rhs) in assignments.iter().rev() {
-        if register_operands.contains(*dst) {
+        if register_operands.contains(dst.as_str()) {
             return Some(*rhs);
         }
     }
@@ -966,6 +979,61 @@ fn emit_sem_expr(expr: &tir::sem_expr::Expr) -> proc_macro2::TokenStream {
             let rhs = emit_sem_expr(rhs);
             quote! { tir::sem_expr::Expr::Div(Box::new(#lhs), Box::new(#rhs)) }
         }
+        Expr::UDiv(lhs, rhs) => {
+            let lhs = emit_sem_expr(lhs);
+            let rhs = emit_sem_expr(rhs);
+            quote! { tir::sem_expr::Expr::UDiv(Box::new(#lhs), Box::new(#rhs)) }
+        }
+        Expr::Eq(lhs, rhs) => {
+            let lhs = emit_sem_expr(lhs);
+            let rhs = emit_sem_expr(rhs);
+            quote! { tir::sem_expr::Expr::Eq(Box::new(#lhs), Box::new(#rhs)) }
+        }
+        Expr::Ne(lhs, rhs) => {
+            let lhs = emit_sem_expr(lhs);
+            let rhs = emit_sem_expr(rhs);
+            quote! { tir::sem_expr::Expr::Ne(Box::new(#lhs), Box::new(#rhs)) }
+        }
+        Expr::Lt(lhs, rhs) => {
+            let lhs = emit_sem_expr(lhs);
+            let rhs = emit_sem_expr(rhs);
+            quote! { tir::sem_expr::Expr::Lt(Box::new(#lhs), Box::new(#rhs)) }
+        }
+        Expr::Le(lhs, rhs) => {
+            let lhs = emit_sem_expr(lhs);
+            let rhs = emit_sem_expr(rhs);
+            quote! { tir::sem_expr::Expr::Le(Box::new(#lhs), Box::new(#rhs)) }
+        }
+        Expr::Gt(lhs, rhs) => {
+            let lhs = emit_sem_expr(lhs);
+            let rhs = emit_sem_expr(rhs);
+            quote! { tir::sem_expr::Expr::Gt(Box::new(#lhs), Box::new(#rhs)) }
+        }
+        Expr::Ge(lhs, rhs) => {
+            let lhs = emit_sem_expr(lhs);
+            let rhs = emit_sem_expr(rhs);
+            quote! { tir::sem_expr::Expr::Ge(Box::new(#lhs), Box::new(#rhs)) }
+        }
+        Expr::ULt(lhs, rhs) => {
+            let lhs = emit_sem_expr(lhs);
+            let rhs = emit_sem_expr(rhs);
+            quote! { tir::sem_expr::Expr::ULt(Box::new(#lhs), Box::new(#rhs)) }
+        }
+        Expr::ULe(lhs, rhs) => {
+            let lhs = emit_sem_expr(lhs);
+            let rhs = emit_sem_expr(rhs);
+            quote! { tir::sem_expr::Expr::ULe(Box::new(#lhs), Box::new(#rhs)) }
+        }
+        Expr::UGt(lhs, rhs) => {
+            let lhs = emit_sem_expr(lhs);
+            let rhs = emit_sem_expr(rhs);
+            quote! { tir::sem_expr::Expr::UGt(Box::new(#lhs), Box::new(#rhs)) }
+        }
+        Expr::UGe(lhs, rhs) => {
+            let lhs = emit_sem_expr(lhs);
+            let rhs = emit_sem_expr(rhs);
+            quote! { tir::sem_expr::Expr::UGe(Box::new(#lhs), Box::new(#rhs)) }
+        }
         Expr::ShiftLeft(lhs, rhs) => {
             let lhs = emit_sem_expr(lhs);
             let rhs = emit_sem_expr(rhs);
@@ -996,6 +1064,38 @@ fn emit_sem_expr(expr: &tir::sem_expr::Expr) -> proc_macro2::TokenStream {
             let rhs = emit_sem_expr(rhs);
             quote! { tir::sem_expr::Expr::Xor(Box::new(#lhs), Box::new(#rhs)) }
         }
+        Expr::Log2Ceil(input) => {
+            let input = emit_sem_expr(input);
+            quote! { tir::sem_expr::Expr::Log2Ceil(Box::new(#input)) }
+        }
+        Expr::Load {
+            addr,
+            bytes,
+            signed,
+        } => {
+            let addr = emit_sem_expr(addr);
+            let bytes = emit_sem_expr(bytes);
+            let signed = emit_sem_expr(signed);
+            quote! {
+                tir::sem_expr::Expr::Load {
+                    addr: Box::new(#addr),
+                    bytes: Box::new(#bytes),
+                    signed: Box::new(#signed),
+                }
+            }
+        }
+        Expr::Store { addr, bytes, value } => {
+            let addr = emit_sem_expr(addr);
+            let bytes = emit_sem_expr(bytes);
+            let value = emit_sem_expr(value);
+            quote! {
+                tir::sem_expr::Expr::Store {
+                    addr: Box::new(#addr),
+                    bytes: Box::new(#bytes),
+                    value: Box::new(#value),
+                }
+            }
+        }
         _ => quote! { tir::sem_expr::Expr::Bool(false) },
     }
 }
@@ -1008,12 +1108,34 @@ fn sem_expr_complexity(expr: &tir::sem_expr::Expr) -> u32 {
         | Expr::Sub(lhs, rhs)
         | Expr::Mul(lhs, rhs)
         | Expr::Div(lhs, rhs)
+        | Expr::UDiv(lhs, rhs)
+        | Expr::Eq(lhs, rhs)
+        | Expr::Ne(lhs, rhs)
+        | Expr::Lt(lhs, rhs)
+        | Expr::Le(lhs, rhs)
+        | Expr::Gt(lhs, rhs)
+        | Expr::Ge(lhs, rhs)
+        | Expr::ULt(lhs, rhs)
+        | Expr::ULe(lhs, rhs)
+        | Expr::UGt(lhs, rhs)
+        | Expr::UGe(lhs, rhs)
         | Expr::ShiftLeft(lhs, rhs)
         | Expr::ShiftRightLogic(lhs, rhs)
         | Expr::ShiftRightArithmetic(lhs, rhs)
         | Expr::And(lhs, rhs)
         | Expr::Or(lhs, rhs)
         | Expr::Xor(lhs, rhs) => 1 + sem_expr_complexity(lhs) + sem_expr_complexity(rhs),
+        Expr::Log2Ceil(input) => 1 + sem_expr_complexity(input),
+        Expr::Load {
+            addr,
+            bytes,
+            signed,
+        } => {
+            1 + sem_expr_complexity(addr) + sem_expr_complexity(bytes) + sem_expr_complexity(signed)
+        }
+        Expr::Store { addr, bytes, value } => {
+            1 + sem_expr_complexity(addr) + sem_expr_complexity(bytes) + sem_expr_complexity(value)
+        }
         _ => 2,
     }
 }

@@ -33,6 +33,10 @@ pub enum Token<'a> {
     Ampersand,
     /// `^`
     Hat,
+    /// `!`
+    Bang,
+    /// `~`
+    Tilde,
 
     /// `.`
     Dot,
@@ -147,6 +151,8 @@ pub(crate) fn lexer<'src>()
         just("=>").to(Token::FatArrow),
         just("..").to(Token::Range),
         just('=').to(Token::Equals),
+        just('!').to(Token::Bang),
+        just('~').to(Token::Tilde),
         just('+').to(Token::Plus),
         just('-').to(Token::Dash),
         just('*').to(Token::Asterisk),
@@ -236,6 +242,8 @@ impl<'a> fmt::Display for Token<'a> {
             Token::Comma => f.write_str(","),
             Token::Ampersand => f.write_char('&'),
             Token::Hat => f.write_char('^'),
+            Token::Bang => f.write_char('!'),
+            Token::Tilde => f.write_char('~'),
             Token::LBracket => f.write_str("["),
             Token::RBracket => f.write_str("]"),
             Token::LParen => f.write_str("("),

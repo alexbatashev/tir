@@ -35,7 +35,18 @@ fn emit_expr<W: Write, R: SymbolResolver>(
         Expr::Add(lhs, rhs) => emit_call2("bvadd", lhs, rhs, output, resolver),
         Expr::Sub(lhs, rhs) => emit_call2("bvsub", lhs, rhs, output, resolver),
         Expr::Mul(lhs, rhs) => emit_call2("bvmul", lhs, rhs, output, resolver),
-        Expr::Div(lhs, rhs) => emit_call2("bvudiv", lhs, rhs, output, resolver),
+        Expr::Div(lhs, rhs) => emit_call2("bvsdiv", lhs, rhs, output, resolver),
+        Expr::UDiv(lhs, rhs) => emit_call2("bvudiv", lhs, rhs, output, resolver),
+        Expr::Eq(lhs, rhs) => emit_cmp("=", lhs, rhs, output, resolver),
+        Expr::Ne(lhs, rhs) => emit_cmp("distinct", lhs, rhs, output, resolver),
+        Expr::Lt(lhs, rhs) => emit_cmp("bvslt", lhs, rhs, output, resolver),
+        Expr::Le(lhs, rhs) => emit_cmp("bvsle", lhs, rhs, output, resolver),
+        Expr::Gt(lhs, rhs) => emit_cmp("bvsgt", lhs, rhs, output, resolver),
+        Expr::Ge(lhs, rhs) => emit_cmp("bvsge", lhs, rhs, output, resolver),
+        Expr::ULt(lhs, rhs) => emit_cmp("bvult", lhs, rhs, output, resolver),
+        Expr::ULe(lhs, rhs) => emit_cmp("bvule", lhs, rhs, output, resolver),
+        Expr::UGt(lhs, rhs) => emit_cmp("bvugt", lhs, rhs, output, resolver),
+        Expr::UGe(lhs, rhs) => emit_cmp("bvuge", lhs, rhs, output, resolver),
         Expr::And(lhs, rhs) => emit_call2("bvand", lhs, rhs, output, resolver),
         Expr::Or(lhs, rhs) => emit_call2("bvor", lhs, rhs, output, resolver),
         Expr::Xor(lhs, rhs) => emit_call2("bvxor", lhs, rhs, output, resolver),
@@ -44,9 +55,15 @@ fn emit_expr<W: Write, R: SymbolResolver>(
         Expr::ShiftRightArithmetic(lhs, rhs) => emit_call2("bvashr", lhs, rhs, output, resolver),
 
         Expr::If { cond, then, else_ } => {
-            write!(output, "(ite (not (= ")?;
-            emit_expr(cond, output, resolver)?;
-            write!(output, " (_ bv0 64))) ")?;
+            write!(output, "(ite ")?;
+            if is_boolean_expr(cond) {
+                emit_expr(cond, output, resolver)?;
+            } else {
+                write!(output, "(not (= ")?;
+                emit_expr(cond, output, resolver)?;
+                write!(output, " (_ bv0 64)))")?;
+            }
+            write!(output, " ")?;
             emit_expr(then, output, resolver)?;
             write!(output, " ")?;
             emit_expr(else_, output, resolver)?;
@@ -61,8 +78,14 @@ fn emit_expr<W: Write, R: SymbolResolver>(
             write!(output, ")")
         }
 
-        Expr::ZExt { input, width } => emit_extend(false, input, *width, output, resolver),
-        Expr::SExt { input, width } => emit_extend(true, input, *width, output, resolver),
+        Expr::ZExt { input, width } => {
+            let target_width = extract_const_u32(width)?;
+            emit_extend(false, input, target_width, output, resolver)
+        }
+        Expr::SExt { input, width } => {
+            let target_width = extract_const_u32(width)?;
+            emit_extend(true, input, target_width, output, resolver)
+        }
 
         Expr::Clamp { input, min, max } => {
             write!(output, "(let ((x ")?;
@@ -78,11 +101,21 @@ fn emit_expr<W: Write, R: SymbolResolver>(
             write!(output, " x)))")
         }
 
+        Expr::Log2Ceil(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "log2Ceil is not yet supported for SMT-LIB emission",
+        )),
+
         Expr::IntToBits(inner) | Expr::FloatToBits(inner) | Expr::Sqrt(inner) => {
             emit_expr(inner, output, resolver)
         }
         Expr::BitsToInt { bits, .. } => emit_expr(bits, output, resolver),
         Expr::BitsToFloat { bits, .. } => emit_expr(bits, output, resolver),
+
+        Expr::Load { .. } | Expr::Store { .. } => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Memory operations are not yet supported for SMT-LIB emission",
+        )),
 
         Expr::Float(_) | Expr::Fma { .. } => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -96,6 +129,20 @@ fn emit_int<W: Write>(int: &APInt, output: &mut W) -> std::io::Result<()> {
 }
 
 fn emit_call2<W: Write, R: SymbolResolver>(
+    op: &str,
+    lhs: &Expr,
+    rhs: &Expr,
+    output: &mut W,
+    resolver: &R,
+) -> std::io::Result<()> {
+    write!(output, "({} ", op)?;
+    emit_expr(lhs, output, resolver)?;
+    write!(output, " ")?;
+    emit_expr(rhs, output, resolver)?;
+    write!(output, ")")
+}
+
+fn emit_cmp<W: Write, R: SymbolResolver>(
     op: &str,
     lhs: &Expr,
     rhs: &Expr,
@@ -140,6 +187,7 @@ fn infer_width(expr: &Expr) -> Option<u32> {
         | Expr::Sub(lhs, _)
         | Expr::Mul(lhs, _)
         | Expr::Div(lhs, _)
+        | Expr::UDiv(lhs, _)
         | Expr::And(lhs, _)
         | Expr::Or(lhs, _)
         | Expr::Xor(lhs, _)
@@ -150,13 +198,24 @@ fn infer_width(expr: &Expr) -> Option<u32> {
         | Expr::FloatToBits(lhs)
         | Expr::Sqrt(lhs) => infer_width(lhs),
         Expr::If { then, .. } => infer_width(then),
+        Expr::Eq(_, _)
+        | Expr::Ne(_, _)
+        | Expr::Lt(_, _)
+        | Expr::Le(_, _)
+        | Expr::Gt(_, _)
+        | Expr::Ge(_, _)
+        | Expr::ULt(_, _)
+        | Expr::ULe(_, _)
+        | Expr::UGt(_, _)
+        | Expr::UGe(_, _) => Some(1),
         Expr::Extract { high, low, .. } => {
             let hi = extract_const_u32(high).ok()?;
             let lo = extract_const_u32(low).ok()?;
             Some(hi - lo + 1)
         }
-        Expr::ZExt { width, .. } | Expr::SExt { width, .. } => Some(*width),
+        Expr::ZExt { width, .. } | Expr::SExt { width, .. } => extract_const_u32(width).ok(),
         Expr::Clamp { input, .. } => infer_width(input),
+        Expr::Log2Ceil(_) => Some(32),
         Expr::BitsToInt { width, .. } => Some(*width),
         Expr::BitsToFloat {
             exp_width,
@@ -164,8 +223,25 @@ fn infer_width(expr: &Expr) -> Option<u32> {
             explicit_leading_bit,
             ..
         } => Some(exp_width + mant_width + if *explicit_leading_bit { 1 } else { 0 }),
-        Expr::Float(_) | Expr::Fma { .. } => None,
+        Expr::Load { .. } | Expr::Store { .. } | Expr::Float(_) | Expr::Fma { .. } => None,
     }
+}
+
+fn is_boolean_expr(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Bool(_)
+            | Expr::Eq(_, _)
+            | Expr::Ne(_, _)
+            | Expr::Lt(_, _)
+            | Expr::Le(_, _)
+            | Expr::Gt(_, _)
+            | Expr::Ge(_, _)
+            | Expr::ULt(_, _)
+            | Expr::ULe(_, _)
+            | Expr::UGt(_, _)
+            | Expr::UGe(_, _)
+    )
 }
 
 fn extract_const_u32(expr: &Expr) -> std::io::Result<u32> {

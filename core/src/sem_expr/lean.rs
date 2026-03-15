@@ -39,6 +39,22 @@ fn emit_expr<W: Write, R: SymbolResolver>(
         Expr::Add(lhs, rhs) => emit_binary_op("BitVec.add", lhs, rhs, output, resolver),
         Expr::Sub(lhs, rhs) => emit_binary_op("BitVec.sub", lhs, rhs, output, resolver),
         Expr::Mul(lhs, rhs) => emit_mul(lhs, rhs, output, resolver),
+        Expr::Eq(lhs, rhs) => emit_binary_op("Eq", lhs, rhs, output, resolver),
+        Expr::Ne(lhs, rhs) => {
+            write!(output, "(Not (Eq ")?;
+            emit_expr(lhs, output, resolver)?;
+            write!(output, " ")?;
+            emit_expr(rhs, output, resolver)?;
+            write!(output, "))")
+        }
+        Expr::Lt(lhs, rhs) => emit_binary_op("BitVec.slt", lhs, rhs, output, resolver),
+        Expr::Le(lhs, rhs) => emit_binary_op("BitVec.sle", lhs, rhs, output, resolver),
+        Expr::Gt(lhs, rhs) => emit_binary_op("BitVec.sgt", lhs, rhs, output, resolver),
+        Expr::Ge(lhs, rhs) => emit_binary_op("BitVec.sge", lhs, rhs, output, resolver),
+        Expr::ULt(lhs, rhs) => emit_binary_op("BitVec.ult", lhs, rhs, output, resolver),
+        Expr::ULe(lhs, rhs) => emit_binary_op("BitVec.ule", lhs, rhs, output, resolver),
+        Expr::UGt(lhs, rhs) => emit_binary_op("BitVec.ugt", lhs, rhs, output, resolver),
+        Expr::UGe(lhs, rhs) => emit_binary_op("BitVec.uge", lhs, rhs, output, resolver),
         Expr::And(lhs, rhs) => emit_binary_op("BitVec.and", lhs, rhs, output, resolver),
         Expr::Or(lhs, rhs) => emit_binary_op("BitVec.or", lhs, rhs, output, resolver),
         Expr::Xor(lhs, rhs) => emit_binary_op("BitVec.xor", lhs, rhs, output, resolver),
@@ -48,15 +64,9 @@ fn emit_expr<W: Write, R: SymbolResolver>(
         Expr::ShiftRightLogic(lhs, rhs) => emit_shift_right_logic(lhs, rhs, output, resolver),
         Expr::ShiftRightArithmetic(lhs, rhs) => emit_shift_right_arith(lhs, rhs, output, resolver),
 
-        // Division (separate signed/unsigned)
-        Expr::Div(lhs, rhs) => {
-            // Check if operands are signed
-            if is_signed(lhs) || is_signed(rhs) {
-                emit_binary_op("BitVec.sdiv", lhs, rhs, output, resolver)
-            } else {
-                emit_binary_op("BitVec.udiv", lhs, rhs, output, resolver)
-            }
-        }
+        // Division
+        Expr::Div(lhs, rhs) => emit_binary_op("BitVec.sdiv", lhs, rhs, output, resolver),
+        Expr::UDiv(lhs, rhs) => emit_binary_op("BitVec.udiv", lhs, rhs, output, resolver),
 
         // Conditional
         Expr::If { cond, then, else_ } => {
@@ -81,12 +91,14 @@ fn emit_expr<W: Write, R: SymbolResolver>(
 
         // Extension operations
         Expr::ZExt { input, width } => {
+            let width = extract_const_u32(width)?;
             write!(output, "(BitVec.zeroExtend {} ", width)?;
             emit_expr(input, output, resolver)?;
             write!(output, ")")
         }
 
         Expr::SExt { input, width } => {
+            let width = extract_const_u32(width)?;
             write!(output, "(BitVec.signExtend {} ", width)?;
             emit_expr(input, output, resolver)?;
             write!(output, ")")
@@ -107,6 +119,11 @@ fn emit_expr<W: Write, R: SymbolResolver>(
             write!(output, " else x)")
         }
 
+        Expr::Log2Ceil(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "log2Ceil is not yet supported in Lean emission",
+        )),
+
         // Conversion operations
         Expr::IntToBits(int_expr) => {
             // IntToBits is a no-op in Lean since Int is already BitVec
@@ -116,6 +133,11 @@ fn emit_expr<W: Write, R: SymbolResolver>(
             // BitsToInt is a no-op in Lean since BitVec is the representation
             emit_expr(bits, output, resolver)
         }
+
+        Expr::Load { .. } | Expr::Store { .. } => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Memory operations are not yet supported in Lean emission",
+        )),
 
         // Unsupported operations for now
         Expr::Float(_) => Err(std::io::Error::new(
@@ -191,6 +213,16 @@ fn emit_mul<W: Write, R: SymbolResolver>(
     emit_binary_op("tir_utils.mul", lhs, rhs, output, resolver)
 }
 
+fn extract_const_u32(expr: &Expr) -> std::io::Result<u32> {
+    match expr {
+        Expr::Int(int) => Ok(int.to_u64() as u32),
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Lean extension width must be a constant Int",
+        )),
+    }
+}
+
 fn emit_shift_left<W: Write, R: SymbolResolver>(
     lhs: &Expr,
     rhs: &Expr,
@@ -228,14 +260,6 @@ fn emit_shift_right_arith<W: Write, R: SymbolResolver>(
     write!(output, " ")?;
     emit_expr(rhs, output, resolver)?;
     write!(output, ")")
-}
-
-/// Check if an expression represents a signed integer
-fn is_signed(expr: &Expr) -> bool {
-    match expr {
-        Expr::Int(int) => int.is_signed(),
-        _ => false,
-    }
 }
 
 #[cfg(test)]
@@ -442,7 +466,7 @@ mod tests {
     fn test_emit_zext() {
         let expr = Expr::ZExt {
             input: Box::new(Expr::Int(APInt::new(8, 0xFF))),
-            width: 16,
+            width: Box::new(Expr::Int(APInt::new(8, 16))),
         };
         let mut output = Vec::new();
         let resolver = TestResolver;
@@ -458,7 +482,7 @@ mod tests {
     fn test_emit_sext() {
         let expr = Expr::SExt {
             input: Box::new(Expr::Int(APInt::new_signed(8, -1))),
-            width: 16,
+            width: Box::new(Expr::Int(APInt::new(8, 16))),
         };
         let mut output = Vec::new();
         let resolver = TestResolver;

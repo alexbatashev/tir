@@ -41,6 +41,17 @@ fn emit_expr<W: Write, R: SymbolResolver>(
         Expr::Sub(lhs, rhs) => emit_infix("-", lhs, rhs, output, resolver),
         Expr::Mul(lhs, rhs) => emit_infix("*", lhs, rhs, output, resolver),
         Expr::Div(lhs, rhs) => emit_infix("/", lhs, rhs, output, resolver),
+        Expr::UDiv(lhs, rhs) => emit_infix("/", lhs, rhs, output, resolver),
+        Expr::Eq(lhs, rhs) => emit_infix("=", lhs, rhs, output, resolver),
+        Expr::Ne(lhs, rhs) => emit_infix("<>", lhs, rhs, output, resolver),
+        Expr::Lt(lhs, rhs) => emit_infix("<", lhs, rhs, output, resolver),
+        Expr::Le(lhs, rhs) => emit_infix("<=", lhs, rhs, output, resolver),
+        Expr::Gt(lhs, rhs) => emit_infix(">", lhs, rhs, output, resolver),
+        Expr::Ge(lhs, rhs) => emit_infix(">=", lhs, rhs, output, resolver),
+        Expr::ULt(lhs, rhs) => emit_infix("<", lhs, rhs, output, resolver),
+        Expr::ULe(lhs, rhs) => emit_infix("<=", lhs, rhs, output, resolver),
+        Expr::UGt(lhs, rhs) => emit_infix(">", lhs, rhs, output, resolver),
+        Expr::UGe(lhs, rhs) => emit_infix(">=", lhs, rhs, output, resolver),
         Expr::And(lhs, rhs) => emit_infix("&&&", lhs, rhs, output, resolver),
         Expr::Or(lhs, rhs) => emit_infix("|||", lhs, rhs, output, resolver),
         Expr::Xor(lhs, rhs) => emit_infix("^^^", lhs, rhs, output, resolver),
@@ -78,11 +89,21 @@ fn emit_expr<W: Write, R: SymbolResolver>(
             write!(output, " else x)")
         }
 
+        Expr::Log2Ceil(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "log2Ceil is not yet supported for Rocq",
+        )),
+
         Expr::IntToBits(inner) | Expr::FloatToBits(inner) | Expr::Sqrt(inner) => {
             emit_expr(inner, output, resolver)
         }
         Expr::BitsToInt { bits, .. } => emit_expr(bits, output, resolver),
         Expr::BitsToFloat { bits, .. } => emit_expr(bits, output, resolver),
+
+        Expr::Load { .. } | Expr::Store { .. } => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Memory operations are not yet supported for Rocq",
+        )),
 
         Expr::Float(_) | Expr::Fma { .. } => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,

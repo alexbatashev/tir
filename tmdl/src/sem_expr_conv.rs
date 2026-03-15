@@ -76,6 +76,7 @@ impl ConversionContext {
             AstExpr::Slice(slice) => self.convert_slice(slice),
             AstExpr::IndexAccess(index) => self.convert_index_access(index),
             AstExpr::Field(field) => self.convert_field(field),
+            AstExpr::Path(path) => self.convert_path(path),
             AstExpr::If(if_expr) => self.convert_if(if_expr),
             AstExpr::Block(block) => self.convert_block(block),
             AstExpr::Assign(_) => {
@@ -148,6 +149,31 @@ impl ConversionContext {
         }
     }
 
+    fn convert_path(&mut self, path: &crate::ast::Path) -> Result<Expr, String> {
+        if path.remainder.len() != 1 {
+            return Err("path expressions must have exactly one register component".to_string());
+        }
+        let reg_name = &path.remainder[0];
+        let number = if path.base == "PC" && reg_name == "pc" {
+            0
+        } else {
+            let digits_start = reg_name.find(|c: char| c.is_ascii_digit()).ok_or_else(|| {
+                format!(
+                    "could not infer register index from path '{}::{}'",
+                    path.base, reg_name
+                )
+            })?;
+            reg_name[digits_start..].parse::<u32>().map_err(|_| {
+                format!(
+                    "invalid register index in path '{}::{}'",
+                    path.base, reg_name
+                )
+            })?
+        };
+        let symbol_id = self.get_or_create_register_symbol(path.base.clone(), number);
+        Ok(Expr::Symbol(symbol_id))
+    }
+
     fn convert_binary(&mut self, binary: &crate::ast::Binary) -> Result<Expr, String> {
         let lhs = self.convert(&binary.lhs)?;
         let rhs = self.convert(&binary.rhs)?;
@@ -157,6 +183,17 @@ impl ConversionContext {
             BinOp::Sub => Expr::Sub(Box::new(lhs), Box::new(rhs)),
             BinOp::Mul => Expr::Mul(Box::new(lhs), Box::new(rhs)),
             BinOp::Div => Expr::Div(Box::new(lhs), Box::new(rhs)),
+            BinOp::UnsignedDiv => Expr::UDiv(Box::new(lhs), Box::new(rhs)),
+            BinOp::Equal => Expr::Eq(Box::new(lhs), Box::new(rhs)),
+            BinOp::NotEqual => Expr::Ne(Box::new(lhs), Box::new(rhs)),
+            BinOp::LessThan => Expr::Lt(Box::new(lhs), Box::new(rhs)),
+            BinOp::GreaterThan => Expr::Gt(Box::new(lhs), Box::new(rhs)),
+            BinOp::LessThenEqual => Expr::Le(Box::new(lhs), Box::new(rhs)),
+            BinOp::GreaterThanEqual => Expr::Ge(Box::new(lhs), Box::new(rhs)),
+            BinOp::UnsignedLessThan => Expr::ULt(Box::new(lhs), Box::new(rhs)),
+            BinOp::UnsignedGreaterThan => Expr::UGt(Box::new(lhs), Box::new(rhs)),
+            BinOp::UnsignedLessThenEqual => Expr::ULe(Box::new(lhs), Box::new(rhs)),
+            BinOp::UnsignedGreaterThanEqual => Expr::UGe(Box::new(lhs), Box::new(rhs)),
             BinOp::BitwiseAnd => Expr::And(Box::new(lhs), Box::new(rhs)),
             BinOp::BitwiseOr => Expr::Or(Box::new(lhs), Box::new(rhs)),
             BinOp::BitwiseXor => Expr::Xor(Box::new(lhs), Box::new(rhs)),
@@ -194,6 +231,61 @@ impl ConversionContext {
                         input: Box::new(input),
                         high: Box::new(high),
                         low: Box::new(low),
+                    })
+                }
+                BuiltinFunction::Log2Ceil => {
+                    if call.arguments.len() != 1 {
+                        return Err("log2Ceil requires 1 argument".to_string());
+                    }
+                    let input = self.convert(&call.arguments[0])?;
+                    Ok(Expr::Log2Ceil(Box::new(input)))
+                }
+                BuiltinFunction::SExt => {
+                    if call.arguments.len() != 2 {
+                        return Err("sext requires 2 arguments".to_string());
+                    }
+                    let input = self.convert(&call.arguments[0])?;
+                    let width = self.convert(&call.arguments[1])?;
+                    Ok(Expr::SExt {
+                        input: Box::new(input),
+                        width: Box::new(width),
+                    })
+                }
+                BuiltinFunction::ZExt => {
+                    if call.arguments.len() != 2 {
+                        return Err("zext requires 2 arguments".to_string());
+                    }
+                    let input = self.convert(&call.arguments[0])?;
+                    let width = self.convert(&call.arguments[1])?;
+                    Ok(Expr::ZExt {
+                        input: Box::new(input),
+                        width: Box::new(width),
+                    })
+                }
+                BuiltinFunction::Load => {
+                    if call.arguments.len() != 3 {
+                        return Err("load requires 3 arguments".to_string());
+                    }
+                    let addr = self.convert(&call.arguments[0])?;
+                    let bytes = self.convert(&call.arguments[1])?;
+                    let signed = self.convert(&call.arguments[2])?;
+                    Ok(Expr::Load {
+                        addr: Box::new(addr),
+                        bytes: Box::new(bytes),
+                        signed: Box::new(signed),
+                    })
+                }
+                BuiltinFunction::Store => {
+                    if call.arguments.len() != 3 {
+                        return Err("store requires 3 arguments".to_string());
+                    }
+                    let addr = self.convert(&call.arguments[0])?;
+                    let bytes = self.convert(&call.arguments[1])?;
+                    let value = self.convert(&call.arguments[2])?;
+                    Ok(Expr::Store {
+                        addr: Box::new(addr),
+                        bytes: Box::new(bytes),
+                        value: Box::new(value),
                     })
                 }
             }
@@ -373,6 +465,52 @@ mod tests {
         match result.expr {
             Expr::Add(_, _) => {}
             _ => panic!("Expected Add"),
+        }
+    }
+
+    #[test]
+    fn test_convert_binary_lt() {
+        let ast = AstExpr::Binary(Binary {
+            lhs: Box::new(AstExpr::Lit(Lit::Int(LitInt::new(
+                "10".to_string(),
+                make_span(),
+            )))),
+            rhs: Box::new(AstExpr::Lit(Lit::Int(LitInt::new(
+                "20".to_string(),
+                make_span(),
+            )))),
+            op: BinOp::LessThan,
+            span: make_span(),
+        });
+
+        let result = convert_to_sem_expr(&ast, HashMap::new()).unwrap();
+
+        match result.expr {
+            Expr::Lt(_, _) => {}
+            _ => panic!("Expected Lt"),
+        }
+    }
+
+    #[test]
+    fn test_convert_binary_unsigned_lt() {
+        let ast = AstExpr::Binary(Binary {
+            lhs: Box::new(AstExpr::Lit(Lit::Int(LitInt::new(
+                "10".to_string(),
+                make_span(),
+            )))),
+            rhs: Box::new(AstExpr::Lit(Lit::Int(LitInt::new(
+                "20".to_string(),
+                make_span(),
+            )))),
+            op: BinOp::UnsignedLessThan,
+            span: make_span(),
+        });
+
+        let result = convert_to_sem_expr(&ast, HashMap::new()).unwrap();
+
+        match result.expr {
+            Expr::ULt(_, _) => {}
+            _ => panic!("Expected ULt"),
         }
     }
 
