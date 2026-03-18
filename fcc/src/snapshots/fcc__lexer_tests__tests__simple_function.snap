@@ -1,0 +1,15 @@
+---
+source: fcc/src/lexer_tests.rs
+expression: tokens
+---
+[
+    KwInt,
+    Identifier,
+    LParen,
+    RParen,
+    LBrace,
+    KwReturn,
+    IntegerLiteral,
+    Semicolon,
+    RBrace,
+]
