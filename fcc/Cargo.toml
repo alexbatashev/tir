@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 logos = "0.16.1"
+tir = { path = "../core" }
 
 [dev-dependencies]
 insta = "1.46.3"

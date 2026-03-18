@@ -1,4 +1,5 @@
-use crate::sem_expr::{APFloat, APInt, Expr};
+use crate::sem_expr::Expr;
+use crate::utils::{APFloat, APInt};
 
 /// Simplify an expression by applying algebraic identities and constant folding
 /// This performs symbolic simplification and does not require all symbols to be bound

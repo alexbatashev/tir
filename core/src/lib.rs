@@ -14,6 +14,7 @@ mod pass;
 mod region;
 pub mod sem_expr;
 mod ty;
+pub mod utils;
 mod value;
 
 pub mod helpers {
