@@ -96,6 +96,12 @@ pub enum Token {
 
     // TODO C11 underscore keywords?
 
+    // Preprocessor punctuation (must come before Hash so ## wins on longest-match).
+    #[token("##")]
+    HashHash,
+    #[token("#")]
+    Hash,
+
     // Or regular expressions.
     #[regex("[a-zA-Z_][a-zA-Z0-9_]*")]
     Identifier,

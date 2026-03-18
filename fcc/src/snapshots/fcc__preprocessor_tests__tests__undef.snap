@@ -1,0 +1,10 @@
+---
+source: fcc/src/preprocessor_tests.rs
+expression: "pp(\"#define FOO 1\\n#undef FOO\\nint x = FOO;\")"
+---
+[
+    KwInt,
+    Identifier,
+    Identifier,
+    Semicolon,
+]

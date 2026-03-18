@@ -1,0 +1,10 @@
+---
+source: fcc/src/preprocessor_tests.rs
+expression: "pp(\"#define LIMIT 42\\nint x = LIMIT;\")"
+---
+[
+    KwInt,
+    Identifier,
+    IntegerLiteral,
+    Semicolon,
+]

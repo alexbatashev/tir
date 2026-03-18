@@ -1,0 +1,8 @@
+---
+source: fcc/src/preprocessor_tests.rs
+expression: "pp(\"#define FLAG\\nint FLAG;\")"
+---
+[
+    KwInt,
+    Semicolon,
+]

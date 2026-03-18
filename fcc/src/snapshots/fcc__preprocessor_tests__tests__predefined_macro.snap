@@ -1,0 +1,10 @@
+---
+source: fcc/src/preprocessor_tests.rs
+expression: "pp_with_defines(\"int x = N;\", &[(\"N\", \"7\")])"
+---
+[
+    KwInt,
+    Identifier,
+    IntegerLiteral,
+    Semicolon,
+]
