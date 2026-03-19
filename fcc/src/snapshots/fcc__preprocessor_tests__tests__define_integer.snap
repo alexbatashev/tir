@@ -5,6 +5,12 @@ expression: "pp(\"#define LIMIT 42\\nint x = LIMIT;\")"
 [
     KwInt,
     Identifier,
-    IntegerLiteral,
+    IntegerLiteral(
+        APInt {
+            width: 6,
+            signed: false,
+            value: 42,
+        },
+    ),
     Semicolon,
 ]

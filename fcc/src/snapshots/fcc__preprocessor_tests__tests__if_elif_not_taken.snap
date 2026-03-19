@@ -1,0 +1,9 @@
+---
+source: fcc/src/preprocessor_tests.rs
+expression: "pp(\"#if 1\\nint a;\\n#elif 1\\nint b;\\n#endif\")"
+---
+[
+    KwInt,
+    Identifier,
+    Semicolon,
+]

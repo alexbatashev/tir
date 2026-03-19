@@ -5,6 +5,12 @@ expression: "pp_with_defines(\"int x = N;\", &[(\"N\", \"7\")])"
 [
     KwInt,
     Identifier,
-    IntegerLiteral,
+    IntegerLiteral(
+        APInt {
+            width: 3,
+            signed: false,
+            value: 7,
+        },
+    ),
     Semicolon,
 ]

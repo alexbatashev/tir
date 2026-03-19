@@ -9,7 +9,13 @@ expression: tokens
     RParen,
     LBrace,
     KwReturn,
-    IntegerLiteral,
+    IntegerLiteral(
+        APInt {
+            width: 1,
+            signed: false,
+            value: 0,
+        },
+    ),
     Semicolon,
     RBrace,
 ]

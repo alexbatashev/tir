@@ -2,17 +2,27 @@
 mod tests {
     use std::collections::HashMap;
 
-    use crate::preprocessor::preprocessed;
+    use logos::Logos;
+
     use crate::lexer::Token;
+    use crate::preprocessor::preprocessed;
 
     fn pp(source: &str) -> Vec<Token> {
         preprocessed(source.as_bytes(), HashMap::new(), &[]).collect()
     }
 
+    /// Helper: accepts `("NAME", "body")` pairs, lexes each body to a Token
+    /// (same as how `#define` would parse it at runtime).
     fn pp_with_defines(source: &str, defines: &[(&str, &str)]) -> Vec<Token> {
         let defines = defines
             .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .map(|(k, v)| {
+                let tok = Token::lexer(v.trim())
+                    .next()
+                    .and_then(|r: Result<Token, _>| r.ok())
+                    .unwrap_or(Token::Hash);
+                (k.to_string(), tok)
+            })
             .collect();
         preprocessed(source.as_bytes(), defines, &[]).collect()
     }
@@ -33,7 +43,6 @@ mod tests {
 
     #[test]
     fn test_define_keyword() {
-        // A macro that expands to a keyword
         insta::assert_debug_snapshot!(pp("#define MYINT int\nMYINT x;"));
     }
 
@@ -45,7 +54,6 @@ mod tests {
 
     #[test]
     fn test_predefined_macro() {
-        // Macros supplied as -D flags via the `defines` argument
         insta::assert_debug_snapshot!(pp_with_defines("int x = N;", &[("N", "7")]));
     }
 
@@ -53,7 +61,6 @@ mod tests {
 
     #[test]
     fn test_undef() {
-        // After #undef the name should be emitted as a plain identifier
         insta::assert_debug_snapshot!(pp("#define FOO 1\n#undef FOO\nint x = FOO;"));
     }
 
@@ -61,9 +68,7 @@ mod tests {
 
     #[test]
     fn test_ifdef_defined() {
-        insta::assert_debug_snapshot!(pp(
-            "#define X\n#ifdef X\nint a;\n#endif\nint b;"
-        ));
+        insta::assert_debug_snapshot!(pp("#define X\n#ifdef X\nint a;\n#endif\nint b;"));
     }
 
     #[test]
@@ -85,15 +90,11 @@ mod tests {
 
     #[test]
     fn test_ifdef_else_taken() {
-        // X is defined → first branch active, else branch skipped
-        insta::assert_debug_snapshot!(pp(
-            "#define X\n#ifdef X\nint a;\n#else\nint b;\n#endif"
-        ));
+        insta::assert_debug_snapshot!(pp("#define X\n#ifdef X\nint a;\n#else\nint b;\n#endif"));
     }
 
     #[test]
     fn test_ifdef_else_not_taken() {
-        // X not defined → first branch skipped, else branch active
         insta::assert_debug_snapshot!(pp("#ifdef X\nint a;\n#else\nint b;\n#endif"));
     }
 
@@ -101,7 +102,6 @@ mod tests {
 
     #[test]
     fn test_nested_ifdef_outer_false() {
-        // Outer condition false → inner block irrelevant; only `int c;` emitted
         insta::assert_debug_snapshot!(pp(
             "#ifdef OUTER\n#ifdef INNER\nint a;\n#else\nint b;\n#endif\n#endif\nint c;"
         ));
@@ -114,10 +114,42 @@ mod tests {
         ));
     }
 
-    // ── #if (expression eval not implemented → treated as false) ─────────
+    // ── #if expression evaluation ─────────────────────────────────────────
 
     #[test]
-    fn test_if_skipped() {
+    fn test_if_true() {
         insta::assert_debug_snapshot!(pp("#if 1\nint a;\n#endif\nint b;"));
+    }
+
+    #[test]
+    fn test_if_false() {
+        insta::assert_debug_snapshot!(pp("#if 0\nint a;\n#endif\nint b;"));
+    }
+
+    #[test]
+    fn test_if_expr() {
+        insta::assert_debug_snapshot!(pp("#if 2 + 3 > 4\nint a;\n#endif"));
+    }
+
+    #[test]
+    fn test_if_macro_value() {
+        insta::assert_debug_snapshot!(pp("#define LEVEL 3\n#if LEVEL > 2\nint a;\n#endif"));
+    }
+
+    #[test]
+    fn test_if_elif_taken() {
+        insta::assert_debug_snapshot!(pp("#if 0\nint a;\n#elif 1\nint b;\n#endif"));
+    }
+
+    #[test]
+    fn test_if_elif_not_taken() {
+        insta::assert_debug_snapshot!(pp("#if 1\nint a;\n#elif 1\nint b;\n#endif"));
+    }
+
+    #[test]
+    fn test_if_defined() {
+        insta::assert_debug_snapshot!(pp(
+            "#define X\n#if defined(X)\nint a;\n#endif\n#if defined(Y)\nint b;\n#endif\nint c;"
+        ));
     }
 }

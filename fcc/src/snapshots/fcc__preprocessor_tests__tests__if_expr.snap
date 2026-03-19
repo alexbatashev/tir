@@ -1,0 +1,9 @@
+---
+source: fcc/src/preprocessor_tests.rs
+expression: "pp(\"#if 2 + 3 > 4\\nint a;\\n#endif\")"
+---
+[
+    KwInt,
+    Identifier,
+    Semicolon,
+]

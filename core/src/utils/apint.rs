@@ -659,15 +659,16 @@ impl FromStr for APInt {
             return Err("empty string".to_string());
         }
 
-        let (radix, digits) = if let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-            (16u64, rest)
-        } else if let Some(rest) = s.strip_prefix("0o").or_else(|| s.strip_prefix("0O")) {
-            (8u64, rest)
-        } else if let Some(rest) = s.strip_prefix("0b").or_else(|| s.strip_prefix("0B")) {
-            (2u64, rest)
-        } else {
-            (10u64, s)
-        };
+        let (radix, digits) =
+            if let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+                (16u64, rest)
+            } else if let Some(rest) = s.strip_prefix("0o").or_else(|| s.strip_prefix("0O")) {
+                (8u64, rest)
+            } else if let Some(rest) = s.strip_prefix("0b").or_else(|| s.strip_prefix("0B")) {
+                (2u64, rest)
+            } else {
+                (10u64, s)
+            };
 
         let clean: String = digits.chars().filter(|&c| c != '_').collect();
         if clean.is_empty() {
@@ -686,7 +687,12 @@ impl FromStr for APInt {
                 .ok_or_else(|| format!("value overflows u64: '{s}'"))?;
         }
 
-        let width = if value == 0 { 1 } else { 64 - value.leading_zeros() }.max(1);
+        let width = if value == 0 {
+            1
+        } else {
+            64 - value.leading_zeros()
+        }
+        .max(1);
         Ok(APInt::new(width, value))
     }
 }

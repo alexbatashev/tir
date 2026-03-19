@@ -2,7 +2,7 @@ use logos::Logos;
 
 use tir::utils::APInt;
 
-#[derive(Logos, Debug, PartialEq)]
+#[derive(Logos, Debug, Clone, PartialEq)]
 #[logos(skip r"[ \t\n\f]+")]
 pub enum Token {
     #[token("alignas")]
