@@ -90,6 +90,7 @@ fn emit_instructions<'a>(
     let mut isel_rule_inits: Vec<proc_macro2::TokenStream> = vec![];
     let mut machine_instruction_impls: Vec<proc_macro2::TokenStream> = vec![];
     let mut instruction_custom_format_impls: Vec<proc_macro2::TokenStream> = vec![];
+    let mut as_sem_expr_impls: Vec<proc_macro2::TokenStream> = vec![];
 
     for inst in files.iter().flat_map(|f| f.instructions()) {
         let name_ident = format_ident!("{}Op", &inst.name);
@@ -338,6 +339,12 @@ fn emit_instructions<'a>(
                     #emit_fn_ident,
                 ));
             });
+        }
+
+        if let Some(impl_ts) =
+            emit_as_sem_expr_impl(inst, item_cache, &ops, &defined_register_operands, &name_ident)
+        {
+            as_sem_expr_impls.push(impl_ts);
         }
 
         let encoding_arms = get_encoding_arms(inst, item_cache);
@@ -626,6 +633,7 @@ fn emit_instructions<'a>(
         #(#instruction_defs)*
         #(#instruction_custom_format_impls)*
         #(#machine_instruction_impls)*
+        #(#as_sem_expr_impls)*
 
         fn get_instruction_parsers() -> std::collections::HashMap<String, Box<tir_be_common::AsmInstructionParser>> {
             let mut map = std::collections::HashMap::new();
@@ -1156,5 +1164,215 @@ fn sem_expr_complexity(expr: &tir::sem_expr::Expr) -> u32 {
             1 + sem_expr_complexity(addr) + sem_expr_complexity(bytes) + sem_expr_complexity(value)
         }
         _ => 2,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AsSemExpr code generation
+// ---------------------------------------------------------------------------
+
+fn emit_as_sem_expr_impl<'a>(
+    inst: &'a ast::Instruction,
+    item_cache: &HashMap<&'a str, &'a ast::Item>,
+    operands: &[(String, Type)],
+    defined_register_operands: &[String],
+    name_ident: &proc_macro2::Ident,
+) -> Option<proc_macro2::TokenStream> {
+    let rhs = resolve_behavior_rhs(inst, operands, defined_register_operands)?;
+
+    let numeric_params: HashMap<_, _> = resolve_params_for_instruction(inst, item_cache)
+        .into_iter()
+        .filter_map(|(name, (_ty, value))| match value {
+            Some(ast::Expr::Lit(ast::Lit::Int(li))) => {
+                Some((name, parse_literal_value(&li) as i64))
+            }
+            _ => None,
+        })
+        .collect();
+
+    let converted = crate::sem_expr_conv::convert_to_sem_expr(rhs, numeric_params).ok()?;
+
+    let mut counter = 0u32;
+    let (stmts, root_var) = emit_as_sem_expr2_stmts(&converted.expr, &mut counter)?;
+
+    Some(quote! {
+        impl tir::sem_expr2::AsSemExpr for #name_ident {
+            fn convert(
+                &self,
+                g: &mut impl tir::graph::Dag<tir::sem_expr2::ExprKind, tir::sem_expr2::ExprPayload>,
+            ) -> tir::graph::NodeId {
+                #(#stmts)*
+                #root_var
+            }
+        }
+    })
+}
+
+/// Recursively translates a `tir::sem_expr::Expr` into a sequence of DAG-building
+/// statements plus the identifier that holds the resulting `NodeId`.
+/// Returns `None` for expression variants that have no direct mapping in `ExprKind`.
+fn emit_as_sem_expr2_stmts(
+    expr: &tir::sem_expr::Expr,
+    counter: &mut u32,
+) -> Option<(Vec<proc_macro2::TokenStream>, proc_macro2::Ident)> {
+    use tir::sem_expr::Expr;
+
+    // Helper: emit a binary inner node
+    macro_rules! binary {
+        ($kind:expr, $lhs:expr, $rhs:expr) => {{
+            let (mut stmts, lhs_var) = emit_as_sem_expr2_stmts($lhs, counter)?;
+            let (rhs_stmts, rhs_var) = emit_as_sem_expr2_stmts($rhs, counter)?;
+            stmts.extend(rhs_stmts);
+            let var = format_ident!("__sem2_{}", *counter);
+            *counter += 1;
+            let kind: proc_macro2::TokenStream = $kind;
+            stmts.push(quote! {
+                let #var = g.add_inner(#kind, &[#lhs_var, #rhs_var]);
+            });
+            Some((stmts, var))
+        }};
+    }
+
+    // Helper: emit a unary inner node
+    macro_rules! unary {
+        ($kind:expr, $input:expr) => {{
+            let (mut stmts, input_var) = emit_as_sem_expr2_stmts($input, counter)?;
+            let var = format_ident!("__sem2_{}", *counter);
+            *counter += 1;
+            let kind: proc_macro2::TokenStream = $kind;
+            stmts.push(quote! {
+                let #var = g.add_inner(#kind, &[#input_var]);
+            });
+            Some((stmts, var))
+        }};
+    }
+
+    match expr {
+        Expr::Symbol(id) => {
+            let var = format_ident!("__sem2_{}", *counter);
+            *counter += 1;
+            let id_lit = proc_macro2::Literal::u32_unsuffixed(*id);
+            let stmt = quote! {
+                let #var = g.add_leaf(
+                    tir::sem_expr2::ExprKind::Symbol,
+                    tir::sem_expr2::ExprPayload::SymbolId(#id_lit),
+                );
+            };
+            Some((vec![stmt], var))
+        }
+        Expr::Int(v) => {
+            let var = format_ident!("__sem2_{}", *counter);
+            *counter += 1;
+            let w = proc_macro2::Literal::u32_unsuffixed(v.width());
+            let stmt = if v.is_signed() {
+                let val = proc_macro2::Literal::i64_unsuffixed(v.to_i64());
+                quote! {
+                    let #var = g.add_leaf(
+                        tir::sem_expr2::ExprKind::Constant,
+                        tir::sem_expr2::ExprPayload::Int(tir::utils::APInt::new_signed(#w, #val)),
+                    );
+                }
+            } else {
+                let val = proc_macro2::Literal::u64_unsuffixed(v.to_u64());
+                quote! {
+                    let #var = g.add_leaf(
+                        tir::sem_expr2::ExprKind::Constant,
+                        tir::sem_expr2::ExprPayload::Int(tir::utils::APInt::new(#w, #val)),
+                    );
+                }
+            };
+            Some((vec![stmt], var))
+        }
+        Expr::Bool(b) => {
+            let var = format_ident!("__sem2_{}", *counter);
+            *counter += 1;
+            let val = *b as u64;
+            let stmt = quote! {
+                let #var = g.add_leaf(
+                    tir::sem_expr2::ExprKind::Constant,
+                    tir::sem_expr2::ExprPayload::Int(tir::utils::APInt::new(1, #val)),
+                );
+            };
+            Some((vec![stmt], var))
+        }
+        Expr::Float(f) => {
+            let var = format_ident!("__sem2_{}", *counter);
+            *counter += 1;
+            // Round-trip through f64 for code generation purposes.
+            let as_f64 = proc_macro2::Literal::f64_unsuffixed(f.to_f64());
+            let stmt = quote! {
+                let #var = g.add_leaf(
+                    tir::sem_expr2::ExprKind::Constant,
+                    tir::sem_expr2::ExprPayload::Float(tir::utils::APFloat::from_f64(#as_f64)),
+                );
+            };
+            Some((vec![stmt], var))
+        }
+        Expr::If { cond, then, else_ } => {
+            let (mut stmts, cond_var) = emit_as_sem_expr2_stmts(cond, counter)?;
+            let (then_stmts, then_var) = emit_as_sem_expr2_stmts(then, counter)?;
+            let (else_stmts, else_var) = emit_as_sem_expr2_stmts(else_, counter)?;
+            stmts.extend(then_stmts);
+            stmts.extend(else_stmts);
+            let var = format_ident!("__sem2_{}", *counter);
+            *counter += 1;
+            stmts.push(quote! {
+                let #var = g.add_inner(tir::sem_expr2::ExprKind::If, &[#cond_var, #then_var, #else_var]);
+            });
+            Some((stmts, var))
+        }
+        Expr::Fma { a, b, c } => {
+            let (mut stmts, a_var) = emit_as_sem_expr2_stmts(a, counter)?;
+            let (b_stmts, b_var) = emit_as_sem_expr2_stmts(b, counter)?;
+            let (c_stmts, c_var) = emit_as_sem_expr2_stmts(c, counter)?;
+            stmts.extend(b_stmts);
+            stmts.extend(c_stmts);
+            let var = format_ident!("__sem2_{}", *counter);
+            *counter += 1;
+            stmts.push(quote! {
+                let #var = g.add_inner(tir::sem_expr2::ExprKind::Fma, &[#a_var, #b_var, #c_var]);
+            });
+            Some((stmts, var))
+        }
+        Expr::ZExt { input, width } => {
+            binary!(quote! { tir::sem_expr2::ExprKind::ZExt }, input, width)
+        }
+        Expr::SExt { input, width } => {
+            binary!(quote! { tir::sem_expr2::ExprKind::SExt }, input, width)
+        }
+        Expr::Add(l, r)  => binary!(quote! { tir::sem_expr2::ExprKind::Add  }, l, r),
+        Expr::Sub(l, r)  => binary!(quote! { tir::sem_expr2::ExprKind::Sub  }, l, r),
+        Expr::Mul(l, r)  => binary!(quote! { tir::sem_expr2::ExprKind::Mul  }, l, r),
+        Expr::Div(l, r)  => binary!(quote! { tir::sem_expr2::ExprKind::Div  }, l, r),
+        Expr::UDiv(l, r) => binary!(quote! { tir::sem_expr2::ExprKind::UDiv }, l, r),
+        Expr::Eq(l, r)   => binary!(quote! { tir::sem_expr2::ExprKind::Eq   }, l, r),
+        Expr::Ne(l, r)   => binary!(quote! { tir::sem_expr2::ExprKind::Ne   }, l, r),
+        Expr::Lt(l, r)   => binary!(quote! { tir::sem_expr2::ExprKind::Lt   }, l, r),
+        Expr::Gt(l, r)   => binary!(quote! { tir::sem_expr2::ExprKind::Gt   }, l, r),
+        Expr::Ge(l, r)   => binary!(quote! { tir::sem_expr2::ExprKind::Ge   }, l, r),
+        Expr::ULt(l, r)  => binary!(quote! { tir::sem_expr2::ExprKind::ULt  }, l, r),
+        Expr::ULe(l, r)  => binary!(quote! { tir::sem_expr2::ExprKind::ULe  }, l, r),
+        Expr::UGt(l, r)  => binary!(quote! { tir::sem_expr2::ExprKind::UGt  }, l, r),
+        Expr::UGe(l, r)  => binary!(quote! { tir::sem_expr2::ExprKind::UGe  }, l, r),
+        Expr::ShiftLeft(l, r)             => binary!(quote! { tir::sem_expr2::ExprKind::ShiftLeft             }, l, r),
+        Expr::ShiftRightLogic(l, r)       => binary!(quote! { tir::sem_expr2::ExprKind::ShiftRightLogic       }, l, r),
+        Expr::ShiftRightArithmetic(l, r)  => binary!(quote! { tir::sem_expr2::ExprKind::ShiftRightArithmetic  }, l, r),
+        Expr::And(l, r)  => binary!(quote! { tir::sem_expr2::ExprKind::And  }, l, r),
+        Expr::Or(l, r)   => binary!(quote! { tir::sem_expr2::ExprKind::Or   }, l, r),
+        Expr::Xor(l, r)  => binary!(quote! { tir::sem_expr2::ExprKind::Xor  }, l, r),
+        Expr::Log2Ceil(x) => unary!(quote! { tir::sem_expr2::ExprKind::Log2Ceil }, x),
+        Expr::Sqrt(x)     => unary!(quote! { tir::sem_expr2::ExprKind::Sqrt     }, x),
+        // No direct ExprKind equivalent — skip so the instruction is simply
+        // not given an AsSemExpr impl rather than generating broken code.
+        Expr::Le(..)
+        | Expr::Clamp { .. }
+        | Expr::Extract { .. }
+        | Expr::Load { .. }
+        | Expr::Store { .. }
+        | Expr::Bits(_)
+        | Expr::IntToBits(_)
+        | Expr::FloatToBits(_)
+        | Expr::BitsToInt { .. }
+        | Expr::BitsToFloat { .. } => None,
     }
 }

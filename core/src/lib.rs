@@ -1,3 +1,5 @@
+extern crate self as tir;
+
 pub mod attributes;
 mod block;
 mod builder;
@@ -20,7 +22,7 @@ pub mod utils;
 mod value;
 
 pub mod helpers {
-    pub use tir_macros::{dialect, operation};
+    pub use tir_macros::{SimpleNode, dialect, operation};
 }
 pub mod parse;
 

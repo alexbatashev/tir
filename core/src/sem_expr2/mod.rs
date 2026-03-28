@@ -1,8 +1,8 @@
 use crate::{
-    Context,
-    builtin::FuncOp,
-    graph::{NodeKind, PostOrderDag},
-    sem_expr::{APFloat, APInt},
+    graph::{Dag, NodeId, PostOrderDag},
+    helpers::SimpleNode,
+    sem_expr::BitVec,
+    utils::{APFloat, APInt},
 };
 
 mod exec;
@@ -11,9 +11,16 @@ pub use exec::execute;
 
 pub type ExprPostGraph = PostOrderDag<ExprKind, ExprPayload>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub trait AsSemExpr {
+    fn convert(&self, g: &mut impl Dag<ExprKind, ExprPayload>) -> NodeId;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, SimpleNode)]
+#[simple_node(default_arity = 2)]
 pub enum ExprKind {
+    #[leaf]
     Symbol,
+    #[leaf]
     Constant,
     Add,
     Sub,
@@ -35,13 +42,22 @@ pub enum ExprKind {
     Or,
     And,
     Xor,
+    /// Arguments are condition, then branch, else branch
+    #[arity = 3]
     If,
+    /// Arguments are address space, address, bytes read
+    #[arity = 3]
     LoadMemory,
+    /// Arguments are address space, address, value, bytes written
+    #[arity = 4]
     StoreMemory,
     ZExt,
     SExt,
+    #[arity = 1]
     Log2Ceil,
+    #[arity = 1]
     Sqrt,
+    #[arity = 3]
     Fma,
 }
 
@@ -49,26 +65,12 @@ pub enum ExprPayload {
     SymbolId(u32),
     Int(APInt),
     Float(APFloat),
+    BitVec(BitVec),
 }
 
-impl NodeKind for ExprKind {
-    fn is_leaf(&self, _: &Context) -> bool {
-        match self {
-            ExprKind::Constant | ExprKind::Symbol => true,
-            _ => false,
-        }
-    }
-
-    fn num_children(&self, _: &Context) -> usize {
-        match self {
-            ExprKind::Constant | ExprKind::Symbol => 0,
-            ExprKind::If | ExprKind::Fma => 3,
-            ExprKind::Sqrt | ExprKind::Log2Ceil => 1,
-            _ => 2,
-        }
-    }
-}
-
-pub fn build_from_function_postorder(func: FuncOp) -> ExprPostGraph {
-    todo!()
+/// A runtime value produced by the expression interpreter.
+#[derive(Clone, Debug)]
+pub enum Value {
+    Int(APInt),
+    Float(APFloat),
 }
