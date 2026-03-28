@@ -1,0 +1,14 @@
+---
+source: fcc/src/preprocessor_tests.rs
+expression: "pp(\"#define MYINT int\\nMYINT x;\")"
+---
+[
+    KwInt,
+    Whitespace(
+        " ",
+    ),
+    Identifier(
+        "x",
+    ),
+    Semicolon,
+]

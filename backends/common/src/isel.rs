@@ -4,7 +4,8 @@ use tir::{
     Block, BlockId, Context, OpId, OpInstance, Operation, OperationRef, Pass, PassError,
     PassTarget, Rewriter, ValueId,
     attributes::AttributeValue,
-    sem_expr::{APInt, Expr, simplify},
+    sem_expr::{Expr, simplify},
+    utils::APInt,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]

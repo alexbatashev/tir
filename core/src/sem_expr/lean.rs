@@ -1,4 +1,5 @@
-use super::{APInt, BitVec, Expr};
+use super::{BitVec, Expr};
+use crate::utils::APInt;
 use std::io::Write;
 
 /// Trait for resolving symbols to Lean expressions

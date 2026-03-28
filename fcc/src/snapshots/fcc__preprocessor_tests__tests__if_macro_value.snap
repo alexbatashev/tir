@@ -1,0 +1,17 @@
+---
+source: fcc/src/preprocessor_tests.rs
+expression: "pp(\"#define LEVEL 3\\n#if LEVEL > 2\\nint a;\\n#endif\")"
+---
+[
+    KwInt,
+    Whitespace(
+        " ",
+    ),
+    Identifier(
+        "a",
+    ),
+    Semicolon,
+    Whitespace(
+        "\n",
+    ),
+]

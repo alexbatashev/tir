@@ -1,4 +1,5 @@
-use super::{APInt, Expr};
+use super::Expr;
+use crate::utils::APInt;
 use std::io::Write;
 
 /// Trait for resolving symbols to SMT-LIB expressions.

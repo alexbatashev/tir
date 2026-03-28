@@ -1,0 +1,17 @@
+---
+source: fcc/src/preprocessor_tests.rs
+expression: "pp(\"#ifdef X\\nint a;\\n#else\\nint b;\\n#endif\")"
+---
+[
+    KwInt,
+    Whitespace(
+        " ",
+    ),
+    Identifier(
+        "b",
+    ),
+    Semicolon,
+    Whitespace(
+        "\n",
+    ),
+]

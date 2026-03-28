@@ -11,7 +11,8 @@ pub use lexer::Token;
 pub use lexer::lex;
 pub use parser::{AsmInstructionParser, AsmParser};
 use tir::attributes::{AttributeValue, RegisterAttr};
-use tir::sem_expr::{APInt, Expr};
+use tir::sem_expr::Expr;
+use tir::utils::APInt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SimTrap {

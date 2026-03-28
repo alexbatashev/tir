@@ -16,6 +16,7 @@ mod region;
 pub mod sem_expr;
 pub mod sem_expr2;
 mod ty;
+pub mod utils;
 mod value;
 
 pub mod helpers {
