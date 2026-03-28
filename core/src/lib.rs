@@ -6,6 +6,7 @@ mod diagnostics;
 mod dialect;
 mod dialects;
 mod error;
+pub mod graph;
 mod interfaces;
 mod ir_formatter;
 mod operand;
@@ -13,6 +14,7 @@ mod operation;
 mod pass;
 mod region;
 pub mod sem_expr;
+pub mod sem_expr2;
 mod ty;
 mod value;
 
