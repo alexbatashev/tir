@@ -372,70 +372,6 @@ fn emit_instructions<'a>(
                 .collect();
 
             if let Ok(converted) = crate::sem_expr_conv::convert_to_sem_expr(rhs, numeric_params) {
-                let expr_tokens = emit_sem_expr(&converted.expr);
-                let mut symbol_arms = Vec::new();
-                for (symbol_id, info) in converted.symbols {
-                    let sym_lit = proc_macro2::Literal::u32_unsuffixed(symbol_id);
-                    match info {
-                        crate::sem_expr_conv::SymbolInfo::Variable { name } => {
-                            let name_lit = proc_macro2::Literal::string(&name);
-                            if let Some((_, ty)) = ops.iter().find(|(n, _)| n == &name) {
-                                match ty {
-                                    Type::Struct(_) => {
-                                        symbol_arms.push(quote! {
-                                            #sym_lit => {
-                                                let (class, index) = tir_be_common::register_attr(self.attributes(), #name_lit)
-                                                    .ok_or(tir_be_common::SimTrap::MissingAttribute {
-                                                        op: #mnemonic_lit,
-                                                        attribute: #name_lit,
-                                                    })?;
-                                                Ok(Some(machine.read_register(&class, index)?))
-                                            }
-                                        });
-                                    }
-                                    Type::Integer => {
-                                        symbol_arms.push(quote! {
-                                            #sym_lit => {
-                                                let value = tir_be_common::int_attr(self.attributes(), #name_lit).ok_or(
-                                                    tir_be_common::SimTrap::MissingAttribute {
-                                                        op: #mnemonic_lit,
-                                                        attribute: #name_lit,
-                                                    },
-                                                )?;
-                                                Ok(Some(tir::utils::APInt::new_signed(64, value)))
-                                            }
-                                        });
-                                    }
-                                    Type::Bits(width) => {
-                                        let width_lit =
-                                            proc_macro2::Literal::u32_unsuffixed(*width as u32);
-                                        symbol_arms.push(quote! {
-                                            #sym_lit => {
-                                                let value = tir_be_common::int_attr(self.attributes(), #name_lit).ok_or(
-                                                    tir_be_common::SimTrap::MissingAttribute {
-                                                        op: #mnemonic_lit,
-                                                        attribute: #name_lit,
-                                                    },
-                                                )?;
-                                                Ok(Some(tir::utils::APInt::new_signed(#width_lit, value)))
-                                            }
-                                        });
-                                    }
-                                    Type::String => {}
-                                    _ => {}
-                                }
-                            }
-                        }
-                        crate::sem_expr_conv::SymbolInfo::Register { class, number } => {
-                            let class_lit = proc_macro2::Literal::string(&class);
-                            let number_lit = proc_macro2::Literal::u16_unsuffixed(number as u16);
-                            symbol_arms.push(quote! {
-                                #sym_lit => Ok(Some(machine.read_register(#class_lit, #number_lit)?))
-                            });
-                        }
-                    }
-                }
-
                 let dst_write = if let Some(dst_name) = defined_register_operands.last() {
                     let dst_lit = proc_macro2::Literal::string(dst_name);
                     quote! {
@@ -453,26 +389,187 @@ fn emit_instructions<'a>(
                     quote! {}
                 };
 
-                quote! {
-                    let expr = #expr_tokens;
-                    let resolved = tir_be_common::resolve_expr_symbols(&expr, |symbol| {
-                        match symbol {
-                            #(#symbol_arms,)*
-                            _ => Ok(None),
+                let mut sem2_counter = 0u32;
+                if emit_as_sem_expr2_stmts(&converted.expr, &mut sem2_counter).is_some() {
+                    // sem_expr2 path: build the DAG via AsSemExpr, populate a symbols
+                    // array indexed by symbol ID, then call sem_expr2::execute.
+                    let max_sym_id =
+                        converted.symbols.keys().max().copied().unwrap_or(0) as usize;
+                    let max_sym_id_lit = proc_macro2::Literal::usize_unsuffixed(max_sym_id);
+
+                    let mut sym_init_steps: Vec<proc_macro2::TokenStream> = Vec::new();
+                    for (symbol_id, info) in converted.symbols.iter() {
+                        let sym_lit =
+                            proc_macro2::Literal::usize_unsuffixed(*symbol_id as usize);
+                        match info {
+                            crate::sem_expr_conv::SymbolInfo::Variable { name } => {
+                                let name_lit = proc_macro2::Literal::string(name);
+                                if let Some((_, ty)) =
+                                    ops.iter().find(|(n, _)| n == name)
+                                {
+                                    match ty {
+                                        Type::Struct(_) => sym_init_steps.push(quote! {
+                                            {
+                                                let (class, index) = tir_be_common::register_attr(self.attributes(), #name_lit)
+                                                    .ok_or(tir_be_common::SimTrap::MissingAttribute {
+                                                        op: #mnemonic_lit,
+                                                        attribute: #name_lit,
+                                                    })?;
+                                                __syms[#sym_lit] = Some(tir::sem_expr2::Value::Int(machine.read_register(&class, index)?));
+                                            }
+                                        }),
+                                        Type::Integer => sym_init_steps.push(quote! {
+                                            {
+                                                let value = tir_be_common::int_attr(self.attributes(), #name_lit)
+                                                    .ok_or(tir_be_common::SimTrap::MissingAttribute {
+                                                        op: #mnemonic_lit,
+                                                        attribute: #name_lit,
+                                                    })?;
+                                                __syms[#sym_lit] = Some(tir::sem_expr2::Value::Int(tir::utils::APInt::new_signed(64, value)));
+                                            }
+                                        }),
+                                        Type::Bits(width) => {
+                                            let width_lit = proc_macro2::Literal::u32_unsuffixed(
+                                                *width as u32,
+                                            );
+                                            sym_init_steps.push(quote! {
+                                                {
+                                                    let value = tir_be_common::int_attr(self.attributes(), #name_lit)
+                                                        .ok_or(tir_be_common::SimTrap::MissingAttribute {
+                                                            op: #mnemonic_lit,
+                                                            attribute: #name_lit,
+                                                        })?;
+                                                    __syms[#sym_lit] = Some(tir::sem_expr2::Value::Int(tir::utils::APInt::new_signed(#width_lit, value)));
+                                                }
+                                            });
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            crate::sem_expr_conv::SymbolInfo::Register { class, number } => {
+                                let class_lit = proc_macro2::Literal::string(class);
+                                let number_lit =
+                                    proc_macro2::Literal::u16_unsuffixed(*number as u16);
+                                sym_init_steps.push(quote! {
+                                    __syms[#sym_lit] = Some(tir::sem_expr2::Value::Int(machine.read_register(#class_lit, #number_lit)?));
+                                });
+                            }
                         }
-                    })?;
-                    let evaluated = tir::sem_expr::evaluate(resolved);
-                    let value = match evaluated {
-                        tir::sem_expr::Expr::Int(i) => i,
-                        _ => {
-                            return Err(tir_be_common::SimTrap::InvalidInstruction {
-                                op: #mnemonic_lit,
-                                reason: "instruction semantic expression did not evaluate to integer".to_string(),
-                            });
+                    }
+
+                    quote! {
+                        let mut __g = tir::sem_expr2::ExprPostGraph::new();
+                        tir::sem_expr2::AsSemExpr::convert(self, &mut __g);
+                        let mut __syms: Vec<Option<tir::sem_expr2::Value>> = vec![None; #max_sym_id_lit + 1];
+                        #(#sym_init_steps)*
+                        let __syms: Vec<tir::sem_expr2::Value> = __syms.into_iter()
+                            .map(|v| v.unwrap_or_else(|| tir::sem_expr2::Value::Int(tir::utils::APInt::new(64, 0))))
+                            .collect();
+                        let value = match tir::sem_expr2::execute(&__g, &__syms) {
+                            tir::sem_expr2::Value::Int(i) => i,
+                            tir::sem_expr2::Value::Float(_) => {
+                                return Err(tir_be_common::SimTrap::InvalidInstruction {
+                                    op: #mnemonic_lit,
+                                    reason: "instruction semantic expression did not evaluate to integer".to_string(),
+                                });
+                            }
+                        };
+                        #dst_write
+                        Ok(())
+                    }
+                } else {
+                    // Fallback: old sem_expr path for expressions not yet supported by
+                    // sem_expr2 (e.g. Load/Store with memory access).
+                    let expr_tokens = emit_sem_expr(&converted.expr);
+                    let mut symbol_arms = Vec::new();
+                    for (symbol_id, info) in converted.symbols.iter() {
+                        let sym_lit = proc_macro2::Literal::u32_unsuffixed(*symbol_id);
+                        match info {
+                            crate::sem_expr_conv::SymbolInfo::Variable { name } => {
+                                let name_lit = proc_macro2::Literal::string(name);
+                                if let Some((_, ty)) =
+                                    ops.iter().find(|(n, _)| n == name)
+                                {
+                                    match ty {
+                                        Type::Struct(_) => {
+                                            symbol_arms.push(quote! {
+                                                #sym_lit => {
+                                                    let (class, index) = tir_be_common::register_attr(self.attributes(), #name_lit)
+                                                        .ok_or(tir_be_common::SimTrap::MissingAttribute {
+                                                            op: #mnemonic_lit,
+                                                            attribute: #name_lit,
+                                                        })?;
+                                                    Ok(Some(machine.read_register(&class, index)?))
+                                                }
+                                            });
+                                        }
+                                        Type::Integer => {
+                                            symbol_arms.push(quote! {
+                                                #sym_lit => {
+                                                    let value = tir_be_common::int_attr(self.attributes(), #name_lit).ok_or(
+                                                        tir_be_common::SimTrap::MissingAttribute {
+                                                            op: #mnemonic_lit,
+                                                            attribute: #name_lit,
+                                                        },
+                                                    )?;
+                                                    Ok(Some(tir::utils::APInt::new_signed(64, value)))
+                                                }
+                                            });
+                                        }
+                                        Type::Bits(width) => {
+                                            let width_lit = proc_macro2::Literal::u32_unsuffixed(
+                                                *width as u32,
+                                            );
+                                            symbol_arms.push(quote! {
+                                                #sym_lit => {
+                                                    let value = tir_be_common::int_attr(self.attributes(), #name_lit).ok_or(
+                                                        tir_be_common::SimTrap::MissingAttribute {
+                                                            op: #mnemonic_lit,
+                                                            attribute: #name_lit,
+                                                        },
+                                                    )?;
+                                                    Ok(Some(tir::utils::APInt::new_signed(#width_lit, value)))
+                                                }
+                                            });
+                                        }
+                                        Type::String => {}
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            crate::sem_expr_conv::SymbolInfo::Register { class, number } => {
+                                let class_lit = proc_macro2::Literal::string(class);
+                                let number_lit =
+                                    proc_macro2::Literal::u16_unsuffixed(*number as u16);
+                                symbol_arms.push(quote! {
+                                    #sym_lit => Ok(Some(machine.read_register(#class_lit, #number_lit)?))
+                                });
+                            }
                         }
-                    };
-                    #dst_write
-                    Ok(())
+                    }
+
+                    quote! {
+                        let expr = #expr_tokens;
+                        let resolved = tir_be_common::resolve_expr_symbols(&expr, |symbol| {
+                            match symbol {
+                                #(#symbol_arms,)*
+                                _ => Ok(None),
+                            }
+                        })?;
+                        let evaluated = tir::sem_expr::evaluate(resolved);
+                        let value = match evaluated {
+                            tir::sem_expr::Expr::Int(i) => i,
+                            _ => {
+                                return Err(tir_be_common::SimTrap::InvalidInstruction {
+                                    op: #mnemonic_lit,
+                                    reason: "instruction semantic expression did not evaluate to integer".to_string(),
+                                });
+                            }
+                        };
+                        #dst_write
+                        Ok(())
+                    }
                 }
             } else {
                 quote! {
