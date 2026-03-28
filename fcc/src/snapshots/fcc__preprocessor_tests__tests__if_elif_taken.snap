@@ -4,6 +4,14 @@ expression: "pp(\"#if 0\\nint a;\\n#elif 1\\nint b;\\n#endif\")"
 ---
 [
     KwInt,
-    Identifier,
+    Whitespace(
+        " ",
+    ),
+    Identifier(
+        "b",
+    ),
     Semicolon,
+    Whitespace(
+        "\n",
+    ),
 ]

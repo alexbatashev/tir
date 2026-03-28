@@ -4,6 +4,14 @@ expression: "pp(\"#define LEVEL 3\\n#if LEVEL > 2\\nint a;\\n#endif\")"
 ---
 [
     KwInt,
-    Identifier,
+    Whitespace(
+        " ",
+    ),
+    Identifier(
+        "a",
+    ),
     Semicolon,
+    Whitespace(
+        "\n",
+    ),
 ]

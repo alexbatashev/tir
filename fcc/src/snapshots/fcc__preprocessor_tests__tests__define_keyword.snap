@@ -4,6 +4,11 @@ expression: "pp(\"#define MYINT int\\nMYINT x;\")"
 ---
 [
     KwInt,
-    Identifier,
+    Whitespace(
+        " ",
+    ),
+    Identifier(
+        "x",
+    ),
     Semicolon,
 ]

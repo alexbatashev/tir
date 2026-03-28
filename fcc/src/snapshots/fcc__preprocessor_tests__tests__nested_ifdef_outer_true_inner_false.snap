@@ -4,9 +4,22 @@ expression: "pp(\"#define OUTER\\n#ifdef OUTER\\n#ifdef INNER\\nint a;\\n#else\\
 ---
 [
     KwInt,
-    Identifier,
+    Whitespace(
+        " ",
+    ),
+    Identifier(
+        "b",
+    ),
     Semicolon,
+    Whitespace(
+        "\n",
+    ),
     KwInt,
-    Identifier,
+    Whitespace(
+        " ",
+    ),
+    Identifier(
+        "c",
+    ),
     Semicolon,
 ]

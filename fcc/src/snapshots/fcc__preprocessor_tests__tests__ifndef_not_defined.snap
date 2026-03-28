@@ -4,9 +4,22 @@ expression: "pp(\"#ifndef MISSING\\nint a;\\n#endif\\nint b;\")"
 ---
 [
     KwInt,
-    Identifier,
+    Whitespace(
+        " ",
+    ),
+    Identifier(
+        "a",
+    ),
     Semicolon,
+    Whitespace(
+        "\n",
+    ),
     KwInt,
-    Identifier,
+    Whitespace(
+        " ",
+    ),
+    Identifier(
+        "b",
+    ),
     Semicolon,
 ]

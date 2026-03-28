@@ -4,11 +4,25 @@ expression: tokens
 ---
 [
     KwInt,
-    Identifier,
+    Whitespace(
+        " ",
+    ),
+    Identifier(
+        "main",
+    ),
     LParen,
     RParen,
+    Whitespace(
+        " ",
+    ),
     LBrace,
+    Whitespace(
+        " ",
+    ),
     KwReturn,
+    Whitespace(
+        " ",
+    ),
     IntegerLiteral(
         APInt {
             width: 1,
@@ -17,5 +31,8 @@ expression: tokens
         },
     ),
     Semicolon,
+    Whitespace(
+        " ",
+    ),
     RBrace,
 ]

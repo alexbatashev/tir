@@ -4,6 +4,14 @@ expression: "pp(\"#ifdef X\\nint a;\\n#else\\nint b;\\n#endif\")"
 ---
 [
     KwInt,
-    Identifier,
+    Whitespace(
+        " ",
+    ),
+    Identifier(
+        "b",
+    ),
     Semicolon,
+    Whitespace(
+        "\n",
+    ),
 ]

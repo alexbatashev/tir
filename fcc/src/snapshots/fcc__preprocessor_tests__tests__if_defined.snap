@@ -4,9 +4,22 @@ expression: "pp(\"#define X\\n#if defined(X)\\nint a;\\n#endif\\n#if defined(Y)\
 ---
 [
     KwInt,
-    Identifier,
+    Whitespace(
+        " ",
+    ),
+    Identifier(
+        "a",
+    ),
     Semicolon,
+    Whitespace(
+        "\n",
+    ),
     KwInt,
-    Identifier,
+    Whitespace(
+        " ",
+    ),
+    Identifier(
+        "c",
+    ),
     Semicolon,
 ]

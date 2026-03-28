@@ -4,6 +4,11 @@ expression: "pp(\"int x;\")"
 ---
 [
     KwInt,
-    Identifier,
+    Whitespace(
+        " ",
+    ),
+    Identifier(
+        "x",
+    ),
     Semicolon,
 ]

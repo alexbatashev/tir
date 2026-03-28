@@ -4,7 +4,20 @@ expression: "pp(\"#define FOO 1\\n#undef FOO\\nint x = FOO;\")"
 ---
 [
     KwInt,
-    Identifier,
-    Identifier,
+    Whitespace(
+        " ",
+    ),
+    Identifier(
+        "x",
+    ),
+    Whitespace(
+        " ",
+    ),
+    Whitespace(
+        " ",
+    ),
+    Identifier(
+        "FOO",
+    ),
     Semicolon,
 ]

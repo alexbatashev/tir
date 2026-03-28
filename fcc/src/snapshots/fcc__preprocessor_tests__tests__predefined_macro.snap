@@ -4,7 +4,18 @@ expression: "pp_with_defines(\"int x = N;\", &[(\"N\", \"7\")])"
 ---
 [
     KwInt,
-    Identifier,
+    Whitespace(
+        " ",
+    ),
+    Identifier(
+        "x",
+    ),
+    Whitespace(
+        " ",
+    ),
+    Whitespace(
+        " ",
+    ),
     IntegerLiteral(
         APInt {
             width: 3,

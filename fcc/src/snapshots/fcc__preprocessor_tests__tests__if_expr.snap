@@ -4,6 +4,14 @@ expression: "pp(\"#if 2 + 3 > 4\\nint a;\\n#endif\")"
 ---
 [
     KwInt,
-    Identifier,
+    Whitespace(
+        " ",
+    ),
+    Identifier(
+        "a",
+    ),
     Semicolon,
+    Whitespace(
+        "\n",
+    ),
 ]

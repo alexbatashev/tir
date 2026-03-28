@@ -4,5 +4,8 @@ expression: "pp(\"#define FLAG\\nint FLAG;\")"
 ---
 [
     KwInt,
+    Whitespace(
+        " ",
+    ),
     Semicolon,
 ]

@@ -4,6 +4,11 @@ expression: "pp(\"#ifdef OUTER\\n#ifdef INNER\\nint a;\\n#else\\nint b;\\n#endif
 ---
 [
     KwInt,
-    Identifier,
+    Whitespace(
+        " ",
+    ),
+    Identifier(
+        "c",
+    ),
     Semicolon,
 ]

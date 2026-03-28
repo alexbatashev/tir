@@ -6,6 +6,11 @@ edition = "2024"
 [dependencies]
 logos = "0.16.1"
 tir = { path = "../core" }
+clap = { version = "4.6.0", features = ["derive"] }
 
 [dev-dependencies]
 insta = "1.46.3"
+
+[[bin]]
+name = "fcc"
+path = "bin.rs"

@@ -699,8 +699,7 @@ impl Iterator for TokenStream {
                     // process_directive always calls skip_line, which sets the offset.
                 }
 
-                Some(Ok(Token::Identifier)) => {
-                    let name = lexer.slice().to_string();
+                Some(Ok(Token::Identifier(name))) => {
                     let new = source_rc.len() - lexer.remainder().len();
                     self.source_stack.last_mut().unwrap().1 = new;
                     if !is_skipping(&self.cond_stack) {
@@ -709,7 +708,7 @@ impl Iterator for TokenStream {
                                 // Empty define — expands to nothing; continue.
                             }
                             Some(tok) => return Some(tok),
-                            None => return Some(Token::Identifier),
+                            None => return Some(Token::Identifier(name)),
                         }
                     }
                 }
