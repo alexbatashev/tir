@@ -1,6 +1,7 @@
 use crate::ast::{BinOp, BuiltinFunction, Expr as AstExpr, Lit};
 use std::collections::HashMap;
-use tir::sem_expr::{APInt, Expr};
+use tir::sem_expr::Expr;
+use tir::utils::APInt;
 
 /// Information about a symbol in the expression
 #[derive(Debug, Clone, PartialEq)]

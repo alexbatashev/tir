@@ -1,0 +1,25 @@
+---
+source: fcc/src/preprocessor_tests.rs
+expression: "pp(\"#define X\\n#if defined(X)\\nint a;\\n#endif\\n#if defined(Y)\\nint b;\\n#endif\\nint c;\")"
+---
+[
+    KwInt,
+    Whitespace(
+        " ",
+    ),
+    Identifier(
+        "a",
+    ),
+    Semicolon,
+    Whitespace(
+        "\n",
+    ),
+    KwInt,
+    Whitespace(
+        " ",
+    ),
+    Identifier(
+        "c",
+    ),
+    Semicolon,
+]

@@ -395,7 +395,7 @@ fn emit_instructions<'a>(
                                                         attribute: #name_lit,
                                                     },
                                                 )?;
-                                                Ok(Some(tir::sem_expr::APInt::new_signed(64, value)))
+                                                Ok(Some(tir::utils::APInt::new_signed(64, value)))
                                             }
                                         });
                                     }
@@ -410,7 +410,7 @@ fn emit_instructions<'a>(
                                                         attribute: #name_lit,
                                                     },
                                                 )?;
-                                                Ok(Some(tir::sem_expr::APInt::new_signed(#width_lit, value)))
+                                                Ok(Some(tir::utils::APInt::new_signed(#width_lit, value)))
                                             }
                                         });
                                     }
@@ -965,10 +965,10 @@ fn emit_sem_expr(expr: &tir::sem_expr::Expr) -> proc_macro2::TokenStream {
             let width = proc_macro2::Literal::u32_unsuffixed(v.width());
             if v.is_signed() {
                 let value = proc_macro2::Literal::i64_unsuffixed(v.to_i64());
-                quote! { tir::sem_expr::Expr::Int(tir::sem_expr::APInt::new_signed(#width, #value)) }
+                quote! { tir::sem_expr::Expr::Int(tir::utils::APInt::new_signed(#width, #value)) }
             } else {
                 let value = proc_macro2::Literal::u64_unsuffixed(v.to_u64());
-                quote! { tir::sem_expr::Expr::Int(tir::sem_expr::APInt::new(#width, #value)) }
+                quote! { tir::sem_expr::Expr::Int(tir::utils::APInt::new(#width, #value)) }
             }
         }
         Expr::Bool(v) => {

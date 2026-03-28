@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 use std::fmt;
 use std::ops::{Add, BitAnd, BitOr, BitXor, Mul, Neg, Not, Sub};
+use std::str::FromStr;
 
 /// Arbitrary Precision Integer similar to LLVM's APInt.
 /// Supports integers of arbitrary bit width, both signed and unsigned.
@@ -639,6 +640,60 @@ impl fmt::LowerHex for APInt {
 impl fmt::UpperHex for APInt {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:X}", self.value)
+    }
+}
+
+impl FromStr for APInt {
+    type Err = String;
+
+    /// Parse an integer literal in the style of Rust/C integer literals.
+    /// Supports:
+    ///   - decimal:     `42`, `1_000`
+    ///   - hexadecimal: `0x1F`, `0X1F`
+    ///   - octal:       `0o77`, `0O77`
+    ///   - binary:      `0b1010`, `0B1010`
+    /// Underscores are allowed as digit separators and are ignored.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.trim();
+        if s.is_empty() {
+            return Err("empty string".to_string());
+        }
+
+        let (radix, digits) =
+            if let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+                (16u64, rest)
+            } else if let Some(rest) = s.strip_prefix("0o").or_else(|| s.strip_prefix("0O")) {
+                (8u64, rest)
+            } else if let Some(rest) = s.strip_prefix("0b").or_else(|| s.strip_prefix("0B")) {
+                (2u64, rest)
+            } else {
+                (10u64, s)
+            };
+
+        let clean: String = digits.chars().filter(|&c| c != '_').collect();
+        if clean.is_empty() {
+            return Err(format!("no digits in '{s}'"));
+        }
+
+        let mut value: u64 = 0;
+        for ch in clean.chars() {
+            let digit = ch
+                .to_digit(radix as u32)
+                .ok_or_else(|| format!("invalid digit '{ch}' for radix {radix}"))?
+                as u64;
+            value = value
+                .checked_mul(radix)
+                .and_then(|v| v.checked_add(digit))
+                .ok_or_else(|| format!("value overflows u64: '{s}'"))?;
+        }
+
+        let width = if value == 0 {
+            1
+        } else {
+            64 - value.leading_zeros()
+        }
+        .max(1);
+        Ok(APInt::new(width, value))
     }
 }
 

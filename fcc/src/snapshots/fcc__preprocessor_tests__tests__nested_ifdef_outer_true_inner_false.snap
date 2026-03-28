@@ -1,0 +1,25 @@
+---
+source: fcc/src/preprocessor_tests.rs
+expression: "pp(\"#define OUTER\\n#ifdef OUTER\\n#ifdef INNER\\nint a;\\n#else\\nint b;\\n#endif\\n#endif\\nint c;\")"
+---
+[
+    KwInt,
+    Whitespace(
+        " ",
+    ),
+    Identifier(
+        "b",
+    ),
+    Semicolon,
+    Whitespace(
+        "\n",
+    ),
+    KwInt,
+    Whitespace(
+        " ",
+    ),
+    Identifier(
+        "c",
+    ),
+    Semicolon,
+]

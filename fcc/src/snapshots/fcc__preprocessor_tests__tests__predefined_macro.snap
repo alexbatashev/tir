@@ -1,0 +1,27 @@
+---
+source: fcc/src/preprocessor_tests.rs
+expression: "pp_with_defines(\"int x = N;\", &[(\"N\", \"7\")])"
+---
+[
+    KwInt,
+    Whitespace(
+        " ",
+    ),
+    Identifier(
+        "x",
+    ),
+    Whitespace(
+        " ",
+    ),
+    Whitespace(
+        " ",
+    ),
+    IntegerLiteral(
+        APInt {
+            width: 3,
+            signed: false,
+            value: 7,
+        },
+    ),
+    Semicolon,
+]

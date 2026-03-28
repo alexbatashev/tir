@@ -130,7 +130,7 @@ impl ProgramBuilder {
 #[derive(Default)]
 pub struct Executor {
     program: Option<ProgramImage>,
-    registers: HashMap<(String, u16), tir::sem_expr::APInt>,
+    registers: HashMap<(String, u16), tir::utils::APInt>,
     memory: Vec<u8>,
     pc: u64,
     pc_explicitly_written: bool,
@@ -252,7 +252,7 @@ impl Executor {
         .into())
     }
 
-    pub fn register_snapshot(&self) -> Vec<(String, u16, tir::sem_expr::APInt)> {
+    pub fn register_snapshot(&self) -> Vec<(String, u16, tir::utils::APInt)> {
         let mut regs = self
             .registers
             .iter()
@@ -311,19 +311,19 @@ impl Executor {
 }
 
 impl MachineContext for Executor {
-    fn read_register(&self, class: &str, index: u16) -> Result<tir::sem_expr::APInt, SimTrap> {
+    fn read_register(&self, class: &str, index: u16) -> Result<tir::utils::APInt, SimTrap> {
         let key = (class.to_string(), index);
         if let Some(value) = self.registers.get(&key) {
             return Ok(value.clone());
         }
-        Ok(tir::sem_expr::APInt::new(64, 0))
+        Ok(tir::utils::APInt::new(64, 0))
     }
 
     fn write_register(
         &mut self,
         class: &str,
         index: u16,
-        value: tir::sem_expr::APInt,
+        value: tir::utils::APInt,
     ) -> Result<(), SimTrap> {
         self.registers.insert((class.to_string(), index), value);
         Ok(())
@@ -371,7 +371,7 @@ impl MachineContext for Executor {
 #[cfg(test)]
 mod tests {
     use tir::Context;
-    use tir::sem_expr::APInt;
+    use tir::utils::APInt;
     use tir_be_common::{AsmDialect, MachineInstruction};
     use tir_riscv::RiscvDialect;
 

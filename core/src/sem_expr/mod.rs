@@ -1,13 +1,11 @@
-mod apfloat;
-mod apint;
 mod bitvec;
 pub mod lean;
 pub mod rocq;
 mod simplification;
 pub mod smtlib;
 
-pub use apfloat::APFloat;
-pub use apint::APInt;
+use crate::utils::APFloat;
+use crate::utils::APInt;
 pub use bitvec::BitVec;
 pub use simplification::simplify;
 
