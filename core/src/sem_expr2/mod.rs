@@ -1,8 +1,15 @@
 use crate::{
     Context,
-    graph::NodeKind,
+    builtin::FuncOp,
+    graph::{NodeKind, PostOrderDag},
     sem_expr::{APFloat, APInt},
 };
+
+mod exec;
+
+pub use exec::execute;
+
+pub type ExprPostGraph = PostOrderDag<ExprKind, ExprPayload>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ExprKind {
@@ -60,4 +67,8 @@ impl NodeKind for ExprKind {
             _ => 2,
         }
     }
+}
+
+pub fn build_from_function_postorder(func: FuncOp) -> ExprPostGraph {
+    todo!()
 }
