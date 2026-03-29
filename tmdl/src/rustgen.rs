@@ -1324,7 +1324,9 @@ fn emit_as_sem_expr2_stmts(
             *counter += 1;
             let kind: proc_macro2::TokenStream = $kind;
             stmts.push(quote! {
-                let #var = g.add_inner(#kind, &[#lhs_var, #rhs_var]);
+                let #var = g.add_node(#kind);
+                g.add_edge(#var, #lhs_var);
+                g.add_edge(#var, #rhs_var);
             });
             Some((stmts, var))
         }};
@@ -1338,7 +1340,8 @@ fn emit_as_sem_expr2_stmts(
             *counter += 1;
             let kind: proc_macro2::TokenStream = $kind;
             stmts.push(quote! {
-                let #var = g.add_inner(#kind, &[#input_var]);
+                let #var = g.add_node(#kind);
+                g.add_edge(#var, #input_var);
             });
             Some((stmts, var))
         }};
@@ -1350,10 +1353,8 @@ fn emit_as_sem_expr2_stmts(
             *counter += 1;
             let id_lit = proc_macro2::Literal::u32_unsuffixed(*id);
             let stmt = quote! {
-                let #var = g.add_leaf(
-                    tir::sem_expr2::ExprKind::Symbol,
-                    tir::sem_expr2::ExprPayload::SymbolId(#id_lit),
-                );
+                let #var = g.add_node(tir::sem_expr2::ExprKind::Symbol);
+                g.set_leaf_data(#var, tir::sem_expr2::ExprPayload::SymbolId(#id_lit));
             };
             Some((vec![stmt], var))
         }
@@ -1364,18 +1365,14 @@ fn emit_as_sem_expr2_stmts(
             let stmt = if v.is_signed() {
                 let val = proc_macro2::Literal::i64_unsuffixed(v.to_i64());
                 quote! {
-                    let #var = g.add_leaf(
-                        tir::sem_expr2::ExprKind::Constant,
-                        tir::sem_expr2::ExprPayload::Int(tir::utils::APInt::new_signed(#w, #val)),
-                    );
+                    let #var = g.add_node(tir::sem_expr2::ExprKind::Constant);
+                    g.set_leaf_data(#var, tir::sem_expr2::ExprPayload::Int(tir::utils::APInt::new_signed(#w, #val)));
                 }
             } else {
                 let val = proc_macro2::Literal::u64_unsuffixed(v.to_u64());
                 quote! {
-                    let #var = g.add_leaf(
-                        tir::sem_expr2::ExprKind::Constant,
-                        tir::sem_expr2::ExprPayload::Int(tir::utils::APInt::new(#w, #val)),
-                    );
+                    let #var = g.add_node(tir::sem_expr2::ExprKind::Constant);
+                    g.set_leaf_data(#var, tir::sem_expr2::ExprPayload::Int(tir::utils::APInt::new(#w, #val)));
                 }
             };
             Some((vec![stmt], var))
@@ -1385,10 +1382,8 @@ fn emit_as_sem_expr2_stmts(
             *counter += 1;
             let val = *b as u64;
             let stmt = quote! {
-                let #var = g.add_leaf(
-                    tir::sem_expr2::ExprKind::Constant,
-                    tir::sem_expr2::ExprPayload::Int(tir::utils::APInt::new(1, #val)),
-                );
+                let #var = g.add_node(tir::sem_expr2::ExprKind::Constant);
+                g.set_leaf_data(#var, tir::sem_expr2::ExprPayload::Int(tir::utils::APInt::new(1, #val)));
             };
             Some((vec![stmt], var))
         }
@@ -1398,10 +1393,8 @@ fn emit_as_sem_expr2_stmts(
             // Round-trip through f64 for code generation purposes.
             let as_f64 = proc_macro2::Literal::f64_unsuffixed(f.to_f64());
             let stmt = quote! {
-                let #var = g.add_leaf(
-                    tir::sem_expr2::ExprKind::Constant,
-                    tir::sem_expr2::ExprPayload::Float(tir::utils::APFloat::from_f64(#as_f64)),
-                );
+                let #var = g.add_node(tir::sem_expr2::ExprKind::Constant);
+                g.set_leaf_data(#var, tir::sem_expr2::ExprPayload::Float(tir::utils::APFloat::from_f64(#as_f64)));
             };
             Some((vec![stmt], var))
         }
@@ -1414,7 +1407,10 @@ fn emit_as_sem_expr2_stmts(
             let var = format_ident!("__sem2_{}", *counter);
             *counter += 1;
             stmts.push(quote! {
-                let #var = g.add_inner(tir::sem_expr2::ExprKind::If, &[#cond_var, #then_var, #else_var]);
+                let #var = g.add_node(tir::sem_expr2::ExprKind::If);
+                g.add_edge(#var, #cond_var);
+                g.add_edge(#var, #then_var);
+                g.add_edge(#var, #else_var);
             });
             Some((stmts, var))
         }
@@ -1427,7 +1423,10 @@ fn emit_as_sem_expr2_stmts(
             let var = format_ident!("__sem2_{}", *counter);
             *counter += 1;
             stmts.push(quote! {
-                let #var = g.add_inner(tir::sem_expr2::ExprKind::Fma, &[#a_var, #b_var, #c_var]);
+                let #var = g.add_node(tir::sem_expr2::ExprKind::Fma);
+                g.add_edge(#var, #a_var);
+                g.add_edge(#var, #b_var);
+                g.add_edge(#var, #c_var);
             });
             Some((stmts, var))
         }

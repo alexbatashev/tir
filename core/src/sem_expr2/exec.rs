@@ -200,13 +200,27 @@ mod tests {
     };
 
     fn sym(g: &mut ExprPostGraph, id: u32) -> NodeId {
-        g.add_leaf(ExprKind::Symbol, ExprPayload::SymbolId(id))
+        let node = g.add_node(ExprKind::Symbol);
+        g.set_leaf_data(node, ExprPayload::SymbolId(id));
+        node
     }
     fn int_con(g: &mut ExprPostGraph, v: i64) -> NodeId {
-        g.add_leaf(ExprKind::Constant, ExprPayload::Int(APInt::new_signed(64, v)))
+        let node = g.add_node(ExprKind::Constant);
+        g.set_leaf_data(node, ExprPayload::Int(APInt::new_signed(64, v)));
+        node
     }
     fn flt_con(g: &mut ExprPostGraph, v: f64) -> NodeId {
-        g.add_leaf(ExprKind::Constant, ExprPayload::Float(APFloat::from_f64(v)))
+        let node = g.add_node(ExprKind::Constant);
+        g.set_leaf_data(node, ExprPayload::Float(APFloat::from_f64(v)));
+        node
+    }
+
+    fn inner(g: &mut ExprPostGraph, kind: ExprKind, children: &[NodeId]) -> NodeId {
+        let node = g.add_node(kind);
+        for &child in children {
+            g.add_edge(node, child);
+        }
+        node
     }
 
     fn iv(v: i64) -> Value { Value::Int(APInt::new_signed(32, v)) }
@@ -222,7 +236,7 @@ mod tests {
     fn int_add() {
         let mut g = ExprPostGraph::new();
         let a = sym(&mut g, 0); let b = sym(&mut g, 1);
-        g.add_inner(ExprKind::Add, &[a, b]);
+        inner(&mut g, ExprKind::Add, &[a, b]);
         assert_eq!(as_i64(execute(&g, &[iv(3), iv(4)])), 7);
     }
 
@@ -230,7 +244,7 @@ mod tests {
     fn int_sub() {
         let mut g = ExprPostGraph::new();
         let a = sym(&mut g, 0); let b = sym(&mut g, 1);
-        g.add_inner(ExprKind::Sub, &[a, b]);
+        inner(&mut g, ExprKind::Sub, &[a, b]);
         assert_eq!(as_i64(execute(&g, &[iv(10), iv(3)])), 7);
     }
 
@@ -238,7 +252,7 @@ mod tests {
     fn int_mul() {
         let mut g = ExprPostGraph::new();
         let a = sym(&mut g, 0); let b = sym(&mut g, 1);
-        g.add_inner(ExprKind::Mul, &[a, b]);
+        inner(&mut g, ExprKind::Mul, &[a, b]);
         assert_eq!(as_i64(execute(&g, &[iv(6), iv(7)])), 42);
     }
 
@@ -246,7 +260,7 @@ mod tests {
     fn int_and() {
         let mut g = ExprPostGraph::new();
         let a = sym(&mut g, 0); let b = sym(&mut g, 1);
-        g.add_inner(ExprKind::And, &[a, b]);
+        inner(&mut g, ExprKind::And, &[a, b]);
         assert_eq!(as_i64(execute(&g, &[uv(0b1100), uv(0b1010)])), 0b1000);
     }
 
@@ -254,7 +268,7 @@ mod tests {
     fn int_shl() {
         let mut g = ExprPostGraph::new();
         let a = sym(&mut g, 0); let b = sym(&mut g, 1);
-        g.add_inner(ExprKind::ShiftLeft, &[a, b]);
+        inner(&mut g, ExprKind::ShiftLeft, &[a, b]);
         assert_eq!(as_i64(execute(&g, &[uv(1), uv(3)])), 8);
     }
 
@@ -262,7 +276,7 @@ mod tests {
     fn int_lshr() {
         let mut g = ExprPostGraph::new();
         let a = sym(&mut g, 0); let b = sym(&mut g, 1);
-        g.add_inner(ExprKind::ShiftRightLogic, &[a, b]);
+        inner(&mut g, ExprKind::ShiftRightLogic, &[a, b]);
         assert_eq!(as_i64(execute(&g, &[uv(16), uv(2)])), 4);
     }
 
@@ -270,7 +284,7 @@ mod tests {
     fn int_ashr_negative() {
         let mut g = ExprPostGraph::new();
         let a = sym(&mut g, 0); let b = sym(&mut g, 1);
-        g.add_inner(ExprKind::ShiftRightArithmetic, &[a, b]);
+        inner(&mut g, ExprKind::ShiftRightArithmetic, &[a, b]);
         assert_eq!(as_i64(execute(&g, &[iv(-8), iv(1)])), -4);
     }
 
@@ -285,7 +299,7 @@ mod tests {
     fn int_shared_node() {
         let mut g = ExprPostGraph::new();
         let a = sym(&mut g, 0);
-        g.add_inner(ExprKind::Add, &[a, a]);
+        inner(&mut g, ExprKind::Add, &[a, a]);
         assert_eq!(as_i64(execute(&g, &[iv(5)])), 10);
     }
 
@@ -293,7 +307,7 @@ mod tests {
     fn int_fma() {
         let mut g = ExprPostGraph::new();
         let a = sym(&mut g, 0); let b = sym(&mut g, 1); let c = sym(&mut g, 2);
-        g.add_inner(ExprKind::Fma, &[a, b, c]);
+        inner(&mut g, ExprKind::Fma, &[a, b, c]);
         assert_eq!(as_i64(execute(&g, &[iv(3), iv(4), iv(5)])), 17);
     }
 
@@ -303,7 +317,7 @@ mod tests {
     fn int_eq_true() {
         let mut g = ExprPostGraph::new();
         let a = sym(&mut g, 0); let b = sym(&mut g, 1);
-        g.add_inner(ExprKind::Eq, &[a, b]);
+        inner(&mut g, ExprKind::Eq, &[a, b]);
         assert_eq!(as_i64(execute(&g, &[iv(5), iv(5)])), 1);
     }
 
@@ -311,7 +325,7 @@ mod tests {
     fn int_eq_false() {
         let mut g = ExprPostGraph::new();
         let a = sym(&mut g, 0); let b = sym(&mut g, 1);
-        g.add_inner(ExprKind::Eq, &[a, b]);
+        inner(&mut g, ExprKind::Eq, &[a, b]);
         assert_eq!(as_i64(execute(&g, &[iv(5), iv(6)])), 0);
     }
 
@@ -319,7 +333,7 @@ mod tests {
     fn int_if_taken() {
         let mut g = ExprPostGraph::new();
         let cond = sym(&mut g, 0); let t = sym(&mut g, 1); let e = sym(&mut g, 2);
-        g.add_inner(ExprKind::If, &[cond, t, e]);
+        inner(&mut g, ExprKind::If, &[cond, t, e]);
         assert_eq!(as_i64(execute(&g, &[iv(1), iv(42), iv(0)])), 42);
     }
 
@@ -327,7 +341,7 @@ mod tests {
     fn int_if_not_taken() {
         let mut g = ExprPostGraph::new();
         let cond = sym(&mut g, 0); let t = sym(&mut g, 1); let e = sym(&mut g, 2);
-        g.add_inner(ExprKind::If, &[cond, t, e]);
+        inner(&mut g, ExprKind::If, &[cond, t, e]);
         assert_eq!(as_i64(execute(&g, &[iv(0), iv(42), iv(99)])), 99);
     }
 
@@ -337,7 +351,7 @@ mod tests {
     fn float_add() {
         let mut g = ExprPostGraph::new();
         let a = sym(&mut g, 0); let b = sym(&mut g, 1);
-        g.add_inner(ExprKind::Add, &[a, b]);
+        inner(&mut g, ExprKind::Add, &[a, b]);
         assert!((as_f64(execute(&g, &[fv(1.5), fv(2.5)]) ) - 4.0).abs() < 1e-9);
     }
 
@@ -345,7 +359,7 @@ mod tests {
     fn float_sub() {
         let mut g = ExprPostGraph::new();
         let a = sym(&mut g, 0); let b = sym(&mut g, 1);
-        g.add_inner(ExprKind::Sub, &[a, b]);
+        inner(&mut g, ExprKind::Sub, &[a, b]);
         assert!((as_f64(execute(&g, &[fv(5.0), fv(3.0)])) - 2.0).abs() < 1e-9);
     }
 
@@ -353,7 +367,7 @@ mod tests {
     fn float_mul() {
         let mut g = ExprPostGraph::new();
         let a = sym(&mut g, 0); let b = sym(&mut g, 1);
-        g.add_inner(ExprKind::Mul, &[a, b]);
+        inner(&mut g, ExprKind::Mul, &[a, b]);
         assert!((as_f64(execute(&g, &[fv(2.0), fv(3.5)])) - 7.0).abs() < 1e-9);
     }
 
@@ -361,7 +375,7 @@ mod tests {
     fn float_div() {
         let mut g = ExprPostGraph::new();
         let a = sym(&mut g, 0); let b = sym(&mut g, 1);
-        g.add_inner(ExprKind::Div, &[a, b]);
+        inner(&mut g, ExprKind::Div, &[a, b]);
         assert!((as_f64(execute(&g, &[fv(7.0), fv(2.0)])) - 3.5).abs() < 1e-9);
     }
 
@@ -369,7 +383,7 @@ mod tests {
     fn float_sqrt() {
         let mut g = ExprPostGraph::new();
         let a = sym(&mut g, 0);
-        g.add_inner(ExprKind::Sqrt, &[a]);
+        inner(&mut g, ExprKind::Sqrt, &[a]);
         assert!((as_f64(execute(&g, &[fv(9.0)])) - 3.0).abs() < 1e-9);
     }
 
@@ -377,7 +391,7 @@ mod tests {
     fn float_fma() {
         let mut g = ExprPostGraph::new();
         let a = sym(&mut g, 0); let b = sym(&mut g, 1); let c = sym(&mut g, 2);
-        g.add_inner(ExprKind::Fma, &[a, b, c]);
+        inner(&mut g, ExprKind::Fma, &[a, b, c]);
         // 2.0 * 3.0 + 1.0 = 7.0
         assert!((as_f64(execute(&g, &[fv(2.0), fv(3.0), fv(1.0)])) - 7.0).abs() < 1e-9);
     }
@@ -393,7 +407,7 @@ mod tests {
     fn float_lt_true() {
         let mut g = ExprPostGraph::new();
         let a = sym(&mut g, 0); let b = sym(&mut g, 1);
-        g.add_inner(ExprKind::Lt, &[a, b]);
+        inner(&mut g, ExprKind::Lt, &[a, b]);
         assert_eq!(as_i64(execute(&g, &[fv(1.0), fv(2.0)])), 1);
     }
 
@@ -401,7 +415,7 @@ mod tests {
     fn float_lt_false() {
         let mut g = ExprPostGraph::new();
         let a = sym(&mut g, 0); let b = sym(&mut g, 1);
-        g.add_inner(ExprKind::Lt, &[a, b]);
+        inner(&mut g, ExprKind::Lt, &[a, b]);
         assert_eq!(as_i64(execute(&g, &[fv(3.0), fv(2.0)])), 0);
     }
 }

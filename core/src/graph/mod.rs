@@ -49,20 +49,6 @@ pub trait MutDag: Dag {
     fn add_node(&mut self, n: Self::Node) -> NodeId;
     fn add_edge(&mut self, from: NodeId, to: NodeId);
     fn set_leaf_data(&mut self, n: NodeId, d: Self::Leaf);
-
-    fn add_leaf(&mut self, kind: Self::Node, data: Self::Leaf) -> NodeId {
-        let id = self.add_node(kind);
-        self.set_leaf_data(id, data);
-        id
-    }
-
-    fn add_inner(&mut self, kind: Self::Node, children: &[NodeId]) -> NodeId {
-        let id = self.add_node(kind);
-        for &child in children {
-            self.add_edge(id, child);
-        }
-        id
-    }
 }
 
 pub struct GenericDag<N: Node, L> {

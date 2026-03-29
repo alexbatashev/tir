@@ -1057,10 +1057,8 @@ fn sem_node_to_dag_stmts(
                 *counter += 1;
                 let idx_lit = proc_macro2::Literal::u32_unsuffixed(idx);
                 let stmt = quote! {
-                    let #var = g.add_leaf(
-                        tir::sem_expr2::ExprKind::Symbol,
-                        tir::sem_expr2::ExprPayload::SymbolId(#idx_lit),
-                    );
+                    let #var = g.add_node(tir::sem_expr2::ExprKind::Symbol);
+                    g.set_leaf_data(#var, tir::sem_expr2::ExprPayload::SymbolId(#idx_lit));
                 };
                 Some((vec![stmt], var))
             } else if let Ok(i) = name.parse::<i64>() {
@@ -1068,10 +1066,8 @@ fn sem_node_to_dag_stmts(
                 *counter += 1;
                 let val = proc_macro2::Literal::i64_unsuffixed(i);
                 let stmt = quote! {
-                    let #var = g.add_leaf(
-                        tir::sem_expr2::ExprKind::Constant,
-                        tir::sem_expr2::ExprPayload::Int(tir::utils::APInt::new_signed(64, #val)),
-                    );
+                    let #var = g.add_node(tir::sem_expr2::ExprKind::Constant);
+                    g.set_leaf_data(#var, tir::sem_expr2::ExprPayload::Int(tir::utils::APInt::new_signed(64, #val)));
                 };
                 Some((vec![stmt], var))
             } else {
@@ -1101,7 +1097,9 @@ fn sem_node_to_dag_stmts(
             let var = format_ident!("__sem_node_{}", *counter);
             *counter += 1;
             stmts.push(quote! {
-                let #var = g.add_inner(#kind, &[#lhs_var, #rhs_var]);
+                let #var = g.add_node(#kind);
+                g.add_edge(#var, #lhs_var);
+                g.add_edge(#var, #rhs_var);
             });
             Some((stmts, var))
         }
