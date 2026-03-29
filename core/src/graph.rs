@@ -194,6 +194,15 @@ impl<N: Node> Node for PatternNodeKind<N> {
 /// ```
 pub type PatternDag<N, L = ()> = PostOrderDag<PatternNodeKind<N>, L>;
 
+/// Pattern construction and validation errors.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum PatternError {
+    #[error("wildcard pattern node {node:?} must not have children")]
+    WildcardHasChildren { node: NodeId },
+    #[error("pattern node {node:?} is disconnected from the pattern root")]
+    DisconnectedNode { node: NodeId },
+}
+
 /// One successful match of a pattern against a region of the target DAG.
 ///
 /// `mapping[i]` is the `NodeId` in the *target* that pattern node
@@ -212,7 +221,7 @@ impl Match {
 }
 
 /// All matches collected by [`PatternMatchDriver::run`].
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct MatchSet {
     /// `(pattern_index, match)` pairs, in discovery order.
     pub matches: Vec<(usize, Match)>,
@@ -228,8 +237,36 @@ impl MatchSet {
     }
 }
 
-/// Matches zero or more patterns against a target DAG using a VF2-style
-/// recursive subgraph-isomorphism search adapted for ordered, rooted DAGs.
+pub fn validate_pattern<N: Node, L>(pattern: &PatternDag<N, L>) -> Result<(), PatternError> {
+    let Some(root) = pattern.root() else {
+        return Ok(());
+    };
+
+    for idx in 0..pattern.len() {
+        let node = NodeId::from_index(idx);
+        if matches!(pattern.get_kind(node), PatternNodeKind::Wildcard)
+            && !pattern.children(node).is_empty()
+        {
+            return Err(PatternError::WildcardHasChildren { node });
+        }
+    }
+
+    let mut reachable = vec![false; pattern.len()];
+    mark_reachable(pattern, root, &mut reachable);
+
+    for (idx, seen) in reachable.into_iter().enumerate() {
+        if !seen {
+            return Err(PatternError::DisconnectedNode {
+                node: NodeId::from_index(idx),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+/// Matches zero or more patterns against a target DAG using an ordered,
+/// rooted DAG matcher with backtracking and consistency checks.
 ///
 /// The pattern root is anchored at every target node in turn; each anchor
 /// attempt is independent. All successful matches are collected so a
@@ -249,11 +286,47 @@ impl<N: Node + PartialEq, L> PatternMatchDriver<N, L> {
         Self { patterns }
     }
 
+    pub fn validate(&self) -> Result<(), PatternError> {
+        for pattern in &self.patterns {
+            validate_pattern(pattern)?;
+        }
+        Ok(())
+    }
+
     /// Match every pattern at every node of `target` and return all results.
     ///
     /// The same target subtree may appear in multiple entries of the returned
     /// [`MatchSet`] (different patterns, or different anchor positions).
-    pub fn run<TL>(&self, target: &impl Dag<N, TL>) -> MatchSet {
+    pub fn run<TL, D>(&self, target: &D) -> MatchSet
+    where
+        D: Dag<N, TL>,
+    {
+        self.try_run(target)
+            .expect("pattern validation failed before matching")
+    }
+
+    /// Match every pattern at every node of `target`, validating patterns
+    /// before the search starts.
+    pub fn try_run<TL, D>(&self, target: &D) -> Result<MatchSet, PatternError>
+    where
+        D: Dag<N, TL>,
+    {
+        self.try_run_with(target, |_, _, _, _| true)
+    }
+
+    /// Like [`PatternMatchDriver::try_run`], but lets the caller reject
+    /// individual node pairs with a target-specific predicate.
+    pub fn try_run_with<TL, D, F>(
+        &self,
+        target: &D,
+        mut predicate: F,
+    ) -> Result<MatchSet, PatternError>
+    where
+        D: Dag<N, TL>,
+        F: FnMut(&PatternDag<N, L>, &D, NodeId, NodeId) -> bool,
+    {
+        self.validate()?;
+
         let mut set = MatchSet::default();
 
         for (pat_idx, pattern) in self.patterns.iter().enumerate() {
@@ -264,12 +337,20 @@ impl<N: Node + PartialEq, L> PatternMatchDriver<N, L> {
             for t_idx in 0..target.len() {
                 let t_root = NodeId::from_index(t_idx);
 
-                // Fresh VF2 state per (pattern, anchor) attempt so that a
+                // Fresh match state per (pattern, anchor) attempt so that a
                 // failed attempt never pollutes the next one.
                 let mut core_p = vec![UNMATCHED; pattern.len()];
                 let mut core_t = vec![UNMATCHED; target.len()];
 
-                if vf2_match(pattern, target, pat_root, t_root, &mut core_p, &mut core_t) {
+                if match_pattern(
+                    pattern,
+                    target,
+                    pat_root,
+                    t_root,
+                    &mut core_p,
+                    &mut core_t,
+                    &mut predicate,
+                ) {
                     let mapping = core_p
                         .iter()
                         .map(|&ti| NodeId::from_index(ti))
@@ -279,11 +360,11 @@ impl<N: Node + PartialEq, L> PatternMatchDriver<N, L> {
             }
         }
 
-        set
+        Ok(set)
     }
 }
 
-// ─── VF2 internals ───────────────────────────────────────────────────────────
+// ─── Matching internals ──────────────────────────────────────────────────────
 
 const UNMATCHED: usize = usize::MAX;
 
@@ -295,21 +376,24 @@ const UNMATCHED: usize = usize::MAX;
 /// * **Failure** (`false`): `core_p`/`core_t` are restored to their state
 ///   *before* this call (full backtracking).
 ///
-/// ## Ordered-DAG VF2
+/// ## Ordered-DAG matching
 /// Because children are ordered, the candidate for pattern child `i` is
 /// always target child `i` — so no candidate enumeration loop is needed.
-/// The VF2 contribution is the consistency check for shared pattern nodes
-/// and the clean backtracking discipline.
-fn vf2_match<N, PL, TL>(
-    pattern: &impl Dag<PatternNodeKind<N>, PL>,
-    target: &impl Dag<N, TL>,
+/// Shared pattern nodes still require consistent reuse of the same target
+/// node, and failures are handled with full backtracking.
+fn match_pattern<N, PL, TL, D, F>(
+    pattern: &PatternDag<N, PL>,
+    target: &D,
     p: NodeId,
     t: NodeId,
     core_p: &mut Vec<usize>,
     core_t: &mut Vec<usize>,
+    predicate: &mut F,
 ) -> bool
 where
     N: Node + PartialEq,
+    D: Dag<N, TL>,
+    F: FnMut(&PatternDag<N, PL>, &D, NodeId, NodeId) -> bool,
 {
     // ── Consistency checks (read-only) ───────────────────────────────────────
     // If `p` is already mapped, the only valid candidate is the same `t`.
@@ -340,6 +424,10 @@ where
         }
     }
 
+    if !predicate(pattern, target, p, t) {
+        return false;
+    }
+
     // ── Extend mapping ───────────────────────────────────────────────────────
     core_p[p.index()] = t.index();
     core_t[t.index()] = p.index();
@@ -354,10 +442,10 @@ where
     let t_children: Vec<NodeId> = target.children(t).to_vec();
 
     for (i, (&pc, &tc)) in p_children.iter().zip(t_children.iter()).enumerate() {
-        if !vf2_match(pattern, target, pc, tc, core_p, core_t) {
+        if !match_pattern(pattern, target, pc, tc, core_p, core_t, predicate) {
             // Undo the siblings that already succeeded (reverse order).
             for j in (0..i).rev() {
-                vf2_undo(pattern, p_children[j], core_p, core_t);
+                undo_match(pattern, p_children[j], core_p, core_t);
             }
             // Undo our own pair and propagate failure.
             core_p[p.index()] = UNMATCHED;
@@ -373,7 +461,7 @@ where
 ///
 /// No-ops if `p` is already unmapped, so it is safe to call on shared pattern
 /// nodes that may have been unset by an earlier sibling's undo pass.
-fn vf2_undo<N: Node, PL>(
+fn undo_match<N: Node, PL>(
     pattern: &impl Dag<PatternNodeKind<N>, PL>,
     p: NodeId,
     core_p: &mut Vec<usize>,
@@ -388,8 +476,22 @@ fn vf2_undo<N: Node, PL>(
 
     if !matches!(pattern.get_kind(p), PatternNodeKind::Wildcard) {
         for &pc in pattern.children(p) {
-            vf2_undo(pattern, pc, core_p, core_t);
+            undo_match(pattern, pc, core_p, core_t);
         }
+    }
+}
+
+fn mark_reachable<N: Node, L>(
+    pattern: &PatternDag<N, L>,
+    node: NodeId,
+    reachable: &mut [bool],
+) {
+    if reachable[node.index()] {
+        return;
+    }
+    reachable[node.index()] = true;
+    for &child in pattern.children(node) {
+        mark_reachable(pattern, child, reachable);
     }
 }
 
@@ -644,5 +746,53 @@ mod tests {
             let matched = m.target_of(NodeId::from_index(0));
             assert!(matched == x || matched == y, "must match a leaf");
         }
+    }
+
+    #[test]
+    fn invalid_pattern_with_disconnected_node_is_rejected() {
+        let mut pat: PatternDag<K> = PatternDag::new();
+        wc(&mut pat); // disconnected
+        exact_leaf(&mut pat); // root
+
+        let driver = PatternMatchDriver::new(vec![pat]);
+        let mut tgt = PostOrderDag::new();
+        leaf(&mut tgt);
+
+        let err = driver.try_run(&tgt).unwrap_err();
+        assert!(matches!(err, PatternError::DisconnectedNode { .. }));
+    }
+
+    #[test]
+    fn invalid_pattern_with_wildcard_parent_is_rejected() {
+        let mut pat: PatternDag<K> = PatternDag::new();
+        let a = wc(&mut pat);
+        pat.add_inner(PatternNodeKind::Wildcard, &[a]);
+
+        let driver = PatternMatchDriver::new(vec![pat]);
+        let mut tgt = PostOrderDag::new();
+        leaf(&mut tgt);
+
+        let err = driver.try_run(&tgt).unwrap_err();
+        assert!(matches!(err, PatternError::WildcardHasChildren { .. }));
+    }
+
+    #[test]
+    fn predicate_can_filter_leaf_payloads() {
+        let mut pat: PatternDag<K, i32> = PatternDag::new();
+        pat.add_leaf(PatternNodeKind::Exact(K::Leaf), 7);
+
+        let mut tgt = PostOrderDag::new();
+        tgt.add_leaf(K::Leaf, 7);
+        tgt.add_leaf(K::Leaf, 9);
+
+        let driver = PatternMatchDriver::new(vec![pat]);
+        let ms = driver
+            .try_run_with(&tgt, |pattern, target, p, t| {
+                pattern.get_leaf_data(p) == target.get_leaf_data(t)
+            })
+            .unwrap();
+
+        assert_eq!(ms.len(), 1);
+        assert_eq!(ms.matches[0].1.target_of(NodeId::from_index(0)), NodeId::from_index(0));
     }
 }
