@@ -2,7 +2,13 @@ use std::collections::HashMap;
 
 use crate::Context;
 
+mod pattern;
 mod postorder;
+
+pub use pattern::{
+    CoverCandidate, GraphCoverDriver, MatchBinding, Pattern, PatternExpr, PatternId,
+    VF2CoverDriver,
+};
 pub use postorder::PostOrderDag;
 
 pub(crate) static EMPTY_CHILDREN: [NodeId; 0] = [];

@@ -423,8 +423,16 @@ mod tests {
     fn int_clamp() {
         let mut g = ExprPostGraph::new();
         let input = sym(&mut g, 0);
-        let min = int_con(&mut g, 3);
-        let max = int_con(&mut g, 10);
+        let min = {
+            let node = g.add_node(ExprKind::Constant);
+            g.set_leaf_data(node, ExprPayload::Int(APInt::new_signed(32, 3)));
+            node
+        };
+        let max = {
+            let node = g.add_node(ExprKind::Constant);
+            g.set_leaf_data(node, ExprPayload::Int(APInt::new_signed(32, 10)));
+            node
+        };
         inner(&mut g, ExprKind::Clamp, &[input, min, max]);
         assert_eq!(as_i64(execute(&g, &[iv(20)])), 10);
     }

@@ -16,6 +16,7 @@ pub trait AsSemExpr {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, SimpleNode)]
+#[repr(u16)]
 #[simple_node(default_arity = 2)]
 pub enum ExprKind {
     #[leaf]
