@@ -1436,6 +1436,22 @@ fn emit_as_sem_expr2_stmts(
         Expr::SExt { input, width } => {
             binary!(quote! { tir::sem_expr2::ExprKind::SExt }, input, width)
         }
+        Expr::Clamp { input, min, max } => {
+            let (mut stmts, input_var) = emit_as_sem_expr2_stmts(input, counter)?;
+            let (min_stmts, min_var) = emit_as_sem_expr2_stmts(min, counter)?;
+            let (max_stmts, max_var) = emit_as_sem_expr2_stmts(max, counter)?;
+            stmts.extend(min_stmts);
+            stmts.extend(max_stmts);
+            let var = format_ident!("__sem2_{}", *counter);
+            *counter += 1;
+            stmts.push(quote! {
+                let #var = g.add_node(tir::sem_expr2::ExprKind::Clamp);
+                g.add_edge(#var, #input_var);
+                g.add_edge(#var, #min_var);
+                g.add_edge(#var, #max_var);
+            });
+            Some((stmts, var))
+        }
         Expr::Add(l, r)  => binary!(quote! { tir::sem_expr2::ExprKind::Add  }, l, r),
         Expr::Sub(l, r)  => binary!(quote! { tir::sem_expr2::ExprKind::Sub  }, l, r),
         Expr::Mul(l, r)  => binary!(quote! { tir::sem_expr2::ExprKind::Mul  }, l, r),
@@ -1461,7 +1477,6 @@ fn emit_as_sem_expr2_stmts(
         // No direct ExprKind equivalent — skip so the instruction is simply
         // not given an AsSemExpr impl rather than generating broken code.
         Expr::Le(..)
-        | Expr::Clamp { .. }
         | Expr::Extract { .. }
         | Expr::Load { .. }
         | Expr::Store { .. }

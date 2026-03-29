@@ -45,6 +45,8 @@ pub enum ExprKind {
     /// Arguments are condition, then branch, else branch
     #[arity = 3]
     If,
+    #[arity = 3]
+    Clamp,
     /// Arguments are address space, address, bytes read
     #[arity = 3]
     LoadMemory,

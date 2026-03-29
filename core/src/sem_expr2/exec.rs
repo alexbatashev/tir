@@ -144,6 +144,29 @@ fn eval_node(
             };
             if cond_zero { c(2) } else { c(1) }
         }
+        ExprKind::Clamp => {
+            let input = as_int!(c(0), "clamp");
+            let min = as_int!(c(1), "clamp");
+            let max = as_int!(c(2), "clamp");
+
+            let result = if input.is_signed() {
+                if input.slt(&min) {
+                    min
+                } else if input.sgt(&max) {
+                    max
+                } else {
+                    input
+                }
+            } else if input.ult(&min) {
+                min
+            } else if input.ugt(&max) {
+                max
+            } else {
+                input
+            };
+
+            Value::Int(result)
+        }
 
         // ── Math (int or float) ────────────────────────────────────────────
         ExprKind::Fma => match c(0) {
@@ -394,6 +417,16 @@ mod tests {
         inner(&mut g, ExprKind::Fma, &[a, b, c]);
         // 2.0 * 3.0 + 1.0 = 7.0
         assert!((as_f64(execute(&g, &[fv(2.0), fv(3.0), fv(1.0)])) - 7.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn int_clamp() {
+        let mut g = ExprPostGraph::new();
+        let input = sym(&mut g, 0);
+        let min = int_con(&mut g, 3);
+        let max = int_con(&mut g, 10);
+        inner(&mut g, ExprKind::Clamp, &[input, min, max]);
+        assert_eq!(as_i64(execute(&g, &[iv(20)])), 10);
     }
 
     #[test]
