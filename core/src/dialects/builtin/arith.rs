@@ -249,7 +249,7 @@ mod tests {
     use crate::{
         Context, IRBuilder, IRFormatter, Operation,
         builtin::{AddIOp, FuncOp, IntegerType, ops},
-        graph::Dag,
+        graph::{Dag, MutDag},
         parse::ir::parse_ir,
         sem_expr2::{AsSemExpr, ExprKind, ExprPayload, ExprPostGraph},
     };
@@ -387,7 +387,7 @@ mod tests {
     ) {
         assert_eq!(g.len(), 3, "expected 3 nodes: lhs symbol, rhs symbol, op");
         assert_eq!(g.get_kind(root), &expected_kind);
-        let children = g.children(root);
+        let children: Vec<_> = g.children(root).collect();
         assert_eq!(children.len(), 2);
         assert_eq!(g.get_kind(children[0]), &ExprKind::Symbol);
         assert_eq!(g.get_kind(children[1]), &ExprKind::Symbol);

@@ -1296,7 +1296,7 @@ fn emit_as_sem_expr_impl<'a>(
         impl tir::sem_expr2::AsSemExpr for #name_ident {
             fn convert(
                 &self,
-                g: &mut impl tir::graph::Dag<tir::sem_expr2::ExprKind, tir::sem_expr2::ExprPayload>,
+                g: &mut impl tir::graph::MutDag<Node = tir::sem_expr2::ExprKind, Leaf = tir::sem_expr2::ExprPayload>,
             ) -> tir::graph::NodeId {
                 #(#stmts)*
                 #root_var

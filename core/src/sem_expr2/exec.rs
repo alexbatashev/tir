@@ -8,19 +8,26 @@ use crate::{
 ///
 /// `symbols[i]` is the value for the operand with `SymbolId(i)`.
 /// Returns the value of the root node.
-pub fn execute(graph: &impl Dag<ExprKind, ExprPayload>, symbols: &[Value]) -> Value {
+pub fn execute(
+    graph: &impl Dag<Node = ExprKind, Leaf = ExprPayload>,
+    symbols: &[Value],
+) -> Value {
     let root = graph.root().expect("cannot execute empty graph");
     let mut cache = vec![None::<Value>; graph.len()];
     eval_node(graph, root, symbols, &mut cache)
 }
 
 fn child_val(
-    graph: &impl Dag<ExprKind, ExprPayload>,
+    graph: &impl Dag<Node = ExprKind, Leaf = ExprPayload>,
     node: NodeId,
     idx: usize,
     cache: &[Option<Value>],
 ) -> Value {
-    cache[graph.children(node)[idx].index()]
+    let child = graph
+        .children(node)
+        .nth(idx)
+        .expect("child index must be in bounds");
+    cache[child.index()]
         .as_ref()
         .expect("child must be evaluated before parent in post-order")
         .clone()
@@ -45,7 +52,7 @@ macro_rules! as_float {
 }
 
 fn eval_node(
-    graph: &impl Dag<ExprKind, ExprPayload>,
+    graph: &impl Dag<Node = ExprKind, Leaf = ExprPayload>,
     node: NodeId,
     symbols: &[Value],
     cache: &mut Vec<Option<Value>>,
@@ -54,7 +61,7 @@ fn eval_node(
         return v.clone();
     }
 
-    for &child_id in graph.children(node) {
+    for child_id in graph.children(node) {
         if cache[child_id.index()].is_none() {
             let v = eval_node(graph, child_id, symbols, cache);
             cache[child_id.index()] = Some(v);
@@ -187,7 +194,10 @@ impl PartialEq for Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{graph::Dag, sem_expr2::{ExprKind, ExprPayload, ExprPostGraph}};
+    use crate::{
+        graph::{Dag, MutDag},
+        sem_expr2::{ExprKind, ExprPayload, ExprPostGraph},
+    };
 
     fn sym(g: &mut ExprPostGraph, id: u32) -> NodeId {
         g.add_leaf(ExprKind::Symbol, ExprPayload::SymbolId(id))

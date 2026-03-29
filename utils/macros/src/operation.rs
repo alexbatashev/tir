@@ -218,7 +218,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
     let as_sem_expr_impl = if let Some(body) = as_sem_expr_body {
         quote! {
             impl tir::sem_expr2::AsSemExpr for #struct_name {
-                fn convert(&self, g: &mut impl tir::graph::Dag<tir::sem_expr2::ExprKind, tir::sem_expr2::ExprPayload>) -> tir::graph::NodeId {
+                fn convert(&self, g: &mut impl tir::graph::MutDag<Node = tir::sem_expr2::ExprKind, Leaf = tir::sem_expr2::ExprPayload>) -> tir::graph::NodeId {
                     #body
                 }
             }
