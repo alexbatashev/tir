@@ -276,6 +276,12 @@ pub enum Expr {
     Invalid,
 }
 
+pub struct SemaLowering {
+    pub root: tir::graph::NodeId,
+    pub variable_symbols: HashMap<String, u32>,
+    pub register_symbols: HashMap<(String, u32), u32>,
+}
+
 struct SemaExprLoweringCtx<
     'a,
     G: tir::graph::MutDag<Node = tir::sem_expr2::ExprKind, Leaf = tir::sem_expr2::ExprPayload>,
@@ -284,6 +290,8 @@ struct SemaExprLoweringCtx<
     params: &'a HashMap<String, i64>,
     next_symbol_id: u32,
     register_symbols: HashMap<(String, u32), u32>,
+    variable_symbols: HashMap<String, u32>,
+    had_error: bool,
 }
 
 impl<
@@ -297,6 +305,8 @@ impl<
             params,
             next_symbol_id: 0,
             register_symbols: HashMap::new(),
+            variable_symbols: HashMap::new(),
+            had_error: false,
         }
     }
 
@@ -332,6 +342,15 @@ impl<
     fn alloc_variable_symbol(&mut self) -> u32 {
         let id = self.next_symbol_id;
         self.next_symbol_id += 1;
+        id
+    }
+
+    fn get_or_create_variable_symbol(&mut self, name: String) -> u32 {
+        if let Some(&id) = self.variable_symbols.get(&name) {
+            return id;
+        }
+        let id = self.alloc_variable_symbol();
+        self.variable_symbols.insert(name, id);
         id
     }
 
@@ -469,6 +488,29 @@ impl Expr {
         let mut ctx = SemaExprLoweringCtx::new(g, params);
         self.lower_with_ctx(&mut ctx)
     }
+
+    /// Lower this expression into a semantic expression graph, returning the
+    /// symbol table alongside the root node.  Returns `None` if the expression
+    /// contains operations that cannot be represented (e.g. Load/Store).
+    pub fn lower_to_sema(
+        &self,
+        g: &mut impl tir::graph::MutDag<
+            Node = tir::sem_expr2::ExprKind,
+            Leaf = tir::sem_expr2::ExprPayload,
+        >,
+        params: &HashMap<String, i64>,
+    ) -> Option<SemaLowering> {
+        let mut ctx = SemaExprLoweringCtx::new(g, params);
+        let root = self.lower_with_ctx(&mut ctx);
+        if ctx.had_error {
+            return None;
+        }
+        Some(SemaLowering {
+            root,
+            variable_symbols: ctx.variable_symbols,
+            register_symbols: ctx.register_symbols,
+        })
+    }
 }
 
 impl Assign {
@@ -541,7 +583,7 @@ impl Ident {
                 ctx.add_int_const(tir::utils::APInt::new(width, abs_value))
             }
         } else {
-            let id = ctx.alloc_variable_symbol();
+            let id = ctx.get_or_create_variable_symbol(self.name.clone());
             ctx.add_leaf(
                 tir::sem_expr2::ExprKind::Symbol,
                 tir::sem_expr2::ExprPayload::SymbolId(id),
@@ -760,11 +802,9 @@ impl Call {
                 let width = self.arguments[1].lower_with_ctx(ctx);
                 ctx.add_node(tir::sem_expr2::ExprKind::ZExt, &[input, width])
             }
-            BuiltinFunction::Load => {
-                panic!("load is not representable in sem_expr2 without additional memory semantics")
-            }
-            BuiltinFunction::Store => {
-                panic!("store is not representable in sem_expr2 without additional memory semantics")
+            BuiltinFunction::Load | BuiltinFunction::Store => {
+                ctx.had_error = true;
+                ctx.add_bool_const(false)
             }
         }
     }
