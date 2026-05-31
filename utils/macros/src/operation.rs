@@ -204,7 +204,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         })
         .collect();
 
-    let semantic_expr2_method = if let Some(body) = &as_sem_expr_body {
+    let semantic_expr_method = if let Some(body) = &as_sem_expr_body {
         let actual_type_setter = if has_results {
             quote! {
                 let __tir_sem_expr_context = self.0.context.upgrade();
@@ -215,7 +215,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
             quote! {}
         };
         quote! {
-            fn semantic_expr2(&self, g: &mut tir::sem_expr2::ExprPostGraph) -> Option<tir::graph::NodeId> {
+            fn semantic_expr(&self, g: &mut tir::sem_expr::ExprPostGraph) -> Option<tir::graph::NodeId> {
                 use tir::graph::MutDag;
                 let __tir_sem_expr_root = { #body };
                 g.set_original_op(__tir_sem_expr_root, <Self as tir::Operation>::id(self));
@@ -238,8 +238,8 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
             quote! {}
         };
         quote! {
-            impl tir::sem_expr2::AsSemExpr for #struct_name {
-                fn convert(&self, g: &mut impl tir::graph::MutDag<Node = tir::sem_expr2::ExprKind, Leaf = tir::sem_expr2::ExprPayload>) -> tir::graph::NodeId {
+            impl tir::sem_expr::AsSemExpr for #struct_name {
+                fn convert(&self, g: &mut impl tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>) -> tir::graph::NodeId {
                     let __tir_sem_expr_root = { #body };
                     g.set_original_op(__tir_sem_expr_root, <Self as tir::Operation>::id(self));
                     #actual_type_setter
@@ -646,7 +646,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
                 &[#(#operand_name_literals),*]
             }
 
-            #semantic_expr2_method
+            #semantic_expr_method
             #interface_registration_method
         }
 
@@ -905,7 +905,7 @@ impl Parse for Operation {
             .find_map(|f| match &f.member {
                 Member::Named(ident) => {
                     if ident.to_string().as_str() == "sem" {
-                        let new = expr_as_sem_expr2_body(&f.expr, &operands);
+                        let new = expr_as_sem_expr_body(&f.expr, &operands);
                         Some(new)
                     } else {
                         None
@@ -997,8 +997,8 @@ fn sem_node_to_dag_stmts(
                 *counter += 1;
                 let idx_lit = proc_macro2::Literal::u32_unsuffixed(idx);
                 let stmt = quote! {
-                    let #var = g.add_node(tir::sem_expr2::ExprKind::Symbol);
-                    g.set_leaf_data(#var, tir::sem_expr2::ExprPayload::SymbolId(#idx_lit));
+                    let #var = g.add_node(tir::sem_expr::ExprKind::Symbol);
+                    g.set_leaf_data(#var, tir::sem_expr::ExprPayload::SymbolId(#idx_lit));
                 };
                 Some((vec![stmt], var))
             } else if let Ok(i) = name.parse::<i64>() {
@@ -1006,8 +1006,8 @@ fn sem_node_to_dag_stmts(
                 *counter += 1;
                 let val = proc_macro2::Literal::i64_unsuffixed(i);
                 let stmt = quote! {
-                    let #var = g.add_node(tir::sem_expr2::ExprKind::Constant);
-                    g.set_leaf_data(#var, tir::sem_expr2::ExprPayload::Int(tir::utils::APInt::new_signed(64, #val)));
+                    let #var = g.add_node(tir::sem_expr::ExprKind::Constant);
+                    g.set_leaf_data(#var, tir::sem_expr::ExprPayload::Int(tir::utils::APInt::new_signed(64, #val)));
                 };
                 Some((vec![stmt], var))
             } else {
@@ -1019,16 +1019,16 @@ fn sem_node_to_dag_stmts(
                 return None;
             };
             let kind = match op.as_str() {
-                "add" => quote! { tir::sem_expr2::ExprKind::Add },
-                "sub" => quote! { tir::sem_expr2::ExprKind::Sub },
-                "mul" => quote! { tir::sem_expr2::ExprKind::Mul },
-                "div" => quote! { tir::sem_expr2::ExprKind::Div },
-                "and" => quote! { tir::sem_expr2::ExprKind::And },
-                "or" => quote! { tir::sem_expr2::ExprKind::Or },
-                "xor" => quote! { tir::sem_expr2::ExprKind::Xor },
-                "shl" => quote! { tir::sem_expr2::ExprKind::ShiftLeft },
-                "lshr" => quote! { tir::sem_expr2::ExprKind::ShiftRightLogic },
-                "ashr" => quote! { tir::sem_expr2::ExprKind::ShiftRightArithmetic },
+                "add" => quote! { tir::sem_expr::ExprKind::Add },
+                "sub" => quote! { tir::sem_expr::ExprKind::Sub },
+                "mul" => quote! { tir::sem_expr::ExprKind::Mul },
+                "div" => quote! { tir::sem_expr::ExprKind::Div },
+                "and" => quote! { tir::sem_expr::ExprKind::And },
+                "or" => quote! { tir::sem_expr::ExprKind::Or },
+                "xor" => quote! { tir::sem_expr::ExprKind::Xor },
+                "shl" => quote! { tir::sem_expr::ExprKind::ShiftLeft },
+                "lshr" => quote! { tir::sem_expr::ExprKind::ShiftRightLogic },
+                "ashr" => quote! { tir::sem_expr::ExprKind::ShiftRightArithmetic },
                 _ => return None,
             };
             let (mut stmts, lhs_var) = sem_node_to_dag_stmts(lhs, operand_symbols, counter)?;
@@ -1046,7 +1046,7 @@ fn sem_node_to_dag_stmts(
     }
 }
 
-fn expr_as_sem_expr2_body(expr: &Expr, operands: &[ValueSpec]) -> Option<proc_macro2::TokenStream> {
+fn expr_as_sem_expr_body(expr: &Expr, operands: &[ValueSpec]) -> Option<proc_macro2::TokenStream> {
     let sem_src = match expr {
         Expr::Lit(lit) => {
             if let syn::Lit::Str(s) = &lit.lit {

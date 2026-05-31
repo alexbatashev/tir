@@ -1,6 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::{Context, graph::{Dag, Node, NodeId}};
+use crate::{
+    Context,
+    graph::{Dag, Node, NodeId},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PatternId(u32);
@@ -73,8 +76,11 @@ impl CoverCandidate {
 }
 
 pub trait GraphCoverDriver<N: Node, L, A> {
-    fn matches(ctx: &Context, g: &impl Dag<Node = N, Leaf = L>, pattern: &Pattern<N, A>)
-    -> Vec<MatchBinding>;
+    fn matches(
+        ctx: &Context,
+        g: &impl Dag<Node = N, Leaf = L>,
+        pattern: &Pattern<N, A>,
+    ) -> Vec<MatchBinding>;
 
     fn cover(
         ctx: &Context,
@@ -386,8 +392,7 @@ impl<N: Node + PartialEq, L, A> GraphCoverDriver<N, L, A> for VF2CoverDriver {
             state: &mut SearchState,
             out: &mut Vec<MatchBinding>,
         ) {
-            let Some(pattern_node) =
-                next_pattern_node(pattern, pattern_order, state, pattern_root)
+            let Some(pattern_node) = next_pattern_node(pattern, pattern_order, state, pattern_root)
             else {
                 let pattern_to_graph: Vec<_> = state
                     .pattern_to_graph
@@ -407,16 +412,12 @@ impl<N: Node + PartialEq, L, A> GraphCoverDriver<N, L, A> for VF2CoverDriver {
                 return;
             };
 
-            let candidates: Vec<NodeId> = match forced_graph_candidate(
-                pattern,
-                graph_children,
-                pattern_node,
-                state,
-            ) {
-                Ok(Some(candidate)) => vec![candidate],
-                Ok(None) => (0..g.len()).map(NodeId::from_index).collect(),
-                Err(()) => return,
-            };
+            let candidates: Vec<NodeId> =
+                match forced_graph_candidate(pattern, graph_children, pattern_node, state) {
+                    Ok(Some(candidate)) => vec![candidate],
+                    Ok(None) => (0..g.len()).map(NodeId::from_index).collect(),
+                    Err(()) => return,
+                };
 
             for graph_node in candidates {
                 if !feasible(
@@ -496,7 +497,7 @@ mod tests {
     use crate::{
         Context,
         graph::{MutDag, NodeId, PostOrderDag},
-        sem_expr2::ExprKind,
+        sem_expr::ExprKind,
     };
 
     use super::{GraphCoverDriver, Pattern, PatternExpr, VF2CoverDriver};

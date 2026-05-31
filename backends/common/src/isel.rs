@@ -5,7 +5,7 @@ use tir::{
     PassTarget, Rewriter, ValueId,
     attributes::AttributeValue,
     graph::{Dag, NodeId},
-    sem_expr2::{ExprKind, ExprPayload, ExprPostGraph},
+    sem_expr::{ExprKind, ExprPayload, ExprPostGraph},
     utils::APInt,
 };
 
@@ -711,7 +711,7 @@ impl<'a> SemDagBuilder<'a> {
             operands.push(self.build_from_value(*operand));
         }
         let mut graph = ExprPostGraph::new();
-        let root = op.clone().as_dyn_op().semantic_expr2(&mut graph)?;
+        let root = op.clone().as_dyn_op().semantic_expr(&mut graph)?;
         Some(self.lower_graph_node(&graph, root, &operands))
     }
 
@@ -734,7 +734,7 @@ impl<'a> SemDagBuilder<'a> {
                 }
             } else {
                 let mut graph = ExprPostGraph::new();
-                if let Some(root) = def.clone().as_dyn_op().semantic_expr2(&mut graph) {
+                if let Some(root) = def.clone().as_dyn_op().semantic_expr(&mut graph) {
                     let mut operands = Vec::with_capacity(def.operands.len());
                     for operand in &def.operands {
                         operands.push(self.build_from_value(*operand));

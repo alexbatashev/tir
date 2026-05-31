@@ -1,6 +1,6 @@
 use crate::{
     graph::{Dag, NodeId},
-    sem_expr2::{ExprKind, ExprPayload, Value},
+    sem_expr::{ExprKind, ExprPayload, Value},
     utils::{APFloat, APInt},
 };
 
@@ -243,7 +243,7 @@ mod tests {
     use super::*;
     use crate::{
         graph::MutDag,
-        sem_expr2::{ExprKind, ExprPayload, ExprPostGraph},
+        sem_expr::{ExprKind, ExprPayload, ExprPostGraph},
     };
 
     fn sym(g: &mut ExprPostGraph, id: u32) -> NodeId {

@@ -251,7 +251,7 @@ mod tests {
         builtin::{AddIOp, FuncOp, IntegerType, ops},
         graph::Dag,
         parse::ir::parse_ir,
-        sem_expr2::{AsSemExpr, ExprKind, ExprPayload, ExprPostGraph},
+        sem_expr::{AsSemExpr, ExprKind, ExprPayload, ExprPostGraph},
     };
 
     #[test]
@@ -380,11 +380,7 @@ mod tests {
         (context, lhs.id(), rhs.id())
     }
 
-    fn check_binary_sem(
-        g: &ExprPostGraph,
-        root: crate::graph::NodeId,
-        expected_kind: ExprKind,
-    ) {
+    fn check_binary_sem(g: &ExprPostGraph, root: crate::graph::NodeId, expected_kind: ExprKind) {
         assert_eq!(g.len(), 3, "expected 3 nodes: lhs symbol, rhs symbol, op");
         assert_eq!(g.get_kind(root), &expected_kind);
         let children: Vec<_> = g.children(root).collect();
@@ -409,7 +405,10 @@ mod tests {
         result: crate::ValueId,
     ) {
         assert_eq!(g.get_original_op(root), Some(op.id()));
-        assert_eq!(g.get_actual_type(root), Some(context.get_value(result).ty()));
+        assert_eq!(
+            g.get_actual_type(root),
+            Some(context.get_value(result).ty())
+        );
     }
 
     #[test]

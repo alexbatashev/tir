@@ -358,16 +358,16 @@ impl SmtSymbolResolver<'_> {
     }
 }
 
-fn emit_sem_expr2(
-    graph: &tir::sem_expr2::ExprPostGraph,
+fn emit_sem_expr(
+    graph: &tir::sem_expr::ExprPostGraph,
     node: NodeId,
     resolver: &SmtSymbolResolver<'_>,
 ) -> Option<String> {
-    use tir::sem_expr2::{ExprKind, ExprPayload};
+    use tir::sem_expr::{ExprKind, ExprPayload};
 
     let child = |idx: usize| {
         let child = graph.children(node).nth(idx)?;
-        emit_sem_expr2(graph, child, resolver)
+        emit_sem_expr(graph, child, resolver)
     };
     let binary = |op: &str| Some(format!("({} {} {})", op, child(0)?, child(1)?));
 
@@ -439,7 +439,7 @@ fn build_smt_behavior<'a>(
         numeric_params: &HashMap<String, i64>,
         state_name: &str,
     ) -> Option<String> {
-        let mut graph = tir::sem_expr2::ExprPostGraph::new();
+        let mut graph = tir::sem_expr::ExprPostGraph::new();
         let lowering = e.lower_to_sema(&mut graph, numeric_params)?;
         let mut symbols = HashMap::new();
         for (name, id) in &lowering.variable_symbols {
@@ -459,7 +459,7 @@ fn build_smt_behavior<'a>(
             operands,
             state_name,
         };
-        emit_sem_expr2(&graph, lowering.root, &resolver)
+        emit_sem_expr(&graph, lowering.root, &resolver)
     }
 
     fn eval_expr_legacy(e: &ast::Expr, operands: &HashMap<String, Type>) -> String {
