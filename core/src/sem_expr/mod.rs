@@ -1,5 +1,5 @@
 use crate::{
-    Operation,
+    Operation, ValueId,
     graph::{MutDag, NodeId, PostOrderDag},
     helpers::SimpleNode,
     utils::{APFloat, APInt},
@@ -15,7 +15,7 @@ pub trait AsSemExpr: Operation {
     fn convert(&self, g: &mut impl MutDag<Node = ExprKind, Leaf = ExprPayload>) -> NodeId;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, SimpleNode)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, SimpleNode)]
 #[repr(u16)]
 #[simple_node(default_arity = 2)]
 pub enum ExprKind {
@@ -64,8 +64,10 @@ pub enum ExprKind {
     Fma,
 }
 
+#[derive(Clone, Debug, PartialEq)]
 pub enum ExprPayload {
     SymbolId(u32),
+    Value(ValueId),
     Int(APInt),
     Float(APFloat),
 }

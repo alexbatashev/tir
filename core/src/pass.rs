@@ -5,6 +5,7 @@ use crate::{Block, Context, OpId, OpInstance, Operation};
 #[derive(Debug)]
 pub enum PassError {
     MissingBlock(&'static str),
+    InvalidRuleSet(String),
     RewriteFailed(OpId),
 }
 
@@ -14,6 +15,7 @@ impl std::fmt::Display for PassError {
             PassError::MissingBlock(name) => {
                 write!(f, "operation '{name}' does not have a parent block")
             }
+            PassError::InvalidRuleSet(message) => write!(f, "invalid rule set: {message}"),
             PassError::RewriteFailed(op) => write!(f, "failed to rewrite op {op:?}"),
         }
     }
@@ -44,6 +46,14 @@ pub struct OperationRef {
 }
 
 impl OperationRef {
+    pub fn new(op: Arc<OpInstance>, block: Option<Arc<Block>>, position: Option<usize>) -> Self {
+        Self {
+            op,
+            block,
+            position,
+        }
+    }
+
     pub fn op(&self) -> &Arc<OpInstance> {
         &self.op
     }

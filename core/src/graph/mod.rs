@@ -6,7 +6,7 @@ mod pattern;
 mod postorder;
 
 pub use pattern::{
-    CoverCandidate, GraphCoverDriver, MatchBinding, Pattern, PatternExpr, PatternId,
+    CoverCandidate, CoverLegality, GraphCoverDriver, MatchBinding, Pattern, PatternExpr, PatternId,
     VF2CoverDriver,
 };
 pub use postorder::PostOrderDag;
@@ -30,6 +30,17 @@ pub trait Node {
     fn is_leaf(&self, ctx: &Context) -> bool;
 
     fn num_children(&self, ctx: &Context) -> usize;
+
+    fn matches_pattern(&self, pattern: &Self, _ctx: &Context) -> bool
+    where
+        Self: PartialEq + Sized,
+    {
+        self == pattern
+    }
+
+    fn is_commutative(&self) -> bool {
+        false
+    }
 }
 
 pub trait Dag {

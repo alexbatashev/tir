@@ -1063,6 +1063,10 @@ fn emit_expr_payload_ts(payload: &tir::sem_expr::ExprPayload) -> proc_macro2::To
             let id_lit = proc_macro2::Literal::u32_unsuffixed(*id);
             quote! { tir::sem_expr::ExprPayload::SymbolId(#id_lit) }
         }
+        ExprPayload::Value(value) => {
+            let value_lit = proc_macro2::Literal::u32_unsuffixed(value.number());
+            quote! { tir::sem_expr::ExprPayload::Value(tir::ValueId::from_number(#value_lit)) }
+        }
         ExprPayload::Int(v) => {
             let width = proc_macro2::Literal::u32_unsuffixed(v.width());
             if v.is_signed() {

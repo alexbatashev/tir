@@ -14,6 +14,7 @@ mod ir_formatter;
 mod operand;
 mod operation;
 mod pass;
+pub mod pbqp;
 mod region;
 pub mod sem_expr;
 mod ty;

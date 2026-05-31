@@ -1,10 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use tir::{
     Block, BlockId, Context, OpId, OpInstance, Operation, OperationRef, Pass, PassError,
     PassTarget, Rewriter, ValueId,
     attributes::AttributeValue,
-    graph::{Dag, NodeId},
+    graph::{CoverLegality, Dag, Node, NodeId, Pattern, PatternExpr, VF2CoverDriver},
+    pbqp::{self, INF_COST, PbqpAlternative, PbqpMatrix, PbqpProblem},
     sem_expr::{ExprKind, ExprPayload, ExprPostGraph},
     utils::APInt,
 };
@@ -12,39 +13,58 @@ use tir::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SemNodeId(u32);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum SemOpcode {
-    IntConst,
-    BoolConst,
-    InputValue,
-    UnknownSymbol,
-    Add,
-    Sub,
-    Mul,
-    Div,
-    ShiftLeft,
-    ShiftRightLogic,
-    ShiftRightArithmetic,
-    And,
-    Or,
-    Xor,
-    Opaque,
+impl SemNodeId {
+    fn index(self) -> usize {
+        self.0 as usize
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct SemNode {
     pub id: SemNodeId,
-    pub opcode: SemOpcode,
+    pub kind: ExprKind,
     pub inputs: Vec<SemNodeId>,
-    pub int_value: Option<APInt>,
-    pub bool_value: Option<bool>,
-    pub leaf_value: Option<ValueId>,
-    pub unknown_symbol: Option<u32>,
+    pub payload: Option<ExprPayload>,
+}
+
+impl PartialEq for SemNode {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind && self.payload == other.payload
+    }
+}
+
+impl tir::graph::Node for SemNode {
+    fn is_leaf(&self, ctx: &Context) -> bool {
+        self.kind.is_leaf(ctx)
+    }
+
+    fn num_children(&self, ctx: &Context) -> usize {
+        self.kind.num_children(ctx)
+    }
+
+    fn is_commutative(&self) -> bool {
+        matches!(
+            self.kind,
+            ExprKind::Add | ExprKind::Mul | ExprKind::And | ExprKind::Or | ExprKind::Xor
+        )
+    }
+
+    fn matches_pattern(&self, pattern: &Self, _ctx: &Context) -> bool {
+        if self.kind != pattern.kind {
+            return false;
+        }
+
+        match (&self.payload, &pattern.payload) {
+            (_, None) => true,
+            (Some(actual), Some(expected)) => actual == expected,
+            (None, Some(_)) => false,
+        }
+    }
 }
 
 impl SemNode {
     fn is_terminal(&self) -> bool {
-        self.leaf_value.is_some() || self.int_value.is_some() || self.bool_value.is_some()
+        self.inputs.is_empty()
     }
 }
 
@@ -187,159 +207,6 @@ impl Rule {
     }
 }
 
-pub struct Selection {
-    pub rule_index: usize,
-    pub m: RuleMatch,
-    pub total_cost: u64,
-}
-
-pub struct SelectionInput<'a> {
-    pub dag: &'a SemDagArena,
-    pub root: SemNodeId,
-    pub op: &'a OperationRef,
-    pub rules: &'a [Rule],
-    pub matcher: &'a MatcherAutomaton,
-    pub pressure: SelectionPressure,
-    pub target_model: &'a dyn TargetIselModel,
-    pub context: &'a Context,
-}
-
-pub struct SelectionResult {
-    pub selection: Option<Selection>,
-}
-
-pub trait IselAlgorithm: Send + Sync {
-    fn select_function(&self, input: SelectionInput<'_>) -> SelectionResult;
-}
-
-pub struct GlobalDpSelector;
-
-#[derive(Clone, Debug)]
-struct CandidateScore {
-    rule_index: usize,
-    captures: CaptureBindings,
-    total_cost: u64,
-}
-
-impl IselAlgorithm for GlobalDpSelector {
-    fn select_function(&self, input: SelectionInput<'_>) -> SelectionResult {
-        let mut memo: HashMap<SemNodeId, Option<u64>> = HashMap::new();
-        let candidates = input.matcher.candidate_rules(input.dag.node(input.root));
-
-        let mut best: Option<CandidateScore> = None;
-        for rule_index in candidates {
-            let rule = &input.rules[rule_index];
-            if !input.target_model.supports_rule(rule.compiled_rule_id) {
-                continue;
-            }
-
-            let mut captures = CaptureBindings::new();
-            let Some(pattern_root) = rule.pattern.root() else {
-                continue;
-            };
-            if !match_pattern(
-                &rule.pattern,
-                pattern_root,
-                input.root,
-                input.dag,
-                &mut captures,
-            ) {
-                continue;
-            }
-
-            let rule_match = captures.to_rule_match(input.dag);
-            if !(rule.legality_fn)(input.context, input.op, &rule_match, input.target_model) {
-                continue;
-            }
-
-            let mut total = rule.base_cost as u64;
-            total += (rule.dynamic_cost_fn)(
-                input.context,
-                input.op,
-                &rule_match,
-                &input.pressure,
-                input.target_model,
-            ) as u64;
-
-            let boundaries = captures.boundary_nodes(input.root, input.dag);
-            for boundary in boundaries {
-                total +=
-                    best_cost_for_node(boundary, input.dag, input.rules, input.matcher, &mut memo)
-                        .unwrap_or(u64::MAX / 4);
-            }
-
-            let score = CandidateScore {
-                rule_index,
-                captures,
-                total_cost: total,
-            };
-
-            match &best {
-                Some(existing)
-                    if existing.total_cost < score.total_cost
-                        || (existing.total_cost == score.total_cost
-                            && existing.rule_index <= score.rule_index) => {}
-                _ => best = Some(score),
-            }
-        }
-
-        let selection = best.map(|winner| Selection {
-            rule_index: winner.rule_index,
-            m: winner.captures.to_rule_match(input.dag),
-            total_cost: winner.total_cost,
-        });
-
-        SelectionResult { selection }
-    }
-}
-
-fn best_cost_for_node(
-    node: SemNodeId,
-    dag: &SemDagArena,
-    rules: &[Rule],
-    matcher: &MatcherAutomaton,
-    memo: &mut HashMap<SemNodeId, Option<u64>>,
-) -> Option<u64> {
-    if let Some(cached) = memo.get(&node) {
-        return *cached;
-    }
-
-    let sem_node = dag.node(node);
-    if sem_node.is_terminal() {
-        memo.insert(node, Some(0));
-        return Some(0);
-    }
-
-    let mut best: Option<u64> = None;
-    for rule_index in matcher.candidate_rules(sem_node) {
-        let rule = &rules[rule_index];
-        let mut captures = CaptureBindings::new();
-        let Some(pattern_root) = rule.pattern.root() else {
-            continue;
-        };
-        if !match_pattern(&rule.pattern, pattern_root, node, dag, &mut captures) {
-            continue;
-        }
-
-        let mut total = rule.base_cost as u64;
-        for boundary in captures.boundary_nodes(node, dag) {
-            let Some(sub) = best_cost_for_node(boundary, dag, rules, matcher, memo) else {
-                total = u64::MAX / 4;
-                break;
-            };
-            total = total.saturating_add(sub);
-        }
-
-        best = Some(match best {
-            Some(existing) if existing <= total => existing,
-            _ => total,
-        });
-    }
-
-    memo.insert(node, best);
-    best
-}
-
 #[derive(Clone, Debug)]
 struct CaptureBindings {
     entries: Vec<(u32, SemNodeId)>,
@@ -350,14 +217,6 @@ impl CaptureBindings {
         Self {
             entries: Vec::new(),
         }
-    }
-
-    fn mark(&self) -> usize {
-        self.entries.len()
-    }
-
-    fn rollback(&mut self, mark: usize) {
-        self.entries.truncate(mark);
     }
 
     fn bind(&mut self, symbol: u32, node: SemNodeId) -> bool {
@@ -373,184 +232,36 @@ impl CaptureBindings {
         let mut int_bindings = Vec::new();
         let mut value_bindings = Vec::new();
         for (sym, node_id) in &self.entries {
-            if let Some(v) = &dag.node(*node_id).int_value {
-                int_bindings.push((*sym, v.clone()));
-            }
-            if let Some(v) = dag.node(*node_id).leaf_value {
-                value_bindings.push((*sym, v));
+            match dag.node(*node_id).payload.as_ref() {
+                Some(ExprPayload::Int(v)) => int_bindings.push((*sym, v.clone())),
+                Some(ExprPayload::Value(v)) => value_bindings.push((*sym, *v)),
+                _ => {}
             }
         }
         RuleMatch::new(int_bindings, value_bindings)
     }
-
-    fn boundary_nodes(&self, root: SemNodeId, dag: &SemDagArena) -> Vec<SemNodeId> {
-        let mut out = Vec::new();
-        for (_, node) in &self.entries {
-            if *node == root {
-                continue;
-            }
-            let n = dag.node(*node);
-            if n.is_terminal() {
-                continue;
-            }
-            if !out.contains(node) {
-                out.push(*node);
-            }
-        }
-        out
-    }
 }
 
-fn match_pattern(
-    pattern: &ExprPostGraph,
+#[derive(Clone, Debug)]
+struct PatternNodeBinding {
     pattern_node: NodeId,
-    candidate: SemNodeId,
-    dag: &SemDagArena,
-    captures: &mut CaptureBindings,
-) -> bool {
-    let node = dag.node(candidate);
-    match pattern.get_node(pattern_node) {
-        ExprKind::Symbol => {
-            let Some(ExprPayload::SymbolId(id)) = pattern.get_leaf_data(pattern_node) else {
-                return false;
-            };
-            captures.bind(*id, candidate)
-        }
-        ExprKind::Constant => match pattern.get_leaf_data(pattern_node) {
-            Some(ExprPayload::Int(v)) => matches!(node.int_value.as_ref(), Some(cv) if cv == v),
-            _ => false,
-        },
-        ExprKind::Add => match_binary(
-            pattern,
-            pattern_node,
-            candidate,
-            dag,
-            captures,
-            SemOpcode::Add,
-            true,
-        ),
-        ExprKind::Sub => match_binary(
-            pattern,
-            pattern_node,
-            candidate,
-            dag,
-            captures,
-            SemOpcode::Sub,
-            false,
-        ),
-        ExprKind::Mul => match_binary(
-            pattern,
-            pattern_node,
-            candidate,
-            dag,
-            captures,
-            SemOpcode::Mul,
-            true,
-        ),
-        ExprKind::Div => match_binary(
-            pattern,
-            pattern_node,
-            candidate,
-            dag,
-            captures,
-            SemOpcode::Div,
-            false,
-        ),
-        ExprKind::ShiftLeft => match_binary(
-            pattern,
-            pattern_node,
-            candidate,
-            dag,
-            captures,
-            SemOpcode::ShiftLeft,
-            false,
-        ),
-        ExprKind::ShiftRightLogic => match_binary(
-            pattern,
-            pattern_node,
-            candidate,
-            dag,
-            captures,
-            SemOpcode::ShiftRightLogic,
-            false,
-        ),
-        ExprKind::ShiftRightArithmetic => match_binary(
-            pattern,
-            pattern_node,
-            candidate,
-            dag,
-            captures,
-            SemOpcode::ShiftRightArithmetic,
-            false,
-        ),
-        ExprKind::And => match_binary(
-            pattern,
-            pattern_node,
-            candidate,
-            dag,
-            captures,
-            SemOpcode::And,
-            true,
-        ),
-        ExprKind::Or => match_binary(
-            pattern,
-            pattern_node,
-            candidate,
-            dag,
-            captures,
-            SemOpcode::Or,
-            true,
-        ),
-        ExprKind::Xor => match_binary(
-            pattern,
-            pattern_node,
-            candidate,
-            dag,
-            captures,
-            SemOpcode::Xor,
-            true,
-        ),
-        _ => false,
-    }
+    sem_node: SemNodeId,
+    is_boundary: bool,
 }
 
-fn match_binary(
-    pattern: &ExprPostGraph,
-    pattern_node: NodeId,
-    candidate: SemNodeId,
-    dag: &SemDagArena,
-    captures: &mut CaptureBindings,
-    opcode: SemOpcode,
-    commutative: bool,
-) -> bool {
-    let node = dag.node(candidate);
-    if node.opcode != opcode || node.inputs.len() != 2 {
-        return false;
-    }
-    let children: Vec<NodeId> = pattern.children(pattern_node).collect();
-    if children.len() != 2 {
-        return false;
-    }
+#[derive(Clone, Debug)]
+struct FullMatchBindings {
+    captures: CaptureBindings,
+    pattern_nodes: Vec<PatternNodeBinding>,
+}
 
-    let mark = captures.mark();
-    if match_pattern(pattern, children[0], node.inputs[0], dag, captures)
-        && match_pattern(pattern, children[1], node.inputs[1], dag, captures)
-    {
-        return true;
+impl FullMatchBindings {
+    fn sem_node_for_pattern(&self, pattern_node: NodeId) -> Option<SemNodeId> {
+        self.pattern_nodes
+            .iter()
+            .find(|binding| binding.pattern_node == pattern_node)
+            .map(|binding| binding.sem_node)
     }
-    captures.rollback(mark);
-
-    if commutative {
-        let mark = captures.mark();
-        if match_pattern(pattern, children[0], node.inputs[1], dag, captures)
-            && match_pattern(pattern, children[1], node.inputs[0], dag, captures)
-        {
-            return true;
-        }
-        captures.rollback(mark);
-    }
-
-    false
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -562,10 +273,9 @@ enum SemKey {
     },
     Input(u32),
     UnknownSymbol(u32),
-    Bin {
-        opcode: SemOpcode,
-        lhs: SemNodeId,
-        rhs: SemNodeId,
+    Op {
+        kind: ExprKind,
+        inputs: Vec<SemNodeId>,
     },
     Opaque,
 }
@@ -585,6 +295,17 @@ impl SemDagArena {
 
     pub fn node(&self, id: SemNodeId) -> &SemNode {
         &self.nodes[id.0 as usize]
+    }
+
+    fn len(&self) -> usize {
+        self.nodes.len()
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (SemNodeId, &SemNode)> {
+        self.nodes.iter().enumerate().map(|(idx, node)| {
+            let id = SemNodeId(idx as u32);
+            (id, node)
+        })
     }
 
     fn intern_with_key(&mut self, key: SemKey, mut node: SemNode) -> SemNodeId {
@@ -607,12 +328,9 @@ impl SemDagArena {
             },
             SemNode {
                 id: SemNodeId(0),
-                opcode: SemOpcode::IntConst,
+                kind: ExprKind::Constant,
                 inputs: Vec::new(),
-                int_value: Some(value),
-                bool_value: None,
-                leaf_value: None,
-                unknown_symbol: None,
+                payload: Some(ExprPayload::Int(value)),
             },
         )
     }
@@ -622,12 +340,9 @@ impl SemDagArena {
             SemKey::Input(value.number()),
             SemNode {
                 id: SemNodeId(0),
-                opcode: SemOpcode::InputValue,
+                kind: ExprKind::Symbol,
                 inputs: Vec::new(),
-                int_value: None,
-                bool_value: None,
-                leaf_value: Some(value),
-                unknown_symbol: None,
+                payload: Some(ExprPayload::Value(value)),
             },
         )
     }
@@ -637,37 +352,31 @@ impl SemDagArena {
             SemKey::UnknownSymbol(symbol),
             SemNode {
                 id: SemNodeId(0),
-                opcode: SemOpcode::UnknownSymbol,
+                kind: ExprKind::Symbol,
                 inputs: Vec::new(),
-                int_value: None,
-                bool_value: None,
-                leaf_value: None,
-                unknown_symbol: Some(symbol),
+                payload: Some(ExprPayload::SymbolId(symbol)),
             },
         )
     }
 
-    fn intern_binary(&mut self, opcode: SemOpcode, lhs: SemNodeId, rhs: SemNodeId) -> SemNodeId {
-        let (lhs, rhs) = if matches!(
-            opcode,
-            SemOpcode::Add | SemOpcode::Mul | SemOpcode::And | SemOpcode::Or | SemOpcode::Xor
-        ) && rhs < lhs
-        {
-            (rhs, lhs)
-        } else {
-            (lhs, rhs)
-        };
+    fn intern_op(&mut self, kind: ExprKind, mut inputs: Vec<SemNodeId>) -> SemNodeId {
+        if matches!(
+            kind,
+            ExprKind::Add | ExprKind::Mul | ExprKind::And | ExprKind::Or | ExprKind::Xor
+        ) {
+            inputs.sort();
+        }
 
         self.intern_with_key(
-            SemKey::Bin { opcode, lhs, rhs },
+            SemKey::Op {
+                kind,
+                inputs: inputs.clone(),
+            },
             SemNode {
                 id: SemNodeId(0),
-                opcode,
-                inputs: vec![lhs, rhs],
-                int_value: None,
-                bool_value: None,
-                leaf_value: None,
-                unknown_symbol: None,
+                kind,
+                inputs,
+                payload: None,
             },
         )
     }
@@ -677,14 +386,75 @@ impl SemDagArena {
             SemKey::Opaque,
             SemNode {
                 id: SemNodeId(0),
-                opcode: SemOpcode::Opaque,
+                kind: ExprKind::Symbol,
                 inputs: Vec::new(),
-                int_value: None,
-                bool_value: None,
-                leaf_value: None,
-                unknown_symbol: None,
+                payload: Some(ExprPayload::SymbolId(u32::MAX)),
             },
         )
+    }
+}
+
+impl Dag for SemDagArena {
+    type Node = SemNode;
+    type Leaf = ();
+
+    fn len(&self) -> usize {
+        self.nodes.len()
+    }
+
+    fn get_node(&self, id: NodeId) -> &Self::Node {
+        &self.nodes[id.index()]
+    }
+
+    fn get_leaf_data(&self, _id: NodeId) -> Option<&Self::Leaf> {
+        None
+    }
+
+    fn get_original_op(&self, _id: NodeId) -> Option<OpId> {
+        None
+    }
+
+    fn get_actual_type(&self, _id: NodeId) -> Option<tir::TypeId> {
+        None
+    }
+
+    fn root(&self) -> Option<NodeId> {
+        self.nodes.len().checked_sub(1).map(NodeId::from_index)
+    }
+
+    fn children(&self, id: NodeId) -> impl Iterator<Item = NodeId> {
+        self.nodes[id.index()]
+            .inputs
+            .iter()
+            .map(|input| NodeId::from_index(input.index()))
+    }
+
+    fn postorder(&self, start: NodeId) -> impl Iterator<Item = NodeId> {
+        (0..=start.index()).map(NodeId::from_index)
+    }
+
+    fn preorder(&self, start: NodeId) -> impl Iterator<Item = NodeId> {
+        std::iter::once(start)
+    }
+}
+
+struct IselCoverLegality<'a> {
+    shared_roots: &'a HashSet<SemNodeId>,
+}
+
+impl CoverLegality<SemNode, (), usize> for IselCoverLegality<'_> {
+    fn binding_allowed(
+        &self,
+        _ctx: &Context,
+        _g: &impl Dag<Node = SemNode, Leaf = ()>,
+        pattern: &Pattern<SemNode, usize>,
+        pattern_node: NodeId,
+        graph_node: NodeId,
+    ) -> bool {
+        pattern.is_duplicable(pattern_node)
+            || !self
+                .shared_roots
+                .contains(&SemNodeId(graph_node.index() as u32))
     }
 }
 
@@ -775,21 +545,8 @@ impl<'a> SemDagBuilder<'a> {
                     .children(node)
                     .map(|child| self.lower_graph_node(graph, child, operands))
                     .collect();
-                let opcode = match kind {
-                    ExprKind::Add => Some(SemOpcode::Add),
-                    ExprKind::Sub => Some(SemOpcode::Sub),
-                    ExprKind::Mul => Some(SemOpcode::Mul),
-                    ExprKind::Div => Some(SemOpcode::Div),
-                    ExprKind::ShiftLeft => Some(SemOpcode::ShiftLeft),
-                    ExprKind::ShiftRightLogic => Some(SemOpcode::ShiftRightLogic),
-                    ExprKind::ShiftRightArithmetic => Some(SemOpcode::ShiftRightArithmetic),
-                    ExprKind::And => Some(SemOpcode::And),
-                    ExprKind::Or => Some(SemOpcode::Or),
-                    ExprKind::Xor => Some(SemOpcode::Xor),
-                    _ => None,
-                };
-                if let (Some(opcode), [lhs, rhs]) = (opcode, children.as_slice()) {
-                    self.arena.intern_binary(opcode, *lhs, *rhs)
+                if kind.num_children(self.context) == children.len() {
+                    self.arena.intern_op(*kind, children)
                 } else {
                     self.arena.intern_opaque()
                 }
@@ -798,100 +555,199 @@ impl<'a> SemDagBuilder<'a> {
     }
 }
 
-pub struct MatcherAutomaton {
-    by_opcode: HashMap<SemOpcode, Vec<usize>>,
-    fallback_rules: Vec<usize>,
-    all_rules: Vec<usize>,
+#[derive(Clone, Debug)]
+enum BlockDecision {
+    Emit { rule_index: usize, m: RuleMatch },
+    Consume,
 }
 
-impl MatcherAutomaton {
-    fn compile(rules: &mut [Rule]) -> Self {
-        let mut by_opcode: HashMap<SemOpcode, Vec<usize>> = HashMap::new();
-        let mut fallback_rules = Vec::new();
-
-        for (idx, rule) in rules.iter_mut().enumerate() {
-            rule.compiled_rule_id = CompiledRuleId(idx as u32);
-            if let Some(root_opcode) = pattern_root_opcode(&rule.pattern) {
-                by_opcode.entry(root_opcode).or_default().push(idx);
-            } else {
-                fallback_rules.push(idx);
-            }
-        }
-
-        Self {
-            by_opcode,
-            fallback_rules,
-            all_rules: (0..rules.len()).collect(),
-        }
-    }
-
-    fn candidate_rules(&self, node: &SemNode) -> Vec<usize> {
-        let mut out = Vec::new();
-        if let Some(specific) = self.by_opcode.get(&node.opcode) {
-            out.extend(specific.iter().copied());
-        }
-        out.extend(self.fallback_rules.iter().copied());
-
-        if out.is_empty() {
-            out.extend(self.all_rules.iter().copied());
-        }
-        out
-    }
+#[derive(Clone, Debug)]
+enum PbqpIselAlternative {
+    External,
+    Root {
+        match_id: usize,
+    },
+    Internal {
+        match_id: usize,
+        pattern_node: NodeId,
+    },
 }
 
-fn pattern_root_opcode(pattern: &ExprPostGraph) -> Option<SemOpcode> {
-    match pattern.get_node(pattern.root()?) {
-        ExprKind::Constant => match pattern.get_leaf_data(pattern.root()?) {
-            Some(ExprPayload::Int(_)) => Some(SemOpcode::IntConst),
-            _ => None,
-        },
-        ExprKind::Add => Some(SemOpcode::Add),
-        ExprKind::Sub => Some(SemOpcode::Sub),
-        ExprKind::Mul => Some(SemOpcode::Mul),
-        ExprKind::Div => Some(SemOpcode::Div),
-        ExprKind::ShiftLeft => Some(SemOpcode::ShiftLeft),
-        ExprKind::ShiftRightLogic => Some(SemOpcode::ShiftRightLogic),
-        ExprKind::ShiftRightArithmetic => Some(SemOpcode::ShiftRightArithmetic),
-        ExprKind::And => Some(SemOpcode::And),
-        ExprKind::Or => Some(SemOpcode::Or),
-        ExprKind::Xor => Some(SemOpcode::Xor),
-        ExprKind::Symbol => None,
-        _ => None,
-    }
+#[derive(Clone, Debug)]
+struct PbqpIselMatch {
+    pattern_index: usize,
+    rule_index: usize,
+    root: SemNodeId,
+    pattern_root: NodeId,
+    bindings: FullMatchBindings,
+    cost: u64,
 }
 
 struct BlockSelectionCache {
     dag: SemDagArena,
-    roots_by_op: HashMap<OpId, SemNodeId>,
+    op_by_root: HashMap<SemNodeId, OpId>,
+    decisions_by_op: Option<HashMap<OpId, BlockDecision>>,
+}
+
+struct CompiledIselPattern {
+    rule_index: usize,
+    pattern: Pattern<SemNode, usize>,
+    boundary_symbols: HashMap<NodeId, u32>,
+}
+
+fn compile_isel_pattern(rule_index: usize, expr: &ExprPostGraph) -> Option<CompiledIselPattern> {
+    let root = expr.root()?;
+    let mut pattern = Pattern::new(rule_index);
+    let mut boundary_symbols = HashMap::new();
+    let mut memo = HashMap::new();
+    let pattern_root =
+        compile_isel_pattern_node(expr, root, &mut pattern, &mut boundary_symbols, &mut memo)?;
+    pattern.set_root(pattern_root);
+
+    Some(CompiledIselPattern {
+        rule_index,
+        pattern,
+        boundary_symbols,
+    })
+}
+
+fn compile_isel_pattern_node(
+    expr: &ExprPostGraph,
+    node: NodeId,
+    pattern: &mut Pattern<SemNode, usize>,
+    boundary_symbols: &mut HashMap<NodeId, u32>,
+    memo: &mut HashMap<NodeId, NodeId>,
+) -> Option<NodeId> {
+    if let Some(compiled) = memo.get(&node).copied() {
+        return Some(compiled);
+    }
+
+    let compiled = match expr.get_node(node) {
+        ExprKind::Symbol => {
+            let Some(ExprPayload::SymbolId(symbol)) = expr.get_leaf_data(node) else {
+                return None;
+            };
+            let compiled = pattern.add_node(PatternExpr::Boundary);
+            pattern.set_duplicable(compiled, true);
+            boundary_symbols.insert(compiled, *symbol);
+            compiled
+        }
+        ExprKind::Constant => match expr.get_leaf_data(node) {
+            Some(ExprPayload::Int(value)) => pattern.add_node(PatternExpr::Node(template_node(
+                ExprKind::Constant,
+                Some(ExprPayload::Int(value.clone())),
+            ))),
+            _ => return None,
+        },
+        kind => {
+            let compiled = pattern.add_node(PatternExpr::Node(template_node(*kind, None)));
+            memo.insert(node, compiled);
+            for child in expr.children(node) {
+                let compiled_child =
+                    compile_isel_pattern_node(expr, child, pattern, boundary_symbols, memo)?;
+                pattern.add_edge(compiled, compiled_child);
+            }
+            return Some(compiled);
+        }
+    };
+
+    memo.insert(node, compiled);
+    Some(compiled)
+}
+
+fn template_node(kind: ExprKind, payload: Option<ExprPayload>) -> SemNode {
+    SemNode {
+        id: SemNodeId(0),
+        kind,
+        inputs: Vec::new(),
+        payload,
+    }
+}
+
+fn validate_block_rule_set(
+    patterns: &[CompiledIselPattern],
+    cache: &BlockSelectionCache,
+) -> Vec<String> {
+    let atomics = atomic_materializers(patterns);
+    let mut errors = Vec::new();
+
+    let mut required = Vec::new();
+    for root in cache.op_by_root.keys().copied() {
+        let sem_node = cache.dag.node(root);
+        if sem_node.is_terminal() {
+            continue;
+        }
+        if !required.contains(&sem_node.kind) {
+            required.push(sem_node.kind);
+        }
+    }
+    required.sort();
+
+    for kind in required {
+        if !atomics.contains(&kind) {
+            errors.push(format!(
+                "missing atomic materializer rule for semantic kind {kind:?}"
+            ));
+        }
+    }
+
+    errors
+}
+
+fn atomic_materializers(patterns: &[CompiledIselPattern]) -> HashSet<ExprKind> {
+    let mut atomics = HashSet::new();
+    for compiled in patterns {
+        let Some(root) = compiled.pattern.root() else {
+            continue;
+        };
+        let PatternExpr::Node(root_node) = compiled.pattern.get_node(root) else {
+            continue;
+        };
+        if root_node.kind.num_children(&Context::default()) == 0 {
+            continue;
+        }
+
+        let children = compiled.pattern.children(root);
+        if !children.is_empty()
+            && children
+                .iter()
+                .all(|&child| matches!(compiled.pattern.get_node(child), PatternExpr::Boundary))
+        {
+            atomics.insert(root_node.kind);
+        }
+    }
+    atomics
 }
 
 pub type OpLowering = fn(&Context, &OperationRef, &mut Rewriter) -> Result<bool, PassError>;
 
 pub struct InstructionSelectPass {
     rules: Vec<Rule>,
-    matcher: MatcherAutomaton,
-    algorithm: Box<dyn IselAlgorithm>,
+    compiled_patterns: Vec<CompiledIselPattern>,
     target_model: Box<dyn TargetIselModel>,
     op_lowerings: Vec<OpLowering>,
     block_cache: HashMap<BlockId, BlockSelectionCache>,
+    emitted_blocks: HashSet<BlockId>,
 }
 
 impl InstructionSelectPass {
     pub fn new(mut rules: Vec<Rule>) -> Self {
-        let matcher = MatcherAutomaton::compile(&mut rules);
+        for (idx, rule) in rules.iter_mut().enumerate() {
+            rule.compiled_rule_id = CompiledRuleId(idx as u32);
+        }
+        let compiled_patterns: Vec<_> = rules
+            .iter()
+            .enumerate()
+            .filter_map(|(rule_index, rule)| compile_isel_pattern(rule_index, &rule.pattern))
+            .collect();
         Self {
             rules,
-            matcher,
-            algorithm: Box::new(GlobalDpSelector),
+            compiled_patterns,
             target_model: Box::new(DefaultTargetIselModel),
             op_lowerings: vec![],
             block_cache: HashMap::new(),
+            emitted_blocks: HashSet::new(),
         }
-    }
-
-    pub fn with_algorithm(mut self, algorithm: Box<dyn IselAlgorithm>) -> Self {
-        self.algorithm = algorithm;
-        self
     }
 
     pub fn with_target_model(mut self, target_model: Box<dyn TargetIselModel>) -> Self {
@@ -936,9 +792,724 @@ impl InstructionSelectPass {
             block.id(),
             BlockSelectionCache {
                 dag: builder.arena,
-                roots_by_op,
+                op_by_root: roots_by_op.iter().map(|(op, root)| (*root, *op)).collect(),
+                decisions_by_op: None,
             },
         );
+    }
+
+    fn ensure_block_solution(&mut self, context: &Context, block: &Block) {
+        self.ensure_block_cache(context, block);
+        let Some(cache) = self.block_cache.get(&block.id()) else {
+            return;
+        };
+        if cache.decisions_by_op.is_some() {
+            return;
+        }
+
+        let decisions = self.solve_block(context, block, cache);
+        if let Some(cache) = self.block_cache.get_mut(&block.id()) {
+            cache.decisions_by_op = Some(decisions);
+        }
+    }
+
+    fn commit_block_solution(
+        &mut self,
+        context: &Context,
+        block: &Block,
+        rewriter: &mut Rewriter,
+    ) -> Result<(), PassError> {
+        if !self.emitted_blocks.insert(block.id()) {
+            return Ok(());
+        }
+
+        self.ensure_block_cache(context, block);
+        if let Some(cache) = self.block_cache.get(&block.id()) {
+            let validation_errors = validate_block_rule_set(&self.compiled_patterns, cache);
+            if !validation_errors.is_empty() {
+                return Err(PassError::InvalidRuleSet(validation_errors.join("; ")));
+            }
+        }
+
+        self.ensure_block_solution(context, block);
+        let decisions = self
+            .block_cache
+            .get(&block.id())
+            .and_then(|cache| cache.decisions_by_op.as_ref())
+            .cloned()
+            .unwrap_or_default();
+
+        if decisions.is_empty() {
+            return Ok(());
+        }
+
+        let op_ids = block.op_ids();
+        for (position, op_id) in op_ids.into_iter().enumerate() {
+            let Some(decision) = decisions.get(&op_id).cloned() else {
+                continue;
+            };
+            let op_ref = OperationRef::new(
+                context.get_op(op_id),
+                Some(context.get_block(block.id())),
+                Some(position),
+            );
+            match decision {
+                BlockDecision::Emit { rule_index, m } => {
+                    let rule = &self.rules[rule_index];
+                    let plan = (rule.emit_plan_fn)(context, &op_ref, &m)?;
+                    let new_op = plan.into_op();
+                    rewriter.replace_op(&op_ref, new_op.as_ref())?;
+                }
+                BlockDecision::Consume => {
+                    rewriter.erase_op(&op_ref)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn solve_block(
+        &self,
+        context: &Context,
+        block: &Block,
+        cache: &BlockSelectionCache,
+    ) -> HashMap<OpId, BlockDecision> {
+        let mut op_refs = HashMap::new();
+        for (position, op_id) in block.op_ids().into_iter().enumerate() {
+            let op = context.get_op(op_id);
+            op_refs.insert(
+                op_id,
+                OperationRef::new(op, Some(context.get_block(block.id())), Some(position)),
+            );
+        }
+
+        let matches = self.collect_block_matches(context, cache, &op_refs);
+        if matches.is_empty() {
+            return HashMap::new();
+        }
+
+        let mut alternatives_by_node = vec![Vec::<PbqpIselAlternative>::new(); cache.dag.len()];
+        for (node, sem_node) in cache.dag.iter() {
+            if sem_node.is_terminal() {
+                alternatives_by_node[node.index()].push(PbqpIselAlternative::External);
+            }
+        }
+
+        for (match_id, m) in matches.iter().enumerate() {
+            alternatives_by_node[m.root.index()].push(PbqpIselAlternative::Root { match_id });
+            for binding in &m.bindings.pattern_nodes {
+                if binding.is_boundary || binding.pattern_node == m.pattern_root {
+                    continue;
+                }
+                alternatives_by_node[binding.sem_node.index()].push(
+                    PbqpIselAlternative::Internal {
+                        match_id,
+                        pattern_node: binding.pattern_node,
+                    },
+                );
+            }
+        }
+
+        for (node, alternatives) in alternatives_by_node.iter_mut().enumerate() {
+            if alternatives.is_empty() {
+                let sem_node = cache.dag.node(SemNodeId(node as u32));
+                if sem_node.is_terminal() || !cache.op_by_root.contains_key(&SemNodeId(node as u32))
+                {
+                    alternatives.push(PbqpIselAlternative::External);
+                }
+            }
+        }
+
+        if alternatives_by_node.iter().any(Vec::is_empty) {
+            return HashMap::new();
+        }
+
+        let mut problem = PbqpProblem::new();
+        for alternatives in &alternatives_by_node {
+            let costs = alternatives
+                .iter()
+                .map(|alternative| match alternative {
+                    PbqpIselAlternative::Root { match_id } => matches[*match_id].cost,
+                    PbqpIselAlternative::External | PbqpIselAlternative::Internal { .. } => 0,
+                })
+                .collect();
+            problem.add_node(costs);
+        }
+
+        for (match_id, m) in matches.iter().enumerate() {
+            let mut coherent = Vec::new();
+            for (node, alternatives) in alternatives_by_node.iter().enumerate() {
+                for (alternative, pbqp_alt) in alternatives.iter().enumerate() {
+                    let belongs_to_match = match pbqp_alt {
+                        PbqpIselAlternative::Root {
+                            match_id: alt_match,
+                        }
+                        | PbqpIselAlternative::Internal {
+                            match_id: alt_match,
+                            ..
+                        } => *alt_match == match_id,
+                        PbqpIselAlternative::External => false,
+                    };
+                    if belongs_to_match {
+                        coherent.push(PbqpAlternative {
+                            node: pbqp::PbqpNodeId::from_index(node),
+                            alternative,
+                        });
+                    }
+                }
+            }
+            if m.bindings.pattern_nodes.len() > 1 {
+                problem.add_coherence_set(coherent);
+            }
+        }
+
+        for (parent_id, parent) in cache.dag.iter() {
+            for &child_id in &parent.inputs {
+                let parent_alts = &alternatives_by_node[parent_id.index()];
+                let child_alts = &alternatives_by_node[child_id.index()];
+                let mut matrix = PbqpMatrix::zero(parent_alts.len(), child_alts.len());
+
+                for (parent_alt_idx, parent_alt) in parent_alts.iter().enumerate() {
+                    for (child_alt_idx, child_alt) in child_alts.iter().enumerate() {
+                        if !self.alternatives_compatible(
+                            parent_id, child_id, parent_alt, child_alt, &matches,
+                        ) {
+                            matrix.set(parent_alt_idx, child_alt_idx, INF_COST);
+                        }
+                    }
+                }
+
+                problem.add_edge(
+                    pbqp::PbqpNodeId::from_index(parent_id.index()),
+                    pbqp::PbqpNodeId::from_index(child_id.index()),
+                    matrix,
+                );
+            }
+        }
+
+        let Ok(solution) = pbqp::solve(&problem) else {
+            return HashMap::new();
+        };
+
+        let mut decisions = HashMap::new();
+        for (node, choice) in solution.choices.iter().copied().enumerate() {
+            let node_id = SemNodeId(node as u32);
+            let Some(op_id) = cache.op_by_root.get(&node_id).copied() else {
+                continue;
+            };
+            match &alternatives_by_node[node][choice] {
+                PbqpIselAlternative::Root { match_id } => {
+                    let m = &matches[*match_id];
+                    decisions.insert(
+                        op_id,
+                        BlockDecision::Emit {
+                            rule_index: m.rule_index,
+                            m: m.bindings.captures.to_rule_match(&cache.dag),
+                        },
+                    );
+                }
+                PbqpIselAlternative::Internal { .. } => {
+                    decisions.insert(op_id, BlockDecision::Consume);
+                }
+                PbqpIselAlternative::External => {}
+            }
+        }
+
+        decisions
+    }
+
+    fn collect_block_matches(
+        &self,
+        context: &Context,
+        cache: &BlockSelectionCache,
+        op_refs: &HashMap<OpId, OperationRef>,
+    ) -> Vec<PbqpIselMatch> {
+        let mut matches = Vec::new();
+        let shared_roots = self.shared_semantic_roots(context, cache);
+        let legality = IselCoverLegality {
+            shared_roots: &shared_roots,
+        };
+        for (pattern_index, compiled) in self.compiled_patterns.iter().enumerate() {
+            let rule = &self.rules[compiled.rule_index];
+            if !self.target_model.supports_rule(rule.compiled_rule_id) {
+                continue;
+            }
+
+            let Some(pattern_root) = compiled.pattern.root() else {
+                continue;
+            };
+
+            for binding in VF2CoverDriver::matches_with_legality(
+                context,
+                &cache.dag,
+                &compiled.pattern,
+                &legality,
+            ) {
+                let root = SemNodeId(binding.graph_root().index() as u32);
+                let Some(op_id) = cache.op_by_root.get(&root) else {
+                    continue;
+                };
+                let Some(op_ref) = op_refs.get(op_id) else {
+                    continue;
+                };
+
+                let mut captures = CaptureBindings::new();
+                for (pattern_node, symbol) in &compiled.boundary_symbols {
+                    captures.bind(
+                        *symbol,
+                        SemNodeId(binding.binding(*pattern_node).index() as u32),
+                    );
+                }
+
+                let pattern_nodes = (0..compiled.pattern.len())
+                    .map(NodeId::from_index)
+                    .map(|pattern_node| PatternNodeBinding {
+                        pattern_node,
+                        sem_node: SemNodeId(binding.binding(pattern_node).index() as u32),
+                        is_boundary: matches!(
+                            compiled.pattern.get_node(pattern_node),
+                            PatternExpr::Boundary
+                        ),
+                    })
+                    .collect();
+                let bindings = FullMatchBindings {
+                    captures,
+                    pattern_nodes,
+                };
+
+                let rule_match = bindings.captures.to_rule_match(&cache.dag);
+                if !(rule.legality_fn)(context, op_ref, &rule_match, self.target_model.as_ref()) {
+                    continue;
+                }
+
+                let pressure = SelectionPressure {
+                    estimated_live_operands: op_ref.op().operands.len() as u32,
+                    estimated_register_pressure: self
+                        .target_model
+                        .estimate_register_pressure(op_ref),
+                };
+                let cost = rule.base_cost as u64
+                    + (rule.dynamic_cost_fn)(
+                        context,
+                        op_ref,
+                        &rule_match,
+                        &pressure,
+                        self.target_model.as_ref(),
+                    ) as u64;
+
+                matches.push(PbqpIselMatch {
+                    pattern_index,
+                    rule_index: compiled.rule_index,
+                    root,
+                    pattern_root,
+                    bindings,
+                    cost,
+                });
+            }
+        }
+        matches
+    }
+
+    fn shared_semantic_roots(
+        &self,
+        context: &Context,
+        cache: &BlockSelectionCache,
+    ) -> HashSet<SemNodeId> {
+        let mut operand_uses = HashMap::<ValueId, usize>::new();
+        for op_id in cache.op_by_root.values().copied() {
+            let op = context.get_op(op_id);
+            for operand in &op.operands {
+                *operand_uses.entry(*operand).or_insert(0) += 1;
+            }
+        }
+
+        let mut shared = HashSet::new();
+        for (root, op_id) in &cache.op_by_root {
+            let op = context.get_op(*op_id);
+            if op
+                .results
+                .iter()
+                .any(|result| operand_uses.get(result).copied().unwrap_or_default() > 1)
+            {
+                shared.insert(*root);
+            }
+        }
+        shared
+    }
+
+    fn alternatives_compatible(
+        &self,
+        parent: SemNodeId,
+        child: SemNodeId,
+        parent_alt: &PbqpIselAlternative,
+        child_alt: &PbqpIselAlternative,
+        matches: &[PbqpIselMatch],
+    ) -> bool {
+        if let Some(requirement) = self.child_requirement(parent, child, parent_alt, matches) {
+            return match requirement {
+                ChildRequirement::Materialized => matches!(
+                    child_alt,
+                    PbqpIselAlternative::Root { .. } | PbqpIselAlternative::External
+                ),
+                ChildRequirement::SameMatch {
+                    match_id,
+                    pattern_node,
+                } => matches!(
+                    child_alt,
+                    PbqpIselAlternative::Internal {
+                        match_id: child_match,
+                        pattern_node: child_pattern_node,
+                    } if *child_match == match_id && *child_pattern_node == pattern_node
+                ),
+            };
+        }
+
+        if let PbqpIselAlternative::Internal {
+            match_id,
+            pattern_node,
+        } = child_alt
+        {
+            return self.parent_satisfies_internal_child(
+                parent,
+                child,
+                parent_alt,
+                *match_id,
+                *pattern_node,
+                matches,
+            );
+        }
+
+        true
+    }
+
+    fn child_requirement(
+        &self,
+        _parent: SemNodeId,
+        child: SemNodeId,
+        parent_alt: &PbqpIselAlternative,
+        matches: &[PbqpIselMatch],
+    ) -> Option<ChildRequirement> {
+        let (match_id, parent_pattern_node) = match parent_alt {
+            PbqpIselAlternative::Root { match_id } => {
+                let m = &matches[*match_id];
+                (*match_id, m.pattern_root)
+            }
+            PbqpIselAlternative::Internal {
+                match_id,
+                pattern_node,
+            } => (*match_id, *pattern_node),
+            PbqpIselAlternative::External => return None,
+        };
+
+        let m = &matches[match_id];
+        let pattern = &self.compiled_patterns[m.pattern_index].pattern;
+        for &pattern_child in pattern.children(parent_pattern_node) {
+            if m.bindings.sem_node_for_pattern(pattern_child) != Some(child) {
+                continue;
+            }
+            let is_boundary = m
+                .bindings
+                .pattern_nodes
+                .iter()
+                .find(|binding| binding.pattern_node == pattern_child)
+                .is_some_and(|binding| binding.is_boundary);
+            return if is_boundary {
+                Some(ChildRequirement::Materialized)
+            } else {
+                Some(ChildRequirement::SameMatch {
+                    match_id,
+                    pattern_node: pattern_child,
+                })
+            };
+        }
+
+        None
+    }
+
+    fn parent_satisfies_internal_child(
+        &self,
+        parent: SemNodeId,
+        child: SemNodeId,
+        parent_alt: &PbqpIselAlternative,
+        child_match_id: usize,
+        child_pattern_node: NodeId,
+        matches: &[PbqpIselMatch],
+    ) -> bool {
+        let m = &matches[child_match_id];
+        let pattern = &self.compiled_patterns[m.pattern_index].pattern;
+        for pattern_parent in (0..pattern.len()).map(NodeId::from_index) {
+            if !pattern
+                .children(pattern_parent)
+                .iter()
+                .any(|&pattern_child| pattern_child == child_pattern_node)
+            {
+                continue;
+            }
+            if m.bindings.sem_node_for_pattern(pattern_parent) != Some(parent) {
+                continue;
+            }
+            if m.bindings.sem_node_for_pattern(child_pattern_node) != Some(child) {
+                continue;
+            }
+            return match parent_alt {
+                PbqpIselAlternative::Root { match_id } => {
+                    *match_id == child_match_id && pattern_parent == m.pattern_root
+                }
+                PbqpIselAlternative::Internal {
+                    match_id,
+                    pattern_node,
+                } => *match_id == child_match_id && *pattern_node == pattern_parent,
+                PbqpIselAlternative::External => false,
+            };
+        }
+
+        false
+    }
+}
+
+enum ChildRequirement {
+    Materialized,
+    SameMatch {
+        match_id: usize,
+        pattern_node: NodeId,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use tir::{
+        Context, IRBuilder, IRFormatter, Operation, PassManager,
+        builtin::{FuncOp, IntegerType, ops},
+        graph::MutDag,
+        sem_expr::{ExprKind, ExprPayload, ExprPostGraph},
+    };
+
+    use super::{EmitPlan, InstructionSelectPass, Rule, RuleMatch};
+
+    fn symbol(g: &mut ExprPostGraph, id: u32) -> tir::graph::NodeId {
+        let node = g.add_node(ExprKind::Symbol);
+        g.set_leaf_data(node, ExprPayload::SymbolId(id));
+        node
+    }
+
+    fn binary(
+        g: &mut ExprPostGraph,
+        kind: ExprKind,
+        lhs: tir::graph::NodeId,
+        rhs: tir::graph::NodeId,
+    ) -> tir::graph::NodeId {
+        let node = g.add_node(kind);
+        g.add_edge(node, lhs);
+        g.add_edge(node, rhs);
+        node
+    }
+
+    fn atomic_pattern(kind: ExprKind) -> ExprPostGraph {
+        let mut g = ExprPostGraph::new();
+        let lhs = symbol(&mut g, 0);
+        let rhs = symbol(&mut g, 1);
+        binary(&mut g, kind, lhs, rhs);
+        g
+    }
+
+    fn add_mul_pattern() -> ExprPostGraph {
+        let mut g = ExprPostGraph::new();
+        let x = symbol(&mut g, 0);
+        let y = symbol(&mut g, 1);
+        let mul = binary(&mut g, ExprKind::Mul, x, y);
+        let z = symbol(&mut g, 2);
+        binary(&mut g, ExprKind::Add, mul, z);
+        g
+    }
+
+    fn emit_add(
+        context: &Context,
+        op: &tir::OperationRef,
+        m: &RuleMatch,
+    ) -> Result<EmitPlan, tir::PassError> {
+        let lhs = m
+            .value_binding(0)
+            .unwrap_or_else(|| op.op().operands.first().copied().unwrap());
+        let rhs = m
+            .value_binding(2)
+            .or_else(|| m.value_binding(1))
+            .unwrap_or_else(|| op.op().operands[1]);
+        let result_ty = context.get_value(op.op().results[0]).ty();
+        Ok(EmitPlan::single(Box::new(
+            ops::addi(context, lhs, rhs, result_ty).build(),
+        )))
+    }
+
+    fn emit_mul(
+        context: &Context,
+        op: &tir::OperationRef,
+        _m: &RuleMatch,
+    ) -> Result<EmitPlan, tir::PassError> {
+        let result_ty = context.get_value(op.op().results[0]).ty();
+        Ok(EmitPlan::single(Box::new(
+            ops::muli(context, op.op().operands[0], op.op().operands[1], result_ty).build(),
+        )))
+    }
+
+    #[test]
+    fn pbqp_selector_consumes_internal_nodes_of_selected_pattern() {
+        let context = Context::with_default_dialects();
+        let module = ops::module(&context, None).build();
+
+        let i32_ty = IntegerType::new(&context, 32);
+        let x = context.create_value(i32_ty, None);
+        let y = context.create_value(i32_ty, None);
+        let z = context.create_value(i32_ty, None);
+        let x_id = x.id();
+        let y_id = y.id();
+        let z_id = z.id();
+        let region = context.create_region();
+        let block = context.create_block(vec![x, y, z]);
+        region.add_block(block.id());
+
+        let func = ops::func(&context, "demo", i32_ty, Some(region.id())).build();
+        let mut fb = IRBuilder::new(func.body());
+        let mul = ops::muli(&context, x_id, y_id, i32_ty).build();
+        let mul_result = mul.result();
+        fb.insert(mul);
+        let add = ops::addi(&context, mul_result, z_id, i32_ty).build();
+        let add_result = add.result();
+        fb.insert(add);
+        fb.insert(ops::r#return(&context, add_result).build());
+
+        let mut mb = IRBuilder::new(module.body());
+        mb.insert(func);
+        mb.insert(ops::module_end(&context).build());
+
+        let rules = vec![
+            Rule::new("add-mul", add_mul_pattern(), 1, emit_add),
+            Rule::new("add", atomic_pattern(ExprKind::Add), 10, emit_add),
+            Rule::new("mul", atomic_pattern(ExprKind::Mul), 10, emit_mul),
+        ];
+
+        let mut pm = PassManager::new();
+        pm.nest(FuncOp::name())
+            .add_pass(InstructionSelectPass::new(rules));
+        pm.run(&context, context.get_op(module.id()))
+            .expect("pass pipeline should succeed");
+
+        let body_ops: Vec<_> = context
+            .get_region(region.id())
+            .iter(context.clone())
+            .next()
+            .unwrap()
+            .op_ids()
+            .into_iter()
+            .map(|op_id| context.get_op(op_id).name)
+            .collect();
+        assert_eq!(body_ops, vec!["addi", "return"]);
+
+        let mut buf = String::new();
+        let mut fmt = IRFormatter::new(&mut buf);
+        module.print(&mut fmt).expect("print lowered module");
+        assert!(!buf.contains("muli"));
+    }
+
+    #[test]
+    fn rule_validation_rejects_missing_atomic_materializer() {
+        let context = Context::with_default_dialects();
+        let module = ops::module(&context, None).build();
+
+        let i32_ty = IntegerType::new(&context, 32);
+        let x = context.create_value(i32_ty, None);
+        let y = context.create_value(i32_ty, None);
+        let z = context.create_value(i32_ty, None);
+        let x_id = x.id();
+        let y_id = y.id();
+        let z_id = z.id();
+        let region = context.create_region();
+        let block = context.create_block(vec![x, y, z]);
+        region.add_block(block.id());
+
+        let func = ops::func(&context, "demo", i32_ty, Some(region.id())).build();
+        let mut fb = IRBuilder::new(func.body());
+        let mul = ops::muli(&context, x_id, y_id, i32_ty).build();
+        let mul_result = mul.result();
+        fb.insert(mul);
+        let add = ops::addi(&context, mul_result, z_id, i32_ty).build();
+        let add_result = add.result();
+        fb.insert(add);
+        fb.insert(ops::r#return(&context, add_result).build());
+
+        let mut mb = IRBuilder::new(module.body());
+        mb.insert(func);
+        mb.insert(ops::module_end(&context).build());
+
+        let rules = vec![
+            Rule::new("add-mul", add_mul_pattern(), 1, emit_add),
+            Rule::new("add", atomic_pattern(ExprKind::Add), 10, emit_add),
+        ];
+
+        let mut pm = PassManager::new();
+        pm.nest(FuncOp::name())
+            .add_pass(InstructionSelectPass::new(rules));
+        let err = pm
+            .run(&context, context.get_op(module.id()))
+            .expect_err("incomplete rule set should be rejected");
+        assert!(err.to_string().contains("Mul"));
+    }
+
+    #[test]
+    fn pbqp_selector_does_not_consume_shared_internal_nodes() {
+        let context = Context::with_default_dialects();
+        let module = ops::module(&context, None).build();
+
+        let i32_ty = IntegerType::new(&context, 32);
+        let x = context.create_value(i32_ty, None);
+        let y = context.create_value(i32_ty, None);
+        let z = context.create_value(i32_ty, None);
+        let x_id = x.id();
+        let y_id = y.id();
+        let z_id = z.id();
+        let region = context.create_region();
+        let block = context.create_block(vec![x, y, z]);
+        region.add_block(block.id());
+
+        let func = ops::func(&context, "demo", i32_ty, Some(region.id())).build();
+        let mut fb = IRBuilder::new(func.body());
+        let mul = ops::muli(&context, x_id, y_id, i32_ty).build();
+        let mul_result = mul.result();
+        fb.insert(mul);
+        let add0 = ops::addi(&context, mul_result, z_id, i32_ty).build();
+        let add0_result = add0.result();
+        fb.insert(add0);
+        let add1 = ops::addi(&context, mul_result, add0_result, i32_ty).build();
+        let add1_result = add1.result();
+        fb.insert(add1);
+        fb.insert(ops::r#return(&context, add1_result).build());
+
+        let mut mb = IRBuilder::new(module.body());
+        mb.insert(func);
+        mb.insert(ops::module_end(&context).build());
+
+        let rules = vec![
+            Rule::new("add-mul", add_mul_pattern(), 1, emit_add),
+            Rule::new("add", atomic_pattern(ExprKind::Add), 10, emit_add),
+            Rule::new("mul", atomic_pattern(ExprKind::Mul), 10, emit_mul),
+        ];
+
+        let mut pm = PassManager::new();
+        pm.nest(FuncOp::name())
+            .add_pass(InstructionSelectPass::new(rules));
+        pm.run(&context, context.get_op(module.id()))
+            .expect("pass pipeline should succeed");
+
+        let body_ops: Vec<_> = context
+            .get_region(region.id())
+            .iter(context.clone())
+            .next()
+            .unwrap()
+            .op_ids()
+            .into_iter()
+            .map(|op_id| context.get_op(op_id).name)
+            .collect();
+        assert_eq!(body_ops, vec!["muli", "addi", "addi", "return"]);
     }
 }
 
@@ -971,37 +1542,8 @@ impl Pass for InstructionSelectPass {
             return Ok(());
         };
 
-        self.ensure_block_cache(context, block);
-
-        let Some(cache) = self.block_cache.get(&block.id()) else {
-            return Ok(());
-        };
-
-        let Some(root) = cache.roots_by_op.get(&op.op().id) else {
-            return Ok(());
-        };
-
-        let pressure = SelectionPressure {
-            estimated_live_operands: op.op().operands.len() as u32,
-            estimated_register_pressure: self.target_model.estimate_register_pressure(op),
-        };
-
-        let result = self.algorithm.select_function(SelectionInput {
-            dag: &cache.dag,
-            root: *root,
-            op,
-            rules: &self.rules,
-            matcher: &self.matcher,
-            pressure,
-            target_model: self.target_model.as_ref(),
-            context,
-        });
-
-        if let Some(selection) = result.selection {
-            let rule = &self.rules[selection.rule_index];
-            let plan = (rule.emit_plan_fn)(context, op, &selection.m)?;
-            let new_op = plan.into_op();
-            rewriter.replace_op(op, new_op.as_ref())?;
+        if self.target_model.is_pbqp_enabled() {
+            self.commit_block_solution(context, block, rewriter)?;
         }
 
         Ok(())
