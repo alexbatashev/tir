@@ -1,4 +1,5 @@
 use crate::{
+    Operation,
     graph::{MutDag, NodeId, PostOrderDag},
     helpers::SimpleNode,
     sem_expr::BitVec,
@@ -11,7 +12,7 @@ pub use exec::execute;
 
 pub type ExprPostGraph = PostOrderDag<ExprKind, ExprPayload>;
 
-pub trait AsSemExpr {
+pub trait AsSemExpr: Operation {
     fn convert(&self, g: &mut impl MutDag<Node = ExprKind, Leaf = ExprPayload>) -> NodeId;
 }
 

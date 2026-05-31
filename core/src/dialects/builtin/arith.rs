@@ -249,7 +249,7 @@ mod tests {
     use crate::{
         Context, IRBuilder, IRFormatter, Operation,
         builtin::{AddIOp, FuncOp, IntegerType, ops},
-        graph::{Dag, MutDag},
+        graph::Dag,
         parse::ir::parse_ir,
         sem_expr2::{AsSemExpr, ExprKind, ExprPayload, ExprPostGraph},
     };
@@ -401,6 +401,17 @@ mod tests {
         );
     }
 
+    fn check_sem_metadata(
+        context: &Context,
+        op: &impl Operation,
+        g: &ExprPostGraph,
+        root: crate::graph::NodeId,
+        result: crate::ValueId,
+    ) {
+        assert_eq!(g.get_original_op(root), Some(op.id()));
+        assert_eq!(g.get_actual_type(root), Some(context.get_value(result).ty()));
+    }
+
     #[test]
     fn addi_sem_expr() {
         let (context, lhs, rhs) = make_binary_op_context();
@@ -408,6 +419,7 @@ mod tests {
         let mut g = ExprPostGraph::new();
         let root = op.convert(&mut g);
         check_binary_sem(&g, root, ExprKind::Add);
+        check_sem_metadata(&context, &op, &g, root, op.result());
     }
 
     #[test]

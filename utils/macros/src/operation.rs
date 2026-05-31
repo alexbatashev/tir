@@ -216,10 +216,22 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
     };
 
     let as_sem_expr_impl = if let Some(body) = as_sem_expr_body {
+        let actual_type_setter = if has_results {
+            quote! {
+                let __tir_sem_expr_context = self.0.context.upgrade();
+                let __tir_sem_expr_actual_type = __tir_sem_expr_context.get_value(self.result()).ty();
+                g.set_actual_type(__tir_sem_expr_root, __tir_sem_expr_actual_type);
+            }
+        } else {
+            quote! {}
+        };
         quote! {
             impl tir::sem_expr2::AsSemExpr for #struct_name {
                 fn convert(&self, g: &mut impl tir::graph::MutDag<Node = tir::sem_expr2::ExprKind, Leaf = tir::sem_expr2::ExprPayload>) -> tir::graph::NodeId {
-                    #body
+                    let __tir_sem_expr_root = { #body };
+                    g.set_original_op(__tir_sem_expr_root, <Self as tir::Operation>::id(self));
+                    #actual_type_setter
+                    __tir_sem_expr_root
                 }
             }
         }

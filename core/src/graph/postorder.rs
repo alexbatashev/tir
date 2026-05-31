@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
-use crate::graph::{Dag, EMPTY_CHILDREN, MutDag, Node, NodeId};
+use crate::{
+    OpId, TypeId,
+    graph::{Dag, EMPTY_CHILDREN, MutDag, Node, NodeId},
+};
 
 /// A DAG where nodes are physically stored in strict post order.
 pub struct PostOrderDag<N: Node, L> {
@@ -8,6 +11,8 @@ pub struct PostOrderDag<N: Node, L> {
     edges: HashMap<NodeId, Vec<NodeId>>,
     parents: HashMap<NodeId, Vec<NodeId>>,
     data: HashMap<NodeId, L>,
+    original_ops: HashMap<NodeId, OpId>,
+    actual_types: HashMap<NodeId, TypeId>,
     descendants: Vec<Vec<u64>>,
 }
 
@@ -18,6 +23,8 @@ impl<N: Node, L> PostOrderDag<N, L> {
             edges: HashMap::new(),
             parents: HashMap::new(),
             data: HashMap::new(),
+            original_ops: HashMap::new(),
+            actual_types: HashMap::new(),
             descendants: Vec::new(),
         }
     }
@@ -143,6 +150,14 @@ impl<N: Node, L> Dag for PostOrderDag<N, L> {
         self.data.get(&id)
     }
 
+    fn get_original_op(&self, id: NodeId) -> Option<OpId> {
+        self.original_ops.get(&id).copied()
+    }
+
+    fn get_actual_type(&self, id: NodeId) -> Option<TypeId> {
+        self.actual_types.get(&id).copied()
+    }
+
     fn root(&self) -> Option<NodeId> {
         self.nodes.len().checked_sub(1).map(NodeId::from_index)
     }
@@ -207,5 +222,13 @@ impl<N: Node, L> MutDag for PostOrderDag<N, L> {
 
     fn set_leaf_data(&mut self, n: NodeId, d: Self::Leaf) {
         self.data.insert(n, d);
+    }
+
+    fn set_original_op(&mut self, n: NodeId, op: OpId) {
+        self.original_ops.insert(n, op);
+    }
+
+    fn set_actual_type(&mut self, n: NodeId, ty: TypeId) {
+        self.actual_types.insert(n, ty);
     }
 }

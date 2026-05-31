@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::Context;
+use crate::{Context, OpId, TypeId};
 
 mod pattern;
 mod postorder;
@@ -43,6 +43,8 @@ pub trait Dag {
         self.get_node(id)
     }
     fn get_leaf_data(&self, id: NodeId) -> Option<&Self::Leaf>;
+    fn get_original_op(&self, id: NodeId) -> Option<OpId>;
+    fn get_actual_type(&self, id: NodeId) -> Option<TypeId>;
 
     fn root(&self) -> Option<NodeId>;
     fn children(&self, id: NodeId) -> impl Iterator<Item = NodeId>;
@@ -55,12 +57,16 @@ pub trait MutDag: Dag {
     fn add_node(&mut self, n: Self::Node) -> NodeId;
     fn add_edge(&mut self, from: NodeId, to: NodeId);
     fn set_leaf_data(&mut self, n: NodeId, d: Self::Leaf);
+    fn set_original_op(&mut self, n: NodeId, op: OpId);
+    fn set_actual_type(&mut self, n: NodeId, ty: TypeId);
 }
 
 pub struct GenericDag<N: Node, L> {
     nodes: Vec<N>,
     edges: HashMap<NodeId, Vec<NodeId>>,
     data: HashMap<NodeId, L>,
+    original_ops: HashMap<NodeId, OpId>,
+    actual_types: HashMap<NodeId, TypeId>,
 }
 
 impl<N: Node, L> GenericDag<N, L> {
@@ -150,6 +156,14 @@ impl<N: Node, L> Dag for GenericDag<N, L> {
         self.data.get(&id)
     }
 
+    fn get_original_op(&self, id: NodeId) -> Option<OpId> {
+        self.original_ops.get(&id).copied()
+    }
+
+    fn get_actual_type(&self, id: NodeId) -> Option<TypeId> {
+        self.actual_types.get(&id).copied()
+    }
+
     fn root(&self) -> Option<NodeId> {
         self.nodes.len().checked_sub(1).map(NodeId::from_index)
     }
@@ -193,5 +207,13 @@ impl<N: Node, L> MutDag for GenericDag<N, L> {
 
     fn set_leaf_data(&mut self, n: NodeId, d: Self::Leaf) {
         self.data.insert(n, d);
+    }
+
+    fn set_original_op(&mut self, n: NodeId, op: OpId) {
+        self.original_ops.insert(n, op);
+    }
+
+    fn set_actual_type(&mut self, n: NodeId, ty: TypeId) {
+        self.actual_types.insert(n, ty);
     }
 }
