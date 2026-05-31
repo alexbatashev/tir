@@ -15,7 +15,6 @@ mod operand;
 mod operation;
 mod pass;
 mod region;
-pub mod sem_expr;
 pub mod sem_expr2;
 mod ty;
 pub mod utils;

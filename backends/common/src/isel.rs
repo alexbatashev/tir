@@ -4,7 +4,8 @@ use tir::{
     Block, BlockId, Context, OpId, OpInstance, Operation, OperationRef, Pass, PassError,
     PassTarget, Rewriter, ValueId,
     attributes::AttributeValue,
-    sem_expr::{Expr, simplify},
+    graph::{Dag, NodeId},
+    sem_expr2::{ExprKind, ExprPayload, ExprPostGraph},
     utils::APInt,
 };
 
@@ -52,25 +53,18 @@ pub struct CompiledRuleId(u32);
 
 #[derive(Debug, Clone)]
 pub struct RuleMatch {
-    expr_bindings: Vec<(u32, Expr)>,
+    int_bindings: Vec<(u32, APInt)>,
     value_bindings: Vec<(u32, ValueId)>,
 }
 
 impl RuleMatch {
-    fn new(mut expr_bindings: Vec<(u32, Expr)>, mut value_bindings: Vec<(u32, ValueId)>) -> Self {
-        expr_bindings.sort_by_key(|(sym, _)| *sym);
+    fn new(mut int_bindings: Vec<(u32, APInt)>, mut value_bindings: Vec<(u32, ValueId)>) -> Self {
+        int_bindings.sort_by_key(|(sym, _)| *sym);
         value_bindings.sort_by_key(|(sym, _)| *sym);
         Self {
-            expr_bindings,
+            int_bindings,
             value_bindings,
         }
-    }
-
-    pub fn expr_binding(&self, symbol: u32) -> Option<&Expr> {
-        self.expr_bindings
-            .iter()
-            .find(|(sym, _)| *sym == symbol)
-            .map(|(_, expr)| expr)
     }
 
     pub fn value_binding(&self, symbol: u32) -> Option<ValueId> {
@@ -81,10 +75,10 @@ impl RuleMatch {
     }
 
     pub fn int_binding(&self, symbol: u32) -> Option<i64> {
-        match self.expr_binding(symbol) {
-            Some(Expr::Int(v)) => Some(v.to_u64() as i64),
-            _ => None,
-        }
+        self.int_bindings
+            .iter()
+            .find(|(sym, _)| *sym == symbol)
+            .map(|(_, v)| v.to_u64() as i64)
     }
 }
 
@@ -154,10 +148,9 @@ fn default_dynamic_cost(
     0
 }
 
-#[derive(Clone)]
 pub struct Rule {
     pub name: &'static str,
-    pub pattern: Expr,
+    pub pattern: ExprPostGraph,
     pub compiled_rule_id: CompiledRuleId,
     pub base_cost: u32,
     pub legality_fn: RuleLegalityFn,
@@ -168,7 +161,7 @@ pub struct Rule {
 impl Rule {
     pub fn new(
         name: &'static str,
-        pattern: Expr,
+        pattern: ExprPostGraph,
         base_cost: u32,
         emit_plan_fn: RuleEmitPlanFn,
     ) -> Self {
@@ -241,7 +234,16 @@ impl IselAlgorithm for GlobalDpSelector {
             }
 
             let mut captures = CaptureBindings::new();
-            if !match_pattern(&rule.pattern, input.root, input.dag, &mut captures) {
+            let Some(pattern_root) = rule.pattern.root() else {
+                continue;
+            };
+            if !match_pattern(
+                &rule.pattern,
+                pattern_root,
+                input.root,
+                input.dag,
+                &mut captures,
+            ) {
                 continue;
             }
 
@@ -312,7 +314,10 @@ fn best_cost_for_node(
     for rule_index in matcher.candidate_rules(sem_node) {
         let rule = &rules[rule_index];
         let mut captures = CaptureBindings::new();
-        if !match_pattern(&rule.pattern, node, dag, &mut captures) {
+        let Some(pattern_root) = rule.pattern.root() else {
+            continue;
+        };
+        if !match_pattern(&rule.pattern, pattern_root, node, dag, &mut captures) {
             continue;
         }
 
@@ -365,16 +370,17 @@ impl CaptureBindings {
     }
 
     fn to_rule_match(&self, dag: &SemDagArena) -> RuleMatch {
-        let mut expr_bindings = Vec::with_capacity(self.entries.len());
+        let mut int_bindings = Vec::new();
         let mut value_bindings = Vec::new();
         for (sym, node_id) in &self.entries {
-            let expr = dag.node_to_expr(*node_id);
-            expr_bindings.push((*sym, expr));
+            if let Some(v) = &dag.node(*node_id).int_value {
+                int_bindings.push((*sym, v.clone()));
+            }
             if let Some(v) = dag.node(*node_id).leaf_value {
                 value_bindings.push((*sym, v));
             }
         }
-        RuleMatch::new(expr_bindings, value_bindings)
+        RuleMatch::new(int_bindings, value_bindings)
     }
 
     fn boundary_nodes(&self, root: SemNodeId, dag: &SemDagArena) -> Vec<SemNodeId> {
@@ -396,69 +402,121 @@ impl CaptureBindings {
 }
 
 fn match_pattern(
-    pattern: &Expr,
+    pattern: &ExprPostGraph,
+    pattern_node: NodeId,
     candidate: SemNodeId,
     dag: &SemDagArena,
     captures: &mut CaptureBindings,
 ) -> bool {
     let node = dag.node(candidate);
-    match pattern {
-        Expr::Symbol(id) => captures.bind(*id, candidate),
-        Expr::Int(v) => matches!(node.int_value.as_ref(), Some(cv) if cv == v),
-        Expr::Bool(v) => matches!(node.bool_value, Some(cv) if cv == *v),
-        Expr::Add(lhs, rhs) => {
-            match_binary(lhs, rhs, candidate, dag, captures, SemOpcode::Add, true)
+    match pattern.get_node(pattern_node) {
+        ExprKind::Symbol => {
+            let Some(ExprPayload::SymbolId(id)) = pattern.get_leaf_data(pattern_node) else {
+                return false;
+            };
+            captures.bind(*id, candidate)
         }
-        Expr::Sub(lhs, rhs) => {
-            match_binary(lhs, rhs, candidate, dag, captures, SemOpcode::Sub, false)
-        }
-        Expr::Mul(lhs, rhs) => {
-            match_binary(lhs, rhs, candidate, dag, captures, SemOpcode::Mul, true)
-        }
-        Expr::Div(lhs, rhs) => {
-            match_binary(lhs, rhs, candidate, dag, captures, SemOpcode::Div, false)
-        }
-        Expr::ShiftLeft(lhs, rhs) => match_binary(
-            lhs,
-            rhs,
+        ExprKind::Constant => match pattern.get_leaf_data(pattern_node) {
+            Some(ExprPayload::Int(v)) => matches!(node.int_value.as_ref(), Some(cv) if cv == v),
+            _ => false,
+        },
+        ExprKind::Add => match_binary(
+            pattern,
+            pattern_node,
+            candidate,
+            dag,
+            captures,
+            SemOpcode::Add,
+            true,
+        ),
+        ExprKind::Sub => match_binary(
+            pattern,
+            pattern_node,
+            candidate,
+            dag,
+            captures,
+            SemOpcode::Sub,
+            false,
+        ),
+        ExprKind::Mul => match_binary(
+            pattern,
+            pattern_node,
+            candidate,
+            dag,
+            captures,
+            SemOpcode::Mul,
+            true,
+        ),
+        ExprKind::Div => match_binary(
+            pattern,
+            pattern_node,
+            candidate,
+            dag,
+            captures,
+            SemOpcode::Div,
+            false,
+        ),
+        ExprKind::ShiftLeft => match_binary(
+            pattern,
+            pattern_node,
             candidate,
             dag,
             captures,
             SemOpcode::ShiftLeft,
             false,
         ),
-        Expr::ShiftRightLogic(lhs, rhs) => match_binary(
-            lhs,
-            rhs,
+        ExprKind::ShiftRightLogic => match_binary(
+            pattern,
+            pattern_node,
             candidate,
             dag,
             captures,
             SemOpcode::ShiftRightLogic,
             false,
         ),
-        Expr::ShiftRightArithmetic(lhs, rhs) => match_binary(
-            lhs,
-            rhs,
+        ExprKind::ShiftRightArithmetic => match_binary(
+            pattern,
+            pattern_node,
             candidate,
             dag,
             captures,
             SemOpcode::ShiftRightArithmetic,
             false,
         ),
-        Expr::And(lhs, rhs) => {
-            match_binary(lhs, rhs, candidate, dag, captures, SemOpcode::And, true)
-        }
-        Expr::Or(lhs, rhs) => match_binary(lhs, rhs, candidate, dag, captures, SemOpcode::Or, true),
-        Expr::Xor(lhs, rhs) => {
-            match_binary(lhs, rhs, candidate, dag, captures, SemOpcode::Xor, true)
-        }
-        _ => dag.node_to_expr(candidate) == *pattern,
+        ExprKind::And => match_binary(
+            pattern,
+            pattern_node,
+            candidate,
+            dag,
+            captures,
+            SemOpcode::And,
+            true,
+        ),
+        ExprKind::Or => match_binary(
+            pattern,
+            pattern_node,
+            candidate,
+            dag,
+            captures,
+            SemOpcode::Or,
+            true,
+        ),
+        ExprKind::Xor => match_binary(
+            pattern,
+            pattern_node,
+            candidate,
+            dag,
+            captures,
+            SemOpcode::Xor,
+            true,
+        ),
+        _ => false,
     }
 }
 
 fn match_binary(
-    lhs: &Expr,
-    rhs: &Expr,
+    pattern: &ExprPostGraph,
+    pattern_node: NodeId,
     candidate: SemNodeId,
     dag: &SemDagArena,
     captures: &mut CaptureBindings,
@@ -469,10 +527,14 @@ fn match_binary(
     if node.opcode != opcode || node.inputs.len() != 2 {
         return false;
     }
+    let children: Vec<NodeId> = pattern.children(pattern_node).collect();
+    if children.len() != 2 {
+        return false;
+    }
 
     let mark = captures.mark();
-    if match_pattern(lhs, node.inputs[0], dag, captures)
-        && match_pattern(rhs, node.inputs[1], dag, captures)
+    if match_pattern(pattern, children[0], node.inputs[0], dag, captures)
+        && match_pattern(pattern, children[1], node.inputs[1], dag, captures)
     {
         return true;
     }
@@ -480,8 +542,8 @@ fn match_binary(
 
     if commutative {
         let mark = captures.mark();
-        if match_pattern(lhs, node.inputs[1], dag, captures)
-            && match_pattern(rhs, node.inputs[0], dag, captures)
+        if match_pattern(pattern, children[0], node.inputs[1], dag, captures)
+            && match_pattern(pattern, children[1], node.inputs[0], dag, captures)
         {
             return true;
         }
@@ -498,7 +560,6 @@ enum SemKey {
         signed: bool,
         value: u64,
     },
-    Bool(bool),
     Input(u32),
     UnknownSymbol(u32),
     Bin {
@@ -550,21 +611,6 @@ impl SemDagArena {
                 inputs: Vec::new(),
                 int_value: Some(value),
                 bool_value: None,
-                leaf_value: None,
-                unknown_symbol: None,
-            },
-        )
-    }
-
-    fn intern_bool(&mut self, value: bool) -> SemNodeId {
-        self.intern_with_key(
-            SemKey::Bool(value),
-            SemNode {
-                id: SemNodeId(0),
-                opcode: SemOpcode::BoolConst,
-                inputs: Vec::new(),
-                int_value: None,
-                bool_value: Some(value),
                 leaf_value: None,
                 unknown_symbol: None,
             },
@@ -640,75 +686,6 @@ impl SemDagArena {
             },
         )
     }
-
-    pub fn node_to_expr(&self, root: SemNodeId) -> Expr {
-        fn build(id: SemNodeId, arena: &SemDagArena, memo: &mut HashMap<SemNodeId, Expr>) -> Expr {
-            if let Some(existing) = memo.get(&id) {
-                return existing.clone();
-            }
-            let node = arena.node(id);
-            let expr = match node.opcode {
-                SemOpcode::IntConst => Expr::Int(
-                    node.int_value
-                        .clone()
-                        .unwrap_or_else(|| APInt::new_signed(64, 0)),
-                ),
-                SemOpcode::BoolConst => Expr::Bool(node.bool_value.unwrap_or(false)),
-                SemOpcode::InputValue => {
-                    // Expose leaf bindings as synthetic symbols; bindings use value_binding for real values.
-                    let synthetic = node.leaf_value.map(|v| 10_000 + v.number()).unwrap_or(0);
-                    Expr::Symbol(synthetic)
-                }
-                SemOpcode::UnknownSymbol => Expr::Symbol(node.unknown_symbol.unwrap_or(0)),
-                SemOpcode::Add => Expr::Add(
-                    Box::new(build(node.inputs[0], arena, memo)),
-                    Box::new(build(node.inputs[1], arena, memo)),
-                ),
-                SemOpcode::Sub => Expr::Sub(
-                    Box::new(build(node.inputs[0], arena, memo)),
-                    Box::new(build(node.inputs[1], arena, memo)),
-                ),
-                SemOpcode::Mul => Expr::Mul(
-                    Box::new(build(node.inputs[0], arena, memo)),
-                    Box::new(build(node.inputs[1], arena, memo)),
-                ),
-                SemOpcode::Div => Expr::Div(
-                    Box::new(build(node.inputs[0], arena, memo)),
-                    Box::new(build(node.inputs[1], arena, memo)),
-                ),
-                SemOpcode::ShiftLeft => Expr::ShiftLeft(
-                    Box::new(build(node.inputs[0], arena, memo)),
-                    Box::new(build(node.inputs[1], arena, memo)),
-                ),
-                SemOpcode::ShiftRightLogic => Expr::ShiftRightLogic(
-                    Box::new(build(node.inputs[0], arena, memo)),
-                    Box::new(build(node.inputs[1], arena, memo)),
-                ),
-                SemOpcode::ShiftRightArithmetic => Expr::ShiftRightArithmetic(
-                    Box::new(build(node.inputs[0], arena, memo)),
-                    Box::new(build(node.inputs[1], arena, memo)),
-                ),
-                SemOpcode::And => Expr::And(
-                    Box::new(build(node.inputs[0], arena, memo)),
-                    Box::new(build(node.inputs[1], arena, memo)),
-                ),
-                SemOpcode::Or => Expr::Or(
-                    Box::new(build(node.inputs[0], arena, memo)),
-                    Box::new(build(node.inputs[1], arena, memo)),
-                ),
-                SemOpcode::Xor => Expr::Xor(
-                    Box::new(build(node.inputs[0], arena, memo)),
-                    Box::new(build(node.inputs[1], arena, memo)),
-                ),
-                SemOpcode::Opaque => Expr::Bool(false),
-            };
-            memo.insert(id, expr.clone());
-            expr
-        }
-
-        let mut memo = HashMap::new();
-        build(root, self, &mut memo)
-    }
 }
 
 struct SemDagBuilder<'a> {
@@ -729,12 +706,13 @@ impl<'a> SemDagBuilder<'a> {
     }
 
     fn build_for_op(&mut self, op: &std::sync::Arc<OpInstance>) -> Option<SemNodeId> {
-        let sem = simplify(op.clone().as_dyn_op().semantic_expr()?);
         let mut operands = Vec::with_capacity(op.operands.len());
         for operand in &op.operands {
             operands.push(self.build_from_value(*operand));
         }
-        Some(self.lower_expr(&sem, &operands))
+        let mut graph = ExprPostGraph::new();
+        let root = op.clone().as_dyn_op().semantic_expr2(&mut graph)?;
+        Some(self.lower_graph_node(&graph, root, &operands))
     }
 
     fn build_from_value(&mut self, value: ValueId) -> SemNodeId {
@@ -754,15 +732,17 @@ impl<'a> SemDagBuilder<'a> {
                 } else {
                     self.arena.intern_input_value(value)
                 }
-            } else if let Some(sem_expr) = def.clone().as_dyn_op().semantic_expr() {
-                let sem_expr = simplify(sem_expr);
-                let mut operands = Vec::with_capacity(def.operands.len());
-                for operand in &def.operands {
-                    operands.push(self.build_from_value(*operand));
-                }
-                self.lower_expr(&sem_expr, &operands)
             } else {
-                self.arena.intern_input_value(value)
+                let mut graph = ExprPostGraph::new();
+                if let Some(root) = def.clone().as_dyn_op().semantic_expr2(&mut graph) {
+                    let mut operands = Vec::with_capacity(def.operands.len());
+                    for operand in &def.operands {
+                        operands.push(self.build_from_value(*operand));
+                    }
+                    self.lower_graph_node(&graph, root, &operands)
+                } else {
+                    self.arena.intern_input_value(value)
+                }
             }
         } else {
             self.arena.intern_input_value(value)
@@ -772,67 +752,48 @@ impl<'a> SemDagBuilder<'a> {
         node
     }
 
-    fn lower_expr(&mut self, expr: &Expr, operands: &[SemNodeId]) -> SemNodeId {
-        match expr {
-            Expr::Symbol(id) => operands
-                .get(*id as usize)
-                .copied()
-                .unwrap_or_else(|| self.arena.intern_unknown_symbol(*id)),
-            Expr::Int(v) => self.arena.intern_int(v.clone()),
-            Expr::Bool(v) => self.arena.intern_bool(*v),
-            Expr::Add(lhs, rhs) => {
-                let lhs = self.lower_expr(lhs, operands);
-                let rhs = self.lower_expr(rhs, operands);
-                self.arena.intern_binary(SemOpcode::Add, lhs, rhs)
+    fn lower_graph_node(
+        &mut self,
+        graph: &ExprPostGraph,
+        node: NodeId,
+        operands: &[SemNodeId],
+    ) -> SemNodeId {
+        match graph.get_node(node) {
+            ExprKind::Symbol => match graph.get_leaf_data(node) {
+                Some(ExprPayload::SymbolId(id)) => operands
+                    .get(*id as usize)
+                    .copied()
+                    .unwrap_or_else(|| self.arena.intern_unknown_symbol(*id)),
+                _ => self.arena.intern_opaque(),
+            },
+            ExprKind::Constant => match graph.get_leaf_data(node) {
+                Some(ExprPayload::Int(v)) => self.arena.intern_int(v.clone()),
+                _ => self.arena.intern_opaque(),
+            },
+            kind => {
+                let children: Vec<SemNodeId> = graph
+                    .children(node)
+                    .map(|child| self.lower_graph_node(graph, child, operands))
+                    .collect();
+                let opcode = match kind {
+                    ExprKind::Add => Some(SemOpcode::Add),
+                    ExprKind::Sub => Some(SemOpcode::Sub),
+                    ExprKind::Mul => Some(SemOpcode::Mul),
+                    ExprKind::Div => Some(SemOpcode::Div),
+                    ExprKind::ShiftLeft => Some(SemOpcode::ShiftLeft),
+                    ExprKind::ShiftRightLogic => Some(SemOpcode::ShiftRightLogic),
+                    ExprKind::ShiftRightArithmetic => Some(SemOpcode::ShiftRightArithmetic),
+                    ExprKind::And => Some(SemOpcode::And),
+                    ExprKind::Or => Some(SemOpcode::Or),
+                    ExprKind::Xor => Some(SemOpcode::Xor),
+                    _ => None,
+                };
+                if let (Some(opcode), [lhs, rhs]) = (opcode, children.as_slice()) {
+                    self.arena.intern_binary(opcode, *lhs, *rhs)
+                } else {
+                    self.arena.intern_opaque()
+                }
             }
-            Expr::Sub(lhs, rhs) => {
-                let lhs = self.lower_expr(lhs, operands);
-                let rhs = self.lower_expr(rhs, operands);
-                self.arena.intern_binary(SemOpcode::Sub, lhs, rhs)
-            }
-            Expr::Mul(lhs, rhs) => {
-                let lhs = self.lower_expr(lhs, operands);
-                let rhs = self.lower_expr(rhs, operands);
-                self.arena.intern_binary(SemOpcode::Mul, lhs, rhs)
-            }
-            Expr::Div(lhs, rhs) => {
-                let lhs = self.lower_expr(lhs, operands);
-                let rhs = self.lower_expr(rhs, operands);
-                self.arena.intern_binary(SemOpcode::Div, lhs, rhs)
-            }
-            Expr::ShiftLeft(lhs, rhs) => {
-                let lhs = self.lower_expr(lhs, operands);
-                let rhs = self.lower_expr(rhs, operands);
-                self.arena.intern_binary(SemOpcode::ShiftLeft, lhs, rhs)
-            }
-            Expr::ShiftRightLogic(lhs, rhs) => {
-                let lhs = self.lower_expr(lhs, operands);
-                let rhs = self.lower_expr(rhs, operands);
-                self.arena
-                    .intern_binary(SemOpcode::ShiftRightLogic, lhs, rhs)
-            }
-            Expr::ShiftRightArithmetic(lhs, rhs) => {
-                let lhs = self.lower_expr(lhs, operands);
-                let rhs = self.lower_expr(rhs, operands);
-                self.arena
-                    .intern_binary(SemOpcode::ShiftRightArithmetic, lhs, rhs)
-            }
-            Expr::And(lhs, rhs) => {
-                let lhs = self.lower_expr(lhs, operands);
-                let rhs = self.lower_expr(rhs, operands);
-                self.arena.intern_binary(SemOpcode::And, lhs, rhs)
-            }
-            Expr::Or(lhs, rhs) => {
-                let lhs = self.lower_expr(lhs, operands);
-                let rhs = self.lower_expr(rhs, operands);
-                self.arena.intern_binary(SemOpcode::Or, lhs, rhs)
-            }
-            Expr::Xor(lhs, rhs) => {
-                let lhs = self.lower_expr(lhs, operands);
-                let rhs = self.lower_expr(rhs, operands);
-                self.arena.intern_binary(SemOpcode::Xor, lhs, rhs)
-            }
-            _ => self.arena.intern_opaque(),
         }
     }
 }
@@ -878,21 +839,23 @@ impl MatcherAutomaton {
     }
 }
 
-fn pattern_root_opcode(pattern: &Expr) -> Option<SemOpcode> {
-    match pattern {
-        Expr::Int(_) => Some(SemOpcode::IntConst),
-        Expr::Bool(_) => Some(SemOpcode::BoolConst),
-        Expr::Add(_, _) => Some(SemOpcode::Add),
-        Expr::Sub(_, _) => Some(SemOpcode::Sub),
-        Expr::Mul(_, _) => Some(SemOpcode::Mul),
-        Expr::Div(_, _) => Some(SemOpcode::Div),
-        Expr::ShiftLeft(_, _) => Some(SemOpcode::ShiftLeft),
-        Expr::ShiftRightLogic(_, _) => Some(SemOpcode::ShiftRightLogic),
-        Expr::ShiftRightArithmetic(_, _) => Some(SemOpcode::ShiftRightArithmetic),
-        Expr::And(_, _) => Some(SemOpcode::And),
-        Expr::Or(_, _) => Some(SemOpcode::Or),
-        Expr::Xor(_, _) => Some(SemOpcode::Xor),
-        Expr::Symbol(_) => None,
+fn pattern_root_opcode(pattern: &ExprPostGraph) -> Option<SemOpcode> {
+    match pattern.get_node(pattern.root()?) {
+        ExprKind::Constant => match pattern.get_leaf_data(pattern.root()?) {
+            Some(ExprPayload::Int(_)) => Some(SemOpcode::IntConst),
+            _ => None,
+        },
+        ExprKind::Add => Some(SemOpcode::Add),
+        ExprKind::Sub => Some(SemOpcode::Sub),
+        ExprKind::Mul => Some(SemOpcode::Mul),
+        ExprKind::Div => Some(SemOpcode::Div),
+        ExprKind::ShiftLeft => Some(SemOpcode::ShiftLeft),
+        ExprKind::ShiftRightLogic => Some(SemOpcode::ShiftRightLogic),
+        ExprKind::ShiftRightArithmetic => Some(SemOpcode::ShiftRightArithmetic),
+        ExprKind::And => Some(SemOpcode::And),
+        ExprKind::Or => Some(SemOpcode::Or),
+        ExprKind::Xor => Some(SemOpcode::Xor),
+        ExprKind::Symbol => None,
         _ => None,
     }
 }
@@ -960,7 +923,7 @@ impl InstructionSelectPass {
         let op_ids = block.op_ids();
         for op_id in &op_ids {
             let op = context.get_op(*op_id);
-            if op.results.is_empty() || op.clone().as_dyn_op().semantic_expr().is_none() {
+            if op.results.is_empty() {
                 continue;
             }
 
@@ -1001,10 +964,6 @@ impl Pass for InstructionSelectPass {
         }
 
         if op.op().results.is_empty() {
-            return Ok(());
-        }
-
-        if op.op().clone().as_dyn_op().semantic_expr().is_none() {
             return Ok(());
         }
 

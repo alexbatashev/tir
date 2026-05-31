@@ -4,12 +4,11 @@ use std::io::Write;
 use crate::Type;
 use crate::ast;
 use crate::error::TMDLError;
-use crate::sem_expr_conv::{SymbolInfo, convert_to_sem_expr};
 use crate::sem_expr_state;
 use crate::utils::{
     get_encoding_arms, resolve_operands_for_instruction, resolve_params_for_instruction,
 };
-use tir::sem_expr::smtlib as sem_smtlib;
+use tir::graph::{Dag, NodeId};
 
 const REG_INDEX_WIDTH: u16 = 5;
 const REG_VALUE_WIDTH: u16 = 64;
@@ -320,40 +319,101 @@ fn build_smt_encoding<'a>(
 // Behavior (execution semantics)
 // ---------------------------------------------------------------------------
 
+enum SmtSymbolInfo {
+    Register { class: String, number: u32 },
+    Variable { name: String },
+}
+
 struct SmtSymbolResolver<'a> {
-    symbols: &'a HashMap<u32, SymbolInfo>,
+    symbols: HashMap<u32, SmtSymbolInfo>,
     operands: &'a HashMap<String, Type>,
     state_name: &'a str,
 }
 
-impl sem_smtlib::SymbolResolver for SmtSymbolResolver<'_> {
-    fn resolve(&self, symbol_id: u32) -> Result<String, String> {
-        let symbol = self
-            .symbols
-            .get(&symbol_id)
-            .ok_or_else(|| format!("Unknown symbol id {}", symbol_id))?;
+impl SmtSymbolResolver<'_> {
+    fn resolve(&self, symbol_id: u32) -> Option<String> {
+        let symbol = self.symbols.get(&symbol_id)?;
 
         match symbol {
-            SymbolInfo::Register { class, number } => Ok(format!(
+            SmtSymbolInfo::Register { class, number } => Some(format!(
                 "(read_{} {} (_ bv{} {}))",
                 class.to_lowercase(),
                 self.state_name,
                 number,
                 REG_INDEX_WIDTH
             )),
-            SymbolInfo::Variable { name } => {
+            SmtSymbolInfo::Variable { name } => {
                 if let Some(Type::Struct(rc)) = self.operands.get(name) {
-                    Ok(format!(
+                    Some(format!(
                         "(read_{} {} {})",
                         rc.to_lowercase(),
                         self.state_name,
                         name.to_lowercase()
                     ))
                 } else {
-                    Ok(name.to_lowercase())
+                    Some(name.to_lowercase())
                 }
             }
         }
+    }
+}
+
+fn emit_sem_expr2(
+    graph: &tir::sem_expr2::ExprPostGraph,
+    node: NodeId,
+    resolver: &SmtSymbolResolver<'_>,
+) -> Option<String> {
+    use tir::sem_expr2::{ExprKind, ExprPayload};
+
+    let child = |idx: usize| {
+        let child = graph.children(node).nth(idx)?;
+        emit_sem_expr2(graph, child, resolver)
+    };
+    let binary = |op: &str| Some(format!("({} {} {})", op, child(0)?, child(1)?));
+
+    match graph.get_node(node) {
+        ExprKind::Symbol => match graph.get_leaf_data(node)? {
+            ExprPayload::SymbolId(id) => resolver.resolve(*id),
+            _ => None,
+        },
+        ExprKind::Constant => match graph.get_leaf_data(node)? {
+            ExprPayload::Int(i) => Some(format!("(_ bv{} {})", i.to_u64(), i.width())),
+            _ => None,
+        },
+        ExprKind::Add => binary("bvadd"),
+        ExprKind::Sub => binary("bvsub"),
+        ExprKind::Mul => binary("bvmul"),
+        ExprKind::Div => binary("bvsdiv"),
+        ExprKind::UDiv => binary("bvudiv"),
+        ExprKind::Eq => binary("="),
+        ExprKind::Ne => binary("distinct"),
+        ExprKind::Lt => binary("bvslt"),
+        ExprKind::Gt => binary("bvsgt"),
+        ExprKind::Ge => binary("bvsge"),
+        ExprKind::ULt => binary("bvult"),
+        ExprKind::ULe => binary("bvule"),
+        ExprKind::UGt => binary("bvugt"),
+        ExprKind::UGe => binary("bvuge"),
+        ExprKind::ShiftLeft => binary("bvshl"),
+        ExprKind::ShiftRightArithmetic => binary("bvashr"),
+        ExprKind::ShiftRightLogic => binary("bvlshr"),
+        ExprKind::Or => binary("bvor"),
+        ExprKind::And => binary("bvand"),
+        ExprKind::Xor => binary("bvxor"),
+        ExprKind::If => Some(format!(
+            "(ite (not (= {} (_ bv0 64))) {} {})",
+            child(0)?,
+            child(1)?,
+            child(2)?
+        )),
+        ExprKind::Clamp
+        | ExprKind::LoadMemory
+        | ExprKind::StoreMemory
+        | ExprKind::ZExt
+        | ExprKind::SExt
+        | ExprKind::Log2Ceil
+        | ExprKind::Sqrt
+        | ExprKind::Fma => None,
     }
 }
 
@@ -379,15 +439,27 @@ fn build_smt_behavior<'a>(
         numeric_params: &HashMap<String, i64>,
         state_name: &str,
     ) -> Option<String> {
-        let converted = convert_to_sem_expr(e, numeric_params.clone()).ok()?;
+        let mut graph = tir::sem_expr2::ExprPostGraph::new();
+        let lowering = e.lower_to_sema(&mut graph, numeric_params)?;
+        let mut symbols = HashMap::new();
+        for (name, id) in &lowering.variable_symbols {
+            symbols.insert(*id, SmtSymbolInfo::Variable { name: name.clone() });
+        }
+        for ((class, number), id) in &lowering.register_symbols {
+            symbols.insert(
+                *id,
+                SmtSymbolInfo::Register {
+                    class: class.clone(),
+                    number: *number,
+                },
+            );
+        }
         let resolver = SmtSymbolResolver {
-            symbols: &converted.symbols,
+            symbols,
             operands,
             state_name,
         };
-        let mut out = Vec::new();
-        sem_smtlib::emit(&converted.expr, &mut out, &resolver).ok()?;
-        String::from_utf8(out).ok()
+        emit_sem_expr2(&graph, lowering.root, &resolver)
     }
 
     fn eval_expr_legacy(e: &ast::Expr, operands: &HashMap<String, Type>) -> String {

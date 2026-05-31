@@ -4,7 +4,6 @@ mod error;
 mod lexer;
 mod parser;
 mod rustgen;
-mod sem_expr_conv;
 mod sem_expr_state;
 mod sema;
 mod smtlibgen;
@@ -21,7 +20,6 @@ pub use compiler::{Action, Compiler, OutputKind, compiler_main};
 
 pub use lexer::lex;
 pub use parser::parse;
-pub use sem_expr_conv::{ConversionResult, SymbolInfo, convert_to_sem_expr};
 pub use sema::analyze as sema_analyze;
 pub use typeck::check as type_check;
 pub use types::*;

@@ -2,7 +2,6 @@ use crate::{
     Operation,
     graph::{MutDag, NodeId, PostOrderDag},
     helpers::SimpleNode,
-    sem_expr::BitVec,
     utils::{APFloat, APInt},
 };
 
@@ -69,7 +68,6 @@ pub enum ExprPayload {
     SymbolId(u32),
     Int(APInt),
     Float(APFloat),
-    BitVec(BitVec),
 }
 
 /// A runtime value produced by the expression interpreter.

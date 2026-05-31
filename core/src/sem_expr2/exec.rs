@@ -8,10 +8,7 @@ use crate::{
 ///
 /// `symbols[i]` is the value for the operand with `SymbolId(i)`.
 /// Returns the value of the root node.
-pub fn execute(
-    graph: &impl Dag<Node = ExprKind, Leaf = ExprPayload>,
-    symbols: &[Value],
-) -> Value {
+pub fn execute(graph: &impl Dag<Node = ExprKind, Leaf = ExprPayload>, symbols: &[Value]) -> Value {
     let root = graph.root().expect("cannot execute empty graph");
     let mut cache = vec![None::<Value>; graph.len()];
     eval_node(graph, root, symbols, &mut cache)
@@ -119,22 +116,43 @@ fn eval_node(
         // ── Comparisons ────────────────────────────────────────────────────
         ExprKind::Eq => Value::Int(APInt::new(1, bool_result(c(0) == c(1)))),
         ExprKind::Ne => Value::Int(APInt::new(1, bool_result(c(0) != c(1)))),
-        ExprKind::Lt => Value::Int(APInt::new(1, match c(0) {
-            Value::Int(a) => bool_result(a.slt(&as_int!(c(1), "lt"))),
-            Value::Float(a) => bool_result(a.lt(&as_float!(c(1), "lt"))),
-        })),
-        ExprKind::Gt => Value::Int(APInt::new(1, match c(0) {
-            Value::Int(a) => bool_result(a.sgt(&as_int!(c(1), "gt"))),
-            Value::Float(a) => bool_result(a.gt(&as_float!(c(1), "gt"))),
-        })),
-        ExprKind::Ge => Value::Int(APInt::new(1, match c(0) {
-            Value::Int(a) => bool_result(a.sge(&as_int!(c(1), "ge"))),
-            Value::Float(a) => bool_result(a.ge(&as_float!(c(1), "ge"))),
-        })),
-        ExprKind::ULt => Value::Int(APInt::new(1, bool_result(as_int!(c(0), "ult").ult(&as_int!(c(1), "ult"))))),
-        ExprKind::ULe => Value::Int(APInt::new(1, bool_result(as_int!(c(0), "ule").ule(&as_int!(c(1), "ule"))))),
-        ExprKind::UGt => Value::Int(APInt::new(1, bool_result(as_int!(c(0), "ugt").ugt(&as_int!(c(1), "ugt"))))),
-        ExprKind::UGe => Value::Int(APInt::new(1, bool_result(as_int!(c(0), "uge").uge(&as_int!(c(1), "uge"))))),
+        ExprKind::Lt => Value::Int(APInt::new(
+            1,
+            match c(0) {
+                Value::Int(a) => bool_result(a.slt(&as_int!(c(1), "lt"))),
+                Value::Float(a) => bool_result(a.lt(&as_float!(c(1), "lt"))),
+            },
+        )),
+        ExprKind::Gt => Value::Int(APInt::new(
+            1,
+            match c(0) {
+                Value::Int(a) => bool_result(a.sgt(&as_int!(c(1), "gt"))),
+                Value::Float(a) => bool_result(a.gt(&as_float!(c(1), "gt"))),
+            },
+        )),
+        ExprKind::Ge => Value::Int(APInt::new(
+            1,
+            match c(0) {
+                Value::Int(a) => bool_result(a.sge(&as_int!(c(1), "ge"))),
+                Value::Float(a) => bool_result(a.ge(&as_float!(c(1), "ge"))),
+            },
+        )),
+        ExprKind::ULt => Value::Int(APInt::new(
+            1,
+            bool_result(as_int!(c(0), "ult").ult(&as_int!(c(1), "ult"))),
+        )),
+        ExprKind::ULe => Value::Int(APInt::new(
+            1,
+            bool_result(as_int!(c(0), "ule").ule(&as_int!(c(1), "ule"))),
+        )),
+        ExprKind::UGt => Value::Int(APInt::new(
+            1,
+            bool_result(as_int!(c(0), "ugt").ugt(&as_int!(c(1), "ugt"))),
+        )),
+        ExprKind::UGe => Value::Int(APInt::new(
+            1,
+            bool_result(as_int!(c(0), "uge").uge(&as_int!(c(1), "uge"))),
+        )),
 
         // ── Control ────────────────────────────────────────────────────────
         ExprKind::If => {
@@ -171,7 +189,9 @@ fn eval_node(
         // ── Math (int or float) ────────────────────────────────────────────
         ExprKind::Fma => match c(0) {
             Value::Int(a) => Value::Int(a.mul(&as_int!(c(1), "fma")).add(&as_int!(c(2), "fma"))),
-            Value::Float(a) => Value::Float(a.fma(&as_float!(c(1), "fma"), &as_float!(c(2), "fma"))),
+            Value::Float(a) => {
+                Value::Float(a.fma(&as_float!(c(1), "fma"), &as_float!(c(2), "fma")))
+            }
         },
         ExprKind::Sqrt => match c(0) {
             Value::Int(a) => {
@@ -183,7 +203,11 @@ fn eval_node(
         ExprKind::Log2Ceil => {
             let a = as_int!(c(0), "log2ceil");
             let v = a.to_u64();
-            let result = if v <= 1 { 0u64 } else { 64 - (v - 1).leading_zeros() as u64 };
+            let result = if v <= 1 {
+                0u64
+            } else {
+                64 - (v - 1).leading_zeros() as u64
+            };
             Value::Int(APInt::new(a.width(), result))
         }
 
@@ -218,7 +242,7 @@ impl PartialEq for Value {
 mod tests {
     use super::*;
     use crate::{
-        graph::{Dag, MutDag},
+        graph::MutDag,
         sem_expr2::{ExprKind, ExprPayload, ExprPostGraph},
     };
 
@@ -246,19 +270,36 @@ mod tests {
         node
     }
 
-    fn iv(v: i64) -> Value { Value::Int(APInt::new_signed(32, v)) }
-    fn fv(v: f64) -> Value { Value::Float(APFloat::from_f64(v)) }
-    fn uv(v: u64) -> Value { Value::Int(APInt::new(32, v)) }
+    fn iv(v: i64) -> Value {
+        Value::Int(APInt::new_signed(32, v))
+    }
+    fn fv(v: f64) -> Value {
+        Value::Float(APFloat::from_f64(v))
+    }
+    fn uv(v: u64) -> Value {
+        Value::Int(APInt::new(32, v))
+    }
 
-    fn as_i64(v: Value) -> i64 { match v { Value::Int(i) => i.to_i64(), Value::Float(_) => panic!() } }
-    fn as_f64(v: Value) -> f64 { match v { Value::Float(f) => f.to_f64(), Value::Int(_) => panic!() } }
+    fn as_i64(v: Value) -> i64 {
+        match v {
+            Value::Int(i) => i.to_i64(),
+            Value::Float(_) => panic!(),
+        }
+    }
+    fn as_f64(v: Value) -> f64 {
+        match v {
+            Value::Float(f) => f.to_f64(),
+            Value::Int(_) => panic!(),
+        }
+    }
 
     // ── Integer arithmetic ─────────────────────────────────────────────────
 
     #[test]
     fn int_add() {
         let mut g = ExprPostGraph::new();
-        let a = sym(&mut g, 0); let b = sym(&mut g, 1);
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
         inner(&mut g, ExprKind::Add, &[a, b]);
         assert_eq!(as_i64(execute(&g, &[iv(3), iv(4)])), 7);
     }
@@ -266,7 +307,8 @@ mod tests {
     #[test]
     fn int_sub() {
         let mut g = ExprPostGraph::new();
-        let a = sym(&mut g, 0); let b = sym(&mut g, 1);
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
         inner(&mut g, ExprKind::Sub, &[a, b]);
         assert_eq!(as_i64(execute(&g, &[iv(10), iv(3)])), 7);
     }
@@ -274,7 +316,8 @@ mod tests {
     #[test]
     fn int_mul() {
         let mut g = ExprPostGraph::new();
-        let a = sym(&mut g, 0); let b = sym(&mut g, 1);
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
         inner(&mut g, ExprKind::Mul, &[a, b]);
         assert_eq!(as_i64(execute(&g, &[iv(6), iv(7)])), 42);
     }
@@ -282,7 +325,8 @@ mod tests {
     #[test]
     fn int_and() {
         let mut g = ExprPostGraph::new();
-        let a = sym(&mut g, 0); let b = sym(&mut g, 1);
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
         inner(&mut g, ExprKind::And, &[a, b]);
         assert_eq!(as_i64(execute(&g, &[uv(0b1100), uv(0b1010)])), 0b1000);
     }
@@ -290,7 +334,8 @@ mod tests {
     #[test]
     fn int_shl() {
         let mut g = ExprPostGraph::new();
-        let a = sym(&mut g, 0); let b = sym(&mut g, 1);
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
         inner(&mut g, ExprKind::ShiftLeft, &[a, b]);
         assert_eq!(as_i64(execute(&g, &[uv(1), uv(3)])), 8);
     }
@@ -298,7 +343,8 @@ mod tests {
     #[test]
     fn int_lshr() {
         let mut g = ExprPostGraph::new();
-        let a = sym(&mut g, 0); let b = sym(&mut g, 1);
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
         inner(&mut g, ExprKind::ShiftRightLogic, &[a, b]);
         assert_eq!(as_i64(execute(&g, &[uv(16), uv(2)])), 4);
     }
@@ -306,7 +352,8 @@ mod tests {
     #[test]
     fn int_ashr_negative() {
         let mut g = ExprPostGraph::new();
-        let a = sym(&mut g, 0); let b = sym(&mut g, 1);
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
         inner(&mut g, ExprKind::ShiftRightArithmetic, &[a, b]);
         assert_eq!(as_i64(execute(&g, &[iv(-8), iv(1)])), -4);
     }
@@ -329,7 +376,9 @@ mod tests {
     #[test]
     fn int_fma() {
         let mut g = ExprPostGraph::new();
-        let a = sym(&mut g, 0); let b = sym(&mut g, 1); let c = sym(&mut g, 2);
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
+        let c = sym(&mut g, 2);
         inner(&mut g, ExprKind::Fma, &[a, b, c]);
         assert_eq!(as_i64(execute(&g, &[iv(3), iv(4), iv(5)])), 17);
     }
@@ -339,7 +388,8 @@ mod tests {
     #[test]
     fn int_eq_true() {
         let mut g = ExprPostGraph::new();
-        let a = sym(&mut g, 0); let b = sym(&mut g, 1);
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
         inner(&mut g, ExprKind::Eq, &[a, b]);
         assert_eq!(as_i64(execute(&g, &[iv(5), iv(5)])), 1);
     }
@@ -347,7 +397,8 @@ mod tests {
     #[test]
     fn int_eq_false() {
         let mut g = ExprPostGraph::new();
-        let a = sym(&mut g, 0); let b = sym(&mut g, 1);
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
         inner(&mut g, ExprKind::Eq, &[a, b]);
         assert_eq!(as_i64(execute(&g, &[iv(5), iv(6)])), 0);
     }
@@ -355,7 +406,9 @@ mod tests {
     #[test]
     fn int_if_taken() {
         let mut g = ExprPostGraph::new();
-        let cond = sym(&mut g, 0); let t = sym(&mut g, 1); let e = sym(&mut g, 2);
+        let cond = sym(&mut g, 0);
+        let t = sym(&mut g, 1);
+        let e = sym(&mut g, 2);
         inner(&mut g, ExprKind::If, &[cond, t, e]);
         assert_eq!(as_i64(execute(&g, &[iv(1), iv(42), iv(0)])), 42);
     }
@@ -363,7 +416,9 @@ mod tests {
     #[test]
     fn int_if_not_taken() {
         let mut g = ExprPostGraph::new();
-        let cond = sym(&mut g, 0); let t = sym(&mut g, 1); let e = sym(&mut g, 2);
+        let cond = sym(&mut g, 0);
+        let t = sym(&mut g, 1);
+        let e = sym(&mut g, 2);
         inner(&mut g, ExprKind::If, &[cond, t, e]);
         assert_eq!(as_i64(execute(&g, &[iv(0), iv(42), iv(99)])), 99);
     }
@@ -373,15 +428,17 @@ mod tests {
     #[test]
     fn float_add() {
         let mut g = ExprPostGraph::new();
-        let a = sym(&mut g, 0); let b = sym(&mut g, 1);
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
         inner(&mut g, ExprKind::Add, &[a, b]);
-        assert!((as_f64(execute(&g, &[fv(1.5), fv(2.5)]) ) - 4.0).abs() < 1e-9);
+        assert!((as_f64(execute(&g, &[fv(1.5), fv(2.5)])) - 4.0).abs() < 1e-9);
     }
 
     #[test]
     fn float_sub() {
         let mut g = ExprPostGraph::new();
-        let a = sym(&mut g, 0); let b = sym(&mut g, 1);
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
         inner(&mut g, ExprKind::Sub, &[a, b]);
         assert!((as_f64(execute(&g, &[fv(5.0), fv(3.0)])) - 2.0).abs() < 1e-9);
     }
@@ -389,7 +446,8 @@ mod tests {
     #[test]
     fn float_mul() {
         let mut g = ExprPostGraph::new();
-        let a = sym(&mut g, 0); let b = sym(&mut g, 1);
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
         inner(&mut g, ExprKind::Mul, &[a, b]);
         assert!((as_f64(execute(&g, &[fv(2.0), fv(3.5)])) - 7.0).abs() < 1e-9);
     }
@@ -397,7 +455,8 @@ mod tests {
     #[test]
     fn float_div() {
         let mut g = ExprPostGraph::new();
-        let a = sym(&mut g, 0); let b = sym(&mut g, 1);
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
         inner(&mut g, ExprKind::Div, &[a, b]);
         assert!((as_f64(execute(&g, &[fv(7.0), fv(2.0)])) - 3.5).abs() < 1e-9);
     }
@@ -413,7 +472,9 @@ mod tests {
     #[test]
     fn float_fma() {
         let mut g = ExprPostGraph::new();
-        let a = sym(&mut g, 0); let b = sym(&mut g, 1); let c = sym(&mut g, 2);
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
+        let c = sym(&mut g, 2);
         inner(&mut g, ExprKind::Fma, &[a, b, c]);
         // 2.0 * 3.0 + 1.0 = 7.0
         assert!((as_f64(execute(&g, &[fv(2.0), fv(3.0), fv(1.0)])) - 7.0).abs() < 1e-9);
@@ -447,7 +508,8 @@ mod tests {
     #[test]
     fn float_lt_true() {
         let mut g = ExprPostGraph::new();
-        let a = sym(&mut g, 0); let b = sym(&mut g, 1);
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
         inner(&mut g, ExprKind::Lt, &[a, b]);
         assert_eq!(as_i64(execute(&g, &[fv(1.0), fv(2.0)])), 1);
     }
@@ -455,7 +517,8 @@ mod tests {
     #[test]
     fn float_lt_false() {
         let mut g = ExprPostGraph::new();
-        let a = sym(&mut g, 0); let b = sym(&mut g, 1);
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
         inner(&mut g, ExprKind::Lt, &[a, b]);
         assert_eq!(as_i64(execute(&g, &[fv(3.0), fv(2.0)])), 0);
     }

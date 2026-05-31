@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write;
 
 use quote::{format_ident, quote};
+use tir::graph::Dag;
 
 use crate::Type;
 use crate::ast;
@@ -10,7 +11,6 @@ use crate::utils::{
     get_encoding_arms, parse_literal_value, resolve_effective_asm_for_instruction,
     resolve_operands_for_instruction, resolve_params_for_instruction,
 };
-
 
 pub fn generate_rust<'a>(
     dialect: &str,
@@ -80,6 +80,8 @@ fn emit_instructions<'a>(
     let mut instruction_defs = vec![];
     let mut instruction_parsers_impls: Vec<proc_macro2::TokenStream> = vec![];
     let mut instruction_parser_map_inits: Vec<proc_macro2::TokenStream> = vec![];
+    let mut isel_rule_emitters: Vec<proc_macro2::TokenStream> = vec![];
+    let mut isel_rule_inits: Vec<proc_macro2::TokenStream> = vec![];
     let mut machine_instruction_impls: Vec<proc_macro2::TokenStream> = vec![];
     let mut instruction_custom_format_impls: Vec<proc_macro2::TokenStream> = vec![];
     let mut as_sem_expr_impls: Vec<proc_macro2::TokenStream> = vec![];
@@ -238,9 +240,126 @@ fn emit_instructions<'a>(
             })
             .collect();
 
-        if let Some(impl_ts) =
-            emit_as_sem_expr_impl(inst, &ops, &defined_register_operands, &name_ident, &numeric_params)
+        if let Some(semantics) =
+            analyze_instruction_semantics(inst, &ops, &defined_register_operands, &numeric_params)
         {
+            let emit_fn_ident = format_ident!("emit_isel_{}", inst.name.to_lowercase());
+            let pattern_fn_ident = format_ident!("isel_pattern_{}", inst.name.to_lowercase());
+            let rule_name_lit = proc_macro2::Literal::string(&inst.name.to_lowercase());
+            let mut emit_attr_steps = Vec::new();
+            for (op_name, op_ty) in &ops {
+                let op_name_lit = proc_macro2::Literal::string(op_name);
+                match op_ty {
+                    Type::Struct(class_name) => {
+                        let class_lit = proc_macro2::Literal::string(class_name);
+                        if let Some(def_pos) = defined_register_operands
+                            .iter()
+                            .position(|name| name == op_name)
+                        {
+                            let def_pos_lit = proc_macro2::Literal::usize_unsuffixed(def_pos);
+                            emit_attr_steps.push(quote! {
+                                let dst = op
+                                    .op()
+                                    .results
+                                    .get(#def_pos_lit)
+                                    .ok_or(tir::PassError::RewriteFailed(op.op().id))?
+                                    .number();
+                                builder = builder.attr(
+                                    #op_name_lit,
+                                    tir::attributes::AttributeValue::Register(
+                                        tir::attributes::RegisterAttr::Virtual {
+                                            id: dst,
+                                            class: Some(#class_lit.to_string()),
+                                        },
+                                    ),
+                                );
+                            });
+                        } else if let Some(sym) = semantics.variable_symbols.get(op_name) {
+                            let sym_lit = proc_macro2::Literal::u32_unsuffixed(*sym);
+                            emit_attr_steps.push(quote! {
+                                let src = m.value_binding(#sym_lit).ok_or(tir::PassError::RewriteFailed(op.op().id))?;
+                                builder = builder.attr(
+                                    #op_name_lit,
+                                    tir::attributes::AttributeValue::Register(
+                                        tir::attributes::RegisterAttr::Virtual {
+                                            id: src.number(),
+                                            class: Some(#class_lit.to_string()),
+                                        },
+                                    ),
+                                );
+                            });
+                        } else if let Some(Some(reg_idx)) =
+                            semantics.fixed_register_by_class.get(class_name)
+                        {
+                            let idx_lit = proc_macro2::Literal::u16_unsuffixed(*reg_idx);
+                            emit_attr_steps.push(quote! {
+                                builder = builder.attr(
+                                    #op_name_lit,
+                                    tir::attributes::AttributeValue::Register(
+                                        tir::attributes::RegisterAttr::Physical {
+                                            class: #class_lit.to_string(),
+                                            index: #idx_lit,
+                                        },
+                                    ),
+                                );
+                            });
+                        }
+                    }
+                    Type::Integer | Type::Bits(_) => {
+                        if let Some(sym) = semantics.variable_symbols.get(op_name) {
+                            let sym_lit = proc_macro2::Literal::u32_unsuffixed(*sym);
+                            emit_attr_steps.push(quote! {
+                                let v = m.int_binding(#sym_lit).ok_or(tir::PassError::RewriteFailed(op.op().id))?;
+                                builder = builder.attr(
+                                    #op_name_lit,
+                                    tir::attributes::AttributeValue::Int(v),
+                                );
+                            });
+                        }
+                    }
+                    Type::String => {}
+                    _ => {}
+                }
+            }
+
+            let (pattern_stmts, _root_var) = emit_dag_as_code(&semantics.pattern, semantics.root);
+            let base_cost_lit = proc_macro2::Literal::u32_unsuffixed(semantics.base_cost);
+            isel_rule_emitters.push(quote! {
+                fn #pattern_fn_ident() -> tir::sem_expr2::ExprPostGraph {
+                    use tir::graph::MutDag;
+                    let mut g = tir::sem_expr2::ExprPostGraph::new();
+                    #(#pattern_stmts)*
+                    g
+                }
+
+                fn #emit_fn_ident(
+                    context: &tir::Context,
+                    op: &tir::OperationRef,
+                    m: &tir_be_common::isel::RuleMatch,
+                ) -> Result<tir_be_common::isel::EmitPlan, tir::PassError> {
+                    let mut builder = #builder_ident::new(context);
+                    #(#emit_attr_steps)*
+                    Ok(tir_be_common::isel::EmitPlan::single(Box::new(builder.build())))
+                }
+            });
+
+            isel_rule_inits.push(quote! {
+                rules.push(tir_be_common::isel::Rule::new(
+                    #rule_name_lit,
+                    #pattern_fn_ident(),
+                    #base_cost_lit,
+                    #emit_fn_ident,
+                ));
+            });
+        }
+
+        if let Some(impl_ts) = emit_as_sem_expr_impl(
+            inst,
+            &ops,
+            &defined_register_operands,
+            &name_ident,
+            &numeric_params,
+        ) {
             as_sem_expr_impls.push(impl_ts);
         }
 
@@ -528,6 +647,14 @@ fn emit_instructions<'a>(
 
             map
         }
+
+        #(#isel_rule_emitters)*
+
+        pub fn get_isel_rules() -> Vec<tir_be_common::isel::Rule> {
+            let mut rules = Vec::new();
+            #(#isel_rule_inits)*
+            rules
+        }
     })
 }
 
@@ -611,6 +738,54 @@ fn emit_register_trait_helpers(files: &[ast::File]) -> Result<proc_macro2::Token
 // ---------------------------------------------------------------------------
 // Instruction analysis helpers
 // ---------------------------------------------------------------------------
+
+struct InstructionSemantics {
+    pattern: tir::sem_expr2::ExprPostGraph,
+    root: tir::graph::NodeId,
+    base_cost: u32,
+    variable_symbols: HashMap<String, u32>,
+    fixed_register_by_class: HashMap<String, Option<u16>>,
+}
+
+fn analyze_instruction_semantics(
+    inst: &ast::Instruction,
+    operands: &[(String, Type)],
+    defined_register_operands: &[String],
+    numeric_params: &HashMap<String, i64>,
+) -> Option<InstructionSemantics> {
+    let rhs = resolve_behavior_rhs(inst, operands, defined_register_operands)?;
+    let mut pattern = tir::sem_expr2::ExprPostGraph::new();
+    let lowering = rhs.lower_to_sema(&mut pattern, numeric_params)?;
+    let base_cost = pattern.len().try_into().unwrap_or(u32::MAX).max(1);
+    let fixed_register_by_class = split_fixed_registers(&lowering.register_symbols);
+
+    Some(InstructionSemantics {
+        pattern,
+        root: lowering.root,
+        base_cost,
+        variable_symbols: lowering.variable_symbols,
+        fixed_register_by_class,
+    })
+}
+
+fn split_fixed_registers(symbols: &HashMap<(String, u32), u32>) -> HashMap<String, Option<u16>> {
+    let mut fixed_register_by_class: HashMap<String, Option<u16>> = HashMap::new();
+
+    for ((class, number), _) in symbols {
+        let entry = fixed_register_by_class.entry(class.clone()).or_insert(None);
+        if let Ok(number_u16) = u16::try_from(*number) {
+            match entry {
+                None => *entry = Some(number_u16),
+                Some(existing) if *existing == number_u16 => {}
+                Some(_) => *entry = None,
+            }
+        } else {
+            *entry = None;
+        }
+    }
+
+    fixed_register_by_class
+}
 
 fn register_operand_names(operands: &[(String, Type)]) -> HashSet<&str> {
     operands
@@ -780,7 +955,6 @@ fn compile_asm_template(template: &str) -> Vec<AsmAction> {
     actions
 }
 
-
 // ---------------------------------------------------------------------------
 // AsSemExpr code generation
 // ---------------------------------------------------------------------------
@@ -902,9 +1076,6 @@ fn emit_expr_payload_ts(payload: &tir::sem_expr2::ExprPayload) -> proc_macro2::T
         ExprPayload::Float(f) => {
             let val = proc_macro2::Literal::f64_unsuffixed(f.to_f64());
             quote! { tir::sem_expr2::ExprPayload::Float(tir::utils::APFloat::from_f64(#val)) }
-        }
-        ExprPayload::BitVec(_) => {
-            quote! { compile_error!("BitVec payload not supported in code generation") }
         }
     }
 }

@@ -16,7 +16,6 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         results,
         interfaces,
         custom_format,
-        semantic_expr,
         as_sem_expr_body,
         custom_verifier,
     } = parse_macro_input!(item as Operation);
@@ -205,10 +204,23 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         })
         .collect();
 
-    let semantic_expr_method = if let Some(sem_expr) = semantic_expr {
+    let semantic_expr2_method = if let Some(body) = &as_sem_expr_body {
+        let actual_type_setter = if has_results {
+            quote! {
+                let __tir_sem_expr_context = self.0.context.upgrade();
+                let __tir_sem_expr_actual_type = __tir_sem_expr_context.get_value(self.result()).ty();
+                g.set_actual_type(__tir_sem_expr_root, __tir_sem_expr_actual_type);
+            }
+        } else {
+            quote! {}
+        };
         quote! {
-            fn semantic_expr(&self) -> Option<tir::sem_expr::Expr> {
-                Some(#sem_expr)
+            fn semantic_expr2(&self, g: &mut tir::sem_expr2::ExprPostGraph) -> Option<tir::graph::NodeId> {
+                use tir::graph::MutDag;
+                let __tir_sem_expr_root = { #body };
+                g.set_original_op(__tir_sem_expr_root, <Self as tir::Operation>::id(self));
+                #actual_type_setter
+                Some(__tir_sem_expr_root)
             }
         }
     } else {
@@ -634,7 +646,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
                 &[#(#operand_name_literals),*]
             }
 
-            #semantic_expr_method
+            #semantic_expr2_method
             #interface_registration_method
         }
 
@@ -716,7 +728,6 @@ struct Operation {
     results: Vec<ValueSpec>,
     interfaces: Vec<Path>,
     custom_format: bool,
-    semantic_expr: Option<proc_macro2::TokenStream>,
     as_sem_expr_body: Option<proc_macro2::TokenStream>,
     custom_verifier: bool,
 }
@@ -888,19 +899,21 @@ impl Parse for Operation {
             })
             .unwrap_or(false);
 
-        let (semantic_expr, as_sem_expr_body) =
-            struct_.fields.iter().find_map(|f| match &f.member {
+        let as_sem_expr_body = struct_
+            .fields
+            .iter()
+            .find_map(|f| match &f.member {
                 Member::Named(ident) => {
                     if ident.to_string().as_str() == "sem" {
-                        let old = expr_as_semantic_expr(&f.expr, &operands);
                         let new = expr_as_sem_expr2_body(&f.expr, &operands);
-                        Some((old, new))
+                        Some(new)
                     } else {
                         None
                     }
                 }
                 _ => None,
-            }).unwrap_or((None, None));
+            })
+            .unwrap_or(None);
 
         Ok(Operation {
             struct_name,
@@ -913,7 +926,6 @@ impl Parse for Operation {
             results,
             interfaces,
             custom_format,
-            semantic_expr,
             as_sem_expr_body,
             custom_verifier,
         })
@@ -971,90 +983,6 @@ fn parse_sem_expr(input: &str) -> Option<SemNode> {
         pos += 1;
     }
     if pos == chars.len() { Some(expr) } else { None }
-}
-
-fn sem_atom_to_expr(
-    atom: &str,
-    operand_symbols: &std::collections::HashMap<String, u32>,
-) -> Option<proc_macro2::TokenStream> {
-    if let Some(sym) = operand_symbols.get(atom) {
-        let sym_lit = proc_macro2::Literal::u32_unsuffixed(*sym);
-        return Some(quote! { tir::sem_expr::Expr::Symbol(#sym_lit) });
-    }
-    if let Ok(i) = atom.parse::<i64>() {
-        let width = proc_macro2::Literal::u32_unsuffixed(64);
-        let value = proc_macro2::Literal::i64_unsuffixed(i);
-        return Some(
-            quote! { tir::sem_expr::Expr::Int(tir::sem_expr::APInt::new_signed(#width, #value)) },
-        );
-    }
-    None
-}
-
-fn sem_node_to_expr(
-    node: &SemNode,
-    operand_symbols: &std::collections::HashMap<String, u32>,
-) -> Option<proc_macro2::TokenStream> {
-    match node {
-        SemNode::Atom(a) => sem_atom_to_expr(a, operand_symbols),
-        SemNode::List(items) => {
-            let [SemNode::Atom(op), lhs, rhs] = items.as_slice() else {
-                return None;
-            };
-            let lhs_ts = sem_node_to_expr(lhs, operand_symbols)?;
-            let rhs_ts = sem_node_to_expr(rhs, operand_symbols)?;
-            Some(match op.as_str() {
-                "add" => quote! { tir::sem_expr::Expr::Add(Box::new(#lhs_ts), Box::new(#rhs_ts)) },
-                "sub" => quote! { tir::sem_expr::Expr::Sub(Box::new(#lhs_ts), Box::new(#rhs_ts)) },
-                "mul" => quote! { tir::sem_expr::Expr::Mul(Box::new(#lhs_ts), Box::new(#rhs_ts)) },
-                "div" => quote! { tir::sem_expr::Expr::Div(Box::new(#lhs_ts), Box::new(#rhs_ts)) },
-                "and" => quote! { tir::sem_expr::Expr::And(Box::new(#lhs_ts), Box::new(#rhs_ts)) },
-                "or" => quote! { tir::sem_expr::Expr::Or(Box::new(#lhs_ts), Box::new(#rhs_ts)) },
-                "xor" => quote! { tir::sem_expr::Expr::Xor(Box::new(#lhs_ts), Box::new(#rhs_ts)) },
-                "shl" => {
-                    quote! { tir::sem_expr::Expr::ShiftLeft(Box::new(#lhs_ts), Box::new(#rhs_ts)) }
-                }
-                "lshr" => {
-                    quote! { tir::sem_expr::Expr::ShiftRightLogic(Box::new(#lhs_ts), Box::new(#rhs_ts)) }
-                }
-                "ashr" => {
-                    quote! { tir::sem_expr::Expr::ShiftRightArithmetic(Box::new(#lhs_ts), Box::new(#rhs_ts)) }
-                }
-                _ => return None,
-            })
-        }
-    }
-}
-
-fn expr_as_semantic_expr(expr: &Expr, operands: &[ValueSpec]) -> Option<proc_macro2::TokenStream> {
-    let sem_src = match expr {
-        Expr::Lit(lit) => {
-            if let syn::Lit::Str(s) = &lit.lit {
-                s.value()
-            } else {
-                return None;
-            }
-        }
-        _ => return None,
-    };
-
-    let mut symbols = std::collections::HashMap::new();
-    for (idx, operand) in operands.iter().enumerate() {
-        symbols.insert(operand.name.clone(), idx as u32);
-    }
-
-    let parsed = parse_sem_expr(&sem_src)?;
-    let SemNode::List(items) = parsed else {
-        return None;
-    };
-    let [SemNode::Atom(set_kw), SemNode::Atom(_dst), rhs] = items.as_slice() else {
-        return None;
-    };
-    if set_kw != "set" {
-        return None;
-    }
-
-    sem_node_to_expr(rhs, &symbols)
 }
 
 fn sem_node_to_dag_stmts(
