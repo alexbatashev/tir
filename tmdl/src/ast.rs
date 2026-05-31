@@ -276,6 +276,115 @@ pub enum Expr {
     Invalid,
 }
 
+pub struct SemaLowering {
+    pub root: tir::graph::NodeId,
+    pub variable_symbols: HashMap<String, u32>,
+    pub register_symbols: HashMap<(String, u32), u32>,
+}
+
+struct SemaExprLoweringCtx<
+    'a,
+    G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
+> {
+    graph: &'a mut G,
+    params: &'a HashMap<String, i64>,
+    next_symbol_id: u32,
+    register_symbols: HashMap<(String, u32), u32>,
+    variable_symbols: HashMap<String, u32>,
+    had_error: bool,
+}
+
+impl<'a, G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>>
+    SemaExprLoweringCtx<'a, G>
+{
+    fn new(graph: &'a mut G, params: &'a HashMap<String, i64>) -> Self {
+        Self {
+            graph,
+            params,
+            next_symbol_id: 0,
+            register_symbols: HashMap::new(),
+            variable_symbols: HashMap::new(),
+            had_error: false,
+        }
+    }
+
+    fn add_node(
+        &mut self,
+        kind: tir::sem_expr::ExprKind,
+        children: &[tir::graph::NodeId],
+    ) -> tir::graph::NodeId {
+        let node = self.graph.add_node(kind);
+        for &child in children {
+            self.graph.add_edge(node, child);
+        }
+        node
+    }
+
+    fn add_leaf(
+        &mut self,
+        kind: tir::sem_expr::ExprKind,
+        data: tir::sem_expr::ExprPayload,
+    ) -> tir::graph::NodeId {
+        let node = self.graph.add_node(kind);
+        self.graph.set_leaf_data(node, data);
+        node
+    }
+
+    fn add_int_const(&mut self, value: tir::utils::APInt) -> tir::graph::NodeId {
+        self.add_leaf(
+            tir::sem_expr::ExprKind::Constant,
+            tir::sem_expr::ExprPayload::Int(value),
+        )
+    }
+
+    fn add_bool_const(&mut self, value: bool) -> tir::graph::NodeId {
+        self.add_int_const(tir::utils::APInt::new(1, value as u64))
+    }
+
+    fn alloc_variable_symbol(&mut self) -> u32 {
+        let id = self.next_symbol_id;
+        self.next_symbol_id += 1;
+        id
+    }
+
+    fn get_or_create_variable_symbol(&mut self, name: String) -> u32 {
+        if let Some(&id) = self.variable_symbols.get(&name) {
+            return id;
+        }
+        let id = self.alloc_variable_symbol();
+        self.variable_symbols.insert(name, id);
+        id
+    }
+
+    fn get_or_create_register_symbol(&mut self, class: String, number: u32) -> u32 {
+        if let Some(&id) = self.register_symbols.get(&(class.clone(), number)) {
+            return id;
+        }
+
+        let id = self.alloc_variable_symbol();
+        self.register_symbols.insert((class, number), id);
+        id
+    }
+
+    fn build_extract(
+        &mut self,
+        input_node: tir::graph::NodeId,
+        high_node: tir::graph::NodeId,
+        low_node: tir::graph::NodeId,
+    ) -> tir::graph::NodeId {
+        let one = self.add_int_const(tir::utils::APInt::new(16, 1));
+        let width = self.add_node(tir::sem_expr::ExprKind::Sub, &[high_node, low_node]);
+        let width_plus_one = self.add_node(tir::sem_expr::ExprKind::Add, &[width, one]);
+        let shifted_one = self.add_node(tir::sem_expr::ExprKind::ShiftLeft, &[one, width_plus_one]);
+        let mask = self.add_node(tir::sem_expr::ExprKind::Sub, &[shifted_one, one]);
+        let shifted_input = self.add_node(
+            tir::sem_expr::ExprKind::ShiftRightLogic,
+            &[input_node, low_node],
+        );
+        self.add_node(tir::sem_expr::ExprKind::And, &[shifted_input, mask])
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct File {
     pub items: Vec<Item>,
@@ -335,6 +444,374 @@ impl Into<Expr> for Block {
 impl Into<Expr> for If {
     fn into(self) -> Expr {
         Expr::If(self)
+    }
+}
+
+impl Expr {
+    fn lower_with_ctx<
+        G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
+    >(
+        &self,
+        ctx: &mut SemaExprLoweringCtx<'_, G>,
+    ) -> tir::graph::NodeId {
+        match self {
+            Expr::Assign(x) => x.as_sema_expr(ctx),
+            Expr::Binary(x) => x.as_sema_expr(ctx),
+            Expr::Block(x) => x.as_sema_expr(ctx),
+            Expr::Call(x) => x.as_sema_expr(ctx),
+            Expr::Field(x) => x.as_sema_expr(ctx),
+            Expr::Ident(x) => x.as_sema_expr(ctx),
+            Expr::If(x) => x.as_sema_expr(ctx),
+            Expr::IndexAccess(x) => x.as_sema_expr(ctx),
+            Expr::Path(x) => x.as_sema_expr(ctx),
+            Expr::Lit(x) => x.as_sema_expr(ctx),
+            Expr::Slice(x) => x.as_sema_expr(ctx),
+            Expr::BuiltinFunction(_) => panic!("builtin functions must be called"),
+            Expr::Invalid => panic!("cannot convert invalid expression"),
+        }
+    }
+
+    pub fn as_sema_expr(
+        &self,
+        g: &mut impl tir::graph::MutDag<
+            Node = tir::sem_expr::ExprKind,
+            Leaf = tir::sem_expr::ExprPayload,
+        >,
+    ) -> tir::graph::NodeId {
+        self.as_sema_expr_with_params(g, &HashMap::new())
+    }
+
+    pub(crate) fn as_sema_expr_with_params(
+        &self,
+        g: &mut impl tir::graph::MutDag<
+            Node = tir::sem_expr::ExprKind,
+            Leaf = tir::sem_expr::ExprPayload,
+        >,
+        params: &HashMap<String, i64>,
+    ) -> tir::graph::NodeId {
+        let mut ctx = SemaExprLoweringCtx::new(g, params);
+        self.lower_with_ctx(&mut ctx)
+    }
+
+    /// Lower this expression into a semantic expression graph, returning the
+    /// symbol table alongside the root node.  Returns `None` if the expression
+    /// contains operations that cannot be represented (e.g. Load/Store).
+    pub fn lower_to_sema(
+        &self,
+        g: &mut impl tir::graph::MutDag<
+            Node = tir::sem_expr::ExprKind,
+            Leaf = tir::sem_expr::ExprPayload,
+        >,
+        params: &HashMap<String, i64>,
+    ) -> Option<SemaLowering> {
+        let mut ctx = SemaExprLoweringCtx::new(g, params);
+        let root = self.lower_with_ctx(&mut ctx);
+        if ctx.had_error {
+            return None;
+        }
+        Some(SemaLowering {
+            root,
+            variable_symbols: ctx.variable_symbols,
+            register_symbols: ctx.register_symbols,
+        })
+    }
+}
+
+impl Assign {
+    fn as_sema_expr<
+        G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
+    >(
+        &self,
+        ctx: &mut SemaExprLoweringCtx<'_, G>,
+    ) -> tir::graph::NodeId {
+        self.value.lower_with_ctx(ctx)
+    }
+}
+
+impl Lit {
+    fn as_sema_expr<
+        G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
+    >(
+        &self,
+        ctx: &mut SemaExprLoweringCtx<'_, G>,
+    ) -> tir::graph::NodeId {
+        match self {
+            Lit::Int(lit_int) => {
+                let value_str = lit_int.value();
+                let value = if value_str.starts_with("0x") || value_str.starts_with("0X") {
+                    u64::from_str_radix(&value_str[2..], 16).expect("invalid hex literal")
+                } else if value_str.starts_with("0b") || value_str.starts_with("0B") {
+                    u64::from_str_radix(&value_str[2..], 2).expect("invalid binary literal")
+                } else {
+                    value_str.parse::<u64>().expect("invalid integer literal")
+                };
+
+                let width = if value == 0 {
+                    1
+                } else {
+                    64 - value.leading_zeros()
+                };
+
+                ctx.add_int_const(tir::utils::APInt::new(width, value))
+            }
+            Lit::Str(_) => panic!("string literals are not supported in semantic expressions"),
+        }
+    }
+}
+
+impl Ident {
+    fn as_sema_expr<
+        G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
+    >(
+        &self,
+        ctx: &mut SemaExprLoweringCtx<'_, G>,
+    ) -> tir::graph::NodeId {
+        if let Some(&value) = ctx.params.get(&self.name) {
+            let (width, abs_value) = if value < 0 {
+                let abs = value.unsigned_abs();
+                let width = if abs == 0 {
+                    1
+                } else {
+                    64 - abs.leading_zeros() + 1
+                };
+                (width, abs)
+            } else {
+                let v = value as u64;
+                let width = if v == 0 { 1 } else { 64 - v.leading_zeros() };
+                (width, v)
+            };
+
+            if value < 0 {
+                ctx.add_int_const(tir::utils::APInt::new_signed(width, value))
+            } else {
+                ctx.add_int_const(tir::utils::APInt::new(width, abs_value))
+            }
+        } else {
+            let id = ctx.get_or_create_variable_symbol(self.name.clone());
+            ctx.add_leaf(
+                tir::sem_expr::ExprKind::Symbol,
+                tir::sem_expr::ExprPayload::SymbolId(id),
+            )
+        }
+    }
+}
+
+impl Path {
+    fn as_sema_expr<
+        G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
+    >(
+        &self,
+        ctx: &mut SemaExprLoweringCtx<'_, G>,
+    ) -> tir::graph::NodeId {
+        assert!(
+            self.remainder.len() == 1,
+            "path expressions must have exactly one register component"
+        );
+
+        let reg_name = &self.remainder[0];
+        let number = if self.base == "PC" && reg_name == "pc" {
+            0
+        } else {
+            let digits_start = reg_name
+                .find(|c: char| c.is_ascii_digit())
+                .expect("could not infer register index from path");
+            reg_name[digits_start..]
+                .parse::<u32>()
+                .expect("invalid register index in path")
+        };
+
+        let symbol_id = ctx.get_or_create_register_symbol(self.base.clone(), number);
+        ctx.add_leaf(
+            tir::sem_expr::ExprKind::Symbol,
+            tir::sem_expr::ExprPayload::SymbolId(symbol_id),
+        )
+    }
+}
+
+impl Field {
+    fn as_sema_expr<
+        G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
+    >(
+        &self,
+        ctx: &mut SemaExprLoweringCtx<'_, G>,
+    ) -> tir::graph::NodeId {
+        if let Expr::Ident(base_ident) = &*self.base {
+            if base_ident.name == "self" {
+                return Ident::new(self.member.clone(), self.span).as_sema_expr(ctx);
+            }
+
+            let register_number = if let Some(num_str) = self.member.strip_prefix('x') {
+                num_str
+                    .parse::<u32>()
+                    .expect("invalid register number in field access")
+            } else {
+                self.member
+                    .parse::<u32>()
+                    .expect("invalid register number in field access")
+            };
+
+            let symbol_id =
+                ctx.get_or_create_register_symbol(base_ident.name.clone(), register_number);
+            ctx.add_leaf(
+                tir::sem_expr::ExprKind::Symbol,
+                tir::sem_expr::ExprPayload::SymbolId(symbol_id),
+            )
+        } else {
+            panic!("register field access requires base to be an identifier")
+        }
+    }
+}
+
+impl Binary {
+    fn as_sema_expr<
+        G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
+    >(
+        &self,
+        ctx: &mut SemaExprLoweringCtx<'_, G>,
+    ) -> tir::graph::NodeId {
+        let lhs = self.lhs.lower_with_ctx(ctx);
+        let rhs = self.rhs.lower_with_ctx(ctx);
+
+        use tir::sem_expr::ExprKind as K;
+
+        match self.op {
+            BinOp::Add => ctx.add_node(K::Add, &[lhs, rhs]),
+            BinOp::Sub => ctx.add_node(K::Sub, &[lhs, rhs]),
+            BinOp::Mul => ctx.add_node(K::Mul, &[lhs, rhs]),
+            BinOp::Div => ctx.add_node(K::Div, &[lhs, rhs]),
+            BinOp::UnsignedDiv => ctx.add_node(K::UDiv, &[lhs, rhs]),
+            BinOp::Equal => ctx.add_node(K::Eq, &[lhs, rhs]),
+            BinOp::NotEqual => ctx.add_node(K::Ne, &[lhs, rhs]),
+            BinOp::LessThan => ctx.add_node(K::Lt, &[lhs, rhs]),
+            BinOp::GreaterThan => ctx.add_node(K::Gt, &[lhs, rhs]),
+            BinOp::LessThenEqual => ctx.add_node(K::Ge, &[rhs, lhs]),
+            BinOp::GreaterThanEqual => ctx.add_node(K::Ge, &[lhs, rhs]),
+            BinOp::UnsignedLessThan => ctx.add_node(K::ULt, &[lhs, rhs]),
+            BinOp::UnsignedGreaterThan => ctx.add_node(K::UGt, &[lhs, rhs]),
+            BinOp::UnsignedLessThenEqual => ctx.add_node(K::UGe, &[rhs, lhs]),
+            BinOp::UnsignedGreaterThanEqual => ctx.add_node(K::UGe, &[lhs, rhs]),
+            BinOp::BitwiseAnd => ctx.add_node(K::And, &[lhs, rhs]),
+            BinOp::BitwiseOr => ctx.add_node(K::Or, &[lhs, rhs]),
+            BinOp::BitwiseXor => ctx.add_node(K::Xor, &[lhs, rhs]),
+            BinOp::ShiftLeftLogical => ctx.add_node(K::ShiftLeft, &[lhs, rhs]),
+            BinOp::ShiftRightLogical => ctx.add_node(K::ShiftRightLogic, &[lhs, rhs]),
+            BinOp::ShiftRightArithmetic => ctx.add_node(K::ShiftRightArithmetic, &[lhs, rhs]),
+        }
+    }
+}
+
+impl If {
+    fn as_sema_expr<
+        G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
+    >(
+        &self,
+        ctx: &mut SemaExprLoweringCtx<'_, G>,
+    ) -> tir::graph::NodeId {
+        let cond = self.cond.lower_with_ctx(ctx);
+        let then_ = self.then.lower_with_ctx(ctx);
+        let else_ = if let Some(else_expr) = &self.else_ {
+            else_expr.lower_with_ctx(ctx)
+        } else {
+            ctx.add_bool_const(false)
+        };
+
+        ctx.add_node(tir::sem_expr::ExprKind::If, &[cond, then_, else_])
+    }
+}
+
+impl Block {
+    fn as_sema_expr<
+        G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
+    >(
+        &self,
+        ctx: &mut SemaExprLoweringCtx<'_, G>,
+    ) -> tir::graph::NodeId {
+        if self.stmts.is_empty() {
+            ctx.add_bool_const(false)
+        } else {
+            self.stmts
+                .last()
+                .expect("non-empty block must have last expr")
+                .lower_with_ctx(ctx)
+        }
+    }
+}
+
+impl Slice {
+    fn as_sema_expr<
+        G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
+    >(
+        &self,
+        ctx: &mut SemaExprLoweringCtx<'_, G>,
+    ) -> tir::graph::NodeId {
+        let input = self.base.lower_with_ctx(ctx);
+        let high = Lit::Int(LitInt::new(self.end.to_string(), self.span)).as_sema_expr(ctx);
+        let low = Lit::Int(LitInt::new(self.start.to_string(), self.span)).as_sema_expr(ctx);
+        ctx.build_extract(input, high, low)
+    }
+}
+
+impl IndexAccess {
+    fn as_sema_expr<
+        G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
+    >(
+        &self,
+        ctx: &mut SemaExprLoweringCtx<'_, G>,
+    ) -> tir::graph::NodeId {
+        let input = self.base.lower_with_ctx(ctx);
+        let idx = Lit::Int(LitInt::new(self.index.to_string(), self.span)).as_sema_expr(ctx);
+        ctx.build_extract(input, idx, idx)
+    }
+}
+
+impl Call {
+    fn as_sema_expr<
+        G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
+    >(
+        &self,
+        ctx: &mut SemaExprLoweringCtx<'_, G>,
+    ) -> tir::graph::NodeId {
+        let Expr::BuiltinFunction(builtin) = &*self.callee else {
+            panic!("only builtin functions are supported");
+        };
+
+        match builtin {
+            BuiltinFunction::Clamp => {
+                assert!(self.arguments.len() == 3, "clamp requires 3 arguments");
+                let input = self.arguments[0].lower_with_ctx(ctx);
+                let min = self.arguments[1].lower_with_ctx(ctx);
+                let max = self.arguments[2].lower_with_ctx(ctx);
+                ctx.add_node(tir::sem_expr::ExprKind::Clamp, &[input, min, max])
+            }
+            BuiltinFunction::Extract => {
+                assert!(self.arguments.len() == 3, "extract requires 3 arguments");
+                let input = self.arguments[0].lower_with_ctx(ctx);
+                let high = self.arguments[1].lower_with_ctx(ctx);
+                let low = self.arguments[2].lower_with_ctx(ctx);
+                ctx.build_extract(input, high, low)
+            }
+            BuiltinFunction::Log2Ceil => {
+                assert!(self.arguments.len() == 1, "log2Ceil requires 1 argument");
+                let input = self.arguments[0].lower_with_ctx(ctx);
+                ctx.add_node(tir::sem_expr::ExprKind::Log2Ceil, &[input])
+            }
+            BuiltinFunction::SExt => {
+                assert!(self.arguments.len() == 2, "sext requires 2 arguments");
+                let input = self.arguments[0].lower_with_ctx(ctx);
+                let width = self.arguments[1].lower_with_ctx(ctx);
+                ctx.add_node(tir::sem_expr::ExprKind::SExt, &[input, width])
+            }
+            BuiltinFunction::ZExt => {
+                assert!(self.arguments.len() == 2, "zext requires 2 arguments");
+                let input = self.arguments[0].lower_with_ctx(ctx);
+                let width = self.arguments[1].lower_with_ctx(ctx);
+                ctx.add_node(tir::sem_expr::ExprKind::ZExt, &[input, width])
+            }
+            BuiltinFunction::Load | BuiltinFunction::Store => {
+                ctx.had_error = true;
+                ctx.add_bool_const(false)
+            }
+        }
     }
 }
 

@@ -127,26 +127,6 @@ impl APInt {
         }
     }
 
-    /// Convert to BitVec (reinterpret cast)
-    pub fn to_bitvec(&self) -> crate::sem_expr::BitVec {
-        crate::sem_expr::BitVec::from_u128(self.width as usize, self.value as u128)
-    }
-
-    /// Create from BitVec (reinterpret cast)
-    pub fn from_bitvec(width: u32, signed: bool, bits: &crate::sem_expr::BitVec) -> Self {
-        assert!(width > 0 && width <= 64, "Width must be between 1 and 64");
-        assert!(bits.width() <= 128, "BitVec too large to convert to APInt");
-
-        let value = bits.to_u128() as u64;
-        let mask = Self::mask_for_width(width);
-
-        APInt {
-            width,
-            signed,
-            value: value & mask,
-        }
-    }
-
     /// Check if the value is zero
     pub fn is_zero(&self) -> bool {
         self.value == 0

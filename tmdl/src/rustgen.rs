@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write;
 
 use quote::{format_ident, quote};
+use tir::graph::Dag;
 
 use crate::Type;
 use crate::ast;
@@ -10,13 +11,6 @@ use crate::utils::{
     get_encoding_arms, parse_literal_value, resolve_effective_asm_for_instruction,
     resolve_operands_for_instruction, resolve_params_for_instruction,
 };
-
-struct InstructionSemantics {
-    pattern: proc_macro2::TokenStream,
-    base_cost: u32,
-    variable_symbols: HashMap<String, u32>,
-    fixed_register_by_class: HashMap<String, Option<u16>>,
-}
 
 pub fn generate_rust<'a>(
     dialect: &str,
@@ -90,6 +84,7 @@ fn emit_instructions<'a>(
     let mut isel_rule_inits: Vec<proc_macro2::TokenStream> = vec![];
     let mut machine_instruction_impls: Vec<proc_macro2::TokenStream> = vec![];
     let mut instruction_custom_format_impls: Vec<proc_macro2::TokenStream> = vec![];
+    let mut as_sem_expr_impls: Vec<proc_macro2::TokenStream> = vec![];
 
     for inst in files.iter().flat_map(|f| f.instructions()) {
         let name_ident = format_ident!("{}Op", &inst.name);
@@ -235,17 +230,28 @@ fn emit_instructions<'a>(
             }
         });
 
+        let numeric_params: HashMap<String, i64> = resolve_params_for_instruction(inst, item_cache)
+            .into_iter()
+            .filter_map(|(name, (_ty, value))| match value {
+                Some(ast::Expr::Lit(ast::Lit::Int(li))) => {
+                    Some((name, parse_literal_value(&li) as i64))
+                }
+                _ => None,
+            })
+            .collect();
+
         if let Some(semantics) =
-            analyze_instruction_semantics(inst, item_cache, &ops, &defined_register_operands)
+            analyze_instruction_semantics(inst, &ops, &defined_register_operands, &numeric_params)
         {
             let emit_fn_ident = format_ident!("emit_isel_{}", inst.name.to_lowercase());
+            let pattern_fn_ident = format_ident!("isel_pattern_{}", inst.name.to_lowercase());
             let rule_name_lit = proc_macro2::Literal::string(&inst.name.to_lowercase());
             let mut emit_attr_steps = Vec::new();
             for (op_name, op_ty) in &ops {
-                let op_name_lit = proc_macro2::Literal::string(&op_name);
+                let op_name_lit = proc_macro2::Literal::string(op_name);
                 match op_ty {
                     Type::Struct(class_name) => {
-                        let class_lit = proc_macro2::Literal::string(&class_name);
+                        let class_lit = proc_macro2::Literal::string(class_name);
                         if let Some(def_pos) = defined_register_operands
                             .iter()
                             .position(|name| name == op_name)
@@ -316,9 +322,16 @@ fn emit_instructions<'a>(
                 }
             }
 
-            let pattern = semantics.pattern;
+            let (pattern_stmts, _root_var) = emit_dag_as_code(&semantics.pattern, semantics.root);
             let base_cost_lit = proc_macro2::Literal::u32_unsuffixed(semantics.base_cost);
             isel_rule_emitters.push(quote! {
+                fn #pattern_fn_ident() -> tir::sem_expr::ExprPostGraph {
+                    use tir::graph::MutDag;
+                    let mut g = tir::sem_expr::ExprPostGraph::new();
+                    #(#pattern_stmts)*
+                    g
+                }
+
                 fn #emit_fn_ident(
                     context: &tir::Context,
                     op: &tir::OperationRef,
@@ -333,11 +346,21 @@ fn emit_instructions<'a>(
             isel_rule_inits.push(quote! {
                 rules.push(tir_be_common::isel::Rule::new(
                     #rule_name_lit,
-                    #pattern,
+                    #pattern_fn_ident(),
                     #base_cost_lit,
                     #emit_fn_ident,
                 ));
             });
+        }
+
+        if let Some(impl_ts) = emit_as_sem_expr_impl(
+            inst,
+            &ops,
+            &defined_register_operands,
+            &name_ident,
+            &numeric_params,
+        ) {
+            as_sem_expr_impls.push(impl_ts);
         }
 
         let encoding_arms = get_encoding_arms(inst, item_cache);
@@ -354,110 +377,99 @@ fn emit_instructions<'a>(
         let execute_body = if let Some(rhs) =
             resolve_behavior_rhs(inst, &ops, &defined_register_operands)
         {
-            let numeric_params: HashMap<_, _> = resolve_params_for_instruction(inst, item_cache)
-                .into_iter()
-                .filter_map(|(name, (_ty, value))| match value {
-                    Some(ast::Expr::Lit(ast::Lit::Int(li))) => {
-                        Some((name, parse_literal_value(&li) as i64))
+            let dst_write = if let Some(dst_name) = defined_register_operands.last() {
+                let dst_lit = proc_macro2::Literal::string(dst_name);
+                quote! {
+                    let (dst_class, dst_idx) = tir_be_common::register_attr(self.attributes(), #dst_lit).ok_or(
+                        tir_be_common::SimTrap::MissingAttribute {
+                            op: #mnemonic_lit,
+                            attribute: #dst_lit,
+                        },
+                    )?;
+                    if !register_has_trait_hardwired_zero(&dst_class, dst_idx) {
+                        machine.write_register(&dst_class, dst_idx, value)?;
                     }
-                    _ => None,
-                })
-                .collect();
+                }
+            } else {
+                quote! {}
+            };
 
-            if let Ok(converted) = crate::sem_expr_conv::convert_to_sem_expr(rhs, numeric_params) {
-                let expr_tokens = emit_sem_expr(&converted.expr);
-                let mut symbol_arms = Vec::new();
-                for (symbol_id, info) in converted.symbols {
-                    let sym_lit = proc_macro2::Literal::u32_unsuffixed(symbol_id);
-                    match info {
-                        crate::sem_expr_conv::SymbolInfo::Variable { name } => {
-                            let name_lit = proc_macro2::Literal::string(&name);
-                            if let Some((_, ty)) = ops.iter().find(|(n, _)| n == &name) {
-                                match ty {
-                                    Type::Struct(_) => {
-                                        symbol_arms.push(quote! {
-                                            #sym_lit => {
-                                                let (class, index) = tir_be_common::register_attr(self.attributes(), #name_lit)
-                                                    .ok_or(tir_be_common::SimTrap::MissingAttribute {
-                                                        op: #mnemonic_lit,
-                                                        attribute: #name_lit,
-                                                    })?;
-                                                Ok(Some(machine.read_register(&class, index)?))
-                                            }
-                                        });
-                                    }
-                                    Type::Integer => {
-                                        symbol_arms.push(quote! {
-                                            #sym_lit => {
-                                                let value = tir_be_common::int_attr(self.attributes(), #name_lit).ok_or(
-                                                    tir_be_common::SimTrap::MissingAttribute {
-                                                        op: #mnemonic_lit,
-                                                        attribute: #name_lit,
-                                                    },
-                                                )?;
-                                                Ok(Some(tir::utils::APInt::new_signed(64, value)))
-                                            }
-                                        });
-                                    }
-                                    Type::Bits(width) => {
-                                        let width_lit =
-                                            proc_macro2::Literal::u32_unsuffixed(*width as u32);
-                                        symbol_arms.push(quote! {
-                                            #sym_lit => {
-                                                let value = tir_be_common::int_attr(self.attributes(), #name_lit).ok_or(
-                                                    tir_be_common::SimTrap::MissingAttribute {
-                                                        op: #mnemonic_lit,
-                                                        attribute: #name_lit,
-                                                    },
-                                                )?;
-                                                Ok(Some(tir::utils::APInt::new_signed(#width_lit, value)))
-                                            }
-                                        });
-                                    }
-                                    Type::String => {}
-                                    _ => {}
+            let mut dag = tir::sem_expr::ExprPostGraph::new();
+            if let Some(lowering) = rhs.lower_to_sema(&mut dag, &numeric_params) {
+                let max_sym_id = [
+                    lowering.variable_symbols.values().copied().max(),
+                    lowering.register_symbols.values().copied().max(),
+                ]
+                .into_iter()
+                .flatten()
+                .max()
+                .unwrap_or(0) as usize;
+                let max_sym_id_lit = proc_macro2::Literal::usize_unsuffixed(max_sym_id);
+
+                let mut sym_init_steps: Vec<proc_macro2::TokenStream> = Vec::new();
+                for (name, &sym_id) in &lowering.variable_symbols {
+                    let sym_lit = proc_macro2::Literal::usize_unsuffixed(sym_id as usize);
+                    let name_lit = proc_macro2::Literal::string(name);
+                    if let Some((_, ty)) = ops.iter().find(|(n, _)| n == name) {
+                        match ty {
+                            Type::Struct(_) => sym_init_steps.push(quote! {
+                                {
+                                    let (class, index) = tir_be_common::register_attr(self.attributes(), #name_lit)
+                                        .ok_or(tir_be_common::SimTrap::MissingAttribute {
+                                            op: #mnemonic_lit,
+                                            attribute: #name_lit,
+                                        })?;
+                                    __syms[#sym_lit] = Some(tir::sem_expr::Value::Int(machine.read_register(&class, index)?));
                                 }
+                            }),
+                            Type::Integer => sym_init_steps.push(quote! {
+                                {
+                                    let value = tir_be_common::int_attr(self.attributes(), #name_lit)
+                                        .ok_or(tir_be_common::SimTrap::MissingAttribute {
+                                            op: #mnemonic_lit,
+                                            attribute: #name_lit,
+                                        })?;
+                                    __syms[#sym_lit] = Some(tir::sem_expr::Value::Int(tir::utils::APInt::new_signed(64, value)));
+                                }
+                            }),
+                            Type::Bits(width) => {
+                                let width_lit =
+                                    proc_macro2::Literal::u32_unsuffixed(*width as u32);
+                                sym_init_steps.push(quote! {
+                                    {
+                                        let value = tir_be_common::int_attr(self.attributes(), #name_lit)
+                                            .ok_or(tir_be_common::SimTrap::MissingAttribute {
+                                                op: #mnemonic_lit,
+                                                attribute: #name_lit,
+                                            })?;
+                                        __syms[#sym_lit] = Some(tir::sem_expr::Value::Int(tir::utils::APInt::new_signed(#width_lit, value)));
+                                    }
+                                });
                             }
-                        }
-                        crate::sem_expr_conv::SymbolInfo::Register { class, number } => {
-                            let class_lit = proc_macro2::Literal::string(&class);
-                            let number_lit = proc_macro2::Literal::u16_unsuffixed(number as u16);
-                            symbol_arms.push(quote! {
-                                #sym_lit => Ok(Some(machine.read_register(#class_lit, #number_lit)?))
-                            });
+                            _ => {}
                         }
                     }
                 }
-
-                let dst_write = if let Some(dst_name) = defined_register_operands.last() {
-                    let dst_lit = proc_macro2::Literal::string(dst_name);
-                    quote! {
-                        let (dst_class, dst_idx) = tir_be_common::register_attr(self.attributes(), #dst_lit).ok_or(
-                            tir_be_common::SimTrap::MissingAttribute {
-                                op: #mnemonic_lit,
-                                attribute: #dst_lit,
-                            },
-                        )?;
-                        if !register_has_trait_hardwired_zero(&dst_class, dst_idx) {
-                            machine.write_register(&dst_class, dst_idx, value)?;
-                        }
-                    }
-                } else {
-                    quote! {}
-                };
+                for ((class, number), &sym_id) in &lowering.register_symbols {
+                    let sym_lit = proc_macro2::Literal::usize_unsuffixed(sym_id as usize);
+                    let class_lit = proc_macro2::Literal::string(class);
+                    let number_lit = proc_macro2::Literal::u16_unsuffixed(*number as u16);
+                    sym_init_steps.push(quote! {
+                        __syms[#sym_lit] = Some(tir::sem_expr::Value::Int(machine.read_register(#class_lit, #number_lit)?));
+                    });
+                }
 
                 quote! {
-                    let expr = #expr_tokens;
-                    let resolved = tir_be_common::resolve_expr_symbols(&expr, |symbol| {
-                        match symbol {
-                            #(#symbol_arms,)*
-                            _ => Ok(None),
-                        }
-                    })?;
-                    let evaluated = tir::sem_expr::evaluate(resolved);
-                    let value = match evaluated {
-                        tir::sem_expr::Expr::Int(i) => i,
-                        _ => {
+                    let mut __g = tir::sem_expr::ExprPostGraph::new();
+                    tir::sem_expr::AsSemExpr::convert(self, &mut __g);
+                    let mut __syms: Vec<Option<tir::sem_expr::Value>> = vec![None; #max_sym_id_lit + 1];
+                    #(#sym_init_steps)*
+                    let __syms: Vec<tir::sem_expr::Value> = __syms.into_iter()
+                        .map(|v| v.unwrap_or_else(|| tir::sem_expr::Value::Int(tir::utils::APInt::new(64, 0))))
+                        .collect();
+                    let value = match tir::sem_expr::execute(&__g, &__syms) {
+                        tir::sem_expr::Value::Int(i) => i,
+                        tir::sem_expr::Value::Float(_) => {
                             return Err(tir_be_common::SimTrap::InvalidInstruction {
                                 op: #mnemonic_lit,
                                 reason: "instruction semantic expression did not evaluate to integer".to_string(),
@@ -626,6 +638,7 @@ fn emit_instructions<'a>(
         #(#instruction_defs)*
         #(#instruction_custom_format_impls)*
         #(#machine_instruction_impls)*
+        #(#as_sem_expr_impls)*
 
         fn get_instruction_parsers() -> std::collections::HashMap<String, Box<tir_be_common::AsmInstructionParser>> {
             let mut map = std::collections::HashMap::new();
@@ -726,64 +739,52 @@ fn emit_register_trait_helpers(files: &[ast::File]) -> Result<proc_macro2::Token
 // Instruction analysis helpers
 // ---------------------------------------------------------------------------
 
-fn analyze_instruction_semantics<'a>(
-    inst: &'a ast::Instruction,
-    item_cache: &HashMap<&'a str, &'a ast::Item>,
+struct InstructionSemantics {
+    pattern: tir::sem_expr::ExprPostGraph,
+    root: tir::graph::NodeId,
+    base_cost: u32,
+    variable_symbols: HashMap<String, u32>,
+    fixed_register_by_class: HashMap<String, Option<u16>>,
+}
+
+fn analyze_instruction_semantics(
+    inst: &ast::Instruction,
     operands: &[(String, Type)],
     defined_register_operands: &[String],
+    numeric_params: &HashMap<String, i64>,
 ) -> Option<InstructionSemantics> {
     let rhs = resolve_behavior_rhs(inst, operands, defined_register_operands)?;
-
-    let numeric_params: HashMap<_, _> = resolve_params_for_instruction(inst, item_cache)
-        .into_iter()
-        .filter_map(|(name, (_ty, value))| match value {
-            Some(ast::Expr::Lit(ast::Lit::Int(li))) => {
-                Some((name, parse_literal_value(&li) as i64))
-            }
-            _ => None,
-        })
-        .collect();
-
-    let converted = crate::sem_expr_conv::convert_to_sem_expr(rhs, numeric_params).ok()?;
-    let pattern = emit_sem_expr(&converted.expr);
-    let base_cost = sem_expr_complexity(&converted.expr).max(1);
-    let (variable_symbols, fixed_register_by_class) = split_symbols(&converted.symbols);
+    let mut pattern = tir::sem_expr::ExprPostGraph::new();
+    let lowering = rhs.lower_to_sema(&mut pattern, numeric_params)?;
+    let base_cost = pattern.len().try_into().unwrap_or(u32::MAX).max(1);
+    let fixed_register_by_class = split_fixed_registers(&lowering.register_symbols);
 
     Some(InstructionSemantics {
         pattern,
+        root: lowering.root,
         base_cost,
-        variable_symbols,
+        variable_symbols: lowering.variable_symbols,
         fixed_register_by_class,
     })
 }
 
-fn split_symbols(
-    symbols: &HashMap<u32, crate::sem_expr_conv::SymbolInfo>,
-) -> (HashMap<String, u32>, HashMap<String, Option<u16>>) {
-    let mut variable_symbols: HashMap<String, u32> = HashMap::new();
+fn split_fixed_registers(symbols: &HashMap<(String, u32), u32>) -> HashMap<String, Option<u16>> {
     let mut fixed_register_by_class: HashMap<String, Option<u16>> = HashMap::new();
 
-    for (sym, info) in symbols {
-        match info {
-            crate::sem_expr_conv::SymbolInfo::Variable { name } => {
-                variable_symbols.insert(name.clone(), *sym);
+    for ((class, number), _) in symbols {
+        let entry = fixed_register_by_class.entry(class.clone()).or_insert(None);
+        if let Ok(number_u16) = u16::try_from(*number) {
+            match entry {
+                None => *entry = Some(number_u16),
+                Some(existing) if *existing == number_u16 => {}
+                Some(_) => *entry = None,
             }
-            crate::sem_expr_conv::SymbolInfo::Register { class, number } => {
-                let entry = fixed_register_by_class.entry(class.clone()).or_insert(None);
-                if let Ok(number_u16) = u16::try_from(*number) {
-                    match entry {
-                        None => *entry = Some(number_u16),
-                        Some(existing) if *existing == number_u16 => {}
-                        Some(_) => *entry = None,
-                    }
-                } else {
-                    *entry = None;
-                }
-            }
+        } else {
+            *entry = None;
         }
     }
 
-    (variable_symbols, fixed_register_by_class)
+    fixed_register_by_class
 }
 
 fn register_operand_names(operands: &[(String, Type)]) -> HashSet<&str> {
@@ -955,206 +956,126 @@ fn compile_asm_template(template: &str) -> Vec<AsmAction> {
 }
 
 // ---------------------------------------------------------------------------
-// sem_expr code emission
+// AsSemExpr code generation
 // ---------------------------------------------------------------------------
 
-fn emit_sem_expr(expr: &tir::sem_expr::Expr) -> proc_macro2::TokenStream {
-    use tir::sem_expr::Expr;
-    match expr {
-        Expr::Int(v) => {
-            let width = proc_macro2::Literal::u32_unsuffixed(v.width());
-            if v.is_signed() {
-                let value = proc_macro2::Literal::i64_unsuffixed(v.to_i64());
-                quote! { tir::sem_expr::Expr::Int(tir::utils::APInt::new_signed(#width, #value)) }
-            } else {
-                let value = proc_macro2::Literal::u64_unsuffixed(v.to_u64());
-                quote! { tir::sem_expr::Expr::Int(tir::utils::APInt::new(#width, #value)) }
+fn emit_as_sem_expr_impl(
+    inst: &ast::Instruction,
+    operands: &[(String, Type)],
+    defined_register_operands: &[String],
+    name_ident: &proc_macro2::Ident,
+    numeric_params: &HashMap<String, i64>,
+) -> Option<proc_macro2::TokenStream> {
+    let rhs = resolve_behavior_rhs(inst, operands, defined_register_operands)?;
+    let mut dag = tir::sem_expr::ExprPostGraph::new();
+    let lowering = rhs.lower_to_sema(&mut dag, numeric_params)?;
+    let (stmts, root_var) = emit_dag_as_code(&dag, lowering.root);
+
+    Some(quote! {
+        impl tir::sem_expr::AsSemExpr for #name_ident {
+            fn convert(
+                &self,
+                g: &mut impl tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
+            ) -> tir::graph::NodeId {
+                #(#stmts)*
+                #root_var
             }
         }
-        Expr::Bool(v) => {
-            quote! { tir::sem_expr::Expr::Bool(#v) }
+    })
+}
+
+fn emit_dag_as_code(
+    dag: &tir::sem_expr::ExprPostGraph,
+    root: tir::graph::NodeId,
+) -> (Vec<proc_macro2::TokenStream>, proc_macro2::Ident) {
+    use tir::graph::Dag;
+
+    let mut stmts: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut node_vars: HashMap<usize, proc_macro2::Ident> = HashMap::new();
+    let mut counter = 0usize;
+
+    for node_id in dag.postorder(root) {
+        let var = format_ident!("__sem_{}", counter);
+        counter += 1;
+
+        let kind_ts = emit_expr_kind_ts(dag.get_node(node_id));
+        stmts.push(quote! { let #var = g.add_node(#kind_ts); });
+
+        if let Some(data) = dag.get_leaf_data(node_id) {
+            let data_ts = emit_expr_payload_ts(data);
+            stmts.push(quote! { g.set_leaf_data(#var, #data_ts); });
         }
-        Expr::Symbol(id) => {
-            let id_lit = proc_macro2::Literal::u32_unsuffixed(*id);
-            quote! { tir::sem_expr::Expr::Symbol(#id_lit) }
+
+        let children: Vec<tir::graph::NodeId> = dag.children(node_id).collect();
+        for child_id in children {
+            let child_var = node_vars[&child_id.index()].clone();
+            stmts.push(quote! { g.add_edge(#var, #child_var); });
         }
-        Expr::Add(lhs, rhs) => {
-            let lhs = emit_sem_expr(lhs);
-            let rhs = emit_sem_expr(rhs);
-            quote! { tir::sem_expr::Expr::Add(Box::new(#lhs), Box::new(#rhs)) }
-        }
-        Expr::Sub(lhs, rhs) => {
-            let lhs = emit_sem_expr(lhs);
-            let rhs = emit_sem_expr(rhs);
-            quote! { tir::sem_expr::Expr::Sub(Box::new(#lhs), Box::new(#rhs)) }
-        }
-        Expr::Mul(lhs, rhs) => {
-            let lhs = emit_sem_expr(lhs);
-            let rhs = emit_sem_expr(rhs);
-            quote! { tir::sem_expr::Expr::Mul(Box::new(#lhs), Box::new(#rhs)) }
-        }
-        Expr::Div(lhs, rhs) => {
-            let lhs = emit_sem_expr(lhs);
-            let rhs = emit_sem_expr(rhs);
-            quote! { tir::sem_expr::Expr::Div(Box::new(#lhs), Box::new(#rhs)) }
-        }
-        Expr::UDiv(lhs, rhs) => {
-            let lhs = emit_sem_expr(lhs);
-            let rhs = emit_sem_expr(rhs);
-            quote! { tir::sem_expr::Expr::UDiv(Box::new(#lhs), Box::new(#rhs)) }
-        }
-        Expr::Eq(lhs, rhs) => {
-            let lhs = emit_sem_expr(lhs);
-            let rhs = emit_sem_expr(rhs);
-            quote! { tir::sem_expr::Expr::Eq(Box::new(#lhs), Box::new(#rhs)) }
-        }
-        Expr::Ne(lhs, rhs) => {
-            let lhs = emit_sem_expr(lhs);
-            let rhs = emit_sem_expr(rhs);
-            quote! { tir::sem_expr::Expr::Ne(Box::new(#lhs), Box::new(#rhs)) }
-        }
-        Expr::Lt(lhs, rhs) => {
-            let lhs = emit_sem_expr(lhs);
-            let rhs = emit_sem_expr(rhs);
-            quote! { tir::sem_expr::Expr::Lt(Box::new(#lhs), Box::new(#rhs)) }
-        }
-        Expr::Le(lhs, rhs) => {
-            let lhs = emit_sem_expr(lhs);
-            let rhs = emit_sem_expr(rhs);
-            quote! { tir::sem_expr::Expr::Le(Box::new(#lhs), Box::new(#rhs)) }
-        }
-        Expr::Gt(lhs, rhs) => {
-            let lhs = emit_sem_expr(lhs);
-            let rhs = emit_sem_expr(rhs);
-            quote! { tir::sem_expr::Expr::Gt(Box::new(#lhs), Box::new(#rhs)) }
-        }
-        Expr::Ge(lhs, rhs) => {
-            let lhs = emit_sem_expr(lhs);
-            let rhs = emit_sem_expr(rhs);
-            quote! { tir::sem_expr::Expr::Ge(Box::new(#lhs), Box::new(#rhs)) }
-        }
-        Expr::ULt(lhs, rhs) => {
-            let lhs = emit_sem_expr(lhs);
-            let rhs = emit_sem_expr(rhs);
-            quote! { tir::sem_expr::Expr::ULt(Box::new(#lhs), Box::new(#rhs)) }
-        }
-        Expr::ULe(lhs, rhs) => {
-            let lhs = emit_sem_expr(lhs);
-            let rhs = emit_sem_expr(rhs);
-            quote! { tir::sem_expr::Expr::ULe(Box::new(#lhs), Box::new(#rhs)) }
-        }
-        Expr::UGt(lhs, rhs) => {
-            let lhs = emit_sem_expr(lhs);
-            let rhs = emit_sem_expr(rhs);
-            quote! { tir::sem_expr::Expr::UGt(Box::new(#lhs), Box::new(#rhs)) }
-        }
-        Expr::UGe(lhs, rhs) => {
-            let lhs = emit_sem_expr(lhs);
-            let rhs = emit_sem_expr(rhs);
-            quote! { tir::sem_expr::Expr::UGe(Box::new(#lhs), Box::new(#rhs)) }
-        }
-        Expr::ShiftLeft(lhs, rhs) => {
-            let lhs = emit_sem_expr(lhs);
-            let rhs = emit_sem_expr(rhs);
-            quote! { tir::sem_expr::Expr::ShiftLeft(Box::new(#lhs), Box::new(#rhs)) }
-        }
-        Expr::ShiftRightLogic(lhs, rhs) => {
-            let lhs = emit_sem_expr(lhs);
-            let rhs = emit_sem_expr(rhs);
-            quote! { tir::sem_expr::Expr::ShiftRightLogic(Box::new(#lhs), Box::new(#rhs)) }
-        }
-        Expr::ShiftRightArithmetic(lhs, rhs) => {
-            let lhs = emit_sem_expr(lhs);
-            let rhs = emit_sem_expr(rhs);
-            quote! { tir::sem_expr::Expr::ShiftRightArithmetic(Box::new(#lhs), Box::new(#rhs)) }
-        }
-        Expr::And(lhs, rhs) => {
-            let lhs = emit_sem_expr(lhs);
-            let rhs = emit_sem_expr(rhs);
-            quote! { tir::sem_expr::Expr::And(Box::new(#lhs), Box::new(#rhs)) }
-        }
-        Expr::Or(lhs, rhs) => {
-            let lhs = emit_sem_expr(lhs);
-            let rhs = emit_sem_expr(rhs);
-            quote! { tir::sem_expr::Expr::Or(Box::new(#lhs), Box::new(#rhs)) }
-        }
-        Expr::Xor(lhs, rhs) => {
-            let lhs = emit_sem_expr(lhs);
-            let rhs = emit_sem_expr(rhs);
-            quote! { tir::sem_expr::Expr::Xor(Box::new(#lhs), Box::new(#rhs)) }
-        }
-        Expr::Log2Ceil(input) => {
-            let input = emit_sem_expr(input);
-            quote! { tir::sem_expr::Expr::Log2Ceil(Box::new(#input)) }
-        }
-        Expr::Load {
-            addr,
-            bytes,
-            signed,
-        } => {
-            let addr = emit_sem_expr(addr);
-            let bytes = emit_sem_expr(bytes);
-            let signed = emit_sem_expr(signed);
-            quote! {
-                tir::sem_expr::Expr::Load {
-                    addr: Box::new(#addr),
-                    bytes: Box::new(#bytes),
-                    signed: Box::new(#signed),
-                }
-            }
-        }
-        Expr::Store { addr, bytes, value } => {
-            let addr = emit_sem_expr(addr);
-            let bytes = emit_sem_expr(bytes);
-            let value = emit_sem_expr(value);
-            quote! {
-                tir::sem_expr::Expr::Store {
-                    addr: Box::new(#addr),
-                    bytes: Box::new(#bytes),
-                    value: Box::new(#value),
-                }
-            }
-        }
-        _ => quote! { tir::sem_expr::Expr::Bool(false) },
+
+        node_vars.insert(node_id.index(), var);
+    }
+
+    let root_var = node_vars[&root.index()].clone();
+    (stmts, root_var)
+}
+
+fn emit_expr_kind_ts(kind: &tir::sem_expr::ExprKind) -> proc_macro2::TokenStream {
+    use tir::sem_expr::ExprKind;
+    match kind {
+        ExprKind::Symbol => quote! { tir::sem_expr::ExprKind::Symbol },
+        ExprKind::Constant => quote! { tir::sem_expr::ExprKind::Constant },
+        ExprKind::Add => quote! { tir::sem_expr::ExprKind::Add },
+        ExprKind::Sub => quote! { tir::sem_expr::ExprKind::Sub },
+        ExprKind::Mul => quote! { tir::sem_expr::ExprKind::Mul },
+        ExprKind::Div => quote! { tir::sem_expr::ExprKind::Div },
+        ExprKind::UDiv => quote! { tir::sem_expr::ExprKind::UDiv },
+        ExprKind::Eq => quote! { tir::sem_expr::ExprKind::Eq },
+        ExprKind::Ne => quote! { tir::sem_expr::ExprKind::Ne },
+        ExprKind::Lt => quote! { tir::sem_expr::ExprKind::Lt },
+        ExprKind::Gt => quote! { tir::sem_expr::ExprKind::Gt },
+        ExprKind::Ge => quote! { tir::sem_expr::ExprKind::Ge },
+        ExprKind::ULt => quote! { tir::sem_expr::ExprKind::ULt },
+        ExprKind::ULe => quote! { tir::sem_expr::ExprKind::ULe },
+        ExprKind::UGt => quote! { tir::sem_expr::ExprKind::UGt },
+        ExprKind::UGe => quote! { tir::sem_expr::ExprKind::UGe },
+        ExprKind::ShiftLeft => quote! { tir::sem_expr::ExprKind::ShiftLeft },
+        ExprKind::ShiftRightArithmetic => quote! { tir::sem_expr::ExprKind::ShiftRightArithmetic },
+        ExprKind::ShiftRightLogic => quote! { tir::sem_expr::ExprKind::ShiftRightLogic },
+        ExprKind::Or => quote! { tir::sem_expr::ExprKind::Or },
+        ExprKind::And => quote! { tir::sem_expr::ExprKind::And },
+        ExprKind::Xor => quote! { tir::sem_expr::ExprKind::Xor },
+        ExprKind::If => quote! { tir::sem_expr::ExprKind::If },
+        ExprKind::Clamp => quote! { tir::sem_expr::ExprKind::Clamp },
+        ExprKind::LoadMemory => quote! { tir::sem_expr::ExprKind::LoadMemory },
+        ExprKind::StoreMemory => quote! { tir::sem_expr::ExprKind::StoreMemory },
+        ExprKind::ZExt => quote! { tir::sem_expr::ExprKind::ZExt },
+        ExprKind::SExt => quote! { tir::sem_expr::ExprKind::SExt },
+        ExprKind::Log2Ceil => quote! { tir::sem_expr::ExprKind::Log2Ceil },
+        ExprKind::Sqrt => quote! { tir::sem_expr::ExprKind::Sqrt },
+        ExprKind::Fma => quote! { tir::sem_expr::ExprKind::Fma },
     }
 }
 
-fn sem_expr_complexity(expr: &tir::sem_expr::Expr) -> u32 {
-    use tir::sem_expr::Expr;
-    match expr {
-        Expr::Int(_) | Expr::Bool(_) | Expr::Symbol(_) => 1,
-        Expr::Add(lhs, rhs)
-        | Expr::Sub(lhs, rhs)
-        | Expr::Mul(lhs, rhs)
-        | Expr::Div(lhs, rhs)
-        | Expr::UDiv(lhs, rhs)
-        | Expr::Eq(lhs, rhs)
-        | Expr::Ne(lhs, rhs)
-        | Expr::Lt(lhs, rhs)
-        | Expr::Le(lhs, rhs)
-        | Expr::Gt(lhs, rhs)
-        | Expr::Ge(lhs, rhs)
-        | Expr::ULt(lhs, rhs)
-        | Expr::ULe(lhs, rhs)
-        | Expr::UGt(lhs, rhs)
-        | Expr::UGe(lhs, rhs)
-        | Expr::ShiftLeft(lhs, rhs)
-        | Expr::ShiftRightLogic(lhs, rhs)
-        | Expr::ShiftRightArithmetic(lhs, rhs)
-        | Expr::And(lhs, rhs)
-        | Expr::Or(lhs, rhs)
-        | Expr::Xor(lhs, rhs) => 1 + sem_expr_complexity(lhs) + sem_expr_complexity(rhs),
-        Expr::Log2Ceil(input) => 1 + sem_expr_complexity(input),
-        Expr::Load {
-            addr,
-            bytes,
-            signed,
-        } => {
-            1 + sem_expr_complexity(addr) + sem_expr_complexity(bytes) + sem_expr_complexity(signed)
+fn emit_expr_payload_ts(payload: &tir::sem_expr::ExprPayload) -> proc_macro2::TokenStream {
+    use tir::sem_expr::ExprPayload;
+    match payload {
+        ExprPayload::SymbolId(id) => {
+            let id_lit = proc_macro2::Literal::u32_unsuffixed(*id);
+            quote! { tir::sem_expr::ExprPayload::SymbolId(#id_lit) }
         }
-        Expr::Store { addr, bytes, value } => {
-            1 + sem_expr_complexity(addr) + sem_expr_complexity(bytes) + sem_expr_complexity(value)
+        ExprPayload::Int(v) => {
+            let width = proc_macro2::Literal::u32_unsuffixed(v.width());
+            if v.is_signed() {
+                let val = proc_macro2::Literal::i64_unsuffixed(v.to_i64());
+                quote! { tir::sem_expr::ExprPayload::Int(tir::utils::APInt::new_signed(#width, #val)) }
+            } else {
+                let val = proc_macro2::Literal::u64_unsuffixed(v.to_u64());
+                quote! { tir::sem_expr::ExprPayload::Int(tir::utils::APInt::new(#width, #val)) }
+            }
         }
-        _ => 2,
+        ExprPayload::Float(f) => {
+            let val = proc_macro2::Literal::f64_unsuffixed(f.to_f64());
+            quote! { tir::sem_expr::ExprPayload::Float(tir::utils::APFloat::from_f64(#val)) }
+        }
     }
 }

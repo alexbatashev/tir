@@ -249,7 +249,9 @@ mod tests {
     use crate::{
         Context, IRBuilder, IRFormatter, Operation,
         builtin::{AddIOp, FuncOp, IntegerType, ops},
+        graph::Dag,
         parse::ir::parse_ir,
+        sem_expr::{AsSemExpr, ExprKind, ExprPayload, ExprPostGraph},
     };
 
     #[test]
@@ -369,5 +371,125 @@ mod tests {
             .verify(&context)
             .expect_err("expected SameOperandType verification to fail");
         assert!(err.to_string().contains("operand types must be the same"));
+    }
+
+    fn make_binary_op_context() -> (Context, crate::ValueId, crate::ValueId) {
+        let context = Context::with_default_dialects();
+        let lhs = context.create_value(IntegerType::new(&context, 32), None);
+        let rhs = context.create_value(IntegerType::new(&context, 32), None);
+        (context, lhs.id(), rhs.id())
+    }
+
+    fn check_binary_sem(g: &ExprPostGraph, root: crate::graph::NodeId, expected_kind: ExprKind) {
+        assert_eq!(g.len(), 3, "expected 3 nodes: lhs symbol, rhs symbol, op");
+        assert_eq!(g.get_kind(root), &expected_kind);
+        let children: Vec<_> = g.children(root).collect();
+        assert_eq!(children.len(), 2);
+        assert_eq!(g.get_kind(children[0]), &ExprKind::Symbol);
+        assert_eq!(g.get_kind(children[1]), &ExprKind::Symbol);
+        assert!(
+            matches!(g.get_leaf_data(children[0]), Some(ExprPayload::SymbolId(0))),
+            "lhs should be symbol 0"
+        );
+        assert!(
+            matches!(g.get_leaf_data(children[1]), Some(ExprPayload::SymbolId(1))),
+            "rhs should be symbol 1"
+        );
+    }
+
+    fn check_sem_metadata(
+        context: &Context,
+        op: &impl Operation,
+        g: &ExprPostGraph,
+        root: crate::graph::NodeId,
+        result: crate::ValueId,
+    ) {
+        assert_eq!(g.get_original_op(root), Some(op.id()));
+        assert_eq!(
+            g.get_actual_type(root),
+            Some(context.get_value(result).ty())
+        );
+    }
+
+    #[test]
+    fn addi_sem_expr() {
+        let (context, lhs, rhs) = make_binary_op_context();
+        let op = ops::addi(&context, lhs, rhs, IntegerType::new(&context, 32)).build();
+        let mut g = ExprPostGraph::new();
+        let root = op.convert(&mut g);
+        check_binary_sem(&g, root, ExprKind::Add);
+        check_sem_metadata(&context, &op, &g, root, op.result());
+    }
+
+    #[test]
+    fn subi_sem_expr() {
+        let (context, lhs, rhs) = make_binary_op_context();
+        let op = ops::subi(&context, lhs, rhs, IntegerType::new(&context, 32)).build();
+        let mut g = ExprPostGraph::new();
+        let root = op.convert(&mut g);
+        check_binary_sem(&g, root, ExprKind::Sub);
+    }
+
+    #[test]
+    fn muli_sem_expr() {
+        let (context, lhs, rhs) = make_binary_op_context();
+        let op = ops::muli(&context, lhs, rhs, IntegerType::new(&context, 32)).build();
+        let mut g = ExprPostGraph::new();
+        let root = op.convert(&mut g);
+        check_binary_sem(&g, root, ExprKind::Mul);
+    }
+
+    #[test]
+    fn andi_sem_expr() {
+        let (context, lhs, rhs) = make_binary_op_context();
+        let op = ops::andi(&context, lhs, rhs, IntegerType::new(&context, 32)).build();
+        let mut g = ExprPostGraph::new();
+        let root = op.convert(&mut g);
+        check_binary_sem(&g, root, ExprKind::And);
+    }
+
+    #[test]
+    fn ori_sem_expr() {
+        let (context, lhs, rhs) = make_binary_op_context();
+        let op = ops::ori(&context, lhs, rhs, IntegerType::new(&context, 32)).build();
+        let mut g = ExprPostGraph::new();
+        let root = op.convert(&mut g);
+        check_binary_sem(&g, root, ExprKind::Or);
+    }
+
+    #[test]
+    fn xori_sem_expr() {
+        let (context, lhs, rhs) = make_binary_op_context();
+        let op = ops::xori(&context, lhs, rhs, IntegerType::new(&context, 32)).build();
+        let mut g = ExprPostGraph::new();
+        let root = op.convert(&mut g);
+        check_binary_sem(&g, root, ExprKind::Xor);
+    }
+
+    #[test]
+    fn shli_sem_expr() {
+        let (context, lhs, rhs) = make_binary_op_context();
+        let op = ops::shli(&context, lhs, rhs, IntegerType::new(&context, 32)).build();
+        let mut g = ExprPostGraph::new();
+        let root = op.convert(&mut g);
+        check_binary_sem(&g, root, ExprKind::ShiftLeft);
+    }
+
+    #[test]
+    fn shrui_sem_expr() {
+        let (context, lhs, rhs) = make_binary_op_context();
+        let op = ops::shrui(&context, lhs, rhs, IntegerType::new(&context, 32)).build();
+        let mut g = ExprPostGraph::new();
+        let root = op.convert(&mut g);
+        check_binary_sem(&g, root, ExprKind::ShiftRightLogic);
+    }
+
+    #[test]
+    fn shrsi_sem_expr() {
+        let (context, lhs, rhs) = make_binary_op_context();
+        let op = ops::shrsi(&context, lhs, rhs, IntegerType::new(&context, 32)).build();
+        let mut g = ExprPostGraph::new();
+        let root = op.convert(&mut g);
+        check_binary_sem(&g, root, ExprKind::ShiftRightArithmetic);
     }
 }

@@ -247,26 +247,6 @@ impl APFloat {
         sign_shifted | exp_shifted | mantissa
     }
 
-    /// Convert to BitVec (reinterpret cast)
-    pub fn to_bitvec(&self) -> crate::sem_expr::BitVec {
-        let total_width = self.bit_width() as usize;
-        crate::sem_expr::BitVec::from_u128(total_width, self.to_bits())
-    }
-
-    /// Create from BitVec (reinterpret cast)
-    pub fn from_bitvec(
-        exp_width: u32,
-        mant_width: u32,
-        explicit_leading_bit: bool,
-        bits: &crate::sem_expr::BitVec,
-    ) -> Self {
-        assert!(
-            bits.width() <= 128,
-            "BitVec too large to convert to APFloat (max 128 bits)"
-        );
-        Self::from_bits(exp_width, mant_width, explicit_leading_bit, bits.to_u128())
-    }
-
     /// Create from f32 (creates a single precision APFloat)
     pub fn from_f32(value: f32) -> Self {
         Self::from_bits(8, 23, false, value.to_bits() as u128)
