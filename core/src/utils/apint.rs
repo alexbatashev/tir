@@ -119,8 +119,13 @@ impl APInt {
     /// Convert to i64, interpreting as signed
     pub fn to_i64(&self) -> i64 {
         if self.signed && self.is_negative() {
-            // Sign extend
-            let extension = u64::MAX << self.width;
+            // Sign extend. At width >= 64 the bit pattern is already the i64, so
+            // there are no upper bits to fill (and `u64::MAX << 64` would panic).
+            let extension = if self.width >= 64 {
+                0
+            } else {
+                u64::MAX << self.width
+            };
             (self.value | extension) as i64
         } else {
             self.value as i64

@@ -6,8 +6,10 @@ use crate::{
 };
 
 mod exec;
+mod infer;
 
 pub use exec::execute;
+pub use infer::{canonicalize_for_selection, infer_widths};
 
 pub type ExprPostGraph = PostOrderDag<ExprKind, ExprPayload>;
 
@@ -56,6 +58,12 @@ pub enum ExprKind {
     StoreMemory,
     ZExt,
     SExt,
+    /// Bit-field extract: arguments are value, high bit, low bit (both inclusive).
+    /// The result is the `high - low + 1` low bits. This is the single canonical
+    /// representation of truncation/bit-slicing — there is deliberately no separate
+    /// `Trunc` (`Trunc(x, n) == Extract(x, n-1, 0)`).
+    #[arity = 3]
+    Extract,
     #[arity = 1]
     Log2Ceil,
     #[arity = 1]

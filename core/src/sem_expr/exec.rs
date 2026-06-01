@@ -211,9 +211,26 @@ fn eval_node(
             Value::Int(APInt::new(a.width(), result))
         }
 
+        ExprKind::Extract => {
+            let value = as_int!(c(0), "extract");
+            let high = as_int!(c(1), "extract").to_u64() as u32;
+            let low = as_int!(c(2), "extract").to_u64() as u32;
+            Value::Int(value.extract_bits(high, low))
+        }
+        ExprKind::ZExt => {
+            let value = as_int!(c(0), "zext");
+            let width = as_int!(c(1), "zext").to_u64() as u32;
+            Value::Int(value.zero_extend(width))
+        }
+        ExprKind::SExt => {
+            let value = as_int!(c(0), "sext");
+            let width = as_int!(c(1), "sext").to_u64() as u32;
+            // Sign-extend from the value's current MSB regardless of how its
+            // signedness flag happens to be set (e.g. `extract` yields unsigned).
+            Value::Int(value.with_signed(true).sign_extend(width))
+        }
+
         // ── Not yet supported ──────────────────────────────────────────────
-        ExprKind::ZExt => todo!("ZExt requires a target-width payload"),
-        ExprKind::SExt => todo!("SExt requires a target-width payload"),
         ExprKind::LoadMemory | ExprKind::StoreMemory => {
             unimplemented!("memory operations are not supported by this interpreter")
         }
@@ -320,6 +337,29 @@ mod tests {
         let b = sym(&mut g, 1);
         inner(&mut g, ExprKind::Mul, &[a, b]);
         assert_eq!(as_i64(execute(&g, &[iv(6), iv(7)])), 42);
+    }
+
+    #[test]
+    fn addw_tree_sign_extends_low_word() {
+        // The RV64 `addw` semantics expressed directly in the graph, no extra
+        // primitives: sext(extract(rs1 + rs2, 31, 0), 64).
+        let mut g = ExprPostGraph::new();
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
+        let add = inner(&mut g, ExprKind::Add, &[a, b]);
+        let hi = int_con(&mut g, 31);
+        let lo = int_con(&mut g, 0);
+        let ext = inner(&mut g, ExprKind::Extract, &[add, hi, lo]);
+        let width = int_con(&mut g, 64);
+        inner(&mut g, ExprKind::SExt, &[ext, width]);
+
+        // 0x7FFF_FFFF + 1 = 0x8000_0000, whose low word is negative as i32 and
+        // sign-extends to -2147483648 in 64 bits.
+        let inputs = [
+            Value::Int(APInt::new(64, 0x7FFF_FFFF)),
+            Value::Int(APInt::new(64, 1)),
+        ];
+        assert_eq!(as_i64(execute(&g, &inputs)), -2_147_483_648);
     }
 
     #[test]

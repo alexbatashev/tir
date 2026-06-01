@@ -31,11 +31,22 @@ impl<N: Node> PatternExpr<N> {
     }
 }
 
+/// Restricts what a boundary (operand) pattern node may bind to, distinguishing
+/// register operands from immediates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperandConstraint {
+    /// Must bind to a non-constant value (a register / SSA value).
+    Register,
+    /// Must bind to a compile-time constant (an immediate).
+    Immediate,
+}
+
 pub struct Pattern<N: Node, A> {
     nodes: Vec<PatternExpr<N>>,
     edges: HashMap<NodeId, Vec<NodeId>>,
     parents: HashMap<NodeId, Vec<NodeId>>,
     duplicable: HashSet<NodeId>,
+    operand_constraints: HashMap<NodeId, OperandConstraint>,
     root: Option<NodeId>,
     applicator: A,
 }
@@ -136,6 +147,7 @@ impl<N: Node, A> Pattern<N, A> {
             edges: HashMap::new(),
             parents: HashMap::new(),
             duplicable: HashSet::new(),
+            operand_constraints: HashMap::new(),
             root: None,
             applicator: a,
         }
@@ -170,6 +182,14 @@ impl<N: Node, A> Pattern<N, A> {
         } else {
             self.duplicable.remove(&node);
         }
+    }
+
+    pub fn set_operand_constraint(&mut self, node: NodeId, constraint: OperandConstraint) {
+        self.operand_constraints.insert(node, constraint);
+    }
+
+    pub fn operand_constraint(&self, node: NodeId) -> Option<OperandConstraint> {
+        self.operand_constraints.get(&node).copied()
     }
 
     pub fn is_duplicable(&self, node: NodeId) -> bool {
@@ -424,7 +444,11 @@ impl VF2CoverDriver {
             let pattern_arity = pattern.children(pattern_node).len();
             match pattern.get_node(pattern_node) {
                 PatternExpr::Any => graph_children[graph_node.index()].len() == pattern_arity,
-                PatternExpr::Boundary => true,
+                PatternExpr::Boundary => match pattern.operand_constraint(pattern_node) {
+                    Some(OperandConstraint::Register) => !g.get_kind(graph_node).is_constant(),
+                    Some(OperandConstraint::Immediate) => g.get_kind(graph_node).is_constant(),
+                    None => true,
+                },
                 PatternExpr::Leaf => g.get_kind(graph_node).is_leaf(ctx),
                 PatternExpr::Node(kind) => {
                     graph_children[graph_node.index()].len() == pattern_arity

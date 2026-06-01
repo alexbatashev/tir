@@ -24,6 +24,12 @@ dialect! {
             XorOp,
             AndOp,
             OrOp,
+            // RV64I word ops
+            AddWordOp,
+            SubWordOp,
+            ShiftLeftLogicalWordOp,
+            ShiftRightLogicalWordOp,
+            ShiftRightArithmeticWordOp,
             VirtualReturnOp
         ],
     }
@@ -106,8 +112,8 @@ fn lower_func_and_return_to_asm_symbol(
     Ok(false)
 }
 
-pub fn create_isel_pass() -> tir_be_common::isel::InstructionSelectPass {
-    tir_be_common::isel::InstructionSelectPass::new(get_isel_rules())
+pub fn create_isel_pass(context: &tir::Context) -> tir_be_common::isel::InstructionSelectPass {
+    tir_be_common::isel::InstructionSelectPass::new(get_isel_rules(context))
         .with_op_lowering(lower_func_and_return_to_asm_symbol)
 }
 
@@ -185,7 +191,7 @@ mod tests {
         module.verify(&context).expect("Invalid module");
         // assert!(module.verify(&context).is_ok());
         let mut pm = PassManager::new();
-        pm.nest(FuncOp::name()).add_pass(create_isel_pass());
+        pm.nest(FuncOp::name()).add_pass(create_isel_pass(&context));
         pm.run(&context, context.get_op(module.id()))
             .expect("pass pipeline should succeed");
         assert!(module.verify(&context).is_ok());
@@ -194,5 +200,123 @@ mod tests {
         let mut fmt = IRFormatter::new(&mut buf);
         module.print(&mut fmt).expect("print lowered module");
         insta::assert_snapshot!("builtin_add_lowers_to_riscv_add_ir", &buf);
+    }
+
+    #[test]
+    fn multi_op_function_lowers_end_to_end() {
+        let context = Context::with_default_dialects();
+        context.register_dialect::<AsmDialect>();
+        context.register_dialect::<RiscvDialect>();
+
+        let i32 = IntegerType::new(&context, 32);
+        let module = ops::module(&context, None).build();
+
+        let a = context.create_value(i32, None);
+        let b = context.create_value(i32, None);
+        let c = context.create_value(i32, None);
+        let region = context.create_region();
+        let block = context.create_block(vec![a, b, c]);
+        region.add_block(block.id());
+
+        let func = ops::func(&context, "demo", i32, Some(region.id())).build();
+        let body = func.body();
+        let args = body.arguments();
+        let (a, b, c) = (args[0].id(), args[1].id(), args[2].id());
+
+        // t1 = a + b ; t2 = t1 - c ; t3 = t2 & a ; t4 = t3 | b ; return t4
+        let mut fb = IRBuilder::new(func.body());
+        let t1 = ops::addi(&context, a, b, i32).build();
+        let t1r = t1.result();
+        fb.insert(t1);
+        let t2 = ops::subi(&context, t1r, c, i32).build();
+        let t2r = t2.result();
+        fb.insert(t2);
+        let t3 = ops::andi(&context, t2r, a, i32).build();
+        let t3r = t3.result();
+        fb.insert(t3);
+        let t4 = ops::ori(&context, t3r, b, i32).build();
+        let t4r = t4.result();
+        fb.insert(t4);
+        fb.insert(ops::r#return(&context, t4r).build());
+
+        let mut mb = IRBuilder::new(module.body());
+        mb.insert(func);
+        mb.insert(ops::module_end(&context).build());
+
+        module.verify(&context).expect("invalid module");
+        let mut pm = PassManager::new();
+        pm.nest(FuncOp::name()).add_pass(create_isel_pass(&context));
+        pm.run(&context, context.get_op(module.id()))
+            .expect("pass pipeline should succeed");
+
+        let mut buf = String::new();
+        let mut fmt = IRFormatter::new(&mut buf);
+        module.print(&mut fmt).expect("print lowered module");
+        println!("=== lowered IR ===\n{buf}");
+
+        let body: Vec<_> = context
+            .get_region(region.id())
+            .iter(context.clone())
+            .next()
+            .unwrap()
+            .op_ids()
+            .into_iter()
+            .map(|id| context.get_op(id).name)
+            .collect();
+        assert_eq!(
+            body,
+            vec!["addw", "subw", "and", "or", "vret", "symbol_end"],
+            "i32 add/sub should select the word ops (addw/subw) on RV64, while \
+             bitwise and/or (no word variant) select the plain ops"
+        );
+    }
+
+    #[test]
+    fn i32_register_shift_selects_word_shift() {
+        let context = Context::with_default_dialects();
+        context.register_dialect::<AsmDialect>();
+        context.register_dialect::<RiscvDialect>();
+
+        let i32 = IntegerType::new(&context, 32);
+        let module = ops::module(&context, None).build();
+        let a = context.create_value(i32, None);
+        let b = context.create_value(i32, None);
+        let region = context.create_region();
+        let block = context.create_block(vec![a, b]);
+        region.add_block(block.id());
+
+        let func = ops::func(&context, "demo", i32, Some(region.id())).build();
+        let body = func.body();
+        let args = body.arguments();
+        let (a, b) = (args[0].id(), args[1].id());
+
+        // a << b with b a register. Earlier this matched the immediate shift slliw
+        // (whose emit then failed). With operand constraints slliw rejects the
+        // register amount, and the Clamp-stripped register word shift sllw wins.
+        let mut fb = IRBuilder::new(func.body());
+        let s = ops::shli(&context, a, b, i32).build();
+        let sr = s.result();
+        fb.insert(s);
+        fb.insert(ops::r#return(&context, sr).build());
+
+        let mut mb = IRBuilder::new(module.body());
+        mb.insert(func);
+        mb.insert(ops::module_end(&context).build());
+
+        let mut pm = PassManager::new();
+        pm.nest(FuncOp::name()).add_pass(create_isel_pass(&context));
+        pm.run(&context, context.get_op(module.id()))
+            .expect("pass pipeline should succeed");
+
+        let body: Vec<_> = context
+            .get_region(region.id())
+            .iter(context.clone())
+            .next()
+            .unwrap()
+            .op_ids()
+            .into_iter()
+            .map(|id| context.get_op(id).name)
+            .collect();
+        assert_eq!(body, vec!["sllw", "vret", "symbol_end"]);
     }
 }

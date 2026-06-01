@@ -372,16 +372,14 @@ impl<'a, G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_e
         high_node: tir::graph::NodeId,
         low_node: tir::graph::NodeId,
     ) -> tir::graph::NodeId {
-        let one = self.add_int_const(tir::utils::APInt::new(16, 1));
-        let width = self.add_node(tir::sem_expr::ExprKind::Sub, &[high_node, low_node]);
-        let width_plus_one = self.add_node(tir::sem_expr::ExprKind::Add, &[width, one]);
-        let shifted_one = self.add_node(tir::sem_expr::ExprKind::ShiftLeft, &[one, width_plus_one]);
-        let mask = self.add_node(tir::sem_expr::ExprKind::Sub, &[shifted_one, one]);
-        let shifted_input = self.add_node(
-            tir::sem_expr::ExprKind::ShiftRightLogic,
-            &[input_node, low_node],
-        );
-        self.add_node(tir::sem_expr::ExprKind::And, &[shifted_input, mask])
+        // A single canonical `Extract` node rather than a shift/and/mask tree, so
+        // instruction selection can match truncation/bit-slicing structurally
+        // (e.g. addw = sext(extract(rs1+rs2, 31, 0), XLEN)) instead of pattern-
+        // matching a fragile arithmetic expansion.
+        self.add_node(
+            tir::sem_expr::ExprKind::Extract,
+            &[input_node, high_node, low_node],
+        )
     }
 }
 
