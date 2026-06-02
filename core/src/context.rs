@@ -220,6 +220,15 @@ impl Context {
         self.0.read().operations.contains_key(&id)
     }
 
+    /// Remove an op from the operation arena. Called by `Rewriter::erase_op`/
+    /// `replace_op` once the op has left its block, so the arena tracks the *live*
+    /// IR rather than accumulating detached ops (which otherwise show up as phantom
+    /// references to any whole-program scan). Existing `Arc<OpInstance>` handles
+    /// (e.g. inside an `OperationRef`) keep the instance alive after removal.
+    pub(crate) fn remove_operation(&self, id: OpId) {
+        self.0.write().operations.remove(&id);
+    }
+
     pub fn create_value(&self, ty: TypeId, defining_op: Option<OpId>) -> Value {
         let mut inner = self.0.write();
 

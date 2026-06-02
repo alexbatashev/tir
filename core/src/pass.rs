@@ -117,8 +117,10 @@ impl Rewriter {
             .ok_or(PassError::MissingBlock(target.name()))?;
         if block.replace_op(target.op.id, new_op.id()) {
             // The replaced-out op no longer references its operands; the new op
-            // registered its own uses when it was added to the context.
+            // registered its own uses when it was added to the context. Drop the old
+            // op from the arena so it doesn't linger as a phantom.
             self.context.detach_op_uses(&target.op);
+            self.context.remove_operation(target.op.id);
             Ok(())
         } else {
             Err(PassError::RewriteFailed(target.op.id))
@@ -132,6 +134,7 @@ impl Rewriter {
             .ok_or(PassError::MissingBlock(target.name()))?;
         if block.remove_op(target.op.id) {
             self.context.detach_op_uses(&target.op);
+            self.context.remove_operation(target.op.id);
             Ok(())
         } else {
             Err(PassError::RewriteFailed(target.op.id))
@@ -250,6 +253,13 @@ impl PassManager {
             for block in region.iter(context.clone()) {
                 let op_ids = block.op_ids();
                 for (index, op_id) in op_ids.into_iter().enumerate() {
+                    // A pass run earlier in this walk may have erased or replaced a
+                    // later op in the same block (isel rewrites the whole block at
+                    // once); the snapshot still holds the old id. Skip ops that are no
+                    // longer live — a replacement carries a new id and isn't revisited.
+                    if !context.has_operation(op_id) {
+                        continue;
+                    }
                     let op = context.get_op(op_id);
                     let child = OperationRef {
                         op,
@@ -334,6 +344,7 @@ mod tests {
         )
         .build();
         let add_result = add.result();
+        let add_id = add.id();
         func_builder.insert(add);
         func_builder.insert(ops::r#return(&context, add_result).build());
 
@@ -360,6 +371,9 @@ mod tests {
         let uses = context.value_uses(func_body.arguments()[0].id());
         assert_eq!(uses.len(), 1, "param0 should have exactly one use");
         assert_eq!(uses[0].op(), subi_id);
+
+        // The replaced-out addi is gone from the arena, not just the block.
+        assert!(!context.has_operation(add_id), "replaced op should leave the arena");
     }
 
     #[test]
@@ -377,8 +391,9 @@ mod tests {
         let mut b = IRBuilder::new(body.clone());
         let neg = ops::subi(&context, body.arguments()[0].id(), body.arguments()[0].id(), i32)
             .build();
+        let neg_id = neg.id();
         let neg_ref = super::OperationRef::new(
-            context.get_op(neg.id()),
+            context.get_op(neg_id),
             Some(body.clone()),
             None,
         );
@@ -392,5 +407,7 @@ mod tests {
             !context.is_value_used(body.arguments()[0].id()),
             "erasing the only consumer must clear the value's uses"
         );
+        // The erased op is gone from the arena, not just the block.
+        assert!(!context.has_operation(neg_id), "erased op should leave the arena");
     }
 }
