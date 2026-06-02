@@ -17,14 +17,36 @@ impl PatternId {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PatternExpr<N: Node> {
     Any,
+    Boundary,
     Leaf,
     Node(N),
+}
+
+impl<N: Node> PatternExpr<N> {
+    fn node(&self) -> Option<&N> {
+        match self {
+            PatternExpr::Node(node) => Some(node),
+            _ => None,
+        }
+    }
+}
+
+/// Restricts what a boundary (operand) pattern node may bind to, distinguishing
+/// register operands from immediates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperandConstraint {
+    /// Must bind to a non-constant value (a register / SSA value).
+    Register,
+    /// Must bind to a compile-time constant (an immediate).
+    Immediate,
 }
 
 pub struct Pattern<N: Node, A> {
     nodes: Vec<PatternExpr<N>>,
     edges: HashMap<NodeId, Vec<NodeId>>,
     parents: HashMap<NodeId, Vec<NodeId>>,
+    duplicable: HashSet<NodeId>,
+    operand_constraints: HashMap<NodeId, OperandConstraint>,
     root: Option<NodeId>,
     applicator: A,
 }
@@ -91,12 +113,41 @@ pub trait GraphCoverDriver<N: Node, L, A> {
 
 pub struct VF2CoverDriver {}
 
+pub trait CoverLegality<N: Node, L, A> {
+    fn binding_allowed(
+        &self,
+        ctx: &Context,
+        g: &impl Dag<Node = N, Leaf = L>,
+        pattern: &Pattern<N, A>,
+        pattern_node: NodeId,
+        graph_node: NodeId,
+    ) -> bool;
+}
+
+#[derive(Default)]
+pub struct DefaultCoverLegality;
+
+impl<N: Node, L, A> CoverLegality<N, L, A> for DefaultCoverLegality {
+    fn binding_allowed(
+        &self,
+        _ctx: &Context,
+        _g: &impl Dag<Node = N, Leaf = L>,
+        _pattern: &Pattern<N, A>,
+        _pattern_node: NodeId,
+        _graph_node: NodeId,
+    ) -> bool {
+        true
+    }
+}
+
 impl<N: Node, A> Pattern<N, A> {
     pub fn new(a: A) -> Self {
         Self {
             nodes: vec![],
             edges: HashMap::new(),
             parents: HashMap::new(),
+            duplicable: HashSet::new(),
+            operand_constraints: HashMap::new(),
             root: None,
             applicator: a,
         }
@@ -123,6 +174,26 @@ impl<N: Node, A> Pattern<N, A> {
     pub fn add_edge(&mut self, from: NodeId, to: NodeId) {
         self.edges.entry(from).or_default().push(to);
         self.parents.entry(to).or_default().push(from);
+    }
+
+    pub fn set_duplicable(&mut self, node: NodeId, duplicable: bool) {
+        if duplicable {
+            self.duplicable.insert(node);
+        } else {
+            self.duplicable.remove(&node);
+        }
+    }
+
+    pub fn set_operand_constraint(&mut self, node: NodeId, constraint: OperandConstraint) {
+        self.operand_constraints.insert(node, constraint);
+    }
+
+    pub fn operand_constraint(&self, node: NodeId) -> Option<OperandConstraint> {
+        self.operand_constraints.get(&node).copied()
+    }
+
+    pub fn is_duplicable(&self, node: NodeId) -> bool {
+        self.duplicable.contains(&node)
     }
 
     pub fn set_root(&mut self, root: NodeId) {
@@ -223,6 +294,11 @@ impl<N: Node, A> Pattern<N, A> {
             let arity = self.children(node).len();
             match expr {
                 PatternExpr::Any => {}
+                PatternExpr::Boundary => {
+                    if arity != 0 {
+                        return Err("boundary pattern nodes cannot have children");
+                    }
+                }
                 PatternExpr::Leaf => {
                     if arity != 0 {
                         return Err("leaf pattern nodes cannot have children");
@@ -248,6 +324,37 @@ impl<N: Node + PartialEq, L, A> GraphCoverDriver<N, L, A> for VF2CoverDriver {
         ctx: &Context,
         g: &impl Dag<Node = N, Leaf = L>,
         pattern: &Pattern<N, A>,
+    ) -> Vec<MatchBinding> {
+        VF2CoverDriver::matches_with_legality(ctx, g, pattern, &DefaultCoverLegality)
+    }
+
+    fn cover(
+        ctx: &Context,
+        g: &impl Dag<Node = N, Leaf = L>,
+        patterns: &[Pattern<N, A>],
+    ) -> Vec<CoverCandidate> {
+        let mut candidates = Vec::new();
+
+        for (i, pattern) in patterns.iter().enumerate() {
+            let pattern_id = PatternId::from_index(i);
+            for binding in Self::matches(ctx, g, pattern) {
+                candidates.push(CoverCandidate {
+                    pattern_id,
+                    binding,
+                });
+            }
+        }
+
+        candidates
+    }
+}
+
+impl VF2CoverDriver {
+    pub fn matches_with_legality<N: Node + PartialEq, L, A>(
+        ctx: &Context,
+        g: &impl Dag<Node = N, Leaf = L>,
+        pattern: &Pattern<N, A>,
+        legality: &impl CoverLegality<N, L, A>,
     ) -> Vec<MatchBinding> {
         let Ok(pattern_root) = pattern.validate(ctx) else {
             return Vec::new();
@@ -298,6 +405,14 @@ impl<N: Node + PartialEq, L, A> GraphCoverDriver<N, L, A> for VF2CoverDriver {
                     continue;
                 };
 
+                if pattern
+                    .get_node(parent)
+                    .node()
+                    .is_some_and(|node| node.is_commutative())
+                {
+                    continue;
+                }
+
                 for (slot, &child) in pattern.children(parent).iter().enumerate() {
                     if child != pattern_node {
                         continue;
@@ -327,14 +442,18 @@ impl<N: Node + PartialEq, L, A> GraphCoverDriver<N, L, A> for VF2CoverDriver {
             graph_node: NodeId,
         ) -> bool {
             let pattern_arity = pattern.children(pattern_node).len();
-            if graph_children[graph_node.index()].len() != pattern_arity {
-                return false;
-            }
-
             match pattern.get_node(pattern_node) {
-                PatternExpr::Any => true,
+                PatternExpr::Any => graph_children[graph_node.index()].len() == pattern_arity,
+                PatternExpr::Boundary => match pattern.operand_constraint(pattern_node) {
+                    Some(OperandConstraint::Register) => !g.get_kind(graph_node).is_constant(),
+                    Some(OperandConstraint::Immediate) => g.get_kind(graph_node).is_constant(),
+                    None => true,
+                },
                 PatternExpr::Leaf => g.get_kind(graph_node).is_leaf(ctx),
-                PatternExpr::Node(kind) => g.get_kind(graph_node) == kind,
+                PatternExpr::Node(kind) => {
+                    graph_children[graph_node.index()].len() == pattern_arity
+                        && g.get_kind(graph_node).matches_pattern(kind, ctx)
+                }
             }
         }
 
@@ -346,12 +465,17 @@ impl<N: Node + PartialEq, L, A> GraphCoverDriver<N, L, A> for VF2CoverDriver {
             state: &SearchState,
             pattern_node: NodeId,
             graph_node: NodeId,
+            legality: &impl CoverLegality<N, L, A>,
         ) -> bool {
             if state.graph_to_pattern.contains_key(&graph_node) {
                 return false;
             }
 
             if !node_compatible(ctx, pattern, g, graph_children, pattern_node, graph_node) {
+                return false;
+            }
+
+            if !legality.binding_allowed(ctx, g, pattern, pattern_node, graph_node) {
                 return false;
             }
 
@@ -364,7 +488,16 @@ impl<N: Node + PartialEq, L, A> GraphCoverDriver<N, L, A> for VF2CoverDriver {
                     if child != pattern_node {
                         continue;
                     }
-                    if graph_children[graph_parent.index()].get(slot).copied() != Some(graph_node) {
+                    let edge_matches = if pattern
+                        .get_node(parent)
+                        .node()
+                        .is_some_and(|node| node.is_commutative())
+                    {
+                        graph_children[graph_parent.index()].contains(&graph_node)
+                    } else {
+                        graph_children[graph_parent.index()].get(slot).copied() == Some(graph_node)
+                    };
+                    if !edge_matches {
                         return false;
                     }
                 }
@@ -374,7 +507,13 @@ impl<N: Node + PartialEq, L, A> GraphCoverDriver<N, L, A> for VF2CoverDriver {
                 let Some(graph_child) = state.pattern_to_graph[pattern_child.index()] else {
                     continue;
                 };
-                if graph_children[graph_node.index()].get(slot).copied() != Some(graph_child) {
+                let edge_matches = match pattern.get_node(pattern_node) {
+                    PatternExpr::Node(kind) if kind.is_commutative() => {
+                        graph_children[graph_node.index()].contains(&graph_child)
+                    }
+                    _ => graph_children[graph_node.index()].get(slot).copied() == Some(graph_child),
+                };
+                if !edge_matches {
                     return false;
                 }
             }
@@ -389,6 +528,7 @@ impl<N: Node + PartialEq, L, A> GraphCoverDriver<N, L, A> for VF2CoverDriver {
             graph_children: &[Vec<NodeId>],
             pattern_order: &[NodeId],
             pattern_root: NodeId,
+            legality: &impl CoverLegality<N, L, A>,
             state: &mut SearchState,
             out: &mut Vec<MatchBinding>,
         ) {
@@ -428,6 +568,7 @@ impl<N: Node + PartialEq, L, A> GraphCoverDriver<N, L, A> for VF2CoverDriver {
                     state,
                     pattern_node,
                     graph_node,
+                    legality,
                 ) {
                     continue;
                 }
@@ -442,6 +583,7 @@ impl<N: Node + PartialEq, L, A> GraphCoverDriver<N, L, A> for VF2CoverDriver {
                     graph_children,
                     pattern_order,
                     pattern_root,
+                    legality,
                     state,
                     out,
                 );
@@ -464,31 +606,12 @@ impl<N: Node + PartialEq, L, A> GraphCoverDriver<N, L, A> for VF2CoverDriver {
             &graph_children,
             &pattern_order,
             pattern_root,
+            legality,
             &mut state,
             &mut results,
         );
 
         results
-    }
-
-    fn cover(
-        ctx: &Context,
-        g: &impl Dag<Node = N, Leaf = L>,
-        patterns: &[Pattern<N, A>],
-    ) -> Vec<CoverCandidate> {
-        let mut candidates = Vec::new();
-
-        for (i, pattern) in patterns.iter().enumerate() {
-            let pattern_id = PatternId::from_index(i);
-            for binding in Self::matches(ctx, g, pattern) {
-                candidates.push(CoverCandidate {
-                    pattern_id,
-                    binding,
-                });
-            }
-        }
-
-        candidates
     }
 }
 
@@ -496,7 +619,7 @@ impl<N: Node + PartialEq, L, A> GraphCoverDriver<N, L, A> for VF2CoverDriver {
 mod tests {
     use crate::{
         Context,
-        graph::{MutDag, NodeId, PostOrderDag},
+        graph::{MutDag, Node, NodeId, PostOrderDag},
         sem_expr::ExprKind,
     };
 
@@ -516,6 +639,26 @@ mod tests {
         g.add_edge(node, lhs);
         g.add_edge(node, rhs);
         node
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct ClassNode {
+        class: u8,
+        value: u8,
+    }
+
+    impl Node for ClassNode {
+        fn is_leaf(&self, _ctx: &Context) -> bool {
+            true
+        }
+
+        fn num_children(&self, _ctx: &Context) -> usize {
+            0
+        }
+
+        fn matches_pattern(&self, pattern: &Self, _ctx: &Context) -> bool {
+            self.class == pattern.class
+        }
     }
 
     #[test]
@@ -642,5 +785,23 @@ mod tests {
             candidates[0].binding().graph_root(),
             candidates[1].binding().graph_root()
         );
+    }
+
+    #[test]
+    fn node_match_hook_can_ignore_nonstructural_payload() {
+        let ctx = Context::default();
+        let mut g = PostOrderDag::<ClassNode, ()>::new();
+        let node = g.add_node(ClassNode { class: 7, value: 1 });
+
+        let mut pattern = Pattern::new("class");
+        let root = pattern.add_node(PatternExpr::Node(ClassNode {
+            class: 7,
+            value: 99,
+        }));
+        pattern.set_root(root);
+
+        let matches = VF2CoverDriver::matches(&ctx, &g, &pattern);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].graph_root(), node);
     }
 }

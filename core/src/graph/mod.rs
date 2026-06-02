@@ -2,12 +2,14 @@ use std::collections::HashMap;
 
 use crate::{Context, OpId, TypeId};
 
+mod egraph;
 mod pattern;
 mod postorder;
 
+pub use egraph::{EClassId, EGraph, EMatch, ENode, Rewrite, SaturationLimits};
 pub use pattern::{
-    CoverCandidate, GraphCoverDriver, MatchBinding, Pattern, PatternExpr, PatternId,
-    VF2CoverDriver,
+    CoverCandidate, CoverLegality, GraphCoverDriver, MatchBinding, OperandConstraint, Pattern,
+    PatternExpr, PatternId, VF2CoverDriver,
 };
 pub use postorder::PostOrderDag;
 
@@ -30,6 +32,24 @@ pub trait Node {
     fn is_leaf(&self, ctx: &Context) -> bool;
 
     fn num_children(&self, ctx: &Context) -> usize;
+
+    fn matches_pattern(&self, pattern: &Self, _ctx: &Context) -> bool
+    where
+        Self: PartialEq + Sized,
+    {
+        self == pattern
+    }
+
+    fn is_commutative(&self) -> bool {
+        false
+    }
+
+    /// Whether this node is a compile-time constant. Used to distinguish immediate
+    /// operands (which must bind to a constant) from register operands (which must
+    /// not) during pattern matching.
+    fn is_constant(&self) -> bool {
+        false
+    }
 }
 
 pub trait Dag {

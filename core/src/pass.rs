@@ -5,6 +5,7 @@ use crate::{Block, Context, OpId, OpInstance, Operation};
 #[derive(Debug)]
 pub enum PassError {
     MissingBlock(&'static str),
+    InvalidRuleSet(String),
     RewriteFailed(OpId),
 }
 
@@ -14,6 +15,7 @@ impl std::fmt::Display for PassError {
             PassError::MissingBlock(name) => {
                 write!(f, "operation '{name}' does not have a parent block")
             }
+            PassError::InvalidRuleSet(message) => write!(f, "invalid rule set: {message}"),
             PassError::RewriteFailed(op) => write!(f, "failed to rewrite op {op:?}"),
         }
     }
@@ -44,6 +46,14 @@ pub struct OperationRef {
 }
 
 impl OperationRef {
+    pub fn new(op: Arc<OpInstance>, block: Option<Arc<Block>>, position: Option<usize>) -> Self {
+        Self {
+            op,
+            block,
+            position,
+        }
+    }
+
     pub fn op(&self) -> &Arc<OpInstance> {
         &self.op
     }
@@ -106,6 +116,11 @@ impl Rewriter {
             .as_ref()
             .ok_or(PassError::MissingBlock(target.name()))?;
         if block.replace_op(target.op.id, new_op.id()) {
+            // The replaced-out op no longer references its operands; the new op
+            // registered its own uses when it was added to the context. Drop the old
+            // op from the arena so it doesn't linger as a phantom.
+            self.context.detach_op_uses(&target.op);
+            self.context.remove_operation(target.op.id);
             Ok(())
         } else {
             Err(PassError::RewriteFailed(target.op.id))
@@ -118,10 +133,35 @@ impl Rewriter {
             .as_ref()
             .ok_or(PassError::MissingBlock(target.name()))?;
         if block.remove_op(target.op.id) {
+            self.context.detach_op_uses(&target.op);
+            self.context.remove_operation(target.op.id);
             Ok(())
         } else {
             Err(PassError::RewriteFailed(target.op.id))
         }
+    }
+
+    /// Insert `new_op` immediately before `target` in its block. Used when one
+    /// source op lowers to several machine instructions (e.g. a sub-word sign
+    /// extension becoming `slli` then `srai`): the feeding instructions are inserted
+    /// ahead of the op that consumes them. Repeated calls before the same target
+    /// preserve insertion order.
+    pub fn insert_op_before(
+        &mut self,
+        target: &OperationRef,
+        new_op: &dyn Operation,
+    ) -> Result<(), PassError> {
+        let block = target
+            .block
+            .as_ref()
+            .ok_or(PassError::MissingBlock(target.name()))?;
+        let position = block
+            .op_ids()
+            .iter()
+            .position(|id| *id == target.op.id)
+            .ok_or(PassError::RewriteFailed(target.op.id))?;
+        block.insert(position, new_op.id());
+        Ok(())
     }
 }
 
@@ -213,6 +253,13 @@ impl PassManager {
             for block in region.iter(context.clone()) {
                 let op_ids = block.op_ids();
                 for (index, op_id) in op_ids.into_iter().enumerate() {
+                    // A pass run earlier in this walk may have erased or replaced a
+                    // later op in the same block (isel rewrites the whole block at
+                    // once); the snapshot still holds the old id. Skip ops that are no
+                    // longer live — a replacement carries a new id and isn't revisited.
+                    if !context.has_operation(op_id) {
+                        continue;
+                    }
                     let op = context.get_op(op_id);
                     let child = OperationRef {
                         op,
@@ -297,6 +344,7 @@ mod tests {
         )
         .build();
         let add_result = add.result();
+        let add_id = add.id();
         func_builder.insert(add);
         func_builder.insert(ops::r#return(&context, add_result).build());
 
@@ -316,5 +364,50 @@ mod tests {
             .collect();
 
         assert_eq!(op_names, vec!["subi", "return"]);
+
+        // The use-list followed the rewrite: param0 is now used by the subi (the
+        // replacement), not the erased addi.
+        let subi_id = func_body.op_ids()[0];
+        let uses = context.value_uses(func_body.arguments()[0].id());
+        assert_eq!(uses.len(), 1, "param0 should have exactly one use");
+        assert_eq!(uses[0].op(), subi_id);
+
+        // The replaced-out addi is gone from the arena, not just the block.
+        assert!(!context.has_operation(add_id), "replaced op should leave the arena");
+    }
+
+    #[test]
+    fn erasing_an_op_detaches_its_operand_uses() {
+        let context = Context::with_default_dialects();
+        let i32 = IntegerType::new(&context, 32);
+
+        let region = context.create_region();
+        let arg = context.create_value(i32, None);
+        let block = context.create_block(vec![arg.clone()]);
+        region.add_block(block.id());
+        let func = ops::func(&context, "demo", i32, Some(region.id())).build();
+        let body = func.body();
+
+        let mut b = IRBuilder::new(body.clone());
+        let neg = ops::subi(&context, body.arguments()[0].id(), body.arguments()[0].id(), i32)
+            .build();
+        let neg_id = neg.id();
+        let neg_ref = super::OperationRef::new(
+            context.get_op(neg_id),
+            Some(body.clone()),
+            None,
+        );
+        b.insert(neg);
+        assert!(context.is_value_used(body.arguments()[0].id()));
+
+        let mut rewriter = super::Rewriter::new(context.clone());
+        rewriter.erase_op(&neg_ref).expect("erase should succeed");
+
+        assert!(
+            !context.is_value_used(body.arguments()[0].id()),
+            "erasing the only consumer must clear the value's uses"
+        );
+        // The erased op is gone from the arena, not just the block.
+        assert!(!context.has_operation(neg_id), "erased op should leave the arena");
     }
 }

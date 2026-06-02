@@ -246,6 +246,25 @@ fn emit_instructions<'a>(
             let emit_fn_ident = format_ident!("emit_isel_{}", inst.name.to_lowercase());
             let pattern_fn_ident = format_ident!("isel_pattern_{}", inst.name.to_lowercase());
             let rule_name_lit = proc_macro2::Literal::string(&inst.name.to_lowercase());
+
+            // Per-operand constraints: registers must bind to non-constant values,
+            // immediates to constants. Keyed by the operand's pattern symbol id.
+            let mut operand_constraint_entries: Vec<proc_macro2::TokenStream> = Vec::new();
+            for (op_name, op_ty) in &ops {
+                let Some(&symbol) = semantics.variable_symbols.get(op_name) else {
+                    continue;
+                };
+                let symbol_lit = proc_macro2::Literal::u32_unsuffixed(symbol);
+                let constraint = match op_ty {
+                    Type::Struct(_) => quote! { tir::graph::OperandConstraint::Register },
+                    Type::Bits(_) | Type::Integer => {
+                        quote! { tir::graph::OperandConstraint::Immediate }
+                    }
+                    _ => continue,
+                };
+                operand_constraint_entries.push(quote! { (#symbol_lit, #constraint) });
+            }
+
             let mut emit_attr_steps = Vec::new();
             for (op_name, op_ty) in &ops {
                 let op_name_lit = proc_macro2::Literal::string(op_name);
@@ -322,10 +341,29 @@ fn emit_instructions<'a>(
                 }
             }
 
-            let (pattern_stmts, _root_var) = emit_dag_as_code(&semantics.pattern, semantics.root);
-            let base_cost_lit = proc_macro2::Literal::u32_unsuffixed(semantics.base_cost);
+            // Canonicalize the behavior-derived pattern into the form selection
+            // matches against (collapse word-op sext/extract wrappers to a typed op,
+            // strip shift-amount masks), then type each node from its structurally
+            // determined width. A plain `add` stays untyped; `addw` becomes an i32
+            // `Add`; `sll` becomes a plain `ShiftLeft`.
+            let (canon_pattern, canon_root, forced_widths) =
+                tir::sem_expr::canonicalize_for_selection(&semantics.pattern, semantics.root);
+            let mut pattern_widths = tir::sem_expr::infer_widths(&canon_pattern, |_| None);
+            for (index, forced) in forced_widths.iter().enumerate() {
+                if forced.is_some() {
+                    pattern_widths[index] = *forced;
+                }
+            }
+            let (pattern_stmts, _root_var) =
+                emit_dag_as_code(&canon_pattern, canon_root, &pattern_widths);
+            // Cost reflects the canonical pattern's size (one machine instruction).
+            let base_cost = {
+                use tir::graph::Dag;
+                (canon_pattern.len() as u32).max(1)
+            };
+            let base_cost_lit = proc_macro2::Literal::u32_unsuffixed(base_cost);
             isel_rule_emitters.push(quote! {
-                fn #pattern_fn_ident() -> tir::sem_expr::ExprPostGraph {
+                fn #pattern_fn_ident(_context: &tir::Context) -> tir::sem_expr::ExprPostGraph {
                     use tir::graph::MutDag;
                     let mut g = tir::sem_expr::ExprPostGraph::new();
                     #(#pattern_stmts)*
@@ -344,12 +382,15 @@ fn emit_instructions<'a>(
             });
 
             isel_rule_inits.push(quote! {
-                rules.push(tir_be_common::isel::Rule::new(
-                    #rule_name_lit,
-                    #pattern_fn_ident(),
-                    #base_cost_lit,
-                    #emit_fn_ident,
-                ));
+                rules.push(
+                    tir_be_common::isel::Rule::new(
+                        #rule_name_lit,
+                        #pattern_fn_ident(context),
+                        #base_cost_lit,
+                        #emit_fn_ident,
+                    )
+                    .with_operand_constraints(vec![#(#operand_constraint_entries),*]),
+                );
             });
         }
 
@@ -650,7 +691,8 @@ fn emit_instructions<'a>(
 
         #(#isel_rule_emitters)*
 
-        pub fn get_isel_rules() -> Vec<tir_be_common::isel::Rule> {
+        pub fn get_isel_rules(context: &tir::Context) -> Vec<tir_be_common::isel::Rule> {
+            let _ = &context;
             let mut rules = Vec::new();
             #(#isel_rule_inits)*
             rules
@@ -969,7 +1011,9 @@ fn emit_as_sem_expr_impl(
     let rhs = resolve_behavior_rhs(inst, operands, defined_register_operands)?;
     let mut dag = tir::sem_expr::ExprPostGraph::new();
     let lowering = rhs.lower_to_sema(&mut dag, numeric_params)?;
-    let (stmts, root_var) = emit_dag_as_code(&dag, lowering.root);
+    // The AsSemExpr impl carries no type annotations (the program-graph builder
+    // infers them), so pass no widths.
+    let (stmts, root_var) = emit_dag_as_code(&dag, lowering.root, &[]);
 
     Some(quote! {
         impl tir::sem_expr::AsSemExpr for #name_ident {
@@ -987,6 +1031,7 @@ fn emit_as_sem_expr_impl(
 fn emit_dag_as_code(
     dag: &tir::sem_expr::ExprPostGraph,
     root: tir::graph::NodeId,
+    widths: &[Option<u32>],
 ) -> (Vec<proc_macro2::TokenStream>, proc_macro2::Ident) {
     use tir::graph::Dag;
 
@@ -1004,6 +1049,20 @@ fn emit_dag_as_code(
         if let Some(data) = dag.get_leaf_data(node_id) {
             let data_ts = emit_expr_payload_ts(data);
             stmts.push(quote! { g.set_leaf_data(#var, #data_ts); });
+        }
+
+        // Type constraint for this node, where the width is structurally
+        // determined (extract result, extension target, comparison). Only
+        // *operation* nodes are typed: leaf operands stay wildcards (so e.g. a
+        // plain `add` matches any width), and constant leaves are matched by value
+        // rather than by a fragile value-derived width.
+        if dag.get_leaf_data(node_id).is_none() {
+            if let Some(Some(width)) = widths.get(node_id.index()).copied() {
+                let width_lit = proc_macro2::Literal::u32_unsuffixed(width);
+                stmts.push(quote! {
+                    g.set_actual_type(#var, tir::builtin::IntegerType::new(_context, #width_lit));
+                });
+            }
         }
 
         let children: Vec<tir::graph::NodeId> = dag.children(node_id).collect();
@@ -1050,6 +1109,7 @@ fn emit_expr_kind_ts(kind: &tir::sem_expr::ExprKind) -> proc_macro2::TokenStream
         ExprKind::StoreMemory => quote! { tir::sem_expr::ExprKind::StoreMemory },
         ExprKind::ZExt => quote! { tir::sem_expr::ExprKind::ZExt },
         ExprKind::SExt => quote! { tir::sem_expr::ExprKind::SExt },
+        ExprKind::Extract => quote! { tir::sem_expr::ExprKind::Extract },
         ExprKind::Log2Ceil => quote! { tir::sem_expr::ExprKind::Log2Ceil },
         ExprKind::Sqrt => quote! { tir::sem_expr::ExprKind::Sqrt },
         ExprKind::Fma => quote! { tir::sem_expr::ExprKind::Fma },
@@ -1062,6 +1122,10 @@ fn emit_expr_payload_ts(payload: &tir::sem_expr::ExprPayload) -> proc_macro2::To
         ExprPayload::SymbolId(id) => {
             let id_lit = proc_macro2::Literal::u32_unsuffixed(*id);
             quote! { tir::sem_expr::ExprPayload::SymbolId(#id_lit) }
+        }
+        ExprPayload::Value(value) => {
+            let value_lit = proc_macro2::Literal::u32_unsuffixed(value.number());
+            quote! { tir::sem_expr::ExprPayload::Value(tir::ValueId::from_number(#value_lit)) }
         }
         ExprPayload::Int(v) => {
             let width = proc_macro2::Literal::u32_unsuffixed(v.width());

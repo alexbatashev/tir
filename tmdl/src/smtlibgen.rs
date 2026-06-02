@@ -411,6 +411,7 @@ fn emit_sem_expr(
         | ExprKind::StoreMemory
         | ExprKind::ZExt
         | ExprKind::SExt
+        | ExprKind::Extract
         | ExprKind::Log2Ceil
         | ExprKind::Sqrt
         | ExprKind::Fma => None,

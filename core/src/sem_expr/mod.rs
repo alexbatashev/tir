@@ -1,13 +1,17 @@
 use crate::{
-    Operation,
+    Operation, ValueId,
     graph::{MutDag, NodeId, PostOrderDag},
     helpers::SimpleNode,
     utils::{APFloat, APInt},
 };
 
+mod discover;
 mod exec;
+mod infer;
 
+pub use discover::{EquivalenceOracle, FuzzOracle, confirm_extension_via_shifts};
 pub use exec::execute;
+pub use infer::{canonicalize_for_selection, infer_widths};
 
 pub type ExprPostGraph = PostOrderDag<ExprKind, ExprPayload>;
 
@@ -15,7 +19,7 @@ pub trait AsSemExpr: Operation {
     fn convert(&self, g: &mut impl MutDag<Node = ExprKind, Leaf = ExprPayload>) -> NodeId;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, SimpleNode)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, SimpleNode)]
 #[repr(u16)]
 #[simple_node(default_arity = 2)]
 pub enum ExprKind {
@@ -56,6 +60,12 @@ pub enum ExprKind {
     StoreMemory,
     ZExt,
     SExt,
+    /// Bit-field extract: arguments are value, high bit, low bit (both inclusive).
+    /// The result is the `high - low + 1` low bits. This is the single canonical
+    /// representation of truncation/bit-slicing — there is deliberately no separate
+    /// `Trunc` (`Trunc(x, n) == Extract(x, n-1, 0)`).
+    #[arity = 3]
+    Extract,
     #[arity = 1]
     Log2Ceil,
     #[arity = 1]
@@ -64,8 +74,10 @@ pub enum ExprKind {
     Fma,
 }
 
+#[derive(Clone, Debug, PartialEq)]
 pub enum ExprPayload {
     SymbolId(u32),
+    Value(ValueId),
     Int(APInt),
     Float(APFloat),
 }

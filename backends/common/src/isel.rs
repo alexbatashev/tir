@@ -1,50 +1,132 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 
 use tir::{
     Block, BlockId, Context, OpId, OpInstance, Operation, OperationRef, Pass, PassError,
-    PassTarget, Rewriter, ValueId,
+    PassTarget, Rewriter, TypeId, ValueId,
     attributes::AttributeValue,
-    graph::{Dag, NodeId},
-    sem_expr::{ExprKind, ExprPayload, ExprPostGraph},
+    graph::{
+        Dag, EClassId, EGraph, EMatch, ENode, Node, NodeId, OperandConstraint, Pattern,
+        PatternExpr, Rewrite,
+    },
+    builtin::IntegerType,
+    pbqp::{self, INF_COST, PbqpAlternative, PbqpMatrix, PbqpProblem},
+    sem_expr::{ExprKind, ExprPayload, ExprPostGraph, FuzzOracle, confirm_extension_via_shifts, infer_widths},
     utils::APInt,
 };
+
+/// The semantic e-graph instruction selection operates over: e-classes of
+/// equivalent semantic expressions for the values computed in a block.
+pub type SemEGraph = EGraph<SemNode, ()>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SemNodeId(u32);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum SemOpcode {
-    IntConst,
-    BoolConst,
-    InputValue,
-    UnknownSymbol,
-    Add,
-    Sub,
-    Mul,
-    Div,
-    ShiftLeft,
-    ShiftRightLogic,
-    ShiftRightArithmetic,
-    And,
-    Or,
-    Xor,
-    Opaque,
+impl SemNodeId {
+    fn index(self) -> usize {
+        self.0 as usize
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct SemNode {
     pub id: SemNodeId,
-    pub opcode: SemOpcode,
+    pub kind: ExprKind,
     pub inputs: Vec<SemNodeId>,
-    pub int_value: Option<APInt>,
-    pub bool_value: Option<bool>,
-    pub leaf_value: Option<ValueId>,
-    pub unknown_symbol: Option<u32>,
+    pub payload: Option<ExprPayload>,
+    /// The IR type of the value this node represents (the result type for an op
+    /// node, the value type for a leaf). `None` on a *pattern* node means "match
+    /// any type"; `None` on a *graph* node means the type is unknown (e.g. an
+    /// intermediate node of a multi-node semantic expansion).
+    ///
+    /// The type is stored verbatim from the IR — no width is collapsed or
+    /// normalized — so every target can constrain on exactly the widths/classes it
+    /// distinguishes (x86/AArch64 8/16/32/64-bit forms, RISC-V word vs XLEN, vector
+    /// element types, floats), and untyped rules stay width-agnostic.
+    pub ty: Option<TypeId>,
+    /// The IR value this node produces, if it corresponds to one (an op result or a
+    /// block input). Lets an operand that resolves to an intermediate result be
+    /// materialized as that register value at emit time. Metadata only — not part
+    /// of equality or matching.
+    pub value: Option<ValueId>,
 }
 
-impl SemNode {
-    fn is_terminal(&self) -> bool {
-        self.leaf_value.is_some() || self.int_value.is_some() || self.bool_value.is_some()
+impl PartialEq for SemNode {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind && self.payload == other.payload && self.ty == other.ty
+    }
+}
+
+impl Eq for SemNode {}
+
+/// Hashes exactly the fields compared by [`PartialEq`] — the operator label
+/// (kind, payload, type), never the structural `inputs`/`id`/`value` metadata — so
+/// the e-graph hash-cons treats two e-nodes as congruent iff they have the same
+/// label and the same operand classes.
+impl Hash for SemNode {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.kind.hash(state);
+        self.ty.hash(state);
+        match &self.payload {
+            None => 0u8.hash(state),
+            Some(ExprPayload::SymbolId(s)) => {
+                1u8.hash(state);
+                s.hash(state);
+            }
+            Some(ExprPayload::Value(v)) => {
+                2u8.hash(state);
+                v.number().hash(state);
+            }
+            Some(ExprPayload::Int(i)) => {
+                3u8.hash(state);
+                i.width().hash(state);
+                i.is_signed().hash(state);
+                i.to_u64().hash(state);
+            }
+            Some(ExprPayload::Float(f)) => {
+                4u8.hash(state);
+                f.to_f64().to_bits().hash(state);
+            }
+        }
+    }
+}
+
+impl tir::graph::Node for SemNode {
+    fn is_leaf(&self, ctx: &Context) -> bool {
+        self.kind.is_leaf(ctx)
+    }
+
+    fn num_children(&self, ctx: &Context) -> usize {
+        self.kind.num_children(ctx)
+    }
+
+    fn is_commutative(&self) -> bool {
+        matches!(
+            self.kind,
+            ExprKind::Add | ExprKind::Mul | ExprKind::And | ExprKind::Or | ExprKind::Xor
+        )
+    }
+
+    fn is_constant(&self) -> bool {
+        self.kind == ExprKind::Constant
+    }
+
+    fn matches_pattern(&self, pattern: &Self, _ctx: &Context) -> bool {
+        if self.kind != pattern.kind {
+            return false;
+        }
+
+        // A typed pattern node only matches a graph node of exactly that type;
+        // an untyped pattern node (`ty == None`) is a type wildcard.
+        if pattern.ty.is_some() && self.ty != pattern.ty {
+            return false;
+        }
+
+        match (&self.payload, &pattern.payload) {
+            (_, None) => true,
+            (Some(actual), Some(expected)) => actual == expected,
+            (None, Some(_)) => false,
+        }
     }
 }
 
@@ -118,11 +200,64 @@ pub trait TargetIselModel: Send + Sync {
     fn estimate_register_pressure(&self, op: &OperationRef) -> u32 {
         op.op().operands.len() as u32
     }
+
+    /// The objective consulted by the PBQP builder for node and edge costs.
+    ///
+    /// Targets that want to tune selection (subtarget-specific instruction
+    /// costs, register-pressure weighting, materialization penalties) return a
+    /// custom [`IselCostModel`]. The default reproduces the historical
+    /// `base_cost + dynamic_cost_fn` behavior.
+    fn cost_model(&self) -> &dyn IselCostModel {
+        &DEFAULT_COST_MODEL
+    }
 }
 
 pub struct DefaultTargetIselModel;
 
 impl TargetIselModel for DefaultTargetIselModel {}
+
+/// The optimization objective the PBQP builder minimizes.
+///
+/// `node_cost` is the full instruction cost placed on the *root* alternative of
+/// a pattern match (non-root alternatives carry zero, per the paper). `edge_cost`
+/// adds a compatibility cost to *finite* parent -> child edges, letting a target
+/// price, e.g., materializing a value into a register. `pressure_weight` scales
+/// the estimated register pressure into the node cost.
+pub trait IselCostModel: Send + Sync {
+    fn node_cost(
+        &self,
+        context: &Context,
+        op: &OperationRef,
+        rule: &Rule,
+        m: &RuleMatch,
+        pressure: &SelectionPressure,
+        target: &dyn TargetIselModel,
+    ) -> u64 {
+        let dynamic = (rule.dynamic_cost_fn)(context, op, m, pressure, target) as u64;
+        rule.base_cost as u64
+            + dynamic
+            + self.pressure_weight() * pressure.estimated_register_pressure as u64
+    }
+
+    /// Extra cost for a satisfied parent -> child compatibility edge. `materialized`
+    /// is true when the parent reaches the child through an untyped boundary leaf,
+    /// i.e. the child must be available as a register value.
+    fn edge_cost(&self, _parent: ExprKind, _child: ExprKind, _materialized: bool) -> u64 {
+        0
+    }
+
+    /// Weight applied to the estimated register pressure of a match. Zero (the
+    /// default) ignores pressure entirely, matching historical behavior.
+    fn pressure_weight(&self) -> u64 {
+        0
+    }
+}
+
+pub struct DefaultIselCostModel;
+
+impl IselCostModel for DefaultIselCostModel {}
+
+static DEFAULT_COST_MODEL: DefaultIselCostModel = DefaultIselCostModel;
 
 pub type RuleLegalityFn = fn(&Context, &OperationRef, &RuleMatch, &dyn TargetIselModel) -> bool;
 pub type RuleDynamicCostFn =
@@ -153,6 +288,10 @@ pub struct Rule {
     pub pattern: ExprPostGraph,
     pub compiled_rule_id: CompiledRuleId,
     pub base_cost: u32,
+    /// Per-operand-symbol constraint (register vs immediate). Symbols absent here
+    /// are unconstrained, so hand-written and synthesized rules keep matching any
+    /// value.
+    pub operand_constraints: Vec<(u32, OperandConstraint)>,
     pub legality_fn: RuleLegalityFn,
     pub dynamic_cost_fn: RuleDynamicCostFn,
     pub emit_plan_fn: RuleEmitPlanFn,
@@ -170,10 +309,21 @@ impl Rule {
             pattern,
             compiled_rule_id: CompiledRuleId(0),
             base_cost,
+            operand_constraints: Vec::new(),
             legality_fn: default_legality,
             dynamic_cost_fn: default_dynamic_cost,
             emit_plan_fn,
         }
+    }
+
+    /// Constrain operand symbols to register or immediate operands, so e.g. an
+    /// immediate-shift pattern only matches a constant shift amount.
+    pub fn with_operand_constraints(
+        mut self,
+        constraints: Vec<(u32, OperandConstraint)>,
+    ) -> Self {
+        self.operand_constraints = constraints;
+        self
     }
 
     pub fn with_legality(mut self, legality_fn: RuleLegalityFn) -> Self {
@@ -187,162 +337,9 @@ impl Rule {
     }
 }
 
-pub struct Selection {
-    pub rule_index: usize,
-    pub m: RuleMatch,
-    pub total_cost: u64,
-}
-
-pub struct SelectionInput<'a> {
-    pub dag: &'a SemDagArena,
-    pub root: SemNodeId,
-    pub op: &'a OperationRef,
-    pub rules: &'a [Rule],
-    pub matcher: &'a MatcherAutomaton,
-    pub pressure: SelectionPressure,
-    pub target_model: &'a dyn TargetIselModel,
-    pub context: &'a Context,
-}
-
-pub struct SelectionResult {
-    pub selection: Option<Selection>,
-}
-
-pub trait IselAlgorithm: Send + Sync {
-    fn select_function(&self, input: SelectionInput<'_>) -> SelectionResult;
-}
-
-pub struct GlobalDpSelector;
-
-#[derive(Clone, Debug)]
-struct CandidateScore {
-    rule_index: usize,
-    captures: CaptureBindings,
-    total_cost: u64,
-}
-
-impl IselAlgorithm for GlobalDpSelector {
-    fn select_function(&self, input: SelectionInput<'_>) -> SelectionResult {
-        let mut memo: HashMap<SemNodeId, Option<u64>> = HashMap::new();
-        let candidates = input.matcher.candidate_rules(input.dag.node(input.root));
-
-        let mut best: Option<CandidateScore> = None;
-        for rule_index in candidates {
-            let rule = &input.rules[rule_index];
-            if !input.target_model.supports_rule(rule.compiled_rule_id) {
-                continue;
-            }
-
-            let mut captures = CaptureBindings::new();
-            let Some(pattern_root) = rule.pattern.root() else {
-                continue;
-            };
-            if !match_pattern(
-                &rule.pattern,
-                pattern_root,
-                input.root,
-                input.dag,
-                &mut captures,
-            ) {
-                continue;
-            }
-
-            let rule_match = captures.to_rule_match(input.dag);
-            if !(rule.legality_fn)(input.context, input.op, &rule_match, input.target_model) {
-                continue;
-            }
-
-            let mut total = rule.base_cost as u64;
-            total += (rule.dynamic_cost_fn)(
-                input.context,
-                input.op,
-                &rule_match,
-                &input.pressure,
-                input.target_model,
-            ) as u64;
-
-            let boundaries = captures.boundary_nodes(input.root, input.dag);
-            for boundary in boundaries {
-                total +=
-                    best_cost_for_node(boundary, input.dag, input.rules, input.matcher, &mut memo)
-                        .unwrap_or(u64::MAX / 4);
-            }
-
-            let score = CandidateScore {
-                rule_index,
-                captures,
-                total_cost: total,
-            };
-
-            match &best {
-                Some(existing)
-                    if existing.total_cost < score.total_cost
-                        || (existing.total_cost == score.total_cost
-                            && existing.rule_index <= score.rule_index) => {}
-                _ => best = Some(score),
-            }
-        }
-
-        let selection = best.map(|winner| Selection {
-            rule_index: winner.rule_index,
-            m: winner.captures.to_rule_match(input.dag),
-            total_cost: winner.total_cost,
-        });
-
-        SelectionResult { selection }
-    }
-}
-
-fn best_cost_for_node(
-    node: SemNodeId,
-    dag: &SemDagArena,
-    rules: &[Rule],
-    matcher: &MatcherAutomaton,
-    memo: &mut HashMap<SemNodeId, Option<u64>>,
-) -> Option<u64> {
-    if let Some(cached) = memo.get(&node) {
-        return *cached;
-    }
-
-    let sem_node = dag.node(node);
-    if sem_node.is_terminal() {
-        memo.insert(node, Some(0));
-        return Some(0);
-    }
-
-    let mut best: Option<u64> = None;
-    for rule_index in matcher.candidate_rules(sem_node) {
-        let rule = &rules[rule_index];
-        let mut captures = CaptureBindings::new();
-        let Some(pattern_root) = rule.pattern.root() else {
-            continue;
-        };
-        if !match_pattern(&rule.pattern, pattern_root, node, dag, &mut captures) {
-            continue;
-        }
-
-        let mut total = rule.base_cost as u64;
-        for boundary in captures.boundary_nodes(node, dag) {
-            let Some(sub) = best_cost_for_node(boundary, dag, rules, matcher, memo) else {
-                total = u64::MAX / 4;
-                break;
-            };
-            total = total.saturating_add(sub);
-        }
-
-        best = Some(match best {
-            Some(existing) if existing <= total => existing,
-            _ => total,
-        });
-    }
-
-    memo.insert(node, best);
-    best
-}
-
 #[derive(Clone, Debug)]
 struct CaptureBindings {
-    entries: Vec<(u32, SemNodeId)>,
+    entries: Vec<(u32, EClassId)>,
 }
 
 impl CaptureBindings {
@@ -352,205 +349,60 @@ impl CaptureBindings {
         }
     }
 
-    fn mark(&self) -> usize {
-        self.entries.len()
-    }
-
-    fn rollback(&mut self, mark: usize) {
-        self.entries.truncate(mark);
-    }
-
-    fn bind(&mut self, symbol: u32, node: SemNodeId) -> bool {
+    fn bind(&mut self, symbol: u32, class: EClassId) -> bool {
         if let Some((_, existing)) = self.entries.iter().find(|(sym, _)| *sym == symbol) {
-            *existing == node
+            *existing == class
         } else {
-            self.entries.push((symbol, node));
+            self.entries.push((symbol, class));
             true
         }
     }
 
-    fn to_rule_match(&self, dag: &SemDagArena) -> RuleMatch {
+    fn to_rule_match(&self, egraph: &SemEGraph) -> RuleMatch {
         let mut int_bindings = Vec::new();
         let mut value_bindings = Vec::new();
-        for (sym, node_id) in &self.entries {
-            if let Some(v) = &dag.node(*node_id).int_value {
+        for (sym, class) in &self.entries {
+            let nodes = egraph.nodes(*class);
+            // Prefer a concrete constant, then an input value, then the value an
+            // intermediate result produces (so emit can read it as a register).
+            if let Some(ExprPayload::Int(v)) = nodes
+                .iter()
+                .find_map(|n| n.node.payload.as_ref().filter(|p| matches!(p, ExprPayload::Int(_))))
+            {
                 int_bindings.push((*sym, v.clone()));
-            }
-            if let Some(v) = dag.node(*node_id).leaf_value {
+            } else if let Some(v) = nodes.iter().find_map(|n| match n.node.payload.as_ref() {
+                Some(ExprPayload::Value(v)) => Some(*v),
+                _ => None,
+            }) {
+                value_bindings.push((*sym, v));
+            } else if let Some(v) = nodes.iter().find_map(|n| n.node.value) {
                 value_bindings.push((*sym, v));
             }
         }
         RuleMatch::new(int_bindings, value_bindings)
     }
-
-    fn boundary_nodes(&self, root: SemNodeId, dag: &SemDagArena) -> Vec<SemNodeId> {
-        let mut out = Vec::new();
-        for (_, node) in &self.entries {
-            if *node == root {
-                continue;
-            }
-            let n = dag.node(*node);
-            if n.is_terminal() {
-                continue;
-            }
-            if !out.contains(node) {
-                out.push(*node);
-            }
-        }
-        out
-    }
 }
 
-fn match_pattern(
-    pattern: &ExprPostGraph,
+#[derive(Clone, Debug)]
+struct PatternNodeBinding {
     pattern_node: NodeId,
-    candidate: SemNodeId,
-    dag: &SemDagArena,
-    captures: &mut CaptureBindings,
-) -> bool {
-    let node = dag.node(candidate);
-    match pattern.get_node(pattern_node) {
-        ExprKind::Symbol => {
-            let Some(ExprPayload::SymbolId(id)) = pattern.get_leaf_data(pattern_node) else {
-                return false;
-            };
-            captures.bind(*id, candidate)
-        }
-        ExprKind::Constant => match pattern.get_leaf_data(pattern_node) {
-            Some(ExprPayload::Int(v)) => matches!(node.int_value.as_ref(), Some(cv) if cv == v),
-            _ => false,
-        },
-        ExprKind::Add => match_binary(
-            pattern,
-            pattern_node,
-            candidate,
-            dag,
-            captures,
-            SemOpcode::Add,
-            true,
-        ),
-        ExprKind::Sub => match_binary(
-            pattern,
-            pattern_node,
-            candidate,
-            dag,
-            captures,
-            SemOpcode::Sub,
-            false,
-        ),
-        ExprKind::Mul => match_binary(
-            pattern,
-            pattern_node,
-            candidate,
-            dag,
-            captures,
-            SemOpcode::Mul,
-            true,
-        ),
-        ExprKind::Div => match_binary(
-            pattern,
-            pattern_node,
-            candidate,
-            dag,
-            captures,
-            SemOpcode::Div,
-            false,
-        ),
-        ExprKind::ShiftLeft => match_binary(
-            pattern,
-            pattern_node,
-            candidate,
-            dag,
-            captures,
-            SemOpcode::ShiftLeft,
-            false,
-        ),
-        ExprKind::ShiftRightLogic => match_binary(
-            pattern,
-            pattern_node,
-            candidate,
-            dag,
-            captures,
-            SemOpcode::ShiftRightLogic,
-            false,
-        ),
-        ExprKind::ShiftRightArithmetic => match_binary(
-            pattern,
-            pattern_node,
-            candidate,
-            dag,
-            captures,
-            SemOpcode::ShiftRightArithmetic,
-            false,
-        ),
-        ExprKind::And => match_binary(
-            pattern,
-            pattern_node,
-            candidate,
-            dag,
-            captures,
-            SemOpcode::And,
-            true,
-        ),
-        ExprKind::Or => match_binary(
-            pattern,
-            pattern_node,
-            candidate,
-            dag,
-            captures,
-            SemOpcode::Or,
-            true,
-        ),
-        ExprKind::Xor => match_binary(
-            pattern,
-            pattern_node,
-            candidate,
-            dag,
-            captures,
-            SemOpcode::Xor,
-            true,
-        ),
-        _ => false,
-    }
+    class: EClassId,
+    is_boundary: bool,
 }
 
-fn match_binary(
-    pattern: &ExprPostGraph,
-    pattern_node: NodeId,
-    candidate: SemNodeId,
-    dag: &SemDagArena,
-    captures: &mut CaptureBindings,
-    opcode: SemOpcode,
-    commutative: bool,
-) -> bool {
-    let node = dag.node(candidate);
-    if node.opcode != opcode || node.inputs.len() != 2 {
-        return false;
-    }
-    let children: Vec<NodeId> = pattern.children(pattern_node).collect();
-    if children.len() != 2 {
-        return false;
-    }
+#[derive(Clone, Debug)]
+struct FullMatchBindings {
+    captures: CaptureBindings,
+    pattern_nodes: Vec<PatternNodeBinding>,
+}
 
-    let mark = captures.mark();
-    if match_pattern(pattern, children[0], node.inputs[0], dag, captures)
-        && match_pattern(pattern, children[1], node.inputs[1], dag, captures)
-    {
-        return true;
+impl FullMatchBindings {
+    fn class_for_pattern(&self, pattern_node: NodeId) -> Option<EClassId> {
+        self.pattern_nodes
+            .iter()
+            .find(|binding| binding.pattern_node == pattern_node)
+            .map(|binding| binding.class)
     }
-    captures.rollback(mark);
-
-    if commutative {
-        let mark = captures.mark();
-        if match_pattern(pattern, children[0], node.inputs[1], dag, captures)
-            && match_pattern(pattern, children[1], node.inputs[0], dag, captures)
-        {
-            return true;
-        }
-        captures.rollback(mark);
-    }
-
-    false
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -559,13 +411,14 @@ enum SemKey {
         width: u32,
         signed: bool,
         value: u64,
+        ty: Option<TypeId>,
     },
     Input(u32),
     UnknownSymbol(u32),
-    Bin {
-        opcode: SemOpcode,
-        lhs: SemNodeId,
-        rhs: SemNodeId,
+    Op {
+        kind: ExprKind,
+        inputs: Vec<SemNodeId>,
+        ty: Option<TypeId>,
     },
     Opaque,
 }
@@ -587,6 +440,10 @@ impl SemDagArena {
         &self.nodes[id.0 as usize]
     }
 
+    fn len(&self) -> usize {
+        self.nodes.len()
+    }
+
     fn intern_with_key(&mut self, key: SemKey, mut node: SemNode) -> SemNodeId {
         if let Some(id) = self.interner.get(&key) {
             return *id;
@@ -598,76 +455,74 @@ impl SemDagArena {
         id
     }
 
-    fn intern_int(&mut self, value: APInt) -> SemNodeId {
+    fn intern_int(&mut self, value: APInt, ty: Option<TypeId>) -> SemNodeId {
         self.intern_with_key(
             SemKey::Int {
                 width: value.width(),
                 signed: value.is_signed(),
                 value: value.to_u64(),
+                ty,
             },
             SemNode {
                 id: SemNodeId(0),
-                opcode: SemOpcode::IntConst,
+                kind: ExprKind::Constant,
                 inputs: Vec::new(),
-                int_value: Some(value),
-                bool_value: None,
-                leaf_value: None,
-                unknown_symbol: None,
+                payload: Some(ExprPayload::Int(value)),
+                ty,
+                value: None,
             },
         )
     }
 
-    fn intern_input_value(&mut self, value: ValueId) -> SemNodeId {
+    fn intern_input_value(&mut self, value: ValueId, ty: Option<TypeId>) -> SemNodeId {
         self.intern_with_key(
             SemKey::Input(value.number()),
             SemNode {
                 id: SemNodeId(0),
-                opcode: SemOpcode::InputValue,
+                kind: ExprKind::Symbol,
                 inputs: Vec::new(),
-                int_value: None,
-                bool_value: None,
-                leaf_value: Some(value),
-                unknown_symbol: None,
+                payload: Some(ExprPayload::Value(value)),
+                ty,
+                value: Some(value),
             },
         )
     }
 
-    fn intern_unknown_symbol(&mut self, symbol: u32) -> SemNodeId {
+    fn intern_unknown_symbol(&mut self, symbol: u32, ty: Option<TypeId>) -> SemNodeId {
         self.intern_with_key(
             SemKey::UnknownSymbol(symbol),
             SemNode {
                 id: SemNodeId(0),
-                opcode: SemOpcode::UnknownSymbol,
+                kind: ExprKind::Symbol,
                 inputs: Vec::new(),
-                int_value: None,
-                bool_value: None,
-                leaf_value: None,
-                unknown_symbol: Some(symbol),
+                payload: Some(ExprPayload::SymbolId(symbol)),
+                ty,
+                value: None,
             },
         )
     }
 
-    fn intern_binary(&mut self, opcode: SemOpcode, lhs: SemNodeId, rhs: SemNodeId) -> SemNodeId {
-        let (lhs, rhs) = if matches!(
-            opcode,
-            SemOpcode::Add | SemOpcode::Mul | SemOpcode::And | SemOpcode::Or | SemOpcode::Xor
-        ) && rhs < lhs
-        {
-            (rhs, lhs)
-        } else {
-            (lhs, rhs)
-        };
+    fn intern_op(&mut self, kind: ExprKind, mut inputs: Vec<SemNodeId>, ty: Option<TypeId>) -> SemNodeId {
+        if matches!(
+            kind,
+            ExprKind::Add | ExprKind::Mul | ExprKind::And | ExprKind::Or | ExprKind::Xor
+        ) {
+            inputs.sort();
+        }
 
         self.intern_with_key(
-            SemKey::Bin { opcode, lhs, rhs },
+            SemKey::Op {
+                kind,
+                inputs: inputs.clone(),
+                ty,
+            },
             SemNode {
                 id: SemNodeId(0),
-                opcode,
-                inputs: vec![lhs, rhs],
-                int_value: None,
-                bool_value: None,
-                leaf_value: None,
-                unknown_symbol: None,
+                kind,
+                inputs,
+                payload: None,
+                ty,
+                value: None,
             },
         )
     }
@@ -677,14 +532,66 @@ impl SemDagArena {
             SemKey::Opaque,
             SemNode {
                 id: SemNodeId(0),
-                opcode: SemOpcode::Opaque,
+                kind: ExprKind::Symbol,
                 inputs: Vec::new(),
-                int_value: None,
-                bool_value: None,
-                leaf_value: None,
-                unknown_symbol: None,
+                payload: Some(ExprPayload::SymbolId(u32::MAX)),
+                ty: None,
+                value: None,
             },
         )
+    }
+
+    /// Record that `node` produces IR `value` (idempotent; first writer wins, which
+    /// is correct since identical computations are the same value under CSE).
+    fn set_value(&mut self, node: SemNodeId, value: ValueId) {
+        let slot = &mut self.nodes[node.0 as usize].value;
+        if slot.is_none() {
+            *slot = Some(value);
+        }
+    }
+}
+
+impl Dag for SemDagArena {
+    type Node = SemNode;
+    type Leaf = ();
+
+    fn len(&self) -> usize {
+        self.nodes.len()
+    }
+
+    fn get_node(&self, id: NodeId) -> &Self::Node {
+        &self.nodes[id.index()]
+    }
+
+    fn get_leaf_data(&self, _id: NodeId) -> Option<&Self::Leaf> {
+        None
+    }
+
+    fn get_original_op(&self, _id: NodeId) -> Option<OpId> {
+        None
+    }
+
+    fn get_actual_type(&self, id: NodeId) -> Option<tir::TypeId> {
+        self.nodes[id.index()].ty
+    }
+
+    fn root(&self) -> Option<NodeId> {
+        self.nodes.len().checked_sub(1).map(NodeId::from_index)
+    }
+
+    fn children(&self, id: NodeId) -> impl Iterator<Item = NodeId> {
+        self.nodes[id.index()]
+            .inputs
+            .iter()
+            .map(|input| NodeId::from_index(input.index()))
+    }
+
+    fn postorder(&self, start: NodeId) -> impl Iterator<Item = NodeId> {
+        (0..=start.index()).map(NodeId::from_index)
+    }
+
+    fn preorder(&self, start: NodeId) -> impl Iterator<Item = NodeId> {
+        std::iter::once(start)
     }
 }
 
@@ -712,7 +619,12 @@ impl<'a> SemDagBuilder<'a> {
         }
         let mut graph = ExprPostGraph::new();
         let root = op.clone().as_dyn_op().semantic_expr(&mut graph)?;
-        Some(self.lower_graph_node(&graph, root, &operands))
+        let widths = self.infer_local_widths(&graph, &operands);
+        let node = self.lower_graph_node(&graph, root, &operands, &widths);
+        if let Some(result) = op.results.first() {
+            self.arena.set_value(node, *result);
+        }
+        Some(node)
     }
 
     fn build_from_value(&mut self, value: ValueId) -> SemNodeId {
@@ -720,17 +632,18 @@ impl<'a> SemDagBuilder<'a> {
             return *existing;
         }
 
+        let value_ty = Some(self.context.get_value(value).ty());
         let node = if let Some(def_op_id) = self.value_to_def.get(&value) {
             let def = self.context.get_op(*def_op_id);
             if def.name == "constant" {
                 if let Some(attr) = def.attributes.iter().find(|a| a.name == "value") {
                     if let AttributeValue::Int(v) = &attr.value {
-                        self.arena.intern_int(APInt::new_signed(64, *v))
+                        self.arena.intern_int(APInt::new_signed(64, *v), value_ty)
                     } else {
-                        self.arena.intern_input_value(value)
+                        self.arena.intern_input_value(value, value_ty)
                     }
                 } else {
-                    self.arena.intern_input_value(value)
+                    self.arena.intern_input_value(value, value_ty)
                 }
             } else {
                 let mut graph = ExprPostGraph::new();
@@ -739,57 +652,70 @@ impl<'a> SemDagBuilder<'a> {
                     for operand in &def.operands {
                         operands.push(self.build_from_value(*operand));
                     }
-                    self.lower_graph_node(&graph, root, &operands)
+                    let widths = self.infer_local_widths(&graph, &operands);
+                    let node = self.lower_graph_node(&graph, root, &operands, &widths);
+                    self.arena.set_value(node, value);
+                    node
                 } else {
-                    self.arena.intern_input_value(value)
+                    self.arena.intern_input_value(value, value_ty)
                 }
             }
         } else {
-            self.arena.intern_input_value(value)
+            self.arena.intern_input_value(value, value_ty)
         };
 
         self.value_to_node.insert(value, node);
         node
     }
 
+    /// Infer the width of every node of `graph` from the IR types of the operands
+    /// it references, then resolve those widths against the live context. This is
+    /// the same width rule TMDL uses for patterns, so the program graph and the
+    /// rule patterns end up typed consistently.
+    fn infer_local_widths(
+        &self,
+        graph: &ExprPostGraph,
+        operands: &[SemNodeId],
+    ) -> Vec<Option<u32>> {
+        infer_widths(graph, |node| match graph.get_leaf_data(node) {
+            Some(ExprPayload::SymbolId(id)) => operands
+                .get(*id as usize)
+                .and_then(|&sem| self.arena.node(sem).ty)
+                .and_then(|ty| type_width(self.context, ty)),
+            _ => None,
+        })
+    }
+
+    /// Lower one node of a semantic-expression graph, typing each node from its
+    /// inferred width. Operand leaves keep the IR type they were built with;
+    /// internal nodes (and the root) take their inferred width resolved to a type.
     fn lower_graph_node(
         &mut self,
         graph: &ExprPostGraph,
         node: NodeId,
         operands: &[SemNodeId],
+        widths: &[Option<u32>],
     ) -> SemNodeId {
+        let node_ty = widths[node.index()].map(|width| IntegerType::new(self.context, width));
         match graph.get_node(node) {
             ExprKind::Symbol => match graph.get_leaf_data(node) {
                 Some(ExprPayload::SymbolId(id)) => operands
                     .get(*id as usize)
                     .copied()
-                    .unwrap_or_else(|| self.arena.intern_unknown_symbol(*id)),
+                    .unwrap_or_else(|| self.arena.intern_unknown_symbol(*id, node_ty)),
                 _ => self.arena.intern_opaque(),
             },
             ExprKind::Constant => match graph.get_leaf_data(node) {
-                Some(ExprPayload::Int(v)) => self.arena.intern_int(v.clone()),
+                Some(ExprPayload::Int(v)) => self.arena.intern_int(v.clone(), node_ty),
                 _ => self.arena.intern_opaque(),
             },
             kind => {
                 let children: Vec<SemNodeId> = graph
                     .children(node)
-                    .map(|child| self.lower_graph_node(graph, child, operands))
+                    .map(|child| self.lower_graph_node(graph, child, operands, widths))
                     .collect();
-                let opcode = match kind {
-                    ExprKind::Add => Some(SemOpcode::Add),
-                    ExprKind::Sub => Some(SemOpcode::Sub),
-                    ExprKind::Mul => Some(SemOpcode::Mul),
-                    ExprKind::Div => Some(SemOpcode::Div),
-                    ExprKind::ShiftLeft => Some(SemOpcode::ShiftLeft),
-                    ExprKind::ShiftRightLogic => Some(SemOpcode::ShiftRightLogic),
-                    ExprKind::ShiftRightArithmetic => Some(SemOpcode::ShiftRightArithmetic),
-                    ExprKind::And => Some(SemOpcode::And),
-                    ExprKind::Or => Some(SemOpcode::Or),
-                    ExprKind::Xor => Some(SemOpcode::Xor),
-                    _ => None,
-                };
-                if let (Some(opcode), [lhs, rhs]) = (opcode, children.as_slice()) {
-                    self.arena.intern_binary(opcode, *lhs, *rhs)
+                if kind.num_children(self.context) == children.len() {
+                    self.arena.intern_op(*kind, children, node_ty)
                 } else {
                     self.arena.intern_opaque()
                 }
@@ -798,99 +724,514 @@ impl<'a> SemDagBuilder<'a> {
     }
 }
 
-pub struct MatcherAutomaton {
-    by_opcode: HashMap<SemOpcode, Vec<usize>>,
-    fallback_rules: Vec<usize>,
-    all_rules: Vec<usize>,
+/// The integer bit-width of an IR type, or `None` if it is not an integer type.
+fn type_width(context: &Context, ty: TypeId) -> Option<u32> {
+    let data = context.get_type_data(ty);
+    (data.as_ref() as &dyn std::any::Any)
+        .downcast_ref::<IntegerType>()
+        .map(IntegerType::width)
 }
 
-impl MatcherAutomaton {
-    fn compile(rules: &mut [Rule]) -> Self {
-        let mut by_opcode: HashMap<SemOpcode, Vec<usize>> = HashMap::new();
-        let mut fallback_rules = Vec::new();
+/// Headroom factor that lets pattern specificity break ties between equal-cost
+/// matches without ever overriding a genuine instruction-cost difference.
+const SPECIFICITY_SCALE: u64 = 8;
 
-        for (idx, rule) in rules.iter_mut().enumerate() {
-            rule.compiled_rule_id = CompiledRuleId(idx as u32);
-            if let Some(root_opcode) = pattern_root_opcode(&rule.pattern) {
-                by_opcode.entry(root_opcode).or_default().push(idx);
-            } else {
-                fallback_rules.push(idx);
-            }
-        }
-
-        Self {
-            by_opcode,
-            fallback_rules,
-            all_rules: (0..rules.len()).collect(),
-        }
-    }
-
-    fn candidate_rules(&self, node: &SemNode) -> Vec<usize> {
-        let mut out = Vec::new();
-        if let Some(specific) = self.by_opcode.get(&node.opcode) {
-            out.extend(specific.iter().copied());
-        }
-        out.extend(self.fallback_rules.iter().copied());
-
-        if out.is_empty() {
-            out.extend(self.all_rules.iter().copied());
-        }
-        out
-    }
+/// Fold a match's specificity into its cost: scale the instruction cost, then give
+/// a small discount for each type-constrained pattern node. So among equally cheap
+/// matches the most specific (e.g. i32 `addw` over untyped `add`) wins, while a
+/// cheaper instruction still wins outright.
+fn specificity_adjusted_cost(cost: u64, specificity: usize) -> u64 {
+    cost.saturating_mul(SPECIFICITY_SCALE)
+        .saturating_sub((specificity as u64).min(SPECIFICITY_SCALE - 1))
 }
 
-fn pattern_root_opcode(pattern: &ExprPostGraph) -> Option<SemOpcode> {
-    match pattern.get_node(pattern.root()?) {
-        ExprKind::Constant => match pattern.get_leaf_data(pattern.root()?) {
-            Some(ExprPayload::Int(_)) => Some(SemOpcode::IntConst),
-            _ => None,
-        },
-        ExprKind::Add => Some(SemOpcode::Add),
-        ExprKind::Sub => Some(SemOpcode::Sub),
-        ExprKind::Mul => Some(SemOpcode::Mul),
-        ExprKind::Div => Some(SemOpcode::Div),
-        ExprKind::ShiftLeft => Some(SemOpcode::ShiftLeft),
-        ExprKind::ShiftRightLogic => Some(SemOpcode::ShiftRightLogic),
-        ExprKind::ShiftRightArithmetic => Some(SemOpcode::ShiftRightArithmetic),
-        ExprKind::And => Some(SemOpcode::And),
-        ExprKind::Or => Some(SemOpcode::Or),
-        ExprKind::Xor => Some(SemOpcode::Xor),
-        ExprKind::Symbol => None,
-        _ => None,
-    }
+#[derive(Clone, Debug)]
+enum BlockDecision {
+    Emit { rule_index: usize, m: RuleMatch },
+    Consume,
+}
+
+#[derive(Clone, Debug)]
+enum PbqpIselAlternative {
+    External,
+    Root {
+        match_id: usize,
+    },
+    Internal {
+        match_id: usize,
+        pattern_node: NodeId,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct PbqpIselMatch {
+    pattern_index: usize,
+    rule_index: usize,
+    root: EClassId,
+    pattern_root: NodeId,
+    bindings: FullMatchBindings,
+    cost: u64,
 }
 
 struct BlockSelectionCache {
-    dag: SemDagArena,
-    roots_by_op: HashMap<OpId, SemNodeId>,
+    egraph: SemEGraph,
+    /// The e-class that produces each op's result value.
+    op_by_root: HashMap<EClassId, OpId>,
+    /// E-classes used as an operand by more than one consumer; such a value must be
+    /// materialized into a register and cannot be internalized into a match.
+    shared_classes: HashSet<EClassId>,
+    /// The solved emission plan, or the completeness error explaining why the block
+    /// cannot be selected with this rule set.
+    plan: Option<Result<BlockPlan, String>>,
+}
+
+/// The emission plan for a block: how each original op is rewritten, plus the extra
+/// instructions to insert for rewrite-introduced e-classes that have no original op
+/// (the `slli` of a `slli`/`srai` sign-extension expansion).
+#[derive(Clone, Debug, Default)]
+struct BlockPlan {
+    op_decisions: HashMap<OpId, BlockDecision>,
+    introduced: Vec<IntroducedEmit>,
+}
+
+/// An instruction to materialize for an introduced e-class: emitted with a fresh
+/// destination value and inserted just before `anchor` (the source op whose
+/// expansion produced it). Operands precede consumers in `BlockPlan::introduced`.
+#[derive(Clone, Debug)]
+struct IntroducedEmit {
+    rule_index: usize,
+    m: RuleMatch,
+    dest: ValueId,
+    dest_ty: TypeId,
+    anchor: OpId,
+}
+
+struct CompiledIselPattern {
+    rule_index: usize,
+    pattern: Pattern<SemNode, usize>,
+    boundary_symbols: HashMap<NodeId, u32>,
+    /// Number of type-constrained pattern nodes — how "specific" this pattern is.
+    /// At equal instruction cost, a more specific match is preferred, so an i32
+    /// `addw` (one typed node) beats the untyped `add` for an i32 value, while the
+    /// untyped `add`/`and` still match every other width.
+    specificity: usize,
+}
+
+fn compile_isel_pattern(
+    rule_index: usize,
+    expr: &ExprPostGraph,
+    operand_constraints: &[(u32, OperandConstraint)],
+) -> Option<CompiledIselPattern> {
+    let root = expr.root()?;
+    let mut pattern = Pattern::new(rule_index);
+    let mut boundary_symbols = HashMap::new();
+    let mut memo = HashMap::new();
+    let pattern_root =
+        compile_isel_pattern_node(expr, root, &mut pattern, &mut boundary_symbols, &mut memo)?;
+    pattern.set_root(pattern_root);
+
+    // Constrain each operand boundary to register or immediate, so e.g. an
+    // immediate-shift pattern never matches a register shift amount.
+    for (&pattern_node, &symbol) in &boundary_symbols {
+        if let Some((_, constraint)) = operand_constraints.iter().find(|(s, _)| *s == symbol) {
+            pattern.set_operand_constraint(pattern_node, *constraint);
+        }
+    }
+
+    let specificity = (0..pattern.len())
+        .map(NodeId::from_index)
+        .filter(|&n| matches!(pattern.get_node(n), PatternExpr::Node(node) if node.ty.is_some()))
+        .count();
+
+    Some(CompiledIselPattern {
+        rule_index,
+        pattern,
+        boundary_symbols,
+        specificity,
+    })
+}
+
+fn compile_isel_pattern_node(
+    expr: &ExprPostGraph,
+    node: NodeId,
+    pattern: &mut Pattern<SemNode, usize>,
+    boundary_symbols: &mut HashMap<NodeId, u32>,
+    memo: &mut HashMap<NodeId, NodeId>,
+) -> Option<NodeId> {
+    if let Some(compiled) = memo.get(&node).copied() {
+        return Some(compiled);
+    }
+
+    let compiled = match expr.get_node(node) {
+        ExprKind::Symbol => {
+            let Some(ExprPayload::SymbolId(symbol)) = expr.get_leaf_data(node) else {
+                return None;
+            };
+            let compiled = pattern.add_node(PatternExpr::Boundary);
+            pattern.set_duplicable(compiled, true);
+            boundary_symbols.insert(compiled, *symbol);
+            compiled
+        }
+        ExprKind::Constant => match expr.get_leaf_data(node) {
+            Some(ExprPayload::Int(value)) => pattern.add_node(PatternExpr::Node(template_node(
+                ExprKind::Constant,
+                Some(ExprPayload::Int(value.clone())),
+                expr.get_actual_type(node),
+            ))),
+            _ => return None,
+        },
+        kind => {
+            let compiled = pattern.add_node(PatternExpr::Node(template_node(
+                *kind,
+                None,
+                expr.get_actual_type(node),
+            )));
+            memo.insert(node, compiled);
+            for child in expr.children(node) {
+                let compiled_child =
+                    compile_isel_pattern_node(expr, child, pattern, boundary_symbols, memo)?;
+                pattern.add_edge(compiled, compiled_child);
+            }
+            return Some(compiled);
+        }
+    };
+
+    memo.insert(node, compiled);
+    Some(compiled)
+}
+
+fn template_node(kind: ExprKind, payload: Option<ExprPayload>, ty: Option<TypeId>) -> SemNode {
+    SemNode {
+        id: SemNodeId(0),
+        kind,
+        inputs: Vec::new(),
+        payload,
+        ty,
+        value: None,
+    }
+}
+
+
+/// A solved cover: the chosen alternative for every PBQP node, the e-class each
+/// PBQP node stands for (same index), and the achieved cost.
+struct DagCover {
+    choices: Vec<PbqpIselAlternative>,
+    classes: Vec<EClassId>,
+}
+
+/// Build and solve the PBQP cover over the e-graph: one PBQP node per e-class,
+/// alternatives drawn from the instruction-pattern `matches`, and parent -> child
+/// compatibility derived from each match's pattern structure (not a single DAG
+/// shape, since a class may be realized by several equivalent e-nodes). The
+/// `edge_cost` closure prices satisfied materialization edges. Returns `None` if
+/// the instance is infeasible (a class with no valid alternative).
+fn build_eclass_cover(
+    egraph: &SemEGraph,
+    op_by_root: &HashMap<EClassId, OpId>,
+    patterns: &[CompiledIselPattern],
+    matches: &[PbqpIselMatch],
+    edge_cost: impl Fn(EClassId, EClassId, &PbqpIselAlternative) -> u64,
+) -> Option<DagCover> {
+    let classes: Vec<EClassId> = egraph.classes().map(|c| egraph.find(c)).collect();
+    let index: HashMap<EClassId, usize> = classes
+        .iter()
+        .enumerate()
+        .map(|(i, &c)| (c, i))
+        .collect();
+    let class_index = |c: EClassId| index[&egraph.find(c)];
+
+    let is_terminal = |c: EClassId| egraph.nodes(c).iter().any(|n| n.children.is_empty());
+
+    let mut alternatives_by_node = vec![Vec::<PbqpIselAlternative>::new(); classes.len()];
+    for (i, &c) in classes.iter().enumerate() {
+        if is_terminal(c) {
+            alternatives_by_node[i].push(PbqpIselAlternative::External);
+        }
+    }
+
+    for (match_id, m) in matches.iter().enumerate() {
+        alternatives_by_node[class_index(m.root)].push(PbqpIselAlternative::Root { match_id });
+        for binding in &m.bindings.pattern_nodes {
+            if binding.is_boundary || binding.pattern_node == m.pattern_root {
+                continue;
+            }
+            alternatives_by_node[class_index(binding.class)].push(PbqpIselAlternative::Internal {
+                match_id,
+                pattern_node: binding.pattern_node,
+            });
+        }
+    }
+
+    for (i, &c) in classes.iter().enumerate() {
+        if alternatives_by_node[i].is_empty() && (is_terminal(c) || !op_by_root.contains_key(&c)) {
+            alternatives_by_node[i].push(PbqpIselAlternative::External);
+        }
+    }
+
+    if alternatives_by_node.iter().any(Vec::is_empty) {
+        return None;
+    }
+
+    let mut problem = PbqpProblem::new();
+    for alternatives in &alternatives_by_node {
+        let costs = alternatives
+            .iter()
+            .map(|alternative| match alternative {
+                PbqpIselAlternative::Root { match_id } => matches[*match_id].cost,
+                PbqpIselAlternative::External | PbqpIselAlternative::Internal { .. } => 0,
+            })
+            .collect();
+        problem.add_node(costs);
+    }
+
+    for (match_id, m) in matches.iter().enumerate() {
+        let mut coherent = Vec::new();
+        for (node, alternatives) in alternatives_by_node.iter().enumerate() {
+            for (alternative, pbqp_alt) in alternatives.iter().enumerate() {
+                let belongs_to_match = match pbqp_alt {
+                    PbqpIselAlternative::Root { match_id: alt_match }
+                    | PbqpIselAlternative::Internal { match_id: alt_match, .. } => {
+                        *alt_match == match_id
+                    }
+                    PbqpIselAlternative::External => false,
+                };
+                if belongs_to_match {
+                    coherent.push(PbqpAlternative {
+                        node: pbqp::PbqpNodeId::from_index(node),
+                        alternative,
+                    });
+                }
+            }
+        }
+        if m.bindings.pattern_nodes.len() > 1 {
+            problem.add_coherence_set(coherent);
+        }
+    }
+
+    // Edges follow each match's pattern structure: a (parent class -> operand
+    // class) relation for every pattern edge of every match. Deduplicated so each
+    // ordered class pair is priced once.
+    let mut edge_pairs: HashSet<(usize, usize)> = HashSet::new();
+    for m in matches {
+        let pattern = &patterns[m.pattern_index].pattern;
+        for pp in (0..pattern.len()).map(NodeId::from_index) {
+            let Some(parent_class) = m.bindings.class_for_pattern(pp) else {
+                continue;
+            };
+            for &pc in pattern.children(pp) {
+                let Some(child_class) = m.bindings.class_for_pattern(pc) else {
+                    continue;
+                };
+                let pi = class_index(parent_class);
+                let ci = class_index(child_class);
+                if pi != ci {
+                    edge_pairs.insert((pi, ci));
+                }
+            }
+        }
+    }
+
+    for (pi, ci) in edge_pairs {
+        let (parent_class, child_class) = (classes[pi], classes[ci]);
+        let parent_alts = &alternatives_by_node[pi];
+        let child_alts = &alternatives_by_node[ci];
+        let mut matrix = PbqpMatrix::zero(parent_alts.len(), child_alts.len());
+
+        for (parent_alt_idx, parent_alt) in parent_alts.iter().enumerate() {
+            for (child_alt_idx, child_alt) in child_alts.iter().enumerate() {
+                if !alternatives_compatible(
+                    patterns,
+                    parent_class,
+                    child_class,
+                    parent_alt,
+                    child_alt,
+                    matches,
+                ) {
+                    matrix.set(parent_alt_idx, child_alt_idx, INF_COST);
+                    continue;
+                }
+                let cost = edge_cost(parent_class, child_class, parent_alt);
+                if cost != 0 {
+                    matrix.set(parent_alt_idx, child_alt_idx, cost);
+                }
+            }
+        }
+
+        problem.add_edge(
+            pbqp::PbqpNodeId::from_index(pi),
+            pbqp::PbqpNodeId::from_index(ci),
+            matrix,
+        );
+    }
+
+    let solution = pbqp::solve(&problem).ok()?;
+    let choices = solution
+        .choices
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(node, choice)| alternatives_by_node[node][choice].clone())
+        .collect();
+    Some(DagCover { choices, classes })
+}
+
+
+/// The semantic kinds for which the rule set provides an atomic materializer (a
+/// pattern whose root is that kind with only operand boundaries beneath it).
+fn atomic_kinds(patterns: &[CompiledIselPattern]) -> HashSet<ExprKind> {
+    let ctx = Context::default();
+    let mut kinds = HashSet::new();
+    for compiled in patterns {
+        let Some(root) = compiled.pattern.root() else {
+            continue;
+        };
+        let PatternExpr::Node(root_node) = compiled.pattern.get_node(root) else {
+            continue;
+        };
+        if root_node.kind.num_children(&ctx) == 0 {
+            continue;
+        }
+        let children = compiled.pattern.children(root);
+        if !children.is_empty()
+            && children
+                .iter()
+                .all(|&child| matches!(compiled.pattern.get_node(child), PatternExpr::Boundary))
+        {
+            kinds.insert(root_node.kind);
+        }
+    }
+    kinds
+}
+
+/// The integer width of an e-class, taken from whichever member carries a known
+/// integer type (the original IR node keeps its type; rewrite-introduced nodes are
+/// left untyped).
+fn class_width(ctx: &Context, egraph: &SemEGraph, class: EClassId) -> Option<u32> {
+    egraph
+        .nodes(class)
+        .iter()
+        .find_map(|n| n.node.ty.and_then(|ty| type_width(ctx, ty)))
+}
+
+/// Discover the algebraic bridges the rule set needs to cover sub-word extensions.
+/// If the target has `slli` plus the matching right shift, confirm the standard
+/// shift-pair identity against the [`FuzzOracle`] and, on success, emit a
+/// width-parameterized rewrite. No hand-written selection rule is involved — only a
+/// proved bit-vector lemma the target's own instructions happen to realize.
+fn discover_rewrites(patterns: &[CompiledIselPattern]) -> Vec<Rewrite<SemNode, ()>> {
+    let atomics = atomic_kinds(patterns);
+    if !atomics.contains(&ExprKind::ShiftLeft) {
+        return Vec::new();
+    }
+    let oracle = FuzzOracle::default();
+    let mut rewrites = Vec::new();
+    for (ext_kind, shr_kind) in [
+        (ExprKind::SExt, ExprKind::ShiftRightArithmetic),
+        (ExprKind::ZExt, ExprKind::ShiftRightLogic),
+    ] {
+        if atomics.contains(&shr_kind) && confirm_extension_via_shifts(ext_kind, shr_kind, &oracle)
+        {
+            rewrites.push(extension_rewrite(ext_kind, shr_kind));
+        }
+    }
+    rewrites
+}
+
+/// Build the rewrite `ext_kind(v, W) -> shr_kind(shl(v, W - n), W - n)` with
+/// `n = width(v)`. The introduced shift nodes are left untyped so they match the
+/// target's width-agnostic shift patterns, and the shift amount is a fresh constant.
+fn extension_rewrite(ext_kind: ExprKind, shr_kind: ExprKind) -> Rewrite<SemNode, ()> {
+    let mut searcher = Pattern::<SemNode, ()>::new(());
+    let value = searcher.add_node(PatternExpr::Boundary);
+    searcher.set_duplicable(value, true);
+    let width = searcher.add_node(PatternExpr::Boundary);
+    searcher.set_duplicable(width, true);
+    let root = searcher.add_node(PatternExpr::Node(template_node(ext_kind, None, None)));
+    searcher.add_edge(root, value);
+    searcher.add_edge(root, width);
+    searcher.set_root(root);
+
+    Rewrite {
+        name: format!("{ext_kind:?}-via-shifts"),
+        searcher,
+        apply: Box::new(move |ctx: &Context, egraph: &mut SemEGraph, m: &EMatch| {
+            let root_class = m.root();
+            let value_class = m.binding(value);
+            let (Some(w), Some(n)) = (
+                class_width(ctx, egraph, root_class),
+                class_width(ctx, egraph, value_class),
+            ) else {
+                return;
+            };
+            if n >= w {
+                return;
+            }
+            let amount = template_node(
+                ExprKind::Constant,
+                Some(ExprPayload::Int(APInt::new(64, (w - n) as u64))),
+                None,
+            );
+            let shift_amount = egraph.add(ENode::leaf(amount, None));
+            let shl = egraph.add(ENode::op(
+                template_node(ExprKind::ShiftLeft, None, None),
+                vec![value_class, shift_amount],
+            ));
+            let shr = egraph.add(ENode::op(
+                template_node(shr_kind, None, None),
+                vec![shl, shift_amount],
+            ));
+            egraph.union(root_class, shr);
+        }),
+    }
 }
 
 pub type OpLowering = fn(&Context, &OperationRef, &mut Rewriter) -> Result<bool, PassError>;
 
 pub struct InstructionSelectPass {
     rules: Vec<Rule>,
-    matcher: MatcherAutomaton,
-    algorithm: Box<dyn IselAlgorithm>,
+    compiled_patterns: Vec<CompiledIselPattern>,
+    /// Target-independent algebraic identities the program e-graph is saturated
+    /// with before covering (e.g. discovered `sext`/shift bridges). Populated by
+    /// rewrite discovery; empty means selection is purely syntactic tiling.
+    rewrites: Vec<tir::graph::Rewrite<SemNode, ()>>,
     target_model: Box<dyn TargetIselModel>,
     op_lowerings: Vec<OpLowering>,
     block_cache: HashMap<BlockId, BlockSelectionCache>,
+    emitted_blocks: HashSet<BlockId>,
 }
 
 impl InstructionSelectPass {
     pub fn new(mut rules: Vec<Rule>) -> Self {
-        let matcher = MatcherAutomaton::compile(&mut rules);
+        for (idx, rule) in rules.iter_mut().enumerate() {
+            rule.compiled_rule_id = CompiledRuleId(idx as u32);
+        }
+        let compiled_patterns: Vec<_> = rules
+            .iter()
+            .enumerate()
+            .filter_map(|(rule_index, rule)| {
+                compile_isel_pattern(rule_index, &rule.pattern, &rule.operand_constraints)
+            })
+            .collect();
+
+        let rewrites = discover_rewrites(&compiled_patterns);
+
         Self {
             rules,
-            matcher,
-            algorithm: Box::new(GlobalDpSelector),
+            compiled_patterns,
+            rewrites,
             target_model: Box::new(DefaultTargetIselModel),
             op_lowerings: vec![],
             block_cache: HashMap::new(),
+            emitted_blocks: HashSet::new(),
         }
     }
 
-    pub fn with_algorithm(mut self, algorithm: Box<dyn IselAlgorithm>) -> Self {
-        self.algorithm = algorithm;
+    /// Install the algebraic identities used to saturate the program e-graph before
+    /// covering. These are proved equivalences (target-independent bit-vector
+    /// lemmas, or sequences discovered against the target's own instructions), so
+    /// the rule set stays free of hand-written selection rules.
+    pub fn with_rewrites(mut self, rewrites: Vec<tir::graph::Rewrite<SemNode, ()>>) -> Self {
+        self.rewrites = rewrites;
         self
     }
 
@@ -932,13 +1273,1439 @@ impl InstructionSelectPass {
             }
         }
 
+        // Seed the e-graph from the interned semantic DAG (children precede parents,
+        // so each operand's class is ready), then saturate with the algebraic
+        // identities. Class ids are resolved through `find` afterwards because
+        // saturation may have merged classes.
+        let arena = builder.arena;
+        let mut egraph = SemEGraph::new();
+        let mut sem_to_class: Vec<EClassId> = Vec::with_capacity(arena.len());
+        for i in 0..arena.len() {
+            let node = arena.node(SemNodeId(i as u32)).clone();
+            let children: Vec<EClassId> =
+                node.inputs.iter().map(|c| sem_to_class[c.index()]).collect();
+            sem_to_class.push(egraph.add(ENode {
+                node,
+                children,
+                leaf: None,
+            }));
+        }
+        egraph.saturate(context, &self.rewrites, Default::default());
+
+        let class_of = |semid: SemNodeId| egraph.find(sem_to_class[semid.index()]);
+
+        let op_by_root: HashMap<EClassId, OpId> = roots_by_op
+            .iter()
+            .map(|(op, root)| (class_of(*root), *op))
+            .collect();
+
+        // A value used as an operand by more than one consumer must stay a register.
+        let mut operand_uses: HashMap<ValueId, usize> = HashMap::new();
+        for op_id in &op_ids {
+            for operand in &context.get_op(*op_id).operands {
+                *operand_uses.entry(*operand).or_insert(0) += 1;
+            }
+        }
+        let mut shared_classes = HashSet::new();
+        for (op_id, root) in &roots_by_op {
+            let op = context.get_op(*op_id);
+            if op
+                .results
+                .iter()
+                .any(|r| operand_uses.get(r).copied().unwrap_or(0) > 1)
+            {
+                shared_classes.insert(class_of(*root));
+            }
+        }
+
         self.block_cache.insert(
             block.id(),
             BlockSelectionCache {
-                dag: builder.arena,
-                roots_by_op,
+                egraph,
+                op_by_root,
+                shared_classes,
+                plan: None,
             },
         );
+    }
+
+    fn ensure_block_solution(&mut self, context: &Context, block: &Block) {
+        self.ensure_block_cache(context, block);
+        let Some(cache) = self.block_cache.get(&block.id()) else {
+            return;
+        };
+        if cache.plan.is_some() {
+            return;
+        }
+
+        let plan = self.solve_block(context, block, cache);
+        if let Some(cache) = self.block_cache.get_mut(&block.id()) {
+            cache.plan = Some(plan);
+        }
+    }
+
+    fn commit_block_solution(
+        &mut self,
+        context: &Context,
+        block: &Block,
+        rewriter: &mut Rewriter,
+    ) -> Result<(), PassError> {
+        if !self.emitted_blocks.insert(block.id()) {
+            return Ok(());
+        }
+
+        self.ensure_block_solution(context, block);
+        let plan = match self
+            .block_cache
+            .get(&block.id())
+            .and_then(|cache| cache.plan.clone())
+        {
+            Some(Ok(plan)) => plan,
+            Some(Err(message)) => return Err(PassError::InvalidRuleSet(message)),
+            None => return Ok(()),
+        };
+
+        let block_arc = context.get_block(block.id());
+
+        // Insert the rewrite-introduced instructions first, in operand-first order,
+        // each ahead of its anchor op. A synthetic op-ref carries the fresh
+        // destination value so the emitter reads it as the result register.
+        for intro in &plan.introduced {
+            let synthetic = synthetic_op_ref(context, &block_arc, intro.dest, intro.dest_ty);
+            let rule = &self.rules[intro.rule_index];
+            let new_op = (rule.emit_plan_fn)(context, &synthetic, &intro.m)?.into_op();
+            let anchor = OperationRef::new(
+                context.get_op(intro.anchor),
+                Some(block_arc.clone()),
+                None,
+            );
+            rewriter.insert_op_before(&anchor, new_op.as_ref())?;
+        }
+
+        // Rewrite the original ops (positions are resolved by id, so insertions
+        // above do not invalidate this).
+        for (op_id, decision) in &plan.op_decisions {
+            let op_ref =
+                OperationRef::new(context.get_op(*op_id), Some(block_arc.clone()), None);
+            match decision {
+                BlockDecision::Emit { rule_index, m } => {
+                    let rule = &self.rules[*rule_index];
+                    let new_op = (rule.emit_plan_fn)(context, &op_ref, m)?.into_op();
+                    rewriter.replace_op(&op_ref, new_op.as_ref())?;
+                }
+                BlockDecision::Consume => {
+                    rewriter.erase_op(&op_ref)?;
+                }
+            }
+        }
+
+        // Drop constants left dead by selection: an immediate operand folds its
+        // constant into the instruction's attribute (e.g. `slliw`'s `imm`), so the
+        // defining `constant` op no longer feeds anything. It binds to an *immediate
+        // boundary*, never an interior node, so the cover gives it neither Emit nor
+        // Consume and it lingers as dead code. Replacing the consumer detached the
+        // constant's operand use, and the folded immediate is an `Int` attribute (not
+        // a register use), so the maintained def-use chain now reports zero uses.
+        for op_id in block_arc.op_ids() {
+            let op = context.get_op(op_id);
+            if op.name != "constant" {
+                continue;
+            }
+            if op.results.iter().all(|v| !context.is_value_used(*v)) {
+                let op_ref = OperationRef::new(op, Some(block_arc.clone()), None);
+                rewriter.erase_op(&op_ref)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn solve_block(
+        &self,
+        context: &Context,
+        block: &Block,
+        cache: &BlockSelectionCache,
+    ) -> Result<BlockPlan, String> {
+        let mut op_refs = HashMap::new();
+        for (position, op_id) in block.op_ids().into_iter().enumerate() {
+            let op = context.get_op(op_id);
+            op_refs.insert(
+                op_id,
+                OperationRef::new(op, Some(context.get_block(block.id())), Some(position)),
+            );
+        }
+
+        let matches = self.collect_block_matches(context, cache, &op_refs);
+
+        if let Some(message) = completeness_error(&cache.egraph, &cache.op_by_root, &matches) {
+            return Err(message);
+        }
+        if matches.is_empty() {
+            return Ok(BlockPlan::default());
+        }
+
+        let cost_model = self.target_model.cost_model();
+        let Some(cover) = build_eclass_cover(
+            &cache.egraph,
+            &cache.op_by_root,
+            &self.compiled_patterns,
+            &matches,
+            |parent, child, parent_alt| {
+                materialization_edge_cost(
+                    &self.compiled_patterns,
+                    &cache.egraph,
+                    parent,
+                    child,
+                    parent_alt,
+                    &matches,
+                    cost_model,
+                )
+            },
+        ) else {
+            return Ok(BlockPlan::default());
+        };
+
+        // The match chosen as Root for each e-class, and the classes consumed as an
+        // interior node of some selected match.
+        let mut root_match: HashMap<EClassId, usize> = HashMap::new();
+        let mut internal_classes: HashSet<EClassId> = HashSet::new();
+        for (node, choice) in cover.choices.iter().enumerate() {
+            match choice {
+                PbqpIselAlternative::Root { match_id } => {
+                    root_match.insert(cover.classes[node], *match_id);
+                }
+                PbqpIselAlternative::Internal { .. } => {
+                    internal_classes.insert(cover.classes[node]);
+                }
+                PbqpIselAlternative::External => {}
+            }
+        }
+
+        let mut emit = EmissionBuilder {
+            egraph: &cache.egraph,
+            op_by_root: &cache.op_by_root,
+            matches: &matches,
+            root_match: &root_match,
+            context,
+            introduced_dest: HashMap::new(),
+            introduced: Vec::new(),
+        };
+
+        // Inverse of op_by_root for this block's ops.
+        let class_of_op: HashMap<OpId, EClassId> = cache
+            .op_by_root
+            .iter()
+            .map(|(class, op)| (*op, *class))
+            .collect();
+
+        let mut op_decisions = HashMap::new();
+        for op_id in block.op_ids() {
+            let Some(class) = class_of_op.get(&op_id).map(|c| cache.egraph.find(*c)) else {
+                continue;
+            };
+            if let Some(&match_id) = root_match.get(&class) {
+                let result_ty = context
+                    .get_op(op_id)
+                    .results
+                    .first()
+                    .map(|v| context.get_value(*v).ty());
+                let m = emit.resolve_match(match_id, op_id, result_ty);
+                op_decisions.insert(
+                    op_id,
+                    BlockDecision::Emit {
+                        rule_index: matches[match_id].rule_index,
+                        m,
+                    },
+                );
+            } else if internal_classes.contains(&class) {
+                op_decisions.insert(op_id, BlockDecision::Consume);
+            }
+        }
+
+        Ok(BlockPlan {
+            op_decisions,
+            introduced: emit.introduced,
+        })
+    }
+
+    fn collect_block_matches(
+        &self,
+        context: &Context,
+        cache: &BlockSelectionCache,
+        op_refs: &HashMap<OpId, OperationRef>,
+    ) -> Vec<PbqpIselMatch> {
+        let mut matches = Vec::new();
+        for (pattern_index, compiled) in self.compiled_patterns.iter().enumerate() {
+            let rule = &self.rules[compiled.rule_index];
+            if !self.target_model.supports_rule(rule.compiled_rule_id) {
+                continue;
+            }
+            let Some(pattern_root) = compiled.pattern.root() else {
+                continue;
+            };
+            let pattern = &compiled.pattern;
+
+            // A class shared by several consumers must be materialized into a
+            // register: it may be a match *root* (the instruction that produces it)
+            // or a boundary operand, but never an *interior* node that some larger
+            // match would consume and erase.
+            let allowed = |pattern_node: NodeId, class: EClassId| {
+                pattern_node == pattern_root
+                    || pattern.is_duplicable(pattern_node)
+                    || !cache.shared_classes.contains(&cache.egraph.find(class))
+            };
+
+            for m in cache
+                .egraph
+                .ematch_with_legality(context, pattern, &allowed)
+            {
+                let root = cache.egraph.find(m.root());
+                let op_id = cache.op_by_root.get(&root).copied();
+                // Instructions root at computed values: an original op result, or a
+                // rewrite-introduced intermediate (which has no op). Matches rooted at
+                // a pure operand (leaf/constant) are not instruction candidates.
+                let is_computed = cache
+                    .egraph
+                    .nodes(root)
+                    .iter()
+                    .any(|n| !n.children.is_empty());
+                if op_id.is_none() && !is_computed {
+                    continue;
+                }
+
+                let mut captures = CaptureBindings::new();
+                for (pattern_node, symbol) in &compiled.boundary_symbols {
+                    captures.bind(*symbol, cache.egraph.find(m.binding(*pattern_node)));
+                }
+
+                let pattern_nodes = (0..pattern.len())
+                    .map(NodeId::from_index)
+                    .map(|pattern_node| PatternNodeBinding {
+                        pattern_node,
+                        class: cache.egraph.find(m.binding(pattern_node)),
+                        is_boundary: matches!(
+                            pattern.get_node(pattern_node),
+                            PatternExpr::Boundary
+                        ),
+                    })
+                    .collect();
+                let bindings = FullMatchBindings {
+                    captures,
+                    pattern_nodes,
+                };
+
+                // Cost and legality are op-relative when there is a backing op;
+                // a rewrite-introduced root has no op, so it takes the rule's
+                // target-independent base cost and skips op legality.
+                let rule_match = bindings.captures.to_rule_match(&cache.egraph);
+                let cost = if let Some(op_ref) = op_id.and_then(|id| op_refs.get(&id)) {
+                    if !(rule.legality_fn)(context, op_ref, &rule_match, self.target_model.as_ref())
+                    {
+                        continue;
+                    }
+                    let pressure = SelectionPressure {
+                        estimated_live_operands: op_ref.op().operands.len() as u32,
+                        estimated_register_pressure: self
+                            .target_model
+                            .estimate_register_pressure(op_ref),
+                    };
+                    self.target_model.cost_model().node_cost(
+                        context,
+                        op_ref,
+                        rule,
+                        &rule_match,
+                        &pressure,
+                        self.target_model.as_ref(),
+                    )
+                } else {
+                    rule.base_cost as u64
+                };
+
+                matches.push(PbqpIselMatch {
+                    pattern_index,
+                    rule_index: compiled.rule_index,
+                    root,
+                    pattern_root,
+                    bindings,
+                    cost: specificity_adjusted_cost(cost, compiled.specificity),
+                });
+            }
+        }
+        matches
+    }
+}
+
+/// Coverage completeness: every op-root e-class must be emittable as an instruction
+/// (it roots some match) or consumable by a parent match (it is an interior node of
+/// some match). A non-terminal op-root that is neither cannot be selected by this
+/// rule set — even after saturation — so selection fails with a diagnostic.
+fn completeness_error(
+    egraph: &SemEGraph,
+    op_by_root: &HashMap<EClassId, OpId>,
+    matches: &[PbqpIselMatch],
+) -> Option<String> {
+    let mut has_root: HashSet<EClassId> = HashSet::new();
+    let mut has_internal: HashSet<EClassId> = HashSet::new();
+    for m in matches {
+        has_root.insert(egraph.find(m.root));
+        for binding in &m.bindings.pattern_nodes {
+            if !binding.is_boundary && binding.pattern_node != m.pattern_root {
+                has_internal.insert(egraph.find(binding.class));
+            }
+        }
+    }
+
+    let mut missing: Vec<ExprKind> = Vec::new();
+    for &class in op_by_root.keys() {
+        let class = egraph.find(class);
+        if egraph.nodes(class).iter().any(|n| n.children.is_empty()) {
+            continue;
+        }
+        if has_root.contains(&class) || has_internal.contains(&class) {
+            continue;
+        }
+        if let Some(kind) = egraph.nodes(class).first().map(|n| n.node.kind) {
+            if !missing.contains(&kind) {
+                missing.push(kind);
+            }
+        }
+    }
+
+    if missing.is_empty() {
+        return None;
+    }
+    missing.sort();
+    Some(
+        missing
+            .iter()
+            .map(|kind| format!("missing atomic materializer rule for semantic kind {kind:?}"))
+            .collect::<Vec<_>>()
+            .join("; "),
+    )
+}
+
+/// Turns a solved cover into concrete per-instruction `RuleMatch`es, materializing
+/// rewrite-introduced e-classes (those covered by a Root match but with no original
+/// IR op) as fresh-valued instructions threaded into their consumers' operands.
+struct EmissionBuilder<'a> {
+    egraph: &'a SemEGraph,
+    op_by_root: &'a HashMap<EClassId, OpId>,
+    matches: &'a [PbqpIselMatch],
+    root_match: &'a HashMap<EClassId, usize>,
+    context: &'a Context,
+    /// Fresh destination value assigned to each introduced class.
+    introduced_dest: HashMap<EClassId, ValueId>,
+    introduced: Vec<IntroducedEmit>,
+}
+
+impl EmissionBuilder<'_> {
+    /// A Root-covered class with no original op is one the rewrites introduced.
+    fn is_introduced(&self, class: EClassId) -> bool {
+        self.root_match.contains_key(&class) && !self.op_by_root.contains_key(&class)
+    }
+
+    /// Build the operand bindings for a match, first materializing any introduced
+    /// operand instructions (anchored before `anchor`).
+    fn resolve_match(&mut self, match_id: usize, anchor: OpId, anchor_ty: Option<TypeId>) -> RuleMatch {
+        let operand_classes: Vec<EClassId> = self.matches[match_id]
+            .bindings
+            .captures
+            .entries
+            .iter()
+            .map(|(_, class)| self.egraph.find(*class))
+            .collect();
+        for class in operand_classes {
+            if self.is_introduced(class) {
+                self.emit_introduced(class, anchor, anchor_ty);
+            }
+        }
+        self.build_rule_match(match_id)
+    }
+
+    /// Ensure an introduced class is emitted (operands first), returning its fresh
+    /// destination value.
+    fn emit_introduced(&mut self, class: EClassId, anchor: OpId, anchor_ty: Option<TypeId>) -> ValueId {
+        if let Some(&dest) = self.introduced_dest.get(&class) {
+            return dest;
+        }
+        let match_id = self.root_match[&class];
+        let operand_classes: Vec<EClassId> = self.matches[match_id]
+            .bindings
+            .captures
+            .entries
+            .iter()
+            .map(|(_, c)| self.egraph.find(*c))
+            .collect();
+        for c in operand_classes {
+            if self.is_introduced(c) {
+                self.emit_introduced(c, anchor, anchor_ty);
+            }
+        }
+
+        let dest_ty = anchor_ty
+            .or_else(|| class_width(self.context, self.egraph, class).map(|w| IntegerType::new(self.context, w)))
+            .unwrap_or_else(|| IntegerType::new(self.context, 64));
+        let dest = self.context.create_value(dest_ty, None).id();
+        self.introduced_dest.insert(class, dest);
+
+        let m = self.build_rule_match(match_id);
+        self.introduced.push(IntroducedEmit {
+            rule_index: self.matches[match_id].rule_index,
+            m,
+            dest,
+            dest_ty,
+            anchor,
+        });
+        dest
+    }
+
+    /// Resolve each capture symbol to a concrete operand: an introduced operand's
+    /// fresh value, then a constant immediate, then an input value, then the value
+    /// an intermediate result produces.
+    fn build_rule_match(&self, match_id: usize) -> RuleMatch {
+        let mut int_bindings = Vec::new();
+        let mut value_bindings = Vec::new();
+        for (sym, class) in &self.matches[match_id].bindings.captures.entries {
+            let class = self.egraph.find(*class);
+            if let Some(&dest) = self.introduced_dest.get(&class) {
+                value_bindings.push((*sym, dest));
+                continue;
+            }
+            let nodes = self.egraph.nodes(class);
+            if let Some(ExprPayload::Int(v)) = nodes
+                .iter()
+                .find_map(|n| n.node.payload.as_ref().filter(|p| matches!(p, ExprPayload::Int(_))))
+            {
+                int_bindings.push((*sym, v.clone()));
+            } else if let Some(v) = nodes.iter().find_map(|n| match n.node.payload.as_ref() {
+                Some(ExprPayload::Value(v)) => Some(*v),
+                _ => None,
+            }) {
+                value_bindings.push((*sym, v));
+            } else if let Some(v) = nodes.iter().find_map(|n| n.node.value) {
+                value_bindings.push((*sym, v));
+            }
+        }
+        RuleMatch::new(int_bindings, value_bindings)
+    }
+}
+
+/// A throwaway op-ref carrying only `dest` as its result, so an introduced
+/// instruction's emitter (which reads the destination from the op's result) emits
+/// into a fresh register without a backing IR op.
+fn synthetic_op_ref(
+    context: &Context,
+    block: &std::sync::Arc<Block>,
+    dest: ValueId,
+    _dest_ty: TypeId,
+) -> OperationRef {
+    let instance = std::sync::Arc::new(OpInstance {
+        id: OpId::invalid(),
+        name: "isel.introduced",
+        dialect: "isel",
+        context: context.as_context_ref(),
+        operands: Vec::new(),
+        results: vec![dest],
+        regions: Vec::new(),
+        attributes: Vec::new(),
+        attribute_roles: &[],
+    });
+    OperationRef::new(instance, Some(block.clone()), None)
+}
+
+fn alternatives_compatible(
+    patterns: &[CompiledIselPattern],
+    parent: EClassId,
+    child: EClassId,
+    parent_alt: &PbqpIselAlternative,
+    child_alt: &PbqpIselAlternative,
+    matches: &[PbqpIselMatch],
+) -> bool {
+    if let Some(requirement) = child_requirement(patterns, child, parent_alt, matches) {
+        return match requirement {
+            ChildRequirement::Materialized => matches!(
+                child_alt,
+                PbqpIselAlternative::Root { .. } | PbqpIselAlternative::External
+            ),
+            ChildRequirement::SameMatch {
+                match_id,
+                pattern_node,
+            } => matches!(
+                child_alt,
+                PbqpIselAlternative::Internal {
+                    match_id: child_match,
+                    pattern_node: child_pattern_node,
+                } if *child_match == match_id && *child_pattern_node == pattern_node
+            ),
+        };
+    }
+
+    if let PbqpIselAlternative::Internal {
+        match_id,
+        pattern_node,
+    } = child_alt
+    {
+        return parent_satisfies_internal_child(
+            patterns,
+            parent,
+            child,
+            parent_alt,
+            *match_id,
+            *pattern_node,
+            matches,
+        );
+    }
+
+    true
+}
+
+fn child_requirement(
+    patterns: &[CompiledIselPattern],
+    child: EClassId,
+    parent_alt: &PbqpIselAlternative,
+    matches: &[PbqpIselMatch],
+) -> Option<ChildRequirement> {
+    let (match_id, parent_pattern_node) = match parent_alt {
+        PbqpIselAlternative::Root { match_id } => {
+            let m = &matches[*match_id];
+            (*match_id, m.pattern_root)
+        }
+        PbqpIselAlternative::Internal {
+            match_id,
+            pattern_node,
+        } => (*match_id, *pattern_node),
+        PbqpIselAlternative::External => return None,
+    };
+
+    let m = &matches[match_id];
+    let pattern = &patterns[m.pattern_index].pattern;
+    for &pattern_child in pattern.children(parent_pattern_node) {
+        if m.bindings.class_for_pattern(pattern_child) != Some(child) {
+            continue;
+        }
+        let is_boundary = m
+            .bindings
+            .pattern_nodes
+            .iter()
+            .find(|binding| binding.pattern_node == pattern_child)
+            .is_some_and(|binding| binding.is_boundary);
+        return if is_boundary {
+            Some(ChildRequirement::Materialized)
+        } else {
+            Some(ChildRequirement::SameMatch {
+                match_id,
+                pattern_node: pattern_child,
+            })
+        };
+    }
+
+    None
+}
+
+/// Cost added to a *finite* parent -> child edge by the target objective. Only
+/// materialization edges (parent reaches the child through an untyped boundary)
+/// are priced; structural same-match edges stay at zero.
+fn materialization_edge_cost(
+    patterns: &[CompiledIselPattern],
+    egraph: &SemEGraph,
+    parent: EClassId,
+    child: EClassId,
+    parent_alt: &PbqpIselAlternative,
+    matches: &[PbqpIselMatch],
+    cost_model: &dyn IselCostModel,
+) -> u64 {
+    let materialized = matches!(
+        child_requirement(patterns, child, parent_alt, matches),
+        Some(ChildRequirement::Materialized)
+    );
+    if !materialized {
+        return 0;
+    }
+    let (Some(parent_kind), Some(child_kind)) = (
+        egraph.nodes(parent).first().map(|n| n.node.kind),
+        egraph.nodes(child).first().map(|n| n.node.kind),
+    ) else {
+        return 0;
+    };
+    cost_model.edge_cost(parent_kind, child_kind, true)
+}
+
+fn parent_satisfies_internal_child(
+    patterns: &[CompiledIselPattern],
+    parent: EClassId,
+    child: EClassId,
+    parent_alt: &PbqpIselAlternative,
+    child_match_id: usize,
+    child_pattern_node: NodeId,
+    matches: &[PbqpIselMatch],
+) -> bool {
+    let m = &matches[child_match_id];
+    let pattern = &patterns[m.pattern_index].pattern;
+    for pattern_parent in (0..pattern.len()).map(NodeId::from_index) {
+        if !pattern.children(pattern_parent).contains(&child_pattern_node) {
+            continue;
+        }
+        if m.bindings.class_for_pattern(pattern_parent) != Some(parent) {
+            continue;
+        }
+        if m.bindings.class_for_pattern(child_pattern_node) != Some(child) {
+            continue;
+        }
+        return match parent_alt {
+            PbqpIselAlternative::Root { match_id } => {
+                *match_id == child_match_id && pattern_parent == m.pattern_root
+            }
+            PbqpIselAlternative::Internal {
+                match_id,
+                pattern_node,
+            } => *match_id == child_match_id && *pattern_node == pattern_parent,
+            PbqpIselAlternative::External => false,
+        };
+    }
+
+    false
+}
+
+enum ChildRequirement {
+    Materialized,
+    SameMatch {
+        match_id: usize,
+        pattern_node: NodeId,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use tir::{
+        Context, IRBuilder, IRFormatter, Operation, PassManager, TypeId,
+        builtin::{FuncOp, IntegerType, ops},
+        graph::{MutDag, OperandConstraint},
+        sem_expr::{ExprKind, ExprPayload, ExprPostGraph},
+    };
+
+    use super::{
+        EmitPlan, InstructionSelectPass, IselCostModel, Rule, RuleMatch, SemEGraph, SemNode,
+        SelectionPressure, TargetIselModel, extension_rewrite, template_node,
+    };
+
+    fn symbol(g: &mut ExprPostGraph, id: u32) -> tir::graph::NodeId {
+        let node = g.add_node(ExprKind::Symbol);
+        g.set_leaf_data(node, ExprPayload::SymbolId(id));
+        node
+    }
+
+    fn binary(
+        g: &mut ExprPostGraph,
+        kind: ExprKind,
+        lhs: tir::graph::NodeId,
+        rhs: tir::graph::NodeId,
+    ) -> tir::graph::NodeId {
+        let node = g.add_node(kind);
+        g.add_edge(node, lhs);
+        g.add_edge(node, rhs);
+        node
+    }
+
+    fn atomic_pattern(kind: ExprKind) -> ExprPostGraph {
+        let mut g = ExprPostGraph::new();
+        let lhs = symbol(&mut g, 0);
+        let rhs = symbol(&mut g, 1);
+        binary(&mut g, kind, lhs, rhs);
+        g
+    }
+
+    fn add_mul_pattern() -> ExprPostGraph {
+        let mut g = ExprPostGraph::new();
+        let x = symbol(&mut g, 0);
+        let y = symbol(&mut g, 1);
+        let mul = binary(&mut g, ExprKind::Mul, x, y);
+        let z = symbol(&mut g, 2);
+        binary(&mut g, ExprKind::Add, mul, z);
+        g
+    }
+
+    fn emit_add(
+        context: &Context,
+        op: &tir::OperationRef,
+        m: &RuleMatch,
+    ) -> Result<EmitPlan, tir::PassError> {
+        let lhs = m
+            .value_binding(0)
+            .unwrap_or_else(|| op.op().operands.first().copied().unwrap());
+        let rhs = m
+            .value_binding(2)
+            .or_else(|| m.value_binding(1))
+            .unwrap_or_else(|| op.op().operands[1]);
+        let result_ty = context.get_value(op.op().results[0]).ty();
+        Ok(EmitPlan::single(Box::new(
+            ops::addi(context, lhs, rhs, result_ty).build(),
+        )))
+    }
+
+    fn emit_mul(
+        context: &Context,
+        op: &tir::OperationRef,
+        _m: &RuleMatch,
+    ) -> Result<EmitPlan, tir::PassError> {
+        let result_ty = context.get_value(op.op().results[0]).ty();
+        Ok(EmitPlan::single(Box::new(
+            ops::muli(context, op.op().operands[0], op.op().operands[1], result_ty).build(),
+        )))
+    }
+
+    #[test]
+    fn pbqp_selector_consumes_internal_nodes_of_selected_pattern() {
+        let context = Context::with_default_dialects();
+        let module = ops::module(&context, None).build();
+
+        let i32_ty = IntegerType::new(&context, 32);
+        let x = context.create_value(i32_ty, None);
+        let y = context.create_value(i32_ty, None);
+        let z = context.create_value(i32_ty, None);
+        let x_id = x.id();
+        let y_id = y.id();
+        let z_id = z.id();
+        let region = context.create_region();
+        let block = context.create_block(vec![x, y, z]);
+        region.add_block(block.id());
+
+        let func = ops::func(&context, "demo", i32_ty, Some(region.id())).build();
+        let mut fb = IRBuilder::new(func.body());
+        let mul = ops::muli(&context, x_id, y_id, i32_ty).build();
+        let mul_result = mul.result();
+        fb.insert(mul);
+        let add = ops::addi(&context, mul_result, z_id, i32_ty).build();
+        let add_result = add.result();
+        fb.insert(add);
+        fb.insert(ops::r#return(&context, add_result).build());
+
+        let mut mb = IRBuilder::new(module.body());
+        mb.insert(func);
+        mb.insert(ops::module_end(&context).build());
+
+        let rules = vec![
+            Rule::new("add-mul", add_mul_pattern(), 1, emit_add),
+            Rule::new("add", atomic_pattern(ExprKind::Add), 10, emit_add),
+            Rule::new("mul", atomic_pattern(ExprKind::Mul), 10, emit_mul),
+        ];
+
+        let mut pm = PassManager::new();
+        pm.nest(FuncOp::name())
+            .add_pass(InstructionSelectPass::new(rules));
+        pm.run(&context, context.get_op(module.id()))
+            .expect("pass pipeline should succeed");
+
+        let body_ops: Vec<_> = context
+            .get_region(region.id())
+            .iter(context.clone())
+            .next()
+            .unwrap()
+            .op_ids()
+            .into_iter()
+            .map(|op_id| context.get_op(op_id).name)
+            .collect();
+        assert_eq!(body_ops, vec!["addi", "return"]);
+
+        let mut buf = String::new();
+        let mut fmt = IRFormatter::new(&mut buf);
+        module.print(&mut fmt).expect("print lowered module");
+        assert!(!buf.contains("muli"));
+    }
+
+    #[test]
+    fn rule_validation_rejects_missing_atomic_materializer() {
+        let context = Context::with_default_dialects();
+        let module = ops::module(&context, None).build();
+
+        let i32_ty = IntegerType::new(&context, 32);
+        let x = context.create_value(i32_ty, None);
+        let y = context.create_value(i32_ty, None);
+        let z = context.create_value(i32_ty, None);
+        let x_id = x.id();
+        let y_id = y.id();
+        let z_id = z.id();
+        let region = context.create_region();
+        let block = context.create_block(vec![x, y, z]);
+        region.add_block(block.id());
+
+        // A standalone Mul that no rule can root and no parent match can consume:
+        // the e-graph cover is infeasible, so selection fails naming the kind.
+        let _ = z_id;
+        let func = ops::func(&context, "demo", i32_ty, Some(region.id())).build();
+        let mut fb = IRBuilder::new(func.body());
+        let mul = ops::muli(&context, x_id, y_id, i32_ty).build();
+        let mul_result = mul.result();
+        fb.insert(mul);
+        fb.insert(ops::r#return(&context, mul_result).build());
+
+        let mut mb = IRBuilder::new(module.body());
+        mb.insert(func);
+        mb.insert(ops::module_end(&context).build());
+
+        let rules = vec![Rule::new("add", atomic_pattern(ExprKind::Add), 10, emit_add)];
+
+        let mut pm = PassManager::new();
+        pm.nest(FuncOp::name())
+            .add_pass(InstructionSelectPass::new(rules));
+        let err = pm
+            .run(&context, context.get_op(module.id()))
+            .expect_err("incomplete rule set should be rejected");
+        assert!(err.to_string().contains("Mul"));
+    }
+
+    #[test]
+    fn pbqp_selector_does_not_consume_shared_internal_nodes() {
+        let context = Context::with_default_dialects();
+        let module = ops::module(&context, None).build();
+
+        let i32_ty = IntegerType::new(&context, 32);
+        let x = context.create_value(i32_ty, None);
+        let y = context.create_value(i32_ty, None);
+        let z = context.create_value(i32_ty, None);
+        let x_id = x.id();
+        let y_id = y.id();
+        let z_id = z.id();
+        let region = context.create_region();
+        let block = context.create_block(vec![x, y, z]);
+        region.add_block(block.id());
+
+        let func = ops::func(&context, "demo", i32_ty, Some(region.id())).build();
+        let mut fb = IRBuilder::new(func.body());
+        let mul = ops::muli(&context, x_id, y_id, i32_ty).build();
+        let mul_result = mul.result();
+        fb.insert(mul);
+        let add0 = ops::addi(&context, mul_result, z_id, i32_ty).build();
+        let add0_result = add0.result();
+        fb.insert(add0);
+        let add1 = ops::addi(&context, mul_result, add0_result, i32_ty).build();
+        let add1_result = add1.result();
+        fb.insert(add1);
+        fb.insert(ops::r#return(&context, add1_result).build());
+
+        let mut mb = IRBuilder::new(module.body());
+        mb.insert(func);
+        mb.insert(ops::module_end(&context).build());
+
+        let rules = vec![
+            Rule::new("add-mul", add_mul_pattern(), 1, emit_add),
+            Rule::new("add", atomic_pattern(ExprKind::Add), 10, emit_add),
+            Rule::new("mul", atomic_pattern(ExprKind::Mul), 10, emit_mul),
+        ];
+
+        let mut pm = PassManager::new();
+        pm.nest(FuncOp::name())
+            .add_pass(InstructionSelectPass::new(rules));
+        pm.run(&context, context.get_op(module.id()))
+            .expect("pass pipeline should succeed");
+
+        let body_ops: Vec<_> = context
+            .get_region(region.id())
+            .iter(context.clone())
+            .next()
+            .unwrap()
+            .op_ids()
+            .into_iter()
+            .map(|op_id| context.get_op(op_id).name)
+            .collect();
+        assert_eq!(body_ops, vec!["muli", "addi", "addi", "return"]);
+    }
+
+    fn add_mul_add_pattern() -> ExprPostGraph {
+        let mut g = ExprPostGraph::new();
+        let a = symbol(&mut g, 0);
+        let b = symbol(&mut g, 1);
+        let inner = binary(&mut g, ExprKind::Add, a, b);
+        let c = symbol(&mut g, 2);
+        let mul = binary(&mut g, ExprKind::Mul, inner, c);
+        let d = symbol(&mut g, 3);
+        binary(&mut g, ExprKind::Add, mul, d);
+        g
+    }
+
+    /// A cost model that makes the fused `add-mul` rule prohibitively expensive,
+    /// so selection must fall back to the atomic `mul` + `add` cover.
+    struct NoFusionCostModel;
+
+    impl IselCostModel for NoFusionCostModel {
+        fn node_cost(
+            &self,
+            _context: &Context,
+            _op: &tir::OperationRef,
+            rule: &Rule,
+            _m: &RuleMatch,
+            _pressure: &SelectionPressure,
+            _target: &dyn TargetIselModel,
+        ) -> u64 {
+            if rule.name == "add-mul" {
+                1000
+            } else {
+                rule.base_cost as u64
+            }
+        }
+    }
+
+    struct NoFusionTarget {
+        cost: NoFusionCostModel,
+    }
+
+    impl TargetIselModel for NoFusionTarget {
+        fn cost_model(&self) -> &dyn IselCostModel {
+            &self.cost
+        }
+    }
+
+    #[test]
+    fn cost_model_override_changes_selection() {
+        let context = Context::with_default_dialects();
+        let module = ops::module(&context, None).build();
+
+        let i32_ty = IntegerType::new(&context, 32);
+        let x = context.create_value(i32_ty, None);
+        let y = context.create_value(i32_ty, None);
+        let z = context.create_value(i32_ty, None);
+        let (x_id, y_id, z_id) = (x.id(), y.id(), z.id());
+        let region = context.create_region();
+        let block = context.create_block(vec![x, y, z]);
+        region.add_block(block.id());
+
+        let func = ops::func(&context, "demo", i32_ty, Some(region.id())).build();
+        let mut fb = IRBuilder::new(func.body());
+        let mul = ops::muli(&context, x_id, y_id, i32_ty).build();
+        let mul_result = mul.result();
+        fb.insert(mul);
+        let add = ops::addi(&context, mul_result, z_id, i32_ty).build();
+        let add_result = add.result();
+        fb.insert(add);
+        fb.insert(ops::r#return(&context, add_result).build());
+
+        let mut mb = IRBuilder::new(module.body());
+        mb.insert(func);
+        mb.insert(ops::module_end(&context).build());
+
+        let rules = vec![
+            Rule::new("add-mul", add_mul_pattern(), 1, emit_add),
+            Rule::new("add", atomic_pattern(ExprKind::Add), 10, emit_add),
+            Rule::new("mul", atomic_pattern(ExprKind::Mul), 10, emit_mul),
+        ];
+
+        let mut pm = PassManager::new();
+        pm.nest(FuncOp::name()).add_pass(
+            InstructionSelectPass::new(rules).with_target_model(Box::new(NoFusionTarget {
+                cost: NoFusionCostModel,
+            })),
+        );
+        pm.run(&context, context.get_op(module.id()))
+            .expect("pass pipeline should succeed");
+
+        let body_ops: Vec<_> = context
+            .get_region(region.id())
+            .iter(context.clone())
+            .next()
+            .unwrap()
+            .op_ids()
+            .into_iter()
+            .map(|op_id| context.get_op(op_id).name)
+            .collect();
+        // With fusion priced out, the default add-mul cost-1 win is overridden.
+        assert_eq!(body_ops, vec!["muli", "addi", "return"]);
+    }
+
+    #[test]
+    fn composite_rule_falls_back_to_atomic_cover() {
+        let context = Context::with_default_dialects();
+        let module = ops::module(&context, None).build();
+
+        let i32_ty = IntegerType::new(&context, 32);
+        let a = context.create_value(i32_ty, None);
+        let b = context.create_value(i32_ty, None);
+        let c = context.create_value(i32_ty, None);
+        let d = context.create_value(i32_ty, None);
+        let (a_id, b_id, c_id, d_id) = (a.id(), b.id(), c.id(), d.id());
+        let region = context.create_region();
+        let block = context.create_block(vec![a, b, c, d]);
+        region.add_block(block.id());
+
+        let func = ops::func(&context, "demo", i32_ty, Some(region.id())).build();
+        let mut fb = IRBuilder::new(func.body());
+        let add0 = ops::addi(&context, a_id, b_id, i32_ty).build();
+        let add0_result = add0.result();
+        fb.insert(add0);
+        let mul = ops::muli(&context, add0_result, c_id, i32_ty).build();
+        let mul_result = mul.result();
+        fb.insert(mul);
+        let add1 = ops::addi(&context, mul_result, d_id, i32_ty).build();
+        let add1_result = add1.result();
+        fb.insert(add1);
+        fb.insert(ops::r#return(&context, add1_result).build());
+
+        let mut mb = IRBuilder::new(module.body());
+        mb.insert(func);
+        mb.insert(ops::module_end(&context).build());
+
+        // `add-mul-add` requires a `Mul(Add(_,_),_)` subpattern that no rule
+        // provides; the pass synthesizes it. Selection must remain valid and, with
+        // fusion priced high, fall back to the atomic cover.
+        let rules = vec![
+            Rule::new("add-mul-add", add_mul_add_pattern(), 100, emit_add),
+            Rule::new("add", atomic_pattern(ExprKind::Add), 10, emit_add),
+            Rule::new("mul", atomic_pattern(ExprKind::Mul), 10, emit_mul),
+        ];
+
+        let mut pm = PassManager::new();
+        pm.nest(FuncOp::name())
+            .add_pass(InstructionSelectPass::new(rules));
+        pm.run(&context, context.get_op(module.id()))
+            .expect("pass pipeline should succeed");
+
+        let body_ops: Vec<_> = context
+            .get_region(region.id())
+            .iter(context.clone())
+            .next()
+            .unwrap()
+            .op_ids()
+            .into_iter()
+            .map(|op_id| context.get_op(op_id).name)
+            .collect();
+        assert_eq!(body_ops, vec!["addi", "muli", "addi", "return"]);
+    }
+
+    /// A binary pattern constrained to a specific result type via the pattern
+    /// graph's actual-type annotation (the channel a typed rule would use).
+    fn typed_binary_pattern(kind: ExprKind, ty: TypeId) -> ExprPostGraph {
+        let mut g = ExprPostGraph::new();
+        let lhs = symbol(&mut g, 0);
+        let rhs = symbol(&mut g, 1);
+        let root = binary(&mut g, kind, lhs, rhs);
+        g.set_actual_type(root, ty);
+        g
+    }
+
+    fn emit_sub(
+        context: &Context,
+        op: &tir::OperationRef,
+        _m: &RuleMatch,
+    ) -> Result<EmitPlan, tir::PassError> {
+        let result_ty = context.get_value(op.op().results[0]).ty();
+        Ok(EmitPlan::single(Box::new(
+            ops::subi(context, op.op().operands[0], op.op().operands[1], result_ty).build(),
+        )))
+    }
+
+    #[test]
+    fn selection_is_type_aware() {
+        let context = Context::with_default_dialects();
+        let module = ops::module(&context, None).build();
+
+        let i32_ty = IntegerType::new(&context, 32);
+        let i64_ty = IntegerType::new(&context, 64);
+        let a32v = context.create_value(i32_ty, None);
+        let b32v = context.create_value(i32_ty, None);
+        let a64v = context.create_value(i64_ty, None);
+        let b64v = context.create_value(i64_ty, None);
+        let (a32, b32, a64, b64) = (a32v.id(), b32v.id(), a64v.id(), b64v.id());
+        let region = context.create_region();
+        let block = context.create_block(vec![a32v, b32v, a64v, b64v]);
+        region.add_block(block.id());
+
+        let func = ops::func(&context, "demo", i64_ty, Some(region.id())).build();
+        let mut fb = IRBuilder::new(func.body());
+        let add32 = ops::addi(&context, a32, b32, i32_ty).build();
+        fb.insert(add32);
+        let add64 = ops::addi(&context, a64, b64, i64_ty).build();
+        let add64_result = add64.result();
+        fb.insert(add64);
+        fb.insert(ops::r#return(&context, add64_result).build());
+
+        let mut mb = IRBuilder::new(module.body());
+        mb.insert(func);
+        mb.insert(ops::module_end(&context).build());
+
+        // Same opcode (Add), two result widths. The i32-constrained rule must only
+        // fire on the i32 add; the i64 add falls back to the width-agnostic rule.
+        let rules = vec![
+            Rule::new("add.i32", typed_binary_pattern(ExprKind::Add, i32_ty), 1, emit_sub),
+            Rule::new("add", atomic_pattern(ExprKind::Add), 10, emit_add),
+        ];
+
+        let mut pm = PassManager::new();
+        pm.nest(FuncOp::name())
+            .add_pass(InstructionSelectPass::new(rules));
+        pm.run(&context, context.get_op(module.id()))
+            .expect("pass pipeline should succeed");
+
+        let body_ops: Vec<_> = context
+            .get_region(region.id())
+            .iter(context.clone())
+            .next()
+            .unwrap()
+            .op_ids()
+            .into_iter()
+            .map(|op_id| context.get_op(op_id).name)
+            .collect();
+        // i32 add -> the type-constrained rule (subi stand-in); i64 add -> fallback addi.
+        assert_eq!(body_ops, vec!["subi", "addi", "return"]);
+    }
+
+    /// Build `add(add(a,b), c)` over i32 values and select it with a fused
+    /// `Add(Add(_,_),_)` rule whose *internal* node carries `inner_width` as a type
+    /// constraint (plus an untyped atomic `add` fallback). Returns the lowered op
+    /// names. Fusion (the `subi` marker) only happens when the inner constraint
+    /// agrees with the inferred i32 type of the inner add.
+    fn run_inner_typed_fusion(inner_width: Option<u32>) -> Vec<&'static str> {
+        let context = Context::with_default_dialects();
+        let module = ops::module(&context, None).build();
+
+        let i32_ty = IntegerType::new(&context, 32);
+        let a = context.create_value(i32_ty, None);
+        let b = context.create_value(i32_ty, None);
+        let c = context.create_value(i32_ty, None);
+        let (a_id, b_id, c_id) = (a.id(), b.id(), c.id());
+        let region = context.create_region();
+        let block = context.create_block(vec![a, b, c]);
+        region.add_block(block.id());
+
+        let func = ops::func(&context, "demo", i32_ty, Some(region.id())).build();
+        let mut fb = IRBuilder::new(func.body());
+        let add0 = ops::addi(&context, a_id, b_id, i32_ty).build();
+        let add0_result = add0.result();
+        fb.insert(add0);
+        let add1 = ops::addi(&context, add0_result, c_id, i32_ty).build();
+        let add1_result = add1.result();
+        fb.insert(add1);
+        fb.insert(ops::r#return(&context, add1_result).build());
+
+        let mut mb = IRBuilder::new(module.body());
+        mb.insert(func);
+        mb.insert(ops::module_end(&context).build());
+
+        // Fused pattern Add(Add(s0, s1), s2); optionally constrain the inner Add.
+        let mut pattern = ExprPostGraph::new();
+        let s0 = symbol(&mut pattern, 0);
+        let s1 = symbol(&mut pattern, 1);
+        let inner = binary(&mut pattern, ExprKind::Add, s0, s1);
+        let s2 = symbol(&mut pattern, 2);
+        binary(&mut pattern, ExprKind::Add, inner, s2);
+        if let Some(width) = inner_width {
+            pattern.set_actual_type(inner, IntegerType::new(&context, width));
+        }
+
+        let rules = vec![
+            Rule::new("add-add", pattern, 1, emit_sub),
+            Rule::new("add", atomic_pattern(ExprKind::Add), 10, emit_add),
+        ];
+
+        let mut pm = PassManager::new();
+        pm.nest(FuncOp::name())
+            .add_pass(InstructionSelectPass::new(rules));
+        pm.run(&context, context.get_op(module.id()))
+            .expect("pass pipeline should succeed");
+
+        context
+            .get_region(region.id())
+            .iter(context.clone())
+            .next()
+            .unwrap()
+            .op_ids()
+            .into_iter()
+            .map(|op_id| context.get_op(op_id).name)
+            .collect()
+    }
+
+    #[test]
+    fn internal_node_type_constraint_is_enforced() {
+        // Inner add inferred as i32 from i32 operands. A matching i32 constraint
+        // (or no constraint) lets the fused rule consume it; an i64 constraint
+        // forbids the match, falling back to two atomic adds.
+        assert_eq!(run_inner_typed_fusion(Some(32)), vec!["subi", "return"]);
+        assert_eq!(run_inner_typed_fusion(None), vec!["subi", "return"]);
+        assert_eq!(
+            run_inner_typed_fusion(Some(64)),
+            vec!["addi", "addi", "return"]
+        );
+    }
+
+    /// The square problem: a sub-word sign extension has no single RISC-V base
+    /// instruction. Equality saturation with the discovered `SExt -> slli/srai`
+    /// bridge must make the `SExt(v@i16, 64)` class selectable as an arithmetic
+    /// shift by `W - n = 48`, exactly the `srai` of the `add, slli, srai` idiom.
+    #[test]
+    fn saturation_bridges_sign_extension_to_shift_pair() {
+        use tir::graph::{ENode, OperandConstraint, Pattern, PatternExpr, SaturationLimits};
+        use tir::sem_expr::{ExprKind, ExprPayload};
+        use tir::utils::APInt;
+
+        let ctx = Context::with_default_dialects();
+        let i16 = IntegerType::new(&ctx, 16);
+        let i64 = IntegerType::new(&ctx, 64);
+
+        // SExt(v @ i16, 64), typed i64 — the program graph node no RV64 base
+        // instruction can root.
+        let mut egraph = SemEGraph::new();
+        let v = egraph.add(ENode::leaf(
+            template_node(ExprKind::Symbol, Some(ExprPayload::SymbolId(0)), Some(i16)),
+            None,
+        ));
+        let width = egraph.add(ENode::leaf(
+            template_node(
+                ExprKind::Constant,
+                Some(ExprPayload::Int(APInt::new(64, 64))),
+                None,
+            ),
+            None,
+        ));
+        let sext = egraph.add(ENode::op(
+            template_node(ExprKind::SExt, None, Some(i64)),
+            vec![v, width],
+        ));
+
+        let rewrite = extension_rewrite(ExprKind::SExt, ExprKind::ShiftRightArithmetic);
+        egraph.saturate(&ctx, std::slice::from_ref(&rewrite), SaturationLimits::default());
+
+        // The sext class now also contains the shift-pair realization.
+        assert!(
+            egraph
+                .nodes(sext)
+                .iter()
+                .any(|n| n.node.kind == ExprKind::ShiftRightArithmetic),
+            "saturation should add the arithmetic-shift bridge to the sext class"
+        );
+
+        // An immediate `srai` pattern matches the class, with shift amount 64-16=48.
+        let mut srai = Pattern::<SemNode, ()>::new(());
+        let rs1 = srai.add_node(PatternExpr::Boundary);
+        srai.set_duplicable(rs1, true);
+        let imm = srai.add_node(PatternExpr::Boundary);
+        srai.set_duplicable(imm, true);
+        srai.set_operand_constraint(imm, OperandConstraint::Immediate);
+        let root = srai.add_node(PatternExpr::Node(template_node(
+            ExprKind::ShiftRightArithmetic,
+            None,
+            None,
+        )));
+        srai.add_edge(root, rs1);
+        srai.add_edge(root, imm);
+        srai.set_root(root);
+
+        let matches = egraph.ematch(&ctx, &srai);
+        let m = matches
+            .iter()
+            .find(|m| egraph.find(m.root()) == egraph.find(sext))
+            .expect("an immediate srai must match the sext class after saturation");
+        let shift_amount = egraph
+            .nodes(m.binding(imm))
+            .iter()
+            .find_map(|n| match n.node.payload.as_ref() {
+                Some(ExprPayload::Int(v)) => Some(v.to_u64()),
+                _ => None,
+            })
+            .expect("the srai shift amount must be a constant");
+        assert_eq!(shift_amount, 48);
+    }
+
+    fn shift_imm_pattern(kind: ExprKind) -> ExprPostGraph {
+        let mut g = ExprPostGraph::new();
+        let rs1 = symbol(&mut g, 0);
+        let imm = symbol(&mut g, 1);
+        binary(&mut g, kind, rs1, imm);
+        g
+    }
+
+    fn emit_shift_marker(
+        marker: ExprKind,
+    ) -> impl Fn(&Context, &tir::OperationRef, &RuleMatch) -> Result<EmitPlan, tir::PassError> {
+        move |context, op, m| {
+            let rs1 = m
+                .value_binding(0)
+                .ok_or(tir::PassError::RewriteFailed(op.op().id))?;
+            let result_ty = context.get_value(op.op().results[0]).ty();
+            // The shift amount is an immediate (m.int_binding(1)); operands beyond the
+            // mnemonic don't matter for this test, so the source register is reused.
+            let built: Box<dyn Operation> = match marker {
+                ExprKind::ShiftLeft => Box::new(ops::shli(context, rs1, rs1, result_ty).build()),
+                _ => Box::new(ops::shrsi(context, rs1, rs1, result_ty).build()),
+            };
+            Ok(EmitPlan::single(built))
+        }
+    }
+
+    fn emit_slli(
+        context: &Context,
+        op: &tir::OperationRef,
+        m: &RuleMatch,
+    ) -> Result<EmitPlan, tir::PassError> {
+        emit_shift_marker(ExprKind::ShiftLeft)(context, op, m)
+    }
+
+    fn emit_srai(
+        context: &Context,
+        op: &tir::OperationRef,
+        m: &RuleMatch,
+    ) -> Result<EmitPlan, tir::PassError> {
+        emit_shift_marker(ExprKind::ShiftRightArithmetic)(context, op, m)
+    }
+
+    /// End-to-end square: `extsi(addi(a, b) : i16) : i64` lowers to `add, slli, srai`.
+    /// The `add` covers the addi; saturation bridges the un-selectable sign extension
+    /// into a `slli`/`srai` pair, and multi-instruction emission materializes the
+    /// introduced `slli` (an e-class with no original op) before the `srai`.
+    #[test]
+    fn square_sign_extension_lowers_to_shift_pair() {
+        let context = Context::with_default_dialects();
+        let module = ops::module(&context, None).build();
+
+        let i16_ty = IntegerType::new(&context, 16);
+        let i64_ty = IntegerType::new(&context, 64);
+        let a = context.create_value(i16_ty, None);
+        let b = context.create_value(i16_ty, None);
+        let (a_id, b_id) = (a.id(), b.id());
+        let region = context.create_region();
+        let block = context.create_block(vec![a, b]);
+        region.add_block(block.id());
+
+        let func = ops::func(&context, "square", i64_ty, Some(region.id())).build();
+        let mut fb = IRBuilder::new(func.body());
+        let add = ops::addi(&context, a_id, b_id, i16_ty).build();
+        let add_result = add.result();
+        fb.insert(add);
+        let ext = ops::extsi(&context, add_result, i64_ty).build();
+        let ext_result = ext.result();
+        fb.insert(ext);
+        fb.insert(ops::r#return(&context, ext_result).build());
+
+        let mut mb = IRBuilder::new(module.body());
+        mb.insert(func);
+        mb.insert(ops::module_end(&context).build());
+
+        let rules = vec![
+            Rule::new("add", atomic_pattern(ExprKind::Add), 1, emit_add),
+            Rule::new("slli", shift_imm_pattern(ExprKind::ShiftLeft), 1, emit_slli)
+                .with_operand_constraints(vec![(1, OperandConstraint::Immediate)]),
+            Rule::new(
+                "srai",
+                shift_imm_pattern(ExprKind::ShiftRightArithmetic),
+                1,
+                emit_srai,
+            )
+            .with_operand_constraints(vec![(1, OperandConstraint::Immediate)]),
+        ];
+
+        let mut pm = PassManager::new();
+        pm.nest(FuncOp::name())
+            .add_pass(InstructionSelectPass::new(rules));
+        pm.run(&context, context.get_op(module.id()))
+            .expect("square should select");
+
+        let body_ops: Vec<_> = context
+            .get_region(region.id())
+            .iter(context.clone())
+            .next()
+            .unwrap()
+            .op_ids()
+            .into_iter()
+            .map(|op_id| context.get_op(op_id).name)
+            .collect();
+        // add (from the addi), then the slli/srai sign-extension idiom, then return.
+        assert_eq!(body_ops, vec!["addi", "shli", "shrsi", "return"]);
     }
 }
 
@@ -971,37 +2738,8 @@ impl Pass for InstructionSelectPass {
             return Ok(());
         };
 
-        self.ensure_block_cache(context, block);
-
-        let Some(cache) = self.block_cache.get(&block.id()) else {
-            return Ok(());
-        };
-
-        let Some(root) = cache.roots_by_op.get(&op.op().id) else {
-            return Ok(());
-        };
-
-        let pressure = SelectionPressure {
-            estimated_live_operands: op.op().operands.len() as u32,
-            estimated_register_pressure: self.target_model.estimate_register_pressure(op),
-        };
-
-        let result = self.algorithm.select_function(SelectionInput {
-            dag: &cache.dag,
-            root: *root,
-            op,
-            rules: &self.rules,
-            matcher: &self.matcher,
-            pressure,
-            target_model: self.target_model.as_ref(),
-            context,
-        });
-
-        if let Some(selection) = result.selection {
-            let rule = &self.rules[selection.rule_index];
-            let plan = (rule.emit_plan_fn)(context, op, &selection.m)?;
-            let new_op = plan.into_op();
-            rewriter.replace_op(op, new_op.as_ref())?;
+        if self.target_model.is_pbqp_enabled() {
+            self.commit_block_solution(context, block, rewriter)?;
         }
 
         Ok(())

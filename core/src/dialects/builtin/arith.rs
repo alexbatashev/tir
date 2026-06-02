@@ -215,6 +215,7 @@ operation! {
         results: R {
             result: "crate::builtin::IntegerType",
         },
+        sem: "(set result (sext input))",
     }
 }
 
@@ -228,6 +229,7 @@ operation! {
         results: R {
             result: "crate::builtin::IntegerType",
         },
+        sem: "(set result (zext input))",
     }
 }
 
@@ -241,6 +243,7 @@ operation! {
         results: R {
             result: "crate::builtin::IntegerType",
         },
+        sem: "(set result (trunc input))",
     }
 }
 
@@ -491,5 +494,53 @@ mod tests {
         let mut g = ExprPostGraph::new();
         let root = op.convert(&mut g);
         check_binary_sem(&g, root, ExprKind::ShiftRightArithmetic);
+    }
+
+    /// The width-changing ops take their width from the result type via the unary
+    /// sem-DSL forms: `extsi -> SExt(x, W)`, `extui -> ZExt(x, W)`,
+    /// `trunci -> Extract(x, W-1, 0)`.
+    fn const_value(g: &ExprPostGraph, node: crate::graph::NodeId) -> u64 {
+        match g.get_leaf_data(node) {
+            Some(ExprPayload::Int(v)) => v.to_u64(),
+            other => panic!("expected an integer constant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extsi_sem_expr_uses_result_width() {
+        let context = Context::with_default_dialects();
+        let input = context.create_value(IntegerType::new(&context, 16), None);
+        let op = ops::extsi(&context, input.id(), IntegerType::new(&context, 64)).build();
+        let mut g = ExprPostGraph::new();
+        let root = op.convert(&mut g);
+        assert_eq!(g.get_kind(root), &ExprKind::SExt);
+        let children: Vec<_> = g.children(root).collect();
+        assert_eq!(g.get_kind(children[0]), &ExprKind::Symbol);
+        assert_eq!(const_value(&g, children[1]), 64);
+    }
+
+    #[test]
+    fn extui_sem_expr_uses_result_width() {
+        let context = Context::with_default_dialects();
+        let input = context.create_value(IntegerType::new(&context, 8), None);
+        let op = ops::extui(&context, input.id(), IntegerType::new(&context, 32)).build();
+        let mut g = ExprPostGraph::new();
+        let root = op.convert(&mut g);
+        assert_eq!(g.get_kind(root), &ExprKind::ZExt);
+        assert_eq!(const_value(&g, g.children(root).nth(1).unwrap()), 32);
+    }
+
+    #[test]
+    fn trunci_sem_expr_is_low_bit_extract() {
+        let context = Context::with_default_dialects();
+        let input = context.create_value(IntegerType::new(&context, 64), None);
+        let op = ops::trunci(&context, input.id(), IntegerType::new(&context, 16)).build();
+        let mut g = ExprPostGraph::new();
+        let root = op.convert(&mut g);
+        assert_eq!(g.get_kind(root), &ExprKind::Extract);
+        let children: Vec<_> = g.children(root).collect();
+        assert_eq!(g.get_kind(children[0]), &ExprKind::Symbol);
+        assert_eq!(const_value(&g, children[1]), 15); // high = W - 1
+        assert_eq!(const_value(&g, children[2]), 0); // low
     }
 }

@@ -168,6 +168,43 @@ impl Context {
             }
         }
 
+        // Register this op as a use of each operand value, so `Value::uses` is a live
+        // def-use chain. Detached again when the op is erased or replaced.
+        for (index, operand) in instance.operands.iter().enumerate() {
+            if let Some(value) = inner.values.get(operand).cloned() {
+                let mut value = (*value).clone();
+                value.add_use(op_id, crate::UseSite::Operand(index));
+                inner.values.insert(*operand, Arc::new(value));
+            }
+        }
+
+        // Machine ops carry their register operands in role-tagged attributes rather
+        // than `operands`/`results`, so mirror the above over those: a `Use` register
+        // is a use of its virtual value; a `Def` register is that value's def-site.
+        // Virtual register ids are value numbers; physical registers have none and are
+        // skipped — they are not SSA. ReadWrite counts as both.
+        for (attr_name, role) in instance.attribute_roles {
+            use crate::attributes::{AttributeRole, AttributeValue, RegisterAttr};
+            let Some(attr) = instance.attributes.iter().find(|a| a.name == *attr_name) else {
+                continue;
+            };
+            let AttributeValue::Register(RegisterAttr::Virtual { id, .. }) = &attr.value else {
+                continue;
+            };
+            let value_id = ValueId::from_number(*id);
+            let Some(value) = inner.values.get(&value_id).cloned() else {
+                continue;
+            };
+            let mut value = (*value).clone();
+            if matches!(role, AttributeRole::Use | AttributeRole::ReadWrite) {
+                value.add_use(op_id, crate::UseSite::Attribute(attr_name));
+            }
+            if matches!(role, AttributeRole::Def | AttributeRole::ReadWrite) {
+                value = value.with_defining_op(op_id);
+            }
+            inner.values.insert(value_id, Arc::new(value));
+        }
+
         for r in &instance.regions {
             inner.regions.get(&r).unwrap().set_parent_op(op_id);
         }
@@ -181,6 +218,15 @@ impl Context {
 
     pub fn has_operation(&self, id: OpId) -> bool {
         self.0.read().operations.contains_key(&id)
+    }
+
+    /// Remove an op from the operation arena. Called by `Rewriter::erase_op`/
+    /// `replace_op` once the op has left its block, so the arena tracks the *live*
+    /// IR rather than accumulating detached ops (which otherwise show up as phantom
+    /// references to any whole-program scan). Existing `Arc<OpInstance>` handles
+    /// (e.g. inside an `OperationRef`) keep the instance alive after removal.
+    pub(crate) fn remove_operation(&self, id: OpId) {
+        self.0.write().operations.remove(&id);
     }
 
     pub fn create_value(&self, ty: TypeId, defining_op: Option<OpId>) -> Value {
@@ -201,6 +247,49 @@ impl Context {
     pub fn get_value(&self, id: ValueId) -> Arc<Value> {
         let inner = self.0.read();
         inner.values.get(&id).unwrap().clone()
+    }
+
+    /// The operands that reference `id`, as `(op, operand-index)` pairs. See
+    /// [`Value::uses`] for what is and isn't tracked.
+    pub fn value_uses(&self, id: ValueId) -> Vec<crate::Use> {
+        let inner = self.0.read();
+        inner
+            .values
+            .get(&id)
+            .map(|v| v.uses().to_vec())
+            .unwrap_or_default()
+    }
+
+    /// Whether any operand references `id`.
+    pub fn is_value_used(&self, id: ValueId) -> bool {
+        let inner = self.0.read();
+        inner.values.get(&id).is_some_and(|v| v.is_used())
+    }
+
+    /// Drop every use contributed by `op` from the values it referenced. Called when
+    /// an op leaves the live IR (erase/replace) to keep `Value::uses` consistent.
+    /// Visits both SSA `operands` and virtual register operands carried in attributes
+    /// (the same set `add_operation` registered); `remove_uses_of` filters by op id,
+    /// so visiting a value the op only *defined* is harmless. `defining_op` is left
+    /// untouched — on replace, the new op has already claimed the def-site.
+    pub(crate) fn detach_op_uses(&self, op: &OpInstance) {
+        use crate::attributes::{AttributeValue, RegisterAttr};
+
+        let mut touched: Vec<ValueId> = op.operands.clone();
+        for attr in &op.attributes {
+            if let AttributeValue::Register(RegisterAttr::Virtual { id, .. }) = &attr.value {
+                touched.push(ValueId::from_number(*id));
+            }
+        }
+
+        let mut inner = self.0.write();
+        for value_id in touched {
+            if let Some(value) = inner.values.get(&value_id).cloned() {
+                let mut value = (*value).clone();
+                value.remove_uses_of(op.id);
+                inner.values.insert(value_id, Arc::new(value));
+            }
+        }
     }
 
     pub fn has_value(&self, id: ValueId) -> bool {
@@ -475,6 +564,44 @@ mod tests {
     #[test]
     fn default_context() {
         let _ = Context::with_default_dialects();
+    }
+
+    #[test]
+    fn adding_an_op_registers_operand_uses() {
+        let context = Context::with_default_dialects();
+        let i32 = builtin::IntegerType::new(&context, 32);
+        let lhs = context.create_value(i32, None);
+        let rhs = context.create_value(i32, None);
+
+        assert!(!context.is_value_used(lhs.id()));
+
+        let add = builtin::ops::addi(&context, lhs.id(), rhs.id(), i32).build();
+
+        // The local `lhs` handle is a pre-use snapshot; the live value carries the use.
+        assert!(context.is_value_used(lhs.id()));
+        let uses = context.value_uses(lhs.id());
+        assert_eq!(uses.len(), 1);
+        assert_eq!(uses[0].op(), add.id());
+        assert_eq!(uses[0].operand_index(), Some(0));
+        assert_eq!(context.value_uses(rhs.id())[0].operand_index(), Some(1));
+    }
+
+    #[test]
+    fn an_operand_used_twice_records_both_indices() {
+        let context = Context::with_default_dialects();
+        let i32 = builtin::IntegerType::new(&context, 32);
+        let x = context.create_value(i32, None);
+
+        let add = builtin::ops::addi(&context, x.id(), x.id(), i32).build();
+
+        let mut indices: Vec<usize> = context
+            .value_uses(x.id())
+            .iter()
+            .filter_map(|u| u.operand_index())
+            .collect();
+        indices.sort();
+        assert_eq!(indices, vec![0, 1]);
+        assert!(context.value_uses(x.id()).iter().all(|u| u.op() == add.id()));
     }
 
     #[test]
