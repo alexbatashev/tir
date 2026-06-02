@@ -1399,6 +1399,30 @@ impl InstructionSelectPass {
             }
         }
 
+        // Drop constants left dead by selection: an immediate operand folds its
+        // constant into the instruction's attribute (e.g. `slliw`'s `imm`), so the
+        // defining `constant` op no longer feeds anything. It binds to an *immediate
+        // boundary*, never an interior node, so the cover gives it neither Emit nor
+        // Consume and it lingers as dead code. Erase any block-local constant whose
+        // result is referenced nowhere — the scan is whole-program, so a constant
+        // still used (as an operand, or as a register input in another block) is kept.
+        let referenced = context.referenced_value_numbers();
+        for op_id in block_arc.op_ids() {
+            let op = context.get_op(op_id);
+            if op.name != "constant" {
+                continue;
+            }
+            if op
+                .results
+                .iter()
+                .all(|v| !referenced.contains(&v.number()))
+            {
+                let op_ref =
+                    OperationRef::new(op, Some(block_arc.clone()), None);
+                rewriter.erase_op(&op_ref)?;
+            }
+        }
+
         Ok(())
     }
 

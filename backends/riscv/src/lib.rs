@@ -15,7 +15,7 @@ dialect! {
     RiscvDialect {
         name: "riscv",
         operations: [
-            // RV32I
+            // RV32I register-register ALU
             AddOp,
             SubOp,
             ShiftLeftLogicalOp,
@@ -24,12 +24,52 @@ dialect! {
             XorOp,
             AndOp,
             OrOp,
-            // RV64I word ops
+            SetLessThanOp,
+            SetLessThanUnsignedOp,
+            // RV32I register-immediate ALU
+            AddImmOp,
+            XorImmOp,
+            OrImmOp,
+            AndImmOp,
+            ShiftLeftLogicalImmOp,
+            ShiftRightLogicalImmOp,
+            ShiftRightArithmeticImmOp,
+            SetLessThanImmOp,
+            SetLessThanUnsignedImmOp,
+            LoadUpperImmOp,
+            AddUpperImmToPCOp,
+            // RV64I word ops (register-register)
             AddWordOp,
             SubWordOp,
             ShiftLeftLogicalWordOp,
             ShiftRightLogicalWordOp,
             ShiftRightArithmeticWordOp,
+            // RV64I word ops (register-immediate)
+            AddImmWordOp,
+            ShiftLeftLogicalImmWordOp,
+            ShiftRightLogicalImmWordOp,
+            ShiftRightArithmeticImmWordOp,
+            // Loads / stores
+            LoadByteOp,
+            LoadByteUnsignedOp,
+            LoadHalfWordOp,
+            LoadHalfWordUnsignedOp,
+            LoadWordOp,
+            LoadWordUnsignedOp,
+            LoadDoubleWordOp,
+            StoreByteOp,
+            StoreHalfWordOp,
+            StoreWordOp,
+            StoreDoubleWordOp,
+            // Control flow
+            BranchEqOp,
+            BranchNotEqOp,
+            BranchLtOp,
+            BranchGeOp,
+            BranchLtUnsignedOp,
+            BranchGeUnsignedOp,
+            JumpAndLinkOp,
+            JumpAndLinkRegOp,
             VirtualReturnOp
         ],
     }
@@ -318,5 +358,126 @@ mod tests {
             .map(|id| context.get_op(id).name)
             .collect();
         assert_eq!(body, vec!["sllw", "vret", "symbol_end"]);
+    }
+
+    #[test]
+    fn i32_immediate_shift_selects_imm_word_shift() {
+        let context = Context::with_default_dialects();
+        context.register_dialect::<AsmDialect>();
+        context.register_dialect::<RiscvDialect>();
+
+        let i32 = IntegerType::new(&context, 32);
+        let module = ops::module(&context, None).build();
+        let a = context.create_value(i32, None);
+        let region = context.create_region();
+        let block = context.create_block(vec![a]);
+        region.add_block(block.id());
+
+        let func = ops::func(&context, "demo", i32, Some(region.id())).build();
+        let body = func.body();
+        let a = body.arguments()[0].id();
+
+        // a << 3 with 3 an immediate constant. Should pick slliw, not sllw.
+        let mut fb = IRBuilder::new(func.body());
+        let three = ops::constant(&context, 3, i32).build();
+        let three_r = three.result();
+        fb.insert(three);
+        let s = ops::shli(&context, a, three_r, i32).build();
+        let sr = s.result();
+        fb.insert(s);
+        fb.insert(ops::r#return(&context, sr).build());
+
+        let mut mb = IRBuilder::new(module.body());
+        mb.insert(func);
+        mb.insert(ops::module_end(&context).build());
+
+        let mut pm = PassManager::new();
+        pm.nest(FuncOp::name()).add_pass(create_isel_pass(&context));
+        pm.run(&context, context.get_op(module.id()))
+            .expect("pass pipeline should succeed");
+
+        let body: Vec<_> = context
+            .get_region(region.id())
+            .iter(context.clone())
+            .next()
+            .unwrap()
+            .op_ids()
+            .into_iter()
+            .map(|id| context.get_op(id).name)
+            .collect();
+        // The lowered IR prints (slliw is registered in the dialect, so get_dyn_op
+        // resolves it — an unregistered op would panic here).
+        let mut buf = String::new();
+        let mut fmt = IRFormatter::new(&mut buf);
+        module.print(&mut fmt).expect("print lowered module");
+        assert!(buf.contains("slliw"), "expected slliw in:\n{buf}");
+
+        // slliw carries the folded immediate, not a register shift amount.
+        let slliw = context
+            .get_region(region.id())
+            .iter(context.clone())
+            .next()
+            .unwrap()
+            .op_ids()
+            .into_iter()
+            .map(|id| context.get_op(id))
+            .find(|op| op.name == "slliw")
+            .expect("slliw should be selected");
+        assert!(
+            slliw
+                .attributes
+                .iter()
+                .any(|a| a.name == "imm" && matches!(a.value, tir::attributes::AttributeValue::Int(3))),
+            "slliw should fold the immediate 3, got {:?}",
+            slliw.attributes
+        );
+        // The folded constant is dead and removed; only slliw survives.
+        assert_eq!(body, vec!["slliw", "vret", "symbol_end"]);
+    }
+
+    #[test]
+    fn live_constant_is_not_erased() {
+        // A constant with a genuine remaining use (returned directly, so no
+        // instruction folds it as an immediate) must survive dead-constant cleanup.
+        let context = Context::with_default_dialects();
+        context.register_dialect::<AsmDialect>();
+        context.register_dialect::<RiscvDialect>();
+
+        let i32 = IntegerType::new(&context, 32);
+        let module = ops::module(&context, None).build();
+        let region = context.create_region();
+        let block = context.create_block(vec![]);
+        region.add_block(block.id());
+
+        let func = ops::func(&context, "demo", i32, Some(region.id())).build();
+
+        let mut fb = IRBuilder::new(func.body());
+        let five = ops::constant(&context, 5, i32).build();
+        let five_r = five.result();
+        fb.insert(five);
+        fb.insert(ops::r#return(&context, five_r).build());
+
+        let mut mb = IRBuilder::new(module.body());
+        mb.insert(func);
+        mb.insert(ops::module_end(&context).build());
+
+        let mut pm = PassManager::new();
+        pm.nest(FuncOp::name()).add_pass(create_isel_pass(&context));
+        pm.run(&context, context.get_op(module.id()))
+            .expect("pass pipeline should succeed");
+
+        let body: Vec<_> = context
+            .get_region(region.id())
+            .iter(context.clone())
+            .next()
+            .unwrap()
+            .op_ids()
+            .into_iter()
+            .map(|id| context.get_op(id).name)
+            .collect();
+        assert!(
+            body.contains(&"constant"),
+            "a constant feeding the return must be kept, got {body:?}"
+        );
     }
 }

@@ -116,6 +116,10 @@ impl Rewriter {
             .as_ref()
             .ok_or(PassError::MissingBlock(target.name()))?;
         if block.replace_op(target.op.id, new_op.id()) {
+            // The replaced-out op no longer references its operands; the new op
+            // registered its own uses when it was added to the context.
+            self.context
+                .detach_op_uses(target.op.id, &target.op.operands);
             Ok(())
         } else {
             Err(PassError::RewriteFailed(target.op.id))
@@ -128,6 +132,8 @@ impl Rewriter {
             .as_ref()
             .ok_or(PassError::MissingBlock(target.name()))?;
         if block.remove_op(target.op.id) {
+            self.context
+                .detach_op_uses(target.op.id, &target.op.operands);
             Ok(())
         } else {
             Err(PassError::RewriteFailed(target.op.id))
@@ -349,5 +355,44 @@ mod tests {
             .collect();
 
         assert_eq!(op_names, vec!["subi", "return"]);
+
+        // The use-list followed the rewrite: param0 is now used by the subi (the
+        // replacement), not the erased addi.
+        let subi_id = func_body.op_ids()[0];
+        let uses = context.value_uses(func_body.arguments()[0].id());
+        assert_eq!(uses.len(), 1, "param0 should have exactly one use");
+        assert_eq!(uses[0].op(), subi_id);
+    }
+
+    #[test]
+    fn erasing_an_op_detaches_its_operand_uses() {
+        let context = Context::with_default_dialects();
+        let i32 = IntegerType::new(&context, 32);
+
+        let region = context.create_region();
+        let arg = context.create_value(i32, None);
+        let block = context.create_block(vec![arg.clone()]);
+        region.add_block(block.id());
+        let func = ops::func(&context, "demo", i32, Some(region.id())).build();
+        let body = func.body();
+
+        let mut b = IRBuilder::new(body.clone());
+        let neg = ops::subi(&context, body.arguments()[0].id(), body.arguments()[0].id(), i32)
+            .build();
+        let neg_ref = super::OperationRef::new(
+            context.get_op(neg.id()),
+            Some(body.clone()),
+            None,
+        );
+        b.insert(neg);
+        assert!(context.is_value_used(body.arguments()[0].id()));
+
+        let mut rewriter = super::Rewriter::new(context.clone());
+        rewriter.erase_op(&neg_ref).expect("erase should succeed");
+
+        assert!(
+            !context.is_value_used(body.arguments()[0].id()),
+            "erasing the only consumer must clear the value's uses"
+        );
     }
 }

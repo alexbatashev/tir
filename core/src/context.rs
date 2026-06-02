@@ -168,6 +168,16 @@ impl Context {
             }
         }
 
+        // Register this op as a use of each operand value, so `Value::uses` is a live
+        // def-use chain. Detached again when the op is erased or replaced.
+        for (index, operand) in instance.operands.iter().enumerate() {
+            if let Some(value) = inner.values.get(operand).cloned() {
+                let mut value = (*value).clone();
+                value.add_use(op_id, index);
+                inner.values.insert(*operand, Arc::new(value));
+            }
+        }
+
         for r in &instance.regions {
             inner.regions.get(&r).unwrap().set_parent_op(op_id);
         }
@@ -203,6 +213,37 @@ impl Context {
         inner.values.get(&id).unwrap().clone()
     }
 
+    /// The operands that reference `id`, as `(op, operand-index)` pairs. See
+    /// [`Value::uses`] for what is and isn't tracked.
+    pub fn value_uses(&self, id: ValueId) -> Vec<crate::Use> {
+        let inner = self.0.read();
+        inner
+            .values
+            .get(&id)
+            .map(|v| v.uses().to_vec())
+            .unwrap_or_default()
+    }
+
+    /// Whether any operand references `id`.
+    pub fn is_value_used(&self, id: ValueId) -> bool {
+        let inner = self.0.read();
+        inner.values.get(&id).is_some_and(|v| v.is_used())
+    }
+
+    /// Drop every operand-use contributed by `op` from the values it referenced.
+    /// Called when an op leaves the live IR (erase/replace) to keep `Value::uses`
+    /// consistent. `operands` is the op's operand list (the source of those uses).
+    pub(crate) fn detach_op_uses(&self, op: OpId, operands: &[ValueId]) {
+        let mut inner = self.0.write();
+        for operand in operands {
+            if let Some(value) = inner.values.get(operand).cloned() {
+                let mut value = (*value).clone();
+                value.remove_uses_of(op);
+                inner.values.insert(*operand, Arc::new(value));
+            }
+        }
+    }
+
     pub fn has_value(&self, id: ValueId) -> bool {
         self.0.read().values.contains_key(&id)
     }
@@ -213,6 +254,54 @@ impl Context {
             .blocks
             .values()
             .any(|block| block.arguments().iter().any(|arg| arg.id() == id))
+    }
+
+    /// Value numbers referenced by any *live* operation: direct `operands`, plus
+    /// virtual-register operands carried in attributes (machine ops produced by
+    /// instruction selection encode their register inputs as
+    /// [`RegisterAttr::Virtual`] rather than in `operands`).
+    ///
+    /// Only ops reachable through blocks are scanned, not the context's operation
+    /// arena — `erase_op`/`replace_op` detach ops from their block but leave them in
+    /// the arena, so an arena scan would see phantom references from already-removed
+    /// ops.
+    ///
+    /// This is a stateless full scan — the `Value::uses` list is not maintained —
+    /// and a deliberate over-approximation: it makes no attempt to tell a register
+    /// *def* (`rd`) from a *use*, so a number may appear only because it is defined.
+    /// The guarantee runs one way: a value number *absent* from this set is
+    /// referenced by no live operation and is safe to erase along with its defining
+    /// op. Intended for best-effort dead-value elimination after selection.
+    pub fn referenced_value_numbers(&self) -> std::collections::HashSet<u32> {
+        use crate::attributes::{AttributeValue, RegisterAttr};
+
+        fn collect(value: &AttributeValue, out: &mut std::collections::HashSet<u32>) {
+            match value {
+                AttributeValue::Register(RegisterAttr::Virtual { id, .. }) => {
+                    out.insert(*id);
+                }
+                AttributeValue::Array(items) => items.iter().for_each(|v| collect(v, out)),
+                AttributeValue::Dict(entries) => entries.values().for_each(|v| collect(v, out)),
+                _ => {}
+            }
+        }
+
+        let inner = self.0.read();
+        let mut used = std::collections::HashSet::new();
+        for block in inner.blocks.values() {
+            for op_id in block.op_ids() {
+                let Some(op) = inner.operations.get(&op_id) else {
+                    continue;
+                };
+                for operand in &op.operands {
+                    used.insert(operand.number());
+                }
+                for attr in &op.attributes {
+                    collect(&attr.value, &mut used);
+                }
+            }
+        }
+        used
     }
 
     pub fn create_region(&self) -> Arc<Region> {
@@ -475,6 +564,44 @@ mod tests {
     #[test]
     fn default_context() {
         let _ = Context::with_default_dialects();
+    }
+
+    #[test]
+    fn adding_an_op_registers_operand_uses() {
+        let context = Context::with_default_dialects();
+        let i32 = builtin::IntegerType::new(&context, 32);
+        let lhs = context.create_value(i32, None);
+        let rhs = context.create_value(i32, None);
+
+        assert!(!context.is_value_used(lhs.id()));
+
+        let add = builtin::ops::addi(&context, lhs.id(), rhs.id(), i32).build();
+
+        // The local `lhs` handle is a pre-use snapshot; the live value carries the use.
+        assert!(context.is_value_used(lhs.id()));
+        let uses = context.value_uses(lhs.id());
+        assert_eq!(uses.len(), 1);
+        assert_eq!(uses[0].op(), add.id());
+        assert_eq!(uses[0].operand_index(), 0);
+        assert_eq!(context.value_uses(rhs.id())[0].operand_index(), 1);
+    }
+
+    #[test]
+    fn an_operand_used_twice_records_both_indices() {
+        let context = Context::with_default_dialects();
+        let i32 = builtin::IntegerType::new(&context, 32);
+        let x = context.create_value(i32, None);
+
+        let add = builtin::ops::addi(&context, x.id(), x.id(), i32).build();
+
+        let mut indices: Vec<usize> = context
+            .value_uses(x.id())
+            .iter()
+            .map(|u| u.operand_index())
+            .collect();
+        indices.sort();
+        assert_eq!(indices, vec![0, 1]);
+        assert!(context.value_uses(x.id()).iter().all(|u| u.op() == add.id()));
     }
 
     #[test]
