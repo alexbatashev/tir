@@ -5,9 +5,11 @@ use crate::{
     utils::{APFloat, APInt},
 };
 
+mod discover;
 mod exec;
 mod infer;
 
+pub use discover::{EquivalenceOracle, FuzzOracle, confirm_extension_via_shifts};
 pub use exec::execute;
 pub use infer::{canonicalize_for_selection, infer_widths};
 

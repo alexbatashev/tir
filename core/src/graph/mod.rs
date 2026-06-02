@@ -2,9 +2,11 @@ use std::collections::HashMap;
 
 use crate::{Context, OpId, TypeId};
 
+mod egraph;
 mod pattern;
 mod postorder;
 
+pub use egraph::{EClassId, EGraph, EMatch, ENode, Rewrite, SaturationLimits};
 pub use pattern::{
     CoverCandidate, CoverLegality, GraphCoverDriver, MatchBinding, OperandConstraint, Pattern,
     PatternExpr, PatternId, VF2CoverDriver,

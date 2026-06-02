@@ -133,6 +133,29 @@ impl Rewriter {
             Err(PassError::RewriteFailed(target.op.id))
         }
     }
+
+    /// Insert `new_op` immediately before `target` in its block. Used when one
+    /// source op lowers to several machine instructions (e.g. a sub-word sign
+    /// extension becoming `slli` then `srai`): the feeding instructions are inserted
+    /// ahead of the op that consumes them. Repeated calls before the same target
+    /// preserve insertion order.
+    pub fn insert_op_before(
+        &mut self,
+        target: &OperationRef,
+        new_op: &dyn Operation,
+    ) -> Result<(), PassError> {
+        let block = target
+            .block
+            .as_ref()
+            .ok_or(PassError::MissingBlock(target.name()))?;
+        let position = block
+            .op_ids()
+            .iter()
+            .position(|id| *id == target.op.id)
+            .ok_or(PassError::RewriteFailed(target.op.id))?;
+        block.insert(position, new_op.id());
+        Ok(())
+    }
 }
 
 enum PassNode {

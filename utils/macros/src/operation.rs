@@ -1015,6 +1015,69 @@ fn sem_node_to_dag_stmts(
             }
         }
         SemNode::List(items) => {
+            // Unary width-changing ops take the result width from the op's result
+            // type (read through the context the generated body already holds), so
+            // `(sext x)`/`(zext x)`/`(trunc x)` need no explicit width operand.
+            if let [SemNode::Atom(op), arg] = items.as_slice() {
+                let ext_kind = match op.as_str() {
+                    "sext" => Some(quote! { tir::sem_expr::ExprKind::SExt }),
+                    "zext" => Some(quote! { tir::sem_expr::ExprKind::ZExt }),
+                    "trunc" => None,
+                    _ => return None,
+                };
+                let (mut stmts, arg_var) = sem_node_to_dag_stmts(arg, operand_symbols, counter)?;
+                let width_var = format_ident!("__sem_node_{}", *counter);
+                *counter += 1;
+                stmts.push(quote! {
+                    let __tir_result_width = {
+                        let __ctx = self.0.context.upgrade();
+                        let __ty = __ctx.get_value(self.0.results[0]).ty();
+                        (__ctx.get_type_data(__ty).as_ref() as &dyn std::any::Any)
+                            .downcast_ref::<tir::builtin::IntegerType>()
+                            .map(|t| t.width())
+                            .unwrap_or(0) as u64
+                    };
+                    let #width_var = g.add_node(tir::sem_expr::ExprKind::Constant);
+                    g.set_leaf_data(
+                        #width_var,
+                        tir::sem_expr::ExprPayload::Int(tir::utils::APInt::new(16, __tir_result_width)),
+                    );
+                });
+                let var = format_ident!("__sem_node_{}", *counter);
+                *counter += 1;
+                if let Some(kind) = ext_kind {
+                    stmts.push(quote! {
+                        let #var = g.add_node(#kind);
+                        g.add_edge(#var, #arg_var);
+                        g.add_edge(#var, #width_var);
+                    });
+                } else {
+                    // trunc x  ==  extract(x, result_width - 1, 0)
+                    let low_var = format_ident!("__sem_node_{}", *counter);
+                    *counter += 1;
+                    stmts.push(quote! {
+                        let #low_var = g.add_node(tir::sem_expr::ExprKind::Constant);
+                        g.set_leaf_data(
+                            #low_var,
+                            tir::sem_expr::ExprPayload::Int(tir::utils::APInt::new(16, 0)),
+                        );
+                        // Reuse the width constant as the (high = width - 1) bound.
+                        g.set_leaf_data(
+                            #width_var,
+                            tir::sem_expr::ExprPayload::Int(tir::utils::APInt::new(
+                                16,
+                                __tir_result_width.saturating_sub(1),
+                            )),
+                        );
+                        let #var = g.add_node(tir::sem_expr::ExprKind::Extract);
+                        g.add_edge(#var, #arg_var);
+                        g.add_edge(#var, #width_var);
+                        g.add_edge(#var, #low_var);
+                    });
+                }
+                return Some((stmts, var));
+            }
+
             let [SemNode::Atom(op), lhs, rhs] = items.as_slice() else {
                 return None;
             };
