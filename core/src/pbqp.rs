@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 pub const INF_COST: u64 = u64::MAX / 4;
 
@@ -166,20 +166,37 @@ struct Solver {
     problem: PbqpProblem,
     active: Vec<bool>,
     reductions: Vec<Reduction>,
+    /// Per-node neighbor set, maintained alongside `problem.edges` so neighbor
+    /// queries are O(degree) rather than a full O(edges) scan — the difference
+    /// between the solver being usable and unusable at register-allocation scale.
+    adjacency: Vec<HashSet<usize>>,
 }
 
 impl Solver {
     fn new(problem: PbqpProblem) -> Self {
         let active = vec![true; problem.node_count()];
+        let mut adjacency = vec![HashSet::new(); problem.node_count()];
+        for &(a, b) in problem.edges.keys() {
+            adjacency[a].insert(b);
+            adjacency[b].insert(a);
+        }
         Self {
             problem,
             active,
             reductions: Vec::new(),
+            adjacency,
         }
     }
 
     fn solve(mut self, original: &PbqpProblem) -> Result<PbqpSolution, PbqpSolveError> {
         self.validate()?;
+
+        // Normalize costs and propagate impossible alternatives once, up front. This
+        // is where INF node costs (pre-coloring) and coherence-set fragments get
+        // pruned. Re-running the global propagation after every reduction is
+        // quadratic in the accumulated INF entries and dominated solve time at
+        // register-allocation scale; the per-node reductions below already respect
+        // INF through saturating cost arithmetic, so a single pass suffices.
         self.normalize_and_propagate()?;
 
         while let Some(node) = self.next_active_node() {
@@ -189,7 +206,10 @@ impl Solver {
                 2 => self.reduce_r2(node)?,
                 _ => self.reduce_rn(node)?,
             }
-            self.normalize_and_propagate()?;
+            // The reductions read edge costs directly via `edge_cost`, so a global
+            // re-normalization pass per step is redundant; only feasibility needs
+            // re-checking after the reduction folds costs into the surviving nodes.
+            self.ensure_feasible()?;
         }
 
         let choices = self.reconstruct()?;
@@ -310,6 +330,8 @@ impl Solver {
 
         for key in zero_edges {
             self.problem.edges.remove(&key);
+            self.adjacency[key.0].remove(&key.1);
+            self.adjacency[key.1].remove(&key.0);
             changed = true;
         }
 
@@ -406,24 +428,17 @@ impl Solver {
     }
 
     fn degree(&self, node: usize) -> usize {
-        self.neighbors(node).len()
+        self.adjacency[node]
+            .iter()
+            .filter(|&&n| self.active[n])
+            .count()
     }
 
     fn neighbors(&self, node: usize) -> Vec<usize> {
-        self.problem
-            .edges
-            .keys()
-            .filter_map(|&(lhs, rhs)| {
-                if !self.active[lhs] || !self.active[rhs] {
-                    None
-                } else if lhs == node {
-                    Some(rhs)
-                } else if rhs == node {
-                    Some(lhs)
-                } else {
-                    None
-                }
-            })
+        self.adjacency[node]
+            .iter()
+            .copied()
+            .filter(|&n| self.active[n])
             .collect()
     }
 
@@ -540,12 +555,13 @@ impl Solver {
     }
 
     fn locally_cheapest_alternative(&self, node: usize) -> Result<usize, PbqpSolveError> {
+        let neighbors = self.neighbors(node);
         self.problem.node_costs[node]
             .iter()
             .enumerate()
             .filter(|(_, cost)| **cost < INF_COST)
             .map(|(alternative, &base)| {
-                let edge_costs = self.neighbors(node).into_iter().fold(0, |acc, neighbor| {
+                let edge_costs = neighbors.iter().copied().fold(0, |acc, neighbor| {
                     let best = (0..self.problem.node_costs[neighbor].len())
                         .filter(|&neighbor_alt| {
                             self.problem.node_costs[neighbor][neighbor_alt] < INF_COST
@@ -596,12 +612,22 @@ impl Solver {
                 }
             })
             .or_insert(matrix);
+        self.adjacency[a].insert(b);
+        self.adjacency[b].insert(a);
     }
 
     fn remove_incident_edges(&mut self, node: usize) {
-        self.problem
-            .edges
-            .retain(|&(lhs, rhs), _| lhs != node && rhs != node);
+        let neighbors: Vec<usize> = self.adjacency[node].iter().copied().collect();
+        for neighbor in neighbors {
+            self.adjacency[neighbor].remove(&node);
+            let key = if node < neighbor {
+                (node, neighbor)
+            } else {
+                (neighbor, node)
+            };
+            self.problem.edges.remove(&key);
+        }
+        self.adjacency[node].clear();
     }
 
     fn reconstruct(&self) -> Result<Vec<usize>, PbqpSolveError> {

@@ -1,9 +1,11 @@
 use tir::helpers::dialect;
 
 pub mod isel;
+pub mod liveness;
 mod lexer;
 mod operations;
 mod parser;
+pub mod regalloc;
 
 pub use operations::*;
 

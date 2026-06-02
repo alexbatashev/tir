@@ -21,6 +21,7 @@ pub fn generate_rust<'a>(
     let features = emit_features(files)?;
     let register_traits = emit_register_trait_helpers(files)?;
     let registers = emit_register_parsers_and_printers(files)?;
+    let register_info = emit_register_info(files)?;
     let instructions = emit_instructions(dialect, files, item_cache)?;
 
     let final_rust = quote! {
@@ -28,6 +29,8 @@ pub fn generate_rust<'a>(
         #register_traits
 
         #registers
+
+        #register_info
 
         #instructions
     };
@@ -754,6 +757,50 @@ fn emit_register_parsers_and_printers(
     }
 
     Ok(quote! { #(#fns)* })
+}
+
+/// Emit a `register_info()` constructor returning the target-independent
+/// [`tir_be_common::regalloc::RegisterInfo`] the allocator consumes: per class, the
+/// allocatable order plus the caller/callee-saved, argument, return-value, and
+/// reserved index sets, all derived from each register's TMDL traits.
+fn emit_register_info(files: &[ast::File]) -> Result<proc_macro2::TokenStream, TMDLError> {
+    let slice = |indices: &[u16]| {
+        let lits = indices
+            .iter()
+            .map(|i| proc_macro2::Literal::u16_unsuffixed(*i));
+        quote! { &[#(#lits),*] }
+    };
+
+    let mut class_entries = Vec::new();
+    for rc in files.iter().flat_map(|f| f.register_classes()) {
+        let name_lit = proc_macro2::Literal::string(&rc.name);
+        let meta = rc.allocation_metadata();
+        let allocation_order = slice(&meta.allocation_order);
+        let caller_saved = slice(&meta.caller_saved);
+        let callee_saved = slice(&meta.callee_saved);
+        let arguments = slice(&meta.arguments);
+        let return_values = slice(&meta.return_values);
+        let reserved = slice(&meta.reserved);
+        class_entries.push(quote! {
+            tir_be_common::regalloc::RegClassInfo {
+                name: #name_lit,
+                allocation_order: #allocation_order,
+                caller_saved: #caller_saved,
+                callee_saved: #callee_saved,
+                arguments: #arguments,
+                return_values: #return_values,
+                reserved: #reserved,
+            }
+        });
+    }
+
+    Ok(quote! {
+        pub fn register_info() -> tir_be_common::regalloc::RegisterInfo {
+            tir_be_common::regalloc::RegisterInfo {
+                classes: &[#(#class_entries),*],
+            }
+        }
+    })
 }
 
 fn emit_register_trait_helpers(files: &[ast::File]) -> Result<proc_macro2::TokenStream, TMDLError> {

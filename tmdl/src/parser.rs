@@ -531,6 +531,12 @@ where
                     "callee_saved" => Some(RegisterTrait::CalleeSaved),
                     "stack_pointer" => Some(RegisterTrait::StackPointer),
                     "program_counter" => Some(RegisterTrait::ProgramCounter),
+                    "global_pointer" => Some(RegisterTrait::GlobalPointer),
+                    "thread_pointer" => Some(RegisterTrait::ThreadPointer),
+                    "argument" => Some(RegisterTrait::Argument),
+                    "return_value" => Some(RegisterTrait::ReturnValue),
+                    "temporary" => Some(RegisterTrait::Temporary),
+                    "saved" => Some(RegisterTrait::Saved),
                     _ => None,
                 })
                 .collect()
