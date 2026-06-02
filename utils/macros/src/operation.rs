@@ -691,6 +691,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
                     results: result_vec,
                     regions,
                     attributes: self.attributes,
+                    attribute_roles: #struct_name::attribute_roles(),
                 };
 
                 let instance = self.context.add_operation(instance);
@@ -1267,9 +1268,9 @@ fn get_roles(expr: &Expr) -> Option<Vec<RoleSpec>> {
 }
 
 fn make_roles_table(_op_ident: &Ident, roles: &[RoleSpec]) -> proc_macro2::TokenStream {
-    if roles.is_empty() {
-        return quote! {};
-    }
+    // Always emit `attribute_roles()` (empty when no roles) so `build()` can thread
+    // the table onto every `OpInstance` uniformly, and the core can read register
+    // def/use roles without resolving the op back to its concrete type.
     let mut pairs = Vec::new();
     for r in roles {
         let name = r.name.clone();

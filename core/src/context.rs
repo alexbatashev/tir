@@ -173,9 +173,36 @@ impl Context {
         for (index, operand) in instance.operands.iter().enumerate() {
             if let Some(value) = inner.values.get(operand).cloned() {
                 let mut value = (*value).clone();
-                value.add_use(op_id, index);
+                value.add_use(op_id, crate::UseSite::Operand(index));
                 inner.values.insert(*operand, Arc::new(value));
             }
+        }
+
+        // Machine ops carry their register operands in role-tagged attributes rather
+        // than `operands`/`results`, so mirror the above over those: a `Use` register
+        // is a use of its virtual value; a `Def` register is that value's def-site.
+        // Virtual register ids are value numbers; physical registers have none and are
+        // skipped — they are not SSA. ReadWrite counts as both.
+        for (attr_name, role) in instance.attribute_roles {
+            use crate::attributes::{AttributeRole, AttributeValue, RegisterAttr};
+            let Some(attr) = instance.attributes.iter().find(|a| a.name == *attr_name) else {
+                continue;
+            };
+            let AttributeValue::Register(RegisterAttr::Virtual { id, .. }) = &attr.value else {
+                continue;
+            };
+            let value_id = ValueId::from_number(*id);
+            let Some(value) = inner.values.get(&value_id).cloned() else {
+                continue;
+            };
+            let mut value = (*value).clone();
+            if matches!(role, AttributeRole::Use | AttributeRole::ReadWrite) {
+                value.add_use(op_id, crate::UseSite::Attribute(attr_name));
+            }
+            if matches!(role, AttributeRole::Def | AttributeRole::ReadWrite) {
+                value = value.with_defining_op(op_id);
+            }
+            inner.values.insert(value_id, Arc::new(value));
         }
 
         for r in &instance.regions {
@@ -230,16 +257,28 @@ impl Context {
         inner.values.get(&id).is_some_and(|v| v.is_used())
     }
 
-    /// Drop every operand-use contributed by `op` from the values it referenced.
-    /// Called when an op leaves the live IR (erase/replace) to keep `Value::uses`
-    /// consistent. `operands` is the op's operand list (the source of those uses).
-    pub(crate) fn detach_op_uses(&self, op: OpId, operands: &[ValueId]) {
+    /// Drop every use contributed by `op` from the values it referenced. Called when
+    /// an op leaves the live IR (erase/replace) to keep `Value::uses` consistent.
+    /// Visits both SSA `operands` and virtual register operands carried in attributes
+    /// (the same set `add_operation` registered); `remove_uses_of` filters by op id,
+    /// so visiting a value the op only *defined* is harmless. `defining_op` is left
+    /// untouched — on replace, the new op has already claimed the def-site.
+    pub(crate) fn detach_op_uses(&self, op: &OpInstance) {
+        use crate::attributes::{AttributeValue, RegisterAttr};
+
+        let mut touched: Vec<ValueId> = op.operands.clone();
+        for attr in &op.attributes {
+            if let AttributeValue::Register(RegisterAttr::Virtual { id, .. }) = &attr.value {
+                touched.push(ValueId::from_number(*id));
+            }
+        }
+
         let mut inner = self.0.write();
-        for operand in operands {
-            if let Some(value) = inner.values.get(operand).cloned() {
+        for value_id in touched {
+            if let Some(value) = inner.values.get(&value_id).cloned() {
                 let mut value = (*value).clone();
-                value.remove_uses_of(op);
-                inner.values.insert(*operand, Arc::new(value));
+                value.remove_uses_of(op.id);
+                inner.values.insert(value_id, Arc::new(value));
             }
         }
     }
@@ -254,54 +293,6 @@ impl Context {
             .blocks
             .values()
             .any(|block| block.arguments().iter().any(|arg| arg.id() == id))
-    }
-
-    /// Value numbers referenced by any *live* operation: direct `operands`, plus
-    /// virtual-register operands carried in attributes (machine ops produced by
-    /// instruction selection encode their register inputs as
-    /// [`RegisterAttr::Virtual`] rather than in `operands`).
-    ///
-    /// Only ops reachable through blocks are scanned, not the context's operation
-    /// arena — `erase_op`/`replace_op` detach ops from their block but leave them in
-    /// the arena, so an arena scan would see phantom references from already-removed
-    /// ops.
-    ///
-    /// This is a stateless full scan — the `Value::uses` list is not maintained —
-    /// and a deliberate over-approximation: it makes no attempt to tell a register
-    /// *def* (`rd`) from a *use*, so a number may appear only because it is defined.
-    /// The guarantee runs one way: a value number *absent* from this set is
-    /// referenced by no live operation and is safe to erase along with its defining
-    /// op. Intended for best-effort dead-value elimination after selection.
-    pub fn referenced_value_numbers(&self) -> std::collections::HashSet<u32> {
-        use crate::attributes::{AttributeValue, RegisterAttr};
-
-        fn collect(value: &AttributeValue, out: &mut std::collections::HashSet<u32>) {
-            match value {
-                AttributeValue::Register(RegisterAttr::Virtual { id, .. }) => {
-                    out.insert(*id);
-                }
-                AttributeValue::Array(items) => items.iter().for_each(|v| collect(v, out)),
-                AttributeValue::Dict(entries) => entries.values().for_each(|v| collect(v, out)),
-                _ => {}
-            }
-        }
-
-        let inner = self.0.read();
-        let mut used = std::collections::HashSet::new();
-        for block in inner.blocks.values() {
-            for op_id in block.op_ids() {
-                let Some(op) = inner.operations.get(&op_id) else {
-                    continue;
-                };
-                for operand in &op.operands {
-                    used.insert(operand.number());
-                }
-                for attr in &op.attributes {
-                    collect(&attr.value, &mut used);
-                }
-            }
-        }
-        used
     }
 
     pub fn create_region(&self) -> Arc<Region> {
@@ -582,8 +573,8 @@ mod tests {
         let uses = context.value_uses(lhs.id());
         assert_eq!(uses.len(), 1);
         assert_eq!(uses[0].op(), add.id());
-        assert_eq!(uses[0].operand_index(), 0);
-        assert_eq!(context.value_uses(rhs.id())[0].operand_index(), 1);
+        assert_eq!(uses[0].operand_index(), Some(0));
+        assert_eq!(context.value_uses(rhs.id())[0].operand_index(), Some(1));
     }
 
     #[test]
@@ -597,7 +588,7 @@ mod tests {
         let mut indices: Vec<usize> = context
             .value_uses(x.id())
             .iter()
-            .map(|u| u.operand_index())
+            .filter_map(|u| u.operand_index())
             .collect();
         indices.sort();
         assert_eq!(indices, vec![0, 1]);

@@ -53,37 +53,47 @@ impl Value {
         self
     }
 
-    /// The operands that reference this value, as `(op, operand-index)` pairs.
+    /// The operations that reference this value, with where the reference sits (see
+    /// [`UseSite`]).
     ///
     /// Maintained by the [`Context`](crate::Context): an entry is added when an
     /// operation is added to the context and removed when it is erased or replaced.
-    /// Only `operands` are tracked — register operands that instruction selection
-    /// stores in attributes (`RegisterAttr::Virtual`) are *not* reflected here.
+    /// Both SSA `operands` and machine-IR register operands carried in attributes
+    /// (`RegisterAttr::Virtual` tagged `Use`/`ReadWrite`) are tracked; physical
+    /// registers have no value id and so never appear here.
     pub fn uses(&self) -> &[Use] {
         &self.uses
     }
 
-    /// Whether any operand references this value. See [`Value::uses`].
+    /// Whether any operation references this value. See [`Value::uses`].
     pub fn is_used(&self) -> bool {
         !self.uses.is_empty()
     }
 
-    pub(crate) fn add_use(&mut self, op: OpId, index: usize) {
-        self.uses.push(Use { op, index });
+    pub(crate) fn add_use(&mut self, op: OpId, site: UseSite) {
+        self.uses.push(Use { op, site });
     }
 
-    /// Drop every use contributed by `op` (an op may use a value at several indices).
+    /// Drop every use contributed by `op` (an op may use a value at several sites).
     pub(crate) fn remove_uses_of(&mut self, op: OpId) {
         self.uses.retain(|u| u.op != op);
     }
 }
 
-/// A reference to a value from an operation's operand list: the using `op` and the
-/// operand `index` within it.
+/// Where a [`Use`] sits within the referencing operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UseSite {
+    /// The operand at this index in the op's SSA `operands`.
+    Operand(usize),
+    /// A register operand carried in this named attribute (machine ops).
+    Attribute(&'static str),
+}
+
+/// A reference to a value from an operation: the using `op` and the [`UseSite`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Use {
     op: OpId,
-    index: usize,
+    site: UseSite,
 }
 
 impl Use {
@@ -91,7 +101,15 @@ impl Use {
         self.op
     }
 
-    pub fn operand_index(&self) -> usize {
-        self.index
+    pub fn site(&self) -> UseSite {
+        self.site
+    }
+
+    /// The operand index, if this use is an SSA operand (not a register attribute).
+    pub fn operand_index(&self) -> Option<usize> {
+        match self.site {
+            UseSite::Operand(i) => Some(i),
+            UseSite::Attribute(_) => None,
+        }
     }
 }

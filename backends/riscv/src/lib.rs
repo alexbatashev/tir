@@ -433,6 +433,20 @@ mod tests {
         );
         // The folded constant is dead and removed; only slliw survives.
         assert_eq!(body, vec!["slliw", "vret", "symbol_end"]);
+
+        // The def-use chain now spans the machine-IR register layer: `a` feeds
+        // slliw's rs1 (a register operand carried in an attribute, not `operands`),
+        // so it reports a use referencing slliw with no operand index.
+        assert!(context.is_value_used(a), "block arg a should be used by slliw");
+        let uses = context.value_uses(a);
+        assert_eq!(uses.len(), 1);
+        assert_eq!(uses[0].op(), slliw.id);
+        assert_eq!(uses[0].operand_index(), None);
+
+        // slliw's rd value is defined by slliw (def-site followed the rewrite off the
+        // erased source op), and the folded constant is genuinely unused.
+        assert_eq!(context.get_value(sr).defining_op(), Some(slliw.id));
+        assert!(!context.is_value_used(three_r), "folded constant should be dead");
     }
 
     #[test]

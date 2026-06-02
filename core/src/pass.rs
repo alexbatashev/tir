@@ -118,8 +118,7 @@ impl Rewriter {
         if block.replace_op(target.op.id, new_op.id()) {
             // The replaced-out op no longer references its operands; the new op
             // registered its own uses when it was added to the context.
-            self.context
-                .detach_op_uses(target.op.id, &target.op.operands);
+            self.context.detach_op_uses(&target.op);
             Ok(())
         } else {
             Err(PassError::RewriteFailed(target.op.id))
@@ -132,8 +131,7 @@ impl Rewriter {
             .as_ref()
             .ok_or(PassError::MissingBlock(target.name()))?;
         if block.remove_op(target.op.id) {
-            self.context
-                .detach_op_uses(target.op.id, &target.op.operands);
+            self.context.detach_op_uses(&target.op);
             Ok(())
         } else {
             Err(PassError::RewriteFailed(target.op.id))
