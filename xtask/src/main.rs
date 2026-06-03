@@ -41,7 +41,10 @@ fn check(sh: &Shell) -> anyhow::Result<()> {
     let root = project_root();
     sh.change_dir(root);
 
-    cmd!(sh, "cargo run --bin check-runner").run()?;
+    // FileCheck-style tests now run as ordinary integration tests (the `lit`
+    // harnesses in each crate's `tests/` directory), so running the test suite
+    // exercises them alongside the unit tests.
+    cmd!(sh, "cargo test --workspace").run()?;
 
     Ok(())
 }

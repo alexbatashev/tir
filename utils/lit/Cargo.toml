@@ -1,0 +1,16 @@
+[package]
+name = "tir-lit"
+version = "0.1.0"
+edition = "2021"
+
+# A small LIT-style test driver that discovers FileCheck tests, runs their
+# `RUN:` pipelines and reports each file as an individual `cargo test` case via
+# libtest-mimic.
+
+[lib]
+name = "tir_lit"
+path = "src/lib.rs"
+
+[dependencies]
+filecheck = { path = "../filecheck" }
+libtest-mimic = "0.8"

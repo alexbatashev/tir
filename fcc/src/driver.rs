@@ -27,12 +27,38 @@ pub struct CompileArgs {
     stage: CompileStage,
     #[arg(short = 'o', default_value = "-")]
     output: OsString,
+    /// Predefine a macro, e.g. `-D NAME=VALUE` (or `-D NAME`).
+    #[arg(short = 'D', value_name = "NAME[=VALUE]")]
+    defines: Vec<String>,
     inputs: Vec<OsString>,
+}
+
+/// Build the predefined-macro map from `-D` arguments. Each value is lexed to a
+/// single token, mirroring how `#define NAME VALUE` is stored.
+fn build_defines(defines: &[String]) -> HashMap<String, Token> {
+    use logos::Logos;
+    defines
+        .iter()
+        .map(|d| {
+            let (name, value) = match d.split_once('=') {
+                Some((n, v)) => (n.to_string(), v.to_string()),
+                None => (d.to_string(), "1".to_string()),
+            };
+            let tok = Token::lexer(value.trim())
+                .next()
+                .and_then(|r| r.ok())
+                .unwrap_or(Token::Hash);
+            (name, tok)
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, ValueEnum)]
 pub enum CompileStage {
+    /// Emit the preprocessed token stream as reconstructed source text.
     Preprocess,
+    /// Emit the preprocessed token stream in its debug representation.
+    Tokens,
     Ast,
     Ir,
 }
@@ -70,7 +96,15 @@ fn run_compile(args: CompileArgs) {
 
         match args.stage {
             CompileStage::Preprocess => {
-                emit_preprocess(&mut out, preprocessed(reader, HashMap::new(), &[]));
+                emit_preprocess(
+                    &mut out,
+                    preprocessed(reader, build_defines(&args.defines), &[]),
+                );
+            }
+            CompileStage::Tokens => {
+                let tokens: Vec<Token> =
+                    preprocessed(reader, build_defines(&args.defines), &[]).collect();
+                writeln!(out, "{tokens:#?}").unwrap();
             }
             CompileStage::Ast => {
                 let unit = parse_source(reader);
