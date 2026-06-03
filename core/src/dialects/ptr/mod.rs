@@ -8,7 +8,10 @@ use std::any::Any;
 use std::sync::Arc;
 
 use crate::ty::TypeConstraint;
-use crate::{Context, Error, IRFormatter, Type, TypeId, dialect, operation, parse::Span};
+use crate::{
+    Context, Error, IRFormatter, MemoryRead, MemoryWrite, Operation, PromotableAllocation, Type,
+    TypeId, dialect, operation, parse::Span,
+};
 
 use crate as tir;
 use crate::Any as AnyConstraint;
@@ -120,6 +123,7 @@ operation! {
         results: R {
             result: "crate::ptr::PtrType",
         },
+        interfaces: [PromotableAllocation],
     }
 }
 
@@ -133,6 +137,7 @@ operation! {
         results: R {
             result: "AnyConstraint",
         },
+        interfaces: [MemoryRead],
     }
 }
 
@@ -144,6 +149,7 @@ operation! {
             value: "AnyConstraint",
             ptr: "crate::ptr::PtrType",
         },
+        interfaces: [MemoryWrite],
     }
 }
 
@@ -220,5 +226,31 @@ mod tests {
         let mut f = IRFormatter::new(&mut new_buf);
         new_func.print(&mut f).expect("print ok");
         assert_eq!(buf, new_buf);
+    }
+}
+
+impl PromotableAllocation for AllocaOp {
+    fn promoted_location(&self) -> tir::ValueId {
+        self.result()
+    }
+}
+
+impl MemoryRead for LoadOp {
+    fn read_location(&self) -> tir::ValueId {
+        self.operands()[0]
+    }
+
+    fn read_value(&self) -> tir::ValueId {
+        self.result()
+    }
+}
+
+impl MemoryWrite for StoreOp {
+    fn write_location(&self) -> tir::ValueId {
+        self.operands()[1]
+    }
+
+    fn written_value(&self) -> tir::ValueId {
+        self.operands()[0]
     }
 }

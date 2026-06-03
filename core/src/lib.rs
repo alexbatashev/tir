@@ -14,6 +14,7 @@ mod ir_formatter;
 mod operand;
 mod operation;
 mod pass;
+pub mod passes;
 pub mod pbqp;
 mod region;
 pub mod sem_expr;
@@ -32,7 +33,9 @@ pub use context::{Context, ContextIterator, ContextRef, GetFromContext};
 pub use diagnostics::{print_error_range, print_parse_error};
 pub use dialect::Dialect;
 pub use error::Error;
-pub use interfaces::{Commutative, SameOperandType, Terminator};
+pub use interfaces::{
+    Commutative, MemoryRead, MemoryWrite, PromotableAllocation, SameOperandType, Terminator,
+};
 pub use ir_formatter::IRFormatter;
 pub use operand::Operand;
 pub use operation::{

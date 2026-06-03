@@ -6,6 +6,7 @@ members = [
     "utils/filecheck",
     "utils/lit",
     "utils/not",
+    "utils/tir-opt",
     "tmdl",
     "xtask",
     "core",

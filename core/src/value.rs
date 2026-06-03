@@ -78,6 +78,12 @@ impl Value {
     pub(crate) fn remove_uses_of(&mut self, op: OpId) {
         self.uses.retain(|u| u.op != op);
     }
+
+    pub(crate) fn remove_use(&mut self, op: OpId, site: UseSite) {
+        if let Some(index) = self.uses.iter().position(|u| u.op == op && u.site == site) {
+            self.uses.remove(index);
+        }
+    }
 }
 
 /// Where a [`Use`] sits within the referencing operation.
