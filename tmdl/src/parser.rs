@@ -30,6 +30,8 @@ where
         register_class_def().map(Item::RegisterClass),
         template_def().map(Item::Template),
         instruction_def().map(Item::Instruction),
+        unit_def().map(Item::Unit),
+        machine_def().map(Item::Machine),
     ))
     .repeated()
     .at_least(0)
@@ -228,6 +230,7 @@ where
                 encoding().map(TemplateOrInstBody::Encoding),
                 asm().map(TemplateOrInstBody::Asm),
                 behavior().map(TemplateOrInstBody::Behavior),
+                schedule().map(TemplateOrInstBody::Schedule),
             ))
             .repeated()
             .collect::<Vec<_>>()
@@ -283,6 +286,14 @@ where
                 })
                 .unwrap();
 
+            let schedule = body.iter().find_map(|b| {
+                if let TemplateOrInstBody::Schedule(t) = b {
+                    Some(t.clone())
+                } else {
+                    None
+                }
+            });
+
             Instruction {
                 name,
                 for_isas: for_isas.unwrap_or_default(),
@@ -292,6 +303,7 @@ where
                 encoding,
                 asm,
                 behavior,
+                schedule,
                 span: e.span(),
             }
         })
@@ -304,6 +316,7 @@ enum TemplateOrInstBody {
     Encoding(Vec<EncodingArm>),
     Asm(Expr),
     Behavior(Expr),
+    Schedule(Schedule),
 }
 
 fn asm<'src, I>() -> impl Parser<'src, I, Expr, extra::Err<Rich<'src, Token<'src>, Span>>>
@@ -318,6 +331,403 @@ where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
     just(Token::KwBehavior).ignore_then(expr())
+}
+
+/// Parse an integer literal token (`42`, `0x10`, `0b101`) into an `i64`.
+fn int_lit<'src, I>() -> impl Parser<'src, I, i64, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    select! { Token::Number(n) => n }.try_map_with(|n, e| {
+        parse_int_lit(n).ok_or_else(|| Rich::custom(e.span(), "invalid integer literal"))
+    })
+}
+
+fn parse_int_lit(n: &str) -> Option<i64> {
+    if let Some(h) = n.strip_prefix("0x").or_else(|| n.strip_prefix("0X")) {
+        i64::from_str_radix(h, 16).ok()
+    } else if let Some(b) = n.strip_prefix("0b").or_else(|| n.strip_prefix("0B")) {
+        i64::from_str_radix(b, 2).ok()
+    } else {
+        n.parse::<i64>().ok()
+    }
+}
+
+/// Parse a bracketed, comma-separated list of identifiers: `[a, b, c]`.
+fn ident_list<'src, I>()
+-> impl Parser<'src, I, Vec<String>, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    let ident = select! { Token::Identifier(i) => i.to_string() };
+    ident
+        .separated_by(just(Token::Comma))
+        .allow_trailing()
+        .collect()
+        .delimited_by(just(Token::LBracket), just(Token::RBracket))
+}
+
+/// Instruction `schedule { units = [..]; }` block.
+fn schedule<'src, I>() -> impl Parser<'src, I, Schedule, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    just(Token::KwSchedule)
+        .ignore_then(
+            just(Token::Identifier("units"))
+                .ignore_then(just(Token::Equals))
+                .ignore_then(ident_list())
+                .then_ignore(just(Token::Semicolon))
+                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+        )
+        .map_with(|units, e| Schedule {
+            units,
+            span: e.span(),
+        })
+        .labelled("schedule block")
+}
+
+#[derive(Clone)]
+enum UnitField {
+    Latency(i64),
+    Throughput(i64),
+}
+
+/// A `name = N;` integer pair, used inside `buffers` and `resource` bodies.
+fn kv_int_pair<'src, I>()
+-> impl Parser<'src, I, (String, i64), extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    let ident = select! { Token::Identifier(i) => i.to_string() };
+    ident
+        .then_ignore(just(Token::Equals))
+        .then(int_lit())
+        .then_ignore(just(Token::Semicolon))
+}
+
+/// Top-level `unit Name;` or `unit Name { latency = N; throughput = N; }`.
+fn unit_def<'src, I>()
+-> impl Parser<'src, I, UnitDecl, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    let field = choice((
+        just(Token::Identifier("latency"))
+            .ignore_then(just(Token::Equals))
+            .ignore_then(int_lit())
+            .then_ignore(just(Token::Semicolon))
+            .map(UnitField::Latency),
+        just(Token::Identifier("throughput"))
+            .ignore_then(just(Token::Equals))
+            .ignore_then(int_lit())
+            .then_ignore(just(Token::Semicolon))
+            .map(UnitField::Throughput),
+    ));
+    let body = field
+        .repeated()
+        .collect::<Vec<_>>()
+        .delimited_by(just(Token::LBrace), just(Token::RBrace));
+
+    just(Token::KwUnit)
+        .ignore_then(ident())
+        .then(choice((
+            body.map(Some),
+            just(Token::Semicolon).to(None::<Vec<UnitField>>),
+        )))
+        .map_with(|(name, fields), e| {
+            let mut default_latency = None;
+            let mut default_throughput = None;
+            for f in fields.unwrap_or_default() {
+                match f {
+                    UnitField::Latency(v) => default_latency = Some(v),
+                    UnitField::Throughput(v) => default_throughput = Some(v),
+                }
+            }
+            UnitDecl {
+                name,
+                default_latency,
+                default_throughput,
+                span: e.span(),
+            }
+        })
+        .labelled("unit declaration")
+}
+
+#[derive(Clone)]
+enum BindField {
+    Latency(i64),
+    Throughput(i64),
+    Uses(Vec<String>),
+    Reads(String),
+    Writes(String),
+}
+
+/// The timing fields common to a `bind` and an `override` body.
+#[derive(Default)]
+struct BindFields {
+    latency: Option<i64>,
+    throughput: Option<i64>,
+    reads: Option<String>,
+    writes: Option<String>,
+    uses: Vec<String>,
+}
+
+fn aggregate_bind_fields(fields: Vec<BindField>) -> BindFields {
+    let mut out = BindFields::default();
+    for f in fields {
+        match f {
+            BindField::Latency(v) => out.latency = Some(v),
+            BindField::Throughput(v) => out.throughput = Some(v),
+            BindField::Uses(u) => out.uses = u,
+            BindField::Reads(p) => out.reads = Some(p),
+            BindField::Writes(p) => out.writes = Some(p),
+        }
+    }
+    out
+}
+
+/// One `latency`/`throughput`/`uses`/`reads`/`writes` field of a `bind` or
+/// `override` body.
+fn bind_field<'src, I>() -> impl Parser<'src, I, BindField, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    let ident = select! { Token::Identifier(i) => i.to_string() };
+    choice((
+        just(Token::Identifier("latency"))
+            .ignore_then(just(Token::Equals))
+            .ignore_then(int_lit())
+            .then_ignore(just(Token::Semicolon))
+            .map(BindField::Latency),
+        just(Token::Identifier("throughput"))
+            .ignore_then(just(Token::Equals))
+            .ignore_then(int_lit())
+            .then_ignore(just(Token::Semicolon))
+            .map(BindField::Throughput),
+        just(Token::Identifier("uses"))
+            .ignore_then(just(Token::Equals))
+            .ignore_then(ident_list())
+            .then_ignore(just(Token::Semicolon))
+            .map(BindField::Uses),
+        just(Token::Identifier("reads"))
+            .ignore_then(just(Token::Equals))
+            .ignore_then(ident.clone())
+            .then_ignore(just(Token::Semicolon))
+            .map(BindField::Reads),
+        just(Token::Identifier("writes"))
+            .ignore_then(just(Token::Equals))
+            .ignore_then(ident)
+            .then_ignore(just(Token::Semicolon))
+            .map(BindField::Writes),
+    ))
+}
+
+/// A braced `bind`/`override` body: zero or more timing fields.
+fn bind_body<'src, I>()
+-> impl Parser<'src, I, Vec<BindField>, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    bind_field()
+        .repeated()
+        .collect::<Vec<_>>()
+        .delimited_by(just(Token::LBrace), just(Token::RBrace))
+}
+
+#[derive(Clone)]
+enum MachineBody {
+    IssueWidth(i64),
+    Buffers(Vec<(String, i64)>),
+    Pipeline(Vec<PipelinePhase>),
+    Override(MachineOverride),
+    Forward(Forward),
+    Resource(MachineResource),
+    Bind(UnitBind),
+}
+
+/// Parse a pipeline-stage protection mode identifier into [`Protection`].
+fn protection_mode<'src, I>()
+-> impl Parser<'src, I, Protection, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    select! { Token::Identifier(i) => i }.try_map_with(|i, e| match i {
+        "protected" => Ok(Protection::Protected),
+        "unprotected" => Ok(Protection::Unprotected),
+        "hard" => Ok(Protection::Hard),
+        other => Err(Rich::custom(
+            e.span(),
+            format!("unknown protection mode '{other}' (expected protected, unprotected, or hard)"),
+        )),
+    })
+}
+
+/// Parse one pipeline phase: `NAME;` or `NAME: <protection>;`.
+fn pipeline_phase<'src, I>()
+-> impl Parser<'src, I, PipelinePhase, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    let ident = select! { Token::Identifier(i) => i.to_string() };
+    ident
+        .then(just(Token::Colon).ignore_then(protection_mode()).or_not())
+        .then_ignore(just(Token::Semicolon))
+        .map_with(|(name, protection), e| PipelinePhase {
+            name,
+            protection: protection.unwrap_or(Protection::Protected),
+            span: e.span(),
+        })
+}
+
+/// Top-level `machine Name for [..] { issue_width=..; buffers{..} resource X{..} bind Y{..} }`.
+fn machine_def<'src, I>()
+-> impl Parser<'src, I, Machine, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    let ident = select! { Token::Identifier(i) => i.to_string() };
+
+    let issue_width = just(Token::Identifier("issue_width"))
+        .ignore_then(just(Token::Equals))
+        .ignore_then(int_lit())
+        .then_ignore(just(Token::Semicolon))
+        .map(MachineBody::IssueWidth);
+
+    let buffers = just(Token::KwBuffers)
+        .ignore_then(
+            kv_int_pair()
+                .repeated()
+                .collect::<Vec<(String, i64)>>()
+                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+        )
+        .map(MachineBody::Buffers);
+
+    let pipeline = just(Token::KwPipeline)
+        .ignore_then(
+            pipeline_phase()
+                .repeated()
+                .collect::<Vec<_>>()
+                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+        )
+        .map(MachineBody::Pipeline);
+
+    let resource = just(Token::KwResource)
+        .ignore_then(ident.clone())
+        .then(
+            kv_int_pair()
+                .repeated()
+                .collect::<Vec<(String, i64)>>()
+                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+        )
+        .map_with(|(name, fields), e| {
+            let units = fields
+                .iter()
+                .find(|(k, _)| k == "units")
+                .map(|(_, v)| *v)
+                .unwrap_or(1);
+            MachineBody::Resource(MachineResource {
+                name,
+                units,
+                span: e.span(),
+            })
+        });
+
+    let bind = just(Token::KwBind)
+        .ignore_then(ident.clone())
+        .then(bind_body())
+        .map_with(|(unit, fields), e| {
+            let f = aggregate_bind_fields(fields);
+            MachineBody::Bind(UnitBind {
+                unit,
+                latency: f.latency,
+                throughput: f.throughput,
+                reads: f.reads,
+                writes: f.writes,
+                uses: f.uses,
+                span: e.span(),
+            })
+        });
+
+    let r#override = just(Token::KwOverride)
+        .ignore_then(ident.clone())
+        .then(bind_body())
+        .map_with(|(instruction, fields), e| {
+            let f = aggregate_bind_fields(fields);
+            MachineBody::Override(MachineOverride {
+                instruction,
+                latency: f.latency,
+                throughput: f.throughput,
+                reads: f.reads,
+                writes: f.writes,
+                uses: f.uses,
+                span: e.span(),
+            })
+        });
+
+    // `forward FROM => TO { latency = N; }`
+    let forward = just(Token::KwForward)
+        .ignore_then(ident.clone())
+        .then_ignore(just(Token::FatArrow))
+        .then(ident.clone())
+        .then(
+            just(Token::Identifier("latency"))
+                .ignore_then(just(Token::Equals))
+                .ignore_then(int_lit())
+                .then_ignore(just(Token::Semicolon))
+                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+        )
+        .map_with(|((from, to), latency), e| {
+            MachineBody::Forward(Forward {
+                from,
+                to,
+                latency,
+                span: e.span(),
+            })
+        });
+
+    just(Token::KwMachine)
+        .ignore_then(ident.clone())
+        .then(for_isas())
+        .then(
+            choice((issue_width, buffers, pipeline, r#override, forward, resource, bind))
+                .repeated()
+                .collect::<Vec<_>>()
+                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+        )
+        .map_with(|((name, for_isas), body), e| {
+            let mut issue_width = None;
+            let mut buffers = Vec::new();
+            let mut pipeline = Vec::new();
+            let mut resources = Vec::new();
+            let mut binds = Vec::new();
+            let mut overrides = Vec::new();
+            let mut forwards = Vec::new();
+            for b in body {
+                match b {
+                    MachineBody::IssueWidth(v) => issue_width = Some(v),
+                    MachineBody::Buffers(v) => buffers = v,
+                    MachineBody::Pipeline(v) => pipeline = v,
+                    MachineBody::Resource(r) => resources.push(r),
+                    MachineBody::Bind(bd) => binds.push(bd),
+                    MachineBody::Override(ov) => overrides.push(ov),
+                    MachineBody::Forward(fw) => forwards.push(fw),
+                }
+            }
+            Machine {
+                name,
+                for_isas,
+                issue_width,
+                buffers,
+                pipeline,
+                resources,
+                binds,
+                overrides,
+                forwards,
+                span: e.span(),
+            }
+        })
+        .labelled("machine definition")
 }
 
 fn encoding<'src, I>()
@@ -923,7 +1333,7 @@ mod tests {
         lexer::lexer,
     };
 
-    use super::{inline_expr, isa_def};
+    use super::{inline_expr, instruction_def, isa_def, machine_def, unit_def};
 
     #[test]
     fn smoke_isa() {
@@ -973,6 +1383,158 @@ mod tests {
             Expr::Binary(bin) => assert_eq!(bin.op, BinOp::NotEqual),
             _ => panic!("Expected binary expression"),
         }
+    }
+
+    #[test]
+    fn smoke_unit_decl() {
+        let code = "unit WriteIMul { latency = 3; throughput = 1; }";
+        let (tokens, _e) = lexer().parse(code).into_output_errors();
+        let tokens = tokens.unwrap();
+        let parsed = unit_def().then(end()).parse(
+            tokens
+                .as_slice()
+                .map((code.len()..code.len()).into(), |(t, s)| (t, s)),
+        );
+        let u = parsed.output().expect("unit decl should parse").0.clone();
+        assert_eq!(u.name, "WriteIMul");
+        assert_eq!(u.default_latency, Some(3));
+        assert_eq!(u.default_throughput, Some(1));
+    }
+
+    #[test]
+    fn smoke_unit_decl_bare() {
+        let code = "unit WriteLoad;";
+        let (tokens, _e) = lexer().parse(code).into_output_errors();
+        let tokens = tokens.unwrap();
+        let parsed = unit_def().then(end()).parse(
+            tokens
+                .as_slice()
+                .map((code.len()..code.len()).into(), |(t, s)| (t, s)),
+        );
+        let u = parsed.output().expect("bare unit decl should parse").0.clone();
+        assert_eq!(u.name, "WriteLoad");
+        assert_eq!(u.default_latency, None);
+    }
+
+    #[test]
+    fn smoke_machine() {
+        let code = "machine RocketCore for [RV64I] {
+            issue_width = 2;
+            buffers { rob = 64; lsq = 16; }
+            resource ALU { units = 2; }
+            resource MUL { units = 1; }
+            bind WriteIALU { latency = 1; uses = [ALU]; }
+            bind WriteIMul { latency = 3; uses = [MUL]; }
+        }";
+        let (tokens, _e) = lexer().parse(code).into_output_errors();
+        let tokens = tokens.unwrap();
+        let parsed = machine_def().then(end()).parse(
+            tokens
+                .as_slice()
+                .map((code.len()..code.len()).into(), |(t, s)| (t, s)),
+        );
+        let m = parsed.output().expect("machine should parse").0.clone();
+        assert_eq!(m.name, "RocketCore");
+        assert_eq!(m.for_isas, vec!["RV64I".to_string()]);
+        assert_eq!(m.issue_width, Some(2));
+        assert_eq!(m.buffers, vec![("rob".into(), 64), ("lsq".into(), 16)]);
+        assert_eq!(m.resources.len(), 2);
+        assert_eq!(m.resources[0].name, "ALU");
+        assert_eq!(m.resources[0].units, 2);
+        assert_eq!(m.binds.len(), 2);
+        assert_eq!(m.binds[0].unit, "WriteIALU");
+        assert_eq!(m.binds[0].latency, Some(1));
+        assert_eq!(m.binds[0].uses, vec!["ALU".to_string()]);
+    }
+
+    #[test]
+    fn smoke_machine_pipeline_and_phase_bind() {
+        use crate::ast::Protection;
+        let code = "machine InOrder for [RV64I] {
+            pipeline { IF; ID; EX: unprotected; MEM; WB; }
+            resource LSU { units = 1; }
+            bind WriteLoad { reads = ID; writes = MEM; uses = [LSU]; }
+        }";
+        let (tokens, _e) = lexer().parse(code).into_output_errors();
+        let tokens = tokens.unwrap();
+        let parsed = machine_def().then(end()).parse(
+            tokens
+                .as_slice()
+                .map((code.len()..code.len()).into(), |(t, s)| (t, s)),
+        );
+        let m = parsed.output().expect("machine should parse").0.clone();
+        assert_eq!(m.pipeline.len(), 5);
+        assert_eq!(m.pipeline[0].name, "IF");
+        assert_eq!(m.pipeline[0].protection, Protection::Protected);
+        assert_eq!(m.pipeline[2].name, "EX");
+        assert_eq!(m.pipeline[2].protection, Protection::Unprotected);
+        assert_eq!(m.binds[0].reads.as_deref(), Some("ID"));
+        assert_eq!(m.binds[0].writes.as_deref(), Some("MEM"));
+    }
+
+    #[test]
+    fn smoke_machine_override_and_forward() {
+        let code = "machine M for [RV64I] {
+            resource ALU { units = 2; }
+            resource LSU { units = 1; }
+            bind WriteIALU { latency = 1; uses = [ALU]; }
+            override Mul { latency = 3; uses = [ALU]; }
+            forward ALU => ALU { latency = 0; }
+            forward LSU => ALU { latency = 1; }
+        }";
+        let (tokens, _e) = lexer().parse(code).into_output_errors();
+        let tokens = tokens.unwrap();
+        let parsed = machine_def().then(end()).parse(
+            tokens
+                .as_slice()
+                .map((code.len()..code.len()).into(), |(t, s)| (t, s)),
+        );
+        let m = parsed.output().expect("machine should parse").0.clone();
+        assert_eq!(m.overrides.len(), 1);
+        assert_eq!(m.overrides[0].instruction, "Mul");
+        assert_eq!(m.overrides[0].latency, Some(3));
+        assert_eq!(m.overrides[0].uses, vec!["ALU".to_string()]);
+        assert_eq!(m.forwards.len(), 2);
+        assert_eq!(
+            (m.forwards[0].from.as_str(), m.forwards[0].to.as_str(), m.forwards[0].latency),
+            ("ALU", "ALU", 0)
+        );
+        assert_eq!(
+            (m.forwards[1].from.as_str(), m.forwards[1].to.as_str(), m.forwards[1].latency),
+            ("LSU", "ALU", 1)
+        );
+    }
+
+    #[test]
+    fn smoke_instruction_schedule() {
+        let code = "instruction Mul : MulDivOp {
+            behavior { rd = rs1; }
+            schedule { units = [WriteIMul]; }
+        }";
+        let (tokens, _e) = lexer().parse(code).into_output_errors();
+        let tokens = tokens.unwrap();
+        let parsed = instruction_def().then(end()).parse(
+            tokens
+                .as_slice()
+                .map((code.len()..code.len()).into(), |(t, s)| (t, s)),
+        );
+        let inst = parsed.output().expect("instruction should parse").0.clone();
+        let sched = inst.schedule.expect("schedule block should be present");
+        assert_eq!(sched.units, vec!["WriteIMul".to_string()]);
+    }
+
+    #[test]
+    fn instruction_without_schedule_is_none() {
+        let code = "instruction Add : ALUOp { behavior { rd = rs1; } }";
+        let (tokens, _e) = lexer().parse(code).into_output_errors();
+        let tokens = tokens.unwrap();
+        let parsed = instruction_def().then(end()).parse(
+            tokens
+                .as_slice()
+                .map((code.len()..code.len()).into(), |(t, s)| (t, s)),
+        );
+        let inst = parsed.output().expect("instruction should parse").0.clone();
+        assert!(inst.schedule.is_none());
     }
 
     #[test]

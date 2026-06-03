@@ -122,6 +122,132 @@ pub struct Instruction {
     pub encoding: Vec<EncodingArm>,
     pub asm: Option<Expr>,
     pub behavior: Expr,
+    /// Performance model membership: the units (scheduling classes) this
+    /// instruction belongs to. `None` when the instruction carries no `schedule`
+    /// block; consumers fall back to a default scheduling class.
+    pub schedule: Option<Schedule>,
+    #[serde(skip_serializing)]
+    pub span: Span,
+}
+
+/// The `schedule { ... }` block of an instruction. Declares only *membership* in
+/// machine-independent scheduling classes ([`UnitDecl`]); the concrete cost
+/// (latency, resources) is supplied per-machine by [`UnitBind`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Schedule {
+    pub units: Vec<String>,
+    #[serde(skip_serializing)]
+    pub span: Span,
+}
+
+/// A top-level `unit` declaration: a machine-independent scheduling-class
+/// identity that instructions reference and machines bind to concrete cost. The
+/// optional defaults are resource-agnostic and feed the compiler cost model when
+/// no specific machine is selected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UnitDecl {
+    pub name: String,
+    pub default_latency: Option<i64>,
+    pub default_throughput: Option<i64>,
+    #[serde(skip_serializing)]
+    pub span: Span,
+}
+
+/// One functional unit / issue resource declared by a [`Machine`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MachineResource {
+    pub name: String,
+    /// Number of parallel units of this resource.
+    pub units: i64,
+    #[serde(skip_serializing)]
+    pub span: Span,
+}
+
+/// How a pipeline stage handles data hazards. Mirrors
+/// [`tir_be_common::sched::Protection`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum Protection {
+    Protected,
+    Unprotected,
+    Hard,
+}
+
+/// One named stage of a [`Machine`]'s pipeline. Its position in the pipeline list
+/// is its cycle offset from issue.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PipelinePhase {
+    pub name: String,
+    pub protection: Protection,
+    #[serde(skip_serializing)]
+    pub span: Span,
+}
+
+/// A machine's binding of one [`UnitDecl`] to concrete cost on that machine.
+///
+/// Timing is either scalar (`latency`) or phase-based (`reads`/`writes` naming
+/// pipeline phases); the latter desugars to `latency = cycle(writes) -
+/// cycle(reads)` with a non-zero read cycle. Scalar `latency = N` is equivalent
+/// to reading at cycle 0 and writing at cycle N.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UnitBind {
+    pub unit: String,
+    pub latency: Option<i64>,
+    pub throughput: Option<i64>,
+    /// Pipeline phase at which source operands are read (phase-based form).
+    pub reads: Option<String>,
+    /// Pipeline phase at which the result is written (phase-based form).
+    pub writes: Option<String>,
+    /// Resources (by [`MachineResource`] name) this unit occupies.
+    pub uses: Vec<String>,
+    #[serde(skip_serializing)]
+    pub span: Span,
+}
+
+/// A machine's per-instruction cost override (the LLVM `InstRW` analogue): it
+/// supersedes the `unit`-based resolution for one specific instruction on this
+/// machine. Carries the same timing fields as a [`UnitBind`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MachineOverride {
+    /// The overridden instruction, by its TMDL `instruction` name.
+    pub instruction: String,
+    pub latency: Option<i64>,
+    pub throughput: Option<i64>,
+    pub reads: Option<String>,
+    pub writes: Option<String>,
+    pub uses: Vec<String>,
+    #[serde(skip_serializing)]
+    pub span: Span,
+}
+
+/// A forwarding/bypass path between two of a machine's resources, with the
+/// producer→consumer latency it grants. Mirrors [`tir_be_common::sched::Forward`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Forward {
+    pub from: String,
+    pub to: String,
+    pub latency: i64,
+    #[serde(skip_serializing)]
+    pub span: Span,
+}
+
+/// A `machine` block: one device implementation. Holds the resource menu, buffer
+/// sizes (defaults; the Rust simulator may override), and per-unit cost
+/// bindings for a set of ISAs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Machine {
+    pub name: String,
+    pub for_isas: Vec<String>,
+    pub issue_width: Option<i64>,
+    /// Structural buffer sizes by name (e.g. `rob`, `lsq`, `iq`).
+    pub buffers: Vec<(String, i64)>,
+    /// Ordered pipeline stages; empty when no `pipeline` block is declared.
+    pub pipeline: Vec<PipelinePhase>,
+    pub resources: Vec<MachineResource>,
+    pub binds: Vec<UnitBind>,
+    /// Per-instruction cost overrides (take precedence over `binds`).
+    pub overrides: Vec<MachineOverride>,
+    /// Forwarding/bypass paths between resources.
+    pub forwards: Vec<Forward>,
     #[serde(skip_serializing)]
     pub span: Span,
 }
@@ -141,6 +267,8 @@ pub enum Item {
     RegisterClass(RegisterClass),
     Template(Template),
     Instruction(Instruction),
+    Unit(UnitDecl),
+    Machine(Machine),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
@@ -842,6 +970,8 @@ impl Item {
             Item::Instruction(inst) => &inst.name,
             Item::RegisterClass(rc) => &rc.name,
             Item::Template(tmpl) => &tmpl.name,
+            Item::Unit(su) => &su.name,
+            Item::Machine(m) => &m.name,
         }
     }
 
@@ -855,6 +985,20 @@ impl Item {
     pub fn as_instruction(&self) -> Option<&Instruction> {
         match self {
             Item::Instruction(i) => Some(i),
+            _ => None,
+        }
+    }
+
+    pub fn as_unit(&self) -> Option<&UnitDecl> {
+        match self {
+            Item::Unit(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    pub fn as_machine(&self) -> Option<&Machine> {
+        match self {
+            Item::Machine(m) => Some(m),
             _ => None,
         }
     }
@@ -1095,6 +1239,20 @@ impl File {
     pub fn register_classes(&self) -> impl Iterator<Item = &RegisterClass> {
         self.items.iter().filter_map(|f| match f {
             Item::RegisterClass(rc) => Some(rc),
+            _ => None,
+        })
+    }
+
+    pub fn units(&self) -> impl Iterator<Item = &UnitDecl> {
+        self.items.iter().filter_map(|f| match f {
+            Item::Unit(s) => Some(s),
+            _ => None,
+        })
+    }
+
+    pub fn machines(&self) -> impl Iterator<Item = &Machine> {
+        self.items.iter().filter_map(|f| match f {
+            Item::Machine(m) => Some(m),
             _ => None,
         })
     }

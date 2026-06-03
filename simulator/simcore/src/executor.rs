@@ -134,6 +134,8 @@ pub struct Executor {
     memory: Vec<u8>,
     pc: u64,
     pc_explicitly_written: bool,
+    record_trace: bool,
+    trace: Vec<(tir::OpId, u64)>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -158,6 +160,18 @@ impl Executor {
         self.pc = program.entry_pc;
         self.program = Some(program);
         Ok(())
+    }
+
+    /// Record the dynamic instruction stream (the executed op ids, in order) so a
+    /// timing model can replay it. Off by default to avoid the memory cost.
+    pub fn enable_trace_recording(&mut self) {
+        self.record_trace = true;
+    }
+
+    /// The recorded dynamic instruction stream as `(op, pc)` pairs, in execution
+    /// order. The PC lets a timing model reconstruct branch directions/outcomes.
+    pub fn trace(&self) -> &[(tir::OpId, u64)] {
+        &self.trace
     }
 
     pub fn run(&mut self, until_pc: u64, max_cycles: u64) -> Result<(), Error> {
@@ -219,15 +233,23 @@ impl Executor {
                     );
                     Self::emit_trace_line(out, &line);
                 }
+                if self.record_trace {
+                    self.trace.push((op_id, inst_pc));
+                }
+                // Expose this instruction's own address so PC-relative semantics
+                // (`PC::pc`) resolve correctly even mid-block.
+                self.pc = inst_pc;
+                self.pc_explicitly_written = false;
                 machine_inst.execute(self)?;
                 if trace.registers_after_each_instruction {
                     self.emit_register_dump(out, "registers");
                 }
-                if !self.pc_explicitly_written {
-                    inst_pc = inst_pc.wrapping_add(u64::from(machine_inst.width_bytes()));
-                } else {
-                    inst_pc = self.pc;
+                if self.pc_explicitly_written {
+                    // A control transfer wrote PC: `self.pc` holds the target, and
+                    // the next block is resolved at the top of the outer loop.
+                    break;
                 }
+                inst_pc = inst_pc.wrapping_add(u64::from(machine_inst.width_bytes()));
             }
 
             if !self.pc_explicitly_written {
@@ -237,7 +259,7 @@ impl Executor {
                     if trace.registers_at_end {
                         self.emit_register_dump(out, "final registers");
                     }
-                    return Err(Error::MissingFallthrough { pc: self.pc });
+                    return Err(Error::MissingFallthrough { pc: inst_pc });
                 }
             }
         }
@@ -312,6 +334,11 @@ impl Executor {
 
 impl MachineContext for Executor {
     fn read_register(&self, class: &str, index: u16) -> Result<tir::utils::APInt, SimTrap> {
+        // The program counter is held specially (it drives instruction fetch), but
+        // semantics reference it as the `PC` register class (e.g. `PC::pc`).
+        if class == "PC" {
+            return Ok(tir::utils::APInt::new(64, self.pc));
+        }
         let key = (class.to_string(), index);
         if let Some(value) = self.registers.get(&key) {
             return Ok(value.clone());
@@ -325,6 +352,10 @@ impl MachineContext for Executor {
         index: u16,
         value: tir::utils::APInt,
     ) -> Result<(), SimTrap> {
+        if class == "PC" {
+            self.write_pc(value.to_u64());
+            return Ok(());
+        }
         self.registers.insert((class.to_string(), index), value);
         Ok(())
     }
