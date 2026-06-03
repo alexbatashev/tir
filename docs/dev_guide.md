@@ -32,8 +32,35 @@ cargo nextest r
 
 ### Running check tests
 
-There are also check-tests, which are very similar to LLVM Integrated Tests.
-An easy and quick way to run those is to invoke `cargo xtask check`.
+There are also check-tests, which are very similar to LLVM Integrated Tests
+(LIT). Each test file lives under a crate's `checks/` directory and contains
+one or more `RUN:` lines that pipe a tool's output into `filecheck`, e.g.:
+
+```
+// RUN: tmdlc --action=emit-ast --output=- %S/../Inputs/simple.tmdl | filecheck %s
+// CHECK: File {
+// CHECK-NEXT:     items: [
+```
+
+These run as ordinary integration tests, so `cargo test` (or `cargo nextest r`)
+executes them alongside the unit tests — each check file shows up as its own
+test case. `cargo xtask check` is a convenience wrapper around the test suite.
+
+`filecheck` is a small, self-contained reimplementation of LLVM's FileCheck
+(built on `chumsky` and `ariadne`); it lives in `utils/filecheck` and is also
+available as a standalone binary. The LIT driver is in `utils/lit`.
+
+The `CHECK` lines for golden-output tests are generated, not written by hand.
+Regenerate them after an intentional output change with:
+
+```sh
+cargo build                              # build the tools first
+./utils/scripts/update_checks.py tmdl    # or: fcc, ...
+```
+
+Pass explicit file paths to (re)generate specific tests, including brand-new
+ones. Hand-authored tests (those without the generated header) are never
+touched by a bulk regeneration.
 
 ### Running fuzz tests
 

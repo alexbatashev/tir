@@ -1,0 +1,2 @@
+#define FLAG
+int FLAG;

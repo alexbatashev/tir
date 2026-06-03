@@ -4,6 +4,7 @@ resolver = "2"
 members = [
     "utils/check-runner",
     "utils/filecheck",
+    "utils/lit",
     "utils/not",
     "tmdl",
     "xtask",

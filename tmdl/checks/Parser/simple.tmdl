@@ -1,4 +1,4 @@
-// This file was generated with ./utils/scripts/update_tmdlc_checks.py. Do not modify CHECKs manually.
+// This file was generated with ./utils/scripts/update_checks.py. Do not modify CHECKs manually.
 
 // RUN: tmdlc --action=emit-ast --output=- %S/../Inputs/simple.tmdl | filecheck %s
 
@@ -336,7 +336,12 @@
 // CHECK-NEXT:                         stmts: [
 // CHECK-NEXT:                             Assign(
 // CHECK-NEXT:                                 Assign {
-// CHECK-NEXT:                                     dest: "rd",
+// CHECK-NEXT:                                     dest: Ident(
+// CHECK-NEXT:                                         Ident {
+// CHECK-NEXT:                                             name: "rd",
+// CHECK-NEXT:                                             span: 1014..1017,
+// CHECK-NEXT:                                         },
+// CHECK-NEXT:                                     ),
 // CHECK-NEXT:                                     value: Binary(
 // CHECK-NEXT:                                         Binary {
 // CHECK-NEXT:                                             lhs: Ident(

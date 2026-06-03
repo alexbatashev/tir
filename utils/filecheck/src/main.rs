@@ -1,37 +1,54 @@
-use clap::{CommandFactory, FromArgMatches, Parser};
-use litcheck_core::Input;
-use litcheck_filecheck::Config;
-use litcheck_filecheck::Test;
+use std::io::Read;
+use std::path::PathBuf;
 
+use clap::Parser;
+use filecheck::{verify, Config, Source};
+
+/// A standalone FileCheck-style matcher built on chumsky and ariadne.
 #[derive(Debug, Parser)]
 #[command(name = "filecheck", arg_required_else_help(true))]
 struct Cli {
-    #[arg(value_name = "CHECK")]
-    pub match_file: Input,
-    #[arg(value_name = "VERIFY", default_value = "-")]
-    pub input_file: Input,
+    /// File containing the check directives.
+    #[arg(value_name = "CHECK-FILE")]
+    check_file: PathBuf,
+
+    /// File to verify. Defaults to standard input.
+    #[arg(value_name = "INPUT-FILE", default_value = "-")]
+    input_file: PathBuf,
+
     #[command(flatten)]
-    pub config: Config,
+    config: Config,
+}
+
+fn read_source(path: &PathBuf) -> Source {
+    if path.as_os_str() == "-" {
+        let mut text = String::new();
+        std::io::stdin()
+            .read_to_string(&mut text)
+            .unwrap_or_else(|e| {
+                eprintln!("filecheck: cannot read stdin: {e}");
+                std::process::exit(2);
+            });
+        Source::new("<stdin>", text)
+    } else {
+        let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
+            eprintln!("filecheck: cannot read '{}': {e}", path.display());
+            std::process::exit(2);
+        });
+        Source::new(path.display().to_string(), text)
+    }
 }
 
 fn main() {
-    let cmd = Cli::command().mut_arg("allow_empty", |arg| arg.long("allow_empty"));
-    let matches = cmd.get_matches();
-    let args = Cli::from_arg_matches(&matches).unwrap();
-    let match_file = args.match_file.into_source(true).unwrap();
+    let args = Cli::parse();
 
-    let mut config = args.config;
-    config.comment_prefixes.sort();
-    config.comment_prefixes.dedup();
-    config.check_prefixes.sort();
-    config.check_prefixes.dedup();
+    let check = read_source(&args.check_file);
+    let input = read_source(&args.input_file);
 
-    let input_file = args.input_file.into_source(true).unwrap();
-    let mut test = Test::new(match_file, &config);
-    match test.verify(input_file) {
-        Ok(_) => {}
-        Err(err) => {
-            eprintln!("filecheck failed:\n{:?}", err);
+    match verify(&check, &input, &args.config) {
+        Ok(()) => {}
+        Err(diagnostic) => {
+            eprint!("{diagnostic}");
             std::process::exit(1);
         }
     }
