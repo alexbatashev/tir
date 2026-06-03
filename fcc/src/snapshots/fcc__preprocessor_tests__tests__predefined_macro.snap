@@ -1,5 +1,6 @@
 ---
 source: fcc/src/preprocessor_tests.rs
+assertion_line: 57
 expression: "pp_with_defines(\"int x = N;\", &[(\"N\", \"7\")])"
 ---
 [
@@ -13,6 +14,7 @@ expression: "pp_with_defines(\"int x = N;\", &[(\"N\", \"7\")])"
     Whitespace(
         " ",
     ),
+    Assign,
     Whitespace(
         " ",
     ),

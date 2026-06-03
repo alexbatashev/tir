@@ -124,6 +124,16 @@ pub enum Token {
     RBrace,
     #[token(";")]
     Semicolon,
+    #[token(",")]
+    Comma,
+    #[token("=")]
+    Assign,
+    #[token("+")]
+    Plus,
+    #[token("-")]
+    Minus,
+    #[token("*")]
+    Star,
 }
 
 impl fmt::Display for Token {
@@ -184,6 +194,11 @@ impl fmt::Display for Token {
             Token::LBrace => f.write_str("{"),
             Token::RBrace => f.write_str("}"),
             Token::Semicolon => f.write_str(";"),
+            Token::Comma => f.write_str(","),
+            Token::Assign => f.write_str("="),
+            Token::Plus => f.write_str("+"),
+            Token::Minus => f.write_str("-"),
+            Token::Star => f.write_str("*"),
         }
     }
 }

@@ -32,7 +32,7 @@ pub(crate) fn parse_single_op<'src>(
     }
 
     if let Some(name) = parser.parse_ident() {
-        let (dialect, name) = if parser.peek_char() == Some('.') {
+        let (dialect, name) = if parser.parse_token(".") {
             if let Some(op_name) = parser.parse_ident() {
                 (name, op_name)
             } else {

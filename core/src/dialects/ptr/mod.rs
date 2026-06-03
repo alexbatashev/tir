@@ -1,0 +1,224 @@
+//! The `ptr` dialect: pointers plus the loads and stores that read and write
+//! through them. It is deliberately tiny — just enough to express the
+//! memory-based (non-SSA) lowering a simple C frontend produces, where every
+//! local lives in a stack slot. There is no pointer arithmetic and loads/stores
+//! carry no offset.
+
+use std::any::Any;
+use std::sync::Arc;
+
+use crate::ty::TypeConstraint;
+use crate::{Context, Error, IRFormatter, Type, TypeId, dialect, operation, parse::Span};
+
+use crate as tir;
+use crate::Any as AnyConstraint;
+
+pub mod ops {
+    pub use super::{AllocaOp, LoadOp, StoreOp, alloca, load, store};
+}
+
+dialect! {
+    PtrDialect {
+        name: "ptr",
+        operations: [
+            AllocaOp,
+            LoadOp,
+            StoreOp,
+        ],
+        types: [PtrType],
+    }
+}
+
+/// A pointer type, written `!ptr.p` (opaque) or `!ptr.p<!i32>` (typed). A typed
+/// pointer remembers its pointee so loads can recover their result type; an
+/// opaque pointer carries no pointee.
+pub struct PtrType {
+    pointee: Option<Arc<dyn Type>>,
+}
+
+impl PtrType {
+    /// An opaque pointer: `!ptr.p`.
+    pub fn opaque(context: &Context) -> TypeId {
+        context.get_type_id(Arc::new(Self { pointee: None }))
+    }
+
+    /// A typed pointer to `pointee`: `!ptr.p<!pointee>`.
+    pub fn typed(context: &Context, pointee: TypeId) -> TypeId {
+        let pointee = context.get_type_data(pointee);
+        context.get_type_id(Arc::new(Self {
+            pointee: Some(pointee),
+        }))
+    }
+
+    /// The pointee type id, or `None` for an opaque pointer.
+    pub fn pointee(&self, context: &Context) -> Option<TypeId> {
+        self.pointee
+            .as_ref()
+            .map(|p| context.get_type_id(p.clone()))
+    }
+}
+
+impl TypeConstraint for PtrType {}
+
+impl Type for PtrType {
+    fn dialect(&self) -> &'static str {
+        "ptr"
+    }
+
+    fn parse_key() -> &'static str {
+        "p"
+    }
+
+    fn parse<'src>(
+        _mnemonic: &str,
+        parser: &mut tir::parse::text::Parser<'src>,
+        context: &Context,
+    ) -> Result<TypeId, (Span, Error)> {
+        use tir::parse::common::Cursor;
+        if parser.parse_token("<") {
+            let pointee = parser
+                .parse_type(context)?
+                .ok_or_else(|| (parser.span(), Error::ExpectedType))?;
+            if !parser.parse_token(">") {
+                return Err((parser.span(), Error::ExpectedToken(">")));
+            }
+            Ok(Self::typed(context, pointee))
+        } else {
+            Ok(Self::opaque(context))
+        }
+    }
+
+    fn print(&self, fmt: &mut IRFormatter<'_>) -> Result<(), std::fmt::Error> {
+        fmt.write("p")?;
+        if let Some(pointee) = &self.pointee {
+            fmt.write("<!")?;
+            if pointee.dialect() != "builtin" {
+                fmt.write(format!("{}.", pointee.dialect()))?;
+            }
+            pointee.print(fmt)?;
+            fmt.write(">")?;
+        }
+        Ok(())
+    }
+
+    fn eq(&self, other: &dyn Type) -> bool {
+        let Some(other) = (other as &dyn Any).downcast_ref::<PtrType>() else {
+            return false;
+        };
+        match (&self.pointee, &other.pointee) {
+            (None, None) => true,
+            (Some(a), Some(b)) => a.eq(b.as_ref()),
+            _ => false,
+        }
+    }
+}
+
+operation! {
+    AllocaOp {
+        name: "alloca",
+        dialect: "ptr",
+        results: R {
+            result: "crate::ptr::PtrType",
+        },
+    }
+}
+
+operation! {
+    LoadOp {
+        name: "load",
+        dialect: "ptr",
+        operands: O {
+            ptr: "crate::ptr::PtrType",
+        },
+        results: R {
+            result: "AnyConstraint",
+        },
+    }
+}
+
+operation! {
+    StoreOp {
+        name: "store",
+        dialect: "ptr",
+        operands: O {
+            value: "AnyConstraint",
+            ptr: "crate::ptr::PtrType",
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        IRBuilder, IRFormatter, Operation,
+        builtin::{FuncOp, IntegerType, ops as builtin_ops},
+        parse::ir::parse_ir,
+    };
+
+    #[test]
+    fn opaque_and_typed_pointer_roundtrip() {
+        let context = Context::with_default_dialects();
+
+        let opaque = PtrType::opaque(&context);
+        assert_eq!(context.type_to_string(opaque), "!ptr.p");
+
+        let i32_ty = IntegerType::new(&context, 32);
+        let typed = PtrType::typed(&context, i32_ty);
+        assert_eq!(context.type_to_string(typed), "!ptr.p<!i32>");
+
+        // Typed pointer remembers its pointee.
+        let data = context.get_type_data(typed);
+        let ptr = (data.as_ref() as &dyn Any)
+            .downcast_ref::<PtrType>()
+            .unwrap();
+        assert_eq!(ptr.pointee(&context), Some(i32_ty));
+
+        // An opaque pointer carries no pointee.
+        let opaque_data = context.get_type_data(opaque);
+        let opaque_ptr = (opaque_data.as_ref() as &dyn Any)
+            .downcast_ref::<PtrType>()
+            .unwrap();
+        assert_eq!(opaque_ptr.pointee(&context), None);
+
+        // Typed and opaque pointers are distinct, identical ones are interned.
+        assert_ne!(opaque, typed);
+        assert_eq!(PtrType::typed(&context, i32_ty), typed);
+    }
+
+    #[test]
+    fn alloca_store_load_in_func_roundtrip() {
+        let context = Context::with_default_dialects();
+        let i32_ty = IntegerType::new(&context, 32);
+
+        let param = context.create_value(i32_ty, None);
+        let param_id = param.id();
+        let region = context.create_region();
+        let block = context.create_block(vec![param]);
+        region.add_block(block.id());
+
+        let func = builtin_ops::func(&context, "id", i32_ty, Some(region.id())).build();
+
+        let mut builder = IRBuilder::new(func.body());
+        let slot = builder.insert(ops::alloca(&context, PtrType::typed(&context, i32_ty)).build());
+        builder.insert(ops::store(&context, param_id, slot.result()).build());
+        let loaded = builder.insert(ops::load(&context, slot.result(), i32_ty).build());
+        builder.insert(builtin_ops::r#return(&context, loaded.result()).build());
+
+        assert!(func.verify(&context).is_ok());
+
+        let mut buf = String::new();
+        let mut f = IRFormatter::new(&mut buf);
+        func.print(&mut f).expect("print ok");
+        assert!(buf.contains("ptr.alloca"));
+        assert!(buf.contains("ptr.store"));
+        assert!(buf.contains("ptr.load"));
+
+        let new_context = Context::with_default_dialects();
+        let new_func = parse_ir::<FuncOp>(&new_context, &buf).expect("parse func");
+        let mut new_buf = String::new();
+        let mut f = IRFormatter::new(&mut new_buf);
+        new_func.print(&mut f).expect("print ok");
+        assert_eq!(buf, new_buf);
+    }
+}
