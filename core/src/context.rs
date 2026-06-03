@@ -224,6 +224,23 @@ impl Context {
         self.0.read().operations.contains_key(&id)
     }
 
+    /// Replace an operation's attributes in place, keeping its id, position, and
+    /// regions. Register allocation uses this to rewrite virtual register operands
+    /// to physical ones once the def-use chain is no longer needed; it deliberately
+    /// does not update `Value::uses`, since physical registers are not SSA values.
+    pub fn set_op_attributes(
+        &self,
+        id: OpId,
+        attributes: Vec<crate::attributes::NamedAttribute>,
+    ) {
+        let mut inner = self.0.write();
+        if let Some(existing) = inner.operations.get(&id).cloned() {
+            let mut updated = (*existing).clone();
+            updated.attributes = attributes;
+            inner.operations.insert(id, Arc::new(updated));
+        }
+    }
+
     /// Remove an op from the operation arena. Called by `Rewriter::erase_op`/
     /// `replace_op` once the op has left its block, so the arena tracks the *live*
     /// IR rather than accumulating detached ops (which otherwise show up as phantom

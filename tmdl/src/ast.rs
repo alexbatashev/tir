@@ -12,6 +12,15 @@ pub enum RegisterTrait {
     CalleeSaved,
     StackPointer,
     ProgramCounter,
+    GlobalPointer,
+    ThreadPointer,
+    /// Carries an incoming argument under the calling convention. Argument order
+    /// follows the register index order within the class (a0 before a1, ...).
+    Argument,
+    /// Holds an outgoing return value under the calling convention.
+    ReturnValue,
+    Temporary,
+    Saved,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -56,6 +65,19 @@ pub struct RegisterNameTables {
     pub parse_names: Vec<(String, u16)>,
     pub isa_names: Vec<(u16, String)>,
     pub abi_names: Vec<(u16, String)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RegisterAllocationMetadata {
+    /// Allocatable register indices in preferred allocation order.
+    pub allocation_order: Vec<u16>,
+    pub caller_saved: Vec<u16>,
+    pub callee_saved: Vec<u16>,
+    /// Argument registers in calling-convention order.
+    pub arguments: Vec<u16>,
+    pub return_values: Vec<u16>,
+    /// Indices reserved by the ABI and never allocated.
+    pub reserved: Vec<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -918,6 +940,82 @@ impl RegisterClass {
                 .any(|t| matches!(t, RegisterTrait::HardwiredZero))
                 .then(|| parse_trailing_index(&reg.name).unwrap_or(u16::MAX))
         })
+    }
+
+    /// Every register that carries a concrete encoding index, paired with its
+    /// traits, sorted by index. Registers without a trailing index (e.g. `pc`) are
+    /// skipped — they have no encodable slot and are never allocated.
+    pub fn indexed_registers(&self) -> Vec<(u16, Vec<RegisterTrait>)> {
+        let mut regs = self
+            .resolve_registers()
+            .filter_map(|reg| parse_trailing_index(&reg.name).map(|idx| (idx, reg.traits)))
+            .collect::<Vec<_>>();
+        regs.sort_by_key(|(idx, _)| *idx);
+        regs
+    }
+
+    /// Register allocation metadata derived from per-register traits: which
+    /// registers are allocatable (and in what preferred order), the caller/callee
+    /// saved partitions, the ordered argument registers, and the return-value
+    /// registers. Indices that are reserved by the ABI (zero, return address,
+    /// stack/global/thread pointer, program counter) never appear in the
+    /// allocation order.
+    pub fn allocation_metadata(&self) -> RegisterAllocationMetadata {
+        let regs = self.indexed_registers();
+        let is_reserved = |traits: &[RegisterTrait]| {
+            traits.iter().any(|t| {
+                matches!(
+                    t,
+                    RegisterTrait::HardwiredZero
+                        | RegisterTrait::ReturnAddress
+                        | RegisterTrait::StackPointer
+                        | RegisterTrait::ProgramCounter
+                        | RegisterTrait::GlobalPointer
+                        | RegisterTrait::ThreadPointer
+                )
+            })
+        };
+        let has = |traits: &[RegisterTrait], want: &RegisterTrait| traits.contains(want);
+
+        let mut caller_saved = Vec::new();
+        let mut callee_saved = Vec::new();
+        let mut arguments = Vec::new();
+        let mut return_values = Vec::new();
+        let mut reserved = Vec::new();
+        for (idx, traits) in &regs {
+            if is_reserved(traits) {
+                reserved.push(*idx);
+            }
+            if has(traits, &RegisterTrait::CallerSaved) && !is_reserved(traits) {
+                caller_saved.push(*idx);
+            }
+            if has(traits, &RegisterTrait::CalleeSaved) && !is_reserved(traits) {
+                callee_saved.push(*idx);
+            }
+            if has(traits, &RegisterTrait::Argument) {
+                arguments.push(*idx);
+            }
+            if has(traits, &RegisterTrait::ReturnValue) {
+                return_values.push(*idx);
+            }
+        }
+
+        // Allocate caller-saved (scratch) registers first so short-lived values
+        // avoid forcing a callee-saved register's save/restore.
+        let allocation_order = caller_saved
+            .iter()
+            .chain(callee_saved.iter())
+            .copied()
+            .collect();
+
+        RegisterAllocationMetadata {
+            allocation_order,
+            caller_saved,
+            callee_saved,
+            arguments,
+            return_values,
+            reserved,
+        }
     }
 
     pub fn resolve_registers(&self) -> impl Iterator<Item = Register> {

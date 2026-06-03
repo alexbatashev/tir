@@ -17,7 +17,10 @@ register_class GPR for [ARMv8A64] {
     param WIDTH: Integer = self.XLEN;
 
     registers {
-        x0..x29 => { traits = [caller_saved] },
+        x0 => { traits = [argument, return_value, caller_saved] },
+        x1..x7 => { traits = [argument, caller_saved] },
+        x8..x28 => { traits = [caller_saved] },
+        x29("fp") => { traits = [stack_pointer, callee_saved] },
         x30("lr") => { traits = [return_address, caller_saved] },
         x31("xzr") => { traits = [hardwired_zero] },
     }
