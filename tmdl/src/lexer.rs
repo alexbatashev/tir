@@ -99,6 +99,24 @@ pub enum Token<'a> {
     KwAsm,
     /// `behavior`
     KwBehavior,
+    /// `unit`
+    KwUnit,
+    /// `machine`
+    KwMachine,
+    /// `resource`
+    KwResource,
+    /// `buffers`
+    KwBuffers,
+    /// `bind`
+    KwBind,
+    /// `schedule`
+    KwSchedule,
+    /// `pipeline`
+    KwPipeline,
+    /// `override`
+    KwOverride,
+    /// `forward`
+    KwForward,
 }
 
 impl<'a> Token<'a> {
@@ -179,6 +197,15 @@ pub(crate) fn lexer<'src>()
         "else" => Token::KwElse,
         "asm" => Token::KwAsm,
         "behavior" => Token::KwBehavior,
+        "unit" => Token::KwUnit,
+        "machine" => Token::KwMachine,
+        "resource" => Token::KwResource,
+        "buffers" => Token::KwBuffers,
+        "bind" => Token::KwBind,
+        "schedule" => Token::KwSchedule,
+        "pipeline" => Token::KwPipeline,
+        "override" => Token::KwOverride,
+        "forward" => Token::KwForward,
         _ => Token::Identifier(ident),
     });
 
@@ -265,6 +292,15 @@ impl<'a> fmt::Display for Token<'a> {
             Token::KwElse => f.write_str("else"),
             Token::KwAsm => f.write_str("asm"),
             Token::KwBehavior => f.write_str("behavior"),
+            Token::KwUnit => f.write_str("unit"),
+            Token::KwMachine => f.write_str("machine"),
+            Token::KwResource => f.write_str("resource"),
+            Token::KwBuffers => f.write_str("buffers"),
+            Token::KwBind => f.write_str("bind"),
+            Token::KwSchedule => f.write_str("schedule"),
+            Token::KwPipeline => f.write_str("pipeline"),
+            Token::KwOverride => f.write_str("override"),
+            Token::KwForward => f.write_str("forward"),
         }
     }
 }

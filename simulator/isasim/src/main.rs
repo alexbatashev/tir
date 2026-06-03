@@ -1,6 +1,8 @@
 use clap::Parser;
 use tir_be_common::AsmDialect;
+use tir_be_common::sched::MachineModel;
 use tir_riscv::RiscvDialect;
+use tir_sim::timing::{self, TimingConfig};
 use tir_sim::{Executor, ProgramBuilder, TraceOptions};
 
 #[derive(Parser)]
@@ -25,7 +27,21 @@ struct Cli {
     trace_registers_each: bool,
     #[arg(long, default_value_t = false)]
     trace_registers_end: bool,
+    /// Report cycle-approximate timing after the functional run.
+    #[arg(long, default_value_t = false)]
+    timing: bool,
+    /// Machine model for `--timing`: `in-order` or `ooo`.
+    #[arg(long, default_value = "ooo")]
+    machine: String,
     program: String,
+}
+
+fn select_machine(name: &str) -> Option<MachineModel> {
+    match name {
+        "in-order" | "inorder" => Some(tir_riscv::in_order_core_model()),
+        "ooo" | "out-of-order" => Some(tir_riscv::out_of_order_core_model()),
+        _ => None,
+    }
 }
 
 fn main() {
@@ -53,6 +69,22 @@ fn main() {
 
     let until_pc = parse_addr(&args.until_pc);
     let mut executor = Executor::new(args.mem_size);
+
+    // Pick the timing model up front so a bad `--machine` fails before running.
+    let model = if args.timing {
+        let m = select_machine(&args.machine).unwrap_or_else(|| {
+            eprintln!(
+                "unknown machine '{}' (expected: in-order, ooo)",
+                args.machine
+            );
+            std::process::exit(2);
+        });
+        executor.enable_trace_recording();
+        Some(m)
+    } else {
+        None
+    };
+
     executor.load(program).expect("failed to load program");
     let trace = TraceOptions {
         instructions: args.trace_instructions,
@@ -63,6 +95,18 @@ fn main() {
     executor
         .run_with_trace(until_pc, args.max_cycles, trace, &mut stdout)
         .expect("program execution failed");
+
+    if let Some(model) = model {
+        let config = TimingConfig::for_model(&model);
+        let result = timing::simulate(&model, &context, executor.trace(), &config);
+        println!(
+            "timing[{}]: {} instructions, {} cycles, IPC {:.3}",
+            model.name,
+            result.instructions,
+            result.cycles,
+            result.ipc(),
+        );
+    }
 }
 
 fn parse_addr(addr: &str) -> u64 {

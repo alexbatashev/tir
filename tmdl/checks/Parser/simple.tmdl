@@ -368,6 +368,7 @@
 // CHECK-NEXT:                         span: 1004..1036,
 // CHECK-NEXT:                     },
 // CHECK-NEXT:                 ),
+// CHECK-NEXT:                 schedule: None,
 // CHECK-NEXT:                 span: 856..1038,
 // CHECK-NEXT:             },
 // CHECK-NEXT:         ),

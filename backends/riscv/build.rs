@@ -7,6 +7,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let compiler = Compiler::builder()
         .add_input("./defs/main.tmdl")
         .add_input("./defs/base.tmdl")
+        .add_input("./defs/perf.tmdl")
         .output(OutputKind::File(format!(
             "{}/riscv.rs",
             std::env::var("OUT_DIR")?

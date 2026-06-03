@@ -134,6 +134,8 @@ pub struct Executor {
     memory: Vec<u8>,
     pc: u64,
     pc_explicitly_written: bool,
+    record_trace: bool,
+    trace: Vec<tir::OpId>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -158,6 +160,17 @@ impl Executor {
         self.pc = program.entry_pc;
         self.program = Some(program);
         Ok(())
+    }
+
+    /// Record the dynamic instruction stream (the executed op ids, in order) so a
+    /// timing model can replay it. Off by default to avoid the memory cost.
+    pub fn enable_trace_recording(&mut self) {
+        self.record_trace = true;
+    }
+
+    /// The recorded dynamic instruction stream, in execution order.
+    pub fn trace(&self) -> &[tir::OpId] {
+        &self.trace
     }
 
     pub fn run(&mut self, until_pc: u64, max_cycles: u64) -> Result<(), Error> {
@@ -218,6 +231,9 @@ impl Executor {
                         Self::format_instruction_line(&context, &op, machine_inst.as_ref())
                     );
                     Self::emit_trace_line(out, &line);
+                }
+                if self.record_trace {
+                    self.trace.push(op_id);
                 }
                 machine_inst.execute(self)?;
                 if trace.registers_after_each_instruction {

@@ -156,6 +156,10 @@ instruction LoadWord for [RV32I, RV64I] : LoadInst {
     behavior {
         rd = sext(load(rs1 + sext(imm, self.XLEN), 4, 0b1), self.XLEN);
     }
+
+    schedule {
+        units = [WriteLoad];
+    }
 }
 
 instruction LoadByteUnsigned for [RV32I, RV64I] : LoadInst {
@@ -236,6 +240,10 @@ instruction Add for [RV32I, RV64I] : ALUOp {
 
     behavior {
         rd = rs1 + rs2;
+    }
+
+    schedule {
+        units = [WriteIALU];
     }
 }
 

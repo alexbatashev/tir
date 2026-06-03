@@ -257,6 +257,95 @@ mod tests {
     use crate::{RiscvDialect, create_isel_pass, create_regalloc_pass};
 
     #[test]
+    fn machine_models_resolve_scheduling_classes() {
+        // Resource assignment is shared; an unscheduled instruction falls back to
+        // the default class on either core.
+        for model in [crate::in_order_core_model(), crate::out_of_order_core_model()] {
+            assert_eq!(model.sched_class("add").resources, &["ALU"]);
+            assert_eq!(model.sched_class("lw").resources, &["LSU"]);
+            assert_eq!(
+                model.sched_class("sub"),
+                tir_be_common::sched::InstrSchedClass::DEFAULT
+            );
+        }
+    }
+
+    #[test]
+    fn phase_based_timing_resolves_from_pipeline() {
+        // InOrderCore is phase-based: a 5-stage pipeline (IF ID EX MEM WB), operands
+        // read at ID (cycle 1), results written at EX/MEM.
+        let in_order = crate::in_order_core_model();
+        assert_eq!(in_order.phase_cycle("ID"), Some(1));
+        assert_eq!(in_order.phase_cycle("MEM"), Some(3));
+        assert_eq!(
+            in_order.protection_at(2),
+            Some(tir_be_common::sched::Protection::Protected)
+        );
+
+        // add: read@ID(1) → write@EX(2) ⇒ latency 1, read_cycle 1, write_cycle 2.
+        let add = in_order.sched_class("add");
+        assert_eq!((add.read_cycle, add.latency, add.write_cycle()), (1, 1, 2));
+        // lw: read@ID(1) → write@MEM(3) ⇒ latency 2, read_cycle 1, write_cycle 3.
+        let lw = in_order.sched_class("lw");
+        assert_eq!((lw.read_cycle, lw.latency, lw.write_cycle()), (1, 2, 3));
+
+        // OutOfOrderCore is scalar (`latency = N`): read at cycle 0, no pipeline.
+        let ooo = crate::out_of_order_core_model();
+        assert!(ooo.pipeline.is_empty());
+        let ooo_lw = ooo.sched_class("lw");
+        assert_eq!((ooo_lw.read_cycle, ooo_lw.latency), (0, 4));
+    }
+
+    #[test]
+    fn instruction_cost_reflects_unit_defaults() {
+        // Machine-independent cost comes from the `unit` defaults, not a machine's
+        // `bind`: WriteIALU defaults latency 1, WriteLoad defaults latency 3.
+        assert_eq!(crate::instruction_cost("add"), 1);
+        assert_eq!(crate::instruction_cost("lw"), 3);
+        // Instructions with no `schedule` block fall back to the default cost.
+        assert_eq!(crate::instruction_cost("sub"), 1);
+        assert_eq!(crate::instruction_cost("nonexistent"), 1);
+
+        // The per-machine model may refine the generic default for that silicon:
+        // both demo cores bind WriteLoad to latency 4, independent of the default 3.
+        assert_eq!(crate::instruction_cost("lw"), 3);
+        assert_eq!(crate::out_of_order_core_model().sched_class("lw").latency, 4);
+    }
+
+    #[test]
+    fn override_supersedes_unit_bind() {
+        // OutOfOrderCore overrides `Add` to latency 2, beating WriteIALU's bind (1).
+        assert_eq!(crate::out_of_order_core_model().sched_class("add").latency, 2);
+        // InOrderCore has no override → `add` resolves from its WriteIALU bind.
+        assert_eq!(crate::in_order_core_model().sched_class("add").latency, 1);
+    }
+
+    #[test]
+    fn forwarding_paths_are_modeled() {
+        let in_order = crate::in_order_core_model();
+        assert_eq!(in_order.forward_latency("ALU", "ALU"), Some(0));
+        assert_eq!(in_order.forward_latency("LSU", "ALU"), Some(1));
+        assert_eq!(in_order.forward_latency("ALU", "LSU"), None);
+        // OutOfOrderCore declares no forwarding network.
+        assert!(crate::out_of_order_core_model().forwards.is_empty());
+    }
+
+    #[test]
+    fn in_order_and_ooo_differ_structurally() {
+        let in_order = crate::in_order_core_model();
+        assert_eq!(in_order.name, "InOrderCore");
+        assert_eq!(in_order.issue_width, 1);
+        assert_eq!(in_order.buffer("rob"), None); // no reorder buffer
+        assert_eq!(in_order.resource("ALU").map(|r| r.units), Some(1));
+
+        let ooo = crate::out_of_order_core_model();
+        assert_eq!(ooo.name, "OutOfOrderCore");
+        assert_eq!(ooo.issue_width, 4);
+        assert_eq!(ooo.buffer("rob"), Some(128));
+        assert_eq!(ooo.resource("ALU").map(|r| r.units), Some(4));
+    }
+
+    #[test]
     fn smoke_parser() {
         let context = Context::with_default_dialects();
         context.register_dialect::<AsmDialect>();

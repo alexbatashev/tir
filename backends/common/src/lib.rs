@@ -6,6 +6,7 @@ mod lexer;
 mod operations;
 mod parser;
 pub mod regalloc;
+pub mod sched;
 
 pub use operations::*;
 
