@@ -15,6 +15,7 @@ use crate::{
         ImplementsOpInterface, OpInterfaceConverter, downcast_op_interface, op_interface_converter,
     },
     parse::{Span, text::Parser as IRParser},
+    ptr::PtrDialect,
     region::RegionId,
     ty::{Type, TypeParser},
     value::{Value, ValueId},
@@ -114,6 +115,7 @@ impl Context {
         let context = Context::new();
 
         context.register_dialect::<BuiltinDialect>();
+        context.register_dialect::<PtrDialect>();
 
         context
     }
@@ -601,7 +603,12 @@ mod tests {
             .collect();
         indices.sort();
         assert_eq!(indices, vec![0, 1]);
-        assert!(context.value_uses(x.id()).iter().all(|u| u.op() == add.id()));
+        assert!(
+            context
+                .value_uses(x.id())
+                .iter()
+                .all(|u| u.op() == add.id())
+        );
     }
 
     #[test]

@@ -140,7 +140,7 @@ impl<'src> Parser<'src> {
             .parse_ident()
             .ok_or_else(|| (self.span(), crate::Error::ExpectedType))?;
 
-        let (dialect, name) = if self.peek_char() == Some('.') {
+        let (dialect, name) = if self.parse_token(".") {
             let Some(name) = self.parse_ident() else {
                 return Err((self.span(), crate::Error::ExpectedType));
             };
