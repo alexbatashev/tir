@@ -33,6 +33,9 @@ struct Cli {
     /// Machine model for `--timing`: `in-order` or `ooo`.
     #[arg(long, default_value = "ooo")]
     machine: String,
+    /// Branch predictor for `--timing`: `not-taken` or `btfn`.
+    #[arg(long, default_value = "btfn")]
+    predictor: String,
     program: String,
 }
 
@@ -97,14 +100,29 @@ fn main() {
         .expect("program execution failed");
 
     if let Some(model) = model {
+        let mut predictor = tir_sim::predictor::by_name(&args.predictor).unwrap_or_else(|| {
+            eprintln!(
+                "unknown predictor '{}' (expected: not-taken, btfn)",
+                args.predictor
+            );
+            std::process::exit(2);
+        });
         let config = TimingConfig::for_model(&model);
-        let result = timing::simulate(&model, &context, executor.trace(), &config);
+        let result = timing::simulate(
+            &model,
+            &context,
+            executor.trace(),
+            &config,
+            predictor.as_mut(),
+        );
         println!(
-            "timing[{}]: {} instructions, {} cycles, IPC {:.3}",
+            "timing[{} / {}]: {} instructions, {} cycles, IPC {:.3}, {} mispredicts",
             model.name,
+            predictor.name(),
             result.instructions,
             result.cycles,
             result.ipc(),
+            result.mispredicts,
         );
     }
 }

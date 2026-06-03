@@ -249,6 +249,28 @@ fn emit_instructions<'a>(
             })
             .collect();
 
+        // ISA parameters referenced via `self.PARAM` (e.g. `XLEN`). They are not
+        // instruction/template params, so they survive lowering as unbound symbols;
+        // `execute()` binds them from here. An instruction may span ISAs that define
+        // the same parameter with different values (RV32I/RV64I `XLEN`); pick the
+        // widest so 64-bit execution is correct.
+        let isa_param_values: HashMap<String, i64> = {
+            let mut acc: HashMap<String, i64> = HashMap::new();
+            for isa_name in &inst.for_isas {
+                if let Some(ast::Item::Isa(isa)) = item_cache.get(isa_name.as_str()) {
+                    for (name, (_ty, value)) in isa.parameters.iter() {
+                        if let Some(ast::Expr::Lit(ast::Lit::Int(li))) = value {
+                            let v = parse_literal_value(li) as i64;
+                            acc.entry(name.clone())
+                                .and_modify(|e| *e = (*e).max(v))
+                                .or_insert(v);
+                        }
+                    }
+                }
+            }
+            acc
+        };
+
         if let Some(semantics) =
             analyze_instruction_semantics(inst, &ops, &defined_register_operands, &numeric_params)
         {
@@ -407,16 +429,6 @@ fn emit_instructions<'a>(
             });
         }
 
-        if let Some(impl_ts) = emit_as_sem_expr_impl(
-            inst,
-            &ops,
-            &defined_register_operands,
-            &name_ident,
-            &numeric_params,
-        ) {
-            as_sem_expr_impls.push(impl_ts);
-        }
-
         let encoding_arms = get_encoding_arms(inst, item_cache);
         let encoding_bits = encoding_arms
             .iter()
@@ -424,14 +436,34 @@ fn emit_instructions<'a>(
             .max()
             .map(|max_end| max_end + 1)
             .unwrap_or(32);
-        let width_bytes_lit =
-            proc_macro2::Literal::u8_unsuffixed(((encoding_bits as u32 + 7) / 8) as u8);
+        let width_bytes = ((encoding_bits as u32 + 7) / 8) as u64;
+        let width_bytes_lit = proc_macro2::Literal::u8_unsuffixed(width_bytes as u8);
         let mnemonic_lit = proc_macro2::Literal::string(mnemonic_name);
 
-        let execute_body = if let Some(rhs) =
-            resolve_behavior_rhs(inst, &ops, &defined_register_operands)
-        {
-            let dst_write = if let Some(dst_name) = defined_register_operands.last() {
+        // The behavior RHS to compile. Normal instructions assign to a register
+        // operand (`rd`); a conditional branch instead writes `PC::pc`, which we
+        // synthesize into a single value-producing expression written to PC.
+        let resolved_rhs = resolve_behavior_rhs(inst, &ops, &defined_register_operands);
+        let branch_value = if resolved_rhs.is_none() {
+            synthesize_branch_value(inst, width_bytes)
+        } else {
+            None
+        };
+        let writes_pc = branch_value.is_some();
+        let codegen_rhs: Option<&ast::Expr> = branch_value.as_ref().or(resolved_rhs);
+
+        if let Some(rhs) = codegen_rhs {
+            if let Some(impl_ts) = emit_as_sem_expr_impl(rhs, &name_ident, &numeric_params) {
+                as_sem_expr_impls.push(impl_ts);
+            }
+        }
+
+        let execute_body = if let Some(rhs) = codegen_rhs {
+            let dst_write = if writes_pc {
+                quote! {
+                    machine.write_pc(value.to_u64());
+                }
+            } else if let Some(dst_name) = defined_register_operands.last() {
                 let dst_lit = proc_macro2::Literal::string(dst_name);
                 quote! {
                     let (dst_class, dst_idx) = tir_be_common::register_attr(self.attributes(), #dst_lit).ok_or(
@@ -502,6 +534,14 @@ fn emit_instructions<'a>(
                             }
                             _ => {}
                         }
+                    } else if let Some(&value) = isa_param_values.get(name) {
+                        // An ISA parameter (e.g. `XLEN`): bind it to its constant value.
+                        let value_lit = proc_macro2::Literal::i64_unsuffixed(value);
+                        sym_init_steps.push(quote! {
+                            __syms[#sym_lit] = Some(tir::sem_expr::Value::Int(
+                                tir::utils::APInt::new_signed(64, #value_lit),
+                            ));
+                        });
                     }
                 }
                 for ((class, number), &sym_id) in &lowering.register_symbols {
@@ -1393,14 +1433,127 @@ fn compile_asm_template(template: &str) -> Vec<AsmAction> {
 // AsSemExpr code generation
 // ---------------------------------------------------------------------------
 
+/// If the behavior is a conditional control transfer `if COND { PC::pc = TARGET }`
+/// (no else), synthesize the value written to PC every cycle: `if COND { TARGET }
+/// else { PC::pc + width }`. The fall-through arm keeps PC advancing when the branch
+/// is not taken, so the result can be written unconditionally. Returns `None` for
+/// behaviors that are not a bare conditional PC write.
+fn synthesize_branch_value(inst: &ast::Instruction, width_bytes: u64) -> Option<ast::Expr> {
+    let ast::Expr::If(if_) = unwrap_single_stmt_block(&inst.behavior) else {
+        return None;
+    };
+    if if_.else_.is_some() {
+        return None;
+    }
+    let target = extract_pc_assignment_target(&if_.then)?;
+    // Only synthesize when the condition and target lower cleanly. Branches whose
+    // condition reads a status register (e.g. arm64 `PSTATE::z`) cannot be lowered
+    // by the register-path rules, so leave those unhandled rather than panic.
+    if references_unlowerable_register(&if_.cond) || references_unlowerable_register(target) {
+        return None;
+    }
+    let span = if_.span;
+    let pc_read = ast::Expr::Path(ast::Path {
+        base: "PC".to_string(),
+        remainder: vec!["pc".to_string()],
+        span,
+    });
+    // `zext(width, 64)` so the fall-through addend matches `PC::pc`'s 64-bit width
+    // (a bare literal would lower to a narrow constant and mismatch the add).
+    let width_lit = ast::Expr::Lit(ast::Lit::Int(ast::LitInt::new(width_bytes.to_string(), span)));
+    let xlen_lit = ast::Expr::Lit(ast::Lit::Int(ast::LitInt::new("64".to_string(), span)));
+    let width_ext = ast::Expr::Call(ast::Call {
+        callee: Box::new(ast::Expr::BuiltinFunction(ast::BuiltinFunction::ZExt)),
+        arguments: vec![width_lit, xlen_lit],
+        span,
+    });
+    let fallthrough = ast::Expr::Binary(ast::Binary {
+        lhs: Box::new(pc_read),
+        rhs: Box::new(width_ext),
+        op: ast::BinOp::Add,
+        span,
+    });
+    Some(ast::Expr::If(ast::If {
+        cond: if_.cond.clone(),
+        then: Box::new(target.clone()),
+        else_: Some(Box::new(fallthrough)),
+        span,
+    }))
+}
+
+/// Whether an expression references a register path the semantic lowering cannot
+/// represent: anything other than `PC::pc` or a numbered register (e.g. a status
+/// flag like `PSTATE::z`). Used to skip branch synthesis that would otherwise panic.
+fn references_unlowerable_register(e: &ast::Expr) -> bool {
+    match e {
+        ast::Expr::Path(p) => {
+            let is_pc = p.base == "PC" && p.remainder == ["pc"];
+            let is_numbered = p
+                .remainder
+                .first()
+                .is_some_and(|r| r.contains(|c: char| c.is_ascii_digit()));
+            !is_pc && !is_numbered
+        }
+        ast::Expr::Binary(b) => {
+            references_unlowerable_register(&b.lhs) || references_unlowerable_register(&b.rhs)
+        }
+        ast::Expr::Call(c) => {
+            references_unlowerable_register(&c.callee)
+                || c.arguments.iter().any(references_unlowerable_register)
+        }
+        ast::Expr::If(i) => {
+            references_unlowerable_register(&i.cond)
+                || references_unlowerable_register(&i.then)
+                || i.else_
+                    .as_ref()
+                    .is_some_and(|e| references_unlowerable_register(e))
+        }
+        ast::Expr::Block(b) => b.stmts.iter().any(references_unlowerable_register),
+        ast::Expr::Assign(a) => {
+            references_unlowerable_register(&a.dest) || references_unlowerable_register(&a.value)
+        }
+        ast::Expr::Field(f) => references_unlowerable_register(&f.base),
+        ast::Expr::Slice(s) => references_unlowerable_register(&s.base),
+        ast::Expr::IndexAccess(idx) => references_unlowerable_register(&idx.base),
+        _ => false,
+    }
+}
+
+/// Peel `{ stmt }` blocks down to their single inner statement.
+fn unwrap_single_stmt_block(e: &ast::Expr) -> &ast::Expr {
+    match e {
+        ast::Expr::Block(b) if b.stmts.len() == 1 => unwrap_single_stmt_block(&b.stmts[0]),
+        other => other,
+    }
+}
+
+/// The RHS expression of a single `PC::pc = TARGET` assignment inside a branch's
+/// `then` arm.
+fn extract_pc_assignment_target(then: &ast::Expr) -> Option<&ast::Expr> {
+    let assign = match unwrap_single_stmt_block(then) {
+        ast::Expr::Block(b) if b.stmts.len() == 1 => match &b.stmts[0] {
+            ast::Expr::Assign(a) => a,
+            _ => return None,
+        },
+        ast::Expr::Assign(a) => a,
+        _ => return None,
+    };
+    if is_pc_dest(&assign.dest) {
+        Some(assign.value.as_ref())
+    } else {
+        None
+    }
+}
+
+fn is_pc_dest(dest: &ast::Expr) -> bool {
+    matches!(dest, ast::Expr::Path(p) if p.base == "PC" && p.remainder == ["pc"])
+}
+
 fn emit_as_sem_expr_impl(
-    inst: &ast::Instruction,
-    operands: &[(String, Type)],
-    defined_register_operands: &[String],
+    rhs: &ast::Expr,
     name_ident: &proc_macro2::Ident,
     numeric_params: &HashMap<String, i64>,
 ) -> Option<proc_macro2::TokenStream> {
-    let rhs = resolve_behavior_rhs(inst, operands, defined_register_operands)?;
     let mut dag = tir::sem_expr::ExprPostGraph::new();
     let lowering = rhs.lower_to_sema(&mut dag, numeric_params)?;
     // The AsSemExpr impl carries no type annotations (the program-graph builder
