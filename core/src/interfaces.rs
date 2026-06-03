@@ -1,4 +1,4 @@
-use crate::{Context, Operation};
+use crate::{Context, Operation, ValueId};
 
 pub trait Commutative {
     fn is_commutative(&self) -> bool {
@@ -50,6 +50,54 @@ pub trait SameOperandType {
             ));
         }
 
+        Ok(())
+    }
+}
+
+/// Identifies an operation that creates a memory location eligible for local SSA
+/// promotion. Implementations describe the location generically rather than tying
+/// mem2reg to a concrete pointer dialect.
+pub trait PromotableAllocation {
+    /// The SSA value that names the promotable memory location.
+    fn promoted_location(&self) -> ValueId;
+
+    fn verify_interface(
+        &self,
+        _this: &dyn Operation,
+        _context: &Context,
+    ) -> Result<(), crate::Error> {
+        Ok(())
+    }
+}
+
+/// Identifies an operation that reads a value from a memory location.
+pub trait MemoryRead {
+    /// The memory location being read.
+    fn read_location(&self) -> ValueId;
+    /// The SSA value produced by the read.
+    fn read_value(&self) -> ValueId;
+
+    fn verify_interface(
+        &self,
+        _this: &dyn Operation,
+        _context: &Context,
+    ) -> Result<(), crate::Error> {
+        Ok(())
+    }
+}
+
+/// Identifies an operation that writes a value to a memory location.
+pub trait MemoryWrite {
+    /// The memory location being written.
+    fn write_location(&self) -> ValueId;
+    /// The SSA value stored into the memory location.
+    fn written_value(&self) -> ValueId;
+
+    fn verify_interface(
+        &self,
+        _this: &dyn Operation,
+        _context: &Context,
+    ) -> Result<(), crate::Error> {
         Ok(())
     }
 }

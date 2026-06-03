@@ -294,6 +294,55 @@ impl Context {
         }
     }
 
+    /// Replace every SSA operand use of `old` with `new` across the live IR.
+    ///
+    /// This keeps the context-owned def-use lists in sync with the rewritten
+    /// operations. Register-attribute uses are intentionally left untouched: they
+    /// are not SSA operands and currently belong to machine IR, not high-level
+    /// scalar promotion.
+    pub fn replace_value_uses(&self, old: ValueId, new: ValueId) {
+        if old == new {
+            return;
+        }
+
+        let mut inner = self.0.write();
+        let uses = inner
+            .values
+            .get(&old)
+            .map(|v| v.uses().to_vec())
+            .unwrap_or_default();
+
+        for use_site in uses {
+            let crate::UseSite::Operand(index) = use_site.site() else {
+                continue;
+            };
+
+            let Some(op) = inner.operations.get(&use_site.op()).cloned() else {
+                continue;
+            };
+            if op.operands.get(index).copied() != Some(old) {
+                continue;
+            }
+
+            let mut new_instance = (*op).clone();
+            new_instance.operands[index] = new;
+            inner
+                .operations
+                .insert(use_site.op(), Arc::new(new_instance));
+
+            if let Some(old_value) = inner.values.get(&old).cloned() {
+                let mut old_value = (*old_value).clone();
+                old_value.remove_use(use_site.op(), use_site.site());
+                inner.values.insert(old, Arc::new(old_value));
+            }
+            if let Some(new_value) = inner.values.get(&new).cloned() {
+                let mut new_value = (*new_value).clone();
+                new_value.add_use(use_site.op(), use_site.site());
+                inner.values.insert(new, Arc::new(new_value));
+            }
+        }
+    }
+
     pub fn has_value(&self, id: ValueId) -> bool {
         self.0.read().values.contains_key(&id)
     }

@@ -8,3 +8,10 @@ tir-macros = { path = "../utils/macros" }
 parking_lot = "0.12.3"
 thiserror = "2.0.12"
 ariadne = "0.3"
+
+[dev-dependencies]
+tir-lit = { path = "../utils/lit" }
+
+[[test]]
+name = "lit"
+harness = false
