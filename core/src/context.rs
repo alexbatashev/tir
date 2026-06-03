@@ -10,6 +10,7 @@ use crate::{
     Block, Dialect, Error, OpId, OpInstance, Operation, Region, TypeId,
     block::BlockId,
     builtin::BuiltinDialect,
+    dialects::scf::ScfDialect,
     ir_formatter::IRFormatter,
     operation::{
         ImplementsOpInterface, OpInterfaceConverter, downcast_op_interface, op_interface_converter,
@@ -116,6 +117,7 @@ impl Context {
 
         context.register_dialect::<BuiltinDialect>();
         context.register_dialect::<PtrDialect>();
+        context.register_dialect::<ScfDialect>();
 
         context
     }

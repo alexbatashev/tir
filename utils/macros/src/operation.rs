@@ -1293,25 +1293,39 @@ fn make_roles_table(_op_ident: &Ident, roles: &[RoleSpec]) -> proc_macro2::Token
 }
 
 fn make_region_accessors(regions: &[Region]) -> proc_macro2::TokenStream {
-    if !regions.is_empty() {
-        if regions.len() == 1 && regions[0].single_block {
-            make_sinle_block_region_accessor(&regions[0])
+    if regions.is_empty() {
+        return quote! {};
+    }
+
+    let accessors = regions.iter().enumerate().map(|(index, region)| {
+        if region.single_block {
+            make_single_block_region_accessor(region, index)
         } else {
-            todo!()
+            make_region_accessor(region, index)
         }
-    } else {
-        quote! {}
+    });
+
+    quote! { #(#accessors)* }
+}
+
+fn make_region_accessor(region: &Region, index: usize) -> proc_macro2::TokenStream {
+    let func_name = format_ident!("{}", region.name);
+    quote! {
+        pub fn #func_name(&self) -> std::sync::Arc<tir::Region> {
+            use tir::Operation;
+            self.regions().nth(#index).unwrap()
+        }
     }
 }
 
-fn make_sinle_block_region_accessor(region: &Region) -> proc_macro2::TokenStream {
+fn make_single_block_region_accessor(region: &Region, index: usize) -> proc_macro2::TokenStream {
     let func_name = format_ident!("{}", region.name);
 
     quote! {
         pub fn #func_name(&self) -> std::sync::Arc<tir::Block> {
             use tir::Operation;
-            let region = self.regions().next().unwrap();
             let context = self.0.context.upgrade();
+            let region = self.regions().nth(#index).unwrap();
             let block = region.iter(context).next().unwrap();
             block
         }
