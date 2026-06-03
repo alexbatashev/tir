@@ -74,6 +74,19 @@ pub enum ExprKind {
     Fma,
 }
 
+impl ExprKind {
+    /// Whether the operator is commutative in its two operands, so a builder may
+    /// canonicalize operand order and the matcher may match either order. This is
+    /// the single source of truth shared by the program-graph builder and the
+    /// e-graph node label.
+    pub fn is_commutative(&self) -> bool {
+        matches!(
+            self,
+            ExprKind::Add | ExprKind::Mul | ExprKind::And | ExprKind::Or | ExprKind::Xor
+        )
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum ExprPayload {
     SymbolId(u32),

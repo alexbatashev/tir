@@ -19,36 +19,23 @@ use tir::{
 /// equivalent semantic expressions for the values computed in a block.
 pub type SemEGraph = EGraph<SemNode, ()>;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct SemNodeId(u32);
-
-impl SemNodeId {
-    fn index(self) -> usize {
-        self.0 as usize
-    }
-}
-
+/// An e-graph node label: the operator identity (kind/payload) plus the IR type of
+/// the value it represents. Structure (operands) lives in the enclosing
+/// [`ENode::children`], never here — so a label is exactly what hash-consing and
+/// pattern matching compare.
+///
+/// `ty` is the result type for an op node, the value type for a leaf. `None` on a
+/// *pattern* node means "match any type"; `None` on a *graph* node means the type
+/// is unknown (e.g. an intermediate node of a multi-node semantic expansion). The
+/// type is stored verbatim from the IR — no width is collapsed or normalized — so
+/// every target can constrain on exactly the widths/classes it distinguishes
+/// (x86/AArch64 8/16/32/64-bit forms, RISC-V word vs XLEN, vector element types,
+/// floats), and untyped rules stay width-agnostic.
 #[derive(Clone, Debug)]
 pub struct SemNode {
-    pub id: SemNodeId,
     pub kind: ExprKind,
-    pub inputs: Vec<SemNodeId>,
     pub payload: Option<ExprPayload>,
-    /// The IR type of the value this node represents (the result type for an op
-    /// node, the value type for a leaf). `None` on a *pattern* node means "match
-    /// any type"; `None` on a *graph* node means the type is unknown (e.g. an
-    /// intermediate node of a multi-node semantic expansion).
-    ///
-    /// The type is stored verbatim from the IR — no width is collapsed or
-    /// normalized — so every target can constrain on exactly the widths/classes it
-    /// distinguishes (x86/AArch64 8/16/32/64-bit forms, RISC-V word vs XLEN, vector
-    /// element types, floats), and untyped rules stay width-agnostic.
     pub ty: Option<TypeId>,
-    /// The IR value this node produces, if it corresponds to one (an op result or a
-    /// block input). Lets an operand that resolves to an intermediate result be
-    /// materialized as that register value at emit time. Metadata only — not part
-    /// of equality or matching.
-    pub value: Option<ValueId>,
 }
 
 impl PartialEq for SemNode {
@@ -60,9 +47,8 @@ impl PartialEq for SemNode {
 impl Eq for SemNode {}
 
 /// Hashes exactly the fields compared by [`PartialEq`] — the operator label
-/// (kind, payload, type), never the structural `inputs`/`id`/`value` metadata — so
-/// the e-graph hash-cons treats two e-nodes as congruent iff they have the same
-/// label and the same operand classes.
+/// (kind, payload, type) — so the e-graph hash-cons treats two e-nodes as congruent
+/// iff they have the same label and the same operand classes.
 impl Hash for SemNode {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.kind.hash(state);
@@ -101,10 +87,7 @@ impl tir::graph::Node for SemNode {
     }
 
     fn is_commutative(&self) -> bool {
-        matches!(
-            self.kind,
-            ExprKind::Add | ExprKind::Mul | ExprKind::And | ExprKind::Or | ExprKind::Xor
-        )
+        self.kind.is_commutative()
     }
 
     fn is_constant(&self) -> bool {
@@ -161,6 +144,38 @@ impl RuleMatch {
             .iter()
             .find(|(sym, _)| *sym == symbol)
             .map(|(_, v)| v.to_u64() as i64)
+    }
+}
+
+/// The concrete operand a capture e-class resolves to.
+enum Binding {
+    Int(APInt),
+    Value(ValueId),
+}
+
+/// Resolve one capture e-class to its operand binding: a constant immediate, then
+/// an input value, then the IR value an intermediate result produces (looked up in
+/// `class_value`, the map recording which class computes which op result). `None` if
+/// the class carries no materializable operand. This is the single resolution rule
+/// used by both match collection and emission.
+fn class_binding(
+    egraph: &SemEGraph,
+    class_value: &HashMap<EClassId, ValueId>,
+    class: EClassId,
+) -> Option<Binding> {
+    let nodes = egraph.nodes(class);
+    if let Some(ExprPayload::Int(v)) = nodes
+        .iter()
+        .find_map(|n| n.node.payload.as_ref().filter(|p| matches!(p, ExprPayload::Int(_))))
+    {
+        Some(Binding::Int(v.clone()))
+    } else if let Some(v) = nodes.iter().find_map(|n| match n.node.payload.as_ref() {
+        Some(ExprPayload::Value(v)) => Some(*v),
+        _ => None,
+    }) {
+        Some(Binding::Value(v))
+    } else {
+        class_value.get(&egraph.find(class)).copied().map(Binding::Value)
     }
 }
 
@@ -358,25 +373,18 @@ impl CaptureBindings {
         }
     }
 
-    fn to_rule_match(&self, egraph: &SemEGraph) -> RuleMatch {
+    fn to_rule_match(
+        &self,
+        egraph: &SemEGraph,
+        class_value: &HashMap<EClassId, ValueId>,
+    ) -> RuleMatch {
         let mut int_bindings = Vec::new();
         let mut value_bindings = Vec::new();
         for (sym, class) in &self.entries {
-            let nodes = egraph.nodes(*class);
-            // Prefer a concrete constant, then an input value, then the value an
-            // intermediate result produces (so emit can read it as a register).
-            if let Some(ExprPayload::Int(v)) = nodes
-                .iter()
-                .find_map(|n| n.node.payload.as_ref().filter(|p| matches!(p, ExprPayload::Int(_))))
-            {
-                int_bindings.push((*sym, v.clone()));
-            } else if let Some(v) = nodes.iter().find_map(|n| match n.node.payload.as_ref() {
-                Some(ExprPayload::Value(v)) => Some(*v),
-                _ => None,
-            }) {
-                value_bindings.push((*sym, v));
-            } else if let Some(v) = nodes.iter().find_map(|n| n.node.value) {
-                value_bindings.push((*sym, v));
+            match class_binding(egraph, class_value, *class) {
+                Some(Binding::Int(v)) => int_bindings.push((*sym, v)),
+                Some(Binding::Value(v)) => value_bindings.push((*sym, v)),
+                None => {}
             }
         }
         RuleMatch::new(int_bindings, value_bindings)
@@ -405,214 +413,82 @@ impl FullMatchBindings {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-enum SemKey {
-    Int {
-        width: u32,
-        signed: bool,
-        value: u64,
-        ty: Option<TypeId>,
-    },
-    Input(u32),
-    UnknownSymbol(u32),
-    Op {
-        kind: ExprKind,
-        inputs: Vec<SemNodeId>,
-        ty: Option<TypeId>,
-    },
-    Opaque,
-}
-
-pub struct SemDagArena {
-    nodes: Vec<SemNode>,
-    interner: HashMap<SemKey, SemNodeId>,
-}
-
-impl SemDagArena {
-    pub fn new() -> Self {
-        Self {
-            nodes: Vec::new(),
-            interner: HashMap::new(),
-        }
-    }
-
-    pub fn node(&self, id: SemNodeId) -> &SemNode {
-        &self.nodes[id.0 as usize]
-    }
-
-    fn len(&self) -> usize {
-        self.nodes.len()
-    }
-
-    fn intern_with_key(&mut self, key: SemKey, mut node: SemNode) -> SemNodeId {
-        if let Some(id) = self.interner.get(&key) {
-            return *id;
-        }
-        let id = SemNodeId(self.nodes.len() as u32);
-        node.id = id;
-        self.nodes.push(node);
-        self.interner.insert(key, id);
-        id
-    }
-
-    fn intern_int(&mut self, value: APInt, ty: Option<TypeId>) -> SemNodeId {
-        self.intern_with_key(
-            SemKey::Int {
-                width: value.width(),
-                signed: value.is_signed(),
-                value: value.to_u64(),
-                ty,
-            },
-            SemNode {
-                id: SemNodeId(0),
-                kind: ExprKind::Constant,
-                inputs: Vec::new(),
-                payload: Some(ExprPayload::Int(value)),
-                ty,
-                value: None,
-            },
-        )
-    }
-
-    fn intern_input_value(&mut self, value: ValueId, ty: Option<TypeId>) -> SemNodeId {
-        self.intern_with_key(
-            SemKey::Input(value.number()),
-            SemNode {
-                id: SemNodeId(0),
-                kind: ExprKind::Symbol,
-                inputs: Vec::new(),
-                payload: Some(ExprPayload::Value(value)),
-                ty,
-                value: Some(value),
-            },
-        )
-    }
-
-    fn intern_unknown_symbol(&mut self, symbol: u32, ty: Option<TypeId>) -> SemNodeId {
-        self.intern_with_key(
-            SemKey::UnknownSymbol(symbol),
-            SemNode {
-                id: SemNodeId(0),
-                kind: ExprKind::Symbol,
-                inputs: Vec::new(),
-                payload: Some(ExprPayload::SymbolId(symbol)),
-                ty,
-                value: None,
-            },
-        )
-    }
-
-    fn intern_op(&mut self, kind: ExprKind, mut inputs: Vec<SemNodeId>, ty: Option<TypeId>) -> SemNodeId {
-        if matches!(
-            kind,
-            ExprKind::Add | ExprKind::Mul | ExprKind::And | ExprKind::Or | ExprKind::Xor
-        ) {
-            inputs.sort();
-        }
-
-        self.intern_with_key(
-            SemKey::Op {
-                kind,
-                inputs: inputs.clone(),
-                ty,
-            },
-            SemNode {
-                id: SemNodeId(0),
-                kind,
-                inputs,
-                payload: None,
-                ty,
-                value: None,
-            },
-        )
-    }
-
-    fn intern_opaque(&mut self) -> SemNodeId {
-        self.intern_with_key(
-            SemKey::Opaque,
-            SemNode {
-                id: SemNodeId(0),
-                kind: ExprKind::Symbol,
-                inputs: Vec::new(),
-                payload: Some(ExprPayload::SymbolId(u32::MAX)),
-                ty: None,
-                value: None,
-            },
-        )
-    }
-
-    /// Record that `node` produces IR `value` (idempotent; first writer wins, which
-    /// is correct since identical computations are the same value under CSE).
-    fn set_value(&mut self, node: SemNodeId, value: ValueId) {
-        let slot = &mut self.nodes[node.0 as usize].value;
-        if slot.is_none() {
-            *slot = Some(value);
-        }
-    }
-}
-
-impl Dag for SemDagArena {
-    type Node = SemNode;
-    type Leaf = ();
-
-    fn len(&self) -> usize {
-        self.nodes.len()
-    }
-
-    fn get_node(&self, id: NodeId) -> &Self::Node {
-        &self.nodes[id.index()]
-    }
-
-    fn get_leaf_data(&self, _id: NodeId) -> Option<&Self::Leaf> {
-        None
-    }
-
-    fn get_original_op(&self, _id: NodeId) -> Option<OpId> {
-        None
-    }
-
-    fn get_actual_type(&self, id: NodeId) -> Option<tir::TypeId> {
-        self.nodes[id.index()].ty
-    }
-
-    fn root(&self) -> Option<NodeId> {
-        self.nodes.len().checked_sub(1).map(NodeId::from_index)
-    }
-
-    fn children(&self, id: NodeId) -> impl Iterator<Item = NodeId> {
-        self.nodes[id.index()]
-            .inputs
-            .iter()
-            .map(|input| NodeId::from_index(input.index()))
-    }
-
-    fn postorder(&self, start: NodeId) -> impl Iterator<Item = NodeId> {
-        (0..=start.index()).map(NodeId::from_index)
-    }
-
-    fn preorder(&self, start: NodeId) -> impl Iterator<Item = NodeId> {
-        std::iter::once(start)
-    }
-}
-
+/// Builds a block's semantic expressions straight into the e-graph: every lowered
+/// node is hash-consed by [`SemEGraph::add`], so the e-graph *is* the interned DAG
+/// (no separate arena). Returns [`EClassId`]s and records, in `class_value`, which
+/// class computes which op result so an intermediate can later be materialized as a
+/// register value.
 struct SemDagBuilder<'a> {
     context: &'a Context,
     value_to_def: &'a HashMap<ValueId, OpId>,
-    arena: SemDagArena,
-    value_to_node: HashMap<ValueId, SemNodeId>,
+    egraph: &'a mut SemEGraph,
+    /// The e-class built for each already-lowered IR value (operand sharing / CSE).
+    value_to_class: HashMap<ValueId, EClassId>,
+    /// First class found to compute each op result (first writer wins, matching CSE).
+    class_value: HashMap<EClassId, ValueId>,
 }
 
 impl<'a> SemDagBuilder<'a> {
-    fn new(context: &'a Context, value_to_def: &'a HashMap<ValueId, OpId>) -> Self {
+    fn new(
+        context: &'a Context,
+        value_to_def: &'a HashMap<ValueId, OpId>,
+        egraph: &'a mut SemEGraph,
+    ) -> Self {
         Self {
             context,
             value_to_def,
-            arena: SemDagArena::new(),
-            value_to_node: HashMap::new(),
+            egraph,
+            value_to_class: HashMap::new(),
+            class_value: HashMap::new(),
         }
     }
 
-    fn build_for_op(&mut self, op: &std::sync::Arc<OpInstance>) -> Option<SemNodeId> {
+    fn add_leaf(
+        &mut self,
+        kind: ExprKind,
+        payload: Option<ExprPayload>,
+        ty: Option<TypeId>,
+    ) -> EClassId {
+        self.egraph.add(ENode::leaf(SemNode { kind, payload, ty }, None))
+    }
+
+    fn add_int(&mut self, value: APInt, ty: Option<TypeId>) -> EClassId {
+        self.add_leaf(ExprKind::Constant, Some(ExprPayload::Int(value)), ty)
+    }
+
+    fn add_input_value(&mut self, value: ValueId, ty: Option<TypeId>) -> EClassId {
+        self.add_leaf(ExprKind::Symbol, Some(ExprPayload::Value(value)), ty)
+    }
+
+    fn add_unknown_symbol(&mut self, symbol: u32, ty: Option<TypeId>) -> EClassId {
+        self.add_leaf(ExprKind::Symbol, Some(ExprPayload::SymbolId(symbol)), ty)
+    }
+
+    /// A leaf that nothing materializes — the placeholder for an un-lowerable node,
+    /// so a partial semantic expansion still yields a well-formed graph.
+    fn add_opaque(&mut self) -> EClassId {
+        self.add_leaf(ExprKind::Symbol, Some(ExprPayload::SymbolId(u32::MAX)), None)
+    }
+
+    fn add_op(&mut self, kind: ExprKind, mut children: Vec<EClassId>, ty: Option<TypeId>) -> EClassId {
+        // Canonicalize commutative operands so `a op b` and `b op a` hash-cons to the
+        // same e-node, mirroring the program's CSE.
+        if kind.is_commutative() {
+            children.sort();
+        }
+        self.egraph
+            .add(ENode::op(SemNode { kind, payload: None, ty }, children))
+    }
+
+    /// Record that `class` computes IR `value` (idempotent; first writer wins, which
+    /// is correct since identical computations are the same value under CSE).
+    fn set_value(&mut self, class: EClassId, value: ValueId) {
+        self.class_value
+            .entry(self.egraph.find(class))
+            .or_insert(value);
+    }
+
+    fn build_for_op(&mut self, op: &std::sync::Arc<OpInstance>) -> Option<EClassId> {
         let mut operands = Vec::with_capacity(op.operands.len());
         for operand in &op.operands {
             operands.push(self.build_from_value(*operand));
@@ -620,30 +496,28 @@ impl<'a> SemDagBuilder<'a> {
         let mut graph = ExprPostGraph::new();
         let root = op.clone().as_dyn_op().semantic_expr(&mut graph)?;
         let widths = self.infer_local_widths(&graph, &operands);
-        let node = self.lower_graph_node(&graph, root, &operands, &widths);
+        let class = self.lower_graph_node(&graph, root, &operands, &widths);
         if let Some(result) = op.results.first() {
-            self.arena.set_value(node, *result);
+            self.set_value(class, *result);
         }
-        Some(node)
+        Some(class)
     }
 
-    fn build_from_value(&mut self, value: ValueId) -> SemNodeId {
-        if let Some(existing) = self.value_to_node.get(&value) {
+    fn build_from_value(&mut self, value: ValueId) -> EClassId {
+        if let Some(existing) = self.value_to_class.get(&value) {
             return *existing;
         }
 
         let value_ty = Some(self.context.get_value(value).ty());
-        let node = if let Some(def_op_id) = self.value_to_def.get(&value) {
+        let class = if let Some(def_op_id) = self.value_to_def.get(&value) {
             let def = self.context.get_op(*def_op_id);
             if def.name == "constant" {
-                if let Some(attr) = def.attributes.iter().find(|a| a.name == "value") {
-                    if let AttributeValue::Int(v) = &attr.value {
-                        self.arena.intern_int(APInt::new_signed(64, *v), value_ty)
-                    } else {
-                        self.arena.intern_input_value(value, value_ty)
-                    }
-                } else {
-                    self.arena.intern_input_value(value, value_ty)
+                match def.attributes.iter().find(|a| a.name == "value") {
+                    Some(attr) => match &attr.value {
+                        AttributeValue::Int(v) => self.add_int(APInt::new_signed(64, *v), value_ty),
+                        _ => self.add_input_value(value, value_ty),
+                    },
+                    None => self.add_input_value(value, value_ty),
                 }
             } else {
                 let mut graph = ExprPostGraph::new();
@@ -653,19 +527,19 @@ impl<'a> SemDagBuilder<'a> {
                         operands.push(self.build_from_value(*operand));
                     }
                     let widths = self.infer_local_widths(&graph, &operands);
-                    let node = self.lower_graph_node(&graph, root, &operands, &widths);
-                    self.arena.set_value(node, value);
-                    node
+                    let class = self.lower_graph_node(&graph, root, &operands, &widths);
+                    self.set_value(class, value);
+                    class
                 } else {
-                    self.arena.intern_input_value(value, value_ty)
+                    self.add_input_value(value, value_ty)
                 }
             }
         } else {
-            self.arena.intern_input_value(value, value_ty)
+            self.add_input_value(value, value_ty)
         };
 
-        self.value_to_node.insert(value, node);
-        node
+        self.value_to_class.insert(value, class);
+        class
     }
 
     /// Infer the width of every node of `graph` from the IR types of the operands
@@ -675,15 +549,20 @@ impl<'a> SemDagBuilder<'a> {
     fn infer_local_widths(
         &self,
         graph: &ExprPostGraph,
-        operands: &[SemNodeId],
+        operands: &[EClassId],
     ) -> Vec<Option<u32>> {
         infer_widths(graph, |node| match graph.get_leaf_data(node) {
             Some(ExprPayload::SymbolId(id)) => operands
                 .get(*id as usize)
-                .and_then(|&sem| self.arena.node(sem).ty)
+                .and_then(|&class| self.class_ty(class))
                 .and_then(|ty| type_width(self.context, ty)),
             _ => None,
         })
+    }
+
+    /// The IR type recorded on an operand class (taken from any member carrying one).
+    fn class_ty(&self, class: EClassId) -> Option<TypeId> {
+        self.egraph.nodes(class).iter().find_map(|n| n.node.ty)
     }
 
     /// Lower one node of a semantic-expression graph, typing each node from its
@@ -693,31 +572,31 @@ impl<'a> SemDagBuilder<'a> {
         &mut self,
         graph: &ExprPostGraph,
         node: NodeId,
-        operands: &[SemNodeId],
+        operands: &[EClassId],
         widths: &[Option<u32>],
-    ) -> SemNodeId {
+    ) -> EClassId {
         let node_ty = widths[node.index()].map(|width| IntegerType::new(self.context, width));
         match graph.get_node(node) {
             ExprKind::Symbol => match graph.get_leaf_data(node) {
                 Some(ExprPayload::SymbolId(id)) => operands
                     .get(*id as usize)
                     .copied()
-                    .unwrap_or_else(|| self.arena.intern_unknown_symbol(*id, node_ty)),
-                _ => self.arena.intern_opaque(),
+                    .unwrap_or_else(|| self.add_unknown_symbol(*id, node_ty)),
+                _ => self.add_opaque(),
             },
             ExprKind::Constant => match graph.get_leaf_data(node) {
-                Some(ExprPayload::Int(v)) => self.arena.intern_int(v.clone(), node_ty),
-                _ => self.arena.intern_opaque(),
+                Some(ExprPayload::Int(v)) => self.add_int(v.clone(), node_ty),
+                _ => self.add_opaque(),
             },
             kind => {
-                let children: Vec<SemNodeId> = graph
+                let children: Vec<EClassId> = graph
                     .children(node)
                     .map(|child| self.lower_graph_node(graph, child, operands, widths))
                     .collect();
                 if kind.num_children(self.context) == children.len() {
-                    self.arena.intern_op(*kind, children, node_ty)
+                    self.add_op(*kind, children, node_ty)
                 } else {
-                    self.arena.intern_opaque()
+                    self.add_opaque()
                 }
             }
         }
@@ -777,6 +656,9 @@ struct BlockSelectionCache {
     egraph: SemEGraph,
     /// The e-class that produces each op's result value.
     op_by_root: HashMap<EClassId, OpId>,
+    /// The IR value each (canonical) e-class computes, so an operand resolving to an
+    /// intermediate result can be materialized as that register value at emit time.
+    class_value: HashMap<EClassId, ValueId>,
     /// E-classes used as an operand by more than one consumer; such a value must be
     /// materialized into a register and cannot be internalized into a match.
     shared_classes: HashSet<EClassId>,
@@ -901,14 +783,7 @@ fn compile_isel_pattern_node(
 }
 
 fn template_node(kind: ExprKind, payload: Option<ExprPayload>, ty: Option<TypeId>) -> SemNode {
-    SemNode {
-        id: SemNodeId(0),
-        kind,
-        inputs: Vec::new(),
-        payload,
-        ty,
-        value: None,
-    }
+    SemNode { kind, payload, ty }
 }
 
 
@@ -1258,46 +1133,40 @@ impl InstructionSelectPass {
             }
         }
 
-        let mut builder = SemDagBuilder::new(context, &value_to_def);
-        let mut roots_by_op = HashMap::new();
-
-        let op_ids = block.op_ids();
-        for op_id in &op_ids {
-            let op = context.get_op(*op_id);
-            if op.results.is_empty() {
-                continue;
-            }
-
-            if let Some(root) = builder.build_for_op(&op) {
-                roots_by_op.insert(*op_id, root);
-            }
-        }
-
-        // Seed the e-graph from the interned semantic DAG (children precede parents,
-        // so each operand's class is ready), then saturate with the algebraic
-        // identities. Class ids are resolved through `find` afterwards because
-        // saturation may have merged classes.
-        let arena = builder.arena;
+        // Build every op's semantic expression directly into the e-graph (it
+        // hash-conses, so it is itself the interned DAG), then saturate with the
+        // algebraic identities. Class ids are resolved through `find` afterwards
+        // because saturation may have merged classes.
         let mut egraph = SemEGraph::new();
-        let mut sem_to_class: Vec<EClassId> = Vec::with_capacity(arena.len());
-        for i in 0..arena.len() {
-            let node = arena.node(SemNodeId(i as u32)).clone();
-            let children: Vec<EClassId> =
-                node.inputs.iter().map(|c| sem_to_class[c.index()]).collect();
-            sem_to_class.push(egraph.add(ENode {
-                node,
-                children,
-                leaf: None,
-            }));
-        }
+        let mut roots_by_op = HashMap::new();
+        let op_ids = block.op_ids();
+        let class_value = {
+            let mut builder = SemDagBuilder::new(context, &value_to_def, &mut egraph);
+            for op_id in &op_ids {
+                let op = context.get_op(*op_id);
+                if op.results.is_empty() {
+                    continue;
+                }
+                if let Some(root) = builder.build_for_op(&op) {
+                    roots_by_op.insert(*op_id, root);
+                }
+            }
+            builder.class_value
+        };
         egraph.saturate(context, &self.rewrites, Default::default());
-
-        let class_of = |semid: SemNodeId| egraph.find(sem_to_class[semid.index()]);
 
         let op_by_root: HashMap<EClassId, OpId> = roots_by_op
             .iter()
-            .map(|(op, root)| (class_of(*root), *op))
+            .map(|(op, root)| (egraph.find(*root), *op))
             .collect();
+
+        // Re-canonicalize the class -> value map through `find`, since saturation may
+        // have merged classes. No two value-carrying classes merge under the current
+        // rewrites, so first-writer-wins keeps it unambiguous.
+        let mut canon_class_value: HashMap<EClassId, ValueId> = HashMap::new();
+        for (class, value) in class_value {
+            canon_class_value.entry(egraph.find(class)).or_insert(value);
+        }
 
         // A value used as an operand by more than one consumer must stay a register.
         let mut operand_uses: HashMap<ValueId, usize> = HashMap::new();
@@ -1314,7 +1183,7 @@ impl InstructionSelectPass {
                 .iter()
                 .any(|r| operand_uses.get(r).copied().unwrap_or(0) > 1)
             {
-                shared_classes.insert(class_of(*root));
+                shared_classes.insert(egraph.find(*root));
             }
         }
 
@@ -1323,6 +1192,7 @@ impl InstructionSelectPass {
             BlockSelectionCache {
                 egraph,
                 op_by_root,
+                class_value: canon_class_value,
                 shared_classes,
                 plan: None,
             },
@@ -1483,6 +1353,7 @@ impl InstructionSelectPass {
 
         let mut emit = EmissionBuilder {
             egraph: &cache.egraph,
+            class_value: &cache.class_value,
             op_by_root: &cache.op_by_root,
             matches: &matches,
             root_match: &root_match,
@@ -1597,7 +1468,9 @@ impl InstructionSelectPass {
                 // Cost and legality are op-relative when there is a backing op;
                 // a rewrite-introduced root has no op, so it takes the rule's
                 // target-independent base cost and skips op legality.
-                let rule_match = bindings.captures.to_rule_match(&cache.egraph);
+                let rule_match = bindings
+                    .captures
+                    .to_rule_match(&cache.egraph, &cache.class_value);
                 let cost = if let Some(op_ref) = op_id.and_then(|id| op_refs.get(&id)) {
                     if !(rule.legality_fn)(context, op_ref, &rule_match, self.target_model.as_ref())
                     {
@@ -1689,6 +1562,7 @@ fn completeness_error(
 /// IR op) as fresh-valued instructions threaded into their consumers' operands.
 struct EmissionBuilder<'a> {
     egraph: &'a SemEGraph,
+    class_value: &'a HashMap<EClassId, ValueId>,
     op_by_root: &'a HashMap<EClassId, OpId>,
     matches: &'a [PbqpIselMatch],
     root_match: &'a HashMap<EClassId, usize>,
@@ -1767,23 +1641,16 @@ impl EmissionBuilder<'_> {
         let mut value_bindings = Vec::new();
         for (sym, class) in &self.matches[match_id].bindings.captures.entries {
             let class = self.egraph.find(*class);
+            // An introduced operand's fresh value takes priority; otherwise resolve
+            // the class to its constant/input/intermediate operand as usual.
             if let Some(&dest) = self.introduced_dest.get(&class) {
                 value_bindings.push((*sym, dest));
                 continue;
             }
-            let nodes = self.egraph.nodes(class);
-            if let Some(ExprPayload::Int(v)) = nodes
-                .iter()
-                .find_map(|n| n.node.payload.as_ref().filter(|p| matches!(p, ExprPayload::Int(_))))
-            {
-                int_bindings.push((*sym, v.clone()));
-            } else if let Some(v) = nodes.iter().find_map(|n| match n.node.payload.as_ref() {
-                Some(ExprPayload::Value(v)) => Some(*v),
-                _ => None,
-            }) {
-                value_bindings.push((*sym, v));
-            } else if let Some(v) = nodes.iter().find_map(|n| n.node.value) {
-                value_bindings.push((*sym, v));
+            match class_binding(self.egraph, self.class_value, class) {
+                Some(Binding::Int(v)) => int_bindings.push((*sym, v)),
+                Some(Binding::Value(v)) => value_bindings.push((*sym, v)),
+                None => {}
             }
         }
         RuleMatch::new(int_bindings, value_bindings)
