@@ -4,14 +4,60 @@ use crate::{
     utils::{APFloat, APInt},
 };
 
+/// Memory backend used by semantic expressions containing `LoadMemory` or
+/// `StoreMemory`.
+pub trait Memory {
+    type Error;
+
+    fn read_memory(&mut self, address: u64, size: usize) -> Result<u64, Self::Error>;
+    fn write_memory(&mut self, address: u64, size: usize, value: u64) -> Result<(), Self::Error>;
+}
+
+enum NoMemoryError {}
+
+struct NoMemory;
+
+impl Memory for NoMemory {
+    type Error = NoMemoryError;
+
+    fn read_memory(&mut self, _address: u64, _size: usize) -> Result<u64, Self::Error> {
+        unimplemented!("memory operations are not supported by this interpreter")
+    }
+
+    fn write_memory(
+        &mut self,
+        _address: u64,
+        _size: usize,
+        _value: u64,
+    ) -> Result<(), Self::Error> {
+        unimplemented!("memory operations are not supported by this interpreter")
+    }
+}
+
 /// Evaluate the expression DAG given concrete values for each symbol.
 ///
 /// `symbols[i]` is the value for the operand with `SymbolId(i)`.
 /// Returns the value of the root node.
 pub fn execute(graph: &impl Dag<Node = ExprKind, Leaf = ExprPayload>, symbols: &[Value]) -> Value {
+    match execute_with_memory(graph, symbols, &mut NoMemory) {
+        Ok(value) => value,
+        Err(err) => match err {},
+    }
+}
+
+/// Evaluate the expression DAG with a memory backend for load/store nodes.
+///
+/// Loads read little-endian byte sequences and produce an integer whose width is
+/// `size * 8`. Stores write the low bytes of their value and return a dummy
+/// 1-bit integer; callers normally ignore the result for store statements.
+pub fn execute_with_memory<M: Memory>(
+    graph: &impl Dag<Node = ExprKind, Leaf = ExprPayload>,
+    symbols: &[Value],
+    memory: &mut M,
+) -> Result<Value, M::Error> {
     let root = graph.root().expect("cannot execute empty graph");
     let mut cache = vec![None::<Value>; graph.len()];
-    eval_node(graph, root, symbols, &mut cache)
+    eval_node(graph, root, symbols, &mut cache, memory)
 }
 
 fn child_val(
@@ -78,19 +124,20 @@ fn ints_equal(a: APInt, b: APInt) -> bool {
     a.with_signed(false) == b.with_signed(false)
 }
 
-fn eval_node(
+fn eval_node<M: Memory>(
     graph: &impl Dag<Node = ExprKind, Leaf = ExprPayload>,
     node: NodeId,
     symbols: &[Value],
     cache: &mut Vec<Option<Value>>,
-) -> Value {
+    memory: &mut M,
+) -> Result<Value, M::Error> {
     if let Some(ref v) = cache[node.index()] {
-        return v.clone();
+        return Ok(v.clone());
     }
 
     for child_id in graph.children(node) {
         if cache[child_id.index()].is_none() {
-            let v = eval_node(graph, child_id, symbols, cache);
+            let v = eval_node(graph, child_id, symbols, cache, memory)?;
             cache[child_id.index()] = Some(v);
         }
     }
@@ -309,14 +356,24 @@ fn eval_node(
             Value::Int(value.with_signed(true).sign_extend(width))
         }
 
-        // ── Not yet supported ──────────────────────────────────────────────
-        ExprKind::LoadMemory | ExprKind::StoreMemory => {
-            unimplemented!("memory operations are not supported by this interpreter")
+        // ── Memory ─────────────────────────────────────────────────────────
+        ExprKind::LoadMemory => {
+            let address = as_int!(c(0), "load").to_u64();
+            let size = as_int!(c(1), "load").to_u64() as usize;
+            let value = memory.read_memory(address, size)?;
+            Value::Int(APInt::new((size as u32) * 8, value))
+        }
+        ExprKind::StoreMemory => {
+            let address = as_int!(c(0), "store").to_u64();
+            let size = as_int!(c(1), "store").to_u64() as usize;
+            let value = as_int!(c(2), "store").to_u64();
+            memory.write_memory(address, size, value)?;
+            Value::Int(APInt::new(1, 0))
         }
     };
 
     cache[node.index()] = Some(result.clone());
-    result
+    Ok(result)
 }
 
 fn bool_result(b: bool) -> u64 {
@@ -376,6 +433,37 @@ mod tests {
         Value::Int(APInt::new(32, v))
     }
 
+    #[derive(Default)]
+    struct TestMemory {
+        bytes: Vec<u8>,
+    }
+
+    impl Memory for TestMemory {
+        type Error = ();
+
+        fn read_memory(&mut self, address: u64, size: usize) -> Result<u64, Self::Error> {
+            let start = address as usize;
+            let mut value = 0;
+            for (offset, byte) in self.bytes[start..start + size].iter().enumerate() {
+                value |= u64::from(*byte) << (offset * 8);
+            }
+            Ok(value)
+        }
+
+        fn write_memory(
+            &mut self,
+            address: u64,
+            size: usize,
+            value: u64,
+        ) -> Result<(), Self::Error> {
+            let start = address as usize;
+            for offset in 0..size {
+                self.bytes[start + offset] = ((value >> (offset * 8)) & 0xff) as u8;
+            }
+            Ok(())
+        }
+    }
+
     fn as_i64(v: Value) -> i64 {
         match v {
             Value::Int(i) => i.to_i64(),
@@ -387,6 +475,33 @@ mod tests {
             Value::Float(f) => f.to_f64(),
             Value::Int(_) => panic!(),
         }
+    }
+
+    #[test]
+    fn memory_load_and_store_execute_little_endian() {
+        let mut g = ExprPostGraph::new();
+        let address = int_con(&mut g, 4);
+        let bytes = int_con(&mut g, 4);
+        let metadata = int_con(&mut g, 0);
+        inner(&mut g, ExprKind::LoadMemory, &[address, bytes, metadata]);
+
+        let mut memory = TestMemory { bytes: vec![0; 16] };
+        memory.bytes[4..8].copy_from_slice(&[0x78, 0x56, 0x34, 0x12]);
+        let loaded = execute_with_memory(&g, &[], &mut memory).unwrap();
+        assert_eq!(as_i64(loaded), 0x1234_5678);
+
+        let mut g = ExprPostGraph::new();
+        let address = int_con(&mut g, 8);
+        let bytes = int_con(&mut g, 2);
+        let value = int_con(&mut g, 0xbeef);
+        let address_space = int_con(&mut g, 0);
+        inner(
+            &mut g,
+            ExprKind::StoreMemory,
+            &[address, bytes, value, address_space],
+        );
+        execute_with_memory(&g, &[], &mut memory).unwrap();
+        assert_eq!(&memory.bytes[8..10], &[0xef, 0xbe]);
     }
 
     // ── Integer arithmetic ─────────────────────────────────────────────────

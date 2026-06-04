@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
 use tir::{
-    Block, BlockId, Context, OpId, OpInstance, Operation, OperationRef, Pass, PassError,
-    PassTarget, Rewriter, TypeId, ValueId,
+    Block, BlockId, Context, MemoryRead, MemoryWrite, OpId, OpInstance, Operation, OperationRef,
+    Pass, PassError, PassTarget, Rewriter, TypeId, ValueId,
     attributes::AttributeValue,
     builtin::IntegerType,
     graph::{
@@ -462,6 +462,17 @@ impl<'a> SemDagBuilder<'a> {
         self.add_leaf(ExprKind::Constant, Some(ExprPayload::Int(value)), ty)
     }
 
+    fn add_u64_const(&mut self, value: u64) -> EClassId {
+        self.add_int(minimal_unsigned_apint(value), None)
+    }
+
+    fn zero_offset_address(&mut self, address: EClassId, address_width: u32) -> EClassId {
+        let zero = self.add_u64_const(0);
+        let width = self.add_u64_const(u64::from(address_width));
+        let offset = self.add_op(ExprKind::SExt, vec![zero, width], None);
+        self.add_op(ExprKind::Add, vec![address, offset], None)
+    }
+
     fn add_input_value(&mut self, value: ValueId, ty: Option<TypeId>) -> EClassId {
         self.add_leaf(ExprKind::Symbol, Some(ExprPayload::Value(value)), ty)
     }
@@ -510,6 +521,10 @@ impl<'a> SemDagBuilder<'a> {
     }
 
     fn build_for_op(&mut self, op: &std::sync::Arc<OpInstance>) -> Option<EClassId> {
+        if let Some(class) = self.build_memory_effect(op) {
+            return Some(class);
+        }
+
         let mut operands = Vec::with_capacity(op.operands.len());
         for operand in &op.operands {
             operands.push(self.build_from_value(*operand));
@@ -522,6 +537,65 @@ impl<'a> SemDagBuilder<'a> {
             self.set_value(class, *result);
         }
         Some(class)
+    }
+
+    fn build_memory_effect(&mut self, op: &std::sync::Arc<OpInstance>) -> Option<EClassId> {
+        let read_parts = op
+            .clone()
+            .as_interface::<dyn MemoryRead>()
+            .map(|read| (read.read_location(), read.read_value()))
+            .or_else(|| {
+                ((op.name == "load" || op.name == "ptr.load")
+                    && op.operands.len() == 1
+                    && op.results.len() == 1)
+                    .then(|| (op.operands[0], op.results[0]))
+            });
+
+        if let Some((location, result)) = read_parts {
+            let result_ty = self.context.get_value(result).ty();
+            let bytes = type_width(self.context, result_ty)? / 8;
+            let address_width =
+                type_width(self.context, self.context.get_value(location).ty()).unwrap_or(64);
+            let address = self.build_from_value(location);
+            let address = self.zero_offset_address(address, address_width);
+            let bytes = self.add_u64_const(u64::from(bytes));
+            let metadata = self.add_u64_const(0);
+            let class = self.add_op(
+                ExprKind::LoadMemory,
+                vec![address, bytes, metadata],
+                Some(result_ty),
+            );
+            self.set_value(class, result);
+            return Some(class);
+        }
+
+        let write_parts = op
+            .clone()
+            .as_interface::<dyn MemoryWrite>()
+            .map(|write| (write.write_location(), write.written_value()))
+            .or_else(|| {
+                ((op.name == "store" || op.name == "ptr.store") && op.operands.len() == 2)
+                    .then(|| (op.operands[1], op.operands[0]))
+            });
+
+        if let Some((location, value)) = write_parts {
+            let value_ty = self.context.get_value(value).ty();
+            let bytes = type_width(self.context, value_ty)? / 8;
+            let address_width =
+                type_width(self.context, self.context.get_value(location).ty()).unwrap_or(64);
+            let address = self.build_from_value(location);
+            let address = self.zero_offset_address(address, address_width);
+            let bytes = self.add_u64_const(u64::from(bytes));
+            let value = self.build_from_value(value);
+            let address_space = self.add_u64_const(0);
+            return Some(self.add_op(
+                ExprKind::StoreMemory,
+                vec![address, bytes, value, address_space],
+                None,
+            ));
+        }
+
+        None
     }
 
     fn build_from_value(&mut self, value: ValueId) -> EClassId {
@@ -626,6 +700,15 @@ fn type_width(context: &Context, ty: TypeId) -> Option<u32> {
     (data.as_ref() as &dyn std::any::Any)
         .downcast_ref::<IntegerType>()
         .map(IntegerType::width)
+}
+
+fn minimal_unsigned_apint(value: u64) -> APInt {
+    let width = if value == 0 {
+        1
+    } else {
+        64 - value.leading_zeros()
+    };
+    APInt::new(width, value)
 }
 
 /// Headroom factor that lets pattern specificity break ties between equal-cost
@@ -1159,9 +1242,6 @@ impl InstructionSelectPass {
             let mut builder = SemDagBuilder::new(context, &value_to_def, &mut egraph);
             for op_id in &op_ids {
                 let op = context.get_op(*op_id);
-                if op.results.is_empty() {
-                    continue;
-                }
                 if let Some(root) = builder.build_for_op(&op) {
                     roots_by_op.insert(*op_id, root);
                 }

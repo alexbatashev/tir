@@ -94,7 +94,11 @@ pub fn infer_widths(
                 .and_then(|&c| const_value(c))
                 .map(|w| w as u32),
 
-            ExprKind::LoadMemory | ExprKind::StoreMemory => None,
+            ExprKind::LoadMemory => children
+                .get(1)
+                .and_then(|&c| const_value(c))
+                .map(|bytes| (bytes as u32) * 8),
+            ExprKind::StoreMemory => None,
         };
 
         widths[index] = width;
@@ -147,6 +151,17 @@ fn is_shift(kind: ExprKind) -> bool {
     )
 }
 
+fn extract_from_zero_hi(graph: &ExprPostGraph, node: NodeId) -> Option<(NodeId, u64)> {
+    if *graph.get_node(node) != ExprKind::Extract {
+        return None;
+    }
+    let children: Vec<NodeId> = graph.children(node).collect();
+    if children.len() != 3 || canon_const_u64(graph, children[2]) != Some(0) {
+        return None;
+    }
+    canon_const_u64(graph, children[1]).map(|hi| (children[0], hi))
+}
+
 fn canon_rebuild(
     graph: &ExprPostGraph,
     node: NodeId,
@@ -162,16 +177,9 @@ fn canon_rebuild(
     let children: Vec<NodeId> = graph.children(node).collect();
 
     // Result-extension collapse: SExt(Extract(inner, hi, 0), _) -> inner @ width hi+1.
-    if kind == ExprKind::SExt
-        && children.len() == 2
-        && *graph.get_node(children[0]) == ExprKind::Extract
-    {
-        let extract_children: Vec<NodeId> = graph.children(children[0]).collect();
-        if extract_children.len() == 3
-            && canon_const_u64(graph, extract_children[2]) == Some(0)
-            && let Some(hi) = canon_const_u64(graph, extract_children[1])
-        {
-            let inner = canon_rebuild(graph, extract_children[0], out, memo, forced);
+    if kind == ExprKind::SExt && children.len() == 2 {
+        if let Some((source, hi)) = extract_from_zero_hi(graph, children[0]) {
+            let inner = canon_rebuild(graph, source, out, memo, forced);
             forced.insert(inner.index(), (hi + 1) as u32);
             memo.insert(node.index(), inner);
             return inner;
@@ -198,6 +206,49 @@ fn canon_rebuild(
         let new_node = out.add_node(kind);
         out.add_edge(new_node, value);
         out.add_edge(new_node, amount);
+        memo.insert(node.index(), new_node);
+        return new_node;
+    }
+
+    // The third TMDL `load` operand records signedness/address-space metadata.
+    // The raw memory value is unsigned bytes; explicit `SExt`/`ZExt` nodes carry
+    // signedness for both isel and execution. Normalize the metadata child so
+    // source IR loads can match signed and unsigned target load forms by their
+    // surrounding extension.
+    if kind == ExprKind::LoadMemory && children.len() == 3 {
+        let address = canon_rebuild(graph, children[0], out, memo, forced);
+        let bytes = canon_rebuild(graph, children[1], out, memo, forced);
+        let zero = out.add_node(ExprKind::Constant);
+        out.set_leaf_data(zero, ExprPayload::Int(crate::utils::APInt::new(1, 0)));
+        let new_node = out.add_node(kind);
+        out.add_edge(new_node, address);
+        out.add_edge(new_node, bytes);
+        out.add_edge(new_node, zero);
+        memo.insert(node.index(), new_node);
+        return new_node;
+    }
+
+    // Stores in TMDL usually truncate the source register explicitly:
+    // `store(addr, 4, extract(rs, 31, 0))`. Source IR already carries the stored
+    // value's width, so canonicalize that extract to the inner value and force the
+    // width on the matched operand.
+    if kind == ExprKind::StoreMemory && children.len() == 4 {
+        let address = canon_rebuild(graph, children[0], out, memo, forced);
+        let bytes = canon_rebuild(graph, children[1], out, memo, forced);
+        let value_src = children[2];
+        let value = if let Some((source, hi)) = extract_from_zero_hi(graph, value_src) {
+            let inner = canon_rebuild(graph, source, out, memo, forced);
+            forced.insert(inner.index(), (hi + 1) as u32);
+            inner
+        } else {
+            canon_rebuild(graph, value_src, out, memo, forced)
+        };
+        let address_space = canon_rebuild(graph, children[3], out, memo, forced);
+        let new_node = out.add_node(kind);
+        out.add_edge(new_node, address);
+        out.add_edge(new_node, bytes);
+        out.add_edge(new_node, value);
+        out.add_edge(new_node, address_space);
         memo.insert(node.index(), new_node);
         return new_node;
     }

@@ -10,7 +10,7 @@ mod exec;
 mod infer;
 
 pub use discover::{EquivalenceOracle, FuzzOracle, confirm_extension_via_shifts};
-pub use exec::execute;
+pub use exec::{Memory, execute, execute_with_memory};
 pub use infer::{canonicalize_for_selection, infer_widths};
 
 pub type ExprPostGraph = PostOrderDag<ExprKind, ExprPayload>;
@@ -52,10 +52,12 @@ pub enum ExprKind {
     If,
     #[arity = 3]
     Clamp,
-    /// Arguments are address space, address, bytes read
+    /// Arguments are address, bytes read, signedness/address-space metadata.
+    /// The third operand is nonsemantic for raw memory execution; explicit
+    /// `SExt`/`ZExt` nodes model signedness.
     #[arity = 3]
     LoadMemory,
-    /// Arguments are address space, address, value, bytes written
+    /// Arguments are address, bytes written, value, address-space metadata.
     #[arity = 4]
     StoreMemory,
     ZExt,

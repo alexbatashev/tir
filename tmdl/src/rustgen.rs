@@ -491,48 +491,24 @@ fn emit_instructions<'a>(
                 None => quote! { Ok(()) },
             }
         } else {
-            // Execute every assignment in the behavior, in order. Handling all of
-            // them — not just the primary destination — is what makes
-            // multi-destination behaviors fully simulated rather than silently
-            // dropping every write but one: e.g. AArch64 `cmp` setting the four
-            // PSTATE flags, or `bl` writing both the link register and PC.
-            let mut assignments = Vec::new();
-            collect_behavior_assignment_exprs(&inst.behavior, &mut assignments);
-            if assignments.is_empty() {
-                quote! { Ok(()) }
-            } else {
-                let mut steps: Vec<proc_macro2::TokenStream> = Vec::new();
-                let mut unlowerable = false;
-                for (dest, rhs) in assignments {
-                    match emit_assignment_exec(
-                        dest,
-                        rhs,
-                        &ops,
-                        &numeric_params,
-                        &isa_param_values,
-                        &mnemonic_lit,
-                        &register_index_map,
-                    ) {
-                        Some(step) => steps.push(step),
-                        None => {
-                            unlowerable = true;
-                            break;
-                        }
-                    }
-                }
-                if unlowerable {
-                    quote! {
-                        Err(tir_be_common::SimTrap::InvalidInstruction {
-                            op: #mnemonic_lit,
-                            reason: "failed to convert behavior to executable expression".to_string(),
-                        })
-                    }
-                } else {
-                    quote! {
-                        #(#steps)*
-                        Ok(())
-                    }
-                }
+            match emit_behavior_exec(
+                &inst.behavior,
+                &ops,
+                &numeric_params,
+                &isa_param_values,
+                &mnemonic_lit,
+                &register_index_map,
+            ) {
+                Some(body) => quote! {
+                    #body
+                    Ok(())
+                },
+                None => quote! {
+                    Err(tir_be_common::SimTrap::InvalidInstruction {
+                        op: #mnemonic_lit,
+                        reason: "failed to convert behavior to executable expression".to_string(),
+                    })
+                },
             }
         };
 
@@ -1296,10 +1272,21 @@ fn resolve_behavior_rhs<'a>(
             return Some(*rhs);
         }
     }
+    if let Some(store) = find_store_effect_expr(&inst.behavior) {
+        return Some(store);
+    }
     match &inst.behavior {
         ast::Expr::Assign(a) => Some(a.value.as_ref()),
         ast::Expr::Block(_) | ast::Expr::If(_) => None,
         other => Some(other),
+    }
+}
+
+fn find_store_effect_expr(expr: &ast::Expr) -> Option<&ast::Expr> {
+    match expr {
+        ast::Expr::Call(_) if is_store_call(expr) => Some(expr),
+        ast::Expr::Block(b) => b.stmts.iter().find_map(find_store_effect_expr),
+        _ => None,
     }
 }
 
@@ -1490,24 +1477,105 @@ fn emit_as_sem_expr_impl(
     })
 }
 
-/// Collect every assignment in a behavior as `(destination, value)` expression
-/// pairs, in source order, descending only through statement blocks. Unlike
-/// [`collect_behavior_assignments`] it keeps the destination *expression* (so a
-/// status-register or PC path can be told apart from a plain operand) and does not
-/// recurse into `if` arms — a conditional that writes PC is a branch handled
-/// separately, and recursing would turn its guarded write into an unconditional one.
-fn collect_behavior_assignment_exprs<'a>(
-    expr: &'a ast::Expr,
-    out: &mut Vec<(&'a ast::Expr, &'a ast::Expr)>,
-) {
+fn is_store_call(expr: &ast::Expr) -> bool {
+    matches!(
+        expr,
+        ast::Expr::Call(ast::Call {
+            callee,
+            ..
+        }) if matches!(callee.as_ref(), ast::Expr::BuiltinFunction(ast::BuiltinFunction::Store))
+    )
+}
+
+fn emit_behavior_exec(
+    expr: &ast::Expr,
+    ops: &[(String, Type)],
+    numeric_params: &HashMap<String, i64>,
+    isa_param_values: &HashMap<String, i64>,
+    mnemonic_lit: &proc_macro2::Literal,
+    register_index_map: &HashMap<(String, String), u32>,
+) -> Option<proc_macro2::TokenStream> {
     match expr {
-        ast::Expr::Assign(a) => out.push((a.dest.as_ref(), a.value.as_ref())),
+        ast::Expr::Assign(a) => emit_assignment_exec(
+            a.dest.as_ref(),
+            a.value.as_ref(),
+            ops,
+            numeric_params,
+            isa_param_values,
+            mnemonic_lit,
+            register_index_map,
+        ),
+        ast::Expr::Call(_) if is_store_call(expr) => emit_effect_exec(
+            expr,
+            ops,
+            numeric_params,
+            isa_param_values,
+            mnemonic_lit,
+            register_index_map,
+        ),
         ast::Expr::Block(b) => {
+            let mut steps = Vec::new();
             for stmt in &b.stmts {
-                collect_behavior_assignment_exprs(stmt, out);
+                if let Some(step) = emit_behavior_exec(
+                    stmt,
+                    ops,
+                    numeric_params,
+                    isa_param_values,
+                    mnemonic_lit,
+                    register_index_map,
+                ) {
+                    steps.push(step);
+                } else if matches!(
+                    stmt,
+                    ast::Expr::Assign(_) | ast::Expr::Block(_) | ast::Expr::If(_)
+                ) || is_store_call(stmt)
+                {
+                    return None;
+                }
             }
+            Some(quote! { #(#steps)* })
         }
-        _ => {}
+        ast::Expr::If(i) => {
+            let cond_eval = emit_value_eval(
+                i.cond.as_ref(),
+                ops,
+                numeric_params,
+                isa_param_values,
+                mnemonic_lit,
+                register_index_map,
+            )?;
+            let then_body = emit_behavior_exec(
+                i.then.as_ref(),
+                ops,
+                numeric_params,
+                isa_param_values,
+                mnemonic_lit,
+                register_index_map,
+            )?;
+            let else_body = if let Some(else_expr) = &i.else_ {
+                emit_behavior_exec(
+                    else_expr.as_ref(),
+                    ops,
+                    numeric_params,
+                    isa_param_values,
+                    mnemonic_lit,
+                    register_index_map,
+                )?
+            } else {
+                quote! {}
+            };
+            Some(quote! {
+                {
+                    #cond_eval
+                    if value.to_u64() != 0 {
+                        #then_body
+                    } else {
+                        #else_body
+                    }
+                }
+            })
+        }
+        _ => Some(quote! {}),
     }
 }
 
@@ -1536,6 +1604,30 @@ fn emit_assignment_exec(
         {
             #eval
             #write
+        }
+    })
+}
+
+fn emit_effect_exec(
+    expr: &ast::Expr,
+    ops: &[(String, Type)],
+    numeric_params: &HashMap<String, i64>,
+    isa_param_values: &HashMap<String, i64>,
+    mnemonic_lit: &proc_macro2::Literal,
+    register_index_map: &HashMap<(String, String), u32>,
+) -> Option<proc_macro2::TokenStream> {
+    let eval = emit_value_eval(
+        expr,
+        ops,
+        numeric_params,
+        isa_param_values,
+        mnemonic_lit,
+        register_index_map,
+    )?;
+    Some(quote! {
+        {
+            #eval
+            let _ = value;
         }
     })
 }
@@ -1572,7 +1664,25 @@ fn emit_value_eval(
             let __syms: Vec<tir::sem_expr::Value> = __syms.into_iter()
                 .map(|v| v.unwrap_or_else(|| tir::sem_expr::Value::Int(tir::utils::APInt::new(64, 0))))
                 .collect();
-            match tir::sem_expr::execute(&__g, &__syms) {
+            struct __TmdlMachineMemory<'a>(&'a mut dyn tir_be_common::MachineContext);
+            impl tir::sem_expr::Memory for __TmdlMachineMemory<'_> {
+                type Error = tir_be_common::SimTrap;
+
+                fn read_memory(&mut self, address: u64, size: usize) -> Result<u64, Self::Error> {
+                    self.0.read_memory(address, size)
+                }
+
+                fn write_memory(
+                    &mut self,
+                    address: u64,
+                    size: usize,
+                    value: u64,
+                ) -> Result<(), Self::Error> {
+                    self.0.write_memory(address, size, value)
+                }
+            }
+            let mut __memory = __TmdlMachineMemory(machine);
+            match tir::sem_expr::execute_with_memory(&__g, &__syms, &mut __memory)? {
                 tir::sem_expr::Value::Int(i) => i,
                 tir::sem_expr::Value::Float(_) => {
                     return Err(tir_be_common::SimTrap::InvalidInstruction {

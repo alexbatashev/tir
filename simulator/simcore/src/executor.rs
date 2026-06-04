@@ -137,6 +137,7 @@ pub struct Executor {
     /// from the map are their own file.
     register_files: HashMap<String, String>,
     memory: Vec<u8>,
+    memory_base: u64,
     pc: u64,
     pc_explicitly_written: bool,
     record_trace: bool,
@@ -152,8 +153,13 @@ pub struct TraceOptions {
 
 impl Executor {
     pub fn new(memory_size: usize) -> Self {
+        Self::new_at(memory_size, 0)
+    }
+
+    pub fn new_at(memory_size: usize, memory_base: u64) -> Self {
         Self {
             memory: vec![0u8; memory_size],
+            memory_base,
             ..Self::default()
         }
     }
@@ -383,7 +389,10 @@ impl MachineContext for Executor {
     }
 
     fn read_memory(&self, address: u64, size: usize) -> Result<u64, SimTrap> {
-        let start = usize::try_from(address).map_err(|_| SimTrap::BadAddress { address, size })?;
+        let offset = address
+            .checked_sub(self.memory_base)
+            .ok_or(SimTrap::BadAddress { address, size })?;
+        let start = usize::try_from(offset).map_err(|_| SimTrap::BadAddress { address, size })?;
         let end = start
             .checked_add(size)
             .ok_or(SimTrap::BadAddress { address, size })?;
@@ -398,7 +407,10 @@ impl MachineContext for Executor {
     }
 
     fn write_memory(&mut self, address: u64, size: usize, value: u64) -> Result<(), SimTrap> {
-        let start = usize::try_from(address).map_err(|_| SimTrap::BadAddress { address, size })?;
+        let offset = address
+            .checked_sub(self.memory_base)
+            .ok_or(SimTrap::BadAddress { address, size })?;
+        let start = usize::try_from(offset).map_err(|_| SimTrap::BadAddress { address, size })?;
         let end = start
             .checked_add(size)
             .ok_or(SimTrap::BadAddress { address, size })?;
@@ -570,6 +582,62 @@ mod tests {
         assert!(trace_text.contains("add"));
         assert!(trace_text.contains("registers:"));
         assert!(trace_text.contains("final registers:"));
+    }
+
+    #[test]
+    fn riscv_load_store_execute_against_memory_window() {
+        use tir::Operation;
+        use tir::attributes::{AttributeValue, RegisterAttr};
+        use tir_be_common::MachineContext;
+
+        fn gpr(index: u16) -> AttributeValue {
+            AttributeValue::Register(RegisterAttr::Physical {
+                class: "GPR".to_string(),
+                index,
+            })
+        }
+
+        let context = Context::with_default_dialects();
+        context.register_dialect::<AsmDialect>();
+        context.register_dialect::<RiscvDialect>();
+
+        let base = 0x8000_0000;
+        let data = base + 0x100;
+
+        let mut executor = Executor::new_at(4096, base);
+        MachineContext::write_register(&mut executor, "GPR", 1, APInt::new(64, data)).unwrap();
+        MachineContext::write_memory(&mut executor, data, 4, 0x1234_5678).unwrap();
+
+        let lw = tir_riscv::LoadWordOpBuilder::new(&context)
+            .attr("rd", gpr(2))
+            .attr("rs1", gpr(1))
+            .attr("imm", AttributeValue::Int(0))
+            .build();
+        let sw = tir_riscv::StoreWordOpBuilder::new(&context)
+            .attr("rs2", gpr(2))
+            .attr("rs1", gpr(1))
+            .attr("imm", AttributeValue::Int(4))
+            .build();
+
+        context
+            .get_op(lw.id())
+            .as_interface::<dyn MachineInstruction>()
+            .unwrap()
+            .execute(&mut executor)
+            .unwrap();
+        context
+            .get_op(sw.id())
+            .as_interface::<dyn MachineInstruction>()
+            .unwrap()
+            .execute(&mut executor)
+            .unwrap();
+
+        let x2 = MachineContext::read_register(&executor, "GPR", 2).unwrap();
+        assert_eq!(x2.to_u64(), 0x1234_5678);
+        assert_eq!(
+            MachineContext::read_memory(&executor, data + 4, 4).unwrap(),
+            0x1234_5678
+        );
     }
 
     /// `cmp` writes all four AArch64 condition flags (`PSTATE` n/z/c/v), and a

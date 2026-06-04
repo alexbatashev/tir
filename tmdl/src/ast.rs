@@ -671,8 +671,8 @@ impl Expr {
     }
 
     /// Lower this expression into a semantic expression graph, returning the
-    /// symbol table alongside the root node.  Returns `None` if the expression
-    /// contains operations that cannot be represented (e.g. Load/Store).
+    /// symbol table alongside the root node. Returns `None` if the expression
+    /// contains operations that cannot be represented.
     pub fn lower_to_sema(
         &self,
         g: &mut impl tir::graph::MutDag<
@@ -1019,9 +1019,26 @@ impl Call {
                 let width = self.arguments[1].lower_with_ctx(ctx);
                 ctx.add_node(tir::sem_expr::ExprKind::ZExt, &[input, width])
             }
-            BuiltinFunction::Load | BuiltinFunction::Store => {
-                ctx.had_error = true;
-                ctx.add_bool_const(false)
+            BuiltinFunction::Load => {
+                assert!(self.arguments.len() == 3, "load requires 3 arguments");
+                let address = self.arguments[0].lower_with_ctx(ctx);
+                let bytes = self.arguments[1].lower_with_ctx(ctx);
+                let metadata = self.arguments[2].lower_with_ctx(ctx);
+                ctx.add_node(
+                    tir::sem_expr::ExprKind::LoadMemory,
+                    &[address, bytes, metadata],
+                )
+            }
+            BuiltinFunction::Store => {
+                assert!(self.arguments.len() == 3, "store requires 3 arguments");
+                let address = self.arguments[0].lower_with_ctx(ctx);
+                let bytes = self.arguments[1].lower_with_ctx(ctx);
+                let value = self.arguments[2].lower_with_ctx(ctx);
+                let address_space = ctx.add_int_const(tir::utils::APInt::new(1, 0));
+                ctx.add_node(
+                    tir::sem_expr::ExprKind::StoreMemory,
+                    &[address, bytes, value, address_space],
+                )
             }
         }
     }
