@@ -23,10 +23,7 @@ use crate::predictor::BranchPredictor;
 /// applies to these. (Belongs on the instruction as a control-flow property
 /// eventually; a mnemonic table is fine while RISC-V is the only backend.)
 fn is_conditional_branch(mnemonic: &str) -> bool {
-    matches!(
-        mnemonic,
-        "beq" | "bne" | "blt" | "bge" | "bltu" | "bgeu"
-    )
+    matches!(mnemonic, "beq" | "bne" | "blt" | "bge" | "bltu" | "bgeu")
 }
 
 /// Knobs the microarchitecture model exposes for experimentation. These are *not*
@@ -295,8 +292,13 @@ mod tests {
         let mut exec = Executor::new(4096);
         exec.enable_trace_recording();
         exec.load(program).unwrap();
-        exec.run_with_trace(until_pc, 10_000, TraceOptions::default(), &mut std::io::sink())
-            .unwrap();
+        exec.run_with_trace(
+            until_pc,
+            10_000,
+            TraceOptions::default(),
+            &mut std::io::sink(),
+        )
+        .unwrap();
 
         simulate(model, &context, exec.trace(), config, &mut AlwaysNotTaken)
     }
@@ -324,14 +326,23 @@ mod tests {
         let in_order_model = tir_riscv::in_order_core_model();
         let ooo_model = tir_riscv::out_of_order_core_model();
 
-        let io = time_asm(asm, &in_order_model, &TimingConfig::for_model(&in_order_model));
+        let io = time_asm(
+            asm,
+            &in_order_model,
+            &TimingConfig::for_model(&in_order_model),
+        );
         let oo = time_asm(asm, &ooo_model, &TimingConfig::for_model(&ooo_model));
 
         assert_eq!(io.instructions, 5);
         assert_eq!(oo.instructions, 5);
         // The out-of-order core finishes the independent chain in fewer cycles and
         // sustains higher IPC.
-        assert!(oo.cycles < io.cycles, "ooo {} should beat in-order {}", oo.cycles, io.cycles);
+        assert!(
+            oo.cycles < io.cycles,
+            "ooo {} should beat in-order {}",
+            oo.cycles,
+            io.cycles
+        );
         assert!(oo.ipc() > io.ipc());
     }
 
@@ -373,7 +384,10 @@ mod tests {
         let ant = simulate(&model, &context, &trace, &config, &mut AlwaysNotTaken);
         let btfn = simulate(&model, &context, &trace, &config, &mut BackwardTaken);
 
-        assert_eq!(ant.mispredicts, 1, "not-taken mispredicts the taken back-edge");
+        assert_eq!(
+            ant.mispredicts, 1,
+            "not-taken mispredicts the taken back-edge"
+        );
         assert_eq!(btfn.mispredicts, 0, "btfn predicts the back-edge taken");
         assert!(
             ant.cycles > btfn.cycles,
@@ -423,11 +437,21 @@ mod tests {
         let mut exec = Executor::new(4096);
         exec.enable_trace_recording();
         exec.load(program).unwrap();
-        exec.run_with_trace(until_pc, 10_000, TraceOptions::default(), &mut std::io::sink())
-            .unwrap();
+        exec.run_with_trace(
+            until_pc,
+            10_000,
+            TraceOptions::default(),
+            &mut std::io::sink(),
+        )
+        .unwrap();
 
         // The loop ran to completion: counter 3 → 0.
-        assert_eq!(MachineContext::read_register(&exec, "GPR", 10).unwrap().to_u64(), 0);
+        assert_eq!(
+            MachineContext::read_register(&exec, "GPR", 10)
+                .unwrap()
+                .to_u64(),
+            0
+        );
         let trace = exec.trace().to_vec();
 
         let model = tir_riscv::out_of_order_core_model();
@@ -435,9 +459,17 @@ mod tests {
         let ant = simulate(&model, &context, &trace, &config, &mut AlwaysNotTaken);
         let btfn = simulate(&model, &context, &trace, &config, &mut BackwardTaken);
 
-        assert_eq!(ant.mispredicts, 2, "not-taken mispredicts both taken back-edges");
+        assert_eq!(
+            ant.mispredicts, 2,
+            "not-taken mispredicts both taken back-edges"
+        );
         assert_eq!(btfn.mispredicts, 1, "btfn only mispredicts the loop exit");
-        assert!(btfn.cycles < ant.cycles, "btfn {} should beat ant {}", btfn.cycles, ant.cycles);
+        assert!(
+            btfn.cycles < ant.cycles,
+            "btfn {} should beat ant {}",
+            btfn.cycles,
+            ant.cycles
+        );
     }
 
     /// A dependent chain serializes on both cores regardless of issue width.

@@ -274,9 +274,7 @@ pub fn analyze(
 
     // 3. Backward scan within each block to build the interference relation.
     for (i, info) in block_infos.iter().enumerate() {
-        result
-            .live_in
-            .insert(info.block, live_in[i].clone());
+        result.live_in.insert(info.block, live_in[i].clone());
 
         let mut live: HashSet<u32> = live_out[i].iter().copied().collect();
 

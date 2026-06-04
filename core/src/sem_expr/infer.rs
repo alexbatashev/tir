@@ -89,9 +89,10 @@ pub fn infer_widths(
             }
 
             // Extensions widen to their target-width argument.
-            ExprKind::SExt | ExprKind::ZExt => {
-                children.get(1).and_then(|&c| const_value(c)).map(|w| w as u32)
-            }
+            ExprKind::SExt | ExprKind::ZExt => children
+                .get(1)
+                .and_then(|&c| const_value(c))
+                .map(|w| w as u32),
 
             ExprKind::LoadMemory | ExprKind::StoreMemory => None,
         };
@@ -161,7 +162,9 @@ fn canon_rebuild(
     let children: Vec<NodeId> = graph.children(node).collect();
 
     // Result-extension collapse: SExt(Extract(inner, hi, 0), _) -> inner @ width hi+1.
-    if kind == ExprKind::SExt && children.len() == 2 && *graph.get_node(children[0]) == ExprKind::Extract
+    if kind == ExprKind::SExt
+        && children.len() == 2
+        && *graph.get_node(children[0]) == ExprKind::Extract
     {
         let extract_children: Vec<NodeId> = graph.children(children[0]).collect();
         if extract_children.len() == 3
@@ -303,7 +306,11 @@ mod tests {
         assert_eq!(*canon.get_node(new_root), ExprKind::ShiftLeft);
         let children: Vec<_> = canon.children(new_root).collect();
         assert_eq!(children.len(), 2);
-        assert!(children.iter().all(|&c| *canon.get_node(c) == ExprKind::Symbol));
+        assert!(
+            children
+                .iter()
+                .all(|&c| *canon.get_node(c) == ExprKind::Symbol)
+        );
         assert_eq!(canon.len(), 3); // ShiftLeft + two symbols
     }
 

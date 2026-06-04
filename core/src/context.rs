@@ -228,11 +228,7 @@ impl Context {
     /// regions. Register allocation uses this to rewrite virtual register operands
     /// to physical ones once the def-use chain is no longer needed; it deliberately
     /// does not update `Value::uses`, since physical registers are not SSA values.
-    pub fn set_op_attributes(
-        &self,
-        id: OpId,
-        attributes: Vec<crate::attributes::NamedAttribute>,
-    ) {
+    pub fn set_op_attributes(&self, id: OpId, attributes: Vec<crate::attributes::NamedAttribute>) {
         let mut inner = self.0.write();
         if let Some(existing) = inner.operations.get(&id).cloned() {
             let mut updated = (*existing).clone();

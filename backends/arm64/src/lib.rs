@@ -311,7 +311,10 @@ mod tests {
         let mut buf = String::new();
         let mut fmt = IRFormatter::new(&mut buf);
         module.print(&mut fmt).expect("print lowered module");
-        assert!(!buf.contains("builtin"), "no builtin ops should remain:\n{buf}");
+        assert!(
+            !buf.contains("builtin"),
+            "no builtin ops should remain:\n{buf}"
+        );
     }
 
     #[test]

@@ -1,8 +1,8 @@
 use tir::helpers::dialect;
 
 pub mod isel;
-pub mod liveness;
 mod lexer;
+pub mod liveness;
 mod operations;
 mod parser;
 pub mod regalloc;

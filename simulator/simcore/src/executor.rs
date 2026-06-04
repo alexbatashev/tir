@@ -652,7 +652,11 @@ mod tests {
         };
         // imm=4, target = pc + (sext(imm) << 2) = 0x1000 + 16.
         assert_eq!(run_beq(1), 0x1010, "branch taken when Z is set");
-        assert_eq!(run_beq(0), 0x1004, "fall-through (pc + width) when Z is clear");
+        assert_eq!(
+            run_beq(0),
+            0x1004,
+            "fall-through (pc + width) when Z is clear"
+        );
 
         // `bl` writes two destinations: the link register (x30 = pc + 4) and PC.
         // Both used to be dropped because only one assignment was ever emitted.
@@ -666,8 +670,13 @@ mod tests {
             .as_interface::<dyn MachineInstruction>()
             .expect("bl is a machine instruction");
         mi.execute(&mut ex).expect("bl executes");
-        let x30 = MachineContext::read_register(&ex, "GPR", 30).unwrap().to_u64();
-        assert_eq!(x30, 0x2004, "link register holds the return address (pc + 4)");
+        let x30 = MachineContext::read_register(&ex, "GPR", 30)
+            .unwrap()
+            .to_u64();
+        assert_eq!(
+            x30, 0x2004,
+            "link register holds the return address (pc + 4)"
+        );
         assert_eq!(
             MachineContext::read_pc(&ex),
             0x2000 + (3 << 2),

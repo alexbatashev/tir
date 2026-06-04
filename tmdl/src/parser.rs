@@ -409,8 +409,7 @@ where
 }
 
 /// Top-level `unit Name;` or `unit Name { latency = N; throughput = N; }`.
-fn unit_def<'src, I>()
--> impl Parser<'src, I, UnitDecl, extra::Err<Rich<'src, Token<'src>, Span>>>
+fn unit_def<'src, I>() -> impl Parser<'src, I, UnitDecl, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
@@ -491,7 +490,8 @@ fn aggregate_bind_fields(fields: Vec<BindField>) -> BindFields {
 
 /// One `latency`/`throughput`/`uses`/`reads`/`writes` field of a `bind` or
 /// `override` body.
-fn bind_field<'src, I>() -> impl Parser<'src, I, BindField, extra::Err<Rich<'src, Token<'src>, Span>>>
+fn bind_field<'src, I>()
+-> impl Parser<'src, I, BindField, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
@@ -583,8 +583,7 @@ where
 }
 
 /// Top-level `machine Name for [..] { issue_width=..; buffers{..} resource X{..} bind Y{..} }`.
-fn machine_def<'src, I>()
--> impl Parser<'src, I, Machine, extra::Err<Rich<'src, Token<'src>, Span>>>
+fn machine_def<'src, I>() -> impl Parser<'src, I, Machine, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
@@ -692,10 +691,18 @@ where
         .ignore_then(ident.clone())
         .then(for_isas())
         .then(
-            choice((issue_width, buffers, pipeline, r#override, forward, resource, bind))
-                .repeated()
-                .collect::<Vec<_>>()
-                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+            choice((
+                issue_width,
+                buffers,
+                pipeline,
+                r#override,
+                forward,
+                resource,
+                bind,
+            ))
+            .repeated()
+            .collect::<Vec<_>>()
+            .delimited_by(just(Token::LBrace), just(Token::RBrace)),
         )
         .map_with(|((name, for_isas), body), e| {
             let mut issue_width = None;
@@ -1339,8 +1346,7 @@ mod tests {
 
     #[test]
     fn register_class_parses_inheritance() {
-        let with_base =
-            "register_class GPRsp for [Isa] : GPR { registers { x31(\"sp\") => { traits = [stack_pointer] }, } }";
+        let with_base = "register_class GPRsp for [Isa] : GPR { registers { x31(\"sp\") => { traits = [stack_pointer] }, } }";
         let (tokens, _e) = lexer().parse(with_base).into_output_errors();
         let tokens = tokens.unwrap();
         let rc = register_class_def()
@@ -1505,7 +1511,11 @@ mod tests {
                 .as_slice()
                 .map((code.len()..code.len()).into(), |(t, s)| (t, s)),
         );
-        let u = parsed.output().expect("bare unit decl should parse").0.clone();
+        let u = parsed
+            .output()
+            .expect("bare unit decl should parse")
+            .0
+            .clone();
         assert_eq!(u.name, "WriteLoad");
         assert_eq!(u.default_latency, None);
     }
@@ -1590,11 +1600,19 @@ mod tests {
         assert_eq!(m.overrides[0].uses, vec!["ALU".to_string()]);
         assert_eq!(m.forwards.len(), 2);
         assert_eq!(
-            (m.forwards[0].from.as_str(), m.forwards[0].to.as_str(), m.forwards[0].latency),
+            (
+                m.forwards[0].from.as_str(),
+                m.forwards[0].to.as_str(),
+                m.forwards[0].latency
+            ),
             ("ALU", "ALU", 0)
         );
         assert_eq!(
-            (m.forwards[1].from.as_str(), m.forwards[1].to.as_str(), m.forwards[1].latency),
+            (
+                m.forwards[1].from.as_str(),
+                m.forwards[1].to.as_str(),
+                m.forwards[1].latency
+            ),
             ("LSU", "ALU", 1)
         );
     }

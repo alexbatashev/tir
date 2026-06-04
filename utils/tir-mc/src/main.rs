@@ -79,7 +79,11 @@ fn run() -> Result<(), String> {
             "regalloc" => {
                 pm.add_pass(target.regalloc_pass());
             }
-            other => return Err(format!("unknown pass '{other}' (supported: isel, regalloc)")),
+            other => {
+                return Err(format!(
+                    "unknown pass '{other}' (supported: isel, regalloc)"
+                ));
+            }
         }
     }
 
