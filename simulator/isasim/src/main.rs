@@ -1,5 +1,5 @@
 use clap::Parser;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tir::utils::APInt;
 use tir_be_common::MachineContext;
 use tir_sim::timing::{self, TimingConfig};
@@ -49,7 +49,32 @@ struct Cli {
     /// Branch predictor for `--timing`: `not-taken` or `btfn`.
     #[arg(long, default_value = "btfn")]
     predictor: String,
+    /// Write a structured JSON snapshot of architectural state (PC, GPRs, and any
+    /// requested memory windows) to this path after the run. Used by the
+    /// differential ISA test suite to compare against a golden oracle.
+    #[arg(long)]
+    dump_state: Option<String>,
+    /// Memory window to include in `--dump-state`, formatted `addr:len` (e.g.
+    /// `0x80008000:256`). Repeatable. Ignored unless `--dump-state` is set.
+    #[arg(long)]
+    dump_mem: Vec<String>,
     program: String,
+}
+
+/// JSON shape emitted by `--dump-state`. Hex strings keep large addresses/values
+/// readable and avoid any signedness ambiguity across the oracle boundary.
+#[derive(Serialize)]
+struct StateDump {
+    pc: String,
+    /// `gprs[i]` is the value of integer register `x{i}` (unwritten reads as 0).
+    gprs: Vec<String>,
+    mem: Vec<MemWindowDump>,
+}
+
+#[derive(Serialize)]
+struct MemWindowDump {
+    addr: String,
+    bytes: Vec<u8>,
 }
 
 fn main() {
@@ -158,6 +183,65 @@ fn main() {
             result.mispredicts,
         );
     }
+
+    if let Some(path) = &args.dump_state {
+        write_state_dump(&executor, path, &args.dump_mem);
+    }
+}
+
+/// Snapshot the final architectural state to `path` as JSON. `mem_windows` are
+/// `addr:len` specs whose bytes are read out one at a time so any window that
+/// runs past the configured memory simply reports a hard error rather than
+/// silently truncating.
+fn write_state_dump(executor: &Executor, path: &str, mem_windows: &[String]) {
+    let mut gprs = Vec::with_capacity(32);
+    for index in 0..32u16 {
+        let value = executor
+            .read_register("GPR", index)
+            .expect("failed to read GPR for state dump");
+        gprs.push(format!("0x{:x}", value.to_u64()));
+    }
+
+    let mut mem = Vec::with_capacity(mem_windows.len());
+    for spec in mem_windows {
+        let (addr, len) = parse_mem_window(spec);
+        let mut bytes = Vec::with_capacity(len);
+        for offset in 0..len {
+            let address = addr
+                .checked_add(offset as u64)
+                .expect("memory window address overflow");
+            let byte = executor
+                .read_memory(address, 1)
+                .expect("memory window does not fit configured memory window");
+            bytes.push(byte as u8);
+        }
+        mem.push(MemWindowDump {
+            addr: format!("0x{addr:x}"),
+            bytes,
+        });
+    }
+
+    let dump = StateDump {
+        pc: format!("0x{:x}", executor.read_pc()),
+        gprs,
+        mem,
+    };
+    let json = serde_json::to_string_pretty(&dump).expect("failed to serialize state dump");
+    std::fs::write(path, json).expect("failed to write state dump");
+}
+
+/// Parse a `--dump-mem` spec of the form `addr:len`, where `addr` is a hex/decimal
+/// address and `len` is a byte count.
+fn parse_mem_window(spec: &str) -> (u64, usize) {
+    let (addr, len) = spec
+        .split_once(':')
+        .unwrap_or_else(|| panic!("--dump-mem expects 'addr:len', got '{spec}'"));
+    let addr = parse_addr(addr.trim());
+    let len = len
+        .trim()
+        .parse::<usize>()
+        .unwrap_or_else(|_| panic!("--dump-mem length must be a byte count, got '{len}'"));
+    (addr, len)
 }
 
 /// Resolve a `--until-pc` argument to an address. The argument may be a `0x`

@@ -211,7 +211,13 @@ fn eval_node<M: Memory>(
             Value::Int(as_int!(c(0), "lshr").lshr(as_int!(c(1), "lshr").to_u64() as u32))
         }
         ExprKind::ShiftRightArithmetic => {
-            Value::Int(as_int!(c(0), "ashr").ashr(as_int!(c(1), "ashr").to_u64() as u32))
+            // An arithmetic shift always treats its operand as signed (sign bit =
+            // MSB of the operand width), regardless of the value's stored
+            // signedness flag. Register values are stored unsigned, so without
+            // forcing this `>>>` would silently degrade to a logical shift.
+            let mut value = as_int!(c(0), "ashr");
+            value.set_signed(true);
+            Value::Int(value.ashr(as_int!(c(1), "ashr").to_u64() as u32))
         }
 
         // ── Comparisons ────────────────────────────────────────────────────
