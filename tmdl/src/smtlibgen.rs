@@ -307,7 +307,7 @@ fn build_smt_encoding<'a>(
         pieces.push((high_bit, piece));
     }
 
-    pieces.sort_by(|a, b| b.0.cmp(&a.0));
+    pieces.sort_by_key(|piece| std::cmp::Reverse(piece.0));
 
     let mut iter = pieces.into_iter().map(|(_, piece)| piece);
     iter.next()
@@ -714,7 +714,7 @@ fn build_decoder<'a>(
                 };
 
                 // Sort pieces by op_hi descending so the concat builds high→low.
-                pieces.sort_by(|a, b| b.1.cmp(&a.1));
+                pieces.sort_by_key(|piece| std::cmp::Reverse(piece.1));
 
                 // Reconstruct the operand from its pieces, filling any gaps
                 // between non-contiguous slices with zero bits.

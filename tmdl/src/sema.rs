@@ -445,11 +445,7 @@ fn check_template_parents(
 
     let mut current = template;
 
-    loop {
-        let Some(parent_name) = current.parent_template.as_deref() else {
-            break;
-        };
-
+    while let Some(parent_name) = current.parent_template.as_deref() {
         match item_cache.get(parent_name).copied() {
             None => {
                 diags.push((
