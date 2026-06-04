@@ -95,6 +95,20 @@ fn emit_instructions<'a>(
     let mut instruction_custom_format_impls: Vec<proc_macro2::TokenStream> = vec![];
     let mut as_sem_expr_impls: Vec<proc_macro2::TokenStream> = vec![];
 
+    // `(class, register-name) -> encoding index` over every register class, so the
+    // simulator can lower register paths that carry no numeric index in their name
+    // (e.g. status flags `PSTATE::z`) to a stable slot.
+    let register_index_map: HashMap<(String, String), u32> = files
+        .iter()
+        .flat_map(|f| f.register_classes())
+        .flat_map(|rc| {
+            let class = rc.name.clone();
+            rc.register_indices()
+                .into_iter()
+                .map(move |(name, idx)| ((class.clone(), name), u32::from(idx)))
+        })
+        .collect();
+
     for inst in files.iter().flat_map(|f| f.instructions()) {
         let name_ident = format_ident!("{}Op", &inst.name);
         let builder_ident = format_ident!("{}OpBuilder", &inst.name);
@@ -177,17 +191,17 @@ fn emit_instructions<'a>(
         for (op_name, op_ty) in &ops {
             if let Type::Struct(class_name) = op_ty {
                 let attr_name_lit = proc_macro2::Literal::string(op_name);
-                let class_lit = proc_macro2::Literal::string(class_name);
                 let print_fn_ident = format_ident!("print_{}", class_name.to_lowercase());
+                // Print through the operand's declared class table, keyed by index.
+                // The operand position fixes the class, so the stored attribute class
+                // is not consulted: a physical register reached through an aliasing
+                // class (e.g. `("GPR", 29)` materialized by hand-written prologue code
+                // landing in a `GPRsp` operand) still prints the right name.
                 register_attr_print_arms.push(quote! {
                     #attr_name_lit => {
-                        if let tir::attributes::AttributeValue::Register(tir::attributes::RegisterAttr::Physical { class, index }) = &attr.value {
-                            if class == #class_lit {
-                                if let Some(name) = #print_fn_ident(*index, false) {
-                                    fmt.write(name)?;
-                                } else {
-                                    attr.value.print(fmt, &context)?;
-                                }
+                        if let tir::attributes::AttributeValue::Register(tir::attributes::RegisterAttr::Physical { index, .. }) = &attr.value {
+                            if let Some(name) = #print_fn_ident(*index, false) {
+                                fmt.write(name)?;
                             } else {
                                 attr.value.print(fmt, &context)?;
                             }
@@ -449,7 +463,6 @@ fn emit_instructions<'a>(
         } else {
             None
         };
-        let writes_pc = branch_value.is_some();
         let codegen_rhs: Option<&ast::Expr> = branch_value.as_ref().or(resolved_rhs);
 
         if let Some(rhs) = codegen_rhs {
@@ -458,132 +471,68 @@ fn emit_instructions<'a>(
             }
         }
 
-        let execute_body = if let Some(rhs) = codegen_rhs {
-            let dst_write = if writes_pc {
-                quote! {
+        let execute_body = if let Some(branch_val) = branch_value.as_ref() {
+            // Conditional control transfer: `synthesize_branch_value` folds the
+            // condition into one value (taken target or fall-through) written to PC
+            // every cycle.
+            match emit_value_eval(
+                branch_val,
+                &ops,
+                &numeric_params,
+                &isa_param_values,
+                &mnemonic_lit,
+                &register_index_map,
+            ) {
+                Some(eval) => quote! {
+                    #eval
                     machine.write_pc(value.to_u64());
-                }
-            } else if let Some(dst_name) = defined_register_operands.last() {
-                let dst_lit = proc_macro2::Literal::string(dst_name);
-                quote! {
-                    let (dst_class, dst_idx) = tir_be_common::register_attr(self.attributes(), #dst_lit).ok_or(
-                        tir_be_common::SimTrap::MissingAttribute {
-                            op: #mnemonic_lit,
-                            attribute: #dst_lit,
-                        },
-                    )?;
-                    if !register_has_trait_hardwired_zero(&dst_class, dst_idx) {
-                        machine.write_register(&dst_class, dst_idx, value)?;
-                    }
-                }
-            } else {
-                quote! {}
-            };
-
-            let mut dag = tir::sem_expr::ExprPostGraph::new();
-            if let Some(lowering) = rhs.lower_to_sema(&mut dag, &numeric_params) {
-                let max_sym_id = [
-                    lowering.variable_symbols.values().copied().max(),
-                    lowering.register_symbols.values().copied().max(),
-                ]
-                .into_iter()
-                .flatten()
-                .max()
-                .unwrap_or(0) as usize;
-                let max_sym_id_lit = proc_macro2::Literal::usize_unsuffixed(max_sym_id);
-
-                let mut sym_init_steps: Vec<proc_macro2::TokenStream> = Vec::new();
-                for (name, &sym_id) in &lowering.variable_symbols {
-                    let sym_lit = proc_macro2::Literal::usize_unsuffixed(sym_id as usize);
-                    let name_lit = proc_macro2::Literal::string(name);
-                    if let Some((_, ty)) = ops.iter().find(|(n, _)| n == name) {
-                        match ty {
-                            Type::Struct(_) => sym_init_steps.push(quote! {
-                                {
-                                    let (class, index) = tir_be_common::register_attr(self.attributes(), #name_lit)
-                                        .ok_or(tir_be_common::SimTrap::MissingAttribute {
-                                            op: #mnemonic_lit,
-                                            attribute: #name_lit,
-                                        })?;
-                                    __syms[#sym_lit] = Some(tir::sem_expr::Value::Int(machine.read_register(&class, index)?));
-                                }
-                            }),
-                            Type::Integer => sym_init_steps.push(quote! {
-                                {
-                                    let value = tir_be_common::int_attr(self.attributes(), #name_lit)
-                                        .ok_or(tir_be_common::SimTrap::MissingAttribute {
-                                            op: #mnemonic_lit,
-                                            attribute: #name_lit,
-                                        })?;
-                                    __syms[#sym_lit] = Some(tir::sem_expr::Value::Int(tir::utils::APInt::new_signed(64, value)));
-                                }
-                            }),
-                            Type::Bits(width) => {
-                                let width_lit =
-                                    proc_macro2::Literal::u32_unsuffixed(*width as u32);
-                                sym_init_steps.push(quote! {
-                                    {
-                                        let value = tir_be_common::int_attr(self.attributes(), #name_lit)
-                                            .ok_or(tir_be_common::SimTrap::MissingAttribute {
-                                                op: #mnemonic_lit,
-                                                attribute: #name_lit,
-                                            })?;
-                                        __syms[#sym_lit] = Some(tir::sem_expr::Value::Int(tir::utils::APInt::new_signed(#width_lit, value)));
-                                    }
-                                });
-                            }
-                            _ => {}
-                        }
-                    } else if let Some(&value) = isa_param_values.get(name) {
-                        // An ISA parameter (e.g. `XLEN`): bind it to its constant value.
-                        let value_lit = proc_macro2::Literal::i64_unsuffixed(value);
-                        sym_init_steps.push(quote! {
-                            __syms[#sym_lit] = Some(tir::sem_expr::Value::Int(
-                                tir::utils::APInt::new_signed(64, #value_lit),
-                            ));
-                        });
-                    }
-                }
-                for ((class, number), &sym_id) in &lowering.register_symbols {
-                    let sym_lit = proc_macro2::Literal::usize_unsuffixed(sym_id as usize);
-                    let class_lit = proc_macro2::Literal::string(class);
-                    let number_lit = proc_macro2::Literal::u16_unsuffixed(*number as u16);
-                    sym_init_steps.push(quote! {
-                        __syms[#sym_lit] = Some(tir::sem_expr::Value::Int(machine.read_register(#class_lit, #number_lit)?));
-                    });
-                }
-
-                quote! {
-                    let mut __g = tir::sem_expr::ExprPostGraph::new();
-                    tir::sem_expr::AsSemExpr::convert(self, &mut __g);
-                    let mut __syms: Vec<Option<tir::sem_expr::Value>> = vec![None; #max_sym_id_lit + 1];
-                    #(#sym_init_steps)*
-                    let __syms: Vec<tir::sem_expr::Value> = __syms.into_iter()
-                        .map(|v| v.unwrap_or_else(|| tir::sem_expr::Value::Int(tir::utils::APInt::new(64, 0))))
-                        .collect();
-                    let value = match tir::sem_expr::execute(&__g, &__syms) {
-                        tir::sem_expr::Value::Int(i) => i,
-                        tir::sem_expr::Value::Float(_) => {
-                            return Err(tir_be_common::SimTrap::InvalidInstruction {
-                                op: #mnemonic_lit,
-                                reason: "instruction semantic expression did not evaluate to integer".to_string(),
-                            });
-                        }
-                    };
-                    #dst_write
                     Ok(())
-                }
-            } else {
-                quote! {
-                    Err(tir_be_common::SimTrap::InvalidInstruction {
-                        op: #mnemonic_lit,
-                        reason: "failed to convert behavior to executable expression".to_string(),
-                    })
-                }
+                },
+                None => quote! { Ok(()) },
             }
         } else {
-            quote! {
-                Ok(())
+            // Execute every assignment in the behavior, in order. Handling all of
+            // them — not just the primary destination — is what makes
+            // multi-destination behaviors fully simulated rather than silently
+            // dropping every write but one: e.g. AArch64 `cmp` setting the four
+            // PSTATE flags, or `bl` writing both the link register and PC.
+            let mut assignments = Vec::new();
+            collect_behavior_assignment_exprs(&inst.behavior, &mut assignments);
+            if assignments.is_empty() {
+                quote! { Ok(()) }
+            } else {
+                let mut steps: Vec<proc_macro2::TokenStream> = Vec::new();
+                let mut unlowerable = false;
+                for (dest, rhs) in assignments {
+                    match emit_assignment_exec(
+                        dest,
+                        rhs,
+                        &ops,
+                        &numeric_params,
+                        &isa_param_values,
+                        &mnemonic_lit,
+                        &register_index_map,
+                    ) {
+                        Some(step) => steps.push(step),
+                        None => {
+                            unlowerable = true;
+                            break;
+                        }
+                    }
+                }
+                if unlowerable {
+                    quote! {
+                        Err(tir_be_common::SimTrap::InvalidInstruction {
+                            op: #mnemonic_lit,
+                            reason: "failed to convert behavior to executable expression".to_string(),
+                        })
+                    }
+                } else {
+                    quote! {
+                        #(#steps)*
+                        Ok(())
+                    }
+                }
             }
         };
 
@@ -821,9 +770,16 @@ fn emit_register_info(files: &[ast::File]) -> Result<proc_macro2::TokenStream, T
         quote! { &[#(#lits),*] }
     };
 
+    let classes: HashMap<String, &ast::RegisterClass> = files
+        .iter()
+        .flat_map(|f| f.register_classes())
+        .map(|rc| (rc.name.clone(), rc))
+        .collect();
+
     let mut class_entries = Vec::new();
     for rc in files.iter().flat_map(|f| f.register_classes()) {
         let name_lit = proc_macro2::Literal::string(&rc.name);
+        let file_lit = proc_macro2::Literal::string(rc.register_file(&classes));
         let meta = rc.allocation_metadata();
         let allocation_order = slice(&meta.allocation_order);
         let caller_saved = slice(&meta.caller_saved);
@@ -834,6 +790,7 @@ fn emit_register_info(files: &[ast::File]) -> Result<proc_macro2::TokenStream, T
         class_entries.push(quote! {
             tir_be_common::regalloc::RegClassInfo {
                 name: #name_lit,
+                file: #file_lit,
                 allocation_order: #allocation_order,
                 caller_saved: #caller_saved,
                 callee_saved: #callee_saved,
@@ -1446,12 +1403,6 @@ fn synthesize_branch_value(inst: &ast::Instruction, width_bytes: u64) -> Option<
         return None;
     }
     let target = extract_pc_assignment_target(&if_.then)?;
-    // Only synthesize when the condition and target lower cleanly. Branches whose
-    // condition reads a status register (e.g. arm64 `PSTATE::z`) cannot be lowered
-    // by the register-path rules, so leave those unhandled rather than panic.
-    if references_unlowerable_register(&if_.cond) || references_unlowerable_register(target) {
-        return None;
-    }
     let span = if_.span;
     let pc_read = ast::Expr::Path(ast::Path {
         base: "PC".to_string(),
@@ -1479,44 +1430,6 @@ fn synthesize_branch_value(inst: &ast::Instruction, width_bytes: u64) -> Option<
         else_: Some(Box::new(fallthrough)),
         span,
     }))
-}
-
-/// Whether an expression references a register path the semantic lowering cannot
-/// represent: anything other than `PC::pc` or a numbered register (e.g. a status
-/// flag like `PSTATE::z`). Used to skip branch synthesis that would otherwise panic.
-fn references_unlowerable_register(e: &ast::Expr) -> bool {
-    match e {
-        ast::Expr::Path(p) => {
-            let is_pc = p.base == "PC" && p.remainder == ["pc"];
-            let is_numbered = p
-                .remainder
-                .first()
-                .is_some_and(|r| r.contains(|c: char| c.is_ascii_digit()));
-            !is_pc && !is_numbered
-        }
-        ast::Expr::Binary(b) => {
-            references_unlowerable_register(&b.lhs) || references_unlowerable_register(&b.rhs)
-        }
-        ast::Expr::Call(c) => {
-            references_unlowerable_register(&c.callee)
-                || c.arguments.iter().any(references_unlowerable_register)
-        }
-        ast::Expr::If(i) => {
-            references_unlowerable_register(&i.cond)
-                || references_unlowerable_register(&i.then)
-                || i.else_
-                    .as_ref()
-                    .is_some_and(|e| references_unlowerable_register(e))
-        }
-        ast::Expr::Block(b) => b.stmts.iter().any(references_unlowerable_register),
-        ast::Expr::Assign(a) => {
-            references_unlowerable_register(&a.dest) || references_unlowerable_register(&a.value)
-        }
-        ast::Expr::Field(f) => references_unlowerable_register(&f.base),
-        ast::Expr::Slice(s) => references_unlowerable_register(&s.base),
-        ast::Expr::IndexAccess(idx) => references_unlowerable_register(&idx.base),
-        _ => false,
-    }
 }
 
 /// Peel `{ stmt }` blocks down to their single inner statement.
@@ -1571,6 +1484,234 @@ fn emit_as_sem_expr_impl(
             }
         }
     })
+}
+
+/// Collect every assignment in a behavior as `(destination, value)` expression
+/// pairs, in source order, descending only through statement blocks. Unlike
+/// [`collect_behavior_assignments`] it keeps the destination *expression* (so a
+/// status-register or PC path can be told apart from a plain operand) and does not
+/// recurse into `if` arms — a conditional that writes PC is a branch handled
+/// separately, and recursing would turn its guarded write into an unconditional one.
+fn collect_behavior_assignment_exprs<'a>(
+    expr: &'a ast::Expr,
+    out: &mut Vec<(&'a ast::Expr, &'a ast::Expr)>,
+) {
+    match expr {
+        ast::Expr::Assign(a) => out.push((a.dest.as_ref(), a.value.as_ref())),
+        ast::Expr::Block(b) => {
+            for stmt in &b.stmts {
+                collect_behavior_assignment_exprs(stmt, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Emit one assignment from a behavior: evaluate its value, then write it to the
+/// destination (a register operand, a fixed/status register named by class, or PC).
+/// Returns `None` if the value cannot be lowered or the destination is unrecognized.
+fn emit_assignment_exec(
+    dest: &ast::Expr,
+    rhs: &ast::Expr,
+    ops: &[(String, Type)],
+    numeric_params: &HashMap<String, i64>,
+    isa_param_values: &HashMap<String, i64>,
+    mnemonic_lit: &proc_macro2::Literal,
+    register_index_map: &HashMap<(String, String), u32>,
+) -> Option<proc_macro2::TokenStream> {
+    let eval = emit_value_eval(
+        rhs,
+        ops,
+        numeric_params,
+        isa_param_values,
+        mnemonic_lit,
+        register_index_map,
+    )?;
+    let write = emit_destination_write(dest, ops, register_index_map, mnemonic_lit)?;
+    Some(quote! {
+        {
+            #eval
+            #write
+        }
+    })
+}
+
+/// Emit the statements that bind `value` to the result of evaluating `rhs` against
+/// the machine state (reading operands, fixed/status registers, and ISA params).
+/// Returns `None` if the expression cannot be lowered (e.g. it loads memory).
+fn emit_value_eval(
+    rhs: &ast::Expr,
+    ops: &[(String, Type)],
+    numeric_params: &HashMap<String, i64>,
+    isa_param_values: &HashMap<String, i64>,
+    mnemonic_lit: &proc_macro2::Literal,
+    register_index_map: &HashMap<(String, String), u32>,
+) -> Option<proc_macro2::TokenStream> {
+    let mut dag = tir::sem_expr::ExprPostGraph::new();
+    let lowering = rhs.lower_to_sema_with_registers(&mut dag, numeric_params, register_index_map)?;
+    // Build the semantic graph inline (no type annotations, so no `_context`).
+    let (dag_stmts, _root) = emit_dag_as_code(&dag, lowering.root, &[]);
+    let (max_sym_id, sym_inits) = emit_sym_inits(&lowering, ops, isa_param_values, mnemonic_lit);
+    let max_sym_id_lit = proc_macro2::Literal::usize_unsuffixed(max_sym_id);
+
+    Some(quote! {
+        let value = {
+            let mut __g = tir::sem_expr::ExprPostGraph::new();
+            {
+                use tir::graph::MutDag as _;
+                let g = &mut __g;
+                #(#dag_stmts)*
+            }
+            let mut __syms: Vec<Option<tir::sem_expr::Value>> = vec![None; #max_sym_id_lit + 1];
+            #(#sym_inits)*
+            let __syms: Vec<tir::sem_expr::Value> = __syms.into_iter()
+                .map(|v| v.unwrap_or_else(|| tir::sem_expr::Value::Int(tir::utils::APInt::new(64, 0))))
+                .collect();
+            match tir::sem_expr::execute(&__g, &__syms) {
+                tir::sem_expr::Value::Int(i) => i,
+                tir::sem_expr::Value::Float(_) => {
+                    return Err(tir_be_common::SimTrap::InvalidInstruction {
+                        op: #mnemonic_lit,
+                        reason: "instruction semantic expression did not evaluate to integer".to_string(),
+                    });
+                }
+            }
+        };
+    })
+}
+
+/// Emit the steps that fill `__syms` for a lowered behavior: register operands and
+/// fixed/status registers are read from the machine; integer operands and ISA
+/// parameters are bound to constants. Returns the highest symbol id (to size the
+/// table) and the steps.
+fn emit_sym_inits(
+    lowering: &ast::SemaLowering,
+    ops: &[(String, Type)],
+    isa_param_values: &HashMap<String, i64>,
+    mnemonic_lit: &proc_macro2::Literal,
+) -> (usize, Vec<proc_macro2::TokenStream>) {
+    let max_sym_id = [
+        lowering.variable_symbols.values().copied().max(),
+        lowering.register_symbols.values().copied().max(),
+    ]
+    .into_iter()
+    .flatten()
+    .max()
+    .unwrap_or(0) as usize;
+
+    let mut steps: Vec<proc_macro2::TokenStream> = Vec::new();
+    for (name, &sym_id) in &lowering.variable_symbols {
+        let sym_lit = proc_macro2::Literal::usize_unsuffixed(sym_id as usize);
+        let name_lit = proc_macro2::Literal::string(name);
+        if let Some((_, ty)) = ops.iter().find(|(n, _)| n == name) {
+            match ty {
+                Type::Struct(_) => steps.push(quote! {
+                    {
+                        let (class, index) = tir_be_common::register_attr(self.attributes(), #name_lit)
+                            .ok_or(tir_be_common::SimTrap::MissingAttribute {
+                                op: #mnemonic_lit,
+                                attribute: #name_lit,
+                            })?;
+                        __syms[#sym_lit] = Some(tir::sem_expr::Value::Int(machine.read_register(&class, index)?));
+                    }
+                }),
+                Type::Integer => steps.push(quote! {
+                    {
+                        let value = tir_be_common::int_attr(self.attributes(), #name_lit)
+                            .ok_or(tir_be_common::SimTrap::MissingAttribute {
+                                op: #mnemonic_lit,
+                                attribute: #name_lit,
+                            })?;
+                        __syms[#sym_lit] = Some(tir::sem_expr::Value::Int(tir::utils::APInt::new_signed(64, value)));
+                    }
+                }),
+                Type::Bits(width) => {
+                    let width_lit = proc_macro2::Literal::u32_unsuffixed(*width as u32);
+                    steps.push(quote! {
+                        {
+                            let value = tir_be_common::int_attr(self.attributes(), #name_lit)
+                                .ok_or(tir_be_common::SimTrap::MissingAttribute {
+                                    op: #mnemonic_lit,
+                                    attribute: #name_lit,
+                                })?;
+                            __syms[#sym_lit] = Some(tir::sem_expr::Value::Int(tir::utils::APInt::new_signed(#width_lit, value)));
+                        }
+                    });
+                }
+                _ => {}
+            }
+        } else if let Some(&value) = isa_param_values.get(name) {
+            // An ISA parameter (e.g. `XLEN`): bind it to its constant value.
+            let value_lit = proc_macro2::Literal::i64_unsuffixed(value);
+            steps.push(quote! {
+                __syms[#sym_lit] = Some(tir::sem_expr::Value::Int(
+                    tir::utils::APInt::new_signed(64, #value_lit),
+                ));
+            });
+        }
+    }
+    for ((class, number), &sym_id) in &lowering.register_symbols {
+        let sym_lit = proc_macro2::Literal::usize_unsuffixed(sym_id as usize);
+        let class_lit = proc_macro2::Literal::string(class);
+        let number_lit = proc_macro2::Literal::u16_unsuffixed(*number as u16);
+        steps.push(quote! {
+            __syms[#sym_lit] = Some(tir::sem_expr::Value::Int(machine.read_register(#class_lit, #number_lit)?));
+        });
+    }
+
+    (max_sym_id, steps)
+}
+
+/// Emit the write that stores `value` to an assignment's destination: PC, a register
+/// operand resolved from the instruction's attributes (honoring hard-wired-zero
+/// registers), or a register named directly by class (e.g. a status flag
+/// `PSTATE::z`). Returns `None` for an unrecognized destination.
+fn emit_destination_write(
+    dest: &ast::Expr,
+    ops: &[(String, Type)],
+    register_index_map: &HashMap<(String, String), u32>,
+    mnemonic_lit: &proc_macro2::Literal,
+) -> Option<proc_macro2::TokenStream> {
+    if is_pc_dest(dest) {
+        return Some(quote! { machine.write_pc(value.to_u64()); });
+    }
+
+    let name = assignment_dest_name(dest)?;
+
+    // A register operand: its concrete `(class, index)` comes from the attributes.
+    if let Some((_, Type::Struct(_))) = ops.iter().find(|(n, _)| *n == name) {
+        let name_lit = proc_macro2::Literal::string(&name);
+        return Some(quote! {
+            let (dst_class, dst_idx) = tir_be_common::register_attr(self.attributes(), #name_lit).ok_or(
+                tir_be_common::SimTrap::MissingAttribute {
+                    op: #mnemonic_lit,
+                    attribute: #name_lit,
+                },
+            )?;
+            if !register_has_trait_hardwired_zero(&dst_class, dst_idx) {
+                machine.write_register(&dst_class, dst_idx, value)?;
+            }
+        });
+    }
+
+    // A register named directly by class, e.g. a status flag `PSTATE::z` or a fixed
+    // register like `GPR::x30`; its index is fixed at compile time.
+    if let ast::Expr::Path(path) = dest {
+        if path.remainder.len() == 1 {
+            let key = (path.base.clone(), path.remainder[0].clone());
+            if let Some(&index) = register_index_map.get(&key) {
+                let class_lit = proc_macro2::Literal::string(&path.base);
+                let index_lit = proc_macro2::Literal::u16_unsuffixed(index as u16);
+                return Some(quote! {
+                    if !register_has_trait_hardwired_zero(#class_lit, #index_lit) {
+                        machine.write_register(#class_lit, #index_lit, value)?;
+                    }
+                });
+            }
+        }
+    }
+
+    None
 }
 
 fn emit_dag_as_code(

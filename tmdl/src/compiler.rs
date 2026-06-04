@@ -105,6 +105,8 @@ impl Compiler {
                 parsed_files.push(file.unwrap());
             }
 
+            crate::ast::resolve_register_class_inheritance(&mut parsed_files);
+
             let sema_diags = sema_analyze(&parsed_files);
             if !sema_diags.is_empty() {
                 use std::collections::BTreeMap;
@@ -198,6 +200,8 @@ impl Compiler {
 
             parsed_files.push(file.unwrap());
         }
+
+        crate::ast::resolve_register_class_inheritance(&mut parsed_files);
 
         // Semantic analysis for whole-program actions
         let sema_diags = sema_analyze(&parsed_files);

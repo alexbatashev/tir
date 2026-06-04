@@ -431,6 +431,7 @@ mod tests {
             tir_be_common::regalloc::RegisterInfo {
                 classes: &[tir_be_common::regalloc::RegClassInfo {
                     name: "GPR",
+                    file: "GPR",
                     allocation_order: &[0, 1, 2, 3, 4],
                     caller_saved: &[0, 1, 2, 3, 4],
                     callee_saved: &[],

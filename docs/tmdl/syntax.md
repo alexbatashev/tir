@@ -95,6 +95,28 @@ register_class GPR for [RV32I, RV64I] {
 - Range: `start..end("alias{}") => { traits = [..] }` uses `{}` placeholder to number aliases sequentially.
 - Known traits currently recognized by tools: `hardwired_zero`, `return_address`, `caller_saved`, `callee_saved`, `stack_pointer`. Other identifiers parse but may be ignored by current tooling.
 
+#### Inheritance
+
+A class may inherit another with `: Base`. It absorbs the base's parameters and
+registers, then applies its own declarations as overrides — parameters by name,
+registers by encoding index (or by name for index-less registers). The two classes
+name the **same physical register file**: a given encoding index is the same
+register in both, so the register allocator treats their indices as aliases. This
+expresses architectures where one encoding slot denotes different registers in
+different operand positions — e.g. AArch64 encoding `31` is the zero register in
+most operands but the stack pointer in addressing bases and add/sub-immediate:
+
+```
+register_class GPRsp for [ARMv8A64] : GPR {
+  registers {
+    x31("sp") => { traits = [stack_pointer] },   // overrides GPR's xzr at slot 31
+  }
+}
+```
+
+Operands then bind to the precise class (`rn: GPRsp` vs `rn: GPR`), and assembly
+printing resolves each operand's register name through its own class.
+
 ### Instruction Template
 
 ```

@@ -53,6 +53,13 @@ pub enum RegisterDef {
 pub struct RegisterClass {
     pub name: String,
     pub for_isas: Vec<String>,
+    /// Name of the register class this one inherits from, if any. A derived class
+    /// shares the base's physical register file (the same encoding indices name the
+    /// same registers) but may add registers and override individual encoding slots
+    /// — e.g. AArch64 `GPRsp : GPR` redefines slot 31 as `sp` instead of `xzr`.
+    /// Resolved (flattened into `parameters`/`registers`) by
+    /// [`resolve_register_class_inheritance`] before any analysis runs.
+    pub base: Option<String>,
     #[serde(serialize_with = "serialize_params")]
     pub parameters: StableHashMap<String, (Type, Option<Expr>)>,
     pub registers: Vec<RegisterDef>,
@@ -438,6 +445,11 @@ struct SemaExprLoweringCtx<
 > {
     graph: &'a mut G,
     params: &'a HashMap<String, i64>,
+    /// Maps `(class, register-name)` to the register's canonical encoding index, so
+    /// register paths like `PSTATE::z` that carry no numeric index in their name can
+    /// still be lowered to a stable `(class, index)` slot. When absent, only PC and
+    /// numbered registers (whose index is in the name, e.g. `x5`) can be resolved.
+    register_indices: Option<&'a HashMap<(String, String), u32>>,
     next_symbol_id: u32,
     register_symbols: HashMap<(String, u32), u32>,
     variable_symbols: HashMap<String, u32>,
@@ -451,6 +463,23 @@ impl<'a, G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_e
         Self {
             graph,
             params,
+            register_indices: None,
+            next_symbol_id: 0,
+            register_symbols: HashMap::new(),
+            variable_symbols: HashMap::new(),
+            had_error: false,
+        }
+    }
+
+    fn new_with_registers(
+        graph: &'a mut G,
+        params: &'a HashMap<String, i64>,
+        register_indices: &'a HashMap<(String, String), u32>,
+    ) -> Self {
+        Self {
+            graph,
+            params,
+            register_indices: Some(register_indices),
             next_symbol_id: 0,
             register_symbols: HashMap::new(),
             variable_symbols: HashMap::new(),
@@ -663,6 +692,32 @@ impl Expr {
             register_symbols: ctx.register_symbols,
         })
     }
+
+    /// Like [`Expr::lower_to_sema`], but resolves index-less register paths (e.g.
+    /// status flags such as `PSTATE::z`) through `register_indices`, a
+    /// `(class, register-name) -> index` table derived from the register-class
+    /// definitions. Used by simulator codegen so flag reads and writes resolve to a
+    /// stable register slot instead of failing to lower.
+    pub fn lower_to_sema_with_registers(
+        &self,
+        g: &mut impl tir::graph::MutDag<
+            Node = tir::sem_expr::ExprKind,
+            Leaf = tir::sem_expr::ExprPayload,
+        >,
+        params: &HashMap<String, i64>,
+        register_indices: &HashMap<(String, String), u32>,
+    ) -> Option<SemaLowering> {
+        let mut ctx = SemaExprLoweringCtx::new_with_registers(g, params, register_indices);
+        let root = self.lower_with_ctx(&mut ctx);
+        if ctx.had_error {
+            return None;
+        }
+        Some(SemaLowering {
+            root,
+            variable_symbols: ctx.variable_symbols,
+            register_symbols: ctx.register_symbols,
+        })
+    }
 }
 
 impl Assign {
@@ -751,21 +806,30 @@ impl Path {
         &self,
         ctx: &mut SemaExprLoweringCtx<'_, G>,
     ) -> tir::graph::NodeId {
-        assert!(
-            self.remainder.len() == 1,
-            "path expressions must have exactly one register component"
-        );
+        if self.remainder.len() != 1 {
+            ctx.had_error = true;
+            return ctx.add_int_const(tir::utils::APInt::new(64, 0));
+        }
 
         let reg_name = &self.remainder[0];
+        // Resolve the register's encoding index: PC is special; otherwise prefer the
+        // `(class, name)` table (which gives index-less registers like status flags a
+        // stable slot), falling back to a trailing numeric index in the name. A path
+        // that resolves to neither is unrepresentable, so mark the lowering failed
+        // rather than panicking — callers turn that into a skipped/None lowering.
         let number = if self.base == "PC" && reg_name == "pc" {
-            0
+            Some(0)
+        } else if let Some(indices) = ctx.register_indices {
+            indices.get(&(self.base.clone(), reg_name.clone())).copied()
         } else {
-            let digits_start = reg_name
+            reg_name
                 .find(|c: char| c.is_ascii_digit())
-                .expect("could not infer register index from path");
-            reg_name[digits_start..]
-                .parse::<u32>()
-                .expect("invalid register index in path")
+                .and_then(|start| reg_name[start..].parse::<u32>().ok())
+        };
+
+        let Some(number) = number else {
+            ctx.had_error = true;
+            return ctx.add_int_const(tir::utils::APInt::new(64, 0));
         };
 
         let symbol_id = ctx.get_or_create_register_symbol(self.base.clone(), number);
@@ -1086,6 +1150,26 @@ impl RegisterClass {
         })
     }
 
+    /// Maps each register's name — and its ABI alias, when fixed — to its canonical
+    /// encoding index. The index is the trailing number in the name when present
+    /// (`x5` -> 5), otherwise the register's ordinal position in declaration order
+    /// (status flags `n`, `z`, `c`, `v` -> 0, 1, 2, 3). This gives index-less
+    /// registers a stable slot the simulator can address, while leaving numbered
+    /// registers at the index their operand encoding already uses.
+    pub fn register_indices(&self) -> Vec<(String, u16)> {
+        let mut out = Vec::new();
+        for (position, reg) in self.resolve_registers().enumerate() {
+            let index = parse_trailing_index(&reg.name).unwrap_or(position as u16);
+            out.push((reg.name.clone(), index));
+            if let Some(alias) = &reg.alias {
+                if !alias.contains("{}") && alias != &reg.name {
+                    out.push((alias.clone(), index));
+                }
+            }
+        }
+        out
+    }
+
     /// Every register that carries a concrete encoding index, paired with its
     /// traits, sorted by index. Registers without a trailing index (e.g. `pc`) are
     /// skipped — they have no encodable slot and are never allocated.
@@ -1162,6 +1246,26 @@ impl RegisterClass {
         }
     }
 
+    /// The name of the physical register file this class draws from: the root of
+    /// its inheritance chain. Classes that share a file (e.g. AArch64 `GPR` and
+    /// `GPRsp`) name the same physical register at a given encoding index, so the
+    /// register allocator must treat those indices as aliases. A standalone class
+    /// is its own file. `classes` maps every class name to its definition.
+    pub fn register_file<'a>(&'a self, classes: &'a HashMap<String, &'a RegisterClass>) -> &'a str {
+        let mut current = self;
+        let mut seen = std::collections::HashSet::new();
+        while let Some(base_name) = &current.base {
+            if !seen.insert(current.name.clone()) {
+                break; // defensive: inheritance cycle
+            }
+            match classes.get(base_name) {
+                Some(base) => current = base,
+                None => break,
+            }
+        }
+        &current.name
+    }
+
     pub fn resolve_registers(&self) -> impl Iterator<Item = Register> {
         let mut registers = Vec::new();
 
@@ -1191,6 +1295,83 @@ impl RegisterClass {
         }
 
         registers.into_iter()
+    }
+}
+
+/// Flatten `register_class` inheritance in place: every class with a `base`
+/// absorbs the base's parameters and (encoding-expanded) registers, then applies
+/// its own declarations as overrides — parameters by name, registers by trailing
+/// encoding index (or by name for index-less registers like `pc`). After this runs
+/// every class carries its complete register set, so all downstream analysis
+/// (typeck, sema, codegen) can treat classes as self-contained. `base` itself is
+/// left intact so codegen can still recover the shared register file (see
+/// [`RegisterClass::register_file`]).
+pub fn resolve_register_class_inheritance(files: &mut [File]) {
+    let raw: HashMap<String, RegisterClass> = files
+        .iter()
+        .flat_map(|f| f.register_classes())
+        .map(|rc| (rc.name.clone(), rc.clone()))
+        .collect();
+
+    fn merge(
+        name: &str,
+        raw: &HashMap<String, RegisterClass>,
+        cache: &mut HashMap<String, RegisterClass>,
+    ) -> RegisterClass {
+        if let Some(done) = cache.get(name) {
+            return done.clone();
+        }
+        let mut rc = raw
+            .get(name)
+            .cloned()
+            .expect("merge called with a known class name");
+
+        if let Some(base_name) = rc.base.clone() {
+            // A dangling base is reported by sema; treat it as no inheritance here.
+            if raw.contains_key(&base_name) && base_name != name {
+                let base = merge(&base_name, raw, cache);
+
+                let mut parameters = base.parameters.clone();
+                for (key, value) in rc.parameters.iter() {
+                    parameters.insert(key.clone(), value.clone());
+                }
+
+                let mut registers: Vec<Register> = base.resolve_registers().collect();
+                for own in rc.resolve_registers() {
+                    let key = parse_trailing_index(&own.name);
+                    let existing = registers.iter().position(|r| match key {
+                        Some(idx) => parse_trailing_index(&r.name) == Some(idx),
+                        None => r.name == own.name,
+                    });
+                    match existing {
+                        Some(pos) => registers[pos] = own,
+                        None => registers.push(own),
+                    }
+                }
+
+                rc.parameters = parameters;
+                rc.registers = registers.into_iter().map(RegisterDef::Single).collect();
+            }
+        }
+
+        cache.insert(name.to_string(), rc.clone());
+        rc
+    }
+
+    let mut cache: HashMap<String, RegisterClass> = HashMap::new();
+    for name in raw.keys() {
+        merge(name, &raw, &mut cache);
+    }
+
+    for file in files.iter_mut() {
+        for item in file.items.iter_mut() {
+            if let Item::RegisterClass(rc) = item {
+                if let Some(merged) = cache.get(&rc.name) {
+                    rc.parameters = merged.parameters.clone();
+                    rc.registers = merged.registers.clone();
+                }
+            }
+        }
     }
 }
 
