@@ -12,3 +12,10 @@ tir = { path = "../../core" }
 tir-be-common = { path = "../common" }
 tir-riscv = { path = "../riscv" }
 arm64 = { path = "../arm64" }
+
+[dev-dependencies]
+tir-lit = { path = "../../utils/lit" }
+
+[[test]]
+name = "lit"
+harness = false
