@@ -671,7 +671,7 @@ fn emit_instructions<'a>(
                 let mn_lit = proc_macro2::Literal::string(mn);
                 instruction_parser_map_inits.push(quote! {
                     let f: tir_be_common::AsmInstructionParser = #parse_fn_ident;
-                    map.insert(#mn_lit.to_string(), Box::new(f));
+                    map.entry(#mn_lit.to_string()).or_default().push(Box::new(f));
                 });
             }
         }
@@ -683,8 +683,8 @@ fn emit_instructions<'a>(
         #(#machine_instruction_impls)*
         #(#as_sem_expr_impls)*
 
-        fn get_instruction_parsers() -> std::collections::HashMap<String, Box<tir_be_common::AsmInstructionParser>> {
-            let mut map = std::collections::HashMap::new();
+        fn get_instruction_parsers() -> std::collections::HashMap<String, Vec<Box<tir_be_common::AsmInstructionParser>>> {
+            let mut map: std::collections::HashMap<String, Vec<Box<tir_be_common::AsmInstructionParser>>> = std::collections::HashMap::new();
             #(#instruction_parsers_impls)*
             #(#instruction_parser_map_inits)*
 
@@ -902,8 +902,9 @@ fn emit_machine_models<'a>(
         });
 
         let name_lit = proc_macro2::Literal::string(&machine.name);
-        let issue_width_lit =
-            proc_macro2::Literal::u16_unsuffixed(clamp_u16(machine.issue_width.unwrap_or(1).max(1)));
+        let issue_width_lit = proc_macro2::Literal::u16_unsuffixed(clamp_u16(
+            machine.issue_width.unwrap_or(1).max(1),
+        ));
         let fn_ident = format_ident!("{}_model", to_snake_case(&machine.name));
 
         model_fns.push(quote! {
@@ -1411,7 +1412,10 @@ fn synthesize_branch_value(inst: &ast::Instruction, width_bytes: u64) -> Option<
     });
     // `zext(width, 64)` so the fall-through addend matches `PC::pc`'s 64-bit width
     // (a bare literal would lower to a narrow constant and mismatch the add).
-    let width_lit = ast::Expr::Lit(ast::Lit::Int(ast::LitInt::new(width_bytes.to_string(), span)));
+    let width_lit = ast::Expr::Lit(ast::Lit::Int(ast::LitInt::new(
+        width_bytes.to_string(),
+        span,
+    )));
     let xlen_lit = ast::Expr::Lit(ast::Lit::Int(ast::LitInt::new("64".to_string(), span)));
     let width_ext = ast::Expr::Call(ast::Call {
         callee: Box::new(ast::Expr::BuiltinFunction(ast::BuiltinFunction::ZExt)),
@@ -1548,7 +1552,8 @@ fn emit_value_eval(
     register_index_map: &HashMap<(String, String), u32>,
 ) -> Option<proc_macro2::TokenStream> {
     let mut dag = tir::sem_expr::ExprPostGraph::new();
-    let lowering = rhs.lower_to_sema_with_registers(&mut dag, numeric_params, register_index_map)?;
+    let lowering =
+        rhs.lower_to_sema_with_registers(&mut dag, numeric_params, register_index_map)?;
     // Build the semantic graph inline (no type annotations, so no `_context`).
     let (dag_stmts, _root) = emit_dag_as_code(&dag, lowering.root, &[]);
     let (max_sym_id, sym_inits) = emit_sym_inits(&lowering, ops, isa_param_values, mnemonic_lit);

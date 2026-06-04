@@ -373,7 +373,10 @@ mod tests {
         assert_eq!(uses[0].op(), subi_id);
 
         // The replaced-out addi is gone from the arena, not just the block.
-        assert!(!context.has_operation(add_id), "replaced op should leave the arena");
+        assert!(
+            !context.has_operation(add_id),
+            "replaced op should leave the arena"
+        );
     }
 
     #[test]
@@ -389,14 +392,15 @@ mod tests {
         let body = func.body();
 
         let mut b = IRBuilder::new(body.clone());
-        let neg = ops::subi(&context, body.arguments()[0].id(), body.arguments()[0].id(), i32)
-            .build();
+        let neg = ops::subi(
+            &context,
+            body.arguments()[0].id(),
+            body.arguments()[0].id(),
+            i32,
+        )
+        .build();
         let neg_id = neg.id();
-        let neg_ref = super::OperationRef::new(
-            context.get_op(neg_id),
-            Some(body.clone()),
-            None,
-        );
+        let neg_ref = super::OperationRef::new(context.get_op(neg_id), Some(body.clone()), None);
         b.insert(neg);
         assert!(context.is_value_used(body.arguments()[0].id()));
 
@@ -408,6 +412,9 @@ mod tests {
             "erasing the only consumer must clear the value's uses"
         );
         // The erased op is gone from the arena, not just the block.
-        assert!(!context.has_operation(neg_id), "erased op should leave the arena");
+        assert!(
+            !context.has_operation(neg_id),
+            "erased op should leave the arena"
+        );
     }
 }

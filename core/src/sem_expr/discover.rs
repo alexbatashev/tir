@@ -18,12 +18,7 @@ use crate::{
 /// Decides whether two single-output expression graphs (over the same symbols)
 /// compute the same value for every input of the given symbol widths.
 pub trait EquivalenceOracle {
-    fn equivalent(
-        &self,
-        lhs: &ExprPostGraph,
-        rhs: &ExprPostGraph,
-        symbol_widths: &[u32],
-    ) -> bool;
+    fn equivalent(&self, lhs: &ExprPostGraph, rhs: &ExprPostGraph, symbol_widths: &[u32]) -> bool;
 }
 
 /// Property-testing oracle: evaluates both graphs on boundary values plus a
@@ -42,12 +37,7 @@ impl Default for FuzzOracle {
 }
 
 impl EquivalenceOracle for FuzzOracle {
-    fn equivalent(
-        &self,
-        lhs: &ExprPostGraph,
-        rhs: &ExprPostGraph,
-        symbol_widths: &[u32],
-    ) -> bool {
+    fn equivalent(&self, lhs: &ExprPostGraph, rhs: &ExprPostGraph, symbol_widths: &[u32]) -> bool {
         let value_sets: Vec<Vec<APInt>> = symbol_widths
             .iter()
             .map(|&w| sample_values(w, self.samples_per_symbol))
@@ -88,7 +78,11 @@ fn values_bit_eq(a: &Value, b: &Value) -> bool {
             // Compare bit patterns over the common width, ignoring how each side's
             // signedness flag would sign- vs zero-extend `to_u64` past that width.
             let width = a.width();
-            let mask = if width >= 64 { u64::MAX } else { (1u64 << width) - 1 };
+            let mask = if width >= 64 {
+                u64::MAX
+            } else {
+                (1u64 << width) - 1
+            };
             width == b.width() && (a.to_u64() & mask) == (b.to_u64() & mask)
         }
         _ => false,
@@ -98,7 +92,11 @@ fn values_bit_eq(a: &Value, b: &Value) -> bool {
 /// Boundary values (0, 1, all-ones, sign bit, alternating patterns) plus a small
 /// deterministic LCG spread, all masked to `width` bits.
 fn sample_values(width: u32, extra: usize) -> Vec<APInt> {
-    let mask = if width >= 64 { u64::MAX } else { (1u64 << width) - 1 };
+    let mask = if width >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << width) - 1
+    };
     let mut raw = vec![
         0u64,
         1,
@@ -109,7 +107,9 @@ fn sample_values(width: u32, extra: usize) -> Vec<APInt> {
     ];
     let mut state = 0x9E37_79B9_7F4A_7C15u64;
     for _ in 0..extra {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         raw.push(state & mask);
     }
     raw.sort_unstable();

@@ -513,7 +513,8 @@ impl<N: Node + Clone + Eq + Hash, L: Clone + Eq + Hash> EGraph<N, L> {
                     let Some(child_costs) = child_costs else {
                         continue;
                     };
-                    let total = cost(&node.node, &child_costs).saturating_add(child_costs.iter().sum());
+                    let total =
+                        cost(&node.node, &child_costs).saturating_add(child_costs.iter().sum());
                     let improve = match best.get(&class) {
                         Some((_, existing)) => total < *existing,
                         None => true,
@@ -534,10 +535,7 @@ impl<N: Node + Clone + Eq + Hash, L: Clone + Eq + Hash> EGraph<N, L> {
 
 /// Merge two partial assignments, failing if they bind the same pattern node to
 /// different classes.
-fn merge_bindings(
-    a: &[Option<EClassId>],
-    b: &[Option<EClassId>],
-) -> Option<Vec<Option<EClassId>>> {
+fn merge_bindings(a: &[Option<EClassId>], b: &[Option<EClassId>]) -> Option<Vec<Option<EClassId>>> {
     let mut out = a.to_vec();
     for (slot, &value) in out.iter_mut().zip(b.iter()) {
         match (*slot, value) {

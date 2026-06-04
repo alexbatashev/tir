@@ -260,7 +260,10 @@ mod tests {
     fn machine_models_resolve_scheduling_classes() {
         // Resource assignment is shared; an unscheduled instruction falls back to
         // the default class on either core.
-        for model in [crate::in_order_core_model(), crate::out_of_order_core_model()] {
+        for model in [
+            crate::in_order_core_model(),
+            crate::out_of_order_core_model(),
+        ] {
             assert_eq!(model.sched_class("add").resources, &["ALU"]);
             assert_eq!(model.sched_class("lw").resources, &["LSU"]);
             assert_eq!(
@@ -309,13 +312,19 @@ mod tests {
         // The per-machine model may refine the generic default for that silicon:
         // both demo cores bind WriteLoad to latency 4, independent of the default 3.
         assert_eq!(crate::instruction_cost("lw"), 3);
-        assert_eq!(crate::out_of_order_core_model().sched_class("lw").latency, 4);
+        assert_eq!(
+            crate::out_of_order_core_model().sched_class("lw").latency,
+            4
+        );
     }
 
     #[test]
     fn override_supersedes_unit_bind() {
         // OutOfOrderCore overrides `Add` to latency 2, beating WriteIALU's bind (1).
-        assert_eq!(crate::out_of_order_core_model().sched_class("add").latency, 2);
+        assert_eq!(
+            crate::out_of_order_core_model().sched_class("add").latency,
+            2
+        );
         // InOrderCore has no override → `add` resolves from its WriteIALU bind.
         assert_eq!(crate::in_order_core_model().sched_class("add").latency, 1);
     }
@@ -605,7 +614,8 @@ mod tests {
             slliw
                 .attributes
                 .iter()
-                .any(|a| a.name == "imm" && matches!(a.value, tir::attributes::AttributeValue::Int(3))),
+                .any(|a| a.name == "imm"
+                    && matches!(a.value, tir::attributes::AttributeValue::Int(3))),
             "slliw should fold the immediate 3, got {:?}",
             slliw.attributes
         );
@@ -615,7 +625,10 @@ mod tests {
         // The def-use chain now spans the machine-IR register layer: `a` feeds
         // slliw's rs1 (a register operand carried in an attribute, not `operands`),
         // so it reports a use referencing slliw with no operand index.
-        assert!(context.is_value_used(a), "block arg a should be used by slliw");
+        assert!(
+            context.is_value_used(a),
+            "block arg a should be used by slliw"
+        );
         let uses = context.value_uses(a);
         assert_eq!(uses.len(), 1);
         assert_eq!(uses[0].op(), slliw.id);
@@ -624,7 +637,10 @@ mod tests {
         // slliw's rd value is defined by slliw (def-site followed the rewrite off the
         // erased source op), and the folded constant is genuinely unused.
         assert_eq!(context.get_value(sr).defining_op(), Some(slliw.id));
-        assert!(!context.is_value_used(three_r), "folded constant should be dead");
+        assert!(
+            !context.is_value_used(three_r),
+            "folded constant should be dead"
+        );
     }
 
     #[test]
@@ -673,17 +689,17 @@ mod tests {
         );
     }
 
-    fn phys_of(
-        op: &std::sync::Arc<tir::OpInstance>,
-        name: &str,
-    ) -> Option<(String, u16)> {
+    fn phys_of(op: &std::sync::Arc<tir::OpInstance>, name: &str) -> Option<(String, u16)> {
         use tir::attributes::{AttributeValue, RegisterAttr};
-        op.attributes.iter().find(|a| a.name == name).and_then(|a| match &a.value {
-            AttributeValue::Register(RegisterAttr::Physical { class, index }) => {
-                Some((class.clone(), *index))
-            }
-            _ => None,
-        })
+        op.attributes
+            .iter()
+            .find(|a| a.name == name)
+            .and_then(|a| match &a.value {
+                AttributeValue::Register(RegisterAttr::Physical { class, index }) => {
+                    Some((class.clone(), *index))
+                }
+                _ => None,
+            })
     }
 
     fn body_blocks_have_no_virtual(context: &Context, region_id: tir::RegionId) {
@@ -966,8 +982,14 @@ mod tests {
             .into_iter()
             .map(|id| context.get_op(id).name)
             .collect();
-        assert!(names.contains(&"sd"), "expected spill stores, got {names:?}");
-        assert!(names.contains(&"ld"), "expected spill reloads, got {names:?}");
+        assert!(
+            names.contains(&"sd"),
+            "expected spill stores, got {names:?}"
+        );
+        assert!(
+            names.contains(&"ld"),
+            "expected spill reloads, got {names:?}"
+        );
         assert_eq!(
             names.first(),
             Some(&"addi"),

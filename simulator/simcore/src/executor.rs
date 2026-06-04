@@ -131,6 +131,11 @@ impl ProgramBuilder {
 pub struct Executor {
     program: Option<ProgramImage>,
     registers: HashMap<(String, u16), tir::utils::APInt>,
+    /// Map from register class name to its physical register file. Classes that
+    /// share a file (e.g. AArch64 `GPR` and `GPRsp`) alias index-for-index, so
+    /// register storage is keyed by file rather than by class. Classes absent
+    /// from the map are their own file.
+    register_files: HashMap<String, String>,
     memory: Vec<u8>,
     pc: u64,
     pc_explicitly_written: bool,
@@ -166,6 +171,22 @@ impl Executor {
     /// timing model can replay it. Off by default to avoid the memory cost.
     pub fn enable_trace_recording(&mut self) {
         self.record_trace = true;
+    }
+
+    /// Declare which register classes share a physical register file (class name
+    /// -> file name). With this set, a value written through one class is
+    /// visible through any aliasing class, matching real hardware (e.g. AArch64
+    /// `GPR`/`GPRsp`). Without it, each class is its own independent file.
+    pub fn set_register_files(&mut self, register_files: HashMap<String, String>) {
+        self.register_files = register_files;
+    }
+
+    /// Canonicalize a register class to the physical file it draws from.
+    fn register_file<'a>(&'a self, class: &'a str) -> &'a str {
+        self.register_files
+            .get(class)
+            .map(String::as_str)
+            .unwrap_or(class)
     }
 
     /// The recorded dynamic instruction stream as `(op, pc)` pairs, in execution
@@ -339,7 +360,7 @@ impl MachineContext for Executor {
         if class == "PC" {
             return Ok(tir::utils::APInt::new(64, self.pc));
         }
-        let key = (class.to_string(), index);
+        let key = (self.register_file(class).to_string(), index);
         if let Some(value) = self.registers.get(&key) {
             return Ok(value.clone());
         }
@@ -356,7 +377,8 @@ impl MachineContext for Executor {
             self.write_pc(value.to_u64());
             return Ok(());
         }
-        self.registers.insert((class.to_string(), index), value);
+        let file = self.register_file(class).to_string();
+        self.registers.insert((file, index), value);
         Ok(())
     }
 
@@ -630,7 +652,11 @@ mod tests {
         };
         // imm=4, target = pc + (sext(imm) << 2) = 0x1000 + 16.
         assert_eq!(run_beq(1), 0x1010, "branch taken when Z is set");
-        assert_eq!(run_beq(0), 0x1004, "fall-through (pc + width) when Z is clear");
+        assert_eq!(
+            run_beq(0),
+            0x1004,
+            "fall-through (pc + width) when Z is clear"
+        );
 
         // `bl` writes two destinations: the link register (x30 = pc + 4) and PC.
         // Both used to be dropped because only one assignment was ever emitted.
@@ -644,8 +670,13 @@ mod tests {
             .as_interface::<dyn MachineInstruction>()
             .expect("bl is a machine instruction");
         mi.execute(&mut ex).expect("bl executes");
-        let x30 = MachineContext::read_register(&ex, "GPR", 30).unwrap().to_u64();
-        assert_eq!(x30, 0x2004, "link register holds the return address (pc + 4)");
+        let x30 = MachineContext::read_register(&ex, "GPR", 30)
+            .unwrap()
+            .to_u64();
+        assert_eq!(
+            x30, 0x2004,
+            "link register holds the return address (pc + 4)"
+        );
         assert_eq!(
             MachineContext::read_pc(&ex),
             0x2000 + (3 << 2),

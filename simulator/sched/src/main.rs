@@ -136,7 +136,10 @@ fn critical_path(model: &MachineModel, insts: &[Inst]) -> u32 {
 }
 
 fn print_report(model: &MachineModel, insts: &[Inst]) {
-    println!("Machine: {} (issue width {})", model.name, model.issue_width);
+    println!(
+        "Machine: {} (issue width {})",
+        model.name, model.issue_width
+    );
     if !model.pipeline.is_empty() {
         let stages: Vec<String> = model
             .pipeline
@@ -220,9 +223,10 @@ fn print_report(model: &MachineModel, insts: &[Inst]) {
         bottleneck = String::from("issue");
     }
     let critical = critical_path(model, insts);
-    println!("uOps: {}   Issue bound: {issue_bound:.2} cycles", insts.len());
     println!(
-        "Block RThroughput: {block_rthroughput:.2} cycles/iter  (bottleneck: {bottleneck})"
+        "uOps: {}   Issue bound: {issue_bound:.2} cycles",
+        insts.len()
     );
+    println!("Block RThroughput: {block_rthroughput:.2} cycles/iter  (bottleneck: {bottleneck})");
     println!("Critical path (latency, forwarded): {critical} cycles");
 }

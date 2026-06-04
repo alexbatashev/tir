@@ -5,13 +5,16 @@ use tir::{
     Block, BlockId, Context, OpId, OpInstance, Operation, OperationRef, Pass, PassError,
     PassTarget, Rewriter, TypeId, ValueId,
     attributes::AttributeValue,
+    builtin::IntegerType,
     graph::{
         Dag, EClassId, EGraph, EMatch, ENode, Node, NodeId, OperandConstraint, Pattern,
         PatternExpr, Rewrite,
     },
-    builtin::IntegerType,
     pbqp::{self, INF_COST, PbqpAlternative, PbqpMatrix, PbqpProblem},
-    sem_expr::{ExprKind, ExprPayload, ExprPostGraph, FuzzOracle, confirm_extension_via_shifts, infer_widths},
+    sem_expr::{
+        ExprKind, ExprPayload, ExprPostGraph, FuzzOracle, confirm_extension_via_shifts,
+        infer_widths,
+    },
     utils::APInt,
 };
 
@@ -164,10 +167,12 @@ fn class_binding(
     class: EClassId,
 ) -> Option<Binding> {
     let nodes = egraph.nodes(class);
-    if let Some(ExprPayload::Int(v)) = nodes
-        .iter()
-        .find_map(|n| n.node.payload.as_ref().filter(|p| matches!(p, ExprPayload::Int(_))))
-    {
+    if let Some(ExprPayload::Int(v)) = nodes.iter().find_map(|n| {
+        n.node
+            .payload
+            .as_ref()
+            .filter(|p| matches!(p, ExprPayload::Int(_)))
+    }) {
         Some(Binding::Int(v.clone()))
     } else if let Some(v) = nodes.iter().find_map(|n| match n.node.payload.as_ref() {
         Some(ExprPayload::Value(v)) => Some(*v),
@@ -175,7 +180,10 @@ fn class_binding(
     }) {
         Some(Binding::Value(v))
     } else {
-        class_value.get(&egraph.find(class)).copied().map(Binding::Value)
+        class_value
+            .get(&egraph.find(class))
+            .copied()
+            .map(Binding::Value)
     }
 }
 
@@ -333,10 +341,7 @@ impl Rule {
 
     /// Constrain operand symbols to register or immediate operands, so e.g. an
     /// immediate-shift pattern only matches a constant shift amount.
-    pub fn with_operand_constraints(
-        mut self,
-        constraints: Vec<(u32, OperandConstraint)>,
-    ) -> Self {
+    pub fn with_operand_constraints(mut self, constraints: Vec<(u32, OperandConstraint)>) -> Self {
         self.operand_constraints = constraints;
         self
     }
@@ -449,7 +454,8 @@ impl<'a> SemDagBuilder<'a> {
         payload: Option<ExprPayload>,
         ty: Option<TypeId>,
     ) -> EClassId {
-        self.egraph.add(ENode::leaf(SemNode { kind, payload, ty }, None))
+        self.egraph
+            .add(ENode::leaf(SemNode { kind, payload, ty }, None))
     }
 
     fn add_int(&mut self, value: APInt, ty: Option<TypeId>) -> EClassId {
@@ -467,17 +473,32 @@ impl<'a> SemDagBuilder<'a> {
     /// A leaf that nothing materializes — the placeholder for an un-lowerable node,
     /// so a partial semantic expansion still yields a well-formed graph.
     fn add_opaque(&mut self) -> EClassId {
-        self.add_leaf(ExprKind::Symbol, Some(ExprPayload::SymbolId(u32::MAX)), None)
+        self.add_leaf(
+            ExprKind::Symbol,
+            Some(ExprPayload::SymbolId(u32::MAX)),
+            None,
+        )
     }
 
-    fn add_op(&mut self, kind: ExprKind, mut children: Vec<EClassId>, ty: Option<TypeId>) -> EClassId {
+    fn add_op(
+        &mut self,
+        kind: ExprKind,
+        mut children: Vec<EClassId>,
+        ty: Option<TypeId>,
+    ) -> EClassId {
         // Canonicalize commutative operands so `a op b` and `b op a` hash-cons to the
         // same e-node, mirroring the program's CSE.
         if kind.is_commutative() {
             children.sort();
         }
-        self.egraph
-            .add(ENode::op(SemNode { kind, payload: None, ty }, children))
+        self.egraph.add(ENode::op(
+            SemNode {
+                kind,
+                payload: None,
+                ty,
+            },
+            children,
+        ))
     }
 
     /// Record that `class` computes IR `value` (idempotent; first writer wins, which
@@ -546,11 +567,7 @@ impl<'a> SemDagBuilder<'a> {
     /// it references, then resolve those widths against the live context. This is
     /// the same width rule TMDL uses for patterns, so the program graph and the
     /// rule patterns end up typed consistently.
-    fn infer_local_widths(
-        &self,
-        graph: &ExprPostGraph,
-        operands: &[EClassId],
-    ) -> Vec<Option<u32>> {
+    fn infer_local_widths(&self, graph: &ExprPostGraph, operands: &[EClassId]) -> Vec<Option<u32>> {
         infer_widths(graph, |node| match graph.get_leaf_data(node) {
             Some(ExprPayload::SymbolId(id)) => operands
                 .get(*id as usize)
@@ -786,7 +803,6 @@ fn template_node(kind: ExprKind, payload: Option<ExprPayload>, ty: Option<TypeId
     SemNode { kind, payload, ty }
 }
 
-
 /// A solved cover: the chosen alternative for every PBQP node, the e-class each
 /// PBQP node stands for (same index), and the achieved cost.
 struct DagCover {
@@ -808,11 +824,8 @@ fn build_eclass_cover(
     edge_cost: impl Fn(EClassId, EClassId, &PbqpIselAlternative) -> u64,
 ) -> Option<DagCover> {
     let classes: Vec<EClassId> = egraph.classes().map(|c| egraph.find(c)).collect();
-    let index: HashMap<EClassId, usize> = classes
-        .iter()
-        .enumerate()
-        .map(|(i, &c)| (c, i))
-        .collect();
+    let index: HashMap<EClassId, usize> =
+        classes.iter().enumerate().map(|(i, &c)| (c, i)).collect();
     let class_index = |c: EClassId| index[&egraph.find(c)];
 
     let is_terminal = |c: EClassId| egraph.nodes(c).iter().any(|n| n.children.is_empty());
@@ -864,10 +877,13 @@ fn build_eclass_cover(
         for (node, alternatives) in alternatives_by_node.iter().enumerate() {
             for (alternative, pbqp_alt) in alternatives.iter().enumerate() {
                 let belongs_to_match = match pbqp_alt {
-                    PbqpIselAlternative::Root { match_id: alt_match }
-                    | PbqpIselAlternative::Internal { match_id: alt_match, .. } => {
-                        *alt_match == match_id
+                    PbqpIselAlternative::Root {
+                        match_id: alt_match,
                     }
+                    | PbqpIselAlternative::Internal {
+                        match_id: alt_match,
+                        ..
+                    } => *alt_match == match_id,
                     PbqpIselAlternative::External => false,
                 };
                 if belongs_to_match {
@@ -949,7 +965,6 @@ fn build_eclass_cover(
         .collect();
     Some(DagCover { choices, classes })
 }
-
 
 /// The semantic kinds for which the rule set provides an atomic materializer (a
 /// pattern whose root is that kind with only operand boundaries beneath it).
@@ -1244,19 +1259,15 @@ impl InstructionSelectPass {
             let synthetic = synthetic_op_ref(context, &block_arc, intro.dest, intro.dest_ty);
             let rule = &self.rules[intro.rule_index];
             let new_op = (rule.emit_plan_fn)(context, &synthetic, &intro.m)?.into_op();
-            let anchor = OperationRef::new(
-                context.get_op(intro.anchor),
-                Some(block_arc.clone()),
-                None,
-            );
+            let anchor =
+                OperationRef::new(context.get_op(intro.anchor), Some(block_arc.clone()), None);
             rewriter.insert_op_before(&anchor, new_op.as_ref())?;
         }
 
         // Rewrite the original ops (positions are resolved by id, so insertions
         // above do not invalidate this).
         for (op_id, decision) in &plan.op_decisions {
-            let op_ref =
-                OperationRef::new(context.get_op(*op_id), Some(block_arc.clone()), None);
+            let op_ref = OperationRef::new(context.get_op(*op_id), Some(block_arc.clone()), None);
             match decision {
                 BlockDecision::Emit { rule_index, m } => {
                     let rule = &self.rules[*rule_index];
@@ -1580,7 +1591,12 @@ impl EmissionBuilder<'_> {
 
     /// Build the operand bindings for a match, first materializing any introduced
     /// operand instructions (anchored before `anchor`).
-    fn resolve_match(&mut self, match_id: usize, anchor: OpId, anchor_ty: Option<TypeId>) -> RuleMatch {
+    fn resolve_match(
+        &mut self,
+        match_id: usize,
+        anchor: OpId,
+        anchor_ty: Option<TypeId>,
+    ) -> RuleMatch {
         let operand_classes: Vec<EClassId> = self.matches[match_id]
             .bindings
             .captures
@@ -1598,7 +1614,12 @@ impl EmissionBuilder<'_> {
 
     /// Ensure an introduced class is emitted (operands first), returning its fresh
     /// destination value.
-    fn emit_introduced(&mut self, class: EClassId, anchor: OpId, anchor_ty: Option<TypeId>) -> ValueId {
+    fn emit_introduced(
+        &mut self,
+        class: EClassId,
+        anchor: OpId,
+        anchor_ty: Option<TypeId>,
+    ) -> ValueId {
         if let Some(&dest) = self.introduced_dest.get(&class) {
             return dest;
         }
@@ -1617,7 +1638,10 @@ impl EmissionBuilder<'_> {
         }
 
         let dest_ty = anchor_ty
-            .or_else(|| class_width(self.context, self.egraph, class).map(|w| IntegerType::new(self.context, w)))
+            .or_else(|| {
+                class_width(self.context, self.egraph, class)
+                    .map(|w| IntegerType::new(self.context, w))
+            })
             .unwrap_or_else(|| IntegerType::new(self.context, 64));
         let dest = self.context.create_value(dest_ty, None).id();
         self.introduced_dest.insert(class, dest);
@@ -1809,7 +1833,10 @@ fn parent_satisfies_internal_child(
     let m = &matches[child_match_id];
     let pattern = &patterns[m.pattern_index].pattern;
     for pattern_parent in (0..pattern.len()).map(NodeId::from_index) {
-        if !pattern.children(pattern_parent).contains(&child_pattern_node) {
+        if !pattern
+            .children(pattern_parent)
+            .contains(&child_pattern_node)
+        {
             continue;
         }
         if m.bindings.class_for_pattern(pattern_parent) != Some(parent) {
@@ -1851,8 +1878,8 @@ mod tests {
     };
 
     use super::{
-        EmitPlan, InstructionSelectPass, IselCostModel, Rule, RuleMatch, SemEGraph, SemNode,
-        SelectionPressure, TargetIselModel, extension_rewrite, template_node,
+        EmitPlan, InstructionSelectPass, IselCostModel, Rule, RuleMatch, SelectionPressure,
+        SemEGraph, SemNode, TargetIselModel, extension_rewrite, template_node,
     };
 
     fn symbol(g: &mut ExprPostGraph, id: u32) -> tir::graph::NodeId {
@@ -2009,7 +2036,12 @@ mod tests {
         mb.insert(func);
         mb.insert(ops::module_end(&context).build());
 
-        let rules = vec![Rule::new("add", atomic_pattern(ExprKind::Add), 10, emit_add)];
+        let rules = vec![Rule::new(
+            "add",
+            atomic_pattern(ExprKind::Add),
+            10,
+            emit_add,
+        )];
 
         let mut pm = PassManager::new();
         pm.nest(FuncOp::name())
@@ -2156,11 +2188,12 @@ mod tests {
         ];
 
         let mut pm = PassManager::new();
-        pm.nest(FuncOp::name()).add_pass(
-            InstructionSelectPass::new(rules).with_target_model(Box::new(NoFusionTarget {
-                cost: NoFusionCostModel,
-            })),
-        );
+        pm.nest(FuncOp::name())
+            .add_pass(
+                InstructionSelectPass::new(rules).with_target_model(Box::new(NoFusionTarget {
+                    cost: NoFusionCostModel,
+                })),
+            );
         pm.run(&context, context.get_op(module.id()))
             .expect("pass pipeline should succeed");
 
@@ -2290,7 +2323,12 @@ mod tests {
         // Same opcode (Add), two result widths. The i32-constrained rule must only
         // fire on the i32 add; the i64 add falls back to the width-agnostic rule.
         let rules = vec![
-            Rule::new("add.i32", typed_binary_pattern(ExprKind::Add, i32_ty), 1, emit_sub),
+            Rule::new(
+                "add.i32",
+                typed_binary_pattern(ExprKind::Add, i32_ty),
+                1,
+                emit_sub,
+            ),
             Rule::new("add", atomic_pattern(ExprKind::Add), 10, emit_add),
         ];
 
@@ -2426,7 +2464,11 @@ mod tests {
         ));
 
         let rewrite = extension_rewrite(ExprKind::SExt, ExprKind::ShiftRightArithmetic);
-        egraph.saturate(&ctx, std::slice::from_ref(&rewrite), SaturationLimits::default());
+        egraph.saturate(
+            &ctx,
+            std::slice::from_ref(&rewrite),
+            SaturationLimits::default(),
+        );
 
         // The sext class now also contains the shift-pair realization.
         assert!(

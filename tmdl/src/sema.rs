@@ -43,7 +43,10 @@ fn check_performance_model(
             if !seen_units.insert(unit.name.as_str()) {
                 diags.push((
                     file.file_name.clone(),
-                    Rich::custom(unit.span, format!("duplicate unit declaration '{}'", unit.name)),
+                    Rich::custom(
+                        unit.span,
+                        format!("duplicate unit declaration '{}'", unit.name),
+                    ),
                 ));
             }
         }
@@ -903,9 +906,7 @@ mod perf_model_tests {
         // assert only that the performance model itself is clean.
         let perf: Vec<_> = diagnose(&src)
             .into_iter()
-            .filter(|d| {
-                d.contains("unit") || d.contains("resource") || d.contains("bind")
-            })
+            .filter(|d| d.contains("unit") || d.contains("resource") || d.contains("bind"))
             .collect();
         assert!(perf.is_empty(), "unexpected perf diags: {perf:?}");
     }
@@ -933,7 +934,9 @@ mod perf_model_tests {
         ";
         let diags = diagnose(src);
         assert!(
-            diags.iter().any(|d| d.contains("binds unknown unit 'NotAUnit'")),
+            diags
+                .iter()
+                .any(|d| d.contains("binds unknown unit 'NotAUnit'")),
             "diags: {diags:?}"
         );
     }
@@ -949,7 +952,9 @@ mod perf_model_tests {
         ";
         let diags = diagnose(src);
         assert!(
-            diags.iter().any(|d| d.contains("uses unknown resource 'FPU'")),
+            diags
+                .iter()
+                .any(|d| d.contains("uses unknown resource 'FPU'")),
             "diags: {diags:?}"
         );
     }
@@ -966,7 +971,9 @@ mod perf_model_tests {
         ";
         let diags = diagnose(src);
         assert!(
-            diags.iter().any(|d| d.contains("references phase 'NOPE' not in machine 'M' pipeline")),
+            diags
+                .iter()
+                .any(|d| d.contains("references phase 'NOPE' not in machine 'M' pipeline")),
             "diags: {diags:?}"
         );
     }
@@ -982,7 +989,9 @@ mod perf_model_tests {
         ";
         let diags = diagnose(src);
         assert!(
-            diags.iter().any(|d| d.contains("references phase 'ID' not in machine 'M' pipeline")),
+            diags
+                .iter()
+                .any(|d| d.contains("references phase 'ID' not in machine 'M' pipeline")),
             "diags: {diags:?}"
         );
     }
@@ -997,7 +1006,9 @@ mod perf_model_tests {
         ";
         let diags = diagnose(src);
         assert!(
-            diags.iter().any(|d| d.contains("overrides unknown instruction 'Nope'")),
+            diags
+                .iter()
+                .any(|d| d.contains("overrides unknown instruction 'Nope'")),
             "diags: {diags:?}"
         );
     }
@@ -1012,7 +1023,9 @@ mod perf_model_tests {
         ";
         let diags = diagnose(src);
         assert!(
-            diags.iter().any(|d| d.contains("forward target 'FPU' is not a resource")),
+            diags
+                .iter()
+                .any(|d| d.contains("forward target 'FPU' is not a resource")),
             "diags: {diags:?}"
         );
     }
@@ -1030,8 +1043,21 @@ mod perf_model_tests {
             }
         ";
         let diags = diagnose(src);
-        assert!(diags.iter().any(|d| d.contains("duplicate unit declaration 'W'")), "diags: {diags:?}");
-        assert!(diags.iter().any(|d| d.contains("duplicate resource 'ALU'")), "diags: {diags:?}");
-        assert!(diags.iter().any(|d| d.contains("duplicate bind for unit 'W'")), "diags: {diags:?}");
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.contains("duplicate unit declaration 'W'")),
+            "diags: {diags:?}"
+        );
+        assert!(
+            diags.iter().any(|d| d.contains("duplicate resource 'ALU'")),
+            "diags: {diags:?}"
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.contains("duplicate bind for unit 'W'")),
+            "diags: {diags:?}"
+        );
     }
 }

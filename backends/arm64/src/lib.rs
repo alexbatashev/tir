@@ -118,6 +118,12 @@ fn lower_func_and_return_to_asm_symbol(
     Ok(false)
 }
 
+impl Arm64Dialect {
+    pub fn get_asm_parser(&self) -> tir_be_common::AsmParser {
+        tir_be_common::AsmParser::new(get_instruction_parsers())
+    }
+}
+
 pub fn create_isel_pass(context: &tir::Context) -> tir_be_common::isel::InstructionSelectPass {
     tir_be_common::isel::InstructionSelectPass::new(get_isel_rules(context))
         .with_op_lowering(lower_func_and_return_to_asm_symbol)
@@ -305,7 +311,10 @@ mod tests {
         let mut buf = String::new();
         let mut fmt = IRFormatter::new(&mut buf);
         module.print(&mut fmt).expect("print lowered module");
-        assert!(!buf.contains("builtin"), "no builtin ops should remain:\n{buf}");
+        assert!(
+            !buf.contains("builtin"),
+            "no builtin ops should remain:\n{buf}"
+        );
     }
 
     #[test]

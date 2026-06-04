@@ -18,8 +18,7 @@ use std::collections::{HashMap, HashSet};
 use tir::attributes::{AttributeRole, AttributeValue, RegisterAttr};
 use tir::pbqp::{self, INF_COST, PbqpMatrix, PbqpNodeId, PbqpProblem};
 use tir::{
-    BlockId, Context, OpId, Operation, OperationRef, Pass, PassError, PassTarget, Rewriter,
-    ValueId,
+    BlockId, Context, OpId, Operation, OperationRef, Pass, PassError, PassTarget, Rewriter, ValueId,
 };
 
 use crate::liveness::{self, Liveness, PhysReg};
@@ -280,9 +279,9 @@ fn node_costs(
                         INF_COST
                     };
                 }
-                if forbidden.is_some_and(|set| {
-                    set.iter().any(|f| info.phys_key(f) == info.phys_key(p))
-                }) {
+                if forbidden
+                    .is_some_and(|set| set.iter().any(|f| info.phys_key(f) == info.phys_key(p)))
+                {
                     return INF_COST;
                 }
                 if class.is_callee_saved(p.1) {
@@ -523,9 +522,9 @@ impl RegisterAllocationPass {
                     if uses {
                         let fresh = context.create_value(ty, None).id().number();
                         frame.temps.insert(fresh);
-                        let reload =
-                            self.target
-                                .emit_spill_reload(context, fresh, &class, &frame_reg, offset);
+                        let reload = self
+                            .target
+                            .emit_spill_reload(context, fresh, &class, &frame_reg, offset);
                         let op_ref = op_ref_in(context, block_id, op_id);
                         rewriter.insert_op_before(&op_ref, reload.as_ref())?;
                         rename_attr(context, op_id, vreg, fresh, RoleClass::Read);
@@ -535,9 +534,9 @@ impl RegisterAllocationPass {
                         let fresh = context.create_value(ty, None).id().number();
                         frame.temps.insert(fresh);
                         rename_attr(context, op_id, vreg, fresh, RoleClass::Write);
-                        let store =
-                            self.target
-                                .emit_spill_store(context, fresh, &class, &frame_reg, offset);
+                        let store = self
+                            .target
+                            .emit_spill_store(context, fresh, &class, &frame_reg, offset);
                         insert_after(context, rewriter, block_id, op_id, store.as_ref())?;
                     }
                 }
@@ -633,7 +632,11 @@ fn symbol_body_blocks(context: &Context, op: &OperationRef) -> Vec<BlockId> {
 }
 
 fn op_ref_in(context: &Context, block_id: BlockId, op_id: OpId) -> OperationRef {
-    OperationRef::new(context.get_op(op_id), Some(context.get_block(block_id)), None)
+    OperationRef::new(
+        context.get_op(op_id),
+        Some(context.get_block(block_id)),
+        None,
+    )
 }
 
 /// Insert `new_op` immediately after `op_id` in its block (before the following op,
@@ -724,7 +727,10 @@ fn rename_attr(context: &Context, op_id: OpId, from: u32, to: u32, role_class: R
         let matches_dir = match role_class {
             RoleClass::Read => matches!(role, AttributeRole::Use | AttributeRole::ReadWrite),
             RoleClass::Write => {
-                matches!(role, AttributeRole::Def | AttributeRole::ReadWrite | AttributeRole::Clobber)
+                matches!(
+                    role,
+                    AttributeRole::Def | AttributeRole::ReadWrite | AttributeRole::Clobber
+                )
             }
         };
         if !matches_dir {
@@ -833,7 +839,11 @@ mod tests {
 
         let map = assigned(result);
         let regs: BTreeSet<u16> = map.values().map(|(_, i)| *i).collect();
-        assert_eq!(regs.len(), 3, "all three vregs must occupy distinct registers");
+        assert_eq!(
+            regs.len(),
+            3,
+            "all three vregs must occupy distinct registers"
+        );
     }
 
     #[test]
@@ -895,7 +905,10 @@ mod tests {
 
         let map = assigned(result);
         assert_eq!(map[&1], ("R".to_string(), 0));
-        assert_ne!(map[&2].1, 0, "an interfering vreg cannot reuse the pinned register");
+        assert_ne!(
+            map[&2].1, 0,
+            "an interfering vreg cannot reuse the pinned register"
+        );
     }
 
     #[test]
@@ -943,7 +956,11 @@ mod tests {
         .unwrap();
 
         let map = assigned(result);
-        assert_eq!(map[&1], ("R".to_string(), 2), "only the unforbidden register remains");
+        assert_eq!(
+            map[&1],
+            ("R".to_string(), 2),
+            "only the unforbidden register remains"
+        );
     }
 
     // Two register classes (`GPR` and `GPRsp`) over one shared file with a single

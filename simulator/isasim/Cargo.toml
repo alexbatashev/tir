@@ -6,6 +6,13 @@ edition = "2024"
 [dependencies]
 tir = { path = "../../core" }
 tir-sim = { path = "../simcore" }
-tir-riscv = { path = "../../backends/riscv" }
 tir-be-common = { path = "../../backends/common" }
+tir-targets = { path = "../../backends/targets" }
 clap = { version = "4.5.58", features = ["derive"] }
+
+[dev-dependencies]
+tir-lit = { path = "../../utils/lit" }
+
+[[test]]
+name = "lit"
+harness = false

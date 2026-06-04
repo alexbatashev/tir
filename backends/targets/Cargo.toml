@@ -1,0 +1,21 @@
+[package]
+name = "tir-targets"
+version = "0.1.0"
+edition = "2024"
+
+# Target registry: maps `--march`/`--mcpu` names to a `TargetMachine` that
+# bundles a backend's dialects, isel/regalloc passes, asm parser and machine
+# models. Shared by `tir-mc` and `isasim` so target selection lives in one place.
+
+[dependencies]
+tir = { path = "../../core" }
+tir-be-common = { path = "../common" }
+tir-riscv = { path = "../riscv" }
+arm64 = { path = "../arm64" }
+
+[dev-dependencies]
+tir-lit = { path = "../../utils/lit" }
+
+[[test]]
+name = "lit"
+harness = false

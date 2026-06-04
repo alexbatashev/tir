@@ -128,10 +128,7 @@ impl MachineModel {
 
     /// The declared default size of a structural buffer (e.g. `"rob"`), if any.
     pub fn buffer(&self, name: &str) -> Option<u32> {
-        self.buffers
-            .iter()
-            .find(|b| b.name == name)
-            .map(|b| b.size)
+        self.buffers.iter().find(|b| b.name == name).map(|b| b.size)
     }
 
     /// The cycle offset (index) of a named pipeline phase, if declared.
