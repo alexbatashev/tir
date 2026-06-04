@@ -45,6 +45,18 @@ impl Block {
         self.operations.read().len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.operations.read().is_empty()
+    }
+
+    pub fn successors(&self) -> Vec<BlockId> {
+        self.successors.read().clone()
+    }
+
+    pub fn predecessors(&self) -> Vec<BlockId> {
+        self.predecessors.read().clone()
+    }
+
     pub(crate) fn insert(&self, index: usize, id: OpId) {
         self.operations.write().insert(index, id);
     }

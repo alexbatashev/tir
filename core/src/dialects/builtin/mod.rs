@@ -52,6 +52,7 @@ pub struct IntegerType {
 }
 
 impl IntegerType {
+    #[allow(clippy::new_ret_no_self)]
     pub fn new(context: &Context, width: u32) -> TypeId {
         context.get_type_id(Arc::new(Self { width }))
     }
@@ -99,6 +100,7 @@ impl Type for IntegerType {
 pub struct IndexType;
 
 impl IndexType {
+    #[allow(clippy::new_ret_no_self)]
     pub fn new(context: &Context) -> TypeId {
         context.get_type_id(Arc::new(Self))
     }
@@ -135,6 +137,7 @@ impl Type for IndexType {
 pub struct UnitType;
 
 impl UnitType {
+    #[allow(clippy::new_ret_no_self)]
     pub fn new(context: &Context) -> TypeId {
         context.get_type_id(Arc::new(Self))
     }

@@ -44,13 +44,11 @@ pub fn construct_simple_node(input: TokenStream) -> TokenStream {
                 is_leaf = true;
             } else if attr.path().is_ident("arity") {
                 // #[arity = N]
-                if let Meta::NameValue(nv) = &attr.meta {
-                    if let Expr::Lit(expr_lit) = &nv.value {
-                        if let Lit::Int(n) = &expr_lit.lit {
-                            custom_arity =
-                                Some(n.base10_parse().expect("arity must be an integer"));
-                        }
-                    }
+                if let Meta::NameValue(nv) = &attr.meta
+                    && let Expr::Lit(expr_lit) = &nv.value
+                    && let Lit::Int(n) = &expr_lit.lit
+                {
+                    custom_arity = Some(n.base10_parse().expect("arity must be an integer"));
                 }
             }
         }

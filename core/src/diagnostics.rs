@@ -16,7 +16,7 @@ pub fn print_parse_error(
 ) -> std::io::Result<()> {
     let start = span.0 as usize;
     let end = start.saturating_add(1);
-    print_error_range(source_name, source, start..end, &format!("{}", err))
+    print_error_range(source_name, source, start..end, format!("{}", err))
 }
 
 /// Print an error for an arbitrary byte range in the source.

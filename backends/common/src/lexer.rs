@@ -37,6 +37,7 @@ pub enum Token<'src> {
     HexNumber(&'src str),
 }
 
+#[allow(clippy::result_unit_err)]
 pub fn lex<'src>(source: &'src str) -> Result<Vec<Token<'src>>, ()> {
     let mut lexer = Token::lexer(source);
 
@@ -62,10 +63,10 @@ impl<'src> tir::parse::tokens::TokenLike<'src> for Token<'src> {
     }
 
     fn is_symbol(&self, sym: tir::parse::tokens::Symbol) -> bool {
-        match (self, sym) {
-            (Token::Comma, tir::parse::tokens::Symbol::Comma) => true,
-            _ => false,
-        }
+        matches!(
+            (self, sym),
+            (Token::Comma, tir::parse::tokens::Symbol::Comma)
+        )
     }
 }
 

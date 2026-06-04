@@ -7,7 +7,7 @@ use std::{
 use parking_lot::RwLock;
 
 use crate::{
-    Block, Dialect, Error, OpId, OpInstance, Operation, Region, TypeId,
+    Block, Dialect, Error, OpId, OpInstance, Operation, OperationParser, Region, TypeId,
     block::BlockId,
     builtin::BuiltinDialect,
     dialects::scf::ScfDialect,
@@ -15,7 +15,7 @@ use crate::{
     operation::{
         ImplementsOpInterface, OpInterfaceConverter, downcast_op_interface, op_interface_converter,
     },
-    parse::{Span, text::Parser as IRParser},
+    parse::text::Parser as IRParser,
     ptr::PtrDialect,
     region::RegionId,
     ty::{Type, TypeParser},
@@ -122,6 +122,10 @@ impl Context {
         context
     }
 
+    pub fn root_context(&self) -> Option<Context> {
+        self.0.read().root_context.clone()
+    }
+
     pub fn as_context_ref(&self) -> ContextRef {
         ContextRef(Arc::downgrade(&self.0))
     }
@@ -144,11 +148,10 @@ impl Context {
             .dialects
             .get(D::name())
             .cloned()
-            .map(|d| {
+            .and_then(|d| {
                 let d: Arc<dyn Any + Send + Sync> = d;
                 d.downcast::<D>().ok()
             })
-            .flatten()
     }
 
     pub fn add_operation(&self, mut instance: OpInstance) -> Arc<OpInstance> {
@@ -210,7 +213,7 @@ impl Context {
         }
 
         for r in &instance.regions {
-            inner.regions.get(&r).unwrap().set_parent_op(op_id);
+            inner.regions.get(r).unwrap().set_parent_op(op_id);
         }
 
         let instance = Arc::new(instance);
@@ -462,12 +465,7 @@ impl Context {
         downcast_op_interface::<I>(erased)
     }
 
-    pub fn get_parser(
-        &self,
-        dialect: &str,
-        name: &str,
-    ) -> Result<fn(&mut IRParser, &Context) -> Result<Box<dyn Operation>, (Span, Error)>, Error>
-    {
+    pub fn get_parser(&self, dialect: &str, name: &str) -> Result<OperationParser, Error> {
         let inner = self.0.read();
 
         let dialect = inner

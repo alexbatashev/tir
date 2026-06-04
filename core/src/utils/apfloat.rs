@@ -4,7 +4,7 @@ use std::fmt;
 /// Arbitrary Precision Floating Point
 /// Supports any combination of exponent and mantissa widths
 /// Can represent IEEE 754, BF16, FP8 variants, x86 extended, and custom formats
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct APFloat {
     /// Number of exponent bits
     exp_width: u32,
@@ -545,11 +545,6 @@ impl APFloat {
         )
     }
 
-    /// Equal (ordered comparison, returns false for NaN)
-    pub fn eq(&self, other: &APFloat) -> bool {
-        matches!(self.compare(other), Some(Ordering::Equal))
-    }
-
     // ============ Helper Functions ============
 
     fn shift_mantissa_left(&self, shift: u32) -> (u64, u64) {
@@ -588,6 +583,12 @@ impl APFloat {
             let new_low = self.mantissa_high >> (shift - 64);
             (0, new_low)
         }
+    }
+}
+
+impl PartialEq for APFloat {
+    fn eq(&self, other: &Self) -> bool {
+        matches!(self.compare(other), Some(Ordering::Equal))
     }
 }
 
@@ -672,32 +673,32 @@ mod tests {
 
     #[test]
     fn test_from_f32() {
-        let val = APFloat::from_f32(3.14159);
+        let val = APFloat::from_f32(3.125);
         assert_eq!(val.exp_width(), 8);
         assert_eq!(val.mant_width(), 23);
-        assert!((val.to_f32() - 3.14159).abs() < 0.00001);
+        assert!((val.to_f32() - 3.125).abs() < 0.00001);
     }
 
     #[test]
     fn test_from_f64() {
-        let val = APFloat::from_f64(2.718281828);
+        let val = APFloat::from_f64(2.75);
         assert_eq!(val.exp_width(), 11);
         assert_eq!(val.mant_width(), 52);
-        assert!((val.to_f64() - 2.718281828).abs() < 0.000000001);
+        assert!((val.to_f64() - 2.75).abs() < 0.000000001);
     }
 
     #[test]
     fn test_negation() {
-        let val = APFloat::from_f32(3.14);
+        let val = APFloat::from_f32(3.125);
         let neg_val = val.neg();
-        assert_eq!(neg_val.to_f32(), -3.14);
+        assert_eq!(neg_val.to_f32(), -3.125);
     }
 
     #[test]
     fn test_abs() {
-        let val = APFloat::from_f32(-3.14);
+        let val = APFloat::from_f32(-3.125);
         let abs_val = val.abs();
-        assert_eq!(abs_val.to_f32(), 3.14);
+        assert_eq!(abs_val.to_f32(), 3.125);
     }
 
     #[test]
@@ -765,12 +766,12 @@ mod tests {
     #[test]
     fn test_conversion() {
         // Convert single to double
-        let single = APFloat::from_f32(3.14159);
+        let single = APFloat::from_f32(3.125);
         let double = single.convert(11, 52, false);
 
         assert_eq!(double.exp_width(), 11);
         assert_eq!(double.mant_width(), 52);
-        assert!((double.to_f64() - 3.14159).abs() < 0.00001);
+        assert!((double.to_f64() - 3.125).abs() < 0.00001);
     }
 
     #[test]
@@ -789,7 +790,7 @@ mod tests {
     #[test]
     fn test_bfloat16_conversion() {
         // Create a single precision float
-        let single = APFloat::from_f32(3.14159);
+        let single = APFloat::from_f32(3.125);
         // Convert to BFloat16
         let bf16 = single.convert(8, 7, false);
 
@@ -799,7 +800,7 @@ mod tests {
         // Convert back to single
         let back = bf16.convert(8, 23, false);
         // Should lose some precision due to reduced mantissa
-        assert!((back.to_f32() - 3.14159).abs() < 0.01);
+        assert!((back.to_f32() - 3.125).abs() < 0.01);
     }
 
     #[test]

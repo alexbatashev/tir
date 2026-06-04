@@ -6,7 +6,10 @@ use crate::parse::text::Parser as IRParser;
 use crate::ty::TypeParser;
 use crate::{Context, Error, OpInstance, Operation};
 
+pub type OperationParser = fn(&mut IRParser, &Context) -> Result<Box<dyn Operation>, (Span, Error)>;
+
 pub trait Dialect: 'static + Send + Sync + Any {
+    #[allow(clippy::new_ret_no_self)]
     fn new() -> Arc<dyn Dialect>
     where
         Self: Sized;
@@ -20,10 +23,7 @@ pub trait Dialect: 'static + Send + Sync + Any {
 
     fn get_dyn_op(&self, op: Arc<OpInstance>) -> Box<dyn Operation>;
 
-    fn get_parser(
-        &self,
-        name: &str,
-    ) -> Result<fn(&mut IRParser, &Context) -> Result<Box<dyn Operation>, (Span, Error)>, Error>;
+    fn get_parser(&self, name: &str) -> Result<OperationParser, Error>;
 
     fn get_type_parser(&self, name: &str) -> Result<TypeParser, Error>;
 }

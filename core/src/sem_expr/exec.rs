@@ -1,7 +1,7 @@
 use crate::{
     graph::{Dag, NodeId},
     sem_expr::{ExprKind, ExprPayload, Value},
-    utils::{APFloat, APInt},
+    utils::APInt,
 };
 
 /// Memory backend used by semantic expressions containing `LoadMemory` or
@@ -391,7 +391,7 @@ impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Value::Int(a), Value::Int(b)) => a == b,
-            (Value::Float(a), Value::Float(b)) => APFloat::eq(a, b),
+            (Value::Float(a), Value::Float(b)) => a == b,
             _ => false,
         }
     }
@@ -403,6 +403,7 @@ mod tests {
     use crate::{
         graph::MutDag,
         sem_expr::{ExprKind, ExprPayload, ExprPostGraph},
+        utils::APFloat,
     };
 
     fn sym(g: &mut ExprPostGraph, id: u32) -> NodeId {
@@ -741,8 +742,8 @@ mod tests {
     #[test]
     fn float_constant() {
         let mut g = ExprPostGraph::new();
-        flt_con(&mut g, 3.14);
-        assert!((as_f64(execute(&g, &[])) - 3.14).abs() < 1e-9);
+        flt_con(&mut g, 3.125);
+        assert!((as_f64(execute(&g, &[])) - 3.125).abs() < 1e-9);
     }
 
     #[test]

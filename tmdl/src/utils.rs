@@ -46,9 +46,9 @@ where
     }
 }
 
-impl<K: Eq + Hash, V: PartialEq> Into<StableHashMap<K, V>> for HashMap<K, V> {
-    fn into(self) -> StableHashMap<K, V> {
-        StableHashMap(self)
+impl<K: Eq + Hash, V: PartialEq> From<HashMap<K, V>> for StableHashMap<K, V> {
+    fn from(val: HashMap<K, V>) -> Self {
+        StableHashMap(val)
     }
 }
 
@@ -191,10 +191,10 @@ pub fn resolve_params_for_instruction<'a>(
 
 pub fn parse_literal_value(lit: &ast::LitInt) -> u64 {
     let v = lit.value();
-    if v.starts_with("0b") {
-        u64::from_str_radix(&v[2..], 2).unwrap_or(0)
-    } else if v.starts_with("0x") || v.starts_with("0X") {
-        u64::from_str_radix(&v[2..], 16).unwrap_or(0)
+    if let Some(stripped) = v.strip_prefix("0b") {
+        u64::from_str_radix(stripped, 2).unwrap_or(0)
+    } else if let Some(stripped) = v.strip_prefix("0x").or_else(|| v.strip_prefix("0X")) {
+        u64::from_str_radix(stripped, 16).unwrap_or(0)
     } else {
         v.parse::<u64>().unwrap_or(0)
     }

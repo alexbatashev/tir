@@ -31,7 +31,7 @@ pub use block::{Block, BlockId};
 pub use builder::{IRBuilder, InsertionPoint};
 pub use context::{Context, ContextIterator, ContextRef, GetFromContext};
 pub use diagnostics::{print_error_range, print_parse_error};
-pub use dialect::Dialect;
+pub use dialect::{Dialect, OperationParser};
 pub use error::Error;
 pub use interfaces::{
     Commutative, MemoryRead, MemoryWrite, PromotableAllocation, SameOperandType, Terminator,

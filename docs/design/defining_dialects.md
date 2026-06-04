@@ -1,59 +1,329 @@
 # Defining Dialects
 
-## Intro
+A dialect is a named IR vocabulary: a set of operations, types, interfaces, and
+lowering or analysis hooks that describe one domain at a useful level of
+abstraction. TIR keeps dialects small and composable. A frontend can start in
+`builtin` plus `ptr`, an instruction selector can progressively replace those
+operations with a target dialect such as `riscv`, and later passes can still
+walk all of them through the same `Context`, `Operation`, `Type`, and `Pass`
+interfaces.
 
-Dialects are semantically-complete purpose-focused pieces of intermediate
-representation. An example of a TIR dialect is `riscv` dialect, that contains
-operations, types and algorithms to accurately represent RISC-V ISA on both
-assembly and binary levels. Dialects can both co-exist together and progressively
-lower one to another.
+There are two ways to get a dialect:
+
+- Write it directly in Rust with `dialect!` and `operation!`.
+- Generate a target-machine dialect from TMDL.
+
+Use Rust for IR infrastructure and hand-written compiler dialects. Use TMDL for
+large ISA descriptions where the operation set, asm parser, semantic expression,
+register tables, and machine model should come from one source of truth.
+
+## Dialect Registration
+
+A Rust dialect is declared with `dialect!`:
+
+```rust
+use crate::{dialect, operation};
+
+dialect! {
+    PtrDialect {
+        name: "ptr",
+        operations: [
+            AllocaOp,
+            LoadOp,
+            StoreOp,
+        ],
+        types: [PtrType],
+    }
+}
+```
+
+The macro creates the dialect struct and implements `tir::Dialect`. During
+registration it installs:
+
+- dynamic operation converters,
+- text parsers for each operation,
+- type parsers for each type,
+- operation interface registrations.
+
+Dialects are made available through a `Context`:
+
+```rust
+let context = tir::Context::with_default_dialects();
+// or, for an empty context:
+let context = tir::Context::new();
+context.register_dialect::<PtrDialect>();
+```
+
+`Context::with_default_dialects()` registers the core dialects used by ordinary
+IR: `builtin`, `ptr`, and `scf`.
 
 ## Defining Operations
 
-TIR provides a crate to help developers easily define new operations.
-
-Below is an example of a simple operation:
+Operations are declared with `operation!`. The macro emits the operation wrapper,
+builder, parser, printer, verifier plumbing, and the convenience constructor
+function used by most builders.
 
 ```rust
-use crate::builtin::DIALECT_NAME;
-use tir_core::{Op, OpImpl, Type};
-use tir_macros::{Assembly, Op};
+use crate as tir;
+use crate::{MemoryRead, operation};
 
-#[derive(Op, Assembly)]
-#[operation(name = "super", known_attrs(value: IntegerAttr))]
-pub struct SuperOp {
-    #[operand]
-    operand1: Register,
-    #[ret_type]
-    return_type: Type,
-    r#impl: OpImpl,
+operation! {
+    LoadOp {
+        name: "load",
+        dialect: "ptr",
+        operands: O {
+            ptr: "crate::ptr::PtrType",
+        },
+        results: R {
+            result: "crate::Any",
+        },
+        interfaces: [MemoryRead],
+    }
 }
 
+impl MemoryRead for LoadOp {
+    fn read_location(&self) -> tir::ValueId {
+        self.operands()[0]
+    }
+
+    fn read_value(&self) -> tir::ValueId {
+        self.result()
+    }
+}
 ```
 
-The helper macros would implement the following things for you:
+The generated builder is used directly:
 
-- Getters and setters for operands (i.e., `get_operand1`, `set_operand1`)
-- Getters for regions
-- Default assembly parser and printer.
+```rust
+let loaded = builder.insert(
+    LoadOpBuilder::new(&context)
+        .ptr(pointer_value)
+        .result_type(i32_ty)
+        .build(),
+);
+```
 
-Additional methods can be defined manually by implementing `impl SuperOp {...}`.
+The macro also creates a lowercase helper named after the operation. For
+operation names that are Rust keywords, use a raw identifier at the call site:
 
-### Field Configurations
+```rust
+builder.insert(tir::builtin::ops::r#return(&context, value).build());
+```
 
-**`#[operation(..., known_attrs(attr1: AttrType))]`**
+### Operation Sections
 
-Defines an attribute of a specific type. Any type used in attributes must be convertible
-to `tir_core::Attribute` enum. Also implements basic attribute getters and setters.
+`operation!` accepts these sections:
 
-**`#[operand]`**
+```rust
+operation! {
+    AddIOp {
+        name: "addi",
+        dialect: "builtin",
+        attributes: A {
+            predicate: "Str",
+        },
+        operands: O {
+            lhs: "crate::builtin::IntegerType",
+            rhs: "crate::builtin::IntegerType",
+        },
+        results: R {
+            result: "crate::builtin::IntegerType",
+        },
+        roles: R {
+            lhs: Use,
+            rhs: Use,
+        },
+        regions: R {
+            body: Region {
+                single_block: true,
+            }
+        },
+        interfaces: [Commutative, SameOperandType],
+        sem: "(set result (add lhs rhs))",
+        format: "custom",
+    }
+}
+```
 
-Defines an operand of a specific type. Also implements basic setters and getters
-for the operand.
+Only `name` and `dialect` are required. Most operations use a subset of the
+sections above.
 
-**`#[region(single_block, no_args)]`**
+- `attributes`: declares required attribute names and their expected attribute
+  kinds. The generated verifier checks the shape.
+- `operands`: declares ordered operands and their type constraints.
+- `results`: declares result slots and their type constraints. Current builders
+  use one `result_type` field for result-producing operations.
+- `roles`: marks machine operands as `Use` or `Def`. This matters for backend
+  liveness and register allocation.
+- `regions`: declares nested regions. A `single_block` region is auto-created by
+  the builder when omitted.
+- `interfaces`: registers dynamic operation interfaces with the `Context`.
+- `sem`: attaches a semantic-expression lowering for instruction selection,
+  rewriting, and simulation.
+- `format: "custom"`: opts out of the default text parser/printer and expects
+  `custom_print` and `custom_parse` methods on the operation type.
 
-Defines a region. Also defines a basic getter `get_<field_name>_region`. If
-`single_block` argument is passed, also defines a `get_<field_name>` single block
-getter. If both `single_block` and `no_args` are passed, a default region will be
-created during operation building.
+## Types
+
+A dialect type is ordinary Rust implementing `tir::Type`; if it is usable as an
+operation constraint, it also implements `tir::TypeConstraint`.
+
+```rust
+use std::any::Any;
+use std::sync::Arc;
+
+use crate as tir;
+use crate::{
+    Context, Error, IRFormatter, Type, TypeId, TypeConstraint, parse::Span,
+};
+
+pub struct PtrType {
+    pointee: Option<Arc<dyn Type>>,
+}
+
+impl PtrType {
+    pub fn opaque(context: &Context) -> TypeId {
+        context.get_type_id(Arc::new(Self { pointee: None }))
+    }
+}
+
+impl TypeConstraint for PtrType {}
+
+impl Type for PtrType {
+    fn dialect(&self) -> &'static str {
+        "ptr"
+    }
+
+    fn parse_key() -> &'static str {
+        "p"
+    }
+
+    fn parse<'src>(
+        _mnemonic: &str,
+        _parser: &mut tir::parse::text::Parser<'src>,
+        context: &Context,
+    ) -> Result<TypeId, (Span, Error)> {
+        Ok(Self::opaque(context))
+    }
+
+    fn print(&self, fmt: &mut IRFormatter<'_>) -> Result<(), std::fmt::Error> {
+        fmt.write("p")
+    }
+
+    fn eq(&self, other: &dyn Type) -> bool {
+        (other as &dyn Any).downcast_ref::<PtrType>().is_some()
+    }
+}
+```
+
+Types are interned in the context with `Context::get_type_id`. Two type values
+are considered the same when their `Type::eq` implementation says so.
+
+Textual type syntax is dialect-qualified unless the type belongs to `builtin`.
+For example, `!i32` is the builtin integer type and `!ptr.p` is the pointer type
+from the `ptr` dialect.
+
+## Interfaces
+
+Interfaces let passes ask for behavior without depending on concrete operation
+types. For example, `mem2reg` uses `PromotableAllocation`, `MemoryRead`, and
+`MemoryWrite`; backend passes use `MachineInstruction`.
+
+To expose an interface:
+
+1. List it in the operation's `interfaces` section.
+2. Implement the trait for the operation type.
+
+The `operation!` macro emits the `ImplementsOpInterface` plumbing, and the
+`dialect!` macro registers it when the dialect is installed in a context.
+
+## Parsing and Printing
+
+The default operation format is intentionally regular:
+
+- optional result list,
+- dialect-qualified operation name,
+- optional attribute dictionary,
+- optional region bodies.
+
+Use the default format for compiler IR. Choose `format: "custom"` only when the
+operation needs target assembly syntax or another non-generic shape. Custom
+format operations must provide:
+
+```rust
+impl MyOp {
+    fn custom_print<'a, 'b: 'a>(
+        &'a self,
+        fmt: &'a mut tir::IRFormatter<'b>,
+    ) -> Result<(), std::fmt::Error> {
+        // ...
+        Ok(())
+    }
+
+    fn custom_parse<'src>(
+        parser: &mut tir::parse::text::Parser<'src>,
+        context: &tir::Context,
+    ) -> Result<Box<dyn tir::Operation>, (tir::parse::Span, tir::Error)> {
+        // ...
+    }
+}
+```
+
+Generated ISA dialects usually get their custom asm parser/printer from TMDL
+instead of hand-written Rust.
+
+## Semantic Expressions
+
+The `sem` section lowers an operation into a small semantic-expression DAG:
+
+```rust
+operation! {
+    AddIOp {
+        name: "addi",
+        dialect: "builtin",
+        operands: O {
+            lhs: "crate::builtin::IntegerType",
+            rhs: "crate::builtin::IntegerType",
+        },
+        results: R {
+            result: "crate::builtin::IntegerType",
+        },
+        sem: "(set result (add lhs rhs))",
+    }
+}
+```
+
+Semantic expressions are used by instruction selection, algebraic rewrites, and
+the simulator. If an operation has a result, the generated semantic expression
+records the concrete result type from the owning context.
+
+## TMDL-Generated Dialects
+
+Target ISAs are usually too large to maintain as hand-written Rust. A TMDL file
+can describe:
+
+- register classes and aliases,
+- instruction definitions,
+- assembly templates,
+- instruction behavior,
+- scheduling units and machine models.
+
+The backend build script runs `tmdlc --action=emit-rust`, includes the generated
+Rust from `OUT_DIR`, and then the handwritten backend module adds the dialect
+declaration, special virtual operations, and target-specific lowering passes.
+
+Keep generated code clippy-clean by fixing the generator templates in
+`tmdl/src/rustgen.rs`, not by adding warning suppressions around `include!`.
+
+## Checklist
+
+When adding or changing a Rust dialect:
+
+1. Add all operation and type definitions.
+2. Register them in the `dialect!` declaration.
+3. Implement every listed interface trait.
+4. Add custom parse/print only when the generic format is not enough.
+5. Add roundtrip tests for types and operations.
+6. Run `cargo fmt --check`.
+7. Run `cargo clippy --workspace --all-targets -- -D warnings`.
+8. Run `cargo test --workspace`.

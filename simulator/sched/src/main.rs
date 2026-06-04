@@ -108,10 +108,10 @@ fn main() {
 fn edge_latency(model: &MachineModel, producer: &Inst, consumer: &Inst) -> u32 {
     let p_res = producer.class.resources.first().copied();
     let c_res = consumer.class.resources.first().copied();
-    if let (Some(p), Some(c)) = (p_res, c_res) {
-        if let Some(f) = model.forward_latency(p, c) {
-            return u32::from(f);
-        }
+    if let (Some(p), Some(c)) = (p_res, c_res)
+        && let Some(f) = model.forward_latency(p, c)
+    {
+        return u32::from(f);
     }
     u32::from(producer.class.latency)
 }

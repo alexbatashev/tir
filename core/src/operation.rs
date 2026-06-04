@@ -3,7 +3,7 @@ use crate::{
     ir_formatter::IRFormatter, parse::Span, parse::text::Parser as IRParser, region::RegionId,
     value::ValueId,
 };
-use std::{any::Any, sync::Arc, u32};
+use std::{any::Any, sync::Arc};
 
 pub type ErasedOpInterface = Box<dyn Any>;
 pub type OpInterfaceConverter = fn(Arc<OpInstance>) -> ErasedOpInterface;

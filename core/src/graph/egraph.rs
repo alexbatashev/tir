@@ -91,13 +91,15 @@ impl EMatch {
 /// extends the e-graph (typically adding the right-hand side and unioning it with
 /// the match root). The applier owns the algebraic content so a rule can compute
 /// width-dependent constants, which is what bit-vector identities need.
+pub type EGraphApplier<N, L> = dyn Fn(&Context, &mut EGraph<N, L>, &EMatch) + Send + Sync;
+
 pub struct Rewrite<N: Node, L> {
     pub name: String,
     pub searcher: Pattern<N, ()>,
     /// Extends the e-graph with the rule's right-hand side for a given match. Gets
     /// the [`Context`] so width-dependent rules can resolve types and build typed
     /// nodes (e.g. the constant shift amount `W - n` of a sign-extension bridge).
-    pub apply: Box<dyn Fn(&Context, &mut EGraph<N, L>, &EMatch) + Send + Sync>,
+    pub apply: Box<EGraphApplier<N, L>>,
 }
 
 /// Bounds on a saturation run, so a runaway rule set can never loop forever.

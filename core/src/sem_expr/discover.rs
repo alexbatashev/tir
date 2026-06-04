@@ -10,7 +10,7 @@
 //! at the call site.
 
 use crate::{
-    graph::{Dag, MutDag, NodeId},
+    graph::{MutDag, NodeId},
     sem_expr::{ExprKind, ExprPayload, ExprPostGraph, Value, execute},
     utils::APInt,
 };

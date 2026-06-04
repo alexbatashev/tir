@@ -1628,10 +1628,10 @@ fn completeness_error(
         if has_root.contains(&class) || has_internal.contains(&class) {
             continue;
         }
-        if let Some(kind) = egraph.nodes(class).first().map(|n| n.node.kind) {
-            if !missing.contains(&kind) {
-                missing.push(kind);
-            }
+        if let Some(kind) = egraph.nodes(class).first().map(|n| n.node.kind)
+            && !missing.contains(&kind)
+        {
+            missing.push(kind);
         }
     }
 
@@ -1946,6 +1946,43 @@ enum ChildRequirement {
         match_id: usize,
         pattern_node: NodeId,
     },
+}
+
+impl Pass for InstructionSelectPass {
+    fn name(&self) -> &'static str {
+        "instruction-select"
+    }
+
+    fn target(&self) -> PassTarget {
+        PassTarget::Any
+    }
+
+    fn run(
+        &mut self,
+        op: &OperationRef,
+        context: &Context,
+        rewriter: &mut Rewriter,
+    ) -> Result<(), PassError> {
+        for lowering in &self.op_lowerings {
+            if lowering(context, op, rewriter)? {
+                return Ok(());
+            }
+        }
+
+        if op.op().results.is_empty() {
+            return Ok(());
+        }
+
+        let Some(block) = op.block() else {
+            return Ok(());
+        };
+
+        if self.target_model.is_pbqp_enabled() {
+            self.commit_block_solution(context, block, rewriter)?;
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -2695,42 +2732,5 @@ mod tests {
             .collect();
         // add (from the addi), then the slli/srai sign-extension idiom, then return.
         assert_eq!(body_ops, vec!["addi", "shli", "shrsi", "return"]);
-    }
-}
-
-impl Pass for InstructionSelectPass {
-    fn name(&self) -> &'static str {
-        "instruction-select"
-    }
-
-    fn target(&self) -> PassTarget {
-        PassTarget::Any
-    }
-
-    fn run(
-        &mut self,
-        op: &OperationRef,
-        context: &Context,
-        rewriter: &mut Rewriter,
-    ) -> Result<(), PassError> {
-        for lowering in &self.op_lowerings {
-            if lowering(context, op, rewriter)? {
-                return Ok(());
-            }
-        }
-
-        if op.op().results.is_empty() {
-            return Ok(());
-        }
-
-        let Some(block) = op.block() else {
-            return Ok(());
-        };
-
-        if self.target_model.is_pbqp_enabled() {
-            self.commit_block_solution(context, block, rewriter)?;
-        }
-
-        Ok(())
     }
 }

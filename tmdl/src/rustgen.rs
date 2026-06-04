@@ -44,7 +44,7 @@ pub fn generate_rust<'a>(
     let syntax_tree = syn::parse2(final_rust).unwrap();
     let formatted = prettyplease::unparse(&syntax_tree);
 
-    output.write(formatted.as_bytes())?;
+    output.write_all(formatted.as_bytes())?;
 
     Ok(())
 }
@@ -212,6 +212,18 @@ fn emit_instructions<'a>(
                 });
             }
         }
+        let custom_print_attr_body = if register_attr_print_arms.is_empty() {
+            quote! {
+                attr.value.print(fmt, &context)?;
+            }
+        } else {
+            quote! {
+                match attr.name.as_str() {
+                    #(#register_attr_print_arms,)*
+                    _ => attr.value.print(fmt, &context)?,
+                }
+            }
+        };
         instruction_custom_format_impls.push(quote! {
             impl #name_ident {
                 fn custom_print<'a, 'b: 'a>(
@@ -233,10 +245,7 @@ fn emit_instructions<'a>(
                             first = false;
                             fmt.write(&attr.name)?;
                             fmt.write(" = ")?;
-                            match attr.name.as_str() {
-                                #(#register_attr_print_arms,)*
-                                _ => attr.value.print(fmt, &context)?,
-                            }
+                            #custom_print_attr_body
                         }
                         fmt.write("}")?;
                     }
@@ -321,11 +330,16 @@ fn emit_instructions<'a>(
                             .position(|name| name == op_name)
                         {
                             let def_pos_lit = proc_macro2::Literal::usize_unsuffixed(def_pos);
+                            let result_accessor = if def_pos == 0 {
+                                quote! { .first() }
+                            } else {
+                                quote! { .get(#def_pos_lit) }
+                            };
                             emit_attr_steps.push(quote! {
                                 let dst = op
                                     .op()
                                     .results
-                                    .get(#def_pos_lit)
+                                    #result_accessor
                                     .ok_or(tir::PassError::RewriteFailed(op.op().id))?
                                     .number();
                                 builder = builder.attr(
@@ -421,6 +435,7 @@ fn emit_instructions<'a>(
                     op: &tir::OperationRef,
                     m: &tir_be_common::isel::RuleMatch,
                 ) -> Result<tir_be_common::isel::EmitPlan, tir::PassError> {
+                    let _ = m;
                     let mut builder = #builder_ident::new(context);
                     #(#emit_attr_steps)*
                     Ok(tir_be_common::isel::EmitPlan::single(Box::new(builder.build())))
@@ -428,18 +443,16 @@ fn emit_instructions<'a>(
             });
 
             isel_rule_inits.push(quote! {
-                rules.push(
-                    tir_be_common::isel::Rule::new(
-                        #rule_name_lit,
-                        #pattern_fn_ident(context),
-                        // base_cost is the larger of the canonical pattern size and the
-                        // TMDL-modeled instruction cost, so a genuinely expensive
-                        // instruction (high `unit` latency) outweighs the structural proxy.
-                        (#base_cost_lit).max(instruction_cost(#mnemonic_cost_lit)),
-                        #emit_fn_ident,
-                    )
-                    .with_operand_constraints(vec![#(#operand_constraint_entries),*]),
-                );
+                tir_be_common::isel::Rule::new(
+                    #rule_name_lit,
+                    #pattern_fn_ident(context),
+                    // base_cost is the larger of the canonical pattern size and the
+                    // TMDL-modeled instruction cost, so a genuinely expensive
+                    // instruction (high `unit` latency) outweighs the structural proxy.
+                    (#base_cost_lit).max(instruction_cost(#mnemonic_cost_lit)),
+                    #emit_fn_ident,
+                )
+                .with_operand_constraints(vec![#(#operand_constraint_entries),*])
             });
         }
 
@@ -450,7 +463,7 @@ fn emit_instructions<'a>(
             .max()
             .map(|max_end| max_end + 1)
             .unwrap_or(32);
-        let width_bytes = ((encoding_bits as u32 + 7) / 8) as u64;
+        let width_bytes = (encoding_bits as u32).div_ceil(8) as u64;
         let width_bytes_lit = proc_macro2::Literal::u8_unsuffixed(width_bytes as u8);
         let mnemonic_lit = proc_macro2::Literal::string(mnemonic_name);
 
@@ -465,10 +478,10 @@ fn emit_instructions<'a>(
         };
         let codegen_rhs: Option<&ast::Expr> = branch_value.as_ref().or(resolved_rhs);
 
-        if let Some(rhs) = codegen_rhs {
-            if let Some(impl_ts) = emit_as_sem_expr_impl(rhs, &name_ident, &numeric_params) {
-                as_sem_expr_impls.push(impl_ts);
-            }
+        if let Some(rhs) = codegen_rhs
+            && let Some(impl_ts) = emit_as_sem_expr_impl(rhs, &name_ident, &numeric_params)
+        {
+            as_sem_expr_impls.push(impl_ts);
         }
 
         let execute_body = if let Some(branch_val) = branch_value.as_ref() {
@@ -554,7 +567,7 @@ fn emit_instructions<'a>(
                                         format_ident!("parse_{}", class_name.to_lowercase());
                                     let class_lit = proc_macro2::Literal::string(class_name);
                                     parse_steps.push(quote! {
-                                        let idx = #fn_ident(parser)?;
+                                        let idx = #fn_ident(parser).ok_or(())?;
                                         op_builder = op_builder.attr(
                                             #op_name_lit,
                                             tir::attributes::AttributeValue::Register(
@@ -647,11 +660,17 @@ fn emit_instructions<'a>(
                 let mn_lit = proc_macro2::Literal::string(mn);
                 instruction_parser_map_inits.push(quote! {
                     let f: tir_be_common::AsmInstructionParser = #parse_fn_ident;
-                    map.entry(#mn_lit.to_string()).or_default().push(Box::new(f));
+                    map.entry(#mn_lit.to_string()).or_default().push(f);
                 });
             }
         }
     }
+
+    let isel_rules_body = if isel_rule_inits.is_empty() {
+        quote! { Vec::new() }
+    } else {
+        quote! { vec![#(#isel_rule_inits),*] }
+    };
 
     Ok(quote! {
         #(#instruction_defs)*
@@ -659,8 +678,8 @@ fn emit_instructions<'a>(
         #(#machine_instruction_impls)*
         #(#as_sem_expr_impls)*
 
-        fn get_instruction_parsers() -> std::collections::HashMap<String, Vec<Box<tir_be_common::AsmInstructionParser>>> {
-            let mut map: std::collections::HashMap<String, Vec<Box<tir_be_common::AsmInstructionParser>>> = std::collections::HashMap::new();
+        fn get_instruction_parsers() -> std::collections::HashMap<String, Vec<tir_be_common::AsmInstructionParser>> {
+            let mut map: std::collections::HashMap<String, Vec<tir_be_common::AsmInstructionParser>> = std::collections::HashMap::new();
             #(#instruction_parsers_impls)*
             #(#instruction_parser_map_inits)*
 
@@ -671,9 +690,7 @@ fn emit_instructions<'a>(
 
         pub fn get_isel_rules(context: &tir::Context) -> Vec<tir_be_common::isel::Rule> {
             let _ = &context;
-            let mut rules = Vec::new();
-            #(#isel_rule_inits)*
-            rules
+            #isel_rules_body
         }
     })
 }
@@ -692,14 +709,17 @@ fn emit_register_parsers_and_printers(
         let match_arms = tables
             .parse_names
             .iter()
-            .map(|(name, idx)| quote! { #name => Some(#idx as u16), })
+            .map(|(name, idx)| {
+                let idx_lit = proc_macro2::Literal::u16_unsuffixed(*idx);
+                quote! { #name => Some(#idx_lit), }
+            })
             .collect::<Vec<_>>();
         let abi_match_arms = tables
             .abi_names
             .iter()
             .map(|(idx, name)| {
                 let idx_lit = proc_macro2::Literal::u16_unsuffixed(*idx);
-                quote! { #idx_lit => return Some(#name.to_string()), }
+                quote! { #idx_lit => Some(#name.to_string()), }
             })
             .collect::<Vec<_>>();
         let isa_match_arms = tables
@@ -707,26 +727,79 @@ fn emit_register_parsers_and_printers(
             .iter()
             .map(|(idx, name)| {
                 let idx_lit = proc_macro2::Literal::u16_unsuffixed(*idx);
-                quote! { #idx_lit => return Some(#name.to_string()), }
+                quote! { #idx_lit => Some(#name.to_string()), }
             })
             .collect::<Vec<_>>();
-
-        fns.push(quote! {
-            fn #fn_name<'src>(parser: &mut tir::parse::tokens::Parser<'src, tir_be_common::Token<'src>>) -> Result<u16, ()> {
+        let parse_body = if match_arms.is_empty() {
+            quote! {
+                let _ = parser;
+                None
+            }
+        } else {
+            quote! {
                 if let Some(name) = parser.parse_ident() {
-                    let idx = match name {
+                    match name {
                         #(#match_arms)*
                         _ => None,
-                    };
-                    if let Some(i) = idx { return Ok(i); }
+                    }
+                } else {
+                    None
                 }
-                Err(())
             }
-            fn #print_fn_name(idx: u16, prefer_abi: bool) -> Option<String> {
-                if prefer_abi {
-                    match idx { #(#abi_match_arms)* _ => {} }
+        };
+        let abi_lookup = if abi_match_arms.is_empty() {
+            quote! { None }
+        } else {
+            quote! {
+                match idx {
+                    #(#abi_match_arms)*
+                    _ => None,
                 }
-                match idx { #(#isa_match_arms)* _ => None }
+            }
+        };
+        let isa_lookup = if isa_match_arms.is_empty() {
+            quote! { None }
+        } else {
+            quote! {
+                match idx {
+                    #(#isa_match_arms)*
+                    _ => None,
+                }
+            }
+        };
+
+        let print_body = match (abi_match_arms.is_empty(), isa_match_arms.is_empty()) {
+            (true, true) => quote! {
+                let _ = (idx, prefer_abi);
+                None
+            },
+            (true, false) => quote! {
+                let _ = prefer_abi;
+                #isa_lookup
+            },
+            (false, true) => quote! {
+                if prefer_abi {
+                    #abi_lookup
+                } else {
+                    None
+                }
+            },
+            (false, false) => quote! {
+                let abi_name = if prefer_abi {
+                    #abi_lookup
+                } else {
+                    None
+                };
+                abi_name.or(#isa_lookup)
+            },
+        };
+
+        fns.push(quote! {
+            pub fn #fn_name<'src>(parser: &mut tir::parse::tokens::Parser<'src, tir_be_common::Token<'src>>) -> Option<u16> {
+                #parse_body
+            }
+            pub fn #print_fn_name(idx: u16, prefer_abi: bool) -> Option<String> {
+                #print_body
             }
         });
     }
@@ -903,7 +976,7 @@ fn emit_machine_models<'a>(
 
 /// Resource-agnostic `unit` defaults, keyed by name. Used both when a machine
 /// does not bind a unit and to drive the machine-independent [`instruction_cost`].
-fn collect_unit_defaults<'a>(files: &'a [ast::File]) -> HashMap<&'a str, &'a ast::UnitDecl> {
+fn collect_unit_defaults(files: &[ast::File]) -> HashMap<&str, &ast::UnitDecl> {
     files
         .iter()
         .flat_map(|f| f.units())
@@ -969,15 +1042,24 @@ fn emit_instruction_cost<'a>(
         arms.push(quote! { #m_lit => #c_lit, });
     }
 
+    let cost_body = if arms.is_empty() {
+        quote! { 1 }
+    } else {
+        quote! {
+            match mnemonic {
+                #(#arms)*
+                _ => 1,
+            }
+        }
+    };
+
     Ok(quote! {
         /// Machine-independent instruction cost (a latency proxy) derived from TMDL
         /// `unit` defaults. The instruction-selection cost model consults this so it
         /// shares one source of truth with the simulator's per-machine model.
         pub fn instruction_cost(mnemonic: &str) -> u32 {
-            match mnemonic {
-                #(#arms)*
-                _ => 1,
-            }
+            let _ = mnemonic;
+            #cost_body
         }
     })
 }
@@ -1123,22 +1205,27 @@ fn to_snake_case(s: &str) -> String {
 }
 
 fn emit_register_trait_helpers(files: &[ast::File]) -> Result<proc_macro2::TokenStream, TMDLError> {
-    let mut hardwired_arms = Vec::new();
+    let mut hardwired_patterns = Vec::new();
 
     for rc in files.iter().flat_map(|f| f.register_classes()) {
         let class_lit = proc_macro2::Literal::string(&rc.name);
         if let Some(idx) = rc.hardwired_zero_register_index() {
             let idx_lit = proc_macro2::Literal::u16_unsuffixed(idx);
-            hardwired_arms.push(quote! { (#class_lit, #idx_lit) => true, });
+            hardwired_patterns.push(quote! { (#class_lit, #idx_lit) });
         }
     }
+    let hardwired_body = if hardwired_patterns.is_empty() {
+        quote! {
+            let _ = (class, index);
+            false
+        }
+    } else {
+        quote! { matches!((class, index), #(#hardwired_patterns)|*) }
+    };
 
     Ok(quote! {
         pub fn register_has_trait_hardwired_zero(class: &str, index: u16) -> bool {
-            match (class, index) {
-                #(#hardwired_arms)*
-                _ => false,
-            }
+            #hardwired_body
         }
     })
 }
@@ -1147,6 +1234,7 @@ fn emit_register_trait_helpers(files: &[ast::File]) -> Result<proc_macro2::Token
 // Instruction analysis helpers
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 struct InstructionSemantics {
     pattern: tir::sem_expr::ExprPostGraph,
     root: tir::graph::NodeId,
@@ -1179,7 +1267,7 @@ fn analyze_instruction_semantics(
 fn split_fixed_registers(symbols: &HashMap<(String, u32), u32>) -> HashMap<String, Option<u16>> {
     let mut fixed_register_by_class: HashMap<String, Option<u16>> = HashMap::new();
 
-    for ((class, number), _) in symbols {
+    for (class, number) in symbols.keys() {
         let entry = fixed_register_by_class.entry(class.clone()).or_insert(None);
         if let Ok(number_u16) = u16::try_from(*number) {
             match entry {
@@ -1296,15 +1384,13 @@ fn find_store_effect_expr(expr: &ast::Expr) -> Option<&ast::Expr> {
 
 fn resolve_string(expr: &ast::Expr) -> Option<String> {
     match &expr {
-        ast::Expr::Lit(lit) => match lit {
-            ast::Lit::Str(lstr) => Some(lstr.value().to_owned()),
-            _ => None,
-        },
+        ast::Expr::Lit(ast::Lit::Str(lstr)) => Some(lstr.value().to_owned()),
+        ast::Expr::Lit(_) => None,
         ast::Expr::Block(b) => {
-            if b.last_expr_return {
-                if let Some(ast::Expr::Lit(ast::Lit::Str(s))) = b.stmts.last() {
-                    return Some(s.value().to_owned());
-                }
+            if b.last_expr_return
+                && let Some(ast::Expr::Lit(ast::Lit::Str(s))) = b.stmts.last()
+            {
+                return Some(s.value().to_owned());
             }
             None
         }
@@ -1649,7 +1735,7 @@ fn emit_value_eval(
     // Build the semantic graph inline (no type annotations, so no `_context`).
     let (dag_stmts, _root) = emit_dag_as_code(&dag, lowering.root, &[]);
     let (max_sym_id, sym_inits) = emit_sym_inits(&lowering, ops, isa_param_values, mnemonic_lit);
-    let max_sym_id_lit = proc_macro2::Literal::usize_unsuffixed(max_sym_id);
+    let sym_count_lit = proc_macro2::Literal::usize_unsuffixed(max_sym_id + 1);
 
     Some(quote! {
         let value = {
@@ -1659,7 +1745,7 @@ fn emit_value_eval(
                 let g = &mut __g;
                 #(#dag_stmts)*
             }
-            let mut __syms: Vec<Option<tir::sem_expr::Value>> = vec![None; #max_sym_id_lit + 1];
+            let mut __syms: Vec<Option<tir::sem_expr::Value>> = vec![None; #sym_count_lit];
             #(#sym_inits)*
             let __syms: Vec<tir::sem_expr::Value> = __syms.into_iter()
                 .map(|v| v.unwrap_or_else(|| tir::sem_expr::Value::Int(tir::utils::APInt::new(64, 0))))
@@ -1811,18 +1897,18 @@ fn emit_destination_write(
 
     // A register named directly by class, e.g. a status flag `PSTATE::z` or a fixed
     // register like `GPR::x30`; its index is fixed at compile time.
-    if let ast::Expr::Path(path) = dest {
-        if path.remainder.len() == 1 {
-            let key = (path.base.clone(), path.remainder[0].clone());
-            if let Some(&index) = register_index_map.get(&key) {
-                let class_lit = proc_macro2::Literal::string(&path.base);
-                let index_lit = proc_macro2::Literal::u16_unsuffixed(index as u16);
-                return Some(quote! {
-                    if !register_has_trait_hardwired_zero(#class_lit, #index_lit) {
-                        machine.write_register(#class_lit, #index_lit, value)?;
-                    }
-                });
-            }
+    if let ast::Expr::Path(path) = dest
+        && path.remainder.len() == 1
+    {
+        let key = (path.base.clone(), path.remainder[0].clone());
+        if let Some(&index) = register_index_map.get(&key) {
+            let class_lit = proc_macro2::Literal::string(&path.base);
+            let index_lit = proc_macro2::Literal::u16_unsuffixed(index as u16);
+            return Some(quote! {
+                if !register_has_trait_hardwired_zero(#class_lit, #index_lit) {
+                    machine.write_register(#class_lit, #index_lit, value)?;
+                }
+            });
         }
     }
 
@@ -1838,11 +1924,8 @@ fn emit_dag_as_code(
 
     let mut stmts: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut node_vars: HashMap<usize, proc_macro2::Ident> = HashMap::new();
-    let mut counter = 0usize;
-
-    for node_id in dag.postorder(root) {
+    for (counter, node_id) in dag.postorder(root).enumerate() {
         let var = format_ident!("__sem_{}", counter);
-        counter += 1;
 
         let kind_ts = emit_expr_kind_ts(dag.get_node(node_id));
         stmts.push(quote! { let #var = g.add_node(#kind_ts); });
@@ -1857,13 +1940,13 @@ fn emit_dag_as_code(
         // *operation* nodes are typed: leaf operands stay wildcards (so e.g. a
         // plain `add` matches any width), and constant leaves are matched by value
         // rather than by a fragile value-derived width.
-        if dag.get_leaf_data(node_id).is_none() {
-            if let Some(Some(width)) = widths.get(node_id.index()).copied() {
-                let width_lit = proc_macro2::Literal::u32_unsuffixed(width);
-                stmts.push(quote! {
-                    g.set_actual_type(#var, tir::builtin::IntegerType::new(_context, #width_lit));
-                });
-            }
+        if dag.get_leaf_data(node_id).is_none()
+            && let Some(Some(width)) = widths.get(node_id.index()).copied()
+        {
+            let width_lit = proc_macro2::Literal::u32_unsuffixed(width);
+            stmts.push(quote! {
+                g.set_actual_type(#var, tir::builtin::IntegerType::new(_context, #width_lit));
+            });
         }
 
         let children: Vec<tir::graph::NodeId> = dag.children(node_id).collect();

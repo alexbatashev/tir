@@ -24,5 +24,4 @@ members = [
 
 [profile.bench]
 debug = true
-debuginfo-level = 2
 lto = true

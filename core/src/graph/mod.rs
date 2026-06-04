@@ -58,6 +58,10 @@ pub trait Dag {
 
     fn len(&self) -> usize;
 
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     fn get_node(&self, id: NodeId) -> &Self::Node;
     fn get_kind(&self, id: NodeId) -> &Self::Node {
         self.get_node(id)

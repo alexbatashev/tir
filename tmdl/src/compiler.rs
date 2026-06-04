@@ -7,7 +7,6 @@ use std::{fs, io};
 use ariadne::{Color, Label, Report, ReportKind, sources};
 use chumsky::error::{Cheap, Rich};
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, ValueEnum};
-use serde_json;
 
 use crate::Span;
 use crate::error::TMDLError;

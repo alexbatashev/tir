@@ -3,8 +3,8 @@
 //! agnostic — it only needs the `--march` string carried by the `Program`.
 
 use crate::oracle::{Oracle, Program};
-use crate::state::{ArchState, MemWindow, GPR_COUNT};
-use anyhow::{bail, Context, Result};
+use crate::state::{ArchState, GPR_COUNT, MemWindow};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -67,7 +67,10 @@ impl Oracle for IsasimOracle {
             serde_json::from_str(&text).context("parsing isasim state dump")?;
 
         if dump.gprs.len() != GPR_COUNT {
-            bail!("isasim reported {} gprs, expected {GPR_COUNT}", dump.gprs.len());
+            bail!(
+                "isasim reported {} gprs, expected {GPR_COUNT}",
+                dump.gprs.len()
+            );
         }
         let mut gprs = [0u64; GPR_COUNT];
         for (i, raw) in dump.gprs.iter().enumerate() {

@@ -92,7 +92,7 @@ where
 {
     let ident = select! { Token::Identifier(ident) => ident.to_string() };
     just(Token::KwRegClass)
-        .ignore_then(ident.clone())
+        .ignore_then(ident)
         .then(for_isas())
         .then(just(Token::Colon).ignore_then(ident).or_not())
         .then(
@@ -150,7 +150,7 @@ where
     just(Token::KwTemplate)
         .ignore_then(ident)
         .then(for_isas().or_not())
-        .then(just(Token::Colon).ignore_then(ident.clone()).or_not())
+        .then(just(Token::Colon).ignore_then(ident).or_not())
         .then(
             choice((
                 parameter().map(TemplateOrInstBody::Param),
@@ -224,7 +224,7 @@ where
     just(Token::KwInstruction)
         .ignore_then(ident)
         .then(for_isas().or_not())
-        .then(just(Token::Colon).ignore_then(ident.clone()).or_not())
+        .then(just(Token::Colon).ignore_then(ident).or_not())
         .then(
             choice((
                 parameter().map(TemplateOrInstBody::Param),
@@ -514,7 +514,7 @@ where
             .map(BindField::Uses),
         just(Token::Identifier("reads"))
             .ignore_then(just(Token::Equals))
-            .ignore_then(ident.clone())
+            .ignore_then(ident)
             .then_ignore(just(Token::Semicolon))
             .map(BindField::Reads),
         just(Token::Identifier("writes"))
@@ -614,7 +614,7 @@ where
         .map(MachineBody::Pipeline);
 
     let resource = just(Token::KwResource)
-        .ignore_then(ident.clone())
+        .ignore_then(ident)
         .then(
             kv_int_pair()
                 .repeated()
@@ -635,7 +635,7 @@ where
         });
 
     let bind = just(Token::KwBind)
-        .ignore_then(ident.clone())
+        .ignore_then(ident)
         .then(bind_body())
         .map_with(|(unit, fields), e| {
             let f = aggregate_bind_fields(fields);
@@ -651,7 +651,7 @@ where
         });
 
     let r#override = just(Token::KwOverride)
-        .ignore_then(ident.clone())
+        .ignore_then(ident)
         .then(bind_body())
         .map_with(|(instruction, fields), e| {
             let f = aggregate_bind_fields(fields);
@@ -668,9 +668,9 @@ where
 
     // `forward FROM => TO { latency = N; }`
     let forward = just(Token::KwForward)
-        .ignore_then(ident.clone())
+        .ignore_then(ident)
         .then_ignore(just(Token::FatArrow))
-        .then(ident.clone())
+        .then(ident)
         .then(
             just(Token::Identifier("latency"))
                 .ignore_then(just(Token::Equals))
@@ -688,7 +688,7 @@ where
         });
 
     just(Token::KwMachine)
-        .ignore_then(ident.clone())
+        .ignore_then(ident)
         .then(for_isas())
         .then(
             choice((
@@ -747,7 +747,6 @@ where
     let num = select! { Token::Number(i) => i.parse::<u16>().unwrap() };
 
     let single_bit = num
-        .clone()
         .then_ignore(just(Token::FatArrow))
         .then(inline_expr())
         .map_with(|(start, value), e| EncodingArm {
@@ -757,7 +756,6 @@ where
             span: e.span(),
         });
     let range = num
-        .clone()
         .then_ignore(just(Token::Range))
         .then(num)
         .then_ignore(just(Token::FatArrow))
@@ -788,7 +786,7 @@ where
     let ident = select! { Token::Identifier(ident) => ident.to_string() };
     just(Token::KwParam)
         .ignored()
-        .then(ident.clone())
+        .then(ident)
         .then_ignore(just(Token::Colon))
         .then(type_())
         .then(just(Token::Equals).then(inline_expr()).or_not())
@@ -805,7 +803,7 @@ where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
     let ident = select! { Token::Identifier(i) => i.to_string() };
-    let single_operand = ident.clone().then_ignore(just(Token::Colon)).then(type_());
+    let single_operand = ident.then_ignore(just(Token::Colon)).then(type_());
     just(Token::KwOperands)
         .ignored()
         .then(
@@ -827,17 +825,15 @@ where
     let single_isa =
         select! { Token::Identifier(ident) => IsaRequirement::Single(ident.to_string()) };
     let any = ident
-        .clone()
         .separated_by(just(Token::Pipe))
         .collect::<Vec<_>>()
         .delimited_by(just(Token::LBracket), just(Token::RBracket))
-        .map(|any| IsaRequirement::Any(any));
+        .map(IsaRequirement::Any);
     let all = ident
-        .clone()
         .separated_by(just(Token::Comma))
         .collect::<Vec<_>>()
         .delimited_by(just(Token::LBracket), just(Token::RBracket))
-        .map(|all| IsaRequirement::All(all));
+        .map(IsaRequirement::All);
     just(Token::KwRequires)
         .ignored()
         .then(choice((single_isa, any, all)))
@@ -931,7 +927,7 @@ fn register_traits<'src, I>()
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
-    just(Token::Identifier("traits".into()))
+    just(Token::Identifier("traits"))
         .then_ignore(just(Token::Equals))
         .then_ignore(just(Token::LBracket))
         .ignore_then(
@@ -1018,22 +1014,22 @@ where
         let ident = select! { Token::Identifier(i) => i.to_string() };
         let scope = just(Token::Colon).then(just(Token::Colon));
 
-        let ident_or_path = ident
-            .clone()
-            .then(scope.ignore_then(ident.clone()).or_not())
-            .map_with(|(base, member), e| {
-                if let Some(member) = member {
-                    Expr::Path(Path {
-                        base,
-                        remainder: vec![member],
-                        span: e.span(),
-                    })
-                } else if let Some(b) = builtin_from_ident(&base) {
-                    Expr::BuiltinFunction(b)
-                } else {
-                    Ident::new(base, e.span()).into()
-                }
-            });
+        let ident_or_path =
+            ident
+                .then(scope.ignore_then(ident).or_not())
+                .map_with(|(base, member), e| {
+                    if let Some(member) = member {
+                        Expr::Path(Path {
+                            base,
+                            remainder: vec![member],
+                            span: e.span(),
+                        })
+                    } else if let Some(b) = builtin_from_ident(&base) {
+                        Expr::BuiltinFunction(b)
+                    } else {
+                        Ident::new(base, e.span()).into()
+                    }
+                });
 
         let literal_or_ident = choice((
             ident_or_path,
@@ -1074,17 +1070,15 @@ where
         let postfix_op = choice((
             // field: .ident
             just(Token::Dot)
-                .then(ident.clone())
+                .then(ident)
                 .map_with(|(_, b), e| PostfixOp::Field(b, e.span())),
             // slice: [start..end]
-            num.clone()
-                .then_ignore(just(Token::Range))
-                .then(num.clone())
+            num.then_ignore(just(Token::Range))
+                .then(num)
                 .delimited_by(just(Token::LBracket), just(Token::RBracket))
                 .map_with(|(start, end), e| PostfixOp::Slice(start, end, e.span())),
             // index: [idx]
-            num.clone()
-                .delimited_by(just(Token::LBracket), just(Token::RBracket))
+            num.delimited_by(just(Token::LBracket), just(Token::RBracket))
                 .map_with(|index, e| PostfixOp::Index(index, e.span())),
             // call: (args)
             items
@@ -1220,7 +1214,6 @@ where
     let ident = select! { Token::Identifier(i) => i.to_string() };
     let scope = just(Token::Colon).then(just(Token::Colon));
     let assign_target = ident
-        .clone()
         .then(scope.ignore_then(ident).or_not())
         .map_with(|(base, member), e| {
             if let Some(member) = member {
@@ -1325,11 +1318,7 @@ where
 }
 
 fn is_ident(token: &Token) -> bool {
-    if let Token::Identifier(_) = token {
-        true
-    } else {
-        false
-    }
+    matches!(token, Token::Identifier(_))
 }
 
 #[cfg(test)]

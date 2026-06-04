@@ -69,12 +69,11 @@ fn build_isa_param_vars(files: &[ast::File], tvg: &mut TypeVarGen) -> HashMap<St
 }
 
 fn reg_class_type(rc: &ast::RegisterClass, isa_param_vars: &HashMap<String, TypeVar>) -> Type {
-    if let Some((_ty, Some(default))) = rc.parameters.get("WIDTH") {
-        if let ast::Expr::Field(field) = default {
-            if let Some(&tv) = isa_param_vars.get(&field.member) {
-                return Type::Con("bits".into(), vec![Type::Var(tv)]);
-            }
-        }
+    if let Some((_ty, Some(default))) = rc.parameters.get("WIDTH")
+        && let ast::Expr::Field(field) = default
+        && let Some(&tv) = isa_param_vars.get(&field.member)
+    {
+        return Type::Con("bits".into(), vec![Type::Var(tv)]);
     }
     unreachable!("All register classes must have WIDTH parameter")
 }
@@ -216,7 +215,7 @@ fn infer<'a>(
                         path.span,
                         format!(
                             "path '{}' must have exactly one register component",
-                            format!("{}::{}", path.base, path.remainder.join("::"))
+                            format_args!("{}::{}", path.base, path.remainder.join("::"))
                         ),
                     ),
                 ));

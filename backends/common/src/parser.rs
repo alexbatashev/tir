@@ -15,18 +15,19 @@ pub struct AsmParser {
     /// Candidate parsers per mnemonic. A single mnemonic (e.g. AArch64 `add`)
     /// can name several instruction forms (register vs. immediate), so each key
     /// maps to a list tried in turn with backtracking.
-    instruction_parsers: HashMap<String, Vec<Box<AsmInstructionParser>>>,
+    instruction_parsers: HashMap<String, Vec<AsmInstructionParser>>,
 }
 
 impl AsmParser {
-    pub fn new(instruction_parsers: HashMap<String, Vec<Box<AsmInstructionParser>>>) -> Self {
+    pub fn new(instruction_parsers: HashMap<String, Vec<AsmInstructionParser>>) -> Self {
         AsmParser {
             instruction_parsers,
         }
     }
 
+    #[allow(clippy::result_unit_err)]
     pub fn parse_asm(&self, context: &tir::Context, src: &str) -> Result<ModuleOp, ()> {
-        let module = ModuleOpBuilder::new(&context).build();
+        let module = ModuleOpBuilder::new(context).build();
 
         let tokens = lex(src)?;
 

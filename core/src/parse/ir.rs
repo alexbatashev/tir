@@ -8,7 +8,7 @@ use crate::{Context, Error, Operation, Region};
 use super::common::{Cursor, Span};
 use super::text::Parser as TextParser;
 
-pub fn parse_ir<'a, T: Operation>(context: &Context, src: &'a str) -> Result<T, (Span, Error)> {
+pub fn parse_ir<T: Operation>(context: &Context, src: &str) -> Result<T, (Span, Error)> {
     let mut parser = TextParser::new(src);
 
     let op = parse_single_op(&mut parser, context)?;

@@ -2,8 +2,8 @@
 //! shared memory layout, and the Spike golden oracle.
 
 use crate::oracle::{Oracle, Program};
-use crate::state::{ArchState, MemWindow, GPR_COUNT};
-use anyhow::{bail, Context, Result};
+use crate::state::{ArchState, GPR_COUNT, MemWindow};
+use anyhow::{Context, Result, bail};
 use std::path::Path;
 use std::process::Command;
 
@@ -28,11 +28,7 @@ const GCC_MARCH: &str = "rv64imafd";
 const GCC_ABI: &str = "lp64d";
 
 /// External tools this target's golden oracle needs.
-pub const REQUIRED_TOOLS: &[&str] = &[
-    "spike",
-    "riscv64-unknown-elf-gcc",
-    "riscv64-unknown-elf-nm",
-];
+pub const REQUIRED_TOOLS: &[&str] = &["spike", "riscv64-unknown-elf-gcc", "riscv64-unknown-elf-nm"];
 
 /// ABI register names in `x0..x31` order, used to map Spike's `reg 0` dump back
 /// to numeric indices.
@@ -192,11 +188,11 @@ fn resolve_symbol(elf: &Path, name: &str) -> Result<u64> {
         let addr = fields.next();
         let _kind = fields.next();
         let sym = fields.next();
-        if sym == Some(name) {
-            if let Some(addr) = addr {
-                return u64::from_str_radix(addr, 16)
-                    .with_context(|| format!("parsing address of symbol '{name}'"));
-            }
+        if sym == Some(name)
+            && let Some(addr) = addr
+        {
+            return u64::from_str_radix(addr, 16)
+                .with_context(|| format!("parsing address of symbol '{name}'"));
         }
     }
     bail!("symbol '{name}' not found in linked image")
@@ -259,14 +255,13 @@ fn parse_reg_pairs(line: &str) -> Vec<(&str, u64)> {
     let mut pairs = Vec::new();
     let mut i = 0;
     while i + 1 < tokens.len() {
-        if let Some(name) = tokens[i].strip_suffix(':') {
-            if ABI_NAMES.contains(&name) {
-                if let Some(value) = parse_bare_hex(tokens[i + 1]) {
-                    pairs.push((name, value));
-                    i += 2;
-                    continue;
-                }
-            }
+        if let Some(name) = tokens[i].strip_suffix(':')
+            && ABI_NAMES.contains(&name)
+            && let Some(value) = parse_bare_hex(tokens[i + 1])
+        {
+            pairs.push((name, value));
+            i += 2;
+            continue;
         }
         i += 1;
     }
@@ -276,7 +271,9 @@ fn parse_reg_pairs(line: &str) -> Vec<(&str, u64)> {
 /// Parse a token that is exactly a `0x`-prefixed hex number, else `None`.
 fn parse_bare_hex(token: &str) -> Option<u64> {
     let token = token.trim();
-    let hex = token.strip_prefix("0x").or_else(|| token.strip_prefix("0X"))?;
+    let hex = token
+        .strip_prefix("0x")
+        .or_else(|| token.strip_prefix("0X"))?;
     if hex.is_empty() || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
@@ -285,12 +282,9 @@ fn parse_bare_hex(token: &str) -> Option<u64> {
 
 /// Run a command, returning its stdout on success or an error containing stderr.
 fn run_tool(cmd: &mut Command) -> Result<String> {
-    let output = cmd.output().with_context(|| {
-        format!(
-            "spawning {}",
-            cmd.get_program().to_string_lossy()
-        )
-    })?;
+    let output = cmd
+        .output()
+        .with_context(|| format!("spawning {}", cmd.get_program().to_string_lossy()))?;
     if !output.status.success() {
         bail!(
             "{} failed ({}):\n{}",

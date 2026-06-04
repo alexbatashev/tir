@@ -286,7 +286,7 @@ fn check_performance_model(
     diags
 }
 
-fn build_item_cache<'a>(files: &'a [ast::File]) -> HashMap<&'a str, &'a ast::Item> {
+fn build_item_cache(files: &[ast::File]) -> HashMap<&str, &ast::Item> {
     files
         .iter()
         .flat_map(|f| f.items.iter().map(|i| (i.name(), i)))
@@ -521,7 +521,7 @@ fn check_instruction_consistent(
     let mut diags = vec![];
 
     // Check parent template exists and is a template.
-    if let Some(parent_name) = instruction.parent_template.as_ref().map(|n| n.as_str()) {
+    if let Some(parent_name) = instruction.parent_template.as_deref() {
         match item_cache.get(parent_name).copied() {
             None => diags.push((
                 file_name.to_string(),
@@ -652,7 +652,14 @@ fn check_instruction_consistent(
 
     // Asm must exist somewhere in the chain or instruction.
     let effective_asm = resolve_effective_asm_for_instruction(instruction, item_cache);
-    if effective_asm.is_none() {
+    if let Some(effective_asm) = effective_asm {
+        diags.extend(check_asm(
+            instruction,
+            effective_asm,
+            &params_cache,
+            file_name,
+        ));
+    } else {
         diags.push((
             file_name.to_string(),
             Rich::custom(
@@ -662,13 +669,6 @@ fn check_instruction_consistent(
                     instruction.name
                 ),
             ),
-        ));
-    } else {
-        diags.extend(check_asm(
-            instruction,
-            effective_asm.unwrap(),
-            &params_cache,
-            file_name,
         ));
     }
 

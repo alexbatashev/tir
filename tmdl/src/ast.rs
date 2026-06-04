@@ -588,15 +588,15 @@ impl LitStr {
     }
 }
 
-impl Into<Expr> for LitInt {
-    fn into(self) -> Expr {
-        Expr::Lit(Lit::Int(self))
+impl From<LitInt> for Expr {
+    fn from(val: LitInt) -> Self {
+        Expr::Lit(Lit::Int(val))
     }
 }
 
-impl Into<Expr> for LitStr {
-    fn into(self) -> Expr {
-        Expr::Lit(Lit::Str(self))
+impl From<LitStr> for Expr {
+    fn from(val: LitStr) -> Self {
+        Expr::Lit(Lit::Str(val))
     }
 }
 
@@ -606,21 +606,21 @@ impl Ident {
     }
 }
 
-impl Into<Expr> for Ident {
-    fn into(self) -> Expr {
-        Expr::Ident(self)
+impl From<Ident> for Expr {
+    fn from(val: Ident) -> Self {
+        Expr::Ident(val)
     }
 }
 
-impl Into<Expr> for Block {
-    fn into(self) -> Expr {
-        Expr::Block(self)
+impl From<Block> for Expr {
+    fn from(val: Block) -> Self {
+        Expr::Block(val)
     }
 }
 
-impl Into<Expr> for If {
-    fn into(self) -> Expr {
-        Expr::If(self)
+impl From<If> for Expr {
+    fn from(val: If) -> Self {
+        Expr::If(val)
     }
 }
 
@@ -1178,10 +1178,11 @@ impl RegisterClass {
         for (position, reg) in self.resolve_registers().enumerate() {
             let index = parse_trailing_index(&reg.name).unwrap_or(position as u16);
             out.push((reg.name.clone(), index));
-            if let Some(alias) = &reg.alias {
-                if !alias.contains("{}") && alias != &reg.name {
-                    out.push((alias.clone(), index));
-                }
+            if let Some(alias) = &reg.alias
+                && !alias.contains("{}")
+                && alias != &reg.name
+            {
+                out.push((alias.clone(), index));
             }
         }
         out
@@ -1382,11 +1383,11 @@ pub fn resolve_register_class_inheritance(files: &mut [File]) {
 
     for file in files.iter_mut() {
         for item in file.items.iter_mut() {
-            if let Item::RegisterClass(rc) = item {
-                if let Some(merged) = cache.get(&rc.name) {
-                    rc.parameters = merged.parameters.clone();
-                    rc.registers = merged.registers.clone();
-                }
+            if let Item::RegisterClass(rc) = item
+                && let Some(merged) = cache.get(&rc.name)
+            {
+                rc.parameters = merged.parameters.clone();
+                rc.registers = merged.registers.clone();
             }
         }
     }

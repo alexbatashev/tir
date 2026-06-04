@@ -224,27 +224,6 @@ pub(crate) fn lexer<'src>()
         .collect()
 }
 
-#[cfg(test)]
-mod test {
-    use chumsky::Parser;
-
-    use super::lexer;
-
-    #[test]
-    fn smoke_lexer() {
-        let input = "
-          isa RV32I {
-              XLEN = 32
-          }
-       ";
-
-        let parser = lexer();
-        let result = parser.parse(input);
-
-        println!("{:#?}", result);
-    }
-}
-
 impl<'a> fmt::Display for Token<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -302,5 +281,26 @@ impl<'a> fmt::Display for Token<'a> {
             Token::KwOverride => f.write_str("override"),
             Token::KwForward => f.write_str("forward"),
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use chumsky::Parser;
+
+    use super::lexer;
+
+    #[test]
+    fn smoke_lexer() {
+        let input = "
+          isa RV32I {
+              XLEN = 32
+          }
+       ";
+
+        let parser = lexer();
+        let result = parser.parse(input);
+
+        println!("{:#?}", result);
     }
 }

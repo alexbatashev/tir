@@ -1,5 +1,5 @@
 [package]
-name = "check-runner-fuzz"
+name = "tir-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2021"
@@ -12,6 +12,7 @@ libfuzzer-sys = "0.4"
 tmdl = { path = "../tmdl" }
 tir = { path = "../core" }
 tir-riscv = { path = "../backends/riscv" }
+arm64 = { path = "../backends/arm64" }
 tir-be-common = { path = "../backends/common" }
 
 # [dependencies.check-runner]
@@ -26,6 +27,13 @@ bench = false
 [[bin]]
 name = "riscv-assembly-fuzz"
 path = "fuzz_targets/riscv-assembly.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "arm64-assembly-fuzz"
+path = "fuzz_targets/arm64-assembly.rs"
 test = false
 doc = false
 bench = false

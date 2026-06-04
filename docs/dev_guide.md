@@ -64,16 +64,20 @@ touched by a bulk regeneration.
 
 ### Running fuzz tests
 
-We also have fuzzing set up for each user input parser, like a disassembler
-or an IR parser. These tests also require an external tool, that can be
-installed with a command like `cargo install cargo-fuzz`. The usage is very
-simple:
+We also have fuzzing set up for user-facing parsers. These tests require
+`cargo-fuzz`, which can be installed with `cargo install cargo-fuzz`.
 
 ```sh
-# List tests
+# List fuzz targets.
 cargo fuzz list
-# Run specific test
-cargo +nightly fuzz run fuzz_riscv_disassembler -- -max_total_time=60 -max_len=16384
+
+# Make sure all fuzz binaries still compile.
+cargo check -p tir-fuzz --bins
+
+# Run one target for a bounded local smoke campaign.
+cargo +nightly fuzz run tmdl-fuzz -- -max_total_time=60
+cargo +nightly fuzz run riscv-assembly-fuzz -- -max_total_time=60
+cargo +nightly fuzz run arm64-assembly-fuzz -- -max_total_time=60
 ```
 
 ### Collecting coverage info

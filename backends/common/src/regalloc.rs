@@ -685,10 +685,10 @@ fn abi_precolor(
         for &block_id in blocks {
             for op_id in context.get_block(block_id).op_ids() {
                 let body_op = context.get_op(op_id);
-                if body_op.name == "vret" {
-                    if let Some(value) = body_op.operands.first() {
-                        precolor.insert(value.number(), (class.name.to_string(), ret_reg));
-                    }
+                if body_op.name == "vret"
+                    && let Some(value) = body_op.operands.first()
+                {
+                    precolor.insert(value.number(), (class.name.to_string(), ret_reg));
                 }
             }
         }
@@ -736,14 +736,14 @@ fn rename_attr(context: &Context, op_id: OpId, from: u32, to: u32, role_class: R
         if !matches_dir {
             continue;
         }
-        if let AttributeValue::Register(RegisterAttr::Virtual { id, class }) = &attr.value {
-            if *id == from {
-                attr.value = AttributeValue::Register(RegisterAttr::Virtual {
-                    id: to,
-                    class: class.clone(),
-                });
-                changed = true;
-            }
+        if let AttributeValue::Register(RegisterAttr::Virtual { id, class }) = &attr.value
+            && *id == from
+        {
+            attr.value = AttributeValue::Register(RegisterAttr::Virtual {
+                id: to,
+                class: class.clone(),
+            });
+            changed = true;
         }
     }
     if changed {
@@ -760,14 +760,14 @@ fn rewrite_registers(context: &Context, blocks: &[BlockId], assignment: &HashMap
             let mut attrs = op.attributes.clone();
             let mut changed = false;
             for attr in &mut attrs {
-                if let AttributeValue::Register(RegisterAttr::Virtual { id, .. }) = &attr.value {
-                    if let Some((class, index)) = assignment.get(id) {
-                        attr.value = AttributeValue::Register(RegisterAttr::Physical {
-                            class: class.clone(),
-                            index: *index,
-                        });
-                        changed = true;
-                    }
+                if let AttributeValue::Register(RegisterAttr::Virtual { id, .. }) = &attr.value
+                    && let Some((class, index)) = assignment.get(id)
+                {
+                    attr.value = AttributeValue::Register(RegisterAttr::Physical {
+                        class: class.clone(),
+                        index: *index,
+                    });
+                    changed = true;
                 }
             }
             if changed {

@@ -519,10 +519,10 @@ fn build_smt_behavior<'a>(
             ast::Expr::Slice(s) => eval_expr_legacy(&s.base, operands),
             ast::Expr::IndexAccess(s) => eval_expr_legacy(&s.base, operands),
             ast::Expr::Field(f) => {
-                if let ast::Expr::Ident(id) = &*f.base {
-                    if id.name == "self" {
-                        return f.member.to_lowercase();
-                    }
+                if let ast::Expr::Ident(id) = &*f.base
+                    && id.name == "self"
+                {
+                    return f.member.to_lowercase();
                 }
                 "(_ bv0 64)".to_string()
             }
@@ -671,23 +671,23 @@ fn build_decoder<'a>(
                     // Unresolved param: no guard emitted (treated as don't-care).
                 }
                 ast::Expr::Slice(s) => {
-                    if let ast::Expr::Ident(id) = &*s.base {
-                        if operands.contains_key(&id.name) {
-                            operand_pieces
-                                .entry(id.name.clone())
-                                .or_default()
-                                .push((s.start, s.end, word_lo, word_hi));
-                        }
+                    if let ast::Expr::Ident(id) = &*s.base
+                        && operands.contains_key(&id.name)
+                    {
+                        operand_pieces
+                            .entry(id.name.clone())
+                            .or_default()
+                            .push((s.start, s.end, word_lo, word_hi));
                     }
                 }
                 ast::Expr::IndexAccess(s) => {
-                    if let ast::Expr::Ident(id) = &*s.base {
-                        if operands.contains_key(&id.name) {
-                            operand_pieces
-                                .entry(id.name.clone())
-                                .or_default()
-                                .push((s.index, s.index, word_lo, word_hi));
-                        }
+                    if let ast::Expr::Ident(id) = &*s.base
+                        && operands.contains_key(&id.name)
+                    {
+                        operand_pieces
+                            .entry(id.name.clone())
+                            .or_default()
+                            .push((s.index, s.index, word_lo, word_hi));
                     }
                 }
                 _ => {}

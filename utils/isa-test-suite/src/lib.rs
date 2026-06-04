@@ -13,7 +13,7 @@ mod oracle;
 mod riscv;
 mod state;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use isasim_oracle::IsasimOracle;
 use oracle::Oracle;
 use std::path::{Path, PathBuf};

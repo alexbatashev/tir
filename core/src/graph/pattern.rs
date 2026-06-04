@@ -457,6 +457,7 @@ impl VF2CoverDriver {
             }
         }
 
+        #[allow(clippy::too_many_arguments)]
         fn feasible<N: Node + PartialEq, L, A>(
             ctx: &Context,
             pattern: &Pattern<N, A>,
@@ -521,6 +522,7 @@ impl VF2CoverDriver {
             true
         }
 
+        #[allow(clippy::too_many_arguments)]
         fn search<N: Node + PartialEq, L, A>(
             ctx: &Context,
             pattern: &Pattern<N, A>,

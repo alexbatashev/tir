@@ -663,11 +663,7 @@ impl Iterator for TokenStream {
     fn next(&mut self) -> Option<Token> {
         loop {
             // Drop exhausted frames.
-            while self
-                .source_stack
-                .last()
-                .map_or(false, |(s, o)| *o >= s.len())
-            {
+            while self.source_stack.last().is_some_and(|(s, o)| *o >= s.len()) {
                 self.source_stack.pop();
             }
 

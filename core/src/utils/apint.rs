@@ -379,14 +379,14 @@ impl APInt {
 
         // Sign extend to 128 bits for proper signed multiplication
         let a_signed = if self.is_negative() {
-            let extension = (u128::MAX << self.width) & u128::MAX;
+            let extension = u128::MAX << self.width;
             (self.value as u128) | extension
         } else {
             self.value as u128
         };
 
         let b_signed = if other.is_negative() {
-            let extension = (u128::MAX << other.width) & u128::MAX;
+            let extension = u128::MAX << other.width;
             (other.value as u128) | extension
         } else {
             other.value as u128
@@ -410,7 +410,7 @@ impl APInt {
 
         // Sign extend self if negative
         let a_signed = if self.is_negative() {
-            let extension = (u128::MAX << self.width) & u128::MAX;
+            let extension = u128::MAX << self.width;
             (self.value as u128) | extension
         } else {
             self.value as u128
@@ -637,6 +637,7 @@ impl FromStr for APInt {
     ///   - hexadecimal: `0x1F`, `0X1F`
     ///   - octal:       `0o77`, `0O77`
     ///   - binary:      `0b1010`, `0B1010`
+    ///
     /// Underscores are allowed as digit separators and are ignored.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let s = s.trim();

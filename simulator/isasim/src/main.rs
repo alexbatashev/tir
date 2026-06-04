@@ -369,7 +369,7 @@ fn parse_hex_bytes(hex: &str) -> Vec<u8> {
             panic!("invalid character in memory hex data");
         }
     }
-    if compact.len() % 2 != 0 {
+    if !compact.len().is_multiple_of(2) {
         panic!("memory hex data must contain an even number of digits");
     }
     (0..compact.len())

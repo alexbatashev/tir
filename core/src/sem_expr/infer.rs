@@ -177,13 +177,14 @@ fn canon_rebuild(
     let children: Vec<NodeId> = graph.children(node).collect();
 
     // Result-extension collapse: SExt(Extract(inner, hi, 0), _) -> inner @ width hi+1.
-    if kind == ExprKind::SExt && children.len() == 2 {
-        if let Some((source, hi)) = extract_from_zero_hi(graph, children[0]) {
-            let inner = canon_rebuild(graph, source, out, memo, forced);
-            forced.insert(inner.index(), (hi + 1) as u32);
-            memo.insert(node.index(), inner);
-            return inner;
-        }
+    if kind == ExprKind::SExt
+        && children.len() == 2
+        && let Some((source, hi)) = extract_from_zero_hi(graph, children[0])
+    {
+        let inner = canon_rebuild(graph, source, out, memo, forced);
+        forced.insert(inner.index(), (hi + 1) as u32);
+        memo.insert(node.index(), inner);
+        return inner;
     }
 
     // Shift-amount mask strip: the encoding's amount mask is implicit, so

@@ -81,8 +81,7 @@ pub mod ops {
 
 impl RiscvDialect {
     pub fn get_asm_parser(&self) -> tir_be_common::AsmParser {
-        let parser = tir_be_common::AsmParser::new(get_instruction_parsers());
-        parser
+        tir_be_common::AsmParser::new(get_instruction_parsers())
     }
 }
 

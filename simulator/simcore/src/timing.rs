@@ -110,10 +110,10 @@ fn phys_regs(refs: &[RegRef]) -> Vec<(String, u16)> {
 fn edge_latency(model: &MachineModel, producer: &Slot, consumer: &Slot) -> u64 {
     let p = producer.class.resources.first().copied();
     let c = consumer.class.resources.first().copied();
-    if let (Some(p), Some(c)) = (p, c) {
-        if let Some(f) = model.forward_latency(p, c) {
-            return u64::from(f);
-        }
+    if let (Some(p), Some(c)) = (p, c)
+        && let Some(f) = model.forward_latency(p, c)
+    {
+        return u64::from(f);
     }
     u64::from(producer.class.latency)
 }
@@ -219,10 +219,10 @@ pub fn simulate(
         // Reserve the earliest-free lane in each used resource for `rthroughput`.
         let busy_until = t + u64::from(slots[i].class.rthroughput.max(1));
         for r in slots[i].class.resources {
-            if let Some(lane_set) = lanes.get_mut(*r) {
-                if let Some(lane) = lane_set.iter_mut().min_by_key(|c| **c) {
-                    *lane = busy_until;
-                }
+            if let Some(lane_set) = lanes.get_mut(*r)
+                && let Some(lane) = lane_set.iter_mut().min_by_key(|c| **c)
+            {
+                *lane = busy_until;
             }
         }
 
