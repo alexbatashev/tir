@@ -53,6 +53,13 @@ pub enum RegisterDef {
 pub struct RegisterClass {
     pub name: String,
     pub for_isas: Vec<String>,
+    /// Name of the register class this one inherits from, if any. A derived class
+    /// shares the base's physical register file (the same encoding indices name the
+    /// same registers) but may add registers and override individual encoding slots
+    /// — e.g. AArch64 `GPRsp : GPR` redefines slot 31 as `sp` instead of `xzr`.
+    /// Resolved (flattened into `parameters`/`registers`) by
+    /// [`resolve_register_class_inheritance`] before any analysis runs.
+    pub base: Option<String>,
     #[serde(serialize_with = "serialize_params")]
     pub parameters: StableHashMap<String, (Type, Option<Expr>)>,
     pub registers: Vec<RegisterDef>,
@@ -1162,6 +1169,26 @@ impl RegisterClass {
         }
     }
 
+    /// The name of the physical register file this class draws from: the root of
+    /// its inheritance chain. Classes that share a file (e.g. AArch64 `GPR` and
+    /// `GPRsp`) name the same physical register at a given encoding index, so the
+    /// register allocator must treat those indices as aliases. A standalone class
+    /// is its own file. `classes` maps every class name to its definition.
+    pub fn register_file<'a>(&'a self, classes: &'a HashMap<String, &'a RegisterClass>) -> &'a str {
+        let mut current = self;
+        let mut seen = std::collections::HashSet::new();
+        while let Some(base_name) = &current.base {
+            if !seen.insert(current.name.clone()) {
+                break; // defensive: inheritance cycle
+            }
+            match classes.get(base_name) {
+                Some(base) => current = base,
+                None => break,
+            }
+        }
+        &current.name
+    }
+
     pub fn resolve_registers(&self) -> impl Iterator<Item = Register> {
         let mut registers = Vec::new();
 
@@ -1191,6 +1218,83 @@ impl RegisterClass {
         }
 
         registers.into_iter()
+    }
+}
+
+/// Flatten `register_class` inheritance in place: every class with a `base`
+/// absorbs the base's parameters and (encoding-expanded) registers, then applies
+/// its own declarations as overrides — parameters by name, registers by trailing
+/// encoding index (or by name for index-less registers like `pc`). After this runs
+/// every class carries its complete register set, so all downstream analysis
+/// (typeck, sema, codegen) can treat classes as self-contained. `base` itself is
+/// left intact so codegen can still recover the shared register file (see
+/// [`RegisterClass::register_file`]).
+pub fn resolve_register_class_inheritance(files: &mut [File]) {
+    let raw: HashMap<String, RegisterClass> = files
+        .iter()
+        .flat_map(|f| f.register_classes())
+        .map(|rc| (rc.name.clone(), rc.clone()))
+        .collect();
+
+    fn merge(
+        name: &str,
+        raw: &HashMap<String, RegisterClass>,
+        cache: &mut HashMap<String, RegisterClass>,
+    ) -> RegisterClass {
+        if let Some(done) = cache.get(name) {
+            return done.clone();
+        }
+        let mut rc = raw
+            .get(name)
+            .cloned()
+            .expect("merge called with a known class name");
+
+        if let Some(base_name) = rc.base.clone() {
+            // A dangling base is reported by sema; treat it as no inheritance here.
+            if raw.contains_key(&base_name) && base_name != name {
+                let base = merge(&base_name, raw, cache);
+
+                let mut parameters = base.parameters.clone();
+                for (key, value) in rc.parameters.iter() {
+                    parameters.insert(key.clone(), value.clone());
+                }
+
+                let mut registers: Vec<Register> = base.resolve_registers().collect();
+                for own in rc.resolve_registers() {
+                    let key = parse_trailing_index(&own.name);
+                    let existing = registers.iter().position(|r| match key {
+                        Some(idx) => parse_trailing_index(&r.name) == Some(idx),
+                        None => r.name == own.name,
+                    });
+                    match existing {
+                        Some(pos) => registers[pos] = own,
+                        None => registers.push(own),
+                    }
+                }
+
+                rc.parameters = parameters;
+                rc.registers = registers.into_iter().map(RegisterDef::Single).collect();
+            }
+        }
+
+        cache.insert(name.to_string(), rc.clone());
+        rc
+    }
+
+    let mut cache: HashMap<String, RegisterClass> = HashMap::new();
+    for name in raw.keys() {
+        merge(name, &raw, &mut cache);
+    }
+
+    for file in files.iter_mut() {
+        for item in file.items.iter_mut() {
+            if let Item::RegisterClass(rc) = item {
+                if let Some(merged) = cache.get(&rc.name) {
+                    rc.parameters = merged.parameters.clone();
+                    rc.registers = merged.registers.clone();
+                }
+            }
+        }
     }
 }
 

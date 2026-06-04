@@ -26,6 +26,17 @@ register_class GPR for [ARMv8A64] {
     }
 }
 
+// On AArch64 the 5-bit GPR field value 31 names the zero register (`xzr`) in most
+// operand positions, but the stack pointer (`sp`) in the base register of
+// addressing modes and in the `rd`/`rn` of add/sub-immediate. `GPRsp` is the same
+// physical register file as `GPR` (x0..x30 are shared and alias index-for-index),
+// overriding only slot 31. Operands that can reference `sp` use this class.
+register_class GPRsp for [ARMv8A64] : GPR {
+    registers {
+        x31("sp") => { traits = [stack_pointer] },
+    }
+}
+
 register_class PSTATE for [ARMv8A64] {
     param ENCODING_LEN: Integer = 2;
     param WIDTH: Integer = self.FLAG_WIDTH;
@@ -106,9 +117,10 @@ template AddSubImm for [ARMv8A64] {
     param SETFLAGS: bits<1> = 0b0;
     param SH: bits<1> = 0b0;
 
+    // add/sub (immediate) can read and write the stack pointer.
     operands {
-        rd: GPR,
-        rn: GPR,
+        rd: GPRsp,
+        rn: GPRsp,
         imm: bits<12>,
     }
 
@@ -192,9 +204,11 @@ template LoadStoreImmUnsigned for [ARMv8A64] {
     param OPC: bits<2>;
     param V: bits<1> = 0b0;
 
+    // The base register `rn` is the stack pointer in stack-relative addressing; the
+    // transferred register `rt` uses the zero register at slot 31.
     operands {
         rt: GPR,
-        rn: GPR,
+        rn: GPRsp,
         imm: bits<12>,
     }
 

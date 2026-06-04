@@ -92,8 +92,9 @@ where
 {
     let ident = select! { Token::Identifier(ident) => ident.to_string() };
     just(Token::KwRegClass)
-        .ignore_then(ident)
+        .ignore_then(ident.clone())
         .then(for_isas())
+        .then(just(Token::Colon).ignore_then(ident).or_not())
         .then(
             choice((
                 parameter().map(RegClassBody::Param),
@@ -103,7 +104,7 @@ where
             .collect::<Vec<_>>()
             .delimited_by(just(Token::LBrace), just(Token::RBrace)),
         )
-        .map_with(|((name, for_isas), body), e| {
+        .map_with(|(((name, for_isas), base), body), e| {
             let parameters = body
                 .iter()
                 .filter_map(|b| match b {
@@ -125,6 +126,7 @@ where
             RegisterClass {
                 name,
                 for_isas,
+                base,
                 parameters,
                 registers,
                 span: e.span(),
@@ -1333,7 +1335,99 @@ mod tests {
         lexer::lexer,
     };
 
-    use super::{inline_expr, instruction_def, isa_def, machine_def, unit_def};
+    use super::{inline_expr, instruction_def, isa_def, machine_def, register_class_def, unit_def};
+
+    #[test]
+    fn register_class_parses_inheritance() {
+        let with_base =
+            "register_class GPRsp for [Isa] : GPR { registers { x31(\"sp\") => { traits = [stack_pointer] }, } }";
+        let (tokens, _e) = lexer().parse(with_base).into_output_errors();
+        let tokens = tokens.unwrap();
+        let rc = register_class_def()
+            .then(end())
+            .parse(
+                tokens
+                    .as_slice()
+                    .map((with_base.len()..with_base.len()).into(), |(t, s)| (t, s)),
+            )
+            .output()
+            .unwrap()
+            .0
+            .clone();
+        assert_eq!(rc.base.as_deref(), Some("GPR"));
+
+        let no_base = "register_class GPR for [Isa] { registers { x0 => { traits = [] }, } }";
+        let (tokens, _e) = lexer().parse(no_base).into_output_errors();
+        let tokens = tokens.unwrap();
+        let rc = register_class_def()
+            .then(end())
+            .parse(
+                tokens
+                    .as_slice()
+                    .map((no_base.len()..no_base.len()).into(), |(t, s)| (t, s)),
+            )
+            .output()
+            .unwrap()
+            .0
+            .clone();
+        assert_eq!(rc.base, None);
+    }
+
+    #[test]
+    fn inheritance_merges_base_registers_and_params() {
+        use crate::ast::{RegisterTrait, resolve_register_class_inheritance};
+
+        let code = r#"
+            isa Isa { param XLEN: Integer = 64; }
+            register_class GPR for [Isa] {
+                param ENCODING_LEN: Integer = 5;
+                param WIDTH: Integer = self.XLEN;
+                registers {
+                    x0..x30 => { traits = [caller_saved] },
+                    x31("xzr") => { traits = [hardwired_zero] },
+                }
+            }
+            register_class GPRsp for [Isa] : GPR {
+                registers {
+                    x31("sp") => { traits = [stack_pointer] },
+                }
+            }
+        "#;
+        let (tokens, _e) = crate::lex(code);
+        let (file, errs) = crate::parse(code, &tokens, "test");
+        assert!(errs.is_empty(), "{errs:?}");
+        let mut files = vec![file.unwrap()];
+        resolve_register_class_inheritance(&mut files);
+
+        let gprsp = files[0]
+            .register_classes()
+            .find(|c| c.name == "GPRsp")
+            .unwrap();
+        // Parameters are inherited from the base.
+        assert!(gprsp.parameters.get("WIDTH").is_some());
+        assert!(gprsp.parameters.get("ENCODING_LEN").is_some());
+        // The full register file is present, with slot 31 overridden to `sp`.
+        let regs: Vec<_> = gprsp.resolve_registers().collect();
+        assert_eq!(regs.len(), 32);
+        let r31 = regs.iter().find(|r| r.name == "x31").unwrap();
+        assert_eq!(r31.alias.as_deref(), Some("sp"));
+        assert!(r31.traits.contains(&RegisterTrait::StackPointer));
+        // The base class is left untouched: slot 31 is still `xzr`.
+        let gpr = files[0]
+            .register_classes()
+            .find(|c| c.name == "GPR")
+            .unwrap();
+        let g31 = gpr.resolve_registers().find(|r| r.name == "x31").unwrap();
+        assert_eq!(g31.alias.as_deref(), Some("xzr"));
+        assert!(g31.traits.contains(&RegisterTrait::HardwiredZero));
+        // Both classes report the same shared register file.
+        let classes: std::collections::HashMap<String, &crate::ast::RegisterClass> = files[0]
+            .register_classes()
+            .map(|c| (c.name.clone(), c))
+            .collect();
+        assert_eq!(gpr.register_file(&classes), "GPR");
+        assert_eq!(gprsp.register_file(&classes), "GPR");
+    }
 
     #[test]
     fn smoke_isa() {

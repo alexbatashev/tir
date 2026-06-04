@@ -81,6 +81,7 @@
 // CHECK-NEXT:                     "TestIsa32",
 // CHECK-NEXT:                     "TestIsa64",
 // CHECK-NEXT:                 ],
+// CHECK-NEXT:                 base: None,
 // CHECK-NEXT:                 parameters: {
 // CHECK-NEXT:                     "ENCODING_LEN": (
 // CHECK-NEXT:                         Integer,

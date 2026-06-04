@@ -177,17 +177,17 @@ fn emit_instructions<'a>(
         for (op_name, op_ty) in &ops {
             if let Type::Struct(class_name) = op_ty {
                 let attr_name_lit = proc_macro2::Literal::string(op_name);
-                let class_lit = proc_macro2::Literal::string(class_name);
                 let print_fn_ident = format_ident!("print_{}", class_name.to_lowercase());
+                // Print through the operand's declared class table, keyed by index.
+                // The operand position fixes the class, so the stored attribute class
+                // is not consulted: a physical register reached through an aliasing
+                // class (e.g. `("GPR", 29)` materialized by hand-written prologue code
+                // landing in a `GPRsp` operand) still prints the right name.
                 register_attr_print_arms.push(quote! {
                     #attr_name_lit => {
-                        if let tir::attributes::AttributeValue::Register(tir::attributes::RegisterAttr::Physical { class, index }) = &attr.value {
-                            if class == #class_lit {
-                                if let Some(name) = #print_fn_ident(*index, false) {
-                                    fmt.write(name)?;
-                                } else {
-                                    attr.value.print(fmt, &context)?;
-                                }
+                        if let tir::attributes::AttributeValue::Register(tir::attributes::RegisterAttr::Physical { index, .. }) = &attr.value {
+                            if let Some(name) = #print_fn_ident(*index, false) {
+                                fmt.write(name)?;
                             } else {
                                 attr.value.print(fmt, &context)?;
                             }
@@ -821,9 +821,16 @@ fn emit_register_info(files: &[ast::File]) -> Result<proc_macro2::TokenStream, T
         quote! { &[#(#lits),*] }
     };
 
+    let classes: HashMap<String, &ast::RegisterClass> = files
+        .iter()
+        .flat_map(|f| f.register_classes())
+        .map(|rc| (rc.name.clone(), rc))
+        .collect();
+
     let mut class_entries = Vec::new();
     for rc in files.iter().flat_map(|f| f.register_classes()) {
         let name_lit = proc_macro2::Literal::string(&rc.name);
+        let file_lit = proc_macro2::Literal::string(rc.register_file(&classes));
         let meta = rc.allocation_metadata();
         let allocation_order = slice(&meta.allocation_order);
         let caller_saved = slice(&meta.caller_saved);
@@ -834,6 +841,7 @@ fn emit_register_info(files: &[ast::File]) -> Result<proc_macro2::TokenStream, T
         class_entries.push(quote! {
             tir_be_common::regalloc::RegClassInfo {
                 name: #name_lit,
+                file: #file_lit,
                 allocation_order: #allocation_order,
                 caller_saved: #caller_saved,
                 callee_saved: #callee_saved,

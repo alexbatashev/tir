@@ -840,6 +840,7 @@ mod tests {
             tir_be_common::regalloc::RegisterInfo {
                 classes: &[tir_be_common::regalloc::RegClassInfo {
                     name: "GPR",
+                    file: "GPR",
                     allocation_order: &[10, 11, 5, 6, 7],
                     caller_saved: &[10, 11, 5, 6, 7],
                     callee_saved: &[],

@@ -29,6 +29,12 @@ use crate::liveness::{self, Liveness, PhysReg};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegClassInfo {
     pub name: &'static str,
+    /// The physical register file this class draws from — the root of its TMDL
+    /// inheritance chain. Classes that share a file (e.g. AArch64 `GPR` and
+    /// `GPRsp`, which differ only in whether encoding 31 is `xzr` or `sp`) name the
+    /// same physical register at a given index, so the allocator treats their
+    /// indices as aliases. A standalone class is its own file.
+    pub file: &'static str,
     /// Allocatable register indices, in preferred allocation order. A class with
     /// an empty order (e.g. the program-counter class) is never allocated.
     pub allocation_order: &'static [u16],
@@ -66,6 +72,17 @@ impl RegisterInfo {
     /// Build a lookup from class name to its info for repeated queries.
     pub fn class_map(&self) -> HashMap<&'static str, &RegClassInfo> {
         self.classes.iter().map(|c| (c.name, c)).collect()
+    }
+
+    /// The physical-register identity of `p` for aliasing purposes: its register
+    /// file (the root of the class's inheritance chain) plus index. Two
+    /// `(class, index)` pairs that resolve to the same `(file, index)` are the same
+    /// physical register even when reached through different classes — e.g.
+    /// `("GPR", 7)` and `("GPRsp", 7)` on AArch64. An unknown class is treated as
+    /// its own file.
+    pub fn phys_key<'a>(&'a self, p: &'a PhysReg) -> (&'a str, u16) {
+        let file = self.class(&p.0).map_or(p.0.as_str(), |c| c.file);
+        (file, p.1)
     }
 
     /// The class that owns the calling convention's argument registers — the
@@ -161,6 +178,7 @@ pub fn allocate(config: &AllocConfig) -> Result<AllocResult, RegAllocError> {
     let mut problem = PbqpProblem::new();
     for (i, &vreg) in vregs.iter().enumerate() {
         let costs = node_costs(
+            info,
             &alternatives[i],
             node_classes[i],
             vreg,
@@ -180,7 +198,7 @@ pub fn allocate(config: &AllocConfig) -> Result<AllocResult, RegAllocError> {
         let (Some(&iu), Some(&iv)) = (node_of.get(&u), node_of.get(&v)) else {
             continue;
         };
-        if let Some(matrix) = interference_matrix(&alternatives[iu], &alternatives[iv]) {
+        if let Some(matrix) = interference_matrix(info, &alternatives[iu], &alternatives[iv]) {
             problem.add_edge(
                 PbqpNodeId::from_index(iu),
                 PbqpNodeId::from_index(iv),
@@ -236,6 +254,7 @@ fn resolve_class<'a>(
 /// Build the cost vector for one node's alternatives, honoring pre-coloring,
 /// forbidden physical registers, and the callee-saved bias.
 fn node_costs(
+    info: &RegisterInfo,
     alternatives: &[Alternative],
     class: &RegClassInfo,
     vreg: u32,
@@ -251,10 +270,19 @@ fn node_costs(
         .map(|alt| match alt {
             Alternative::Phys(p) => {
                 if let Some(target) = pinned {
-                    // Pinned vregs accept only their target register.
-                    return if p == target { 0 } else { INF_COST };
+                    // Pinned vregs accept only their target register. Compare by
+                    // physical identity so a precolor reached through one class
+                    // (e.g. an ABI `GPR` arg) matches an alternative in an aliasing
+                    // class (`GPRsp`).
+                    return if info.phys_key(p) == info.phys_key(target) {
+                        0
+                    } else {
+                        INF_COST
+                    };
                 }
-                if forbidden.is_some_and(|set| set.contains(p)) {
+                if forbidden.is_some_and(|set| {
+                    set.iter().any(|f| info.phys_key(f) == info.phys_key(p))
+                }) {
                     return INF_COST;
                 }
                 if class.is_callee_saved(p.1) {
@@ -279,13 +307,20 @@ fn node_costs(
 /// sets share no physical register (so they can never conflict and no edge is
 /// needed). Two alternatives conflict when they resolve to the same physical
 /// register; spilling never conflicts.
-fn interference_matrix(left: &[Alternative], right: &[Alternative]) -> Option<PbqpMatrix> {
+fn interference_matrix(
+    info: &RegisterInfo,
+    left: &[Alternative],
+    right: &[Alternative],
+) -> Option<PbqpMatrix> {
     let mut matrix = PbqpMatrix::zero(left.len(), right.len());
     let mut any = false;
     for (i, l) in left.iter().enumerate() {
         for (j, r) in right.iter().enumerate() {
             if let (Alternative::Phys(lp), Alternative::Phys(rp)) = (l, r) {
-                if lp == rp {
+                // Conflict when the two alternatives are the same physical register,
+                // comparing by register file so aliasing classes (e.g. `GPR` and
+                // `GPRsp` sharing index 7) correctly interfere.
+                if info.phys_key(lp) == info.phys_key(rp) {
                     matrix.set(i, j, INF_COST);
                     any = true;
                 }
@@ -753,6 +788,7 @@ mod tests {
         RegisterInfo {
             classes: &[RegClassInfo {
                 name: "R",
+                file: "R",
                 allocation_order: &[0, 1, 2],
                 caller_saved: &[0, 1, 2],
                 callee_saved: &[],
@@ -908,5 +944,159 @@ mod tests {
 
         let map = assigned(result);
         assert_eq!(map[&1], ("R".to_string(), 2), "only the unforbidden register remains");
+    }
+
+    // Two register classes (`GPR` and `GPRsp`) over one shared file with a single
+    // allocatable register, mirroring AArch64's slot-31 aliasing.
+    static ALIASING_CLASSES: &[RegClassInfo] = &[
+        RegClassInfo {
+            name: "GPR",
+            file: "GPR",
+            allocation_order: &[0],
+            caller_saved: &[0],
+            callee_saved: &[],
+            arguments: &[0],
+            return_values: &[],
+            reserved: &[],
+        },
+        RegClassInfo {
+            name: "GPRsp",
+            file: "GPR",
+            allocation_order: &[0],
+            caller_saved: &[0],
+            callee_saved: &[],
+            arguments: &[],
+            return_values: &[],
+            reserved: &[],
+        },
+    ];
+
+    fn two_class_liveness(class1: &str, class2: &str) -> Liveness {
+        let mut lv = Liveness::default();
+        lv.vregs.insert(1);
+        lv.vreg_class.insert(1, class1.to_string());
+        lv.vregs.insert(2);
+        lv.vreg_class.insert(2, class2.to_string());
+        lv.interference.insert((1, 2));
+        lv
+    }
+
+    #[test]
+    fn aliasing_classes_share_physical_registers() {
+        // The two interfering vregs live in different classes that share one file
+        // with a single register, so they cannot both be colored: one must spill.
+        // Without file-based aliasing, `("GPR", 0)` and `("GPRsp", 0)` would look
+        // distinct and the allocator would wrongly color both.
+        let info = RegisterInfo {
+            classes: ALIASING_CLASSES,
+        };
+        let liveness = two_class_liveness("GPR", "GPRsp");
+        let precolor = HashMap::new();
+        let result = allocate(&AllocConfig {
+            info: &info,
+            liveness: &liveness,
+            precolor: &precolor,
+            spill_cost: &|_| 100,
+        })
+        .unwrap();
+
+        match result {
+            AllocResult::Spill(spilled) => assert_eq!(spilled.len(), 1),
+            other => panic!("expected a spill from the shared file, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn distinct_files_do_not_alias() {
+        // Same shape, but the classes belong to different files, so both vregs can
+        // independently take index 0.
+        static CLASSES: &[RegClassInfo] = &[
+            RegClassInfo {
+                name: "A",
+                file: "A",
+                allocation_order: &[0],
+                caller_saved: &[0],
+                callee_saved: &[],
+                arguments: &[],
+                return_values: &[],
+                reserved: &[],
+            },
+            RegClassInfo {
+                name: "B",
+                file: "B",
+                allocation_order: &[0],
+                caller_saved: &[0],
+                callee_saved: &[],
+                arguments: &[],
+                return_values: &[],
+                reserved: &[],
+            },
+        ];
+        let info = RegisterInfo { classes: CLASSES };
+        let liveness = two_class_liveness("A", "B");
+        let precolor = HashMap::new();
+        let result = allocate(&AllocConfig {
+            info: &info,
+            liveness: &liveness,
+            precolor: &precolor,
+            spill_cost: &|_| 100,
+        })
+        .unwrap();
+
+        let map = assigned(result);
+        assert_eq!(map[&1], ("A".to_string(), 0));
+        assert_eq!(map[&2], ("B".to_string(), 0));
+    }
+
+    #[test]
+    fn forbidden_register_aliases_across_classes() {
+        // A `GPRsp` vreg forbidding `("GPR", 0)` — a clobber expressed through the
+        // aliasing base class — must avoid index 0 and take the other register.
+        static CLASSES: &[RegClassInfo] = &[
+            RegClassInfo {
+                name: "GPR",
+                file: "GPR",
+                allocation_order: &[0, 1],
+                caller_saved: &[0, 1],
+                callee_saved: &[],
+                arguments: &[],
+                return_values: &[],
+                reserved: &[],
+            },
+            RegClassInfo {
+                name: "GPRsp",
+                file: "GPR",
+                allocation_order: &[0, 1],
+                caller_saved: &[0, 1],
+                callee_saved: &[],
+                arguments: &[],
+                return_values: &[],
+                reserved: &[],
+            },
+        ];
+        let info = RegisterInfo { classes: CLASSES };
+        let mut liveness = Liveness::default();
+        liveness.vregs.insert(1);
+        liveness.vreg_class.insert(1, "GPRsp".to_string());
+        liveness
+            .forbidden
+            .entry(1)
+            .or_default()
+            .insert(("GPR".to_string(), 0u16));
+        let precolor = HashMap::new();
+        let result = allocate(&AllocConfig {
+            info: &info,
+            liveness: &liveness,
+            precolor: &precolor,
+            spill_cost: &|_| 100,
+        })
+        .unwrap();
+
+        let map = assigned(result);
+        assert_eq!(
+            map[&1],
+            ("GPRsp".to_string(), 1),
+            "a forbidden index aliases across the shared file"
+        );
     }
 }
