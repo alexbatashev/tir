@@ -12,11 +12,14 @@ pub type AsmInstructionParser =
     for<'src> fn(&tir::Context, &mut IRBuilder, &mut Parser<'src, Token<'src>>) -> Result<(), ()>;
 
 pub struct AsmParser {
-    instruction_parsers: HashMap<String, Box<AsmInstructionParser>>,
+    /// Candidate parsers per mnemonic. A single mnemonic (e.g. AArch64 `add`)
+    /// can name several instruction forms (register vs. immediate), so each key
+    /// maps to a list tried in turn with backtracking.
+    instruction_parsers: HashMap<String, Vec<Box<AsmInstructionParser>>>,
 }
 
 impl AsmParser {
-    pub fn new(instruction_parsers: HashMap<String, Box<AsmInstructionParser>>) -> Self {
+    pub fn new(instruction_parsers: HashMap<String, Vec<Box<AsmInstructionParser>>>) -> Self {
         AsmParser {
             instruction_parsers,
         }
@@ -67,13 +70,28 @@ impl AsmParser {
                     let _ = parser.bump();
                 }
                 Token::Ident(ident) => {
-                    // Try to dispatch to an instruction parser by mnemonic
+                    // Try to dispatch to an instruction parser by mnemonic.
                     let key = ident.to_string();
-                    if let Some(handler) = self.instruction_parsers.get(&key) {
+                    if let Some(handlers) = self.instruction_parsers.get(&key) {
                         // consume mnemonic
                         let _ = parser.bump();
-                        // parse the rest of the instruction
-                        handler(context, &mut builder, &mut parser)?;
+                        // A mnemonic may have several forms (e.g. register vs.
+                        // immediate `add`); try each, rewinding the token cursor
+                        // between failed attempts. The generated parsers only
+                        // emit IR on success, so backtracking the cursor is
+                        // enough to undo a failed candidate.
+                        let start = parser.position();
+                        let mut parsed = false;
+                        for handler in handlers {
+                            parser.reset(start);
+                            if handler(context, &mut builder, &mut parser).is_ok() {
+                                parsed = true;
+                                break;
+                            }
+                        }
+                        if !parsed {
+                            return Err(());
+                        }
                     } else {
                         // Unknown ident in text section; skip it for now
                         let _ = parser.bump();

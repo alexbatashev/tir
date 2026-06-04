@@ -191,12 +191,25 @@ impl Cursor for Parser<'_> {
     }
 
     fn skip_trivia(&mut self) {
+        // `position` is a byte offset (see `parse_token`/`peek_char`), so work in
+        // byte offsets throughout to stay correct on non-ASCII input.
         let mut last = self.position as usize;
-        while let Some(c) = self.src.chars().nth(last) {
-            if !c.is_whitespace() && c != '\n' {
-                break;
+        loop {
+            // Whitespace (including newlines).
+            last += self.src[last..]
+                .char_indices()
+                .find(|(_, c)| !c.is_whitespace())
+                .map_or(self.src.len() - last, |(i, _)| i);
+            // `//` line comments, so a `.tir` test file can carry lit
+            // `RUN:`/`CHECK:` directives without breaking the parser.
+            if self.src[last..].starts_with("//") {
+                match self.src[last..].find('\n') {
+                    Some(i) => last += i + 1,
+                    None => last = self.src.len(),
+                }
+                continue;
             }
-            last += 1;
+            break;
         }
 
         self.position = last as u32;

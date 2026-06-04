@@ -36,6 +36,19 @@ impl<'src, Tok> Parser<'src, Tok> {
         }
         tok
     }
+
+    /// Current cursor position, for use as a backtracking checkpoint with
+    /// [`Parser::reset`].
+    pub fn position(&self) -> u32 {
+        self.position
+    }
+
+    /// Rewind the cursor to a position previously returned by
+    /// [`Parser::position`]. Used to retry an alternative when a speculative
+    /// parse fails.
+    pub fn reset(&mut self, position: u32) {
+        self.position = position;
+    }
 }
 
 impl<'src, Tok: TokenLike<'src>> Parser<'src, Tok> {

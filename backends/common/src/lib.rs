@@ -7,8 +7,10 @@ mod operations;
 mod parser;
 pub mod regalloc;
 pub mod sched;
+pub mod target;
 
 pub use operations::*;
+pub use target::TargetMachine;
 
 pub use lexer::Token;
 pub use lexer::lex;

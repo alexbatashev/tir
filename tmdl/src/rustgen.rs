@@ -671,7 +671,7 @@ fn emit_instructions<'a>(
                 let mn_lit = proc_macro2::Literal::string(mn);
                 instruction_parser_map_inits.push(quote! {
                     let f: tir_be_common::AsmInstructionParser = #parse_fn_ident;
-                    map.insert(#mn_lit.to_string(), Box::new(f));
+                    map.entry(#mn_lit.to_string()).or_default().push(Box::new(f));
                 });
             }
         }
@@ -683,8 +683,8 @@ fn emit_instructions<'a>(
         #(#machine_instruction_impls)*
         #(#as_sem_expr_impls)*
 
-        fn get_instruction_parsers() -> std::collections::HashMap<String, Box<tir_be_common::AsmInstructionParser>> {
-            let mut map = std::collections::HashMap::new();
+        fn get_instruction_parsers() -> std::collections::HashMap<String, Vec<Box<tir_be_common::AsmInstructionParser>>> {
+            let mut map: std::collections::HashMap<String, Vec<Box<tir_be_common::AsmInstructionParser>>> = std::collections::HashMap::new();
             #(#instruction_parsers_impls)*
             #(#instruction_parser_map_inits)*
 

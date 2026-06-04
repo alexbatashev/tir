@@ -1,16 +1,15 @@
 use clap::Parser;
-use tir_be_common::AsmDialect;
-use tir_be_common::sched::MachineModel;
-use tir_riscv::RiscvDialect;
 use tir_sim::timing::{self, TimingConfig};
 use tir_sim::{Executor, ProgramBuilder, TraceOptions};
 
 #[derive(Parser)]
 struct Cli {
+    /// Target architecture (e.g. `riscv64`, `arm64`).
     #[arg(long)]
-    target: String,
+    march: String,
+    /// Target CPU. Accepted for forward compatibility; currently unused.
     #[arg(long)]
-    march: Option<String>,
+    mcpu: Option<String>,
     #[arg(long, default_value_t = 65536)]
     mem_size: usize,
     #[arg(long, default_value_t = 0x80000000_u64)]
@@ -39,25 +38,22 @@ struct Cli {
     program: String,
 }
 
-fn select_machine(name: &str) -> Option<MachineModel> {
-    match name {
-        "in-order" | "inorder" => Some(tir_riscv::in_order_core_model()),
-        "ooo" | "out-of-order" => Some(tir_riscv::out_of_order_core_model()),
-        _ => None,
-    }
-}
-
 fn main() {
     let args = Cli::parse();
     let src = std::fs::read_to_string(&args.program).expect("failed to read program path");
 
+    let target = tir_targets::select(&args.march, args.mcpu.as_deref()).unwrap_or_else(|| {
+        eprintln!(
+            "unknown target '{}' (supported: {})",
+            args.march,
+            tir_targets::SUPPORTED_TARGETS.join(", ")
+        );
+        std::process::exit(2);
+    });
+
     let context = tir::Context::with_default_dialects();
-    context.register_dialect::<AsmDialect>();
-    context.register_dialect::<RiscvDialect>();
-    let dialect = context
-        .find_dialect::<RiscvDialect>()
-        .expect("failed to register riscv dialect");
-    let asm_parser = dialect.get_asm_parser();
+    target.register_dialects(&context);
+    let asm_parser = target.asm_parser(&context);
     let module = asm_parser
         .parse_asm(&context, &src)
         .expect("failed to parse assembly");
@@ -70,15 +66,28 @@ fn main() {
     )
     .expect("failed to build program image");
 
-    let until_pc = parse_addr(&args.until_pc);
+    // `--until-pc` accepts either a symbol name or a numeric address, so tests
+    // can stop at a label without hand-computing its address.
+    let until_pc = resolve_pc(&args.until_pc, &program.symbols);
     let mut executor = Executor::new(args.mem_size);
+
+    // Teach the executor which register classes share a physical file so, e.g.,
+    // a value written via AArch64 `GPRsp` reads back through `GPR`.
+    let register_info = target.register_info();
+    let register_files = register_info
+        .classes
+        .iter()
+        .map(|c| (c.name.to_string(), c.file.to_string()))
+        .collect();
+    executor.set_register_files(register_files);
 
     // Pick the timing model up front so a bad `--machine` fails before running.
     let model = if args.timing {
-        let m = select_machine(&args.machine).unwrap_or_else(|| {
+        let m = target.machine_model(&args.machine).unwrap_or_else(|| {
             eprintln!(
-                "unknown machine '{}' (expected: in-order, ooo)",
-                args.machine
+                "unknown machine '{}' for target '{}' (expected: in-order, ooo)",
+                args.machine,
+                target.name(),
             );
             std::process::exit(2);
         });
@@ -127,10 +136,17 @@ fn main() {
     }
 }
 
-fn parse_addr(addr: &str) -> u64 {
-    if let Some(hex) = addr.strip_prefix("0x").or_else(|| addr.strip_prefix("0X")) {
-        u64::from_str_radix(hex, 16).expect("invalid hex address")
-    } else {
-        addr.parse::<u64>().expect("invalid decimal address")
+/// Resolve a `--until-pc` argument to an address. The argument may be a `0x`
+/// hex literal, a decimal address, or the name of a symbol in the program.
+fn resolve_pc(arg: &str, symbols: &std::collections::BTreeMap<String, u64>) -> u64 {
+    if let Some(hex) = arg.strip_prefix("0x").or_else(|| arg.strip_prefix("0X")) {
+        return u64::from_str_radix(hex, 16).expect("invalid hex address");
     }
+    if let Ok(addr) = arg.parse::<u64>() {
+        return addr;
+    }
+    *symbols.get(arg).unwrap_or_else(|| {
+        eprintln!("--until-pc: '{arg}' is neither an address nor a known symbol");
+        std::process::exit(2);
+    })
 }

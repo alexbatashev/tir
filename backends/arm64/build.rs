@@ -9,6 +9,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .add_input("./defs/data_processing.tmdl")
         .add_input("./defs/loads_stores.tmdl")
         .add_input("./defs/branches.tmdl")
+        .add_input("./defs/perf.tmdl")
         .output(OutputKind::File(format!(
             "{}/arm64.rs",
             std::env::var("OUT_DIR")?
