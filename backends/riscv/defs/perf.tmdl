@@ -1,0 +1,66 @@
+// Cycle-approximate performance model for RISC-V.
+//
+// Machine-independent scheduling-class identities. Instructions declare
+// membership via their `schedule` block; machines bind them to concrete cost.
+// The optional defaults are resource-agnostic and feed the compiler cost model
+// (`instruction_cost`) when no specific machine is selected; a machine's `bind`
+// may refine them for that silicon.
+unit WriteIALU { latency = 1; }
+unit WriteLoad { latency = 3; }
+
+// Generic in-order core: a single narrow pipeline with no reorder buffer (just a
+// small store buffer). The Rust simulator pairs this with an in-order execution
+// model.
+machine InOrderCore for [RV64I] {
+    issue_width = 1;
+
+    buffers {
+        sb = 8;
+    }
+
+    // Classic 5-stage pipeline. Phase position = cycle offset from issue; all
+    // stages are hardware-interlocked (protected).
+    pipeline {
+        IF;
+        ID;
+        EX: protected;
+        MEM;
+        WB;
+    }
+
+    resource ALU { units = 1; }
+    resource LSU { units = 1; }
+
+    // Phase-based timing: operands read at ID, results written at EX/MEM. Latency
+    // is the phase distance (EX-ID = 1, MEM-ID = 2), with a non-zero read cycle.
+    bind WriteIALU { reads = ID; writes = EX;  uses = [ALU]; }
+    bind WriteLoad { reads = ID; writes = MEM; uses = [LSU]; }
+
+    // Bypass network: an ALU result feeds a dependent ALU op back-to-back (0-cycle
+    // forward); a load result reaches a dependent ALU op with a 1-cycle bubble.
+    forward ALU => ALU { latency = 0; }
+    forward LSU => ALU { latency = 1; }
+}
+
+// Generic out-of-order core: wider issue plus a reorder buffer, load/store queue,
+// and issue queue. Same per-instruction latencies; the difference is structural
+// (buffer sizes, unit counts) and in the Rust execution model that consumes it.
+machine OutOfOrderCore for [RV64I] {
+    issue_width = 4;
+
+    buffers {
+        rob = 128;
+        lsq = 32;
+        iq = 64;
+    }
+
+    resource ALU { units = 4; }
+    resource LSU { units = 2; }
+
+    bind WriteIALU { latency = 1; uses = [ALU]; }
+    bind WriteLoad { latency = 4; uses = [LSU]; }
+
+    // Per-instruction override (InstRW): this specific instruction costs more than
+    // its unit's generic bind on this machine, regardless of WriteIALU.
+    override Add { latency = 2; uses = [ALU]; }
+}

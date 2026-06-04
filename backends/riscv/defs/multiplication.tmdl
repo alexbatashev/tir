@@ -1,0 +1,20 @@
+isa Zmmul requires [RV32I | RV64I] {}
+isa RVM requires [RV32I | RV64I] {}
+
+// Common template for R-type multiply/divide instructions
+template MulDivOp for [Zmmul, RVM] : RType {
+    param OPCODE: bits<7> = 0b0110011;
+    param FUNCT7: bits<7> = 0b0000001;
+}
+
+instruction Mul for [Zmmul, RVM] : MulDivOp {
+    param MNEMONIC: String = "mul";
+    param FUNCT3: bits<3> = 0b000;
+    behavior { rd = extract(rs1 * rs2, self.XLEN - 1, 0); }
+}
+
+instruction MulH for [Zmmul, RVM] : MulDivOp {
+    param MNEMONIC: String = "mulh";
+    param FUNCT3: bits<3> = 0b001;
+    behavior { rd = extract(rs1 * rs2, (2 * self.XLEN) - 1, self.XLEN); }
+}

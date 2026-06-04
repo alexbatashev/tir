@@ -1,18 +1,20 @@
-use std::env;
-use std::path::PathBuf;
+use std::error::Error;
 
-use tmdl::{Action, Compiler};
+use tmdl::{Action, Compiler, OutputKind};
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+fn main() -> Result<(), Box<dyn Error>> {
+    println!("cargo:rerun-if-changed=defs");
     let compiler = Compiler::builder()
-        .action(Action::EmitRust)
-        .add_input("defs/registers.tmdl")
-        .output(tmdl::OutputKind::Batch(
-            out_dir.to_str().unwrap().to_string(),
-        ))
+        .add_input("./defs/main.tmdl")
+        .add_input("./defs/base.tmdl")
+        .add_input("./defs/perf.tmdl")
+        .output(OutputKind::File(format!(
+            "{}/riscv.rs",
+            std::env::var("OUT_DIR")?
+        )))
         .dialect(Some("riscv".to_string()))
+        .action(Action::EmitRust)
         .build();
 
-    compiler.compile()
+    Ok(compiler.compile()?)
 }

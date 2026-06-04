@@ -1,0 +1,23 @@
+// RUN: tir-mc --march=riscv64 --run=isel,regalloc %s | filecheck %s
+
+// After register allocation every virtual register is rewritten to a physical
+// RISC-V register. The two parameters arrive in the calling convention's
+// argument registers (x10, x11) and the return value is produced in x10.
+
+module {
+  func @chain(%0: !i32, %1: !i32) -> !i32 {
+    %2 = addi %0, %1 : !i32
+    %3 = subi %2, %1 : !i32
+    %4 = andi %3, %0 : !i32
+    %5 = ori %4, %1 : !i32
+    return %5
+  }
+  module_end
+}
+
+// Arguments are pre-colored to x10/x11; every instruction operand is physical.
+// CHECK: riscv.addw {rd = {{x[0-9]+}}, rs1 = x10, rs2 = x11}
+// CHECK: riscv.subw
+// CHECK: riscv.and
+// CHECK: riscv.or {rd = x10,
+// CHECK: riscv.vret

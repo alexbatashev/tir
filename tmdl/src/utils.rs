@@ -1,0 +1,201 @@
+use core::fmt;
+use std::collections::hash_map::{
+    IntoIter as HashMapIntoIter, Iter as HashMapIter, IterMut as HashMapIterMut,
+};
+use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
+use std::ops::{Deref, DerefMut};
+
+use chumsky::container::Container;
+
+use crate::Type;
+use crate::ast::{self, Instruction, Item};
+
+#[derive(PartialEq, Clone)]
+pub struct StableHashMap<K: Eq + Hash, V: PartialEq>(HashMap<K, V>);
+
+impl<K: Eq + Hash, V: PartialEq> Default for StableHashMap<K, V> {
+    fn default() -> Self {
+        Self(HashMap::new())
+    }
+}
+
+impl<K: Eq + Hash, V: PartialEq> Deref for StableHashMap<K, V> {
+    type Target = HashMap<K, V>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<K: Eq + Hash, V: PartialEq> DerefMut for StableHashMap<K, V> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl<K: Eq + Hash, V: PartialEq> fmt::Debug for StableHashMap<K, V>
+where
+    K: Ord + fmt::Debug,
+    V: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut entries: Vec<_> = self.0.iter().collect();
+        entries.sort_by_key(|(k, _)| *k);
+        f.debug_map().entries(entries).finish()
+    }
+}
+
+impl<K: Eq + Hash, V: PartialEq> From<HashMap<K, V>> for StableHashMap<K, V> {
+    fn from(val: HashMap<K, V>) -> Self {
+        StableHashMap(val)
+    }
+}
+
+impl<K: Eq + Hash, V: PartialEq> FromIterator<(K, V)> for StableHashMap<K, V>
+where
+    K: Eq + Hash,
+{
+    fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
+        Self(HashMap::from_iter(iter))
+    }
+}
+
+impl<K: Eq + Hash, V: PartialEq> Container<(K, V)> for StableHashMap<K, V> {
+    fn push(&mut self, item: (K, V)) {
+        self.0.push(item)
+    }
+
+    fn with_capacity(n: usize) -> Self {
+        Self(HashMap::with_capacity(n))
+    }
+}
+
+impl<K: Eq + Hash, V: PartialEq> IntoIterator for StableHashMap<K, V> {
+    type Item = (K, V);
+    type IntoIter = HashMapIntoIter<K, V>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl<'a, K: Eq + Hash, V: PartialEq> IntoIterator for &'a StableHashMap<K, V> {
+    type Item = (&'a K, &'a V);
+    type IntoIter = HashMapIter<'a, K, V>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl<'a, K: Eq + Hash, V: PartialEq> IntoIterator for &'a mut StableHashMap<K, V> {
+    type Item = (&'a K, &'a mut V);
+    type IntoIter = HashMapIterMut<'a, K, V>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter_mut()
+    }
+}
+
+pub fn resolve_operands_for_instruction<'a>(
+    inst: &'a ast::Instruction,
+    item_cache: &HashMap<&'a str, &'a ast::Item>,
+) -> Vec<(String, Type)> {
+    resolve_template_chain(inst, item_cache)
+        .into_iter()
+        .flat_map(|t| t.operands.iter())
+        .map(|(name, ty)| (name.clone(), ty.clone()))
+        .chain(
+            inst.operands
+                .iter()
+                .map(|(name, ty)| (name.clone(), ty.clone())),
+        )
+        .collect()
+}
+
+pub fn resolve_template_chain<'a>(
+    inst: &'a ast::Instruction,
+    item_cache: &HashMap<&'a str, &'a ast::Item>,
+) -> Vec<&'a ast::Template> {
+    let mut chain = Vec::new();
+    let mut visited = HashSet::new();
+    let mut current_parent = inst.parent_template.as_deref();
+
+    while let Some(parent_name) = current_parent {
+        if !visited.insert(parent_name) {
+            break;
+        }
+        match item_cache.get(parent_name).copied() {
+            Some(ast::Item::Template(t)) => {
+                chain.push(t);
+                current_parent = t.parent_template.as_deref();
+            }
+            _ => break,
+        }
+    }
+
+    chain.reverse();
+    chain
+}
+
+pub fn resolve_effective_encoding_for_instruction<'a>(
+    inst: &'a ast::Instruction,
+    item_cache: &HashMap<&'a str, &'a ast::Item>,
+) -> &'a [ast::EncodingArm] {
+    if !inst.encoding.is_empty() {
+        return &inst.encoding;
+    }
+    resolve_template_chain(inst, item_cache)
+        .into_iter()
+        .rev()
+        .find(|t| !t.encoding.is_empty())
+        .map(|t| t.encoding.as_slice())
+        .unwrap_or(&[])
+}
+
+pub fn resolve_effective_asm_for_instruction<'a>(
+    inst: &'a ast::Instruction,
+    item_cache: &HashMap<&'a str, &'a ast::Item>,
+) -> Option<&'a ast::Expr> {
+    inst.asm.as_ref().or_else(|| {
+        resolve_template_chain(inst, item_cache)
+            .into_iter()
+            .rev()
+            .find_map(|t| t.asm.as_ref())
+    })
+}
+
+pub fn get_encoding_arms<'a>(
+    instruction: &'a Instruction,
+    item_cache: &HashMap<&'a str, &'a Item>,
+) -> Vec<ast::EncodingArm> {
+    resolve_effective_encoding_for_instruction(instruction, item_cache).to_vec()
+}
+
+pub fn resolve_params_for_instruction<'a>(
+    inst: &'a ast::Instruction,
+    cache: &HashMap<&'a str, &'a ast::Item>,
+) -> HashMap<String, (Type, Option<ast::Expr>)> {
+    resolve_template_chain(inst, cache)
+        .into_iter()
+        .flat_map(|t| t.params.iter())
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .chain(
+            inst.params
+                .iter()
+                .map(|(name, value)| (name.clone(), value.clone())),
+        )
+        .collect()
+}
+
+pub fn parse_literal_value(lit: &ast::LitInt) -> u64 {
+    let v = lit.value();
+    if let Some(stripped) = v.strip_prefix("0b") {
+        u64::from_str_radix(stripped, 2).unwrap_or(0)
+    } else if let Some(stripped) = v.strip_prefix("0x").or_else(|| v.strip_prefix("0X")) {
+        u64::from_str_radix(stripped, 16).unwrap_or(0)
+    } else {
+        v.parse::<u64>().unwrap_or(0)
+    }
+}

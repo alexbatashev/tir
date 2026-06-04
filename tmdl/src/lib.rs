@@ -1,14 +1,25 @@
-pub mod ast;
+mod ast;
 mod compiler;
-mod diagnostic;
+mod error;
 mod lexer;
 mod parser;
 mod rustgen;
-mod syntax_kind;
+mod sem_expr_state;
+mod sema;
+mod smtlibgen;
+mod typeck;
+mod types;
+mod utils;
 
-pub use compiler::*;
-pub use diagnostic::*;
-pub use lexer::*;
-pub use parser::*;
-pub use rustgen::*;
-pub use syntax_kind::*;
+use chumsky::prelude::*;
+
+pub type Span = SimpleSpan;
+pub type Spanned<T> = (T, Span);
+
+pub use compiler::{Action, Compiler, OutputKind, compiler_main};
+
+pub use lexer::lex;
+pub use parser::parse;
+pub use sema::analyze as sema_analyze;
+pub use typeck::check as type_check;
+pub use types::*;

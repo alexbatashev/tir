@@ -1,144 +1,121 @@
-use std::marker::PhantomData;
-use std::sync::Arc;
+use crate::OpId;
+use crate::TypeId;
 
-use crate::AllocId;
-use crate::BlockArg;
-use crate::BlockRef;
-use crate::ContextRef;
-use crate::ContextWRef;
-use crate::OpRef;
-use crate::Ty;
-use crate::Type;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ValueId(u32);
+
+impl ValueId {
+    pub(crate) fn new(id: u32) -> Self {
+        Self(id)
+    }
+
+    pub fn number(&self) -> u32 {
+        self.0
+    }
+
+    pub fn from_number(n: u32) -> Self {
+        Self(n)
+    }
+}
 
 #[derive(Debug, Clone)]
-pub enum ValueOwner {
-    Op(AllocId),
-    BlockArg(BlockArg),
+pub struct Value {
+    id: ValueId,
+    ty: TypeId,
+    defining_op: Option<OpId>,
+    uses: Vec<Use>,
 }
 
-#[derive(Debug, Clone)]
-pub struct Value<T: Into<Type> + TryFrom<Type> + Clone = Type> {
-    owner: ValueOwner,
-    context: ContextWRef,
-    name: Arc<String>,
-    _a: PhantomData<T>,
-}
-
-impl PartialEq for Value {
-    fn eq(&self, other: &Self) -> bool {
-        let context = self.context.upgrade();
-        let other_context = other.context.upgrade();
-
-        if context.is_none() || other_context.is_none() {
-            return false;
-        }
-
-        let context = context.unwrap();
-        let other_context = other_context.unwrap();
-
-        if Arc::as_ptr(&context) != Arc::as_ptr(&other_context) {
-            return false;
-        }
-
-        match (&self.owner, &other.owner) {
-            (ValueOwner::Op(id), ValueOwner::Op(other_id)) => id == other_id,
-            (ValueOwner::BlockArg(arg), ValueOwner::BlockArg(other_arg)) => arg == other_arg,
-            _ => false,
-        }
-    }
-}
-
-impl<T: Into<Type> + TryFrom<Type> + Clone> Value<T> {
-    pub fn from_block_arg(context: ContextWRef, name: &str, arg: BlockArg) -> Self {
-        Value {
-            owner: ValueOwner::BlockArg(arg),
-            context,
-            name: Arc::new(name.to_string()),
-            _a: PhantomData,
+impl Value {
+    pub fn new(id: ValueId, ty: TypeId, defining_op: Option<OpId>) -> Self {
+        Self {
+            id,
+            ty,
+            defining_op,
+            uses: vec![],
         }
     }
 
-    pub fn from_op(context: ContextRef, name: &str, alloc_id: AllocId) -> Self {
-        Value {
-            owner: ValueOwner::Op(alloc_id),
-            context: Arc::downgrade(&context),
-            name: Arc::new(name.to_string()),
-            _a: PhantomData,
+    pub fn id(&self) -> ValueId {
+        self.id
+    }
+
+    pub fn ty(&self) -> TypeId {
+        self.ty
+    }
+
+    pub fn defining_op(&self) -> Option<OpId> {
+        self.defining_op
+    }
+
+    pub fn with_defining_op(mut self, op: OpId) -> Self {
+        self.defining_op = Some(op);
+        self
+    }
+
+    /// The operations that reference this value, with where the reference sits (see
+    /// [`UseSite`]).
+    ///
+    /// Maintained by the [`Context`](crate::Context): an entry is added when an
+    /// operation is added to the context and removed when it is erased or replaced.
+    /// Both SSA `operands` and machine-IR register operands carried in attributes
+    /// (`RegisterAttr::Virtual` tagged `Use`/`ReadWrite`) are tracked; physical
+    /// registers have no value id and so never appear here.
+    pub fn uses(&self) -> &[Use] {
+        &self.uses
+    }
+
+    /// Whether any operation references this value. See [`Value::uses`].
+    pub fn is_used(&self) -> bool {
+        !self.uses.is_empty()
+    }
+
+    pub(crate) fn add_use(&mut self, op: OpId, site: UseSite) {
+        self.uses.push(Use { op, site });
+    }
+
+    /// Drop every use contributed by `op` (an op may use a value at several sites).
+    pub(crate) fn remove_uses_of(&mut self, op: OpId) {
+        self.uses.retain(|u| u.op != op);
+    }
+
+    pub(crate) fn remove_use(&mut self, op: OpId, site: UseSite) {
+        if let Some(index) = self.uses.iter().position(|u| u.op == op && u.site == site) {
+            self.uses.remove(index);
         }
-    }
-
-    pub fn get_context(&self) -> ContextRef {
-        self.context.upgrade().unwrap()
-    }
-
-    pub fn get_defining_op(&self) -> Option<OpRef> {
-        match &self.owner {
-            ValueOwner::Op(alloc_id) => {
-                let context = self.context.upgrade().unwrap();
-                context.get_op(*alloc_id)
-            }
-            _ => None,
-        }
-    }
-
-    pub fn get_defining_block(&self) -> Option<BlockRef> {
-        match &self.owner {
-            ValueOwner::BlockArg(arg) => arg.get_block(),
-            _ => None,
-        }
-    }
-
-    pub fn get_type(&self) -> T {
-        match &self.owner {
-            ValueOwner::BlockArg(arg) => match arg.get_type().try_into() {
-                Ok(res) => res,
-                _ => unreachable!(),
-            },
-            ValueOwner::Op(alloc_id) => {
-                let context = self.context.upgrade().unwrap();
-                let op = context.get_op(*alloc_id).clone().unwrap();
-                let ret_ty = op.borrow().get_return_type().unwrap();
-
-                match ret_ty.try_into() {
-                    Ok(res) => res,
-                    _ => unreachable!(),
-                }
-            }
-        }
-    }
-
-    pub fn get_name(&self) -> &str {
-        &self.name
     }
 }
 
-impl Value<Type> {
-    #[allow(clippy::result_unit_err)]
-    pub fn try_cast<Target: Ty + Clone + Into<Type> + TryFrom<Type>>(
-        &self,
-    ) -> Result<Value<Target>, ()> {
-        let ty = self.get_type();
-
-        if !ty.isa::<Target>() {
-            return Err(());
-        }
-
-        Ok(Value {
-            owner: self.owner.clone(),
-            context: self.context.clone(),
-            name: self.name.clone(),
-            _a: PhantomData,
-        })
-    }
+/// Where a [`Use`] sits within the referencing operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UseSite {
+    /// The operand at this index in the op's SSA `operands`.
+    Operand(usize),
+    /// A register operand carried in this named attribute (machine ops).
+    Attribute(&'static str),
 }
 
-impl<T: Ty + Clone + Into<Type> + TryFrom<Type>> From<Value<T>> for Value {
-    fn from(value: Value<T>) -> Self {
-        Value {
-            owner: value.owner,
-            context: value.context,
-            name: value.name,
-            _a: PhantomData,
+/// A reference to a value from an operation: the using `op` and the [`UseSite`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Use {
+    op: OpId,
+    site: UseSite,
+}
+
+impl Use {
+    pub fn op(&self) -> OpId {
+        self.op
+    }
+
+    pub fn site(&self) -> UseSite {
+        self.site
+    }
+
+    /// The operand index, if this use is an SSA operand (not a register attribute).
+    pub fn operand_index(&self) -> Option<usize> {
+        match self.site {
+            UseSite::Operand(i) => Some(i),
+            UseSite::Attribute(_) => None,
         }
     }
 }

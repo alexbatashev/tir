@@ -1,4 +1,4 @@
-use glob::glob;
+use glob::{glob, Pattern};
 use map_ok::MapOk;
 use regex::Regex;
 use serde::Deserialize;
@@ -16,6 +16,7 @@ struct GlobalConfig {
 #[derive(Debug, Deserialize)]
 struct Suite {
     name: String,
+    enabled: Option<bool>,
     glob: Vec<String>,
 }
 
@@ -128,17 +129,39 @@ pub fn main() -> Result<(), String> {
 
     let mut has_failures = false;
     for (path, suite) in configs {
+        if !&suite.enabled.unwrap_or(true) {
+            eprintln!("Skipping {} as disabled", &suite.name);
+            continue;
+        }
         eprintln!("Running {}", &suite.name);
 
         let path = path.parent().unwrap().to_str().unwrap();
 
-        let tests = suite
+        let (include_patterns, exclude_patterns): (Vec<_>, Vec<_>) = suite
             .glob
             .iter()
+            .partition(|pattern| !pattern.starts_with('!'));
+
+        let exclude_patterns = exclude_patterns
+            .iter()
+            .map(|pattern| {
+                Pattern::new(pattern.trim_start_matches('!'))
+                    .expect("Failed to parse exclude pattern")
+            })
+            .collect::<Vec<_>>();
+
+        let tests = include_patterns
+            .iter()
             .flat_map(|pattern| {
-                glob(&format!("{}/{}", path, &pattern)).expect("Failed to glob tests")
+                glob(&format!("{}/{}", path, pattern)).expect("Failed to glob tests")
             })
             .filter_map(|test| test.ok())
+            .filter(|test| {
+                let test = test.strip_prefix(path).unwrap_or(test.as_path());
+                !exclude_patterns
+                    .iter()
+                    .any(|pattern| pattern.matches_path(test))
+            })
             .collect::<Vec<_>>();
 
         for test in tests {

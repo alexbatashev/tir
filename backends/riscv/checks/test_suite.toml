@@ -1,4 +1,3 @@
 [suite]
-name = "TIR RISC-V Backend checks"
-glob = ["**/*.s", "**/*.tir"]
-
+name = "TIR RISC-V backend checks"
+glob = ["**/*.S", "**/*.s", "**/*.tir", "!**/Inputs/**/*"]

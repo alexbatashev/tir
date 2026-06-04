@@ -10,6 +10,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -27,13 +30,9 @@ jobs:
         RUSTFLAGS: '-C instrument-coverage --deny warnings'
         RUSTDOCFLAGS: '-C instrument-coverage'
     - name: Run cargo tests
+      # The FileCheck-style `lit` suites run as ordinary integration tests, so
+      # this also exercises the check tests.
       run: cargo nextest r -v
-      env:
-        CARGO_INCREMENTAL: '0'
-        RUSTFLAGS: '-C instrument-coverage --deny warnings'
-        RUSTDOCFLAGS: '-C instrument-coverage'
-    - name: Run check tests
-      run: cargo xtask check-only
       env:
         CARGO_INCREMENTAL: '0'
         RUSTFLAGS: '-C instrument-coverage --deny warnings'
@@ -48,7 +47,6 @@ jobs:
             --ignore 'fuzz/*' \
             --ignore 'utils/*' \
             --ignore 'xtask/*' \
-            --ignore 'target/**/build/litcheck-filecheck-*/**' \
             --ignore '**/tests/**' \
             -o lcov.info
     - name: Coveralls

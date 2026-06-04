@@ -1,3 +1,6 @@
+pub mod utils;
+mod verify_riscv;
+
 use std::{env, path::PathBuf};
 use xshell::{cmd, Shell};
 
@@ -13,6 +16,14 @@ fn main() -> anyhow::Result<()> {
         }
         Some("check-only") => check(&sh)?,
         Some("docs") => build_docs(&sh)?,
+        Some("verify") => {
+            let isa = env::args().nth(2);
+            match isa.as_deref() {
+                Some(isa) => verify_isa(isa, &sh)?,
+                _ => print_help(),
+            }
+        }
+        Some("isa-test-suite") => isa_test_suite(&sh)?,
         _ => print_help(),
     }
     Ok(())
@@ -31,7 +42,10 @@ fn check(sh: &Shell) -> anyhow::Result<()> {
     let root = project_root();
     sh.change_dir(root);
 
-    cmd!(sh, "cargo run --bin check-runner").run()?;
+    // FileCheck-style tests now run as ordinary integration tests (the `lit`
+    // harnesses in each crate's `tests/` directory), so running the test suite
+    // exercises them alongside the unit tests.
+    cmd!(sh, "cargo test --workspace").run()?;
 
     Ok(())
 }
@@ -55,6 +69,33 @@ fn build_docs(sh: &Shell) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Run the differential ISA test suite: build the `tir-isasim` binary (the
+/// simulator under test), then compare each snippet's architectural state
+/// against a golden reference model (Spike for RISC-V).
+fn isa_test_suite(sh: &Shell) -> anyhow::Result<()> {
+    let root = project_root();
+    sh.change_dir(&root);
+
+    cmd!(sh, "cargo build -p tir-isasim").run()?;
+    let isasim_bin = root.join("target/debug/tir-isasim");
+
+    let all_passed = tir_isa_test_suite::run(&isasim_bin)?;
+    if !all_passed {
+        anyhow::bail!("ISA test suite reported failures");
+    }
+    Ok(())
+}
+
+fn verify_isa(isa: &str, sh: &Shell) -> anyhow::Result<()> {
+    match isa {
+        "riscv" => verify_riscv::verify_riscv(sh),
+        _ => {
+            print_help();
+            Ok(())
+        }
+    }
+}
+
 fn print_help() {
     eprintln!(
         "Tasks:
@@ -62,6 +103,8 @@ fn print_help() {
 build            builds TIR project
 check            builds project and runs check tests
 check-only       only runs check tests without building the project
+verify <isa>     run formal ISA verification. Available ISAs: riscv
+isa-test-suite   run differential ISA tests against a golden oracle (riscv/Spike)
 docs             builds project documentation
 help             shows this message
 "

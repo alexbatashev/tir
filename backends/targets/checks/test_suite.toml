@@ -1,0 +1,3 @@
+[suite]
+name = "TIR target registry checks"
+glob = ["**/*.tir", "!**/Inputs/**/*"]

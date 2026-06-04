@@ -1,3 +1,0 @@
-[suite]
-name = "TIR Core LIT checks"
-glob = ["**/*.tir"]

@@ -1,3 +1,0 @@
-; RUN: not tir opt %s 
-
-func@x(%t:!fu.c@\012-\012

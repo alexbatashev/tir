@@ -1,4 +1,5 @@
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+
 use tmdl::lex;
 
 const LARGE_INSTR_TEMPLATE_INPUT: &str = include_str!("./Inputs/large_instr_template.tmdl");
@@ -8,7 +9,8 @@ fn large_instr_template(c: &mut Criterion) {
     group.throughput(Throughput::Bytes(LARGE_INSTR_TEMPLATE_INPUT.len() as u64));
     group.bench_function("lex", |b| {
         b.iter(|| {
-            let _ = lex(LARGE_INSTR_TEMPLATE_INPUT).unwrap();
+            let (_, errs) = lex(LARGE_INSTR_TEMPLATE_INPUT);
+            assert!(errs.is_empty());
         })
     });
     group.finish()

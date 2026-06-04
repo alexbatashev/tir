@@ -1,121 +1,306 @@
-use lpl::combinators::text::{string_literal, take_while, StringConfig};
-use lpl::combinators::{
-    eof,
-    lang::{ident, integer_literal, line_comment},
-    literal, zero_or_more,
-};
-use lpl::syntax::GreenElement;
-use lpl::StrStream;
-use lpl::{Diagnostic, Parser};
+use core::fmt;
+use std::fmt::Write;
 
-use crate::{SyntaxKind, Token, TokenData};
+use chumsky::prelude::*;
 
-/// Lexes the input string into a stream of tokens.
-///
-/// This function takes a string input and attempts to tokenize it using various lexing functions.
-/// It processes the input in the following order:
-/// 1. Keywords
-/// 2. Punctuation
-/// 3. Built-in types
-/// 4. Operators
-/// 5. Identifiers
-/// 6. Comments
-///
-/// # Arguments
-///
-/// * `input` - A string slice that holds the input to be lexed.
-///
-/// # Returns
-///
-/// * `Result<TokenStream<'a>, Diagnostic>` - A Result containing either a TokenStream on success,
-///   or a Diagnostic if lexing fails.
-pub fn lex(input: &str) -> Result<Vec<GreenElement<SyntaxKind>>, Diagnostic> {
-    let stream: StrStream = input.into();
+use crate::Spanned;
 
-    let token = lex_keyword()
-        .or_else(lex_bit_literal())
-        .or_else(lex_string_literal())
-        .or_else(lex_identifier())
-        .or_else(lex_punctuation())
-        .or_else(lex_integer_literal())
-        .or_else(lex_comment())
-        .or_else(lex_whitespace());
+// Token definition
+#[derive(Debug, Clone, PartialEq)]
+pub enum Token<'a> {
+    Comment(&'a str),
+    Identifier(&'a str),
+    Number(&'a str),
+    StringLit(&'a str),
 
-    let parser = eof(zero_or_more(
-        token
-            .spanned()
-            .map(|(t, s)| GreenElement::Token(t.spanned(s))),
+    /// `=>`
+    FatArrow,
+    /// `..`
+    Range,
+
+    /// `=`
+    Equals,
+
+    /// `+`
+    Plus,
+    /// `-`
+    Dash,
+    /// `/`
+    ForwardSlash,
+    /// `*`
+    Asterisk,
+    /// `&`
+    Ampersand,
+    /// `^`
+    Hat,
+    /// `!`
+    Bang,
+    /// `~`
+    Tilde,
+
+    /// `.`
+    Dot,
+    /// `,`
+    Comma,
+    /// `:`
+    Colon,
+    /// `;`
+    Semicolon,
+    /// `\`
+    BackSlash,
+
+    /// `{`
+    LBrace,
+    /// `}`
+    RBrace,
+    /// `[`
+    LBracket,
+    /// `]`
+    RBracket,
+    /// `(`
+    LParen,
+    /// `)`
+    RParen,
+    /// `<`
+    LAngle,
+    /// `>`
+    RAngle,
+
+    /// `|`
+    Pipe,
+
+    /// `isa`
+    KwIsa,
+    /// `requires`
+    KwRequires,
+    /// `register_class`
+    KwRegClass,
+    /// `for`
+    KwFor,
+    /// `registers`
+    KwRegisters,
+    /// `parameters`
+    KwParameters,
+    /// `template`
+    KwTemplate,
+    /// `instruction`
+    KwInstruction,
+    /// `param`
+    KwParam,
+    /// `operands`
+    KwOperands,
+    /// `encoding`
+    KwEncoding,
+    /// `if`
+    KwIf,
+    /// `else`
+    KwElse,
+    /// `asm`
+    KwAsm,
+    /// `behavior`
+    KwBehavior,
+    /// `unit`
+    KwUnit,
+    /// `machine`
+    KwMachine,
+    /// `resource`
+    KwResource,
+    /// `buffers`
+    KwBuffers,
+    /// `bind`
+    KwBind,
+    /// `schedule`
+    KwSchedule,
+    /// `pipeline`
+    KwPipeline,
+    /// `override`
+    KwOverride,
+    /// `forward`
+    KwForward,
+}
+
+impl<'a> Token<'a> {
+    pub fn as_ident(&self) -> &'a str {
+        if let Token::Identifier(ident) = self {
+            ident
+        } else {
+            unreachable!()
+        }
+    }
+}
+
+pub fn lex<'src>(source: &'src str) -> (Vec<Spanned<Token<'src>>>, Vec<Cheap>) {
+    let (tokens, errors) = lexer().parse(source).into_output_errors();
+
+    (tokens.unwrap_or_default(), errors)
+}
+
+pub(crate) fn lexer<'src>()
+-> impl Parser<'src, &'src str, Vec<Spanned<Token<'src>>>, extra::Err<Cheap>> {
+    let num = just("0b")
+        .then(text::int(2).repeated().at_least(1))
+        .to_slice()
+        .or(just("0x")
+            .then(text::int(16).repeated().at_least(1))
+            .to_slice())
+        .or(text::int(10).repeated().at_least(1).to_slice())
+        .map(|n: &str| Token::Number(n));
+
+    let str_ = just('"')
+        .ignore_then(none_of('"').repeated().to_slice())
+        .then_ignore(just('"'))
+        .map(|s: &str| Token::StringLit(s));
+
+    let control = choice((
+        just('{').to(Token::LBrace),
+        just('}').to(Token::RBrace),
+        just('[').to(Token::LBracket),
+        just(']').to(Token::RBracket),
+        just('(').to(Token::LParen),
+        just(')').to(Token::RParen),
+        just('<').to(Token::LAngle),
+        just('>').to(Token::RAngle),
+        just(',').to(Token::Comma),
+        just(':').to(Token::Colon),
+        just(';').to(Token::Semicolon),
     ));
 
-    let (tokens, _) = parser.parse(stream)?;
+    let op = choice((
+        just("=>").to(Token::FatArrow),
+        just("..").to(Token::Range),
+        just('=').to(Token::Equals),
+        just('!').to(Token::Bang),
+        just('~').to(Token::Tilde),
+        just('+').to(Token::Plus),
+        just('-').to(Token::Dash),
+        just('*').to(Token::Asterisk),
+        just('/').to(Token::ForwardSlash),
+        just('|').to(Token::Pipe),
+        just('.').to(Token::Dot),
+        just('&').to(Token::Ampersand),
+        just('^').to(Token::Hat),
+    ));
 
-    Ok(tokens)
+    let ident = text::ascii::ident().map(|ident: &str| match ident {
+        "isa" => Token::KwIsa,
+        "requires" => Token::KwRequires,
+        "for" => Token::KwFor,
+        "registers" => Token::KwRegisters,
+        "register_class" => Token::KwRegClass,
+        "parameters" => Token::KwParameters,
+        "template" => Token::KwTemplate,
+        "instruction" => Token::KwInstruction,
+        "param" => Token::KwParam,
+        "operands" => Token::KwOperands,
+        "encoding" => Token::KwEncoding,
+        "if" => Token::KwIf,
+        "else" => Token::KwElse,
+        "asm" => Token::KwAsm,
+        "behavior" => Token::KwBehavior,
+        "unit" => Token::KwUnit,
+        "machine" => Token::KwMachine,
+        "resource" => Token::KwResource,
+        "buffers" => Token::KwBuffers,
+        "bind" => Token::KwBind,
+        "schedule" => Token::KwSchedule,
+        "pipeline" => Token::KwPipeline,
+        "override" => Token::KwOverride,
+        "forward" => Token::KwForward,
+        _ => Token::Identifier(ident),
+    });
+
+    let token = str_.or(num).or(control).or(op).or(ident);
+
+    let comment = just("//")
+        .then(any().and_is(just('\n').not()).repeated())
+        .padded();
+
+    token
+        .padded_by(comment.repeated())
+        .padded()
+        .map_with(|tok, e| (tok, e.span()))
+        .recover_with(skip_then_retry_until(any().ignored(), end()))
+        .repeated()
+        .collect()
 }
 
-fn lex_integer_literal<'a>() -> impl Parser<'a, StrStream<'a>, Token> {
-    integer_literal(10).map(|n| TokenData::new(SyntaxKind::IntegerLiteral, n.to_owned()))
+impl<'a> fmt::Display for Token<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Token::Dot => f.write_str("."),
+            Token::Asterisk => f.write_str("*"),
+            Token::Identifier(i) => f.write_str(i),
+            Token::LBrace => f.write_str("{"),
+            Token::RBrace => f.write_str("}"),
+            Token::KwParameters => f.write_str("parameters"),
+            Token::Comment(s) => write!(f, "#{}", s),
+            Token::Number(n) => write!(f, "{}", n),
+            Token::StringLit(s) => write!(f, "\"{}\"", s),
+            Token::FatArrow => f.write_str("=>"),
+            Token::Range => f.write_str(".."),
+            Token::Equals => f.write_str("="),
+            Token::Plus => f.write_str("+"),
+            Token::Dash => f.write_str("-"),
+            Token::Colon => f.write_char(':'),
+            Token::Semicolon => f.write_char(';'),
+            Token::ForwardSlash => f.write_str("/"),
+            Token::BackSlash => f.write_str("\\"),
+            Token::Comma => f.write_str(","),
+            Token::Ampersand => f.write_char('&'),
+            Token::Hat => f.write_char('^'),
+            Token::Bang => f.write_char('!'),
+            Token::Tilde => f.write_char('~'),
+            Token::LBracket => f.write_str("["),
+            Token::RBracket => f.write_str("]"),
+            Token::LParen => f.write_str("("),
+            Token::RParen => f.write_str(")"),
+            Token::LAngle => f.write_str("<"),
+            Token::RAngle => f.write_str(">"),
+            Token::Pipe => f.write_str("|"),
+            Token::KwIsa => f.write_str("isa"),
+            Token::KwRequires => f.write_str("requires"),
+            Token::KwRegClass => f.write_str("register_class"),
+            Token::KwFor => f.write_str("for"),
+            Token::KwRegisters => f.write_str("registers"),
+            Token::KwTemplate => f.write_str("template"),
+            Token::KwInstruction => f.write_str("instruction"),
+            Token::KwParam => f.write_str("param"),
+            Token::KwOperands => f.write_str("operands"),
+            Token::KwEncoding => f.write_str("encoding"),
+            Token::KwIf => f.write_str("if"),
+            Token::KwElse => f.write_str("else"),
+            Token::KwAsm => f.write_str("asm"),
+            Token::KwBehavior => f.write_str("behavior"),
+            Token::KwUnit => f.write_str("unit"),
+            Token::KwMachine => f.write_str("machine"),
+            Token::KwResource => f.write_str("resource"),
+            Token::KwBuffers => f.write_str("buffers"),
+            Token::KwBind => f.write_str("bind"),
+            Token::KwSchedule => f.write_str("schedule"),
+            Token::KwPipeline => f.write_str("pipeline"),
+            Token::KwOverride => f.write_str("override"),
+            Token::KwForward => f.write_str("forward"),
+        }
+    }
 }
 
-fn lex_bit_literal<'a>() -> impl Parser<'a, StrStream<'a>, Token> {
-    literal("0b")
-        .and_then(take_while(|c| *c == '1' || *c == '0'))
-        .map(|(prefix, bits)| TokenData::new(SyntaxKind::BitLiteral, format!("{}{}", prefix, bits)))
-}
+#[cfg(test)]
+mod test {
+    use chumsky::Parser;
 
-fn lex_keyword<'a>() -> impl Parser<'a, StrStream<'a>, Token> {
-    literal("instr_template")
-        .map(|kw| TokenData::new(SyntaxKind::InstrTemplateKw, kw.to_owned()))
-        .or_else(
-            literal("encoding").map(|kw| TokenData::new(SyntaxKind::EncodingKw, kw.to_owned())),
-        )
-        .or_else(literal("asm").map(|kw| TokenData::new(SyntaxKind::AsmKw, kw.to_owned())))
-        .or_else(literal("instr").map(|kw| TokenData::new(SyntaxKind::InstrKw, kw.to_owned())))
-        .or_else(literal("for").map(|kw| TokenData::new(SyntaxKind::ForKw, kw.to_owned())))
-        .or_else(literal("let").map(|kw| TokenData::new(SyntaxKind::LetKw, kw.to_owned())))
-        .or_else(literal("enum").map(|kw| TokenData::new(SyntaxKind::EnumKw, kw.to_owned())))
-        .or_else(literal("impl").map(|kw| TokenData::new(SyntaxKind::ImplKw, kw.to_owned())))
-        .or_else(literal("self").map(|kw| TokenData::new(SyntaxKind::SelfKw, kw.to_owned())))
-        .or_else(literal("flag").map(|kw| TokenData::new(SyntaxKind::FlagKw, kw.to_owned())))
-        .or_else(literal("fn").map(|kw| TokenData::new(SyntaxKind::FnKw, kw.to_owned())))
-}
+    use super::lexer;
 
-fn lex_punctuation<'a>() -> impl Parser<'a, StrStream<'a>, Token> {
-    literal("{")
-        .map(|p| TokenData::new(SyntaxKind::LeftBrace, p.to_owned()))
-        .or_else(literal("}").map(|p| TokenData::new(SyntaxKind::RightBrace, p.to_owned())))
-        .or_else(literal("<").map(|p| TokenData::new(SyntaxKind::LeftAngle, p.to_owned())))
-        .or_else(literal(">").map(|p| TokenData::new(SyntaxKind::RightAngle, p.to_owned())))
-        .or_else(literal("[").map(|p| TokenData::new(SyntaxKind::LeftBracket, p.to_owned())))
-        .or_else(literal("]").map(|p| TokenData::new(SyntaxKind::RightBracket, p.to_owned())))
-        .or_else(literal("(").map(|p| TokenData::new(SyntaxKind::LeftParen, p.to_owned())))
-        .or_else(literal(")").map(|p| TokenData::new(SyntaxKind::RightParen, p.to_owned())))
-        .or_else(literal(":").map(|p| TokenData::new(SyntaxKind::Colon, p.to_owned())))
-        .or_else(literal(";").map(|p| TokenData::new(SyntaxKind::Semicolon, p.to_owned())))
-        .or_else(literal(",").map(|p| TokenData::new(SyntaxKind::Comma, p.to_owned())))
-        .or_else(literal(".").map(|p| TokenData::new(SyntaxKind::Dot, p.to_owned())))
-        .or_else(literal("$").map(|p| TokenData::new(SyntaxKind::DollarSign, p.to_owned())))
-        .or_else(literal("@").map(|p| TokenData::new(SyntaxKind::At, p.to_owned())))
-        .or_else(literal("\"").map(|p| TokenData::new(SyntaxKind::DoubleQuote, p.to_owned())))
-        .or_else(literal("=").map(|p| TokenData::new(SyntaxKind::Equals, p.to_owned())))
-        .or_else(literal("#").map(|p| TokenData::new(SyntaxKind::Pound, p.to_owned())))
-        .or_else(literal("-").map(|p| TokenData::new(SyntaxKind::Minus, p.to_owned())))
-}
+    #[test]
+    fn smoke_lexer() {
+        let input = "
+          isa RV32I {
+              XLEN = 32
+          }
+       ";
 
-fn lex_identifier<'a>() -> impl Parser<'a, StrStream<'a>, Token> {
-    ident(|c| c == '_' || c == '$').map(|i| TokenData::new(SyntaxKind::Identifier, i.to_string()))
-}
+        let parser = lexer();
+        let result = parser.parse(input);
 
-fn lex_comment<'a>() -> impl Parser<'a, StrStream<'a>, Token> {
-    line_comment("///")
-        .map(|c| TokenData::new(SyntaxKind::LocalDocComment, c.to_string()))
-        .or_else(line_comment("//").map(|c| TokenData::new(SyntaxKind::Comment, c.to_string())))
-}
-
-fn lex_whitespace<'a>() -> impl Parser<'a, StrStream<'a>, Token> {
-    take_while(|c| c.is_whitespace()).map(|p| TokenData::new(SyntaxKind::Whitespace, p.to_string()))
-}
-
-fn lex_string_literal<'a>() -> impl Parser<'a, StrStream<'a>, Token> {
-    string_literal(StringConfig::default())
-        .map(|lit| TokenData::new(SyntaxKind::StringLiteral, lit.to_string()))
+        println!("{:#?}", result);
+    }
 }

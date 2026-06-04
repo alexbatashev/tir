@@ -1,87 +1,117 @@
-mod diagnostic;
-pub mod isema;
+use tir::helpers::dialect;
+
+pub mod isel;
 mod lexer;
-pub mod parser;
+pub mod liveness;
+mod operations;
+mod parser;
+pub mod regalloc;
+pub mod sched;
 pub mod target;
-mod target_options;
 
-pub use diagnostic::*;
-pub use lexer::*;
-use lpl::{combinators::NotTuple, ParseResult};
-pub use target_options::*;
+pub use operations::*;
+pub use target::TargetMachine;
 
-use tir_core::{parser::Parsable, Attr, Printable, Result};
+pub use lexer::Token;
+pub use lexer::lex;
+pub use parser::{AsmInstructionParser, AsmParser};
+use tir::attributes::{AttributeValue, RegisterAttr};
+use tir::utils::APInt;
 
-use thiserror::Error;
-
-#[derive(Clone, Copy)]
-pub enum Register<T: Into<Register<T>> + Printable + Parsable<T> + Copy> {
-    Virtual(u64),
-    Architecture(T),
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SimTrap {
+    MissingRegister {
+        class: String,
+        index: u16,
+    },
+    MissingAttribute {
+        op: &'static str,
+        attribute: &'static str,
+    },
+    InvalidAttribute {
+        op: &'static str,
+        attribute: &'static str,
+    },
+    InvalidInstruction {
+        op: &'static str,
+        reason: String,
+    },
+    BadAddress {
+        address: u64,
+        size: usize,
+    },
+    ProgramNotLoaded,
+    PcNotMapped {
+        pc: u64,
+    },
+    MaxCyclesExceeded {
+        max_cycles: u64,
+        until_pc: u64,
+    },
 }
 
-pub trait BinaryStream {
-    fn write(&mut self, data: &[u8]);
+pub trait MachineContext {
+    fn read_register(&self, class: &str, index: u16) -> Result<APInt, SimTrap>;
+    fn write_register(&mut self, class: &str, index: u16, value: APInt) -> Result<(), SimTrap>;
+    fn read_memory(&self, address: u64, size: usize) -> Result<u64, SimTrap>;
+    fn write_memory(&mut self, address: u64, size: usize, value: u64) -> Result<(), SimTrap>;
+    fn read_pc(&self) -> u64;
+    fn write_pc(&mut self, value: u64);
 }
 
-pub trait BinaryEmittable {
-    fn encode(&self, target_opts: &TargetOptions, stream: &mut Box<dyn BinaryStream>)
-        -> Result<()>;
+pub trait MachineInstruction {
+    fn verify_interface(
+        &self,
+        _this: &dyn tir::Operation,
+        _context: &tir::Context,
+    ) -> Result<(), tir::Error> {
+        Ok(())
+    }
+    fn mnemonic(&self) -> &'static str;
+    fn width_bytes(&self) -> u8;
+    fn execute(&self, machine: &mut dyn MachineContext) -> Result<(), SimTrap>;
+    fn explicit_pc_write(&self) -> bool {
+        false
+    }
 }
 
-pub trait AsmPrintable {
-    fn print(&self, target_opts: &TargetOptions)
-    where
-        Self: Sized;
-}
-
-pub trait ISAParser {
-    fn parse(stream: TokenStream) -> ParseResult<TokenStream, ()>;
-}
-
-#[derive(Error, Debug)]
-pub enum DisassemblerError {
-    #[error("unexpected end of stream, need `{0}` more bytes, only `{1}` bytes left")]
-    UnexpectedEndOfStream(usize, usize),
-    #[error("unknown disassembler error")]
-    Unknown,
-}
-
-impl<T: Into<Register<T>> + Printable + Parsable<T> + Copy> Printable for Register<T> {
-    fn print(&self, fmt: &mut dyn tir_core::IRFormatter) {
-        match &self {
-            Register::Virtual(virt) => fmt.write_direct(&format!("virt_reg<{}>", virt)),
-            Register::Architecture(reg) => reg.print(fmt),
+pub fn register_attr(
+    attrs: &[tir::attributes::NamedAttribute],
+    name: &str,
+) -> Option<(String, u16)> {
+    attrs.iter().find_map(|attr| {
+        if attr.name != name {
+            return None;
         }
-    }
-}
-
-impl<T: Into<Register<T>> + Printable + Parsable<T> + Copy> Parsable<Register<T>> for Register<T> {
-    fn parse(input: tir_core::IRStrStream) -> ParseResult<tir_core::IRStrStream, Register<T>> {
-        let (reg, ni) = T::parse(input)?;
-        Ok((Register::Architecture(reg), ni))
-    }
-}
-
-#[allow(clippy::from_over_into)]
-impl<T: Into<Register<T>> + Printable + Parsable<T> + Into<tir_core::Attr> + Copy>
-    Into<tir_core::Attr> for Register<T>
-{
-    fn into(self) -> tir_core::Attr {
-        match self {
-            Register::Virtual(virt) => Attr::U64(virt),
-            Register::Architecture(arch) => arch.into(),
+        match &attr.value {
+            AttributeValue::Register(RegisterAttr::Physical { class, index }) => {
+                Some((class.clone(), *index))
+            }
+            _ => None,
         }
-    }
+    })
 }
 
-impl<T: Into<Register<T>> + Printable + Parsable<T> + Copy> Register<T> {
-    pub fn as_arch(&self) -> T {
-        match &self {
-            Register::Architecture(arch) => *arch,
-            _ => unreachable!(),
+pub fn int_attr(attrs: &[tir::attributes::NamedAttribute], name: &str) -> Option<i64> {
+    attrs.iter().find_map(|attr| {
+        if attr.name != name {
+            return None;
         }
-    }
+        match attr.value {
+            AttributeValue::Int(i) => Some(i),
+            AttributeValue::UInt(u) => i64::try_from(u).ok(),
+            _ => None,
+        }
+    })
 }
 
-impl<T: Into<Register<T>> + Printable + Parsable<T> + Copy> NotTuple for Register<T> {}
+pub mod ops {
+    pub use crate::operations::*;
+}
+
+dialect! {
+    AsmDialect {
+        name: "asm",
+        operations: [SectionOp, SectionEndOp, SymbolOp, SymbolEndOp, BlockEndOp],
+    }
+}

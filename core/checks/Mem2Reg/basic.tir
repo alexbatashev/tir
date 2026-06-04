@@ -1,0 +1,11 @@
+// RUN: tir-opt --pass mem2reg %S/../Inputs/basic.tir | filecheck %s
+
+// CHECK: module {
+// CHECK-NEXT: func @f(%{{[0-9]+}}: !i32, %{{[0-9]+}}: !i32) -> !i32 {
+// CHECK-NEXT: %7 = muli %0, %1 : !i32
+// CHECK-NEXT: %9 = constant {value = 1} : !i32
+// CHECK-NEXT: %10 = addi %7, %9 : !i32
+// CHECK-NEXT: return %10
+// CHECK-NEXT: }
+// CHECK-NEXT: module_end
+// CHECK-NEXT: }

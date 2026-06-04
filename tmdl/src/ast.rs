@@ -1,1368 +1,1487 @@
-use core::fmt;
+use crate::utils::StableHashMap;
+use crate::{Span, Type};
+use serde::Serialize;
+use serde::ser::{SerializeStruct, Serializer};
+use std::collections::HashMap;
 
-use lpl::{syntax::NodeOrToken, Span};
-
-use crate::{SyntaxElement, SyntaxKind, SyntaxNode};
-
-macro_rules! ast_with_doc {
-    ($name: ident) => {
-        impl $name {
-            pub fn doc(&self) -> Option<String> {
-                let all: Vec<_> = self
-                    .syntax()
-                    .children()
-                    .filter_map(|c| match c {
-                        NodeOrToken::Token(t) if t.kind() == SyntaxKind::LocalDocComment => {
-                            Some(t.text().to_string())
-                        }
-                        _ => None,
-                    })
-                    .collect();
-
-                if all.is_empty() {
-                    None
-                } else {
-                    Some(all.join("\n"))
-                }
-            }
-        }
-    };
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub enum RegisterTrait {
+    HardwiredZero,
+    ReturnAddress,
+    CallerSaved,
+    CalleeSaved,
+    StackPointer,
+    ProgramCounter,
+    GlobalPointer,
+    ThreadPointer,
+    /// Carries an incoming argument under the calling convention. Argument order
+    /// follows the register index order within the class (a0 before a1, ...).
+    Argument,
+    /// Holds an outgoing return value under the calling convention.
+    ReturnValue,
+    Temporary,
+    Saved,
 }
 
-macro_rules! trivial_ast_node {
-    ($name: ident, $kind:expr) => {
-        #[repr(transparent)]
-        #[derive(Clone)]
-        pub struct $name(SyntaxNode);
-
-        impl $name {
-            pub fn new(root: SyntaxNode) -> Option<Self> {
-                if root.kind() != $kind {
-                    return None;
-                }
-
-                Some(Self(root))
-            }
-        }
-
-        impl ASTNode for $name {
-            fn syntax(&self) -> &SyntaxNode {
-                &self.0
-            }
-        }
-    };
-
-    ($name: ident, $kind:expr, with_doc) => {
-        trivial_ast_node!($name, $kind);
-        ast_with_doc!($name);
-    };
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Register {
+    pub name: String,
+    pub alias: Option<String>,
+    pub traits: Vec<RegisterTrait>,
+    pub subregisters: Vec<Register>,
+    #[serde(skip_serializing)]
+    pub span: Span,
 }
 
-macro_rules! ast_printer {
-    ($name: ident, $($field:ident),+) => {
-        impl fmt::Debug for $name {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.debug_struct(stringify!($name))
-                    $(
-                    .field(stringify!($field), &self.$field())
-                    )*
-                    .finish()
-            }
-        }
-    }
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RegisterRange {
+    pub start: String,
+    pub end: String,
+    pub alias_pattern: Option<String>,
+    pub traits: Vec<RegisterTrait>,
+    #[serde(skip_serializing)]
+    pub span: Span,
 }
 
-pub trait ASTNode {
-    fn syntax(&self) -> &SyntaxNode;
-    fn span(&self) -> Span {
-        self.syntax().span()
-    }
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub enum RegisterDef {
+    Single(Register),
+    Range(RegisterRange),
 }
 
-pub trait ExprNode {
-    fn ty(&self) -> &Type;
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RegisterClass {
+    pub name: String,
+    pub for_isas: Vec<String>,
+    /// Name of the register class this one inherits from, if any. A derived class
+    /// shares the base's physical register file (the same encoding indices name the
+    /// same registers) but may add registers and override individual encoding slots
+    /// — e.g. AArch64 `GPRsp : GPR` redefines slot 31 as `sp` instead of `xzr`.
+    /// Resolved (flattened into `parameters`/`registers`) by
+    /// [`resolve_register_class_inheritance`] before any analysis runs.
+    pub base: Option<String>,
+    #[serde(serialize_with = "serialize_params")]
+    pub parameters: StableHashMap<String, (Type, Option<Expr>)>,
+    pub registers: Vec<RegisterDef>,
+    #[serde(skip_serializing)]
+    pub span: Span,
 }
 
-pub trait AttrListOwner: ASTNode {
-    fn attr_list(&self) -> Option<AttrList> {
-        self.syntax()
-            .children()
-            .find(|c| match c {
-                NodeOrToken::Node(n) => n.kind() == SyntaxKind::AttrList,
-                _ => false,
-            })
-            .and_then(|c| AttrList::new(c.as_node().clone()))
-    }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisterNameTables {
+    pub parse_names: Vec<(String, u16)>,
+    pub isa_names: Vec<(u16, String)>,
+    pub abi_names: Vec<(u16, String)>,
 }
 
-#[derive(Clone)]
-pub enum Type {
-    Bits(u16),
-    String,
-    Integer,
-    Unresolved(SyntaxElement),
-    Void,
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RegisterAllocationMetadata {
+    /// Allocatable register indices in preferred allocation order.
+    pub allocation_order: Vec<u16>,
+    pub caller_saved: Vec<u16>,
+    pub callee_saved: Vec<u16>,
+    /// Argument registers in calling-convention order.
+    pub arguments: Vec<u16>,
+    pub return_values: Vec<u16>,
+    /// Indices reserved by the ABI and never allocated.
+    pub reserved: Vec<u16>,
 }
 
-trivial_ast_node!(AttrList, SyntaxKind::AttrList);
-trivial_ast_node!(Attr, SyntaxKind::Attr);
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub enum IsaRequirement {
+    Single(String),
+    Any(Vec<String>),
+    All(Vec<String>),
+}
 
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Isa {
+    pub name: String,
+    pub requires: Option<IsaRequirement>,
+    #[serde(serialize_with = "serialize_params")]
+    pub parameters: StableHashMap<String, (Type, Option<Expr>)>,
+    #[serde(skip_serializing)]
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Template {
+    pub name: String,
+    pub for_isas: Vec<String>,
+    pub parent_template: Option<String>,
+    #[serde(serialize_with = "serialize_params")]
+    pub params: StableHashMap<String, (Type, Option<Expr>)>,
+    pub operands: Vec<(String, Type)>,
+    pub encoding: Vec<EncodingArm>,
+    pub asm: Option<Expr>,
+    #[serde(skip_serializing)]
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Instruction {
+    pub name: String,
+    pub for_isas: Vec<String>,
+    pub parent_template: Option<String>,
+    #[serde(serialize_with = "serialize_params")]
+    pub params: StableHashMap<String, (Type, Option<Expr>)>,
+    pub operands: Vec<(String, Type)>,
+    pub encoding: Vec<EncodingArm>,
+    pub asm: Option<Expr>,
+    pub behavior: Expr,
+    /// Performance model membership: the units (scheduling classes) this
+    /// instruction belongs to. `None` when the instruction carries no `schedule`
+    /// block; consumers fall back to a default scheduling class.
+    pub schedule: Option<Schedule>,
+    #[serde(skip_serializing)]
+    pub span: Span,
+}
+
+/// The `schedule { ... }` block of an instruction. Declares only *membership* in
+/// machine-independent scheduling classes ([`UnitDecl`]); the concrete cost
+/// (latency, resources) is supplied per-machine by [`UnitBind`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Schedule {
+    pub units: Vec<String>,
+    #[serde(skip_serializing)]
+    pub span: Span,
+}
+
+/// A top-level `unit` declaration: a machine-independent scheduling-class
+/// identity that instructions reference and machines bind to concrete cost. The
+/// optional defaults are resource-agnostic and feed the compiler cost model when
+/// no specific machine is selected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UnitDecl {
+    pub name: String,
+    pub default_latency: Option<i64>,
+    pub default_throughput: Option<i64>,
+    #[serde(skip_serializing)]
+    pub span: Span,
+}
+
+/// One functional unit / issue resource declared by a [`Machine`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MachineResource {
+    pub name: String,
+    /// Number of parallel units of this resource.
+    pub units: i64,
+    #[serde(skip_serializing)]
+    pub span: Span,
+}
+
+/// How a pipeline stage handles data hazards. Mirrors
+/// [`tir_be_common::sched::Protection`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum Protection {
+    Protected,
+    Unprotected,
+    Hard,
+}
+
+/// One named stage of a [`Machine`]'s pipeline. Its position in the pipeline list
+/// is its cycle offset from issue.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PipelinePhase {
+    pub name: String,
+    pub protection: Protection,
+    #[serde(skip_serializing)]
+    pub span: Span,
+}
+
+/// A machine's binding of one [`UnitDecl`] to concrete cost on that machine.
+///
+/// Timing is either scalar (`latency`) or phase-based (`reads`/`writes` naming
+/// pipeline phases); the latter desugars to `latency = cycle(writes) -
+/// cycle(reads)` with a non-zero read cycle. Scalar `latency = N` is equivalent
+/// to reading at cycle 0 and writing at cycle N.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UnitBind {
+    pub unit: String,
+    pub latency: Option<i64>,
+    pub throughput: Option<i64>,
+    /// Pipeline phase at which source operands are read (phase-based form).
+    pub reads: Option<String>,
+    /// Pipeline phase at which the result is written (phase-based form).
+    pub writes: Option<String>,
+    /// Resources (by [`MachineResource`] name) this unit occupies.
+    pub uses: Vec<String>,
+    #[serde(skip_serializing)]
+    pub span: Span,
+}
+
+/// A machine's per-instruction cost override (the LLVM `InstRW` analogue): it
+/// supersedes the `unit`-based resolution for one specific instruction on this
+/// machine. Carries the same timing fields as a [`UnitBind`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MachineOverride {
+    /// The overridden instruction, by its TMDL `instruction` name.
+    pub instruction: String,
+    pub latency: Option<i64>,
+    pub throughput: Option<i64>,
+    pub reads: Option<String>,
+    pub writes: Option<String>,
+    pub uses: Vec<String>,
+    #[serde(skip_serializing)]
+    pub span: Span,
+}
+
+/// A forwarding/bypass path between two of a machine's resources, with the
+/// producer→consumer latency it grants. Mirrors [`tir_be_common::sched::Forward`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Forward {
+    pub from: String,
+    pub to: String,
+    pub latency: i64,
+    #[serde(skip_serializing)]
+    pub span: Span,
+}
+
+/// A `machine` block: one device implementation. Holds the resource menu, buffer
+/// sizes (defaults; the Rust simulator may override), and per-unit cost
+/// bindings for a set of ISAs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Machine {
+    pub name: String,
+    pub for_isas: Vec<String>,
+    pub issue_width: Option<i64>,
+    /// Structural buffer sizes by name (e.g. `rob`, `lsq`, `iq`).
+    pub buffers: Vec<(String, i64)>,
+    /// Ordered pipeline stages; empty when no `pipeline` block is declared.
+    pub pipeline: Vec<PipelinePhase>,
+    pub resources: Vec<MachineResource>,
+    pub binds: Vec<UnitBind>,
+    /// Per-instruction cost overrides (take precedence over `binds`).
+    pub overrides: Vec<MachineOverride>,
+    /// Forwarding/bypass paths between resources.
+    pub forwards: Vec<Forward>,
+    #[serde(skip_serializing)]
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct EncodingArm {
+    pub start: u16,
+    pub end: Option<u16>,
+    pub value: Expr,
+    #[serde(skip_serializing)]
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum Item {
-    InstrTemplateDecl(InstrTemplateDecl),
-    InstrDecl(InstrDecl),
-    EncodingDecl(EncodingDecl),
-    AsmDecl(AsmDecl),
-    EnumDecl(EnumDecl),
-    ImplDecl(ImplDecl),
-    FlagDecl(FlagDecl),
-    FnDecl(FnDecl),
+    Isa(Isa),
+    RegisterClass(RegisterClass),
+    Template(Template),
+    Instruction(Instruction),
+    Unit(UnitDecl),
+    Machine(Machine),
 }
 
-#[derive(Clone)]
-pub struct SourceFile {
-    syntax: SyntaxNode,
-    items: Vec<Item>,
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub enum Lit {
+    Str(LitStr),
+    Int(LitInt),
 }
 
-#[derive(Clone)]
-pub struct InstrTemplateDecl {
-    syntax: SyntaxNode,
-    params: Vec<InstrTemplateParameterDecl>,
-    fields: Vec<StructFieldDecl>,
-    parent_template: Option<SyntaxNode>,
-    parent_template_args: Vec<InstrTemplateArg>,
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub struct LitStr {
+    value: String,
+    #[serde(skip_serializing)]
+    pub span: Span,
 }
 
-trivial_ast_node!(
-    InstrTemplateParameterDecl,
-    SyntaxKind::InstrTemplateSingleParam
-);
-
-#[derive(Clone)]
-pub struct InstrDecl {
-    syntax: SyntaxNode,
-    template_args: Vec<InstrTemplateArg>,
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub struct LitInt {
+    value: String,
+    #[serde(skip_serializing)]
+    pub span: Span,
 }
 
-trivial_ast_node!(InstrTemplateArg, SyntaxKind::InstrParentTemplateArg);
-
-#[derive(Clone)]
-pub struct EncodingDecl {
-    #[allow(dead_code)]
-    syntax: SyntaxNode,
-    body: BlockExpr,
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub struct Field {
+    pub base: Box<Expr>,
+    pub member: String,
+    #[serde(skip_serializing)]
+    pub span: Span,
 }
 
-#[derive(Clone)]
-pub struct AsmDecl {
-    #[allow(dead_code)]
-    syntax: SyntaxNode,
-    body: BlockExpr,
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub struct If {
+    pub cond: Box<Expr>,
+    pub then: Box<Expr>,
+    pub else_: Option<Box<Expr>>,
+    #[serde(skip_serializing)]
+    pub span: Span,
 }
 
-trivial_ast_node!(ImplDecl, SyntaxKind::ImplDecl);
-ast_printer!(ImplDecl, trait_name, target_name);
-
-trivial_ast_node!(StructFieldDecl, SyntaxKind::StructField);
-ast_printer!(StructFieldDecl, name, ty);
-
-#[derive(Clone)]
-pub struct EnumDecl {
-    syntax: SyntaxNode,
-    variants: Vec<EnumVariantDecl>,
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub struct Block {
+    pub stmts: Vec<Expr>,
+    pub last_expr_return: bool,
+    #[serde(skip_serializing)]
+    pub span: Span,
 }
-ast_with_doc!(EnumDecl);
 
-trivial_ast_node!(EnumVariantDecl, SyntaxKind::EnumVariantDecl, with_doc);
-trivial_ast_node!(FlagDecl, SyntaxKind::FlagDecl, with_doc);
-ast_printer!(FlagDecl, name, doc);
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub struct Ident {
+    pub name: String,
+    #[serde(skip_serializing)]
+    pub span: Span,
+}
 
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub struct Assign {
+    pub dest: Box<Expr>,
+    pub value: Box<Expr>,
+    #[serde(skip_serializing)]
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub struct Path {
+    pub base: String,
+    pub remainder: Vec<String>,
+    #[serde(skip_serializing)]
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub enum BinOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    UnsignedDiv,
+    Equal,
+    NotEqual,
+    LessThan,
+    GreaterThan,
+    LessThenEqual,
+    GreaterThanEqual,
+    UnsignedLessThan,
+    UnsignedGreaterThan,
+    UnsignedLessThenEqual,
+    UnsignedGreaterThanEqual,
+    BitwiseAnd,
+    BitwiseOr,
+    BitwiseXor,
+    ShiftLeftLogical,
+    ShiftRightLogical,
+    ShiftRightArithmetic,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub struct Binary {
+    pub lhs: Box<Expr>,
+    pub rhs: Box<Expr>,
+    pub op: BinOp,
+    #[serde(skip_serializing)]
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub enum BuiltinFunction {
+    Clamp,
+    Extract,
+    Log2Ceil,
+    SExt,
+    ZExt,
+    Load,
+    Store,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub struct Call {
+    pub callee: Box<Expr>,
+    pub arguments: Vec<Expr>,
+    #[serde(skip_serializing)]
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub struct Slice {
+    pub base: Box<Expr>,
+    pub start: u16,
+    pub end: u16,
+    #[serde(skip_serializing)]
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub struct IndexAccess {
+    pub base: Box<Expr>,
+    pub index: u16,
+    #[serde(skip_serializing)]
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub enum Expr {
-    Literal(LiteralExpr),
-    Block(BlockExpr),
-    List(ListExpr),
-    BinOp(BinOpExpr),
+    Assign(Assign),
+    Binary(Binary),
+    Block(Block),
+    Call(Call),
+    Field(Field),
+    Ident(Ident),
+    If(If),
+    IndexAccess(IndexAccess),
+    Path(Path),
+    Lit(Lit),
+    Slice(Slice),
+    BuiltinFunction(BuiltinFunction),
+    Invalid,
 }
 
-#[derive(Clone)]
-pub struct LiteralExpr {
-    #[allow(dead_code)]
-    syntax: SyntaxNode,
-    ty: Type,
+pub struct SemaLowering {
+    pub root: tir::graph::NodeId,
+    pub variable_symbols: HashMap<String, u32>,
+    pub register_symbols: HashMap<(String, u32), u32>,
 }
 
-#[derive(Clone)]
-pub struct BlockExpr {
-    #[allow(dead_code)]
-    syntax: SyntaxNode,
-    stmts: Vec<Expr>,
-    ty: Type,
+struct SemaExprLoweringCtx<
+    'a,
+    G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
+> {
+    graph: &'a mut G,
+    params: &'a HashMap<String, i64>,
+    /// Maps `(class, register-name)` to the register's canonical encoding index, so
+    /// register paths like `PSTATE::z` that carry no numeric index in their name can
+    /// still be lowered to a stable `(class, index)` slot. When absent, only PC and
+    /// numbered registers (whose index is in the name, e.g. `x5`) can be resolved.
+    register_indices: Option<&'a HashMap<(String, String), u32>>,
+    next_symbol_id: u32,
+    register_symbols: HashMap<(String, u32), u32>,
+    variable_symbols: HashMap<String, u32>,
+    had_error: bool,
 }
 
-#[derive(Clone)]
-pub struct ListExpr {
-    #[allow(dead_code)]
-    syntax: SyntaxNode,
-    elements: Vec<Expr>,
-    ty: Type,
+impl<'a, G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>>
+    SemaExprLoweringCtx<'a, G>
+{
+    fn new(graph: &'a mut G, params: &'a HashMap<String, i64>) -> Self {
+        Self {
+            graph,
+            params,
+            register_indices: None,
+            next_symbol_id: 0,
+            register_symbols: HashMap::new(),
+            variable_symbols: HashMap::new(),
+            had_error: false,
+        }
+    }
+
+    fn new_with_registers(
+        graph: &'a mut G,
+        params: &'a HashMap<String, i64>,
+        register_indices: &'a HashMap<(String, String), u32>,
+    ) -> Self {
+        Self {
+            graph,
+            params,
+            register_indices: Some(register_indices),
+            next_symbol_id: 0,
+            register_symbols: HashMap::new(),
+            variable_symbols: HashMap::new(),
+            had_error: false,
+        }
+    }
+
+    fn add_node(
+        &mut self,
+        kind: tir::sem_expr::ExprKind,
+        children: &[tir::graph::NodeId],
+    ) -> tir::graph::NodeId {
+        let node = self.graph.add_node(kind);
+        for &child in children {
+            self.graph.add_edge(node, child);
+        }
+        node
+    }
+
+    fn add_leaf(
+        &mut self,
+        kind: tir::sem_expr::ExprKind,
+        data: tir::sem_expr::ExprPayload,
+    ) -> tir::graph::NodeId {
+        let node = self.graph.add_node(kind);
+        self.graph.set_leaf_data(node, data);
+        node
+    }
+
+    fn add_int_const(&mut self, value: tir::utils::APInt) -> tir::graph::NodeId {
+        self.add_leaf(
+            tir::sem_expr::ExprKind::Constant,
+            tir::sem_expr::ExprPayload::Int(value),
+        )
+    }
+
+    fn add_bool_const(&mut self, value: bool) -> tir::graph::NodeId {
+        self.add_int_const(tir::utils::APInt::new(1, value as u64))
+    }
+
+    fn alloc_variable_symbol(&mut self) -> u32 {
+        let id = self.next_symbol_id;
+        self.next_symbol_id += 1;
+        id
+    }
+
+    fn get_or_create_variable_symbol(&mut self, name: String) -> u32 {
+        if let Some(&id) = self.variable_symbols.get(&name) {
+            return id;
+        }
+        let id = self.alloc_variable_symbol();
+        self.variable_symbols.insert(name, id);
+        id
+    }
+
+    fn get_or_create_register_symbol(&mut self, class: String, number: u32) -> u32 {
+        if let Some(&id) = self.register_symbols.get(&(class.clone(), number)) {
+            return id;
+        }
+
+        let id = self.alloc_variable_symbol();
+        self.register_symbols.insert((class, number), id);
+        id
+    }
+
+    fn build_extract(
+        &mut self,
+        input_node: tir::graph::NodeId,
+        high_node: tir::graph::NodeId,
+        low_node: tir::graph::NodeId,
+    ) -> tir::graph::NodeId {
+        // A single canonical `Extract` node rather than a shift/and/mask tree, so
+        // instruction selection can match truncation/bit-slicing structurally
+        // (e.g. addw = sext(extract(rs1+rs2, 31, 0), XLEN)) instead of pattern-
+        // matching a fragile arithmetic expansion.
+        self.add_node(
+            tir::sem_expr::ExprKind::Extract,
+            &[input_node, high_node, low_node],
+        )
+    }
 }
 
-#[derive(Clone, Debug)]
-pub enum BinOpKind {
-    BitConcat,
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct File {
+    pub items: Vec<Item>,
+    pub file_name: String,
 }
 
-#[derive(Clone)]
-pub struct BinOpExpr {
-    #[allow(dead_code)]
-    syntax: SyntaxNode,
-    kind: BinOpKind,
-    left: Box<Expr>,
-    right: Box<Expr>,
+impl LitInt {
+    pub fn new(value: String, span: Span) -> Self {
+        Self { value, span }
+    }
+
+    pub fn value(&self) -> &str {
+        &self.value
+    }
 }
 
-trivial_ast_node!(FnDecl, SyntaxKind::FnDecl);
-ast_printer!(FnDecl, signature, body);
-trivial_ast_node!(FnSignature, SyntaxKind::FnSignature);
-trivial_ast_node!(FnParam, SyntaxKind::FnParam);
+impl LitStr {
+    pub fn new(value: String, span: Span) -> Self {
+        Self { value, span }
+    }
 
-impl Type {
-    pub fn new(syntax: SyntaxNode) -> Option<Type> {
-        if syntax.kind() != SyntaxKind::Type {
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+}
+
+impl From<LitInt> for Expr {
+    fn from(val: LitInt) -> Self {
+        Expr::Lit(Lit::Int(val))
+    }
+}
+
+impl From<LitStr> for Expr {
+    fn from(val: LitStr) -> Self {
+        Expr::Lit(Lit::Str(val))
+    }
+}
+
+impl Ident {
+    pub fn new(name: String, span: Span) -> Ident {
+        Ident { name, span }
+    }
+}
+
+impl From<Ident> for Expr {
+    fn from(val: Ident) -> Self {
+        Expr::Ident(val)
+    }
+}
+
+impl From<Block> for Expr {
+    fn from(val: Block) -> Self {
+        Expr::Block(val)
+    }
+}
+
+impl From<If> for Expr {
+    fn from(val: If) -> Self {
+        Expr::If(val)
+    }
+}
+
+impl Expr {
+    fn lower_with_ctx<
+        G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
+    >(
+        &self,
+        ctx: &mut SemaExprLoweringCtx<'_, G>,
+    ) -> tir::graph::NodeId {
+        match self {
+            Expr::Assign(x) => x.as_sema_expr(ctx),
+            Expr::Binary(x) => x.as_sema_expr(ctx),
+            Expr::Block(x) => x.as_sema_expr(ctx),
+            Expr::Call(x) => x.as_sema_expr(ctx),
+            Expr::Field(x) => x.as_sema_expr(ctx),
+            Expr::Ident(x) => x.as_sema_expr(ctx),
+            Expr::If(x) => x.as_sema_expr(ctx),
+            Expr::IndexAccess(x) => x.as_sema_expr(ctx),
+            Expr::Path(x) => x.as_sema_expr(ctx),
+            Expr::Lit(x) => x.as_sema_expr(ctx),
+            Expr::Slice(x) => x.as_sema_expr(ctx),
+            Expr::BuiltinFunction(_) => panic!("builtin functions must be called"),
+            Expr::Invalid => panic!("cannot convert invalid expression"),
+        }
+    }
+
+    pub fn as_sema_expr(
+        &self,
+        g: &mut impl tir::graph::MutDag<
+            Node = tir::sem_expr::ExprKind,
+            Leaf = tir::sem_expr::ExprPayload,
+        >,
+    ) -> tir::graph::NodeId {
+        self.as_sema_expr_with_params(g, &HashMap::new())
+    }
+
+    pub(crate) fn as_sema_expr_with_params(
+        &self,
+        g: &mut impl tir::graph::MutDag<
+            Node = tir::sem_expr::ExprKind,
+            Leaf = tir::sem_expr::ExprPayload,
+        >,
+        params: &HashMap<String, i64>,
+    ) -> tir::graph::NodeId {
+        let mut ctx = SemaExprLoweringCtx::new(g, params);
+        self.lower_with_ctx(&mut ctx)
+    }
+
+    /// Lower this expression into a semantic expression graph, returning the
+    /// symbol table alongside the root node. Returns `None` if the expression
+    /// contains operations that cannot be represented.
+    pub fn lower_to_sema(
+        &self,
+        g: &mut impl tir::graph::MutDag<
+            Node = tir::sem_expr::ExprKind,
+            Leaf = tir::sem_expr::ExprPayload,
+        >,
+        params: &HashMap<String, i64>,
+    ) -> Option<SemaLowering> {
+        let mut ctx = SemaExprLoweringCtx::new(g, params);
+        let root = self.lower_with_ctx(&mut ctx);
+        if ctx.had_error {
             return None;
         }
+        Some(SemaLowering {
+            root,
+            variable_symbols: ctx.variable_symbols,
+            register_symbols: ctx.register_symbols,
+        })
+    }
 
-        let ident = syntax
-            .children()
-            .find(|c| {
-                if let NodeOrToken::Token(token) = c {
-                    token.kind() == SyntaxKind::Identifier
+    /// Like [`Expr::lower_to_sema`], but resolves index-less register paths (e.g.
+    /// status flags such as `PSTATE::z`) through `register_indices`, a
+    /// `(class, register-name) -> index` table derived from the register-class
+    /// definitions. Used by simulator codegen so flag reads and writes resolve to a
+    /// stable register slot instead of failing to lower.
+    pub fn lower_to_sema_with_registers(
+        &self,
+        g: &mut impl tir::graph::MutDag<
+            Node = tir::sem_expr::ExprKind,
+            Leaf = tir::sem_expr::ExprPayload,
+        >,
+        params: &HashMap<String, i64>,
+        register_indices: &HashMap<(String, String), u32>,
+    ) -> Option<SemaLowering> {
+        let mut ctx = SemaExprLoweringCtx::new_with_registers(g, params, register_indices);
+        let root = self.lower_with_ctx(&mut ctx);
+        if ctx.had_error {
+            return None;
+        }
+        Some(SemaLowering {
+            root,
+            variable_symbols: ctx.variable_symbols,
+            register_symbols: ctx.register_symbols,
+        })
+    }
+}
+
+impl Assign {
+    fn as_sema_expr<
+        G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
+    >(
+        &self,
+        ctx: &mut SemaExprLoweringCtx<'_, G>,
+    ) -> tir::graph::NodeId {
+        self.value.lower_with_ctx(ctx)
+    }
+}
+
+impl Lit {
+    fn as_sema_expr<
+        G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
+    >(
+        &self,
+        ctx: &mut SemaExprLoweringCtx<'_, G>,
+    ) -> tir::graph::NodeId {
+        match self {
+            Lit::Int(lit_int) => {
+                let value_str = lit_int.value();
+                let value = if value_str.starts_with("0x") || value_str.starts_with("0X") {
+                    u64::from_str_radix(&value_str[2..], 16).expect("invalid hex literal")
+                } else if value_str.starts_with("0b") || value_str.starts_with("0B") {
+                    u64::from_str_radix(&value_str[2..], 2).expect("invalid binary literal")
                 } else {
-                    false
-                }
-            })?
-            .as_token()
-            .text()
-            .to_string();
+                    value_str.parse::<u64>().expect("invalid integer literal")
+                };
 
-        match ident.as_ref() {
-            "str" => Some(Type::String),
-            "bits" => {
-                let param = syntax
-                    .children()
-                    .find_map(|c| match c {
-                        NodeOrToken::Node(node) if node.kind() == SyntaxKind::TypeParams => {
-                            Some(node)
-                        }
-                        _ => None,
-                    })
-                    .iter()
-                    .flat_map(|n| n.children())
-                    .find_map(|c| match c {
-                        NodeOrToken::Node(node) if node.kind() == SyntaxKind::LiteralExpr => {
-                            Some(node)
-                        }
-                        _ => None,
-                    })
-                    .iter()
-                    .flat_map(|n| n.children())
-                    .find_map(|c| match c {
-                        NodeOrToken::Token(token) if token.kind() == SyntaxKind::IntegerLiteral => {
-                            Some(token.text().to_string())
-                        }
-                        _ => None,
-                    })?;
+                let width = if value == 0 {
+                    1
+                } else {
+                    64 - value.leading_zeros()
+                };
 
-                let num_bits = param.parse::<u16>().ok()?;
-
-                Some(Type::Bits(num_bits))
+                ctx.add_int_const(tir::utils::APInt::new(width, value))
             }
-            _ => Some(Type::Unresolved(NodeOrToken::Node(syntax))),
+            Lit::Str(_) => panic!("string literals are not supported in semantic expressions"),
         }
     }
 }
 
-impl fmt::Debug for Type {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Type::Unresolved(_) => write!(f, "<unresolved>"),
-            Type::String => write!(f, "str"),
-            Type::Bits(num) => write!(f, "bits<{}>", num),
-            Type::Integer => write!(f, "int"),
-            Type::Void => write!(f, "()"),
+impl Ident {
+    fn as_sema_expr<
+        G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
+    >(
+        &self,
+        ctx: &mut SemaExprLoweringCtx<'_, G>,
+    ) -> tir::graph::NodeId {
+        if let Some(&value) = ctx.params.get(&self.name) {
+            let (width, abs_value) = if value < 0 {
+                let abs = value.unsigned_abs();
+                let width = if abs == 0 {
+                    1
+                } else {
+                    64 - abs.leading_zeros() + 1
+                };
+                (width, abs)
+            } else {
+                let v = value as u64;
+                let width = if v == 0 { 1 } else { 64 - v.leading_zeros() };
+                (width, v)
+            };
+
+            if value < 0 {
+                ctx.add_int_const(tir::utils::APInt::new_signed(width, value))
+            } else {
+                ctx.add_int_const(tir::utils::APInt::new(width, abs_value))
+            }
+        } else {
+            let id = ctx.get_or_create_variable_symbol(self.name.clone());
+            ctx.add_leaf(
+                tir::sem_expr::ExprKind::Symbol,
+                tir::sem_expr::ExprPayload::SymbolId(id),
+            )
+        }
+    }
+}
+
+impl Path {
+    fn as_sema_expr<
+        G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
+    >(
+        &self,
+        ctx: &mut SemaExprLoweringCtx<'_, G>,
+    ) -> tir::graph::NodeId {
+        if self.remainder.len() != 1 {
+            ctx.had_error = true;
+            return ctx.add_int_const(tir::utils::APInt::new(64, 0));
+        }
+
+        let reg_name = &self.remainder[0];
+        // Resolve the register's encoding index: PC is special; otherwise prefer the
+        // `(class, name)` table (which gives index-less registers like status flags a
+        // stable slot), falling back to a trailing numeric index in the name. A path
+        // that resolves to neither is unrepresentable, so mark the lowering failed
+        // rather than panicking — callers turn that into a skipped/None lowering.
+        let number = if self.base == "PC" && reg_name == "pc" {
+            Some(0)
+        } else if let Some(indices) = ctx.register_indices {
+            indices.get(&(self.base.clone(), reg_name.clone())).copied()
+        } else {
+            reg_name
+                .find(|c: char| c.is_ascii_digit())
+                .and_then(|start| reg_name[start..].parse::<u32>().ok())
+        };
+
+        let Some(number) = number else {
+            ctx.had_error = true;
+            return ctx.add_int_const(tir::utils::APInt::new(64, 0));
+        };
+
+        let symbol_id = ctx.get_or_create_register_symbol(self.base.clone(), number);
+        ctx.add_leaf(
+            tir::sem_expr::ExprKind::Symbol,
+            tir::sem_expr::ExprPayload::SymbolId(symbol_id),
+        )
+    }
+}
+
+impl Field {
+    fn as_sema_expr<
+        G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
+    >(
+        &self,
+        ctx: &mut SemaExprLoweringCtx<'_, G>,
+    ) -> tir::graph::NodeId {
+        if let Expr::Ident(base_ident) = &*self.base {
+            if base_ident.name == "self" {
+                return Ident::new(self.member.clone(), self.span).as_sema_expr(ctx);
+            }
+
+            let register_number = if let Some(num_str) = self.member.strip_prefix('x') {
+                num_str
+                    .parse::<u32>()
+                    .expect("invalid register number in field access")
+            } else {
+                self.member
+                    .parse::<u32>()
+                    .expect("invalid register number in field access")
+            };
+
+            let symbol_id =
+                ctx.get_or_create_register_symbol(base_ident.name.clone(), register_number);
+            ctx.add_leaf(
+                tir::sem_expr::ExprKind::Symbol,
+                tir::sem_expr::ExprPayload::SymbolId(symbol_id),
+            )
+        } else {
+            panic!("register field access requires base to be an identifier")
+        }
+    }
+}
+
+impl Binary {
+    fn as_sema_expr<
+        G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
+    >(
+        &self,
+        ctx: &mut SemaExprLoweringCtx<'_, G>,
+    ) -> tir::graph::NodeId {
+        let lhs = self.lhs.lower_with_ctx(ctx);
+        let rhs = self.rhs.lower_with_ctx(ctx);
+
+        use tir::sem_expr::ExprKind as K;
+
+        match self.op {
+            BinOp::Add => ctx.add_node(K::Add, &[lhs, rhs]),
+            BinOp::Sub => ctx.add_node(K::Sub, &[lhs, rhs]),
+            BinOp::Mul => ctx.add_node(K::Mul, &[lhs, rhs]),
+            BinOp::Div => ctx.add_node(K::Div, &[lhs, rhs]),
+            BinOp::UnsignedDiv => ctx.add_node(K::UDiv, &[lhs, rhs]),
+            BinOp::Equal => ctx.add_node(K::Eq, &[lhs, rhs]),
+            BinOp::NotEqual => ctx.add_node(K::Ne, &[lhs, rhs]),
+            BinOp::LessThan => ctx.add_node(K::Lt, &[lhs, rhs]),
+            BinOp::GreaterThan => ctx.add_node(K::Gt, &[lhs, rhs]),
+            BinOp::LessThenEqual => ctx.add_node(K::Ge, &[rhs, lhs]),
+            BinOp::GreaterThanEqual => ctx.add_node(K::Ge, &[lhs, rhs]),
+            BinOp::UnsignedLessThan => ctx.add_node(K::ULt, &[lhs, rhs]),
+            BinOp::UnsignedGreaterThan => ctx.add_node(K::UGt, &[lhs, rhs]),
+            BinOp::UnsignedLessThenEqual => ctx.add_node(K::UGe, &[rhs, lhs]),
+            BinOp::UnsignedGreaterThanEqual => ctx.add_node(K::UGe, &[lhs, rhs]),
+            BinOp::BitwiseAnd => ctx.add_node(K::And, &[lhs, rhs]),
+            BinOp::BitwiseOr => ctx.add_node(K::Or, &[lhs, rhs]),
+            BinOp::BitwiseXor => ctx.add_node(K::Xor, &[lhs, rhs]),
+            BinOp::ShiftLeftLogical => ctx.add_node(K::ShiftLeft, &[lhs, rhs]),
+            BinOp::ShiftRightLogical => ctx.add_node(K::ShiftRightLogic, &[lhs, rhs]),
+            BinOp::ShiftRightArithmetic => ctx.add_node(K::ShiftRightArithmetic, &[lhs, rhs]),
+        }
+    }
+}
+
+impl If {
+    fn as_sema_expr<
+        G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
+    >(
+        &self,
+        ctx: &mut SemaExprLoweringCtx<'_, G>,
+    ) -> tir::graph::NodeId {
+        let cond = self.cond.lower_with_ctx(ctx);
+        let then_ = self.then.lower_with_ctx(ctx);
+        let else_ = if let Some(else_expr) = &self.else_ {
+            else_expr.lower_with_ctx(ctx)
+        } else {
+            ctx.add_bool_const(false)
+        };
+
+        ctx.add_node(tir::sem_expr::ExprKind::If, &[cond, then_, else_])
+    }
+}
+
+impl Block {
+    fn as_sema_expr<
+        G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
+    >(
+        &self,
+        ctx: &mut SemaExprLoweringCtx<'_, G>,
+    ) -> tir::graph::NodeId {
+        if self.stmts.is_empty() {
+            ctx.add_bool_const(false)
+        } else {
+            self.stmts
+                .last()
+                .expect("non-empty block must have last expr")
+                .lower_with_ctx(ctx)
+        }
+    }
+}
+
+impl Slice {
+    fn as_sema_expr<
+        G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
+    >(
+        &self,
+        ctx: &mut SemaExprLoweringCtx<'_, G>,
+    ) -> tir::graph::NodeId {
+        let input = self.base.lower_with_ctx(ctx);
+        let high = Lit::Int(LitInt::new(self.end.to_string(), self.span)).as_sema_expr(ctx);
+        let low = Lit::Int(LitInt::new(self.start.to_string(), self.span)).as_sema_expr(ctx);
+        ctx.build_extract(input, high, low)
+    }
+}
+
+impl IndexAccess {
+    fn as_sema_expr<
+        G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
+    >(
+        &self,
+        ctx: &mut SemaExprLoweringCtx<'_, G>,
+    ) -> tir::graph::NodeId {
+        let input = self.base.lower_with_ctx(ctx);
+        let idx = Lit::Int(LitInt::new(self.index.to_string(), self.span)).as_sema_expr(ctx);
+        ctx.build_extract(input, idx, idx)
+    }
+}
+
+impl Call {
+    fn as_sema_expr<
+        G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
+    >(
+        &self,
+        ctx: &mut SemaExprLoweringCtx<'_, G>,
+    ) -> tir::graph::NodeId {
+        let Expr::BuiltinFunction(builtin) = &*self.callee else {
+            panic!("only builtin functions are supported");
+        };
+
+        match builtin {
+            BuiltinFunction::Clamp => {
+                assert!(self.arguments.len() == 3, "clamp requires 3 arguments");
+                let input = self.arguments[0].lower_with_ctx(ctx);
+                let min = self.arguments[1].lower_with_ctx(ctx);
+                let max = self.arguments[2].lower_with_ctx(ctx);
+                ctx.add_node(tir::sem_expr::ExprKind::Clamp, &[input, min, max])
+            }
+            BuiltinFunction::Extract => {
+                assert!(self.arguments.len() == 3, "extract requires 3 arguments");
+                let input = self.arguments[0].lower_with_ctx(ctx);
+                let high = self.arguments[1].lower_with_ctx(ctx);
+                let low = self.arguments[2].lower_with_ctx(ctx);
+                ctx.build_extract(input, high, low)
+            }
+            BuiltinFunction::Log2Ceil => {
+                assert!(self.arguments.len() == 1, "log2Ceil requires 1 argument");
+                let input = self.arguments[0].lower_with_ctx(ctx);
+                ctx.add_node(tir::sem_expr::ExprKind::Log2Ceil, &[input])
+            }
+            BuiltinFunction::SExt => {
+                assert!(self.arguments.len() == 2, "sext requires 2 arguments");
+                let input = self.arguments[0].lower_with_ctx(ctx);
+                let width = self.arguments[1].lower_with_ctx(ctx);
+                ctx.add_node(tir::sem_expr::ExprKind::SExt, &[input, width])
+            }
+            BuiltinFunction::ZExt => {
+                assert!(self.arguments.len() == 2, "zext requires 2 arguments");
+                let input = self.arguments[0].lower_with_ctx(ctx);
+                let width = self.arguments[1].lower_with_ctx(ctx);
+                ctx.add_node(tir::sem_expr::ExprKind::ZExt, &[input, width])
+            }
+            BuiltinFunction::Load => {
+                assert!(self.arguments.len() == 3, "load requires 3 arguments");
+                let address = self.arguments[0].lower_with_ctx(ctx);
+                let bytes = self.arguments[1].lower_with_ctx(ctx);
+                let metadata = self.arguments[2].lower_with_ctx(ctx);
+                ctx.add_node(
+                    tir::sem_expr::ExprKind::LoadMemory,
+                    &[address, bytes, metadata],
+                )
+            }
+            BuiltinFunction::Store => {
+                assert!(self.arguments.len() == 3, "store requires 3 arguments");
+                let address = self.arguments[0].lower_with_ctx(ctx);
+                let bytes = self.arguments[1].lower_with_ctx(ctx);
+                let value = self.arguments[2].lower_with_ctx(ctx);
+                let address_space = ctx.add_int_const(tir::utils::APInt::new(1, 0));
+                ctx.add_node(
+                    tir::sem_expr::ExprKind::StoreMemory,
+                    &[address, bytes, value, address_space],
+                )
+            }
         }
     }
 }
 
 impl Item {
-    pub fn name(&self) -> String {
+    pub fn name(&self) -> &str {
         match self {
-            Item::InstrDecl(instr) => instr.name(),
-            Item::InstrTemplateDecl(instr) => instr.name(),
-            Item::EnumDecl(instr) => instr.name(),
-            Item::FnDecl(fn_) => fn_.signature().name(),
-            _ => "unknown".to_owned(),
+            Item::Isa(isa) => &isa.name,
+            Item::Instruction(inst) => &inst.name,
+            Item::RegisterClass(rc) => &rc.name,
+            Item::Template(tmpl) => &tmpl.name,
+            Item::Unit(su) => &su.name,
+            Item::Machine(m) => &m.name,
         }
     }
-}
 
-impl fmt::Debug for Item {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    pub fn as_register_class(&self) -> Option<&RegisterClass> {
         match self {
-            Item::InstrTemplateDecl(i) => i.fmt(f),
-            Item::InstrDecl(i) => i.fmt(f),
-            Item::EncodingDecl(i) => i.fmt(f),
-            Item::AsmDecl(i) => i.fmt(f),
-            Item::EnumDecl(i) => i.fmt(f),
-            Item::ImplDecl(i) => i.fmt(f),
-            Item::FlagDecl(i) => i.fmt(f),
-            Item::FnDecl(i) => i.fmt(f),
+            Item::RegisterClass(rc) => Some(rc),
+            _ => None,
+        }
+    }
+
+    pub fn as_instruction(&self) -> Option<&Instruction> {
+        match self {
+            Item::Instruction(i) => Some(i),
+            _ => None,
+        }
+    }
+
+    pub fn as_unit(&self) -> Option<&UnitDecl> {
+        match self {
+            Item::Unit(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    pub fn as_machine(&self) -> Option<&Machine> {
+        match self {
+            Item::Machine(m) => Some(m),
+            _ => None,
         }
     }
 }
 
-impl From<InstrTemplateDecl> for Item {
-    fn from(i: InstrTemplateDecl) -> Self {
-        Item::InstrTemplateDecl(i)
-    }
-}
-
-impl From<InstrDecl> for Item {
-    fn from(i: InstrDecl) -> Self {
-        Item::InstrDecl(i)
-    }
-}
-
-impl From<EncodingDecl> for Item {
-    fn from(i: EncodingDecl) -> Self {
-        Item::EncodingDecl(i)
-    }
-}
-
-impl From<AsmDecl> for Item {
-    fn from(i: AsmDecl) -> Self {
-        Item::AsmDecl(i)
-    }
-}
-
-impl From<EnumDecl> for Item {
-    fn from(i: EnumDecl) -> Self {
-        Item::EnumDecl(i)
-    }
-}
-
-impl From<ImplDecl> for Item {
-    fn from(i: ImplDecl) -> Self {
-        Item::ImplDecl(i)
-    }
-}
-
-impl From<FlagDecl> for Item {
-    fn from(i: FlagDecl) -> Self {
-        Item::FlagDecl(i)
-    }
-}
-
-impl From<FnDecl> for Item {
-    fn from(i: FnDecl) -> Self {
-        Item::FnDecl(i)
-    }
-}
-
-impl SourceFile {
-    pub fn new(root: SyntaxNode) -> Option<SourceFile> {
-        if root.kind() != SyntaxKind::TranslationUnit {
-            return None;
+impl Serialize for Type {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("Type", 2)?;
+        match self {
+            Type::String => {
+                state.serialize_field("name", "String")?;
+            }
+            Type::Integer => {
+                state.serialize_field("name", "Integer")?;
+            }
+            Type::Bits(width) => {
+                state.serialize_field("name", "Bits")?;
+                state.serialize_field("width", width)?;
+            }
+            Type::Struct(name) => {
+                state.serialize_field("name", "Struct")?;
+                state.serialize_field("struct", name)?;
+            }
+            _ => unreachable!("Other types should not be part of AST"),
         }
+        state.end()
+    }
+}
 
-        let items = root
-            .children()
-            .filter_map(|child| match child {
-                NodeOrToken::Node(node) => match node.kind() {
-                    SyntaxKind::InstrTemplateDecl => {
-                        InstrTemplateDecl::new(node.clone()).map(|t| t.into())
-                    }
-                    SyntaxKind::InstrDecl => InstrDecl::new(node.clone()).map(|t| t.into()),
-                    SyntaxKind::EncodingDecl => EncodingDecl::new(node.clone()).map(|t| t.into()),
-                    SyntaxKind::AsmDecl => AsmDecl::new(node.clone()).map(|t| t.into()),
-                    SyntaxKind::EnumDecl => EnumDecl::new(node.clone()).map(|t| t.into()),
-                    SyntaxKind::ImplDecl => ImplDecl::new(node.clone()).map(|t| t.into()),
-                    SyntaxKind::FlagDecl => FlagDecl::new(node.clone()).map(|t| t.into()),
-                    SyntaxKind::FnDecl => FnDecl::new(node.clone()).map(|t| t.into()),
-                    _ => None,
-                },
-                _ => None,
+impl RegisterClass {
+    pub fn register_name_tables(&self) -> RegisterNameTables {
+        let mut entries = self
+            .resolve_registers()
+            .map(|reg| {
+                (
+                    parse_trailing_index(&reg.name).unwrap_or(u16::MAX),
+                    reg.name,
+                    reg.alias,
+                )
             })
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|(idx, _, _)| *idx);
+
+        let mut next_alias_index = HashMap::new();
+        entries.into_iter().fold(
+            RegisterNameTables {
+                parse_names: Vec::new(),
+                isa_names: Vec::new(),
+                abi_names: Vec::new(),
+            },
+            |mut out, (idx, isa_name, alias)| {
+                if idx != u16::MAX {
+                    out.parse_names.push((isa_name.clone(), idx));
+                    out.isa_names.push((idx, isa_name));
+                }
+
+                if let Some(alias_name) = alias {
+                    let full_alias = if alias_name.contains("{}") {
+                        let stem = alias_name.replace("{}", "");
+                        let counter = next_alias_index.entry(stem.clone()).or_insert(0);
+                        let alias = format!("{}{}", stem, *counter);
+                        *counter += 1;
+                        alias
+                    } else {
+                        alias_name
+                    };
+                    out.parse_names.push((full_alias.clone(), idx));
+                    out.abi_names.push((idx, full_alias));
+                }
+
+                out
+            },
+        )
+    }
+
+    pub fn hardwired_zero_register_index(&self) -> Option<u16> {
+        self.resolve_registers().find_map(|reg| {
+            reg.traits
+                .iter()
+                .any(|t| matches!(t, RegisterTrait::HardwiredZero))
+                .then(|| parse_trailing_index(&reg.name).unwrap_or(u16::MAX))
+        })
+    }
+
+    /// Maps each register's name — and its ABI alias, when fixed — to its canonical
+    /// encoding index. The index is the trailing number in the name when present
+    /// (`x5` -> 5), otherwise the register's ordinal position in declaration order
+    /// (status flags `n`, `z`, `c`, `v` -> 0, 1, 2, 3). This gives index-less
+    /// registers a stable slot the simulator can address, while leaving numbered
+    /// registers at the index their operand encoding already uses.
+    pub fn register_indices(&self) -> Vec<(String, u16)> {
+        let mut out = Vec::new();
+        for (position, reg) in self.resolve_registers().enumerate() {
+            let index = parse_trailing_index(&reg.name).unwrap_or(position as u16);
+            out.push((reg.name.clone(), index));
+            if let Some(alias) = &reg.alias
+                && !alias.contains("{}")
+                && alias != &reg.name
+            {
+                out.push((alias.clone(), index));
+            }
+        }
+        out
+    }
+
+    /// Every register that carries a concrete encoding index, paired with its
+    /// traits, sorted by index. Registers without a trailing index (e.g. `pc`) are
+    /// skipped — they have no encodable slot and are never allocated.
+    pub fn indexed_registers(&self) -> Vec<(u16, Vec<RegisterTrait>)> {
+        let mut regs = self
+            .resolve_registers()
+            .filter_map(|reg| parse_trailing_index(&reg.name).map(|idx| (idx, reg.traits)))
+            .collect::<Vec<_>>();
+        regs.sort_by_key(|(idx, _)| *idx);
+        regs
+    }
+
+    /// Register allocation metadata derived from per-register traits: which
+    /// registers are allocatable (and in what preferred order), the caller/callee
+    /// saved partitions, the ordered argument registers, and the return-value
+    /// registers. Indices that are reserved by the ABI (zero, return address,
+    /// stack/global/thread pointer, program counter) never appear in the
+    /// allocation order.
+    pub fn allocation_metadata(&self) -> RegisterAllocationMetadata {
+        let regs = self.indexed_registers();
+        let is_reserved = |traits: &[RegisterTrait]| {
+            traits.iter().any(|t| {
+                matches!(
+                    t,
+                    RegisterTrait::HardwiredZero
+                        | RegisterTrait::ReturnAddress
+                        | RegisterTrait::StackPointer
+                        | RegisterTrait::ProgramCounter
+                        | RegisterTrait::GlobalPointer
+                        | RegisterTrait::ThreadPointer
+                )
+            })
+        };
+        let has = |traits: &[RegisterTrait], want: &RegisterTrait| traits.contains(want);
+
+        let mut caller_saved = Vec::new();
+        let mut callee_saved = Vec::new();
+        let mut arguments = Vec::new();
+        let mut return_values = Vec::new();
+        let mut reserved = Vec::new();
+        for (idx, traits) in &regs {
+            if is_reserved(traits) {
+                reserved.push(*idx);
+            }
+            if has(traits, &RegisterTrait::CallerSaved) && !is_reserved(traits) {
+                caller_saved.push(*idx);
+            }
+            if has(traits, &RegisterTrait::CalleeSaved) && !is_reserved(traits) {
+                callee_saved.push(*idx);
+            }
+            if has(traits, &RegisterTrait::Argument) {
+                arguments.push(*idx);
+            }
+            if has(traits, &RegisterTrait::ReturnValue) {
+                return_values.push(*idx);
+            }
+        }
+
+        // Allocate caller-saved (scratch) registers first so short-lived values
+        // avoid forcing a callee-saved register's save/restore.
+        let allocation_order = caller_saved
+            .iter()
+            .chain(callee_saved.iter())
+            .copied()
             .collect();
 
-        Some(SourceFile {
-            syntax: root,
-            items,
-        })
-    }
-
-    pub fn items(&self) -> std::slice::Iter<'_, Item> {
-        self.items.iter()
-    }
-}
-
-impl ASTNode for SourceFile {
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
-
-    fn span(&self) -> Span {
-        self.syntax().span()
-    }
-}
-
-ast_printer!(SourceFile, items);
-
-impl InstrTemplateDecl {
-    pub fn new(syntax: SyntaxNode) -> Option<InstrTemplateDecl> {
-        if syntax.kind() != SyntaxKind::InstrTemplateDecl {
-            return None;
-        }
-
-        let params = syntax
-            .children()
-            .find_map(|c| match c {
-                NodeOrToken::Node(node) if node.kind() == SyntaxKind::InstrTemplateParams => {
-                    Some(node)
-                }
-                _ => None,
-            })
-            .iter()
-            .flat_map(|n| n.children())
-            .filter_map(|c| match c {
-                NodeOrToken::Node(node) if node.kind() == SyntaxKind::InstrTemplateSingleParam => {
-                    InstrTemplateParameterDecl::new(node)
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-
-        let fields = syntax
-            .children()
-            .find_map(|c| match c {
-                NodeOrToken::Node(node) if node.kind() == SyntaxKind::StructBody => Some(node),
-                _ => None,
-            })
-            .iter()
-            .flat_map(|n| n.children())
-            .filter_map(|c| match c {
-                NodeOrToken::Node(node) if node.kind() == SyntaxKind::StructField => {
-                    StructFieldDecl::new(node)
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-
-        let parent_template = syntax.children().find_map(|c| match c {
-            NodeOrToken::Node(node) if node.kind() == SyntaxKind::InstrParentTemplate => Some(node),
-            _ => None,
-        });
-        let parent_template_args = syntax
-            .children()
-            .find_map(|c| match c {
-                NodeOrToken::Node(node) if node.kind() == SyntaxKind::InstrParentTemplate => {
-                    Some(node)
-                }
-                _ => None,
-            })
-            .iter()
-            .flat_map(|n| n.children())
-            .filter_map(|c| match c {
-                NodeOrToken::Node(node) if node.kind() == SyntaxKind::InstrParentTemplateArg => {
-                    InstrTemplateArg::new(node)
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-
-        Some(Self {
-            syntax,
-            params,
-            fields,
-            parent_template,
-            parent_template_args,
-        })
-    }
-
-    pub fn name(&self) -> String {
-        self.syntax
-            .children()
-            .find_map(|child| match child {
-                NodeOrToken::Node(node) => {
-                    if node.kind() == SyntaxKind::InstrTemplateName {
-                        Some(node)
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            })
-            .iter()
-            .flat_map(|node| node.children())
-            .find_map(|child| match child {
-                crate::SyntaxElement::Token(token) => {
-                    if token.kind() == SyntaxKind::Identifier {
-                        Some(token.text().to_string())
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            })
-            .unwrap_or("unknown".to_string())
-    }
-
-    pub fn parameters(&self) -> &[InstrTemplateParameterDecl] {
-        &self.params
-    }
-
-    pub fn fields(&self) -> &[StructFieldDecl] {
-        &self.fields
-    }
-
-    pub fn has_parent_template(&self) -> bool {
-        self.parent_template.is_some()
-    }
-
-    pub fn parent_template_name(&self) -> Option<String> {
-        self.parent_template
-            .iter()
-            .flat_map(|c| c.children())
-            .find_map(|child| match child {
-                NodeOrToken::Node(node) => {
-                    if node.kind() == SyntaxKind::InstrParentTemplateName {
-                        Some(node)
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            })
-            .iter()
-            .flat_map(|node| node.children())
-            .find_map(|child| match child {
-                crate::SyntaxElement::Token(token) => {
-                    if token.kind() == SyntaxKind::Identifier {
-                        Some(token.text().to_string())
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            })
-    }
-
-    pub fn parent_template_args(&self) -> std::slice::Iter<'_, InstrTemplateArg> {
-        self.parent_template_args.iter()
-    }
-}
-
-ast_printer!(
-    InstrTemplateDecl,
-    name,
-    parameters,
-    fields,
-    parent_template_name,
-    parent_template_args
-);
-
-impl InstrTemplateParameterDecl {
-    pub fn name(&self) -> String {
-        self.syntax()
-            .children()
-            .find_map(|child| match child {
-                NodeOrToken::Node(node)
-                    if node.kind() == SyntaxKind::InstrTemplateSingleParamName =>
-                {
-                    Some(node)
-                }
-                _ => None,
-            })
-            .iter()
-            .flat_map(|node| node.children())
-            .find_map(|child| match child {
-                crate::SyntaxElement::Token(token) if token.kind() == SyntaxKind::Identifier => {
-                    Some(token.text().to_string())
-                }
-                _ => None,
-            })
-            .unwrap_or("unknown".to_string())
-    }
-
-    pub fn ty(&self) -> Type {
-        let ty = self
-            .syntax()
-            .children()
-            .find_map(|child| match child {
-                NodeOrToken::Node(node) if node.kind() == SyntaxKind::Type => Some(node),
-                _ => None,
-            })
-            .unwrap();
-
-        Type::new(ty).unwrap()
-    }
-}
-
-ast_printer!(InstrTemplateParameterDecl, name, ty);
-
-impl InstrDecl {
-    pub fn new(syntax: SyntaxNode) -> Option<Self> {
-        if syntax.kind() != SyntaxKind::InstrDecl {
-            return None;
-        }
-
-        let template_args = syntax
-            .children()
-            .find_map(|c| match c {
-                NodeOrToken::Node(node) if node.kind() == SyntaxKind::InstrParentTemplate => {
-                    Some(node)
-                }
-                _ => None,
-            })
-            .iter()
-            .flat_map(|n| n.children())
-            .filter_map(|c| match c {
-                NodeOrToken::Node(node) if node.kind() == SyntaxKind::InstrParentTemplateArg => {
-                    InstrTemplateArg::new(node)
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-
-        Some(Self {
-            syntax,
-            template_args,
-        })
-    }
-
-    pub fn name(&self) -> String {
-        self.syntax
-            .children()
-            .find_map(|c| match c {
-                NodeOrToken::Node(node) if node.kind() == SyntaxKind::InstrName => Some(node),
-                _ => None,
-            })
-            .iter()
-            .flat_map(|n| n.children())
-            .find_map(|c| match c {
-                NodeOrToken::Token(token) if token.kind() == SyntaxKind::Identifier => {
-                    Some(token.text().to_string())
-                }
-                _ => None,
-            })
-            .unwrap_or("unknown".to_string())
-    }
-
-    pub fn template_name(&self) -> String {
-        self.syntax
-            .children()
-            .find_map(|c| match c {
-                NodeOrToken::Node(node) if node.kind() == SyntaxKind::InstrParentTemplate => {
-                    Some(node)
-                }
-                _ => None,
-            })
-            .iter()
-            .flat_map(|n| n.children())
-            .find_map(|c| match c {
-                NodeOrToken::Node(node) if node.kind() == SyntaxKind::InstrParentTemplateName => {
-                    Some(node)
-                }
-                _ => None,
-            })
-            .iter()
-            .flat_map(|n| n.children())
-            .find_map(|c| match c {
-                NodeOrToken::Token(token) if token.kind() == SyntaxKind::Identifier => {
-                    Some(token.text().to_string())
-                }
-                _ => None,
-            })
-            .unwrap_or("unknown".to_string())
-    }
-
-    pub fn template_args(&self) -> &[InstrTemplateArg] {
-        &self.template_args
-    }
-}
-
-ast_printer!(InstrDecl, name, template_name, template_args);
-
-// FIXME remove this
-impl fmt::Debug for InstrTemplateArg {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("InstrTemplateArg").finish()
-    }
-}
-
-impl EncodingDecl {
-    pub fn new(syntax: SyntaxNode) -> Option<Self> {
-        if syntax.kind() != SyntaxKind::EncodingDecl {
-            return None;
-        }
-
-        let body = syntax.children().find_map(|c| match c {
-            NodeOrToken::Node(n) if n.kind() == SyntaxKind::BlockExpr => BlockExpr::new(n),
-            _ => None,
-        })?;
-
-        Some(Self { syntax, body })
-    }
-
-    pub fn target_name(&self) -> String {
-        self.syntax
-            .children()
-            .find_map(|child| match child {
-                NodeOrToken::Node(node) => {
-                    if node.kind() == SyntaxKind::ImplTargetName {
-                        Some(node)
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            })
-            .iter()
-            .flat_map(|node| node.children())
-            .find_map(|child| match child {
-                crate::SyntaxElement::Token(token) => {
-                    if token.kind() == SyntaxKind::Identifier {
-                        Some(token.text().to_string())
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            })
-            .unwrap_or("unknown".to_string())
-    }
-
-    pub fn body(&self) -> &BlockExpr {
-        &self.body
-    }
-}
-
-ast_printer!(EncodingDecl, target_name, body);
-
-impl AsmDecl {
-    pub fn new(syntax: SyntaxNode) -> Option<Self> {
-        if syntax.kind() != SyntaxKind::AsmDecl {
-            return None;
-        }
-
-        let body = syntax.children().find_map(|c| match c {
-            NodeOrToken::Node(n) if n.kind() == SyntaxKind::BlockExpr => BlockExpr::new(n),
-            _ => None,
-        })?;
-
-        Some(Self { syntax, body })
-    }
-
-    pub fn target_name(&self) -> String {
-        self.syntax
-            .children()
-            .find_map(|child| match child {
-                NodeOrToken::Node(node) => {
-                    if node.kind() == SyntaxKind::ImplTargetName {
-                        Some(node)
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            })
-            .iter()
-            .flat_map(|node| node.children())
-            .find_map(|child| match child {
-                crate::SyntaxElement::Token(token) => {
-                    if token.kind() == SyntaxKind::Identifier {
-                        Some(token.text().to_string())
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            })
-            .unwrap_or("unknown".to_string())
-    }
-
-    pub fn body(&self) -> &BlockExpr {
-        &self.body
-    }
-}
-
-ast_printer!(AsmDecl, target_name, body);
-
-impl ImplDecl {
-    pub fn target_name(&self) -> String {
-        self.syntax()
-            .children()
-            .find_map(|child| match child {
-                NodeOrToken::Node(node) => {
-                    if node.kind() == SyntaxKind::ImplTargetName {
-                        Some(node)
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            })
-            .iter()
-            .flat_map(|node| node.children())
-            .find_map(|child| match child {
-                crate::SyntaxElement::Token(token) => {
-                    if token.kind() == SyntaxKind::Identifier {
-                        Some(token.text().to_string())
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            })
-            .unwrap_or("unknown".to_string())
-    }
-
-    pub fn trait_name(&self) -> String {
-        self.syntax()
-            .children()
-            .find_map(|child| match child {
-                NodeOrToken::Node(node) => {
-                    if node.kind() == SyntaxKind::ImplTraitName {
-                        Some(node)
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            })
-            .iter()
-            .flat_map(|node| node.children())
-            .find_map(|child| match child {
-                crate::SyntaxElement::Token(token) => {
-                    if token.kind() == SyntaxKind::Identifier {
-                        Some(token.text().to_string())
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            })
-            .unwrap_or("unknown".to_string())
-    }
-}
-
-impl StructFieldDecl {
-    pub fn name(&self) -> String {
-        self.syntax()
-            .children()
-            .find_map(|c| match c {
-                NodeOrToken::Token(t) if t.kind() == SyntaxKind::Identifier => {
-                    Some(t.text().to_string())
-                }
-                _ => None,
-            })
-            .unwrap_or("unknown".to_string())
-    }
-
-    pub fn ty(&self) -> Type {
-        self.syntax()
-            .children()
-            .find_map(|c| match c {
-                NodeOrToken::Node(n) if n.kind() == SyntaxKind::Type => Type::new(n),
-                _ => None,
-            })
-            .unwrap()
-    }
-}
-
-ast_printer!(EnumDecl, name, doc, variants);
-
-impl ASTNode for EnumDecl {
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
-}
-
-impl EnumDecl {
-    pub fn new(syntax: SyntaxNode) -> Option<Self> {
-        if syntax.kind() != SyntaxKind::EnumDecl {
-            return None;
-        }
-
-        let variants = syntax
-            .children()
-            .find_map(|c| match c {
-                NodeOrToken::Node(n) if n.kind() == SyntaxKind::EnumBody => Some(n),
-                _ => None,
-            })
-            .iter()
-            .flat_map(|n| n.children())
-            .filter_map(|c| match c {
-                NodeOrToken::Node(n) if n.kind() == SyntaxKind::EnumVariantDecl => {
-                    EnumVariantDecl::new(n)
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-
-        Some(Self { syntax, variants })
-    }
-
-    pub fn name(&self) -> String {
-        self.syntax()
-            .children()
-            .find_map(|c| match c {
-                NodeOrToken::Token(t) if t.kind() == SyntaxKind::Identifier => {
-                    Some(t.text().to_string())
-                }
-                _ => None,
-            })
-            .unwrap_or("unknown".to_string())
-    }
-
-    pub fn variants(&self) -> &[EnumVariantDecl] {
-        &self.variants
-    }
-}
-
-impl EnumVariantDecl {
-    pub fn name(&self) -> String {
-        self.syntax()
-            .children()
-            .find_map(|c| match c {
-                NodeOrToken::Token(t) if t.kind() == SyntaxKind::Identifier => {
-                    Some(t.text().to_string())
-                }
-                _ => None,
-            })
-            .unwrap_or("unknown".to_string())
-    }
-}
-
-impl AttrListOwner for EnumVariantDecl {}
-
-ast_printer!(EnumVariantDecl, name, doc, attr_list);
-
-impl FlagDecl {
-    pub fn name(&self) -> String {
-        self.syntax()
-            .children()
-            .find_map(|c| match c {
-                NodeOrToken::Token(t) if t.kind() == SyntaxKind::Identifier => {
-                    Some(t.text().to_string())
-                }
-                _ => None,
-            })
-            .unwrap_or("unknown".to_string())
-    }
-}
-
-impl From<LiteralExpr> for Expr {
-    fn from(value: LiteralExpr) -> Self {
-        Expr::Literal(value)
-    }
-}
-
-impl From<BlockExpr> for Expr {
-    fn from(value: BlockExpr) -> Self {
-        Expr::Block(value)
-    }
-}
-
-impl From<ListExpr> for Expr {
-    fn from(value: ListExpr) -> Self {
-        Expr::List(value)
-    }
-}
-
-impl From<BinOpExpr> for Expr {
-    fn from(value: BinOpExpr) -> Self {
-        Expr::BinOp(value)
-    }
-}
-
-impl Expr {
-    pub fn as_list(&self) -> ListExpr {
-        match &self {
-            Expr::List(list) => list.clone(),
-            _ => unreachable!("Not a List!"),
+        RegisterAllocationMetadata {
+            allocation_order,
+            caller_saved,
+            callee_saved,
+            arguments,
+            return_values,
+            reserved,
         }
     }
 
-    pub fn as_literal(&self) -> LiteralExpr {
-        match &self {
-            Expr::Literal(literal) => literal.clone(),
-            _ => unreachable!("Not a Literal!"),
+    /// The name of the physical register file this class draws from: the root of
+    /// its inheritance chain. Classes that share a file (e.g. AArch64 `GPR` and
+    /// `GPRsp`) name the same physical register at a given encoding index, so the
+    /// register allocator must treat those indices as aliases. A standalone class
+    /// is its own file. `classes` maps every class name to its definition.
+    pub fn register_file<'a>(&'a self, classes: &'a HashMap<String, &'a RegisterClass>) -> &'a str {
+        let mut current = self;
+        let mut seen = std::collections::HashSet::new();
+        while let Some(base_name) = &current.base {
+            if !seen.insert(current.name.clone()) {
+                break; // defensive: inheritance cycle
+            }
+            match classes.get(base_name) {
+                Some(base) => current = base,
+                None => break,
+            }
         }
+        &current.name
     }
-}
 
-impl ExprNode for Expr {
-    fn ty(&self) -> &Type {
-        match self {
-            Expr::Literal(l) => l.ty(),
-            Expr::Block(b) => b.ty(),
-            Expr::BinOp(b) => b.ty(),
-            Expr::List(l) => l.ty(),
-        }
-    }
-}
+    pub fn resolve_registers(&self) -> impl Iterator<Item = Register> {
+        let mut registers = Vec::new();
 
-impl fmt::Debug for Expr {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Expr::Literal(l) => l.fmt(f),
-            Expr::Block(b) => b.fmt(f),
-            Expr::BinOp(b) => b.fmt(f),
-            Expr::List(l) => l.fmt(f),
-        }
-    }
-}
+        for def in &self.registers {
+            match def {
+                RegisterDef::Single(register) => registers.push(register.clone()),
+                RegisterDef::Range(range) => {
+                    let (Some(start_idx), Some(end_idx)) = (
+                        parse_trailing_index(&range.start),
+                        parse_trailing_index(&range.end),
+                    ) else {
+                        continue;
+                    };
 
-impl LiteralExpr {
-    pub fn new(syntax: SyntaxNode) -> Option<Self> {
-        if syntax.kind() != SyntaxKind::LiteralExpr {
-            return None;
-        }
-
-        let ty = syntax.children().find_map(|c| match c {
-            NodeOrToken::Token(token) => {
-                if token.kind() == SyntaxKind::IntegerLiteral {
-                    Some(Type::Integer)
-                } else if token.kind() == SyntaxKind::StringLiteral {
-                    Some(Type::String)
-                } else if token.kind() == SyntaxKind::BitLiteral {
-                    Some(Type::Bits((token.text_len() - 2) as u16))
-                } else if token.kind() == SyntaxKind::Identifier {
-                    Some(Type::Unresolved(NodeOrToken::Token(token)))
-                } else {
-                    None
+                    let prefix = strip_trailing_digits(&range.start);
+                    for idx in start_idx..=end_idx {
+                        registers.push(Register {
+                            name: format!("{prefix}{idx}"),
+                            alias: range.alias_pattern.clone(),
+                            traits: range.traits.clone(),
+                            subregisters: Vec::new(),
+                            span: range.span,
+                        });
+                    }
                 }
             }
-            NodeOrToken::Node(node) if node.kind() == SyntaxKind::FieldExpr => {
-                Some(Type::Unresolved(NodeOrToken::Node(node)))
-            }
-            _ => None,
-        })?;
+        }
 
-        Some(Self { syntax, ty })
+        registers.into_iter()
     }
+}
 
-    pub fn text(&self) -> String {
-        self.syntax
-            .children()
-            .find_map(|c| match c {
-                NodeOrToken::Token(t) if t.kind() == SyntaxKind::StringLiteral => {
-                    Some(t.text().to_string())
+/// Flatten `register_class` inheritance in place: every class with a `base`
+/// absorbs the base's parameters and (encoding-expanded) registers, then applies
+/// its own declarations as overrides — parameters by name, registers by trailing
+/// encoding index (or by name for index-less registers like `pc`). After this runs
+/// every class carries its complete register set, so all downstream analysis
+/// (typeck, sema, codegen) can treat classes as self-contained. `base` itself is
+/// left intact so codegen can still recover the shared register file (see
+/// [`RegisterClass::register_file`]).
+pub fn resolve_register_class_inheritance(files: &mut [File]) {
+    let raw: HashMap<String, RegisterClass> = files
+        .iter()
+        .flat_map(|f| f.register_classes())
+        .map(|rc| (rc.name.clone(), rc.clone()))
+        .collect();
+
+    fn merge(
+        name: &str,
+        raw: &HashMap<String, RegisterClass>,
+        cache: &mut HashMap<String, RegisterClass>,
+    ) -> RegisterClass {
+        if let Some(done) = cache.get(name) {
+            return done.clone();
+        }
+        let mut rc = raw
+            .get(name)
+            .cloned()
+            .expect("merge called with a known class name");
+
+        if let Some(base_name) = rc.base.clone() {
+            // A dangling base is reported by sema; treat it as no inheritance here.
+            if raw.contains_key(&base_name) && base_name != name {
+                let base = merge(&base_name, raw, cache);
+
+                let mut parameters = base.parameters.clone();
+                for (key, value) in rc.parameters.iter() {
+                    parameters.insert(key.clone(), value.clone());
                 }
-                _ => None,
-            })
-            .unwrap()
-    }
-}
 
-impl ExprNode for LiteralExpr {
-    fn ty(&self) -> &Type {
-        &self.ty
-    }
-}
+                let mut registers: Vec<Register> = base.resolve_registers().collect();
+                for own in rc.resolve_registers() {
+                    let key = parse_trailing_index(&own.name);
+                    let existing = registers.iter().position(|r| match key {
+                        Some(idx) => parse_trailing_index(&r.name) == Some(idx),
+                        None => r.name == own.name,
+                    });
+                    match existing {
+                        Some(pos) => registers[pos] = own,
+                        None => registers.push(own),
+                    }
+                }
 
-ast_printer!(LiteralExpr, ty);
-
-impl ExprNode for BlockExpr {
-    fn ty(&self) -> &Type {
-        &self.ty
-    }
-}
-
-impl BlockExpr {
-    pub fn new(syntax: SyntaxNode) -> Option<Self> {
-        if syntax.kind() != SyntaxKind::BlockExpr {
-            return None;
+                rc.parameters = parameters;
+                rc.registers = registers.into_iter().map(RegisterDef::Single).collect();
+            }
         }
 
-        let stmts = syntax
-            .children()
-            .filter_map(map_expr)
-            .collect::<Vec<Expr>>();
-
-        let ty = stmts.last().map(|e| e.ty()).cloned().unwrap_or(Type::Void);
-
-        Some(Self { syntax, stmts, ty })
+        cache.insert(name.to_string(), rc.clone());
+        rc
     }
-}
 
-impl fmt::Debug for BlockExpr {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BlockExpr")
-            .field("type", &self.ty)
-            .field("stmts", &self.stmts)
-            .finish()
+    let mut cache: HashMap<String, RegisterClass> = HashMap::new();
+    for name in raw.keys() {
+        merge(name, &raw, &mut cache);
     }
-}
 
-impl ExprNode for ListExpr {
-    fn ty(&self) -> &Type {
-        &self.ty
-    }
-}
-
-impl ListExpr {
-    pub fn new(syntax: SyntaxNode) -> Option<Self> {
-        if syntax.kind() != SyntaxKind::ListExpr {
-            return None;
+    for file in files.iter_mut() {
+        for item in file.items.iter_mut() {
+            if let Item::RegisterClass(rc) = item
+                && let Some(merged) = cache.get(&rc.name)
+            {
+                rc.parameters = merged.parameters.clone();
+                rc.registers = merged.registers.clone();
+            }
         }
+    }
+}
 
-        let elements = syntax
-            .children()
-            .filter_map(map_expr)
-            .collect::<Vec<Expr>>();
+fn parse_trailing_index(s: &str) -> Option<u16> {
+    let mut i = s.len();
+    while i > 0 && s.as_bytes()[i - 1].is_ascii_digit() {
+        i -= 1;
+    }
+    if i < s.len() {
+        s[i..].parse::<u16>().ok()
+    } else {
+        None
+    }
+}
 
-        let ty = elements.last().map(|e| e.ty()).cloned()?;
+fn strip_trailing_digits(s: &str) -> &str {
+    let mut i = s.len();
+    while i > 0 && s.as_bytes()[i - 1].is_ascii_digit() {
+        i -= 1;
+    }
+    &s[..i]
+}
 
-        Some(Self {
-            syntax,
-            elements,
+impl File {
+    pub fn isas(&self) -> impl Iterator<Item = &Isa> {
+        self.items.iter().filter_map(|f| match f {
+            Item::Isa(isa) => Some(isa),
+            _ => None,
+        })
+    }
+
+    pub fn templates(&self) -> impl Iterator<Item = &Template> {
+        self.items.iter().filter_map(|f| match f {
+            Item::Template(t) => Some(t),
+            _ => None,
+        })
+    }
+
+    pub fn instructions(&self) -> impl Iterator<Item = &Instruction> {
+        self.items.iter().filter_map(|f| match f {
+            Item::Instruction(i) => Some(i),
+            _ => None,
+        })
+    }
+
+    pub fn register_classes(&self) -> impl Iterator<Item = &RegisterClass> {
+        self.items.iter().filter_map(|f| match f {
+            Item::RegisterClass(rc) => Some(rc),
+            _ => None,
+        })
+    }
+
+    pub fn units(&self) -> impl Iterator<Item = &UnitDecl> {
+        self.items.iter().filter_map(|f| match f {
+            Item::Unit(s) => Some(s),
+            _ => None,
+        })
+    }
+
+    pub fn machines(&self) -> impl Iterator<Item = &Machine> {
+        self.items.iter().filter_map(|f| match f {
+            Item::Machine(m) => Some(m),
+            _ => None,
+        })
+    }
+}
+
+#[derive(Serialize)]
+struct ParamRef<'a> {
+    name: &'a str,
+    #[serde(rename = "type")]
+    ty: &'a Type,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    value: Option<&'a Expr>,
+}
+
+fn serialize_params<S>(
+    params: &HashMap<String, (Type, Option<Expr>)>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let mut mapped: Vec<ParamRef<'_>> = params
+        .iter()
+        .map(|(name, (ty, val))| ParamRef {
+            name,
             ty,
+            value: val.as_ref(),
         })
-    }
+        .collect();
+    mapped.sort_by_key(|x| x.name);
 
-    pub fn elements(&self) -> &[Expr] {
-        &self.elements
-    }
-}
-
-impl fmt::Debug for ListExpr {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_list().entries(&self.elements).finish()
-    }
-}
-
-impl BinOpExpr {
-    pub fn new(syntax: SyntaxNode) -> Option<Self> {
-        if syntax.kind() != SyntaxKind::BinOpExpr {
-            return None;
-        }
-
-        let left: Box<Expr> = syntax
-            .children()
-            .find_map(|c| match c {
-                NodeOrToken::Node(n) if n.kind() == SyntaxKind::BinOpExprLeft => Some(n),
-                _ => None,
-            })
-            .iter()
-            .flat_map(|n| n.children())
-            .find_map(map_expr)
-            .map(Box::new)
-            .unwrap();
-        let kind: BinOpKind = syntax
-            .children()
-            .find_map(|c| match c {
-                NodeOrToken::Node(n) if n.kind() == SyntaxKind::BinOpExprOp => Some(n),
-                _ => None,
-            })
-            .iter()
-            .flat_map(|n| n.children())
-            .find_map(|c| match c {
-                NodeOrToken::Token(token) => match token.kind() {
-                    SyntaxKind::At => Some(BinOpKind::BitConcat),
-                    _ => None,
-                },
-                _ => None,
-            })?;
-        let right: Box<Expr> = syntax
-            .children()
-            .find_map(|c| match c {
-                NodeOrToken::Node(n) if n.kind() == SyntaxKind::BinOpExprRight => Some(n),
-                _ => None,
-            })
-            .iter()
-            .flat_map(|n| n.children())
-            .find_map(map_expr)
-            .map(Box::new)?;
-
-        Some(Self {
-            syntax,
-            kind,
-            left,
-            right,
-        })
-    }
-}
-
-impl fmt::Debug for BinOpExpr {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BinOpExpr")
-            .field("kind", &self.kind)
-            .field("left", &*self.left)
-            .field("right", &*self.right)
-            .finish()
-    }
-}
-
-impl ExprNode for BinOpExpr {
-    fn ty(&self) -> &Type {
-        self.left.ty()
-    }
-}
-
-fn map_expr(element: SyntaxElement) -> Option<Expr> {
-    match element {
-        NodeOrToken::Node(node) => match node.kind() {
-            SyntaxKind::LiteralExpr => LiteralExpr::new(node).map(|e| e.into()),
-            SyntaxKind::BlockExpr => BlockExpr::new(node).map(|e| e.into()),
-            SyntaxKind::BinOpExpr => BinOpExpr::new(node).map(|e| e.into()),
-            SyntaxKind::ListExpr => ListExpr::new(node).map(|e| e.into()),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-impl AttrList {
-    pub fn attributes(&self) -> impl Iterator<Item = Attr> + use<'_> {
-        self.syntax().children().filter_map(|c| match c {
-            NodeOrToken::Node(n) => Attr::new(n.clone()),
-            _ => None,
-        })
-    }
-}
-
-impl fmt::Debug for AttrList {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_list().entries(self.attributes()).finish()
-    }
-}
-
-impl Attr {
-    pub fn name(&self) -> String {
-        self.syntax()
-            .children()
-            .find_map(|child| match child {
-                NodeOrToken::Token(t) => {
-                    if t.kind() == SyntaxKind::Identifier {
-                        Some(t.text().to_string())
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            })
-            .unwrap()
-    }
-
-    pub fn exprs(&self) -> impl Iterator<Item = Expr> + use<'_> {
-        self.syntax().children().filter_map(map_expr)
-    }
-}
-
-impl fmt::Debug for Attr {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let exprs = self.exprs().collect::<Vec<_>>();
-        f.debug_struct("Attr")
-            .field("name", &self.name())
-            .field("values", &exprs)
-            .finish()
-    }
-}
-
-impl FnDecl {
-    pub fn signature(&self) -> FnSignature {
-        self.syntax()
-            .children()
-            .find_map(|c| match c {
-                NodeOrToken::Node(n) if n.kind() == SyntaxKind::FnSignature => {
-                    FnSignature::new(n.clone())
-                }
-                _ => None,
-            })
-            .unwrap()
-    }
-
-    pub fn body(&self) -> BlockExpr {
-        self.syntax()
-            .children()
-            .find_map(|c| match c {
-                NodeOrToken::Node(n) if n.kind() == SyntaxKind::BlockExpr => {
-                    BlockExpr::new(n.clone())
-                }
-                _ => None,
-            })
-            .unwrap()
-    }
-}
-
-impl FnSignature {
-    pub fn name(&self) -> String {
-        self.syntax()
-            .children()
-            .find_map(|c| match c {
-                NodeOrToken::Token(t) if t.kind() == SyntaxKind::Identifier => {
-                    Some(t.text().to_string())
-                }
-                _ => None,
-            })
-            .unwrap()
-    }
-
-    pub fn params(&self) -> impl Iterator<Item = FnParam> + use<'_> {
-        self.syntax()
-            .children()
-            .find(|c| match c {
-                NodeOrToken::Node(n) => n.kind() == SyntaxKind::FnParamList,
-                _ => false,
-            })
-            .map(|list| {
-                list.as_node()
-                    .children()
-                    .filter_map(|c| match c {
-                        NodeOrToken::Node(n) if n.kind() == SyntaxKind::FnParam => {
-                            FnParam::new(n.clone())
-                        }
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .into_iter()
-            .flatten()
-    }
-
-    pub fn ret_ty(&self) -> Option<Type> {
-        self.syntax()
-            .children()
-            .find_map(|c| match c {
-                NodeOrToken::Node(n) if n.kind() == SyntaxKind::FnRetType => Some(n.clone()),
-                _ => None,
-            })
-            .and_then(|node| {
-                node.children().find_map(|c| match c {
-                    NodeOrToken::Node(c) if c.kind() == SyntaxKind::Type => Type::new(c),
-                    _ => None,
-                })
-            })
-    }
-}
-
-impl fmt::Debug for FnSignature {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let params = self.params().collect::<Vec<_>>();
-        f.debug_struct("FnSignature")
-            .field("name", &self.name())
-            .field("parameters", &params)
-            .field("return_type", &self.ret_ty())
-            .finish()
-    }
-}
-
-impl fmt::Debug for FnParam {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("FnParam").field(&self.0).finish()
-    }
+    mapped.serialize(serializer)
 }

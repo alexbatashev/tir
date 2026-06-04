@@ -1,0 +1,115 @@
+// ARMv8-A A64 load/store integer instructions
+
+instruction LoadByteUnsigned for [ARMv8A64] : LoadStoreImmUnsigned {
+    param MNEMONIC: String = "ldrb";
+    param SIZE: bits<2> = 0b00;
+    param OPC: bits<2> = 0b01;
+
+    behavior {
+        rt = zext(load(rn + zext(imm, self.XLEN), 1, 0b0), self.XLEN);
+    }
+}
+
+instruction LoadHalfwordUnsigned for [ARMv8A64] : LoadStoreImmUnsigned {
+    param MNEMONIC: String = "ldrh";
+    param SIZE: bits<2> = 0b01;
+    param OPC: bits<2> = 0b01;
+
+    behavior {
+        rt = zext(load(rn + zext(imm, self.XLEN), 2, 0b0), self.XLEN);
+    }
+}
+
+instruction LoadWordUnsigned for [ARMv8A64] : LoadStoreImmUnsigned {
+    param MNEMONIC: String = "ldr";
+    param OPNAME: String = "load_word_unsigned";
+    param SIZE: bits<2> = 0b10;
+    param OPC: bits<2> = 0b01;
+
+    behavior {
+        rt = zext(load(rn + zext(imm, self.XLEN), 4, 0b0), self.XLEN);
+    }
+}
+
+instruction LoadDoubleword for [ARMv8A64] : LoadStoreImmUnsigned {
+    param MNEMONIC: String = "ldr";
+    param OPNAME: String = "load_doubleword";
+    param SIZE: bits<2> = 0b11;
+    param OPC: bits<2> = 0b01;
+
+    behavior {
+        rt = load(rn + zext(imm, self.XLEN), 8, 0b0);
+    }
+}
+
+instruction LoadByteSigned for [ARMv8A64] : LoadStoreImmUnsigned {
+    param MNEMONIC: String = "ldrsb";
+    param SIZE: bits<2> = 0b00;
+    param OPC: bits<2> = 0b10;
+
+    behavior {
+        rt = sext(load(rn + zext(imm, self.XLEN), 1, 0b1), self.XLEN);
+    }
+}
+
+instruction LoadHalfwordSigned for [ARMv8A64] : LoadStoreImmUnsigned {
+    param MNEMONIC: String = "ldrsh";
+    param SIZE: bits<2> = 0b01;
+    param OPC: bits<2> = 0b10;
+
+    behavior {
+        rt = sext(load(rn + zext(imm, self.XLEN), 2, 0b1), self.XLEN);
+    }
+}
+
+instruction LoadWordSigned for [ARMv8A64] : LoadStoreImmUnsigned {
+    param MNEMONIC: String = "ldrsw";
+    param SIZE: bits<2> = 0b10;
+    param OPC: bits<2> = 0b10;
+
+    behavior {
+        rt = sext(load(rn + zext(imm, self.XLEN), 4, 0b1), self.XLEN);
+    }
+}
+
+instruction StoreByte for [ARMv8A64] : LoadStoreImmUnsigned {
+    param MNEMONIC: String = "strb";
+    param SIZE: bits<2> = 0b00;
+    param OPC: bits<2> = 0b00;
+
+    behavior {
+        store(rn + zext(imm, self.XLEN), 1, extract(rt, 7, 0));
+    }
+}
+
+instruction StoreHalfword for [ARMv8A64] : LoadStoreImmUnsigned {
+    param MNEMONIC: String = "strh";
+    param SIZE: bits<2> = 0b01;
+    param OPC: bits<2> = 0b00;
+
+    behavior {
+        store(rn + zext(imm, self.XLEN), 2, extract(rt, 15, 0));
+    }
+}
+
+instruction StoreWord for [ARMv8A64] : LoadStoreImmUnsigned {
+    param MNEMONIC: String = "str";
+    param OPNAME: String = "store_word";
+    param SIZE: bits<2> = 0b10;
+    param OPC: bits<2> = 0b00;
+
+    behavior {
+        store(rn + zext(imm, self.XLEN), 4, extract(rt, 31, 0));
+    }
+}
+
+instruction StoreDoubleword for [ARMv8A64] : LoadStoreImmUnsigned {
+    param MNEMONIC: String = "str";
+    param OPNAME: String = "store_doubleword";
+    param SIZE: bits<2> = 0b11;
+    param OPC: bits<2> = 0b00;
+
+    behavior {
+        store(rn + zext(imm, self.XLEN), 8, rt);
+    }
+}

@@ -1,895 +1,1657 @@
-use lang::{just_token, token, trivia};
-use lpl::syntax::GreenNodeData;
-use lpl::{combinators::*, Span};
-use lpl::{
-    syntax::{GreenElement, NodeOrToken},
-    ParseStream, Parser,
+use chumsky::{input::ValueInput, prelude::*};
+
+use crate::{
+    Span, Spanned, Type,
+    ast::{self, *},
+    lexer::Token,
 };
 
-use crate::diagnostic::DiagKind;
-use crate::{ImmElement, ImmNode, SyntaxKind, TokenStream};
-
-pub fn parse(tokens: &[ImmElement]) -> ImmNode {
-    let stream = TokenStream::new(tokens);
-
-    let top_level_decl = instr_template_decl()
-        .or_else(instr_decl())
-        .or_else(encoding())
-        .or_else(asm_())
-        .or_else(enum_())
-        .or_else(impl_())
-        .or_else(flag())
-        .or_else(func_decl());
-    let parser = zero_or_more(top_level_decl.map(NodeOrToken::Node).or_else(catch_all()));
-
-    let result = parser.parse(stream).unwrap();
-
-    GreenNodeData::new(SyntaxKind::TranslationUnit, result.0, Span::empty())
+pub fn parse<'src>(
+    source: &'src str,
+    tokens: &'src [Spanned<Token>],
+    file_name: &str,
+) -> (Option<File>, Vec<Rich<'src, Token<'src>, Span>>) {
+    file(file_name)
+        .then_ignore(end())
+        .parse(tokens.map((source.len()..source.len()).into(), |(t, s)| (t, s)))
+        .into_output_errors()
 }
 
-fn attached_comment<'a>() -> impl Parser<'a, TokenStream<'a>, Vec<ImmElement>> {
-    move |tokens: TokenStream<'a>| {
-        if tokens.len() < 2 {
-            return Err(DiagKind::UnexpectedEof(tokens.span()).into());
-        }
-
-        let mut comments = vec![];
-
-        for i in (0..tokens.len()).step_by(2) {
-            let maybe_comment = tokens.nth(i).unwrap();
-            if maybe_comment.as_token().kind() != SyntaxKind::Comment
-                && maybe_comment.as_token().kind() != SyntaxKind::LocalDocComment
-            {
-                break;
-            }
-
-            let maybe_newline = tokens.nth(i + 1).unwrap();
-            if maybe_newline.as_token().kind() != SyntaxKind::Whitespace
-                && maybe_newline.as_token().text() != "\n"
-            {
-                return Err(DiagKind::TokenNotFound(SyntaxKind::Whitespace, tokens.span()).into());
-            }
-
-            comments.push(maybe_comment);
-            comments.push(maybe_newline);
-        }
-
-        let len = comments.len();
-        Ok((comments, tokens.slice(len..)))
-    }
-}
-
-fn catch_all<'a>() -> impl Parser<'a, TokenStream<'a>, ImmElement> {
-    move |tokens: TokenStream<'a>| {
-        if tokens.len() > 0 {
-            return Ok((tokens.nth(0).unwrap(), tokens.slice(1..)));
-        }
-        Err(DiagKind::UnexpectedEof(tokens.span()).into())
-    }
-}
-
-fn attr<'a>() -> impl Parser<'a, TokenStream<'a>, ImmElement> {
-    let reg_names = just_token("reg_names")
-        .and_then(just_token(SyntaxKind::LeftParen))
-        .and_then(inline_expr())
-        .and_then(just_token(SyntaxKind::RightParen))
-        .flat()
-        .map(|(attr_name, left_paren, expr, right_paren)| {
-            let mut elements = vec![];
-
-            let span = attr_name.as_token().span();
-            elements.push(attr_name);
-            elements.push(left_paren);
-            elements.push(expr);
-            elements.push(right_paren);
-
-            NodeOrToken::Node(GreenNodeData::new(SyntaxKind::Attr, elements, span))
-        })
-        .label("reg_names");
-
-    reg_names.label("attr")
-}
-
-fn attr_list<'a>() -> impl Parser<'a, TokenStream<'a>, ImmElement> {
-    token(SyntaxKind::Pound)
-        .and_then(just_token(SyntaxKind::LeftBracket))
-        .and_then(separated(attr(), just_token(SyntaxKind::Comma)))
-        .and_then(token(SyntaxKind::RightBracket))
-        .flat()
-        .map(|(pound, left_bracket, attr_list, right_bracket)| {
-            let mut elements = vec![];
-
-            elements.extend(pound.trivia().iter().cloned());
-            elements.push(pound.token().clone());
-            elements.push(left_bracket);
-            elements.extend(attr_list);
-            elements.extend(right_bracket.trivia().iter().cloned());
-            elements.push(right_bracket.token().clone());
-
-            NodeOrToken::Node(GreenNodeData::new(
-                SyntaxKind::AttrList,
-                elements,
-                pound.token().as_token().span(),
-            ))
-        })
-        .label("attr list")
-}
-
-fn instr_template_decl<'a>() -> impl Parser<'a, TokenStream<'a>, ImmNode> {
-    let parent_template = token(SyntaxKind::Colon).and_then(template_instantiation());
-    attached_comment()
-        .and_then(just_token(SyntaxKind::InstrTemplateKw))
-        .and_then(token(SyntaxKind::Identifier))
-        .and_then(instr_template_parameters())
-        .and_then(optional(parent_template))
-        .and_then(trivia())
-        .and_then(struct_body())
-        .flat()
-        .map(|(comment, kw, name, params, parent, aliens, body)| {
-            let mut elements = comment;
-
-            let kw_span = kw.as_token().span();
-            elements.push(kw);
-            elements.extend(name.trivia().iter().cloned());
-            let name_span = name.token().as_token().span();
-            elements.push(GreenElement::Node(GreenNodeData::new(
-                SyntaxKind::InstrTemplateName,
-                vec![name.token().clone()],
-                name_span,
-            )));
-            elements.push(NodeOrToken::Node(params));
-            if let Some((colon, parent_inst)) = parent {
-                elements.extend(colon.trivia().iter().cloned());
-                elements.push(colon.token().clone());
-                elements.push(parent_inst);
-            }
-            elements.extend(aliens);
-            elements.push(NodeOrToken::Node(body));
-
-            GreenNodeData::new(SyntaxKind::InstrTemplateDecl, elements, kw_span)
-        })
-        .label("instr_template_decl")
-}
-
-fn ty<'a>() -> impl Parser<'a, TokenStream<'a>, ImmElement> {
-    let params = move || {
-        just_token(SyntaxKind::LeftAngle)
-            .and_then(just_token([
-                SyntaxKind::IntegerLiteral,
-                SyntaxKind::StringLiteral,
-                SyntaxKind::BitLiteral,
-            ]))
-            .and_then(just_token(SyntaxKind::RightAngle))
-            .flat()
-            .map(|(left_angle, lit, right_angle)| {
-                let span = left_angle.as_token().span();
-                let lit_span = lit.as_token().span();
-                let lit_expr = NodeOrToken::Node(GreenNodeData::new(
-                    SyntaxKind::LiteralExpr,
-                    vec![lit],
-                    lit_span,
-                ));
-                let elements = vec![left_angle, lit_expr, right_angle];
-                NodeOrToken::Node(GreenNodeData::new(SyntaxKind::TypeParams, elements, span))
-            })
-            .label("type params")
-    };
-    let single_type = token(SyntaxKind::Identifier)
-        .and_then(optional(params()))
-        .map(|(ident, params)| {
-            let span = ident.token().as_token().span();
-            let mut elements = vec![];
-            elements.extend(ident.trivia().iter().cloned());
-            elements.push(ident.token().clone());
-            if let Some(params) = params {
-                elements.push(params)
-            }
-            NodeOrToken::Node(GreenNodeData::new(SyntaxKind::Type, elements, span))
-        })
-        .label("plain type");
-
-    let array = token(SyntaxKind::LeftBracket)
-        .and_then(token(SyntaxKind::Identifier))
-        .and_then(optional(params()))
-        .and_then(token(SyntaxKind::RightBracket))
-        .flat()
-        .map(|(left_bracket, ident, params, right_bracket)| {
-            let span = ident.token().as_token().span();
-            let mut elements = vec![];
-            elements.extend(left_bracket.trivia().iter().cloned());
-            elements.push(left_bracket.token().clone());
-            elements.extend(ident.trivia().iter().cloned());
-            elements.push(ident.token().clone());
-            if let Some(params) = params {
-                elements.push(params)
-            }
-            elements.extend(right_bracket.trivia().iter().cloned());
-            elements.push(right_bracket.token().clone());
-            NodeOrToken::Node(GreenNodeData::new(SyntaxKind::Type, elements, span))
-        })
-        .label("array type");
-
-    single_type.or_else(array).label("type")
-}
-
-fn single_template_parameter<'a>() -> impl Parser<'a, TokenStream<'a>, ImmElement> {
-    token(SyntaxKind::Identifier)
-        .and_then(token(SyntaxKind::Colon))
-        .and_then(ty())
-        .and_then(trivia())
-        .flat()
-        .map(|(name, colon, ty, aliens)| {
-            let mut elements = vec![];
-            let span = name.token().as_token().span();
-            elements.extend(name.trivia().iter().cloned());
-            elements.push(NodeOrToken::Node(GreenNodeData::new(
-                SyntaxKind::InstrTemplateSingleParamName,
-                vec![name.token().clone()],
-                span.clone(),
-            )));
-            elements.extend(colon.trivia().iter().cloned());
-            elements.push(colon.token().clone());
-            elements.push(ty);
-            elements.extend(aliens);
-            NodeOrToken::Node(GreenNodeData::new(
-                SyntaxKind::InstrTemplateSingleParam,
-                elements,
-                span,
-            ))
-        })
-        .label("single template parameter")
-}
-
-fn instr_template_parameters<'a>() -> impl Parser<'a, TokenStream<'a>, ImmNode> {
-    token(SyntaxKind::LeftAngle)
-        .and_then(separated(
-            single_template_parameter(),
-            just_token(SyntaxKind::Comma),
-        ))
-        .and_then(token(SyntaxKind::RightAngle))
-        .flat()
-        .map(|(angle_start, params, angle_end)| {
-            let mut elements = vec![];
-            let span = angle_start.token().as_token().span();
-            elements.extend(angle_start.trivia().iter().cloned());
-            elements.push(angle_start.token().clone());
-            elements.extend(params);
-            elements.extend(angle_end.trivia().iter().cloned());
-            elements.push(angle_end.token().clone());
-            GreenNodeData::new(SyntaxKind::InstrTemplateParams, elements, span)
-        })
-        .label("instr template parameters")
-}
-
-fn struct_field<'a>() -> impl Parser<'a, TokenStream<'a>, ImmElement> {
-    token(SyntaxKind::Identifier)
-        .and_then(token(SyntaxKind::Colon))
-        .and_then(ty())
-        .and_then(trivia())
-        .flat()
-        .map(|(name, colon, ty, aliens)| {
-            let span = name.token().as_token().span();
-            let mut elements = vec![];
-            elements.extend(name.trivia().iter().cloned());
-            elements.push(name.token().clone());
-            elements.extend(colon.trivia().iter().cloned());
-            elements.push(colon.token().clone());
-            elements.push(ty);
-            elements.extend(aliens);
-
-            NodeOrToken::Node(GreenNodeData::new(SyntaxKind::StructField, elements, span))
-        })
-        .label("struct field")
-}
-
-fn struct_body<'a>() -> impl Parser<'a, TokenStream<'a>, ImmNode> {
-    just_token(SyntaxKind::LeftBrace)
-        .and_then(optional(separated(
-            struct_field(),
-            just_token(SyntaxKind::Comma),
-        )))
-        .and_then(token(SyntaxKind::RightBrace))
-        .flat()
-        .map(|(left_brace, fields, right_brace)| {
-            let span = left_brace.as_token().span();
-            let mut elements = vec![];
-            elements.push(left_brace);
-            if let Some(fields) = fields {
-                elements.extend(fields);
-            }
-            elements.extend(right_brace.trivia().iter().cloned());
-            elements.push(right_brace.token().clone());
-
-            GreenNodeData::new(SyntaxKind::StructBody, elements, span)
-        })
-        .label("struct body")
-}
-
-fn encoding<'a>() -> impl Parser<'a, TokenStream<'a>, ImmNode> {
-    just_token(SyntaxKind::EncodingKw)
-        .and_then(token(SyntaxKind::ForKw))
-        .and_then(token(SyntaxKind::Identifier))
-        .and_then(trivia())
-        .and_then(expr())
-        .flat()
-        .map(|(kw, for_kw, name, aliens, body)| {
-            let span = kw.as_token().span();
-            let mut elements = vec![];
-            elements.push(kw);
-            elements.extend(for_kw.trivia().iter().cloned());
-            elements.push(for_kw.token().clone());
-            elements.extend(name.trivia().iter().cloned());
-            let name_span = name.token().as_token().span();
-            elements.push(NodeOrToken::Node(GreenNodeData::new(
-                SyntaxKind::ImplTargetName,
-                vec![name.token().clone()],
-                name_span,
-            )));
-            elements.extend(aliens);
-            elements.push(body);
-
-            GreenNodeData::new(SyntaxKind::EncodingDecl, elements, span)
-        })
-        .label("encoding")
-}
-
-fn asm_<'a>() -> impl Parser<'a, TokenStream<'a>, ImmNode> {
-    just_token(SyntaxKind::AsmKw)
-        .and_then(token(SyntaxKind::ForKw))
-        .and_then(token(SyntaxKind::Identifier))
-        .and_then(trivia())
-        .and_then(expr())
-        .flat()
-        .map(|(asm_, for_, name, aliens, body)| {
-            let span = asm_.as_token().span();
-            let mut elements = vec![];
-            elements.push(asm_);
-            elements.extend(for_.trivia().iter().cloned());
-            elements.push(for_.token().clone());
-            elements.extend(name.trivia().iter().cloned());
-            let name_span = name.token().as_token().span();
-            elements.push(NodeOrToken::Node(GreenNodeData::new(
-                SyntaxKind::ImplTargetName,
-                vec![name.token().clone()],
-                name_span,
-            )));
-            elements.extend(aliens);
-            elements.push(body);
-
-            GreenNodeData::new(SyntaxKind::AsmDecl, elements, span)
-        })
-        .label("asm")
-}
-
-fn inline_expr<'a>() -> impl Parser<'a, TokenStream<'a>, ImmElement> {
-    recursive(|inline_expr| {
-        let literal_expr = move || {
-            token(SyntaxKind::BitLiteral)
-                .or_else(token(SyntaxKind::StringLiteral))
-                .or_else(token(SyntaxKind::IntegerLiteral))
-                .or_else(token(SyntaxKind::SelfKw))
-                .or_else(token(SyntaxKind::Identifier))
-                .map(|lit| {
-                    let mut elements = vec![];
-
-                    elements.extend(lit.trivia().iter().cloned());
-                    elements.push(lit.token().clone());
-
-                    NodeOrToken::Node(GreenNodeData::new(
-                        SyntaxKind::LiteralExpr,
-                        elements,
-                        lit.token().as_token().span(),
-                    ))
-                })
-        };
-
-        let list = token(SyntaxKind::LeftBracket)
-            .and_then(separated(inline_expr, just_token(SyntaxKind::Comma)))
-            .and_then(token(SyntaxKind::RightBracket))
-            .flat()
-            .map(|(left_bracket, items, right_bracket)| {
-                let mut elements = vec![];
-
-                elements.extend(left_bracket.trivia().iter().cloned());
-                elements.push(left_bracket.token().clone());
-
-                elements.extend(items);
-
-                elements.extend(right_bracket.trivia().iter().cloned());
-                elements.push(right_bracket.token().clone());
-
-                NodeOrToken::Node(GreenNodeData::new(
-                    SyntaxKind::ListExpr,
-                    elements,
-                    left_bracket.token().as_token().span(),
-                ))
-            })
-            .label("list expr");
-
-        // FIXME: this is a temporary WA until we support left recursion properly
-        let field_expr = move || {
-            token([SyntaxKind::Identifier, SyntaxKind::SelfKw])
-                .and_then(just_token(SyntaxKind::Dot))
-                .and_then(just_token(SyntaxKind::Identifier))
-                .flat()
-                .map(|(left, dot, right)| {
-                    let span = dot.as_token().span();
-                    let mut elements = vec![];
-                    elements.extend(left.trivia().iter().cloned());
-                    elements.push(left.token().clone());
-                    elements.push(dot);
-                    elements.push(right);
-                    let node = NodeOrToken::Node(GreenNodeData::new(
-                        SyntaxKind::FieldExpr,
-                        elements,
-                        span.clone(),
-                    ));
-                    NodeOrToken::Node(GreenNodeData::new(
-                        SyntaxKind::LiteralExpr,
-                        vec![node],
-                        span,
-                    ))
-                })
-                .label("field expr")
-        };
-
-        let atom = move || field_expr().or_else(literal_expr());
-
-        let bit_concat = fold_left(atom(), token(SyntaxKind::At), |left, op, right| {
-            let span = op.token().as_token().span();
-            let mut elements = vec![];
-            let left_span = left.as_node().span();
-            elements.push(NodeOrToken::Node(GreenNodeData::new(
-                SyntaxKind::BinOpExprLeft,
-                vec![left],
-                left_span,
-            )));
-            elements.extend(op.trivia().iter().cloned());
-            elements.push(NodeOrToken::Node(GreenNodeData::new(
-                SyntaxKind::BinOpExprOp,
-                vec![op.token().clone()],
-                span.clone(),
-            )));
-            let right_span = right.as_node().span();
-            elements.push(NodeOrToken::Node(GreenNodeData::new(
-                SyntaxKind::BinOpExprRight,
-                vec![right],
-                right_span,
-            )));
-            NodeOrToken::Node(GreenNodeData::new(SyntaxKind::BinOpExpr, elements, span))
-        })
-        .label("bit concat");
-
-        bit_concat.or_else(atom()).or_else(list)
+/// Parse single translation unit
+fn file<'src, I>(
+    file_name: &str,
+) -> impl Parser<'src, I, File, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    let fname = file_name.to_string();
+    choice((
+        isa_def().map(Item::Isa),
+        register_class_def().map(Item::RegisterClass),
+        template_def().map(Item::Template),
+        instruction_def().map(Item::Instruction),
+        unit_def().map(Item::Unit),
+        machine_def().map(Item::Machine),
+    ))
+    .repeated()
+    .at_least(0)
+    .collect()
+    .map(move |items| File {
+        items,
+        file_name: fname.clone(),
     })
-    .label("inline expr")
 }
 
-fn expr<'a>() -> impl Parser<'a, TokenStream<'a>, ImmElement> {
-    recursive(
-        |expr: Recursive<'a, _, ImmElement, dyn Parser<'a, _, ImmElement> + 'a>| {
-            let block = move || {
-                token(SyntaxKind::LeftBrace)
-                    .and_then(zero_or_more(
-                        expr.clone().and_then(token(SyntaxKind::Semicolon)),
-                    ))
-                    .and_then(optional(inline_expr()))
-                    .and_then(token(SyntaxKind::RightBrace))
-                    .flat()
-                    .map(|(left_brace, stmts, end_expr, right_brace)| {
-                        let mut elements = vec![];
-
-                        elements.extend(left_brace.trivia().iter().cloned());
-                        elements.push(left_brace.token().clone());
-                        elements.extend(stmts.iter().map(|(inner_expr, semicolon)| {
-                            let mut elements: Vec<ImmElement> = vec![];
-                            let span = Span::empty();
-                            elements.push(inner_expr.clone());
-                            elements.extend(semicolon.trivia().iter().cloned());
-                            elements.push(semicolon.token().clone());
-
-                            NodeOrToken::Node(GreenNodeData::new(
-                                SyntaxKind::ExprStmt,
-                                elements,
-                                span,
-                            ))
-                        }));
-
-                        if let Some(end_expr) = end_expr {
-                            elements.push(end_expr);
-                        }
-
-                        elements.extend(right_brace.trivia().iter().cloned());
-                        elements.push(right_brace.token().clone());
-
-                        NodeOrToken::Node(GreenNodeData::new(
-                            SyntaxKind::BlockExpr,
-                            elements,
-                            left_brace.token().as_token().span(),
-                        ))
-                    })
-                    .label("block")
-                    .boxed()
-            };
-
-            block().or_else(inline_expr())
-        },
-    )
-}
-
-fn instr_decl<'a>() -> impl Parser<'a, TokenStream<'a>, ImmNode> {
-    attached_comment()
-        .and_then(just_token(SyntaxKind::InstrKw))
-        .and_then(token(SyntaxKind::Identifier))
-        .and_then(token(SyntaxKind::Colon))
-        .and_then(template_instantiation())
-        .and_then(token(SyntaxKind::Semicolon))
-        .flat()
-        .map(|(comment, instr_kw, name, colon, template, semicolon)| {
-            let mut elements = comment;
-
-            let span = instr_kw.as_token().span();
-            elements.push(instr_kw);
-            let name_span = name.token().as_token().span();
-            elements.extend(name.trivia().iter().cloned());
-            elements.push(NodeOrToken::Node(GreenNodeData::new(
-                SyntaxKind::InstrName,
-                vec![name.token().clone()],
-                name_span,
-            )));
-            elements.extend(colon.trivia().iter().cloned());
-            elements.push(colon.token().clone());
-            elements.push(template);
-            elements.extend(semicolon.trivia().iter().cloned());
-            elements.push(semicolon.token().clone());
-
-            GreenNodeData::new(SyntaxKind::InstrDecl, elements, span)
+/// Parse isa definition.
+/// Example:
+///
+/// ```tmdl
+/// isa RV32I {
+///   XLEN = 32,
+/// }
+/// ```
+fn isa_def<'src, I>() -> impl Parser<'src, I, Isa, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    just(Token::KwIsa)
+        .ignore_then(ident())
+        .then(isa_requirements())
+        .then_ignore(just(Token::LBrace))
+        .then(parameter().repeated().collect())
+        .then_ignore(just(Token::RBrace))
+        .map_with(|((name, requires), parameters), e| Isa {
+            name,
+            requires,
+            parameters,
+            span: e.span(),
         })
-        .label("instr decl")
+        .labelled("ISA definition")
 }
 
-fn template_instantiation_param<'a>() -> impl Parser<'a, TokenStream<'a>, ImmElement> {
-    // TODO parse trivia and attach to the element
-    token(SyntaxKind::StringLiteral)
-        .or_else(token(SyntaxKind::IntegerLiteral))
-        .or_else(token(SyntaxKind::BitLiteral))
-        .or_else(token(SyntaxKind::Identifier))
-        .map(|lit| {
-            let mut elements = vec![];
-            let span = lit.token().as_token().span();
-            elements.extend(lit.trivia().iter().cloned());
-            let lit_expr = NodeOrToken::Node(GreenNodeData::new(
-                SyntaxKind::LiteralExpr,
-                vec![lit.token().clone()],
-                span.clone(),
-            ));
-            elements.push(lit_expr);
-            NodeOrToken::Node(GreenNodeData::new(
-                SyntaxKind::InstrParentTemplateArg,
-                elements,
-                span,
+/// Register class definition
+///
+/// Example:
+/// ```tmdl
+/// register_class GPR for TestIsa {
+///   parameters {
+///     width = self.XLEN,
+///     encoding_len = 5,
+///   }
+///   registers {
+///     x0("zero") => { traits = [hardwired_zero] },
+///     x1("ra") => { traits = [return_address, caller_saved] },
+///     x2..x31("r{}") => { traits = [ callee_saved ] },
+///   }
+/// }
+/// ```
+fn register_class_def<'src, I>()
+-> impl Parser<'src, I, RegisterClass, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    let ident = select! { Token::Identifier(ident) => ident.to_string() };
+    just(Token::KwRegClass)
+        .ignore_then(ident)
+        .then(for_isas())
+        .then(just(Token::Colon).ignore_then(ident).or_not())
+        .then(
+            choice((
+                parameter().map(RegClassBody::Param),
+                register_class_registers().map(RegClassBody::Registers),
             ))
-        })
-        .label("template inst param")
-}
-
-fn template_instantiation<'a>() -> impl Parser<'a, TokenStream<'a>, ImmElement> {
-    token(SyntaxKind::Identifier)
-        .and_then(token(SyntaxKind::LeftAngle))
-        .and_then(separated(
-            template_instantiation_param(),
-            just_token(SyntaxKind::Comma),
-        ))
-        .and_then(token(SyntaxKind::RightAngle))
-        .flat()
-        .map(|(ident, left_angle, params, right_angle)| {
-            let mut elements = vec![];
-            let span = ident.token().as_token().span();
-            elements.extend(ident.trivia().iter().cloned());
-            elements.push(NodeOrToken::Node(GreenNodeData::new(
-                SyntaxKind::InstrParentTemplateName,
-                vec![ident.token().clone()],
-                span.clone(),
-            )));
-            elements.extend(left_angle.trivia().iter().cloned());
-            elements.push(left_angle.token().clone());
-            elements.extend(params);
-            elements.extend(right_angle.trivia().iter().cloned());
-            elements.push(right_angle.token().clone());
-
-            NodeOrToken::Node(GreenNodeData::new(
-                SyntaxKind::InstrParentTemplate,
-                elements,
-                span,
-            ))
-        })
-        .label("template inst")
-}
-
-fn enum_single_variant<'a>() -> impl Parser<'a, TokenStream<'a>, ImmElement> {
-    optional(attr_list())
-        .and_then(token(SyntaxKind::Identifier))
-        .and_then(trivia())
-        .flat()
-        .map(|(attr_list, name, trivia)| {
-            let span = name.token().as_token().span();
-            let mut elements = vec![];
-
-            if let Some(attr_list) = attr_list {
-                elements.push(attr_list);
-            }
-
-            elements.extend(name.trivia().iter().cloned());
-            elements.push(name.token().clone());
-            elements.extend(trivia);
-
-            NodeOrToken::Node(GreenNodeData::new(
-                SyntaxKind::EnumVariantDecl,
-                elements,
-                span,
-            ))
-        })
-        .label("enum single variant")
-}
-
-fn enum_variants<'a>() -> impl Parser<'a, TokenStream<'a>, ImmElement> {
-    token(SyntaxKind::LeftBrace)
-        .and_then(optional(separated(
-            enum_single_variant(),
-            just_token(SyntaxKind::Comma),
-        )))
-        .and_then(token(SyntaxKind::RightBrace))
-        .flat()
-        .map(|(left_brace, fields, right_brace)| {
-            let span = left_brace.token().as_token().span();
-            let mut elements = vec![];
-            elements.extend(left_brace.trivia().iter().cloned());
-            elements.push(left_brace.token().clone());
-            if let Some(fields) = fields {
-                elements.extend(fields);
-            }
-            elements.extend(right_brace.trivia().iter().cloned());
-            elements.push(right_brace.token().clone());
-
-            NodeOrToken::Node(GreenNodeData::new(SyntaxKind::EnumBody, elements, span))
-        })
-        .label("enum variants")
-}
-
-fn enum_<'a>() -> impl Parser<'a, TokenStream<'a>, ImmNode> {
-    attached_comment()
-        .and_then(token(SyntaxKind::EnumKw))
-        .and_then(token(SyntaxKind::Identifier))
-        .and_then(enum_variants())
-        .flat()
-        .map(|(comment, kw, name, body)| {
-            let span = kw.token().as_token().span();
-
-            let mut elements = comment;
-
-            elements.extend(kw.trivia().iter().cloned());
-            elements.push(kw.token().clone());
-            elements.extend(name.trivia().iter().cloned());
-            elements.push(name.token().clone());
-            elements.push(body);
-
-            GreenNodeData::new(SyntaxKind::EnumDecl, elements, span)
-        })
-        .label("enum")
-}
-
-fn impl_body<'a>() -> impl Parser<'a, TokenStream<'a>, ImmElement> {
-    token(SyntaxKind::LeftBrace)
-        .and_then(zero_or_more(func_decl()))
-        .and_then(token(SyntaxKind::RightBrace))
-        .flat()
-        .map(|(left, functions, right)| {
-            let mut elements = vec![];
-            let span = left.token().as_token().span();
-            elements.extend(left.trivia().iter().cloned());
-            elements.push(left.token().clone());
-            elements.extend(functions.iter().cloned().map(NodeOrToken::Node));
-            elements.extend(right.trivia().iter().cloned());
-            elements.push(right.token().clone());
-            NodeOrToken::Node(GreenNodeData::new(SyntaxKind::ImplBody, elements, span))
-        })
-        .label("trait impl body")
-}
-
-fn impl_<'a>() -> impl Parser<'a, TokenStream<'a>, ImmNode> {
-    token(SyntaxKind::ImplKw)
-        .and_then(token(SyntaxKind::Identifier))
-        .and_then(token(SyntaxKind::ForKw))
-        .and_then(token(SyntaxKind::Identifier))
-        .and_then(impl_body())
-        .flat()
-        .map(|(kw, trait_name, for_kw, target_name, body)| {
-            let span = kw.token().as_token().span();
-
-            let mut elements = vec![];
-
-            elements.extend(kw.trivia().iter().cloned());
-            elements.push(kw.token().clone());
-            elements.extend(trait_name.trivia().iter().cloned());
-            let name_span = trait_name.token().as_token().span();
-            elements.push(NodeOrToken::Node(GreenNodeData::new(
-                SyntaxKind::ImplTraitName,
-                vec![trait_name.token().clone()],
-                name_span,
-            )));
-            elements.extend(for_kw.trivia().iter().cloned());
-            elements.push(for_kw.token().clone());
-            elements.extend(target_name.trivia().iter().cloned());
-            let target_span = target_name.token().as_token().span();
-            elements.push(NodeOrToken::Node(GreenNodeData::new(
-                SyntaxKind::ImplTargetName,
-                vec![target_name.token().clone()],
-                target_span,
-            )));
-            elements.push(body);
-
-            GreenNodeData::new(SyntaxKind::ImplDecl, elements, span)
-        })
-        .label("trait impl")
-}
-
-fn flag<'a>() -> impl Parser<'a, TokenStream<'a>, ImmNode> {
-    attached_comment()
-        .and_then(just_token(SyntaxKind::FlagKw))
-        .and_then(token(SyntaxKind::Identifier))
-        .and_then(token(SyntaxKind::Semicolon))
-        .flat()
-        .map(|(comments, flag_kw, name, semicolon)| {
-            let mut elements = comments;
-
-            let span = flag_kw.as_token().span();
-            elements.push(flag_kw);
-            elements.extend(name.trivia().iter().cloned());
-            elements.push(name.token().clone());
-            elements.extend(semicolon.trivia().iter().cloned());
-            elements.push(semicolon.token().clone());
-
-            GreenNodeData::new(SyntaxKind::FlagDecl, elements, span)
-        })
-        .label("flag")
-}
-
-fn func_param<'a>() -> impl Parser<'a, TokenStream<'a>, ImmElement> {
-    let generic_param = token(SyntaxKind::Identifier)
-        .and_then(token(SyntaxKind::Colon))
-        .and_then(ty())
-        .and_then(trivia())
-        .flat()
-        .map(|(name, colon, ty, aliens)| {
-            let mut elements = vec![];
-
-            elements.extend(name.trivia().iter().cloned());
-            elements.push(name.token().clone());
-            elements.extend(colon.trivia().iter().cloned());
-            elements.push(colon.token().clone());
-            elements.push(ty);
-            elements.extend(aliens);
-
-            NodeOrToken::Node(GreenNodeData::new(
-                SyntaxKind::FnParam,
-                elements,
-                name.token().as_token().span(),
-            ))
-        });
-
-    let self_param = token(SyntaxKind::SelfKw)
-        .and_then(trivia())
-        .map(|(kw, aliens)| {
-            let mut elements = vec![];
-
-            elements.extend(kw.trivia().iter().cloned());
-            elements.push(kw.token().clone());
-            elements.extend(aliens);
-
-            NodeOrToken::Node(GreenNodeData::new(
-                SyntaxKind::FnParam,
-                elements,
-                kw.token().as_token().span(),
-            ))
-        });
-
-    self_param
-        .or_else(generic_param)
-        .label("function parameter")
-}
-
-fn func_ret_ty<'a>() -> impl Parser<'a, TokenStream<'a>, ImmElement> {
-    token(SyntaxKind::Minus)
-        .and_then(just_token(SyntaxKind::RightAngle))
-        .and_then(ty())
-        .flat()
-        .map(|(minus, _angle, ty)| {
-            let mut elements = vec![];
-
-            elements.extend(minus.trivia().iter().cloned());
-
-            let arrow = NodeOrToken::Token(
-                lpl::syntax::GreenTokenData::new(SyntaxKind::Arrow, "->".to_string())
-                    .spanned(minus.token().as_token().span()),
-            );
-            elements.push(arrow);
-
-            elements.push(ty);
-
-            NodeOrToken::Node(GreenNodeData::new(
-                SyntaxKind::FnRetType,
-                elements,
-                minus.token().as_token().span(),
-            ))
-        })
-        .label("function return type")
-}
-
-fn func_signature<'a>() -> impl Parser<'a, TokenStream<'a>, ImmElement> {
-    attached_comment()
-        .and_then(token(SyntaxKind::FnKw))
-        .and_then(token(SyntaxKind::Identifier))
-        .and_then(token(SyntaxKind::LeftParen))
-        .and_then(optional(separated(
-            func_param(),
-            just_token(SyntaxKind::Comma),
-        )))
-        .and_then(token(SyntaxKind::RightParen))
-        .and_then(trivia())
-        .and_then(optional(func_ret_ty()))
-        .flat()
-        .map(
-            |(comment, kw, name, left_paren, params, right_paren, aliens, ret_ty)| {
-                let mut elements = comment;
-
-                elements.extend(kw.trivia().iter().cloned());
-                elements.push(kw.token().clone());
-                elements.extend(name.trivia().iter().cloned());
-                elements.push(name.token().clone());
-                elements.extend(left_paren.trivia().iter().cloned());
-                elements.push(left_paren.token().clone());
-
-                if let Some(params) = params {
-                    elements.extend(params);
-                }
-
-                elements.extend(right_paren.trivia().iter().cloned());
-                elements.push(right_paren.token().clone());
-
-                elements.extend(aliens);
-
-                if let Some(ret_ty) = ret_ty {
-                    elements.push(ret_ty);
-                }
-
-                NodeOrToken::Node(GreenNodeData::new(
-                    SyntaxKind::FnSignature,
-                    elements,
-                    kw.token().as_token().span(),
-                ))
-            },
+            .repeated()
+            .collect::<Vec<_>>()
+            .delimited_by(just(Token::LBrace), just(Token::RBrace)),
         )
-        .label("function signature")
+        .map_with(|(((name, for_isas), base), body), e| {
+            let parameters = body
+                .iter()
+                .filter_map(|b| match b {
+                    RegClassBody::Param(p) => Some(p.clone()),
+                    _ => None,
+                })
+                .collect();
+
+            let registers = body
+                .iter()
+                .find_map(|b| {
+                    if let RegClassBody::Registers(r) = b {
+                        Some(r.clone())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default();
+            RegisterClass {
+                name,
+                for_isas,
+                base,
+                parameters,
+                registers,
+                span: e.span(),
+            }
+        })
+        .labelled("register class definition")
 }
 
-fn func_decl<'a>() -> impl Parser<'a, TokenStream<'a>, ImmNode> {
-    func_signature()
-        .and_then(trivia())
-        .and_then(expr())
-        .flat()
-        .map(|(sig, aliens, body)| {
-            let mut elements = vec![];
+enum RegClassBody {
+    Param((String, (Type, Option<ast::Expr>))),
+    Registers(Vec<RegisterDef>),
+}
 
-            elements.push(sig);
-            elements.extend(aliens);
-            elements.push(body);
+fn template_def<'src, I>()
+-> impl Parser<'src, I, Template, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    let ident = select! { Token::Identifier(ident) => ident.to_string() };
 
-            GreenNodeData::new(
-                SyntaxKind::FnDecl,
-                elements,
-                // FIXME add a correct span
-                Span::empty(),
-            )
+    just(Token::KwTemplate)
+        .ignore_then(ident)
+        .then(for_isas().or_not())
+        .then(just(Token::Colon).ignore_then(ident).or_not())
+        .then(
+            choice((
+                parameter().map(TemplateOrInstBody::Param),
+                instruction_operands().map(TemplateOrInstBody::Operands),
+                encoding().map(TemplateOrInstBody::Encoding),
+                asm().map(TemplateOrInstBody::Asm),
+            ))
+            .repeated()
+            .collect::<Vec<_>>()
+            .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+        )
+        .map_with(|(((name, for_isas), parent_template), body), e| {
+            let params = body
+                .iter()
+                .filter_map(|b| match b {
+                    TemplateOrInstBody::Param(p) => Some(p.clone()),
+                    _ => None,
+                })
+                .collect();
+
+            let operands = body
+                .iter()
+                .find_map(|b| {
+                    if let TemplateOrInstBody::Operands(o) = b {
+                        Some(o.clone())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default();
+
+            let encoding = body
+                .iter()
+                .find_map(|b| {
+                    if let TemplateOrInstBody::Encoding(e) = b {
+                        Some(e.clone())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default();
+
+            let asm = body.iter().find_map(|b| {
+                if let TemplateOrInstBody::Asm(a) = b {
+                    Some(a.clone())
+                } else {
+                    None
+                }
+            });
+
+            Template {
+                name,
+                for_isas: for_isas.unwrap_or_default(),
+                parent_template,
+                params,
+                operands,
+                encoding,
+                asm,
+                span: e.span(),
+            }
         })
-        .label("function declaration")
+}
+
+fn instruction_def<'src, I>()
+-> impl Parser<'src, I, Instruction, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    let ident = select! { Token::Identifier(ident) => ident.to_string() };
+
+    just(Token::KwInstruction)
+        .ignore_then(ident)
+        .then(for_isas().or_not())
+        .then(just(Token::Colon).ignore_then(ident).or_not())
+        .then(
+            choice((
+                parameter().map(TemplateOrInstBody::Param),
+                instruction_operands().map(TemplateOrInstBody::Operands),
+                encoding().map(TemplateOrInstBody::Encoding),
+                asm().map(TemplateOrInstBody::Asm),
+                behavior().map(TemplateOrInstBody::Behavior),
+                schedule().map(TemplateOrInstBody::Schedule),
+            ))
+            .repeated()
+            .collect::<Vec<_>>()
+            .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+        )
+        .map_with(|(((name, for_isas), parent_template), body), e| {
+            let params = body
+                .iter()
+                .filter_map(|b| match b {
+                    TemplateOrInstBody::Param(p) => Some(p.clone()),
+                    _ => None,
+                })
+                .collect();
+
+            let operands = body
+                .iter()
+                .find_map(|b| {
+                    if let TemplateOrInstBody::Operands(o) = b {
+                        Some(o.clone())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default();
+
+            let encoding = body
+                .iter()
+                .find_map(|b| {
+                    if let TemplateOrInstBody::Encoding(e) = b {
+                        Some(e.clone())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default();
+
+            let asm = body.iter().find_map(|b| {
+                if let TemplateOrInstBody::Asm(a) = b {
+                    Some(a.clone())
+                } else {
+                    None
+                }
+            });
+
+            let behavior = body
+                .iter()
+                .find_map(|b| {
+                    if let TemplateOrInstBody::Behavior(a) = b {
+                        Some(a.clone())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap();
+
+            let schedule = body.iter().find_map(|b| {
+                if let TemplateOrInstBody::Schedule(t) = b {
+                    Some(t.clone())
+                } else {
+                    None
+                }
+            });
+
+            Instruction {
+                name,
+                for_isas: for_isas.unwrap_or_default(),
+                parent_template,
+                params,
+                operands,
+                encoding,
+                asm,
+                behavior,
+                schedule,
+                span: e.span(),
+            }
+        })
+        .labelled("instruction definition")
+}
+
+enum TemplateOrInstBody {
+    Param((String, (Type, Option<ast::Expr>))),
+    Operands(Vec<(String, Type)>),
+    Encoding(Vec<EncodingArm>),
+    Asm(Expr),
+    Behavior(Expr),
+    Schedule(Schedule),
+}
+
+fn asm<'src, I>() -> impl Parser<'src, I, Expr, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    just(Token::KwAsm).ignore_then(expr())
+}
+
+fn behavior<'src, I>() -> impl Parser<'src, I, Expr, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    just(Token::KwBehavior).ignore_then(expr())
+}
+
+/// Parse an integer literal token (`42`, `0x10`, `0b101`) into an `i64`.
+fn int_lit<'src, I>() -> impl Parser<'src, I, i64, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    select! { Token::Number(n) => n }.try_map_with(|n, e| {
+        parse_int_lit(n).ok_or_else(|| Rich::custom(e.span(), "invalid integer literal"))
+    })
+}
+
+fn parse_int_lit(n: &str) -> Option<i64> {
+    if let Some(h) = n.strip_prefix("0x").or_else(|| n.strip_prefix("0X")) {
+        i64::from_str_radix(h, 16).ok()
+    } else if let Some(b) = n.strip_prefix("0b").or_else(|| n.strip_prefix("0B")) {
+        i64::from_str_radix(b, 2).ok()
+    } else {
+        n.parse::<i64>().ok()
+    }
+}
+
+/// Parse a bracketed, comma-separated list of identifiers: `[a, b, c]`.
+fn ident_list<'src, I>()
+-> impl Parser<'src, I, Vec<String>, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    let ident = select! { Token::Identifier(i) => i.to_string() };
+    ident
+        .separated_by(just(Token::Comma))
+        .allow_trailing()
+        .collect()
+        .delimited_by(just(Token::LBracket), just(Token::RBracket))
+}
+
+/// Instruction `schedule { units = [..]; }` block.
+fn schedule<'src, I>() -> impl Parser<'src, I, Schedule, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    just(Token::KwSchedule)
+        .ignore_then(
+            just(Token::Identifier("units"))
+                .ignore_then(just(Token::Equals))
+                .ignore_then(ident_list())
+                .then_ignore(just(Token::Semicolon))
+                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+        )
+        .map_with(|units, e| Schedule {
+            units,
+            span: e.span(),
+        })
+        .labelled("schedule block")
+}
+
+#[derive(Clone)]
+enum UnitField {
+    Latency(i64),
+    Throughput(i64),
+}
+
+/// A `name = N;` integer pair, used inside `buffers` and `resource` bodies.
+fn kv_int_pair<'src, I>()
+-> impl Parser<'src, I, (String, i64), extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    let ident = select! { Token::Identifier(i) => i.to_string() };
+    ident
+        .then_ignore(just(Token::Equals))
+        .then(int_lit())
+        .then_ignore(just(Token::Semicolon))
+}
+
+/// Top-level `unit Name;` or `unit Name { latency = N; throughput = N; }`.
+fn unit_def<'src, I>() -> impl Parser<'src, I, UnitDecl, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    let field = choice((
+        just(Token::Identifier("latency"))
+            .ignore_then(just(Token::Equals))
+            .ignore_then(int_lit())
+            .then_ignore(just(Token::Semicolon))
+            .map(UnitField::Latency),
+        just(Token::Identifier("throughput"))
+            .ignore_then(just(Token::Equals))
+            .ignore_then(int_lit())
+            .then_ignore(just(Token::Semicolon))
+            .map(UnitField::Throughput),
+    ));
+    let body = field
+        .repeated()
+        .collect::<Vec<_>>()
+        .delimited_by(just(Token::LBrace), just(Token::RBrace));
+
+    just(Token::KwUnit)
+        .ignore_then(ident())
+        .then(choice((
+            body.map(Some),
+            just(Token::Semicolon).to(None::<Vec<UnitField>>),
+        )))
+        .map_with(|(name, fields), e| {
+            let mut default_latency = None;
+            let mut default_throughput = None;
+            for f in fields.unwrap_or_default() {
+                match f {
+                    UnitField::Latency(v) => default_latency = Some(v),
+                    UnitField::Throughput(v) => default_throughput = Some(v),
+                }
+            }
+            UnitDecl {
+                name,
+                default_latency,
+                default_throughput,
+                span: e.span(),
+            }
+        })
+        .labelled("unit declaration")
+}
+
+#[derive(Clone)]
+enum BindField {
+    Latency(i64),
+    Throughput(i64),
+    Uses(Vec<String>),
+    Reads(String),
+    Writes(String),
+}
+
+/// The timing fields common to a `bind` and an `override` body.
+#[derive(Default)]
+struct BindFields {
+    latency: Option<i64>,
+    throughput: Option<i64>,
+    reads: Option<String>,
+    writes: Option<String>,
+    uses: Vec<String>,
+}
+
+fn aggregate_bind_fields(fields: Vec<BindField>) -> BindFields {
+    let mut out = BindFields::default();
+    for f in fields {
+        match f {
+            BindField::Latency(v) => out.latency = Some(v),
+            BindField::Throughput(v) => out.throughput = Some(v),
+            BindField::Uses(u) => out.uses = u,
+            BindField::Reads(p) => out.reads = Some(p),
+            BindField::Writes(p) => out.writes = Some(p),
+        }
+    }
+    out
+}
+
+/// One `latency`/`throughput`/`uses`/`reads`/`writes` field of a `bind` or
+/// `override` body.
+fn bind_field<'src, I>()
+-> impl Parser<'src, I, BindField, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    let ident = select! { Token::Identifier(i) => i.to_string() };
+    choice((
+        just(Token::Identifier("latency"))
+            .ignore_then(just(Token::Equals))
+            .ignore_then(int_lit())
+            .then_ignore(just(Token::Semicolon))
+            .map(BindField::Latency),
+        just(Token::Identifier("throughput"))
+            .ignore_then(just(Token::Equals))
+            .ignore_then(int_lit())
+            .then_ignore(just(Token::Semicolon))
+            .map(BindField::Throughput),
+        just(Token::Identifier("uses"))
+            .ignore_then(just(Token::Equals))
+            .ignore_then(ident_list())
+            .then_ignore(just(Token::Semicolon))
+            .map(BindField::Uses),
+        just(Token::Identifier("reads"))
+            .ignore_then(just(Token::Equals))
+            .ignore_then(ident)
+            .then_ignore(just(Token::Semicolon))
+            .map(BindField::Reads),
+        just(Token::Identifier("writes"))
+            .ignore_then(just(Token::Equals))
+            .ignore_then(ident)
+            .then_ignore(just(Token::Semicolon))
+            .map(BindField::Writes),
+    ))
+}
+
+/// A braced `bind`/`override` body: zero or more timing fields.
+fn bind_body<'src, I>()
+-> impl Parser<'src, I, Vec<BindField>, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    bind_field()
+        .repeated()
+        .collect::<Vec<_>>()
+        .delimited_by(just(Token::LBrace), just(Token::RBrace))
+}
+
+#[derive(Clone)]
+enum MachineBody {
+    IssueWidth(i64),
+    Buffers(Vec<(String, i64)>),
+    Pipeline(Vec<PipelinePhase>),
+    Override(MachineOverride),
+    Forward(Forward),
+    Resource(MachineResource),
+    Bind(UnitBind),
+}
+
+/// Parse a pipeline-stage protection mode identifier into [`Protection`].
+fn protection_mode<'src, I>()
+-> impl Parser<'src, I, Protection, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    select! { Token::Identifier(i) => i }.try_map_with(|i, e| match i {
+        "protected" => Ok(Protection::Protected),
+        "unprotected" => Ok(Protection::Unprotected),
+        "hard" => Ok(Protection::Hard),
+        other => Err(Rich::custom(
+            e.span(),
+            format!("unknown protection mode '{other}' (expected protected, unprotected, or hard)"),
+        )),
+    })
+}
+
+/// Parse one pipeline phase: `NAME;` or `NAME: <protection>;`.
+fn pipeline_phase<'src, I>()
+-> impl Parser<'src, I, PipelinePhase, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    let ident = select! { Token::Identifier(i) => i.to_string() };
+    ident
+        .then(just(Token::Colon).ignore_then(protection_mode()).or_not())
+        .then_ignore(just(Token::Semicolon))
+        .map_with(|(name, protection), e| PipelinePhase {
+            name,
+            protection: protection.unwrap_or(Protection::Protected),
+            span: e.span(),
+        })
+}
+
+/// Top-level `machine Name for [..] { issue_width=..; buffers{..} resource X{..} bind Y{..} }`.
+fn machine_def<'src, I>() -> impl Parser<'src, I, Machine, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    let ident = select! { Token::Identifier(i) => i.to_string() };
+
+    let issue_width = just(Token::Identifier("issue_width"))
+        .ignore_then(just(Token::Equals))
+        .ignore_then(int_lit())
+        .then_ignore(just(Token::Semicolon))
+        .map(MachineBody::IssueWidth);
+
+    let buffers = just(Token::KwBuffers)
+        .ignore_then(
+            kv_int_pair()
+                .repeated()
+                .collect::<Vec<(String, i64)>>()
+                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+        )
+        .map(MachineBody::Buffers);
+
+    let pipeline = just(Token::KwPipeline)
+        .ignore_then(
+            pipeline_phase()
+                .repeated()
+                .collect::<Vec<_>>()
+                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+        )
+        .map(MachineBody::Pipeline);
+
+    let resource = just(Token::KwResource)
+        .ignore_then(ident)
+        .then(
+            kv_int_pair()
+                .repeated()
+                .collect::<Vec<(String, i64)>>()
+                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+        )
+        .map_with(|(name, fields), e| {
+            let units = fields
+                .iter()
+                .find(|(k, _)| k == "units")
+                .map(|(_, v)| *v)
+                .unwrap_or(1);
+            MachineBody::Resource(MachineResource {
+                name,
+                units,
+                span: e.span(),
+            })
+        });
+
+    let bind = just(Token::KwBind)
+        .ignore_then(ident)
+        .then(bind_body())
+        .map_with(|(unit, fields), e| {
+            let f = aggregate_bind_fields(fields);
+            MachineBody::Bind(UnitBind {
+                unit,
+                latency: f.latency,
+                throughput: f.throughput,
+                reads: f.reads,
+                writes: f.writes,
+                uses: f.uses,
+                span: e.span(),
+            })
+        });
+
+    let r#override = just(Token::KwOverride)
+        .ignore_then(ident)
+        .then(bind_body())
+        .map_with(|(instruction, fields), e| {
+            let f = aggregate_bind_fields(fields);
+            MachineBody::Override(MachineOverride {
+                instruction,
+                latency: f.latency,
+                throughput: f.throughput,
+                reads: f.reads,
+                writes: f.writes,
+                uses: f.uses,
+                span: e.span(),
+            })
+        });
+
+    // `forward FROM => TO { latency = N; }`
+    let forward = just(Token::KwForward)
+        .ignore_then(ident)
+        .then_ignore(just(Token::FatArrow))
+        .then(ident)
+        .then(
+            just(Token::Identifier("latency"))
+                .ignore_then(just(Token::Equals))
+                .ignore_then(int_lit())
+                .then_ignore(just(Token::Semicolon))
+                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+        )
+        .map_with(|((from, to), latency), e| {
+            MachineBody::Forward(Forward {
+                from,
+                to,
+                latency,
+                span: e.span(),
+            })
+        });
+
+    just(Token::KwMachine)
+        .ignore_then(ident)
+        .then(for_isas())
+        .then(
+            choice((
+                issue_width,
+                buffers,
+                pipeline,
+                r#override,
+                forward,
+                resource,
+                bind,
+            ))
+            .repeated()
+            .collect::<Vec<_>>()
+            .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+        )
+        .map_with(|((name, for_isas), body), e| {
+            let mut issue_width = None;
+            let mut buffers = Vec::new();
+            let mut pipeline = Vec::new();
+            let mut resources = Vec::new();
+            let mut binds = Vec::new();
+            let mut overrides = Vec::new();
+            let mut forwards = Vec::new();
+            for b in body {
+                match b {
+                    MachineBody::IssueWidth(v) => issue_width = Some(v),
+                    MachineBody::Buffers(v) => buffers = v,
+                    MachineBody::Pipeline(v) => pipeline = v,
+                    MachineBody::Resource(r) => resources.push(r),
+                    MachineBody::Bind(bd) => binds.push(bd),
+                    MachineBody::Override(ov) => overrides.push(ov),
+                    MachineBody::Forward(fw) => forwards.push(fw),
+                }
+            }
+            Machine {
+                name,
+                for_isas,
+                issue_width,
+                buffers,
+                pipeline,
+                resources,
+                binds,
+                overrides,
+                forwards,
+                span: e.span(),
+            }
+        })
+        .labelled("machine definition")
+}
+
+fn encoding<'src, I>()
+-> impl Parser<'src, I, Vec<EncodingArm>, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    let num = select! { Token::Number(i) => i.parse::<u16>().unwrap() };
+
+    let single_bit = num
+        .then_ignore(just(Token::FatArrow))
+        .then(inline_expr())
+        .map_with(|(start, value), e| EncodingArm {
+            start,
+            end: None,
+            value,
+            span: e.span(),
+        });
+    let range = num
+        .then_ignore(just(Token::Range))
+        .then(num)
+        .then_ignore(just(Token::FatArrow))
+        .then(inline_expr())
+        .map_with(|((start, end), value), e| EncodingArm {
+            start,
+            end: Some(end),
+            value,
+            span: e.span(),
+        });
+    just(Token::KwEncoding)
+        .ignored()
+        .then(
+            choice((single_bit, range))
+                .separated_by(just(Token::Comma))
+                .allow_trailing()
+                .collect()
+                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+        )
+        .map(|((), arms)| arms)
+}
+
+fn parameter<'src, I>()
+-> impl Parser<'src, I, (String, (Type, Option<ast::Expr>)), extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    let ident = select! { Token::Identifier(ident) => ident.to_string() };
+    just(Token::KwParam)
+        .ignored()
+        .then(ident)
+        .then_ignore(just(Token::Colon))
+        .then(type_())
+        .then(just(Token::Equals).then(inline_expr()).or_not())
+        .then_ignore(just(Token::Semicolon))
+        .map(|((((), name), ty), expr)| {
+            let expr = expr.map(|e| e.1);
+            (name, (ty, expr))
+        })
+}
+
+fn instruction_operands<'src, I>()
+-> impl Parser<'src, I, Vec<(String, Type)>, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    let ident = select! { Token::Identifier(i) => i.to_string() };
+    let single_operand = ident.then_ignore(just(Token::Colon)).then(type_());
+    just(Token::KwOperands)
+        .ignored()
+        .then(
+            single_operand
+                .separated_by(just(Token::Comma))
+                .allow_trailing()
+                .collect()
+                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+        )
+        .map(|((), operands)| operands)
+}
+
+fn isa_requirements<'src, I>()
+-> impl Parser<'src, I, Option<IsaRequirement>, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    let ident = select! { Token::Identifier(ident) => ident.to_string() };
+    let single_isa =
+        select! { Token::Identifier(ident) => IsaRequirement::Single(ident.to_string()) };
+    let any = ident
+        .separated_by(just(Token::Pipe))
+        .collect::<Vec<_>>()
+        .delimited_by(just(Token::LBracket), just(Token::RBracket))
+        .map(IsaRequirement::Any);
+    let all = ident
+        .separated_by(just(Token::Comma))
+        .collect::<Vec<_>>()
+        .delimited_by(just(Token::LBracket), just(Token::RBracket))
+        .map(IsaRequirement::All);
+    just(Token::KwRequires)
+        .ignored()
+        .then(choice((single_isa, any, all)))
+        .or_not()
+        .map(|isa| isa.map(|(_, isa)| isa))
+}
+
+fn for_isas<'src, I>()
+-> impl Parser<'src, I, Vec<String>, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    let ident = select! { Token::Identifier(ident) => ident.to_string() };
+    just(Token::KwFor)
+        .ignored()
+        .then(
+            ident
+                .separated_by(just(Token::Comma))
+                .collect::<Vec<_>>()
+                .delimited_by(just(Token::LBracket), just(Token::RBracket)),
+        )
+        .map(|(_, isas)| isas)
+        .or_not()
+        .map(|isas_opt| isas_opt.unwrap_or_default())
+}
+
+fn register_class_registers<'src, I>()
+-> impl Parser<'src, I, Vec<RegisterDef>, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    just(Token::KwRegisters)
+        .ignored()
+        .then(
+            single_register()
+                .separated_by(just(Token::Comma))
+                .allow_trailing()
+                .collect()
+                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+        )
+        .map(|((), v)| v)
+        .labelled("register class registers")
+}
+
+fn single_register<'src, I>()
+-> impl Parser<'src, I, RegisterDef, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    let ident = select! { Token::Identifier(ident) => ident.to_string() };
+    let alias = just(Token::LParen)
+        .ignored()
+        .then(select! { Token::StringLit(s) => s.to_string() })
+        .then_ignore(just(Token::RParen))
+        .map(|(_, alias)| Some(alias))
+        .or_not()
+        .map(|o| o.flatten());
+
+    let reg_traits = register_traits();
+
+    let single = ident
+        .then(alias)
+        .then_ignore(just(Token::FatArrow))
+        .then_ignore(just(Token::LBrace))
+        .then(reg_traits)
+        .then_ignore(just(Token::RBrace))
+        .map_with(|((name, alias), traits), e| {
+            RegisterDef::Single(Register {
+                name,
+                alias,
+                traits,
+                subregisters: Vec::new(),
+                span: e.span(),
+            })
+        });
+
+    let range = register_range();
+
+    choice((range, single)).labelled("register")
+}
+
+fn ident<'src, I>() -> impl Parser<'src, I, String, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    any().filter(is_ident).map(|t| t.as_ident().to_string())
+}
+
+fn register_traits<'src, I>()
+-> impl Parser<'src, I, Vec<RegisterTrait>, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    just(Token::Identifier("traits"))
+        .then_ignore(just(Token::Equals))
+        .then_ignore(just(Token::LBracket))
+        .ignore_then(
+            select! { Token::Identifier(t) => t.to_string() }
+                .separated_by(just(Token::Comma))
+                .collect::<Vec<_>>(),
+        )
+        .then_ignore(just(Token::RBracket))
+        .map(|traits| {
+            traits
+                .into_iter()
+                .filter_map(|t| match t.as_str() {
+                    "hardwired_zero" => Some(RegisterTrait::HardwiredZero),
+                    "return_address" => Some(RegisterTrait::ReturnAddress),
+                    "caller_saved" => Some(RegisterTrait::CallerSaved),
+                    "callee_saved" => Some(RegisterTrait::CalleeSaved),
+                    "stack_pointer" => Some(RegisterTrait::StackPointer),
+                    "program_counter" => Some(RegisterTrait::ProgramCounter),
+                    "global_pointer" => Some(RegisterTrait::GlobalPointer),
+                    "thread_pointer" => Some(RegisterTrait::ThreadPointer),
+                    "argument" => Some(RegisterTrait::Argument),
+                    "return_value" => Some(RegisterTrait::ReturnValue),
+                    "temporary" => Some(RegisterTrait::Temporary),
+                    "saved" => Some(RegisterTrait::Saved),
+                    _ => None,
+                })
+                .collect()
+        })
+}
+
+fn register_range<'src, I>()
+-> impl Parser<'src, I, RegisterDef, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    let ident = select! { Token::Identifier(ident) => ident.to_string() };
+    let alias_pattern = just(Token::LParen)
+        .ignored()
+        .then(select! { Token::StringLit(s) => s.to_string() })
+        .then_ignore(just(Token::RParen))
+        .map(|(_, alias)| Some(alias))
+        .or_not()
+        .map(|o| o.flatten());
+
+    let reg_traits = register_traits();
+
+    ident
+        .then_ignore(just(Token::Range))
+        .then(ident)
+        .then(alias_pattern)
+        .then_ignore(just(Token::FatArrow))
+        .then_ignore(just(Token::LBrace))
+        .then(reg_traits)
+        .then_ignore(just(Token::RBrace))
+        .map_with(|(((start, end), alias_pattern), traits), e| {
+            RegisterDef::Range(RegisterRange {
+                start,
+                end,
+                alias_pattern,
+                traits,
+                span: e.span(),
+            })
+        })
+}
+
+fn inline_expr<'src, I>() -> impl Parser<'src, I, Expr, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    recursive(|expr| {
+        fn builtin_from_ident(name: &str) -> Option<BuiltinFunction> {
+            match name {
+                "clamp" => Some(BuiltinFunction::Clamp),
+                "extract" => Some(BuiltinFunction::Extract),
+                "log2Ceil" => Some(BuiltinFunction::Log2Ceil),
+                "sext" => Some(BuiltinFunction::SExt),
+                "zext" => Some(BuiltinFunction::ZExt),
+                "load" => Some(BuiltinFunction::Load),
+                "store" => Some(BuiltinFunction::Store),
+                _ => None,
+            }
+        }
+
+        let ident = select! { Token::Identifier(i) => i.to_string() };
+        let scope = just(Token::Colon).then(just(Token::Colon));
+
+        let ident_or_path =
+            ident
+                .then(scope.ignore_then(ident).or_not())
+                .map_with(|(base, member), e| {
+                    if let Some(member) = member {
+                        Expr::Path(Path {
+                            base,
+                            remainder: vec![member],
+                            span: e.span(),
+                        })
+                    } else if let Some(b) = builtin_from_ident(&base) {
+                        Expr::BuiltinFunction(b)
+                    } else {
+                        Ident::new(base, e.span()).into()
+                    }
+                });
+
+        let literal_or_ident = choice((
+            ident_or_path,
+            select! { Token::Number(n) => n.to_string() }
+                .map_with(|n, e| LitInt::new(n, e.span()).into()),
+            select! { Token::StringLit(s) => s.to_string() }
+                .map_with(|s, e| LitStr::new(s, e.span()).into()),
+        ))
+        .labelled("value");
+
+        let num = select! {
+          Token::Number(n) => n.parse::<u16>().unwrap(),
+        };
+
+        let ident = select! { Token::Identifier(i) => i.to_string() };
+
+        let atom = literal_or_ident
+            .or(expr
+                .clone()
+                .delimited_by(just(Token::LParen), just(Token::RParen)))
+            .boxed();
+
+        let items = expr
+            .clone()
+            .separated_by(just(Token::Comma))
+            .allow_trailing()
+            .collect::<Vec<_>>();
+
+        // Postfix chain: field access, slice, index, then call
+        #[derive(Clone)]
+        enum PostfixOp {
+            Field(String, Span),
+            Slice(u16, u16, Span),
+            Index(u16, Span),
+            Call(Vec<Expr>, Span),
+        }
+
+        let postfix_op = choice((
+            // field: .ident
+            just(Token::Dot)
+                .then(ident)
+                .map_with(|(_, b), e| PostfixOp::Field(b, e.span())),
+            // slice: [start..end]
+            num.then_ignore(just(Token::Range))
+                .then(num)
+                .delimited_by(just(Token::LBracket), just(Token::RBracket))
+                .map_with(|(start, end), e| PostfixOp::Slice(start, end, e.span())),
+            // index: [idx]
+            num.delimited_by(just(Token::LBracket), just(Token::RBracket))
+                .map_with(|index, e| PostfixOp::Index(index, e.span())),
+            // call: (args)
+            items
+                .delimited_by(just(Token::LParen), just(Token::RParen))
+                .map_with(|arguments, e| PostfixOp::Call(arguments, e.span())),
+        ));
+
+        let basic = atom
+            .clone()
+            .foldl_with(postfix_op.repeated(), |base, op, _e| match op {
+                PostfixOp::Field(member, span) => Expr::Field(Field {
+                    base: Box::new(base),
+                    member,
+                    span,
+                }),
+                PostfixOp::Slice(start, end, span) => Expr::Slice(Slice {
+                    base: Box::new(base),
+                    start,
+                    end,
+                    span,
+                }),
+                PostfixOp::Index(index, span) => Expr::IndexAccess(IndexAccess {
+                    base: Box::new(base),
+                    index,
+                    span,
+                }),
+                PostfixOp::Call(arguments, span) => Expr::Call(Call {
+                    callee: Box::new(base),
+                    arguments,
+                    span,
+                }),
+            });
+
+        let op = just(Token::Asterisk)
+            .to(BinOp::Mul)
+            .or(just(Token::Tilde)
+                .then(just(Token::ForwardSlash))
+                .to(BinOp::UnsignedDiv))
+            .or(just(Token::ForwardSlash).to(BinOp::Div));
+        let product = basic
+            .clone()
+            .foldl_with(op.then(expr).repeated(), |a, (op, b), e| {
+                let sp = e.span();
+                Expr::Binary(Binary {
+                    lhs: Box::new(a),
+                    rhs: Box::new(b),
+                    op,
+                    span: sp,
+                })
+            });
+
+        let op = choice((
+            just(Token::Plus).to(BinOp::Add),
+            just(Token::Dash).to(BinOp::Sub),
+            just(Token::Pipe).to(BinOp::BitwiseOr),
+            just(Token::Ampersand).to(BinOp::BitwiseAnd),
+            just(Token::Hat).to(BinOp::BitwiseXor),
+            just(Token::LAngle)
+                .then(just(Token::LAngle))
+                .to(BinOp::ShiftLeftLogical),
+            // Prefer the longer operator first: >>> (arith) before >> (logical)
+            just(Token::RAngle)
+                .then(just(Token::RAngle))
+                .then(just(Token::RAngle))
+                .to(BinOp::ShiftRightArithmetic),
+            just(Token::RAngle)
+                .then(just(Token::RAngle))
+                .to(BinOp::ShiftRightLogical),
+        ));
+
+        let arith = product
+            .clone()
+            .foldl_with(op.then(product).repeated(), |a, (op, b), e| {
+                let sp = e.span();
+                Expr::Binary(Binary {
+                    lhs: Box::new(a),
+                    rhs: Box::new(b),
+                    op,
+                    span: sp,
+                })
+            });
+
+        let cmp_op = choice((
+            just(Token::Equals)
+                .then(just(Token::Equals))
+                .to(BinOp::Equal),
+            just(Token::Bang)
+                .then(just(Token::Equals))
+                .to(BinOp::NotEqual),
+            just(Token::Tilde)
+                .then(just(Token::LAngle))
+                .then(just(Token::Equals))
+                .to(BinOp::UnsignedLessThenEqual),
+            just(Token::Tilde)
+                .then(just(Token::RAngle))
+                .then(just(Token::Equals))
+                .to(BinOp::UnsignedGreaterThanEqual),
+            just(Token::Tilde)
+                .then(just(Token::LAngle))
+                .to(BinOp::UnsignedLessThan),
+            just(Token::Tilde)
+                .then(just(Token::RAngle))
+                .to(BinOp::UnsignedGreaterThan),
+            just(Token::LAngle)
+                .then(just(Token::Equals))
+                .to(BinOp::LessThenEqual),
+            just(Token::RAngle)
+                .then(just(Token::Equals))
+                .to(BinOp::GreaterThanEqual),
+            just(Token::LAngle).to(BinOp::LessThan),
+            just(Token::RAngle).to(BinOp::GreaterThan),
+        ));
+
+        arith
+            .clone()
+            .foldl_with(cmp_op.then(arith).repeated(), |a, (op, b), e| {
+                let sp = e.span();
+                Expr::Binary(Binary {
+                    lhs: Box::new(a),
+                    rhs: Box::new(b),
+                    op,
+                    span: sp,
+                })
+            })
+            .labelled("inline expression")
+    })
+}
+
+fn expr<'src, I>() -> impl Parser<'src, I, Expr, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    let ident = select! { Token::Identifier(i) => i.to_string() };
+    let scope = just(Token::Colon).then(just(Token::Colon));
+    let assign_target = ident
+        .then(scope.ignore_then(ident).or_not())
+        .map_with(|(base, member), e| {
+            if let Some(member) = member {
+                Expr::Path(Path {
+                    base,
+                    remainder: vec![member],
+                    span: e.span(),
+                })
+            } else {
+                Expr::Ident(Ident::new(base, e.span()))
+            }
+        })
+        .boxed();
+
+    recursive(|expr| {
+        let assign = assign_target
+            .clone()
+            .then_ignore(just(Token::Equals))
+            .then(expr.clone().or(inline_expr()))
+            .map_with(|(dest, value), e| {
+                Expr::Assign(Assign {
+                    dest: Box::new(dest),
+                    value: Box::new(value),
+                    span: e.span(),
+                })
+            })
+            .labelled("assignment");
+        let stmt = expr.clone().or(assign).or(inline_expr()).boxed();
+
+        let block = stmt
+            .separated_by(just(Token::Semicolon))
+            .collect::<Vec<_>>()
+            .then(just(Token::Semicolon).or_not())
+            .delimited_by(just(Token::LBrace), just(Token::RBrace))
+            .map_with(|(stmts, trailing_semicolon), e| {
+                let last_expr_return = trailing_semicolon.is_none() && !stmts.is_empty();
+                Block {
+                    stmts,
+                    last_expr_return,
+                    span: e.span(),
+                }
+                .into()
+            })
+            .boxed()
+            .recover_with(via_parser(nested_delimiters(
+                Token::LBrace,
+                Token::RBrace,
+                [
+                    (Token::LParen, Token::RParen),
+                    (Token::LBracket, Token::RBracket),
+                ],
+                |_| Expr::Invalid,
+            )));
+
+        let if_ = recursive(|if_| {
+            just(Token::KwIf)
+                .ignore_then(inline_expr())
+                .then(block.clone())
+                .then(
+                    just(Token::KwElse)
+                        .ignore_then(block.clone().or(if_))
+                        .or_not(),
+                )
+                .map_with(|((cond, a), b), e| {
+                    Expr::If(If {
+                        cond: Box::new(cond),
+                        then: Box::new(a),
+                        else_: b.map(Box::new),
+                        span: e.span(),
+                    })
+                })
+                .boxed()
+        });
+
+        block.clone().or(if_)
+    })
+}
+
+fn type_<'src, I>() -> impl Parser<'src, I, Type, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    let num = select! { Token::Number(n) => n };
+
+    let ident = select! { Token::Identifier(i) => i.to_string() };
+
+    let bits = just(Token::Identifier("bits"))
+        .ignored()
+        .then_ignore(just(Token::LAngle))
+        .then(num.try_map_with(|n, e| {
+            n.parse::<u16>()
+                .map_err(|_| Rich::custom(e.span(), "Expected unsigned integer"))
+        }))
+        .then_ignore(just(Token::RAngle))
+        .map(|((), bits)| Type::Bits(bits));
+    choice((
+        just(Token::Identifier("String")).to(Type::String),
+        just(Token::Identifier("Integer")).to(Type::Integer),
+        bits,
+        ident.map(Type::Struct),
+    ))
+}
+
+fn is_ident(token: &Token) -> bool {
+    matches!(token, Token::Identifier(_))
+}
+
+#[cfg(test)]
+mod tests {
+    use chumsky::Parser;
+    use chumsky::prelude::*;
+
+    use crate::{
+        ast::{BinOp, Expr},
+        lexer::lexer,
+    };
+
+    use super::{inline_expr, instruction_def, isa_def, machine_def, register_class_def, unit_def};
+
+    #[test]
+    fn register_class_parses_inheritance() {
+        let with_base = "register_class GPRsp for [Isa] : GPR { registers { x31(\"sp\") => { traits = [stack_pointer] }, } }";
+        let (tokens, _e) = lexer().parse(with_base).into_output_errors();
+        let tokens = tokens.unwrap();
+        let rc = register_class_def()
+            .then(end())
+            .parse(
+                tokens
+                    .as_slice()
+                    .map((with_base.len()..with_base.len()).into(), |(t, s)| (t, s)),
+            )
+            .output()
+            .unwrap()
+            .0
+            .clone();
+        assert_eq!(rc.base.as_deref(), Some("GPR"));
+
+        let no_base = "register_class GPR for [Isa] { registers { x0 => { traits = [] }, } }";
+        let (tokens, _e) = lexer().parse(no_base).into_output_errors();
+        let tokens = tokens.unwrap();
+        let rc = register_class_def()
+            .then(end())
+            .parse(
+                tokens
+                    .as_slice()
+                    .map((no_base.len()..no_base.len()).into(), |(t, s)| (t, s)),
+            )
+            .output()
+            .unwrap()
+            .0
+            .clone();
+        assert_eq!(rc.base, None);
+    }
+
+    #[test]
+    fn inheritance_merges_base_registers_and_params() {
+        use crate::ast::{RegisterTrait, resolve_register_class_inheritance};
+
+        let code = r#"
+            isa Isa { param XLEN: Integer = 64; }
+            register_class GPR for [Isa] {
+                param ENCODING_LEN: Integer = 5;
+                param WIDTH: Integer = self.XLEN;
+                registers {
+                    x0..x30 => { traits = [caller_saved] },
+                    x31("xzr") => { traits = [hardwired_zero] },
+                }
+            }
+            register_class GPRsp for [Isa] : GPR {
+                registers {
+                    x31("sp") => { traits = [stack_pointer] },
+                }
+            }
+        "#;
+        let (tokens, _e) = crate::lex(code);
+        let (file, errs) = crate::parse(code, &tokens, "test");
+        assert!(errs.is_empty(), "{errs:?}");
+        let mut files = vec![file.unwrap()];
+        resolve_register_class_inheritance(&mut files);
+
+        let gprsp = files[0]
+            .register_classes()
+            .find(|c| c.name == "GPRsp")
+            .unwrap();
+        // Parameters are inherited from the base.
+        assert!(gprsp.parameters.get("WIDTH").is_some());
+        assert!(gprsp.parameters.get("ENCODING_LEN").is_some());
+        // The full register file is present, with slot 31 overridden to `sp`.
+        let regs: Vec<_> = gprsp.resolve_registers().collect();
+        assert_eq!(regs.len(), 32);
+        let r31 = regs.iter().find(|r| r.name == "x31").unwrap();
+        assert_eq!(r31.alias.as_deref(), Some("sp"));
+        assert!(r31.traits.contains(&RegisterTrait::StackPointer));
+        // The base class is left untouched: slot 31 is still `xzr`.
+        let gpr = files[0]
+            .register_classes()
+            .find(|c| c.name == "GPR")
+            .unwrap();
+        let g31 = gpr.resolve_registers().find(|r| r.name == "x31").unwrap();
+        assert_eq!(g31.alias.as_deref(), Some("xzr"));
+        assert!(g31.traits.contains(&RegisterTrait::HardwiredZero));
+        // Both classes report the same shared register file.
+        let classes: std::collections::HashMap<String, &crate::ast::RegisterClass> = files[0]
+            .register_classes()
+            .map(|c| (c.name.clone(), c))
+            .collect();
+        assert_eq!(gpr.register_file(&classes), "GPR");
+        assert_eq!(gprsp.register_file(&classes), "GPR");
+    }
+
+    #[test]
+    fn smoke_isa() {
+        let code = "isa RV32I {}";
+        let (tokens, mut _errors) = lexer().parse(code).into_output_errors();
+
+        let tokens = tokens.unwrap();
+        let isa = isa_def().then(end()).parse(
+            tokens
+                .as_slice()
+                .map((code.len()..code.len()).into(), |(t, s)| (t, s)),
+        );
+
+        println!("{:?}", isa);
+        assert!(isa.has_output());
+    }
+
+    #[test]
+    fn inline_expr_parses_less_equal() {
+        let code = "a <= b";
+        let (tokens, mut _errors) = lexer().parse(code).into_output_errors();
+        let tokens = tokens.unwrap();
+        let parsed = inline_expr().then(end()).parse(
+            tokens
+                .as_slice()
+                .map((code.len()..code.len()).into(), |(t, s)| (t, s)),
+        );
+        let expr = parsed.output().unwrap().0.clone();
+        match expr {
+            Expr::Binary(bin) => assert_eq!(bin.op, BinOp::LessThenEqual),
+            _ => panic!("Expected binary expression"),
+        }
+    }
+
+    #[test]
+    fn inline_expr_parses_not_equal() {
+        let code = "a != b";
+        let (tokens, mut _errors) = lexer().parse(code).into_output_errors();
+        let tokens = tokens.unwrap();
+        let parsed = inline_expr().then(end()).parse(
+            tokens
+                .as_slice()
+                .map((code.len()..code.len()).into(), |(t, s)| (t, s)),
+        );
+        let expr = parsed.output().unwrap().0.clone();
+        match expr {
+            Expr::Binary(bin) => assert_eq!(bin.op, BinOp::NotEqual),
+            _ => panic!("Expected binary expression"),
+        }
+    }
+
+    #[test]
+    fn smoke_unit_decl() {
+        let code = "unit WriteIMul { latency = 3; throughput = 1; }";
+        let (tokens, _e) = lexer().parse(code).into_output_errors();
+        let tokens = tokens.unwrap();
+        let parsed = unit_def().then(end()).parse(
+            tokens
+                .as_slice()
+                .map((code.len()..code.len()).into(), |(t, s)| (t, s)),
+        );
+        let u = parsed.output().expect("unit decl should parse").0.clone();
+        assert_eq!(u.name, "WriteIMul");
+        assert_eq!(u.default_latency, Some(3));
+        assert_eq!(u.default_throughput, Some(1));
+    }
+
+    #[test]
+    fn smoke_unit_decl_bare() {
+        let code = "unit WriteLoad;";
+        let (tokens, _e) = lexer().parse(code).into_output_errors();
+        let tokens = tokens.unwrap();
+        let parsed = unit_def().then(end()).parse(
+            tokens
+                .as_slice()
+                .map((code.len()..code.len()).into(), |(t, s)| (t, s)),
+        );
+        let u = parsed
+            .output()
+            .expect("bare unit decl should parse")
+            .0
+            .clone();
+        assert_eq!(u.name, "WriteLoad");
+        assert_eq!(u.default_latency, None);
+    }
+
+    #[test]
+    fn smoke_machine() {
+        let code = "machine RocketCore for [RV64I] {
+            issue_width = 2;
+            buffers { rob = 64; lsq = 16; }
+            resource ALU { units = 2; }
+            resource MUL { units = 1; }
+            bind WriteIALU { latency = 1; uses = [ALU]; }
+            bind WriteIMul { latency = 3; uses = [MUL]; }
+        }";
+        let (tokens, _e) = lexer().parse(code).into_output_errors();
+        let tokens = tokens.unwrap();
+        let parsed = machine_def().then(end()).parse(
+            tokens
+                .as_slice()
+                .map((code.len()..code.len()).into(), |(t, s)| (t, s)),
+        );
+        let m = parsed.output().expect("machine should parse").0.clone();
+        assert_eq!(m.name, "RocketCore");
+        assert_eq!(m.for_isas, vec!["RV64I".to_string()]);
+        assert_eq!(m.issue_width, Some(2));
+        assert_eq!(m.buffers, vec![("rob".into(), 64), ("lsq".into(), 16)]);
+        assert_eq!(m.resources.len(), 2);
+        assert_eq!(m.resources[0].name, "ALU");
+        assert_eq!(m.resources[0].units, 2);
+        assert_eq!(m.binds.len(), 2);
+        assert_eq!(m.binds[0].unit, "WriteIALU");
+        assert_eq!(m.binds[0].latency, Some(1));
+        assert_eq!(m.binds[0].uses, vec!["ALU".to_string()]);
+    }
+
+    #[test]
+    fn smoke_machine_pipeline_and_phase_bind() {
+        use crate::ast::Protection;
+        let code = "machine InOrder for [RV64I] {
+            pipeline { IF; ID; EX: unprotected; MEM; WB; }
+            resource LSU { units = 1; }
+            bind WriteLoad { reads = ID; writes = MEM; uses = [LSU]; }
+        }";
+        let (tokens, _e) = lexer().parse(code).into_output_errors();
+        let tokens = tokens.unwrap();
+        let parsed = machine_def().then(end()).parse(
+            tokens
+                .as_slice()
+                .map((code.len()..code.len()).into(), |(t, s)| (t, s)),
+        );
+        let m = parsed.output().expect("machine should parse").0.clone();
+        assert_eq!(m.pipeline.len(), 5);
+        assert_eq!(m.pipeline[0].name, "IF");
+        assert_eq!(m.pipeline[0].protection, Protection::Protected);
+        assert_eq!(m.pipeline[2].name, "EX");
+        assert_eq!(m.pipeline[2].protection, Protection::Unprotected);
+        assert_eq!(m.binds[0].reads.as_deref(), Some("ID"));
+        assert_eq!(m.binds[0].writes.as_deref(), Some("MEM"));
+    }
+
+    #[test]
+    fn smoke_machine_override_and_forward() {
+        let code = "machine M for [RV64I] {
+            resource ALU { units = 2; }
+            resource LSU { units = 1; }
+            bind WriteIALU { latency = 1; uses = [ALU]; }
+            override Mul { latency = 3; uses = [ALU]; }
+            forward ALU => ALU { latency = 0; }
+            forward LSU => ALU { latency = 1; }
+        }";
+        let (tokens, _e) = lexer().parse(code).into_output_errors();
+        let tokens = tokens.unwrap();
+        let parsed = machine_def().then(end()).parse(
+            tokens
+                .as_slice()
+                .map((code.len()..code.len()).into(), |(t, s)| (t, s)),
+        );
+        let m = parsed.output().expect("machine should parse").0.clone();
+        assert_eq!(m.overrides.len(), 1);
+        assert_eq!(m.overrides[0].instruction, "Mul");
+        assert_eq!(m.overrides[0].latency, Some(3));
+        assert_eq!(m.overrides[0].uses, vec!["ALU".to_string()]);
+        assert_eq!(m.forwards.len(), 2);
+        assert_eq!(
+            (
+                m.forwards[0].from.as_str(),
+                m.forwards[0].to.as_str(),
+                m.forwards[0].latency
+            ),
+            ("ALU", "ALU", 0)
+        );
+        assert_eq!(
+            (
+                m.forwards[1].from.as_str(),
+                m.forwards[1].to.as_str(),
+                m.forwards[1].latency
+            ),
+            ("LSU", "ALU", 1)
+        );
+    }
+
+    #[test]
+    fn smoke_instruction_schedule() {
+        let code = "instruction Mul : MulDivOp {
+            behavior { rd = rs1; }
+            schedule { units = [WriteIMul]; }
+        }";
+        let (tokens, _e) = lexer().parse(code).into_output_errors();
+        let tokens = tokens.unwrap();
+        let parsed = instruction_def().then(end()).parse(
+            tokens
+                .as_slice()
+                .map((code.len()..code.len()).into(), |(t, s)| (t, s)),
+        );
+        let inst = parsed.output().expect("instruction should parse").0.clone();
+        let sched = inst.schedule.expect("schedule block should be present");
+        assert_eq!(sched.units, vec!["WriteIMul".to_string()]);
+    }
+
+    #[test]
+    fn instruction_without_schedule_is_none() {
+        let code = "instruction Add : ALUOp { behavior { rd = rs1; } }";
+        let (tokens, _e) = lexer().parse(code).into_output_errors();
+        let tokens = tokens.unwrap();
+        let parsed = instruction_def().then(end()).parse(
+            tokens
+                .as_slice()
+                .map((code.len()..code.len()).into(), |(t, s)| (t, s)),
+        );
+        let inst = parsed.output().expect("instruction should parse").0.clone();
+        assert!(inst.schedule.is_none());
+    }
+
+    #[test]
+    fn inline_expr_parses_unsigned_less_equal() {
+        let code = "a ~<= b";
+        let (tokens, mut _errors) = lexer().parse(code).into_output_errors();
+        let tokens = tokens.unwrap();
+        let parsed = inline_expr().then(end()).parse(
+            tokens
+                .as_slice()
+                .map((code.len()..code.len()).into(), |(t, s)| (t, s)),
+        );
+        let expr = parsed.output().unwrap().0.clone();
+        match expr {
+            Expr::Binary(bin) => assert_eq!(bin.op, BinOp::UnsignedLessThenEqual),
+            _ => panic!("Expected binary expression"),
+        }
+    }
 }
