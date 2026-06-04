@@ -549,4 +549,107 @@ mod tests {
         assert!(trace_text.contains("registers:"));
         assert!(trace_text.contains("final registers:"));
     }
+
+    /// `cmp` writes all four AArch64 condition flags (`PSTATE` n/z/c/v), and a
+    /// conditional branch reads them back. Both used to be silently dropped: the
+    /// multi-assignment behaviors only emitted one write (or none), and flag paths
+    /// could not be lowered at all. Flags live in a register class with index-less
+    /// registers, so this also exercises the canonical-index support that ports to
+    /// any target with status/flag registers.
+    #[test]
+    fn arm64_compare_sets_flags_and_conditional_branch_reads_them() {
+        use tir::Operation;
+        use tir::attributes::{AttributeValue, RegisterAttr};
+        use tir_be_common::{MachineContext, MachineInstruction};
+
+        fn gpr(index: u16) -> AttributeValue {
+            AttributeValue::Register(RegisterAttr::Physical {
+                class: "GPR".to_string(),
+                index,
+            })
+        }
+
+        // PSTATE flag slots, assigned by declaration order in the register class.
+        const N: u16 = 0;
+        const Z: u16 = 1;
+        const C: u16 = 2;
+        const V: u16 = 3;
+
+        let context = Context::with_default_dialects();
+        context.register_dialect::<tir_be_common::AsmDialect>();
+        context.register_dialect::<arm64::Arm64Dialect>();
+
+        let exec_cmp = |x0: u64, x1: u64| -> Executor {
+            let mut ex = Executor::new(64);
+            MachineContext::write_register(&mut ex, "GPR", 0, APInt::new(64, x0)).unwrap();
+            MachineContext::write_register(&mut ex, "GPR", 1, APInt::new(64, x1)).unwrap();
+            let cmp = arm64::CompareOpBuilder::new(&context)
+                .attr("rn", gpr(0))
+                .attr("rm", gpr(1))
+                .build();
+            let mi = context
+                .get_op(cmp.id())
+                .as_interface::<dyn MachineInstruction>()
+                .expect("cmp is a machine instruction");
+            mi.execute(&mut ex).expect("cmp executes");
+            ex
+        };
+        let flag = |ex: &Executor, idx: u16| {
+            MachineContext::read_register(ex, "PSTATE", idx)
+                .unwrap()
+                .to_u64()
+        };
+
+        // Equal operands: Z and C set, N and V clear.
+        let eq = exec_cmp(5, 5);
+        assert_eq!(flag(&eq, Z), 1, "Z set when operands are equal");
+        assert_eq!(flag(&eq, N), 0);
+        assert_eq!(flag(&eq, C), 1, "C set: 5 >=u 5");
+        assert_eq!(flag(&eq, V), 0);
+
+        // 5 - 7 is negative and borrows: N set, Z and C clear.
+        let lt = exec_cmp(5, 7);
+        assert_eq!(flag(&lt, Z), 0);
+        assert_eq!(flag(&lt, N), 1, "N set: 5 - 7 is negative");
+        assert_eq!(flag(&lt, C), 0, "C clear: 5 <u 7");
+
+        // A b.eq reads Z: taken when set, fall-through (pc + 4) when clear.
+        let run_beq = |z: u64| -> u64 {
+            let mut ex = Executor::new(64);
+            MachineContext::write_pc(&mut ex, 0x1000);
+            MachineContext::write_register(&mut ex, "PSTATE", Z, APInt::new(1, z)).unwrap();
+            let beq = arm64::BranchEqOpBuilder::new(&context)
+                .attr("imm", AttributeValue::Int(4))
+                .build();
+            let mi = context
+                .get_op(beq.id())
+                .as_interface::<dyn MachineInstruction>()
+                .expect("b.eq is a machine instruction");
+            mi.execute(&mut ex).expect("b.eq executes");
+            MachineContext::read_pc(&ex)
+        };
+        // imm=4, target = pc + (sext(imm) << 2) = 0x1000 + 16.
+        assert_eq!(run_beq(1), 0x1010, "branch taken when Z is set");
+        assert_eq!(run_beq(0), 0x1004, "fall-through (pc + width) when Z is clear");
+
+        // `bl` writes two destinations: the link register (x30 = pc + 4) and PC.
+        // Both used to be dropped because only one assignment was ever emitted.
+        let mut ex = Executor::new(64);
+        MachineContext::write_pc(&mut ex, 0x2000);
+        let bl = arm64::BranchLinkOpBuilder::new(&context)
+            .attr("imm", AttributeValue::Int(3))
+            .build();
+        let mi = context
+            .get_op(bl.id())
+            .as_interface::<dyn MachineInstruction>()
+            .expect("bl is a machine instruction");
+        mi.execute(&mut ex).expect("bl executes");
+        let x30 = MachineContext::read_register(&ex, "GPR", 30).unwrap().to_u64();
+        assert_eq!(x30, 0x2004, "link register holds the return address (pc + 4)");
+        assert_eq!(
+            MachineContext::read_pc(&ex),
+            0x2000 + (3 << 2),
+            "pc takes the branch target"
+        );
+    }
 }

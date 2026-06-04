@@ -48,6 +48,36 @@ macro_rules! as_float {
     };
 }
 
+/// Widen `v` to `width`, sign-extending signed values and zero-extending unsigned
+/// ones; a no-op when it is already at least that wide.
+fn widen(v: APInt, width: u32) -> APInt {
+    if v.width() >= width {
+        v
+    } else if v.is_signed() {
+        v.sign_extend(width)
+    } else {
+        v.zero_extend(width)
+    }
+}
+
+/// Bring two integers to a common width before a binary operation. Behavior
+/// expressions freely mix a wide value (a register, `XLEN`) with a bare narrow
+/// literal (`- 1`, `<< 2`, a `zext`-ed constant), so the interpreter extends the
+/// narrower operand rather than requiring exactly matching widths. Equal-width
+/// operands — the common case — pass through unchanged.
+fn coerce_ints(a: APInt, b: APInt) -> (APInt, APInt) {
+    let width = a.width().max(b.width());
+    (widen(a, width), widen(b, width))
+}
+
+/// Equality of two integers independent of width and signedness: operands are
+/// widened to a common width and compared by value, so e.g. a 64-bit register
+/// equals a narrow literal of the same magnitude.
+fn ints_equal(a: APInt, b: APInt) -> bool {
+    let (a, b) = coerce_ints(a, b);
+    a.with_signed(false) == b.with_signed(false)
+}
+
 fn eval_node(
     graph: &impl Dag<Node = ExprKind, Leaf = ExprPayload>,
     node: NodeId,
@@ -82,27 +112,51 @@ fn eval_node(
 
         // ── Arithmetic (int or float) ──────────────────────────────────────
         ExprKind::Add => match c(0) {
-            Value::Int(a) => Value::Int(a.add(&as_int!(c(1), "add"))),
+            Value::Int(a) => {
+                let (a, b) = coerce_ints(a, as_int!(c(1), "add"));
+                Value::Int(a.add(&b))
+            }
             Value::Float(a) => Value::Float(a.add(&as_float!(c(1), "add"))),
         },
         ExprKind::Sub => match c(0) {
-            Value::Int(a) => Value::Int(a.sub(&as_int!(c(1), "sub"))),
+            Value::Int(a) => {
+                let (a, b) = coerce_ints(a, as_int!(c(1), "sub"));
+                Value::Int(a.sub(&b))
+            }
             Value::Float(a) => Value::Float(a.sub(&as_float!(c(1), "sub"))),
         },
         ExprKind::Mul => match c(0) {
-            Value::Int(a) => Value::Int(a.mul(&as_int!(c(1), "mul"))),
+            Value::Int(a) => {
+                let (a, b) = coerce_ints(a, as_int!(c(1), "mul"));
+                Value::Int(a.mul(&b))
+            }
             Value::Float(a) => Value::Float(a.mul(&as_float!(c(1), "mul"))),
         },
         ExprKind::Div => match c(0) {
-            Value::Int(a) => Value::Int(a.sdiv(&as_int!(c(1), "div"))),
+            Value::Int(a) => {
+                let (a, b) = coerce_ints(a, as_int!(c(1), "div"));
+                Value::Int(a.sdiv(&b))
+            }
             Value::Float(a) => Value::Float(a.div(&as_float!(c(1), "div"))),
         },
-        ExprKind::UDiv => Value::Int(as_int!(c(0), "udiv").udiv(&as_int!(c(1), "udiv"))),
+        ExprKind::UDiv => {
+            let (a, b) = coerce_ints(as_int!(c(0), "udiv"), as_int!(c(1), "udiv"));
+            Value::Int(a.udiv(&b))
+        }
 
         // ── Bitwise (int only) ─────────────────────────────────────────────
-        ExprKind::And => Value::Int(as_int!(c(0), "and").and(&as_int!(c(1), "and"))),
-        ExprKind::Or => Value::Int(as_int!(c(0), "or").or(&as_int!(c(1), "or"))),
-        ExprKind::Xor => Value::Int(as_int!(c(0), "xor").xor(&as_int!(c(1), "xor"))),
+        ExprKind::And => {
+            let (a, b) = coerce_ints(as_int!(c(0), "and"), as_int!(c(1), "and"));
+            Value::Int(a.and(&b))
+        }
+        ExprKind::Or => {
+            let (a, b) = coerce_ints(as_int!(c(0), "or"), as_int!(c(1), "or"));
+            Value::Int(a.or(&b))
+        }
+        ExprKind::Xor => {
+            let (a, b) = coerce_ints(as_int!(c(0), "xor"), as_int!(c(1), "xor"));
+            Value::Int(a.xor(&b))
+        }
         ExprKind::ShiftLeft => {
             Value::Int(as_int!(c(0), "shl").shl(as_int!(c(1), "shl").to_u64() as u32))
         }
@@ -114,45 +168,66 @@ fn eval_node(
         }
 
         // ── Comparisons ────────────────────────────────────────────────────
-        ExprKind::Eq => Value::Int(APInt::new(1, bool_result(c(0) == c(1)))),
-        ExprKind::Ne => Value::Int(APInt::new(1, bool_result(c(0) != c(1)))),
+        ExprKind::Eq => {
+            let eq = match (c(0), c(1)) {
+                (Value::Int(a), Value::Int(b)) => ints_equal(a, b),
+                (l, r) => l == r,
+            };
+            Value::Int(APInt::new(1, bool_result(eq)))
+        }
+        ExprKind::Ne => {
+            let ne = match (c(0), c(1)) {
+                (Value::Int(a), Value::Int(b)) => !ints_equal(a, b),
+                (l, r) => l != r,
+            };
+            Value::Int(APInt::new(1, bool_result(ne)))
+        }
         ExprKind::Lt => Value::Int(APInt::new(
             1,
             match c(0) {
-                Value::Int(a) => bool_result(a.slt(&as_int!(c(1), "lt"))),
+                Value::Int(a) => {
+                    let (a, b) = coerce_ints(a, as_int!(c(1), "lt"));
+                    bool_result(a.slt(&b))
+                }
                 Value::Float(a) => bool_result(a.lt(&as_float!(c(1), "lt"))),
             },
         )),
         ExprKind::Gt => Value::Int(APInt::new(
             1,
             match c(0) {
-                Value::Int(a) => bool_result(a.sgt(&as_int!(c(1), "gt"))),
+                Value::Int(a) => {
+                    let (a, b) = coerce_ints(a, as_int!(c(1), "gt"));
+                    bool_result(a.sgt(&b))
+                }
                 Value::Float(a) => bool_result(a.gt(&as_float!(c(1), "gt"))),
             },
         )),
         ExprKind::Ge => Value::Int(APInt::new(
             1,
             match c(0) {
-                Value::Int(a) => bool_result(a.sge(&as_int!(c(1), "ge"))),
+                Value::Int(a) => {
+                    let (a, b) = coerce_ints(a, as_int!(c(1), "ge"));
+                    bool_result(a.sge(&b))
+                }
                 Value::Float(a) => bool_result(a.ge(&as_float!(c(1), "ge"))),
             },
         )),
-        ExprKind::ULt => Value::Int(APInt::new(
-            1,
-            bool_result(as_int!(c(0), "ult").ult(&as_int!(c(1), "ult"))),
-        )),
-        ExprKind::ULe => Value::Int(APInt::new(
-            1,
-            bool_result(as_int!(c(0), "ule").ule(&as_int!(c(1), "ule"))),
-        )),
-        ExprKind::UGt => Value::Int(APInt::new(
-            1,
-            bool_result(as_int!(c(0), "ugt").ugt(&as_int!(c(1), "ugt"))),
-        )),
-        ExprKind::UGe => Value::Int(APInt::new(
-            1,
-            bool_result(as_int!(c(0), "uge").uge(&as_int!(c(1), "uge"))),
-        )),
+        ExprKind::ULt => {
+            let (a, b) = coerce_ints(as_int!(c(0), "ult"), as_int!(c(1), "ult"));
+            Value::Int(APInt::new(1, bool_result(a.ult(&b))))
+        }
+        ExprKind::ULe => {
+            let (a, b) = coerce_ints(as_int!(c(0), "ule"), as_int!(c(1), "ule"));
+            Value::Int(APInt::new(1, bool_result(a.ule(&b))))
+        }
+        ExprKind::UGt => {
+            let (a, b) = coerce_ints(as_int!(c(0), "ugt"), as_int!(c(1), "ugt"));
+            Value::Int(APInt::new(1, bool_result(a.ugt(&b))))
+        }
+        ExprKind::UGe => {
+            let (a, b) = coerce_ints(as_int!(c(0), "uge"), as_int!(c(1), "uge"));
+            Value::Int(APInt::new(1, bool_result(a.uge(&b))))
+        }
 
         // ── Control ────────────────────────────────────────────────────────
         ExprKind::If => {
@@ -188,7 +263,11 @@ fn eval_node(
 
         // ── Math (int or float) ────────────────────────────────────────────
         ExprKind::Fma => match c(0) {
-            Value::Int(a) => Value::Int(a.mul(&as_int!(c(1), "fma")).add(&as_int!(c(2), "fma"))),
+            Value::Int(a) => {
+                let (a, b) = coerce_ints(a, as_int!(c(1), "fma"));
+                let (prod, addend) = coerce_ints(a.mul(&b), as_int!(c(2), "fma"));
+                Value::Int(prod.add(&addend))
+            }
             Value::Float(a) => {
                 Value::Float(a.fma(&as_float!(c(1), "fma"), &as_float!(c(2), "fma")))
             }

@@ -9,3 +9,4 @@ tir-be-common = { path = "../../backends/common" }
 
 [dev-dependencies]
 tir-riscv = { path = "../../backends/riscv" }
+arm64 = { path = "../../backends/arm64" }
