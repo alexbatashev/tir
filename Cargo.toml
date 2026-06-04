@@ -19,6 +19,7 @@ members = [
     "simulator/sched", "backends/arm64", "fcc",
     "backends/targets",
     "utils/tir-mc",
+    "utils/isa-test-suite",
 ]
 
 [profile.bench]

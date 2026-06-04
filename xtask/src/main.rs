@@ -23,6 +23,7 @@ fn main() -> anyhow::Result<()> {
                 _ => print_help(),
             }
         }
+        Some("isa-test-suite") => isa_test_suite(&sh)?,
         _ => print_help(),
     }
     Ok(())
@@ -68,6 +69,23 @@ fn build_docs(sh: &Shell) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Run the differential ISA test suite: build the `tir-isasim` binary (the
+/// simulator under test), then compare each snippet's architectural state
+/// against a golden reference model (Spike for RISC-V).
+fn isa_test_suite(sh: &Shell) -> anyhow::Result<()> {
+    let root = project_root();
+    sh.change_dir(&root);
+
+    cmd!(sh, "cargo build -p tir-isasim").run()?;
+    let isasim_bin = root.join("target/debug/tir-isasim");
+
+    let all_passed = tir_isa_test_suite::run(&isasim_bin)?;
+    if !all_passed {
+        anyhow::bail!("ISA test suite reported failures");
+    }
+    Ok(())
+}
+
 fn verify_isa(isa: &str, sh: &Shell) -> anyhow::Result<()> {
     match isa {
         "riscv" => verify_riscv::verify_riscv(sh),
@@ -86,6 +104,7 @@ build            builds TIR project
 check            builds project and runs check tests
 check-only       only runs check tests without building the project
 verify <isa>     run formal ISA verification. Available ISAs: riscv
+isa-test-suite   run differential ISA tests against a golden oracle (riscv/Spike)
 docs             builds project documentation
 help             shows this message
 "
