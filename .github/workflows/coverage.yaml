@@ -44,7 +44,7 @@ jobs:
               --ignore '../*' \
               --ignore "/*" \
               --ignore 'macros/*' \
-              --ignore 'fuzz/*' \
+              --ignore 'utils/fuzz/*' \
               --ignore 'utils/*' \
               --ignore 'xtask/*' \
               --ignore '**/tests/**' \
