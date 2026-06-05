@@ -1,9 +1,9 @@
 //! Target registry shared by `tir-mc` and `isasim`.
 //!
-//! [`select`] maps a `--march` (and optional `--mcpu`) string onto a concrete
-//! [`TargetMachine`]. Both the codegen driver and the simulator go through this
-//! one entry point, so the set of supported targets — and the spelling of their
-//! names — is defined in a single place.
+//! [`select`] asks each backend to parse the requested `--march`/`--mcpu` pair
+//! and wraps the first backend that accepts it as a concrete [`TargetMachine`].
+//! Backend-specific spelling rules stay in the backend crates instead of being
+//! duplicated in this registry.
 
 use tir::Context;
 use tir_be_common::AsmDialect;
@@ -16,28 +16,31 @@ use tir_be_common::sched::MachineModel;
 use arm64::Arm64Dialect;
 use tir_riscv::RiscvDialect;
 
-/// Resolve a `--march`/`--mcpu` pair to a target, or `None` if unknown.
-///
-/// `mcpu` is accepted for forward compatibility (sub-architecture / scheduling
-/// model selection) but does not yet influence the choice of backend.
-pub fn select(march: &str, _mcpu: Option<&str>) -> Option<Box<dyn TargetMachine>> {
-    match march.to_ascii_lowercase().as_str() {
-        "riscv" | "riscv64" | "rv64" | "rv64gc" | "rv64i" => Some(Box::new(RiscvTarget)),
-        "arm64" | "aarch64" | "armv8" | "armv8a" => Some(Box::new(Arm64Target)),
-        _ => None,
+/// Resolve a `--march`/`--mcpu` pair to a target, or `None` if no backend accepts it.
+pub fn select(march: &str, mcpu: Option<&str>) -> Option<Box<dyn TargetMachine>> {
+    if let Some(config) = tir_riscv::TargetConfig::parse(march, mcpu) {
+        return Some(Box::new(RiscvTarget { config }));
     }
+
+    if let Some(config) = arm64::TargetConfig::parse(march, mcpu) {
+        return Some(Box::new(Arm64Target { config }));
+    }
+
+    None
 }
 
-/// Names accepted by [`select`], one canonical spelling per target, for help
-/// text and error messages.
-pub const SUPPORTED_TARGETS: &[&str] = &["riscv64", "arm64"];
+/// Names accepted by [`select`], one canonical spelling per target family, for
+/// help text and error messages.
+pub const SUPPORTED_TARGETS: &[&str] = &["riscv32", "riscv64", "arm64"];
 
-/// The RISC-V (RV64I) target.
-pub struct RiscvTarget;
+/// The RISC-V target.
+pub struct RiscvTarget {
+    config: tir_riscv::TargetConfig,
+}
 
 impl TargetMachine for RiscvTarget {
     fn name(&self) -> &'static str {
-        "riscv64"
+        self.config.canonical_name()
     }
 
     fn register_dialects(&self, context: &Context) {
@@ -74,11 +77,13 @@ impl TargetMachine for RiscvTarget {
 }
 
 /// The AArch64 (ARMv8-A) target.
-pub struct Arm64Target;
+pub struct Arm64Target {
+    config: arm64::TargetConfig,
+}
 
 impl TargetMachine for Arm64Target {
     fn name(&self) -> &'static str {
-        "arm64"
+        self.config.canonical_name()
     }
 
     fn register_dialects(&self, context: &Context) {

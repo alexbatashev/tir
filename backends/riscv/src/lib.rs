@@ -3,6 +3,153 @@ use tir::{Any, Operation};
 
 include!(concat!(env!("OUT_DIR"), "/riscv.rs"));
 
+/// Parsed RISC-V target selection from `--march`/`--mcpu`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TargetConfig {
+    xlen: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CpuModel {
+    Generic,
+    InOrder,
+    OutOfOrder,
+}
+
+impl TargetConfig {
+    /// Parse a RISC-V `--march`/`--mcpu` pair.
+    pub fn parse(march: &str, mcpu: Option<&str>) -> Option<Self> {
+        let config = parse_march(march)?;
+        if let Some(mcpu) = mcpu {
+            parse_mcpu(mcpu, config)?;
+        }
+        Some(config)
+    }
+
+    /// Canonical architecture name for diagnostics and target-specific behavior.
+    pub fn canonical_name(&self) -> &'static str {
+        match self.xlen {
+            32 => "riscv32",
+            _ => "riscv64",
+        }
+    }
+}
+
+fn parse_march(march: &str) -> Option<TargetConfig> {
+    let march = normalize(march);
+    match march.as_str() {
+        "riscv" => Some(TargetConfig { xlen: 64 }),
+        "riscv32" => Some(TargetConfig { xlen: 32 }),
+        "riscv64" => Some(TargetConfig { xlen: 64 }),
+        _ => parse_riscv_isa_string(&march),
+    }
+}
+
+fn parse_mcpu(mcpu: &str, march_config: TargetConfig) -> Option<CpuModel> {
+    let mcpu = normalize(mcpu);
+    for (prefix, xlen) in [("riscv32-", 32), ("riscv64-", 64)] {
+        if let Some(model) = mcpu.strip_prefix(prefix).and_then(parse_cpu_model) {
+            return (march_config.xlen == xlen).then_some(model);
+        }
+    }
+
+    parse_cpu_model(&mcpu)
+}
+
+fn parse_cpu_model(name: &str) -> Option<CpuModel> {
+    match name {
+        "generic" => Some(CpuModel::Generic),
+        "generic-in-order" | "generic-inorder" | "in-order" | "inorder" => Some(CpuModel::InOrder),
+        "generic-ooo" | "generic-out-of-order" | "ooo" | "out-of-order" => {
+            Some(CpuModel::OutOfOrder)
+        }
+        _ => None,
+    }
+}
+
+fn normalize(s: &str) -> String {
+    s.trim().to_ascii_lowercase().replace('_', "-")
+}
+
+fn parse_riscv_isa_string(march: &str) -> Option<TargetConfig> {
+    let rest = march.strip_prefix("rv")?;
+    let (xlen, rest) = if let Some(rest) = rest.strip_prefix("32") {
+        (32, rest)
+    } else if let Some(rest) = rest.strip_prefix("64") {
+        (64, rest)
+    } else {
+        return None;
+    };
+
+    let mut chars = rest.chars().peekable();
+    let base = chars.next()?;
+    match base {
+        'i' | 'e' | 'g' => skip_extension_version(&mut chars),
+        _ => return None,
+    }
+
+    while chars.peek().is_some() {
+        if chars.peek() == Some(&'-') {
+            chars.next();
+            chars.peek()?;
+            continue;
+        }
+
+        let ext = chars.next()?;
+        if ext.is_ascii_digit() {
+            return None;
+        }
+
+        match ext {
+            'm' | 'a' | 'f' | 'd' | 'q' | 'l' | 'c' | 'b' | 'j' | 't' | 'p' | 'v' | 'h' => {
+                skip_extension_version(&mut chars);
+            }
+            'z' | 's' | 'x' => {
+                if !consume_multi_letter_extension(&mut chars) {
+                    return None;
+                }
+            }
+            _ => return None,
+        }
+    }
+
+    Some(TargetConfig { xlen })
+}
+
+fn consume_multi_letter_extension<I>(chars: &mut std::iter::Peekable<I>) -> bool
+where
+    I: Iterator<Item = char>,
+{
+    let mut consumed_name_char = false;
+    while let Some(&c) = chars.peek() {
+        if c == '-' {
+            break;
+        }
+        if c.is_ascii_lowercase() || c.is_ascii_digit() {
+            consumed_name_char = true;
+            chars.next();
+        } else {
+            return false;
+        }
+    }
+    consumed_name_char
+}
+
+fn skip_extension_version<I>(chars: &mut std::iter::Peekable<I>)
+where
+    I: Iterator<Item = char>,
+{
+    while chars.peek().is_some_and(|c| c.is_ascii_digit()) {
+        chars.next();
+    }
+    if chars.peek() == Some(&'p') {
+        chars.next();
+        while chars.peek().is_some_and(|c| c.is_ascii_digit()) {
+            chars.next();
+        }
+    }
+}
+
 operation! {
     VirtualReturnOp {
         name: "vret",
@@ -994,5 +1141,41 @@ mod tests {
             Some(&"addi"),
             "the frame prologue (addi sp) should lead the block, got {names:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod target_parser_tests {
+    use super::TargetConfig;
+
+    #[test]
+    fn march_accepts_gcc_style_isa_strings() {
+        assert_eq!(
+            TargetConfig::parse("rv64im", None).map(|c| c.canonical_name()),
+            Some("riscv64")
+        );
+        assert_eq!(
+            TargetConfig::parse("rv32imac", None).map(|c| c.canonical_name()),
+            Some("riscv32")
+        );
+        assert_eq!(
+            TargetConfig::parse("rv64gc_zba_zbb", None).map(|c| c.canonical_name()),
+            Some("riscv64")
+        );
+    }
+
+    #[test]
+    fn mcpu_accepts_target_prefixed_generic_names() {
+        assert!(TargetConfig::parse("rv32im", Some("riscv32-generic-in-order")).is_some());
+        assert!(TargetConfig::parse("rv64im", Some("riscv32-generic-in-order")).is_none());
+        assert!(TargetConfig::parse("rv64im", Some("generic-in-order")).is_some());
+    }
+
+    #[test]
+    fn unknown_or_malformed_march_is_rejected() {
+        assert!(TargetConfig::parse("rv64", None).is_none());
+        assert!(TargetConfig::parse("rv64zm", None).is_none());
+        assert!(TargetConfig::parse("mips", None).is_none());
+        assert!(TargetConfig::parse("rv64im", Some("riscv64-unknown-cpu")).is_none());
     }
 }
