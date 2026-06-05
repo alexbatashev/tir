@@ -13,7 +13,7 @@ members = [
     "utils/macros",
     "backends/common",
     "backends/riscv",
-    "fuzz",
+    "utils/fuzz",
     "simulator/isasim",
     "simulator/simcore",
     "simulator/sched", "backends/arm64", "fcc",
