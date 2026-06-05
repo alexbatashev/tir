@@ -19,8 +19,15 @@ members = [
     "simulator/sched", "backends/arm64", "fcc",
     "backends/targets",
     "utils/tir-mc",
-    "utils/isa-test-suite",
+    "utils/isa-test-suite", "tools",
 ]
+
+[workspace.dependencies]
+tir-targets = { path = "backends/targets" }
+tir = { path = "core" }
+tir-be-common = { path = "backends/common" }
+
+clap = "4.6.1"
 
 [profile.bench]
 debug = true

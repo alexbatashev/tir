@@ -1,0 +1,14 @@
+[package]
+name = "tir-tools"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "tir"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true, features = ["derive"] }
+tir-targets.workspace = true
+tir.workspace = true
+tir-be-common.workspace = true
