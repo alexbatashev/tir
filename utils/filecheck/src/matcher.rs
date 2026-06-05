@@ -204,6 +204,7 @@ impl<'a> Matcher<'a> {
         let next_end = self.line_end(next_start);
         match self.search(&compiled, next_start, next_end) {
             Some((range, vars)) => {
+                self.check_nots(self.pos, range.start)?;
                 self.commit(range, vars);
                 Ok(())
             }
@@ -221,6 +222,7 @@ impl<'a> Matcher<'a> {
         let line_end = self.line_end(self.pos);
         match self.search(&compiled, self.pos, line_end) {
             Some((range, vars)) => {
+                self.check_nots(self.pos, range.start)?;
                 self.commit(range, vars);
                 Ok(())
             }
@@ -244,6 +246,7 @@ impl<'a> Matcher<'a> {
         let next_start = line_end + 1;
         let next_end = self.line_end(next_start);
         if next_start == next_end {
+            self.check_nots(self.pos, next_start)?;
             self.pos = next_start;
             Ok(())
         } else {
@@ -430,6 +433,27 @@ mod tests {
     fn check_same() {
         let input = "foo bar baz\n";
         assert!(check(input, "// CHECK: foo\n// CHECK-SAME: baz\n").is_ok());
+    }
+
+    #[test]
+    fn check_not_applies_before_next_same_and_empty() {
+        assert!(check(
+            "foo bad bar\n",
+            "// CHECK: foo\n// CHECK-NOT: bad\n// CHECK-SAME: bar\n"
+        )
+        .is_err());
+
+        assert!(check(
+            "foo\nbad ok\n",
+            "// CHECK: foo\n// CHECK-NOT: bad\n// CHECK-NEXT: ok\n"
+        )
+        .is_err());
+
+        assert!(check(
+            "foo bad\n\n",
+            "// CHECK: foo\n// CHECK-NOT: bad\n// CHECK-EMPTY:\n"
+        )
+        .is_err());
     }
 
     #[test]
