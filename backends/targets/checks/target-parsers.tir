@@ -1,0 +1,12 @@
+// RUN: tir-mc --march=rv64im --mcpu=riscv64-generic-in-order --run=isel %s | filecheck %s
+// RUN: tir-mc --march=rv32im --mcpu=riscv32-generic-in-order --run=isel %s | filecheck %s
+// RUN: not tir-mc --march=rv64im --mcpu=riscv32-generic-in-order --run=isel %s
+
+// CHECK: riscv.add
+module {
+  func @add(%0: !i32, %1: !i32) -> !i32 {
+    %2 = addi %0, %1 : !i32
+    return %2
+  }
+  module_end
+}

@@ -3,6 +3,55 @@ use tir::{Any, Operation};
 
 include!(concat!(env!("OUT_DIR"), "/arm64.rs"));
 
+/// Parsed AArch64 target selection from `--march`/`--mcpu`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TargetConfig;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CpuModel {
+    Generic,
+    InOrder,
+    OutOfOrder,
+}
+
+impl TargetConfig {
+    /// Parse an AArch64 `--march`/`--mcpu` pair.
+    pub fn parse(march: &str, mcpu: Option<&str>) -> Option<Self> {
+        parse_march(march)?;
+        if let Some(mcpu) = mcpu {
+            parse_mcpu(mcpu)?;
+        }
+        Some(TargetConfig)
+    }
+
+    /// Canonical architecture name for diagnostics and target-specific behavior.
+    pub fn canonical_name(&self) -> &'static str {
+        "arm64"
+    }
+}
+
+fn parse_march(march: &str) -> Option<()> {
+    match normalize(march).as_str() {
+        "arm64" | "aarch64" | "armv8" | "armv8a" | "armv8-a" => Some(()),
+        _ => None,
+    }
+}
+
+fn parse_mcpu(mcpu: &str) -> Option<CpuModel> {
+    match normalize(mcpu).as_str() {
+        "generic" | "generic-arm64" | "generic-aarch64" => Some(CpuModel::Generic),
+        "generic-in-order" | "generic-inorder" | "in-order" | "inorder" => Some(CpuModel::InOrder),
+        "generic-ooo" | "generic-out-of-order" | "ooo" | "out-of-order" => {
+            Some(CpuModel::OutOfOrder)
+        }
+        _ => None,
+    }
+}
+
+fn normalize(s: &str) -> String {
+    s.trim().to_ascii_lowercase().replace('_', "-")
+}
+
 operation! {
     VirtualReturnOp {
         name: "vret",
@@ -575,5 +624,25 @@ mod tests {
             Some(&"sub_imm"),
             "the frame prologue (sub fp) should lead the block, got {names:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod target_parser_tests {
+    use super::TargetConfig;
+
+    #[test]
+    fn accepts_arm64_aliases_and_generic_cpus() {
+        assert_eq!(
+            TargetConfig::parse("aarch64", Some("generic-in-order")).map(|c| c.canonical_name()),
+            Some("arm64")
+        );
+        assert!(TargetConfig::parse("armv8-a", Some("generic-aarch64")).is_some());
+    }
+
+    #[test]
+    fn rejects_unknown_march_or_cpu() {
+        assert!(TargetConfig::parse("rv64im", None).is_none());
+        assert!(TargetConfig::parse("arm64", Some("cortex-a710")).is_none());
     }
 }
