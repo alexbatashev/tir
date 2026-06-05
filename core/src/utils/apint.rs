@@ -494,7 +494,7 @@ impl APInt {
         APInt {
             width: self.width,
             signed: self.signed,
-            value: (!(self.value).wrapping_add(1)) & mask,
+            value: (!self.value).wrapping_add(1) & mask,
         }
     }
 
@@ -921,6 +921,24 @@ mod tests {
 
         assert_eq!(low.to_u64(), 0x2468ACF13579BDE0);
         assert_eq!(high.to_u64(), 0); // No overflow for this multiplication
+    }
+
+    #[test]
+    fn test_neg() {
+        let one = APInt::new_signed(8, 1);
+        assert_eq!(one.neg().to_i64(), -1);
+
+        let minus_one = APInt::new_signed(8, -1);
+        assert_eq!(minus_one.neg().to_i64(), 1);
+
+        let zero = APInt::new_signed(8, 0);
+        assert_eq!(zero.neg().to_i64(), 0);
+    }
+
+    #[test]
+    fn test_abs() {
+        assert_eq!(APInt::new_signed(8, -5).abs().to_i64(), 5);
+        assert_eq!(APInt::new_signed(8, 5).abs().to_i64(), 5);
     }
 
     #[test]
