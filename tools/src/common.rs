@@ -1,7 +1,7 @@
 use std::{
     ffi::OsString,
     fs::File,
-    io::{self, Read},
+    io::{self, Read, Write},
 };
 
 pub fn read_input(path: Option<&OsString>) -> Result<String, io::Error> {
@@ -11,4 +11,13 @@ pub fn read_input(path: Option<&OsString>) -> Result<String, io::Error> {
         _ => io::stdin().read_to_string(&mut input)?,
     };
     Ok(input)
+}
+
+pub fn write_output(path: &std::ffi::OsStr, contents: &str) -> Result<(), io::Error> {
+    if path == "-" {
+        print!("{contents}");
+        io::stdout().flush()
+    } else {
+        std::fs::write(path, contents)
+    }
 }

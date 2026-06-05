@@ -5,18 +5,23 @@ use clap::{Parser, Subcommand};
 mod common;
 
 pub mod mc;
+pub mod opt;
 
 pub fn tools_main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
 
     match cli.command {
         Command::Mc(args) => mc::run(args),
+        Command::Opt(args) => opt::run(args),
     }
 }
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Compile machine code
     Mc(mc::ToolArgs),
+    /// Run optimizations on IR
+    Opt(opt::ToolArgs),
 }
 
 #[derive(Parser)]
