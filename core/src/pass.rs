@@ -1,6 +1,136 @@
 use std::sync::Arc;
 
+use linkme::distributed_slice;
+
 use crate::{Block, Context, OpId, OpInstance, Operation};
+
+/// A pass made available to the pipeline parser by name.
+///
+/// Backends and libraries contribute entries with [`register_pass!`]; the opt
+/// tool builds pipelines purely from this registry, so adding a pass never
+/// requires touching the tool.
+pub struct PassInfo {
+    pub name: &'static str,
+    pub ctor: fn() -> Box<dyn Pass>,
+}
+
+/// Link-time registry of every pass reachable in the final binary.
+#[distributed_slice]
+pub static PASSES: [PassInfo];
+
+/// Construct a registered pass by name, or `None` if no pass owns that name.
+pub fn build_pass(name: &str) -> Option<Box<dyn Pass>> {
+    PASSES.iter().find(|p| p.name == name).map(|p| (p.ctor)())
+}
+
+/// Names of all registered passes, for help text and diagnostics.
+pub fn registered_passes() -> Vec<&'static str> {
+    let mut names: Vec<_> = PASSES.iter().map(|p| p.name).collect();
+    names.sort_unstable();
+    names
+}
+
+/// Register a pass under `name` so the pipeline parser can build it.
+///
+/// `ty` must implement [`Pass`] and expose a `new() -> Self` constructor.
+#[macro_export]
+macro_rules! register_pass {
+    ($ty:ty, $name:expr) => {
+        const _: () = {
+            #[$crate::linkme::distributed_slice($crate::PASSES)]
+            #[linkme(crate = $crate::linkme)]
+            static REGISTRATION: $crate::PassInfo = $crate::PassInfo {
+                name: $name,
+                ctor: || ::std::boxed::Box::new(<$ty>::new()),
+            };
+        };
+    };
+}
+
+/// Parse an MLIR-style pass pipeline into a [`PassManager`].
+///
+/// The grammar is a comma-separated list of elements, where each element is
+/// either a registered pass name or an op-nesting `op(inner-pipeline)`. The op
+/// name may be dialect-qualified (`builtin.func`) or bare (`func`). Example:
+/// `builtin.func(mem2reg)` runs `mem2reg` nested inside every function.
+pub fn parse_pipeline(spec: &str) -> Result<PassManager, String> {
+    let mut parser = PipelineParser {
+        bytes: spec.as_bytes(),
+        pos: 0,
+    };
+    let mut pm = PassManager::new();
+    parser.parse_list(&mut pm)?;
+    parser.skip_ws();
+    if parser.pos != parser.bytes.len() {
+        return Err(format!(
+            "unexpected '{}' in pass pipeline",
+            &spec[parser.pos..]
+        ));
+    }
+    Ok(pm)
+}
+
+struct PipelineParser<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+}
+
+impl PipelineParser<'_> {
+    fn skip_ws(&mut self) {
+        while self.pos < self.bytes.len() && self.bytes[self.pos].is_ascii_whitespace() {
+            self.pos += 1;
+        }
+    }
+
+    fn parse_ident(&mut self) -> Result<String, String> {
+        let start = self.pos;
+        while self.pos < self.bytes.len() {
+            let c = self.bytes[self.pos];
+            if c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-') {
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+        if self.pos == start {
+            return Err("expected a pass or op name".to_string());
+        }
+        Ok(String::from_utf8_lossy(&self.bytes[start..self.pos]).into_owned())
+    }
+
+    fn parse_list(&mut self, pm: &mut PassManager) -> Result<(), String> {
+        loop {
+            self.parse_element(pm)?;
+            self.skip_ws();
+            if self.pos < self.bytes.len() && self.bytes[self.pos] == b',' {
+                self.pos += 1;
+                continue;
+            }
+            return Ok(());
+        }
+    }
+
+    fn parse_element(&mut self, pm: &mut PassManager) -> Result<(), String> {
+        self.skip_ws();
+        let name = self.parse_ident()?;
+        self.skip_ws();
+        if self.pos < self.bytes.len() && self.bytes[self.pos] == b'(' {
+            self.pos += 1;
+            let nested = pm.nest(name);
+            self.parse_list(nested)?;
+            self.skip_ws();
+            if self.pos >= self.bytes.len() || self.bytes[self.pos] != b')' {
+                return Err("missing ')' in pass pipeline".to_string());
+            }
+            self.pos += 1;
+            Ok(())
+        } else {
+            let pass = build_pass(&name).ok_or_else(|| format!("unknown pass '{name}'"))?;
+            pm.add_boxed_pass(pass);
+            Ok(())
+        }
+    }
+}
 
 #[derive(Debug)]
 pub enum PassError {
@@ -165,10 +295,19 @@ impl Rewriter {
     }
 }
 
+/// Match an op against a nesting spec that is either a bare op name (`func`)
+/// or a dialect-qualified name (`builtin.func`).
+fn matches_op_name(op: &OpInstance, spec: &str) -> bool {
+    match spec.split_once('.') {
+        Some((dialect, name)) => op.dialect == dialect && op.name == name,
+        None => op.name == spec,
+    }
+}
+
 enum PassNode {
     Pass(Box<dyn Pass>),
     Nested {
-        op_name: &'static str,
+        op_name: String,
         manager: PassManager,
     },
 }
@@ -183,13 +322,19 @@ impl PassManager {
     }
 
     pub fn add_pass<P: Pass + 'static>(&mut self, pass: P) -> &mut Self {
-        self.passes.push(PassNode::Pass(Box::new(pass)));
+        self.add_boxed_pass(Box::new(pass))
+    }
+
+    pub fn add_boxed_pass(&mut self, pass: Box<dyn Pass>) -> &mut Self {
+        self.passes.push(PassNode::Pass(pass));
         self
     }
 
-    pub fn nest(&mut self, op_name: &'static str) -> &mut PassManager {
+    /// Nest a sub-pipeline under every op matching `op_name`. The name may be
+    /// dialect-qualified (`builtin.func`) or bare (`func`).
+    pub fn nest(&mut self, op_name: impl Into<String>) -> &mut PassManager {
         self.passes.push(PassNode::Nested {
-            op_name,
+            op_name: op_name.into(),
             manager: PassManager::new(),
         });
         match self.passes.last_mut() {
@@ -234,7 +379,7 @@ impl PassManager {
             }),
             PassNode::Nested { op_name, manager } => {
                 PassManager::walk_ops(context, root, &mut |op_ref| {
-                    if op_ref.name() == *op_name {
+                    if matches_op_name(op_ref.op(), op_name) {
                         manager.run_on_op_ref(context, op_ref.clone())?;
                     }
                     Ok(())
@@ -416,5 +561,40 @@ mod tests {
             !context.has_operation(neg_id),
             "erased op should leave the arena"
         );
+    }
+
+    #[test]
+    fn pipeline_parses_bare_and_nested() {
+        use super::{PassNode, parse_pipeline};
+
+        let pm = parse_pipeline("mem2reg").expect("bare pass should parse");
+        assert!(matches!(pm.passes.as_slice(), [PassNode::Pass(_)]));
+
+        let pm = parse_pipeline(" builtin.func( mem2reg ) ").expect("nested should parse");
+        match pm.passes.as_slice() {
+            [PassNode::Nested { op_name, manager }] => {
+                assert_eq!(op_name, "builtin.func");
+                assert!(matches!(manager.passes.as_slice(), [PassNode::Pass(_)]));
+            }
+            _ => panic!("expected a single nested node"),
+        }
+    }
+
+    #[test]
+    fn pipeline_reports_errors() {
+        assert!(super::parse_pipeline("definitely-not-a-pass").is_err());
+        assert!(super::parse_pipeline("builtin.func(mem2reg").is_err());
+        assert!(super::parse_pipeline("mem2reg)").is_err());
+    }
+
+    #[test]
+    fn matches_bare_and_qualified_op_names() {
+        let context = Context::with_default_dialects();
+        let func = ops::func(&context, "demo", IntegerType::new(&context, 32), None).build();
+        let op = context.get_op(func.id());
+        assert!(super::matches_op_name(&op, "func"));
+        assert!(super::matches_op_name(&op, "builtin.func"));
+        assert!(!super::matches_op_name(&op, "scf.func"));
+        assert!(!super::matches_op_name(&op, "module"));
     }
 }

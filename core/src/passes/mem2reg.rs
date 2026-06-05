@@ -24,6 +24,8 @@ impl Mem2RegPass {
     }
 }
 
+tir::register_pass!(Mem2RegPass, "mem2reg");
+
 impl Pass for Mem2RegPass {
     fn name(&self) -> &'static str {
         "mem2reg"

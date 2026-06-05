@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 tir-macros = { path = "../utils/macros" }
+linkme = "0.3"
 parking_lot = "0.12.3"
 thiserror = "2.0.12"
 ariadne = "0.3"

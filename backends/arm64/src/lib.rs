@@ -268,6 +268,57 @@ pub fn create_regalloc_pass() -> tir_be_common::regalloc::RegisterAllocationPass
     tir_be_common::regalloc::RegisterAllocationPass::new(Box::new(Arm64RegAlloc))
 }
 
+/// The AArch64 (ARMv8-A) target, selected via `--march`/`--mcpu`.
+pub struct Arm64Target {
+    config: TargetConfig,
+}
+
+impl tir_be_common::TargetMachine for Arm64Target {
+    fn name(&self) -> &'static str {
+        self.config.canonical_name()
+    }
+
+    fn register_dialects(&self, context: &tir::Context) {
+        context.register_dialect::<tir_be_common::AsmDialect>();
+        context.register_dialect::<Arm64Dialect>();
+    }
+
+    fn isel_pass(&self, context: &tir::Context) -> tir_be_common::isel::InstructionSelectPass {
+        create_isel_pass(context)
+    }
+
+    fn regalloc_pass(&self) -> tir_be_common::regalloc::RegisterAllocationPass {
+        create_regalloc_pass()
+    }
+
+    fn register_info(&self) -> tir_be_common::regalloc::RegisterInfo {
+        use tir_be_common::regalloc::TargetRegAlloc;
+        Arm64RegAlloc.register_info()
+    }
+
+    fn asm_parser(&self, context: &tir::Context) -> tir_be_common::AsmParser {
+        context
+            .find_dialect::<Arm64Dialect>()
+            .expect("arm64 dialect must be registered before building an asm parser")
+            .get_asm_parser()
+    }
+
+    fn machine_model(&self, name: &str) -> Option<tir_be_common::sched::MachineModel> {
+        match name {
+            "in-order" | "inorder" => Some(in_order_core_model()),
+            "ooo" | "out-of-order" => Some(out_of_order_core_model()),
+            _ => None,
+        }
+    }
+}
+
+fn select_arm64(march: &str, mcpu: Option<&str>) -> Option<Box<dyn tir_be_common::TargetMachine>> {
+    let config = TargetConfig::parse(march, mcpu)?;
+    Some(Box::new(Arm64Target { config }))
+}
+
+tir_be_common::register_target!(select_arm64, ["arm64"]);
+
 #[cfg(test)]
 mod tests {
     use tir::{

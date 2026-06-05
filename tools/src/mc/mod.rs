@@ -50,7 +50,7 @@ pub fn run(args: ToolArgs) -> Result<(), Box<dyn Error>> {
         format!(
             "unknown target '{}' (supported: {})",
             args.march,
-            tir_targets::SUPPORTED_TARGETS.join(", ")
+            tir_targets::supported_targets().join(", ")
         )
     })?;
 
