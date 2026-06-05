@@ -687,8 +687,14 @@ where
             })
         });
 
+    let machine_alias = just(Token::LParen)
+        .ignore_then(select! { Token::StringLit(s) => s.to_string() })
+        .then_ignore(just(Token::RParen))
+        .or_not();
+
     just(Token::KwMachine)
         .ignore_then(ident)
+        .then(machine_alias)
         .then(for_isas())
         .then(
             choice((
@@ -704,7 +710,7 @@ where
             .collect::<Vec<_>>()
             .delimited_by(just(Token::LBrace), just(Token::RBrace)),
         )
-        .map_with(|((name, for_isas), body), e| {
+        .map_with(|(((name, alias), for_isas), body), e| {
             let mut issue_width = None;
             let mut buffers = Vec::new();
             let mut pipeline = Vec::new();
@@ -725,6 +731,7 @@ where
             }
             Machine {
                 name,
+                alias,
                 for_isas,
                 issue_width,
                 buffers,
@@ -1528,6 +1535,7 @@ mod tests {
         );
         let m = parsed.output().expect("machine should parse").0.clone();
         assert_eq!(m.name, "RocketCore");
+        assert_eq!(m.alias, None);
         assert_eq!(m.for_isas, vec!["RV64I".to_string()]);
         assert_eq!(m.issue_width, Some(2));
         assert_eq!(m.buffers, vec![("rob".into(), 64), ("lsq".into(), 16)]);
@@ -1538,6 +1546,24 @@ mod tests {
         assert_eq!(m.binds[0].unit, "WriteIALU");
         assert_eq!(m.binds[0].latency, Some(1));
         assert_eq!(m.binds[0].uses, vec!["ALU".to_string()]);
+    }
+
+    #[test]
+    fn smoke_machine_alias() {
+        let code = "machine InOrderCore (\"in-order\") for [RV64I] {
+            issue_width = 1;
+        }";
+        let (tokens, _e) = lexer().parse(code).into_output_errors();
+        let tokens = tokens.unwrap();
+        let parsed = machine_def().then(end()).parse(
+            tokens
+                .as_slice()
+                .map((code.len()..code.len()).into(), |(t, s)| (t, s)),
+        );
+        let m = parsed.output().expect("machine should parse").0.clone();
+        assert_eq!(m.name, "InOrderCore");
+        assert_eq!(m.alias.as_deref(), Some("in-order"));
+        assert_eq!(m.for_isas, vec!["RV64I".to_string()]);
     }
 
     #[test]

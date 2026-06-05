@@ -10,7 +10,7 @@ unit WriteLoad { latency = 3; }
 
 // Generic in-order core: a single narrow pipeline, hardware-interlocked, paired
 // with the in-order execution model in the Rust simulator.
-machine InOrderCore for [ARMv8A64] {
+machine InOrderCore ("in-order") for [ARMv8A64] {
     issue_width = 1;
 
     buffers {
@@ -37,7 +37,7 @@ machine InOrderCore for [ARMv8A64] {
 
 // Generic out-of-order core: wider issue with a reorder buffer and load/store
 // queue. Same per-instruction latencies; the difference is structural.
-machine OutOfOrderCore for [ARMv8A64] {
+machine OutOfOrderCore ("ooo") for [ARMv8A64] {
     issue_width = 4;
 
     buffers {

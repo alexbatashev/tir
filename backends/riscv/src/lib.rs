@@ -428,11 +428,7 @@ impl tir_be_common::TargetMachine for RiscvTarget {
     }
 
     fn machine_model(&self, name: &str) -> Option<tir_be_common::sched::MachineModel> {
-        match name {
-            "in-order" | "inorder" => Some(in_order_core_model()),
-            "ooo" | "out-of-order" => Some(out_of_order_core_model()),
-            _ => None,
-        }
+        crate::machine_model(name)
     }
 }
 

@@ -243,6 +243,10 @@ pub struct Forward {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Machine {
     pub name: String,
+    /// Optional friendly name used to select this machine (e.g. `in-order`),
+    /// declared as `machine Name ("alias") for [...]`. Keeps tool-facing names
+    /// single-sourced in TMDL alongside the machine itself.
+    pub alias: Option<String>,
     pub for_isas: Vec<String>,
     pub issue_width: Option<i64>,
     /// Structural buffer sizes by name (e.g. `rob`, `lsq`, `iq`).

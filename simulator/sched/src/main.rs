@@ -37,11 +37,7 @@ struct Inst {
 }
 
 fn select_machine(name: &str) -> Option<MachineModel> {
-    match name {
-        "in-order" | "inorder" => Some(tir_riscv::in_order_core_model()),
-        "ooo" | "out-of-order" => Some(tir_riscv::out_of_order_core_model()),
-        _ => None,
-    }
+    tir_riscv::machine_model(name)
 }
 
 fn phys_regs(refs: &[RegRef]) -> Vec<(String, u16)> {

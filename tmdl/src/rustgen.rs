@@ -873,6 +873,8 @@ fn emit_machine_models<'a>(
     let scheduled = collect_scheduled(files, item_cache);
 
     let mut model_fns = Vec::new();
+    let mut lookup_arms = Vec::new();
+    let mut machine_names = Vec::new();
     for machine in files.iter().flat_map(|f| f.machines()) {
         let binds: HashMap<&str, &ast::UnitBind> =
             machine.binds.iter().map(|b| (b.unit.as_str(), b)).collect();
@@ -969,9 +971,32 @@ fn emit_machine_models<'a>(
                 }
             }
         });
+
+        // Select by the machine name, and by its alias when one is declared, so
+        // the tool-facing name lives in TMDL next to the machine.
+        let mut keys = vec![machine.name.clone()];
+        if let Some(alias) = &machine.alias {
+            keys.push(alias.clone());
+        }
+        let key_lits = keys.iter().map(|k| proc_macro2::Literal::string(k));
+        machine_names.push(proc_macro2::Literal::string(keys.last().unwrap()));
+        lookup_arms.push(quote! { #(#key_lits)|* => Some(#fn_ident()) });
     }
 
-    Ok(quote! { #(#model_fns)* })
+    Ok(quote! {
+        #(#model_fns)*
+
+        /// Resolve a machine by its TMDL name or alias, or `None` if unknown.
+        pub fn machine_model(name: &str) -> Option<tir_be_common::sched::MachineModel> {
+            match name {
+                #(#lookup_arms,)*
+                _ => None,
+            }
+        }
+
+        /// Tool-facing names of every machine defined in TMDL (alias preferred).
+        pub const MACHINES: &[&str] = &[#(#machine_names),*];
+    })
 }
 
 /// Resource-agnostic `unit` defaults, keyed by name. Used both when a machine
