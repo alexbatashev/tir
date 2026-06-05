@@ -2,11 +2,9 @@
 resolver = "2"
 
 members = [
-    "utils/check-runner",
     "utils/filecheck",
     "utils/lit",
     "utils/not",
-    "utils/tir-opt",
     "tmdl",
     "xtask",
     "core",
@@ -16,11 +14,20 @@ members = [
     "utils/fuzz",
     "simulator/isasim",
     "simulator/simcore",
-    "simulator/sched", "backends/arm64", "fcc",
+    "simulator/sched",
+    "backends/arm64",
+    "fcc",
     "backends/targets",
-    "utils/tir-mc",
     "utils/isa-test-suite",
+    "tools",
 ]
+
+[workspace.dependencies]
+tir-targets = { path = "backends/targets" }
+tir = { path = "core" }
+tir-be-common = { path = "backends/common" }
+
+clap = "4.6.1"
 
 [profile.bench]
 debug = true

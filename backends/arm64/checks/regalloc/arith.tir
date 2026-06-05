@@ -1,7 +1,4 @@
-// RUN: tir-mc --march=arm64 --run=isel,regalloc %s | filecheck %s
-
-// Register allocation assigns AArch64 physical registers. The AArch64 calling
-// convention passes the first arguments in x0, x1 and returns in x0.
+// RUN: tir mc --march=armv8 --stage=regalloc %s | filecheck %s
 
 module {
   func @chain(%0: !i32, %1: !i32) -> !i32 {
@@ -14,7 +11,6 @@ module {
   module_end
 }
 
-// Arguments are pre-colored to x0/x1; every instruction operand is physical.
 // CHECK: arm64.add {rd = {{x[0-9]+}}, rn = x0, rm = x1}
 // CHECK: arm64.sub
 // CHECK: arm64.and

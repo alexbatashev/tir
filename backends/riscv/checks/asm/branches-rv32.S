@@ -1,3 +1,5 @@
+# RUNx: tir mc --march=rv32i --stage=regalloc %s | filecheck %s
+
     .section .text
     .global _branch_test
 _branch_test:

@@ -1,3 +1,5 @@
+# RUNx: tir mc --march=rv64i --stage=regalloc %s | filecheck %s
+
     .section .data
 bigval: .dword 0x100000000
 

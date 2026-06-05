@@ -19,7 +19,8 @@
 //! The driver understands a small but practical subset of LIT/lit substitution:
 //! `%s` (the test file), `%S` (its directory), the `not` prefix (invert the
 //! exit status) and a `| filecheck %s ...` final stage which is executed
-//! in-process via the [`filecheck`] library rather than as a subprocess.
+//! in-process via the [`filecheck`] library rather than as a subprocess. It also
+//! supports unconditional `XFAIL: *` expected failures.
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -35,6 +36,7 @@ struct TestCase {
     name: String,
     path: PathBuf,
     run_lines: Vec<String>,
+    xfail: bool,
 }
 
 /// Build a workspace binary once and copy it beside the current test executable.
@@ -149,6 +151,7 @@ fn load_case(root: &Path, path: &Path) -> std::io::Result<Option<TestCase>> {
     if run_lines.is_empty() {
         return Ok(None);
     }
+    let xfail = has_unconditional_xfail(&contents);
     let name = path
         .strip_prefix(root)
         .unwrap_or(path)
@@ -158,6 +161,7 @@ fn load_case(root: &Path, path: &Path) -> std::io::Result<Option<TestCase>> {
         name,
         path: path.to_path_buf(),
         run_lines,
+        xfail,
     }))
 }
 
@@ -195,7 +199,29 @@ fn extract_run_lines(contents: &str) -> Vec<String> {
     lines
 }
 
+fn has_unconditional_xfail(contents: &str) -> bool {
+    contents.lines().any(|line| {
+        line.find("XFAIL:").is_some_and(|idx| {
+            line[idx + "XFAIL:".len()..]
+                .split(',')
+                .any(|item| item.trim() == "*")
+        })
+    })
+}
+
 fn run_case(case: &TestCase, tools: &HashMap<String, PathBuf>) -> Result<(), Failed> {
+    let result = run_case_commands(case, tools);
+    if !case.xfail {
+        return result;
+    }
+
+    match result {
+        Ok(()) => Err(Failed::from(format!("XPASS: {}", case.name))),
+        Err(_) => Ok(()),
+    }
+}
+
+fn run_case_commands(case: &TestCase, tools: &HashMap<String, PathBuf>) -> Result<(), Failed> {
     for run in &case.run_lines {
         run_pipeline(run, &case.path, tools)?;
     }
@@ -369,4 +395,41 @@ fn split_csv(s: &str) -> Vec<String> {
         .map(|p| p.trim().to_string())
         .filter(|p| !p.is_empty())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_unconditional_xfail() {
+        assert!(has_unconditional_xfail("// XFAIL: *\n// RUN: tool"));
+        assert!(has_unconditional_xfail("// XFAIL: linux, *\n// RUN: tool"));
+        assert!(!has_unconditional_xfail("// XFAIL: linux\n// RUN: tool"));
+    }
+
+    #[test]
+    fn xfail_accepts_failing_case() {
+        let case = TestCase {
+            name: "xfail.tir".to_string(),
+            path: PathBuf::from("xfail.tir"),
+            run_lines: vec!["missing-tir-lit-test-tool".to_string()],
+            xfail: true,
+        };
+
+        assert!(run_case(&case, &HashMap::new()).is_ok());
+    }
+
+    #[test]
+    fn xfail_rejects_passing_case() {
+        let case = TestCase {
+            name: "xpass.tir".to_string(),
+            path: PathBuf::from("xpass.tir"),
+            run_lines: Vec::new(),
+            xfail: true,
+        };
+
+        let err = run_case(&case, &HashMap::new()).unwrap_err();
+        assert_eq!(err.message(), Some("XPASS: xpass.tir"));
+    }
 }
