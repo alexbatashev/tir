@@ -91,9 +91,7 @@ fn parse_riscv_isa_string(march: &str) -> Option<TargetConfig> {
     while chars.peek().is_some() {
         if chars.peek() == Some(&'-') {
             chars.next();
-            if chars.peek().is_none() {
-                return None;
-            }
+            chars.peek()?;
             continue;
         }
 
