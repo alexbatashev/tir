@@ -11,7 +11,7 @@ unit WriteLoad { latency = 3; }
 // Generic in-order core: a single narrow pipeline with no reorder buffer (just a
 // small store buffer). The Rust simulator pairs this with an in-order execution
 // model.
-machine InOrderCore for [RV64I] {
+machine InOrderCore ("in-order") for [RV64I] {
     issue_width = 1;
 
     buffers {
@@ -45,7 +45,7 @@ machine InOrderCore for [RV64I] {
 // Generic out-of-order core: wider issue plus a reorder buffer, load/store queue,
 // and issue queue. Same per-instruction latencies; the difference is structural
 // (buffer sizes, unit counts) and in the Rust execution model that consumes it.
-machine OutOfOrderCore for [RV64I] {
+machine OutOfOrderCore ("ooo") for [RV64I] {
     issue_width = 4;
 
     buffers {

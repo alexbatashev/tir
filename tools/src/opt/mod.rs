@@ -1,13 +1,14 @@
 use std::{error::Error, ffi::OsString};
 
 use clap::Args;
-use tir::{Context, IRFormatter, Operation, PassManager, builtin::ModuleOp, passes::Mem2RegPass};
+use tir::{Context, IRFormatter, Operation, builtin::ModuleOp};
 
 use crate::common::{read_input, write_output};
 
 #[derive(Args)]
 pub struct ToolArgs {
-    /// Pass to run. May be repeated; currently supports `mem2reg`.
+    /// Pass pipeline in MLIR-style syntax, e.g. `builtin.func(mem2reg)`. May be
+    /// repeated; repeated values are joined into one comma-separated pipeline.
     #[arg(long = "pass", short = 'p')]
     passes: Vec<String>,
 
@@ -26,15 +27,13 @@ pub fn run(args: ToolArgs) -> Result<(), Box<dyn Error>> {
     let module = tir::parse::ir::parse_ir::<ModuleOp>(&context, &input)
         .map_err(|(span, err)| format!("failed to parse input at byte {}: {err:?}", span.0))?;
 
-    let mut pm = PassManager::new();
-    for pass in &args.passes {
-        match pass.as_str() {
-            "mem2reg" => {
-                pm.add_pass(Mem2RegPass::new());
-            }
-            other => return Err(format!("unknown pass '{other}'").into()),
-        }
-    }
+    let pipeline = args.passes.join(",");
+    let mut pm = tir::parse_pipeline(&pipeline).map_err(|e| {
+        format!(
+            "{e} (available passes: {})",
+            tir::registered_passes().join(", ")
+        )
+    })?;
     pm.run(&context, context.get_op(module.id()))
         .map_err(|e| format!("pass pipeline failed: {e}"))?;
 

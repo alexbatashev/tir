@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 tir = { path = "../../core" }
+linkme = "0.3"
 logos = "0.15.0"
 
 [dev-dependencies]

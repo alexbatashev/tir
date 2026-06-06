@@ -392,6 +392,53 @@ pub fn create_regalloc_pass() -> tir_be_common::regalloc::RegisterAllocationPass
     tir_be_common::regalloc::RegisterAllocationPass::new(Box::new(RiscvRegAlloc))
 }
 
+/// The RISC-V target, selected via `--march`/`--mcpu`.
+pub struct RiscvTarget {
+    config: TargetConfig,
+}
+
+impl tir_be_common::TargetMachine for RiscvTarget {
+    fn name(&self) -> &'static str {
+        self.config.canonical_name()
+    }
+
+    fn register_dialects(&self, context: &tir::Context) {
+        context.register_dialect::<tir_be_common::AsmDialect>();
+        context.register_dialect::<RiscvDialect>();
+    }
+
+    fn isel_pass(&self, context: &tir::Context) -> tir_be_common::isel::InstructionSelectPass {
+        create_isel_pass(context)
+    }
+
+    fn regalloc_pass(&self) -> tir_be_common::regalloc::RegisterAllocationPass {
+        create_regalloc_pass()
+    }
+
+    fn register_info(&self) -> tir_be_common::regalloc::RegisterInfo {
+        use tir_be_common::regalloc::TargetRegAlloc;
+        RiscvRegAlloc.register_info()
+    }
+
+    fn asm_parser(&self, context: &tir::Context) -> tir_be_common::AsmParser {
+        context
+            .find_dialect::<RiscvDialect>()
+            .expect("riscv dialect must be registered before building an asm parser")
+            .get_asm_parser()
+    }
+
+    fn machine_model(&self, name: &str) -> Option<tir_be_common::sched::MachineModel> {
+        crate::machine_model(name)
+    }
+}
+
+fn select_riscv(march: &str, mcpu: Option<&str>) -> Option<Box<dyn tir_be_common::TargetMachine>> {
+    let config = TargetConfig::parse(march, mcpu)?;
+    Some(Box::new(RiscvTarget { config }))
+}
+
+tir_be_common::register_target!(select_riscv, ["riscv32", "riscv64"]);
+
 #[cfg(test)]
 mod tests {
     use tir::{

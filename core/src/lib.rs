@@ -1,5 +1,9 @@
 extern crate self as tir;
 
+// Re-exported so the `register_pass!` macro can reference linkme from
+// downstream crates without each of them depending on it directly.
+pub use linkme;
+
 pub mod attributes;
 mod block;
 mod builder;
@@ -43,7 +47,10 @@ pub use operation::{
     OpInterfaceConverter, Operation, Verifiable, downcast_op_interface, erase_op_interface,
     op_interface_converter,
 };
-pub use pass::{OperationRef, Pass, PassError, PassManager, PassTarget, Rewriter};
+pub use pass::{
+    OperationRef, PASSES, Pass, PassError, PassInfo, PassManager, PassTarget, Rewriter, build_pass,
+    parse_pipeline, registered_passes,
+};
 pub use region::{Region, RegionId};
 pub use ty::{Any, Type, TypeConstraint, TypeId, TypeParser};
 pub use value::{Use, UseSite, Value, ValueId};

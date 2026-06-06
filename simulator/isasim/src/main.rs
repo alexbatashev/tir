@@ -85,7 +85,7 @@ fn main() {
         eprintln!(
             "unknown target '{}' (supported: {})",
             args.march,
-            tir_targets::SUPPORTED_TARGETS.join(", ")
+            tir_targets::supported_targets().join(", ")
         );
         std::process::exit(2);
     });
