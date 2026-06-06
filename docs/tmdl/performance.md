@@ -106,3 +106,30 @@ the next cycle. In TMDL this is expressed with the following syntax:
 forward ALU => ALU { latency = 0; }
 forward LSU => ALU { latency = 1; }
 ```
+
+## Registers and register renaming
+
+By default the number of physical registers matches the number of architecture
+registers. However, OoO machines typically employ register renaming to break
+WAR dependencies. Some architectures explicitly define a single unified register
+file (like X86 or ARM), while others have separate registers for different classes
+of instructions (RISC-V). It is possible to override the number of physical
+registers for each class of instructions:
+
+```
+reg_file {
+  GPR { count = 128; }
+  FPR { count = 96; }
+}
+```
+
+## Scoreboarding and VLIW
+
+Some machines delegate instruction scheduling to compiler rather than implement
+it in hardware. The two mechanisms used for that are scoreboarding and Very Long
+Instruction Word (VLIW). In these models rather than handling hazards in hardware,
+delays are inferred from instruction encoding by either putting an explicit nop
+operation for stalls, encoding a delay inside each instruction or explicitly
+acquiring and releasing resources.
+
+TODO describe in detail

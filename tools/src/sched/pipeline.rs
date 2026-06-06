@@ -1,5 +1,5 @@
 use tir::builtin::ModuleOp;
-use tir_be_common::{ddg, sched::MachineModel};
+use tir_be_common::sched::MachineModel;
 
 use crate::sched::event::EventHandler;
 
@@ -10,7 +10,6 @@ pub struct Pipeline {
 
 impl Pipeline {
     pub fn run(mut self, context: &Context, instrs: ModuleOp, max_cycles: usize, num_iters: usize) {
-        // let deps = ddg::build(context, &instrs, Some(&self.model));
         self.events.notify_start();
         let mut cycle = 0;
 
