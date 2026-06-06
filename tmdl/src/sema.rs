@@ -6,7 +6,7 @@ use crate::utils::{
     resolve_effective_asm_for_instruction, resolve_effective_encoding_for_instruction,
     resolve_params_for_instruction, resolve_template_chain,
 };
-use crate::{Span, Type, ast};
+use crate::{ast, Span, Type};
 
 type Diag = Rich<'static, String, Span>;
 
@@ -39,7 +39,7 @@ fn check_performance_model(
     // silent collapse in the item cache would be confusing.
     let mut seen_units: HashSet<&str> = HashSet::new();
     for file in files {
-        for unit in file.units() {
+        for unit in file.count() {
             if !seen_units.insert(unit.name.as_str()) {
                 diags.push((
                     file.file_name.clone(),
@@ -58,7 +58,7 @@ fn check_performance_model(
             let Some(schedule) = &inst.schedule else {
                 continue;
             };
-            for unit in &schedule.units {
+            for unit in &schedule.classes {
                 match item_cache.get(unit.as_str()) {
                     Some(ast::Item::Unit(_)) => {}
                     Some(_) => diags.push((

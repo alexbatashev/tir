@@ -5,13 +5,13 @@
 // The optional defaults are resource-agnostic and feed the compiler cost model
 // (`instruction_cost`) when no specific machine is selected; a machine's `bind`
 // may refine them for that silicon.
-unit WriteIALU { latency = 1; }
-unit WriteLoad { latency = 3; }
+sched_class WriteIALU { latency = 1; }
+sched_class WriteLoad { latency = 3; }
 
 // Generic in-order core: a single narrow pipeline with no reorder buffer (just a
 // small store buffer). The Rust simulator pairs this with an in-order execution
 // model.
-machine InOrderCore ("in-order") for [RV64I] {
+machine InOrderCore ("rv64-in-order") for [RV64I] {
     issue_width = 1;
 
     buffers {
@@ -28,8 +28,8 @@ machine InOrderCore ("in-order") for [RV64I] {
         WB;
     }
 
-    resource ALU { units = 1; }
-    resource LSU { units = 1; }
+    unit ALU { count = 1; }
+    unit LSU { count = 1; }
 
     // Phase-based timing: operands read at ID, results written at EX/MEM. Latency
     // is the phase distance (EX-ID = 1, MEM-ID = 2), with a non-zero read cycle.

@@ -103,8 +103,6 @@ pub enum Token<'a> {
     KwUnit,
     /// `machine`
     KwMachine,
-    /// `resource`
-    KwResource,
     /// `buffers`
     KwBuffers,
     /// `bind`
@@ -117,6 +115,8 @@ pub enum Token<'a> {
     KwOverride,
     /// `forward`
     KwForward,
+    /// `sched_class`
+    KwSchedClass,
 }
 
 impl<'a> Token<'a> {
@@ -135,8 +135,8 @@ pub fn lex<'src>(source: &'src str) -> (Vec<Spanned<Token<'src>>>, Vec<Cheap>) {
     (tokens.unwrap_or_default(), errors)
 }
 
-pub(crate) fn lexer<'src>()
--> impl Parser<'src, &'src str, Vec<Spanned<Token<'src>>>, extra::Err<Cheap>> {
+pub(crate) fn lexer<'src>(
+) -> impl Parser<'src, &'src str, Vec<Spanned<Token<'src>>>, extra::Err<Cheap>> {
     let num = just("0b")
         .then(text::int(2).repeated().at_least(1))
         .to_slice()
@@ -199,13 +199,13 @@ pub(crate) fn lexer<'src>()
         "behavior" => Token::KwBehavior,
         "unit" => Token::KwUnit,
         "machine" => Token::KwMachine,
-        "resource" => Token::KwResource,
         "buffers" => Token::KwBuffers,
         "bind" => Token::KwBind,
         "schedule" => Token::KwSchedule,
         "pipeline" => Token::KwPipeline,
         "override" => Token::KwOverride,
         "forward" => Token::KwForward,
+        "sched_class" => Token::KwSchedClass,
         _ => Token::Identifier(ident),
     });
 
@@ -273,13 +273,13 @@ impl<'a> fmt::Display for Token<'a> {
             Token::KwBehavior => f.write_str("behavior"),
             Token::KwUnit => f.write_str("unit"),
             Token::KwMachine => f.write_str("machine"),
-            Token::KwResource => f.write_str("resource"),
             Token::KwBuffers => f.write_str("buffers"),
             Token::KwBind => f.write_str("bind"),
             Token::KwSchedule => f.write_str("schedule"),
             Token::KwPipeline => f.write_str("pipeline"),
             Token::KwOverride => f.write_str("override"),
             Token::KwForward => f.write_str("forward"),
+            Token::KwSchedClass => f.write_str("sched_class"),
         }
     }
 }

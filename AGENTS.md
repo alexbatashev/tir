@@ -16,11 +16,11 @@
    improve adjacent code unless explicitly asked. If you need to refactor existing
    interfaces, ask user first. Match existing style always. If you see existing
    unrelated dead code - highlight that, but don't delete silently.
-4. Pair your changes with reasonable testing. Tests must be driven by the goals
-   of initial prompt. Define success criteria and express it as a test. Loop
-   until the goal is reached and verified by testing. If the task is to refactor
-   something, make sure existing tests work both before and after your changes.
-   For multistep tasks follow these instructions for each step.
+4. Pair your changes with reasonable testing. Treat tests as a code expression
+   of success criteria for user goals. Loop until the goal is reached and verified
+   by testing. If the task is to refactor something, make sure existing tests work
+   both before and after your changes. For complex tasks follow these instructions
+   for each stage.
 5. Keep code tidy. Remove imports/variables/functions that YOUR changes made
    unused. Don't remove pre-existing dead code unless asked. Every changed line
    should trace directly to the user's request. After all changes are done and
@@ -35,8 +35,6 @@
    kind of duplication. Code must explain itself without additions. While thinking
    or reasoning, speak like a caveman, skip articles and other unnecessary noise.
 7. Use conventional commits v1.0.0 spec for commit titles and descriptions.
-8. Before giving an answer, figure out definition of done. If possible, formulate
-   it as a test and verify your assumptions first.
 
 ## Working with code
 

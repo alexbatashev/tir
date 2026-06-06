@@ -943,7 +943,7 @@ fn emit_machine_models<'a>(
         let resource_lits = machine.resources.iter().map(|r| {
             let name_lit = proc_macro2::Literal::string(&r.name);
             let units_lit = proc_macro2::Literal::u16_unsuffixed(clamp_u16(r.units));
-            quote! { tir_be_common::sched::ProcResource { name: #name_lit, units: #units_lit } }
+            quote! { tir_be_common::sched::ProcUnit { name: #name_lit, units: #units_lit } }
         });
 
         let buffer_lits = machine.buffers.iter().map(|(name, size)| {
@@ -1001,10 +1001,10 @@ fn emit_machine_models<'a>(
 
 /// Resource-agnostic `unit` defaults, keyed by name. Used both when a machine
 /// does not bind a unit and to drive the machine-independent [`instruction_cost`].
-fn collect_unit_defaults(files: &[ast::File]) -> HashMap<&str, &ast::UnitDecl> {
+fn collect_unit_defaults(files: &[ast::File]) -> HashMap<&str, &ast::SchedClassDecl> {
     files
         .iter()
-        .flat_map(|f| f.units())
+        .flat_map(|f| f.count())
         .map(|u| (u.name.as_str(), u))
         .collect()
 }
@@ -1035,7 +1035,7 @@ fn collect_scheduled<'a>(
         let Some(mnemonic) = mnemonic else {
             continue;
         };
-        scheduled.push((inst.name.clone(), mnemonic, schedule.units.clone()));
+        scheduled.push((inst.name.clone(), mnemonic, schedule.classes.clone()));
     }
     scheduled
 }
@@ -1141,7 +1141,7 @@ fn resolve_spec(
 fn resolve_sched_class(
     units: &[String],
     binds: &HashMap<&str, &ast::UnitBind>,
-    unit_defaults: &HashMap<&str, &ast::UnitDecl>,
+    unit_defaults: &HashMap<&str, &ast::SchedClassDecl>,
     pipeline: &[ast::PipelinePhase],
 ) -> ResolvedClass {
     let mut latency: u16 = 0;

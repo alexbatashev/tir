@@ -1,18 +1,23 @@
-//! `tir sched` prints the data dependence graph of machine IR: how instructions
-//! are ordered with respect to one another by their register dependencies.
+//! `tir sched` is a static instruction throughput analyzer, similar to
+//! `llvm-mca` or Intel's `IACA`. It prints a rough approximation of
+//! instructions going through a device pipeline without actually executing
+//! the code.
 
 use std::{error::Error, ffi::OsString};
 
 use clap::Args;
 use tir::{
-    Context, IRFormatter, Operation, PassManager,
     builtin::{FuncOp, ModuleOp},
+    Context, IRFormatter, Operation, PassManager,
 };
-use tir_be_common::TargetMachine;
 use tir_be_common::ddg::{self, Ddg};
 use tir_be_common::sched::MachineModel;
+use tir_be_common::TargetMachine;
 
-use crate::common::{InputKind, parse_module};
+use crate::common::{parse_module, InputKind};
+
+mod event;
+mod pipeline;
 
 #[derive(Args)]
 pub struct ToolArgs {

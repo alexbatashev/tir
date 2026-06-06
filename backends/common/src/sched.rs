@@ -12,7 +12,7 @@
 
 /// One functional unit / issue resource of a machine (e.g. `ALU`, `MUL`, `LSU`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ProcResource {
+pub struct ProcUnit {
     pub name: &'static str,
     /// Number of parallel units of this resource.
     pub units: u16,
@@ -99,7 +99,7 @@ impl InstrSchedClass {
 pub struct MachineModel {
     pub name: &'static str,
     pub issue_width: u16,
-    pub resources: &'static [ProcResource],
+    pub resources: &'static [ProcUnit],
     pub buffers: &'static [BufferSize],
     /// Ordered pipeline stages; each phase's index is its cycle offset from issue.
     /// Empty when the machine declares no `pipeline` (e.g. an out-of-order core
@@ -122,7 +122,7 @@ impl MachineModel {
         }
     }
 
-    pub fn resource(&self, name: &str) -> Option<&ProcResource> {
+    pub fn resource(&self, name: &str) -> Option<&ProcUnit> {
         self.resources.iter().find(|r| r.name == name)
     }
 
