@@ -434,6 +434,10 @@ impl tir_be_common::TargetMachine for RiscvTarget {
     fn machines(&self) -> &'static [&'static str] {
         crate::MACHINES
     }
+
+    fn register_name(&self, class: &str, index: u16, prefer_abi: bool) -> Option<String> {
+        crate::register_name(class, index, prefer_abi)
+    }
 }
 
 fn select_riscv(march: &str, mcpu: Option<&str>) -> Option<Box<dyn tir_be_common::TargetMachine>> {

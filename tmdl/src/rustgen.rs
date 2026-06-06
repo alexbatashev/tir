@@ -699,11 +699,14 @@ fn emit_register_parsers_and_printers(
     files: &[ast::File],
 ) -> Result<proc_macro2::TokenStream, TMDLError> {
     let mut fns = Vec::new();
+    let mut dispatch_arms = Vec::new();
 
     for rc in files.iter().flat_map(|f| f.register_classes()) {
         let rc_name = &rc.name;
         let fn_name = format_ident!("parse_{}", rc_name.to_lowercase());
         let print_fn_name = format_ident!("print_{}", rc_name.to_lowercase());
+        let name_lit = proc_macro2::Literal::string(rc_name);
+        dispatch_arms.push(quote! { #name_lit => #print_fn_name(idx, prefer_abi), });
         let tables = rc.register_name_tables();
 
         let match_arms = tables
@@ -803,6 +806,18 @@ fn emit_register_parsers_and_printers(
             }
         });
     }
+
+    // A class-name dispatcher so callers that only have the runtime `(class, index)`
+    // of a register attribute can recover its ISA/ABI name (e.g. printing `x1`/`ra`
+    // instead of the raw `GPR[1]`).
+    fns.push(quote! {
+        pub fn register_name(class: &str, idx: u16, prefer_abi: bool) -> Option<String> {
+            match class {
+                #(#dispatch_arms)*
+                _ => None,
+            }
+        }
+    });
 
     Ok(quote! { #(#fns)* })
 }

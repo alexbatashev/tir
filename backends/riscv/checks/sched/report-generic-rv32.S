@@ -13,7 +13,7 @@ f:
 
 # CHECK:      Dispatch Width:    1
 # CHECK:      [1]    [2]    Instructions:
-# CHECK-NEXT: 1      1      addi GPR1 <- GPR0
-# CHECK-NEXT: 1      1      add GPR2 <- GPR1, GPR1
-# CHECK-NEXT: 1      1      addi GPR1 <- GPR0
-# CHECK-NEXT: 1      1      add GPR3 <- GPR1, GPR2
+# CHECK-NEXT: 1      1      addi x1, x0, 5
+# CHECK-NEXT: 1      1      add x2, x1, x1
+# CHECK-NEXT: 1      1      addi x1, x0, 9
+# CHECK-NEXT: 1      1      add x3, x1, x2

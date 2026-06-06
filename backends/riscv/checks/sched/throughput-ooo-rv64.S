@@ -13,10 +13,10 @@ f:
 
 # CHECK:      Dispatch Width:    4
 # CHECK:      [1]    [2]    Instructions:
-# CHECK-NEXT: 1      1      addi GPR1 <- GPR0
-# CHECK-NEXT: 1      1      addi GPR2 <- GPR0
-# CHECK-NEXT: 2      1      add GPR3 <- GPR1, GPR2
-# CHECK-NEXT: 1      1      sub GPR4 <- GPR3, GPR1
+# CHECK-NEXT: 1      1      addi x1, x0, 5
+# CHECK-NEXT: 1      1      addi x2, x0, 9
+# CHECK-NEXT: 2      1      add x3, x1, x2
+# CHECK-NEXT: 1      1      sub x4, x3, x1
 # CHECK:      Resources:
 # CHECK-NEXT: [0]: ALU
 # CHECK-NEXT: [1]: LSU

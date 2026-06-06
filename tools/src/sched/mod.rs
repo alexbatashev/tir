@@ -10,8 +10,9 @@ use std::{error::Error, ffi::OsString};
 
 use clap::Args;
 use tir::Context;
+use tir::attributes::{AttributeValue, NamedAttribute, RegisterAttr};
 use tir_be_common::liveness::{RegRef, op_regs};
-use tir_be_common::{MachineInstruction, SectionOp, SymbolOp};
+use tir_be_common::{MachineInstruction, SectionOp, SymbolOp, TargetMachine};
 
 use crate::common::{InputKind, parse_module};
 use crate::sched::event::View;
@@ -101,13 +102,11 @@ pub fn run(args: ToolArgs) -> Result<(), Box<dyn Error>> {
         };
         let mnemonic = mi.mnemonic();
         let regs = op_regs(&op);
-        let defs = phys_regs(&regs.defs);
-        let uses = phys_regs(&regs.uses);
         base.push(BaseInstr {
-            text: render_instruction(mnemonic, &defs, &uses),
+            text: render_instruction(target.as_ref(), mnemonic, &op.attributes),
             class: model.sched_class(mnemonic),
-            defs,
-            uses,
+            defs: phys_regs(&regs.defs),
+            uses: phys_regs(&regs.uses),
         });
     }
 
@@ -157,21 +156,36 @@ fn phys_regs(refs: &[RegRef]) -> Vec<(String, u16)> {
         .collect()
 }
 
-/// A compact `mnemonic def, ... <- use, ...` rendering for the report. The
-/// assembler's exact operand order is not recoverable from the register sets, so
-/// definitions and uses are shown grouped rather than in syntactic position.
-fn render_instruction(mnemonic: &str, defs: &[(String, u16)], uses: &[(String, u16)]) -> String {
-    let fmt = |regs: &[(String, u16)]| {
-        regs.iter()
-            .map(|(c, i)| format!("{c}{i}"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    match (defs.is_empty(), uses.is_empty()) {
-        (true, true) => mnemonic.to_string(),
-        (false, true) => format!("{mnemonic} {}", fmt(defs)),
-        (true, false) => format!("{mnemonic} {}", fmt(uses)),
-        (false, false) => format!("{mnemonic} {} <- {}", fmt(defs), fmt(uses)),
+/// Render an instruction as `mnemonic operand, ...`, naming register operands the
+/// way the ISA does (`x1`, not the raw `(class, index)`) by inverting the asm
+/// parser via [`TargetMachine::register_name`]. Operands are emitted in attribute
+/// order (which matches the encoded operand order for our backends); immediates
+/// print as their value.
+fn render_instruction(
+    target: &dyn TargetMachine,
+    mnemonic: &str,
+    attrs: &[NamedAttribute],
+) -> String {
+    let mut operands = Vec::new();
+    for a in attrs {
+        match &a.value {
+            AttributeValue::Register(RegisterAttr::Physical { class, index }) => operands.push(
+                target
+                    .register_name(class, *index, false)
+                    .unwrap_or_else(|| format!("{class}[{index}]")),
+            ),
+            AttributeValue::Register(RegisterAttr::Virtual { id, .. }) => {
+                operands.push(format!("%virt{id}"))
+            }
+            AttributeValue::Int(v) => operands.push(v.to_string()),
+            AttributeValue::UInt(v) => operands.push(v.to_string()),
+            _ => {}
+        }
+    }
+    if operands.is_empty() {
+        mnemonic.to_string()
+    } else {
+        format!("{mnemonic} {}", operands.join(", "))
     }
 }
 

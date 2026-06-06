@@ -52,6 +52,11 @@ pub trait TargetMachine {
 
     /// The selectable machine names of this target (for help text / diagnostics).
     fn machines(&self) -> &'static [&'static str];
+
+    /// The ISA (or ABI, when `prefer_abi`) name of a register given its class and
+    /// encoding index — the inverse of the asm parser, for printing `x1`/`ra`
+    /// instead of the raw `(class, index)`. `None` if the class/index is unknown.
+    fn register_name(&self, class: &str, index: u16, prefer_abi: bool) -> Option<String>;
 }
 
 /// A target made selectable by `--march`/`--mcpu`.
