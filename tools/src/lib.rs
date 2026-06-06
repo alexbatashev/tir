@@ -6,6 +6,7 @@ mod common;
 
 pub mod mc;
 pub mod opt;
+pub mod sched;
 
 pub fn tools_main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
