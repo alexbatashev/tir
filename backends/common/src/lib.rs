@@ -10,14 +10,14 @@ pub mod sched;
 pub mod target;
 
 pub use operations::*;
-pub use target::{select_target, supported_targets, TargetInfo, TargetMachine, TARGETS};
+pub use target::{TARGETS, TargetInfo, TargetMachine, select_target, supported_targets};
 
 // Re-exported so the `register_target!` macro can reference linkme from the
 // backend crates without each of them depending on it directly.
 pub use linkme;
 
-pub use lexer::lex;
 pub use lexer::Token;
+pub use lexer::lex;
 pub use parser::{AsmInstructionParser, AsmParser};
 use tir::attributes::{AttributeValue, RegisterAttr};
 use tir::utils::APInt;

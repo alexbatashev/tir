@@ -135,8 +135,8 @@ pub fn lex<'src>(source: &'src str) -> (Vec<Spanned<Token<'src>>>, Vec<Cheap>) {
     (tokens.unwrap_or_default(), errors)
 }
 
-pub(crate) fn lexer<'src>(
-) -> impl Parser<'src, &'src str, Vec<Spanned<Token<'src>>>, extra::Err<Cheap>> {
+pub(crate) fn lexer<'src>()
+-> impl Parser<'src, &'src str, Vec<Spanned<Token<'src>>>, extra::Err<Cheap>> {
     let num = just("0b")
         .then(text::int(2).repeated().at_least(1))
         .to_slice()

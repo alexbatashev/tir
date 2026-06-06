@@ -7,13 +7,13 @@ use std::{error::Error, ffi::OsString};
 
 use clap::Args;
 use tir::{
-    builtin::{FuncOp, ModuleOp},
     Context, IRFormatter, Operation, PassManager,
+    builtin::{FuncOp, ModuleOp},
 };
-use tir_be_common::sched::MachineModel;
 use tir_be_common::TargetMachine;
+use tir_be_common::sched::MachineModel;
 
-use crate::common::{parse_module, InputKind};
+use crate::common::{InputKind, parse_module};
 
 mod event;
 mod pipeline;

@@ -1,9 +1,9 @@
 use chumsky::{input::ValueInput, prelude::*};
 
 use crate::{
+    Span, Spanned, Type,
     ast::{self, *},
     lexer::Token,
-    Span, Spanned, Type,
 };
 
 pub fn parse<'src>(
@@ -85,8 +85,8 @@ where
 ///   }
 /// }
 /// ```
-fn register_class_def<'src, I>(
-) -> impl Parser<'src, I, RegisterClass, extra::Err<Rich<'src, Token<'src>, Span>>>
+fn register_class_def<'src, I>()
+-> impl Parser<'src, I, RegisterClass, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
@@ -140,8 +140,8 @@ enum RegClassBody {
     Registers(Vec<RegisterDef>),
 }
 
-fn template_def<'src, I>(
-) -> impl Parser<'src, I, Template, extra::Err<Rich<'src, Token<'src>, Span>>>
+fn template_def<'src, I>()
+-> impl Parser<'src, I, Template, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
@@ -214,8 +214,8 @@ where
         })
 }
 
-fn instruction_def<'src, I>(
-) -> impl Parser<'src, I, Instruction, extra::Err<Rich<'src, Token<'src>, Span>>>
+fn instruction_def<'src, I>()
+-> impl Parser<'src, I, Instruction, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
@@ -356,8 +356,8 @@ fn parse_int_lit(n: &str) -> Option<i64> {
 }
 
 /// Parse a bracketed, comma-separated list of identifiers: `[a, b, c]`.
-fn ident_list<'src, I>(
-) -> impl Parser<'src, I, Vec<String>, extra::Err<Rich<'src, Token<'src>, Span>>>
+fn ident_list<'src, I>()
+-> impl Parser<'src, I, Vec<String>, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
@@ -396,8 +396,8 @@ enum UnitField {
 }
 
 /// A `name = N;` integer pair, used inside `buffers` and `resource` bodies.
-fn kv_int_pair<'src, I>(
-) -> impl Parser<'src, I, (String, i64), extra::Err<Rich<'src, Token<'src>, Span>>>
+fn kv_int_pair<'src, I>()
+-> impl Parser<'src, I, (String, i64), extra::Err<Rich<'src, Token<'src>, Span>>>
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
@@ -409,8 +409,8 @@ where
 }
 
 /// Top-level `unit Name;` or `unit Name { latency = N; throughput = N; }`.
-fn unit_def<'src, I>(
-) -> impl Parser<'src, I, SchedClassDecl, extra::Err<Rich<'src, Token<'src>, Span>>>
+fn unit_def<'src, I>()
+-> impl Parser<'src, I, SchedClassDecl, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
@@ -491,8 +491,8 @@ fn aggregate_bind_fields(fields: Vec<BindField>) -> BindFields {
 
 /// One `latency`/`throughput`/`uses`/`reads`/`writes` field of a `bind` or
 /// `override` body.
-fn bind_field<'src, I>(
-) -> impl Parser<'src, I, BindField, extra::Err<Rich<'src, Token<'src>, Span>>>
+fn bind_field<'src, I>()
+-> impl Parser<'src, I, BindField, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
@@ -527,8 +527,8 @@ where
 }
 
 /// A braced `bind`/`override` body: zero or more timing fields.
-fn bind_body<'src, I>(
-) -> impl Parser<'src, I, Vec<BindField>, extra::Err<Rich<'src, Token<'src>, Span>>>
+fn bind_body<'src, I>()
+-> impl Parser<'src, I, Vec<BindField>, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
@@ -550,8 +550,8 @@ enum MachineBody {
 }
 
 /// Parse a pipeline-stage protection mode identifier into [`Protection`].
-fn protection_mode<'src, I>(
-) -> impl Parser<'src, I, Protection, extra::Err<Rich<'src, Token<'src>, Span>>>
+fn protection_mode<'src, I>()
+-> impl Parser<'src, I, Protection, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
@@ -567,8 +567,8 @@ where
 }
 
 /// Parse one pipeline phase: `NAME;` or `NAME: <protection>;`.
-fn pipeline_phase<'src, I>(
-) -> impl Parser<'src, I, PipelinePhase, extra::Err<Rich<'src, Token<'src>, Span>>>
+fn pipeline_phase<'src, I>()
+-> impl Parser<'src, I, PipelinePhase, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
@@ -747,8 +747,8 @@ where
         .labelled("machine definition")
 }
 
-fn encoding<'src, I>(
-) -> impl Parser<'src, I, Vec<EncodingArm>, extra::Err<Rich<'src, Token<'src>, Span>>>
+fn encoding<'src, I>()
+-> impl Parser<'src, I, Vec<EncodingArm>, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
@@ -786,8 +786,8 @@ where
         .map(|((), arms)| arms)
 }
 
-fn parameter<'src, I>(
-) -> impl Parser<'src, I, (String, (Type, Option<ast::Expr>)), extra::Err<Rich<'src, Token<'src>, Span>>>
+fn parameter<'src, I>()
+-> impl Parser<'src, I, (String, (Type, Option<ast::Expr>)), extra::Err<Rich<'src, Token<'src>, Span>>>
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
@@ -805,8 +805,8 @@ where
         })
 }
 
-fn instruction_operands<'src, I>(
-) -> impl Parser<'src, I, Vec<(String, Type)>, extra::Err<Rich<'src, Token<'src>, Span>>>
+fn instruction_operands<'src, I>()
+-> impl Parser<'src, I, Vec<(String, Type)>, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
@@ -824,8 +824,8 @@ where
         .map(|((), operands)| operands)
 }
 
-fn isa_requirements<'src, I>(
-) -> impl Parser<'src, I, Option<IsaRequirement>, extra::Err<Rich<'src, Token<'src>, Span>>>
+fn isa_requirements<'src, I>()
+-> impl Parser<'src, I, Option<IsaRequirement>, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
@@ -849,8 +849,8 @@ where
         .map(|isa| isa.map(|(_, isa)| isa))
 }
 
-fn for_isas<'src, I>(
-) -> impl Parser<'src, I, Vec<String>, extra::Err<Rich<'src, Token<'src>, Span>>>
+fn for_isas<'src, I>()
+-> impl Parser<'src, I, Vec<String>, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
@@ -868,8 +868,8 @@ where
         .map(|isas_opt| isas_opt.unwrap_or_default())
 }
 
-fn register_class_registers<'src, I>(
-) -> impl Parser<'src, I, Vec<RegisterDef>, extra::Err<Rich<'src, Token<'src>, Span>>>
+fn register_class_registers<'src, I>()
+-> impl Parser<'src, I, Vec<RegisterDef>, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
@@ -886,8 +886,8 @@ where
         .labelled("register class registers")
 }
 
-fn single_register<'src, I>(
-) -> impl Parser<'src, I, RegisterDef, extra::Err<Rich<'src, Token<'src>, Span>>>
+fn single_register<'src, I>()
+-> impl Parser<'src, I, RegisterDef, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
@@ -930,8 +930,8 @@ where
     any().filter(is_ident).map(|t| t.as_ident().to_string())
 }
 
-fn register_traits<'src, I>(
-) -> impl Parser<'src, I, Vec<RegisterTrait>, extra::Err<Rich<'src, Token<'src>, Span>>>
+fn register_traits<'src, I>()
+-> impl Parser<'src, I, Vec<RegisterTrait>, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
@@ -966,8 +966,8 @@ where
         })
 }
 
-fn register_range<'src, I>(
-) -> impl Parser<'src, I, RegisterDef, extra::Err<Rich<'src, Token<'src>, Span>>>
+fn register_range<'src, I>()
+-> impl Parser<'src, I, RegisterDef, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
@@ -1331,8 +1331,8 @@ fn is_ident(token: &Token) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use chumsky::prelude::*;
     use chumsky::Parser;
+    use chumsky::prelude::*;
 
     use crate::{
         ast::{BinOp, Expr},
@@ -1378,7 +1378,7 @@ mod tests {
 
     #[test]
     fn inheritance_merges_base_registers_and_params() {
-        use crate::ast::{resolve_register_class_inheritance, RegisterTrait};
+        use crate::ast::{RegisterTrait, resolve_register_class_inheritance};
 
         let code = r#"
             isa Isa { param XLEN: Integer = 64; }
