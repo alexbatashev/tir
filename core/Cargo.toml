@@ -18,6 +18,10 @@ criterion = { workspace = true, features = ["html_reports"] }
 name = "disjoint_set"
 harness = false
 
+[[bench]]
+name = "egraph"
+harness = false
+
 [[test]]
 name = "lit"
 harness = false

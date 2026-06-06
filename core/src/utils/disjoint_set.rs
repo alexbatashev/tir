@@ -149,6 +149,16 @@ where
     pub fn connected(&self, i: u32, j: u32) -> bool {
         self.uf.connected(i, j)
     }
+
+    pub fn roots(&self) -> impl Iterator<Item = (u32, &V)> {
+        self.values.iter().enumerate().filter_map(|(i, value)| {
+            if self.uf.parents[i] < 0 {
+                Some((i as u32, value.as_ref().expect("root value")))
+            } else {
+                None
+            }
+        })
+    }
 }
 
 #[cfg(test)]

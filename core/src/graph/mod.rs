@@ -93,7 +93,23 @@ pub struct GenericDag<N: Node, L> {
     actual_types: HashMap<NodeId, TypeId>,
 }
 
+impl<N: Node, L> Default for GenericDag<N, L> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<N: Node, L> GenericDag<N, L> {
+    pub fn new() -> Self {
+        Self {
+            nodes: Vec::new(),
+            edges: HashMap::new(),
+            data: HashMap::new(),
+            original_ops: HashMap::new(),
+            actual_types: HashMap::new(),
+        }
+    }
+
     fn contains_descendant(&self, root: NodeId, target: NodeId) -> bool {
         if root == target {
             return true;
