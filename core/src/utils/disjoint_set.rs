@@ -1,15 +1,31 @@
-pub struct DisjointSet {
+struct UnionFind {
     parents: Vec<i32>,
 }
 
-impl DisjointSet {
-    pub fn new(size: usize) -> Self {
-        DisjointSet {
+impl UnionFind {
+    fn with_size(size: usize) -> Self {
+        Self {
             parents: vec![-1; size],
         }
     }
 
-    pub fn find_root(&self, i: u32) -> u32 {
+    fn new() -> Self {
+        Self {
+            parents: Vec::new(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.parents.len()
+    }
+
+    fn push(&mut self) -> u32 {
+        let id = self.parents.len() as u32;
+        self.parents.push(-1);
+        id
+    }
+
+    fn find_root(&self, i: u32) -> u32 {
         assert!(i <= i32::MAX as u32);
 
         let mut i = i as i32;
@@ -21,33 +37,59 @@ impl DisjointSet {
         i as u32
     }
 
-    pub fn union(&mut self, i: u32, j: u32) -> u32 {
+    fn connected(&self, i: u32, j: u32) -> bool {
+        self.find_root(i) == self.find_root(j)
+    }
+
+    fn union(&mut self, i: u32, j: u32) -> (u32, u32, bool) {
         let mut root_i = self.find_root(i);
         let mut root_j = self.find_root(j);
 
-        if root_i != root_j {
-            let mut i_size = -self.parents[root_i as usize];
-            let mut j_size = -self.parents[root_j as usize];
-
-            if i_size > j_size {
-                std::mem::swap(&mut root_i, &mut root_j);
-                std::mem::swap(&mut i_size, &mut j_size);
-            }
-
-            self.parents[root_j as usize] -= i_size;
-            self.parents[root_i as usize] = root_j as i32;
+        if root_i == root_j {
+            return (root_i, root_j, false);
         }
 
-        root_j
+        let mut i_size = -self.parents[root_i as usize];
+        let mut j_size = -self.parents[root_j as usize];
+
+        if i_size > j_size {
+            std::mem::swap(&mut root_i, &mut root_j);
+            std::mem::swap(&mut i_size, &mut j_size);
+        }
+
+        self.parents[root_j as usize] -= i_size;
+        self.parents[root_i as usize] = root_j as i32;
+
+        (root_i, root_j, true)
+    }
+}
+
+pub struct DisjointSet {
+    uf: UnionFind,
+}
+
+impl DisjointSet {
+    pub fn new(size: usize) -> Self {
+        Self {
+            uf: UnionFind::with_size(size),
+        }
+    }
+
+    pub fn find_root(&self, i: u32) -> u32 {
+        self.uf.find_root(i)
+    }
+
+    pub fn union(&mut self, i: u32, j: u32) -> u32 {
+        self.uf.union(i, j).1
     }
 
     pub fn connected(&self, i: u32, j: u32) -> bool {
-        self.find_root(i) == self.find_root(j)
+        self.uf.connected(i, j)
     }
 }
 
 pub struct DisjointMap<V, F> {
-    parents: Vec<i32>,
+    uf: UnionFind,
     values: Vec<Option<V>>,
     merge: F,
 }
@@ -58,37 +100,28 @@ where
 {
     pub fn new(merge: F) -> Self {
         Self {
-            parents: Vec::new(),
+            uf: UnionFind::new(),
             values: Vec::new(),
             merge,
         }
     }
 
     pub fn len(&self) -> usize {
-        self.parents.len()
+        self.uf.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.parents.is_empty()
+        self.uf.len() == 0
     }
 
     pub fn push(&mut self, value: V) -> u32 {
-        let id = self.parents.len() as u32;
-        self.parents.push(-1);
+        let id = self.uf.push();
         self.values.push(Some(value));
         id
     }
 
     pub fn find_root(&self, i: u32) -> u32 {
-        assert!(i <= i32::MAX as u32);
-
-        let mut i = i as i32;
-
-        while self.parents[i as usize] >= 0 {
-            i = self.parents[i as usize]
-        }
-
-        i as u32
+        self.uf.find_root(i)
     }
 
     pub fn get(&self, i: u32) -> &V {
@@ -103,33 +136,18 @@ where
     }
 
     pub fn union(&mut self, i: u32, j: u32) -> u32 {
-        let mut root_i = self.find_root(i);
-        let mut root_j = self.find_root(j);
-
-        if root_i != root_j {
-            let mut i_size = -self.parents[root_i as usize];
-            let mut j_size = -self.parents[root_j as usize];
-
-            if i_size > j_size {
-                std::mem::swap(&mut root_i, &mut root_j);
-                std::mem::swap(&mut i_size, &mut j_size);
-            }
-
-            self.parents[root_j as usize] -= i_size;
-
+        let (root_i, root_j, merged) = self.uf.union(i, j);
+        if merged {
             let val_i = self.values[root_i as usize].take().expect("root value");
             let val_j = self.values[root_j as usize].take().expect("root value");
             self.values[root_j as usize] = Some((self.merge)(val_j, val_i));
             self.values[root_i as usize] = None;
-
-            self.parents[root_i as usize] = root_j as i32;
         }
-
         root_j
     }
 
     pub fn connected(&self, i: u32, j: u32) -> bool {
-        self.find_root(i) == self.find_root(j)
+        self.uf.connected(i, j)
     }
 }
 
