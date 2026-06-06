@@ -170,6 +170,8 @@ template LoadInst for [RV32I, RV64I] : IType {
     asm {
         "{self.MNEMONIC} {rd}, {imm}({rs1})"
     }
+
+    schedule { units = [WriteLoad]; }
 }
 
 // Store instruction template
@@ -201,6 +203,7 @@ template SType for [RV32I, RV64I] {
 // Store instruction template, inherits from SType
 template StoreInst for [RV32I, RV64I] : SType {
     param OPCODE: bits<7> = 0b0100011;
+    schedule { units = [WriteStore]; }
 }
 
 // B-type instruction template

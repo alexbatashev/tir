@@ -43,9 +43,9 @@ struct Cli {
     /// Report cycle-approximate timing after the functional run.
     #[arg(long, default_value_t = false)]
     timing: bool,
-    /// Machine model for `--timing`: `in-order` or `ooo`.
-    #[arg(long, default_value = "ooo")]
-    machine: String,
+    /// Machine model for `--timing` (target-specific, e.g. `rv64-ooo`).
+    #[arg(long)]
+    machine: Option<String>,
     /// Branch predictor for `--timing`: `not-taken` or `btfn`.
     #[arg(long, default_value = "btfn")]
     predictor: String,
@@ -132,11 +132,19 @@ fn main() {
 
     // Pick the timing model up front so a bad `--machine` fails before running.
     let model = if args.timing {
-        let m = target.machine_model(&args.machine).unwrap_or_else(|| {
+        let name = args.machine.as_deref().unwrap_or_else(|| {
             eprintln!(
-                "unknown machine '{}' for target '{}' (expected: in-order, ooo)",
-                args.machine,
+                "--timing requires --machine (one of: {})",
+                target.machines().join(", "),
+            );
+            std::process::exit(2);
+        });
+        let m = target.machine_model(name).unwrap_or_else(|| {
+            eprintln!(
+                "unknown machine '{}' for target '{}' (one of: {})",
+                name,
                 target.name(),
+                target.machines().join(", "),
             );
             std::process::exit(2);
         });

@@ -430,6 +430,14 @@ impl tir_be_common::TargetMachine for RiscvTarget {
     fn machine_model(&self, name: &str) -> Option<tir_be_common::sched::MachineModel> {
         crate::machine_model(name)
     }
+
+    fn machines(&self) -> &'static [&'static str] {
+        crate::MACHINES
+    }
+
+    fn register_name(&self, class: &str, index: u16, prefer_abi: bool) -> Option<String> {
+        crate::register_name(class, index, prefer_abi)
+    }
 }
 
 fn select_riscv(march: &str, mcpu: Option<&str>) -> Option<Box<dyn tir_be_common::TargetMachine>> {
@@ -451,16 +459,19 @@ mod tests {
 
     #[test]
     fn machine_models_resolve_scheduling_classes() {
-        // Resource assignment is shared; an unscheduled instruction falls back to
-        // the default class on either core.
+        // ALU ops resolve to the ALU unit (via the WriteIALU schedule on their
+        // template), loads/stores to the LSU, and an instruction with no schedule
+        // class (e.g. the M-extension `mul`, unmodeled here) falls back to default.
         for model in [
             crate::in_order_core_model(),
             crate::out_of_order_core_model(),
         ] {
             assert_eq!(model.sched_class("add").resources, &["ALU"]);
+            assert_eq!(model.sched_class("sub").resources, &["ALU"]);
             assert_eq!(model.sched_class("lw").resources, &["LSU"]);
+            assert_eq!(model.sched_class("sw").resources, &["LSU"]);
             assert_eq!(
-                model.sched_class("sub"),
+                model.sched_class("mul"),
                 tir_be_common::sched::InstrSchedClass::DEFAULT
             );
         }

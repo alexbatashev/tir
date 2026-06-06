@@ -699,11 +699,14 @@ fn emit_register_parsers_and_printers(
     files: &[ast::File],
 ) -> Result<proc_macro2::TokenStream, TMDLError> {
     let mut fns = Vec::new();
+    let mut dispatch_arms = Vec::new();
 
     for rc in files.iter().flat_map(|f| f.register_classes()) {
         let rc_name = &rc.name;
         let fn_name = format_ident!("parse_{}", rc_name.to_lowercase());
         let print_fn_name = format_ident!("print_{}", rc_name.to_lowercase());
+        let name_lit = proc_macro2::Literal::string(rc_name);
+        dispatch_arms.push(quote! { #name_lit => #print_fn_name(idx, prefer_abi), });
         let tables = rc.register_name_tables();
 
         let match_arms = tables
@@ -803,6 +806,18 @@ fn emit_register_parsers_and_printers(
             }
         });
     }
+
+    // A class-name dispatcher so callers that only have the runtime `(class, index)`
+    // of a register attribute can recover its ISA/ABI name (e.g. printing `x1`/`ra`
+    // instead of the raw `GPR[1]`).
+    fns.push(quote! {
+        pub fn register_name(class: &str, idx: u16, prefer_abi: bool) -> Option<String> {
+            match class {
+                #(#dispatch_arms)*
+                _ => None,
+            }
+        }
+    });
 
     Ok(quote! { #(#fns)* })
 }
@@ -943,13 +958,19 @@ fn emit_machine_models<'a>(
         let resource_lits = machine.resources.iter().map(|r| {
             let name_lit = proc_macro2::Literal::string(&r.name);
             let units_lit = proc_macro2::Literal::u16_unsuffixed(clamp_u16(r.units));
-            quote! { tir_be_common::sched::ProcResource { name: #name_lit, units: #units_lit } }
+            quote! { tir_be_common::sched::ProcUnit { name: #name_lit, units: #units_lit } }
         });
 
         let buffer_lits = machine.buffers.iter().map(|(name, size)| {
             let name_lit = proc_macro2::Literal::string(name);
             let size_lit = proc_macro2::Literal::u32_unsuffixed(clamp_u32(*size));
             quote! { tir_be_common::sched::BufferSize { name: #name_lit, size: #size_lit } }
+        });
+
+        let reg_file_lits = machine.reg_files.iter().map(|(name, count)| {
+            let name_lit = proc_macro2::Literal::string(name);
+            let count_lit = proc_macro2::Literal::u16_unsuffixed(clamp_u16(*count));
+            quote! { tir_be_common::sched::RegFile { name: #name_lit, count: #count_lit } }
         });
 
         let name_lit = proc_macro2::Literal::string(&machine.name);
@@ -967,6 +988,7 @@ fn emit_machine_models<'a>(
                     buffers: &[#(#buffer_lits),*],
                     pipeline: &[#(#pipeline_lits),*],
                     forwards: &[#(#forward_lits),*],
+                    reg_files: &[#(#reg_file_lits),*],
                     sched: &[#(#sched_lits),*],
                 }
             }
@@ -1001,10 +1023,10 @@ fn emit_machine_models<'a>(
 
 /// Resource-agnostic `unit` defaults, keyed by name. Used both when a machine
 /// does not bind a unit and to drive the machine-independent [`instruction_cost`].
-fn collect_unit_defaults(files: &[ast::File]) -> HashMap<&str, &ast::UnitDecl> {
+fn collect_unit_defaults(files: &[ast::File]) -> HashMap<&str, &ast::SchedClassDecl> {
     files
         .iter()
-        .flat_map(|f| f.units())
+        .flat_map(|f| f.count())
         .map(|u| (u.name.as_str(), u))
         .collect()
 }
@@ -1018,7 +1040,9 @@ fn collect_scheduled<'a>(
 ) -> Vec<(String, String, Vec<String>)> {
     let mut scheduled = Vec::new();
     for inst in files.iter().flat_map(|f| f.instructions()) {
-        let Some(schedule) = &inst.schedule else {
+        let Some(schedule) =
+            crate::utils::resolve_effective_schedule_for_instruction(inst, item_cache)
+        else {
             continue;
         };
         let resolved_params = resolve_params_for_instruction(inst, item_cache);
@@ -1035,7 +1059,7 @@ fn collect_scheduled<'a>(
         let Some(mnemonic) = mnemonic else {
             continue;
         };
-        scheduled.push((inst.name.clone(), mnemonic, schedule.units.clone()));
+        scheduled.push((inst.name.clone(), mnemonic, schedule.classes.clone()));
     }
     scheduled
 }
@@ -1141,7 +1165,7 @@ fn resolve_spec(
 fn resolve_sched_class(
     units: &[String],
     binds: &HashMap<&str, &ast::UnitBind>,
-    unit_defaults: &HashMap<&str, &ast::UnitDecl>,
+    unit_defaults: &HashMap<&str, &ast::SchedClassDecl>,
     pipeline: &[ast::PipelinePhase],
 ) -> ResolvedClass {
     let mut latency: u16 = 0;

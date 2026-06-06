@@ -5,12 +5,13 @@
 // each machine. The two generic cores (in-order / out-of-order) give `isasim`
 // something to drive under `--timing` without claiming to model any real
 // silicon.
-unit WriteIALU { latency = 1; }
-unit WriteLoad { latency = 3; }
+sched_class WriteIALU { latency = 1; }
+sched_class WriteLoad { latency = 3; }
+sched_class WriteStore { latency = 1; }
 
 // Generic in-order core: a single narrow pipeline, hardware-interlocked, paired
 // with the in-order execution model in the Rust simulator.
-machine InOrderCore ("in-order") for [ARMv8A64] {
+machine InOrderCore ("arm64-in-order") for [ARMv8A64] {
     issue_width = 1;
 
     buffers {
@@ -25,11 +26,12 @@ machine InOrderCore ("in-order") for [ARMv8A64] {
         WB;
     }
 
-    resource ALU { units = 1; }
-    resource LSU { units = 1; }
+    unit ALU { count = 1; }
+    unit LSU { count = 1; }
 
     bind WriteIALU { reads = ID; writes = EX;  uses = [ALU]; }
     bind WriteLoad { reads = ID; writes = MEM; uses = [LSU]; }
+    bind WriteStore { reads = ID; writes = MEM; uses = [LSU]; }
 
     forward ALU => ALU { latency = 0; }
     forward LSU => ALU { latency = 1; }
@@ -37,7 +39,7 @@ machine InOrderCore ("in-order") for [ARMv8A64] {
 
 // Generic out-of-order core: wider issue with a reorder buffer and load/store
 // queue. Same per-instruction latencies; the difference is structural.
-machine OutOfOrderCore ("ooo") for [ARMv8A64] {
+machine OutOfOrderCore ("arm64-ooo") for [ARMv8A64] {
     issue_width = 4;
 
     buffers {
@@ -46,9 +48,16 @@ machine OutOfOrderCore ("ooo") for [ARMv8A64] {
         iq = 64;
     }
 
-    resource ALU { units = 4; }
-    resource LSU { units = 2; }
+    // Physical register file for renaming: 128 GPRs behind the 32 architectural
+    // names. Drives dispatch-stall modeling when the rename pool is exhausted.
+    reg_file {
+        GPR { count = 128; }
+    }
+
+    unit ALU { count = 4; }
+    unit LSU { count = 2; }
 
     bind WriteIALU { latency = 1; uses = [ALU]; }
     bind WriteLoad { latency = 4; uses = [LSU]; }
+    bind WriteStore { latency = 1; uses = [LSU]; }
 }

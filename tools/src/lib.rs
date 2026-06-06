@@ -6,6 +6,7 @@ mod common;
 
 pub mod mc;
 pub mod opt;
+pub mod sched;
 
 pub fn tools_main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
@@ -13,6 +14,7 @@ pub fn tools_main() -> Result<(), Box<dyn Error>> {
     match cli.command {
         Command::Mc(args) => mc::run(args),
         Command::Opt(args) => opt::run(args),
+        Command::Sched(args) => sched::run(args),
     }
 }
 
@@ -22,6 +24,8 @@ pub enum Command {
     Mc(mc::ToolArgs),
     /// Run optimizations on IR
     Opt(opt::ToolArgs),
+    /// Print the data dependence graph of machine IR
+    Sched(sched::ToolArgs),
 }
 
 #[derive(Parser)]

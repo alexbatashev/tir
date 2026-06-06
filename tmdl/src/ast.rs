@@ -114,6 +114,10 @@ pub struct Template {
     pub operands: Vec<(String, Type)>,
     pub encoding: Vec<EncodingArm>,
     pub asm: Option<Expr>,
+    /// Scheduling-class membership shared by derived instructions that declare no
+    /// `schedule` of their own (resolved by
+    /// [`crate::utils::resolve_effective_schedule_for_instruction`]).
+    pub schedule: Option<Schedule>,
     #[serde(skip_serializing)]
     pub span: Span,
 }
@@ -129,7 +133,7 @@ pub struct Instruction {
     pub encoding: Vec<EncodingArm>,
     pub asm: Option<Expr>,
     pub behavior: Expr,
-    /// Performance model membership: the units (scheduling classes) this
+    /// Performance model membership: the scheduling classes this
     /// instruction belongs to. `None` when the instruction carries no `schedule`
     /// block; consumers fall back to a default scheduling class.
     pub schedule: Option<Schedule>,
@@ -138,21 +142,21 @@ pub struct Instruction {
 }
 
 /// The `schedule { ... }` block of an instruction. Declares only *membership* in
-/// machine-independent scheduling classes ([`UnitDecl`]); the concrete cost
+/// machine-independent scheduling classes ([`SchedClassDecl`]); the concrete cost
 /// (latency, resources) is supplied per-machine by [`UnitBind`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Schedule {
-    pub units: Vec<String>,
+    pub classes: Vec<String>,
     #[serde(skip_serializing)]
     pub span: Span,
 }
 
-/// A top-level `unit` declaration: a machine-independent scheduling-class
+/// A top-level `sched_class` declaration: a machine-independent scheduling-class
 /// identity that instructions reference and machines bind to concrete cost. The
 /// optional defaults are resource-agnostic and feed the compiler cost model when
 /// no specific machine is selected.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct UnitDecl {
+pub struct SchedClassDecl {
     pub name: String,
     pub default_latency: Option<i64>,
     pub default_throughput: Option<i64>,
@@ -162,7 +166,7 @@ pub struct UnitDecl {
 
 /// One functional unit / issue resource declared by a [`Machine`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct MachineResource {
+pub struct MachineUnit {
     pub name: String,
     /// Number of parallel units of this resource.
     pub units: i64,
@@ -189,7 +193,7 @@ pub struct PipelinePhase {
     pub span: Span,
 }
 
-/// A machine's binding of one [`UnitDecl`] to concrete cost on that machine.
+/// A machine's binding of one [`SchedClassDecl`] to concrete cost on that machine.
 ///
 /// Timing is either scalar (`latency`) or phase-based (`reads`/`writes` naming
 /// pipeline phases); the latter desugars to `latency = cycle(writes) -
@@ -204,14 +208,14 @@ pub struct UnitBind {
     pub reads: Option<String>,
     /// Pipeline phase at which the result is written (phase-based form).
     pub writes: Option<String>,
-    /// Resources (by [`MachineResource`] name) this unit occupies.
+    /// Resources (by [`MachineUnit`] name) this unit occupies.
     pub uses: Vec<String>,
     #[serde(skip_serializing)]
     pub span: Span,
 }
 
 /// A machine's per-instruction cost override (the LLVM `InstRW` analogue): it
-/// supersedes the `unit`-based resolution for one specific instruction on this
+/// supersedes the `sched_class`-based resolution for one specific instruction on this
 /// machine. Carries the same timing fields as a [`UnitBind`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MachineOverride {
@@ -253,7 +257,12 @@ pub struct Machine {
     pub buffers: Vec<(String, i64)>,
     /// Ordered pipeline stages; empty when no `pipeline` block is declared.
     pub pipeline: Vec<PipelinePhase>,
-    pub resources: Vec<MachineResource>,
+    pub resources: Vec<MachineUnit>,
+    /// Physical register-file sizes for renaming, keyed by physical-file name (the
+    /// root of a register class's inheritance chain; see
+    /// [`RegisterClass::register_file`]). A file absent here defaults to the
+    /// architectural register count of that file.
+    pub reg_files: Vec<(String, i64)>,
     pub binds: Vec<UnitBind>,
     /// Per-instruction cost overrides (take precedence over `binds`).
     pub overrides: Vec<MachineOverride>,
@@ -278,7 +287,7 @@ pub enum Item {
     RegisterClass(RegisterClass),
     Template(Template),
     Instruction(Instruction),
-    Unit(UnitDecl),
+    Unit(SchedClassDecl),
     Machine(Machine),
 }
 
@@ -1074,7 +1083,7 @@ impl Item {
         }
     }
 
-    pub fn as_unit(&self) -> Option<&UnitDecl> {
+    pub fn as_unit(&self) -> Option<&SchedClassDecl> {
         match self {
             Item::Unit(s) => Some(s),
             _ => None,
@@ -1446,7 +1455,7 @@ impl File {
         })
     }
 
-    pub fn units(&self) -> impl Iterator<Item = &UnitDecl> {
+    pub fn count(&self) -> impl Iterator<Item = &SchedClassDecl> {
         self.items.iter().filter_map(|f| match f {
             Item::Unit(s) => Some(s),
             _ => None,

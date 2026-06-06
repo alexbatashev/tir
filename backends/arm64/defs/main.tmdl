@@ -51,6 +51,7 @@ register_class PSTATE for [ARMv8A64] {
 
 // Data Processing -- Register (add/sub, shifted register)
 template AddSubReg for [ARMv8A64] {
+    schedule { units = [WriteIALU]; }
     param MNEMONIC: String;
     param SF: bits<1> = 0b1;
     param OP: bits<1>;
@@ -82,6 +83,7 @@ template AddSubReg for [ARMv8A64] {
 }
 
 template CmpRegTemplate for [ARMv8A64] {
+    schedule { units = [WriteIALU]; }
     param MNEMONIC: String;
     param SF: bits<1> = 0b1;
     param SHIFT: bits<2> = 0b00;
@@ -111,6 +113,7 @@ template CmpRegTemplate for [ARMv8A64] {
 
 // Data Processing -- Immediate (add/sub immediate)
 template AddSubImm for [ARMv8A64] {
+    schedule { units = [WriteIALU]; }
     param MNEMONIC: String;
     param SF: bits<1> = 0b1;
     param OP: bits<1>;
@@ -142,6 +145,7 @@ template AddSubImm for [ARMv8A64] {
 
 // Data Processing -- Register (logical shifted register)
 template LogicalReg for [ARMv8A64] {
+    schedule { units = [WriteIALU]; }
     param MNEMONIC: String;
     param SF: bits<1> = 0b1;
     param OPC: bits<2>;
@@ -172,6 +176,7 @@ template LogicalReg for [ARMv8A64] {
 
 // Data Processing -- 2 source (register shifts)
 template ShiftReg for [ARMv8A64] {
+    schedule { units = [WriteIALU]; }
     param MNEMONIC: String;
     param SF: bits<1> = 0b1;
     param OPCODE: bits<6>;
@@ -199,6 +204,8 @@ template ShiftReg for [ARMv8A64] {
 
 // Loads/Stores -- Unsigned immediate addressing
 template LoadStoreImmUnsigned for [ARMv8A64] {
+    // Default for the family is a load; the store instructions override to WriteStore.
+    schedule { units = [WriteLoad]; }
     param MNEMONIC: String;
     param SIZE: bits<2>;
     param OPC: bits<2>;
@@ -229,6 +236,7 @@ template LoadStoreImmUnsigned for [ARMv8A64] {
 }
 
 template BranchImm for [ARMv8A64] {
+    schedule { units = [WriteIALU]; }
     param MNEMONIC: String;
 
     operands {
@@ -246,6 +254,7 @@ template BranchImm for [ARMv8A64] {
 }
 
 template BranchLinkImm for [ARMv8A64] {
+    schedule { units = [WriteIALU]; }
     param MNEMONIC: String;
 
     operands {
@@ -263,6 +272,7 @@ template BranchLinkImm for [ARMv8A64] {
 }
 
 template BranchReg for [ARMv8A64] {
+    schedule { units = [WriteIALU]; }
     param MNEMONIC: String;
     param OPCODE: bits<4>;
 
@@ -284,6 +294,7 @@ template BranchReg for [ARMv8A64] {
 }
 
 template CondBranchImm for [ARMv8A64] {
+    schedule { units = [WriteIALU]; }
     param MNEMONIC: String;
     param COND: bits<4>;
 

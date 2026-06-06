@@ -46,9 +46,17 @@ pub trait TargetMachine {
     /// An assembly parser for this target's textual `.s`/`.S` syntax.
     fn asm_parser(&self, context: &Context) -> AsmParser;
 
-    /// A cycle-approximate machine model by name (e.g. `in-order`, `ooo`), or
-    /// `None` if this target has no model under that name.
+    /// A cycle-approximate machine model by name, or `None` if this target has no
+    /// model under that name. Names are globally unique (e.g. `rv64-ooo`).
     fn machine_model(&self, name: &str) -> Option<MachineModel>;
+
+    /// The selectable machine names of this target (for help text / diagnostics).
+    fn machines(&self) -> &'static [&'static str];
+
+    /// The ISA (or ABI, when `prefer_abi`) name of a register given its class and
+    /// encoding index — the inverse of the asm parser, for printing `x1`/`ra`
+    /// instead of the raw `(class, index)`. `None` if the class/index is unknown.
+    fn register_name(&self, class: &str, index: u16, prefer_abi: bool) -> Option<String>;
 }
 
 /// A target made selectable by `--march`/`--mcpu`.

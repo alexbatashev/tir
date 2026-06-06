@@ -39,7 +39,7 @@ fn check_performance_model(
     // silent collapse in the item cache would be confusing.
     let mut seen_units: HashSet<&str> = HashSet::new();
     for file in files {
-        for unit in file.units() {
+        for unit in file.count() {
             if !seen_units.insert(unit.name.as_str()) {
                 diags.push((
                     file.file_name.clone(),
@@ -52,36 +52,39 @@ fn check_performance_model(
         }
     }
 
-    // Instruction `schedule { units = [..] }` names must resolve to a `unit`.
-    for file in files {
-        for inst in file.instructions() {
-            let Some(schedule) = &inst.schedule else {
-                continue;
-            };
-            for unit in &schedule.units {
-                match item_cache.get(unit.as_str()) {
-                    Some(ast::Item::Unit(_)) => {}
-                    Some(_) => diags.push((
-                        file.file_name.clone(),
-                        Rich::custom(
-                            schedule.span,
-                            format!(
-                                "'{}' referenced by instruction '{}' is not a unit",
-                                unit, inst.name
-                            ),
-                        ),
-                    )),
-                    None => diags.push((
-                        file.file_name.clone(),
-                        Rich::custom(
-                            schedule.span,
-                            format!(
-                                "unknown unit '{}' referenced by instruction '{}'",
-                                unit, inst.name
-                            ),
-                        ),
-                    )),
-                }
+    // `schedule { units = [..] }` names — on instructions and on templates (which
+    // derived instructions inherit) — must resolve to a `unit`.
+    let schedule_owners = files.iter().flat_map(|file| {
+        let insts = file.instructions().filter_map(|i| {
+            i.schedule
+                .as_ref()
+                .map(|s| (&file.file_name, "instruction", &i.name, s))
+        });
+        let tmpls = file.templates().filter_map(|t| {
+            t.schedule
+                .as_ref()
+                .map(|s| (&file.file_name, "template", &t.name, s))
+        });
+        insts.chain(tmpls)
+    });
+    for (file_name, kind, owner, schedule) in schedule_owners {
+        for unit in &schedule.classes {
+            match item_cache.get(unit.as_str()) {
+                Some(ast::Item::Unit(_)) => {}
+                Some(_) => diags.push((
+                    file_name.clone(),
+                    Rich::custom(
+                        schedule.span,
+                        format!("'{unit}' referenced by {kind} '{owner}' is not a unit"),
+                    ),
+                )),
+                None => diags.push((
+                    file_name.clone(),
+                    Rich::custom(
+                        schedule.span,
+                        format!("unknown unit '{unit}' referenced by {kind} '{owner}'"),
+                    ),
+                )),
             }
         }
     }
@@ -100,6 +103,52 @@ fn check_performance_model(
                             format!(
                                 "duplicate resource '{}' in machine '{}'",
                                 res.name, machine.name
+                            ),
+                        ),
+                    ));
+                }
+            }
+
+            // `reg_file` names must be unique and resolve to a physical register
+            // file (the root of a register class's inheritance chain) of a class
+            // available to one of this machine's ISAs.
+            let class_map: HashMap<String, &ast::RegisterClass> = files
+                .iter()
+                .flat_map(|f| f.register_classes())
+                .map(|rc| (rc.name.clone(), rc))
+                .collect();
+            let machine_isas: HashSet<&str> = machine.for_isas.iter().map(String::as_str).collect();
+            let valid_files: HashSet<&str> = class_map
+                .values()
+                .filter(|rc| {
+                    rc.for_isas
+                        .iter()
+                        .any(|i| machine_isas.contains(i.as_str()))
+                })
+                .map(|rc| rc.register_file(&class_map))
+                .collect();
+            let mut reg_file_names: HashSet<&str> = HashSet::new();
+            for (name, _) in &machine.reg_files {
+                if !reg_file_names.insert(name.as_str()) {
+                    diags.push((
+                        file.file_name.clone(),
+                        Rich::custom(
+                            machine.span,
+                            format!(
+                                "duplicate reg_file '{}' in machine '{}'",
+                                name, machine.name
+                            ),
+                        ),
+                    ));
+                }
+                if !valid_files.contains(name.as_str()) {
+                    diags.push((
+                        file.file_name.clone(),
+                        Rich::custom(
+                            machine.span,
+                            format!(
+                                "machine '{}' declares reg_file '{}' which is not a physical register file of its ISA(s)",
+                                machine.name, name
                             ),
                         ),
                     ));
@@ -882,11 +931,11 @@ mod perf_model_tests {
     }
 
     const PRELUDE: &str = "
-        unit WriteIALU;
-        unit WriteIMul { latency = 3; }
+        sched_class WriteIALU;
+        sched_class WriteIMul { latency = 3; }
         machine RocketCore for [RV64I] {
-            resource ALU { units = 2; }
-            resource MUL { units = 1; }
+            unit ALU { count = 2; }
+            unit MUL { count = 1; }
             bind WriteIALU { latency = 1; uses = [ALU]; }
             bind WriteIMul { latency = 3; uses = [MUL]; }
         }
@@ -924,7 +973,7 @@ mod perf_model_tests {
     fn bind_to_unknown_unit_is_reported() {
         let src = "
             machine M for [RV64I] {
-                resource ALU { units = 1; }
+                unit ALU { count = 1; }
                 bind NotAUnit { latency = 1; uses = [ALU]; }
             }
         ";
@@ -940,9 +989,9 @@ mod perf_model_tests {
     #[test]
     fn use_of_unknown_resource_is_reported() {
         let src = "
-            unit W;
+            sched_class W;
             machine M for [RV64I] {
-                resource ALU { units = 1; }
+                unit ALU { count = 1; }
                 bind W { latency = 1; uses = [FPU]; }
             }
         ";
@@ -958,10 +1007,10 @@ mod perf_model_tests {
     #[test]
     fn phase_not_in_pipeline_is_reported() {
         let src = "
-            unit W;
+            sched_class W;
             machine M for [RV64I] {
                 pipeline { IF; ID; }
-                resource L { units = 1; }
+                unit L { count = 1; }
                 bind W { reads = ID; writes = NOPE; uses = [L]; }
             }
         ";
@@ -977,9 +1026,9 @@ mod perf_model_tests {
     #[test]
     fn phase_bind_without_pipeline_is_reported() {
         let src = "
-            unit W;
+            sched_class W;
             machine M for [RV64I] {
-                resource L { units = 1; }
+                unit L { count = 1; }
                 bind W { reads = ID; uses = [L]; }
             }
         ";
@@ -996,7 +1045,7 @@ mod perf_model_tests {
     fn override_of_unknown_instruction_is_reported() {
         let src = "
             machine M for [RV64I] {
-                resource ALU { units = 1; }
+                unit ALU { count = 1; }
                 override Nope { latency = 1; uses = [ALU]; }
             }
         ";
@@ -1013,7 +1062,7 @@ mod perf_model_tests {
     fn forward_unknown_resource_is_reported() {
         let src = "
             machine M for [RV64I] {
-                resource ALU { units = 1; }
+                unit ALU { count = 1; }
                 forward ALU => FPU { latency = 0; }
             }
         ";
@@ -1029,11 +1078,11 @@ mod perf_model_tests {
     #[test]
     fn duplicate_unit_and_bind_and_resource_are_reported() {
         let src = "
-            unit W;
-            unit W;
+            sched_class W;
+            sched_class W;
             machine M for [RV64I] {
-                resource ALU { units = 1; }
-                resource ALU { units = 2; }
+                unit ALU { count = 1; }
+                unit ALU { count = 2; }
                 bind W { latency = 1; uses = [ALU]; }
                 bind W { latency = 2; uses = [ALU]; }
             }
