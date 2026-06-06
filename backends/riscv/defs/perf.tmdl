@@ -7,6 +7,7 @@
 // may refine them for that silicon.
 sched_class WriteIALU { latency = 1; }
 sched_class WriteLoad { latency = 3; }
+sched_class WriteStore { latency = 1; }
 
 // Generic in-order core: a single narrow pipeline with no reorder buffer (just a
 // small store buffer). The Rust simulator pairs this with an in-order execution
@@ -35,6 +36,7 @@ machine InOrderCore ("rv64-in-order") for [RV64I] {
     // is the phase distance (EX-ID = 1, MEM-ID = 2), with a non-zero read cycle.
     bind WriteIALU { reads = ID; writes = EX;  uses = [ALU]; }
     bind WriteLoad { reads = ID; writes = MEM; uses = [LSU]; }
+    bind WriteStore { reads = ID; writes = MEM; uses = [LSU]; }
 
     // Bypass network: an ALU result feeds a dependent ALU op back-to-back (0-cycle
     // forward); a load result reaches a dependent ALU op with a 1-cycle bubble.
@@ -65,6 +67,7 @@ machine OutOfOrderCore ("rv64-ooo") for [RV64I] {
 
     bind WriteIALU { latency = 1; uses = [ALU]; }
     bind WriteLoad { latency = 4; uses = [LSU]; }
+    bind WriteStore { latency = 1; uses = [LSU]; }
 
     // Per-instruction override (InstRW): this specific instruction costs more than
     // its unit's generic bind on this machine, regardless of WriteIALU.

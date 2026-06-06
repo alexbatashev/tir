@@ -114,6 +114,10 @@ pub struct Template {
     pub operands: Vec<(String, Type)>,
     pub encoding: Vec<EncodingArm>,
     pub asm: Option<Expr>,
+    /// Scheduling-class membership shared by derived instructions that declare no
+    /// `schedule` of their own (resolved by
+    /// [`crate::utils::resolve_effective_schedule_for_instruction`]).
+    pub schedule: Option<Schedule>,
     #[serde(skip_serializing)]
     pub span: Span,
 }

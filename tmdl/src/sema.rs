@@ -52,36 +52,39 @@ fn check_performance_model(
         }
     }
 
-    // Instruction `schedule { units = [..] }` names must resolve to a `unit`.
-    for file in files {
-        for inst in file.instructions() {
-            let Some(schedule) = &inst.schedule else {
-                continue;
-            };
-            for unit in &schedule.classes {
-                match item_cache.get(unit.as_str()) {
-                    Some(ast::Item::Unit(_)) => {}
-                    Some(_) => diags.push((
-                        file.file_name.clone(),
-                        Rich::custom(
-                            schedule.span,
-                            format!(
-                                "'{}' referenced by instruction '{}' is not a unit",
-                                unit, inst.name
-                            ),
-                        ),
-                    )),
-                    None => diags.push((
-                        file.file_name.clone(),
-                        Rich::custom(
-                            schedule.span,
-                            format!(
-                                "unknown unit '{}' referenced by instruction '{}'",
-                                unit, inst.name
-                            ),
-                        ),
-                    )),
-                }
+    // `schedule { units = [..] }` names — on instructions and on templates (which
+    // derived instructions inherit) — must resolve to a `unit`.
+    let schedule_owners = files.iter().flat_map(|file| {
+        let insts = file.instructions().filter_map(|i| {
+            i.schedule
+                .as_ref()
+                .map(|s| (&file.file_name, "instruction", &i.name, s))
+        });
+        let tmpls = file.templates().filter_map(|t| {
+            t.schedule
+                .as_ref()
+                .map(|s| (&file.file_name, "template", &t.name, s))
+        });
+        insts.chain(tmpls)
+    });
+    for (file_name, kind, owner, schedule) in schedule_owners {
+        for unit in &schedule.classes {
+            match item_cache.get(unit.as_str()) {
+                Some(ast::Item::Unit(_)) => {}
+                Some(_) => diags.push((
+                    file_name.clone(),
+                    Rich::custom(
+                        schedule.span,
+                        format!("'{unit}' referenced by {kind} '{owner}' is not a unit"),
+                    ),
+                )),
+                None => diags.push((
+                    file_name.clone(),
+                    Rich::custom(
+                        schedule.span,
+                        format!("unknown unit '{unit}' referenced by {kind} '{owner}'"),
+                    ),
+                )),
             }
         }
     }

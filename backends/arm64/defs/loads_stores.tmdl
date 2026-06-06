@@ -80,6 +80,8 @@ instruction StoreByte for [ARMv8A64] : LoadStoreImmUnsigned {
     behavior {
         store(rn + zext(imm, self.XLEN), 1, extract(rt, 7, 0));
     }
+
+    schedule { units = [WriteStore]; }
 }
 
 instruction StoreHalfword for [ARMv8A64] : LoadStoreImmUnsigned {
@@ -90,6 +92,8 @@ instruction StoreHalfword for [ARMv8A64] : LoadStoreImmUnsigned {
     behavior {
         store(rn + zext(imm, self.XLEN), 2, extract(rt, 15, 0));
     }
+
+    schedule { units = [WriteStore]; }
 }
 
 instruction StoreWord for [ARMv8A64] : LoadStoreImmUnsigned {
@@ -101,6 +105,8 @@ instruction StoreWord for [ARMv8A64] : LoadStoreImmUnsigned {
     behavior {
         store(rn + zext(imm, self.XLEN), 4, extract(rt, 31, 0));
     }
+
+    schedule { units = [WriteStore]; }
 }
 
 instruction StoreDoubleword for [ARMv8A64] : LoadStoreImmUnsigned {
@@ -112,4 +118,6 @@ instruction StoreDoubleword for [ARMv8A64] : LoadStoreImmUnsigned {
     behavior {
         store(rn + zext(imm, self.XLEN), 8, rt);
     }
+
+    schedule { units = [WriteStore]; }
 }

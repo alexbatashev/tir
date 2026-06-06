@@ -166,6 +166,21 @@ pub fn resolve_effective_asm_for_instruction<'a>(
     })
 }
 
+/// The scheduling-class membership in effect for `inst`: its own `schedule` block,
+/// or the nearest one inherited from its template chain. Lets a family of
+/// instructions share a class by declaring it once on their template.
+pub fn resolve_effective_schedule_for_instruction<'a>(
+    inst: &'a ast::Instruction,
+    item_cache: &HashMap<&'a str, &'a ast::Item>,
+) -> Option<&'a ast::Schedule> {
+    inst.schedule.as_ref().or_else(|| {
+        resolve_template_chain(inst, item_cache)
+            .into_iter()
+            .rev()
+            .find_map(|t| t.schedule.as_ref())
+    })
+}
+
 pub fn get_encoding_arms<'a>(
     instruction: &'a Instruction,
     item_cache: &HashMap<&'a str, &'a Item>,

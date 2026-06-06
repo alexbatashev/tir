@@ -3,19 +3,23 @@
 template ALUOp for [RV32I, RV64I] : RType {
     param OPCODE: bits<7> = 0b0110011;
     param FUNCT7: bits<7> = 0b0000000;
+    schedule { units = [WriteIALU]; }
 }
 
 template IALUOp for [RV32I, RV64I] : IType {
     param OPCODE: bits<7> = 0b0010011;
+    schedule { units = [WriteIALU]; }
 }
 
 template ALUOpWord for [RV64I] : RTypeWord {
     param OPCODE: bits<7> = 0b0111011;
     param FUNCT7: bits<7> = 0b0000000;
+    schedule { units = [WriteIALU]; }
 }
 
 template IALUOpWord for [RV64I] : ITypeWord {
     param OPCODE: bits<7> = 0b0011011;
+    schedule { units = [WriteIALU]; }
 }
 
 instruction LoadUpperImm for [RV32I, RV64I] : UType {
@@ -25,6 +29,8 @@ instruction LoadUpperImm for [RV32I, RV64I] : UType {
     behavior {
         rd = sext(imm, self.XLEN) << 12;
     }
+
+    schedule { units = [WriteIALU]; }
 }
 
 instruction AddUpperImmToPC for [RV32I, RV64I] : UType {
@@ -34,6 +40,8 @@ instruction AddUpperImmToPC for [RV32I, RV64I] : UType {
     behavior {
         rd = PC::pc + (sext(imm, self.XLEN) << 12);
     }
+
+    schedule { units = [WriteIALU]; }
 }
 
 instruction JumpAndLink for [RV32I, RV64I] : JType {
@@ -44,6 +52,8 @@ instruction JumpAndLink for [RV32I, RV64I] : JType {
         rd = PC::pc + zext(0b100, self.XLEN);
         PC::pc = PC::pc + sext(imm, self.XLEN);
     }
+
+    schedule { units = [WriteIALU]; }
 }
 
 instruction JumpAndLinkReg for [RV32I, RV64I] : IType {
@@ -59,10 +69,13 @@ instruction JumpAndLinkReg for [RV32I, RV64I] : IType {
         rd = PC::pc + zext(0b100, self.XLEN);
         PC::pc = rs1 + sext(imm, self.XLEN);
     }
+
+    schedule { units = [WriteIALU]; }
 }
 
 template BranchOp for [RV32I, RV64I] : BType {
     param OPCODE: bits<7> = 0b1100011;
+    schedule { units = [WriteIALU]; }
 }
 
 instruction BranchEq for [RV32I, RV64I] : BranchOp {
@@ -156,10 +169,6 @@ instruction LoadWord for [RV32I, RV64I] : LoadInst {
     behavior {
         rd = sext(load(rs1 + sext(imm, self.XLEN), 4, 0b1), self.XLEN);
     }
-
-    schedule {
-        units = [WriteLoad];
-    }
 }
 
 instruction LoadByteUnsigned for [RV32I, RV64I] : LoadInst {
@@ -240,10 +249,6 @@ instruction Add for [RV32I, RV64I] : ALUOp {
 
     behavior {
         rd = rs1 + rs2;
-    }
-
-    schedule {
-        units = [WriteIALU];
     }
 }
 

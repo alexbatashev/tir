@@ -157,6 +157,7 @@ where
                 instruction_operands().map(TemplateOrInstBody::Operands),
                 encoding().map(TemplateOrInstBody::Encoding),
                 asm().map(TemplateOrInstBody::Asm),
+                schedule().map(TemplateOrInstBody::Schedule),
             ))
             .repeated()
             .collect::<Vec<_>>()
@@ -201,6 +202,14 @@ where
                 }
             });
 
+            let schedule = body.iter().find_map(|b| {
+                if let TemplateOrInstBody::Schedule(t) = b {
+                    Some(t.clone())
+                } else {
+                    None
+                }
+            });
+
             Template {
                 name,
                 for_isas: for_isas.unwrap_or_default(),
@@ -209,6 +218,7 @@ where
                 operands,
                 encoding,
                 asm,
+                schedule,
                 span: e.span(),
             }
         })

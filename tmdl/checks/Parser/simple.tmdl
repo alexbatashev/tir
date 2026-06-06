@@ -286,6 +286,7 @@
 // CHECK-NEXT:                         },
 // CHECK-NEXT:                     ),
 // CHECK-NEXT:                 ),
+// CHECK-NEXT:                 schedule: None,
 // CHECK-NEXT:                 span: 488..856,
 // CHECK-NEXT:             },
 // CHECK-NEXT:         ),

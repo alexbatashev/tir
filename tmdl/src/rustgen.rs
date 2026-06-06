@@ -1040,7 +1040,9 @@ fn collect_scheduled<'a>(
 ) -> Vec<(String, String, Vec<String>)> {
     let mut scheduled = Vec::new();
     for inst in files.iter().flat_map(|f| f.instructions()) {
-        let Some(schedule) = &inst.schedule else {
+        let Some(schedule) =
+            crate::utils::resolve_effective_schedule_for_instruction(inst, item_cache)
+        else {
             continue;
         };
         let resolved_params = resolve_params_for_instruction(inst, item_cache);
