@@ -27,6 +27,7 @@ tir = { path = "core" }
 tir-be-common = { path = "backends/common" }
 
 clap = "4.6.1"
+criterion = "0.8.2"
 
 [profile.bench]
 debug = true

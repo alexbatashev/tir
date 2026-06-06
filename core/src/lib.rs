@@ -12,6 +12,7 @@ mod context;
 mod diagnostics;
 mod dialect;
 mod dialects;
+pub mod egraph;
 mod error;
 pub mod graph;
 mod interfaces;

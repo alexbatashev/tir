@@ -12,6 +12,11 @@ ariadne = "0.3"
 
 [dev-dependencies]
 tir-lit = { path = "../utils/lit" }
+criterion = { workspace = true, features = ["html_reports"] }
+
+[[bench]]
+name = "disjoint_set"
+harness = false
 
 [[test]]
 name = "lit"
