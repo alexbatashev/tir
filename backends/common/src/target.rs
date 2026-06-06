@@ -10,10 +10,10 @@
 use linkme::distributed_slice;
 use tir::Context;
 
-use crate::AsmParser;
 use crate::isel::InstructionSelectPass;
 use crate::regalloc::{RegisterAllocationPass, RegisterInfo};
 use crate::sched::MachineModel;
+use crate::{AsmParser, AsmPrinter};
 
 /// A selectable code-generation / simulation target.
 ///
@@ -45,6 +45,9 @@ pub trait TargetMachine {
 
     /// An assembly parser for this target's textual `.s`/`.S` syntax.
     fn asm_parser(&self, context: &Context) -> AsmParser;
+
+    /// An assembly printer for this target's textual `.s`/`.S` syntax.
+    fn asm_printer(&self, context: &Context) -> AsmPrinter;
 
     /// A cycle-approximate machine model by name, or `None` if this target has no
     /// model under that name. Names are globally unique (e.g. `rv64-ooo`).
