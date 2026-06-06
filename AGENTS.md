@@ -9,11 +9,13 @@
    the problem. No features beyond what's asked. No abstractions for single-use
    code. No flexibility or configurability that was not requested. No error
    handling for impossible situations. If the solution of 200 lines of code can
-   be done in 50 - rewrite it. 
-3. Touch only those pieces of existing code that you absolutely must. Don't
-   improve adjacent code unless explicitly asked. Don't refactor things that are
-   not brokent. Match existing style always. If you see existing unrelated dead
-   code - highlight that, but don't delete silently.
+   be done in 50 - rewrite it. This does not give you permission to cheat.
+   Resolve core issue end-to-end. If a user asks you to fix a test, you are not
+   allowed to simply disable an assertion or entire test - the fix must be genuine. 
+3. Touch only those pieces of existing code that are relevant to the fix. Don't
+   improve adjacent code unless explicitly asked. If you need to refactor existing
+   interfaces, ask user first. Match existing style always. If you see existing
+   unrelated dead code - highlight that, but don't delete silently.
 4. Pair your changes with reasonable testing. Tests must be driven by the goals
    of initial prompt. Define success criteria and express it as a test. Loop
    until the goal is reached and verified by testing. If the task is to refactor
