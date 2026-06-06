@@ -13,7 +13,7 @@ use tir_be_common::TargetMachine;
 pub enum InputKind {
     #[default]
     Auto,
-    TIR,
+    Tir,
     Assembly,
 }
 
@@ -34,7 +34,7 @@ pub fn parse_module(
             {
                 InputKind::Assembly
             } else {
-                InputKind::TIR
+                InputKind::Tir
             }
         }
         _ => kind,
@@ -48,7 +48,7 @@ pub fn parse_module(
                 .map_err(|_| "failed to parse assembly input")?,
             false,
         )),
-        InputKind::TIR => Ok((
+        InputKind::Tir => Ok((
             tir::parse::ir::parse_ir::<ModuleOp>(context, &input).map_err(|(span, err)| {
                 format!("failed to parse input at byte {}: {err:?}", span.0)
             })?,
