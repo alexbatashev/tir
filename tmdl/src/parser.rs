@@ -547,6 +547,7 @@ enum MachineBody {
     Forward(Forward),
     Resource(MachineUnit),
     Bind(UnitBind),
+    RegFiles(Vec<(String, i64)>),
 }
 
 /// Parse a pipeline-stage protection mode identifier into [`Protection`].
@@ -635,6 +636,32 @@ where
             })
         });
 
+    // `reg_file { GPR { count = 128; } FPR { count = 96; } }` — physical register
+    // file sizes for renaming, keyed by physical-file name.
+    let reg_file_entry = ident
+        .then(
+            kv_int_pair()
+                .repeated()
+                .collect::<Vec<(String, i64)>>()
+                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+        )
+        .map(|(name, fields): (String, Vec<(String, i64)>)| {
+            let count = fields
+                .iter()
+                .find(|(k, _)| k == "count")
+                .map(|(_, v)| *v)
+                .unwrap_or(0);
+            (name, count)
+        });
+    let reg_file = just(Token::KwRegFile)
+        .ignore_then(
+            reg_file_entry
+                .repeated()
+                .collect::<Vec<(String, i64)>>()
+                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+        )
+        .map(MachineBody::RegFiles);
+
     let bind = just(Token::KwBind)
         .ignore_then(ident)
         .then(bind_body())
@@ -705,6 +732,7 @@ where
                 r#override,
                 forward,
                 resource,
+                reg_file,
                 bind,
             ))
             .repeated()
@@ -716,6 +744,7 @@ where
             let mut buffers = Vec::new();
             let mut pipeline = Vec::new();
             let mut resources = Vec::new();
+            let mut reg_files = Vec::new();
             let mut binds = Vec::new();
             let mut overrides = Vec::new();
             let mut forwards = Vec::new();
@@ -725,6 +754,7 @@ where
                     MachineBody::Buffers(v) => buffers = v,
                     MachineBody::Pipeline(v) => pipeline = v,
                     MachineBody::Resource(r) => resources.push(r),
+                    MachineBody::RegFiles(rf) => reg_files = rf,
                     MachineBody::Bind(bd) => binds.push(bd),
                     MachineBody::Override(ov) => overrides.push(ov),
                     MachineBody::Forward(fw) => forwards.push(fw),
@@ -738,6 +768,7 @@ where
                 buffers,
                 pipeline,
                 resources,
+                reg_files,
                 binds,
                 overrides,
                 forwards,
@@ -1484,7 +1515,7 @@ mod tests {
 
     #[test]
     fn smoke_unit_decl() {
-        let code = "unit WriteIMul { latency = 3; throughput = 1; }";
+        let code = "sched_class WriteIMul { latency = 3; throughput = 1; }";
         let (tokens, _e) = lexer().parse(code).into_output_errors();
         let tokens = tokens.unwrap();
         let parsed = unit_def().then(end()).parse(
@@ -1500,7 +1531,7 @@ mod tests {
 
     #[test]
     fn smoke_unit_decl_bare() {
-        let code = "unit WriteLoad;";
+        let code = "sched_class WriteLoad;";
         let (tokens, _e) = lexer().parse(code).into_output_errors();
         let tokens = tokens.unwrap();
         let parsed = unit_def().then(end()).parse(
@@ -1522,8 +1553,9 @@ mod tests {
         let code = "machine RocketCore for [RV64I] {
             issue_width = 2;
             buffers { rob = 64; lsq = 16; }
-            resource ALU { units = 2; }
-            resource MUL { units = 1; }
+            reg_file { GPR { count = 96; } }
+            unit ALU { count = 2; }
+            unit MUL { count = 1; }
             bind WriteIALU { latency = 1; uses = [ALU]; }
             bind WriteIMul { latency = 3; uses = [MUL]; }
         }";
@@ -1543,6 +1575,7 @@ mod tests {
         assert_eq!(m.resources.len(), 2);
         assert_eq!(m.resources[0].name, "ALU");
         assert_eq!(m.resources[0].units, 2);
+        assert_eq!(m.reg_files, vec![("GPR".into(), 96)]);
         assert_eq!(m.binds.len(), 2);
         assert_eq!(m.binds[0].unit, "WriteIALU");
         assert_eq!(m.binds[0].latency, Some(1));
@@ -1572,7 +1605,7 @@ mod tests {
         use crate::ast::Protection;
         let code = "machine InOrder for [RV64I] {
             pipeline { IF; ID; EX: unprotected; MEM; WB; }
-            resource LSU { units = 1; }
+            unit LSU { count = 1; }
             bind WriteLoad { reads = ID; writes = MEM; uses = [LSU]; }
         }";
         let (tokens, _e) = lexer().parse(code).into_output_errors();
@@ -1595,8 +1628,8 @@ mod tests {
     #[test]
     fn smoke_machine_override_and_forward() {
         let code = "machine M for [RV64I] {
-            resource ALU { units = 2; }
-            resource LSU { units = 1; }
+            unit ALU { count = 2; }
+            unit LSU { count = 1; }
             bind WriteIALU { latency = 1; uses = [ALU]; }
             override Mul { latency = 3; uses = [ALU]; }
             forward ALU => ALU { latency = 0; }

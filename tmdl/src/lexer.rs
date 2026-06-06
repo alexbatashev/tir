@@ -117,6 +117,8 @@ pub enum Token<'a> {
     KwForward,
     /// `sched_class`
     KwSchedClass,
+    /// `reg_file`
+    KwRegFile,
 }
 
 impl<'a> Token<'a> {
@@ -206,6 +208,7 @@ pub(crate) fn lexer<'src>()
         "override" => Token::KwOverride,
         "forward" => Token::KwForward,
         "sched_class" => Token::KwSchedClass,
+        "reg_file" => Token::KwRegFile,
         _ => Token::Identifier(ident),
     });
 
@@ -280,6 +283,7 @@ impl<'a> fmt::Display for Token<'a> {
             Token::KwOverride => f.write_str("override"),
             Token::KwForward => f.write_str("forward"),
             Token::KwSchedClass => f.write_str("sched_class"),
+            Token::KwRegFile => f.write_str("reg_file"),
         }
     }
 }

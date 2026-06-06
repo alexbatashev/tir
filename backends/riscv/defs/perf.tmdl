@@ -45,7 +45,7 @@ machine InOrderCore ("rv64-in-order") for [RV64I] {
 // Generic out-of-order core: wider issue plus a reorder buffer, load/store queue,
 // and issue queue. Same per-instruction latencies; the difference is structural
 // (buffer sizes, unit counts) and in the Rust execution model that consumes it.
-machine OutOfOrderCore ("ooo") for [RV64I] {
+machine OutOfOrderCore ("rv64-ooo") for [RV64I] {
     issue_width = 4;
 
     buffers {
@@ -54,8 +54,14 @@ machine OutOfOrderCore ("ooo") for [RV64I] {
         iq = 64;
     }
 
-    resource ALU { units = 4; }
-    resource LSU { units = 2; }
+    // Physical register file for renaming: 128 GPRs behind the 32 architectural
+    // names. Drives dispatch-stall modeling when the rename pool is exhausted.
+    reg_file {
+        GPR { count = 128; }
+    }
+
+    unit ALU { count = 4; }
+    unit LSU { count = 2; }
 
     bind WriteIALU { latency = 1; uses = [ALU]; }
     bind WriteLoad { latency = 4; uses = [LSU]; }

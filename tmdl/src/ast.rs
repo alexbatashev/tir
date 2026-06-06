@@ -254,6 +254,11 @@ pub struct Machine {
     /// Ordered pipeline stages; empty when no `pipeline` block is declared.
     pub pipeline: Vec<PipelinePhase>,
     pub resources: Vec<MachineUnit>,
+    /// Physical register-file sizes for renaming, keyed by physical-file name (the
+    /// root of a register class's inheritance chain; see
+    /// [`RegisterClass::register_file`]). A file absent here defaults to the
+    /// architectural register count of that file.
+    pub reg_files: Vec<(String, i64)>,
     pub binds: Vec<UnitBind>,
     /// Per-instruction cost overrides (take precedence over `binds`).
     pub overrides: Vec<MachineOverride>,

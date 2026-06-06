@@ -952,6 +952,12 @@ fn emit_machine_models<'a>(
             quote! { tir_be_common::sched::BufferSize { name: #name_lit, size: #size_lit } }
         });
 
+        let reg_file_lits = machine.reg_files.iter().map(|(name, count)| {
+            let name_lit = proc_macro2::Literal::string(name);
+            let count_lit = proc_macro2::Literal::u16_unsuffixed(clamp_u16(*count));
+            quote! { tir_be_common::sched::RegFile { name: #name_lit, count: #count_lit } }
+        });
+
         let name_lit = proc_macro2::Literal::string(&machine.name);
         let issue_width_lit = proc_macro2::Literal::u16_unsuffixed(clamp_u16(
             machine.issue_width.unwrap_or(1).max(1),
@@ -967,6 +973,7 @@ fn emit_machine_models<'a>(
                     buffers: &[#(#buffer_lits),*],
                     pipeline: &[#(#pipeline_lits),*],
                     forwards: &[#(#forward_lits),*],
+                    reg_files: &[#(#reg_file_lits),*],
                     sched: &[#(#sched_lits),*],
                 }
             }

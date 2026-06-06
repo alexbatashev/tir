@@ -430,6 +430,10 @@ impl tir_be_common::TargetMachine for RiscvTarget {
     fn machine_model(&self, name: &str) -> Option<tir_be_common::sched::MachineModel> {
         crate::machine_model(name)
     }
+
+    fn machines(&self) -> &'static [&'static str] {
+        crate::MACHINES
+    }
 }
 
 fn select_riscv(march: &str, mcpu: Option<&str>) -> Option<Box<dyn tir_be_common::TargetMachine>> {

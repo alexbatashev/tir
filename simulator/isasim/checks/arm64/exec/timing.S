@@ -1,5 +1,5 @@
-# RUN: isasim --march=arm64 --entry=_start --until-pc=done --timing --machine=ooo %s | filecheck %s
-# RUN: isasim --march=arm64 --entry=_start --until-pc=done --timing --machine=in-order %s | filecheck %s
+# RUN: isasim --march=arm64 --entry=_start --until-pc=done --timing --machine=arm64-ooo %s | filecheck %s
+# RUN: isasim --march=arm64 --entry=_start --until-pc=done --timing --machine=arm64-in-order %s | filecheck %s
 
 # AArch64 has its own machine models, so `--timing` works for arm64 too. Four
 # instructions retire.

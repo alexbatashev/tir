@@ -26,6 +26,17 @@ pub struct BufferSize {
     pub size: u32,
 }
 
+/// The number of physical registers in one register file, used to model renaming
+/// pressure on an out-of-order core. `name` is the physical-file name (the root of
+/// a register class's inheritance chain; see `RegisterClass::register_file`), so
+/// aliasing classes share one entry. A file a machine does not declare defaults to
+/// its architectural register count (resolved by the consumer).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegFile {
+    pub name: &'static str,
+    pub count: u16,
+}
+
 /// How a pipeline stage handles data hazards — determines whether the simulator
 /// (and compiler) must honor a latency by stalling, or whether timing is exposed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +118,9 @@ pub struct MachineModel {
     pub pipeline: &'static [PipelinePhase],
     /// Forwarding/bypass paths between resources.
     pub forwards: &'static [Forward],
+    /// Physical register-file sizes for renaming, keyed by physical-file name. A
+    /// file absent here defaults to its architectural register count.
+    pub reg_files: &'static [RegFile],
     /// Per-instruction scheduling classes keyed by operation mnemonic, sorted by
     /// mnemonic for binary search. Resolved at TMDL-compile time.
     pub sched: &'static [(&'static str, InstrSchedClass)],
@@ -129,6 +143,14 @@ impl MachineModel {
     /// The declared default size of a structural buffer (e.g. `"rob"`), if any.
     pub fn buffer(&self, name: &str) -> Option<u32> {
         self.buffers.iter().find(|b| b.name == name).map(|b| b.size)
+    }
+
+    /// The declared physical register count of a file (e.g. `"GPR"`), if any.
+    pub fn reg_file(&self, name: &str) -> Option<u16> {
+        self.reg_files
+            .iter()
+            .find(|f| f.name == name)
+            .map(|f| f.count)
     }
 
     /// The cycle offset (index) of a named pipeline phase, if declared.

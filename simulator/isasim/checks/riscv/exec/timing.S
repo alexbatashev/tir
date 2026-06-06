@@ -1,5 +1,5 @@
-# RUN: isasim --march=riscv64 --entry=_start --until-pc=done --timing --machine=ooo %s | filecheck %s
-# RUN: isasim --march=riscv64 --entry=_start --until-pc=done --timing --machine=in-order %s | filecheck %s
+# RUN: isasim --march=riscv64 --entry=_start --until-pc=done --timing --machine=rv64-ooo %s | filecheck %s
+# RUN: isasim --march=riscv64 --entry=_start --until-pc=done --timing --machine=rv64-in-order %s | filecheck %s
 
 # The cycle-approximate timing model runs after the functional pass and reports
 # the dynamic instruction count and cycle estimate. Three instructions retire.
