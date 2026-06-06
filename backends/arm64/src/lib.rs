@@ -234,6 +234,10 @@ impl Arm64Dialect {
     pub fn get_asm_parser(&self) -> tir_be_common::AsmParser {
         tir_be_common::AsmParser::new(get_instruction_parsers())
     }
+
+    pub fn get_asm_printer(&self) -> tir_be_common::AsmPrinter {
+        tir_be_common::AsmPrinter::new(get_instruction_printers())
+    }
 }
 
 /// Lower the builtin control-flow terminators to AArch64 virtual branch ops,
@@ -399,6 +403,13 @@ impl tir_be_common::TargetMachine for Arm64Target {
             .find_dialect::<Arm64Dialect>()
             .expect("arm64 dialect must be registered before building an asm parser")
             .get_asm_parser()
+    }
+
+    fn asm_printer(&self, context: &tir::Context) -> tir_be_common::AsmPrinter {
+        context
+            .find_dialect::<Arm64Dialect>()
+            .expect("arm64 dialect must be registered before building an asm printer")
+            .get_asm_printer()
     }
 
     fn machine_model(&self, name: &str) -> Option<tir_be_common::sched::MachineModel> {

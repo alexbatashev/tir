@@ -46,6 +46,7 @@ pub fn run(args: ToolArgs) -> Result<(), Box<dyn Error>> {
     let context = Context::with_default_dialects();
     target.register_dialects(&context);
 
+    let stage = args.stage;
     let stop_after = args.stage.unwrap_or(Stage::RegAlloc);
 
     let (module, needs_lowering) = parse_module(
@@ -54,6 +55,7 @@ pub fn run(args: ToolArgs) -> Result<(), Box<dyn Error>> {
         args.input.as_ref(),
         args.kind.unwrap_or_default(),
     )?;
+    let emit_assembly = stage.is_none() && !needs_lowering;
 
     if needs_lowering {
         let mut pm = create_pass_manager(&stop_after, target.as_ref(), &context);
@@ -62,12 +64,20 @@ pub fn run(args: ToolArgs) -> Result<(), Box<dyn Error>> {
             .map_err(|e| format!("pass pipeline failed: {e}"))?;
     }
 
-    let mut rendered = String::new();
-    let mut fmt = IRFormatter::new(&mut rendered);
-    module
-        .print(&mut fmt)
-        .map_err(|e| format!("failed to print IR: {e}"))?;
-    print!("{rendered}");
+    if emit_assembly {
+        let rendered = target
+            .asm_printer(&context)
+            .print_module(&context, &module)
+            .map_err(|e| format!("failed to print assembly: {e}"))?;
+        print!("{rendered}");
+    } else {
+        let mut rendered = String::new();
+        let mut fmt = IRFormatter::new(&mut rendered);
+        module
+            .print(&mut fmt)
+            .map_err(|e| format!("failed to print IR: {e}"))?;
+        print!("{rendered}");
+    }
 
     Ok(())
 }

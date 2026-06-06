@@ -5,6 +5,7 @@ mod lexer;
 pub mod liveness;
 mod operations;
 mod parser;
+mod printer;
 pub mod regalloc;
 pub mod sched;
 pub mod target;
@@ -19,6 +20,7 @@ pub use linkme;
 pub use lexer::Token;
 pub use lexer::lex;
 pub use parser::{AsmInstructionParser, AsmParser};
+pub use printer::{AsmInstructionPrinter, AsmPrintError, AsmPrinter};
 use tir::attributes::{AttributeValue, RegisterAttr};
 use tir::utils::APInt;
 

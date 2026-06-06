@@ -10,9 +10,8 @@ use std::{error::Error, ffi::OsString};
 
 use clap::Args;
 use tir::Context;
-use tir::attributes::{AttributeValue, NamedAttribute, RegisterAttr};
 use tir_be_common::liveness::{RegRef, op_regs};
-use tir_be_common::{MachineInstruction, SectionOp, SymbolOp, TargetMachine};
+use tir_be_common::{MachineInstruction, SectionOp, SymbolOp};
 
 use crate::common::{InputKind, parse_module};
 use crate::sched::event::View;
@@ -91,6 +90,7 @@ pub fn run(args: ToolArgs) -> Result<(), Box<dyn Error>> {
 
     // Collect the region's machine instructions in program order, resolving each to
     // its scheduling class and the physical registers it reads/writes.
+    let asm_printer = target.asm_printer(&context);
     let mut op_ids = Vec::new();
     collect_instructions(&context, module.body(), &mut op_ids);
 
@@ -102,8 +102,11 @@ pub fn run(args: ToolArgs) -> Result<(), Box<dyn Error>> {
         };
         let mnemonic = mi.mnemonic();
         let regs = op_regs(&op);
+        let text = asm_printer
+            .print_instruction(&op)?
+            .ok_or_else(|| format!("no assembly printer registered for '{}'", op.name()))?;
         base.push(BaseInstr {
-            text: render_instruction(target.as_ref(), mnemonic, &op.attributes),
+            text,
             class: model.sched_class(mnemonic),
             defs: phys_regs(&regs.defs),
             uses: phys_regs(&regs.uses),
@@ -154,39 +157,6 @@ fn phys_regs(refs: &[RegRef]) -> Vec<(String, u16)> {
             RegRef::Virtual { .. } => None,
         })
         .collect()
-}
-
-/// Render an instruction as `mnemonic operand, ...`, naming register operands the
-/// way the ISA does (`x1`, not the raw `(class, index)`) by inverting the asm
-/// parser via [`TargetMachine::register_name`]. Operands are emitted in attribute
-/// order (which matches the encoded operand order for our backends); immediates
-/// print as their value.
-fn render_instruction(
-    target: &dyn TargetMachine,
-    mnemonic: &str,
-    attrs: &[NamedAttribute],
-) -> String {
-    let mut operands = Vec::new();
-    for a in attrs {
-        match &a.value {
-            AttributeValue::Register(RegisterAttr::Physical { class, index }) => operands.push(
-                target
-                    .register_name(class, *index, false)
-                    .unwrap_or_else(|| format!("{class}[{index}]")),
-            ),
-            AttributeValue::Register(RegisterAttr::Virtual { id, .. }) => {
-                operands.push(format!("%virt{id}"))
-            }
-            AttributeValue::Int(v) => operands.push(v.to_string()),
-            AttributeValue::UInt(v) => operands.push(v.to_string()),
-            _ => {}
-        }
-    }
-    if operands.is_empty() {
-        mnemonic.to_string()
-    } else {
-        format!("{mnemonic} {}", operands.join(", "))
-    }
 }
 
 /// Build the register-file pressure model: map each register class to its physical

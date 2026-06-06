@@ -89,6 +89,8 @@ fn emit_instructions<'a>(
     let mut instruction_defs = vec![];
     let mut instruction_parsers_impls: Vec<proc_macro2::TokenStream> = vec![];
     let mut instruction_parser_map_inits: Vec<proc_macro2::TokenStream> = vec![];
+    let mut instruction_printers_impls: Vec<proc_macro2::TokenStream> = vec![];
+    let mut instruction_printer_map_inits: Vec<proc_macro2::TokenStream> = vec![];
     let mut isel_rule_emitters: Vec<proc_macro2::TokenStream> = vec![];
     let mut isel_rule_inits: Vec<proc_macro2::TokenStream> = vec![];
     let mut machine_instruction_impls: Vec<proc_macro2::TokenStream> = vec![];
@@ -641,6 +643,96 @@ fn emit_instructions<'a>(
                 }
             }
 
+            let print_parts = compile_asm_printer_template(&template, mnemonic_name);
+            let mut print_steps: Vec<proc_macro2::TokenStream> = Vec::new();
+            for part in print_parts {
+                match part {
+                    AsmPrintPart::Text(text) => {
+                        if !text.is_empty() {
+                            let mut chars = text.chars();
+                            let first = chars.next().expect("text is not empty");
+                            if chars.next().is_none() {
+                                let char_lit = proc_macro2::Literal::character(first);
+                                print_steps.push(quote! {
+                                    out.push(#char_lit);
+                                });
+                            } else {
+                                let text_lit = proc_macro2::Literal::string(&text);
+                                print_steps.push(quote! {
+                                    out.push_str(#text_lit);
+                                });
+                            }
+                        }
+                    }
+                    AsmPrintPart::Operand(op_name) => {
+                        if let Some(ty) = ops_map.get(&op_name) {
+                            let op_name_lit = proc_macro2::Literal::string(&op_name);
+                            match ty {
+                                Type::Struct(class_name) => {
+                                    let fn_ident =
+                                        format_ident!("print_{}", class_name.to_lowercase());
+                                    print_steps.push(quote! {
+                                        let attr = attrs.iter().find(|attr| attr.name == #op_name_lit)?;
+                                        let operand = match &attr.value {
+                                            tir::attributes::AttributeValue::Register(
+                                                tir::attributes::RegisterAttr::Physical { index, .. },
+                                            ) => #fn_ident(*index, false)?,
+                                            tir::attributes::AttributeValue::Register(
+                                                tir::attributes::RegisterAttr::Virtual { id, .. },
+                                            ) => format!("%virt{id}"),
+                                            _ => return None,
+                                        };
+                                        out.push_str(&operand);
+                                    });
+                                }
+                                Type::Integer | Type::Bits(_) => {
+                                    print_steps.push(quote! {
+                                        let attr = attrs.iter().find(|attr| attr.name == #op_name_lit)?;
+                                        match &attr.value {
+                                            tir::attributes::AttributeValue::Int(value) => {
+                                                out.push_str(&value.to_string());
+                                            }
+                                            tir::attributes::AttributeValue::UInt(value) => {
+                                                out.push_str(&value.to_string());
+                                            }
+                                            _ => return None,
+                                        }
+                                    });
+                                }
+                                Type::String => {
+                                    print_steps.push(quote! {
+                                        let attr = attrs.iter().find(|attr| attr.name == #op_name_lit)?;
+                                        match &attr.value {
+                                            tir::attributes::AttributeValue::Str(value) => {
+                                                out.push_str(value);
+                                            }
+                                            _ => return None,
+                                        }
+                                    });
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+
+            let print_fn_ident = format_ident!("print_{}_inst", &inst.name.to_lowercase());
+            instruction_printers_impls.push(quote! {
+                fn #print_fn_ident(op: &tir::OpInstance) -> Option<String> {
+                    let attrs = &op.attributes;
+                    let mut out = String::new();
+                    #(#print_steps)*
+                    Some(out)
+                }
+            });
+
+            let printer_op_name_lit = proc_macro2::Literal::string(op_name);
+            instruction_printer_map_inits.push(quote! {
+                let f: tir_be_common::AsmInstructionPrinter = #print_fn_ident;
+                map.insert(#printer_op_name_lit.to_string(), f);
+            });
+
             let parse_fn_ident = format_ident!("parse_{}_inst", &inst.name.to_lowercase());
             instruction_parsers_impls.push(quote! {
                 fn #parse_fn_ident<'src>(
@@ -682,6 +774,14 @@ fn emit_instructions<'a>(
             let mut map: std::collections::HashMap<String, Vec<tir_be_common::AsmInstructionParser>> = std::collections::HashMap::new();
             #(#instruction_parsers_impls)*
             #(#instruction_parser_map_inits)*
+
+            map
+        }
+
+        fn get_instruction_printers() -> std::collections::HashMap<String, tir_be_common::AsmInstructionPrinter> {
+            let mut map: std::collections::HashMap<String, tir_be_common::AsmInstructionPrinter> = std::collections::HashMap::new();
+            #(#instruction_printers_impls)*
+            #(#instruction_printer_map_inits)*
 
             map
         }
@@ -1464,6 +1564,11 @@ enum AsmAction {
     RParen,
 }
 
+enum AsmPrintPart {
+    Text(String),
+    Operand(String),
+}
+
 fn compile_asm_template(template: &str) -> Vec<AsmAction> {
     let mut actions = Vec::new();
     let mut i = 0;
@@ -1507,6 +1612,37 @@ fn compile_asm_template(template: &str) -> Vec<AsmAction> {
         }
     }
     actions
+}
+
+fn compile_asm_printer_template(template: &str, mnemonic: &str) -> Vec<AsmPrintPart> {
+    let mut parts = Vec::new();
+    let mut cursor = 0;
+
+    while let Some(open_rel) = template[cursor..].find('{') {
+        let open = cursor + open_rel;
+        if open > cursor {
+            parts.push(AsmPrintPart::Text(template[cursor..open].to_string()));
+        }
+
+        let Some(close_rel) = template[open + 1..].find('}') else {
+            parts.push(AsmPrintPart::Text(template[open..].to_string()));
+            return parts;
+        };
+        let close = open + 1 + close_rel;
+        let content = &template[open + 1..close];
+        if content == "self.MNEMONIC" {
+            parts.push(AsmPrintPart::Text(mnemonic.to_string()));
+        } else if !content.starts_with("self.") {
+            parts.push(AsmPrintPart::Operand(content.to_string()));
+        }
+        cursor = close + 1;
+    }
+
+    if cursor < template.len() {
+        parts.push(AsmPrintPart::Text(template[cursor..].to_string()));
+    }
+
+    parts
 }
 
 // ---------------------------------------------------------------------------
