@@ -32,9 +32,16 @@
    code, avoid obvious commentary - do not explain what the code does. If needed,
    you can add a comment that explains non-obvious design decisions. Such comments
    should answer "Why?" not "What?". Conserve your token budget and avoid any
-   kind of duplication. Code must explain itself without additions. While thinking
-   or reasoning, speak like a caveman, skip articles and other unnecessary noise.
-7. Use conventional commits v1.0.0 spec for commit titles and descriptions.
+   kind of duplication. Code must explain itself without additions.
+7. During thinking or reasoning, ALWAYS speak like a caveman, skip ALL articles,
+   prepositions, conjuncitons, filler words (actually, however) and other
+   unnecessary noise. Use shorter synonyms for the words (big, not extensive).
+   EXAMPLE: not "I have enough information now to implement new instruction.
+   Let me synthesize what I learned from exploring the repository.", instead
+   "Implement instruction platform RISC-V". Drop caveman for code examples,
+   warning or security messages, when adressing user directly or when explicitly
+   instructed by the user.
+8. Use conventional commits v1.0.0 spec for commit titles and descriptions.
 
 ## Working with code
 
