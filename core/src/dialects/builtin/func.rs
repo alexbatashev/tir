@@ -86,15 +86,7 @@ impl FuncOp {
             context.print_type(ret_type, fmt)?;
         }
 
-        // Print body region
-        fmt.writeln(" {")?;
-        fmt.push();
-        for op in block.iter(context.clone()) {
-            let dyn_op = op.as_dyn_op();
-            dyn_op.print(fmt)?;
-        }
-        fmt.pop();
-        fmt.writeln("}")?;
+        tir::region_format::print_op_region(fmt, &context, self, 0)?;
 
         Ok(())
     }
@@ -156,7 +148,7 @@ impl FuncOp {
         };
 
         // Parse body region { ... }
-        let body_region = parser.parse_single_block_region_with_args(context, block_args)?;
+        let body_region = parser.parse_region_with_entry_args(context, block_args)?;
 
         let builder = FuncOpBuilder::new(context)
             .sym_name(&sym_name)
@@ -259,6 +251,103 @@ mod tests {
         let mut f = IRFormatter::new(&mut new_buf);
         new_func.print(&mut f).expect("print ok");
 
+        assert_eq!(buf, new_buf);
+    }
+
+    #[test]
+    fn parse_text_labeled_blocks() {
+        let context = Context::with_default_dialects();
+        let src = r#"  func @jump() -> !i32 {
+    br ^bb1
+  ^bb1:
+    %0 = constant {value = 42} : !i32
+    return %0
+  }"#;
+        let func = parse_ir::<FuncOp>(&context, src).expect("parse labeled blocks");
+        let region = func.regions().next().unwrap();
+        assert_eq!(region.iter(context.clone()).len(), 2);
+        assert!(func.verify(&context).is_ok());
+
+        let mut buf = String::new();
+        let mut f = IRFormatter::new(&mut buf);
+        func.print(&mut f).expect("print ok");
+        assert!(buf.contains("^bb1:") || buf.contains("^bb"), "{buf}");
+    }
+
+    #[test]
+    fn multi_block_func_roundtrip() {
+        let context = Context::with_default_dialects();
+        let i32_ty = IntegerType::new(&context, 32);
+
+        let region = context.create_region();
+        let entry = context.create_block(vec![]);
+        let target = context.create_block(vec![]);
+        region.add_block(entry.id());
+        region.add_block(target.id());
+
+        let func = ops::func(&context, "jump", i32_ty, Some(region.id())).build();
+
+        let mut entry_b = IRBuilder::new(entry.clone());
+        entry_b.insert(ops::br(&context, vec![], target.id()).build());
+
+        let mut target_b = IRBuilder::new(target.clone());
+        let c = ops::constant(&context, 42, i32_ty).build();
+        let c_result = c.result();
+        target_b.insert(c);
+        target_b.insert(ops::r#return(&context, c_result).build());
+
+        let mut buf = String::new();
+        let mut f = IRFormatter::new(&mut buf);
+        func.print(&mut f).expect("print ok");
+        assert!(buf.contains("^bb"));
+        assert!(buf.contains("br ^bb"));
+
+        let new_context = Context::with_default_dialects();
+        let new_func = parse_ir::<FuncOp>(&new_context, &buf).expect("parse multi-block func");
+        assert!(new_func.verify(&new_context).is_ok());
+
+        let mut new_buf = String::new();
+        let mut f = IRFormatter::new(&mut new_buf);
+        new_func.print(&mut f).expect("print ok");
+        assert_eq!(buf, new_buf);
+    }
+
+    #[test]
+    fn multi_block_func_with_block_args_roundtrip() {
+        let context = Context::with_default_dialects();
+        let i32_ty = IntegerType::new(&context, 32);
+        let param = context.create_value(i32_ty, None);
+        let param_id = param.id();
+        let arg = context.create_value(i32_ty, None);
+        let arg_id = arg.id();
+
+        let region = context.create_region();
+        let entry = context.create_block(vec![param]);
+        let target = context.create_block(vec![arg]);
+        region.add_block(entry.id());
+        region.add_block(target.id());
+
+        let func = ops::func(&context, "fwd", i32_ty, Some(region.id())).build();
+
+        let mut entry_b = IRBuilder::new(entry.clone());
+        entry_b.insert(ops::br(&context, vec![param_id], target.id()).build());
+
+        let mut target_b = IRBuilder::new(target.clone());
+        target_b.insert(ops::r#return(&context, arg_id).build());
+
+        let mut buf = String::new();
+        let mut f = IRFormatter::new(&mut buf);
+        func.print(&mut f).expect("print ok");
+        assert!(buf.contains("br ^bb"));
+        assert!(buf.contains("):"));
+
+        let new_context = Context::with_default_dialects();
+        let new_func = parse_ir::<FuncOp>(&new_context, &buf).expect("parse func with block args");
+        assert!(new_func.verify(&new_context).is_ok());
+
+        let mut new_buf = String::new();
+        let mut f = IRFormatter::new(&mut new_buf);
+        new_func.print(&mut f).expect("print ok");
         assert_eq!(buf, new_buf);
     }
 
