@@ -2,11 +2,15 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::value::ValueId;
-use crate::{Context, Error, Operation, Region};
+use crate::block::BlockId;
+use crate::value::{Value, ValueId};
+use crate::{Block, Context, Error, Operation, Region};
 
 use super::common::{Cursor, Span};
 use super::text::Parser as TextParser;
+
+type ParseResult<T> = Result<T, (Span, Error)>;
+type BlockLabel = (u32, Vec<Value>);
 
 pub fn parse_ir<T: Operation>(context: &Context, src: &str) -> Result<T, (Span, Error)> {
     let mut parser = TextParser::new(src);
@@ -74,40 +78,187 @@ impl ValueScope {
 }
 
 impl<'src> TextParser<'src> {
-    pub fn parse_single_block_region(
-        &mut self,
-        context: &Context,
-    ) -> Result<Arc<Region>, (Span, Error)> {
-        self.parse_single_block_region_with_args(context, vec![])
+    pub fn parse_region(&mut self, context: &Context) -> Result<Arc<Region>, (Span, Error)> {
+        self.parse_region_with_entry_args(context, vec![])
     }
 
-    pub fn parse_single_block_region_with_args(
+    pub fn parse_region_with_entry_args(
         &mut self,
         context: &Context,
-        block_args: Vec<crate::Value>,
+        entry_args: Vec<Value>,
     ) -> Result<Arc<Region>, (Span, Error)> {
         if !self.parse_token("{") {
             return Err((self.span(), Error::ExpectedToken("{")));
         }
 
-        let mut ops = vec![];
-
-        // FIXME: this is not very error resilient
-        while let Ok(op) = parse_single_op(self, context) {
-            ops.push(op.id());
-        }
-
-        if !self.parse_token("}") {
-            return Err((self.span(), Error::ExpectedToken("}")));
-        }
-
         let region = context.create_region();
+        let entry = context.create_block(entry_args);
+        region.add_block(entry.id());
+
+        let mut current = entry.clone();
+        self.region_parse = Some(super::text::RegionParseState {
+            region: region.clone(),
+            indices: HashMap::from([(0, entry.id())]),
+        });
+
+        let result = self.parse_region_body(context, &region, &mut current);
+        self.region_parse = None;
+        result?;
+        Ok(region)
+    }
+
+    fn parse_region_body(
+        &mut self,
+        context: &Context,
+        region: &Arc<Region>,
+        current: &mut Arc<Block>,
+    ) -> ParseResult<()> {
+        loop {
+            self.skip_trivia();
+            if self.parse_token("}") {
+                return Ok(());
+            }
+
+            if let Some((block_index, block_args)) = self.try_parse_block_label(context)? {
+                *current = self.block_at_region_index(context, region, block_index, block_args)?;
+                continue;
+            }
+
+            let op = parse_single_op(self, context)?;
+            current.insert(current.len(), op.id());
+        }
+    }
+
+    pub(crate) fn resolve_region_block_index(
+        &mut self,
+        context: &Context,
+        index: u32,
+        block_arg_types: &[crate::TypeId],
+    ) -> Result<BlockId, (Span, Error)> {
+        let Some(state) = &mut self.region_parse else {
+            return Ok(BlockId::from_number(index));
+        };
+
+        if let Some(id) = state.indices.get(&index) {
+            let block = context.get_block(*id);
+            if !block_arg_types.is_empty() && block.arguments().is_empty() {
+                return Err((
+                    self.span(),
+                    Error::VerificationError(format!(
+                        "block ^bb{index} was already referenced without arguments"
+                    )),
+                ));
+            }
+            return Ok(*id);
+        }
+
+        let len = state.region.iter(context.clone()).len();
+        if index as usize != len {
+            return Err((
+                self.span(),
+                Error::VerificationError(format!("block ^bb{index} is not defined in this region")),
+            ));
+        }
+
+        let block_args = block_arg_types
+            .iter()
+            .map(|ty| context.create_value(*ty, None))
+            .collect();
+        let block = context.create_block(block_args);
+        state.region.add_block(block.id());
+        state.indices.insert(index, block.id());
+        Ok(block.id())
+    }
+
+    fn try_parse_block_label(&mut self, context: &Context) -> ParseResult<Option<BlockLabel>> {
+        let mark = self.pos();
+        let Some(block_index) = self.parse_block_index() else {
+            return Ok(None);
+        };
+
+        let block_args = if self.parse_token("(") {
+            self.parse_block_argument_list(context)?
+        } else {
+            vec![]
+        };
+
+        if !self.parse_token(":") {
+            self.set_pos(mark);
+            return Ok(None);
+        }
+
+        Ok(Some((block_index, block_args)))
+    }
+
+    fn parse_block_argument_list(
+        &mut self,
+        context: &Context,
+    ) -> Result<Vec<Value>, (Span, Error)> {
+        let mut args = vec![];
+
+        loop {
+            if self.parse_token(")") {
+                return Ok(args);
+            }
+
+            let _val_name = self
+                .parse_value_ref()
+                .ok_or_else(|| (self.span(), Error::ExpectedValueRef))?;
+
+            if !self.parse_token(":") {
+                return Err((self.span(), Error::ExpectedToken(":")));
+            }
+
+            let ty = self
+                .parse_type(context)?
+                .ok_or_else(|| (self.span(), Error::ExpectedType))?;
+            args.push(context.create_value(ty, None));
+
+            if self.parse_token(")") {
+                return Ok(args);
+            }
+            if !self.parse_token(",") {
+                return Err((self.span(), Error::ExpectedToken(",")));
+            }
+        }
+    }
+
+    fn block_at_region_index(
+        &mut self,
+        context: &Context,
+        region: &Arc<Region>,
+        index: u32,
+        block_args: Vec<Value>,
+    ) -> Result<Arc<Block>, (Span, Error)> {
+        let state = self
+            .region_parse
+            .as_mut()
+            .expect("block labels require an active region parse scope");
+
+        if let Some(id) = state.indices.get(&index) {
+            let block = context.get_block(*id);
+            if !block_args.is_empty() && block.arguments().is_empty() {
+                return Err((
+                    self.span(),
+                    Error::VerificationError(format!(
+                        "block ^bb{index} was already referenced without arguments"
+                    )),
+                ));
+            }
+            return Ok(block);
+        }
+
+        let len = region.iter(context.clone()).len();
+        if index as usize != len {
+            return Err((
+                self.span(),
+                Error::VerificationError(format!("block ^bb{index} is not defined in this region")),
+            ));
+        }
+
         let block = context.create_block(block_args);
         region.add_block(block.id());
-        for (idx, id) in ops.iter().enumerate() {
-            block.insert(idx, *id);
-        }
-
-        Ok(region)
+        state.indices.insert(index, block.id());
+        Ok(block)
     }
 }
