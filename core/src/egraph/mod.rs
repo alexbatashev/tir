@@ -1,12 +1,17 @@
 //! A simplified e-graph: enodes live in a [`GenericDag`], equivalence classes in
-//! a [`DisjointMap`] of dag [`NodeId`]s. Congruence is restored by
+//! a [`ContextUnionFind`] of dag [`NodeId`]s. Congruence is restored by
 //! [`EGraph::rebuild`].
+//!
+//! The equality core is *contextual*: [`EGraph::push_context`] enters a scope,
+//! unions made inside it (e.g. an assumed branch condition) are discarded by
+//! [`EGraph::pop_context`], which re-derives the enclosing scope's congruence.
+//! With no context open it is a plain union-find.
 
 use std::collections::HashMap;
 use std::hash::Hash;
 
 use crate::graph::{Dag, GenericDag, Matchable, MutDag, NodeId};
-use crate::utils::DisjointMap;
+use crate::utils::ContextUnionFind;
 use crate::{OpId, TypeId};
 
 mod ematch;
@@ -29,13 +34,6 @@ impl EClassId {
     }
 }
 
-fn merge_members(mut a: Vec<NodeId>, mut b: Vec<NodeId>) -> Vec<NodeId> {
-    a.append(&mut b);
-    a
-}
-
-type EClassMap = DisjointMap<Vec<NodeId>, fn(Vec<NodeId>, Vec<NodeId>) -> Vec<NodeId>>;
-
 /// Hash-cons index: `(label, canonical children) -> [(leaf, class)]`. The leaf is
 /// part of e-node identity but `L` may carry floats, so it stays out of the hash
 /// key and entries sharing a key are told apart by `PartialEq` on the leaf.
@@ -44,7 +42,10 @@ type ENodeMemo<N, L> = HashMap<(N, Vec<EClassId>), Vec<(Option<L>, EClassId)>>;
 pub struct EGraph<N, L> {
     dag: GenericDag<N, L>,
     node_class: Vec<u32>,
-    eclass: EClassMap,
+    uf: ContextUnionFind,
+    /// Canonical class id -> its member e-nodes. Maintained on `add`/`union` and
+    /// fully recomputed by `rebuild` (so it survives `pop_context`).
+    members: HashMap<u32, Vec<NodeId>>,
     memo: ENodeMemo<N, L>,
 }
 
@@ -100,7 +101,8 @@ impl<N: Matchable + Clone + Eq + Hash, L: Clone + PartialEq> EGraph<N, L> {
         Self {
             dag: GenericDag::new(),
             node_class: Vec::new(),
-            eclass: DisjointMap::new(merge_members),
+            uf: ContextUnionFind::new(0),
+            members: HashMap::new(),
             memo: HashMap::new(),
         }
     }
@@ -109,8 +111,21 @@ impl<N: Matchable + Clone + Eq + Hash, L: Clone + PartialEq> EGraph<N, L> {
         &self.dag
     }
 
+    /// Enter an assumption scope. Unions performed until the matching
+    /// [`EGraph::pop_context`] are local to it.
+    pub fn push_context(&mut self) {
+        self.uf.push_context();
+    }
+
+    /// Leave the current assumption scope, dropping its unions and re-deriving the
+    /// enclosing scope's congruence and hash-cons index.
+    pub fn pop_context(&mut self) {
+        self.uf.pop_context();
+        self.rebuild();
+    }
+
     pub fn find(&self, id: EClassId) -> EClassId {
-        EClassId::from_raw(self.eclass.find_root(id.0))
+        EClassId::from_raw(self.uf.find(id.0))
     }
 
     pub fn class_of(&self, node: NodeId) -> EClassId {
@@ -118,19 +133,22 @@ impl<N: Matchable + Clone + Eq + Hash, L: Clone + PartialEq> EGraph<N, L> {
     }
 
     pub fn num_classes(&self) -> usize {
-        self.eclass.roots().count()
+        self.members.len()
     }
 
     pub fn classes(&self) -> impl Iterator<Item = EClassId> + '_ {
-        self.eclass.roots().map(|(id, _)| EClassId::from_raw(id))
+        self.members.keys().map(|&id| EClassId::from_raw(id))
     }
 
     pub fn nodes(&self, class: EClassId) -> &[NodeId] {
-        self.eclass.get(class.0)
+        self.members
+            .get(&self.find(class).0)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     fn representative(&self, class: EClassId) -> NodeId {
-        self.eclass.get(self.find(class).0)[0]
+        self.nodes(class)[0]
     }
 
     pub(crate) fn child_classes(&self, id: NodeId) -> Vec<EClassId> {
@@ -191,8 +209,10 @@ impl<N: Matchable + Clone + Eq + Hash, L: Clone + PartialEq> EGraph<N, L> {
             self.dag.set_actual_type(id, ty);
         }
 
-        let class = EClassId::from_raw(self.eclass.push(vec![id]));
-        self.node_class.push(class.0);
+        let elem = self.uf.add();
+        self.node_class.push(elem);
+        self.members.insert(elem, vec![id]);
+        let class = EClassId::from_raw(elem);
         self.memo_put(&node, &children, leaf.as_ref(), class);
         class
     }
@@ -227,20 +247,40 @@ impl<N: Matchable + Clone + Eq + Hash, L: Clone + PartialEq> EGraph<N, L> {
     }
 
     pub fn union(&mut self, a: EClassId, b: EClassId) -> EClassId {
-        let merged = EClassId::from_raw(self.eclass.union(a.0, b.0));
-        for &node in self.eclass.get(merged.0) {
-            self.node_class[node.index()] = merged.0;
+        let ra = self.find(a).0;
+        let rb = self.find(b).0;
+        if ra == rb {
+            return EClassId::from_raw(ra);
         }
-        merged
+        let lo = self.uf.union(a.0, b.0);
+        let hi = if lo == ra { rb } else { ra };
+        if let Some(mut hi_members) = self.members.remove(&hi) {
+            self.members.entry(lo).or_default().append(&mut hi_members);
+        }
+        EClassId::from_raw(lo)
+    }
+
+    /// Regroup every node under its current canonical class. The class ids change
+    /// as the context stack and unions evolve, so `members` is rebuilt from
+    /// `node_class` rather than maintained across context boundaries.
+    fn recompute_members(&mut self) {
+        self.members.clear();
+        for index in 0..self.dag.len() {
+            let id = NodeId::from_index(index);
+            let class = self.find(self.class_of(id)).0;
+            self.members.entry(class).or_default().push(id);
+        }
     }
 
     /// Restore the congruence invariant after a batch of unions: regroup every
     /// e-node by `(label, canonical children, leaf)`, union classes that collide,
     /// and repeat to a fixpoint. Each sweep is O(n) through the `seen` index (the
     /// previous all-pairs scan was O(n²)); the final index becomes the memo so
-    /// hash-consing stays canonical afterwards.
+    /// hash-consing stays canonical afterwards. Unions land in the active context,
+    /// so a `pop_context` rebuild restores the enclosing scope's congruence.
     pub fn rebuild(&mut self) {
         loop {
+            self.recompute_members();
             let mut seen: ENodeMemo<N, L> = HashMap::new();
             let mut merges: Vec<(EClassId, EClassId)> = Vec::new();
 
@@ -462,6 +502,40 @@ mod tests {
             _ => 1,
         });
         assert_eq!(g.dag().get_node(best[&g.find(mul)].0), &ExprKind::Add);
+    }
+
+    #[test]
+    fn context_union_is_scoped() {
+        let mut g = EGraph::<ExprKind, ()>::new();
+        let a = sym(&mut g);
+        let b = g.add(ExprKind::Constant, &[], None);
+        g.push_context();
+        g.union(a, b);
+        assert_eq!(g.find(a), g.find(b));
+        g.pop_context();
+        assert_ne!(g.find(a), g.find(b));
+    }
+
+    #[test]
+    fn context_congruence_collapses_and_restores() {
+        // f(a) and f(b) are distinct in the base scope; assuming a≡b inside a
+        // context makes them congruent, and popping restores the distinction.
+        let mut g = EGraph::<ExprKind, ()>::new();
+        let a = sym(&mut g);
+        let b = g.add(ExprKind::Constant, &[], None);
+        let fa = unary(&mut g, ExprKind::Sqrt, a);
+        let fb = unary(&mut g, ExprKind::Sqrt, b);
+        g.rebuild();
+        assert_ne!(g.find(fa), g.find(fb));
+
+        g.push_context();
+        g.union(a, b);
+        g.rebuild();
+        assert_eq!(g.find(fa), g.find(fb));
+
+        g.pop_context();
+        assert_ne!(g.find(a), g.find(b));
+        assert_ne!(g.find(fa), g.find(fb));
     }
 
     #[test]

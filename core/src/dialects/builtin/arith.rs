@@ -1,7 +1,7 @@
 use crate::operation;
 
 use crate as tir;
-use crate::{Commutative, SameOperandType};
+use crate::{Commutative, ConstantLike, OpCost, SameOperandType};
 
 operation! {
     ConstantOp {
@@ -13,12 +13,35 @@ operation! {
         results: R {
             result: "crate::builtin::IntegerType",
         },
+        interfaces: [ConstantLike],
     }
 }
 
 impl ConstantOpBuilder {
     pub fn value(self, v: i64) -> Self {
         self.attr("value", tir::attributes::AttributeValue::Int(v))
+    }
+}
+
+impl crate::ConstantLike for ConstantOp {
+    fn constant_value(&self) -> tir::utils::APInt {
+        let context = self.0.context.upgrade();
+        let value = self
+            .0
+            .attributes
+            .iter()
+            .find(|attr| attr.name == "value")
+            .and_then(|attr| match attr.value {
+                tir::attributes::AttributeValue::Int(v) => Some(v),
+                _ => None,
+            })
+            .unwrap_or(0);
+        let ty = context.get_value(self.result()).ty();
+        let width = (context.get_type_data(ty).as_ref() as &dyn std::any::Any)
+            .downcast_ref::<crate::builtin::IntegerType>()
+            .map(crate::builtin::IntegerType::width)
+            .unwrap_or(64);
+        tir::utils::APInt::new_signed(width, value)
     }
 }
 
@@ -70,7 +93,7 @@ operation! {
         results: R {
             result: "crate::builtin::IntegerType",
         },
-        interfaces: [Commutative, SameOperandType],
+        interfaces: [Commutative, SameOperandType, OpCost],
         sem: "(set result (mul lhs rhs))",
     }
 }
@@ -78,6 +101,13 @@ operation! {
 impl Commutative for MulIOp {}
 impl SameOperandType for MulIOp {}
 
+impl crate::OpCost for MulIOp {
+    fn cost(&self) -> u32 {
+        4
+    }
+}
+
+// TODO: removed once InstCombine reads cost through the OpCost interface.
 impl crate::builtin::InstCost for MulIOp {
     const COST: u32 = 4;
 }
@@ -260,6 +290,60 @@ mod tests {
         parse::ir::parse_ir,
         sem_expr::{AsSemExpr, ExprKind, ExprPayload, ExprPostGraph},
     };
+
+    #[test]
+    fn constant_fold_derived_from_sem() {
+        use crate::ConstantFold;
+        use crate::sem_expr::Value;
+        use crate::utils::APInt;
+
+        let context = Context::with_default_dialects();
+        let i32_ty = IntegerType::new(&context, 32);
+        let a = context.create_value(i32_ty, None);
+        let b = context.create_value(i32_ty, None);
+        let op = ops::addi(&context, a.id(), b.id(), i32_ty).build();
+
+        let fold = context
+            .get_op(op.id())
+            .as_interface::<dyn ConstantFold>()
+            .expect("addi derives ConstantFold from its sem");
+        let folded = fold
+            .fold(&[
+                Value::Int(APInt::new_signed(32, 2)),
+                Value::Int(APInt::new_signed(32, 3)),
+            ])
+            .expect("folds two constants");
+        match folded {
+            Value::Int(v) => assert_eq!(v.to_i64(), 5),
+            other => panic!("expected an integer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn op_cost_read_through_interface() {
+        use crate::OpCost;
+
+        let context = Context::with_default_dialects();
+        let i32_ty = IntegerType::new(&context, 32);
+        let a = context.create_value(i32_ty, None);
+        let b = context.create_value(i32_ty, None);
+
+        let mul = ops::muli(&context, a.id(), b.id(), i32_ty).build();
+        let cost = context
+            .get_op(mul.id())
+            .as_interface::<dyn OpCost>()
+            .expect("muli opts into OpCost");
+        assert_eq!(cost.cost(), 4);
+
+        // An op that does not opt in has no OpCost interface; callers default to 1.
+        let add = ops::addi(&context, a.id(), b.id(), i32_ty).build();
+        assert!(
+            context
+                .get_op(add.id())
+                .as_interface::<dyn OpCost>()
+                .is_none()
+        );
+    }
 
     #[test]
     fn addi_construction() {

@@ -86,13 +86,13 @@ impl<N: Matchable + Clone + Eq + std::hash::Hash, L: Clone + PartialEq> EGraph<N
                 break;
             }
 
-            let before = self.eclass.len();
+            let before = self.dag().len();
             for (index, m) in matches {
                 (rewrites[index].apply)(ctx, self, &m);
             }
             self.rebuild();
 
-            if self.eclass.len() == before || self.num_classes() >= limits.max_classes {
+            if self.dag().len() == before || self.num_classes() >= limits.max_classes {
                 break;
             }
         }

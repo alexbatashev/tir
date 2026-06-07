@@ -15,6 +15,16 @@ pub use infer::{canonicalize_for_selection, infer_widths};
 
 pub type ExprPostGraph = PostOrderDag<ExprKind, ExprPayload>;
 
+/// Fold an operation over constant operand `values` by evaluating its declared
+/// semantic expression. `values[i]` is the value of operand `i` (i.e. `SymbolId(i)`
+/// in the op's `sem`). Returns `None` for ops without a semantic expression. This
+/// backs the `ConstantFold` impl the `operation!` macro derives from `sem`.
+pub fn fold_with_sem(op: &dyn Operation, values: &[Value]) -> Option<Value> {
+    let mut graph = ExprPostGraph::new();
+    op.semantic_expr(&mut graph)?;
+    Some(execute(&graph, values))
+}
+
 pub trait AsSemExpr: Operation {
     fn convert(&self, g: &mut impl MutDag<Node = ExprKind, Leaf = ExprPayload>) -> NodeId;
 }

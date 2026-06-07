@@ -1,4 +1,53 @@
+use crate::sem_expr::Value;
+use crate::utils::APInt;
 use crate::{BlockId, Context, Operation, ValueId};
+
+/// Relative execution cost of an operation, consulted by cost-driven rewriters
+/// (e.g. InstCombine) to choose among equivalent forms. The default models one
+/// cheap instruction; expensive ops override it. Exposed as an interface so the
+/// cost is reachable from a `dyn Operation` without the concrete type.
+pub trait OpCost {
+    fn cost(&self) -> u32 {
+        1
+    }
+    fn verify_interface(
+        &self,
+        _this: &dyn Operation,
+        _context: &Context,
+    ) -> Result<(), crate::Error> {
+        Ok(())
+    }
+}
+
+/// An operation that yields a compile-time constant integer, exposed generically so
+/// rewriters can read the value without knowing the concrete constant op.
+pub trait ConstantLike {
+    fn constant_value(&self) -> APInt;
+    fn verify_interface(
+        &self,
+        _this: &dyn Operation,
+        _context: &Context,
+    ) -> Result<(), crate::Error> {
+        Ok(())
+    }
+}
+
+/// Folds an operation over constant operands. The `operation!` macro derives this
+/// automatically for any op that declares `sem` (evaluating it through the
+/// semantic interpreter); ops that fold but lack a semantic expression implement it
+/// by hand.
+pub trait ConstantFold {
+    /// `operands[i]` is the constant value of operand `i`. Returns the folded
+    /// result, or `None` when this op cannot fold these operands.
+    fn fold(&self, operands: &[Value]) -> Option<Value>;
+    fn verify_interface(
+        &self,
+        _this: &dyn Operation,
+        _context: &Context,
+    ) -> Result<(), crate::Error> {
+        Ok(())
+    }
+}
 
 pub trait Commutative {
     fn is_commutative(&self) -> bool {
