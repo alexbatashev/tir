@@ -6,6 +6,7 @@ use std::collections::HashMap;
 
 use crate::graph::{Dag, GenericDag, MutDag, Node, NodeId};
 use crate::utils::DisjointMap;
+use crate::{OpId, TypeId};
 
 mod ematch;
 mod rewrite;
@@ -81,13 +82,13 @@ impl<N: Node, L> Dag for EGraph<N, L> {
     }
 }
 
-impl<N: Node + Clone + Eq, L: Clone + Eq> Default for EGraph<N, L> {
+impl<N: Node + Clone + Eq, L: Clone + PartialEq> Default for EGraph<N, L> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<N: Node + Clone + Eq, L: Clone + Eq> EGraph<N, L> {
+impl<N: Node + Clone + Eq, L: Clone + PartialEq> EGraph<N, L> {
     pub fn new() -> Self {
         Self {
             dag: GenericDag::new(),
@@ -152,6 +153,20 @@ impl<N: Node + Clone + Eq, L: Clone + Eq> EGraph<N, L> {
     }
 
     pub fn add(&mut self, node: N, children: &[EClassId], leaf: Option<L>) -> EClassId {
+        self.add_inner(node, children, leaf, None)
+    }
+
+    /// Annotations a source [`Dag`] node may carry, preserved verbatim onto the
+    /// enode. They live outside the leaf payload so they never affect e-node
+    /// identity (two structurally equal nodes still hash-cons regardless of which
+    /// op produced them), and survive on the stable [`NodeId`] through saturation.
+    fn add_inner(
+        &mut self,
+        node: N,
+        children: &[EClassId],
+        leaf: Option<L>,
+        meta: Option<(OpId, TypeId)>,
+    ) -> EClassId {
         let children: Vec<EClassId> = children.iter().map(|&c| self.find(c)).collect();
         if let Some(existing) = self.find_matching(&node, &children, leaf.as_ref()) {
             return self.class_of(existing);
@@ -163,6 +178,10 @@ impl<N: Node + Clone + Eq, L: Clone + Eq> EGraph<N, L> {
         }
         for &child_class in &children {
             self.dag.add_edge(id, self.representative(child_class));
+        }
+        if let Some((original, ty)) = meta {
+            self.dag.set_original_op(id, original);
+            self.dag.set_actual_type(id, ty);
         }
 
         let class = EClassId::from_raw(self.eclass.push(vec![id]));
@@ -188,10 +207,12 @@ impl<N: Node + Clone + Eq, L: Clone + Eq> EGraph<N, L> {
             .children(node)
             .map(|child| self.add_dag_node(dag, child, memo))
             .collect();
-        let class = self.add(
+        let meta = dag.get_original_op(node).zip(dag.get_actual_type(node));
+        let class = self.add_inner(
             dag.get_node(node).clone(),
             &children,
             dag.get_leaf_data(node).cloned(),
+            meta,
         );
         memo.insert(node.index(), class);
         class
@@ -352,6 +373,25 @@ mod tests {
         for child in g.dag().children(g.nodes(class)[0]) {
             assert!(g.dag().get_node(child).is_leaf(&ctx));
         }
+    }
+
+    #[test]
+    fn add_dag_preserves_source_annotations() {
+        use crate::Operation;
+        let ctx = crate::Context::with_default_dialects();
+        let ty = crate::builtin::IntegerType::new(&ctx, 32);
+        let op = crate::builtin::ops::constant(&ctx, 1, ty).build();
+
+        let mut dag = GenericDag::<ExprKind, ()>::new();
+        let a = dag.add_node(ExprKind::Symbol);
+        dag.set_original_op(a, op.id());
+        dag.set_actual_type(a, ty);
+
+        let mut g = EGraph::<ExprKind, ()>::new();
+        let class = g.add_dag(&dag, a);
+        let node = g.nodes(class)[0];
+        assert_eq!(g.get_original_op(node), Some(op.id()));
+        assert_eq!(g.get_actual_type(node), Some(ty));
     }
 
     #[test]

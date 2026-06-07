@@ -68,7 +68,7 @@ impl Default for SaturationLimits {
     }
 }
 
-impl<N: Node + Clone + Eq, L: Clone + Eq> EGraph<N, L> {
+impl<N: Node + Clone + Eq, L: Clone + PartialEq> EGraph<N, L> {
     pub fn saturate(
         &mut self,
         ctx: &Context,

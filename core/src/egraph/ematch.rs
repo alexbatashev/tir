@@ -3,7 +3,7 @@ use crate::graph::{Dag, OperandConstraint, Pattern, PatternExpr};
 
 use super::{EClassId, EGraph, EMatch, Node, NodeId};
 
-impl<N: Node + Clone + Eq, L: Clone + Eq> EGraph<N, L> {
+impl<N: Node + Clone + Eq, L: Clone + PartialEq> EGraph<N, L> {
     pub fn ematch<A>(&self, ctx: &Context, pattern: &Pattern<N, A>) -> Vec<EMatch> {
         self.ematch_with_legality(ctx, pattern, &|_, _| true)
     }

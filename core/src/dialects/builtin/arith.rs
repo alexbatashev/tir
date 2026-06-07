@@ -78,6 +78,10 @@ operation! {
 impl Commutative for MulIOp {}
 impl SameOperandType for MulIOp {}
 
+impl crate::builtin::InstCost for MulIOp {
+    const COST: u32 = 4;
+}
+
 operation! {
     AndIOp {
         name: "andi",
