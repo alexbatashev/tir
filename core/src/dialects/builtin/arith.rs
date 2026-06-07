@@ -107,11 +107,6 @@ impl crate::OpCost for MulIOp {
     }
 }
 
-// TODO: removed once InstCombine reads cost through the OpCost interface.
-impl crate::builtin::InstCost for MulIOp {
-    const COST: u32 = 4;
-}
-
 operation! {
     AndIOp {
         name: "andi",

@@ -47,6 +47,11 @@ pub struct EGraph<N, L> {
     /// fully recomputed by `rebuild` (so it survives `pop_context`).
     members: HashMap<u32, Vec<NodeId>>,
     memo: ENodeMemo<N, L>,
+    /// Provenance: which rewrite (its index in the saturation set) first introduced
+    /// each node, or `None` for nodes that predate saturation (seeded directly).
+    /// Set by [`Self::saturate`] and read back so a caller can ask the producing
+    /// rewrite to materialize the node it chose.
+    node_producer: Vec<Option<usize>>,
 }
 
 impl<N, L> Dag for EGraph<N, L> {
@@ -104,7 +109,17 @@ impl<N: Matchable + Clone + Eq + Hash, L: Clone + PartialEq> EGraph<N, L> {
             uf: ContextUnionFind::new(0),
             members: HashMap::new(),
             memo: HashMap::new(),
+            node_producer: Vec::new(),
         }
+    }
+
+    /// The rewrite that first introduced `node`, or `None` if it was seeded.
+    pub fn producer(&self, node: NodeId) -> Option<usize> {
+        self.node_producer.get(node.index()).copied().flatten()
+    }
+
+    pub(crate) fn set_producer(&mut self, node: NodeId, producer: usize) {
+        self.node_producer[node.index()] = Some(producer);
     }
 
     pub fn dag(&self) -> &GenericDag<N, L> {
@@ -211,6 +226,7 @@ impl<N: Matchable + Clone + Eq + Hash, L: Clone + PartialEq> EGraph<N, L> {
 
         let elem = self.uf.add();
         self.node_class.push(elem);
+        self.node_producer.push(None);
         self.members.insert(elem, vec![id]);
         let class = EClassId::from_raw(elem);
         self.memo_put(&node, &children, leaf.as_ref(), class);

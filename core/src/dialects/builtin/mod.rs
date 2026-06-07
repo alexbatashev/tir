@@ -16,14 +16,6 @@ pub use control::*;
 pub use func::*;
 pub use module::*;
 
-/// Relative cost of executing an operation, used by cost-driven rewriters such as
-/// InstCombine to decide between equivalent forms. The default models a single
-/// cheap instruction; ops override it when they are deliberately expensive (e.g.
-/// integer multiply lowering to several machine instructions).
-pub trait InstCost {
-    const COST: u32 = 1;
-}
-
 pub mod ops {
     pub use super::arith::*;
     pub use super::control::*;

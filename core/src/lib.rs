@@ -41,7 +41,7 @@ pub use dialect::{Dialect, OperationParser};
 pub use error::Error;
 pub use interfaces::{
     Commutative, ConstantFold, ConstantLike, MemoryRead, MemoryWrite, OpCost, PromotableAllocation,
-    SameOperandType, Terminator,
+    RegionGuard, SameOperandType, Terminator,
 };
 pub use ir_formatter::IRFormatter;
 pub use operand::Operand;

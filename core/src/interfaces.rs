@@ -1,6 +1,23 @@
 use crate::sem_expr::Value;
 use crate::utils::APInt;
-use crate::{BlockId, Context, Operation, ValueId};
+use crate::{BlockId, Context, Operation, RegionId, ValueId};
+
+/// An operation whose nested regions execute under a known fact about a value — e.g.
+/// a structured `if` whose then/else bodies run when the condition is true/false.
+/// Lets a flow-sensitive rewriter assume that fact inside the region without knowing
+/// the concrete control-flow op.
+pub trait RegionGuard {
+    /// For each guarded region, the value known to equal a boolean inside it
+    /// (`true` => 1, `false` => 0).
+    fn guarded_regions(&self) -> Vec<(RegionId, ValueId, bool)>;
+    fn verify_interface(
+        &self,
+        _this: &dyn Operation,
+        _context: &Context,
+    ) -> Result<(), crate::Error> {
+        Ok(())
+    }
+}
 
 /// Relative execution cost of an operation, consulted by cost-driven rewriters
 /// (e.g. InstCombine) to choose among equivalent forms. The default models one

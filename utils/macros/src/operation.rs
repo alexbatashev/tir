@@ -812,6 +812,10 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
                 &[#(#operand_name_literals),*]
             }
 
+            fn parent_block(&self) -> Option<tir::BlockId> {
+                self.0.parent_block()
+            }
+
             #semantic_expr_method
             #interface_registration_method
         }

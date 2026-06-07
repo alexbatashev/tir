@@ -1,37 +1,60 @@
-//! InstCombine: a cost-driven peephole over the builtin arith dialect, built on
-//! the generic e-graph. For each function it lifts the pure integer dataflow into
-//! an e-graph (values crossing block boundaries — block args, loads, control ops —
-//! enter as opaque leaves, so structured and unstructured control flow are handled
-//! uniformly), saturates with the static [`rules`], extracts the cheapest form per
-//! value under [`InstCost`], and rebuilds only the ops that improved.
+//! InstCombine: an equality-saturation peephole over the builtin dialect. It seeds
+//! the function's pure integer dataflow into an e-graph of real IR values, saturates
+//! with a dialect-supplied [`Rule`] set plus generic constant folding (every op's
+//! [`crate::ConstantFold`] interface, derived from its `sem`), then extracts the
+//! cheapest equivalent form per value by [`crate::OpCost`] and rewrites the values
+//! that improved.
 //!
-//! Untouched e-nodes carry the [`crate::graph::Dag`] `original_op`/`actual_type`
-//! annotations through saturation, so an unchanged value is reattached to its
-//! original op (or a dominating equivalent) instead of being rematerialized.
+//! The engine holds no op-specific knowledge: identity, commutativity, cost,
+//! folding and constant-reading all come from op interfaces; op construction is
+//! owned by the rewrites (via their `emit`) and one dialect-supplied constant
+//! builder. See [`rules`] for the builtin ruleset.
 
 mod rules;
+mod term;
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::analysis::DominatorTree;
 use crate::egraph::{EClassId, EGraph, SaturationLimits};
-use crate::graph::{Dag, MutDag, NodeId};
-use crate::sem_expr::{ExprKind, ExprPayload, ExprPostGraph};
+use crate::graph::{Dag, GenericDag, MutDag, NodeId};
 use crate::{
-    BlockId, Commutative, Context, OpId, Operation, OperationRef, Pass, PassError, PassTarget,
-    Rewriter, TypeId, ValueId,
-    builtin::{self, ConstantOp, FuncOp, InstCost},
+    BlockId, Context, OpId, Operation, OperationRef, Pass, PassError, PassTarget, RegionGuard,
+    RegionId, Rewriter, TypeId, ValueId,
+    builtin::{self, FuncOp},
     utils::APInt,
 };
 
-type ArithEGraph = EGraph<ExprKind, ExprPayload>;
+use rules::{Ruleset, builtin_ruleset};
+use term::{Leaf, Term};
 
-#[derive(Default)]
-pub struct InstCombinePass;
+/// Builds a constant op of `ty` holding a value — the one piece of op construction
+/// the engine needs, supplied by the dialect so the engine stays op-agnostic.
+type MakeConstant = dyn Fn(&Context, &APInt, TypeId) -> Box<dyn Operation> + Send + Sync;
+
+type ArithEGraph = EGraph<Term, Leaf>;
+
+pub struct InstCombinePass {
+    ruleset: Ruleset,
+    make_constant: Arc<MakeConstant>,
+}
 
 impl InstCombinePass {
     pub fn new() -> Self {
-        Self
+        Self {
+            ruleset: builtin_ruleset(),
+            make_constant: Arc::new(|context, value: &APInt, ty| {
+                Box::new(builtin::ops::constant(context, value.to_i64(), ty).build())
+                    as Box<dyn Operation>
+            }),
+        }
+    }
+}
+
+impl Default for InstCombinePass {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -60,61 +83,184 @@ impl Pass for InstCombinePass {
         let layout = Layout::collect(context, &dom);
 
         let seed = Seeder::build(context, &layout);
-        let mut eg = EGraph::new();
+        let mut eg = ArithEGraph::new();
         let mut class_of_value: HashMap<ValueId, EClassId> = HashMap::new();
-        for (&value, &node) in &seed.node_of_value {
-            if seed.op_results.contains(&value) {
-                class_of_value.insert(value, eg.add_dag(&seed.graph, node));
+        for &value in &seed.op_results {
+            let node = seed.node_of_value[&value];
+            class_of_value.insert(value, eg.add_dag(&seed.graph, node));
+        }
+
+        // The class of every seeded value (op results plus opaque leaves), so a
+        // guard assumption can union the branch condition with a boolean constant.
+        let mut value_class: HashMap<ValueId, EClassId> = HashMap::new();
+        for &value in seed.node_of_value.keys() {
+            let class = class_of_value
+                .get(&value)
+                .copied()
+                .unwrap_or_else(|| eg.add(Term::Opaque, &[], Some(Leaf::Value(value))));
+            value_class.insert(value, class);
+        }
+
+        let mut driver = Driver {
+            context,
+            eg,
+            class_of_value,
+            value_class,
+            ruleset: &self.ruleset,
+            make_constant: self.make_constant.as_ref(),
+            layout: &layout,
+            constants: &seed.constants,
+        };
+        let body = context.get_op(op.op().id).regions[0];
+        driver.process_region(body, rewriter)
+    }
+}
+
+/// Walks the region tree, rewriting each region under the assumptions that hold
+/// there. Entering a guarded region (via [`RegionGuard`]) pushes a context and
+/// unions the branch condition with a boolean constant; leaving it pops the context,
+/// so the assumption never leaks out. Nested regions without a guard are still
+/// visited, just under the enclosing context.
+struct Driver<'a> {
+    context: &'a Context,
+    eg: ArithEGraph,
+    class_of_value: HashMap<ValueId, EClassId>,
+    value_class: HashMap<ValueId, EClassId>,
+    ruleset: &'a Ruleset,
+    make_constant: &'a MakeConstant,
+    layout: &'a Layout,
+    constants: &'a HashSet<OpId>,
+}
+
+impl Driver<'_> {
+    fn process_region(
+        &mut self,
+        region: RegionId,
+        rewriter: &mut Rewriter,
+    ) -> Result<(), PassError> {
+        self.eg.saturate(
+            self.context,
+            &self.ruleset.rewrites,
+            SaturationLimits::default(),
+        );
+        let best = self.eg.extract_best(|term, _| match term {
+            Term::Op { cost, .. } => *cost as u64,
+            _ => 0,
+        });
+
+        let op_ids: Vec<OpId> = self
+            .context
+            .get_region(region)
+            .iter(self.context.clone())
+            .flat_map(|block| self.context.get_block(block.id()).op_ids())
+            .collect();
+
+        // Rewrite each non-constant value op in this region whose cheapest form is no
+        // longer itself.
+        {
+            let materializer = Materializer {
+                context: self.context,
+                eg: &self.eg,
+                ruleset: self.ruleset,
+                make_constant: self.make_constant,
+                best: &best,
+            };
+            for &op_id in &op_ids {
+                if self.constants.contains(&op_id) {
+                    continue;
+                }
+                let instance = self.context.get_op(op_id);
+                if instance.results.len() != 1 {
+                    continue;
+                }
+                let value = instance.results[0];
+                let Some(&class) = self.class_of_value.get(&value) else {
+                    continue;
+                };
+                let ty = self.context.get_value(value).ty();
+                let target = self.layout.op_ref(self.context, op_id);
+                let mut memo = HashMap::new();
+                let new_value = materializer.emit(class, ty, &target, rewriter, &mut memo)?;
+                if new_value != value {
+                    self.context.replace_value_uses(value, new_value);
+                    rewriter.erase_op(&target)?;
+                }
             }
         }
 
-        eg.saturate(context, &rules::arith_rules(), SaturationLimits::default());
-        let best = eg.extract_best(cost);
+        // Recurse into nested regions, assuming each guard's fact inside its region.
+        // Skip ops the write-back above may have erased.
+        for &op_id in &op_ids {
+            if !self.context.has_operation(op_id) {
+                continue;
+            }
+            let instance = self.context.get_op(op_id);
+            if instance.regions.is_empty() {
+                continue;
+            }
+            let assumptions: HashMap<RegionId, (ValueId, bool)> = instance
+                .clone()
+                .as_interface::<dyn RegionGuard>()
+                .map(|guard| {
+                    guard
+                        .guarded_regions()
+                        .into_iter()
+                        .map(|(region, value, holds)| (region, (value, holds)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            for &sub in &instance.regions {
+                match assumptions.get(&sub) {
+                    Some(&(value, holds)) => {
+                        self.eg.push_context();
+                        self.inject(value, holds);
+                        self.process_region(sub, rewriter)?;
+                        self.eg.pop_context();
+                    }
+                    None => self.process_region(sub, rewriter)?,
+                }
+            }
+        }
+        Ok(())
+    }
 
-        let reconstruct = Reconstruct {
-            eg: &eg,
-            best: &best,
-            layout: &layout,
-            dom: &dom,
-            context,
-        };
-        reconstruct.apply(rewriter, &class_of_value)
+    /// Assume `value == holds` inside the current context by unioning its class with
+    /// the matching boolean constant.
+    fn inject(&mut self, value: ValueId, holds: bool) {
+        let cond = self
+            .value_class
+            .get(&value)
+            .copied()
+            .unwrap_or_else(|| self.eg.add(Term::Opaque, &[], Some(Leaf::Value(value))));
+        let constant = self.eg.add(
+            Term::Const,
+            &[],
+            Some(Leaf::Int(APInt::new(1, holds as u64))),
+        );
+        self.eg.union(cond, constant);
+        self.eg.rebuild();
     }
 }
 
-/// Per-e-node cost: leaves are free, multiply is dear via [`InstCost`], every
-/// other modeled instruction is a single cheap op.
-fn cost(kind: &ExprKind, _children: &[u64]) -> u64 {
-    match kind {
-        ExprKind::Symbol | ExprKind::Constant => 0,
-        ExprKind::Mul => builtin::MulIOp::COST as u64,
-        _ => 1,
-    }
-}
-
-fn modeled_kind(kind: ExprKind) -> bool {
-    use ExprKind::*;
-    matches!(
-        kind,
-        Add | Sub | Mul | And | Or | Xor | ShiftLeft | ShiftRightLogic | ShiftRightArithmetic
-    )
-}
-
-/// Lifts the function's pure integer dataflow into one annotated [`ExprPostGraph`],
-/// sharing a node per value so congruent subexpressions hash-cons in the e-graph.
+/// Lifts the function's pure integer dataflow into one [`GenericDag`] over [`Term`]
+/// labels, sharing a node per value so congruent subexpressions hash-cons. Reads ops
+/// generically through their interfaces — no op is named.
 struct Seeder {
-    graph: ExprPostGraph,
+    graph: GenericDag<Term, Leaf>,
     node_of_value: HashMap<ValueId, NodeId>,
-    /// Values defined by a modeled or constant op (the rewrite candidates).
-    op_results: HashSet<ValueId>,
+    /// Op results to consider rewriting, in program order.
+    op_results: Vec<ValueId>,
+    /// Constant ops, excluded from rewriting.
+    constants: HashSet<OpId>,
 }
 
 impl Seeder {
     fn build(context: &Context, layout: &Layout) -> Self {
         let mut seeder = Seeder {
-            graph: ExprPostGraph::new(),
+            graph: GenericDag::new(),
             node_of_value: HashMap::new(),
-            op_results: HashSet::new(),
+            op_results: Vec::new(),
+            constants: HashSet::new(),
         };
         for op_id in layout.ops(context) {
             seeder.seed_op(context, op_id);
@@ -125,66 +271,56 @@ impl Seeder {
     fn seed_op(&mut self, context: &Context, op_id: OpId) {
         let instance = context.get_op(op_id);
 
-        if let Some(constant) = instance.clone().as_op::<ConstantOp>() {
-            let result = constant.result();
-            let node = self.graph.add_node(ExprKind::Constant);
-            let width = type_width(context, context.get_value(result).ty()).unwrap_or(64);
-            self.graph.set_leaf_data(
-                node,
-                ExprPayload::Int(APInt::new_signed(width, const_value(&instance))),
-            );
+        if let Some(constant) = instance.clone().as_interface::<dyn crate::ConstantLike>() {
+            let result = instance.results[0];
+            let node = self.graph.add_node(Term::Const);
+            self.graph
+                .set_leaf_data(node, Leaf::Int(constant.constant_value()));
             self.annotate(node, op_id, context.get_value(result).ty());
             self.node_of_value.insert(result, node);
-            self.op_results.insert(result);
+            self.op_results.push(result);
+            self.constants.insert(op_id);
             return;
         }
 
-        let mut tmp = ExprPostGraph::new();
-        let kind = instance
-            .clone()
-            .as_dyn_op()
-            .semantic_expr(&mut tmp)
-            .map(|root| *tmp.get_node(root));
+        if is_pure_value(&instance) {
+            let result = instance.results[0];
+            let ty = context.get_value(result).ty();
+            let mut children: Vec<NodeId> = instance
+                .operands
+                .iter()
+                .map(|&operand| self.value_node(operand))
+                .collect();
+            let term = Term::of_op(&instance);
+            if let Term::Op {
+                commutative: true, ..
+            } = term
+            {
+                children.sort_by_key(|n| n.index());
+            }
+            let node = self.graph.add_node(term);
+            for child in children {
+                self.graph.add_edge(node, child);
+            }
+            self.annotate(node, op_id, ty);
+            self.node_of_value.insert(result, node);
+            self.op_results.push(result);
+            return;
+        }
 
-        match kind {
-            Some(kind) if modeled_kind(kind) && instance.operands.len() == 2 => {
-                let result = instance.results[0];
-                let ty = context.get_value(result).ty();
-                // Children must exist before the parent: a [`PostOrderDag`] requires
-                // every edge to point to a strictly lower index.
-                let mut children: Vec<NodeId> = instance
-                    .operands
-                    .iter()
-                    .map(|&operand| self.value_node(operand))
-                    .collect();
-                if instance.as_interface::<dyn Commutative>().is_some() {
-                    children.sort_by_key(|n| n.index());
-                }
-                let node = self.graph.add_node(kind);
-                for child in children {
-                    self.graph.add_edge(node, child);
-                }
-                self.annotate(node, op_id, ty);
-                self.node_of_value.insert(result, node);
-                self.op_results.insert(result);
-            }
-            // Anything we don't model contributes its results as opaque leaves.
-            _ => {
-                for &result in &instance.results {
-                    self.value_node(result);
-                }
-            }
+        for &result in &instance.results {
+            self.value_node(result);
         }
     }
 
-    /// The graph node standing for `value`, creating an opaque leaf the first time
-    /// a non-modeled value (block arg, function param, unmodeled result) is seen.
+    /// The node standing for `value`, creating an opaque leaf the first time an
+    /// external value (block arg, unmodeled result) is seen.
     fn value_node(&mut self, value: ValueId) -> NodeId {
         if let Some(&node) = self.node_of_value.get(&value) {
             return node;
         }
-        let node = self.graph.add_node(ExprKind::Symbol);
-        self.graph.set_leaf_data(node, ExprPayload::Value(value));
+        let node = self.graph.add_node(Term::Opaque);
+        self.graph.set_leaf_data(node, Leaf::Value(value));
         self.node_of_value.insert(value, node);
         node
     }
@@ -195,60 +331,35 @@ impl Seeder {
     }
 }
 
-/// Rebuilds improved values out of the extracted e-graph.
-struct Reconstruct<'a> {
-    eg: &'a ArithEGraph,
-    best: &'a HashMap<EClassId, (NodeId, u64)>,
-    layout: &'a Layout,
-    dom: &'a DominatorTree,
-    context: &'a Context,
+/// A pure value op the e-graph can reason about: one result, no regions, and a
+/// declared semantic expression (so it computes a value with no side effects).
+fn is_pure_value(instance: &Arc<crate::OpInstance>) -> bool {
+    instance.results.len() == 1
+        && instance.regions.is_empty()
+        && instance
+            .clone()
+            .as_dyn_op()
+            .semantic_expr(&mut crate::sem_expr::ExprPostGraph::new())
+            .is_some()
 }
 
-impl Reconstruct<'_> {
-    fn apply(
-        &self,
-        rewriter: &mut Rewriter,
-        class_of_value: &HashMap<ValueId, EClassId>,
-    ) -> Result<(), PassError> {
-        // A modeled operator op is rewritten when its class' cheapest e-node is not
-        // the op itself. Constants are never rewritten — they are already minimal.
-        let mut targets: Vec<(OpId, ValueId, EClassId)> = Vec::new();
-        let mut rewritten: HashSet<OpId> = HashSet::new();
-        for (&value, &class) in class_of_value {
-            let Some(op_id) = self.context.get_value(value).defining_op() else {
-                continue;
-            };
-            if self.context.get_op(op_id).as_op::<ConstantOp>().is_some() {
-                continue;
-            }
-            let class = self.eg.find(class);
-            let best = self.best[&class].0;
-            if self.eg.get_original_op(best) != Some(op_id) {
-                targets.push((op_id, value, class));
-                rewritten.insert(op_id);
-            }
-        }
+/// Rebuilds improved values out of the extracted e-graph. A chosen node is either an
+/// existing IR value (reused) or one a rewrite introduced (built by that rewrite's
+/// `emit`, found through the node's saturation provenance) — never by op identity.
+struct Materializer<'a> {
+    context: &'a Context,
+    eg: &'a ArithEGraph,
+    ruleset: &'a Ruleset,
+    make_constant: &'a MakeConstant,
+    best: &'a HashMap<EClassId, (NodeId, u64)>,
+}
 
-        for (op_id, value, class) in targets {
-            let target = self.layout.op_ref(self.context, op_id);
-            let ty = self.context.get_value(value).ty();
-            let mut memo = HashMap::new();
-            let new_value = self.emit(class, ty, &target, &rewritten, rewriter, &mut memo)?;
-            self.context.replace_value_uses(value, new_value);
-            rewriter.erase_op(&target)?;
-        }
-        Ok(())
-    }
-
-    /// Materialize the cheapest form of `class`, inserting new ops before `target`.
-    /// Bottoms out at opaque leaves and at unchanged dominating ops, which it reuses
-    /// directly; rule-introduced nodes and rewritten ops are built fresh.
+impl Materializer<'_> {
     fn emit(
         &self,
         class: EClassId,
         expected_ty: TypeId,
         target: &OperationRef,
-        rewritten: &HashSet<OpId>,
         rewriter: &mut Rewriter,
         memo: &mut HashMap<EClassId, ValueId>,
     ) -> Result<ValueId, PassError> {
@@ -260,32 +371,25 @@ impl Reconstruct<'_> {
         let ty = self.eg.get_actual_type(node).unwrap_or(expected_ty);
 
         let value = match self.eg.get_node(node) {
-            ExprKind::Symbol => match self.eg.get_leaf_data(node) {
-                Some(ExprPayload::Value(v)) => *v,
+            Term::Opaque => match self.eg.get_leaf_data(node) {
+                Some(Leaf::Value(v)) => *v,
                 other => panic!("opaque leaf without a value: {other:?}"),
             },
-            ExprKind::Constant => {
-                let v = match self.eg.get_leaf_data(node) {
-                    Some(ExprPayload::Int(v)) => v.clone(),
-                    other => panic!("constant without a value: {other:?}"),
-                };
-                let new_op = builtin::ops::constant(self.context, v.to_i64(), ty).build();
-                rewriter.insert_op_before(target, &new_op)?;
-                new_op.result()
-            }
-            &kind => {
-                if let Some(origin) = self.eg.get_original_op(node)
-                    && !rewritten.contains(&origin)
-                    && self.layout.dominates(self.dom, origin, target.op().id)
-                {
+            // A seeded constant reuses its op; a folded/introduced one is built.
+            Term::Const => {
+                if let Some(origin) = self.eg.get_original_op(node) {
                     self.context.get_op(origin).results[0]
                 } else {
-                    let children = self.eg.child_classes(node);
-                    let mut operands = Vec::with_capacity(children.len());
-                    for child in children {
-                        operands.push(self.emit(child, ty, target, rewritten, rewriter, memo)?);
-                    }
-                    self.build_binop(kind, &operands, ty, target, rewriter)?
+                    self.build_constant(node, ty, target, rewriter)?
+                }
+            }
+            // A seeded op reuses its existing value (operand updates propagate via
+            // `replace_value_uses`); a rule-introduced one is built by its rewrite.
+            Term::Op { .. } => {
+                if let Some(origin) = self.eg.get_original_op(node) {
+                    self.context.get_op(origin).results[0]
+                } else {
+                    self.build_introduced(node, ty, target, rewriter, memo)?
                 }
             }
         };
@@ -293,44 +397,50 @@ impl Reconstruct<'_> {
         Ok(value)
     }
 
-    /// Build the concrete builtin op for `kind`, insert it before `target`, and
-    /// return its result. Each generated op exposes an inherent `result()`, so we
-    /// dispatch per kind rather than through a trait object.
-    fn build_binop(
+    fn build_constant(
         &self,
-        kind: ExprKind,
-        operands: &[ValueId],
+        node: NodeId,
         ty: TypeId,
         target: &OperationRef,
         rewriter: &mut Rewriter,
     ) -> Result<ValueId, PassError> {
-        use crate::builtin::ops;
-        let (a, b) = (operands[0], operands[1]);
-        macro_rules! emit {
-            ($builder:ident) => {{
-                let new_op = ops::$builder(self.context, a, b, ty).build();
-                rewriter.insert_op_before(target, &new_op)?;
-                new_op.result()
-            }};
+        let value = match self.eg.get_leaf_data(node) {
+            Some(Leaf::Int(v)) => v.clone(),
+            other => panic!("constant without a value: {other:?}"),
+        };
+        let op = (self.make_constant)(self.context, &value, ty);
+        let id = op.id();
+        rewriter.insert_op_before(target, op.as_ref())?;
+        Ok(self.context.get_op(id).results[0])
+    }
+
+    fn build_introduced(
+        &self,
+        node: NodeId,
+        ty: TypeId,
+        target: &OperationRef,
+        rewriter: &mut Rewriter,
+        memo: &mut HashMap<EClassId, ValueId>,
+    ) -> Result<ValueId, PassError> {
+        let producer = self
+            .eg
+            .producer(node)
+            .expect("a rule-introduced op records its producing rewrite");
+        let emit = self.ruleset.emits[producer]
+            .as_ref()
+            .expect("the producing rewrite supplies an emit for the op it introduces");
+        let mut operands = Vec::new();
+        for child in self.eg.child_classes(node) {
+            operands.push(self.emit(child, ty, target, rewriter, memo)?);
         }
-        Ok(match kind {
-            ExprKind::Add => emit!(addi),
-            ExprKind::Sub => emit!(subi),
-            ExprKind::Mul => emit!(muli),
-            ExprKind::And => emit!(andi),
-            ExprKind::Or => emit!(ori),
-            ExprKind::Xor => emit!(xori),
-            ExprKind::ShiftLeft => emit!(shli),
-            ExprKind::ShiftRightLogic => emit!(shrui),
-            ExprKind::ShiftRightArithmetic => emit!(shrsi),
-            other => panic!("not a modeled binary operator: {other:?}"),
-        })
+        emit(self.context, &operands, ty, target, rewriter)
     }
 }
 
-/// Where every operation lives, lifting block-level dominance to operations.
+/// Where every operation lives: used to iterate ops in program order and to build an
+/// [`OperationRef`] insertion target.
 struct Layout {
-    position: HashMap<OpId, (BlockId, usize)>,
+    block_of: HashMap<OpId, BlockId>,
     blocks: Vec<BlockId>,
 }
 
@@ -342,13 +452,13 @@ impl Layout {
             .collect();
         blocks.sort_by_key(BlockId::number);
 
-        let mut position = HashMap::new();
+        let mut block_of = HashMap::new();
         for &block_id in &blocks {
-            for (index, op_id) in context.get_block(block_id).op_ids().into_iter().enumerate() {
-                position.insert(op_id, (block_id, index));
+            for op_id in context.get_block(block_id).op_ids() {
+                block_of.insert(op_id, block_id);
             }
         }
-        Self { position, blocks }
+        Self { block_of, blocks }
     }
 
     fn ops(&self, context: &Context) -> Vec<OpId> {
@@ -358,45 +468,10 @@ impl Layout {
             .collect()
     }
 
-    fn dominates(&self, dom: &DominatorTree, a: OpId, b: OpId) -> bool {
-        let (Some(&(a_block, a_index)), Some(&(b_block, b_index))) =
-            (self.position.get(&a), self.position.get(&b))
-        else {
-            return false;
-        };
-        if a_block == b_block {
-            a_index <= b_index
-        } else {
-            dom.dominates(a_block, b_block)
-        }
-    }
-
     fn op_ref(&self, context: &Context, op_id: OpId) -> OperationRef {
-        let block = self
-            .position
-            .get(&op_id)
-            .map(|(b, _)| context.get_block(*b));
+        let block = self.block_of.get(&op_id).map(|b| context.get_block(*b));
         OperationRef::new(context.get_op(op_id), block, None)
     }
-}
-
-fn type_width(context: &Context, ty: TypeId) -> Option<u32> {
-    let data = context.get_type_data(ty);
-    (data.as_ref() as &dyn std::any::Any)
-        .downcast_ref::<builtin::IntegerType>()
-        .map(builtin::IntegerType::width)
-}
-
-fn const_value(instance: &crate::OpInstance) -> i64 {
-    instance
-        .attributes
-        .iter()
-        .find(|attr| attr.name == "value")
-        .and_then(|attr| match attr.value {
-            crate::attributes::AttributeValue::Int(v) => Some(v),
-            _ => None,
-        })
-        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -463,6 +538,34 @@ mod tests {
         assert!(!out.contains("muli"), "multiply should be gone:\n{out}");
     }
 
+    /// Real saturation: folding `1 * 4 -> 4` only then enables strength-reducing
+    /// `x * 4 -> x << 2`. The second rule matches a form the first produced.
+    #[test]
+    fn saturation_chains_fold_then_strength_reduce() {
+        let context = Context::with_default_dialects();
+        let i32_ty = IntegerType::new(&context, 32);
+        let (func, _) = func_with(&context, 1, |ctx, builder, args| {
+            let one = builder.insert(b::constant(ctx, 1, i32_ty).build());
+            let four = builder.insert(b::constant(ctx, 4, i32_ty).build());
+            let folded = builder.insert(b::muli(ctx, one.result(), four.result(), i32_ty).build());
+            builder
+                .insert(b::muli(ctx, args[0], folded.result(), i32_ty).build())
+                .result()
+        });
+
+        run(&context, func.id());
+
+        let out = print_func(&func);
+        assert!(
+            out.contains("shli"),
+            "expected a shift after folding:\n{out}"
+        );
+        assert!(
+            !out.contains("muli"),
+            "both multiplies should be gone:\n{out}"
+        );
+    }
+
     #[test]
     fn add_zero_is_identity() {
         let context = Context::with_default_dialects();
@@ -523,6 +626,59 @@ mod tests {
         assert!(
             out.contains("value = 0"),
             "expected a zero constant:\n{out}"
+        );
+    }
+
+    /// Flow sensitivity: inside `if (cond)` the engine assumes `cond == 1`, so
+    /// `muli cond, y` folds to `y` there — while the identical multiply in the entry
+    /// block, where `cond` is unknown, is left alone.
+    #[test]
+    fn assumes_condition_inside_guarded_region() {
+        use crate::{Operand, scf};
+
+        let context = Context::with_default_dialects();
+        let i1 = IntegerType::new(&context, 1);
+        let cond = context.create_value(i1, None);
+        let y = context.create_value(i1, None);
+        let (cond_id, y_id) = (cond.id(), y.id());
+
+        let region = context.create_region();
+        let entry = context.create_block(vec![cond, y]);
+        region.add_block(entry.id());
+
+        let then_region = context.create_region();
+        let then_block = context.create_block(vec![]);
+        then_region.add_block(then_block.id());
+        let mut tb = IRBuilder::new(then_block);
+        tb.insert(b::muli(&context, cond_id, y_id, i1).build());
+        tb.insert(scf::ops::r#yield(&context, Operand::none()).build());
+
+        let else_region = context.create_region();
+        let else_block = context.create_block(vec![]);
+        else_region.add_block(else_block.id());
+        IRBuilder::new(else_block).insert(scf::ops::r#yield(&context, Operand::none()).build());
+
+        let func = b::func(&context, "f", i1, Some(region.id())).build();
+        let mut eb = IRBuilder::new(entry);
+        eb.insert(b::muli(&context, cond_id, y_id, i1).build());
+        eb.insert(
+            scf::ops::r#if(
+                &context,
+                cond_id,
+                Some(then_region.id()),
+                Some(else_region.id()),
+            )
+            .build(),
+        );
+        eb.insert(b::r#return(&context, y_id).build());
+
+        run(&context, func.id());
+
+        let out = print_func(&func);
+        assert_eq!(
+            out.matches("muli").count(),
+            1,
+            "the guarded multiply should fold under cond==true; the entry one stays:\n{out}"
         );
     }
 

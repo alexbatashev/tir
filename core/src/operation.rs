@@ -1,6 +1,9 @@
 use crate::{
-    Context, ContextIterator, Error, GetFromContext, context::ContextRef,
-    ir_formatter::IRFormatter, parse::Span, parse::text::Parser as IRParser, region::RegionId,
+    BlockId, Context, ContextIterator, Error, GetFromContext,
+    context::ContextRef,
+    ir_formatter::IRFormatter,
+    parse::{Span, text::Parser as IRParser},
+    region::RegionId,
     value::ValueId,
 };
 use std::{any::Any, sync::Arc};
@@ -116,6 +119,8 @@ pub trait Operation: 'static + Send + Sync + Any + Verifiable + OpDefVerifiable 
         Self: Sized,
     {
     }
+
+    fn parent_block(&self) -> Option<BlockId>;
 
     /// Verifies that operation is valid.
     ///

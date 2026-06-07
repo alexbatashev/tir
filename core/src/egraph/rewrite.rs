@@ -88,7 +88,13 @@ impl<N: Matchable + Clone + Eq + std::hash::Hash, L: Clone + PartialEq> EGraph<N
 
             let before = self.dag().len();
             for (index, m) in matches {
+                let first_new = self.dag().len();
                 (rewrites[index].apply)(ctx, self, &m);
+                // Tag the nodes this rewrite just introduced so the caller can ask
+                // it to materialize whichever one extraction later selects.
+                for raw in first_new..self.dag().len() {
+                    self.set_producer(NodeId::from_index(raw), index);
+                }
             }
             self.rebuild();
 
