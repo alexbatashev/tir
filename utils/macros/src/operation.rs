@@ -843,6 +843,20 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
             }
         }
 
+        impl From<&#struct_name> for tir::OpId {
+            fn from(v: &#struct_name) -> tir::OpId {
+                use tir::Operation;
+                v.id()
+            }
+        }
+
+        impl From<#struct_name> for tir::OpId {
+            fn from(v: #struct_name) -> tir::OpId {
+                use tir::Operation;
+                v.id()
+            }
+        }
+
         pub fn #op_fn_name(
             context: &tir::Context,
             #(#operand_fn_params,)*

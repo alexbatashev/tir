@@ -93,6 +93,19 @@ impl Block {
         }
     }
 
+    /// Returns true if a comes before b in the block, false otherwise
+    pub fn is_before(&self, a: OpId, b: OpId) -> bool {
+        let ops = self.operations.read();
+        let a_pos = ops.iter().position(|op_id| *op_id == a);
+        let b_pos = ops.iter().position(|op_id| *op_id == b);
+
+        if let (Some(a_pos), Some(b_pos)) = (a_pos, b_pos) {
+            a_pos < b_pos
+        } else {
+            false
+        }
+    }
+
     pub fn iter(&self, context: Context) -> ContextIterator<OpId> {
         ContextIterator::new(context, self.operations.read().clone())
     }

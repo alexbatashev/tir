@@ -14,7 +14,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    BlockId, Context, OpId, Terminator, TypeId,
+    BlockId, Context, OpId, Operation, Terminator, TypeId,
     graph::{Dag, MutDag, Node, NodeId, PostOrderDag},
 };
 
@@ -59,8 +59,8 @@ struct Cfg {
 
 impl DominatorTree {
     /// Build the dominator tree rooted at the entry block of `root`'s region.
-    pub fn new(context: &Context, root: OpId) -> Self {
-        let cfg = build_cfg(context, root);
+    pub fn new<O: Into<OpId>>(context: &Context, root: O) -> Self {
+        let cfg = build_cfg(context, root.into());
         match cfg.entry {
             Some(entry) => {
                 let root = DomNode::Block(entry);
@@ -73,8 +73,8 @@ impl DominatorTree {
     /// Build the post-dominator tree for `root`'s region. Blocks with no
     /// successors (returns, nested-region exits) are joined under a virtual
     /// [`DomNode::Exit`], which becomes the tree root.
-    pub fn post_dominator(context: &Context, root: OpId) -> Self {
-        let cfg = build_cfg(context, root);
+    pub fn post_dominator<O: Into<OpId>>(context: &Context, root: O) -> Self {
+        let cfg = build_cfg(context, root.into());
         if cfg.entry.is_none() {
             return Self::empty();
         }
