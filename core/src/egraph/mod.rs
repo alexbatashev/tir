@@ -3,8 +3,9 @@
 //! [`EGraph::rebuild`].
 
 use std::collections::HashMap;
+use std::hash::Hash;
 
-use crate::graph::{Dag, GenericDag, MutDag, Node, NodeId};
+use crate::graph::{Dag, GenericDag, Matchable, MutDag, NodeId};
 use crate::utils::DisjointMap;
 use crate::{OpId, TypeId};
 
@@ -35,13 +36,19 @@ fn merge_members(mut a: Vec<NodeId>, mut b: Vec<NodeId>) -> Vec<NodeId> {
 
 type EClassMap = DisjointMap<Vec<NodeId>, fn(Vec<NodeId>, Vec<NodeId>) -> Vec<NodeId>>;
 
-pub struct EGraph<N: Node, L> {
+/// Hash-cons index: `(label, canonical children) -> [(leaf, class)]`. The leaf is
+/// part of e-node identity but `L` may carry floats, so it stays out of the hash
+/// key and entries sharing a key are told apart by `PartialEq` on the leaf.
+type ENodeMemo<N, L> = HashMap<(N, Vec<EClassId>), Vec<(Option<L>, EClassId)>>;
+
+pub struct EGraph<N, L> {
     dag: GenericDag<N, L>,
     node_class: Vec<u32>,
     eclass: EClassMap,
+    memo: ENodeMemo<N, L>,
 }
 
-impl<N: Node, L> Dag for EGraph<N, L> {
+impl<N, L> Dag for EGraph<N, L> {
     type Node = N;
     type Leaf = L;
 
@@ -82,18 +89,19 @@ impl<N: Node, L> Dag for EGraph<N, L> {
     }
 }
 
-impl<N: Node + Clone + Eq, L: Clone + PartialEq> Default for EGraph<N, L> {
+impl<N: Matchable + Clone + Eq + Hash, L: Clone + PartialEq> Default for EGraph<N, L> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<N: Node + Clone + Eq, L: Clone + PartialEq> EGraph<N, L> {
+impl<N: Matchable + Clone + Eq + Hash, L: Clone + PartialEq> EGraph<N, L> {
     pub fn new() -> Self {
         Self {
             dag: GenericDag::new(),
             node_class: Vec::new(),
             eclass: DisjointMap::new(merge_members),
+            memo: HashMap::new(),
         }
     }
 
@@ -133,23 +141,22 @@ impl<N: Node + Clone + Eq, L: Clone + PartialEq> EGraph<N, L> {
             .collect()
     }
 
-    fn same_shape(&self, a: NodeId, b: NodeId) -> bool {
-        self.dag.get_node(a) == self.dag.get_node(b)
-            && self.dag.get_leaf_data(a) == self.dag.get_leaf_data(b)
-            && self.child_classes(a) == self.child_classes(b)
+    /// The canonical class of an already-interned e-node with these canonical
+    /// `children`, or `None`. O(bucket) rather than O(graph): a hash lookup then a
+    /// `PartialEq` scan over the few entries that share the `(label, children)` key.
+    fn memo_get(&self, node: &N, children: &[EClassId], leaf: Option<&L>) -> Option<EClassId> {
+        let bucket = self.memo.get(&(node.clone(), children.to_vec()))?;
+        bucket
+            .iter()
+            .find(|(l, _)| l.as_ref() == leaf)
+            .map(|&(_, class)| self.find(class))
     }
 
-    fn find_matching(&self, node: &N, children: &[EClassId], leaf: Option<&L>) -> Option<NodeId> {
-        for index in 0..self.dag.len() {
-            let id = NodeId::from_index(index);
-            if self.dag.get_node(id) == node
-                && self.dag.get_leaf_data(id) == leaf
-                && self.child_classes(id) == children
-            {
-                return Some(id);
-            }
-        }
-        None
+    fn memo_put(&mut self, node: &N, children: &[EClassId], leaf: Option<&L>, class: EClassId) {
+        self.memo
+            .entry((node.clone(), children.to_vec()))
+            .or_default()
+            .push((leaf.cloned(), class));
     }
 
     pub fn add(&mut self, node: N, children: &[EClassId], leaf: Option<L>) -> EClassId {
@@ -168,12 +175,12 @@ impl<N: Node + Clone + Eq, L: Clone + PartialEq> EGraph<N, L> {
         meta: Option<(OpId, TypeId)>,
     ) -> EClassId {
         let children: Vec<EClassId> = children.iter().map(|&c| self.find(c)).collect();
-        if let Some(existing) = self.find_matching(&node, &children, leaf.as_ref()) {
-            return self.class_of(existing);
+        if let Some(existing) = self.memo_get(&node, &children, leaf.as_ref()) {
+            return existing;
         }
 
-        let id = self.dag.add_node(node);
-        if let Some(data) = leaf {
+        let id = self.dag.add_node(node.clone());
+        if let Some(data) = leaf.clone() {
             self.dag.set_leaf_data(id, data);
         }
         for &child_class in &children {
@@ -186,6 +193,7 @@ impl<N: Node + Clone + Eq, L: Clone + PartialEq> EGraph<N, L> {
 
         let class = EClassId::from_raw(self.eclass.push(vec![id]));
         self.node_class.push(class.0);
+        self.memo_put(&node, &children, leaf.as_ref(), class);
         class
     }
 
@@ -226,38 +234,35 @@ impl<N: Node + Clone + Eq, L: Clone + PartialEq> EGraph<N, L> {
         merged
     }
 
-    pub fn congruences(&self) -> Vec<(EClassId, EClassId)> {
-        let mut out = Vec::new();
-        for index in 0..self.dag.len() {
-            let left = NodeId::from_index(index);
-            let left_class = self.class_of(left);
-            for other in index + 1..self.dag.len() {
-                let right = NodeId::from_index(other);
-                if self.same_shape(left, right) {
-                    let right_class = self.class_of(right);
-                    let (mut a, mut b) = (self.find(left_class), self.find(right_class));
-                    if a == b {
-                        continue;
-                    }
-                    if a.0 > b.0 {
-                        std::mem::swap(&mut a, &mut b);
-                    }
-                    if !out.contains(&(a, b)) {
-                        out.push((a, b));
-                    }
-                }
-            }
-        }
-        out
-    }
-
+    /// Restore the congruence invariant after a batch of unions: regroup every
+    /// e-node by `(label, canonical children, leaf)`, union classes that collide,
+    /// and repeat to a fixpoint. Each sweep is O(n) through the `seen` index (the
+    /// previous all-pairs scan was O(n²)); the final index becomes the memo so
+    /// hash-consing stays canonical afterwards.
     pub fn rebuild(&mut self) {
         loop {
-            let congruences = self.congruences();
-            if congruences.is_empty() {
+            let mut seen: ENodeMemo<N, L> = HashMap::new();
+            let mut merges: Vec<(EClassId, EClassId)> = Vec::new();
+
+            for index in 0..self.dag.len() {
+                let id = NodeId::from_index(index);
+                let class = self.find(self.class_of(id));
+                let key = (self.dag.get_node(id).clone(), self.child_classes(id));
+                let leaf = self.dag.get_leaf_data(id).cloned();
+                let bucket = seen.entry(key).or_default();
+                let found = bucket.iter().find(|(l, _)| *l == leaf).map(|&(_, c)| c);
+                match found {
+                    Some(other) if other != class => merges.push((other, class)),
+                    Some(_) => {}
+                    None => bucket.push((leaf, class)),
+                }
+            }
+
+            if merges.is_empty() {
+                self.memo = seen;
                 break;
             }
-            for (a, b) in congruences {
+            for (a, b) in merges {
                 self.union(a, b);
             }
         }
@@ -309,15 +314,16 @@ mod tests {
         let fa = unary(&mut g, ExprKind::Sqrt, a);
         let fb = unary(&mut g, ExprKind::Sqrt, b);
         let fc = unary(&mut g, ExprKind::Sqrt, c);
+
+        // Sqrt(a) and Sqrt(b) become congruent once a and b are merged.
         g.union(a, b);
-        assert_eq!(g.congruences(), vec![(fa, fb)]);
-        g.union(fa, fb);
-        assert_eq!(g.congruences(), vec![]);
-        g.union(a, c);
-        assert_eq!(g.congruences(), vec![(fb, fc)]);
         g.rebuild();
-        assert_eq!(g.congruences(), vec![]);
         assert_eq!(g.find(fa), g.find(fb));
+        assert_ne!(g.find(fb), g.find(fc));
+
+        // Folding c in too collapses all three Sqrt applications into one class.
+        g.union(a, c);
+        g.rebuild();
         assert_eq!(g.find(fc), g.find(fb));
     }
 

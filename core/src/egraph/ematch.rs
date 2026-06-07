@@ -1,9 +1,9 @@
 use crate::Context;
 use crate::graph::{Dag, OperandConstraint, Pattern, PatternExpr};
 
-use super::{EClassId, EGraph, EMatch, Node, NodeId};
+use super::{EClassId, EGraph, EMatch, Matchable, NodeId};
 
-impl<N: Node + Clone + Eq, L: Clone + PartialEq> EGraph<N, L> {
+impl<N: Matchable + Clone + Eq + std::hash::Hash, L: Clone + PartialEq> EGraph<N, L> {
     pub fn ematch<A>(&self, ctx: &Context, pattern: &Pattern<N, A>) -> Vec<EMatch> {
         self.ematch_with_legality(ctx, pattern, &|_, _| true)
     }

@@ -64,14 +64,19 @@ fn build_union_chain(n: usize) -> EGraph<ExprKind, ()> {
     g
 }
 
-fn build_congruence_graph(n: usize) -> EGraph<ExprKind, ()> {
+/// `n` symbols each wrapped in a distinct `Sqrt`, then every symbol unioned into
+/// the first. The unions are left unrepaired so a following `rebuild` must collapse
+/// all `n` `Sqrt` applications into one class — the congruence-heavy case.
+fn build_congruent_graph(n: usize) -> EGraph<ExprKind, ()> {
     let mut g = EGraph::new();
     let symbols: Vec<_> = (0..n).map(|_| sym(&mut g)).collect();
-    for i in 0..n {
-        for j in i + 1..n {
-            black_box(unary(&mut g, ExprKind::Sqrt, symbols[i]));
-            black_box(unary(&mut g, ExprKind::Sqrt, symbols[j]));
-        }
+    let sqrts: Vec<_> = symbols
+        .iter()
+        .map(|&s| unary(&mut g, ExprKind::Sqrt, s))
+        .collect();
+    black_box(&sqrts);
+    for i in 1..n {
+        g.union(symbols[0], symbols[i]);
     }
     g
 }
@@ -218,13 +223,16 @@ fn egraph_class_of(c: &mut Criterion) {
     group.finish();
 }
 
-fn egraph_congruences(c: &mut Criterion) {
-    let mut group = c.benchmark_group("egraph/congruences");
+fn egraph_rebuild_congruent(c: &mut Criterion) {
+    let mut group = c.benchmark_group("egraph/rebuild_congruent");
     for size in CONGRUENCE_SIZES {
-        let g = build_congruence_graph(size);
-        group.throughput(Throughput::Elements(1));
-        group.bench_with_input(BenchmarkId::from_parameter(size), &g, |b, g| {
-            b.iter(|| black_box(g.congruences()));
+        group.throughput(Throughput::Elements(size as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &size| {
+            b.iter_batched(
+                || build_congruent_graph(size),
+                |mut g| g.rebuild(),
+                BatchSize::SmallInput,
+            );
         });
     }
     group.finish();
@@ -359,7 +367,7 @@ criterion_group!(
     egraph_union,
     egraph_find,
     egraph_class_of,
-    egraph_congruences,
+    egraph_rebuild_congruent,
     egraph_rebuild,
     egraph_add_dag,
     egraph_ematch,

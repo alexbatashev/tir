@@ -2,11 +2,11 @@ use std::collections::HashMap;
 
 use crate::{
     OpId, TypeId,
-    graph::{Dag, EMPTY_CHILDREN, MutDag, Node, NodeId},
+    graph::{Dag, EMPTY_CHILDREN, MutDag, NodeId},
 };
 
 /// A DAG where nodes are physically stored in strict post order.
-pub struct PostOrderDag<N: Node, L> {
+pub struct PostOrderDag<N, L> {
     nodes: Vec<N>,
     edges: HashMap<NodeId, Vec<NodeId>>,
     parents: HashMap<NodeId, Vec<NodeId>>,
@@ -16,7 +16,7 @@ pub struct PostOrderDag<N: Node, L> {
     descendants: Vec<Vec<u64>>,
 }
 
-impl<N: Node, L> PostOrderDag<N, L> {
+impl<N, L> PostOrderDag<N, L> {
     pub fn new() -> Self {
         Self {
             nodes: Vec::new(),
@@ -87,20 +87,20 @@ impl<N: Node, L> PostOrderDag<N, L> {
     }
 }
 
-impl<N: Node, L> Default for PostOrderDag<N, L> {
+impl<N, L> Default for PostOrderDag<N, L> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-pub struct PostOrderDagIter<'a, N: Node, L> {
+pub struct PostOrderDagIter<'a, N, L> {
     dag: &'a PostOrderDag<N, L>,
     root: NodeId,
     next_index: usize,
     end_index: usize,
 }
 
-impl<N: Node, L> Iterator for PostOrderDagIter<'_, N, L> {
+impl<N, L> Iterator for PostOrderDagIter<'_, N, L> {
     type Item = NodeId;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -117,13 +117,13 @@ impl<N: Node, L> Iterator for PostOrderDagIter<'_, N, L> {
     }
 }
 
-pub struct PostOrderDagPreorderIter<'a, N: Node, L> {
+pub struct PostOrderDagPreorderIter<'a, N, L> {
     dag: &'a PostOrderDag<N, L>,
     start: NodeId,
     next_ordinal: usize,
 }
 
-impl<N: Node, L> Iterator for PostOrderDagPreorderIter<'_, N, L> {
+impl<N, L> Iterator for PostOrderDagPreorderIter<'_, N, L> {
     type Item = NodeId;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -134,7 +134,7 @@ impl<N: Node, L> Iterator for PostOrderDagPreorderIter<'_, N, L> {
     }
 }
 
-impl<N: Node, L> Dag for PostOrderDag<N, L> {
+impl<N, L> Dag for PostOrderDag<N, L> {
     type Node = N;
     type Leaf = L;
 
@@ -189,7 +189,7 @@ impl<N: Node, L> Dag for PostOrderDag<N, L> {
     }
 }
 
-impl<N: Node, L> MutDag for PostOrderDag<N, L> {
+impl<N, L> MutDag for PostOrderDag<N, L> {
     fn add_node(&mut self, n: Self::Node) -> NodeId {
         let id = NodeId::from_index(self.nodes.len());
         self.nodes.push(n);

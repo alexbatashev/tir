@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use crate::{Context, ContextIterator, GetFromContext, OpId, Value};
+use crate::{Context, ContextIterator, GetFromContext, OpId, Value, context::ContextRef};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BlockId(u32);
@@ -14,6 +14,9 @@ pub struct Block {
     operations: RwLock<Vec<OpId>>,
     successors: RwLock<Vec<BlockId>>,
     predecessors: RwLock<Vec<BlockId>>,
+    /// Handle back to the owning context, used to keep its op-to-parent-block index
+    /// in step with every membership change below. Never held across a context lock.
+    context: ContextRef,
 }
 
 impl BlockId {
@@ -31,13 +34,14 @@ impl BlockId {
 }
 
 impl Block {
-    pub(crate) fn new(id: BlockId, arguments: Vec<Value>) -> Self {
+    pub(crate) fn new(id: BlockId, arguments: Vec<Value>, context: ContextRef) -> Self {
         Self {
             id,
             arguments,
             operations: RwLock::new(vec![]),
             successors: RwLock::new(vec![]),
             predecessors: RwLock::new(vec![]),
+            context,
         }
     }
 
@@ -67,6 +71,7 @@ impl Block {
 
     pub(crate) fn insert(&self, index: usize, id: OpId) {
         self.operations.write().insert(index, id);
+        self.context.upgrade().set_op_parent(id, self.id);
     }
 
     pub fn op_ids(&self) -> Vec<OpId> {
@@ -74,23 +79,39 @@ impl Block {
     }
 
     pub fn replace_op(&self, old: OpId, new: OpId) -> bool {
-        let mut ops = self.operations.write();
-        if let Some(position) = ops.iter().position(|id| *id == old) {
-            ops[position] = new;
-            true
-        } else {
-            false
+        let replaced = {
+            let mut ops = self.operations.write();
+            match ops.iter().position(|id| *id == old) {
+                Some(position) => {
+                    ops[position] = new;
+                    true
+                }
+                None => false,
+            }
+        };
+        if replaced {
+            let context = self.context.upgrade();
+            context.clear_op_parent(old);
+            context.set_op_parent(new, self.id);
         }
+        replaced
     }
 
     pub fn remove_op(&self, id: OpId) -> bool {
-        let mut ops = self.operations.write();
-        if let Some(position) = ops.iter().position(|op_id| *op_id == id) {
-            ops.remove(position);
-            true
-        } else {
-            false
+        let removed = {
+            let mut ops = self.operations.write();
+            match ops.iter().position(|op_id| *op_id == id) {
+                Some(position) => {
+                    ops.remove(position);
+                    true
+                }
+                None => false,
+            }
+        };
+        if removed {
+            self.context.upgrade().clear_op_parent(id);
         }
+        removed
     }
 
     /// Returns true if a comes before b in the block, false otherwise

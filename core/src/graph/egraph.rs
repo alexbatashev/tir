@@ -11,7 +11,7 @@
 //! This is deliberately target-independent and reusable: instruction selection
 //! seeds it from a program's semantic expressions and saturates with bit-vector
 //! identities, but the same type is intended to back a future instcombine-style
-//! mid-end. It is generic over the node label `N: Node` and a leaf payload `L`,
+//! mid-end. It is generic over the node label `N: Matchable` and a leaf payload `L`,
 //! mirroring [`crate::graph::Dag`].
 
 use std::collections::HashMap;
@@ -19,7 +19,7 @@ use std::hash::Hash;
 
 use crate::Context;
 
-use super::{Dag, Node, NodeId, OperandConstraint, Pattern, PatternExpr};
+use super::{Dag, Matchable, NodeId, OperandConstraint, Pattern, PatternExpr};
 
 /// Identifier of an e-class. Stable as an arena index, but may be *non-canonical*
 /// after unions — always pass through [`EGraph::find`] before comparing.
@@ -93,7 +93,7 @@ impl EMatch {
 /// width-dependent constants, which is what bit-vector identities need.
 pub type EGraphApplier<N, L> = dyn Fn(&Context, &mut EGraph<N, L>, &EMatch) + Send + Sync;
 
-pub struct Rewrite<N: Node, L> {
+pub struct Rewrite<N: Matchable, L> {
     pub name: String,
     pub searcher: Pattern<N, ()>,
     /// Extends the e-graph with the rule's right-hand side for a given match. Gets
@@ -118,7 +118,7 @@ impl Default for SaturationLimits {
     }
 }
 
-pub struct EGraph<N: Node, L> {
+pub struct EGraph<N: Matchable, L> {
     /// Union-find parent pointers, indexed by raw e-class id.
     union_find: Vec<u32>,
     /// Canonical class id -> its e-nodes (children kept canonical after `rebuild`).
@@ -129,7 +129,7 @@ pub struct EGraph<N: Node, L> {
     dirty: bool,
 }
 
-impl<N: Node, L> Default for EGraph<N, L> {
+impl<N: Matchable, L> Default for EGraph<N, L> {
     fn default() -> Self {
         Self {
             union_find: Vec::new(),
@@ -140,7 +140,7 @@ impl<N: Node, L> Default for EGraph<N, L> {
     }
 }
 
-impl<N: Node + Clone + Eq + Hash, L: Clone + Eq + Hash> EGraph<N, L> {
+impl<N: Matchable + Clone + Eq + Hash, L: Clone + Eq + Hash> EGraph<N, L> {
     pub fn new() -> Self {
         Self::default()
     }

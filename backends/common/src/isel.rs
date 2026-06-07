@@ -7,7 +7,7 @@ use tir::{
     attributes::AttributeValue,
     builtin::IntegerType,
     graph::{
-        Dag, EClassId, EGraph, EMatch, ENode, Node, NodeId, OperandConstraint, Pattern,
+        Dag, EClassId, EGraph, EMatch, ENode, Matchable, NodeId, OperandConstraint, Pattern,
         PatternExpr, Rewrite,
     },
     pbqp::{self, INF_COST, PbqpAlternative, PbqpMatrix, PbqpProblem},
@@ -80,7 +80,7 @@ impl Hash for SemNode {
     }
 }
 
-impl tir::graph::Node for SemNode {
+impl tir::graph::Matchable for SemNode {
     fn is_leaf(&self, ctx: &Context) -> bool {
         self.kind.is_leaf(ctx)
     }

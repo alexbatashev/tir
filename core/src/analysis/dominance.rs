@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::{
     BlockId, Context, OpId, Operation, Terminator, TypeId,
-    graph::{Dag, MutDag, Node, NodeId, PostOrderDag},
+    graph::{Dag, MutDag, NodeId, PostOrderDag},
 };
 
 /// A node of the (post-)dominator tree. Wraps a real basic block, or the virtual
@@ -25,18 +25,6 @@ pub enum DomNode {
     Block(BlockId),
     /// Virtual exit; only present in post-dominator trees.
     Exit,
-}
-
-impl Node for DomNode {
-    // The tree shape lives in the graph edges, not in the node: these `Node`
-    // methods exist only to satisfy the `Dag` bound and are unused for dominance.
-    fn is_leaf(&self, _ctx: &Context) -> bool {
-        false
-    }
-
-    fn num_children(&self, _ctx: &Context) -> usize {
-        0
-    }
 }
 
 /// A dominator or post-dominator tree over the blocks reachable from a root

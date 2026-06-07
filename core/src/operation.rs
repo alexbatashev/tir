@@ -189,6 +189,11 @@ impl OpInstance {
         self.dialect
     }
 
+    /// The block that holds this operation, or `None` if it is detached or the root.
+    pub fn parent_block(&self) -> Option<crate::BlockId> {
+        self.context.upgrade().parent_block(self.id)
+    }
+
     pub fn as_op<T: Operation + Sized>(self: Arc<Self>) -> Option<T> {
         if self.name == T::name() {
             Some(T::from_op_instance(self))

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::Context;
-use crate::graph::{Dag, Node, NodeId, Pattern};
+use crate::graph::{Dag, Matchable, NodeId, Pattern};
 
 use super::{EClassId, EGraph};
 
@@ -29,13 +29,13 @@ impl EMatch {
 pub type Applier<N, L> = dyn Fn(&Context, &mut EGraph<N, L>, &EMatch) + Send + Sync;
 
 /// A rewrite: e-match `lhs`, then call `apply` for each match.
-pub struct Rewrite<N: Node, L> {
+pub struct Rewrite<N, L> {
     pub name: String,
     pub searcher: Pattern<N, ()>,
     pub apply: Box<Applier<N, L>>,
 }
 
-impl<N: Node, L> Rewrite<N, L> {
+impl<N, L> Rewrite<N, L> {
     pub fn new(
         name: impl Into<String>,
         searcher: Pattern<N, ()>,
@@ -68,7 +68,7 @@ impl Default for SaturationLimits {
     }
 }
 
-impl<N: Node + Clone + Eq, L: Clone + PartialEq> EGraph<N, L> {
+impl<N: Matchable + Clone + Eq + std::hash::Hash, L: Clone + PartialEq> EGraph<N, L> {
     pub fn saturate(
         &mut self,
         ctx: &Context,
