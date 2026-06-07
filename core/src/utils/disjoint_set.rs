@@ -1,40 +1,71 @@
-struct UnionFind {
-    parents: Vec<i32>,
+use std::cell::UnsafeCell;
+
+// Some DisjoinSet implementations chose to perform path compression as part
+// of recursive call chain, which allows them to always keep the main set tidy
+// without really spending much time or memory. Recursion, however, has a hidden
+// cost: if the depth of the node is too large, the recursion will overflow and
+// the program will crash. Another option would be to use a queue or a vector
+// and collect all items in a loop. But in case of large chains re-allocation
+// times would dominate. So, instead we opt in for a partial path compression:
+// only compress path for the first 16 nodes + the node we're looking for.
+// In practice this should be indistinguishable from the recursion path.
+const AUTOCOMPRESS_DEPTH: usize = 16;
+
+struct DisjointSetImpl {
+    parents: UnsafeCell<Vec<i32>>,
 }
 
-impl UnionFind {
+impl DisjointSetImpl {
     fn with_size(size: usize) -> Self {
         Self {
-            parents: vec![-1; size],
+            parents: UnsafeCell::new(vec![-1; size]),
         }
     }
 
     fn new() -> Self {
         Self {
-            parents: Vec::new(),
+            parents: UnsafeCell::new(Vec::new()),
         }
     }
 
     fn len(&self) -> usize {
-        self.parents.len()
+        unsafe { &*self.parents.get() }.len()
     }
 
     fn push(&mut self) -> u32 {
-        let id = self.parents.len() as u32;
-        self.parents.push(-1);
+        let p = unsafe { &mut *self.parents.get() };
+        let id = p.len() as u32;
+        p.push(-1);
         id
     }
 
     fn find_root(&self, i: u32) -> u32 {
         assert!(i <= i32::MAX as u32);
 
-        let mut i = i as i32;
+        let p = unsafe { &mut *self.parents.get() };
 
-        while self.parents[i as usize] >= 0 {
-            i = self.parents[i as usize]
+        let mut curr = i as usize;
+
+        if p[i as usize] >= 0 {
+            let mut backprop = [0; AUTOCOMPRESS_DEPTH];
+            let mut ptr = 0;
+
+            while p[curr] >= 0 {
+                if ptr < backprop.len() {
+                    backprop[ptr] = curr;
+                    ptr += 1;
+                }
+                curr = p[curr] as usize;
+            }
+
+            for x in 0..ptr {
+                p[backprop[x]] = curr as i32;
+            }
+
+            p[i as usize] = curr as i32;
         }
 
-        i as u32
+        curr as u32
     }
 
     fn connected(&self, i: u32, j: u32) -> bool {
@@ -49,29 +80,35 @@ impl UnionFind {
             return (root_i, root_j, false);
         }
 
-        let mut i_size = -self.parents[root_i as usize];
-        let mut j_size = -self.parents[root_j as usize];
+        let p = unsafe { &mut *self.parents.get() };
+        let mut i_size = -p[root_i as usize];
+        let mut j_size = -p[root_j as usize];
 
         if i_size > j_size {
             std::mem::swap(&mut root_i, &mut root_j);
             std::mem::swap(&mut i_size, &mut j_size);
         }
 
-        self.parents[root_j as usize] -= i_size;
-        self.parents[root_i as usize] = root_j as i32;
+        p[root_j as usize] -= i_size;
+        p[root_i as usize] = root_j as i32;
 
         (root_i, root_j, true)
+    }
+
+    fn is_root(&self, i: u32) -> bool {
+        let v = unsafe { (&*self.parents.get())[i as usize] };
+        v < 0
     }
 }
 
 pub struct DisjointSet {
-    uf: UnionFind,
+    uf: DisjointSetImpl,
 }
 
 impl DisjointSet {
     pub fn new(size: usize) -> Self {
         Self {
-            uf: UnionFind::with_size(size),
+            uf: DisjointSetImpl::with_size(size),
         }
     }
 
@@ -89,7 +126,7 @@ impl DisjointSet {
 }
 
 pub struct DisjointMap<V, F> {
-    uf: UnionFind,
+    uf: DisjointSetImpl,
     values: Vec<Option<V>>,
     merge: F,
 }
@@ -100,7 +137,7 @@ where
 {
     pub fn new(merge: F) -> Self {
         Self {
-            uf: UnionFind::new(),
+            uf: DisjointSetImpl::new(),
             values: Vec::new(),
             merge,
         }
@@ -152,7 +189,7 @@ where
 
     pub fn roots(&self) -> impl Iterator<Item = (u32, &V)> {
         self.values.iter().enumerate().filter_map(|(i, value)| {
-            if self.uf.parents[i] < 0 {
+            if self.uf.is_root(i as u32) {
                 Some((i as u32, value.as_ref().expect("root value")))
             } else {
                 None
