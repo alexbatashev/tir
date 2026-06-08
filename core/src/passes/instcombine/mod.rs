@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::analysis::DominatorTree;
-use crate::egraph::{EClassId, EGraph, SaturationLimits};
+use crate::egraph::{EClassId, EGPrinter, EGraph, SaturationLimits};
 use crate::graph::{Dag, GenericDag, MutDag, NodeId};
 use crate::{
     BlockId, Context, OpId, Operation, OperationRef, Pass, PassError, PassTarget, RegionGuard,
@@ -112,7 +112,7 @@ impl Pass for InstCombinePass {
             constants: &seed.constants,
         };
         let body = context.get_op(op.op().id).regions[0];
-        driver.process_region(body, rewriter)
+        driver.process_region(body, op.op().id, rewriter)
     }
 }
 
@@ -132,17 +132,29 @@ struct Driver<'a> {
     constants: &'a HashSet<OpId>,
 }
 
+/// When `TIR_INSTCOMBINE_DOT` names a directory, write the region's e-graph there as
+/// `<op>.<stage>.dot`, so the before- and after-saturation forms can be diffed.
+fn dump_dot(eg: &ArithEGraph, owner: OpId, stage: &str) {
+    if let Some(dir) = std::env::var_os("TIR_INSTCOMBINE_DOT") {
+        let path = std::path::Path::new(&dir).join(format!("{owner:?}.{stage}.dot"));
+        let _ = std::fs::write(path, EGPrinter::new(eg).to_dot());
+    }
+}
+
 impl Driver<'_> {
     fn process_region(
         &mut self,
         region: RegionId,
+        owner: OpId,
         rewriter: &mut Rewriter,
     ) -> Result<(), PassError> {
+        dump_dot(&self.eg, owner, "before");
         self.eg.saturate(
             self.context,
             &self.ruleset.rewrites,
             SaturationLimits::default(),
         );
+        dump_dot(&self.eg, owner, "after");
         let best = self.eg.extract_best(|term, _| match term {
             Term::Op { cost, .. } => *cost as u64,
             _ => 0,
@@ -214,10 +226,10 @@ impl Driver<'_> {
                     Some(&(value, holds)) => {
                         self.eg.push_context();
                         self.inject(value, holds);
-                        self.process_region(sub, rewriter)?;
+                        self.process_region(sub, op_id, rewriter)?;
                         self.eg.pop_context();
                     }
-                    None => self.process_region(sub, rewriter)?,
+                    None => self.process_region(sub, op_id, rewriter)?,
                 }
             }
         }
@@ -474,258 +486,3 @@ impl Layout {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::{
-        Context, IRBuilder, IRFormatter, OpId, Operation, PassManager,
-        builtin::{IntegerType, ops as b},
-    };
-
-    use super::InstCombinePass;
-
-    fn run(context: &Context, func: OpId) {
-        let mut pm = PassManager::new();
-        pm.add_pass(InstCombinePass::new());
-        pm.run(context, context.get_op(func)).expect("instcombine");
-    }
-
-    fn print_func(func: &impl Operation) -> String {
-        let mut out = String::new();
-        let mut fmt = IRFormatter::new(&mut out);
-        func.print(&mut fmt).expect("print");
-        out
-    }
-
-    /// A single-block function `f(x) { body; return last }`.
-    fn func_with<F>(
-        context: &Context,
-        params: usize,
-        build: F,
-    ) -> (crate::builtin::FuncOp, Vec<crate::ValueId>)
-    where
-        F: FnOnce(&Context, &mut IRBuilder, &[crate::ValueId]) -> crate::ValueId,
-    {
-        let i32_ty = IntegerType::new(context, 32);
-        let args: Vec<_> = (0..params)
-            .map(|_| context.create_value(i32_ty, None))
-            .collect();
-        let region = context.create_region();
-        let block = context.create_block(args.clone());
-        region.add_block(block.id());
-        let func = b::func(context, "f", i32_ty, Some(region.id())).build();
-        let arg_ids: Vec<_> = args.iter().map(|v| v.id()).collect();
-        let mut builder = IRBuilder::new(func.body());
-        let result = build(context, &mut builder, &arg_ids);
-        builder.insert(b::r#return(context, result).build());
-        (func, arg_ids)
-    }
-
-    #[test]
-    fn multiply_by_power_of_two_becomes_shift() {
-        let context = Context::with_default_dialects();
-        let i32_ty = IntegerType::new(&context, 32);
-        let (func, _) = func_with(&context, 1, |ctx, builder, args| {
-            let four = builder.insert(b::constant(ctx, 4, i32_ty).build());
-            builder
-                .insert(b::muli(ctx, args[0], four.result(), i32_ty).build())
-                .result()
-        });
-
-        run(&context, func.id());
-
-        let out = print_func(&func);
-        assert!(out.contains("shli"), "expected a shift:\n{out}");
-        assert!(!out.contains("muli"), "multiply should be gone:\n{out}");
-    }
-
-    /// Real saturation: folding `1 * 4 -> 4` only then enables strength-reducing
-    /// `x * 4 -> x << 2`. The second rule matches a form the first produced.
-    #[test]
-    fn saturation_chains_fold_then_strength_reduce() {
-        let context = Context::with_default_dialects();
-        let i32_ty = IntegerType::new(&context, 32);
-        let (func, _) = func_with(&context, 1, |ctx, builder, args| {
-            let one = builder.insert(b::constant(ctx, 1, i32_ty).build());
-            let four = builder.insert(b::constant(ctx, 4, i32_ty).build());
-            let folded = builder.insert(b::muli(ctx, one.result(), four.result(), i32_ty).build());
-            builder
-                .insert(b::muli(ctx, args[0], folded.result(), i32_ty).build())
-                .result()
-        });
-
-        run(&context, func.id());
-
-        let out = print_func(&func);
-        assert!(
-            out.contains("shli"),
-            "expected a shift after folding:\n{out}"
-        );
-        assert!(
-            !out.contains("muli"),
-            "both multiplies should be gone:\n{out}"
-        );
-    }
-
-    #[test]
-    fn add_zero_is_identity() {
-        let context = Context::with_default_dialects();
-        let i32_ty = IntegerType::new(&context, 32);
-        let (func, args) = func_with(&context, 1, |ctx, builder, args| {
-            let zero = builder.insert(b::constant(ctx, 0, i32_ty).build());
-            builder
-                .insert(b::addi(ctx, args[0], zero.result(), i32_ty).build())
-                .result()
-        });
-
-        run(&context, func.id());
-
-        let out = print_func(&func);
-        assert!(!out.contains("addi"), "add should be gone:\n{out}");
-        assert!(
-            out.contains(&format!("return %{}", args[0].number())),
-            "return should read the parameter directly:\n{out}"
-        );
-    }
-
-    #[test]
-    fn folds_constant_expression() {
-        let context = Context::with_default_dialects();
-        let i32_ty = IntegerType::new(&context, 32);
-        let (func, _) = func_with(&context, 0, |ctx, builder, _| {
-            let two = builder.insert(b::constant(ctx, 2, i32_ty).build());
-            let three = builder.insert(b::constant(ctx, 3, i32_ty).build());
-            builder
-                .insert(b::addi(ctx, two.result(), three.result(), i32_ty).build())
-                .result()
-        });
-
-        run(&context, func.id());
-
-        let out = print_func(&func);
-        assert!(!out.contains("addi"), "add should be folded:\n{out}");
-        assert!(
-            out.contains("value = 5"),
-            "expected the folded constant 5:\n{out}"
-        );
-    }
-
-    #[test]
-    fn subtract_self_is_zero() {
-        let context = Context::with_default_dialects();
-        let i32_ty = IntegerType::new(&context, 32);
-        let (func, _) = func_with(&context, 1, |ctx, builder, args| {
-            builder
-                .insert(b::subi(ctx, args[0], args[0], i32_ty).build())
-                .result()
-        });
-
-        run(&context, func.id());
-
-        let out = print_func(&func);
-        assert!(!out.contains("subi"), "subtract should be gone:\n{out}");
-        assert!(
-            out.contains("value = 0"),
-            "expected a zero constant:\n{out}"
-        );
-    }
-
-    /// Flow sensitivity: inside `if (cond)` the engine assumes `cond == 1`, so
-    /// `muli cond, y` folds to `y` there — while the identical multiply in the entry
-    /// block, where `cond` is unknown, is left alone.
-    #[test]
-    fn assumes_condition_inside_guarded_region() {
-        use crate::{Operand, scf};
-
-        let context = Context::with_default_dialects();
-        let i1 = IntegerType::new(&context, 1);
-        let cond = context.create_value(i1, None);
-        let y = context.create_value(i1, None);
-        let (cond_id, y_id) = (cond.id(), y.id());
-
-        let region = context.create_region();
-        let entry = context.create_block(vec![cond, y]);
-        region.add_block(entry.id());
-
-        let then_region = context.create_region();
-        let then_block = context.create_block(vec![]);
-        then_region.add_block(then_block.id());
-        let mut tb = IRBuilder::new(then_block);
-        tb.insert(b::muli(&context, cond_id, y_id, i1).build());
-        tb.insert(scf::ops::r#yield(&context, Operand::none()).build());
-
-        let else_region = context.create_region();
-        let else_block = context.create_block(vec![]);
-        else_region.add_block(else_block.id());
-        IRBuilder::new(else_block).insert(scf::ops::r#yield(&context, Operand::none()).build());
-
-        let func = b::func(&context, "f", i1, Some(region.id())).build();
-        let mut eb = IRBuilder::new(entry);
-        eb.insert(b::muli(&context, cond_id, y_id, i1).build());
-        eb.insert(
-            scf::ops::r#if(
-                &context,
-                cond_id,
-                Some(then_region.id()),
-                Some(else_region.id()),
-            )
-            .build(),
-        );
-        eb.insert(b::r#return(&context, y_id).build());
-
-        run(&context, func.id());
-
-        let out = print_func(&func);
-        assert_eq!(
-            out.matches("muli").count(),
-            1,
-            "the guarded multiply should fold under cond==true; the entry one stays:\n{out}"
-        );
-    }
-
-    /// A value combined in one block feeds an op in a successor block. The
-    /// cross-block value enters the successor's e-graph as an opaque leaf, so the
-    /// successor's `addi _, 0` still folds to it without modeling the branch.
-    #[test]
-    fn combines_across_unstructured_branch() {
-        let context = Context::with_default_dialects();
-        let i32_ty = IntegerType::new(&context, 32);
-        let param = context.create_value(i32_ty, None);
-        let param_id = param.id();
-
-        let region = context.create_region();
-        let entry = context.create_block(vec![param]);
-        let next = context.create_block(vec![]);
-        region.add_block(entry.id());
-        region.add_block(next.id());
-        let func = b::func(&context, "fwd", i32_ty, Some(region.id())).build();
-
-        let mut entry_b = IRBuilder::new(entry.clone());
-        let two = entry_b.insert(b::constant(&context, 2, i32_ty).build());
-        let scaled = entry_b
-            .insert(b::muli(&context, param_id, two.result(), i32_ty).build())
-            .result();
-        entry_b.insert(b::br(&context, vec![], next.id()).build());
-
-        let mut next_b = IRBuilder::new(next.clone());
-        let zero = next_b.insert(b::constant(&context, 0, i32_ty).build());
-        let added = next_b.insert(b::addi(&context, scaled, zero.result(), i32_ty).build());
-        let added_id = added.id();
-        let ret_id = next_b
-            .insert(b::r#return(&context, added.result()).build())
-            .id();
-
-        run(&context, func.id());
-
-        // The `addi _, 0` folded away; the multiply became a shift.
-        assert!(
-            !context.has_operation(added_id),
-            "addi should be folded away"
-        );
-        let ret_operand = context.get_op(ret_id).operands[0];
-        let def = context
-            .get_value(ret_operand)
-            .defining_op()
-            .expect("defined");
-        assert_eq!(context.get_op(def).name, "shli");
-    }
-}

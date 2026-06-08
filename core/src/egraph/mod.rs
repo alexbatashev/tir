@@ -15,8 +15,10 @@ use crate::utils::ContextUnionFind;
 use crate::{OpId, TypeId};
 
 mod ematch;
+mod print;
 mod rewrite;
 
+pub use print::{DotLabel, EGPrinter};
 pub use rewrite::{Applier, EMatch, Rewrite, SaturationLimits};
 
 /// Identifier of an e-class. May be non-canonical after unions — pass through
@@ -552,6 +554,30 @@ mod tests {
         g.pop_context();
         assert_ne!(g.find(a), g.find(b));
         assert_ne!(g.find(fa), g.find(fb));
+    }
+
+    impl DotLabel<()> for ExprKind {
+        fn dot_label(&self, _leaf: Option<&()>) -> String {
+            format!("{self:?}")
+        }
+    }
+
+    #[test]
+    fn printer_emits_cluster_per_class_with_child_edges() {
+        let mut g = EGraph::<ExprKind, ()>::new();
+        let a = sym(&mut g);
+        let b = g.add(ExprKind::Constant, &[], None);
+        let add = g.add(ExprKind::Add, &[a, b], None);
+
+        let dot = EGPrinter::new(&g).to_dot();
+        assert!(dot.starts_with("digraph egraph {"));
+        // One cluster per class.
+        assert_eq!(dot.matches("subgraph cluster_").count(), 3);
+        assert!(dot.contains("label=\"Add\""));
+        assert!(dot.contains("label=\"Symbol\""));
+        // The Add node points at both operand clusters.
+        let add_node = g.nodes(add)[0].index();
+        assert_eq!(dot.matches(&format!("n{add_node} -> ")).count(), 2);
     }
 
     #[test]

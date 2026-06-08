@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 
+use crate::egraph::DotLabel;
 use crate::graph::Matchable;
 use crate::utils::APInt;
 use crate::{Commutative, Context, OpCost, OpInstance, Operation, ValueId};
@@ -70,6 +71,22 @@ pub fn op_term<O: Operation>(commutative: bool, cost: u32) -> Term {
         name: O::name(),
         commutative,
         cost,
+    }
+}
+
+impl DotLabel<Leaf> for Term {
+    fn dot_label(&self, leaf: Option<&Leaf>) -> String {
+        match self {
+            Term::Op { name, .. } => name.to_string(),
+            Term::Const => match leaf {
+                Some(Leaf::Int(v)) => v.to_string(),
+                _ => "const".to_string(),
+            },
+            Term::Opaque => match leaf {
+                Some(Leaf::Value(v)) => format!("%{}", v.number()),
+                _ => "opaque".to_string(),
+            },
+        }
     }
 }
 
