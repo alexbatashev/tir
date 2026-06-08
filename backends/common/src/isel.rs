@@ -6,10 +6,8 @@ use tir::{
     Pass, PassError, PassTarget, Rewriter, TypeId, ValueId,
     attributes::AttributeValue,
     builtin::IntegerType,
-    graph::{
-        Dag, EClassId, EGraph, EMatch, ENode, Matchable, NodeId, OperandConstraint, Pattern,
-        PatternExpr, Rewrite,
-    },
+    egraph::{EClassId, EGraph, EMatch, Rewrite},
+    graph::{Dag, Matchable, NodeId, OperandConstraint, Pattern, PatternExpr},
     pbqp::{self, INF_COST, PbqpAlternative, PbqpMatrix, PbqpProblem},
     sem_expr::{
         ExprKind, ExprPayload, ExprPostGraph, FuzzOracle, confirm_extension_via_shifts,
@@ -23,9 +21,9 @@ use tir::{
 pub type SemEGraph = EGraph<SemNode, ()>;
 
 /// An e-graph node label: the operator identity (kind/payload) plus the IR type of
-/// the value it represents. Structure (operands) lives in the enclosing
-/// [`ENode::children`], never here — so a label is exactly what hash-consing and
-/// pattern matching compare.
+/// the value it represents. Structure (operands) lives in the e-node's child
+/// classes, never here — so a label is exactly what hash-consing and pattern
+/// matching compare.
 ///
 /// `ty` is the result type for an op node, the value type for a leaf. `None` on a
 /// *pattern* node means "match any type"; `None` on a *graph* node means the type
@@ -167,17 +165,22 @@ fn class_binding(
     class: EClassId,
 ) -> Option<Binding> {
     let nodes = egraph.nodes(class);
-    if let Some(ExprPayload::Int(v)) = nodes.iter().find_map(|n| {
-        n.node
+    if let Some(ExprPayload::Int(v)) = nodes.iter().find_map(|&id| {
+        egraph
+            .get_node(id)
             .payload
             .as_ref()
             .filter(|p| matches!(p, ExprPayload::Int(_)))
     }) {
         Some(Binding::Int(v.clone()))
-    } else if let Some(v) = nodes.iter().find_map(|n| match n.node.payload.as_ref() {
-        Some(ExprPayload::Value(v)) => Some(*v),
-        _ => None,
-    }) {
+    } else if let Some(v) =
+        nodes
+            .iter()
+            .find_map(|&id| match egraph.get_node(id).payload.as_ref() {
+                Some(ExprPayload::Value(v)) => Some(*v),
+                _ => None,
+            })
+    {
         Some(Binding::Value(v))
     } else {
         class_value
@@ -454,8 +457,7 @@ impl<'a> SemDagBuilder<'a> {
         payload: Option<ExprPayload>,
         ty: Option<TypeId>,
     ) -> EClassId {
-        self.egraph
-            .add(ENode::leaf(SemNode { kind, payload, ty }, None))
+        self.egraph.add(SemNode { kind, payload, ty }, &[], None)
     }
 
     fn add_int(&mut self, value: APInt, ty: Option<TypeId>) -> EClassId {
@@ -502,14 +504,15 @@ impl<'a> SemDagBuilder<'a> {
         if kind.is_commutative() {
             children.sort();
         }
-        self.egraph.add(ENode::op(
+        self.egraph.add(
             SemNode {
                 kind,
                 payload: None,
                 ty,
             },
-            children,
-        ))
+            &children,
+            None,
+        )
     }
 
     /// Record that `class` computes IR `value` (idempotent; first writer wins, which
@@ -653,7 +656,10 @@ impl<'a> SemDagBuilder<'a> {
 
     /// The IR type recorded on an operand class (taken from any member carrying one).
     fn class_ty(&self, class: EClassId) -> Option<TypeId> {
-        self.egraph.nodes(class).iter().find_map(|n| n.node.ty)
+        self.egraph
+            .nodes(class)
+            .iter()
+            .find_map(|&id| self.egraph.get_node(id).ty)
     }
 
     /// Lower one node of a semantic-expression graph, typing each node from its
@@ -911,7 +917,12 @@ fn build_eclass_cover(
         classes.iter().enumerate().map(|(i, &c)| (c, i)).collect();
     let class_index = |c: EClassId| index[&egraph.find(c)];
 
-    let is_terminal = |c: EClassId| egraph.nodes(c).iter().any(|n| n.children.is_empty());
+    let is_terminal = |c: EClassId| {
+        egraph
+            .nodes(c)
+            .iter()
+            .any(|&id| egraph.children(id).next().is_none())
+    };
 
     let mut alternatives_by_node = vec![Vec::<PbqpIselAlternative>::new(); classes.len()];
     for (i, &c) in classes.iter().enumerate() {
@@ -1083,7 +1094,7 @@ fn class_width(ctx: &Context, egraph: &SemEGraph, class: EClassId) -> Option<u32
     egraph
         .nodes(class)
         .iter()
-        .find_map(|n| n.node.ty.and_then(|ty| type_width(ctx, ty)))
+        .find_map(|&id| egraph.get_node(id).ty.and_then(|ty| type_width(ctx, ty)))
 }
 
 /// Discover the algebraic bridges the rule set needs to cover sub-word extensions.
@@ -1144,15 +1155,17 @@ fn extension_rewrite(ext_kind: ExprKind, shr_kind: ExprKind) -> Rewrite<SemNode,
                 Some(ExprPayload::Int(APInt::new(64, (w - n) as u64))),
                 None,
             );
-            let shift_amount = egraph.add(ENode::leaf(amount, None));
-            let shl = egraph.add(ENode::op(
+            let shift_amount = egraph.add(amount, &[], None);
+            let shl = egraph.add(
                 template_node(ExprKind::ShiftLeft, None, None),
-                vec![value_class, shift_amount],
-            ));
-            let shr = egraph.add(ENode::op(
+                &[value_class, shift_amount],
+                None,
+            );
+            let shr = egraph.add(
                 template_node(shr_kind, None, None),
-                vec![shl, shift_amount],
-            ));
+                &[shl, shift_amount],
+                None,
+            );
             egraph.union(root_class, shr);
         }),
     }
@@ -1166,7 +1179,7 @@ pub struct InstructionSelectPass {
     /// Target-independent algebraic identities the program e-graph is saturated
     /// with before covering (e.g. discovered `sext`/shift bridges). Populated by
     /// rewrite discovery; empty means selection is purely syntactic tiling.
-    rewrites: Vec<tir::graph::Rewrite<SemNode, ()>>,
+    rewrites: Vec<Rewrite<SemNode, ()>>,
     target_model: Box<dyn TargetIselModel>,
     op_lowerings: Vec<OpLowering>,
     block_cache: HashMap<BlockId, BlockSelectionCache>,
@@ -1203,7 +1216,7 @@ impl InstructionSelectPass {
     /// covering. These are proved equivalences (target-independent bit-vector
     /// lemmas, or sequences discovered against the target's own instructions), so
     /// the rule set stays free of hand-written selection rules.
-    pub fn with_rewrites(mut self, rewrites: Vec<tir::graph::Rewrite<SemNode, ()>>) -> Self {
+    pub fn with_rewrites(mut self, rewrites: Vec<Rewrite<SemNode, ()>>) -> Self {
         self.rewrites = rewrites;
         self
     }
@@ -1530,7 +1543,7 @@ impl InstructionSelectPass {
                     .egraph
                     .nodes(root)
                     .iter()
-                    .any(|n| !n.children.is_empty());
+                    .any(|&id| cache.egraph.children(id).next().is_some());
                 if op_id.is_none() && !is_computed {
                     continue;
                 }
@@ -1622,13 +1635,20 @@ fn completeness_error(
     let mut missing: Vec<ExprKind> = Vec::new();
     for &class in op_by_root.keys() {
         let class = egraph.find(class);
-        if egraph.nodes(class).iter().any(|n| n.children.is_empty()) {
+        if egraph
+            .nodes(class)
+            .iter()
+            .any(|&id| egraph.children(id).next().is_none())
+        {
             continue;
         }
         if has_root.contains(&class) || has_internal.contains(&class) {
             continue;
         }
-        if let Some(kind) = egraph.nodes(class).first().map(|n| n.node.kind)
+        if let Some(kind) = egraph
+            .nodes(class)
+            .first()
+            .map(|&id| egraph.get_node(id).kind)
             && !missing.contains(&kind)
         {
             missing.push(kind);
@@ -1893,8 +1913,14 @@ fn materialization_edge_cost(
         return 0;
     }
     let (Some(parent_kind), Some(child_kind)) = (
-        egraph.nodes(parent).first().map(|n| n.node.kind),
-        egraph.nodes(child).first().map(|n| n.node.kind),
+        egraph
+            .nodes(parent)
+            .first()
+            .map(|&id| egraph.get_node(id).kind),
+        egraph
+            .nodes(child)
+            .first()
+            .map(|&id| egraph.get_node(id).kind),
     ) else {
         return 0;
     };
@@ -1990,7 +2016,7 @@ mod tests {
     use tir::{
         Context, IRBuilder, IRFormatter, Operation, PassManager, TypeId,
         builtin::{FuncOp, IntegerType, ops},
-        graph::{MutDag, OperandConstraint},
+        graph::{Dag, MutDag, OperandConstraint},
         sem_expr::{ExprKind, ExprPayload, ExprPostGraph},
     };
 
@@ -2552,7 +2578,8 @@ mod tests {
     /// shift by `W - n = 48`, exactly the `srai` of the `add, slli, srai` idiom.
     #[test]
     fn saturation_bridges_sign_extension_to_shift_pair() {
-        use tir::graph::{ENode, OperandConstraint, Pattern, PatternExpr, SaturationLimits};
+        use tir::egraph::SaturationLimits;
+        use tir::graph::{OperandConstraint, Pattern, PatternExpr};
         use tir::sem_expr::{ExprKind, ExprPayload};
         use tir::utils::APInt;
 
@@ -2563,22 +2590,25 @@ mod tests {
         // SExt(v @ i16, 64), typed i64 — the program graph node no RV64 base
         // instruction can root.
         let mut egraph = SemEGraph::new();
-        let v = egraph.add(ENode::leaf(
+        let v = egraph.add(
             template_node(ExprKind::Symbol, Some(ExprPayload::SymbolId(0)), Some(i16)),
+            &[],
             None,
-        ));
-        let width = egraph.add(ENode::leaf(
+        );
+        let width = egraph.add(
             template_node(
                 ExprKind::Constant,
                 Some(ExprPayload::Int(APInt::new(64, 64))),
                 None,
             ),
+            &[],
             None,
-        ));
-        let sext = egraph.add(ENode::op(
+        );
+        let sext = egraph.add(
             template_node(ExprKind::SExt, None, Some(i64)),
-            vec![v, width],
-        ));
+            &[v, width],
+            None,
+        );
 
         let rewrite = extension_rewrite(ExprKind::SExt, ExprKind::ShiftRightArithmetic);
         egraph.saturate(
@@ -2592,7 +2622,7 @@ mod tests {
             egraph
                 .nodes(sext)
                 .iter()
-                .any(|n| n.node.kind == ExprKind::ShiftRightArithmetic),
+                .any(|&id| egraph.get_node(id).kind == ExprKind::ShiftRightArithmetic),
             "saturation should add the arithmetic-shift bridge to the sext class"
         );
 
@@ -2620,7 +2650,7 @@ mod tests {
         let shift_amount = egraph
             .nodes(m.binding(imm))
             .iter()
-            .find_map(|n| match n.node.payload.as_ref() {
+            .find_map(|&id| match egraph.get_node(id).payload.as_ref() {
                 Some(ExprPayload::Int(v)) => Some(v.to_u64()),
                 _ => None,
             })
