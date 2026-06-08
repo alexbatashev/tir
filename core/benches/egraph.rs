@@ -1,257 +1,268 @@
+//! Symbolic-math equality-saturation benchmark for TIR's e-graph, modelled on
+//! egg's `tests/math.rs`. The `egg_math` bench runs the identical workload on egg
+//! for comparison; both build their rules from [`shared::RULES`] and seed the same
+//! [`shared::SEED_EXPRS`].
+
+use std::collections::HashMap;
 use std::hint::black_box;
 
-use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use tir::Context;
-use tir::egraph::{EGraph, Rewrite, SaturationLimits};
-use tir::graph::{Dag, GenericDag, MutDag, NodeId, Pattern, PatternExpr};
-use tir::sem_expr::ExprKind;
+use tir::egraph::{EClassId, EGraph, EMatch, Rewrite, SaturationLimits};
+use tir::graph::{Dag, Matchable, NodeId, Pattern, PatternExpr};
 
-const SIZES: [usize; 3] = [100, 1_000, 5_000];
-const DEPTHS: [usize; 3] = [10, 50, 200];
-const CONGRUENCE_SIZES: [usize; 3] = [50, 200, 500];
-const TREE_DEPTHS: [usize; 3] = [4, 6, 8];
+#[path = "math_shared.rs"]
+mod shared;
+use shared::{Cond, PRE_SAT_ITERS, RULES, RuleSpec, SAT_ITERS, SEED_EXPRS};
 
-fn sym(g: &mut EGraph<ExprKind, ()>) -> tir::egraph::EClassId {
-    g.add(ExprKind::Symbol, &[], None)
+/// The math language label. Constants and symbols carry their value/name in the
+/// label (not the leaf payload) so e-matching distinguishes `0` from `2` and `x`
+/// from `y` by ordinary label equality.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+enum Math {
+    Diff,
+    Integral,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Pow,
+    Ln,
+    Sqrt,
+    Sin,
+    Cos,
+    Constant(i64),
+    Symbol(String),
 }
 
-fn unary(
-    g: &mut EGraph<ExprKind, ()>,
-    k: ExprKind,
-    a: tir::egraph::EClassId,
-) -> tir::egraph::EClassId {
-    g.add(k, &[a], None)
-}
-
-fn build_sqrt_chain(depth: usize) -> EGraph<ExprKind, ()> {
-    let mut g = EGraph::new();
-    let mut cur = sym(&mut g);
-    for _ in 0..depth {
-        cur = unary(&mut g, ExprKind::Sqrt, cur);
+impl Matchable for Math {
+    fn is_leaf(&self, _: &Context) -> bool {
+        matches!(self, Math::Constant(_) | Math::Symbol(_))
     }
-    g
-}
 
-fn build_shared_adds(n: usize) -> (EGraph<ExprKind, ()>, tir::egraph::EClassId) {
-    let mut g = EGraph::new();
-    let a = sym(&mut g);
-    let b = sym(&mut g);
-    let mut last = g.add(ExprKind::Add, &[a, b], None);
-    for _ in 1..n {
-        last = g.add(ExprKind::Add, &[a, b], None);
-    }
-    (g, last)
-}
-
-fn build_many_adds(n: usize) -> EGraph<ExprKind, ()> {
-    let mut g = EGraph::new();
-    for i in 0..n {
-        let a = sym(&mut g);
-        let b = sym(&mut g);
-        black_box(g.add(ExprKind::Add, &[a, b], None));
-        black_box(i);
-    }
-    g
-}
-
-fn build_union_chain(n: usize) -> EGraph<ExprKind, ()> {
-    let mut g = EGraph::new();
-    let mut classes: Vec<tir::egraph::EClassId> = (0..n).map(|_| sym(&mut g)).collect();
-    for i in 1..n {
-        let merged = g.union(classes[i - 1], classes[i]);
-        classes[i] = merged;
-    }
-    g
-}
-
-/// `n` symbols each wrapped in a distinct `Sqrt`, then every symbol unioned into
-/// the first. The unions are left unrepaired so a following `rebuild` must collapse
-/// all `n` `Sqrt` applications into one class — the congruence-heavy case.
-fn build_congruent_graph(n: usize) -> EGraph<ExprKind, ()> {
-    let mut g = EGraph::new();
-    let symbols: Vec<_> = (0..n).map(|_| sym(&mut g)).collect();
-    let sqrts: Vec<_> = symbols
-        .iter()
-        .map(|&s| unary(&mut g, ExprKind::Sqrt, s))
-        .collect();
-    black_box(&sqrts);
-    for i in 1..n {
-        g.union(symbols[0], symbols[i]);
-    }
-    g
-}
-
-fn build_binary_tree_dag(depth: usize) -> GenericDag<ExprKind, ()> {
-    let mut dag = GenericDag::new();
-    let leaf_count = 1usize << (depth - 1);
-    let mut level: Vec<NodeId> = (0..leaf_count)
-        .map(|_| dag.add_node(ExprKind::Symbol))
-        .collect();
-    while level.len() > 1 {
-        let mut next = Vec::new();
-        for chunk in level.chunks(2) {
-            let add = dag.add_node(ExprKind::Add);
-            dag.add_edge(add, chunk[0]);
-            dag.add_edge(add, chunk[1]);
-            next.push(add);
+    fn num_children(&self, _: &Context) -> usize {
+        match self {
+            Math::Constant(_) | Math::Symbol(_) => 0,
+            Math::Ln | Math::Sqrt | Math::Sin | Math::Cos => 1,
+            _ => 2,
         }
-        level = next;
     }
-    dag
-}
 
-fn add_pattern() -> Pattern<ExprKind, ()> {
-    let mut pattern = Pattern::new(());
-    let pl = pattern.add_node(PatternExpr::Leaf);
-    let pr = pattern.add_node(PatternExpr::Leaf);
-    let proot = pattern.add_node(PatternExpr::Node(ExprKind::Add));
-    pattern.add_edge(proot, pl);
-    pattern.add_edge(proot, pr);
-    pattern.set_root(proot);
-    pattern
-}
-
-fn mul_to_add_rewrite() -> Rewrite<ExprKind, ()> {
-    let mut searcher = Pattern::new(());
-    let sl = searcher.add_node(PatternExpr::Boundary);
-    let sr = searcher.add_node(PatternExpr::Boundary);
-    let sroot = searcher.add_node(PatternExpr::Node(ExprKind::Mul));
-    searcher.add_edge(sroot, sl);
-    searcher.add_edge(sroot, sr);
-    searcher.set_root(sroot);
-
-    Rewrite::new(
-        "mul-to-add",
-        searcher,
-        Box::new(|_ctx, g, m| {
-            let l = m.binding(NodeId::from_index(0));
-            let r = m.binding(NodeId::from_index(1));
-            let added = g.add(ExprKind::Add, &[l, r], None);
-            g.union(m.root(), added);
-        }),
-    )
-}
-
-fn egraph_add_unique(c: &mut Criterion) {
-    let mut group = c.benchmark_group("egraph/add_unique");
-    for size in SIZES {
-        group.throughput(Throughput::Elements(size as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &size| {
-            b.iter(|| {
-                let mut g = EGraph::new();
-                for _ in 0..size {
-                    black_box(sym(&mut g));
-                }
-                g
-            });
-        });
+    // Commutativity is expressed only by the comm-add / comm-mul rules (as in egg),
+    // never by the matcher, so both engines explore it the same way.
+    fn is_commutative(&self) -> bool {
+        false
     }
-    group.finish();
-}
 
-fn egraph_add_shared(c: &mut Criterion) {
-    let mut group = c.benchmark_group("egraph/add_shared");
-    for size in SIZES {
-        group.throughput(Throughput::Elements(size as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &size| {
-            b.iter(|| {
-                let mut g = EGraph::new();
-                let a = sym(&mut g);
-                let b = sym(&mut g);
-                for _ in 0..size {
-                    black_box(g.add(ExprKind::Add, &[a, b], None));
-                }
-                g
-            });
-        });
+    fn is_constant(&self) -> bool {
+        matches!(self, Math::Constant(_))
     }
-    group.finish();
 }
 
-fn egraph_add_chain(c: &mut Criterion) {
-    let mut group = c.benchmark_group("egraph/add_chain");
-    for depth in DEPTHS {
-        group.throughput(Throughput::Elements(depth as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(depth), &depth, |b, &depth| {
-            b.iter(|| build_sqrt_chain(depth));
-        });
+enum Sexp {
+    Atom(String),
+    List(Vec<Sexp>),
+}
+
+fn tokenize(s: &str) -> Vec<String> {
+    s.replace('(', " ( ")
+        .replace(')', " ) ")
+        .split_whitespace()
+        .map(str::to_string)
+        .collect()
+}
+
+fn parse_tokens(toks: &[String], pos: &mut usize) -> Sexp {
+    let tok = toks[*pos].clone();
+    *pos += 1;
+    if tok == "(" {
+        let mut items = Vec::new();
+        while toks[*pos] != ")" {
+            items.push(parse_tokens(toks, pos));
+        }
+        *pos += 1;
+        Sexp::List(items)
+    } else {
+        Sexp::Atom(tok)
     }
-    group.finish();
 }
 
-fn egraph_union(c: &mut Criterion) {
-    let mut group = c.benchmark_group("egraph/union");
-    for size in SIZES {
-        group.throughput(Throughput::Elements(size as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &size| {
-            b.iter(|| {
-                let mut g = EGraph::new();
-                let mut classes: Vec<_> = (0..size).map(|_| sym(&mut g)).collect();
-                for i in 1..size {
-                    classes[i] = black_box(g.union(classes[i - 1], classes[i]));
-                }
-                g
-            });
-        });
+fn parse_sexp(s: &str) -> Sexp {
+    let toks = tokenize(s);
+    let mut pos = 0;
+    parse_tokens(&toks, &mut pos)
+}
+
+fn is_var(a: &str) -> bool {
+    a.starts_with('?')
+}
+
+fn atom_str(e: &Sexp) -> &str {
+    match e {
+        Sexp::Atom(a) => a,
+        Sexp::List(_) => panic!("expected operator atom"),
     }
-    group.finish();
 }
 
-fn egraph_find(c: &mut Criterion) {
-    let mut group = c.benchmark_group("egraph/find");
-    for size in SIZES {
-        let g = build_union_chain(size);
-        group.throughput(Throughput::Elements(1));
-        group.bench_with_input(BenchmarkId::from_parameter(size), &g, |b, g| {
-            let class = g.classes().next().unwrap();
-            b.iter(|| black_box(g.find(class)));
-        });
+fn op_label(head: &str) -> Math {
+    match head {
+        "+" => Math::Add,
+        "-" => Math::Sub,
+        "*" => Math::Mul,
+        "/" => Math::Div,
+        "pow" => Math::Pow,
+        "ln" => Math::Ln,
+        "sqrt" => Math::Sqrt,
+        "sin" => Math::Sin,
+        "cos" => Math::Cos,
+        "d" => Math::Diff,
+        "i" => Math::Integral,
+        other => panic!("unknown operator {other}"),
     }
-    group.finish();
 }
 
-fn egraph_class_of(c: &mut Criterion) {
-    let mut group = c.benchmark_group("egraph/class_of");
-    for size in SIZES {
-        let g = build_sqrt_chain(size);
-        group.throughput(Throughput::Elements(1));
-        group.bench_with_input(BenchmarkId::from_parameter(size), &g, |b, g| {
-            let node = NodeId::from_index(g.len() - 1);
-            b.iter(|| black_box(g.class_of(node)));
-        });
+fn add_expr(g: &mut EGraph<Math, ()>, e: &Sexp) -> EClassId {
+    match e {
+        Sexp::Atom(a) => {
+            if let Ok(n) = a.parse::<i64>() {
+                g.add(Math::Constant(n), &[], None)
+            } else {
+                g.add(Math::Symbol(a.clone()), &[], None)
+            }
+        }
+        Sexp::List(items) => {
+            let children: Vec<EClassId> = items[1..].iter().map(|c| add_expr(g, c)).collect();
+            g.add(op_label(atom_str(&items[0])), &children, None)
+        }
     }
-    group.finish();
 }
 
-fn egraph_rebuild_congruent(c: &mut Criterion) {
-    let mut group = c.benchmark_group("egraph/rebuild_congruent");
-    for size in CONGRUENCE_SIZES {
-        group.throughput(Throughput::Elements(size as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &size| {
+fn build_searcher(e: &Sexp) -> (Pattern<Math, ()>, HashMap<String, NodeId>) {
+    let mut p = Pattern::new(());
+    let mut vars = HashMap::new();
+    let root = add_pat(&mut p, e, &mut vars);
+    p.set_root(root);
+    (p, vars)
+}
+
+fn add_pat(p: &mut Pattern<Math, ()>, e: &Sexp, vars: &mut HashMap<String, NodeId>) -> NodeId {
+    match e {
+        Sexp::Atom(a) => {
+            if is_var(a) {
+                *vars
+                    .entry(a.clone())
+                    .or_insert_with(|| p.add_node(PatternExpr::Boundary))
+            } else if let Ok(n) = a.parse::<i64>() {
+                p.add_node(PatternExpr::Node(Math::Constant(n)))
+            } else {
+                p.add_node(PatternExpr::Node(Math::Symbol(a.clone())))
+            }
+        }
+        Sexp::List(items) => {
+            let node = p.add_node(PatternExpr::Node(op_label(atom_str(&items[0]))));
+            for c in &items[1..] {
+                let cn = add_pat(p, c, vars);
+                p.add_edge(node, cn);
+            }
+            node
+        }
+    }
+}
+
+fn instantiate(g: &mut EGraph<Math, ()>, e: &Sexp, vars: &HashMap<String, EClassId>) -> EClassId {
+    match e {
+        Sexp::Atom(a) => {
+            if is_var(a) {
+                vars[a]
+            } else if let Ok(n) = a.parse::<i64>() {
+                g.add(Math::Constant(n), &[], None)
+            } else {
+                g.add(Math::Symbol(a.clone()), &[], None)
+            }
+        }
+        Sexp::List(items) => {
+            let children: Vec<EClassId> =
+                items[1..].iter().map(|c| instantiate(g, c, vars)).collect();
+            g.add(op_label(atom_str(&items[0])), &children, None)
+        }
+    }
+}
+
+fn class_has(g: &EGraph<Math, ()>, class: EClassId, pred: impl Fn(&Math) -> bool) -> bool {
+    g.nodes(class).iter().any(|&id| pred(g.get_node(id)))
+}
+
+fn eval_cond(c: &Cond, g: &EGraph<Math, ()>, vars: &HashMap<String, EClassId>) -> bool {
+    match *c {
+        Cond::NotZero(v) => !class_has(g, vars[v], |n| matches!(n, Math::Constant(0))),
+        Cond::Sym(v) => class_has(g, vars[v], |n| matches!(n, Math::Symbol(_))),
+        Cond::Const(v) => class_has(g, vars[v], |n| matches!(n, Math::Constant(_))),
+        Cond::ConstOrDistinct(cv, xv) => {
+            g.find(vars[cv]) != g.find(vars[xv])
+                && (class_has(g, vars[cv], |n| matches!(n, Math::Constant(_)))
+                    || class_has(g, vars[cv], |n| matches!(n, Math::Symbol(_))))
+        }
+    }
+}
+
+fn build_rule(spec: &RuleSpec) -> Rewrite<Math, ()> {
+    let (searcher, var_nodes) = build_searcher(&parse_sexp(spec.lhs));
+    let rhs = parse_sexp(spec.rhs);
+    let conds = spec.conds;
+    let apply = Box::new(
+        move |_ctx: &Context, g: &mut EGraph<Math, ()>, m: &EMatch| {
+            let vars: HashMap<String, EClassId> = var_nodes
+                .iter()
+                .map(|(name, &node)| (name.clone(), m.binding(node)))
+                .collect();
+            if !conds.iter().all(|c| eval_cond(c, g, &vars)) {
+                return;
+            }
+            let new = instantiate(g, &rhs, &vars);
+            g.union(m.root(), new);
+        },
+    );
+    Rewrite::new(spec.name, searcher, apply)
+}
+
+fn build_rules() -> Vec<Rewrite<Math, ()>> {
+    RULES.iter().map(build_rule).collect()
+}
+
+fn seed_all() -> EGraph<Math, ()> {
+    let mut g = EGraph::new();
+    for s in SEED_EXPRS {
+        add_expr(&mut g, &parse_sexp(s));
+    }
+    g
+}
+
+fn limits(iters: usize) -> SaturationLimits {
+    SaturationLimits {
+        max_iterations: iters,
+        max_classes: 1_000_000,
+    }
+}
+
+fn extract_cost(node: &Math, _: &[u64]) -> u64 {
+    match node {
+        Math::Diff | Math::Integral => 100,
+        _ => 1,
+    }
+}
+
+fn bench_saturate(c: &mut Criterion) {
+    let ctx = Context::default();
+    let rules = build_rules();
+    let mut group = c.benchmark_group("tir_math/saturate");
+    for &iters in SAT_ITERS {
+        group.bench_with_input(BenchmarkId::from_parameter(iters), &iters, |b, &iters| {
             b.iter_batched(
-                || build_congruent_graph(size),
-                |mut g| g.rebuild(),
-                BatchSize::SmallInput,
-            );
-        });
-    }
-    group.finish();
-}
-
-fn egraph_rebuild(c: &mut Criterion) {
-    let mut group = c.benchmark_group("egraph/rebuild");
-    for depth in DEPTHS {
-        group.throughput(Throughput::Elements(1));
-        group.bench_with_input(BenchmarkId::from_parameter(depth), &depth, |b, &depth| {
-            b.iter_batched(
-                || {
-                    let mut g = build_sqrt_chain(depth);
-                    let a = sym(&mut g);
-                    let fa = unary(&mut g, ExprKind::Sqrt, a);
-                    g.union(fa, a);
+                seed_all,
+                |mut g| {
+                    g.saturate(&ctx, &rules, limits(iters));
                     g
                 },
-                |mut g| g.rebuild(),
                 BatchSize::SmallInput,
             );
         });
@@ -259,120 +270,35 @@ fn egraph_rebuild(c: &mut Criterion) {
     group.finish();
 }
 
-fn egraph_add_dag(c: &mut Criterion) {
-    let mut group = c.benchmark_group("egraph/add_dag");
-    for depth in TREE_DEPTHS {
-        let dag = build_binary_tree_dag(depth);
-        let root = dag.root().unwrap();
-        let nodes = 1usize << (depth - 1);
-        group.throughput(Throughput::Elements(nodes as u64));
-        group.bench_with_input(
-            BenchmarkId::from_parameter(depth),
-            &(dag, root),
-            |b, (dag, root)| {
-                b.iter(|| {
-                    let mut g = EGraph::new();
-                    black_box(g.add_dag(dag, *root));
-                    g
-                });
-            },
-        );
-    }
-    group.finish();
-}
-
-fn egraph_ematch(c: &mut Criterion) {
+fn bench_ematch(c: &mut Criterion) {
     let ctx = Context::default();
-    let pattern = add_pattern();
-    let mut group = c.benchmark_group("egraph/ematch");
-    for size in SIZES {
-        let g = build_many_adds(size);
-        group.throughput(Throughput::Elements(1));
-        group.bench_with_input(BenchmarkId::from_parameter(size), &g, |b, g| {
-            b.iter(|| black_box(g.ematch(&ctx, &pattern)));
+    let rules = build_rules();
+    let mut g = seed_all();
+    g.saturate(&ctx, &rules, limits(PRE_SAT_ITERS));
+    let mut group = c.benchmark_group("tir_math/ematch");
+    group.bench_function("all_rules", |b| {
+        b.iter(|| {
+            let mut total = 0usize;
+            for rule in &rules {
+                total += black_box(g.ematch(&ctx, rule.lhs())).len();
+            }
+            total
         });
-    }
+    });
     group.finish();
 }
 
-fn egraph_saturate(c: &mut Criterion) {
+fn bench_extract(c: &mut Criterion) {
     let ctx = Context::default();
-    let rewrite = mul_to_add_rewrite();
-    let rewrites = [rewrite];
-    let limits = SaturationLimits {
-        max_iterations: 30,
-        max_classes: 10_000,
-    };
-    let mut group = c.benchmark_group("egraph/saturate");
-    for size in [10, 50, 100] {
-        group.throughput(Throughput::Elements(1));
-        group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &size| {
-            b.iter_batched(
-                || {
-                    let mut g = EGraph::new();
-                    for _ in 0..size {
-                        let a = sym(&mut g);
-                        let b = sym(&mut g);
-                        g.add(ExprKind::Mul, &[a, b], None);
-                    }
-                    g
-                },
-                |mut g| g.saturate(&ctx, &rewrites, limits),
-                BatchSize::SmallInput,
-            );
-        });
-    }
+    let rules = build_rules();
+    let mut g = seed_all();
+    g.saturate(&ctx, &rules, limits(PRE_SAT_ITERS));
+    let mut group = c.benchmark_group("tir_math/extract");
+    group.bench_function("best", |b| {
+        b.iter(|| black_box(g.extract_best(extract_cost)));
+    });
     group.finish();
 }
 
-fn egraph_extract_best(c: &mut Criterion) {
-    let mut group = c.benchmark_group("egraph/extract_best");
-    for depth in DEPTHS {
-        let g = build_sqrt_chain(depth);
-        group.throughput(Throughput::Elements(1));
-        group.bench_with_input(BenchmarkId::from_parameter(depth), &g, |b, g| {
-            b.iter(|| {
-                black_box(g.extract_best(|kind, _| match kind {
-                    ExprKind::Mul => 100,
-                    ExprKind::Add => 1,
-                    _ => 1,
-                }))
-            });
-        });
-    }
-    group.finish();
-}
-
-fn egraph_nodes_lookup(c: &mut Criterion) {
-    let mut group = c.benchmark_group("egraph/nodes_lookup");
-    for size in SIZES {
-        let (g, class) = build_shared_adds(size);
-        group.throughput(Throughput::Elements(1));
-        group.bench_with_input(
-            BenchmarkId::from_parameter(size),
-            &(g, class),
-            |b, (g, class)| {
-                b.iter(|| black_box(g.nodes(*class)));
-            },
-        );
-    }
-    group.finish();
-}
-
-criterion_group!(
-    benches,
-    egraph_add_unique,
-    egraph_add_shared,
-    egraph_add_chain,
-    egraph_union,
-    egraph_find,
-    egraph_class_of,
-    egraph_rebuild_congruent,
-    egraph_rebuild,
-    egraph_add_dag,
-    egraph_ematch,
-    egraph_saturate,
-    egraph_extract_best,
-    egraph_nodes_lookup,
-);
+criterion_group!(benches, bench_saturate, bench_ematch, bench_extract);
 criterion_main!(benches);

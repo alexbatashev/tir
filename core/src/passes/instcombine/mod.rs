@@ -485,4 +485,3 @@ impl Layout {
         OperationRef::new(context.get_op(op_id), block, None)
     }
 }
-
