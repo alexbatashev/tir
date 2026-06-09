@@ -1,0 +1,314 @@
+# Instruction Selection
+
+Instruction selection (`backends/common/src/isel/`) turns target-independent IR
+into target instructions. It is **e-graph + PBQP**: each basic block is lowered to
+a semantic e-graph, saturated with proved algebraic identities, tiled against the
+target's instruction patterns, and the cheapest legal cover is found by solving a
+Partitioned Boolean Quadratic Problem (PBQP).
+
+Nothing in the pass hardcodes a semantics, cost, or rule. A target supplies a list
+of `Rule`s (a semantic pattern + an emitter) and an optional cost model; the pass
+does the rest.
+
+## Module layout
+
+| module | responsibility |
+|--------|----------------|
+| `isel/mod.rs` | public API (`Rule`, `EmitRequest`, cost-model traits), the pass driver and per-block cache |
+| `isel/node.rs` | the `SemNode` label, `SemPayload`, and e-class helpers (`class_binding`, widths) |
+| `isel/builder.rs` | `SemDagBuilder`: IR ops → semantic e-graph, including memory effects |
+| `isel/pattern.rs` | `compile_isel_pattern`: rule semantics → matchable `Pattern`s |
+| `isel/rewrites.rs` | discovery of proved algebraic rewrites (`discover_rewrites`) |
+| `isel/cover.rs` | PBQP construction, match dominance pruning, completeness check |
+| `isel/emit.rs` | `BlockPlan` and `EmissionBuilder`: cover → per-op decisions |
+
+## Pipeline
+
+```mermaid
+flowchart LR
+    subgraph per_block["per block, cached in BlockSelectionCache"]
+        ir["IR block"] -->|"1 - build (SemDagBuilder)"| eg["SemEGraph\n(hash-consed semantics)"]
+        eg -->|"2 - saturate with\nproved rewrites"| sat["saturated e-graph"]
+        rules["rules"] -->|compile_isel_pattern| pats["CompiledIselPattern"]
+        pats -->|"3 - ematch + prune\n(collect_block_matches)"| matches["PbqpIselMatch list"]
+        sat --> matches
+        matches -->|"4 - build_eclass_cover\n+ pbqp::solve"| cover["DagCover\n(one alternative per class)"]
+        cover -->|"5 - solve_block\n(EmissionBuilder)"| plan["BlockPlan"]
+        plan -->|"6 - commit_block_solution"| out["rewriter: insert / replace / erase ops"]
+    end
+```
+
+The pass runs per function. The first op it visits in a block triggers
+`commit_block_solution`, which builds and solves the **whole block** at once
+(`emitted_blocks` guards against re-emitting). Results are memoized in
+`block_cache` keyed by `BlockId`, so building and solving each happen once.
+
+## 1. Building the semantic e-graph
+
+`SemDagBuilder` lowers every op in the block into one shared
+`SemEGraph = EGraph<SemNode, ()>`. There is no separate DAG arena: the e-graph
+hash-conses, so it *is* the interned semantic DAG, and identical sub-expressions
+across ops collapse to one e-class (CSE for free).
+
+### What a node is
+
+An e-node is a **label** plus its **operand e-classes**. The label is a
+`SemNode`:
+
+```rust
+struct SemNode { kind: ExprKind, payload: Option<SemPayload>, ty: Option<TypeId> }
+
+enum SemPayload {
+    Expr(ExprPayload), // a semantic constant / symbol / value
+    Opaque(u32),       // a unique, never-merging marker (see below)
+}
+```
+
+Structure (the operands) lives in the e-node's child classes, never in the label.
+So two e-nodes are congruent iff they share a label *and* the same operand classes
+— exactly what `PartialEq`/`Hash` compare. `ty` is the verbatim IR type (no width
+normalization), so every target can constrain on the widths it distinguishes.
+
+```
+   add : i32                       a SemNode label is just (kind, payload, ty);
+   ┌──────────┐                    operands are edges to child classes
+   │ kind=Add │
+   │ ty =i32  │ ──┬──► class[x]    (symbol, ty=i32)
+   └──────────┘   └──► class[y]    (symbol, ty=i32)
+```
+
+`ExprKind` / `ExprPayload` come from each op's `semantic_expr` (the sem-DSL), so a
+multi-node expansion (e.g. a load becomes `LoadMemory(add(addr, sext(0)), bytes,
+meta)`) lands as several e-nodes.
+
+### Opaque payloads: things that must never merge
+
+`SemPayload::Opaque(serial)` makes a node label unique, defeating hash-consing
+and saturation's congruence repair, while still matching any untyped pattern
+node of the same kind (a pattern payload of `None` is a wildcard). It is used
+for:
+
+- **un-lowerable sub-expressions** (`add_opaque`): two unknown computations are
+  never assumed equal;
+- **memory effects and their addressing wrappers** (`add_op_unique`): loads are
+  not pure values (two loads of one address differ across an intervening
+  store), and a pattern-internal e-class can only be fused into a *single*
+  match, so sharing the synthetic `addr + sext(0)` wrapper between memory ops
+  would make any block with two of them uncoverable.
+
+### Memory ops
+
+Ops implementing `MemoryRead` / `MemoryWrite` are lowered by
+`build_memory_effect` into `LoadMemory` / `StoreMemory` nodes whose address is
+wrapped as `addr + sext(0)` so the targets' base+offset addressing patterns
+match a bare pointer. The interfaces are the only trigger; there is no op-name
+matching.
+
+### Side tables produced by the build
+
+| table | meaning |
+|-------|---------|
+| `op_by_root: EClassId → OpId` | the **earliest** op whose result the class produces |
+| `op_root: OpId → EClassId` | every op's canonical root class (total, unlike `op_by_root`) |
+| `class_value: EClassId → ValueId` | the IR value a class computes (so an interior result can be re-materialized as a register) |
+| `shared_classes: Set<EClassId>` | a value used as an operand by **>1 consumer**; it must stay a register and can never be internalized into a larger match |
+
+When saturation merges two value-carrying classes (the values are provably
+equal), both maps deterministically keep the **earliest-defined** op/value: it
+dominates every later use in the block.
+
+## 2. Saturation with proved rewrites
+
+Before tiling, the e-graph is saturated with target-independent algebraic
+identities (`self.rewrites`). These are **not** hand-written selection rules — they
+are bit-vector lemmas the target's own instructions happen to realize.
+
+`discover_rewrites` finds them: if the target has an atomic `slli` plus the
+matching right shift, it confirms the standard shift-pair extension identity
+against a `FuzzOracle` and emits a width-parameterized rewrite:
+
+```
+   SExt(v, W)   ──rewrite──►   ShiftRightArithmetic( ShiftLeft(v, W-n), W-n )
+                                                            with n = width(v)
+```
+
+After `egraph.union`, the `SExt` class *also contains* the shift-pair form, so a
+target with no sub-word sign-extend instruction can still cover it via shifts. The
+introduced shift nodes are untyped, so they match width-agnostic shift patterns.
+
+> Saturation may merge classes, so `op_by_root` and `class_value` are
+> re-canonicalized through `egraph.find` afterwards (earliest definition wins,
+> see §1).
+
+## 3. Patterns and matches
+
+Each `Rule`'s pattern is compiled once (`compile_isel_pattern`) into a
+`Pattern<SemNode>`. Operand leaves become **Boundary** nodes (capture points,
+recorded in `boundary_symbols`); interior nodes become typed/untyped `Node`s.
+`specificity` counts type-constrained nodes — the tie-breaker (see below).
+
+`collect_block_matches` ematches every pattern against the saturated e-graph,
+producing a `PbqpIselMatch` per hit:
+
+```rust
+struct PbqpIselMatch {
+    pattern_index, rule_index,
+    root: EClassId,           // class this match would compute
+    pattern_root: NodeId,
+    bindings: FullMatchBindings,  // pattern_node → class, + symbol → class captures
+    cost: u64,                    // the cost model's node cost, unmodified
+}
+```
+
+A match rooted at a pure operand (leaf/constant) is discarded — instructions root
+at *computed* values only. Shared classes (§1) are allowed as a match root or
+boundary, but never as an interior node a larger match would erase.
+
+### Dominance pruning (specificity)
+
+Before the solve, `prune_dominated_matches` deduplicates interchangeable
+matches: among matches with the same root class, the same internal-class
+coverage, and the same boundary operands, the one that is no cheaper *and* no
+more specific is dropped. So at **equal cost** the type-constrained rule wins
+(an `i32 addw` beats the untyped `add`), while a genuinely cheaper instruction
+still wins on cost alone — and specificity never distorts the PBQP objective.
+
+## 4. The PBQP cover
+
+`build_eclass_cover` maps the tiling problem onto PBQP: **one PBQP node per
+e-class**, each offering a set of **alternatives**:
+
+```
+   PbqpIselAlternative
+   ├─ External                       leaf, or a value materialized in a register
+   ├─ Root { match_id }              this class is the instruction's result   ← cost lives here
+   └─ Internal { match_id, p_node }  this class is an interior node of that match (cost 0)
+```
+
+Only the **Root** alternative carries the match's cost; interior nodes are free
+(the paper's convention). A match spanning multiple e-classes is held together by a
+**coherence set** — pick Root for the match here, and you must pick the matching
+Internal everywhere else, or none.
+
+Edges follow each match's pattern structure (parent class → operand class). The
+compatibility matrix sets `INF_COST` for incoherent pairs and asks
+`alternatives_compatible`:
+
+```
+   parent Root/Internal expects child to be …
+   ├─ Materialized   (child sits under a Boundary)  → child must be Root or External
+   └─ SameMatch      (child is an interior pattern node) → child must be exactly
+                                                            that Internal{match,node}
+```
+
+Finite edges may additionally carry a **materialization cost** from the cost model
+(`materialization_edge_cost` → `edge_cost`), pricing e.g. forcing a value into a
+register. `pbqp::solve` returns the min-cost assignment as a `DagCover` (one chosen
+alternative per class).
+
+### Worked example: `square` lowering
+
+`extsi(addi(a, b) : i16) : i64` with RV-style rules `add`, `slli`, `srai`:
+
+```
+  build + saturate                        cover                       emit
+  ─────────────────                       ─────                       ────
+  Add(a,b) : i16   ◄── op_by_root         Root: add        ─────────► addi
+       │                                                                │
+  SExt(·, 64): i64 ◄── op_by_root         class also holds            (interior
+       │  saturate adds ▼                 srai(slli(·,48),48)          slli has
+  ShiftRightArith( ShiftLeft(·,48), 48)   Root: srai                   NO op →
+              ▲ introduced (no op)        Root: slli (introduced) ───► introduced
+                                                                        emit before
+                                                                        srai)
+                                          ──────────────────────────► addi, slli, srai
+```
+
+The `slli` e-class came from saturation and backs no original IR op, so the
+`EmissionBuilder` materializes it as a fresh-valued instruction inserted *before*
+its consumer (an `IntroducedEmit`).
+
+## 5. Planning emission
+
+`solve_block` reads the cover into a `BlockPlan`:
+
+```rust
+struct BlockPlan {
+    op_decisions: HashMap<OpId, BlockDecision>,   // Emit{rule,match} | Consume
+    introduced: Vec<IntroducedEmit>,              // operand-first order
+}
+```
+
+- A class chosen **Root** and backed by an op → `Emit` that op with the rule.
+- A class chosen **Internal** and backed by an op → `Consume` (erased; folded into
+  its parent instruction).
+- A **Root** class with no backing op → an `IntroducedEmit` (the saturation `slli`).
+
+`EmissionBuilder::resolve_match` turns a chosen match into a concrete
+`RuleMatch` — the symbol→operand bindings the emitter reads. Operand resolution
+order (`class_binding`): introduced fresh value → constant immediate → input value
+→ intermediate result value.
+
+`completeness_error` runs **before** solving: every non-terminal op-root class must
+be a Root or interior of *some* match, else selection fails naming the unsupported
+`ExprKind` ("missing atomic materializer rule for semantic kind …"). This is how an
+incomplete rule set is rejected instead of silently dropping an op.
+
+## 6. Committing
+
+`commit_block_solution` applies the plan through the `Rewriter`:
+
+1. Insert each `IntroducedEmit` before its anchor (operand-first). Its
+   `EmitRequest` carries only the fresh destination value (`op: None`).
+2. For each original op: `replace_op` (Emit) or `erase_op` (Consume).
+3. Drop `constant` ops left dead — an immediate folded into an instruction
+   attribute detaches the constant's only use, so the maintained def-use chain
+   reports zero uses and it is erased.
+
+## Cost model
+
+Two layers, both target-overridable:
+
+```
+   TargetIselModel              IselCostModel
+   ├─ is_pbqp_enabled           ├─ node_cost   (root alternative; base + dynamic + pressure)
+   ├─ supports_rule             ├─ edge_cost   (materialization edges)
+   ├─ estimate_register_pressure└─ pressure_weight
+   └─ cost_model() ─────────────►
+```
+
+The default reproduces `base_cost + dynamic_cost_fn`. Costs enter PBQP
+unmodified; equal-cost ties between interchangeable matches are resolved by
+dominance pruning (§3), not by cost tweaks.
+
+## Emitters
+
+Each rule's emitter is `fn(&Context, &EmitRequest, &RuleMatch) -> EmitPlan`:
+
+```rust
+struct EmitRequest<'a> {
+    op: Option<&'a OperationRef>, // None for a rewrite-introduced instruction
+    results: &'a [ValueId],       // destination values
+    result_ty: Option<TypeId>,
+}
+```
+
+By convention an emitter writes its destination *into the original result
+`ValueId`* (TMDL-generated emitters store it as the destination register
+attribute), so consumers and later passes keep referencing the same values —
+`replace_op` does not rewrite uses.
+
+## Key types at a glance
+
+| type | role |
+|------|------|
+| `SemNode` | e-graph label: `(kind, payload, ty)` |
+| `SemDagBuilder` | lowers a block's ops into the e-graph |
+| `Rule` | a target's pattern + emitter + cost/legality hooks |
+| `CompiledIselPattern` | a rule's pattern compiled for ematch, with boundary symbols + specificity |
+| `PbqpIselMatch` | one ematch hit: root class, bindings, cost |
+| `BlockSelectionCache` | per-block memo: egraph + side tables + solved plan |
+| `BlockPlan` / `IntroducedEmit` | the emission plan and its synthesized instructions |
+| `EmissionBuilder` | turns a cover into per-op `RuleMatch`es, materializing introduced classes |
+| `EmitRequest` | what an emitter writes into: backing op (if any) + destination values |
+| `TargetIselModel` / `IselCostModel` | target hooks for cost, legality, rule support |
