@@ -246,8 +246,11 @@ impl Rule {
 }
 struct BlockSelectionCache {
     egraph: SemEGraph,
-    /// The e-class that produces each op's result value.
+    /// The earliest op whose result each (canonical) e-class produces.
     op_by_root: HashMap<EClassId, OpId>,
+    /// The canonical e-class of every op's root (total over the block's lowered
+    /// ops, unlike `op_by_root`, which keeps one op per merged class).
+    op_root: HashMap<OpId, EClassId>,
     /// The IR value each (canonical) e-class computes, so an operand resolving to an
     /// intermediate result can be materialized as that register value at emit time.
     class_value: HashMap<EClassId, ValueId>,
@@ -350,18 +353,46 @@ impl InstructionSelectPass {
         };
         egraph.saturate(context, &self.rewrites, Default::default());
 
-        let op_by_root: HashMap<EClassId, OpId> = roots_by_op
+        // Saturation may merge classes, so canonicalize both maps through `find`.
+        // When two value-carrying classes merge (the values are provably equal),
+        // the earliest-defined op wins: it is deterministic and its result
+        // dominates every later use in the block.
+        let op_position: HashMap<OpId, usize> = op_ids
             .iter()
-            .map(|(op, root)| (egraph.find(*root), *op))
+            .enumerate()
+            .map(|(position, op)| (*op, position))
             .collect();
 
-        // Re-canonicalize the class -> value map through `find`, since saturation may
-        // have merged classes. No two value-carrying classes merge under the current
-        // rewrites, so first-writer-wins keeps it unambiguous.
+        let mut op_by_root: HashMap<EClassId, OpId> = HashMap::new();
+        for (op, root) in &roots_by_op {
+            op_by_root
+                .entry(egraph.find(*root))
+                .and_modify(|existing| {
+                    if op_position[op] < op_position[existing] {
+                        *existing = *op;
+                    }
+                })
+                .or_insert(*op);
+        }
+
+        let value_position =
+            |v: ValueId| value_to_def.get(&v).map(|op| op_position[op]).unwrap_or(0);
         let mut canon_class_value: HashMap<EClassId, ValueId> = HashMap::new();
         for (class, value) in class_value {
-            canon_class_value.entry(egraph.find(class)).or_insert(value);
+            canon_class_value
+                .entry(egraph.find(class))
+                .and_modify(|existing| {
+                    if value_position(value) < value_position(*existing) {
+                        *existing = value;
+                    }
+                })
+                .or_insert(value);
         }
+
+        let op_root: HashMap<OpId, EClassId> = roots_by_op
+            .iter()
+            .map(|(op, root)| (*op, egraph.find(*root)))
+            .collect();
 
         // A value used as an operand by more than one consumer must stay a register.
         let mut operand_uses: HashMap<ValueId, usize> = HashMap::new();
@@ -387,6 +418,7 @@ impl InstructionSelectPass {
             BlockSelectionCache {
                 egraph,
                 op_by_root,
+                op_root,
                 class_value: canon_class_value,
                 shared_classes,
                 plan: None,
@@ -553,16 +585,9 @@ impl InstructionSelectPass {
             introduced: Vec::new(),
         };
 
-        // Inverse of op_by_root for this block's ops.
-        let class_of_op: HashMap<OpId, EClassId> = cache
-            .op_by_root
-            .iter()
-            .map(|(class, op)| (*op, *class))
-            .collect();
-
         let mut op_decisions = HashMap::new();
         for op_id in block.op_ids() {
-            let Some(class) = class_of_op.get(&op_id).map(|c| cache.egraph.find(*c)) else {
+            let Some(class) = cache.op_root.get(&op_id).map(|c| cache.egraph.find(*c)) else {
                 continue;
             };
             if let Some(&match_id) = root_match.get(&class) {

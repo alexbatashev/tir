@@ -894,3 +894,118 @@ fn memory_ops_select_via_interfaces() {
     // store -> muli marker, load -> shli marker; the alloca is untouched.
     assert_eq!(body_ops, vec!["alloca", "muli", "shli", "return"]);
 }
+
+/// When a rewrite proves two op results equal (their e-classes merge), operand
+/// resolution must deterministically pick the earliest definition, and every
+/// merged op must still receive a selection decision.
+#[test]
+fn merged_value_classes_resolve_to_earliest_def() {
+    use tir::egraph::Rewrite;
+    use tir::graph::{Pattern, PatternExpr};
+
+    let context = Context::with_default_dialects();
+    let module = ops::module(&context, None).build();
+
+    let i32_ty = IntegerType::new(&context, 32);
+    let x = context.create_value(i32_ty, None);
+    let y = context.create_value(i32_ty, None);
+    let z = context.create_value(i32_ty, None);
+    let (x_id, y_id, z_id) = (x.id(), y.id(), z.id());
+    let region = context.create_region();
+    let block = context.create_block(vec![x, y, z]);
+    region.add_block(block.id());
+
+    let func = ops::func(&context, "demo", i32_ty, Some(region.id())).build();
+    let mut fb = IRBuilder::new(func.body());
+    let mul = ops::muli(&context, x_id, y_id, i32_ty).build();
+    let mul_result = mul.result();
+    fb.insert(mul);
+    let add = ops::addi(&context, x_id, y_id, i32_ty).build();
+    let add_result = add.result();
+    fb.insert(add);
+    let sub = ops::subi(&context, add_result, z_id, i32_ty).build();
+    let sub_result = sub.result();
+    fb.insert(sub);
+    fb.insert(ops::r#return(&context, sub_result).build());
+
+    let mut mb = IRBuilder::new(module.body());
+    mb.insert(func);
+    mb.insert(ops::module_end(&context).build());
+
+    // A test-only "proof" that x*y == x+y: union the Mul class with the Add
+    // class, exactly the shape a discovered algebraic bridge produces.
+    let mut searcher = Pattern::<SemNode, ()>::new(());
+    let lhs = searcher.add_node(PatternExpr::Boundary);
+    searcher.set_duplicable(lhs, true);
+    let rhs = searcher.add_node(PatternExpr::Boundary);
+    searcher.set_duplicable(rhs, true);
+    let root = searcher.add_node(PatternExpr::Node(template_node(ExprKind::Mul, None, None)));
+    searcher.add_edge(root, lhs);
+    searcher.add_edge(root, rhs);
+    searcher.set_root(root);
+    let union_mul_add = Rewrite {
+        name: "mul-equals-add".to_string(),
+        searcher,
+        apply: Box::new(
+            |_ctx: &Context, egraph: &mut SemEGraph, m: &tir::egraph::EMatch| {
+                let add_class = egraph.classes().find(|&class| {
+                    egraph
+                        .nodes(class)
+                        .iter()
+                        .any(|&id| egraph.get_node(id).kind == ExprKind::Add)
+                });
+                if let Some(add_class) = add_class {
+                    egraph.union(m.root(), add_class);
+                }
+            },
+        ),
+    };
+
+    fn emit_sub_bound(
+        context: &Context,
+        op: &tir::OperationRef,
+        m: &RuleMatch,
+    ) -> Result<EmitPlan, tir::PassError> {
+        let lhs = m
+            .value_binding(0)
+            .ok_or(tir::PassError::RewriteFailed(op.op().id))?;
+        let rhs = m
+            .value_binding(1)
+            .ok_or(tir::PassError::RewriteFailed(op.op().id))?;
+        let result_ty = context.get_value(op.op().results[0]).ty();
+        Ok(EmitPlan::single(Box::new(
+            ops::subi(context, lhs, rhs, result_ty).build(),
+        )))
+    }
+
+    let rules = vec![
+        Rule::new("mul", atomic_pattern(ExprKind::Mul), 1, emit_mul),
+        Rule::new("add", atomic_pattern(ExprKind::Add), 10, emit_add),
+        Rule::new("sub", atomic_pattern(ExprKind::Sub), 1, emit_sub_bound),
+    ];
+
+    let mut pm = PassManager::new();
+    pm.nest(FuncOp::name())
+        .add_pass(InstructionSelectPass::new(rules).with_rewrites(vec![union_mul_add]));
+    pm.run(&context, context.get_op(module.id()))
+        .expect("merged classes should still select");
+
+    let block_ref = context
+        .get_region(region.id())
+        .iter(context.clone())
+        .next()
+        .unwrap();
+    let body: Vec<_> = block_ref
+        .op_ids()
+        .into_iter()
+        .map(|op_id| context.get_op(op_id))
+        .collect();
+    // Both the mul and the (merged) add lower through the cheaper mul rule.
+    let names: Vec<_> = body.iter().map(|op| op.name).collect();
+    assert_eq!(names, vec!["muli", "muli", "subi", "return"]);
+
+    // The sub operand resolves to the *earliest* definition of the merged class
+    // (the mul result, not the add result).
+    let sub_op = &body[2];
+    assert_eq!(sub_op.operands[0], mul_result);
+}
