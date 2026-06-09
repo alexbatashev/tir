@@ -6,8 +6,8 @@ use tir::{
 };
 
 use super::{
-    EmitPlan, InstructionSelectPass, IselCostModel, Rule, RuleMatch, SelectionPressure, SemEGraph,
-    SemNode, TargetIselModel, extension_rewrite, template_node,
+    EmitPlan, EmitRequest, InstructionSelectPass, IselCostModel, Rule, RuleMatch,
+    SelectionPressure, SemEGraph, SemNode, TargetIselModel, extension_rewrite, template_node,
 };
 
 fn symbol(g: &mut ExprPostGraph, id: u32) -> tir::graph::NodeId {
@@ -48,9 +48,10 @@ fn add_mul_pattern() -> ExprPostGraph {
 
 fn emit_add(
     context: &Context,
-    op: &tir::OperationRef,
+    req: &EmitRequest,
     m: &RuleMatch,
 ) -> Result<EmitPlan, tir::PassError> {
+    let op = req.op.expect("backed by an op");
     let lhs = m
         .value_binding(0)
         .unwrap_or_else(|| op.op().operands.first().copied().unwrap());
@@ -58,7 +59,7 @@ fn emit_add(
         .value_binding(2)
         .or_else(|| m.value_binding(1))
         .unwrap_or_else(|| op.op().operands[1]);
-    let result_ty = context.get_value(op.op().results[0]).ty();
+    let result_ty = req.result_ty.expect("typed result");
     Ok(EmitPlan::single(Box::new(
         ops::addi(context, lhs, rhs, result_ty).build(),
     )))
@@ -66,10 +67,11 @@ fn emit_add(
 
 fn emit_mul(
     context: &Context,
-    op: &tir::OperationRef,
+    req: &EmitRequest,
     _m: &RuleMatch,
 ) -> Result<EmitPlan, tir::PassError> {
-    let result_ty = context.get_value(op.op().results[0]).ty();
+    let op = req.op.expect("backed by an op");
+    let result_ty = req.result_ty.expect("typed result");
     Ok(EmitPlan::single(Box::new(
         ops::muli(context, op.op().operands[0], op.op().operands[1], result_ty).build(),
     )))
@@ -410,10 +412,11 @@ fn typed_binary_pattern(kind: ExprKind, ty: TypeId) -> ExprPostGraph {
 
 fn emit_sub(
     context: &Context,
-    op: &tir::OperationRef,
+    req: &EmitRequest,
     _m: &RuleMatch,
 ) -> Result<EmitPlan, tir::PassError> {
-    let result_ty = context.get_value(op.op().results[0]).ty();
+    let op = req.op.expect("backed by an op");
+    let result_ty = req.result_ty.expect("typed result");
     Ok(EmitPlan::single(Box::new(
         ops::subi(context, op.op().operands[0], op.op().operands[1], result_ty).build(),
     )))
@@ -653,12 +656,12 @@ fn shift_imm_pattern(kind: ExprKind) -> ExprPostGraph {
 
 fn emit_shift_marker(
     marker: ExprKind,
-) -> impl Fn(&Context, &tir::OperationRef, &RuleMatch) -> Result<EmitPlan, tir::PassError> {
-    move |context, op, m| {
+) -> impl Fn(&Context, &EmitRequest, &RuleMatch) -> Result<EmitPlan, tir::PassError> {
+    move |context, req, m| {
         let rs1 = m
             .value_binding(0)
-            .ok_or(tir::PassError::RewriteFailed(op.op().id))?;
-        let result_ty = context.get_value(op.op().results[0]).ty();
+            .ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
+        let result_ty = req.result_ty.expect("typed result");
         // The shift amount is an immediate (m.int_binding(1)); operands beyond the
         // mnemonic don't matter for this test, so the source register is reused.
         let built: Box<dyn Operation> = match marker {
@@ -671,18 +674,18 @@ fn emit_shift_marker(
 
 fn emit_slli(
     context: &Context,
-    op: &tir::OperationRef,
+    req: &EmitRequest,
     m: &RuleMatch,
 ) -> Result<EmitPlan, tir::PassError> {
-    emit_shift_marker(ExprKind::ShiftLeft)(context, op, m)
+    emit_shift_marker(ExprKind::ShiftLeft)(context, req, m)
 }
 
 fn emit_srai(
     context: &Context,
-    op: &tir::OperationRef,
+    req: &EmitRequest,
     m: &RuleMatch,
 ) -> Result<EmitPlan, tir::PassError> {
-    emit_shift_marker(ExprKind::ShiftRightArithmetic)(context, op, m)
+    emit_shift_marker(ExprKind::ShiftRightArithmetic)(context, req, m)
 }
 
 /// End-to-end square: `extsi(addi(a, b) : i16) : i64` lowers to `add, slli, srai`.
@@ -815,13 +818,13 @@ fn store_pattern() -> ExprPostGraph {
 
 fn emit_load_marker(
     context: &Context,
-    op: &tir::OperationRef,
+    req: &EmitRequest,
     m: &RuleMatch,
 ) -> Result<EmitPlan, tir::PassError> {
     let base = m
         .value_binding(0)
-        .ok_or(tir::PassError::RewriteFailed(op.op().id))?;
-    let result_ty = context.get_value(op.op().results[0]).ty();
+        .ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
+    let result_ty = req.result_ty.expect("typed result");
     Ok(EmitPlan::single(Box::new(
         ops::shli(context, base, base, result_ty).build(),
     )))
@@ -829,12 +832,12 @@ fn emit_load_marker(
 
 fn emit_store_marker(
     context: &Context,
-    op: &tir::OperationRef,
+    req: &EmitRequest,
     m: &RuleMatch,
 ) -> Result<EmitPlan, tir::PassError> {
     let value = m
         .value_binding(4)
-        .ok_or(tir::PassError::RewriteFailed(op.op().id))?;
+        .ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
     let result_ty = context.get_value(value).ty();
     Ok(EmitPlan::single(Box::new(
         ops::muli(context, value, value, result_ty).build(),
@@ -963,16 +966,16 @@ fn merged_value_classes_resolve_to_earliest_def() {
 
     fn emit_sub_bound(
         context: &Context,
-        op: &tir::OperationRef,
+        req: &EmitRequest,
         m: &RuleMatch,
     ) -> Result<EmitPlan, tir::PassError> {
         let lhs = m
             .value_binding(0)
-            .ok_or(tir::PassError::RewriteFailed(op.op().id))?;
+            .ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
         let rhs = m
             .value_binding(1)
-            .ok_or(tir::PassError::RewriteFailed(op.op().id))?;
-        let result_ty = context.get_value(op.op().results[0]).ty();
+            .ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
+        let result_ty = req.result_ty.expect("typed result");
         Ok(EmitPlan::single(Box::new(
             ops::subi(context, lhs, rhs, result_ty).build(),
         )))

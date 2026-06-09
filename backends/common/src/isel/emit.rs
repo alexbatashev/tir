@@ -3,10 +3,7 @@
 
 use std::collections::HashMap;
 
-use tir::{
-    Block, Context, OpId, OpInstance, OperationRef, TypeId, ValueId, builtin::IntegerType,
-    egraph::EClassId,
-};
+use tir::{Context, OpId, TypeId, ValueId, builtin::IntegerType, egraph::EClassId};
 
 use super::RuleMatch;
 use super::cover::PbqpIselMatch;
@@ -148,27 +145,4 @@ impl EmissionBuilder<'_> {
         }
         RuleMatch::new(int_bindings, value_bindings)
     }
-}
-
-/// A throwaway op-ref carrying only `dest` as its result, so an introduced
-/// instruction's emitter (which reads the destination from the op's result) emits
-/// into a fresh register without a backing IR op.
-pub(crate) fn synthetic_op_ref(
-    context: &Context,
-    block: &std::sync::Arc<Block>,
-    dest: ValueId,
-    _dest_ty: TypeId,
-) -> OperationRef {
-    let instance = std::sync::Arc::new(OpInstance {
-        id: OpId::invalid(),
-        name: "isel.introduced",
-        dialect: "isel",
-        context: context.as_context_ref(),
-        operands: Vec::new(),
-        results: vec![dest],
-        regions: Vec::new(),
-        attributes: Vec::new(),
-        attribute_roles: &[],
-    });
-    OperationRef::new(instance, Some(block.clone()), None)
 }

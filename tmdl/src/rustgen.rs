@@ -338,11 +338,10 @@ fn emit_instructions<'a>(
                                 quote! { .get(#def_pos_lit) }
                             };
                             emit_attr_steps.push(quote! {
-                                let dst = op
-                                    .op()
+                                let dst = req
                                     .results
                                     #result_accessor
-                                    .ok_or(tir::PassError::RewriteFailed(op.op().id))?
+                                    .ok_or(tir::PassError::RewriteFailed(req.op_id()))?
                                     .number();
                                 builder = builder.attr(
                                     #op_name_lit,
@@ -357,7 +356,7 @@ fn emit_instructions<'a>(
                         } else if let Some(sym) = semantics.variable_symbols.get(op_name) {
                             let sym_lit = proc_macro2::Literal::u32_unsuffixed(*sym);
                             emit_attr_steps.push(quote! {
-                                let src = m.value_binding(#sym_lit).ok_or(tir::PassError::RewriteFailed(op.op().id))?;
+                                let src = m.value_binding(#sym_lit).ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
                                 builder = builder.attr(
                                     #op_name_lit,
                                     tir::attributes::AttributeValue::Register(
@@ -389,7 +388,7 @@ fn emit_instructions<'a>(
                         if let Some(sym) = semantics.variable_symbols.get(op_name) {
                             let sym_lit = proc_macro2::Literal::u32_unsuffixed(*sym);
                             emit_attr_steps.push(quote! {
-                                let v = m.int_binding(#sym_lit).ok_or(tir::PassError::RewriteFailed(op.op().id))?;
+                                let v = m.int_binding(#sym_lit).ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
                                 builder = builder.attr(
                                     #op_name_lit,
                                     tir::attributes::AttributeValue::Int(v),
@@ -434,10 +433,10 @@ fn emit_instructions<'a>(
 
                 fn #emit_fn_ident(
                     context: &tir::Context,
-                    op: &tir::OperationRef,
+                    req: &tir_be_common::isel::EmitRequest,
                     m: &tir_be_common::isel::RuleMatch,
                 ) -> Result<tir_be_common::isel::EmitPlan, tir::PassError> {
-                    let _ = m;
+                    let _ = (req, m);
                     let mut builder = #builder_ident::new(context);
                     #(#emit_attr_steps)*
                     Ok(tir_be_common::isel::EmitPlan::single(Box::new(builder.build())))

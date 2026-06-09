@@ -19,7 +19,7 @@ use std::collections::{HashMap, HashSet};
 
 use tir::{
     Block, BlockId, Context, OpId, Operation, OperationRef, Pass, PassError, PassTarget, Rewriter,
-    ValueId,
+    TypeId, ValueId,
     egraph::{EClassId, Rewrite},
     graph::{Dag, NodeId, OperandConstraint, PatternExpr},
     sem_expr::{ExprKind, ExprPostGraph},
@@ -33,7 +33,7 @@ use cover::{
     CaptureBindings, FullMatchBindings, PatternNodeBinding, PbqpIselAlternative, PbqpIselMatch,
     build_eclass_cover, completeness_error, materialization_edge_cost,
 };
-use emit::{BlockDecision, BlockPlan, EmissionBuilder, synthetic_op_ref};
+use emit::{BlockDecision, BlockPlan, EmissionBuilder};
 use pattern::{CompiledIselPattern, compile_isel_pattern, specificity_adjusted_cost};
 use rewrites::discover_rewrites;
 #[cfg(test)]
@@ -92,6 +92,33 @@ impl EmitPlan {
 
     fn into_op(self) -> Box<dyn Operation> {
         self.op
+    }
+}
+
+/// The destination an emitter writes into: the original op being replaced, or
+/// just fresh destination values for a rewrite-introduced instruction that has
+/// no backing IR op.
+pub struct EmitRequest<'a> {
+    /// The op being replaced; `None` for an introduced instruction.
+    pub op: Option<&'a OperationRef>,
+    /// Destination values, in result order.
+    pub results: &'a [ValueId],
+    /// The type of the first result, when known.
+    pub result_ty: Option<TypeId>,
+}
+
+impl<'a> EmitRequest<'a> {
+    fn for_op(op: &'a OperationRef, context: &Context) -> Self {
+        Self {
+            op: Some(op),
+            results: &op.op().results,
+            result_ty: op.op().results.first().map(|v| context.get_value(*v).ty()),
+        }
+    }
+
+    /// The op id for diagnostics; invalid for an introduced instruction.
+    pub fn op_id(&self) -> OpId {
+        self.op.map(|op| op.op().id).unwrap_or_default()
     }
 }
 
@@ -173,7 +200,7 @@ static DEFAULT_COST_MODEL: DefaultIselCostModel = DefaultIselCostModel;
 pub type RuleLegalityFn = fn(&Context, &OperationRef, &RuleMatch, &dyn TargetIselModel) -> bool;
 pub type RuleDynamicCostFn =
     fn(&Context, &OperationRef, &RuleMatch, &SelectionPressure, &dyn TargetIselModel) -> u32;
-pub type RuleEmitPlanFn = fn(&Context, &OperationRef, &RuleMatch) -> Result<EmitPlan, PassError>;
+pub type RuleEmitPlanFn = fn(&Context, &EmitRequest, &RuleMatch) -> Result<EmitPlan, PassError>;
 
 fn default_legality(
     _context: &Context,
@@ -465,12 +492,16 @@ impl InstructionSelectPass {
         let block_arc = context.get_block(block.id());
 
         // Insert the rewrite-introduced instructions first, in operand-first order,
-        // each ahead of its anchor op. A synthetic op-ref carries the fresh
-        // destination value so the emitter reads it as the result register.
+        // each ahead of its anchor op. The request carries only the fresh
+        // destination value: there is no backing IR op.
         for intro in &plan.introduced {
-            let synthetic = synthetic_op_ref(context, &block_arc, intro.dest, intro.dest_ty);
+            let request = EmitRequest {
+                op: None,
+                results: std::slice::from_ref(&intro.dest),
+                result_ty: Some(intro.dest_ty),
+            };
             let rule = &self.rules[intro.rule_index];
-            let new_op = (rule.emit_plan_fn)(context, &synthetic, &intro.m)?.into_op();
+            let new_op = (rule.emit_plan_fn)(context, &request, &intro.m)?.into_op();
             let anchor =
                 OperationRef::new(context.get_op(intro.anchor), Some(block_arc.clone()), None);
             rewriter.insert_op_before(&anchor, new_op.as_ref())?;
@@ -483,7 +514,8 @@ impl InstructionSelectPass {
             match decision {
                 BlockDecision::Emit { rule_index, m } => {
                     let rule = &self.rules[*rule_index];
-                    let new_op = (rule.emit_plan_fn)(context, &op_ref, m)?.into_op();
+                    let request = EmitRequest::for_op(&op_ref, context);
+                    let new_op = (rule.emit_plan_fn)(context, &request, m)?.into_op();
                     rewriter.replace_op(&op_ref, new_op.as_ref())?;
                 }
                 BlockDecision::Consume => {
