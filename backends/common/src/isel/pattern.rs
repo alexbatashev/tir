@@ -10,18 +10,6 @@ use tir::{
 
 use super::node::{SemNode, template_node};
 
-/// Headroom factor that lets pattern specificity break ties between equal-cost
-/// matches without ever overriding a genuine instruction-cost difference.
-pub(crate) const SPECIFICITY_SCALE: u64 = 8;
-
-/// Fold a match's specificity into its cost: scale the instruction cost, then give
-/// a small discount for each type-constrained pattern node. So among equally cheap
-/// matches the most specific (e.g. i32 `addw` over untyped `add`) wins, while a
-/// cheaper instruction still wins outright.
-pub(crate) fn specificity_adjusted_cost(cost: u64, specificity: usize) -> u64 {
-    cost.saturating_mul(SPECIFICITY_SCALE)
-        .saturating_sub((specificity as u64).min(SPECIFICITY_SCALE - 1))
-}
 pub(crate) struct CompiledIselPattern {
     pub(crate) rule_index: usize,
     pub(crate) pattern: Pattern<SemNode, usize>,

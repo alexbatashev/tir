@@ -31,10 +31,10 @@ pub use node::{SemEGraph, SemNode, SemPayload};
 use builder::SemDagBuilder;
 use cover::{
     CaptureBindings, FullMatchBindings, PatternNodeBinding, PbqpIselAlternative, PbqpIselMatch,
-    build_eclass_cover, completeness_error, materialization_edge_cost,
+    build_eclass_cover, completeness_error, materialization_edge_cost, prune_dominated_matches,
 };
 use emit::{BlockDecision, BlockPlan, EmissionBuilder};
-use pattern::{CompiledIselPattern, compile_isel_pattern, specificity_adjusted_cost};
+use pattern::{CompiledIselPattern, compile_isel_pattern};
 use rewrites::discover_rewrites;
 #[cfg(test)]
 use {node::template_node, rewrites::extension_rewrite};
@@ -748,10 +748,11 @@ impl InstructionSelectPass {
                     root,
                     pattern_root,
                     bindings,
-                    cost: specificity_adjusted_cost(cost, compiled.specificity),
+                    cost,
                 });
             }
         }
+        prune_dominated_matches(&self.compiled_patterns, &mut matches);
         matches
     }
 }

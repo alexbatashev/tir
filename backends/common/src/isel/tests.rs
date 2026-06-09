@@ -1012,3 +1012,59 @@ fn merged_value_classes_resolve_to_earliest_def() {
     let sub_op = &body[2];
     assert_eq!(sub_op.operands[0], mul_result);
 }
+
+/// At *equal* cost, the type-constrained rule must win the tie via dominance
+/// pruning — specificity never reaches the PBQP objective.
+#[test]
+fn equal_cost_tie_breaks_to_more_specific_rule() {
+    let context = Context::with_default_dialects();
+    let module = ops::module(&context, None).build();
+
+    let i32_ty = IntegerType::new(&context, 32);
+    let a = context.create_value(i32_ty, None);
+    let b = context.create_value(i32_ty, None);
+    let (a_id, b_id) = (a.id(), b.id());
+    let region = context.create_region();
+    let block = context.create_block(vec![a, b]);
+    region.add_block(block.id());
+
+    let func = ops::func(&context, "demo", i32_ty, Some(region.id())).build();
+    let mut fb = IRBuilder::new(func.body());
+    let add = ops::addi(&context, a_id, b_id, i32_ty).build();
+    let add_result = add.result();
+    fb.insert(add);
+    fb.insert(ops::r#return(&context, add_result).build());
+
+    let mut mb = IRBuilder::new(module.body());
+    mb.insert(func);
+    mb.insert(ops::module_end(&context).build());
+
+    // Same opcode, same cost; only the type constraint differs. The typed rule
+    // (subi marker) must be selected.
+    let rules = vec![
+        Rule::new("add", atomic_pattern(ExprKind::Add), 10, emit_add),
+        Rule::new(
+            "add.i32",
+            typed_binary_pattern(ExprKind::Add, i32_ty),
+            10,
+            emit_sub,
+        ),
+    ];
+
+    let mut pm = PassManager::new();
+    pm.nest(FuncOp::name())
+        .add_pass(InstructionSelectPass::new(rules));
+    pm.run(&context, context.get_op(module.id()))
+        .expect("pass pipeline should succeed");
+
+    let body_ops: Vec<_> = context
+        .get_region(region.id())
+        .iter(context.clone())
+        .next()
+        .unwrap()
+        .op_ids()
+        .into_iter()
+        .map(|op_id| context.get_op(op_id).name)
+        .collect();
+    assert_eq!(body_ops, vec!["subi", "return"]);
+}

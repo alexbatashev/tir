@@ -263,6 +263,63 @@ pub(crate) fn build_eclass_cover(
         .collect();
     Some(DagCover { choices, classes })
 }
+
+/// Drop matches dominated by an interchangeable alternative: same root class,
+/// same internal-class coverage, same boundary operands, but no cheaper and no
+/// more specific. Specificity (the number of type-constrained pattern nodes)
+/// thus breaks ties between otherwise identical matches without ever touching
+/// the PBQP objective — an i32 `addw` beats the untyped `add` at equal cost,
+/// while a genuinely cheaper instruction still wins on cost alone.
+pub(crate) fn prune_dominated_matches(
+    patterns: &[CompiledIselPattern],
+    matches: &mut Vec<PbqpIselMatch>,
+) {
+    let footprint = |m: &PbqpIselMatch| {
+        let mut boundaries = Vec::new();
+        let mut internals = Vec::new();
+        for binding in &m.bindings.pattern_nodes {
+            if binding.is_boundary {
+                boundaries.push(binding.class);
+            } else if binding.pattern_node != m.pattern_root {
+                internals.push(binding.class);
+            }
+        }
+        boundaries.sort();
+        internals.sort();
+        (m.root, boundaries, internals)
+    };
+
+    let mut groups: HashMap<_, Vec<usize>> = HashMap::new();
+    for (index, m) in matches.iter().enumerate() {
+        groups.entry(footprint(m)).or_default().push(index);
+    }
+
+    let mut keep = vec![true; matches.len()];
+    for group in groups.values() {
+        for &a in group {
+            for &b in group {
+                if a == b || !keep[a] || !keep[b] {
+                    continue;
+                }
+                let (cost_a, spec_a) = (
+                    matches[a].cost,
+                    patterns[matches[a].pattern_index].specificity,
+                );
+                let (cost_b, spec_b) = (
+                    matches[b].cost,
+                    patterns[matches[b].pattern_index].specificity,
+                );
+                if cost_a <= cost_b && spec_a >= spec_b && (cost_a < cost_b || spec_a > spec_b) {
+                    keep[b] = false;
+                }
+            }
+        }
+    }
+
+    let mut kept = keep.iter();
+    matches.retain(|_| *kept.next().unwrap());
+}
+
 /// Coverage completeness: every op-root e-class must be emittable as an instruction
 /// (it roots some match) or consumable by a parent match (it is an interior node of
 /// some match). A non-terminal op-root that is neither cannot be selected by this
