@@ -636,7 +636,7 @@ fn saturation_bridges_sign_extension_to_shift_pair() {
         .nodes(m.binding(imm))
         .iter()
         .find_map(|&id| match egraph.get_node(id).payload.as_ref() {
-            Some(ExprPayload::Int(v)) => Some(v.to_u64()),
+            Some(super::SemPayload::Expr(ExprPayload::Int(v))) => Some(v.to_u64()),
             _ => None,
         })
         .expect("the srai shift amount must be a constant");
@@ -747,4 +747,21 @@ fn square_sign_extension_lowers_to_shift_pair() {
         .collect();
     // add (from the addi), then the slli/srai sign-extension idiom, then return.
     assert_eq!(body_ops, vec!["addi", "shli", "shrsi", "return"]);
+}
+
+/// Opaque leaves stand for *unknown* computations: two of them must never
+/// hash-cons into the same e-class, or unrelated un-lowerable expressions
+/// would be treated as equal.
+#[test]
+fn opaque_leaves_are_distinct() {
+    use super::builder::SemDagBuilder;
+    use std::collections::HashMap;
+
+    let context = Context::with_default_dialects();
+    let value_to_def = HashMap::new();
+    let mut egraph = SemEGraph::new();
+    let mut builder = SemDagBuilder::new(&context, &value_to_def, &mut egraph);
+    let a = builder.add_opaque();
+    let b = builder.add_opaque();
+    assert_ne!(egraph.find(a), egraph.find(b));
 }

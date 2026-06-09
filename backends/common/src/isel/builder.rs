@@ -12,7 +12,7 @@ use tir::{
     utils::APInt,
 };
 
-use super::node::{SemEGraph, SemNode, minimal_unsigned_apint, type_width};
+use super::node::{SemEGraph, SemNode, SemPayload, minimal_unsigned_apint, type_width};
 
 /// Builds a block's semantic expressions straight into the e-graph: every lowered
 /// node is hash-consed by [`SemEGraph::add`], so the e-graph *is* the interned DAG
@@ -27,6 +27,8 @@ pub(crate) struct SemDagBuilder<'a> {
     value_to_class: HashMap<ValueId, EClassId>,
     /// First class found to compute each op result (first writer wins, matching CSE).
     pub(crate) class_value: HashMap<EClassId, ValueId>,
+    /// Serial of the next opaque leaf; each un-lowerable node gets its own.
+    opaque_serial: u32,
 }
 
 impl<'a> SemDagBuilder<'a> {
@@ -41,6 +43,7 @@ impl<'a> SemDagBuilder<'a> {
             egraph,
             value_to_class: HashMap::new(),
             class_value: HashMap::new(),
+            opaque_serial: 0,
         }
     }
 
@@ -50,7 +53,15 @@ impl<'a> SemDagBuilder<'a> {
         payload: Option<ExprPayload>,
         ty: Option<TypeId>,
     ) -> EClassId {
-        self.egraph.add(SemNode { kind, payload, ty }, &[], None)
+        self.egraph.add(
+            SemNode {
+                kind,
+                payload: payload.map(SemPayload::Expr),
+                ty,
+            },
+            &[],
+            None,
+        )
     }
 
     fn add_int(&mut self, value: APInt, ty: Option<TypeId>) -> EClassId {
@@ -77,11 +88,18 @@ impl<'a> SemDagBuilder<'a> {
     }
 
     /// A leaf that nothing materializes — the placeholder for an un-lowerable node,
-    /// so a partial semantic expansion still yields a well-formed graph.
-    fn add_opaque(&mut self) -> EClassId {
-        self.add_leaf(
-            ExprKind::Symbol,
-            Some(ExprPayload::SymbolId(u32::MAX)),
+    /// so a partial semantic expansion still yields a well-formed graph. Each call
+    /// mints a distinct leaf: two unknown computations are never assumed equal.
+    pub(crate) fn add_opaque(&mut self) -> EClassId {
+        let serial = self.opaque_serial;
+        self.opaque_serial += 1;
+        self.egraph.add(
+            SemNode {
+                kind: ExprKind::Symbol,
+                payload: Some(SemPayload::Opaque(serial)),
+                ty: None,
+            },
+            &[],
             None,
         )
     }

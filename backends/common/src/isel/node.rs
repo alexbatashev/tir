@@ -32,8 +32,17 @@ pub type SemEGraph = EGraph<SemNode, ()>;
 #[derive(Clone, Debug)]
 pub struct SemNode {
     pub kind: ExprKind,
-    pub payload: Option<ExprPayload>,
+    pub payload: Option<SemPayload>,
     pub ty: Option<TypeId>,
+}
+
+/// A node label payload: a semantic-expression payload, or an opaque marker for
+/// an un-lowerable sub-expression. Each opaque leaf carries a unique serial so
+/// two unrelated unknown computations never hash-cons into the same e-class.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SemPayload {
+    Expr(ExprPayload),
+    Opaque(u32),
 }
 
 impl PartialEq for SemNode {
@@ -53,23 +62,27 @@ impl Hash for SemNode {
         self.ty.hash(state);
         match &self.payload {
             None => 0u8.hash(state),
-            Some(ExprPayload::SymbolId(s)) => {
+            Some(SemPayload::Expr(ExprPayload::SymbolId(s))) => {
                 1u8.hash(state);
                 s.hash(state);
             }
-            Some(ExprPayload::Value(v)) => {
+            Some(SemPayload::Expr(ExprPayload::Value(v))) => {
                 2u8.hash(state);
                 v.number().hash(state);
             }
-            Some(ExprPayload::Int(i)) => {
+            Some(SemPayload::Expr(ExprPayload::Int(i))) => {
                 3u8.hash(state);
                 i.width().hash(state);
                 i.is_signed().hash(state);
                 i.to_u64().hash(state);
             }
-            Some(ExprPayload::Float(f)) => {
+            Some(SemPayload::Expr(ExprPayload::Float(f))) => {
                 4u8.hash(state);
                 f.to_f64().to_bits().hash(state);
+            }
+            Some(SemPayload::Opaque(serial)) => {
+                5u8.hash(state);
+                serial.hash(state);
             }
         }
     }
@@ -127,19 +140,19 @@ pub(crate) fn class_binding(
     class: EClassId,
 ) -> Option<Binding> {
     let nodes = egraph.nodes(class);
-    if let Some(ExprPayload::Int(v)) = nodes.iter().find_map(|&id| {
-        egraph
-            .get_node(id)
-            .payload
-            .as_ref()
-            .filter(|p| matches!(p, ExprPayload::Int(_)))
-    }) {
+    if let Some(v) = nodes
+        .iter()
+        .find_map(|&id| match egraph.get_node(id).payload.as_ref() {
+            Some(SemPayload::Expr(ExprPayload::Int(v))) => Some(v),
+            _ => None,
+        })
+    {
         Some(Binding::Int(v.clone()))
     } else if let Some(v) =
         nodes
             .iter()
             .find_map(|&id| match egraph.get_node(id).payload.as_ref() {
-                Some(ExprPayload::Value(v)) => Some(*v),
+                Some(SemPayload::Expr(ExprPayload::Value(v))) => Some(*v),
                 _ => None,
             })
     {
@@ -173,7 +186,11 @@ pub(crate) fn template_node(
     payload: Option<ExprPayload>,
     ty: Option<TypeId>,
 ) -> SemNode {
-    SemNode { kind, payload, ty }
+    SemNode {
+        kind,
+        payload: payload.map(SemPayload::Expr),
+        ty,
+    }
 }
 /// The integer width of an e-class, taken from whichever member carries a known
 /// integer type (the original IR node keeps its type; rewrite-introduced nodes are

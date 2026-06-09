@@ -26,7 +26,7 @@ use tir::{
     utils::APInt,
 };
 
-pub use node::{SemEGraph, SemNode};
+pub use node::{SemEGraph, SemNode, SemPayload};
 
 use builder::SemDagBuilder;
 use cover::{
