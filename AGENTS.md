@@ -45,6 +45,8 @@
    me synthesize what I learned from exploring the repository.", instead
    "Implement instruction platform RISC-V".
 9. Use conventional commits v1.0.0 spec for commit titles and descriptions.
+10. Do not scan node_modules, target, build and other automatically-generated
+    files and directories, unless explicitly asked to.
 
 ## Working with code
 
