@@ -765,3 +765,132 @@ fn opaque_leaves_are_distinct() {
     let b = builder.add_opaque();
     assert_ne!(egraph.find(a), egraph.find(b));
 }
+
+/// A multi-operand pattern node (LoadMemory/StoreMemory shapes).
+fn nary(
+    g: &mut ExprPostGraph,
+    kind: ExprKind,
+    children: &[tir::graph::NodeId],
+) -> tir::graph::NodeId {
+    let node = g.add_node(kind);
+    for &child in children {
+        g.add_edge(node, child);
+    }
+    node
+}
+
+/// `LoadMemory(Add(base, SExt(zero, width)), bytes, metadata)` — the shape the
+/// builder gives a zero-offset load, with every operand a boundary.
+fn load_pattern() -> ExprPostGraph {
+    let mut g = ExprPostGraph::new();
+    let base = symbol(&mut g, 0);
+    let zero = symbol(&mut g, 1);
+    let width = symbol(&mut g, 2);
+    let sext = nary(&mut g, ExprKind::SExt, &[zero, width]);
+    let addr = nary(&mut g, ExprKind::Add, &[base, sext]);
+    let bytes = symbol(&mut g, 3);
+    let metadata = symbol(&mut g, 4);
+    nary(&mut g, ExprKind::LoadMemory, &[addr, bytes, metadata]);
+    g
+}
+
+/// `StoreMemory(Add(base, SExt(zero, width)), bytes, value, addrspace)`.
+fn store_pattern() -> ExprPostGraph {
+    let mut g = ExprPostGraph::new();
+    let base = symbol(&mut g, 0);
+    let zero = symbol(&mut g, 1);
+    let width = symbol(&mut g, 2);
+    let sext = nary(&mut g, ExprKind::SExt, &[zero, width]);
+    let addr = nary(&mut g, ExprKind::Add, &[base, sext]);
+    let bytes = symbol(&mut g, 3);
+    let value = symbol(&mut g, 4);
+    let addrspace = symbol(&mut g, 5);
+    nary(
+        &mut g,
+        ExprKind::StoreMemory,
+        &[addr, bytes, value, addrspace],
+    );
+    g
+}
+
+fn emit_load_marker(
+    context: &Context,
+    op: &tir::OperationRef,
+    m: &RuleMatch,
+) -> Result<EmitPlan, tir::PassError> {
+    let base = m
+        .value_binding(0)
+        .ok_or(tir::PassError::RewriteFailed(op.op().id))?;
+    let result_ty = context.get_value(op.op().results[0]).ty();
+    Ok(EmitPlan::single(Box::new(
+        ops::shli(context, base, base, result_ty).build(),
+    )))
+}
+
+fn emit_store_marker(
+    context: &Context,
+    op: &tir::OperationRef,
+    m: &RuleMatch,
+) -> Result<EmitPlan, tir::PassError> {
+    let value = m
+        .value_binding(4)
+        .ok_or(tir::PassError::RewriteFailed(op.op().id))?;
+    let result_ty = context.get_value(value).ty();
+    Ok(EmitPlan::single(Box::new(
+        ops::muli(context, value, value, result_ty).build(),
+    )))
+}
+
+/// Memory lowering is driven purely by the `MemoryRead`/`MemoryWrite` interfaces:
+/// a `ptr.store` and a `ptr.load` of the same slot must lower to the target's
+/// store/load patterns with the base pointer and stored value bound as operands.
+/// The same-slot case also guards the addressing-wrapper uniqueness: were the
+/// synthetic `addr + sext(0)` nodes shared, no block with two memory ops could
+/// be covered at all.
+#[test]
+fn memory_ops_select_via_interfaces() {
+    let context = Context::with_default_dialects();
+    let module = ops::module(&context, None).build();
+
+    let i32_ty = IntegerType::new(&context, 32);
+    let param = context.create_value(i32_ty, None);
+    let param_id = param.id();
+    let region = context.create_region();
+    let block = context.create_block(vec![param]);
+    region.add_block(block.id());
+
+    let func = ops::func(&context, "demo", i32_ty, Some(region.id())).build();
+    let mut fb = IRBuilder::new(func.body());
+    let slot_ty = tir::ptr::PtrType::typed(&context, i32_ty);
+    let slot = fb.insert(tir::ptr::ops::alloca(&context, slot_ty).build());
+    fb.insert(tir::ptr::ops::store(&context, param_id, slot.result()).build());
+    let loaded = fb.insert(tir::ptr::ops::load(&context, slot.result(), i32_ty).build());
+    fb.insert(ops::r#return(&context, loaded.result()).build());
+
+    let mut mb = IRBuilder::new(module.body());
+    mb.insert(func);
+    mb.insert(ops::module_end(&context).build());
+
+    let rules = vec![
+        Rule::new("load", load_pattern(), 1, emit_load_marker),
+        Rule::new("store", store_pattern(), 1, emit_store_marker),
+    ];
+
+    let mut pm = PassManager::new();
+    pm.nest(FuncOp::name())
+        .add_pass(InstructionSelectPass::new(rules));
+    pm.run(&context, context.get_op(module.id()))
+        .expect("memory ops should select through their interfaces");
+
+    let body_ops: Vec<_> = context
+        .get_region(region.id())
+        .iter(context.clone())
+        .next()
+        .unwrap()
+        .op_ids()
+        .into_iter()
+        .map(|op_id| context.get_op(op_id).name)
+        .collect();
+    // store -> muli marker, load -> shli marker; the alloca is untouched.
+    assert_eq!(body_ops, vec!["alloca", "muli", "shli", "return"]);
+}

@@ -72,11 +72,16 @@ impl<'a> SemDagBuilder<'a> {
         self.add_int(minimal_unsigned_apint(value), None)
     }
 
+    /// The synthetic `addr + sext(0)` wrapper that makes a bare pointer match the
+    /// targets' base+offset addressing patterns. Its interior nodes are private to
+    /// one memory op (see [`Self::add_op_unique`]): a pattern-internal e-class can
+    /// only be fused into a single match, so sharing the wrapper between two
+    /// memory ops would make every multi-memory-op block uncoverable.
     fn zero_offset_address(&mut self, address: EClassId, address_width: u32) -> EClassId {
         let zero = self.add_u64_const(0);
         let width = self.add_u64_const(u64::from(address_width));
-        let offset = self.add_op(ExprKind::SExt, vec![zero, width], None);
-        self.add_op(ExprKind::Add, vec![address, offset], None)
+        let offset = self.add_op_unique(ExprKind::SExt, vec![zero, width], None);
+        self.add_op_unique(ExprKind::Add, vec![address, offset], None)
     }
 
     fn add_input_value(&mut self, value: ValueId, ty: Option<TypeId>) -> EClassId {
@@ -126,6 +131,34 @@ impl<'a> SemDagBuilder<'a> {
         )
     }
 
+    /// Like [`Self::add_op`], but never hash-conses with another node: the opaque
+    /// serial in the payload keeps the label distinct, and an untyped pattern node
+    /// of the same kind still matches it (a pattern payload of `None` is a
+    /// wildcard). Used for memory effects and their addressing arithmetic, which
+    /// are not pure values: two loads of the same address are not interchangeable
+    /// across an intervening store, so their e-classes must never merge.
+    fn add_op_unique(
+        &mut self,
+        kind: ExprKind,
+        mut children: Vec<EClassId>,
+        ty: Option<TypeId>,
+    ) -> EClassId {
+        if kind.is_commutative() {
+            children.sort();
+        }
+        let serial = self.opaque_serial;
+        self.opaque_serial += 1;
+        self.egraph.add(
+            SemNode {
+                kind,
+                payload: Some(SemPayload::Opaque(serial)),
+                ty,
+            },
+            &children,
+            None,
+        )
+    }
+
     /// Record that `class` computes IR `value` (idempotent; first writer wins, which
     /// is correct since identical computations are the same value under CSE).
     fn set_value(&mut self, class: EClassId, value: ValueId) {
@@ -157,13 +190,7 @@ impl<'a> SemDagBuilder<'a> {
         let read_parts = op
             .clone()
             .as_interface::<dyn MemoryRead>()
-            .map(|read| (read.read_location(), read.read_value()))
-            .or_else(|| {
-                ((op.name == "load" || op.name == "ptr.load")
-                    && op.operands.len() == 1
-                    && op.results.len() == 1)
-                    .then(|| (op.operands[0], op.results[0]))
-            });
+            .map(|read| (read.read_location(), read.read_value()));
 
         if let Some((location, result)) = read_parts {
             let result_ty = self.context.get_value(result).ty();
@@ -174,7 +201,7 @@ impl<'a> SemDagBuilder<'a> {
             let address = self.zero_offset_address(address, address_width);
             let bytes = self.add_u64_const(u64::from(bytes));
             let metadata = self.add_u64_const(0);
-            let class = self.add_op(
+            let class = self.add_op_unique(
                 ExprKind::LoadMemory,
                 vec![address, bytes, metadata],
                 Some(result_ty),
@@ -186,11 +213,7 @@ impl<'a> SemDagBuilder<'a> {
         let write_parts = op
             .clone()
             .as_interface::<dyn MemoryWrite>()
-            .map(|write| (write.write_location(), write.written_value()))
-            .or_else(|| {
-                ((op.name == "store" || op.name == "ptr.store") && op.operands.len() == 2)
-                    .then(|| (op.operands[1], op.operands[0]))
-            });
+            .map(|write| (write.write_location(), write.written_value()));
 
         if let Some((location, value)) = write_parts {
             let value_ty = self.context.get_value(value).ty();
@@ -202,7 +225,7 @@ impl<'a> SemDagBuilder<'a> {
             let bytes = self.add_u64_const(u64::from(bytes));
             let value = self.build_from_value(value);
             let address_space = self.add_u64_const(0);
-            return Some(self.add_op(
+            return Some(self.add_op_unique(
                 ExprKind::StoreMemory,
                 vec![address, bytes, value, address_space],
                 None,
