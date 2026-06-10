@@ -16,10 +16,6 @@ criterion = { workspace = true, features = ["html_reports"] }
 egg = "0.11"
 
 [[bench]]
-name = "disjoint_set"
-harness = false
-
-[[bench]]
 name = "egraph"
 harness = false
 

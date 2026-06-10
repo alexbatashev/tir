@@ -9,17 +9,17 @@ use std::collections::HashMap;
 #[derive(Default)]
 struct Layer {
     // Child-local parent pointers.
-    uf: HashMap<u32, u32>,
+    ds: HashMap<u32, u32>,
     // Child-local representative -> the other members merged into it.
     ids: HashMap<u32, Vec<u32>>,
 }
 
-pub struct ContextUnionFind {
+pub struct ScopedDisjointSet {
     base: Vec<u32>,
     layers: Vec<Layer>,
 }
 
-impl ContextUnionFind {
+impl ScopedDisjointSet {
     pub fn new(n: usize) -> Self {
         Self {
             base: (0..n as u32).collect(),
@@ -51,7 +51,7 @@ impl ContextUnionFind {
         match self.layers.last_mut() {
             None => self.base[hi as usize] = lo,
             Some(top) => {
-                top.uf.insert(hi, lo);
+                top.ds.insert(hi, lo);
                 let hi_members = top.ids.remove(&hi).unwrap_or_default();
                 let entry = top.ids.entry(lo).or_default();
                 entry.extend(hi_members);
@@ -75,7 +75,7 @@ impl ContextUnionFind {
             return self.find_base(x);
         }
         let layer = &self.layers[level - 1];
-        while let Some(&next) = layer.uf.get(&x) {
+        while let Some(&next) = layer.ds.get(&x) {
             x = next;
         }
         match layer.ids.get(&x) {
@@ -114,7 +114,7 @@ mod tests {
 
     #[test]
     fn plain_uf_basics_and_transitivity() {
-        let mut uf = ContextUnionFind::new(5);
+        let mut uf = ScopedDisjointSet::new(5);
         uf.union(0, 1);
         uf.union(1, 2);
         assert!(uf.connected(0, 2));
@@ -124,7 +124,7 @@ mod tests {
 
     #[test]
     fn scope_isolation() {
-        let mut uf = ContextUnionFind::new(4);
+        let mut uf = ScopedDisjointSet::new(4);
         uf.push_context();
         uf.union(0, 1);
         assert!(uf.connected(0, 1));
@@ -134,7 +134,7 @@ mod tests {
 
     #[test]
     fn base_then_child_transitivity() {
-        let mut uf = ContextUnionFind::new(3);
+        let mut uf = ScopedDisjointSet::new(3);
         uf.union(0, 1);
         uf.push_context();
         uf.union(1, 2);
@@ -146,7 +146,7 @@ mod tests {
 
     #[test]
     fn nested_contexts_do_not_leak() {
-        let mut uf = ContextUnionFind::new(5);
+        let mut uf = ScopedDisjointSet::new(5);
         uf.push_context();
         uf.union(0, 1);
         uf.push_context();
@@ -161,7 +161,7 @@ mod tests {
 
     #[test]
     fn eqset_find_avoids_false_negative() {
-        let mut uf = ContextUnionFind::new(4);
+        let mut uf = ScopedDisjointSet::new(4);
         uf.push_context();
         uf.union(1, 2);
         uf.union(2, 3);

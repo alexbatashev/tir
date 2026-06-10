@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::hash::Hash;
 
 use crate::graph::{Dag, GenericDag, Matchable, MutDag, NodeId};
-use crate::utils::ContextUnionFind;
+use crate::utils::ScopedDisjointSet;
 use crate::{OpId, TypeId};
 
 mod ematch;
@@ -44,7 +44,7 @@ type ENodeMemo<N, L> = HashMap<(N, Vec<EClassId>), Vec<(Option<L>, EClassId)>>;
 pub struct EGraph<N, L> {
     dag: GenericDag<N, L>,
     node_class: Vec<u32>,
-    uf: ContextUnionFind,
+    uf: ScopedDisjointSet,
     /// Canonical class id -> its member e-nodes. Maintained on `add`/`union` and
     /// fully recomputed by `rebuild` (so it survives `pop_context`).
     members: HashMap<u32, Vec<NodeId>>,
@@ -108,7 +108,7 @@ impl<N: Matchable + Clone + Eq + Hash, L: Clone + PartialEq> EGraph<N, L> {
         Self {
             dag: GenericDag::new(),
             node_class: Vec::new(),
-            uf: ContextUnionFind::new(0),
+            uf: ScopedDisjointSet::new(0),
             members: HashMap::new(),
             memo: HashMap::new(),
             node_producer: Vec::new(),
