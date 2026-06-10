@@ -182,8 +182,11 @@ fn rule_validation_rejects_missing_atomic_materializer() {
     assert!(err.to_string().contains("Mul"));
 }
 
+/// A pure subexpression shared by two fused matches is *duplicated*: each
+/// add-mul instruction recomputes the mul internally, and the mul op — no
+/// longer needed as a register value — is consumed.
 #[test]
-fn pbqp_selector_does_not_consume_shared_internal_nodes() {
+fn pbqp_selector_duplicates_shared_pure_internal_nodes() {
     let context = Context::with_default_dialects();
     let module = ops::module(&context, None).build();
 
@@ -236,7 +239,63 @@ fn pbqp_selector_does_not_consume_shared_internal_nodes() {
         .into_iter()
         .map(|op_id| context.get_op(op_id).name)
         .collect();
-    assert_eq!(body_ops, vec!["muli", "addi", "addi", "return"]);
+    assert_eq!(body_ops, vec!["addi", "addi", "return"]);
+}
+
+/// A shared pure value with a use no match can cover (the return) must stay
+/// materialized: the fused match still fires (recomputing the mul), but the
+/// mul op itself is emitted rather than consumed.
+#[test]
+fn shared_value_with_uncoverable_use_stays_materialized() {
+    let context = Context::with_default_dialects();
+    let module = ops::module(&context, None).build();
+
+    let i32_ty = IntegerType::new(&context, 32);
+    let x = context.create_value(i32_ty, None);
+    let y = context.create_value(i32_ty, None);
+    let z = context.create_value(i32_ty, None);
+    let x_id = x.id();
+    let y_id = y.id();
+    let z_id = z.id();
+    let region = context.create_region();
+    let block = context.create_block(vec![x, y, z]);
+    region.add_block(block.id());
+
+    let func = ops::func(&context, "demo", i32_ty, Some(region.id())).build();
+    let mut fb = IRBuilder::new(func.body());
+    let mul = ops::muli(&context, x_id, y_id, i32_ty).build();
+    let mul_result = mul.result();
+    fb.insert(mul);
+    let add = ops::addi(&context, mul_result, z_id, i32_ty).build();
+    fb.insert(add);
+    fb.insert(ops::r#return(&context, mul_result).build());
+
+    let mut mb = IRBuilder::new(module.body());
+    mb.insert(func);
+    mb.insert(ops::module_end(&context).build());
+
+    let rules = vec![
+        Rule::new("add-mul", add_mul_pattern(), 1, emit_add),
+        Rule::new("add", atomic_pattern(ExprKind::Add), 10, emit_add),
+        Rule::new("mul", atomic_pattern(ExprKind::Mul), 10, emit_mul),
+    ];
+
+    let mut pm = PassManager::new();
+    pm.nest(FuncOp::name())
+        .add_pass(InstructionSelectPass::new(rules));
+    pm.run(&context, context.get_op(module.id()))
+        .expect("pass pipeline should succeed");
+
+    let body_ops: Vec<_> = context
+        .get_region(region.id())
+        .iter(context.clone())
+        .next()
+        .unwrap()
+        .op_ids()
+        .into_iter()
+        .map(|op_id| context.get_op(op_id).name)
+        .collect();
+    assert_eq!(body_ops, vec!["muli", "addi", "return"]);
 }
 
 fn add_mul_add_pattern() -> ExprPostGraph {
@@ -782,29 +841,25 @@ fn nary(
     node
 }
 
-/// `LoadMemory(Add(base, SExt(zero, width)), bytes, metadata)` — the shape the
-/// builder gives a zero-offset load, with every operand a boundary.
+/// `LoadMemory(Add(base, offset), bytes, metadata)` — the shape the builder
+/// gives a zero-offset load, with every operand a boundary.
 fn load_pattern() -> ExprPostGraph {
     let mut g = ExprPostGraph::new();
     let base = symbol(&mut g, 0);
-    let zero = symbol(&mut g, 1);
-    let width = symbol(&mut g, 2);
-    let sext = nary(&mut g, ExprKind::SExt, &[zero, width]);
-    let addr = nary(&mut g, ExprKind::Add, &[base, sext]);
+    let offset = symbol(&mut g, 1);
+    let addr = nary(&mut g, ExprKind::Add, &[base, offset]);
     let bytes = symbol(&mut g, 3);
     let metadata = symbol(&mut g, 4);
     nary(&mut g, ExprKind::LoadMemory, &[addr, bytes, metadata]);
     g
 }
 
-/// `StoreMemory(Add(base, SExt(zero, width)), bytes, value, addrspace)`.
+/// `StoreMemory(Add(base, offset), bytes, value, addrspace)`.
 fn store_pattern() -> ExprPostGraph {
     let mut g = ExprPostGraph::new();
     let base = symbol(&mut g, 0);
-    let zero = symbol(&mut g, 1);
-    let width = symbol(&mut g, 2);
-    let sext = nary(&mut g, ExprKind::SExt, &[zero, width]);
-    let addr = nary(&mut g, ExprKind::Add, &[base, sext]);
+    let offset = symbol(&mut g, 1);
+    let addr = nary(&mut g, ExprKind::Add, &[base, offset]);
     let bytes = symbol(&mut g, 3);
     let value = symbol(&mut g, 4);
     let addrspace = symbol(&mut g, 5);
@@ -921,7 +976,6 @@ fn merged_value_classes_resolve_to_earliest_def() {
     let func = ops::func(&context, "demo", i32_ty, Some(region.id())).build();
     let mut fb = IRBuilder::new(func.body());
     let mul = ops::muli(&context, x_id, y_id, i32_ty).build();
-    let mul_result = mul.result();
     fb.insert(mul);
     let add = ops::addi(&context, x_id, y_id, i32_ty).build();
     let add_result = add.result();
@@ -1008,9 +1062,10 @@ fn merged_value_classes_resolve_to_earliest_def() {
     assert_eq!(names, vec!["muli", "muli", "subi", "return"]);
 
     // The sub operand resolves to the *earliest* definition of the merged class
-    // (the mul result, not the add result).
+    // (the mul result, not the add result); `replace_op` then remapped it to the
+    // result of the muli that replaced the original mul.
     let sub_op = &body[2];
-    assert_eq!(sub_op.operands[0], mul_result);
+    assert_eq!(sub_op.operands[0], body[0].results[0]);
 }
 
 /// At *equal* cost, the type-constrained rule must win the tie via dominance

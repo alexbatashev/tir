@@ -406,8 +406,17 @@ fn emit_instructions<'a>(
             // strip shift-amount masks), then type each node from its structurally
             // determined width. A plain `add` stays untyped; `addw` becomes an i32
             // `Add`; `sll` becomes a plain `ShiftLeft`.
+            let immediate_symbols: std::collections::HashSet<u32> = ops
+                .iter()
+                .filter(|(_, op_ty)| matches!(op_ty, Type::Bits(_) | Type::Integer))
+                .filter_map(|(op_name, _)| semantics.variable_symbols.get(op_name).copied())
+                .collect();
             let (canon_pattern, canon_root, forced_widths) =
-                tir::sem_expr::canonicalize_for_selection(&semantics.pattern, semantics.root);
+                tir::sem_expr::canonicalize_for_selection(
+                    &semantics.pattern,
+                    semantics.root,
+                    &immediate_symbols,
+                );
             let mut pattern_widths = tir::sem_expr::infer_widths(&canon_pattern, |_| None);
             for (index, forced) in forced_widths.iter().enumerate() {
                 if forced.is_some() {

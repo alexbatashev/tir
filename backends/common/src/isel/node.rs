@@ -192,6 +192,19 @@ pub(crate) fn template_node(
         ty,
     }
 }
+/// Whether duplicating the class's computation is sound: every member is a pure
+/// value expression, so two fused matches may each recompute it inside their
+/// instruction. Memory effects are excluded — two reads of the same address are
+/// not interchangeable across an intervening write.
+pub(crate) fn class_is_pure(egraph: &SemEGraph, class: EClassId) -> bool {
+    egraph.nodes(class).iter().all(|&id| {
+        !matches!(
+            egraph.get_node(id).kind,
+            ExprKind::LoadMemory | ExprKind::StoreMemory
+        )
+    })
+}
+
 /// The integer width of an e-class, taken from whichever member carries a known
 /// integer type (the original IR node keeps its type; rewrite-introduced nodes are
 /// left untyped).

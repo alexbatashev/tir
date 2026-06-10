@@ -72,16 +72,14 @@ impl<'a> SemDagBuilder<'a> {
         self.add_int(minimal_unsigned_apint(value), None)
     }
 
-    /// The synthetic `addr + sext(0)` wrapper that makes a bare pointer match the
-    /// targets' base+offset addressing patterns. Its interior nodes are private to
-    /// one memory op (see [`Self::add_op_unique`]): a pattern-internal e-class can
-    /// only be fused into a single match, so sharing the wrapper between two
-    /// memory ops would make every multi-memory-op block uncoverable.
-    fn zero_offset_address(&mut self, address: EClassId, address_width: u32) -> EClassId {
+    /// The synthetic `addr + 0` wrapper that makes a bare pointer match the
+    /// targets' base+offset addressing patterns (canonicalized to `Add(base, imm)`).
+    /// The `Add` is private to one memory op (see [`Self::add_op_unique`]), like
+    /// the memory effect it addresses: two memory ops are never interchangeable,
+    /// so neither is their addressing context.
+    fn zero_offset_address(&mut self, address: EClassId) -> EClassId {
         let zero = self.add_u64_const(0);
-        let width = self.add_u64_const(u64::from(address_width));
-        let offset = self.add_op_unique(ExprKind::SExt, vec![zero, width], None);
-        self.add_op_unique(ExprKind::Add, vec![address, offset], None)
+        self.add_op_unique(ExprKind::Add, vec![address, zero], None)
     }
 
     fn add_input_value(&mut self, value: ValueId, ty: Option<TypeId>) -> EClassId {
@@ -195,10 +193,8 @@ impl<'a> SemDagBuilder<'a> {
         if let Some((location, result)) = read_parts {
             let result_ty = self.context.get_value(result).ty();
             let bytes = type_width(self.context, result_ty)? / 8;
-            let address_width =
-                type_width(self.context, self.context.get_value(location).ty()).unwrap_or(64);
             let address = self.build_from_value(location);
-            let address = self.zero_offset_address(address, address_width);
+            let address = self.zero_offset_address(address);
             let bytes = self.add_u64_const(u64::from(bytes));
             let metadata = self.add_u64_const(0);
             let class = self.add_op_unique(
@@ -218,10 +214,8 @@ impl<'a> SemDagBuilder<'a> {
         if let Some((location, value)) = write_parts {
             let value_ty = self.context.get_value(value).ty();
             let bytes = type_width(self.context, value_ty)? / 8;
-            let address_width =
-                type_width(self.context, self.context.get_value(location).ty()).unwrap_or(64);
             let address = self.build_from_value(location);
-            let address = self.zero_offset_address(address, address_width);
+            let address = self.zero_offset_address(address);
             let bytes = self.add_u64_const(u64::from(bytes));
             let value = self.build_from_value(value);
             let address_space = self.add_u64_const(0);

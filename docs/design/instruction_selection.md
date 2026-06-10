@@ -78,7 +78,7 @@ normalization), so every target can constrain on the widths it distinguishes.
 ```
 
 `ExprKind` / `ExprPayload` come from each op's `semantic_expr` (the sem-DSL), so a
-multi-node expansion (e.g. a load becomes `LoadMemory(add(addr, sext(0)), bytes,
+multi-node expansion (e.g. a load becomes `LoadMemory(add(addr, 0), bytes,
 meta)`) lands as several e-nodes.
 
 ### Opaque payloads: things that must never merge
@@ -92,15 +92,14 @@ for:
   never assumed equal;
 - **memory effects and their addressing wrappers** (`add_op_unique`): loads are
   not pure values (two loads of one address differ across an intervening
-  store), and a pattern-internal e-class can only be fused into a *single*
-  match, so sharing the synthetic `addr + sext(0)` wrapper between memory ops
-  would make any block with two of them uncoverable.
+  store), so their e-classes must never merge; the synthetic `addr + 0`
+  wrapper stays private to one memory op for the same reason.
 
 ### Memory ops
 
 Ops implementing `MemoryRead` / `MemoryWrite` are lowered by
 `build_memory_effect` into `LoadMemory` / `StoreMemory` nodes whose address is
-wrapped as `addr + sext(0)` so the targets' base+offset addressing patterns
+wrapped as `addr + 0` so the targets' base+offset addressing patterns
 match a bare pointer. The interfaces are the only trigger; there is no op-name
 matching.
 
@@ -111,7 +110,8 @@ matching.
 | `op_by_root: EClassId → OpId` | the **earliest** op whose result the class produces |
 | `op_root: OpId → EClassId` | every op's canonical root class (total, unlike `op_by_root`) |
 | `class_value: EClassId → ValueId` | the IR value a class computes (so an interior result can be re-materialized as a register) |
-| `shared_classes: Set<EClassId>` | a value used as an operand by **>1 consumer**; it must stay a register and can never be internalized into a larger match |
+| `shared_classes: Set<EClassId>` | a value used as an operand by **>1 consumer**; a memory effect here can never be internalized into a larger match (a pure value still can — duplication) |
+| `must_materialize: Set<EClassId>` | an op-root class whose value is used by an op no match reaches (return, branch, un-lowered, another block); it is never offered a consuming alternative |
 
 When saturation merges two value-carrying classes (the values are provably
 equal), both maps deterministically keep the **earliest-defined** op/value: it
@@ -161,8 +161,10 @@ struct PbqpIselMatch {
 ```
 
 A match rooted at a pure operand (leaf/constant) is discarded — instructions root
-at *computed* values only. Shared classes (§1) are allowed as a match root or
-boundary, but never as an interior node a larger match would erase.
+at *computed* values only. A pure class may sit interior to any number of
+matches (each fused instruction recomputes it); a shared *memory effect* (§1)
+is allowed as a match root or boundary, but never as an interior node a larger
+match would erase.
 
 ### Dominance pruning (specificity)
 
@@ -186,19 +188,24 @@ e-class**, each offering a set of **alternatives**:
 ```
 
 Only the **Root** alternative carries the match's cost; interior nodes are free
-(the paper's convention). A match spanning multiple e-classes is held together by a
-**coherence set** — pick Root for the match here, and you must pick the matching
-Internal everywhere else, or none.
+(the paper's convention). A match's root and its *memory-effect* internals are
+held together by a **coherence set**; pure internals are exempt — the
+instruction recomputes them (duplication), so the match stays selectable even
+when the class is claimed by another match or materialized in its own right.
+Classes in `must_materialize` are never offered Internal alternatives at all.
 
-Edges follow each match's pattern structure (parent class → operand class). The
-compatibility matrix sets `INF_COST` for incoherent pairs and asks
-`alternatives_compatible`:
+Edges connect each match's **root class to every class the match binds**, so
+the match's requirements don't depend on the choices of intermediate pattern
+nodes. The compatibility matrix sets `INF_COST` for incoherent pairs and asks
+`alternatives_compatible` (via `child_requirement`):
 
 ```
-   parent Root/Internal expects child to be …
-   ├─ Materialized   (child sits under a Boundary)  → child must be Root or External
-   └─ SameMatch      (child is an interior pattern node) → child must be exactly
-                                                            that Internal{match,node}
+   parent Root/Internal expects a class its match binds to be …
+   ├─ Materialized   (bound under a Boundary)  → child must be Root or External
+   ├─ SameMatch      (a memory-effect interior node) → child must be exactly
+   │                                                    that Internal{match,node}
+   └─ nothing        (a pure interior node) → any choice; the instruction
+                                              recomputes the value (duplication)
 ```
 
 Finite edges may additionally carry a **materialization cost** from the cost model
@@ -260,7 +267,9 @@ incomplete rule set is rejected instead of silently dropping an op.
 
 1. Insert each `IntroducedEmit` before its anchor (operand-first). Its
    `EmitRequest` carries only the fresh destination value (`op: None`).
-2. For each original op: `replace_op` (Emit) or `erase_op` (Consume).
+2. For each original op, in **reverse block order** (consumers before defs, so
+   a def's `replace_op` use-remapping sees every already-emitted consumer):
+   `replace_op` (Emit) or `erase_op` (Consume).
 3. Drop `constant` ops left dead — an immediate folded into an instruction
    attribute detaches the constant's only use, so the maintained def-use chain
    reports zero uses and it is erased.
@@ -295,8 +304,10 @@ struct EmitRequest<'a> {
 
 By convention an emitter writes its destination *into the original result
 `ValueId`* (TMDL-generated emitters store it as the destination register
-attribute), so consumers and later passes keep referencing the same values —
-`replace_op` does not rewrite uses.
+attribute), so consumers and later passes keep referencing the same values.
+`replace_op` only rewrites SSA uses when the old and new ops declare the same
+number of results; machine ops declare none, so the original values stay live
+and the Def-role register attribute claims their def-site.
 
 ## Key types at a glance
 

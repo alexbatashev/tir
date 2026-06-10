@@ -77,11 +77,17 @@ pub(crate) fn compile_isel_pattern_node(
             compiled
         }
         ExprKind::Constant => match expr.get_leaf_data(node) {
-            Some(ExprPayload::Int(value)) => pattern.add_node(PatternExpr::Node(template_node(
-                ExprKind::Constant,
-                Some(ExprPayload::Int(value.clone())),
-                expr.get_actual_type(node),
-            ))),
+            Some(ExprPayload::Int(value)) => {
+                let compiled = pattern.add_node(PatternExpr::Node(template_node(
+                    ExprKind::Constant,
+                    Some(ExprPayload::Int(value.clone())),
+                    expr.get_actual_type(node),
+                )));
+                // A constant is pure and folds into the encoding, so any number of
+                // matches may embed the same constant class.
+                pattern.set_duplicable(compiled, true);
+                compiled
+            }
             _ => return None,
         },
         kind => {

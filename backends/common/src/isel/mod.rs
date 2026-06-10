@@ -281,9 +281,14 @@ struct BlockSelectionCache {
     /// The IR value each (canonical) e-class computes, so an operand resolving to an
     /// intermediate result can be materialized as that register value at emit time.
     class_value: HashMap<EClassId, ValueId>,
-    /// E-classes used as an operand by more than one consumer; such a value must be
-    /// materialized into a register and cannot be internalized into a match.
+    /// E-classes used as an operand by more than one consumer. A memory effect in
+    /// such a class cannot be internalized into a match; a pure class still can —
+    /// each fused instruction recomputes it (duplication).
     shared_classes: HashSet<EClassId>,
+    /// Op-root e-classes whose value some consumer can never internalize — a use
+    /// by an op no match reaches (return, branch, an un-lowerable op) or by an op
+    /// outside this block — so the defining op must never be consumed.
+    must_materialize: HashSet<EClassId>,
     /// The solved emission plan, or the completeness error explaining why the block
     /// cannot be selected with this rule set.
     plan: Option<Result<BlockPlan, String>>,
@@ -440,6 +445,25 @@ impl InstructionSelectPass {
             }
         }
 
+        // A value used by an op no match can reach (it lowered to no e-graph root)
+        // or by an op outside this block can never be recomputed inside a fused
+        // instruction, so its class must keep a materializing alternative.
+        let block_ops: HashSet<OpId> = op_ids.iter().copied().collect();
+        let mut must_materialize = HashSet::new();
+        for (op_id, root) in &roots_by_op {
+            let op = context.get_op(*op_id);
+            let escapes = op.results.iter().any(|result| {
+                context
+                    .get_value(*result)
+                    .uses()
+                    .iter()
+                    .any(|u| !block_ops.contains(&u.op()) || !roots_by_op.contains_key(&u.op()))
+            });
+            if escapes {
+                must_materialize.insert(egraph.find(*root));
+            }
+        }
+
         self.block_cache.insert(
             block.id(),
             BlockSelectionCache {
@@ -448,6 +472,7 @@ impl InstructionSelectPass {
                 op_root,
                 class_value: canon_class_value,
                 shared_classes,
+                must_materialize,
                 plan: None,
             },
         );
@@ -507,9 +532,18 @@ impl InstructionSelectPass {
             rewriter.insert_op_before(&anchor, new_op.as_ref())?;
         }
 
-        // Rewrite the original ops (positions are resolved by id, so insertions
-        // above do not invalidate this).
-        for (op_id, decision) in &plan.op_decisions {
+        // Rewrite the original ops in reverse block order — consumers before
+        // defs — so when a def's replacement remaps SSA uses of its results
+        // (`replace_op`), every already-emitted consumer is visible. Positions
+        // are resolved by id, so the insertions above do not invalidate this.
+        let commit_order: Vec<OpId> = block_arc
+            .op_ids()
+            .into_iter()
+            .rev()
+            .filter(|op_id| plan.op_decisions.contains_key(op_id))
+            .collect();
+        for op_id in &commit_order {
+            let decision = &plan.op_decisions[op_id];
             let op_ref = OperationRef::new(context.get_op(*op_id), Some(block_arc.clone()), None);
             match decision {
                 BlockDecision::Emit { rule_index, m } => {
@@ -573,11 +607,10 @@ impl InstructionSelectPass {
         let Some(cover) = build_eclass_cover(
             &cache.egraph,
             &cache.op_by_root,
-            &self.compiled_patterns,
+            &cache.must_materialize,
             &matches,
             |parent, child, parent_alt| {
                 materialization_edge_cost(
-                    &self.compiled_patterns,
                     &cache.egraph,
                     parent,
                     child,
@@ -664,13 +697,15 @@ impl InstructionSelectPass {
             };
             let pattern = &compiled.pattern;
 
-            // A class shared by several consumers must be materialized into a
-            // register: it may be a match *root* (the instruction that produces it)
-            // or a boundary operand, but never an *interior* node that some larger
-            // match would consume and erase.
+            // A pure class may sit interior to any number of matches: each fused
+            // instruction recomputes it, and whether the defining op is erased is
+            // the solver's separate Consume decision. A shared *memory effect*
+            // must stay materialized — it may be a match root or a boundary
+            // operand, never an interior node a larger match would consume.
             let allowed = |pattern_node: NodeId, class: EClassId| {
                 pattern_node == pattern_root
                     || pattern.is_duplicable(pattern_node)
+                    || node::class_is_pure(&cache.egraph, class)
                     || !cache.shared_classes.contains(&cache.egraph.find(class))
             };
 
@@ -702,10 +737,16 @@ impl InstructionSelectPass {
                     .map(|pattern_node| PatternNodeBinding {
                         pattern_node,
                         class: cache.egraph.find(m.binding(pattern_node)),
-                        is_boundary: matches!(
-                            pattern.get_node(pattern_node),
-                            PatternExpr::Boundary
-                        ),
+                        // Constants are boundary-like: pure, folded into the
+                        // encoding, never consumed by the match — so the same
+                        // constant class (e.g. the literal 0) can sit inside one
+                        // match and under a boundary of another without making
+                        // the cover infeasible.
+                        is_boundary: match pattern.get_node(pattern_node) {
+                            PatternExpr::Boundary => true,
+                            PatternExpr::Node(node) => node.kind == ExprKind::Constant,
+                            _ => false,
+                        },
                     })
                     .collect();
                 let bindings = FullMatchBindings {
@@ -777,10 +818,8 @@ impl Pass for InstructionSelectPass {
             }
         }
 
-        if op.op().results.is_empty() {
-            return Ok(());
-        }
-
+        // Result-less ops still participate: a store must trigger its block's
+        // selection even when no value-producing op precedes it.
         let Some(block) = op.block() else {
             return Ok(());
         };
