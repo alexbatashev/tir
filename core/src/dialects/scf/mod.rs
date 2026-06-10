@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::builtin::IntegerType;
-use crate::{Context, Error, Operation, Terminator, ValueId, dialect, operation};
+use crate::{Context, Error, Operation, RegionGuard, Terminator, ValueId, dialect, operation};
 
 use crate as tir;
 use crate::Any as AnyConstraint;
@@ -147,7 +147,17 @@ operation! {
             else_body: Region {
                 single_block: true,
             }
-        }
+        },
+        interfaces: [RegionGuard],
+    }
+}
+
+impl tir::RegionGuard for IfOp {
+    fn guarded_regions(&self) -> Vec<(tir::RegionId, ValueId, bool)> {
+        vec![
+            (self.0.regions[0], self.condition(), true),
+            (self.0.regions[1], self.condition(), false),
+        ]
     }
 }
 

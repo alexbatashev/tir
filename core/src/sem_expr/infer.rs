@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::graph::{Dag, MutDag, NodeId};
 
@@ -109,24 +109,37 @@ pub fn infer_widths(
 
 /// Rewrite a behavior-derived pattern into the form instruction selection should
 /// match against, returning the new graph, its root, and forced node widths
-/// (indexed by the new node's index).
+/// (indexed by the new node's index). `immediate_symbols` names the operand
+/// symbols that are encoded immediates rather than registers.
 ///
-/// Two rewrites bridge "how the hardware computes" to "what the IR looks like":
+/// The rewrites bridge "how the hardware computes" to "what the IR looks like":
 /// - **Result-extension collapse:** `SExt(Extract(x, hi, 0), _)` becomes `x`, with
 ///   `x` forced to width `hi + 1`. So `addw`'s `sext(extract(a+b, 31, 0), XLEN)` is
 ///   an i32 `Add`, not a literal structure to match.
 /// - **Shift-amount mask strip:** a shift whose amount is `Extract(amt, k, 0)` (the
 ///   encoding's 5/6-bit field) matches the plain `amt`.
+/// - **Extension-of-load collapse:** `sext/zext(load(...), XLEN)` becomes the typed
+///   load itself, since source IR types the load result instead of wrapping it.
+/// - **Immediate-extension collapse:** `sext/zext(imm, XLEN)` becomes the bare
+///   `imm` symbol, since source IR carries constants at their use width.
 ///
 /// Execution semantics are untouched — only the selection pattern is simplified.
 pub fn canonicalize_for_selection(
     graph: &ExprPostGraph,
     root: NodeId,
+    immediate_symbols: &HashSet<u32>,
 ) -> (ExprPostGraph, NodeId, Vec<Option<u32>>) {
     let mut out = ExprPostGraph::new();
     let mut memo: HashMap<usize, NodeId> = HashMap::new();
     let mut forced: HashMap<usize, u32> = HashMap::new();
-    let new_root = canon_rebuild(graph, root, &mut out, &mut memo, &mut forced);
+    let new_root = canon_rebuild(
+        graph,
+        root,
+        immediate_symbols,
+        &mut out,
+        &mut memo,
+        &mut forced,
+    );
 
     let mut widths = vec![None; out.len()];
     for (index, width) in forced {
@@ -162,9 +175,22 @@ fn extract_from_zero_hi(graph: &ExprPostGraph, node: NodeId) -> Option<(NodeId, 
     canon_const_u64(graph, children[1]).map(|hi| (children[0], hi))
 }
 
+fn is_immediate_leaf(
+    graph: &ExprPostGraph,
+    node: NodeId,
+    immediate_symbols: &HashSet<u32>,
+) -> bool {
+    *graph.get_node(node) == ExprKind::Symbol
+        && matches!(
+            graph.get_leaf_data(node),
+            Some(ExprPayload::SymbolId(id)) if immediate_symbols.contains(id)
+        )
+}
+
 fn canon_rebuild(
     graph: &ExprPostGraph,
     node: NodeId,
+    immediate_symbols: &HashSet<u32>,
     out: &mut ExprPostGraph,
     memo: &mut HashMap<usize, NodeId>,
     forced: &mut HashMap<usize, u32>,
@@ -176,12 +202,30 @@ fn canon_rebuild(
     let kind = *graph.get_node(node);
     let children: Vec<NodeId> = graph.children(node).collect();
 
+    // Extension-of-load collapse: lb/lh/lw-style behaviors extend the raw memory
+    // bytes to XLEN (`sext(load(addr, 4, _), XLEN)`), but source IR types the
+    // load result instead of wrapping it. Match the typed `LoadMemory` itself —
+    // its width is inferred from the bytes operand.
+    //
+    // Immediate-extension collapse: behaviors widen an encoded immediate to the
+    // computation width (`sext(imm, XLEN)`), but source IR carries constants at
+    // their use width, so the canonical pattern binds the bare immediate.
+    if matches!(kind, ExprKind::SExt | ExprKind::ZExt)
+        && children.len() == 2
+        && (*graph.get_node(children[0]) == ExprKind::LoadMemory
+            || is_immediate_leaf(graph, children[0], immediate_symbols))
+    {
+        let inner = canon_rebuild(graph, children[0], immediate_symbols, out, memo, forced);
+        memo.insert(node.index(), inner);
+        return inner;
+    }
+
     // Result-extension collapse: SExt(Extract(inner, hi, 0), _) -> inner @ width hi+1.
     if kind == ExprKind::SExt
         && children.len() == 2
         && let Some((source, hi)) = extract_from_zero_hi(graph, children[0])
     {
-        let inner = canon_rebuild(graph, source, out, memo, forced);
+        let inner = canon_rebuild(graph, source, immediate_symbols, out, memo, forced);
         forced.insert(inner.index(), (hi + 1) as u32);
         memo.insert(node.index(), inner);
         return inner;
@@ -191,7 +235,7 @@ fn canon_rebuild(
     //   Shift(value, Extract(amt, k, 0))  -> Shift(value, amt)
     //   Shift(value, Clamp(amt, _, _))    -> Shift(value, amt)
     if is_shift(kind) && children.len() == 2 {
-        let value = canon_rebuild(graph, children[0], out, memo, forced);
+        let value = canon_rebuild(graph, children[0], immediate_symbols, out, memo, forced);
         let amount = {
             let src = children[1];
             let stripped = match *graph.get_node(src) {
@@ -202,7 +246,14 @@ fn canon_rebuild(
                 ExprKind::Clamp => graph.children(src).next(),
                 _ => None,
             };
-            canon_rebuild(graph, stripped.unwrap_or(src), out, memo, forced)
+            canon_rebuild(
+                graph,
+                stripped.unwrap_or(src),
+                immediate_symbols,
+                out,
+                memo,
+                forced,
+            )
         };
         let new_node = out.add_node(kind);
         out.add_edge(new_node, value);
@@ -217,8 +268,8 @@ fn canon_rebuild(
     // source IR loads can match signed and unsigned target load forms by their
     // surrounding extension.
     if kind == ExprKind::LoadMemory && children.len() == 3 {
-        let address = canon_rebuild(graph, children[0], out, memo, forced);
-        let bytes = canon_rebuild(graph, children[1], out, memo, forced);
+        let address = canon_rebuild(graph, children[0], immediate_symbols, out, memo, forced);
+        let bytes = canon_rebuild(graph, children[1], immediate_symbols, out, memo, forced);
         let zero = out.add_node(ExprKind::Constant);
         out.set_leaf_data(zero, ExprPayload::Int(crate::utils::APInt::new(1, 0)));
         let new_node = out.add_node(kind);
@@ -234,17 +285,17 @@ fn canon_rebuild(
     // value's width, so canonicalize that extract to the inner value and force the
     // width on the matched operand.
     if kind == ExprKind::StoreMemory && children.len() == 4 {
-        let address = canon_rebuild(graph, children[0], out, memo, forced);
-        let bytes = canon_rebuild(graph, children[1], out, memo, forced);
+        let address = canon_rebuild(graph, children[0], immediate_symbols, out, memo, forced);
+        let bytes = canon_rebuild(graph, children[1], immediate_symbols, out, memo, forced);
         let value_src = children[2];
         let value = if let Some((source, hi)) = extract_from_zero_hi(graph, value_src) {
-            let inner = canon_rebuild(graph, source, out, memo, forced);
+            let inner = canon_rebuild(graph, source, immediate_symbols, out, memo, forced);
             forced.insert(inner.index(), (hi + 1) as u32);
             inner
         } else {
-            canon_rebuild(graph, value_src, out, memo, forced)
+            canon_rebuild(graph, value_src, immediate_symbols, out, memo, forced)
         };
-        let address_space = canon_rebuild(graph, children[3], out, memo, forced);
+        let address_space = canon_rebuild(graph, children[3], immediate_symbols, out, memo, forced);
         let new_node = out.add_node(kind);
         out.add_edge(new_node, address);
         out.add_edge(new_node, bytes);
@@ -264,7 +315,7 @@ fn canon_rebuild(
     } else {
         let new_children: Vec<NodeId> = children
             .iter()
-            .map(|&child| canon_rebuild(graph, child, out, memo, forced))
+            .map(|&child| canon_rebuild(graph, child, immediate_symbols, out, memo, forced))
             .collect();
         let new_node = out.add_node(kind);
         for child in new_children {
@@ -335,7 +386,7 @@ mod tests {
         let width = con(&mut g, 64, 16);
         let root = op(&mut g, ExprKind::SExt, &[extract, width]);
 
-        let (canon, new_root, widths) = canonicalize_for_selection(&g, root);
+        let (canon, new_root, widths) = canonicalize_for_selection(&g, root, &Default::default());
         assert_eq!(*canon.get_node(new_root), ExprKind::Add);
         assert_eq!(canon.children(new_root).count(), 2);
         assert_eq!(widths[new_root.index()], Some(32));
@@ -354,7 +405,7 @@ mod tests {
         let amount = op(&mut g, ExprKind::Extract, &[b, hi, lo]);
         let root = op(&mut g, ExprKind::ShiftLeft, &[a, amount]);
 
-        let (canon, new_root, _) = canonicalize_for_selection(&g, root);
+        let (canon, new_root, _) = canonicalize_for_selection(&g, root, &Default::default());
         assert_eq!(*canon.get_node(new_root), ExprKind::ShiftLeft);
         let children: Vec<_> = canon.children(new_root).collect();
         assert_eq!(children.len(), 2);

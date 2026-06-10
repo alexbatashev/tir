@@ -276,6 +276,32 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         })
         .collect();
 
+    // An op that declares `sem` can be folded over constant operands by evaluating
+    // that expression, so derive `ConstantFold` for it automatically (unless the op
+    // already lists the interface, e.g. a hand-written fold).
+    let has_sem = as_sem_expr_body.is_some();
+    let already_lists_fold = interfaces.iter().any(|path| {
+        path.segments
+            .last()
+            .is_some_and(|seg| seg.ident == "ConstantFold")
+    });
+    let derive_constant_fold = has_sem && !already_lists_fold;
+    let constant_fold_impl = if derive_constant_fold {
+        quote! {
+            impl tir::ConstantFold for #struct_name {
+                fn fold(&self, operands: &[tir::sem_expr::Value]) -> Option<tir::sem_expr::Value> {
+                    tir::sem_expr::fold_with_sem(self, operands)
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
+    let mut interfaces = interfaces;
+    if derive_constant_fold {
+        interfaces.push(syn::parse_quote!(tir::ConstantFold));
+    }
+
     let semantic_expr_method = if let Some(body) = &as_sem_expr_body {
         let actual_type_setter = if has_results {
             quote! {
@@ -593,6 +619,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         #(#interface_impls)*
         #verifiable_impl
         #as_sem_expr_impl
+        #constant_fold_impl
 
         impl tir::OpDefVerifiable for #struct_name {
             fn verify_operands(&self, context: &tir::Context) -> Result<(), tir::Error> {
@@ -785,6 +812,10 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
                 &[#(#operand_name_literals),*]
             }
 
+            fn parent_block(&self) -> Option<tir::BlockId> {
+                self.0.parent_block()
+            }
+
             #semantic_expr_method
             #interface_registration_method
         }
@@ -840,6 +871,20 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
                 let instance = self.context.add_operation(instance);
 
                 #struct_name(instance)
+            }
+        }
+
+        impl From<&#struct_name> for tir::OpId {
+            fn from(v: &#struct_name) -> tir::OpId {
+                use tir::Operation;
+                v.id()
+            }
+        }
+
+        impl From<#struct_name> for tir::OpId {
+            fn from(v: #struct_name) -> tir::OpId {
+                use tir::Operation;
+                v.id()
             }
         }
 

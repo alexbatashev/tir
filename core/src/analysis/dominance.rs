@@ -14,8 +14,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    BlockId, Context, OpId, Terminator, TypeId,
-    graph::{Dag, MutDag, Node, NodeId, PostOrderDag},
+    BlockId, Context, OpId, Operation, Terminator, TypeId,
+    graph::{Dag, MutDag, NodeId, PostOrderDag},
 };
 
 /// A node of the (post-)dominator tree. Wraps a real basic block, or the virtual
@@ -25,18 +25,6 @@ pub enum DomNode {
     Block(BlockId),
     /// Virtual exit; only present in post-dominator trees.
     Exit,
-}
-
-impl Node for DomNode {
-    // The tree shape lives in the graph edges, not in the node: these `Node`
-    // methods exist only to satisfy the `Dag` bound and are unused for dominance.
-    fn is_leaf(&self, _ctx: &Context) -> bool {
-        false
-    }
-
-    fn num_children(&self, _ctx: &Context) -> usize {
-        0
-    }
 }
 
 /// A dominator or post-dominator tree over the blocks reachable from a root
@@ -59,8 +47,8 @@ struct Cfg {
 
 impl DominatorTree {
     /// Build the dominator tree rooted at the entry block of `root`'s region.
-    pub fn new(context: &Context, root: OpId) -> Self {
-        let cfg = build_cfg(context, root);
+    pub fn new<O: Into<OpId>>(context: &Context, root: O) -> Self {
+        let cfg = build_cfg(context, root.into());
         match cfg.entry {
             Some(entry) => {
                 let root = DomNode::Block(entry);
@@ -73,8 +61,8 @@ impl DominatorTree {
     /// Build the post-dominator tree for `root`'s region. Blocks with no
     /// successors (returns, nested-region exits) are joined under a virtual
     /// [`DomNode::Exit`], which becomes the tree root.
-    pub fn post_dominator(context: &Context, root: OpId) -> Self {
-        let cfg = build_cfg(context, root);
+    pub fn post_dominator<O: Into<OpId>>(context: &Context, root: O) -> Self {
+        let cfg = build_cfg(context, root.into());
         if cfg.entry.is_none() {
             return Self::empty();
         }
@@ -169,6 +157,27 @@ impl DominatorTree {
                 Some(&parent) => current = parent,
                 None => return false,
             }
+        }
+    }
+
+    pub fn op_dominates<O1: Operation, O2: Operation>(
+        &self,
+        ctx: &Context,
+        a: &O1,
+        b: &O2,
+    ) -> bool {
+        let a_block = a.parent_block();
+        let b_block = b.parent_block();
+
+        if let (Some(a_block), Some(b_block)) = (a_block, b_block) {
+            if a_block == b_block {
+                let block = ctx.get_block(a_block);
+                block.is_before(a.id(), b.id())
+            } else {
+                self.dominates(a_block, b_block)
+            }
+        } else {
+            false
         }
     }
 }

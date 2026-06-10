@@ -12,6 +12,16 @@ ariadne = "0.3"
 
 [dev-dependencies]
 tir-lit = { path = "../utils/lit" }
+criterion = { workspace = true, features = ["html_reports"] }
+egg = "0.11"
+
+[[bench]]
+name = "egraph"
+harness = false
+
+[[bench]]
+name = "egg_math"
+harness = false
 
 [[test]]
 name = "lit"

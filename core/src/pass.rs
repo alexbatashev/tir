@@ -246,6 +246,18 @@ impl Rewriter {
             .as_ref()
             .ok_or(PassError::MissingBlock(target.name()))?;
         if block.replace_op(target.op.id, new_op.id()) {
+            // Rewrite SSA uses of the old results to the new op's results when the
+            // shapes line up, so consumers don't dangle on the erased op's values.
+            // Machine ops declare no SSA results — they instead claim the original
+            // result's def-site through a Def-role register attribute (the emitter
+            // destination convention) — so they skip this entirely and the original
+            // values stay live.
+            let new_results = self.context.get_op(new_op.id()).results.clone();
+            if new_results.len() == target.op.results.len() {
+                for (old, new) in target.op.results.iter().zip(new_results.iter()) {
+                    self.context.replace_value_uses(*old, *new);
+                }
+            }
             // The replaced-out op no longer references its operands; the new op
             // registered its own uses when it was added to the context. Drop the old
             // op from the arena so it doesn't linger as a phantom.

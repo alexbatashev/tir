@@ -86,6 +86,10 @@ struct ContextInstance {
     last_region_id: AtomicU32,
     blocks: HashMap<BlockId, Arc<Block>>,
     last_block_id: AtomicU32,
+    /// Reverse index from an operation to the block that holds it, maintained by
+    /// `Block`'s membership mutators. Lets `parent_block` answer in O(1) instead of
+    /// scanning every block's operation list.
+    op_parent: HashMap<OpId, BlockId>,
     dialects: HashMap<&'static str, Arc<dyn Dialect>>,
     op_interface_converters:
         HashMap<(&'static str, &'static str, std::any::TypeId), OpInterfaceConverter>,
@@ -105,6 +109,7 @@ impl Context {
             last_region_id: AtomicU32::new(0),
             blocks: HashMap::new(),
             last_block_id: AtomicU32::new(0),
+            op_parent: HashMap::new(),
             dialects: HashMap::new(),
             op_interface_converters: HashMap::new(),
             type_cache: vec![],
@@ -389,6 +394,7 @@ impl Context {
     }
 
     pub fn create_block(&self, arguments: Vec<Value>) -> Arc<Block> {
+        let context = self.as_context_ref();
         let mut inner = self.0.write();
 
         let block_id = BlockId::new(
@@ -397,10 +403,25 @@ impl Context {
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
         );
 
-        let block = Arc::new(Block::new(block_id, arguments));
+        let block = Arc::new(Block::new(block_id, arguments, context));
         inner.blocks.insert(block_id, block.clone());
 
         block
+    }
+
+    /// The block currently holding `op`, or `None` for an op not in any block (the
+    /// root op, or one detached by a rewrite). Maintained by `Block`'s membership
+    /// mutators; see [`ContextInstance::op_parent`].
+    pub fn parent_block(&self, op: OpId) -> Option<BlockId> {
+        self.0.read().op_parent.get(&op).copied()
+    }
+
+    pub(crate) fn set_op_parent(&self, op: OpId, block: BlockId) {
+        self.0.write().op_parent.insert(op, block);
+    }
+
+    pub(crate) fn clear_op_parent(&self, op: OpId) {
+        self.0.write().op_parent.remove(&op);
     }
 
     pub fn get_block(&self, id: BlockId) -> Arc<Block> {
@@ -628,6 +649,33 @@ mod tests {
     #[test]
     fn default_context() {
         let _ = Context::with_default_dialects();
+    }
+
+    #[test]
+    fn parent_block_tracks_membership() {
+        use crate::IRBuilder;
+        let context = Context::with_default_dialects();
+        let i32 = builtin::IntegerType::new(&context, 32);
+        let a = context.create_value(i32, None);
+        let b = context.create_value(i32, None);
+
+        let block = context.create_block(vec![]);
+        let mut builder = IRBuilder::new(block.clone());
+        let add = builder.insert(builtin::ops::addi(&context, a.id(), b.id(), i32).build());
+
+        // Inserting into a block records the parent, reachable from just the op.
+        assert_eq!(context.parent_block(add.id()), Some(block.id()));
+        assert_eq!(context.get_op(add.id()).parent_block(), Some(block.id()));
+
+        // Replacing swaps the parent over to the new op; the old op is detached.
+        let sub = builtin::ops::subi(&context, a.id(), b.id(), i32).build();
+        assert!(block.replace_op(add.id(), sub.id()));
+        assert_eq!(context.parent_block(add.id()), None);
+        assert_eq!(context.parent_block(sub.id()), Some(block.id()));
+
+        // Removing clears it.
+        assert!(block.remove_op(sub.id()));
+        assert_eq!(context.parent_block(sub.id()), None);
     }
 
     #[test]

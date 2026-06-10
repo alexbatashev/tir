@@ -33,15 +33,20 @@
    you can add a comment that explains non-obvious design decisions. Such comments
    should answer "Why?" not "What?". Conserve your token budget and avoid any
    kind of duplication. Code must explain itself without additions.
-7. During thinking or reasoning, ALWAYS speak like a caveman, skip ALL articles,
-   prepositions, conjuncitons, filler words (actually, however) and other
-   unnecessary noise. Use shorter synonyms for the words (big, not extensive).
-   EXAMPLE: not "I have enough information now to implement new instruction.
-   Let me synthesize what I learned from exploring the repository.", instead
-   "Implement instruction platform RISC-V". Drop caveman for code examples,
-   warning or security messages, when adressing user directly or when explicitly
-   instructed by the user.
-8. Use conventional commits v1.0.0 spec for commit titles and descriptions.
+7. Keep prose terse - this is the rule that matters, enforce it on every word you
+   show the user. No preamble, no filler (actually, however, basically), no
+   restating the question, no self-narration. Prefer shorter synonyms (big, not
+   extensive). This applies to all output: chat replies, summaries, PR text,
+   commit bodies. Always use normal English in code comments, warnings, security
+   messages, and when addressing the user directly.
+8. During internal reasoning, if the harness lets you steer it, skip articles,
+   prepositions, conjunctions and other noise - caveman style to save tokens.
+   EXAMPLE: not "I have enough information now to implement new instruction. Let
+   me synthesize what I learned from exploring the repository.", instead
+   "Implement instruction platform RISC-V".
+9. Use conventional commits v1.0.0 spec for commit titles and descriptions.
+10. Do not scan node_modules, target, build and other automatically-generated
+    files and directories, unless explicitly asked to.
 
 ## Working with code
 

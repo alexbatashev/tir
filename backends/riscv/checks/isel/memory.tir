@@ -1,0 +1,27 @@
+// RUN: tir mc --march=rv64i --stage=isel %s | filecheck %s
+
+// Loads and stores select through the MemoryRead/MemoryWrite interfaces: each
+// ptr.store becomes a sw and each ptr.load a lw, with the base pointer bound
+// and a zero immediate offset.
+
+module {
+  func @sum(%0: !i32, %1: !i32) -> !i32 {
+    %2 = ptr.alloca : !ptr.p<!i32>
+    ptr.store %0, %2
+    %3 = ptr.alloca : !ptr.p<!i32>
+    ptr.store %1, %3
+    %4 = ptr.load %2 : !i32
+    %5 = ptr.load %3 : !i32
+    %6 = addi %4, %5 : !i32
+    return %6
+  }
+  module_end
+}
+
+// CHECK: asm.symbol {name = "sum", arg_regs = [%virt0:GPR, %virt1:GPR]}
+// CHECK: riscv.sw {rs1 = %virt2:GPR, rs2 = %virt0:GPR, imm = 0}
+// CHECK: riscv.sw {rs1 = %virt3:GPR, rs2 = %virt1:GPR, imm = 0}
+// CHECK: riscv.lw {rd = %virt4:GPR, rs1 = %virt2:GPR, imm = 0}
+// CHECK: riscv.lw {rd = %virt5:GPR, rs1 = %virt3:GPR, imm = 0}
+// CHECK: riscv.addw {rd = %virt6:GPR, rs1 = %virt4:GPR, rs2 = %virt5:GPR}
+// CHECK: riscv.vret

@@ -338,11 +338,10 @@ fn emit_instructions<'a>(
                                 quote! { .get(#def_pos_lit) }
                             };
                             emit_attr_steps.push(quote! {
-                                let dst = op
-                                    .op()
+                                let dst = req
                                     .results
                                     #result_accessor
-                                    .ok_or(tir::PassError::RewriteFailed(op.op().id))?
+                                    .ok_or(tir::PassError::RewriteFailed(req.op_id()))?
                                     .number();
                                 builder = builder.attr(
                                     #op_name_lit,
@@ -357,7 +356,7 @@ fn emit_instructions<'a>(
                         } else if let Some(sym) = semantics.variable_symbols.get(op_name) {
                             let sym_lit = proc_macro2::Literal::u32_unsuffixed(*sym);
                             emit_attr_steps.push(quote! {
-                                let src = m.value_binding(#sym_lit).ok_or(tir::PassError::RewriteFailed(op.op().id))?;
+                                let src = m.value_binding(#sym_lit).ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
                                 builder = builder.attr(
                                     #op_name_lit,
                                     tir::attributes::AttributeValue::Register(
@@ -389,7 +388,7 @@ fn emit_instructions<'a>(
                         if let Some(sym) = semantics.variable_symbols.get(op_name) {
                             let sym_lit = proc_macro2::Literal::u32_unsuffixed(*sym);
                             emit_attr_steps.push(quote! {
-                                let v = m.int_binding(#sym_lit).ok_or(tir::PassError::RewriteFailed(op.op().id))?;
+                                let v = m.int_binding(#sym_lit).ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
                                 builder = builder.attr(
                                     #op_name_lit,
                                     tir::attributes::AttributeValue::Int(v),
@@ -407,8 +406,17 @@ fn emit_instructions<'a>(
             // strip shift-amount masks), then type each node from its structurally
             // determined width. A plain `add` stays untyped; `addw` becomes an i32
             // `Add`; `sll` becomes a plain `ShiftLeft`.
+            let immediate_symbols: std::collections::HashSet<u32> = ops
+                .iter()
+                .filter(|(_, op_ty)| matches!(op_ty, Type::Bits(_) | Type::Integer))
+                .filter_map(|(op_name, _)| semantics.variable_symbols.get(op_name).copied())
+                .collect();
             let (canon_pattern, canon_root, forced_widths) =
-                tir::sem_expr::canonicalize_for_selection(&semantics.pattern, semantics.root);
+                tir::sem_expr::canonicalize_for_selection(
+                    &semantics.pattern,
+                    semantics.root,
+                    &immediate_symbols,
+                );
             let mut pattern_widths = tir::sem_expr::infer_widths(&canon_pattern, |_| None);
             for (index, forced) in forced_widths.iter().enumerate() {
                 if forced.is_some() {
@@ -434,13 +442,13 @@ fn emit_instructions<'a>(
 
                 fn #emit_fn_ident(
                     context: &tir::Context,
-                    op: &tir::OperationRef,
+                    req: &tir_be_common::isel::EmitRequest,
                     m: &tir_be_common::isel::RuleMatch,
-                ) -> Result<tir_be_common::isel::EmitPlan, tir::PassError> {
-                    let _ = m;
+                ) -> Result<Box<dyn tir::Operation>, tir::PassError> {
+                    let _ = (req, m);
                     let mut builder = #builder_ident::new(context);
                     #(#emit_attr_steps)*
-                    Ok(tir_be_common::isel::EmitPlan::single(Box::new(builder.build())))
+                    Ok(Box::new(builder.build()))
                 }
             });
 

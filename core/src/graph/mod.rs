@@ -1,16 +1,11 @@
 use std::collections::HashMap;
 
-use crate::{Context, OpId, TypeId};
+use crate::{OpId, TypeId};
 
-mod egraph;
 mod pattern;
 mod postorder;
 
-pub use egraph::{EClassId, EGraph, EMatch, ENode, Rewrite, SaturationLimits};
-pub use pattern::{
-    CoverCandidate, CoverLegality, GraphCoverDriver, MatchBinding, OperandConstraint, Pattern,
-    PatternExpr, PatternId, VF2CoverDriver,
-};
+pub use pattern::{Matchable, OperandConstraint, Pattern, PatternExpr};
 pub use postorder::PostOrderDag;
 
 pub(crate) static EMPTY_CHILDREN: [NodeId; 0] = [];
@@ -28,32 +23,12 @@ impl NodeId {
     }
 }
 
-pub trait Node {
-    fn is_leaf(&self, ctx: &Context) -> bool;
-
-    fn num_children(&self, ctx: &Context) -> usize;
-
-    fn matches_pattern(&self, pattern: &Self, _ctx: &Context) -> bool
-    where
-        Self: PartialEq + Sized,
-    {
-        self == pattern
-    }
-
-    fn is_commutative(&self) -> bool {
-        false
-    }
-
-    /// Whether this node is a compile-time constant. Used to distinguish immediate
-    /// operands (which must bind to a constant) from register operands (which must
-    /// not) during pattern matching.
-    fn is_constant(&self) -> bool {
-        false
-    }
-}
-
+/// A pure read-only view over a cache-friendly graph store, optimized for a
+/// particular traversal order by the implementor. Deliberately knows nothing about
+/// pattern matching — node labels gain that capability separately via
+/// [`Matchable`], required only by the e-graph.
 pub trait Dag {
-    type Node: Node;
+    type Node;
     type Leaf;
 
     fn len(&self) -> usize;
@@ -85,7 +60,7 @@ pub trait MutDag: Dag {
     fn set_actual_type(&mut self, n: NodeId, ty: TypeId);
 }
 
-pub struct GenericDag<N: Node, L> {
+pub struct GenericDag<N, L> {
     nodes: Vec<N>,
     edges: HashMap<NodeId, Vec<NodeId>>,
     data: HashMap<NodeId, L>,
@@ -93,7 +68,23 @@ pub struct GenericDag<N: Node, L> {
     actual_types: HashMap<NodeId, TypeId>,
 }
 
-impl<N: Node, L> GenericDag<N, L> {
+impl<N, L> Default for GenericDag<N, L> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<N, L> GenericDag<N, L> {
+    pub fn new() -> Self {
+        Self {
+            nodes: Vec::new(),
+            edges: HashMap::new(),
+            data: HashMap::new(),
+            original_ops: HashMap::new(),
+            actual_types: HashMap::new(),
+        }
+    }
+
     fn contains_descendant(&self, root: NodeId, target: NodeId) -> bool {
         if root == target {
             return true;
@@ -123,13 +114,13 @@ impl<N: Node, L> GenericDag<N, L> {
     }
 }
 
-pub struct GenericDagPostorderIter<'a, N: Node, L> {
+pub struct GenericDagPostorderIter<'a, N, L> {
     dag: &'a GenericDag<N, L>,
     start: NodeId,
     next_index: usize,
 }
 
-impl<N: Node, L> Iterator for GenericDagPostorderIter<'_, N, L> {
+impl<N, L> Iterator for GenericDagPostorderIter<'_, N, L> {
     type Item = NodeId;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -146,13 +137,13 @@ impl<N: Node, L> Iterator for GenericDagPostorderIter<'_, N, L> {
     }
 }
 
-pub struct GenericDagPreorderIter<'a, N: Node, L> {
+pub struct GenericDagPreorderIter<'a, N, L> {
     dag: &'a GenericDag<N, L>,
     start: NodeId,
     next_ordinal: usize,
 }
 
-impl<N: Node, L> Iterator for GenericDagPreorderIter<'_, N, L> {
+impl<N, L> Iterator for GenericDagPreorderIter<'_, N, L> {
     type Item = NodeId;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -163,7 +154,7 @@ impl<N: Node, L> Iterator for GenericDagPreorderIter<'_, N, L> {
     }
 }
 
-impl<N: Node, L> Dag for GenericDag<N, L> {
+impl<N, L> Dag for GenericDag<N, L> {
     type Node = N;
 
     type Leaf = L;
@@ -218,7 +209,7 @@ impl<N: Node, L> Dag for GenericDag<N, L> {
     }
 }
 
-impl<N: Node, L> MutDag for GenericDag<N, L> {
+impl<N, L> MutDag for GenericDag<N, L> {
     fn add_node(&mut self, n: Self::Node) -> NodeId {
         let id = NodeId::from_index(self.nodes.len());
         self.nodes.push(n);

@@ -1,6 +1,9 @@
 use crate::{
-    Context, ContextIterator, Error, GetFromContext, context::ContextRef,
-    ir_formatter::IRFormatter, parse::Span, parse::text::Parser as IRParser, region::RegionId,
+    BlockId, Context, ContextIterator, Error, GetFromContext,
+    context::ContextRef,
+    ir_formatter::IRFormatter,
+    parse::{Span, text::Parser as IRParser},
+    region::RegionId,
     value::ValueId,
 };
 use std::{any::Any, sync::Arc};
@@ -117,6 +120,8 @@ pub trait Operation: 'static + Send + Sync + Any + Verifiable + OpDefVerifiable 
     {
     }
 
+    fn parent_block(&self) -> Option<BlockId>;
+
     /// Verifies that operation is valid.
     ///
     /// Order of verification:
@@ -187,6 +192,11 @@ impl OpInstance {
 
     pub fn dialect(&self) -> &'static str {
         self.dialect
+    }
+
+    /// The block that holds this operation, or `None` if it is detached or the root.
+    pub fn parent_block(&self) -> Option<crate::BlockId> {
+        self.context.upgrade().parent_block(self.id)
     }
 
     pub fn as_op<T: Operation + Sized>(self: Arc<Self>) -> Option<T> {
