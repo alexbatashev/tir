@@ -11,9 +11,9 @@ use tir::{
     sem_expr::ExprKind,
 };
 
+use super::RuleMatch;
 use super::node::{Binding, SemEGraph, class_binding, class_is_pure};
 use super::pattern::CompiledIselPattern;
-use super::{IselCostModel, RuleMatch};
 
 #[derive(Clone, Debug)]
 pub(crate) struct CaptureBindings {
@@ -88,9 +88,9 @@ pub(crate) struct PbqpIselMatch {
     pub(crate) bindings: FullMatchBindings,
     pub(crate) cost: u64,
 }
-/// A solved cover: the chosen alternative for every PBQP node, the e-class each
-/// PBQP node stands for (same index), and the achieved cost.
-pub(crate) struct DagCover {
+/// A solved cover: the chosen alternative for every PBQP node and the e-class
+/// each PBQP node stands for (same index).
+pub(crate) struct ClassCover {
     pub(crate) choices: Vec<PbqpIselAlternative>,
     pub(crate) classes: Vec<EClassId>,
 }
@@ -99,16 +99,15 @@ pub(crate) struct DagCover {
 /// alternatives drawn from the instruction-pattern `matches`, and root -> bound
 /// class compatibility derived from each match's bindings. `must_materialize`
 /// lists classes whose value some consumer can never internalize (a use outside
-/// any match's reach), so they are never offered a consuming alternative. The
-/// `edge_cost` closure prices satisfied materialization edges. Returns `None` if
-/// the instance is infeasible (a class with no valid alternative).
+/// any match's reach), so they are never offered a consuming alternative.
+/// Returns `None` if the instance is infeasible (a class with no valid
+/// alternative).
 pub(crate) fn build_eclass_cover(
     egraph: &SemEGraph,
     op_by_root: &HashMap<EClassId, OpId>,
     must_materialize: &HashSet<EClassId>,
     matches: &[PbqpIselMatch],
-    edge_cost: impl Fn(EClassId, EClassId, &PbqpIselAlternative) -> u64,
-) -> Option<DagCover> {
+) -> Option<ClassCover> {
     let classes: Vec<EClassId> = egraph.classes().map(|c| egraph.find(c)).collect();
     let index: HashMap<EClassId, usize> =
         classes.iter().enumerate().map(|(i, &c)| (c, i)).collect();
@@ -202,7 +201,7 @@ pub(crate) fn build_eclass_cover(
     // root alternative imposes the match's requirements (materialized boundary
     // operands, same-match memory internals) directly, so they don't depend on
     // the choices of intermediate pattern nodes. Deduplicated so each ordered
-    // class pair is priced once.
+    // class pair gets one compatibility matrix.
     let mut edge_pairs: HashSet<(usize, usize)> = HashSet::new();
     for m in matches {
         let ri = class_index(m.root);
@@ -215,7 +214,7 @@ pub(crate) fn build_eclass_cover(
     }
 
     for (pi, ci) in edge_pairs {
-        let (parent_class, child_class) = (classes[pi], classes[ci]);
+        let child_class = classes[ci];
         let parent_alts = &alternatives_by_node[pi];
         let child_alts = &alternatives_by_node[ci];
         let mut matrix = PbqpMatrix::zero(parent_alts.len(), child_alts.len());
@@ -224,11 +223,6 @@ pub(crate) fn build_eclass_cover(
             for (child_alt_idx, child_alt) in child_alts.iter().enumerate() {
                 if !alternatives_compatible(egraph, child_class, parent_alt, child_alt, matches) {
                     matrix.set(parent_alt_idx, child_alt_idx, INF_COST);
-                    continue;
-                }
-                let cost = edge_cost(parent_class, child_class, parent_alt);
-                if cost != 0 {
-                    matrix.set(parent_alt_idx, child_alt_idx, cost);
                 }
             }
         }
@@ -248,7 +242,7 @@ pub(crate) fn build_eclass_cover(
         .enumerate()
         .map(|(node, choice)| alternatives_by_node[node][choice].clone())
         .collect();
-    Some(DagCover { choices, classes })
+    Some(ClassCover { choices, classes })
 }
 
 /// Drop matches dominated by an interchangeable alternative: same root class,
@@ -432,39 +426,6 @@ pub(crate) fn child_requirement(
         }),
         None => None,
     }
-}
-
-/// Cost added to a *finite* parent -> child edge by the target objective. Only
-/// materialization edges (parent reaches the child through an untyped boundary)
-/// are priced; structural same-match edges stay at zero.
-pub(crate) fn materialization_edge_cost(
-    egraph: &SemEGraph,
-    parent: EClassId,
-    child: EClassId,
-    parent_alt: &PbqpIselAlternative,
-    matches: &[PbqpIselMatch],
-    cost_model: &dyn IselCostModel,
-) -> u64 {
-    let materialized = matches!(
-        child_requirement(egraph, child, parent_alt, matches),
-        Some(ChildRequirement::Materialized)
-    );
-    if !materialized {
-        return 0;
-    }
-    let (Some(parent_kind), Some(child_kind)) = (
-        egraph
-            .nodes(parent)
-            .first()
-            .map(|&id| egraph.get_node(id).kind),
-        egraph
-            .nodes(child)
-            .first()
-            .map(|&id| egraph.get_node(id).kind),
-    ) else {
-        return 0;
-    };
-    cost_model.edge_cost(parent_kind, child_kind, true)
 }
 
 pub(crate) enum ChildRequirement {

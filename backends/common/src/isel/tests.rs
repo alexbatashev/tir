@@ -6,8 +6,8 @@ use tir::{
 };
 
 use super::{
-    EmitPlan, EmitRequest, InstructionSelectPass, IselCostModel, Rule, RuleMatch,
-    SelectionPressure, SemEGraph, SemNode, TargetIselModel, extension_rewrite, template_node,
+    EmitRequest, InstructionSelectPass, IselCostModel, Rule, RuleMatch, SemEGraph, SemNode,
+    extension_rewrite, template_node,
 };
 
 fn symbol(g: &mut ExprPostGraph, id: u32) -> tir::graph::NodeId {
@@ -50,7 +50,7 @@ fn emit_add(
     context: &Context,
     req: &EmitRequest,
     m: &RuleMatch,
-) -> Result<EmitPlan, tir::PassError> {
+) -> Result<Box<dyn Operation>, tir::PassError> {
     let op = req.op.expect("backed by an op");
     let lhs = m
         .value_binding(0)
@@ -60,21 +60,19 @@ fn emit_add(
         .or_else(|| m.value_binding(1))
         .unwrap_or_else(|| op.op().operands[1]);
     let result_ty = req.result_ty.expect("typed result");
-    Ok(EmitPlan::single(Box::new(
-        ops::addi(context, lhs, rhs, result_ty).build(),
-    )))
+    Ok(Box::new(ops::addi(context, lhs, rhs, result_ty).build()))
 }
 
 fn emit_mul(
     context: &Context,
     req: &EmitRequest,
     _m: &RuleMatch,
-) -> Result<EmitPlan, tir::PassError> {
+) -> Result<Box<dyn Operation>, tir::PassError> {
     let op = req.op.expect("backed by an op");
     let result_ty = req.result_ty.expect("typed result");
-    Ok(EmitPlan::single(Box::new(
+    Ok(Box::new(
         ops::muli(context, op.op().operands[0], op.op().operands[1], result_ty).build(),
-    )))
+    ))
 }
 
 #[test]
@@ -321,24 +319,12 @@ impl IselCostModel for NoFusionCostModel {
         _op: &tir::OperationRef,
         rule: &Rule,
         _m: &RuleMatch,
-        _pressure: &SelectionPressure,
-        _target: &dyn TargetIselModel,
     ) -> u64 {
         if rule.name == "add-mul" {
             1000
         } else {
             rule.base_cost as u64
         }
-    }
-}
-
-struct NoFusionTarget {
-    cost: NoFusionCostModel,
-}
-
-impl TargetIselModel for NoFusionTarget {
-    fn cost_model(&self) -> &dyn IselCostModel {
-        &self.cost
     }
 }
 
@@ -378,11 +364,7 @@ fn cost_model_override_changes_selection() {
 
     let mut pm = PassManager::new();
     pm.nest(FuncOp::name())
-        .add_pass(
-            InstructionSelectPass::new(rules).with_target_model(Box::new(NoFusionTarget {
-                cost: NoFusionCostModel,
-            })),
-        );
+        .add_pass(InstructionSelectPass::new(rules).with_cost_model(Box::new(NoFusionCostModel)));
     pm.run(&context, context.get_op(module.id()))
         .expect("pass pipeline should succeed");
 
@@ -473,12 +455,12 @@ fn emit_sub(
     context: &Context,
     req: &EmitRequest,
     _m: &RuleMatch,
-) -> Result<EmitPlan, tir::PassError> {
+) -> Result<Box<dyn Operation>, tir::PassError> {
     let op = req.op.expect("backed by an op");
     let result_ty = req.result_ty.expect("typed result");
-    Ok(EmitPlan::single(Box::new(
+    Ok(Box::new(
         ops::subi(context, op.op().operands[0], op.op().operands[1], result_ty).build(),
-    )))
+    ))
 }
 
 #[test]
@@ -715,7 +697,7 @@ fn shift_imm_pattern(kind: ExprKind) -> ExprPostGraph {
 
 fn emit_shift_marker(
     marker: ExprKind,
-) -> impl Fn(&Context, &EmitRequest, &RuleMatch) -> Result<EmitPlan, tir::PassError> {
+) -> impl Fn(&Context, &EmitRequest, &RuleMatch) -> Result<Box<dyn Operation>, tir::PassError> {
     move |context, req, m| {
         let rs1 = m
             .value_binding(0)
@@ -727,7 +709,7 @@ fn emit_shift_marker(
             ExprKind::ShiftLeft => Box::new(ops::shli(context, rs1, rs1, result_ty).build()),
             _ => Box::new(ops::shrsi(context, rs1, rs1, result_ty).build()),
         };
-        Ok(EmitPlan::single(built))
+        Ok(built)
     }
 }
 
@@ -735,7 +717,7 @@ fn emit_slli(
     context: &Context,
     req: &EmitRequest,
     m: &RuleMatch,
-) -> Result<EmitPlan, tir::PassError> {
+) -> Result<Box<dyn Operation>, tir::PassError> {
     emit_shift_marker(ExprKind::ShiftLeft)(context, req, m)
 }
 
@@ -743,7 +725,7 @@ fn emit_srai(
     context: &Context,
     req: &EmitRequest,
     m: &RuleMatch,
-) -> Result<EmitPlan, tir::PassError> {
+) -> Result<Box<dyn Operation>, tir::PassError> {
     emit_shift_marker(ExprKind::ShiftRightArithmetic)(context, req, m)
 }
 
@@ -875,28 +857,26 @@ fn emit_load_marker(
     context: &Context,
     req: &EmitRequest,
     m: &RuleMatch,
-) -> Result<EmitPlan, tir::PassError> {
+) -> Result<Box<dyn Operation>, tir::PassError> {
     let base = m
         .value_binding(0)
         .ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
     let result_ty = req.result_ty.expect("typed result");
-    Ok(EmitPlan::single(Box::new(
-        ops::shli(context, base, base, result_ty).build(),
-    )))
+    Ok(Box::new(ops::shli(context, base, base, result_ty).build()))
 }
 
 fn emit_store_marker(
     context: &Context,
     req: &EmitRequest,
     m: &RuleMatch,
-) -> Result<EmitPlan, tir::PassError> {
+) -> Result<Box<dyn Operation>, tir::PassError> {
     let value = m
         .value_binding(4)
         .ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
     let result_ty = context.get_value(value).ty();
-    Ok(EmitPlan::single(Box::new(
+    Ok(Box::new(
         ops::muli(context, value, value, result_ty).build(),
-    )))
+    ))
 }
 
 /// Memory lowering is driven purely by the `MemoryRead`/`MemoryWrite` interfaces:
@@ -1022,7 +1002,7 @@ fn merged_value_classes_resolve_to_earliest_def() {
         context: &Context,
         req: &EmitRequest,
         m: &RuleMatch,
-    ) -> Result<EmitPlan, tir::PassError> {
+    ) -> Result<Box<dyn Operation>, tir::PassError> {
         let lhs = m
             .value_binding(0)
             .ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
@@ -1030,9 +1010,7 @@ fn merged_value_classes_resolve_to_earliest_def() {
             .value_binding(1)
             .ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
         let result_ty = req.result_ty.expect("typed result");
-        Ok(EmitPlan::single(Box::new(
-            ops::subi(context, lhs, rhs, result_ty).build(),
-        )))
+        Ok(Box::new(ops::subi(context, lhs, rhs, result_ty).build()))
     }
 
     let rules = vec![

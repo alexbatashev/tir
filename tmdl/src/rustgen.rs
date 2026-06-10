@@ -444,11 +444,11 @@ fn emit_instructions<'a>(
                     context: &tir::Context,
                     req: &tir_be_common::isel::EmitRequest,
                     m: &tir_be_common::isel::RuleMatch,
-                ) -> Result<tir_be_common::isel::EmitPlan, tir::PassError> {
+                ) -> Result<Box<dyn tir::Operation>, tir::PassError> {
                     let _ = (req, m);
                     let mut builder = #builder_ident::new(context);
                     #(#emit_attr_steps)*
-                    Ok(tir_be_common::isel::EmitPlan::single(Box::new(builder.build())))
+                    Ok(Box::new(builder.build()))
                 }
             });
 

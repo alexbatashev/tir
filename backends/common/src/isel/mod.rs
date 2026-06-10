@@ -31,16 +31,13 @@ pub use node::{SemEGraph, SemNode, SemPayload};
 use builder::SemDagBuilder;
 use cover::{
     CaptureBindings, FullMatchBindings, PatternNodeBinding, PbqpIselAlternative, PbqpIselMatch,
-    build_eclass_cover, completeness_error, materialization_edge_cost, prune_dominated_matches,
+    build_eclass_cover, completeness_error, prune_dominated_matches,
 };
 use emit::{BlockDecision, BlockPlan, EmissionBuilder};
 use pattern::{CompiledIselPattern, compile_isel_pattern};
 use rewrites::discover_rewrites;
 #[cfg(test)]
 use {node::template_node, rewrites::extension_rewrite};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct CompiledRuleId(u32);
 
 #[derive(Debug, Clone)]
 pub struct RuleMatch {
@@ -75,25 +72,6 @@ impl RuleMatch {
             .map(|(_, v)| v.to_u64() as i64)
     }
 }
-#[derive(Clone, Copy, Debug)]
-pub struct SelectionPressure {
-    pub estimated_live_operands: u32,
-    pub estimated_register_pressure: u32,
-}
-
-pub struct EmitPlan {
-    op: Box<dyn Operation>,
-}
-
-impl EmitPlan {
-    pub fn single(op: Box<dyn Operation>) -> Self {
-        Self { op }
-    }
-
-    fn into_op(self) -> Box<dyn Operation> {
-        self.op
-    }
-}
 
 /// The destination an emitter writes into: the original op being replaced, or
 /// just fresh destination values for a rewrite-introduced instruction that has
@@ -122,72 +100,18 @@ impl<'a> EmitRequest<'a> {
     }
 }
 
-pub trait TargetIselModel: Send + Sync {
-    fn subtarget(&self) -> &'static str {
-        "generic"
-    }
-
-    fn is_pbqp_enabled(&self) -> bool {
-        true
-    }
-
-    fn supports_rule(&self, _rule_id: CompiledRuleId) -> bool {
-        true
-    }
-
-    fn estimate_register_pressure(&self, op: &OperationRef) -> u32 {
-        op.op().operands.len() as u32
-    }
-
-    /// The objective consulted by the PBQP builder for node and edge costs.
-    ///
-    /// Targets that want to tune selection (subtarget-specific instruction
-    /// costs, register-pressure weighting, materialization penalties) return a
-    /// custom [`IselCostModel`]. The default reproduces the historical
-    /// `base_cost + dynamic_cost_fn` behavior.
-    fn cost_model(&self) -> &dyn IselCostModel {
-        &DEFAULT_COST_MODEL
-    }
-}
-
-pub struct DefaultTargetIselModel;
-
-impl TargetIselModel for DefaultTargetIselModel {}
-
-/// The optimization objective the PBQP builder minimizes.
-///
-/// `node_cost` is the full instruction cost placed on the *root* alternative of
-/// a pattern match (non-root alternatives carry zero, per the paper). `edge_cost`
-/// adds a compatibility cost to *finite* parent -> child edges, letting a target
-/// price, e.g., materializing a value into a register. `pressure_weight` scales
-/// the estimated register pressure into the node cost.
+/// The optimization objective the PBQP builder minimizes: the cost placed on
+/// the *root* alternative of a pattern match (non-root alternatives carry zero,
+/// per the paper). The default is the rule's TMDL-derived `base_cost`.
 pub trait IselCostModel: Send + Sync {
     fn node_cost(
         &self,
-        context: &Context,
-        op: &OperationRef,
+        _context: &Context,
+        _op: &OperationRef,
         rule: &Rule,
-        m: &RuleMatch,
-        pressure: &SelectionPressure,
-        target: &dyn TargetIselModel,
+        _m: &RuleMatch,
     ) -> u64 {
-        let dynamic = (rule.dynamic_cost_fn)(context, op, m, pressure, target) as u64;
         rule.base_cost as u64
-            + dynamic
-            + self.pressure_weight() * pressure.estimated_register_pressure as u64
-    }
-
-    /// Extra cost for a satisfied parent -> child compatibility edge. `materialized`
-    /// is true when the parent reaches the child through an untyped boundary leaf,
-    /// i.e. the child must be available as a register value.
-    fn edge_cost(&self, _parent: ExprKind, _child: ExprKind, _materialized: bool) -> u64 {
-        0
-    }
-
-    /// Weight applied to the estimated register pressure of a match. Zero (the
-    /// default) ignores pressure entirely, matching historical behavior.
-    fn pressure_weight(&self) -> u64 {
-        0
     }
 }
 
@@ -195,44 +119,18 @@ pub struct DefaultIselCostModel;
 
 impl IselCostModel for DefaultIselCostModel {}
 
-static DEFAULT_COST_MODEL: DefaultIselCostModel = DefaultIselCostModel;
-
-pub type RuleLegalityFn = fn(&Context, &OperationRef, &RuleMatch, &dyn TargetIselModel) -> bool;
-pub type RuleDynamicCostFn =
-    fn(&Context, &OperationRef, &RuleMatch, &SelectionPressure, &dyn TargetIselModel) -> u32;
-pub type RuleEmitPlanFn = fn(&Context, &EmitRequest, &RuleMatch) -> Result<EmitPlan, PassError>;
-
-fn default_legality(
-    _context: &Context,
-    _op: &OperationRef,
-    _m: &RuleMatch,
-    _target: &dyn TargetIselModel,
-) -> bool {
-    true
-}
-
-fn default_dynamic_cost(
-    _context: &Context,
-    _op: &OperationRef,
-    _m: &RuleMatch,
-    _pressure: &SelectionPressure,
-    _target: &dyn TargetIselModel,
-) -> u32 {
-    0
-}
+pub type RuleEmitFn =
+    fn(&Context, &EmitRequest, &RuleMatch) -> Result<Box<dyn Operation>, PassError>;
 
 pub struct Rule {
     pub name: &'static str,
     pub pattern: ExprPostGraph,
-    pub compiled_rule_id: CompiledRuleId,
     pub base_cost: u32,
     /// Per-operand-symbol constraint (register vs immediate). Symbols absent here
     /// are unconstrained, so hand-written and synthesized rules keep matching any
     /// value.
     pub operand_constraints: Vec<(u32, OperandConstraint)>,
-    pub legality_fn: RuleLegalityFn,
-    pub dynamic_cost_fn: RuleDynamicCostFn,
-    pub emit_plan_fn: RuleEmitPlanFn,
+    pub emit_fn: RuleEmitFn,
 }
 
 impl Rule {
@@ -240,17 +138,14 @@ impl Rule {
         name: &'static str,
         pattern: ExprPostGraph,
         base_cost: u32,
-        emit_plan_fn: RuleEmitPlanFn,
+        emit_fn: RuleEmitFn,
     ) -> Self {
         Self {
             name,
             pattern,
-            compiled_rule_id: CompiledRuleId(0),
             base_cost,
             operand_constraints: Vec::new(),
-            legality_fn: default_legality,
-            dynamic_cost_fn: default_dynamic_cost,
-            emit_plan_fn,
+            emit_fn,
         }
     }
 
@@ -258,16 +153,6 @@ impl Rule {
     /// immediate-shift pattern only matches a constant shift amount.
     pub fn with_operand_constraints(mut self, constraints: Vec<(u32, OperandConstraint)>) -> Self {
         self.operand_constraints = constraints;
-        self
-    }
-
-    pub fn with_legality(mut self, legality_fn: RuleLegalityFn) -> Self {
-        self.legality_fn = legality_fn;
-        self
-    }
-
-    pub fn with_dynamic_cost(mut self, dynamic_cost_fn: RuleDynamicCostFn) -> Self {
-        self.dynamic_cost_fn = dynamic_cost_fn;
         self
     }
 }
@@ -302,17 +187,14 @@ pub struct InstructionSelectPass {
     /// with before covering (e.g. discovered `sext`/shift bridges). Populated by
     /// rewrite discovery; empty means selection is purely syntactic tiling.
     rewrites: Vec<Rewrite<SemNode, ()>>,
-    target_model: Box<dyn TargetIselModel>,
+    cost_model: Box<dyn IselCostModel>,
     op_lowerings: Vec<OpLowering>,
     block_cache: HashMap<BlockId, BlockSelectionCache>,
     emitted_blocks: HashSet<BlockId>,
 }
 
 impl InstructionSelectPass {
-    pub fn new(mut rules: Vec<Rule>) -> Self {
-        for (idx, rule) in rules.iter_mut().enumerate() {
-            rule.compiled_rule_id = CompiledRuleId(idx as u32);
-        }
+    pub fn new(rules: Vec<Rule>) -> Self {
         let compiled_patterns: Vec<_> = rules
             .iter()
             .enumerate()
@@ -327,7 +209,7 @@ impl InstructionSelectPass {
             rules,
             compiled_patterns,
             rewrites,
-            target_model: Box::new(DefaultTargetIselModel),
+            cost_model: Box::new(DefaultIselCostModel),
             op_lowerings: vec![],
             block_cache: HashMap::new(),
             emitted_blocks: HashSet::new(),
@@ -343,8 +225,8 @@ impl InstructionSelectPass {
         self
     }
 
-    pub fn with_target_model(mut self, target_model: Box<dyn TargetIselModel>) -> Self {
-        self.target_model = target_model;
+    pub fn with_cost_model(mut self, cost_model: Box<dyn IselCostModel>) -> Self {
+        self.cost_model = cost_model;
         self
     }
 
@@ -526,7 +408,7 @@ impl InstructionSelectPass {
                 result_ty: Some(intro.dest_ty),
             };
             let rule = &self.rules[intro.rule_index];
-            let new_op = (rule.emit_plan_fn)(context, &request, &intro.m)?.into_op();
+            let new_op = (rule.emit_fn)(context, &request, &intro.m)?;
             let anchor =
                 OperationRef::new(context.get_op(intro.anchor), Some(block_arc.clone()), None);
             rewriter.insert_op_before(&anchor, new_op.as_ref())?;
@@ -549,7 +431,7 @@ impl InstructionSelectPass {
                 BlockDecision::Emit { rule_index, m } => {
                     let rule = &self.rules[*rule_index];
                     let request = EmitRequest::for_op(&op_ref, context);
-                    let new_op = (rule.emit_plan_fn)(context, &request, m)?.into_op();
+                    let new_op = (rule.emit_fn)(context, &request, m)?;
                     rewriter.replace_op(&op_ref, new_op.as_ref())?;
                 }
                 BlockDecision::Consume => {
@@ -603,22 +485,11 @@ impl InstructionSelectPass {
             return Ok(BlockPlan::default());
         }
 
-        let cost_model = self.target_model.cost_model();
         let Some(cover) = build_eclass_cover(
             &cache.egraph,
             &cache.op_by_root,
             &cache.must_materialize,
             &matches,
-            |parent, child, parent_alt| {
-                materialization_edge_cost(
-                    &cache.egraph,
-                    parent,
-                    child,
-                    parent_alt,
-                    &matches,
-                    cost_model,
-                )
-            },
         ) else {
             return Ok(BlockPlan::default());
         };
@@ -689,9 +560,6 @@ impl InstructionSelectPass {
         let mut matches = Vec::new();
         for (pattern_index, compiled) in self.compiled_patterns.iter().enumerate() {
             let rule = &self.rules[compiled.rule_index];
-            if !self.target_model.supports_rule(rule.compiled_rule_id) {
-                continue;
-            }
             let Some(pattern_root) = compiled.pattern.root() else {
                 continue;
             };
@@ -754,31 +622,15 @@ impl InstructionSelectPass {
                     pattern_nodes,
                 };
 
-                // Cost and legality are op-relative when there is a backing op;
-                // a rewrite-introduced root has no op, so it takes the rule's
-                // target-independent base cost and skips op legality.
+                // Cost is op-relative when there is a backing op; a
+                // rewrite-introduced root has no op, so it takes the rule's
+                // target-independent base cost.
                 let rule_match = bindings
                     .captures
                     .to_rule_match(&cache.egraph, &cache.class_value);
                 let cost = if let Some(op_ref) = op_id.and_then(|id| op_refs.get(&id)) {
-                    if !(rule.legality_fn)(context, op_ref, &rule_match, self.target_model.as_ref())
-                    {
-                        continue;
-                    }
-                    let pressure = SelectionPressure {
-                        estimated_live_operands: op_ref.op().operands.len() as u32,
-                        estimated_register_pressure: self
-                            .target_model
-                            .estimate_register_pressure(op_ref),
-                    };
-                    self.target_model.cost_model().node_cost(
-                        context,
-                        op_ref,
-                        rule,
-                        &rule_match,
-                        &pressure,
-                        self.target_model.as_ref(),
-                    )
+                    self.cost_model
+                        .node_cost(context, op_ref, rule, &rule_match)
                 } else {
                     rule.base_cost as u64
                 };
@@ -824,10 +676,6 @@ impl Pass for InstructionSelectPass {
             return Ok(());
         };
 
-        if self.target_model.is_pbqp_enabled() {
-            self.commit_block_solution(context, block, rewriter)?;
-        }
-
-        Ok(())
+        self.commit_block_solution(context, block, rewriter)
     }
 }

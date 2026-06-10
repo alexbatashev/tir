@@ -32,7 +32,7 @@ flowchart LR
         rules["rules"] -->|compile_isel_pattern| pats["CompiledIselPattern"]
         pats -->|"3 - ematch + prune\n(collect_block_matches)"| matches["PbqpIselMatch list"]
         sat --> matches
-        matches -->|"4 - build_eclass_cover\n+ pbqp::solve"| cover["DagCover\n(one alternative per class)"]
+        matches -->|"4 - build_eclass_cover\n+ pbqp::solve"| cover["ClassCover\n(one alternative per class)"]
         cover -->|"5 - solve_block\n(EmissionBuilder)"| plan["BlockPlan"]
         plan -->|"6 - commit_block_solution"| out["rewriter: insert / replace / erase ops"]
     end
@@ -208,9 +208,7 @@ nodes. The compatibility matrix sets `INF_COST` for incoherent pairs and asks
                                               recomputes the value (duplication)
 ```
 
-Finite edges may additionally carry a **materialization cost** from the cost model
-(`materialization_edge_cost` → `edge_cost`), pricing e.g. forcing a value into a
-register. `pbqp::solve` returns the min-cost assignment as a `DagCover` (one chosen
+`pbqp::solve` returns the min-cost assignment as a `ClassCover` (one chosen
 alternative per class).
 
 ### Worked example: `square` lowering
@@ -276,23 +274,17 @@ incomplete rule set is rejected instead of silently dropping an op.
 
 ## Cost model
 
-Two layers, both target-overridable:
-
-```
-   TargetIselModel              IselCostModel
-   ├─ is_pbqp_enabled           ├─ node_cost   (root alternative; base + dynamic + pressure)
-   ├─ supports_rule             ├─ edge_cost   (materialization edges)
-   ├─ estimate_register_pressure└─ pressure_weight
-   └─ cost_model() ─────────────►
-```
-
-The default reproduces `base_cost + dynamic_cost_fn`. Costs enter PBQP
-unmodified; equal-cost ties between interchangeable matches are resolved by
-dominance pruning (§3), not by cost tweaks.
+A target may install an `IselCostModel` (`with_cost_model`); its single hook,
+`node_cost(context, op, rule, match)`, prices the Root alternative of an
+op-backed match. The default is the rule's TMDL-derived `base_cost`, which is
+also what a rewrite-introduced match (no backing op) always costs. Costs enter
+PBQP unmodified; equal-cost ties between interchangeable matches are resolved
+by dominance pruning (§3), not by cost tweaks.
 
 ## Emitters
 
-Each rule's emitter is `fn(&Context, &EmitRequest, &RuleMatch) -> EmitPlan`:
+Each rule's emitter is
+`fn(&Context, &EmitRequest, &RuleMatch) -> Result<Box<dyn Operation>, PassError>`:
 
 ```rust
 struct EmitRequest<'a> {
@@ -315,11 +307,11 @@ and the Def-role register attribute claims their def-site.
 |------|------|
 | `SemNode` | e-graph label: `(kind, payload, ty)` |
 | `SemDagBuilder` | lowers a block's ops into the e-graph |
-| `Rule` | a target's pattern + emitter + cost/legality hooks |
+| `Rule` | a target's pattern + emitter + base cost + operand constraints |
 | `CompiledIselPattern` | a rule's pattern compiled for ematch, with boundary symbols + specificity |
 | `PbqpIselMatch` | one ematch hit: root class, bindings, cost |
 | `BlockSelectionCache` | per-block memo: egraph + side tables + solved plan |
 | `BlockPlan` / `IntroducedEmit` | the emission plan and its synthesized instructions |
 | `EmissionBuilder` | turns a cover into per-op `RuleMatch`es, materializing introduced classes |
 | `EmitRequest` | what an emitter writes into: backing op (if any) + destination values |
-| `TargetIselModel` / `IselCostModel` | target hooks for cost, legality, rule support |
+| `IselCostModel` | target hook for match cost (`node_cost`) |
