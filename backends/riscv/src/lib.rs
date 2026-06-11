@@ -1,6 +1,8 @@
 use tir::helpers::{dialect, operation};
 use tir::{Any, Operation};
 
+mod obj;
+
 include!(concat!(env!("OUT_DIR"), "/riscv.rs"));
 
 /// Parsed RISC-V target selection from `--march`/`--mcpu`/`--mattr`.
@@ -749,6 +751,33 @@ impl tir_be_common::TargetMachine for RiscvTarget {
             ]);
         }
         counters
+    }
+
+    fn pre_ra_lowerings(&self) -> Vec<tir_be_common::isel::OpLowering> {
+        let lower_constant = if self.config.xlen == 64 {
+            obj::lower_constant_rv64
+        } else {
+            obj::lower_constant_rv32
+        };
+        vec![lower_constant, obj::lower_vcond_br]
+    }
+
+    fn finalize_lowerings(&self) -> Vec<tir_be_common::isel::OpLowering> {
+        vec![obj::finalize_virtual_ops]
+    }
+
+    fn object_format(&self) -> Option<tir_be_common::binary::ObjectFormatInfo> {
+        Some(obj::object_format(self.config.xlen))
+    }
+
+    fn binary_writer(
+        &self,
+        _context: &tir::Context,
+    ) -> Option<tir_be_common::binary::BinaryWriter> {
+        Some(tir_be_common::binary::BinaryWriter::new(
+            get_instruction_encoders(),
+            get_instruction_patchers(),
+        ))
     }
 }
 
@@ -1704,6 +1733,176 @@ mod tests {
             Some(&"addi"),
             "the frame prologue (addi sp) should lead the block, got {names:?}"
         );
+    }
+
+    #[test]
+    fn encoders_match_isa_golden_words() {
+        use crate::{
+            AddImmOpBuilder, AddOpBuilder, BranchEqOpBuilder, JumpAndLinkOpBuilder,
+            JumpAndLinkRegOpBuilder, LoadDoubleWordOpBuilder, LoadUpperImmOpBuilder,
+            StoreDoubleWordOpBuilder, phys,
+        };
+        use tir::attributes::AttributeValue;
+
+        let context = Context::with_default_dialects();
+        context.register_dialect::<AsmDialect>();
+        context.register_dialect::<RiscvDialect>();
+
+        let encoders = crate::get_instruction_encoders();
+        let gpr = |i: u16| phys(&("GPR".to_string(), i));
+        let word = |id: tir::OpId| -> u32 {
+            let inst = context.get_op(id);
+            let enc = encoders[inst.name](&inst)
+                .unwrap_or_else(|| panic!("'{}' failed to encode", inst.name));
+            assert!(
+                enc.fixups.is_empty(),
+                "unexpected fixups for '{}'",
+                inst.name
+            );
+            u32::from_le_bytes(enc.bytes.try_into().unwrap())
+        };
+
+        // Golden words produced by clang/llvm-mc for riscv64.
+        let add = AddOpBuilder::new(&context)
+            .attr("rd", gpr(10))
+            .attr("rs1", gpr(11))
+            .attr("rs2", gpr(12))
+            .build();
+        assert_eq!(word(add.id()), 0x00C58533, "add x10, x11, x12");
+
+        let addi = AddImmOpBuilder::new(&context)
+            .attr("rd", gpr(5))
+            .attr("rs1", gpr(6))
+            .attr("imm", AttributeValue::Int(-1))
+            .build();
+        assert_eq!(word(addi.id()), 0xFFF30293, "addi x5, x6, -1");
+
+        let jalr = JumpAndLinkRegOpBuilder::new(&context)
+            .attr("rd", gpr(0))
+            .attr("rs1", gpr(1))
+            .attr("imm", AttributeValue::Int(0))
+            .build();
+        assert_eq!(word(jalr.id()), 0x00008067, "jalr x0, x1, 0 (ret)");
+
+        let beq = BranchEqOpBuilder::new(&context)
+            .attr("rs1", gpr(1))
+            .attr("rs2", gpr(2))
+            .attr("imm", AttributeValue::Int(24))
+            .build();
+        assert_eq!(word(beq.id()), 0x00208C63, "beq x1, x2, +24");
+
+        let jal = JumpAndLinkOpBuilder::new(&context)
+            .attr("rd", gpr(1))
+            .attr("imm", AttributeValue::Int(20))
+            .build();
+        assert_eq!(word(jal.id()), 0x014000EF, "jal x1, +20");
+
+        let sd = StoreDoubleWordOpBuilder::new(&context)
+            .attr("rs1", gpr(2))
+            .attr("rs2", gpr(8))
+            .attr("imm", AttributeValue::Int(16))
+            .build();
+        assert_eq!(word(sd.id()), 0x00813823, "sd x8, 16(x2)");
+
+        let ld = LoadDoubleWordOpBuilder::new(&context)
+            .attr("rd", gpr(8))
+            .attr("rs1", gpr(2))
+            .attr("imm", AttributeValue::Int(16))
+            .build();
+        assert_eq!(word(ld.id()), 0x01013403, "ld x8, 16(x2)");
+
+        let lui = LoadUpperImmOpBuilder::new(&context)
+            .attr("rd", gpr(7))
+            .attr("imm", AttributeValue::Int(1))
+            .build();
+        assert_eq!(word(lui.id()), 0x000013B7, "lui x7, 1");
+    }
+
+    #[test]
+    fn encoder_rejects_unencodable_operands() {
+        use crate::{AddImmOpBuilder, AddOpBuilder, phys, virt};
+        use tir::attributes::AttributeValue;
+
+        let context = Context::with_default_dialects();
+        context.register_dialect::<AsmDialect>();
+        context.register_dialect::<RiscvDialect>();
+
+        let encoders = crate::get_instruction_encoders();
+        let gpr = |i: u16| phys(&("GPR".to_string(), i));
+
+        // A virtual register cannot be encoded.
+        let add = AddOpBuilder::new(&context)
+            .attr("rd", virt(1, "GPR"))
+            .attr("rs1", gpr(11))
+            .attr("rs2", gpr(12))
+            .build();
+        assert!(encoders["add"](&context.get_op(add.id())).is_none());
+
+        // An immediate outside bits<12> cannot be encoded.
+        let addi = AddImmOpBuilder::new(&context)
+            .attr("rd", gpr(5))
+            .attr("rs1", gpr(6))
+            .attr("imm", AttributeValue::Int(4096))
+            .build();
+        assert!(encoders["addi"](&context.get_op(addi.id())).is_none());
+    }
+
+    #[test]
+    fn symbol_and_block_operands_become_fixups() {
+        use crate::{BranchEqOpBuilder, JumpAndLinkOpBuilder, phys};
+        use tir::attributes::AttributeValue;
+        use tir_be_common::binary::{FixupTarget, InstFixup};
+
+        let context = Context::with_default_dialects();
+        context.register_dialect::<AsmDialect>();
+        context.register_dialect::<RiscvDialect>();
+
+        let encoders = crate::get_instruction_encoders();
+        let patchers = crate::get_instruction_patchers();
+        let gpr = |i: u16| phys(&("GPR".to_string(), i));
+
+        let jal = JumpAndLinkOpBuilder::new(&context)
+            .attr("rd", gpr(1))
+            .attr("imm", AttributeValue::Str("foo".to_string()))
+            .build();
+        let enc = encoders["jal"](&context.get_op(jal.id())).unwrap();
+        assert_eq!(enc.bytes, 0x000000EFu32.to_le_bytes());
+        assert_eq!(
+            enc.fixups,
+            vec![InstFixup {
+                operand: "imm",
+                target: FixupTarget::Symbol("foo".to_string()),
+            }]
+        );
+
+        // Patching scatters a resolved pc-relative delta into the J-type bits.
+        let mut bytes = enc.bytes.clone();
+        patchers["jal"](&mut bytes, 20).unwrap();
+        assert_eq!(bytes, 0x014000EFu32.to_le_bytes(), "jal x1, +20");
+
+        // Odd and out-of-range deltas are rejected.
+        assert!(patchers["jal"](&mut enc.bytes.clone(), 3).is_none());
+        assert!(patchers["jal"](&mut enc.bytes.clone(), 1 << 20).is_none());
+
+        let block = context.create_block(vec![]);
+        let beq = BranchEqOpBuilder::new(&context)
+            .attr("rs1", gpr(1))
+            .attr("rs2", gpr(2))
+            .attr("imm", AttributeValue::Block(block.id()))
+            .build();
+        let enc = encoders["beq"](&context.get_op(beq.id())).unwrap();
+        assert_eq!(enc.bytes, 0x00208063u32.to_le_bytes());
+        assert_eq!(
+            enc.fixups,
+            vec![InstFixup {
+                operand: "imm",
+                target: FixupTarget::Block(block.id()),
+            }]
+        );
+
+        let mut bytes = enc.bytes.clone();
+        patchers["beq"](&mut bytes, 24).unwrap();
+        assert_eq!(bytes, 0x00208C63u32.to_le_bytes(), "beq x1, x2, +24");
     }
 }
 

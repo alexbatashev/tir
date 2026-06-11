@@ -9,7 +9,12 @@ mod tests {
     fn compile(src: &str) -> String {
         let tokens: Vec<Token> = Token::lexer(src).map(|r| r.unwrap()).collect();
         let unit = parse(&tokens).expect("parse");
-        codegen(&unit).expect("codegen")
+        let context = tir::Context::with_default_dialects();
+        let module = codegen(&context, &unit).expect("codegen");
+        let mut out = String::new();
+        let mut fmt = tir::IRFormatter::new(&mut out);
+        tir::Operation::print(&module, &mut fmt).expect("print");
+        out
     }
 
     /// Codegen behaviour is checked by the LIT tests under `fcc/checks/Codegen`.

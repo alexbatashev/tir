@@ -1,10 +1,13 @@
 use tir::helpers::dialect;
 
+pub mod binary;
 pub mod isel;
 mod lexer;
 pub mod liveness;
+pub mod lower;
 mod operations;
 mod parser;
+pub mod pipeline;
 mod printer;
 pub mod regalloc;
 pub mod sched;

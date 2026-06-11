@@ -25,6 +25,12 @@ pub enum Commands {
 pub struct CompileArgs {
     #[arg(long, value_enum, default_value_t = CompileStage::Preprocess)]
     stage: CompileStage,
+    /// Target architecture (required for the asm and obj stages).
+    #[arg(long)]
+    march: Option<String>,
+    /// Target CPU
+    #[arg(long)]
+    mcpu: Option<String>,
     #[arg(short = 'o', default_value = "-")]
     output: OsString,
     /// Predefine a macro, e.g. `-D NAME=VALUE` (or `-D NAME`).
@@ -53,7 +59,7 @@ fn build_defines(defines: &[String]) -> HashMap<String, Token> {
         .collect()
 }
 
-#[derive(Debug, Clone, ValueEnum)]
+#[derive(Debug, Clone, PartialEq, Eq, ValueEnum)]
 pub enum CompileStage {
     /// Emit the preprocessed token stream as reconstructed source text.
     Preprocess,
@@ -61,6 +67,10 @@ pub enum CompileStage {
     Tokens,
     Ast,
     Ir,
+    /// Emit textual assembly for the selected target.
+    Asm,
+    /// Emit an ELF relocatable object for the selected target.
+    Obj,
 }
 
 pub fn compiler_main() {
@@ -112,16 +122,93 @@ fn run_compile(args: CompileArgs) {
             }
             CompileStage::Ir => {
                 let unit = parse_source(reader);
-                match crate::codegen::codegen(&unit) {
-                    Ok(ir) => write!(out, "{ir}").unwrap(),
-                    Err(e) => {
-                        eprintln!("fcc: codegen error: {e}");
-                        std::process::exit(1);
-                    }
-                }
+                let context = tir::Context::with_default_dialects();
+                let module = lower_to_ir(&context, &unit);
+                let mut ir = String::new();
+                let mut fmt = tir::IRFormatter::new(&mut ir);
+                use tir::Operation;
+                module.print(&mut fmt).unwrap_or_else(|e| {
+                    eprintln!("fcc: failed to print IR: {e}");
+                    std::process::exit(1);
+                });
+                write!(out, "{ir}").unwrap();
+            }
+            CompileStage::Asm | CompileStage::Obj => {
+                let bytes = emit_machine_code(&args, reader);
+                out.write_all(&bytes).unwrap();
             }
         }
     }
+}
+
+fn lower_to_ir(
+    context: &tir::Context,
+    unit: &crate::ast::TranslationUnit,
+) -> tir::builtin::ModuleOp {
+    crate::codegen::codegen(context, unit).unwrap_or_else(|e| {
+        eprintln!("fcc: codegen error: {e}");
+        std::process::exit(1);
+    })
+}
+
+/// Run the backend pipeline (mem2reg, instruction selection, register
+/// allocation, finalization) and render assembly or an ELF object.
+fn emit_machine_code(args: &CompileArgs, reader: Box<dyn io::Read>) -> Vec<u8> {
+    use tir::Operation;
+    use tir_be_common::pipeline::{StopAfter, build_pipeline};
+
+    let Some(march) = args.march.as_deref() else {
+        eprintln!("fcc: --march is required for the asm and obj stages");
+        std::process::exit(1);
+    };
+    let target = tir_targets::select(march, args.mcpu.as_deref(), None).unwrap_or_else(|e| {
+        eprintln!("fcc: {e}");
+        std::process::exit(1);
+    });
+
+    let unit = parse_source(reader);
+    let context = tir::Context::with_default_dialects();
+    target.register_dialects(&context);
+    let module = lower_to_ir(&context, &unit);
+
+    let mut pm = tir::PassManager::new();
+    pm.nest(tir::builtin::FuncOp::name())
+        .add_pass(tir::passes::Mem2RegPass::new());
+    let module_op = context.get_op(module.id());
+    pm.run(&context, module_op.clone()).unwrap_or_else(|e| {
+        eprintln!("fcc: mem2reg failed: {e}");
+        std::process::exit(1);
+    });
+
+    let mut pm = build_pipeline(target.as_ref(), &context, StopAfter::Finalize);
+    pm.run(&context, module_op).unwrap_or_else(|e| {
+        eprintln!("fcc: backend pipeline failed: {e}");
+        std::process::exit(1);
+    });
+
+    if args.stage == CompileStage::Asm {
+        let rendered = target
+            .asm_printer(&context)
+            .print_module(&context, &module)
+            .unwrap_or_else(|e| {
+                eprintln!("fcc: failed to print assembly: {e}");
+                std::process::exit(1);
+            });
+        return rendered.into_bytes();
+    }
+
+    let (Some(format), Some(writer)) = (target.object_format(), target.binary_writer(&context))
+    else {
+        eprintln!("fcc: target '{march}' does not support object emission");
+        std::process::exit(1);
+    };
+    let object = writer
+        .write_module(&context, &module, &format)
+        .unwrap_or_else(|e| {
+            eprintln!("fcc: failed to emit object: {e}");
+            std::process::exit(1);
+        });
+    tir_be_common::binary::write_elf(&object, &format)
 }
 
 fn parse_source(reader: Box<dyn io::Read>) -> crate::ast::TranslationUnit {

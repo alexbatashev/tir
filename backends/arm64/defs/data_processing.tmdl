@@ -110,3 +110,31 @@ instruction Compare for [ARMv8A64] : CmpRegTemplate {
         PSTATE::v = zext(0b0, 1);
     }
 }
+
+instruction MoveWideZero for [ARMv8A64] {
+    param MNEMONIC: String = "movz";
+    schedule { units = [WriteIALU]; }
+
+    operands {
+        rd: GPR,
+        imm: bits<16>,
+    }
+
+    // MOVZ with hw = 0 (no shift); wider constants need movk support.
+    encoding {
+        0..4 => rd,
+        5..20 => imm,
+        21..22 => 0b00,
+        23..28 => 0b100101,
+        29..30 => 0b10,
+        31 => 0b1,
+    }
+
+    asm {
+        "{self.MNEMONIC} {rd}, {imm}"
+    }
+
+    behavior {
+        rd = zext(imm, self.XLEN);
+    }
+}

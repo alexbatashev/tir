@@ -10,7 +10,8 @@
 use linkme::distributed_slice;
 use tir::Context;
 
-use crate::isel::InstructionSelectPass;
+use crate::binary::{BinaryWriter, ObjectFormatInfo};
+use crate::isel::{InstructionSelectPass, OpLowering};
 use crate::regalloc::{RegisterAllocationPass, RegisterInfo};
 use crate::sched::MachineModel;
 use crate::{AsmParser, AsmPrinter};
@@ -83,6 +84,32 @@ pub trait TargetMachine {
     /// registers to their counters instead of the register file.
     fn counter_registers(&self) -> Vec<(&'static str, u16, crate::PerfCounter)> {
         vec![]
+    }
+
+    /// Lowerings that must run between instruction selection and register
+    /// allocation (e.g. expanding `vcond_br` into a conditional branch whose
+    /// SSA condition the allocator still has to color).
+    fn pre_ra_lowerings(&self) -> Vec<OpLowering> {
+        Vec::new()
+    }
+
+    /// Lowerings that finalize virtual ops after register allocation
+    /// (e.g. `vret` into the target's return instruction).
+    fn finalize_lowerings(&self) -> Vec<OpLowering> {
+        Vec::new()
+    }
+
+    /// Object-format parameters (ELF machine/class/relocations), or `None`
+    /// if this target cannot emit object files yet.
+    fn object_format(&self) -> Option<ObjectFormatInfo> {
+        None
+    }
+
+    /// The instruction encoder registry driving object emission, or `None`
+    /// if this target cannot emit object files yet.
+    fn binary_writer(&self, context: &Context) -> Option<BinaryWriter> {
+        let _ = context;
+        None
     }
 }
 

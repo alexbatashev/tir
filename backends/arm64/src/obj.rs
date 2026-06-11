@@ -1,0 +1,152 @@
+//! AArch64 object-emission support: ELF format parameters, relocation
+//! selection, and the lowerings that turn virtual control-flow ops into real
+//! branch instructions around register allocation.
+
+use tir::Operation;
+use tir::attributes::AttributeValue;
+use tir_be_common::binary::{EM_AARCH64, ElfClass, ObjectFormatInfo, RelocKind};
+
+use crate::{
+    BranchImmediateOpBuilder, BranchNotEqOpBuilder, CompareOpBuilder, MoveWideZeroOpBuilder,
+    ReturnOpBuilder, VirtualBranchOp, VirtualCondBranchOp, VirtualReturnOp, phys, virt,
+};
+
+const R_AARCH64_CONDBR19: u32 = 280;
+const R_AARCH64_JUMP26: u32 = 282;
+const R_AARCH64_CALL26: u32 = 283;
+
+pub(crate) fn object_format() -> ObjectFormatInfo {
+    ObjectFormatInfo {
+        elf_machine: EM_AARCH64,
+        elf_class: ElfClass::Elf64,
+        elf_flags: 0,
+        reloc_for: |op| match op {
+            "bl" => Some(RelocKind {
+                r_type: R_AARCH64_CALL26,
+                addend: 0,
+            }),
+            "b" => Some(RelocKind {
+                r_type: R_AARCH64_JUMP26,
+                addend: 0,
+            }),
+            "b.eq" | "b.ne" | "b.lt" | "b.ge" | "b.lo" | "b.hs" => Some(RelocKind {
+                r_type: R_AARCH64_CONDBR19,
+                addend: 0,
+            }),
+            _ => None,
+        },
+        // AArch64 branch immediates are word offsets: byte delta >> 2.
+        pc_rel_scale: |_| 2,
+    }
+}
+
+/// Pre-RA: materialize a `constant` that survived instruction selection into
+/// `movz rd, #imm` (only the unshifted 16-bit form exists so far).
+pub(crate) fn lower_constant(
+    context: &tir::Context,
+    op: &tir::OperationRef,
+    rewriter: &mut tir::Rewriter,
+) -> Result<bool, tir::PassError> {
+    use tir::builtin::ConstantOp;
+
+    let Some(constant) = op.as_op::<ConstantOp>() else {
+        return Ok(false);
+    };
+    let value = tir_be_common::int_attr(constant.attributes(), "value").ok_or_else(|| {
+        tir::PassError::InvalidRuleSet("constant op without an integer value".to_string())
+    })?;
+    if !(0..=0xFFFF).contains(&value) {
+        return Err(tir::PassError::InvalidRuleSet(format!(
+            "constant {value} does not fit movz #imm16; wide constant materialization is not implemented"
+        )));
+    }
+
+    let movz = MoveWideZeroOpBuilder::new(context)
+        .attr("rd", virt(constant.result().number(), "GPR"))
+        .attr("imm", AttributeValue::Int(value))
+        .build();
+    rewriter.replace_op(op, &movz)?;
+    Ok(true)
+}
+
+/// Pre-RA: `vcond_br cond, t, f` becomes `cmp cond, xzr` + `b.ne t` + `b f`.
+/// Runs before register allocation so the condition register gets colored.
+pub(crate) fn lower_vcond_br(
+    context: &tir::Context,
+    op: &tir::OperationRef,
+    rewriter: &mut tir::Rewriter,
+) -> Result<bool, tir::PassError> {
+    let Some(cond_br) = op.as_op::<VirtualCondBranchOp>() else {
+        return Ok(false);
+    };
+    // The only operand is the condition; any extra operands are values
+    // forwarded to successor block arguments, which codegen cannot place yet.
+    let operands = cond_br.operands();
+    let (Some(&condition), 1) = (operands.first(), operands.len()) else {
+        return Err(tir::PassError::InvalidRuleSet(
+            "block arguments on conditional branch edges are not supported by codegen yet"
+                .to_string(),
+        ));
+    };
+    let true_dest = block_attr(&cond_br, "true_dest")?;
+    let false_dest = block_attr(&cond_br, "false_dest")?;
+
+    let cmp = CompareOpBuilder::new(context)
+        .attr("rn", virt(condition.number(), "GPR"))
+        .attr("rm", phys(&("GPR".to_string(), 31))) // xzr
+        .build();
+    rewriter.insert_op_before(op, &cmp)?;
+    let bne = BranchNotEqOpBuilder::new(context)
+        .attr("imm", AttributeValue::Block(true_dest))
+        .build();
+    rewriter.insert_op_before(op, &bne)?;
+
+    let fallthrough = crate::VirtualBranchOpBuilder::new(context)
+        .attr("dest", AttributeValue::Block(false_dest))
+        .build();
+    rewriter.replace_op(op, &fallthrough)?;
+    Ok(true)
+}
+
+fn block_attr(op: &dyn tir::Operation, name: &str) -> Result<tir::BlockId, tir::PassError> {
+    op.attributes()
+        .iter()
+        .find_map(|attr| match (&attr.value, attr.name == name) {
+            (AttributeValue::Block(block), true) => Some(*block),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            tir::PassError::InvalidRuleSet(format!("branch is missing its '{name}' target"))
+        })
+}
+
+/// Post-RA: `vret` becomes `ret x30`; `vbr` becomes `b dest`.
+pub(crate) fn finalize_virtual_ops(
+    context: &tir::Context,
+    op: &tir::OperationRef,
+    rewriter: &mut tir::Rewriter,
+) -> Result<bool, tir::PassError> {
+    if op.as_op::<VirtualReturnOp>().is_some() {
+        let ret = ReturnOpBuilder::new(context)
+            .attr("rn", phys(&("GPR".to_string(), 30)))
+            .build();
+        rewriter.replace_op(op, &ret)?;
+        return Ok(true);
+    }
+
+    if let Some(br) = op.as_op::<VirtualBranchOp>() {
+        if !br.operands().is_empty() {
+            return Err(tir::PassError::InvalidRuleSet(
+                "block arguments on branch edges are not supported by codegen yet".to_string(),
+            ));
+        }
+        let dest = block_attr(&br, "dest")?;
+        let jump = BranchImmediateOpBuilder::new(context)
+            .attr("imm", AttributeValue::Block(dest))
+            .build();
+        rewriter.replace_op(op, &jump)?;
+        return Ok(true);
+    }
+
+    Ok(false)
+}

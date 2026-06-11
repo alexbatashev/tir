@@ -8,9 +8,12 @@
 //! hand.
 
 fn main() {
+    let tir = tir_lit::cargo_test_bin("tir", "tir");
+    let tir = tir.to_str().expect("tir path must be valid UTF-8");
+
     tir_lit::harness_main(
         env!("CARGO_MANIFEST_DIR"),
         "checks",
-        &[("fcc", env!("CARGO_BIN_EXE_fcc"))],
+        &[("fcc", env!("CARGO_BIN_EXE_fcc")), ("tir", tir)],
     );
 }

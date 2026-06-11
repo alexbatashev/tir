@@ -8,9 +8,9 @@
 
 use std::collections::HashMap;
 
-use tir::builtin::{IntegerType, UnitType, ops as b};
+use tir::builtin::{IntegerType, ModuleOp, UnitType, ops as b};
 use tir::ptr::{PtrType, ops as p};
-use tir::{Context, IRBuilder, IRFormatter, Operand, Operation, TypeId, ValueId};
+use tir::{Context, IRBuilder, Operand, Operation, TypeId, ValueId};
 
 use crate::ast::*;
 
@@ -27,25 +27,17 @@ struct FnCodegen<'a> {
     locals: HashMap<String, Slot>,
 }
 
-/// Lower a translation unit into a `builtin.module` and return the printed IR.
-pub fn codegen(unit: &TranslationUnit) -> Result<String, String> {
-    let context = Context::with_default_dialects();
-
-    let module = b::module(&context, None).build();
+/// Lower a translation unit into a `builtin.module` in `context`.
+pub fn codegen(context: &Context, unit: &TranslationUnit) -> Result<ModuleOp, String> {
+    let module = b::module(context, None).build();
     let mut module_builder = IRBuilder::new(module.body());
 
     for func in &unit.functions {
-        let func_op = lower_function(&context, func)?;
+        let func_op = lower_function(context, func)?;
         module_builder.insert(func_op);
     }
-    module_builder.insert(b::module_end(&context).build());
-
-    let mut out = String::new();
-    let mut fmt = IRFormatter::new(&mut out);
-    module
-        .print(&mut fmt)
-        .map_err(|e| format!("failed to print IR: {e}"))?;
-    Ok(out)
+    module_builder.insert(b::module_end(context).build());
+    Ok(module)
 }
 
 fn lower_ctype(context: &Context, ty: &CType) -> TypeId {
