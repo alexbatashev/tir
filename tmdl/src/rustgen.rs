@@ -791,12 +791,12 @@ fn emit_instructions<'a>(
                                 }
                                 Type::Integer | Type::Bits(_) => {
                                     parse_steps.push(quote! {
-                                        let val: i64 = if let Some(tok) = parser.peek() {
+                                        let val = if let Some(tok) = parser.peek() {
                                             match tok {
                                                 tir_be_common::Token::DecNumber(n) => {
                                                     let parsed = (*n).parse::<i64>().map_err(|_| ())?;
                                                     let _ = parser.bump();
-                                                    parsed
+                                                    tir::attributes::AttributeValue::Int(parsed)
                                                 }
                                                 tir_be_common::Token::HexNumber(h) => {
                                                     let s = *h;
@@ -807,15 +807,19 @@ fn emit_instructions<'a>(
                                                     let v = if neg { -v } else { v };
                                                     let v_i64: i64 = v.try_into().map_err(|_| ())?;
                                                     let _ = parser.bump();
-                                                    v_i64
+                                                    tir::attributes::AttributeValue::Int(v_i64)
+                                                }
+                                                // A bare identifier in an immediate position is a
+                                                // symbol reference, resolved at object emission.
+                                                tir_be_common::Token::Ident(name) => {
+                                                    let symbol = (*name).to_string();
+                                                    let _ = parser.bump();
+                                                    tir::attributes::AttributeValue::Str(symbol)
                                                 }
                                                 _ => { return Err(()); }
                                             }
                                         } else { return Err(()); };
-                                        op_builder = op_builder.attr(
-                                            #op_name_lit,
-                                            tir::attributes::AttributeValue::Int(val),
-                                        );
+                                        op_builder = op_builder.attr(#op_name_lit, val);
                                     });
                                 }
                                 Type::String => {
@@ -905,6 +909,9 @@ fn emit_instructions<'a>(
                                             }
                                             tir::attributes::AttributeValue::UInt(value) => {
                                                 out.push_str(&value.to_string());
+                                            }
+                                            tir::attributes::AttributeValue::Str(symbol) => {
+                                                out.push_str(symbol);
                                             }
                                             _ => return None,
                                         }
