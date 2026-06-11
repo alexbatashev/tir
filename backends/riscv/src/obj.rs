@@ -1,0 +1,201 @@
+//! RISC-V object-emission support: ELF format parameters, relocation
+//! selection, and the lowerings that turn virtual control-flow ops into real
+//! branch instructions around register allocation.
+
+use tir::Operation;
+use tir::attributes::AttributeValue;
+use tir_be_common::binary::{EM_RISCV, ElfClass, ObjectFormatInfo, RelocKind};
+
+use crate::{
+    BranchNotEqOpBuilder, JumpAndLinkOpBuilder, JumpAndLinkRegOpBuilder, VirtualBranchOp,
+    VirtualCondBranchOp, VirtualReturnOp, phys, virt,
+};
+
+const R_RISCV_BRANCH: u32 = 16;
+const R_RISCV_JAL: u32 = 17;
+
+pub(crate) fn object_format(xlen: u32) -> ObjectFormatInfo {
+    ObjectFormatInfo {
+        elf_machine: EM_RISCV,
+        elf_class: if xlen == 64 {
+            ElfClass::Elf64
+        } else {
+            ElfClass::Elf32
+        },
+        elf_flags: 0,
+        reloc_for: |op| match op {
+            "jal" => Some(RelocKind {
+                r_type: R_RISCV_JAL,
+                addend: 0,
+            }),
+            "beq" | "bne" | "blt" | "bge" | "bltu" | "bgeu" => Some(RelocKind {
+                r_type: R_RISCV_BRANCH,
+                addend: 0,
+            }),
+            _ => None,
+        },
+        // RISC-V branch immediates are byte offsets (bit 0 implicit in the
+        // encoding's scattering), so deltas are patched unscaled.
+        pc_rel_scale: |_| 0,
+    }
+}
+
+/// Pre-RA: materialize a `constant` that survived instruction selection
+/// (i.e. one no instruction folded as an immediate) into `addi rd, x0, imm`,
+/// or `lui`+`addiw` (`addi` on rv32) when it does not fit 12 bits.
+pub(crate) fn lower_constant_rv32(
+    context: &tir::Context,
+    op: &tir::OperationRef,
+    rewriter: &mut tir::Rewriter,
+) -> Result<bool, tir::PassError> {
+    lower_constant(context, op, rewriter, 32)
+}
+
+pub(crate) fn lower_constant_rv64(
+    context: &tir::Context,
+    op: &tir::OperationRef,
+    rewriter: &mut tir::Rewriter,
+) -> Result<bool, tir::PassError> {
+    lower_constant(context, op, rewriter, 64)
+}
+
+fn lower_constant(
+    context: &tir::Context,
+    op: &tir::OperationRef,
+    rewriter: &mut tir::Rewriter,
+    xlen: u32,
+) -> Result<bool, tir::PassError> {
+    use tir::builtin::ConstantOp;
+
+    let Some(constant) = op.as_op::<ConstantOp>() else {
+        return Ok(false);
+    };
+    let value = tir_be_common::int_attr(constant.attributes(), "value").ok_or_else(|| {
+        tir::PassError::InvalidRuleSet("constant op without an integer value".to_string())
+    })?;
+    let dest = virt(constant.result().number(), "GPR");
+
+    if (-2048..2048).contains(&value) {
+        let li = crate::AddImmOpBuilder::new(context)
+            .attr("rd", dest)
+            .attr("rs1", phys(&("GPR".to_string(), 0)))
+            .attr("imm", AttributeValue::Int(value))
+            .build();
+        rewriter.replace_op(op, &li)?;
+        return Ok(true);
+    }
+
+    if i32::try_from(value).is_err() {
+        return Err(tir::PassError::InvalidRuleSet(format!(
+            "constant {value} does not fit 32 bits; wide constant materialization is not implemented"
+        )));
+    }
+
+    // Split into a sign-adjusted upper-20/lower-12 pair: `lui` then `addiw`
+    // (`addi` on rv32) reconstruct the 32-bit value.
+    let hi = ((value + 0x800) >> 12) & 0xFFFFF;
+    let lo = value - (((value + 0x800) >> 12) << 12);
+    let lui = crate::LoadUpperImmOpBuilder::new(context)
+        .attr("rd", dest.clone())
+        .attr("imm", AttributeValue::Int(hi))
+        .build();
+    rewriter.insert_op_before(op, &lui)?;
+    if xlen == 64 {
+        let add = crate::AddImmWordOpBuilder::new(context)
+            .attr("rd", dest.clone())
+            .attr("rs1", dest)
+            .attr("imm", AttributeValue::Int(lo))
+            .build();
+        rewriter.replace_op(op, &add)?;
+    } else {
+        let add = crate::AddImmOpBuilder::new(context)
+            .attr("rd", dest.clone())
+            .attr("rs1", dest)
+            .attr("imm", AttributeValue::Int(lo))
+            .build();
+        rewriter.replace_op(op, &add)?;
+    }
+    Ok(true)
+}
+
+/// Pre-RA: `vcond_br cond, t, f` becomes `bne cond, x0, t` + `vbr f`. Runs
+/// before register allocation so the condition register gets colored.
+pub(crate) fn lower_vcond_br(
+    context: &tir::Context,
+    op: &tir::OperationRef,
+    rewriter: &mut tir::Rewriter,
+) -> Result<bool, tir::PassError> {
+    let Some(cond_br) = op.as_op::<VirtualCondBranchOp>() else {
+        return Ok(false);
+    };
+    // The only operand is the condition; any extra operands are values
+    // forwarded to successor block arguments, which codegen cannot place yet.
+    let operands = cond_br.operands();
+    let (Some(&condition), 1) = (operands.first(), operands.len()) else {
+        return Err(tir::PassError::InvalidRuleSet(
+            "block arguments on conditional branch edges are not supported by codegen yet"
+                .to_string(),
+        ));
+    };
+    let true_dest = block_attr(&cond_br, "true_dest")?;
+    let false_dest = block_attr(&cond_br, "false_dest")?;
+
+    let bne = BranchNotEqOpBuilder::new(context)
+        .attr("rs1", virt(condition.number(), "GPR"))
+        .attr("rs2", phys(&("GPR".to_string(), 0)))
+        .attr("imm", AttributeValue::Block(true_dest))
+        .build();
+    rewriter.insert_op_before(op, &bne)?;
+
+    let fallthrough = crate::VirtualBranchOpBuilder::new(context)
+        .attr("dest", AttributeValue::Block(false_dest))
+        .build();
+    rewriter.replace_op(op, &fallthrough)?;
+    Ok(true)
+}
+
+fn block_attr(op: &dyn tir::Operation, name: &str) -> Result<tir::BlockId, tir::PassError> {
+    op.attributes()
+        .iter()
+        .find_map(|attr| match (&attr.value, attr.name == name) {
+            (AttributeValue::Block(block), true) => Some(*block),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            tir::PassError::InvalidRuleSet(format!("branch is missing its '{name}' target"))
+        })
+}
+
+/// Post-RA: `vret` becomes `jalr x0, x1, 0`; `vbr` becomes `jal x0, dest`.
+pub(crate) fn finalize_virtual_ops(
+    context: &tir::Context,
+    op: &tir::OperationRef,
+    rewriter: &mut tir::Rewriter,
+) -> Result<bool, tir::PassError> {
+    if op.as_op::<VirtualReturnOp>().is_some() {
+        let ret = JumpAndLinkRegOpBuilder::new(context)
+            .attr("rd", phys(&("GPR".to_string(), 0)))
+            .attr("rs1", phys(&("GPR".to_string(), 1)))
+            .attr("imm", AttributeValue::Int(0))
+            .build();
+        rewriter.replace_op(op, &ret)?;
+        return Ok(true);
+    }
+
+    if let Some(br) = op.as_op::<VirtualBranchOp>() {
+        if !br.operands().is_empty() {
+            return Err(tir::PassError::InvalidRuleSet(
+                "block arguments on branch edges are not supported by codegen yet".to_string(),
+            ));
+        }
+        let dest = block_attr(&br, "dest")?;
+        let jump = JumpAndLinkOpBuilder::new(context)
+            .attr("rd", phys(&("GPR".to_string(), 0)))
+            .attr("imm", AttributeValue::Block(dest))
+            .build();
+        rewriter.replace_op(op, &jump)?;
+        return Ok(true);
+    }
+
+    Ok(false)
+}

@@ -1,0 +1,15 @@
+// RUN: tir mc --march=rv64i --filetype=obj-ascii %s | filecheck %s
+
+module {
+  func @big() -> !i32 {
+    %0 = constant {value = 74565} : !i32
+    return %0
+  }
+  module_end
+}
+
+// 0x12345 does not fit 12 bits: lui a0, 0x12 then addiw a0, a0, 0x345.
+// CHECK: big:
+// CHECK-NEXT: [0x37, 0x25, 0x01, 0x00]
+// CHECK-NEXT: [0x1B, 0x05, 0x55, 0x34]
+// CHECK-NEXT: [0x67, 0x80, 0x00, 0x00]

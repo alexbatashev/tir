@@ -10,11 +10,13 @@ mod ascii;
 mod elf;
 mod elf_read;
 mod format;
+mod writer;
 
 pub use ascii::render_ascii;
 pub use elf::{EM_AARCH64, EM_RISCV, write_elf};
 pub use elf_read::{ElfFile, ElfReadError, ElfRela, ElfSection, ElfSymbol, parse_elf, reloc_name};
 pub use format::{ElfClass, ObjectFormatInfo, RelocKind};
+pub use writer::{BinaryEmitError, BinaryWriter};
 
 use tir::{BlockId, OpInstance};
 

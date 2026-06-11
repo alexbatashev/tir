@@ -1,6 +1,8 @@
 use tir::helpers::{dialect, operation};
 use tir::{Any, Operation};
 
+mod obj;
+
 include!(concat!(env!("OUT_DIR"), "/riscv.rs"));
 
 /// Parsed RISC-V target selection from `--march`/`--mcpu`/`--mattr`.
@@ -749,6 +751,33 @@ impl tir_be_common::TargetMachine for RiscvTarget {
             ]);
         }
         counters
+    }
+
+    fn pre_ra_lowerings(&self) -> Vec<tir_be_common::isel::OpLowering> {
+        let lower_constant = if self.config.xlen == 64 {
+            obj::lower_constant_rv64
+        } else {
+            obj::lower_constant_rv32
+        };
+        vec![lower_constant, obj::lower_vcond_br]
+    }
+
+    fn finalize_lowerings(&self) -> Vec<tir_be_common::isel::OpLowering> {
+        vec![obj::finalize_virtual_ops]
+    }
+
+    fn object_format(&self) -> Option<tir_be_common::binary::ObjectFormatInfo> {
+        Some(obj::object_format(self.config.xlen))
+    }
+
+    fn binary_writer(
+        &self,
+        _context: &tir::Context,
+    ) -> Option<tir_be_common::binary::BinaryWriter> {
+        Some(tir_be_common::binary::BinaryWriter::new(
+            get_instruction_encoders(),
+            get_instruction_patchers(),
+        ))
     }
 }
 

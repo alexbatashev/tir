@@ -1,0 +1,26 @@
+// RUN: tir mc --march=rv64i --filetype=obj-ascii %s | filecheck %s
+// RUN: tir mc --march=rv64i --filetype=obj -o - %s | tir readobj - | filecheck %s --check-prefix=ELF
+// RUN: tir mc --march=rv32i --filetype=obj -o - %s | tir readobj - | filecheck %s --check-prefix=ELF32
+
+module {
+  func @answer() -> !i32 {
+    %0 = constant {value = 42} : !i32
+    return %0
+  }
+  module_end
+}
+
+// addi a0, x0, 42 then jalr x0, x1, 0
+// CHECK: .section .text
+// CHECK-NEXT: answer:
+// CHECK-NEXT: [0x13, 0x05, 0xA0, 0x02]
+// CHECK-NEXT: [0x67, 0x80, 0x00, 0x00]
+
+// ELF: File: ELF64 LSB REL
+// ELF: Machine: EM_RISCV (243)
+// ELF: Section .text: type=PROGBITS flags=AX size=0x8 align=4
+// ELF: Symbol answer: value=0x0 size=0x8 bind=GLOBAL type=FUNC section=.text
+
+// ELF32: File: ELF32 LSB REL
+// ELF32: Machine: EM_RISCV (243)
+// ELF32: Symbol answer: value=0x0 size=0x8 bind=GLOBAL type=FUNC section=.text
