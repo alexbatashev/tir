@@ -6,6 +6,7 @@ mod common;
 
 pub mod mc;
 pub mod opt;
+pub mod readobj;
 pub mod sched;
 
 pub fn tools_main() -> Result<(), Box<dyn Error>> {
@@ -14,6 +15,7 @@ pub fn tools_main() -> Result<(), Box<dyn Error>> {
     match cli.command {
         Command::Mc(args) => mc::run(args),
         Command::Opt(args) => opt::run(args),
+        Command::Readobj(args) => readobj::run(args),
         Command::Sched(args) => sched::run(args),
     }
 }
@@ -24,6 +26,8 @@ pub enum Command {
     Mc(mc::ToolArgs),
     /// Run optimizations on IR
     Opt(opt::ToolArgs),
+    /// Dump headers, symbols and relocations of an object file
+    Readobj(readobj::ToolArgs),
     /// Print the data dependence graph of machine IR
     Sched(sched::ToolArgs),
 }
