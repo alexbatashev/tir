@@ -54,6 +54,13 @@ pub enum SimTrap {
         max_cycles: u64,
         until_pc: u64,
     },
+    /// A synchronous exception raised by instruction semantics (TMDL `trap`,
+    /// e.g. ecall/ebreak) that no installed handler absorbed. `cause` uses the
+    /// target's cause encoding (RISC-V mcause for the riscv backend).
+    Exception {
+        cause: u64,
+        pc: u64,
+    },
 }
 
 pub trait MachineContext {
@@ -70,6 +77,29 @@ pub trait MachineContext {
         let _ = name;
         None
     }
+    /// Raise a synchronous exception from instruction semantics (TMDL `trap`).
+    /// Implementations may absorb it (e.g. emulate an environment call) and
+    /// return `Ok`; the default surfaces it as a [`SimTrap::Exception`].
+    fn raise_exception(&mut self, cause: u64) -> Result<(), SimTrap> {
+        Err(SimTrap::Exception {
+            cause,
+            pc: self.read_pc(),
+        })
+    }
+}
+
+/// A hardware performance counter a target maps onto one of its registers
+/// (e.g. the RISC-V `cycle`/`time`/`instret` CSRs). The `High` variants
+/// deliver the upper 32 bits of the 64-bit counter, for targets that split
+/// counters across two registers (RV32 `cycleh`/`timeh`/`instreth`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PerfCounter {
+    Cycles,
+    Time,
+    InstructionsRetired,
+    CyclesHigh,
+    TimeHigh,
+    InstructionsRetiredHigh,
 }
 
 /// How an instruction affects control flow, derived at TMDL-compile time from
