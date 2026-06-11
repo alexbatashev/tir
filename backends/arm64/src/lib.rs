@@ -1,6 +1,8 @@
 use tir::helpers::{dialect, operation};
 use tir::{Any, Operation};
 
+mod obj;
+
 include!(concat!(env!("OUT_DIR"), "/arm64.rs"));
 
 /// Parsed AArch64 target selection from `--march`/`--mcpu`/`--mattr`.
@@ -197,6 +199,7 @@ dialect! {
             LogicalShiftRightVariableOp,
             ArithmeticShiftRightVariableOp,
             CompareOp,
+            MoveWideZeroOp,
             LoadByteUnsignedOp,
             LoadHalfwordUnsignedOp,
             LoadWordUnsignedOp,
@@ -497,6 +500,28 @@ impl tir_be_common::TargetMachine for Arm64Target {
 
     fn register_name(&self, class: &str, index: u16, prefer_abi: bool) -> Option<String> {
         crate::register_name(class, index, prefer_abi)
+    }
+
+    fn pre_ra_lowerings(&self) -> Vec<tir_be_common::isel::OpLowering> {
+        vec![obj::lower_constant, obj::lower_vcond_br]
+    }
+
+    fn finalize_lowerings(&self) -> Vec<tir_be_common::isel::OpLowering> {
+        vec![obj::finalize_virtual_ops]
+    }
+
+    fn object_format(&self) -> Option<tir_be_common::binary::ObjectFormatInfo> {
+        Some(obj::object_format())
+    }
+
+    fn binary_writer(
+        &self,
+        _context: &tir::Context,
+    ) -> Option<tir_be_common::binary::BinaryWriter> {
+        Some(tir_be_common::binary::BinaryWriter::new(
+            get_instruction_encoders(),
+            get_instruction_patchers(),
+        ))
     }
 }
 
@@ -1026,6 +1051,12 @@ mod tests {
 
         let ret = ReturnOpBuilder::new(&context).attr("rn", gpr(30)).build();
         assert_eq!(word(ret.id()), 0xD65F03C0, "ret");
+
+        let movz = crate::MoveWideZeroOpBuilder::new(&context)
+            .attr("rd", gpr(0))
+            .attr("imm", AttributeValue::Int(42))
+            .build();
+        assert_eq!(word(movz.id()), 0xD2800540, "movz x0, #42");
     }
 
     #[test]

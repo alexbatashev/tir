@@ -1,0 +1,21 @@
+// RUN: tir mc --march=arm64 --filetype=obj-ascii %s | filecheck %s
+// RUN: tir mc --march=arm64 --filetype=obj -o - %s | tir readobj - | filecheck %s --check-prefix=ELF
+
+module {
+  func @answer() -> !i32 {
+    %0 = constant {value = 42} : !i32
+    return %0
+  }
+  module_end
+}
+
+// movz x0, #42 then ret
+// CHECK: .section .text
+// CHECK-NEXT: answer:
+// CHECK-NEXT: [0x40, 0x05, 0x80, 0xD2]
+// CHECK-NEXT: [0xC0, 0x03, 0x5F, 0xD6]
+
+// ELF: File: ELF64 LSB REL
+// ELF: Machine: EM_AARCH64 (183)
+// ELF: Section .text: type=PROGBITS flags=AX size=0x8 align=4
+// ELF: Symbol answer: value=0x0 size=0x8 bind=GLOBAL type=FUNC section=.text
