@@ -14,12 +14,16 @@ mod memory;
 
 #[derive(Parser)]
 struct Cli {
-    /// Target architecture (e.g. `riscv64`, `arm64`).
+    /// Target architecture (e.g. `riscv64`, `rv64im`, `arm64`).
     #[arg(long)]
     march: String,
-    /// Target CPU. Accepted for forward compatibility; currently unused.
+    /// Target CPU. A TMDL machine name (e.g. `scr1-3stage`) provides the default
+    /// for `--machine`.
     #[arg(long)]
     mcpu: Option<String>,
+    /// Target feature toggles (e.g. `+m,-zmmul`), applied on top of `--march`.
+    #[arg(long)]
+    mattr: Option<String>,
     #[arg(long, default_value_t = 65536)]
     mem_size: usize,
     #[arg(long, default_value_t = 0x80000000_u64)]
@@ -71,14 +75,11 @@ fn main() {
     let args = Cli::parse();
     let src = std::fs::read_to_string(&args.program).expect("failed to read program path");
 
-    let target = tir_targets::select(&args.march, args.mcpu.as_deref()).unwrap_or_else(|| {
-        eprintln!(
-            "unknown target '{}' (supported: {})",
-            args.march,
-            tir_targets::supported_targets().join(", ")
-        );
-        std::process::exit(2);
-    });
+    let target = tir_targets::select(&args.march, args.mcpu.as_deref(), args.mattr.as_deref())
+        .unwrap_or_else(|error| {
+            eprintln!("{error}");
+            std::process::exit(2);
+        });
 
     let context = tir::Context::with_default_dialects();
     target.register_dialects(&context);
@@ -99,6 +100,21 @@ fn main() {
     // can stop at a label without hand-computing its address.
     let until_pc = resolve_pc(&args.until_pc, &program.symbols);
     let mut executor = Executor::new_at(args.mem_size, args.mem_start_address);
+    // Teach the executor which register classes share a physical file so, e.g.,
+    // a value written via AArch64 `GPRsp` reads back through `GPR`.
+    let register_info = target.register_info();
+    let register_files = register_info
+        .classes
+        .iter()
+        .map(|c| (c.name.to_string(), c.file.to_string()))
+        .collect();
+    executor.set_register_files(register_files);
+
+    // Install the selected ISA's parameters and register widths so behaviors
+    // execute with the configured XLEN (e.g. rv32 arithmetic wraps at 32 bits).
+    executor.set_isa_params(target.isa_params());
+    executor.set_register_widths(target.register_widths());
+
     if let Some(path) = &args.memory_config {
         memory::load_memory_config(&mut executor, path);
     } else if !args.no_default_memory {
@@ -110,25 +126,19 @@ fn main() {
         );
     }
 
-    // Teach the executor which register classes share a physical file so, e.g.,
-    // a value written via AArch64 `GPRsp` reads back through `GPR`.
-    let register_info = target.register_info();
-    let register_files = register_info
-        .classes
-        .iter()
-        .map(|c| (c.name.to_string(), c.file.to_string()))
-        .collect();
-    executor.set_register_files(register_files);
-
     // Pick the timing model up front so a bad `--machine` fails before running.
     let model = if args.timing {
-        let name = args.machine.as_deref().unwrap_or_else(|| {
-            eprintln!(
-                "--timing requires --machine (one of: {})",
-                target.machines().join(", "),
-            );
-            std::process::exit(2);
-        });
+        let name = args
+            .machine
+            .as_deref()
+            .or_else(|| target.default_machine())
+            .unwrap_or_else(|| {
+                eprintln!(
+                    "--timing requires --machine or --mcpu (one of: {})",
+                    target.machines().join(", "),
+                );
+                std::process::exit(2);
+            });
         let m = target.machine_model(name).unwrap_or_else(|| {
             eprintln!(
                 "unknown machine '{}' for target '{}' (one of: {})",
