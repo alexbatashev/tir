@@ -895,6 +895,29 @@ fn check_encoding(
         )
     };
 
+    let value_width = |name: &str| -> Option<u16> {
+        let ty = params_cache
+            .get(name)
+            .map(|(ty, _)| ty)
+            .or_else(|| operands_cache.get(name))?;
+        match ty {
+            Type::Bits(width) => Some(*width),
+            _ => None,
+        }
+    };
+    let width_error = |span: Span, message: String| {
+        (
+            file_name.to_string(),
+            Rich::custom(
+                span,
+                format!(
+                    "{message} in encoding of instruction '{}'",
+                    instruction.name
+                ),
+            ),
+        )
+    };
+
     for arm in encoding {
         if let ast::Expr::Lit(_) = arm.value {
             continue;
@@ -902,7 +925,66 @@ fn check_encoding(
 
         match encoding_value_name(&arm.value) {
             Some(name) if !known(name) => diags.push(unknown_value(name, arm.span)),
-            Some(_) => {}
+            Some(name) => {
+                let arm_width = arm.end.unwrap_or(arm.start) - arm.start + 1;
+                match &arm.value {
+                    ast::Expr::Slice(slc) => {
+                        let slice_width = slc.end - slc.start + 1;
+                        if slice_width != arm_width {
+                            diags.push(width_error(
+                                arm.span,
+                                format!(
+                                    "slice '{name}[{}..{}]' is {slice_width} bits but the arm covers {arm_width}",
+                                    slc.start, slc.end
+                                ),
+                            ));
+                        }
+                        if let Some(width) = value_width(name)
+                            && slc.end >= width
+                        {
+                            diags.push(width_error(
+                                arm.span,
+                                format!(
+                                    "slice '{name}[{}..{}]' exceeds bits<{width}>",
+                                    slc.start, slc.end
+                                ),
+                            ));
+                        }
+                    }
+                    ast::Expr::IndexAccess(idx) => {
+                        if arm_width != 1 {
+                            diags.push(width_error(
+                                arm.span,
+                                format!(
+                                    "single bit '{name}[{}]' assigned to a {arm_width}-bit arm",
+                                    idx.index
+                                ),
+                            ));
+                        }
+                        if let Some(width) = value_width(name)
+                            && idx.index >= width
+                        {
+                            diags.push(width_error(
+                                arm.span,
+                                format!("bit '{name}[{}]' exceeds bits<{width}>", idx.index),
+                            ));
+                        }
+                    }
+                    ast::Expr::Ident(_) => {
+                        if let Some(width) = value_width(name)
+                            && arm_width != width
+                        {
+                            diags.push(width_error(
+                                arm.span,
+                                format!(
+                                    "'{name}' is bits<{width}> but the arm covers {arm_width} bits"
+                                ),
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
             None => {
                 diags.push(invalid_value(arm.span));
             }
@@ -919,7 +1001,7 @@ mod perf_model_tests {
 
     /// Lex + parse `src` into a one-file program and run semantic analysis,
     /// returning the diagnostic messages.
-    fn diagnose(src: &str) -> Vec<String> {
+    pub(super) fn diagnose(src: &str) -> Vec<String> {
         let (tokens, lex_errs) = lex(src);
         assert!(lex_errs.is_empty(), "lex errors: {lex_errs:?}");
         let (file, parse_errs) = parse(src, &tokens, "test.tmdl");
@@ -1102,6 +1184,97 @@ mod perf_model_tests {
             diags
                 .iter()
                 .any(|d| d.contains("duplicate bind for unit 'W'")),
+            "diags: {diags:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod encoding_tests {
+    use super::perf_model_tests::diagnose;
+
+    const INST: &str = "
+        instruction Foo {
+            param MNEMONIC: String = \"foo\";
+            param OPCODE: bits<7> = 0b0010011;
+            operands { imm: bits<13> }
+            behavior { imm = imm; }
+    ";
+
+    #[test]
+    fn well_formed_encoding_has_no_diagnostics() {
+        let src = format!(
+            "{INST}
+            encoding {{ 0..6 => OPCODE, 7 => imm[12], 8..11 => imm[1..4], 12..19 => imm[5..12] }}
+        }}"
+        );
+        let diags: Vec<_> = diagnose(&src)
+            .into_iter()
+            .filter(|d| d.contains("encoding"))
+            .collect();
+        assert!(diags.is_empty(), "unexpected encoding diags: {diags:?}");
+    }
+
+    #[test]
+    fn slice_out_of_operand_range_is_reported() {
+        let src = format!(
+            "{INST}
+            encoding {{ 0..6 => OPCODE, 8..11 => imm[10..13] }}
+        }}"
+        );
+        let diags = diagnose(&src);
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.contains("slice 'imm[10..13]' exceeds bits<13>")),
+            "diags: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn slice_width_mismatch_is_reported() {
+        let src = format!(
+            "{INST}
+            encoding {{ 0..6 => OPCODE, 8..11 => imm[1..5] }}
+        }}"
+        );
+        let diags = diagnose(&src);
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.contains("slice 'imm[1..5]' is 5 bits but the arm covers 4")),
+            "diags: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn single_bit_out_of_range_is_reported() {
+        let src = format!(
+            "{INST}
+            encoding {{ 0..6 => OPCODE, 7 => imm[13] }}
+        }}"
+        );
+        let diags = diagnose(&src);
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.contains("bit 'imm[13]' exceeds bits<13>")),
+            "diags: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn whole_operand_width_mismatch_is_reported() {
+        let src = format!(
+            "{INST}
+            encoding {{ 0..6 => OPCODE, 12..31 => imm }}
+        }}"
+        );
+        let diags = diagnose(&src);
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.contains("'imm' is bits<13> but the arm covers 20 bits")),
             "diags: {diags:?}"
         );
     }

@@ -944,6 +944,124 @@ mod tests {
             "the frame prologue (sub fp) should lead the block, got {names:?}"
         );
     }
+
+    #[test]
+    fn encoders_match_isa_golden_words() {
+        use crate::{
+            AddOpBuilder, BranchEqOpBuilder, BranchImmediateOpBuilder, BranchLinkOpBuilder,
+            CompareOpBuilder, LoadDoublewordOpBuilder, LogicalShiftLeftVariableOpBuilder,
+            ReturnOpBuilder, StoreDoublewordOpBuilder, phys,
+        };
+        use tir::attributes::AttributeValue;
+
+        let context = Context::with_default_dialects();
+        context.register_dialect::<AsmDialect>();
+        context.register_dialect::<Arm64Dialect>();
+
+        let encoders = crate::get_instruction_encoders();
+        let gpr = |i: u16| phys(&("GPR".to_string(), i));
+        let gprsp = |i: u16| phys(&("GPRsp".to_string(), i));
+        let word = |id: tir::OpId| -> u32 {
+            let inst = context.get_op(id);
+            let enc = encoders[inst.name](&inst)
+                .unwrap_or_else(|| panic!("'{}' failed to encode", inst.name));
+            assert!(
+                enc.fixups.is_empty(),
+                "unexpected fixups for '{}'",
+                inst.name
+            );
+            u32::from_le_bytes(enc.bytes.try_into().unwrap())
+        };
+
+        // Golden words produced by clang/llvm-mc for aarch64.
+        let add = AddOpBuilder::new(&context)
+            .attr("rd", gpr(0))
+            .attr("rn", gpr(1))
+            .attr("rm", gpr(2))
+            .build();
+        assert_eq!(word(add.id()), 0x8B020020, "add x0, x1, x2");
+
+        let lslv = LogicalShiftLeftVariableOpBuilder::new(&context)
+            .attr("rd", gpr(0))
+            .attr("rn", gpr(1))
+            .attr("rm", gpr(2))
+            .build();
+        assert_eq!(word(lslv.id()), 0x9AC22020, "lslv x0, x1, x2");
+
+        let cmp = CompareOpBuilder::new(&context)
+            .attr("rn", gpr(1))
+            .attr("rm", gpr(2))
+            .build();
+        assert_eq!(word(cmp.id()), 0xEB02003F, "cmp x1, x2");
+
+        let ldr = LoadDoublewordOpBuilder::new(&context)
+            .attr("rt", gpr(0))
+            .attr("rn", gprsp(1))
+            .attr("imm", AttributeValue::Int(0))
+            .build();
+        assert_eq!(word(ldr.id()), 0xF9400020, "ldr x0, [x1]");
+
+        let str_ = StoreDoublewordOpBuilder::new(&context)
+            .attr("rt", gpr(2))
+            .attr("rn", gprsp(3))
+            .attr("imm", AttributeValue::Int(0))
+            .build();
+        assert_eq!(word(str_.id()), 0xF9000062, "str x2, [x3]");
+
+        // Branch immediates hold word offsets (the pc-relative byte delta >> 2).
+        let beq = BranchEqOpBuilder::new(&context)
+            .attr("imm", AttributeValue::Int(4))
+            .build();
+        assert_eq!(word(beq.id()), 0x54000080, "b.eq +16");
+
+        let b = BranchImmediateOpBuilder::new(&context)
+            .attr("imm", AttributeValue::Int(3))
+            .build();
+        assert_eq!(word(b.id()), 0x14000003, "b +12");
+
+        let bl = BranchLinkOpBuilder::new(&context)
+            .attr("imm", AttributeValue::Int(2))
+            .build();
+        assert_eq!(word(bl.id()), 0x94000002, "bl +8");
+
+        let ret = ReturnOpBuilder::new(&context).attr("rn", gpr(30)).build();
+        assert_eq!(word(ret.id()), 0xD65F03C0, "ret");
+    }
+
+    #[test]
+    fn symbol_operands_become_fixups() {
+        use crate::BranchLinkOpBuilder;
+        use tir::attributes::AttributeValue;
+        use tir_be_common::binary::{FixupTarget, InstFixup};
+
+        let context = Context::with_default_dialects();
+        context.register_dialect::<AsmDialect>();
+        context.register_dialect::<Arm64Dialect>();
+
+        let encoders = crate::get_instruction_encoders();
+        let patchers = crate::get_instruction_patchers();
+
+        let bl = BranchLinkOpBuilder::new(&context)
+            .attr("imm", AttributeValue::Str("foo".to_string()))
+            .build();
+        let enc = encoders["bl"](&context.get_op(bl.id())).unwrap();
+        assert_eq!(enc.bytes, 0x94000000u32.to_le_bytes());
+        assert_eq!(
+            enc.fixups,
+            vec![InstFixup {
+                operand: "imm",
+                target: FixupTarget::Symbol("foo".to_string()),
+            }]
+        );
+
+        // The patch value is the word offset; the byte-delta scaling happens
+        // in the object writer.
+        let mut bytes = enc.bytes.clone();
+        patchers["bl"](&mut bytes, 2).unwrap();
+        assert_eq!(bytes, 0x94000002u32.to_le_bytes(), "bl +8");
+
+        assert!(patchers["bl"](&mut enc.bytes.clone(), 1 << 25).is_none());
+    }
 }
 
 #[cfg(test)]

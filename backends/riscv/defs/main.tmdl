@@ -324,9 +324,9 @@ template JType for [RV32I, RV64I] {
     encoding {
         0..6 => OPCODE,
         7..11 => rd,
-        12..19 => imm[1..8],
+        12..19 => imm[12..19],
         20 => imm[11],
-        21..30 => imm[12..21],
+        21..30 => imm[1..10],
         31 => imm[20],
     }
 
