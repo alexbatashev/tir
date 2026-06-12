@@ -98,6 +98,42 @@ impl<'a, K: Eq + Hash, V: PartialEq> IntoIterator for &'a mut StableHashMap<K, V
     }
 }
 
+/// Evaluate a `bits<expr>` width expression by lowering it to a semantic
+/// expression and constant-folding it under `params` (the ISA parameter
+/// values). `None` when the expression does not converge to a constant —
+/// e.g. it references an unknown parameter or a register.
+pub fn eval_bits_width(expr: &ast::Expr, params: &HashMap<String, i64>) -> Option<u16> {
+    let mut graph = tir::sem_expr::ExprPostGraph::new();
+    let lowering = expr.lower_to_sema(&mut graph, params)?;
+    if !lowering.variable_symbols.is_empty() || !lowering.register_symbols.is_empty() {
+        return None;
+    }
+    match tir::sem_expr::execute(&graph, &[]) {
+        tir::sem_expr::Value::Int(v) => u16::try_from(v.to_u64()).ok(),
+        tir::sem_expr::Value::Float(_) => None,
+    }
+}
+
+/// Resolve `Type::BitsExpr` operand types to concrete `Type::Bits` widths
+/// under `params`. Panics on non-constant widths: sema rejects those first.
+pub fn resolve_operand_widths(
+    operands: Vec<(String, Type)>,
+    params: &HashMap<String, i64>,
+) -> Vec<(String, Type)> {
+    operands
+        .into_iter()
+        .map(|(name, ty)| match ty {
+            Type::BitsExpr(expr) => {
+                let width = eval_bits_width(&expr, params).unwrap_or_else(|| {
+                    panic!("width of operand '{name}' does not evaluate to a constant")
+                });
+                (name, Type::Bits(width))
+            }
+            other => (name, other),
+        })
+        .collect()
+}
+
 pub fn resolve_operands_for_instruction<'a>(
     inst: &'a ast::Instruction,
     item_cache: &HashMap<&'a str, &'a ast::Item>,
@@ -202,6 +238,111 @@ pub fn resolve_params_for_instruction<'a>(
                 .map(|(name, value)| (name.clone(), value.clone())),
         )
         .collect()
+}
+
+/// ISA parameters referenced via `self.PARAM` (e.g. `XLEN`). They are not
+/// instruction/template params, so they survive lowering as unbound symbols.
+/// Extension ISAs (e.g. `RVM`) inherit parameters from the base ISAs in their
+/// `requires` closure. An instruction may span ISAs that define the same
+/// parameter with different values (RV32I/RV64I `XLEN`); pick the widest so
+/// 64-bit execution is correct.
+pub fn resolve_isa_param_values<'a>(
+    inst: &'a ast::Instruction,
+    item_cache: &HashMap<&'a str, &'a ast::Item>,
+) -> HashMap<String, i64> {
+    let mut acc: HashMap<String, i64> = HashMap::new();
+    let mut pending: Vec<&str> = inst.for_isas.iter().map(String::as_str).collect();
+    let mut visited: HashSet<&str> = HashSet::new();
+    while let Some(isa_name) = pending.pop() {
+        if !visited.insert(isa_name) {
+            continue;
+        }
+        let Some(ast::Item::Isa(isa)) = item_cache.get(isa_name) else {
+            continue;
+        };
+        for (name, (_ty, value)) in isa.parameters.iter() {
+            if let Some(ast::Expr::Lit(ast::Lit::Int(li))) = value {
+                let v = parse_literal_value(li) as i64;
+                acc.entry(name.clone())
+                    .and_modify(|e| *e = (*e).max(v))
+                    .or_insert(v);
+            }
+        }
+        match &isa.requires {
+            None => {}
+            Some(ast::IsaRequirement::Single(parent)) => pending.push(parent),
+            Some(ast::IsaRequirement::Any(parents)) | Some(ast::IsaRequirement::All(parents)) => {
+                pending.extend(parents.iter().map(String::as_str));
+            }
+        }
+    }
+    acc
+}
+
+/// True when an item declared `for [for_isas]` is part of the `target` ISA:
+/// either `target` is listed directly, or a listed extension ISA reaches
+/// `target` through its `requires` closure (e.g. `RVM requires [RV32I | RV64I]`
+/// makes RVM instructions part of both RV32I and RV64I targets).
+pub fn item_supports_isa<'a>(
+    for_isas: &[String],
+    target: &str,
+    item_cache: &HashMap<&'a str, &'a ast::Item>,
+) -> bool {
+    let mut pending: Vec<&str> = for_isas.iter().map(String::as_str).collect();
+    let mut visited: HashSet<&str> = HashSet::new();
+    while let Some(isa_name) = pending.pop() {
+        if isa_name == target {
+            return true;
+        }
+        if !visited.insert(isa_name) {
+            continue;
+        }
+        let Some(ast::Item::Isa(isa)) = item_cache.get(isa_name) else {
+            continue;
+        };
+        match &isa.requires {
+            None => {}
+            Some(ast::IsaRequirement::Single(parent)) => pending.push(parent),
+            Some(ast::IsaRequirement::Any(parents)) | Some(ast::IsaRequirement::All(parents)) => {
+                pending.extend(parents.iter().map(String::as_str));
+            }
+        }
+    }
+    false
+}
+
+/// Parameter values visible from `target`: its own parameters and those
+/// inherited through its `requires` closure, nearest definition winning.
+pub fn isa_param_values<'a>(
+    target: &str,
+    item_cache: &HashMap<&'a str, &'a ast::Item>,
+) -> HashMap<String, i64> {
+    let mut acc: HashMap<String, i64> = HashMap::new();
+    let mut pending: std::collections::VecDeque<&str> = std::collections::VecDeque::new();
+    pending.push_back(target);
+    let mut visited: HashSet<&str> = HashSet::new();
+    while let Some(isa_name) = pending.pop_front() {
+        if !visited.insert(isa_name) {
+            continue;
+        }
+        let Some(ast::Item::Isa(isa)) = item_cache.get(isa_name) else {
+            continue;
+        };
+        for (name, (_ty, value)) in isa.parameters.iter() {
+            if let Some(ast::Expr::Lit(ast::Lit::Int(li))) = value {
+                acc.entry(name.clone())
+                    .or_insert(parse_literal_value(li) as i64);
+            }
+        }
+        match &isa.requires {
+            None => {}
+            Some(ast::IsaRequirement::Single(parent)) => pending.push_back(parent),
+            Some(ast::IsaRequirement::Any(parents)) | Some(ast::IsaRequirement::All(parents)) => {
+                pending.extend(parents.iter().map(String::as_str));
+            }
+        }
+    }
+    acc
 }
 
 pub fn parse_literal_value(lit: &ast::LitInt) -> u64 {

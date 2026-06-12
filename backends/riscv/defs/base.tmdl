@@ -67,7 +67,7 @@ instruction JumpAndLinkReg for [RV32I, RV64I] : IType {
 
     behavior {
         rd = PC::pc + zext(0b100, self.XLEN);
-        PC::pc = rs1 + sext(imm, self.XLEN);
+        PC::pc = (rs1 + sext(imm, self.XLEN)) & ~1;
     }
 
     schedule { units = [WriteIALU]; }
@@ -370,7 +370,7 @@ instruction SetLessThanUnsignedImm for [RV32I, RV64I] : IALUOp {
     param FUNCT3: bits<3> = 0b011;
 
     behavior {
-        rd = if rs1 ~< zext(imm, self.XLEN) {
+        rd = if rs1 ~< sext(imm, self.XLEN) {
             zext(0b1, self.XLEN)
         } else {
             zext(0b0, self.XLEN)
@@ -416,7 +416,9 @@ template ShiftImm for [RV32I, RV64I] {
     operands {
         rd: GPR,
         rs1: GPR,
-        imm: bits<6>,
+        // 5-bit shamt on RV32, 6-bit on RV64; the spare encoding bit on RV32
+        // stays zero (shamt[5]=1 is a reserved encoding).
+        imm: bits<log2Ceil(self.XLEN)>,
     }
 
     encoding {
@@ -514,7 +516,7 @@ instruction ShiftRightLogicalImmWord for [RV64I] : ShiftImmWord64 {
     param FUNCT7: bits<7> = 0b0000000;
 
     behavior {
-        rd = sext(extract(rs1 >> imm, 31, 0), self.XLEN);
+        rd = sext(extract(rs1, 31, 0) >> imm, self.XLEN);
     }
 }
 
@@ -524,7 +526,7 @@ instruction ShiftRightArithmeticImmWord for [RV64I] : ShiftImmWord64 {
     param FUNCT7: bits<7> = 0b0100000;
 
     behavior {
-        rd = sext(extract(rs1 >>> imm, 31, 0), self.XLEN);
+        rd = sext(extract(rs1, 31, 0) >>> imm, self.XLEN);
     }
 }
 
@@ -589,7 +591,7 @@ instruction ShiftLeftLogicalWord for [RV64I] : ALUOpWord {
     param FUNCT3: bits<3> = 0b001;
 
     behavior {
-        rd = sext(extract(rs1 << clamp(rs2, 0, 31), 31, 0), self.XLEN);
+        rd = sext(extract(rs1 << extract(rs2, 4, 0), 31, 0), self.XLEN);
     }
 }
 
@@ -598,7 +600,7 @@ instruction ShiftRightLogicalWord for [RV64I] : ALUOpWord {
     param FUNCT3: bits<3> = 0b101;
 
     behavior {
-        rd = sext(extract(rs1 >> clamp(rs2, 0, 31), 31, 0), self.XLEN);
+        rd = sext(extract(rs1, 31, 0) >> extract(rs2, 4, 0), self.XLEN);
     }
 }
 
@@ -608,6 +610,6 @@ instruction ShiftRightArithmeticWord for [RV64I] : ALUOpWord {
     param FUNCT7: bits<7> = 0b0100000;
 
     behavior {
-        rd = sext(extract(rs1 >>> clamp(rs2, 0, 31), 31, 0), self.XLEN);
+        rd = sext(extract(rs1, 31, 0) >>> extract(rs2, 4, 0), self.XLEN);
     }
 }

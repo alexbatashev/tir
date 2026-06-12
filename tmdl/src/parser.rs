@@ -1173,13 +1173,25 @@ where
                 }),
             });
 
+        let unary = just(Token::Tilde)
+            .to(UnOp::BitwiseNot)
+            .repeated()
+            .foldr_with(basic.clone(), |op, x, e| {
+                Expr::Unary(Unary {
+                    x: Box::new(x),
+                    op,
+                    span: e.span(),
+                })
+            })
+            .boxed();
+
         let op = just(Token::Asterisk)
             .to(BinOp::Mul)
             .or(just(Token::Tilde)
                 .then(just(Token::ForwardSlash))
                 .to(BinOp::UnsignedDiv))
             .or(just(Token::ForwardSlash).to(BinOp::Div));
-        let product = basic
+        let product = unary
             .clone()
             .foldl_with(op.then(expr).repeated(), |a, (op, b), e| {
                 let sp = e.span();
@@ -1361,15 +1373,21 @@ where
 
     let ident = select! { Token::Identifier(i) => i.to_string() };
 
+    let width = num
+        .try_map_with(|n, e| {
+            n.parse::<u16>()
+                .map_err(|_| Rich::custom(e.span(), "Expected unsigned integer"))
+        })
+        .then_ignore(just(Token::RAngle))
+        .map(Type::Bits)
+        .or(inline_expr()
+            .then_ignore(just(Token::RAngle))
+            .map(|e| Type::BitsExpr(Box::new(e))));
     let bits = just(Token::Identifier("bits"))
         .ignored()
         .then_ignore(just(Token::LAngle))
-        .then(num.try_map_with(|n, e| {
-            n.parse::<u16>()
-                .map_err(|_| Rich::custom(e.span(), "Expected unsigned integer"))
-        }))
-        .then_ignore(just(Token::RAngle))
-        .map(|((), bits)| Type::Bits(bits));
+        .then(width)
+        .map(|((), bits)| bits);
     choice((
         just(Token::Identifier("String")).to(Type::String),
         just(Token::Identifier("Integer")).to(Type::Integer),
@@ -1388,7 +1406,7 @@ mod tests {
     use chumsky::prelude::*;
 
     use crate::{
-        ast::{BinOp, Expr},
+        ast::{BinOp, Expr, UnOp},
         lexer::lexer,
     };
 
@@ -1531,6 +1549,29 @@ mod tests {
         let expr = parsed.output().unwrap().0.clone();
         match expr {
             Expr::Binary(bin) => assert_eq!(bin.op, BinOp::NotEqual),
+            _ => panic!("Expected binary expression"),
+        }
+    }
+
+    #[test]
+    fn inline_expr_parses_bitwise_not() {
+        let code = "a & ~1";
+        let (tokens, mut _errors) = lexer().parse(code).into_output_errors();
+        let tokens = tokens.unwrap();
+        let parsed = inline_expr().then(end()).parse(
+            tokens
+                .as_slice()
+                .map((code.len()..code.len()).into(), |(t, s)| (t, s)),
+        );
+        let expr = parsed.output().unwrap().0.clone();
+        match expr {
+            Expr::Binary(bin) => {
+                assert_eq!(bin.op, BinOp::BitwiseAnd);
+                match *bin.rhs {
+                    Expr::Unary(un) => assert_eq!(un.op, UnOp::BitwiseNot),
+                    _ => panic!("Expected unary expression"),
+                }
+            }
             _ => panic!("Expected binary expression"),
         }
     }
@@ -1718,6 +1759,24 @@ mod tests {
         );
         let inst = parsed.output().expect("instruction should parse").0.clone();
         assert!(inst.schedule.is_none());
+    }
+
+    #[test]
+    fn operand_width_expression_parses() {
+        let code = "instruction Foo : Bar {
+            operands { a: bits<6>, b: bits<log2Ceil(self.XLEN)>, }
+            behavior { rd = rs1; }
+        }";
+        let (tokens, _e) = lexer().parse(code).into_output_errors();
+        let tokens = tokens.unwrap();
+        let parsed = instruction_def().then(end()).parse(
+            tokens
+                .as_slice()
+                .map((code.len()..code.len()).into(), |(t, s)| (t, s)),
+        );
+        let inst = parsed.output().expect("instruction should parse").0.clone();
+        assert_eq!(inst.operands[0].1, crate::Type::Bits(6));
+        assert!(matches!(inst.operands[1].1, crate::Type::BitsExpr(_)));
     }
 
     #[test]

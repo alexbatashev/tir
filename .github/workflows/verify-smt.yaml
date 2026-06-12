@@ -1,0 +1,56 @@
+name: SMT equivalence (TMDL vs Sail)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 2 * * *"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Pin the isla revision and the Sail model snapshot ref together; bump them
+  # in sync. `cargo xtask verify` clones/downloads them on demand.
+  TIR_ISLA_REF: master
+  TIR_ISLA_SNAPSHOTS_REF: refs/heads/master
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        isa: [riscv64, riscv32, armv8]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install z3 and binutils stubs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y z3 libz3-dev
+          # The isla config only checks for the toolchain's presence; raw
+          # opcodes never invoke it.
+          mkdir -p "$HOME/bin"
+          for triple in riscv64-linux-gnu aarch64-linux-gnu; do
+            for tool in as objdump ld nm; do
+              ln -sf /usr/bin/false "$HOME/bin/$triple-$tool"
+            done
+          done
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+      - name: Cache isla and the Sail model snapshot
+        uses: actions/cache@v4
+        with:
+          path: |
+            target/isla
+            target/verify/snapshots
+          key: isla-${{ matrix.isa }}-${{ env.TIR_ISLA_REF }}-${{ env.TIR_ISLA_SNAPSHOTS_REF }}
+      - name: Verify
+        run: cargo xtask verify ${{ matrix.isa }}
+      - name: Upload counterexample queries
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smt-queries-${{ matrix.isa }}
+          path: target/verify/smt/${{ matrix.isa }}/queries/

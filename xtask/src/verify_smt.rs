@@ -1,0 +1,1239 @@
+//! SMT equivalence checking of TMDL instruction semantics against the Sail
+//! model of the target architecture (the architecture's golden model).
+//!
+//! For every supported TMDL instruction and a set of concrete operand
+//! assignments:
+//!   1. the instruction word is computed from the TMDL `encode_*` function
+//!      (evaluated by z3), so the TMDL encoding is part of what is checked;
+//!   2. `isla-footprint` symbolically executes that word in the Sail model
+//!      over a fully symbolic register state, producing one SMT trace per
+//!      execution path;
+//!   3. for each path, z3 is asked for a register state where TMDL and Sail
+//!      disagree on the final GPRs or PC. `unsat` proves agreement for ALL
+//!      2^XLEN values of every register; `sat` yields a counterexample.
+//!
+//! Modeling assumptions, reported with the results:
+//!   - machine mode, no traps: paths that touch unmapped architectural state
+//!     (CSRs, mcause, ...) are excluded and counted;
+//!   - the initial PC is 4-byte aligned and `nextPC = PC + 4` (the fetch
+//!     invariant for non-compressed instructions);
+//!   - registers feeding an indirect jump (`jalr` base) hold 4-byte-aligned
+//!     values, so misaligned-fetch trap paths are vacuous (temporary until the
+//!     C extension is modeled);
+//!   - TMDL leaves PC untouched for fall-through instructions, so a Sail path
+//!     that does not write the (next) PC requires TMDL's final PC to equal the
+//!     initial one, and a path that writes it requires equality with it.
+//!
+//! External tools: `isla-footprint` and `z3`, plus a Sail model snapshot and
+//! an isla config per ISA. isla is cloned and built and the snapshot is
+//! downloaded automatically; override locations with `TIR_ISLA_FOOTPRINT`,
+//! `TIR_ISLA_SNAPSHOT`, `TIR_ISLA_CONFIG`, `TIR_Z3`. `TIR_ISLA_REF` pins the
+//! isla checkout and `TIR_ISLA_SNAPSHOTS_REF` the snapshot ref (both default
+//! to master). `TIR_VERIFY_SMT_FILTER=add,sub` restricts the instruction set.
+
+use std::collections::HashMap;
+use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use crate::utils::{download_file, git_checkout, project_root};
+use anyhow::anyhow;
+use xshell::{cmd, Shell};
+
+pub struct IsaSpec {
+    name: &'static str,
+    tmdl_isa: &'static str,
+    dialect: &'static str,
+    defs_dir: &'static str,
+    /// Snapshot file name in the isla-snapshots repository.
+    snapshot: &'static str,
+    /// isla config file name under `xtask/`.
+    config: &'static str,
+    xlen: u32,
+    /// Sail GPR names are `{reg_prefix}{n}` for `n < reg_count`.
+    reg_prefix: &'static str,
+    reg_count: u32,
+    /// Encoding index that names the hardwired-zero register, if it is not a
+    /// real Sail register (RISC-V `x0`; AArch64 has no `R31`).
+    zero_reg: Option<u32>,
+    pc: &'static str,
+    /// Sail's delayed PC register written by branches, when the model has one
+    /// (RISC-V `nextPC`); the ARM model writes the PC directly.
+    next_pc: Option<&'static str>,
+    /// Model bookkeeping registers with no architectural meaning; reads and
+    /// writes of them never exclude a path.
+    ignore_regs: &'static [&'static str],
+    /// Named Sail registers mapped onto single slots of TMDL register-file
+    /// classes beyond the GPR file: `(sail name, tmdl class, slot, index
+    /// width)`. Fields of `struct_reg` are named `<reg>.<field>`. Several
+    /// Sail names may alias one slot (AArch64 `SP_ELx`).
+    extra_regs: &'static [(&'static str, &'static str, u64, u32)],
+    /// Sail struct register accessed via `(_ field |F|)` accessors (AArch64
+    /// `PSTATE`); its fields map through `extra_regs`.
+    struct_reg: Option<&'static str>,
+    /// Concrete operand values for register classes whose encoding space is
+    /// mostly unimplemented (CSR addresses), instead of the GPR patterns.
+    fixed_reg_values: &'static [(&'static str, &'static [u64])],
+    isla_args: &'static [&'static str],
+}
+
+impl IsaSpec {
+    /// TMDL register classes the driver can relate to Sail state.
+    fn class_is_mapped(&self, class: &str) -> bool {
+        class == "gpr" || self.extra_regs.iter().any(|(_, c, _, _)| *c == class)
+    }
+}
+
+/// `mscratch` is the only TMDL-listed CSR with plain read-write storage; the
+/// counter CSRs are read-only and their Sail accesses trap or go through
+/// mcounteren, which is outside the no-trap assumptions.
+const RISCV_EXTRA_REGS: &[(&str, &str, u64, u32)] = &[("mscratch", "csr", 0x340, 12)];
+
+/// The TMDL `pstate` file holds the NZCV flags at their declaration-order
+/// indices; the stack pointer is slot 31 of the shared GPR file, reachable
+/// through the `gprsp` accessors (no hardwired-zero special case). Whichever
+/// `SP_ELx` a path touches plays the role of TMDL's single SP.
+const ARMV8_EXTRA_REGS: &[(&str, &str, u64, u32)] = &[
+    ("PSTATE.N", "pstate", 0, 2),
+    ("PSTATE.Z", "pstate", 1, 2),
+    ("PSTATE.C", "pstate", 2, 2),
+    ("PSTATE.V", "pstate", 3, 2),
+    ("SP_EL0", "gprsp", 31, 5),
+    ("SP_EL1", "gprsp", 31, 5),
+    ("SP_EL2", "gprsp", 31, 5),
+    ("SP_EL3", "gprsp", 31, 5),
+];
+
+const ISA_SPECS: &[IsaSpec] = &[
+    IsaSpec {
+        name: "riscv64",
+        tmdl_isa: "RV64I",
+        dialect: "riscv",
+        defs_dir: "backends/riscv/defs",
+        snapshot: "riscv64.ir",
+        config: "verify-smt-riscv64.toml",
+        xlen: 64,
+        reg_prefix: "x",
+        reg_count: 32,
+        zero_reg: Some(0),
+        pc: "PC",
+        next_pc: Some("nextPC"),
+        ignore_regs: &[],
+        extra_regs: RISCV_EXTRA_REGS,
+        struct_reg: None,
+        fixed_reg_values: &[("csr", &[0x340])],
+        isla_args: &["-I", "cur_privilege=Machine"],
+    },
+    IsaSpec {
+        name: "riscv32",
+        tmdl_isa: "RV32I",
+        dialect: "riscv",
+        defs_dir: "backends/riscv/defs",
+        snapshot: "rv32d.ir",
+        config: "verify-smt-riscv32.toml",
+        xlen: 32,
+        reg_prefix: "x",
+        reg_count: 32,
+        zero_reg: Some(0),
+        pc: "PC",
+        next_pc: Some("nextPC"),
+        ignore_regs: &[],
+        extra_regs: RISCV_EXTRA_REGS,
+        struct_reg: None,
+        fixed_reg_values: &[("csr", &[0x340])],
+        isla_args: &["-I", "cur_privilege=Machine"],
+    },
+    IsaSpec {
+        name: "armv8",
+        tmdl_isa: "ARMv8A64",
+        dialect: "arm64",
+        defs_dir: "backends/arm64/defs",
+        snapshot: "armv8p5.ir",
+        config: "verify-smt-armv8.toml",
+        xlen: 64,
+        reg_prefix: "R",
+        reg_count: 31,
+        zero_reg: None,
+        pc: "_PC",
+        next_pc: None,
+        ignore_regs: &[
+            "SEE",
+            "__unconditional",
+            "__PC_changed",
+            "__currentInstrLength",
+            "BTypeNext",
+            "BTypeCompatible",
+        ],
+        extra_regs: ARMV8_EXTRA_REGS,
+        struct_reg: Some("PSTATE"),
+        fixed_reg_values: &[],
+        isla_args: &[],
+    },
+];
+
+pub fn verify_smt(sh: &Shell, isa: &str) -> anyhow::Result<()> {
+    let spec = ISA_SPECS
+        .iter()
+        .find(|s| s.name == isa)
+        .ok_or_else(|| anyhow!("unsupported ISA {isa}; available: riscv64, riscv32, armv8"))?;
+    let tools = Tools::ensure(sh, spec)?;
+    let root = project_root();
+    let out_dir = root.join("target/verify/smt").join(spec.name);
+    std::fs::create_dir_all(out_dir.join("cache"))?;
+    std::fs::create_dir_all(out_dir.join("queries"))?;
+
+    let smt_path = out_dir.join(format!("{}.smt2", spec.name));
+    generate_tmdl_smt(sh, spec, &root, &smt_path)?;
+    let smt = std::fs::read_to_string(&smt_path)?;
+
+    let instructions = parse_inventory(&smt);
+    let filter: Option<Vec<String>> = std::env::var("TIR_VERIFY_SMT_FILTER")
+        .ok()
+        .map(|f| f.split(',').map(|s| s.trim().to_string()).collect());
+
+    let mut report = Report::default();
+
+    for instr in &instructions {
+        if filter.as_ref().is_some_and(|f| !f.contains(&instr.name)) {
+            continue;
+        }
+        if !instr.supported {
+            report.unsupported.push(instr.name.clone());
+            continue;
+        }
+        // Skip instructions with operands in register classes that have no
+        // correspondence to Sail state (e.g. the TMDL `pc` operand class).
+        if let Some(class) = instr.operands.iter().find_map(|(_, k)| match k {
+            OperandKind::Reg { class, .. } if !spec.class_is_mapped(class) => Some(class),
+            _ => None,
+        }) {
+            report.unsupported.push(format!(
+                "{} (unmapped register class {})",
+                instr.name, class
+            ));
+            continue;
+        }
+        verify_instruction(&tools, spec, &out_dir, &smt, instr, &mut report)?;
+    }
+
+    report.print();
+    if report.failed > 0 {
+        anyhow::bail!(
+            "SMT equivalence check found {} divergence(s)",
+            report.failed
+        );
+    }
+    Ok(())
+}
+
+struct Tools {
+    isla_footprint: PathBuf,
+    snapshot: PathBuf,
+    isla_config: PathBuf,
+    z3: PathBuf,
+}
+
+impl Tools {
+    /// Resolve the external tools, fetching anything that is not overridden
+    /// by an environment variable.
+    fn ensure(sh: &Shell, spec: &IsaSpec) -> anyhow::Result<Self> {
+        let isla_footprint = match std::env::var("TIR_ISLA_FOOTPRINT") {
+            Ok(path) => path.into(),
+            Err(_) => ensure_isla_footprint(sh)?,
+        };
+        let snapshot = match std::env::var("TIR_ISLA_SNAPSHOT") {
+            Ok(path) => path.into(),
+            Err(_) => ensure_snapshot(sh, spec.snapshot)?,
+        };
+        Ok(Tools {
+            isla_footprint,
+            snapshot,
+            isla_config: std::env::var("TIR_ISLA_CONFIG")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| project_root().join("xtask").join(spec.config)),
+            z3: std::env::var("TIR_Z3")
+                .unwrap_or_else(|_| "z3".to_string())
+                .into(),
+        })
+    }
+}
+
+fn ensure_isla_footprint(sh: &Shell) -> anyhow::Result<PathBuf> {
+    let isla_dir = project_root().join("target/isla");
+    let bin = isla_dir.join("target/release/isla-footprint");
+    if bin.exists() {
+        return Ok(bin);
+    }
+    let isla_ref = std::env::var("TIR_ISLA_REF").unwrap_or_else(|_| "master".to_string());
+    git_checkout(
+        sh,
+        "https://github.com/rems-project/isla",
+        &isla_ref,
+        "isla",
+    )?;
+    let manifest = isla_dir.join("Cargo.toml");
+    cmd!(
+        sh,
+        "cargo build --release --manifest-path {manifest} --bin isla-footprint"
+    )
+    .run()?;
+    Ok(bin)
+}
+
+fn ensure_snapshot(sh: &Shell, file: &str) -> anyhow::Result<PathBuf> {
+    let snap_ref =
+        std::env::var("TIR_ISLA_SNAPSHOTS_REF").unwrap_or_else(|_| "refs/heads/master".to_string());
+    let dest = project_root()
+        .join("target/verify/snapshots")
+        .join(snap_ref.replace('/', "-"))
+        .join(file);
+    let url = format!("https://github.com/rems-project/isla-snapshots/raw/{snap_ref}/{file}");
+    download_file(sh, &url, &dest)?;
+    Ok(dest)
+}
+
+fn generate_tmdl_smt(sh: &Shell, spec: &IsaSpec, root: &Path, out: &Path) -> anyhow::Result<()> {
+    let defs: Vec<PathBuf> = std::fs::read_dir(root.join(spec.defs_dir))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|e| e == "tmdl"))
+        .collect();
+    let out_str = out.to_string_lossy().to_string();
+    let dialect = spec.dialect;
+    let tmdl_isa = spec.tmdl_isa;
+    cmd!(
+        sh,
+        "cargo run -p tmdl --bin tmdlc -- --action emit-smtlib --dialect {dialect} --isa {tmdl_isa} --output {out_str} {defs...}"
+    )
+    .run()?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Instruction inventory (from `; INSTRUCTION:` metadata in the generated SMT)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+enum OperandKind {
+    Reg { class: String, idx_width: u32 },
+    Bits(u32),
+    Int,
+}
+
+#[derive(Clone, Debug)]
+struct Instruction {
+    name: String,
+    writes_pc: bool,
+    operands: Vec<(String, OperandKind)>,
+    supported: bool,
+}
+
+fn parse_inventory(smt: &str) -> Vec<Instruction> {
+    let unsupported: Vec<&str> = smt
+        .lines()
+        .filter_map(|l| l.strip_prefix("; UNSUPPORTED-BEHAVIOR: "))
+        .collect();
+
+    smt.lines()
+        .filter_map(|l| l.strip_prefix("; INSTRUCTION: "))
+        .filter_map(|l| {
+            let mut parts = l.split_whitespace();
+            let name = parts.next()?.to_string();
+            let writes_pc = parts.next()? == "writes-pc=true";
+            let operands = parts
+                .map(|op| {
+                    let (op_name, kind) = op.split_once(':')?;
+                    let kind = match kind.split_once(':') {
+                        Some(("reg", rest)) => {
+                            let (class, w) = rest.split_once(':')?;
+                            OperandKind::Reg {
+                                class: class.to_string(),
+                                idx_width: w.parse().ok()?,
+                            }
+                        }
+                        Some(("bits", w)) => OperandKind::Bits(w.parse().ok()?),
+                        _ if kind == "int" => OperandKind::Int,
+                        _ => return None,
+                    };
+                    Some((op_name.to_string(), kind))
+                })
+                .collect::<Option<Vec<_>>>()?;
+            let supported = !unsupported.contains(&name.as_str());
+            Some(Instruction {
+                name,
+                writes_pc,
+                operands,
+                supported,
+            })
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Operand assignments
+// ---------------------------------------------------------------------------
+
+/// Concrete operand tuples for one instruction. Registers cover zero-register
+/// corner cases and aliasing; immediates cover boundary patterns. PC-writing
+/// instructions get 4-byte aligned immediates so that, together with the
+/// aligned-PC assumption, Sail's misaligned-fetch trap paths are vacuous.
+fn operand_cases(spec: &IsaSpec, instr: &Instruction) -> Vec<Vec<u64>> {
+    let fixed_values = |class: &str| {
+        spec.fixed_reg_values
+            .iter()
+            .find(|(c, _)| *c == class)
+            .map(|(_, vals)| *vals)
+    };
+    // Operands with a fixed value list (CSR addresses) sit outside the GPR
+    // patterns; they get their fixed values appended below.
+    let fixed_positions: Vec<(usize, &[u64])> = instr
+        .operands
+        .iter()
+        .enumerate()
+        .filter_map(|(i, (_, k))| match k {
+            OperandKind::Reg { class, .. } => fixed_values(class).map(|vals| (i, vals)),
+            _ => None,
+        })
+        .collect();
+    let reg_positions: Vec<usize> = instr
+        .operands
+        .iter()
+        .enumerate()
+        .filter(|(i, (_, k))| {
+            matches!(k, OperandKind::Reg { .. }) && !fixed_positions.iter().any(|(fi, _)| fi == i)
+        })
+        .map(|(i, _)| i)
+        .collect();
+    let reg_patterns: Vec<Vec<u64>> = match reg_positions.len() {
+        0 => vec![vec![]],
+        1 => vec![vec![1], vec![0], vec![31]],
+        2 => vec![vec![1, 2], vec![0, 3], vec![4, 0], vec![5, 5], vec![31, 30]],
+        _ => vec![
+            vec![1, 2, 3],
+            vec![0, 5, 6],
+            vec![7, 0, 8],
+            vec![9, 10, 0],
+            vec![4, 4, 4],
+            vec![31, 30, 29],
+            vec![11, 12, 12],
+        ],
+    };
+
+    let imm_position: Option<(usize, u32)> =
+        instr
+            .operands
+            .iter()
+            .enumerate()
+            .find_map(|(i, (_, k))| match k {
+                OperandKind::Bits(w) => Some((i, *w)),
+                OperandKind::Int => Some((i, 64)),
+                OperandKind::Reg { .. } => None,
+            });
+    let imm_values: Vec<u64> = match imm_position {
+        None => vec![0],
+        Some((_, w)) => {
+            let mask = if w >= 64 { u64::MAX } else { (1u64 << w) - 1 };
+            if instr.writes_pc {
+                vec![4, 8, mask & !3, 1u64 << (w - 1), (1u64 << (w - 1)) - 4]
+            } else {
+                vec![
+                    0,
+                    1,
+                    mask,
+                    1u64 << (w - 1),
+                    (1u64 << (w - 1)) - 1,
+                    0xAAAA & mask,
+                ]
+            }
+        }
+    };
+
+    let mut cases = vec![];
+    for regs in &reg_patterns {
+        for imm in &imm_values {
+            let mut case = vec![0u64; instr.operands.len()];
+            for (slot, value) in reg_positions.iter().zip(regs) {
+                case[*slot] = *value;
+            }
+            if let Some((slot, _)) = imm_position {
+                case[slot] = *imm;
+            }
+            cases.push(case);
+            if imm_position.is_none() {
+                break;
+            }
+        }
+        if reg_positions.is_empty() {
+            break;
+        }
+    }
+    for (i, case) in cases.iter_mut().enumerate() {
+        for (slot, vals) in &fixed_positions {
+            case[*slot] = vals[i % vals.len()];
+        }
+    }
+    cases
+}
+
+/// First balanced s-expression (or bare token) at the start of `s`.
+fn sexpr_at(s: &str) -> &str {
+    if s.starts_with('(') {
+        let mut depth = 0usize;
+        for (i, c) in s.char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &s[..=i];
+                    }
+                }
+                _ => {}
+            }
+        }
+        s
+    } else {
+        let end = s
+            .find(|c: char| c.is_whitespace() || c == ')')
+            .unwrap_or(s.len());
+        &s[..end]
+    }
+}
+
+/// Indices of register operands whose value feeds a PC write (`jalr`-style
+/// indirect jumps), found by scanning the emitted `execute_*` body for
+/// `read_*` of the operand inside a `write_pc` value expression. Branch
+/// targets are PC-relative and never match.
+fn pc_source_reg_operands(smt: &str, instr: &Instruction) -> Vec<usize> {
+    let Some(start) = smt.find(&format!("(define-fun execute_{} ", instr.name)) else {
+        return vec![];
+    };
+    let body = sexpr_at(&smt[start..]);
+    let mut sources = vec![];
+    let mut rest = body;
+    while let Some(pos) = rest.find("(write_pc ") {
+        rest = &rest[pos + "(write_pc ".len()..];
+        let state = sexpr_at(rest);
+        let value = sexpr_at(rest[state.len()..].trim_start());
+        for (i, (name, kind)) in instr.operands.iter().enumerate() {
+            if let OperandKind::Reg { class, .. } = kind {
+                if value.contains(&format!("(read_{} st {})", class, name)) && !sources.contains(&i)
+                {
+                    sources.push(i);
+                }
+            }
+        }
+    }
+    sources
+}
+
+fn operand_smt_args(spec: &IsaSpec, instr: &Instruction, case: &[u64]) -> String {
+    instr
+        .operands
+        .iter()
+        .zip(case)
+        .map(|((_, kind), value)| match kind {
+            OperandKind::Reg { idx_width, .. } => format!("(_ bv{} {})", value, idx_width),
+            _ => format!("(_ bv{} {})", value, spec.xlen),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+// ---------------------------------------------------------------------------
+// Encoding via z3 (evaluate the TMDL `encode_*` functions)
+// ---------------------------------------------------------------------------
+
+fn encode_words(
+    tools: &Tools,
+    spec: &IsaSpec,
+    out_dir: &Path,
+    smt: &str,
+    instr: &Instruction,
+    cases: &[Vec<u64>],
+) -> anyhow::Result<Vec<u32>> {
+    let mut query = String::from(smt);
+    query.push_str("\n(check-sat)\n");
+    for case in cases {
+        let args = operand_smt_args(spec, instr, case);
+        let call = if args.is_empty() {
+            format!("encode_{}", instr.name)
+        } else {
+            format!("(encode_{} {})", instr.name, args)
+        };
+        writeln!(query, "(get-value ({}))", call)?;
+    }
+    let path = out_dir
+        .join("queries")
+        .join(format!("encode_{}.smt2", instr.name));
+    std::fs::write(&path, query)?;
+    let output = Command::new(&tools.z3).arg("-smt2").arg(&path).output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let words: Vec<u32> = stdout
+        .split("#x")
+        .skip(1)
+        .filter_map(|chunk| u32::from_str_radix(chunk.get(..8)?, 16).ok())
+        .collect();
+    anyhow::ensure!(
+        words.len() == cases.len(),
+        "z3 evaluated {} of {} encodings for {}: {}",
+        words.len(),
+        cases.len(),
+        instr.name,
+        stdout
+    );
+    Ok(words)
+}
+
+// ---------------------------------------------------------------------------
+// isla-footprint invocation (cached per instruction word)
+// ---------------------------------------------------------------------------
+
+/// Traces depend on the Sail snapshot and isla config; fingerprint both so a
+/// swap invalidates the cache.
+fn cache_fingerprint(tools: &Tools) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::fs::read(&tools.isla_config)
+        .unwrap_or_default()
+        .hash(&mut hasher);
+    tools.snapshot.hash(&mut hasher);
+    std::fs::metadata(&tools.snapshot)
+        .map(|m| m.len())
+        .unwrap_or(0)
+        .hash(&mut hasher);
+    hasher.finish()
+}
+
+/// `Ok(None)` means isla failed or had to be killed for this word (a few
+/// encodings blow up its symbolic executor); the caller records and moves on.
+fn sail_traces(
+    tools: &Tools,
+    spec: &IsaSpec,
+    out_dir: &Path,
+    word: u32,
+) -> anyhow::Result<Option<String>> {
+    let cache = out_dir.join("cache").join(format!(
+        "{:08x}-{:016x}.trace",
+        word,
+        cache_fingerprint(tools)
+    ));
+    if let Ok(cached) = std::fs::read_to_string(&cache) {
+        return Ok(Some(cached));
+    }
+    let bits = format!("{:032b}", word);
+    let mut child = Command::new(&tools.isla_footprint)
+        .args(["-A"])
+        .arg(&tools.snapshot)
+        .arg("-C")
+        .arg(&tools.isla_config)
+        .args([
+            "-T",
+            "1",
+            "--function",
+            "isla_footprint_no_init",
+            "--timeout",
+            "90",
+            "--partial",
+            "-i",
+            &bits,
+            "-s",
+        ])
+        .args(spec.isla_args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+
+    // Drain stdout on a thread so a chatty child can't dead-lock on a full
+    // pipe while we poll for exit.
+    let mut pipe = child.stdout.take().expect("stdout piped");
+    let reader = std::thread::spawn(move || {
+        use std::io::Read as _;
+        let mut s = String::new();
+        let _ = pipe.read_to_string(&mut s);
+        s
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let status = loop {
+        match child.try_wait()? {
+            Some(status) => break Some(status),
+            None if std::time::Instant::now() > deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(100)),
+        }
+    };
+    let stdout = reader.join().expect("reader thread");
+    if !status.is_some_and(|s| s.success()) {
+        return Ok(None);
+    }
+    std::fs::write(&cache, &stdout)?;
+    Ok(Some(stdout))
+}
+
+// ---------------------------------------------------------------------------
+// Trace parsing
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq)]
+enum Sexp {
+    Atom(String),
+    List(Vec<Sexp>),
+}
+
+impl std::fmt::Display for Sexp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Sexp::Atom(a) => write!(f, "{}", a),
+            Sexp::List(items) => {
+                write!(f, "(")?;
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, " ")?;
+                    }
+                    write!(f, "{}", item)?;
+                }
+                write!(f, ")")
+            }
+        }
+    }
+}
+
+fn parse_sexps(input: &str) -> Vec<Sexp> {
+    let mut stack: Vec<Vec<Sexp>> = vec![vec![]];
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            // isla appends structural parens after end-of-line location
+            // comments; the comments themselves never contain parens.
+            ';' => {
+                while let Some(&next) = chars.peek() {
+                    if next == '\n' || next == '(' || next == ')' {
+                        break;
+                    }
+                    chars.next();
+                }
+            }
+            '(' => stack.push(vec![]),
+            ')' => {
+                let done = stack.pop().unwrap_or_default();
+                if let Some(top) = stack.last_mut() {
+                    top.push(Sexp::List(done));
+                } else {
+                    stack.push(vec![Sexp::List(done)]);
+                }
+            }
+            '"' | '|' => {
+                let quote = c;
+                let mut atom = String::new();
+                atom.push(quote);
+                for c in chars.by_ref() {
+                    atom.push(c);
+                    if c == quote {
+                        break;
+                    }
+                }
+                if let Some(top) = stack.last_mut() {
+                    top.push(Sexp::Atom(atom));
+                }
+            }
+            c if c.is_whitespace() => {}
+            c => {
+                let mut atom = String::new();
+                atom.push(c);
+                while let Some(&next) = chars.peek() {
+                    if next.is_whitespace() || next == '(' || next == ')' || next == ';' {
+                        break;
+                    }
+                    atom.push(next);
+                    chars.next();
+                }
+                if let Some(top) = stack.last_mut() {
+                    top.push(Sexp::Atom(atom));
+                }
+            }
+        }
+    }
+    stack.pop().unwrap_or_default()
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum MappedReg {
+    X(u32),
+    Pc,
+    NextPc,
+    /// Index into `spec.extra_regs`.
+    Slot(usize),
+}
+
+fn map_register(spec: &IsaSpec, name: &str) -> Option<MappedReg> {
+    let name = name.trim_matches('|');
+    if name == spec.pc {
+        return Some(MappedReg::Pc);
+    }
+    if spec.next_pc == Some(name) {
+        return Some(MappedReg::NextPc);
+    }
+    if let Some(i) = spec.extra_regs.iter().position(|(n, _, _, _)| *n == name) {
+        return Some(MappedReg::Slot(i));
+    }
+    name.strip_prefix(spec.reg_prefix)
+        .and_then(|n| n.parse::<u32>().ok())
+        .filter(|n| *n < spec.reg_count)
+        .map(MappedReg::X)
+}
+
+/// Field name from a `((_ field |F|))` register accessor.
+fn accessor_field(items: &[Sexp]) -> Option<&str> {
+    let Some(Sexp::List(accessors)) = items.get(2) else {
+        return None;
+    };
+    let Some(Sexp::List(accessor)) = accessors.first() else {
+        return None;
+    };
+    match accessor.as_slice() {
+        [Sexp::Atom(u), Sexp::Atom(kw), Sexp::Atom(field)] if u == "_" && kw == "field" => {
+            Some(field.trim_matches('|'))
+        }
+        _ => None,
+    }
+}
+
+/// Component of a `(_ struct (|F| value) ...)` literal.
+fn struct_field<'a>(value: &'a Sexp, field: &str) -> Option<&'a Sexp> {
+    let Sexp::List(items) = value else {
+        return None;
+    };
+    if items.first() != Some(&Sexp::Atom("_".into()))
+        || items.get(1) != Some(&Sexp::Atom("struct".into()))
+    {
+        return None;
+    }
+    items.iter().skip(2).find_map(|item| match item {
+        Sexp::List(pair) => match pair.as_slice() {
+            [Sexp::Atom(name), value] if name.trim_matches('|') == field => Some(value),
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
+#[derive(Default)]
+struct TraceInfo {
+    /// `(register, symbolic-variable)` for symbolic initial-state reads.
+    reads: Vec<(MappedReg, String)>,
+    /// Final value per written register (last write wins).
+    writes: HashMap<MappedReg, String>,
+    /// Verbatim `(declare-const v Sort)` lines.
+    declares: Vec<String>,
+    /// Ordered `define-const` bindings, replayed as a `let` chain.
+    defines: Vec<(String, String)>,
+    asserts: Vec<String>,
+    /// Why this path cannot be checked against the TMDL state (trap paths,
+    /// CSR accesses, memory, ...), if so.
+    excluded: Option<String>,
+}
+
+fn analyze_trace(spec: &IsaSpec, events: &[Sexp]) -> TraceInfo {
+    let mut info = TraceInfo::default();
+    // Variables bound by `define-const`: reads returning them are read-backs
+    // of values the model computed (e.g. Sail writes `nextPC = PC + 4` and
+    // reads it back later), not symbolic initial state.
+    let mut defined_vars = std::collections::HashSet::new();
+    let exclude = |info: &mut TraceInfo, reason: String| {
+        if info.excluded.is_none() {
+            info.excluded = Some(reason);
+        }
+    };
+
+    for event in events {
+        let Sexp::List(items) = event else { continue };
+        let Some(Sexp::Atom(head)) = items.first() else {
+            continue;
+        };
+        match head.as_str() {
+            "read-reg" => {
+                let (Some(Sexp::Atom(name)), Some(value)) = (items.get(1), items.last()) else {
+                    continue;
+                };
+                let trimmed = name.trim_matches('|');
+                if spec.ignore_regs.contains(&trimmed) {
+                    continue;
+                }
+                if spec.struct_reg == Some(trimmed) {
+                    // Mapped fields (NZCV) relate to TMDL state; other fields
+                    // (EL, nRW, ...) are pinned by each path's assertions.
+                    if let Some(field) = accessor_field(items) {
+                        let full = format!("{}.{}", trimmed, field);
+                        if let Some(i) = spec.extra_regs.iter().position(|(n, _, _, _)| *n == full)
+                        {
+                            let reg = MappedReg::Slot(i);
+                            if let Some(Sexp::Atom(var)) = struct_field(value, field) {
+                                if var.starts_with('v')
+                                    && !info.writes.contains_key(&reg)
+                                    && !defined_vars.contains(var)
+                                {
+                                    info.reads.push((reg, var.clone()));
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
+                let symbolic = matches!(value, Sexp::Atom(a) if a.starts_with('v'));
+                match map_register(spec, name) {
+                    Some(reg) => {
+                        if let Sexp::Atom(var) = value {
+                            if !info.writes.contains_key(&reg) && !defined_vars.contains(var) {
+                                info.reads.push((reg, var.clone()));
+                            }
+                        }
+                    }
+                    None if symbolic => {
+                        exclude(&mut info, format!("reads unmapped register {}", name));
+                    }
+                    None => {}
+                }
+            }
+            "write-reg" => {
+                let (Some(Sexp::Atom(name)), Some(value)) = (items.get(1), items.last()) else {
+                    continue;
+                };
+                let trimmed = name.trim_matches('|');
+                if spec.ignore_regs.contains(&trimmed) {
+                    continue;
+                }
+                if spec.struct_reg == Some(trimmed) {
+                    let mapped = accessor_field(items).and_then(|field| {
+                        let full = format!("{}.{}", trimmed, field);
+                        let i = spec.extra_regs.iter().position(|(n, _, _, _)| *n == full)?;
+                        Some((i, struct_field(value, field)?))
+                    });
+                    match mapped {
+                        Some((i, field_value)) => {
+                            info.writes
+                                .insert(MappedReg::Slot(i), field_value.to_string());
+                        }
+                        None => exclude(
+                            &mut info,
+                            format!("writes unmapped {} field (trap/system path)", trimmed),
+                        ),
+                    }
+                    continue;
+                }
+                match map_register(spec, name) {
+                    Some(MappedReg::X(n)) if Some(n) == spec.zero_reg => {}
+                    Some(reg) => {
+                        info.writes.insert(reg, value.to_string());
+                    }
+                    None => exclude(
+                        &mut info,
+                        format!("writes unmapped register {} (trap/system path)", name),
+                    ),
+                }
+            }
+            "declare-const" => {
+                let (Some(Sexp::Atom(var)), Some(sort)) = (items.get(1), items.get(2)) else {
+                    continue;
+                };
+                let is_bitvec = matches!(
+                    sort,
+                    Sexp::List(s) if s.first() == Some(&Sexp::Atom("_".into()))
+                ) || sort == &Sexp::Atom("Bool".into());
+                if is_bitvec {
+                    info.declares
+                        .push(format!("(declare-const {} {})", var, sort));
+                } else {
+                    exclude(&mut info, format!("symbolic non-bitvector state: {}", sort));
+                }
+            }
+            "define-const" => {
+                let (Some(Sexp::Atom(var)), Some(expr)) = (items.get(1), items.get(2)) else {
+                    continue;
+                };
+                defined_vars.insert(var.clone());
+                info.defines.push((var.clone(), expr.to_string()));
+            }
+            "assert" => {
+                if let Some(expr) = items.get(1) {
+                    info.asserts.push(expr.to_string());
+                }
+            }
+            "read-mem" | "write-mem" => {
+                exclude(&mut info, "memory access".to_string());
+            }
+            _ => {}
+        }
+    }
+    info
+}
+
+// ---------------------------------------------------------------------------
+// Equivalence query construction
+// ---------------------------------------------------------------------------
+
+fn build_query(
+    spec: &IsaSpec,
+    smt: &str,
+    instr: &Instruction,
+    case: &[u64],
+    trace: &TraceInfo,
+) -> String {
+    let xlen = spec.xlen;
+    let mut q = String::from(smt);
+    q.push_str("\n(declare-const st0 TMDLState)\n");
+    let args = operand_smt_args(spec, instr, case);
+    let call = if args.is_empty() {
+        format!("(execute_{} st0)", instr.name)
+    } else {
+        format!("(execute_{} st0 {})", instr.name, args)
+    };
+    let _ = writeln!(q, "(define-fun st1 () TMDLState {})", call);
+
+    // Fetch invariant: PC is 4-byte aligned (no compressed instructions).
+    q.push_str("(assert (= ((_ extract 1 0) (pc st0)) #b00))\n");
+
+    // TEMPORARY until the C extension is modeled: registers feeding an
+    // indirect jump are assumed 4-byte aligned, so Sail's misaligned-fetch
+    // trap paths are vacuous. Direct jumps and branches are already covered
+    // by the aligned-PC and aligned-immediate assumptions.
+    for i in pc_source_reg_operands(smt, instr) {
+        if let OperandKind::Reg { class, idx_width } = &instr.operands[i].1 {
+            let _ = writeln!(
+                q,
+                "(assert (= ((_ extract 1 0) (read_{} st0 (_ bv{} {}))) #b00))",
+                class, case[i], idx_width
+            );
+        }
+    }
+
+    for decl in &trace.declares {
+        q.push_str(decl);
+        q.push('\n');
+    }
+    let slot_access = |i: usize, state: &str| {
+        let (_, class, slot, w) = spec.extra_regs[i];
+        format!("(read_{} {} (_ bv{} {}))", class, state, slot, w)
+    };
+    for (reg, var) in &trace.reads {
+        let init = match reg {
+            MappedReg::X(n) => format!("(read_gpr st0 (_ bv{} 5))", n),
+            MappedReg::Pc => "(pc st0)".to_string(),
+            MappedReg::NextPc => format!("(bvadd (pc st0) (_ bv4 {xlen}))"),
+            MappedReg::Slot(i) => slot_access(*i, "st0"),
+        };
+        let _ = writeln!(q, "(assert (= {} {}))", var, init);
+    }
+
+    let mut final_eq: Vec<String> = (0..spec.reg_count)
+        .filter(|n| Some(*n) != spec.zero_reg)
+        .map(|n| {
+            let sail = trace
+                .writes
+                .get(&MappedReg::X(n))
+                .cloned()
+                .unwrap_or_else(|| format!("(read_gpr st0 (_ bv{} 5))", n));
+            format!("(= (read_gpr st1 (_ bv{} 5)) {})", n, sail)
+        })
+        .collect();
+    // Extra mapped state, deduplicated by underlying TMDL slot since several
+    // Sail names may alias one slot (SP_ELx); a write through any alias is
+    // the slot's final value.
+    let mut seen_slots = std::collections::HashSet::new();
+    for (i, (_, class, slot, _)) in spec.extra_regs.iter().enumerate() {
+        if !seen_slots.insert((*class, *slot)) {
+            continue;
+        }
+        let sail = spec
+            .extra_regs
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, c, s, _))| c == class && s == slot)
+            .find_map(|(j, _)| trace.writes.get(&MappedReg::Slot(j)).cloned())
+            .unwrap_or_else(|| slot_access(i, "st0"));
+        final_eq.push(format!("(= {} {})", slot_access(i, "st1"), sail));
+    }
+    // Models with a delayed PC (RISC-V `nextPC`) announce taken branches
+    // there; the ARM model writes the PC register directly.
+    let sail_pc = trace
+        .writes
+        .get(&MappedReg::NextPc)
+        .or_else(|| trace.writes.get(&MappedReg::Pc));
+    let mut asserts = trace.asserts.clone();
+    match sail_pc {
+        Some(target) => {
+            // TMDL encodes fall-through as "PC untouched", while current Sail
+            // models write the next PC unconditionally, so compare against
+            // TMDL's effective next PC. A self-jump (target == initial PC) is
+            // indistinguishable from fall-through under this convention;
+            // assume it away rather than reporting a fake divergence.
+            asserts.push(format!("(distinct {} (pc st0))", target));
+            final_eq.push(format!(
+                "(= (ite (= (pc st1) (pc st0)) (bvadd (pc st0) (_ bv4 {xlen})) (pc st1)) {})",
+                target
+            ));
+        }
+        None => final_eq.push("(= (pc st1) (pc st0))".to_string()),
+    }
+
+    let mut body = format!(
+        "(and {} (not (and {})))",
+        if asserts.is_empty() {
+            "true".to_string()
+        } else {
+            asserts.join(" ")
+        },
+        final_eq.join("\n  ")
+    );
+    for (var, expr) in trace.defines.iter().rev() {
+        body = format!("(let (({} {}))\n{})", var, expr, body);
+    }
+    let _ = writeln!(q, "(assert {})", body);
+    q.push_str("(check-sat)\n");
+
+    // Counterexample probes, only evaluated on `sat`.
+    let mut probes: Vec<String> = vec!["(pc st0)".into(), "(pc st1)".into()];
+    for n in (0..spec.reg_count).filter(|n| Some(*n) != spec.zero_reg) {
+        probes.push(format!("(read_gpr st0 (_ bv{} 5))", n));
+    }
+    let _ = writeln!(q, "(get-value ({}))", probes.join(" "));
+    q
+}
+
+// ---------------------------------------------------------------------------
+// Per-instruction driver and reporting
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+struct Report {
+    verified: usize,
+    failed: usize,
+    unknown: usize,
+    excluded_paths: usize,
+    excluded_reasons: HashMap<String, usize>,
+    unsupported: Vec<String>,
+    failures: Vec<String>,
+}
+
+impl Report {
+    fn print(&self) {
+        println!("\n=== TMDL vs Sail SMT equivalence ===");
+        println!("verified paths:  {}", self.verified);
+        println!("divergences:     {}", self.failed);
+        println!("solver unknown:  {}", self.unknown);
+        println!(
+            "excluded paths:  {} (outside the machine-mode/no-trap assumptions)",
+            self.excluded_paths
+        );
+        let mut reasons: Vec<_> = self.excluded_reasons.iter().collect();
+        reasons.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
+        for (reason, n) in reasons {
+            println!("  {:5}x {}", n, reason);
+        }
+        if !self.unsupported.is_empty() {
+            println!(
+                "not modeled in SMT (skipped): {}",
+                self.unsupported.join(", ")
+            );
+        }
+        for failure in &self.failures {
+            println!("\n{}", failure);
+        }
+    }
+}
+
+fn verify_instruction(
+    tools: &Tools,
+    spec: &IsaSpec,
+    out_dir: &Path,
+    smt: &str,
+    instr: &Instruction,
+    report: &mut Report,
+) -> anyhow::Result<()> {
+    let cases = operand_cases(spec, instr);
+    let words = encode_words(tools, spec, out_dir, smt, instr, &cases)?;
+    print!("{:24}", instr.name);
+    let mut line = String::new();
+
+    for (case, word) in cases.iter().zip(&words) {
+        let Some(raw) = sail_traces(tools, spec, out_dir, *word)? else {
+            report.excluded_paths += 1;
+            *report
+                .excluded_reasons
+                .entry(format!(
+                    "{}: isla-footprint failed or timed out ({:#010x})",
+                    instr.name, word
+                ))
+                .or_default() += 1;
+            line.push('I');
+            continue;
+        };
+        let traces: Vec<Vec<Sexp>> = parse_sexps(&raw)
+            .into_iter()
+            .filter_map(|s| match s {
+                Sexp::List(items) if items.first() == Some(&Sexp::Atom("trace".into())) => {
+                    Some(items[1..].to_vec())
+                }
+                _ => None,
+            })
+            .collect();
+        if traces.is_empty() {
+            report.failed += 1;
+            report.failures.push(format!(
+                "{} {:?} ({:#010x}): Sail produced no execution path (illegal instruction?)",
+                instr.name, case, word
+            ));
+            line.push('E');
+            continue;
+        }
+
+        for (path_idx, events) in traces.iter().enumerate() {
+            let info = analyze_trace(spec, events);
+            if let Some(reason) = &info.excluded {
+                report.excluded_paths += 1;
+                *report
+                    .excluded_reasons
+                    .entry(format!("{}: {}", instr.name, reason))
+                    .or_default() += 1;
+                line.push('-');
+                continue;
+            }
+            let query = build_query(spec, smt, instr, case, &info);
+            let query_path = out_dir
+                .join("queries")
+                .join(format!("{}_{:08x}_p{}.smt2", instr.name, word, path_idx));
+            std::fs::write(&query_path, &query)?;
+            let output = Command::new(&tools.z3)
+                .arg("-smt2")
+                .arg("-T:60")
+                .arg(&query_path)
+                .output()?;
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if stdout.starts_with("unsat") {
+                report.verified += 1;
+                line.push('.');
+            } else if stdout.starts_with("sat") {
+                report.failed += 1;
+                line.push('X');
+                let model = stdout.lines().skip(1).collect::<Vec<_>>().join("\n");
+                report.failures.push(format!(
+                    "DIVERGENCE {} operands {:?} word {:#010x} path {} (query: {})\n\
+                     counterexample (initial pc, final pc, gprs):\n{}",
+                    instr.name,
+                    case,
+                    word,
+                    path_idx,
+                    query_path.display(),
+                    model
+                ));
+            } else {
+                report.unknown += 1;
+                line.push('?');
+            }
+        }
+    }
+    println!("{}", line);
+    Ok(())
+}
