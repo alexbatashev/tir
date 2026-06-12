@@ -153,12 +153,20 @@ instruction LoadByte for [RV32I, RV64I] : LoadInst {
     }
 }
 
+// Misaligned loads and stores trap (no hardware misaligned-access support):
+// mcause 4 (load) / 6 (store), mtval holds the faulting address, and control
+// transfers to the mtvec base (synchronous exceptions ignore vectored mode).
+
 instruction LoadHalfWord for [RV32I, RV64I] : LoadInst {
     param MNEMONIC: String = "lh";
     param FUNCT3: bits<3> = 0b001;
 
     behavior {
-        rd = sext(load(rs1 + sext(imm, self.XLEN), 2, 0b1), self.XLEN);
+        try {
+            rd = sext(load(rs1 + sext(imm, self.XLEN), 2, 0b1), self.XLEN);
+        } except misaligned_load(addr) {
+            trap(4, addr);
+        }
     }
 }
 
@@ -167,7 +175,11 @@ instruction LoadWord for [RV32I, RV64I] : LoadInst {
     param FUNCT3: bits<3> = 0b010;
 
     behavior {
-        rd = sext(load(rs1 + sext(imm, self.XLEN), 4, 0b1), self.XLEN);
+        try {
+            rd = sext(load(rs1 + sext(imm, self.XLEN), 4, 0b1), self.XLEN);
+        } except misaligned_load(addr) {
+            trap(4, addr);
+        }
     }
 }
 
@@ -185,7 +197,11 @@ instruction LoadHalfWordUnsigned for [RV32I, RV64I] : LoadInst {
     param FUNCT3: bits<3> = 0b101;
 
     behavior {
-        rd = zext(load(rs1 + sext(imm, self.XLEN), 2, 0b0), self.XLEN);
+        try {
+            rd = zext(load(rs1 + sext(imm, self.XLEN), 2, 0b0), self.XLEN);
+        } except misaligned_load(addr) {
+            trap(4, addr);
+        }
     }
 }
 
@@ -194,7 +210,11 @@ instruction LoadWordUnsigned for [RV64I] : LoadInst {
     param FUNCT3: bits<3> = 0b110;
 
     behavior {
-        rd = zext(load(rs1 + sext(imm, self.XLEN), 4, 0b0), self.XLEN);
+        try {
+            rd = zext(load(rs1 + sext(imm, self.XLEN), 4, 0b0), self.XLEN);
+        } except misaligned_load(addr) {
+            trap(4, addr);
+        }
     }
 }
 
@@ -203,7 +223,11 @@ instruction LoadDoubleWord for [RV64I] : LoadInst {
     param FUNCT3: bits<3> = 0b011;
 
     behavior {
-        rd = load(rs1 + sext(imm, self.XLEN), 8, 0b0);
+        try {
+            rd = load(rs1 + sext(imm, self.XLEN), 8, 0b0);
+        } except misaligned_load(addr) {
+            trap(4, addr);
+        }
     }
 }
 
@@ -221,7 +245,11 @@ instruction StoreHalfWord for [RV32I, RV64I] : StoreInst {
     param FUNCT3: bits<3> = 0b001;
 
     behavior {
-        store(rs1 + sext(imm, self.XLEN), 2, extract(rs2, 15, 0));
+        try {
+            store(rs1 + sext(imm, self.XLEN), 2, extract(rs2, 15, 0));
+        } except misaligned_store(addr) {
+            trap(6, addr);
+        }
     }
 }
 
@@ -230,7 +258,11 @@ instruction StoreWord for [RV32I, RV64I] : StoreInst {
     param FUNCT3: bits<3> = 0b010;
 
     behavior {
-        store(rs1 + sext(imm, self.XLEN), 4, extract(rs2, 31, 0));
+        try {
+            store(rs1 + sext(imm, self.XLEN), 4, extract(rs2, 31, 0));
+        } except misaligned_store(addr) {
+            trap(6, addr);
+        }
     }
 }
 
@@ -239,7 +271,11 @@ instruction StoreDoubleWord for [RV64I] : StoreInst {
     param FUNCT3: bits<3> = 0b011;
 
     behavior {
-        store(rs1 + sext(imm, self.XLEN), 8, rs2);
+        try {
+            store(rs1 + sext(imm, self.XLEN), 8, rs2);
+        } except misaligned_store(addr) {
+            trap(6, addr);
+        }
     }
 }
 
@@ -562,8 +598,9 @@ instruction EnvBreak for [RV32I, RV64I] : SystemNoOperand {
     param IMM12: bits<12> = 0b000000000001;
 
     behavior {
-        // mcause 3: breakpoint.
-        trap(3);
+        // mcause 3: breakpoint; mtval reports the address of the ebreak
+        // instruction itself.
+        trap(3, PC::pc);
     }
 }
 

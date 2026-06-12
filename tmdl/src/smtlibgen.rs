@@ -40,6 +40,36 @@ struct SmtCtx<'a> {
     classes: BTreeMap<String, ClassInfo>,
     pc_classes: std::collections::HashSet<String>,
     isa_params: HashMap<String, i64>,
+    /// The target ISA's trap-entry sequence, inlined at `trap(...)` calls.
+    trap_handler: Option<&'a ast::TrapHandler>,
+}
+
+/// The trap handler of `isa` or the nearest one in its requires closure.
+fn find_trap_handler<'a>(
+    isa: &str,
+    item_cache: &HashMap<&'a str, &'a ast::Item>,
+) -> Option<&'a ast::TrapHandler> {
+    let mut pending = vec![isa.to_string()];
+    let mut visited = std::collections::HashSet::new();
+    while let Some(name) = pending.pop() {
+        if !visited.insert(name.clone()) {
+            continue;
+        }
+        let Some(ast::Item::Isa(isa)) = item_cache.get(name.as_str()) else {
+            continue;
+        };
+        if let Some(handler) = &isa.trap_handler {
+            return Some(handler);
+        }
+        match &isa.requires {
+            None => {}
+            Some(ast::IsaRequirement::Single(parent)) => pending.push(parent.clone()),
+            Some(ast::IsaRequirement::Any(parents)) | Some(ast::IsaRequirement::All(parents)) => {
+                pending.extend(parents.iter().cloned());
+            }
+        }
+    }
+    None
 }
 
 /// Instruction operands with `bits<expr>` widths resolved for the target ISA
@@ -143,6 +173,7 @@ pub fn generate_smtlib<'a>(
         classes,
         pc_classes,
         isa_params,
+        trap_handler: find_trap_handler(isa, item_cache),
     };
 
     writeln!(output, "{}", HEADER)?;
@@ -181,6 +212,10 @@ fn build_state(ctx: &SmtCtx<'_>, output: &mut Box<dyn Write>) -> Result<(), TMDL
             )
         })
         .collect::<Vec<_>>();
+    fields.push(format!(
+        "(mem (Array (_ BitVec {}) (_ BitVec 8)))",
+        ctx.xlen
+    ));
     fields.push(format!("(pc (_ BitVec {}))", ctx.xlen));
 
     writeln!(
@@ -213,6 +248,7 @@ fn build_state(ctx: &SmtCtx<'_>, output: &mut Box<dyn Write>) -> Result<(), TMDL
                 fields.push(format!("({} st)", n2));
             }
         }
+        fields.push("(mem st)".to_string());
         fields.push("(pc st)".to_string());
         let store = format!("(mk-TMDLState {})", fields.join(" "));
         let write_body = match info.zero_index {
@@ -229,6 +265,7 @@ fn build_state(ctx: &SmtCtx<'_>, output: &mut Box<dyn Write>) -> Result<(), TMDL
         .iter()
         .map(|name| format!("({} st)", name))
         .collect::<Vec<_>>();
+    fields.push("(mem st)".to_string());
     fields.push("val".to_string());
     writeln!(
         output,
@@ -237,8 +274,56 @@ fn build_state(ctx: &SmtCtx<'_>, output: &mut Box<dyn Write>) -> Result<(), TMDL
         fields = fields.join(" ")
     )?;
 
+    // Byte-addressable little-endian memory accessors, one pair per access
+    // width, mirroring the interpreter's `Memory` convention.
+    let xlen = ctx.xlen;
+    for bytes in MEM_ACCESS_BYTES {
+        let val_width = bytes * 8;
+        let byte_at = |i: u16| {
+            if i == 0 {
+                "(select (mem st) addr)".to_string()
+            } else {
+                format!("(select (mem st) (bvadd addr (_ bv{i} {xlen})))")
+            }
+        };
+        let read_body = (0..bytes)
+            .rev()
+            .map(byte_at)
+            .reduce(|acc, b| format!("(concat {} {})", acc, b))
+            .expect("at least one byte");
+        writeln!(
+            output,
+            "\n(define-fun read_mem_{bytes} ((st TMDLState) (addr (_ BitVec {xlen}))) (_ BitVec {val_width})\n  {read_body})",
+        )?;
+
+        let mut mem = "(mem st)".to_string();
+        for i in 0..bytes {
+            let slot = if i == 0 {
+                "addr".to_string()
+            } else {
+                format!("(bvadd addr (_ bv{i} {xlen}))")
+            };
+            let byte = format!("((_ extract {} {}) val)", i * 8 + 7, i * 8);
+            mem = format!("(store {} {} {})", mem, slot, byte);
+        }
+        let mut fields = arrays
+            .iter()
+            .map(|name| format!("({} st)", name))
+            .collect::<Vec<_>>();
+        fields.push(mem);
+        fields.push("(pc st)".to_string());
+        writeln!(
+            output,
+            "\n(define-fun write_mem_{bytes} ((st TMDLState) (addr (_ BitVec {xlen})) (val (_ BitVec {val_width}))) TMDLState\n  (mk-TMDLState {}))",
+            fields.join(" ")
+        )?;
+    }
+
     Ok(())
 }
+
+/// Memory access widths with dedicated SMT accessors.
+const MEM_ACCESS_BYTES: [u16; 4] = [1, 2, 4, 8];
 
 // ---------------------------------------------------------------------------
 // Instruction encoding and execution
@@ -605,6 +690,8 @@ enum SmtSymbolInfo {
 struct SmtSymbolResolver<'a> {
     symbols: HashMap<u32, SmtSymbolInfo>,
     operands: &'a HashMap<String, Type>,
+    /// Let-bound variables (exception payloads), shadowing operands.
+    locals: &'a HashMap<String, SmtVal>,
     state_name: &'a str,
     ctx: &'a SmtCtx<'a>,
 }
@@ -636,6 +723,9 @@ impl SmtSymbolResolver<'_> {
                         false,
                     ))
                 }
+            }
+            SmtSymbolInfo::Variable { name } if self.locals.contains_key(name) => {
+                Some(self.locals[name].clone())
             }
             SmtSymbolInfo::Variable { name } => match self.operands.get(name)? {
                 Type::Struct(rc) => {
@@ -891,14 +981,347 @@ fn emit_sem_expr(
                 signed,
             ))
         }
-        ExprKind::LoadMemory | ExprKind::StoreMemory | ExprKind::Sqrt | ExprKind::Fma => None,
+        ExprKind::LoadMemory => {
+            let (addr, w, s) = child(0)?.as_bv();
+            let bytes = const_child(1)? as u16;
+            if !MEM_ACCESS_BYTES.contains(&bytes) {
+                return None;
+            }
+            let xlen = resolver.ctx.xlen as u32;
+            Some(SmtVal::bv(
+                format!(
+                    "(read_mem_{} {} {})",
+                    bytes,
+                    resolver.state_name,
+                    fit_smt(&addr, w, s, xlen)
+                ),
+                bytes as u32 * 8,
+                false,
+            ))
+        }
+        // Stores are effect statements, handled by `BehaviorEmitter::store`.
+        ExprKind::StoreMemory | ExprKind::Sqrt | ExprKind::Fma => None,
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum MemOpKind {
+    Load,
+    Store,
+}
+
+struct MemOp<'a> {
+    kind: MemOpKind,
+    addr: &'a ast::Expr,
+    bytes: u64,
+}
+
+fn ast_int_lit(e: &ast::Expr) -> Option<u64> {
+    match e {
+        ast::Expr::Lit(ast::Lit::Int(li)) => Some(parse_literal_value(li)),
+        _ => None,
+    }
+}
+
+/// Memory operations on the no-trap path of `e`, in syntactic order. `None`
+/// when an access size is not a literal (no exception condition can be built
+/// for it). Nested try blocks own their accesses and are not descended into.
+fn collect_mem_ops<'a>(e: &'a ast::Expr, out: &mut Vec<MemOp<'a>>) -> Option<()> {
+    match e {
+        ast::Expr::Call(c) => {
+            for arg in &c.arguments {
+                collect_mem_ops(arg, out)?;
+            }
+            let kind = match &*c.callee {
+                ast::Expr::BuiltinFunction(ast::BuiltinFunction::Load) => Some(MemOpKind::Load),
+                ast::Expr::BuiltinFunction(ast::BuiltinFunction::Store) => Some(MemOpKind::Store),
+                _ => None,
+            };
+            if let Some(kind) = kind {
+                let addr = c.arguments.first()?;
+                let bytes = ast_int_lit(c.arguments.get(1)?)?;
+                out.push(MemOp { kind, addr, bytes });
+            }
+        }
+        ast::Expr::Assign(a) => collect_mem_ops(&a.value, out)?,
+        ast::Expr::Binary(b) => {
+            collect_mem_ops(&b.lhs, out)?;
+            collect_mem_ops(&b.rhs, out)?;
+        }
+        ast::Expr::Unary(u) => collect_mem_ops(&u.x, out)?,
+        ast::Expr::Block(b) => {
+            for stmt in &b.stmts {
+                collect_mem_ops(stmt, out)?;
+            }
+        }
+        ast::Expr::If(i) => {
+            collect_mem_ops(&i.cond, out)?;
+            collect_mem_ops(&i.then, out)?;
+            if let Some(else_) = &i.else_ {
+                collect_mem_ops(else_, out)?;
+            }
+        }
+        ast::Expr::Slice(s) => collect_mem_ops(&s.base, out)?,
+        ast::Expr::IndexAccess(i) => collect_mem_ops(&i.base, out)?,
+        ast::Expr::Field(f) => collect_mem_ops(&f.base, out)?,
+        ast::Expr::Try(_)
+        | ast::Expr::Ident(_)
+        | ast::Expr::Path(_)
+        | ast::Expr::Lit(_)
+        | ast::Expr::BuiltinFunction(_)
+        | ast::Expr::Invalid => {}
+    }
+    Some(())
+}
+
+/// Statement emitter folding a behavior into a TMDLState transition.
+struct BehaviorEmitter<'a> {
+    ctx: &'a SmtCtx<'a>,
+    operands: &'a HashMap<String, Type>,
+    numeric_params: &'a HashMap<String, i64>,
+    register_index_map: &'a HashMap<(String, String), u32>,
+    /// Exception payloads visible while a handler body is compiled.
+    locals: std::cell::RefCell<HashMap<String, SmtVal>>,
+    /// Uniquifies exception-payload `let` bindings across nested trys.
+    let_counter: std::cell::Cell<usize>,
+    /// Handler PC writes are trap entries, not architectural branches: they
+    /// must not flip the instruction's `writes-pc` metadata.
+    in_handler: std::cell::Cell<bool>,
+    failed: std::cell::Cell<bool>,
+    writes_pc: std::cell::Cell<bool>,
+}
+
+impl BehaviorEmitter<'_> {
+    fn emit_val(&self, e: &ast::Expr) -> Option<SmtVal> {
+        let mut graph = tir::sem_expr::ExprPostGraph::new();
+        let lowering = e
+            .lower_to_sema_with_registers(&mut graph, self.numeric_params, self.register_index_map)
+            .or_else(|| {
+                self.failed.set(true);
+                None
+            })?;
+        let mut symbols = HashMap::new();
+        for (name, id) in &lowering.variable_symbols {
+            symbols.insert(*id, SmtSymbolInfo::Variable { name: name.clone() });
+        }
+        for ((class, number), id) in &lowering.register_symbols {
+            symbols.insert(
+                *id,
+                SmtSymbolInfo::Register {
+                    class: class.clone(),
+                    number: *number,
+                },
+            );
+        }
+        let locals = self.locals.borrow();
+        let resolver = SmtSymbolResolver {
+            symbols,
+            operands: self.operands,
+            locals: &locals,
+            state_name: "st",
+            ctx: self.ctx,
+        };
+        emit_sem_expr(&graph, lowering.root, &resolver).or_else(|| {
+            self.failed.set(true);
+            None
+        })
+    }
+}
+
+impl sem_expr_state::StateEmitter for BehaviorEmitter<'_> {
+    fn cond(&self, e: &ast::Expr) -> String {
+        self.emit_val(e)
+            .map(|v| v.as_bool())
+            .unwrap_or_else(|| "false".to_string())
+    }
+
+    fn assign(&self, a: &ast::Assign, st_name: &str) -> Option<String> {
+        let ctx = self.ctx;
+        let rhs = self.emit_val(&a.value)?;
+        let (expr, width, signed) = rhs.as_bv();
+        let fit = |target: u16| fit_smt(&expr, width, signed, target as u32);
+        let write_pc = || {
+            if !self.in_handler.get() {
+                self.writes_pc.set(true);
+            }
+            format!("(write_pc {} {})", st_name, fit(ctx.xlen))
+        };
+        let dest_name = match &*a.dest {
+            ast::Expr::Ident(id) => Some(id.name.as_str()),
+            ast::Expr::Path(p) if p.remainder.len() == 1 => Some(p.remainder[0].as_str()),
+            _ => None,
+        };
+        if dest_name == Some("pc") {
+            return Some(write_pc());
+        }
+        if let Some(name) = dest_name {
+            match self.operands.get(name) {
+                Some(Type::Struct(rc)) if ctx.pc_classes.contains(&rc.to_lowercase()) => {
+                    return Some(write_pc());
+                }
+                Some(Type::Struct(rc)) => {
+                    return Some(format!(
+                        "(write_{} {} {} {})",
+                        rc.to_lowercase(),
+                        st_name,
+                        name.to_lowercase(),
+                        fit(ctx.val_width(rc))
+                    ));
+                }
+                _ => {}
+            }
+        }
+        // Writes to a fixed register named by class path (`GPR::x30`,
+        // `PSTATE::n`).
+        if let ast::Expr::Path(p) = &*a.dest
+            && p.remainder.len() == 1
+            && let Some(idx) = self
+                .register_index_map
+                .get(&(p.base.clone(), p.remainder[0].clone()))
+        {
+            let class = p.base.to_lowercase();
+            return Some(format!(
+                "(write_{} {} (_ bv{} {}) {})",
+                class,
+                st_name,
+                idx,
+                ctx.idx_width(&class),
+                fit(ctx.val_width(&class))
+            ));
+        }
+        None
+    }
+
+    fn store(&self, c: &ast::Call, st_name: &str) -> Option<String> {
+        let bytes = ast_int_lit(c.arguments.get(1)?)? as u16;
+        if !MEM_ACCESS_BYTES.contains(&bytes) {
+            return None;
+        }
+        let xlen = self.ctx.xlen as u32;
+        let (addr, wa, sa) = self.emit_val(c.arguments.first()?)?.as_bv();
+        let (val, wv, sv) = self.emit_val(c.arguments.get(2)?)?.as_bv();
+        Some(format!(
+            "(write_mem_{} {} {} {})",
+            bytes,
+            st_name,
+            fit_smt(&addr, wa, sa, xlen),
+            fit_smt(&val, wv, sv, bytes as u32 * 8)
+        ))
+    }
+
+    fn trap(
+        &self,
+        c: &ast::Call,
+        st_name: &str,
+        compile: &dyn Fn(&ast::Expr, &str) -> String,
+    ) -> Option<String> {
+        let handler = self.ctx.trap_handler?;
+        let xlen = self.ctx.xlen as u32;
+        // Bind handler parameters to the call arguments; missing trailing
+        // arguments (ecall has no tval) read as zero.
+        let mut shadowed = Vec::new();
+        for (i, param) in handler.params.iter().enumerate() {
+            let value = match c.arguments.get(i) {
+                Some(arg) => self.emit_val(arg)?,
+                None => SmtVal::bv(format!("(_ bv0 {})", xlen), xlen, false),
+            };
+            shadowed.push((
+                param.clone(),
+                self.locals.borrow_mut().insert(param.clone(), value),
+            ));
+        }
+        let state = compile(&handler.body, st_name);
+        for (param, previous) in shadowed {
+            let mut locals = self.locals.borrow_mut();
+            match previous {
+                Some(value) => locals.insert(param, value),
+                None => locals.remove(&param),
+            };
+        }
+        Some(state)
+    }
+
+    fn ite(&self, cond: &str, then_state: &str, else_state: &str) -> String {
+        format!("(ite {} {} {})", cond, then_state, else_state)
+    }
+
+    fn try_except(
+        &self,
+        t: &ast::TryExcept,
+        st_name: &str,
+        body_state: &str,
+        compile: &dyn Fn(&ast::Expr, &str) -> String,
+    ) -> Option<String> {
+        let mut ops = Vec::new();
+        collect_mem_ops(&t.body, &mut ops)?;
+        // Exception conditions are evaluated against the entry state, which
+        // is only sound while at most one access can raise.
+        if ops.len() > 1 {
+            return None;
+        }
+        let op = ops.first();
+        let xlen = self.ctx.xlen;
+        let var = format!("exc_addr{}", self.let_counter.get());
+        let mut arms: Vec<(String, String)> = Vec::new();
+        for handler in &t.handlers {
+            let wanted = match handler.kind.as_str() {
+                "misaligned_load" => MemOpKind::Load,
+                "misaligned_store" => MemOpKind::Store,
+                // Unknown kinds are already a sema diagnostic.
+                _ => return None,
+            };
+            let Some(op) = op.filter(|o| o.kind == wanted) else {
+                continue;
+            };
+            // A byte access never misaligns: the clause is statically dead.
+            if op.bytes <= 1 {
+                continue;
+            }
+            if !op.bytes.is_power_of_two() {
+                return None;
+            }
+            let cond = format!(
+                "(distinct (bvand {var} (_ bv{} {xlen})) (_ bv0 {xlen}))",
+                op.bytes - 1
+            );
+            if let Some(binding) = &handler.binding {
+                self.locals
+                    .borrow_mut()
+                    .insert(binding.clone(), SmtVal::bv(var.clone(), xlen as u32, false));
+            }
+            let was_in_handler = self.in_handler.replace(true);
+            let state = compile(&handler.body, st_name);
+            self.in_handler.set(was_in_handler);
+            if let Some(binding) = &handler.binding {
+                self.locals.borrow_mut().remove(binding);
+            }
+            arms.push((cond, state));
+        }
+        if arms.is_empty() {
+            return Some(body_state.to_string());
+        }
+        let op = op.expect("a live clause implies an access");
+        let (addr, wa, sa) = self.emit_val(op.addr)?.as_bv();
+        let addr = fit_smt(&addr, wa, sa, xlen as u32);
+        self.let_counter.set(self.let_counter.get() + 1);
+        let folded = arms
+            .into_iter()
+            .rev()
+            .fold(body_state.to_string(), |else_state, (cond, state)| {
+                format!("(ite {} {} {})", cond, state, else_state)
+            });
+        Some(format!("(let (({} {})) {})", var, addr, folded))
+    }
+
+    fn unsupported(&self, _: &ast::Expr) {
+        self.failed.set(true);
     }
 }
 
 /// Translate an instruction behavior into an SMT state-transition expression.
 /// Returns `None` when the behavior uses constructs the SMT model cannot
-/// express (e.g. memory accesses); callers must not pretend such instructions
-/// have identity semantics.
+/// express (e.g. `trap()`); callers must not pretend such instructions have
+/// identity semantics.
 fn build_smt_behavior<'a>(
     ctx: &SmtCtx<'_>,
     item_cache: &HashMap<&'a str, &'a ast::Item>,
@@ -923,120 +1346,22 @@ fn build_smt_behavior<'a>(
             }),
     );
 
-    fn try_emit_sem_expr(
-        e: &ast::Expr,
-        operands: &HashMap<String, Type>,
-        numeric_params: &HashMap<String, i64>,
-        register_index_map: &HashMap<(String, String), u32>,
-        ctx: &SmtCtx<'_>,
-        state_name: &str,
-    ) -> Option<SmtVal> {
-        let mut graph = tir::sem_expr::ExprPostGraph::new();
-        let lowering =
-            e.lower_to_sema_with_registers(&mut graph, numeric_params, register_index_map)?;
-        let mut symbols = HashMap::new();
-        for (name, id) in &lowering.variable_symbols {
-            symbols.insert(*id, SmtSymbolInfo::Variable { name: name.clone() });
-        }
-        for ((class, number), id) in &lowering.register_symbols {
-            symbols.insert(
-                *id,
-                SmtSymbolInfo::Register {
-                    class: class.clone(),
-                    number: *number,
-                },
-            );
-        }
-        let resolver = SmtSymbolResolver {
-            symbols,
-            operands,
-            state_name,
-            ctx,
-        };
-        emit_sem_expr(&graph, lowering.root, &resolver)
-    }
-
-    let failed = std::cell::Cell::new(false);
-    let writes_pc = std::cell::Cell::new(false);
-    let emit_val = |e: &ast::Expr| {
-        try_emit_sem_expr(e, &operands, &numeric_params, register_index_map, ctx, "st").or_else(
-            || {
-                failed.set(true);
-                None
-            },
-        )
+    let emitter = BehaviorEmitter {
+        ctx,
+        operands: &operands,
+        numeric_params: &numeric_params,
+        register_index_map,
+        locals: Default::default(),
+        let_counter: Default::default(),
+        in_handler: Default::default(),
+        failed: Default::default(),
+        writes_pc: Default::default(),
     };
-    // `compile_to_state` only evaluates `if` conditions through this closure.
-    let emit_cond = |e: &ast::Expr| {
-        emit_val(e)
-            .map(|v| v.as_bool())
-            .unwrap_or_else(|| "false".to_string())
-    };
-    let emit_assign = |a: &ast::Assign, st_name: &str| {
-        let rhs = emit_val(&a.value)?;
-        let (expr, width, signed) = rhs.as_bv();
-        let fit = |target: u16| fit_smt(&expr, width, signed, target as u32);
-        let dest_name = match &*a.dest {
-            ast::Expr::Ident(id) => Some(id.name.as_str()),
-            ast::Expr::Path(p) if p.remainder.len() == 1 => Some(p.remainder[0].as_str()),
-            _ => None,
-        };
-        if dest_name == Some("pc") {
-            writes_pc.set(true);
-            return Some(format!("(write_pc {} {})", st_name, fit(ctx.xlen)));
-        }
-        if let Some(name) = dest_name {
-            match operands.get(name) {
-                Some(Type::Struct(rc)) if ctx.pc_classes.contains(&rc.to_lowercase()) => {
-                    writes_pc.set(true);
-                    return Some(format!("(write_pc {} {})", st_name, fit(ctx.xlen)));
-                }
-                Some(Type::Struct(rc)) => {
-                    return Some(format!(
-                        "(write_{} {} {} {})",
-                        rc.to_lowercase(),
-                        st_name,
-                        name.to_lowercase(),
-                        fit(ctx.val_width(rc))
-                    ));
-                }
-                _ => {}
-            }
-        }
-        // Writes to a fixed register named by class path (`GPR::x30`,
-        // `PSTATE::n`).
-        if let ast::Expr::Path(p) = &*a.dest
-            && p.remainder.len() == 1
-            && let Some(idx) = register_index_map.get(&(p.base.clone(), p.remainder[0].clone()))
-        {
-            let class = p.base.to_lowercase();
-            return Some(format!(
-                "(write_{} {} (_ bv{} {}) {})",
-                class,
-                st_name,
-                idx,
-                ctx.idx_width(&class),
-                fit(ctx.val_width(&class))
-            ));
-        }
-        None
-    };
-    let emit_if = |cond: &str, then_state: &str, else_state: &str| {
-        format!("(ite {} {} {})", cond, then_state, else_state)
-    };
-    let on_unsupported = |_: &ast::Expr| failed.set(true);
-    let body = sem_expr_state::compile_to_state(
-        &instruction.behavior,
-        "st",
-        &emit_cond,
-        &emit_assign,
-        &emit_if,
-        &on_unsupported,
-    );
-    if failed.get() {
+    let body = sem_expr_state::compile_to_state(&instruction.behavior, "st", &emitter);
+    if emitter.failed.get() {
         None
     } else {
-        Some((body, writes_pc.get()))
+        Some((body, emitter.writes_pc.get()))
     }
 }
 

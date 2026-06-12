@@ -1779,6 +1779,8 @@ fn collect_behavior_assignments<'a>(expr: &'a ast::Expr, out: &mut Vec<(String, 
                 collect_behavior_assignments(else_expr.as_ref(), out);
             }
         }
+        // Only the no-trap path defines values; handler writes are trap state.
+        ast::Expr::Try(t) => collect_behavior_assignments(&t.body, out),
         _ => {}
     }
 }
@@ -1834,6 +1836,7 @@ fn find_store_effect_expr(expr: &ast::Expr) -> Option<&ast::Expr> {
     match expr {
         ast::Expr::Call(_) if is_store_call(expr) => Some(expr),
         ast::Expr::Block(b) => b.stmts.iter().find_map(find_store_effect_expr),
+        ast::Expr::Try(t) => find_store_effect_expr(&t.body),
         _ => None,
     }
 }
@@ -2057,6 +2060,9 @@ fn pc_writes(e: &ast::Expr) -> (bool, bool) {
                 .unwrap_or((false, false));
             (then_every && else_every, then_any || else_any)
         }
+        // Control-flow kind reflects the no-trap path; handler PC writes are
+        // trap entries, not branches.
+        ast::Expr::Try(t) => pc_writes(&t.body),
         _ => (false, false),
     }
 }
@@ -2105,14 +2111,16 @@ fn is_trap_call(expr: &ast::Expr) -> bool {
     )
 }
 
-/// The constant cause code of a `trap(cause)` call. `None` when the argument is
-/// not a single integer literal.
+/// The constant cause code of a `trap(cause, ...)` call. `None` when the
+/// first argument is not an integer literal. Further arguments (the trap
+/// value payload) only matter to the SMT model; the machine's exception
+/// handling owns that state here.
 fn trap_call_cause(expr: &ast::Expr) -> Option<u64> {
     let ast::Expr::Call(call) = expr else {
         return None;
     };
-    match call.arguments.as_slice() {
-        [ast::Expr::Lit(ast::Lit::Int(li))] => Some(parse_literal_value(li)),
+    match call.arguments.first() {
+        Some(ast::Expr::Lit(ast::Lit::Int(li))) => Some(parse_literal_value(li)),
         _ => None,
     }
 }
@@ -2150,6 +2158,16 @@ fn emit_behavior_exec(
                 machine.raise_exception(#cause_lit)?;
             })
         }
+        // The simulator executes the no-trap path; alignment exceptions are
+        // not modeled here (the SMT backend gives the handlers meaning).
+        ast::Expr::Try(t) => emit_behavior_exec(
+            &t.body,
+            ops,
+            numeric_params,
+            isa_param_values,
+            mnemonic_lit,
+            register_index_map,
+        ),
         ast::Expr::Block(b) => {
             let mut steps = Vec::new();
             for stmt in &b.stmts {
@@ -2164,7 +2182,10 @@ fn emit_behavior_exec(
                     steps.push(step);
                 } else if matches!(
                     stmt,
-                    ast::Expr::Assign(_) | ast::Expr::Block(_) | ast::Expr::If(_)
+                    ast::Expr::Assign(_)
+                        | ast::Expr::Block(_)
+                        | ast::Expr::If(_)
+                        | ast::Expr::Try(_)
                 ) || is_store_call(stmt)
                     || is_trap_call(stmt)
                 {

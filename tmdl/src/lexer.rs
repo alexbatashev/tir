@@ -119,6 +119,10 @@ pub enum Token<'a> {
     KwSchedClass,
     /// `reg_file`
     KwRegFile,
+    /// `try`
+    KwTry,
+    /// `except`
+    KwExcept,
 }
 
 impl<'a> Token<'a> {
@@ -209,6 +213,8 @@ pub(crate) fn lexer<'src>()
         "forward" => Token::KwForward,
         "sched_class" => Token::KwSchedClass,
         "reg_file" => Token::KwRegFile,
+        "try" => Token::KwTry,
+        "except" => Token::KwExcept,
         _ => Token::Identifier(ident),
     });
 
@@ -284,6 +290,8 @@ impl<'a> fmt::Display for Token<'a> {
             Token::KwForward => f.write_str("forward"),
             Token::KwSchedClass => f.write_str("sched_class"),
             Token::KwRegFile => f.write_str("reg_file"),
+            Token::KwTry => f.write_str("try"),
+            Token::KwExcept => f.write_str("except"),
         }
     }
 }

@@ -22,6 +22,20 @@ pub fn analyze(files: &[ast::File]) -> Vec<(String, Diag)> {
     diags.extend(check_templates(files, &cache));
     diags.extend(check_instructions(files, &cache));
     diags.extend(check_performance_model(files, &cache));
+    for file in files {
+        for item in &file.items {
+            if let ast::Item::Isa(isa) = item
+                && let Some(trap) = &isa.trap_handler
+            {
+                diags.extend(check_behavior(
+                    &isa.name,
+                    &trap.body,
+                    &cache,
+                    &file.file_name,
+                ));
+            }
+        }
+    }
 
     diags
 }
@@ -738,9 +752,8 @@ fn check_instruction_consistent(
     }
 
     diags.extend(check_behavior(
-        instruction,
+        &instruction.name,
         &instruction.behavior,
-        &params_cache,
         item_cache,
         file_name,
     ));
@@ -774,10 +787,11 @@ fn check_asm(
     }
 }
 
+/// Validate register paths and exception kinds in a behavior or trap-handler
+/// body; `owner` names it in diagnostics.
 fn check_behavior(
-    instruction: &ast::Instruction,
+    owner: &str,
     behavior: &ast::Expr,
-    _params_cache: &HashMap<&str, (Type, Option<ast::Expr>)>,
     item_cache: &HashMap<&str, &ast::Item>,
     file_name: &str,
 ) -> Vec<(String, Diag)> {
@@ -814,6 +828,12 @@ fn check_behavior(
             }
             ast::Expr::IndexAccess(i) => walk_paths(&i.base, out),
             ast::Expr::Slice(s) => walk_paths(&s.base, out),
+            ast::Expr::Try(t) => {
+                walk_paths(&t.body, out);
+                for handler in &t.handlers {
+                    walk_paths(&handler.body, out);
+                }
+            }
             ast::Expr::Ident(_)
             | ast::Expr::Lit(_)
             | ast::Expr::BuiltinFunction(_)
@@ -821,7 +841,50 @@ fn check_behavior(
         }
     }
 
+    fn walk_excepts<'a>(expr: &'a ast::Expr, out: &mut Vec<&'a ast::ExceptClause>) {
+        match expr {
+            ast::Expr::Try(t) => {
+                walk_excepts(&t.body, out);
+                for handler in &t.handlers {
+                    out.push(handler);
+                    walk_excepts(&handler.body, out);
+                }
+            }
+            ast::Expr::Block(b) => {
+                for stmt in &b.stmts {
+                    walk_excepts(stmt, out);
+                }
+            }
+            ast::Expr::If(i) => {
+                walk_excepts(&i.then, out);
+                if let Some(e) = &i.else_ {
+                    walk_excepts(e, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
     let mut diags = Vec::new();
+    let mut excepts = Vec::new();
+    walk_excepts(behavior, &mut excepts);
+    for clause in excepts {
+        if !ast::EXCEPTION_KINDS.contains(&clause.kind.as_str()) {
+            diags.push((
+                file_name.to_string(),
+                Rich::custom(
+                    clause.span,
+                    format!(
+                        "unknown exception kind '{}' in instruction '{}'; known kinds: {}",
+                        clause.kind,
+                        owner,
+                        ast::EXCEPTION_KINDS.join(", ")
+                    ),
+                ),
+            ));
+        }
+    }
+
     let mut paths = Vec::new();
     walk_paths(behavior, &mut paths);
 
@@ -835,7 +898,7 @@ fn check_behavior(
                         path.span,
                         format!(
                             "unknown register class '{}' in behavior for instruction '{}'",
-                            path.base, instruction.name
+                            path.base, owner
                         ),
                     ),
                 ));
@@ -869,7 +932,7 @@ fn check_behavior(
                     path.span,
                     format!(
                         "unknown register '{}' in path '{}::{}' for instruction '{}'",
-                        reg_name, path.base, reg_name, instruction.name
+                        reg_name, path.base, reg_name, owner
                     ),
                 ),
             ));

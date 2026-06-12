@@ -105,12 +105,25 @@ pub enum IsaRequirement {
     All(Vec<String>),
 }
 
+/// Architectural trap-entry sequence, defined once per ISA: how a synchronous
+/// exception updates state. A `trap(args...)` call in a behavior inlines it in
+/// the SMT model with `params` bound to the call arguments (missing trailing
+/// arguments read as zero); the simulator routes `trap` to the machine.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub struct TrapHandler {
+    pub params: Vec<String>,
+    pub body: Expr,
+    #[serde(skip_serializing)]
+    pub span: Span,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Isa {
     pub name: String,
     pub requires: Option<IsaRequirement>,
     #[serde(serialize_with = "serialize_params")]
     pub parameters: StableHashMap<String, (Type, Option<Expr>)>,
+    pub trap_handler: Option<TrapHandler>,
     #[serde(skip_serializing)]
     pub span: Span,
 }
@@ -354,6 +367,34 @@ pub struct Ident {
     pub span: Span,
 }
 
+/// Exception kinds an `except` clause can catch. Each kind is raised by a
+/// specific builtin when the enclosing `try` names a handler for it; without a
+/// handler the operation keeps its total (no-trap) semantics, which is how
+/// ISAs that do not trap express themselves.
+pub const EXCEPTION_KINDS: &[&str] = &["misaligned_load", "misaligned_store"];
+
+/// One `except kind(binding) { ... }` clause. The binding receives the
+/// exception payload (the faulting address for misaligned accesses).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub struct ExceptClause {
+    pub kind: String,
+    pub binding: Option<String>,
+    pub body: Expr,
+    #[serde(skip_serializing)]
+    pub span: Span,
+}
+
+/// `try { ... } except ...`: precise-trap semantics. If an operation in the
+/// body raises a caught exception, none of the body's effects commit and the
+/// matching clause executes against the state at try entry.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub struct TryExcept {
+    pub body: Box<Expr>,
+    pub handlers: Vec<ExceptClause>,
+    #[serde(skip_serializing)]
+    pub span: Span,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct Assign {
     pub dest: Box<Expr>,
@@ -470,6 +511,7 @@ pub enum Expr {
     Path(Path),
     Lit(Lit),
     Slice(Slice),
+    Try(TryExcept),
     BuiltinFunction(BuiltinFunction),
     Invalid,
 }
@@ -695,6 +737,9 @@ impl Expr {
             Expr::Path(x) => x.as_sema_expr(ctx),
             Expr::Lit(x) => x.as_sema_expr(ctx),
             Expr::Slice(x) => x.as_sema_expr(ctx),
+            // Semantic expressions model the no-trap path; only the SMT
+            // backend gives the handlers meaning.
+            Expr::Try(x) => x.body.lower_with_ctx(ctx),
             Expr::BuiltinFunction(_) => panic!("builtin functions must be called"),
             Expr::Invalid => panic!("cannot convert invalid expression"),
         }

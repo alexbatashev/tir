@@ -1,9 +1,37 @@
 isa RV32I {
     param XLEN: Integer = 32;
+
+    // Machine-mode trap entry (M is the only implemented privilege level):
+    // mepc/mcause/mtval record the exception, mstatus stacks MIE into MPIE
+    // (bit 3 -> bit 7) with MPP (bits 12:11) = M, and control transfers to
+    // the mtvec base (synchronous exceptions ignore vectored mode).
+    trap (cause, tval) {
+        CSR::mepc = PC::pc;
+        CSR::mcause = zext(cause, self.XLEN);
+        CSR::mtval = zext(tval, self.XLEN);
+        CSR::mstatus = (CSR::mstatus & (zext(0b1100010001000, self.XLEN) ^ sext(0b1, self.XLEN)))
+            | (((CSR::mstatus >> 3) & zext(0b1, self.XLEN)) << 7)
+            | (zext(0b11, self.XLEN) << 11);
+        PC::pc = (CSR::mtvec >> 2) << 2;
+    }
 }
 
 isa RV64I {
     param XLEN: Integer = 64;
+
+    // Machine-mode trap entry (M is the only implemented privilege level):
+    // mepc/mcause/mtval record the exception, mstatus stacks MIE into MPIE
+    // (bit 3 -> bit 7) with MPP (bits 12:11) = M, and control transfers to
+    // the mtvec base (synchronous exceptions ignore vectored mode).
+    trap (cause, tval) {
+        CSR::mepc = PC::pc;
+        CSR::mcause = zext(cause, self.XLEN);
+        CSR::mtval = zext(tval, self.XLEN);
+        CSR::mstatus = (CSR::mstatus & (zext(0b1100010001000, self.XLEN) ^ sext(0b1, self.XLEN)))
+            | (((CSR::mstatus >> 3) & zext(0b1, self.XLEN)) << 7)
+            | (zext(0b11, self.XLEN) << 11);
+        PC::pc = (CSR::mtvec >> 2) << 2;
+    }
 }
 
 register_class PC for [RV32I, RV64I] {

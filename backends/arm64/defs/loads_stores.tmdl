@@ -1,4 +1,7 @@
-// ARMv8-A A64 load/store integer instructions
+// ARMv8-A A64 load/store integer instructions. The `imm` operand is the
+// architectural byte offset; the encoding templates store it scaled down by
+// the access size (the imm12 field of LDR Wt holds offset/4), so offsets
+// that are not size-multiples are not representable, as in hardware.
 
 instruction LoadByteUnsigned for [ARMv8A64] : LoadStoreImmUnsigned {
     param MNEMONIC: String = "ldrb";
@@ -10,7 +13,7 @@ instruction LoadByteUnsigned for [ARMv8A64] : LoadStoreImmUnsigned {
     }
 }
 
-instruction LoadHalfwordUnsigned for [ARMv8A64] : LoadStoreImmUnsigned {
+instruction LoadHalfwordUnsigned for [ARMv8A64] : LoadStoreImmUnsignedH {
     param MNEMONIC: String = "ldrh";
     param SIZE: bits<2> = 0b01;
     param OPC: bits<2> = 0b01;
@@ -20,7 +23,7 @@ instruction LoadHalfwordUnsigned for [ARMv8A64] : LoadStoreImmUnsigned {
     }
 }
 
-instruction LoadWordUnsigned for [ARMv8A64] : LoadStoreImmUnsigned {
+instruction LoadWordUnsigned for [ARMv8A64] : LoadStoreImmUnsignedW {
     param MNEMONIC: String = "ldr";
     param OPNAME: String = "load_word_unsigned";
     param SIZE: bits<2> = 0b10;
@@ -31,7 +34,7 @@ instruction LoadWordUnsigned for [ARMv8A64] : LoadStoreImmUnsigned {
     }
 }
 
-instruction LoadDoubleword for [ARMv8A64] : LoadStoreImmUnsigned {
+instruction LoadDoubleword for [ARMv8A64] : LoadStoreImmUnsignedD {
     param MNEMONIC: String = "ldr";
     param OPNAME: String = "load_doubleword";
     param SIZE: bits<2> = 0b11;
@@ -52,7 +55,7 @@ instruction LoadByteSigned for [ARMv8A64] : LoadStoreImmUnsigned {
     }
 }
 
-instruction LoadHalfwordSigned for [ARMv8A64] : LoadStoreImmUnsigned {
+instruction LoadHalfwordSigned for [ARMv8A64] : LoadStoreImmUnsignedH {
     param MNEMONIC: String = "ldrsh";
     param SIZE: bits<2> = 0b01;
     param OPC: bits<2> = 0b10;
@@ -62,7 +65,7 @@ instruction LoadHalfwordSigned for [ARMv8A64] : LoadStoreImmUnsigned {
     }
 }
 
-instruction LoadWordSigned for [ARMv8A64] : LoadStoreImmUnsigned {
+instruction LoadWordSigned for [ARMv8A64] : LoadStoreImmUnsignedW {
     param MNEMONIC: String = "ldrsw";
     param SIZE: bits<2> = 0b10;
     param OPC: bits<2> = 0b10;
@@ -84,7 +87,7 @@ instruction StoreByte for [ARMv8A64] : LoadStoreImmUnsigned {
     schedule { units = [WriteStore]; }
 }
 
-instruction StoreHalfword for [ARMv8A64] : LoadStoreImmUnsigned {
+instruction StoreHalfword for [ARMv8A64] : LoadStoreImmUnsignedH {
     param MNEMONIC: String = "strh";
     param SIZE: bits<2> = 0b01;
     param OPC: bits<2> = 0b00;
@@ -96,7 +99,7 @@ instruction StoreHalfword for [ARMv8A64] : LoadStoreImmUnsigned {
     schedule { units = [WriteStore]; }
 }
 
-instruction StoreWord for [ARMv8A64] : LoadStoreImmUnsigned {
+instruction StoreWord for [ARMv8A64] : LoadStoreImmUnsignedW {
     param MNEMONIC: String = "str";
     param OPNAME: String = "store_word";
     param SIZE: bits<2> = 0b10;
@@ -109,7 +112,7 @@ instruction StoreWord for [ARMv8A64] : LoadStoreImmUnsigned {
     schedule { units = [WriteStore]; }
 }
 
-instruction StoreDoubleword for [ARMv8A64] : LoadStoreImmUnsigned {
+instruction StoreDoubleword for [ARMv8A64] : LoadStoreImmUnsignedD {
     param MNEMONIC: String = "str";
     param OPNAME: String = "store_doubleword";
     param SIZE: bits<2> = 0b11;
