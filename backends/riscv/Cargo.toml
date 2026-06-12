@@ -4,16 +4,16 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-tir = { path = "../../core" }
-tir-be-common = { path = "../common" }
+tir.workspace = true
+tir-be-common.workspace = true
 
 [build-dependencies]
-tmdl = { path = "../../tmdl" }
+tmdl.workspace = true
 
 [dev-dependencies]
-insta = "1.43.1"
-criterion = { version = "0.5", features = ["html_reports"] }
-tir-lit = { path = "../../utils/lit" }
+insta.workspace = true
+criterion = { workspace = true, features = ["html_reports"] }
+tir-lit.workspace = true
 
 [[test]]
 name = "lit"

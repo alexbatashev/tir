@@ -945,13 +945,13 @@ mod tests {
 
         let context = Context::with_default_dialects();
         context.register_dialect::<tir_be_common::AsmDialect>();
-        context.register_dialect::<arm64::Arm64Dialect>();
+        context.register_dialect::<tir_arm64::Arm64Dialect>();
 
         let exec_cmp = |x0: u64, x1: u64| -> Executor {
             let mut ex = Executor::new(64);
             MachineContext::write_register(&mut ex, "GPR", 0, APInt::new(64, x0)).unwrap();
             MachineContext::write_register(&mut ex, "GPR", 1, APInt::new(64, x1)).unwrap();
-            let cmp = arm64::CompareOpBuilder::new(&context)
+            let cmp = tir_arm64::CompareOpBuilder::new(&context)
                 .attr("rn", gpr(0))
                 .attr("rm", gpr(1))
                 .build();
@@ -986,7 +986,7 @@ mod tests {
             let mut ex = Executor::new(64);
             MachineContext::write_pc(&mut ex, 0x1000);
             MachineContext::write_register(&mut ex, "PSTATE", Z, APInt::new(1, z)).unwrap();
-            let beq = arm64::BranchEqOpBuilder::new(&context)
+            let beq = tir_arm64::BranchEqOpBuilder::new(&context)
                 .attr("imm", AttributeValue::Int(4))
                 .build();
             let mi = context
@@ -1008,7 +1008,7 @@ mod tests {
         // Both used to be dropped because only one assignment was ever emitted.
         let mut ex = Executor::new(64);
         MachineContext::write_pc(&mut ex, 0x2000);
-        let bl = arm64::BranchLinkOpBuilder::new(&context)
+        let bl = tir_arm64::BranchLinkOpBuilder::new(&context)
             .attr("imm", AttributeValue::Int(3))
             .build();
         let mi = context

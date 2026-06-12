@@ -6,8 +6,6 @@ use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::ops::{Deref, DerefMut};
 
-use chumsky::container::Container;
-
 use crate::Type;
 use crate::ast::{self, Instruction, Item};
 
@@ -58,16 +56,6 @@ where
 {
     fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
         Self(HashMap::from_iter(iter))
-    }
-}
-
-impl<K: Eq + Hash, V: PartialEq> Container<(K, V)> for StableHashMap<K, V> {
-    fn push(&mut self, item: (K, V)) {
-        self.0.push(item)
-    }
-
-    fn with_capacity(n: usize) -> Self {
-        Self(HashMap::with_capacity(n))
     }
 }
 

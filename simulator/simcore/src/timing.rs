@@ -118,7 +118,7 @@ mod tests {
         let context = tir::Context::with_default_dialects();
         context.register_dialect::<AsmDialect>();
         context.register_dialect::<RiscvDialect>();
-        context.register_dialect::<arm64::Arm64Dialect>();
+        context.register_dialect::<tir_arm64::Arm64Dialect>();
 
         let gpr = |index: u16| {
             AttributeValue::Register(RegisterAttr::Physical {
@@ -166,15 +166,15 @@ mod tests {
             .build();
         assert_eq!(cf(&auipc), ControlFlow::None);
 
-        let b_eq = arm64::BranchEqOpBuilder::new(&context)
+        let b_eq = tir_arm64::BranchEqOpBuilder::new(&context)
             .attr("imm", imm.clone())
             .build();
         assert_eq!(cf(&b_eq), ControlFlow::Conditional);
-        let ret = arm64::ReturnOpBuilder::new(&context)
+        let ret = tir_arm64::ReturnOpBuilder::new(&context)
             .attr("rn", gpr(30))
             .build();
         assert_eq!(cf(&ret), ControlFlow::Unconditional);
-        let bl = arm64::BranchLinkOpBuilder::new(&context)
+        let bl = tir_arm64::BranchLinkOpBuilder::new(&context)
             .attr("imm", imm)
             .build();
         assert_eq!(cf(&bl), ControlFlow::Unconditional);

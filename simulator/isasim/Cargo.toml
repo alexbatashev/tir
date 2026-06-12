@@ -4,16 +4,16 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-tir = { path = "../../core" }
-tir-sim = { path = "../simcore" }
-tir-be-common = { path = "../../backends/common" }
-tir-targets = { path = "../../backends/targets" }
-clap = { version = "4.5.58", features = ["derive"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+tir.workspace = true
+tir-sim.workspace = true
+tir-be-common.workspace = true
+tir-targets.workspace = true
+clap = { workspace = true, features = ["derive"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
 
 [dev-dependencies]
-tir-lit = { path = "../../utils/lit" }
+tir-lit.workspace = true
 
 [[test]]
 name = "lit"

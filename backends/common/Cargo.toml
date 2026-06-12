@@ -4,13 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-tir = { path = "../../core" }
-linkme = "0.3"
-logos = "0.15.0"
+tir.workspace = true
+linkme.workspace = true
+logos.workspace = true
 
 [dev-dependencies]
-insta = "1.43.1"
-criterion = { version = "0.5", features = ["html_reports"] }
+insta.workspace = true
+criterion = { workspace = true, features = ["html_reports"] }
 
 [[bench]]
 name = "lexer"

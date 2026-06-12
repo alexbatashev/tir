@@ -4,11 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-tir-macros = { path = "../utils/macros" }
-linkme = "0.3"
+tir-macros.workspace = true
+linkme.workspace = true
 parking_lot = "0.12.3"
 thiserror = "2.0.12"
-ariadne = "0.3"
+ariadne.workspace = true
 
 [dev-dependencies]
 tir-lit = { path = "../utils/lit" }

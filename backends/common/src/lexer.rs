@@ -1,11 +1,10 @@
 use logos::Logos;
 
 #[derive(Logos, Debug, PartialEq)]
-#[logos(skip r"\s*")]
+#[logos(skip(r"\s+"))]
 // Line comments: `#` (GNU as / RISC-V), `//` (ARM). Skipping them lets a `.S`
 // test file carry lit `RUN:`/`CHECK:` directives without confusing the lexer.
-#[logos(skip r"#[^\n]*")]
-#[logos(skip r"//[^\n]*")]
+#[logos(skip(r"(#|//)[^\n]*", allow_greedy = true))]
 pub enum Token<'src> {
     // Punctuation
     #[token(",")]

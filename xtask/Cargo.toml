@@ -4,6 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-anyhow = "1.0.89"
+anyhow.workspace = true
 xshell = "0.2.7"
 tir-isa-test-suite = { path = "../utils/isa-test-suite" }

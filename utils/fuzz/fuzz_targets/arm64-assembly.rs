@@ -12,9 +12,9 @@ fuzz_target!(|data: &[u8]| {
     if let Ok(input) = std::str::from_utf8(data) {
         let context = tir::Context::with_default_dialects();
         context.register_dialect::<tir_be_common::AsmDialect>();
-        context.register_dialect::<arm64::Arm64Dialect>();
+        context.register_dialect::<tir_arm64::Arm64Dialect>();
 
-        let arm64 = context.find_dialect::<arm64::Arm64Dialect>().unwrap();
+        let arm64 = context.find_dialect::<tir_arm64::Arm64Dialect>().unwrap();
         let parser = arm64.get_asm_parser();
 
         let Ok(module) = parser.parse_asm(&context, input) else {
