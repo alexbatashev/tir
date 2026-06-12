@@ -8,13 +8,13 @@ edition = "2024"
 # models. Shared by `tir-mc` and `isasim` so target selection lives in one place.
 
 [dependencies]
-tir = { path = "../../core" }
-tir-be-common = { path = "../common" }
-tir-riscv = { path = "../riscv" }
-arm64 = { path = "../arm64" }
+tir.workspace = true
+tir-be-common.workspace = true
+tir-riscv.workspace = true
+tir-arm64.workspace = true
 
 [dev-dependencies]
-tir-lit = { path = "../../utils/lit" }
+tir-lit.workspace = true
 
 [[test]]
 name = "lit"

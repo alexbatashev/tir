@@ -26,13 +26,16 @@ pub fn print_error_range(
     range: Range<usize>,
     message: impl std::fmt::Display,
 ) -> std::io::Result<()> {
-    Report::build(ReportKind::Error, source_name, range.start)
+    let source_id = source_name.to_string();
+
+    Report::build(ReportKind::Error, (source_id.clone(), range.clone()))
+        .with_config(ariadne::Config::new().with_index_type(ariadne::IndexType::Byte))
         .with_message(message.to_string())
         .with_label(
-            Label::new((source_name, range))
+            Label::new((source_id.clone(), range))
                 .with_message("here")
                 .with_color(Color::Red),
         )
         .finish()
-        .eprint((source_name, Source::from(source)))
+        .eprint((source_id, Source::from(source)))
 }

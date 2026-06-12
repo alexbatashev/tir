@@ -8,14 +8,12 @@ edition = "2021"
 cargo-fuzz = true
 
 [dependencies]
-libfuzzer-sys = "0.4"
-tmdl = { path = "../../tmdl" }
-tir = { path = "../../core" }
-tir-riscv = { path = "../../backends/riscv" }
-arm64 = { path = "../../backends/arm64" }
-tir-be-common = { path = "../../backends/common" }
-
-# [dependencies.check-runner]
+libfuzzer-sys.workspace = true
+tmdl.workspace = true
+tir.workspace = true
+tir-riscv.workspace = true
+tir-arm64.workspace = true
+tir-be-common.workspace = true
 
 [[bin]]
 name = "tmdl-fuzz"

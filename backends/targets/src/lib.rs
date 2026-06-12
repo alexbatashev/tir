@@ -9,7 +9,7 @@
 
 // Force the backend crates to be linked so their `register_target!` entries are
 // included in the final binary; the registry is otherwise the only user.
-use arm64 as _;
+use tir_arm64 as _;
 use tir_riscv as _;
 
 pub use tir_be_common::{select_target as select, supported_targets};
