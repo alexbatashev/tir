@@ -77,6 +77,15 @@ ignore = [
 "CNTCR" = "0x00000001"
 # SSAdvance?
 "MDSCR_EL1" = "0x00000000"
+# OS lock unlocked, double-lock clear, halting debug disabled: memory
+# accesses consult the watchpoint machinery, which must stay off the
+# symbolic paths.
+"OSLSR_EL1" = "0x00000008"
+"OSDLR_EL1" = "0x00000000"
+"EDSCR" = "0x00000000"
+# Core 0 of cluster 0 (bit 31 is RES1); store paths consult the affinity for
+# the exclusive monitor.
+"MPIDR_EL1" = "0x0000000080000000"
 "InGuardedPage" = false
 "__highest_el_aarch32" = false
 "__currentInstrLength" = 4
@@ -150,6 +159,11 @@ ignore = [
 # Bit 1 being unset allows unaligned accesses
 # Bit 26 being set allows cache-maintenance ops in EL0
 "SCTLR_EL1" = "0x0000000004000000"
+# Pin the exception level to EL1/AArch64: a symbolic EL makes every memory
+# access fork on the translation regime (hundreds of paths per word). NZCV
+# stay symbolic; they are the state under verification.
+"PSTATE.EL" = "0b01"
+"PSTATE.nRW" = "0b0"
 
 # A map from register names that may appear in litmus files to Sail
 # register names

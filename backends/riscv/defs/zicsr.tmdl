@@ -21,6 +21,13 @@ register_class CSR for [Zicsr] {
         timeh => { index = 0xC81 },
         instreth => { index = 0xC82 },
         mscratch => { index = 0x340 },
+        // Machine-mode trap setup state, written by exception handlers in
+        // instruction behaviors (misaligned loads/stores).
+        mstatus => { index = 0x300 },
+        mtvec => { index = 0x305 },
+        mepc => { index = 0x341 },
+        mcause => { index = 0x342 },
+        mtval => { index = 0x343 },
     }
 }
 

@@ -21,6 +21,18 @@ register_class GPR for [TestIsa] {
     }
 }
 
+register_class CSR for [TestIsa] {
+    param ENCODING_LEN: Integer = 12;
+    param WIDTH: Integer = self.XLEN;
+
+    registers {
+        mtvec => { index = 0x305 },
+        mepc => { index = 0x341 },
+        mcause => { index = 0x342 },
+        mtval => { index = 0x343 },
+    }
+}
+
 template RType for [TestIsa] {
     param MNEMONIC: String;
     param OPCODE: bits<7>;
@@ -128,5 +140,30 @@ instruction TAlign for [TestIsa] : RType {
 
     behavior {
         rd = (rs1 & ~rs2) & ~1;
+    }
+}
+
+instruction TLoad for [TestIsa] : RType {
+    param MNEMONIC: String = "tload";
+    param OPCODE: bits<7> = 0b0000111;
+
+    behavior {
+        try {
+            rd = sext(load(rs1 + rs2, 4, 0b1), self.XLEN);
+        } except misaligned_load(addr) {
+            CSR::mepc = PC::pc;
+            CSR::mcause = zext(0b100, self.XLEN);
+            CSR::mtval = addr;
+            PC::pc = (CSR::mtvec >> 2) << 2;
+        }
+    }
+}
+
+instruction TTrap for [TestIsa] : RType {
+    param MNEMONIC: String = "ttrap";
+    param OPCODE: bits<7> = 0b0001000;
+
+    behavior {
+        trap(11);
     }
 }

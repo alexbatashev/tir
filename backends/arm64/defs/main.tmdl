@@ -235,6 +235,99 @@ template LoadStoreImmUnsigned for [ARMv8A64] {
     }
 }
 
+// As LoadStoreImmUnsigned, but the byte-offset operand is stored scaled down
+// by the access size: the field holds imm[12:1], the low bits must be zero.
+template LoadStoreImmUnsignedH for [ARMv8A64] {
+    schedule { units = [WriteLoad]; }
+    param MNEMONIC: String;
+    param SIZE: bits<2>;
+    param OPC: bits<2>;
+    param V: bits<1> = 0b0;
+
+    operands {
+        rt: GPR,
+        rn: GPRsp,
+        imm: bits<13>,
+    }
+
+    encoding {
+        0..4 => rt,
+        5..9 => rn,
+        10..21 => imm[1..12],
+        22..23 => OPC,
+        24..25 => 0b01,
+        26 => V,
+        27..29 => 0b111,
+        30..31 => SIZE,
+    }
+
+    asm {
+        "{self.MNEMONIC} {rt}, [{rn}, {imm}]"
+    }
+}
+
+// As LoadStoreImmUnsigned, but the byte-offset operand is stored scaled down
+// by the access size: the field holds imm[13:2], the low bits must be zero.
+template LoadStoreImmUnsignedW for [ARMv8A64] {
+    schedule { units = [WriteLoad]; }
+    param MNEMONIC: String;
+    param SIZE: bits<2>;
+    param OPC: bits<2>;
+    param V: bits<1> = 0b0;
+
+    operands {
+        rt: GPR,
+        rn: GPRsp,
+        imm: bits<14>,
+    }
+
+    encoding {
+        0..4 => rt,
+        5..9 => rn,
+        10..21 => imm[2..13],
+        22..23 => OPC,
+        24..25 => 0b01,
+        26 => V,
+        27..29 => 0b111,
+        30..31 => SIZE,
+    }
+
+    asm {
+        "{self.MNEMONIC} {rt}, [{rn}, {imm}]"
+    }
+}
+
+// As LoadStoreImmUnsigned, but the byte-offset operand is stored scaled down
+// by the access size: the field holds imm[14:3], the low bits must be zero.
+template LoadStoreImmUnsignedD for [ARMv8A64] {
+    schedule { units = [WriteLoad]; }
+    param MNEMONIC: String;
+    param SIZE: bits<2>;
+    param OPC: bits<2>;
+    param V: bits<1> = 0b0;
+
+    operands {
+        rt: GPR,
+        rn: GPRsp,
+        imm: bits<15>,
+    }
+
+    encoding {
+        0..4 => rt,
+        5..9 => rn,
+        10..21 => imm[3..14],
+        22..23 => OPC,
+        24..25 => 0b01,
+        26 => V,
+        27..29 => 0b111,
+        30..31 => SIZE,
+    }
+
+    asm {
+        "{self.MNEMONIC} {rt}, [{rn}, {imm}]"
+    }
+}
+
 template BranchImm for [ARMv8A64] {
     schedule { units = [WriteIALU]; }
     param MNEMONIC: String;

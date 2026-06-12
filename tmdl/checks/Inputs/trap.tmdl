@@ -1,0 +1,82 @@
+isa TrapIsa {
+    param XLEN: Integer = 64;
+
+    trap (cause, tval) {
+        CSR::mepc = PC::pc;
+        CSR::mcause = zext(cause, self.XLEN);
+        CSR::mtval = zext(tval, self.XLEN);
+        PC::pc = (CSR::mtvec >> 2) << 2;
+    }
+}
+
+register_class PC for [TrapIsa] {
+    param ENCODING_LEN: Integer = 0;
+    param WIDTH: Integer = self.XLEN;
+
+    registers {
+        pc => { traits = [program_counter] },
+    }
+}
+
+register_class GPR for [TrapIsa] {
+    param ENCODING_LEN: Integer = 5;
+    param WIDTH: Integer = self.XLEN;
+
+    registers {
+        x0("zero") => { traits = [hardwired_zero] },
+        x1..x31("r{}") => { traits = [callee_saved] },
+    }
+}
+
+register_class CSR for [TrapIsa] {
+    param ENCODING_LEN: Integer = 12;
+    param WIDTH: Integer = self.XLEN;
+
+    registers {
+        mtvec => { index = 0x305 },
+        mepc => { index = 0x341 },
+        mcause => { index = 0x342 },
+        mtval => { index = 0x343 },
+    }
+}
+
+instruction TCall for [TrapIsa] {
+    param MNEMONIC: String = "tcall";
+
+    encoding {
+        0..31 => 0b1110011,
+    }
+
+    asm { "{self.MNEMONIC}" }
+
+    behavior {
+        trap(11);
+    }
+}
+
+instruction TLoad for [TrapIsa] {
+    param MNEMONIC: String = "tload";
+
+    operands {
+        rd: GPR,
+        rs1: GPR,
+    }
+
+    encoding {
+        0..6 => 0b0000011,
+        7..11 => rd,
+        12..14 => 0b010,
+        15..19 => rs1,
+        20..31 => 0,
+    }
+
+    asm { "{self.MNEMONIC} {rd}, {rs1}" }
+
+    behavior {
+        try {
+            rd = sext(load(rs1, 4, 0b1), self.XLEN);
+        } except misaligned_load(addr) {
+            trap(4, addr);
+        }
+    }
+}

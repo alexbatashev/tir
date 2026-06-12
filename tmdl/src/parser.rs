@@ -54,17 +54,55 @@ fn isa_def<'src, I>() -> impl Parser<'src, I, Isa, extra::Err<Rich<'src, Token<'
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
+    enum IsaBodyItem {
+        Param((String, (Type, Option<Expr>))),
+        Trap(TrapHandler),
+    }
+    let trap = just(Token::Identifier("trap"))
+        .ignore_then(
+            ident()
+                .separated_by(just(Token::Comma))
+                .collect::<Vec<_>>()
+                .delimited_by(just(Token::LParen), just(Token::RParen))
+                .or_not(),
+        )
+        .then(expr())
+        .map_with(|(params, body), e| TrapHandler {
+            params: params.unwrap_or_default(),
+            body,
+            span: e.span(),
+        });
     just(Token::KwIsa)
         .ignore_then(ident())
         .then(isa_requirements())
         .then_ignore(just(Token::LBrace))
-        .then(parameter().repeated().collect())
+        .then(
+            choice((
+                parameter().map(IsaBodyItem::Param),
+                trap.map(IsaBodyItem::Trap),
+            ))
+            .repeated()
+            .collect::<Vec<_>>(),
+        )
         .then_ignore(just(Token::RBrace))
-        .map_with(|((name, requires), parameters), e| Isa {
-            name,
-            requires,
-            parameters,
-            span: e.span(),
+        .map_with(|((name, requires), items), e| {
+            let mut parameters = crate::utils::StableHashMap::default();
+            let mut trap_handler = None;
+            for item in items {
+                match item {
+                    IsaBodyItem::Param((name, value)) => {
+                        parameters.insert(name, value);
+                    }
+                    IsaBodyItem::Trap(t) => trap_handler = Some(t),
+                }
+            }
+            Isa {
+                name,
+                requires,
+                parameters,
+                trap_handler,
+                span: e.span(),
+            }
         })
         .labelled("ISA definition")
 }
@@ -1361,7 +1399,33 @@ where
                 .boxed()
         });
 
-        block.clone().or(if_)
+        let except = just(Token::KwExcept)
+            .ignore_then(ident)
+            .then(
+                ident
+                    .delimited_by(just(Token::LParen), just(Token::RParen))
+                    .or_not(),
+            )
+            .then(block.clone())
+            .map_with(|((kind, binding), body), e| ExceptClause {
+                kind,
+                binding,
+                body,
+                span: e.span(),
+            });
+        let try_ = just(Token::KwTry)
+            .ignore_then(block.clone())
+            .then(except.repeated().at_least(1).collect::<Vec<_>>())
+            .map_with(|(body, handlers), e| {
+                Expr::Try(TryExcept {
+                    body: Box::new(body),
+                    handlers,
+                    span: e.span(),
+                })
+            })
+            .boxed();
+
+        choice((block.clone(), if_, try_))
     })
 }
 

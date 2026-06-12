@@ -44,6 +44,36 @@ pub fn check<'a>(files: &'a [ast::File]) -> (TypeCache<'a>, Vec<(String, Diag)>)
                 &file.file_name,
             );
         }
+        for item in &file.items {
+            let ast::Item::Isa(isa) = item else { continue };
+            let Some(trap) = &isa.trap_handler else {
+                continue;
+            };
+            let mut env = TypeEnv::new();
+            for (name, ty) in &synonyms {
+                env.bind(name.clone(), TypeScheme::mono(ty.clone()));
+            }
+            for name in isa_param_vars.keys() {
+                env.bind(name.clone(), TypeScheme::mono(Type::Integer));
+            }
+            // Trap parameters carry exception payloads: bits of some width.
+            for param in &trap.params {
+                env.bind(
+                    param.clone(),
+                    TypeScheme::mono(Type::Con("bits".into(), vec![Type::Var(tvg.fresh())])),
+                );
+            }
+            let mut subst = Substitution::new();
+            infer(
+                &trap.body,
+                &env,
+                &mut tvg,
+                &mut subst,
+                &mut cache,
+                &mut diags,
+                &file.file_name,
+            );
+        }
     }
 
     (cache, diags)
@@ -377,6 +407,31 @@ fn infer<'a>(
             } else {
                 ty
             }
+        }
+
+        ast::Expr::Try(t) => {
+            infer(&t.body, env, tvg, subst, cache, diags, file_name);
+            for handler in &t.handlers {
+                // The binding carries the faulting address: XLEN-wide bits,
+                // like a register value.
+                let mut handler_env = env.clone();
+                if let Some(binding) = &handler.binding {
+                    handler_env.bind(
+                        binding.clone(),
+                        TypeScheme::mono(Type::Con("bits".into(), vec![Type::Var(tvg.fresh())])),
+                    );
+                }
+                infer(
+                    &handler.body,
+                    &handler_env,
+                    tvg,
+                    subst,
+                    cache,
+                    diags,
+                    file_name,
+                );
+            }
+            Type::Integer
         }
 
         ast::Expr::BuiltinFunction(_) | ast::Expr::Invalid => Type::Var(tvg.fresh()),

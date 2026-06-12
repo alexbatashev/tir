@@ -4,7 +4,9 @@
 //! For every supported TMDL instruction and a set of concrete operand
 //! assignments:
 //!   1. the instruction word is computed from the TMDL `encode_*` function
-//!      (evaluated by z3), so the TMDL encoding is part of what is checked;
+//!      and the operands are decoded back from it via `decode_*` (both
+//!      evaluated by z3), so the TMDL encoding is part of what is checked and
+//!      lossy immediate fields are verified at representable values;
 //!   2. `isla-footprint` symbolically executes that word in the Sail model
 //!      over a fully symbolic register state, producing one SMT trace per
 //!      execution path;
@@ -22,14 +24,19 @@
 //!     C extension is modeled);
 //!   - TMDL leaves PC untouched for fall-through instructions, so a Sail path
 //!     that does not write the (next) PC requires TMDL's final PC to equal the
-//!     initial one, and a path that writes it requires equality with it.
+//!     initial one, and a path that writes it requires equality with it;
+//!   - memory is the TMDL flat little-endian byte array: Sail's plain read
+//!     values are constrained against the initial array and its writes are
+//!     folded into the expected final array. Paths through the platform
+//!     memory map (CLINT) are excluded via their backing-register reads.
 //!
 //! External tools: `isla-footprint` and `z3`, plus a Sail model snapshot and
 //! an isla config per ISA. isla is cloned and built and the snapshot is
 //! downloaded automatically; override locations with `TIR_ISLA_FOOTPRINT`,
-//! `TIR_ISLA_SNAPSHOT`, `TIR_ISLA_CONFIG`, `TIR_Z3`. `TIR_ISLA_REF` pins the
-//! isla checkout and `TIR_ISLA_SNAPSHOTS_REF` the snapshot ref (both default
-//! to master). `TIR_VERIFY_SMT_FILTER=add,sub` restricts the instruction set.
+//! `TIR_ISLA_SNAPSHOT`, `TIR_ISLA_CONFIG`, `TIR_Z3`. `TIR_ISLA_REF` overrides
+//! the isla checkout (default master) and `TIR_ISLA_SNAPSHOTS_REF` the
+//! snapshot ref (default: a pinned commit; see `ISLA_SNAPSHOTS_PIN`).
+//! `TIR_VERIFY_SMT_FILTER=add,sub` restricts the instruction set.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -63,6 +70,11 @@ pub struct IsaSpec {
     /// Model bookkeeping registers with no architectural meaning; reads and
     /// writes of them never exclude a path.
     ignore_regs: &'static [&'static str],
+    /// Registers backing memory-mapped devices (RISC-V CLINT): a read means
+    /// the access resolved into the platform memory map, which TMDL's flat
+    /// memory does not model, so the path is excluded even when the value is
+    /// concrete (`mtimecmp` is pinned by the config).
+    mmio_regs: &'static [&'static str],
     /// Named Sail registers mapped onto single slots of TMDL register-file
     /// classes beyond the GPR file: `(sail name, tmdl class, slot, index
     /// width)`. Fields of `struct_reg` are named `<reg>.<field>`. Several
@@ -74,6 +86,11 @@ pub struct IsaSpec {
     /// Concrete operand values for register classes whose encoding space is
     /// mostly unimplemented (CSR addresses), instead of the GPR patterns.
     fixed_reg_values: &'static [(&'static str, &'static [u64])],
+    /// Sail trap-cause register and the causes TMDL behaviors model. A path
+    /// writing a cause outside this set (access faults: the TMDL model treats
+    /// all of memory as RAM) is excluded, established by a z3 probe since the
+    /// written value is a path expression.
+    trap_cause: Option<(&'static str, &'static [u64])>,
     isla_args: &'static [&'static str],
 }
 
@@ -84,10 +101,22 @@ impl IsaSpec {
     }
 }
 
-/// `mscratch` is the only TMDL-listed CSR with plain read-write storage; the
-/// counter CSRs are read-only and their Sail accesses trap or go through
-/// mcounteren, which is outside the no-trap assumptions.
-const RISCV_EXTRA_REGS: &[(&str, &str, u64, u32)] = &[("mscratch", "csr", 0x340, 12)];
+/// Plain read-write CSR storage (`mscratch`) plus the machine-mode trap setup
+/// state written by exception handlers in TMDL behaviors. The counter CSRs
+/// stay unmapped: they are read-only and their Sail accesses trap or go
+/// through mcounteren, which is outside the no-trap assumptions.
+const RISCV_EXTRA_REGS: &[(&str, &str, u64, u32)] = &[
+    ("mscratch", "csr", 0x340, 12),
+    ("mstatus", "csr", 0x300, 12),
+    ("mtvec", "csr", 0x305, 12),
+    ("mepc", "csr", 0x341, 12),
+    ("mcause", "csr", 0x342, 12),
+    ("mtval", "csr", 0x343, 12),
+];
+
+/// CLINT-backed state: loads/stores whose address falls into the CLINT MMIO
+/// window read or write these instead of memory.
+const RISCV_MMIO_REGS: &[&str] = &["mtime", "mtimecmp", "mip"];
 
 /// The TMDL `pstate` file holds the NZCV flags at their declaration-order
 /// indices; the stack pointer is slot 31 of the shared GPR file, reachable
@@ -118,10 +147,17 @@ const ISA_SPECS: &[IsaSpec] = &[
         zero_reg: Some(0),
         pc: "PC",
         next_pc: Some("nextPC"),
-        ignore_regs: &[],
+        // cur_privilege is pinned to Machine and machine-mode traps stay in
+        // Machine, so its (enum-valued) reads and re-writes carry no state
+        // the TMDL model could diverge on.
+        ignore_regs: &["cur_privilege"],
+        mmio_regs: RISCV_MMIO_REGS,
         extra_regs: RISCV_EXTRA_REGS,
         struct_reg: None,
         fixed_reg_values: &[("csr", &[0x340])],
+        // 3: breakpoint, 4: load address misaligned, 6: store/AMO address
+        // misaligned, 11: environment call from M-mode.
+        trap_cause: Some(("mcause", &[3, 4, 6, 11])),
         isla_args: &["-I", "cur_privilege=Machine"],
     },
     IsaSpec {
@@ -137,10 +173,14 @@ const ISA_SPECS: &[IsaSpec] = &[
         zero_reg: Some(0),
         pc: "PC",
         next_pc: Some("nextPC"),
-        ignore_regs: &[],
+        ignore_regs: &["cur_privilege"],
+        mmio_regs: RISCV_MMIO_REGS,
         extra_regs: RISCV_EXTRA_REGS,
         struct_reg: None,
         fixed_reg_values: &[("csr", &[0x340])],
+        // 3: breakpoint, 4: load address misaligned, 6: store/AMO address
+        // misaligned, 11: environment call from M-mode.
+        trap_cause: Some(("mcause", &[3, 4, 6, 11])),
         isla_args: &["-I", "cur_privilege=Machine"],
     },
     IsaSpec {
@@ -163,10 +203,15 @@ const ISA_SPECS: &[IsaSpec] = &[
             "__currentInstrLength",
             "BTypeNext",
             "BTypeCompatible",
+            // Load/store instruction syndrome, model bookkeeping for fault
+            // reporting; written on every memory access path.
+            "__LSISyndrome",
         ],
+        mmio_regs: &[],
         extra_regs: ARMV8_EXTRA_REGS,
         struct_reg: Some("PSTATE"),
         fixed_reg_values: &[],
+        trap_cause: None,
         isla_args: &[],
     },
 ];
@@ -280,9 +325,14 @@ fn ensure_isla_footprint(sh: &Shell) -> anyhow::Result<PathBuf> {
     Ok(bin)
 }
 
+/// Pinned isla-snapshots commit: the models the specs and configs were
+/// validated against. A floating ref breaks silently when upstream swaps
+/// model generations (rv32d.ir became a new-interface build on 2026-06-02).
+const ISLA_SNAPSHOTS_PIN: &str = "d8b31014643035a3b11071e56ef30001de3f52ab";
+
 fn ensure_snapshot(sh: &Shell, file: &str) -> anyhow::Result<PathBuf> {
     let snap_ref =
-        std::env::var("TIR_ISLA_SNAPSHOTS_REF").unwrap_or_else(|_| "refs/heads/master".to_string());
+        std::env::var("TIR_ISLA_SNAPSHOTS_REF").unwrap_or_else(|_| ISLA_SNAPSHOTS_PIN.to_string());
     let dest = project_root()
         .join("target/verify/snapshots")
         .join(snap_ref.replace('/', "-"))
@@ -584,6 +634,76 @@ fn encode_words(
     Ok(words)
 }
 
+/// Operand values recovered by decoding the instruction words back, so the
+/// equivalence check uses what the encoding can express: lossy immediate
+/// fields drop bits (branch immediates force bit 0, ARM unsigned-offset
+/// loads/stores store the byte offset scaled down by the access size).
+fn decode_operands(
+    tools: &Tools,
+    spec: &IsaSpec,
+    out_dir: &Path,
+    smt: &str,
+    instr: &Instruction,
+    words: &[u32],
+) -> anyhow::Result<Vec<Vec<u64>>> {
+    if instr.operands.is_empty() {
+        return Ok(words.iter().map(|_| vec![]).collect());
+    }
+    let mut query = String::from(smt);
+    query.push_str("\n(check-sat)\n");
+    for word in words {
+        let probes = instr
+            .operands
+            .iter()
+            .map(|(op, _)| {
+                format!(
+                    "({}_{} (decode_{} (_ bv{} 32)))",
+                    instr.name, op, spec.dialect, word
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        writeln!(query, "(get-value ({}))", probes)?;
+    }
+    let path = out_dir
+        .join("queries")
+        .join(format!("decode_{}.smt2", instr.name));
+    std::fs::write(&path, query)?;
+    let output = Command::new(&tools.z3).arg("-smt2").arg(&path).output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // z3 prints bitvector values as #x… (multiples of 4 bits) or #b…; the
+    // echoed probe expressions only contain decimal (_ bvN 32) literals, so
+    // every #-literal is an operand value.
+    let mut values = Vec::new();
+    let mut rest: &str = &stdout;
+    while let Some(pos) = rest.find('#') {
+        rest = &rest[pos + 1..];
+        let (radix, digits): (u32, &str) = match rest.as_bytes().first() {
+            Some(b'x') => (16, &rest[1..]),
+            Some(b'b') => (2, &rest[1..]),
+            _ => continue,
+        };
+        let end = digits
+            .find(|c: char| !c.is_ascii_hexdigit())
+            .unwrap_or(digits.len());
+        if let Ok(v) = u64::from_str_radix(&digits[..end], radix) {
+            values.push(v);
+        }
+        rest = &digits[end..];
+    }
+    anyhow::ensure!(
+        values.len() == words.len() * instr.operands.len(),
+        "z3 decoded {} of {} operand values for {}",
+        values.len(),
+        words.len() * instr.operands.len(),
+        instr.name
+    );
+    Ok(values
+        .chunks(instr.operands.len())
+        .map(|chunk| chunk.to_vec())
+        .collect())
+}
+
 // ---------------------------------------------------------------------------
 // isla-footprint invocation (cached per instruction word)
 // ---------------------------------------------------------------------------
@@ -801,6 +921,43 @@ fn accessor_field(items: &[Sexp]) -> Option<&str> {
     }
 }
 
+/// Whether a memory event's kind is a plain data access. Old-interface
+/// models (RISC-V) use enum atoms (`|Read_plain|`); new-interface models
+/// (ARM) embed the whole request struct, whose `access_kind` must be an
+/// explicit access of plain variety and normal (non-acquire/release)
+/// strength.
+fn is_plain_access(kind: &Sexp) -> bool {
+    match kind {
+        Sexp::Atom(k) => k.trim_matches('|').ends_with("_plain"),
+        Sexp::List(_) => {
+            let rendered = kind.to_string();
+            rendered.contains("|AV_plain|")
+                && (!rendered.contains("|strength|") || rendered.contains("|AS_normal|"))
+        }
+    }
+}
+
+/// Whether the value mentions any isla symbolic variable (`vN`). Struct
+/// register reads (RISC-V `mip`) wrap their symbolic fields in a
+/// `(_ struct ...)` literal, so a bare-atom check is not enough.
+fn contains_symbolic(value: &Sexp) -> bool {
+    match value {
+        Sexp::Atom(a) => a
+            .strip_prefix('v')
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())),
+        Sexp::List(items) => items.iter().any(contains_symbolic),
+    }
+}
+
+/// The payload of a single-field `(_ struct (|bits| value))` literal, as
+/// written for Sail bitfield registers; anything else is returned as is.
+fn unwrap_bits_struct(value: &Sexp) -> &Sexp {
+    match struct_field(value, "bits") {
+        Some(bits) if matches!(value, Sexp::List(items) if items.len() == 3) => bits,
+        _ => value,
+    }
+}
+
 /// Component of a `(_ struct (|F| value) ...)` literal.
 fn struct_field<'a>(value: &'a Sexp, field: &str) -> Option<&'a Sexp> {
     let Sexp::List(items) = value else {
@@ -820,19 +977,31 @@ fn struct_field<'a>(value: &'a Sexp, field: &str) -> Option<&'a Sexp> {
     })
 }
 
+/// One memory access event: `value` is the read result variable or the
+/// written data expression.
+struct MemAccess {
+    value: String,
+    address: String,
+    bytes: u32,
+}
+
 #[derive(Default)]
 struct TraceInfo {
     /// `(register, symbolic-variable)` for symbolic initial-state reads.
     reads: Vec<(MappedReg, String)>,
     /// Final value per written register (last write wins).
     writes: HashMap<MappedReg, String>,
+    /// Plain memory reads, related to the initial TMDL memory array.
+    mem_reads: Vec<MemAccess>,
+    /// Plain memory writes in order, folded into the expected final array.
+    mem_writes: Vec<MemAccess>,
     /// Verbatim `(declare-const v Sort)` lines.
     declares: Vec<String>,
     /// Ordered `define-const` bindings, replayed as a `let` chain.
     defines: Vec<(String, String)>,
     asserts: Vec<String>,
     /// Why this path cannot be checked against the TMDL state (trap paths,
-    /// CSR accesses, memory, ...), if so.
+    /// CSR accesses, ...), if so.
     excluded: Option<String>,
 }
 
@@ -862,6 +1031,16 @@ fn analyze_trace(spec: &IsaSpec, events: &[Sexp]) -> TraceInfo {
                 if spec.ignore_regs.contains(&trimmed) {
                     continue;
                 }
+                if spec.mmio_regs.contains(&trimmed) {
+                    exclude(
+                        &mut info,
+                        format!(
+                            "reads MMIO-backed register {} (platform memory map)",
+                            trimmed
+                        ),
+                    );
+                    continue;
+                }
                 if spec.struct_reg == Some(trimmed) {
                     // Mapped fields (NZCV) relate to TMDL state; other fields
                     // (EL, nRW, ...) are pinned by each path's assertions.
@@ -882,11 +1061,20 @@ fn analyze_trace(spec: &IsaSpec, events: &[Sexp]) -> TraceInfo {
                     }
                     continue;
                 }
-                let symbolic = matches!(value, Sexp::Atom(a) if a.starts_with('v'));
+                // Bitfield registers (RISC-V mstatus, mtvec, mcause) carry
+                // their value in a single-field struct literal.
+                let value = unwrap_bits_struct(value);
+                let symbolic = contains_symbolic(value);
                 match map_register(spec, name) {
                     Some(reg) => {
                         if let Sexp::Atom(var) = value {
-                            if !info.writes.contains_key(&reg) && !defined_vars.contains(var) {
+                            // A concrete read of a mapped register pins the
+                            // TMDL slot to the config's value; a symbolic one
+                            // names the slot's initial state.
+                            let concrete = var.starts_with('#');
+                            if !info.writes.contains_key(&reg)
+                                && (concrete || !defined_vars.contains(var))
+                            {
                                 info.reads.push((reg, var.clone()));
                             }
                         }
@@ -926,7 +1114,8 @@ fn analyze_trace(spec: &IsaSpec, events: &[Sexp]) -> TraceInfo {
                 match map_register(spec, name) {
                     Some(MappedReg::X(n)) if Some(n) == spec.zero_reg => {}
                     Some(reg) => {
-                        info.writes.insert(reg, value.to_string());
+                        info.writes
+                            .insert(reg, unwrap_bits_struct(value).to_string());
                     }
                     None => exclude(
                         &mut info,
@@ -961,8 +1150,43 @@ fn analyze_trace(spec: &IsaSpec, events: &[Sexp]) -> TraceInfo {
                     info.asserts.push(expr.to_string());
                 }
             }
+            // `(read-mem value kind address bytes [tag])`
+            // `(write-mem success kind address data bytes [tag])`
+            // Only plain accesses relate to the TMDL flat memory; reads are
+            // constrained against the initial array, so a read after a write
+            // (no such instruction yet) would be unsound and is excluded.
             "read-mem" | "write-mem" => {
-                exclude(&mut info, "memory access".to_string());
+                let (Some(kind), Some(address), Some(payload), Some(Sexp::Atom(bytes))) = (
+                    items.get(2),
+                    items.get(3),
+                    items.get(if head == "read-mem" { 1 } else { 4 }),
+                    items.get(if head == "read-mem" { 4 } else { 5 }),
+                ) else {
+                    exclude(&mut info, format!("malformed {} event", head));
+                    continue;
+                };
+                if !is_plain_access(kind) {
+                    exclude(&mut info, format!("non-plain memory access {}", kind));
+                    continue;
+                }
+                let Ok(bytes @ (1 | 2 | 4 | 8)) = bytes.parse::<u32>() else {
+                    exclude(&mut info, format!("unsupported access width {}", bytes));
+                    continue;
+                };
+                let access = MemAccess {
+                    value: payload.to_string(),
+                    address: address.to_string(),
+                    bytes,
+                };
+                if head == "read-mem" {
+                    if !info.mem_writes.is_empty() {
+                        exclude(&mut info, "memory read after write".to_string());
+                        continue;
+                    }
+                    info.mem_reads.push(access);
+                } else {
+                    info.mem_writes.push(access);
+                }
             }
             _ => {}
         }
@@ -974,12 +1198,21 @@ fn analyze_trace(spec: &IsaSpec, events: &[Sexp]) -> TraceInfo {
 // Equivalence query construction
 // ---------------------------------------------------------------------------
 
+enum QueryGoal<'a> {
+    /// Find a state where TMDL and Sail disagree on the final state.
+    Equivalence,
+    /// Find a state where the path's written trap cause is outside the set
+    /// the TMDL behaviors model (`sat` = access-fault path, excluded).
+    UnmodeledCause { cause: &'a str, causes: &'a [u64] },
+}
+
 fn build_query(
     spec: &IsaSpec,
     smt: &str,
     instr: &Instruction,
     case: &[u64],
     trace: &TraceInfo,
+    goal: QueryGoal<'_>,
 ) -> String {
     let xlen = spec.xlen;
     let mut q = String::from(smt);
@@ -1062,6 +1295,66 @@ fn build_query(
         .get(&MappedReg::NextPc)
         .or_else(|| trace.writes.get(&MappedReg::Pc));
     let mut asserts = trace.asserts.clone();
+
+    // Memory: Sail's read values come from TMDL's initial array, and the
+    // final array must equal the initial one with Sail's writes applied
+    // little-endian byte by byte (the `write_mem_*` convention). Both the
+    // constraints and the equality can mention `define-const` variables, so
+    // they live inside the let chain with the path asserts.
+    for read in &trace.mem_reads {
+        asserts.push(format!(
+            "(= {} (read_mem_{} st0 {}))",
+            read.value, read.bytes, read.address
+        ));
+    }
+    if trace.mem_writes.is_empty() {
+        // Both sides reduce to the untouched initial array; congruence
+        // closes this cheaply.
+        final_eq.push("(= (mem st1) (mem st0))".to_string());
+    } else {
+        // Whole-array equality of two store chains makes z3 enumerate index
+        // aliasing through the (long) address define-chains — minutes per
+        // query. Equisatisfiable select formulation instead: equality at
+        // every written slot, plus a frame condition at one fresh index
+        // (the extensionality witness), each a directed bitvector goal.
+        let mut sail_mem = "(mem st0)".to_string();
+        let mut slots = Vec::new();
+        for write in &trace.mem_writes {
+            for i in 0..write.bytes {
+                let slot = if i == 0 {
+                    write.address.clone()
+                } else {
+                    format!("(bvadd {} (_ bv{} {}))", write.address, i, xlen)
+                };
+                sail_mem = format!(
+                    "(store {} {} ((_ extract {} {}) {}))",
+                    sail_mem,
+                    slot,
+                    i * 8 + 7,
+                    i * 8,
+                    write.value
+                );
+                slots.push(slot);
+            }
+        }
+        for slot in &slots {
+            final_eq.push(format!(
+                "(= (select (mem st1) {}) (select {} {}))",
+                slot, sail_mem, slot
+            ));
+        }
+        let _ = writeln!(q, "(declare-const mem_frame_idx (_ BitVec {xlen}))");
+        let written = slots
+            .iter()
+            .map(|slot| format!("(= mem_frame_idx {})", slot))
+            .collect::<Vec<_>>()
+            .join(" ");
+        final_eq.push(format!(
+            "(or {} (= (select (mem st1) mem_frame_idx) (select (mem st0) mem_frame_idx)))",
+            written
+        ));
+    }
+
     match sail_pc {
         Some(target) => {
             // TMDL encodes fall-through as "PC untouched", while current Sail
@@ -1078,14 +1371,25 @@ fn build_query(
         None => final_eq.push("(= (pc st1) (pc st0))".to_string()),
     }
 
+    let negated_goal = match goal {
+        QueryGoal::Equivalence => format!("(not (and {}))", final_eq.join("\n  ")),
+        QueryGoal::UnmodeledCause { cause, causes } => format!(
+            "(not (or {}))",
+            causes
+                .iter()
+                .map(|c| format!("(= {} (_ bv{} {}))", cause, c, xlen))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
+    };
     let mut body = format!(
-        "(and {} (not (and {})))",
+        "(and {} {})",
         if asserts.is_empty() {
             "true".to_string()
         } else {
             asserts.join(" ")
         },
-        final_eq.join("\n  ")
+        negated_goal
     );
     for (var, expr) in trace.defines.iter().rev() {
         body = format!("(let (({} {}))\n{})", var, expr, body);
@@ -1093,12 +1397,14 @@ fn build_query(
     let _ = writeln!(q, "(assert {})", body);
     q.push_str("(check-sat)\n");
 
-    // Counterexample probes, only evaluated on `sat`.
-    let mut probes: Vec<String> = vec!["(pc st0)".into(), "(pc st1)".into()];
-    for n in (0..spec.reg_count).filter(|n| Some(*n) != spec.zero_reg) {
-        probes.push(format!("(read_gpr st0 (_ bv{} 5))", n));
+    if matches!(goal, QueryGoal::Equivalence) {
+        // Counterexample probes, only evaluated on `sat`.
+        let mut probes: Vec<String> = vec!["(pc st0)".into(), "(pc st1)".into()];
+        for n in (0..spec.reg_count).filter(|n| Some(*n) != spec.zero_reg) {
+            probes.push(format!("(read_gpr st0 (_ bv{} 5))", n));
+        }
+        let _ = writeln!(q, "(get-value ({}))", probes.join(" "));
     }
-    let _ = writeln!(q, "(get-value ({}))", probes.join(" "));
     q
 }
 
@@ -1154,6 +1460,7 @@ fn verify_instruction(
 ) -> anyhow::Result<()> {
     let cases = operand_cases(spec, instr);
     let words = encode_words(tools, spec, out_dir, smt, instr, &cases)?;
+    let cases = decode_operands(tools, spec, out_dir, smt, instr, &words)?;
     print!("{:24}", instr.name);
     let mut line = String::new();
 
@@ -1200,14 +1507,55 @@ fn verify_instruction(
                 line.push('-');
                 continue;
             }
-            let query = build_query(spec, smt, instr, case, &info);
+            // A path writing a trap cause TMDL does not model (access fault)
+            // lies outside the all-of-memory-is-RAM assumption.
+            let written_cause = spec.trap_cause.and_then(|(cause_reg, causes)| {
+                let slot = spec
+                    .extra_regs
+                    .iter()
+                    .position(|(n, _, _, _)| *n == cause_reg)?;
+                Some((info.writes.get(&MappedReg::Slot(slot))?, causes))
+            });
+            if let Some((cause, causes)) = written_cause {
+                let probe = build_query(
+                    spec,
+                    smt,
+                    instr,
+                    case,
+                    &info,
+                    QueryGoal::UnmodeledCause { cause, causes },
+                );
+                let probe_path = out_dir.join("queries").join(format!(
+                    "{}_{:08x}_p{}_cause.smt2",
+                    instr.name, word, path_idx
+                ));
+                std::fs::write(&probe_path, &probe)?;
+                let output = Command::new(&tools.z3)
+                    .arg("-smt2")
+                    .arg("-T:240")
+                    .arg(&probe_path)
+                    .output()?;
+                if String::from_utf8_lossy(&output.stdout).starts_with("sat") {
+                    report.excluded_paths += 1;
+                    *report
+                        .excluded_reasons
+                        .entry(format!(
+                            "{}: trap cause outside the modeled set (access fault path)",
+                            instr.name
+                        ))
+                        .or_default() += 1;
+                    line.push('-');
+                    continue;
+                }
+            }
+            let query = build_query(spec, smt, instr, case, &info, QueryGoal::Equivalence);
             let query_path = out_dir
                 .join("queries")
                 .join(format!("{}_{:08x}_p{}.smt2", instr.name, word, path_idx));
             std::fs::write(&query_path, &query)?;
             let output = Command::new(&tools.z3)
                 .arg("-smt2")
-                .arg("-T:60")
+                .arg("-T:240")
                 .arg(&query_path)
                 .output()?;
             let stdout = String::from_utf8_lossy(&output.stdout);

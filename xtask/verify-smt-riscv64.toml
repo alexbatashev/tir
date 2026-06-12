@@ -51,6 +51,9 @@ mstatus = "{ bits = 0x0000000000000000 }"
 # Direct mode, base 0: trap paths must reach the architectural state writes
 # (mcause, mepc, ...) instead of asserting on a symbolic tvec mode.
 mtvec = "{ bits = 0x0000000000000000 }"
+# No delegation: machine mode handles all traps (there is no S-mode in the
+# verified model), and a symbolic medeleg would otherwise taint every trap path.
+medeleg = "{ bits = 0x0000000000000000 }"
 mcountinhibit = " { bits = 0x00000000 }"
 mtimecmp = "0x0000000000000000"
 
@@ -82,6 +85,8 @@ plat_clint_size = "0x00000000000c0000"
 plat_htif_tohost = "0x0000000040001000"
 plat_get_16_random_bits = "undefined : %bv16"
 plat_term_write = "()"
+# Effective-address announcement before a store; only the write event matters.
+platform_write_mem_ea = "()"
 print_reg = "()"
 print_platform = "()"
 print_instr = "()"
