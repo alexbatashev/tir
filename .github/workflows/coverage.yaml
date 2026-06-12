@@ -43,7 +43,7 @@ jobs:
           grcov . --binary-path target/debug/ -s . -t lcov --branch --llvm \
               --ignore '../*' \
               --ignore "/*" \
-              --ignore 'targets/*' \
+              --ignore 'target/*' \
               --ignore 'utils/*' \
               --ignore 'xtask/*' \
               --ignore '**/tests/**' \
