@@ -1399,6 +1399,25 @@ where
                 .boxed()
         });
 
+        let loop_var = select! { Token::Identifier(i) => i.to_string() };
+        let for_ = just(Token::KwFor)
+            .ignore_then(loop_var)
+            .then_ignore(just(Token::KwIn))
+            .then(inline_expr())
+            .then_ignore(just(Token::Range))
+            .then(inline_expr())
+            .then(block.clone())
+            .map_with(|(((var, start), end), body), e| {
+                Expr::For(For {
+                    var,
+                    start: Box::new(start),
+                    end: Box::new(end),
+                    body: Box::new(body),
+                    span: e.span(),
+                })
+            })
+            .boxed();
+
         let except = just(Token::KwExcept)
             .ignore_then(ident)
             .then(
@@ -1425,7 +1444,7 @@ where
             })
             .boxed();
 
-        choice((block.clone(), if_, try_))
+        choice((block.clone(), if_, for_, try_))
     })
 }
 
@@ -1474,7 +1493,9 @@ mod tests {
         lexer::lexer,
     };
 
-    use super::{inline_expr, instruction_def, isa_def, machine_def, register_class_def, unit_def};
+    use super::{
+        expr, inline_expr, instruction_def, isa_def, machine_def, register_class_def, unit_def,
+    };
 
     #[test]
     fn register_class_parses_inheritance() {
@@ -1598,6 +1619,67 @@ mod tests {
             Expr::Binary(bin) => assert_eq!(bin.op, BinOp::LessThenEqual),
             _ => panic!("Expected binary expression"),
         }
+    }
+
+    fn parse_expr(code: &str) -> Expr {
+        let (tokens, _e) = lexer().parse(code).into_output_errors();
+        let tokens = tokens.unwrap();
+        expr()
+            .then(end())
+            .parse(
+                tokens
+                    .as_slice()
+                    .map((code.len()..code.len()).into(), |(t, s)| (t, s)),
+            )
+            .output()
+            .unwrap()
+            .0
+            .clone()
+    }
+
+    #[test]
+    fn expr_parses_for_loop_as_accumulator() {
+        let parsed = parse_expr("for i in 0..4 { rd = rd + i; }");
+        let Expr::For(for_) = &parsed else {
+            panic!("expected for loop, got {parsed:?}");
+        };
+        assert_eq!(for_.var, "i");
+        // A single accumulating assignment is recognized as the fold form.
+        assert!(for_.accumulator().is_some());
+    }
+
+    #[test]
+    fn accumulator_loop_lowers_to_loop_node() {
+        use tir::graph::Dag;
+        use tir::sem_expr::{ExprKind, ExprPostGraph};
+
+        // Symbolic bound `n`: the loop survives as a first-class `Loop` node
+        // rather than being unrolled.
+        let parsed = parse_expr("for i in 0..n { acc = acc + i }");
+        let mut graph = ExprPostGraph::new();
+        let lowering = parsed
+            .lower_to_sema(&mut graph, &std::collections::HashMap::new())
+            .expect("loop should lower");
+        assert_eq!(*graph.get_node(lowering.root), ExprKind::Loop);
+        let has_indvar = (0..graph.len())
+            .any(|i| *graph.get_node(tir::graph::NodeId::from_index(i)) == ExprKind::IndVar);
+        let has_acc = (0..graph.len())
+            .any(|i| *graph.get_node(tir::graph::NodeId::from_index(i)) == ExprKind::Acc);
+        assert!(
+            has_indvar && has_acc,
+            "loop body must reference IndVar and Acc"
+        );
+    }
+
+    #[test]
+    fn non_accumulator_loop_unrolls() {
+        // A body that is not a single accumulating assignment falls back to
+        // compile-time unrolling.
+        let parsed = parse_expr("for i in 0..3 { store(i, 4, i); }");
+        let Expr::Block(block) = parsed.expand_loops(&std::collections::HashMap::new()) else {
+            panic!("unrolled loop must be a block");
+        };
+        assert_eq!(block.stmts.len(), 3);
     }
 
     #[test]

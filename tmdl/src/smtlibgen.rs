@@ -1001,6 +1001,9 @@ fn emit_sem_expr(
         }
         // Stores are effect statements, handled by `BehaviorEmitter::store`.
         ExprKind::StoreMemory | ExprKind::Sqrt | ExprKind::Fma => None,
+        // Loops are eliminated by `unroll_loops` before emission; a surviving one
+        // has symbolic bounds, which SMT-LIB cannot express, so it is unsupported.
+        ExprKind::Loop | ExprKind::IndVar | ExprKind::Acc => None,
     }
 }
 
@@ -1064,6 +1067,11 @@ fn collect_mem_ops<'a>(e: &'a ast::Expr, out: &mut Vec<MemOp<'a>>) -> Option<()>
         ast::Expr::Slice(s) => collect_mem_ops(&s.base, out)?,
         ast::Expr::IndexAccess(i) => collect_mem_ops(&i.base, out)?,
         ast::Expr::Field(f) => collect_mem_ops(&f.base, out)?,
+        ast::Expr::For(f) => {
+            collect_mem_ops(&f.start, out)?;
+            collect_mem_ops(&f.end, out)?;
+            collect_mem_ops(&f.body, out)?;
+        }
         ast::Expr::Try(_)
         | ast::Expr::Ident(_)
         | ast::Expr::Path(_)
@@ -1100,6 +1108,9 @@ impl BehaviorEmitter<'_> {
                 self.failed.set(true);
                 None
             })?;
+        // SMT-LIB has no iteration: unroll constant-bound loops to plain
+        // expressions. Symbolic-bound loops survive and fail emission below.
+        let (graph, root) = tir::sem_expr::unroll_loops(&graph, lowering.root);
         let mut symbols = HashMap::new();
         for (name, id) in &lowering.variable_symbols {
             symbols.insert(*id, SmtSymbolInfo::Variable { name: name.clone() });
@@ -1121,7 +1132,7 @@ impl BehaviorEmitter<'_> {
             state_name: "st",
             ctx: self.ctx,
         };
-        emit_sem_expr(&graph, lowering.root, &resolver).or_else(|| {
+        emit_sem_expr(&graph, root, &resolver).or_else(|| {
             self.failed.set(true);
             None
         })
@@ -1357,7 +1368,8 @@ fn build_smt_behavior<'a>(
         failed: Default::default(),
         writes_pc: Default::default(),
     };
-    let body = sem_expr_state::compile_to_state(&instruction.behavior, "st", &emitter);
+    let behavior = instruction.behavior.expand_loops(&numeric_params);
+    let body = sem_expr_state::compile_to_state(&behavior, "st", &emitter);
     if emitter.failed.get() {
         None
     } else {

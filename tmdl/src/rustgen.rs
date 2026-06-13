@@ -1781,6 +1781,7 @@ fn collect_behavior_assignments<'a>(expr: &'a ast::Expr, out: &mut Vec<(String, 
         }
         // Only the no-trap path defines values; handler writes are trap state.
         ast::Expr::Try(t) => collect_behavior_assignments(&t.body, out),
+        ast::Expr::For(f) => collect_behavior_assignments(&f.body, out),
         _ => {}
     }
 }
@@ -1837,6 +1838,7 @@ fn find_store_effect_expr(expr: &ast::Expr) -> Option<&ast::Expr> {
         ast::Expr::Call(_) if is_store_call(expr) => Some(expr),
         ast::Expr::Block(b) => b.stmts.iter().find_map(find_store_effect_expr),
         ast::Expr::Try(t) => find_store_effect_expr(&t.body),
+        ast::Expr::For(f) => find_store_effect_expr(&f.body),
         _ => None,
     }
 }
@@ -2063,6 +2065,8 @@ fn pc_writes(e: &ast::Expr) -> (bool, bool) {
         // Control-flow kind reflects the no-trap path; handler PC writes are
         // trap entries, not branches.
         ast::Expr::Try(t) => pc_writes(&t.body),
+        // A loop may run zero times, so it never *always* writes PC.
+        ast::Expr::For(f) => (false, pc_writes(&f.body).1),
         _ => (false, false),
     }
 }
@@ -2186,6 +2190,7 @@ fn emit_behavior_exec(
                         | ast::Expr::Block(_)
                         | ast::Expr::If(_)
                         | ast::Expr::Try(_)
+                        | ast::Expr::For(_)
                 ) || is_store_call(stmt)
                     || is_trap_call(stmt)
                 {
@@ -2193,6 +2198,36 @@ fn emit_behavior_exec(
                 }
             }
             Some(quote! { #(#steps)* })
+        }
+        ast::Expr::For(f) => {
+            // An accumulator loop writes its folded value to `dest`; the value
+            // lowers to a `Loop` node the runtime interpreter executes (so even
+            // symbolic bounds work). Other loop shapes unroll for constant bounds.
+            if let Some((dest, _)) = f.accumulator() {
+                emit_assignment_exec(
+                    dest,
+                    expr,
+                    ops,
+                    numeric_params,
+                    isa_param_values,
+                    mnemonic_lit,
+                    register_index_map,
+                )
+            } else {
+                let mut consts = numeric_params.clone();
+                for (k, v) in isa_param_values {
+                    consts.entry(k.clone()).or_insert(*v);
+                }
+                let block = ast::unroll_for(f, &consts)?;
+                emit_behavior_exec(
+                    &block,
+                    ops,
+                    numeric_params,
+                    isa_param_values,
+                    mnemonic_lit,
+                    register_index_map,
+                )
+            }
         }
         ast::Expr::If(i) => {
             let cond_eval = emit_value_eval(
@@ -2573,6 +2608,9 @@ fn emit_expr_kind_ts(kind: &tir::sem_expr::ExprKind) -> proc_macro2::TokenStream
         ExprKind::Log2Ceil => quote! { tir::sem_expr::ExprKind::Log2Ceil },
         ExprKind::Sqrt => quote! { tir::sem_expr::ExprKind::Sqrt },
         ExprKind::Fma => quote! { tir::sem_expr::ExprKind::Fma },
+        ExprKind::Loop => quote! { tir::sem_expr::ExprKind::Loop },
+        ExprKind::IndVar => quote! { tir::sem_expr::ExprKind::IndVar },
+        ExprKind::Acc => quote! { tir::sem_expr::ExprKind::Acc },
     }
 }
 

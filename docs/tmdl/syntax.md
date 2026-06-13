@@ -49,6 +49,27 @@ Blocks and if‑expressions are supported for richer constructs:
 if cond { { ... } } else { { ... } }
 ```
 
+`for` loops repeat a block over a half‑open integer range, binding the loop
+variable to each value:
+
+```
+for i in 0..n {
+  rd = rd + i;
+}
+```
+
+A loop whose body is a single accumulating assignment (`dest = step`, where
+`step` may read `dest` and the loop variable) lowers to a first‑class `Loop`
+node in the semantic‑expression graph: a fold of `step` over the range, with
+`dest` as the accumulator. The interpreter evaluates it natively, so the bounds
+may be symbolic (depend on operands). Backends without native iteration — the
+SMT backend — unroll it, which requires the bounds to be compile‑time constants
+(literals, ISA/instruction parameters such as `self.XLEN`, or arithmetic over
+them); a symbolic‑bound loop is reported as unsupported there.
+
+Other loop shapes (multiple statements, memory effects) are not folds; they are
+unrolled at compile time and therefore require constant bounds.
+
 ## Top‑Level Items
 
 TMDL files contain a sequence of items in any order:
