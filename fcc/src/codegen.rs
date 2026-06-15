@@ -14,6 +14,9 @@ use tir::ptr::{PtrType, ops as p};
 use tir::{Context, IRBuilder, Operand, Operation, TypeId, ValueId};
 
 use crate::ast::*;
+use crate::diagnostics::{
+    Diagnostic, EmptyTranslationUnit, UndeclaredIdentifier, UnsupportedConstruct,
+};
 
 /// A local variable: the pointer to its stack slot and the slot's element type.
 #[derive(Clone, Copy)]
@@ -34,17 +37,27 @@ struct FnCodegen<'a> {
 }
 
 /// Lower a translation unit into a `builtin.module` in `context`.
-pub fn codegen(context: &Context, ast: &Ast) -> Result<ModuleOp, String> {
+pub fn codegen(context: &Context, ast: &Ast) -> Result<ModuleOp, Diagnostic> {
     let module = b::module(context, None).build();
     let mut module_builder = IRBuilder::new(module.body());
 
-    let root = ast.root().ok_or("empty translation unit")?;
+    let root = ast.root().ok_or_else(EmptyTranslationUnit::new)?;
     for func in ast.children(root) {
         let func_op = lower_function(context, ast, func)?;
         module_builder.insert(func_op);
     }
     module_builder.insert(b::module_end(context).build());
     Ok(module)
+}
+
+/// Use of a name with no declaration in scope, spanned at the offending node.
+fn undeclared(ast: &Ast, node: NodeId, name: &str) -> Diagnostic {
+    UndeclaredIdentifier::new(ast.get_node(node).span, name).into()
+}
+
+/// A construct the parser accepts but codegen does not lower yet.
+fn unsupported(ast: &Ast, node: NodeId, what: String) -> Diagnostic {
+    UnsupportedConstruct::new(ast.get_node(node).span, what).into()
 }
 
 fn lower_ctype(context: &Context, ty: &CType) -> TypeId {
@@ -54,7 +67,11 @@ fn lower_ctype(context: &Context, ty: &CType) -> TypeId {
     }
 }
 
-fn lower_function(context: &Context, ast: &Ast, func: NodeId) -> Result<impl Operation, String> {
+fn lower_function(
+    context: &Context,
+    ast: &Ast,
+    func: NodeId,
+) -> Result<impl Operation, Diagnostic> {
     let AstLeaf::Function { name, ret } = ast.get_leaf_data(func).unwrap() else {
         unreachable!("function node carries a function payload");
     };
@@ -65,7 +82,7 @@ fn lower_function(context: &Context, ast: &Ast, func: NodeId) -> Result<impl Ope
     let mut param_values = Vec::new();
     for param in ast
         .children(func)
-        .take_while(|&c| matches!(ast.get_node(c), AstKind::Param))
+        .take_while(|&c| matches!(ast.get_node(c).kind, AstKind::Param))
     {
         let AstLeaf::Param { ty, .. } = ast.get_leaf_data(param).unwrap() else {
             unreachable!("param node carries a param payload");
@@ -105,13 +122,13 @@ impl FnCodegen<'_> {
     /// Lower a function: spill parameters into stack slots, then lower each body
     /// statement in source order (statement order is a side-effect ordering, so it
     /// stays top-down; only the expressions within use the post-order iterator).
-    fn lower_body(&mut self, func: NodeId, param_ids: &[ValueId]) -> Result<(), String> {
+    fn lower_body(&mut self, func: NodeId, param_ids: &[ValueId]) -> Result<(), Diagnostic> {
         let ast = self.ast;
 
         let mut idx = 0;
         for param in ast
             .children(func)
-            .take_while(|&c| matches!(ast.get_node(c), AstKind::Param))
+            .take_while(|&c| matches!(ast.get_node(c).kind, AstKind::Param))
         {
             let AstLeaf::Param { name, ty } = ast.get_leaf_data(param).unwrap() else {
                 unreachable!("param node carries a param payload");
@@ -131,9 +148,9 @@ impl FnCodegen<'_> {
         Ok(())
     }
 
-    fn lower_stmt(&mut self, stmt: NodeId) -> Result<(), String> {
+    fn lower_stmt(&mut self, stmt: NodeId) -> Result<(), Diagnostic> {
         let ast = self.ast;
-        match ast.get_node(stmt) {
+        match ast.get_node(stmt).kind {
             AstKind::Decl => {
                 let AstLeaf::Decl { name, ty } = ast.get_leaf_data(stmt).unwrap() else {
                     unreachable!("decl node carries a decl payload");
@@ -155,7 +172,7 @@ impl FnCodegen<'_> {
                 let slot = *self
                     .locals
                     .get(name)
-                    .ok_or_else(|| format!("assignment to unknown variable '{name}'"))?;
+                    .ok_or_else(|| undeclared(ast, stmt, name))?;
                 let value = ast.children(stmt).next().unwrap();
                 let v = self.lower_expr(value)?;
                 self.builder
@@ -173,9 +190,7 @@ impl FnCodegen<'_> {
             }
             // Control flow and expression statements are parsed but not yet
             // lowered; codegen for them is stubbed out for now.
-            kind => Err(format!(
-                "codegen not yet implemented for statement {kind:?}"
-            )),
+            kind => Err(unsupported(ast, stmt, format!("statement {kind:?}"))),
         }
     }
 
@@ -184,7 +199,7 @@ impl FnCodegen<'_> {
     /// AST is a tree, so the subtree is a contiguous index range `[base, root]`;
     /// values are pushed in index order, letting children be read by offset
     /// without hashing.
-    fn lower_expr(&mut self, root: NodeId) -> Result<ValueId, String> {
+    fn lower_expr(&mut self, root: NodeId) -> Result<ValueId, Diagnostic> {
         let ast = self.ast;
         let i32_ty = IntegerType::new(self.context, 32);
         self.values.clear();
@@ -200,7 +215,7 @@ impl FnCodegen<'_> {
                 "subtree not contiguous"
             );
 
-            let value = match ast.get_node(node) {
+            let value = match ast.get_node(node).kind {
                 AstKind::Int => {
                     let AstLeaf::Int(n) = ast.get_leaf_data(node).unwrap() else {
                         unreachable!("int node carries an int payload");
@@ -216,13 +231,12 @@ impl FnCodegen<'_> {
                     let slot = *self
                         .locals
                         .get(name)
-                        .ok_or_else(|| format!("use of unknown variable '{name}'"))?;
+                        .ok_or_else(|| undeclared(ast, node, name))?;
                     self.builder
                         .insert(p::load(self.context, slot.ptr, slot.elem).build())
                         .result()
                 }
                 kind @ (AstKind::Add | AstKind::Sub | AstKind::Mul) => {
-                    let kind = *kind;
                     let mut children = ast.children(node);
                     let l = self.values[children.next().unwrap().index() - base];
                     let r = self.values[children.next().unwrap().index() - base];
@@ -244,9 +258,7 @@ impl FnCodegen<'_> {
                 // The richer operators (division, comparison, logical, unary,
                 // calls) are parsed but not yet lowered; stub them out for now.
                 kind => {
-                    return Err(format!(
-                        "codegen not yet implemented for expression {kind:?}"
-                    ));
+                    return Err(unsupported(ast, node, format!("expression {kind:?}")));
                 }
             };
             self.values.push(value);
