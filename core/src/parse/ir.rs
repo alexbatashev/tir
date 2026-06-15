@@ -3,14 +3,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::block::BlockId;
-use crate::value::{Value, ValueId};
+use crate::value::Value;
 use crate::{Block, Context, Error, Operation, Region};
 
 use super::common::{Cursor, Span};
 use super::text::Parser as TextParser;
 
 type ParseResult<T> = Result<T, (Span, Error)>;
-type BlockLabel = (u32, Vec<Value>);
+type BlockLabel = (u32, Vec<(String, crate::TypeId)>);
 
 pub fn parse_ir<T: Operation>(context: &Context, src: &str) -> Result<T, (Span, Error)> {
     let mut parser = TextParser::new(src);
@@ -37,12 +37,17 @@ pub(crate) fn parse_single_op<'src>(
 ) -> Result<Box<dyn Operation>, (Span, Error)> {
     parser.skip_trivia();
 
-    // Optional SSA result assignment prefix (e.g. "%2 =").
-    // The concrete ValueId is currently allocated by builders from context state.
+    // Optional SSA result assignment prefix (e.g. "%2 ="). The builder allocates the
+    // concrete ValueId; we bind the textual name to it once the op exists so later
+    // operands resolve by name rather than by a literal id.
     let mark = parser.pos();
-    if parser.parse_value_ref().is_some() && !parser.parse_token("=") {
-        parser.set_pos(mark);
-    }
+    let result_name = match parser.parse_value_ref() {
+        Some(name) if parser.parse_token("=") => Some(name.to_string()),
+        _ => {
+            parser.set_pos(mark);
+            None
+        }
+    };
 
     if let Some(name) = parser.parse_ident() {
         let (dialect, name) = if parser.parse_token(".") {
@@ -60,29 +65,15 @@ pub(crate) fn parse_single_op<'src>(
             .get_parser(dialect, name)
             .map_err(|e| (parser.span(), e))?;
 
-        op_parser(parser, context)
+        let op = op_parser(parser, context)?;
+        if let Some(name) = result_name
+            && let Some(result) = context.get_op(op.id()).results.first()
+        {
+            parser.define_value(&name, *result);
+        }
+        Ok(op)
     } else {
         Err((parser.span(), Error::ExpectedOpName))
-    }
-}
-
-/// Maps value names (e.g. "0", "1", "arg") to ValueIds during parsing.
-#[derive(Default, Clone)]
-pub struct ValueScope {
-    values: HashMap<String, ValueId>,
-}
-
-impl ValueScope {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn insert(&mut self, name: String, id: ValueId) {
-        self.values.insert(name, id);
-    }
-
-    pub fn get(&self, name: &str) -> Option<ValueId> {
-        self.values.get(name).copied()
     }
 }
 
@@ -202,7 +193,7 @@ impl<'src> TextParser<'src> {
     fn parse_block_argument_list(
         &mut self,
         context: &Context,
-    ) -> Result<Vec<Value>, (Span, Error)> {
+    ) -> Result<Vec<(String, crate::TypeId)>, (Span, Error)> {
         let mut args = vec![];
 
         loop {
@@ -210,9 +201,10 @@ impl<'src> TextParser<'src> {
                 return Ok(args);
             }
 
-            let _val_name = self
+            let name = self
                 .parse_value_ref()
-                .ok_or_else(|| (self.span(), Error::ExpectedValueRef))?;
+                .ok_or_else(|| (self.span(), Error::ExpectedValueRef))?
+                .to_string();
 
             if !self.parse_token(":") {
                 return Err((self.span(), Error::ExpectedToken(":")));
@@ -221,7 +213,7 @@ impl<'src> TextParser<'src> {
             let ty = self
                 .parse_type(context)?
                 .ok_or_else(|| (self.span(), Error::ExpectedType))?;
-            args.push(context.create_value(ty, None));
+            args.push((name, ty));
 
             if self.parse_token(")") {
                 return Ok(args);
@@ -237,22 +229,27 @@ impl<'src> TextParser<'src> {
         context: &Context,
         region: &Arc<Region>,
         index: u32,
-        block_args: Vec<Value>,
+        named_args: Vec<(String, crate::TypeId)>,
     ) -> Result<Arc<Block>, (Span, Error)> {
-        let state = self
+        let existing = self
             .region_parse
-            .as_mut()
-            .expect("block labels require an active region parse scope");
+            .as_ref()
+            .and_then(|s| s.indices.get(&index).copied());
 
-        if let Some(id) = state.indices.get(&index) {
-            let block = context.get_block(*id);
-            if !block_args.is_empty() && block.arguments().is_empty() {
+        // A forward branch may have already created the block from the successor's
+        // type list; bind the label's names to those existing arguments.
+        if let Some(id) = existing {
+            let block = context.get_block(id);
+            if !named_args.is_empty() && block.arguments().is_empty() {
                 return Err((
                     self.span(),
                     Error::VerificationError(format!(
                         "block ^bb{index} was already referenced without arguments"
                     )),
                 ));
+            }
+            for ((name, _), arg) in named_args.iter().zip(block.arguments()) {
+                self.define_value(name, arg.id());
             }
             return Ok(block);
         }
@@ -265,9 +262,20 @@ impl<'src> TextParser<'src> {
             ));
         }
 
+        let block_args: Vec<Value> = named_args
+            .iter()
+            .map(|(_, ty)| context.create_value(*ty, None))
+            .collect();
+        for ((name, _), arg) in named_args.iter().zip(&block_args) {
+            self.define_value(name, arg.id());
+        }
         let block = context.create_block(block_args);
         region.add_block(block.id());
-        state.indices.insert(index, block.id());
+        self.region_parse
+            .as_mut()
+            .expect("block labels require an active region parse scope")
+            .indices
+            .insert(index, block.id());
         Ok(block)
     }
 }
