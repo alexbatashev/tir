@@ -239,10 +239,14 @@ fn parse_riscv_isa_string(march: &str) -> Result<TargetConfig, String> {
                 enable(Feature::Zmmul);
                 skip_extension_version(&mut chars);
             }
+            'v' => {
+                enable(Feature::RVV);
+                skip_extension_version(&mut chars);
+            }
             // Standard single-letter extensions TMDL does not model yet are
             // accepted so common GNU march strings (e.g. rv64gc) keep working;
             // they contribute no instructions.
-            'a' | 'f' | 'd' | 'q' | 'l' | 'c' | 'b' | 'j' | 't' | 'p' | 'v' | 'h' => {
+            'a' | 'f' | 'd' | 'q' | 'l' | 'c' | 'b' | 'j' | 't' | 'p' | 'h' => {
                 skip_extension_version(&mut chars);
             }
             'z' | 's' | 'x' => {
@@ -443,6 +447,12 @@ dialect! {
             // M extension (Zmmul subset)
             MulOp,
             MulHOp,
+            // V extension (vector-vector arithmetic)
+            VAddOp,
+            VSubOp,
+            VMulOp,
+            VSetVliOp,
+            VSetIVliOp,
             // Zicsr
             CSRReadWriteOp,
             CSRReadSetOp,
@@ -737,6 +747,7 @@ fn create_isel_pass_for(
     features: &[Feature],
 ) -> tir_be_common::isel::InstructionSelectPass {
     tir_be_common::isel::InstructionSelectPass::new(get_isel_rules(context, features))
+        .with_register_definers(get_register_definers(context, features))
         .with_op_lowering(lower_func_and_return_to_asm_symbol)
         .with_op_lowering(lower_branches)
         .with_op_lowering(lower_calls)
@@ -2315,7 +2326,13 @@ mod target_parser_tests {
         // Bare architecture names select the generic, everything-on profile.
         assert_eq!(
             features("riscv64", None),
-            vec![Feature::RV64I, Feature::Zmmul, Feature::RVM, Feature::Zicsr]
+            vec![
+                Feature::RV64I,
+                Feature::Zmmul,
+                Feature::RVM,
+                Feature::Zicsr,
+                Feature::RVV
+            ]
         );
         assert!(!features("riscv32", None).contains(&Feature::RV64I));
     }
@@ -2359,13 +2376,15 @@ mod target_parser_tests {
             crate::isa_params(&[Feature::RV64I, Feature::RVM]),
             vec![("XLEN", 64)]
         );
+        // VR is dynamically sized (width = vlenb, an architectural runtime value),
+        // so it carries no static width here; its size is supplied by the machine.
         assert_eq!(
             crate::register_widths(&[Feature::RV32I]),
-            vec![("PC", 32), ("GPR", 32), ("CSR", 32)]
+            vec![("PC", 32), ("GPR", 32), ("CSR", 32), ("VCSR", 32)]
         );
         assert_eq!(
             crate::register_widths(&[Feature::RV64I]),
-            vec![("PC", 64), ("GPR", 64), ("CSR", 64)]
+            vec![("PC", 64), ("GPR", 64), ("CSR", 64), ("VCSR", 64)]
         );
         // Extensions alone resolve nothing; the base supplies XLEN.
         assert_eq!(crate::isa_params(&[Feature::RVM]), vec![]);

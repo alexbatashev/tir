@@ -1004,6 +1004,11 @@ fn emit_sem_expr(
         // Loops are eliminated by `unroll_loops` before emission; a surviving one
         // has symbolic bounds, which SMT-LIB cannot express, so it is unsupported.
         ExprKind::Loop | ExprKind::IndVar | ExprKind::Acc => None,
+        // Vector values have no scalar SMT-LIB encoding, so a vector map or lane
+        // read is unsupported by the bit-vector backend.
+        ExprKind::VectorMap | ExprKind::Lane => None,
+        ExprKind::Map | ExprKind::Zip | ExprKind::IterConcat => None,
+        ExprKind::Split | ExprKind::Reduce | ExprKind::Arg => None,
     }
 }
 
@@ -1072,6 +1077,7 @@ fn collect_mem_ops<'a>(e: &'a ast::Expr, out: &mut Vec<MemOp<'a>>) -> Option<()>
             collect_mem_ops(&f.end, out)?;
             collect_mem_ops(&f.body, out)?;
         }
+        ast::Expr::Lambda(l) => collect_mem_ops(&l.body, out)?,
         ast::Expr::Try(_)
         | ast::Expr::Ident(_)
         | ast::Expr::Path(_)

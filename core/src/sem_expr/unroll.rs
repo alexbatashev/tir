@@ -86,6 +86,21 @@ fn rebuild(
                 _ => copy_subtree(graph, node, out, &mut HashMap::new()),
             }
         }
+        // A `VectorMap` is a map, not a scalar fold: there is no vector-literal
+        // node to unroll it into, so keep it (and its `IndVar`/`Lane` children)
+        // verbatim. The interpreter evaluates it natively; backends that cannot
+        // iterate detect and reject it just like a symbolic loop.
+        // The functional iterator nodes evaluate a lambda body per element with a
+        // fresh per-element binding (read via `Arg`), like `VectorMap`'s per-lane
+        // `elem`. There is no scalar form to unroll them into, so keep them (and
+        // their bodies) verbatim; backends that cannot iterate detect and reject
+        // them.
+        ExprKind::VectorMap
+        | ExprKind::Map
+        | ExprKind::Zip
+        | ExprKind::IterConcat
+        | ExprKind::Split
+        | ExprKind::Reduce => copy_subtree(graph, node, out, &mut HashMap::new()),
         _ if children.is_empty() => {
             let new = out.add_node(kind);
             if let Some(data) = graph.get_leaf_data(node) {
@@ -181,7 +196,7 @@ mod tests {
     fn as_i64(v: Value) -> i64 {
         match v {
             Value::Int(i) => i.to_i64(),
-            Value::Float(_) => panic!(),
+            _ => panic!(),
         }
     }
 

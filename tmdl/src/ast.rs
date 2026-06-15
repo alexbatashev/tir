@@ -481,15 +481,43 @@ pub enum BuiltinFunction {
     ZExt,
     Load,
     Store,
+    /// `lane(vector, index)`: read one lane of a vector value. Used inside a
+    /// value-producing `for` loop to express elementwise vector behavior.
+    Lane,
     /// `trap(cause)`: raise a synchronous exception (e.g. ecall/ebreak). An
     /// effect-only builtin handled directly by codegen; it produces no value.
     Trap,
+    /// `split(bits, n)`: cut a bit value into `n` equal-width lanes (an iterator),
+    /// lane 0 from the low bits.
+    Split,
+    /// `concat(iter)`: join an iterator's lanes into one bit value, lane 0 in the
+    /// low bits. The inverse of `split`.
+    Concat,
+    /// `map(iter, |x| ...)`: apply a lambda to each lane of an iterator.
+    Map,
+    /// `reduce(iter, |acc, x| ...)`: left-fold a binary lambda over an iterator's
+    /// lanes (e.g. a horizontal add).
+    Reduce,
+    /// `zip(a, b)`: pair two iterators lane-wise so a `map` lambda can read both
+    /// sides as separate parameters.
+    Zip,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct Call {
     pub callee: Box<Expr>,
     pub arguments: Vec<Expr>,
+    #[serde(skip_serializing)]
+    pub span: Span,
+}
+
+/// A Rust-style anonymous function `|params| body`. Only valid as an argument to
+/// the `map`/`reduce` builtins; the lowering inlines its body, binding each
+/// parameter to the corresponding lambda argument.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub struct Lambda {
+    pub params: Vec<String>,
+    pub body: Box<Expr>,
     #[serde(skip_serializing)]
     pub span: Span,
 }
@@ -528,6 +556,7 @@ pub enum Expr {
     Slice(Slice),
     Try(TryExcept),
     BuiltinFunction(BuiltinFunction),
+    Lambda(Lambda),
     Invalid,
 }
 
@@ -615,6 +644,12 @@ fn subst_ident(expr: &mut Expr, var: &str, value: i64) {
                 subst_ident(&mut h.body, var, value);
             }
         }
+        Expr::Lambda(l) => {
+            // A parameter sharing the substituted name shadows it inside the body.
+            if !l.params.iter().any(|p| p == var) {
+                subst_ident(&mut l.body, var, value);
+            }
+        }
     }
 }
 
@@ -663,6 +698,30 @@ impl For {
         }
     }
 
+    /// If the body is a single value-producing expression (not an assignment),
+    /// the loop is a vector map: `elem` is that per-lane expression. This is the
+    /// counterpart of `accumulator`, lowering to a first-class `VectorMap` node.
+    pub(crate) fn map_elem(&self) -> Option<&Expr> {
+        let body = match &*self.body {
+            Expr::Block(b) if b.stmts.len() == 1 => &b.stmts[0],
+            other => other,
+        };
+        match body {
+            Expr::Assign(_) | Expr::Invalid => None,
+            // Effect-only statements (a bare `store`/`trap`) produce no lane value,
+            // so they are unrolled as statements rather than mapped.
+            Expr::Call(c)
+                if matches!(
+                    &*c.callee,
+                    Expr::BuiltinFunction(BuiltinFunction::Store | BuiltinFunction::Trap)
+                ) =>
+            {
+                None
+            }
+            elem => Some(elem),
+        }
+    }
+
     fn as_sema_expr<
         G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
     >(
@@ -670,8 +729,38 @@ impl For {
         ctx: &mut SemaExprLoweringCtx<'_, G>,
     ) -> tir::graph::NodeId {
         let Some((dest, step)) = self.accumulator() else {
-            // Non-accumulator loops are not first-class values: unroll constant
-            // bounds, otherwise the lowering cannot represent them.
+            // A value-producing loop is a vector map: `elem` lowered once with the
+            // loop variable bound to the induction value, building a `VectorMap`
+            // whose lane count is the (zero-based) range length.
+            if let Some(elem) = self.map_elem() {
+                // The lane count must be a compile-time constant so the lowered
+                // pattern carries a concrete vector width that instruction
+                // selection can match. The induction value ranges `0..count`, so
+                // the loop must start at zero for `IndVar` to equal the loop
+                // variable; otherwise fall back to lowering the bound expression.
+                let mut consts = ctx.params.clone();
+                for (name, value) in &ctx.isa_consts {
+                    consts.entry(name.clone()).or_insert(*value);
+                }
+                let count = match (
+                    eval_const_int(&self.start, &consts),
+                    eval_const_int(&self.end, &consts),
+                ) {
+                    (Some(0), Some(end)) if end >= 0 => {
+                        ctx.add_int_const(tir::utils::APInt::new(32, end as u64))
+                    }
+                    _ => self.end.lower_with_ctx(ctx),
+                };
+                let prev = ctx.loop_ctx.take();
+                // A non-matching dest (Invalid) means `Acc` is never produced; only
+                // the loop variable maps to the induction value.
+                ctx.loop_ctx = Some((self.var.clone(), Expr::Invalid));
+                let elem_node = elem.lower_with_ctx(ctx);
+                ctx.loop_ctx = prev;
+                return ctx.add_node(tir::sem_expr::ExprKind::VectorMap, &[count, elem_node]);
+            }
+            // Non-accumulator statement loops are not first-class values: unroll
+            // constant bounds, otherwise the lowering cannot represent them.
             return match unroll_for(self, ctx.params) {
                 Some(block) => block.lower_with_ctx(ctx),
                 None => {
@@ -716,9 +805,11 @@ fn expand_loops_inplace(expr: &mut Expr, consts: &HashMap<String, i64>) {
             expand_loops_inplace(&mut f.start, consts);
             expand_loops_inplace(&mut f.end, consts);
             expand_loops_inplace(&mut f.body, consts);
-            // Accumulator loops lower to a first-class `Loop` node, so leave them
-            // intact; only non-accumulator loops are unrolled here.
+            // Accumulator loops lower to a `Loop` node and value-producing loops to
+            // a `VectorMap`, so leave both intact; only statement loops are
+            // unrolled here.
             if f.accumulator().is_none()
+                && f.map_elem().is_none()
                 && let Some(block) = unroll_for(f, consts)
             {
                 *expr = block;
@@ -765,6 +856,7 @@ fn expand_loops_inplace(expr: &mut Expr, consts: &HashMap<String, i64>) {
                 expand_loops_inplace(&mut h.body, consts);
             }
         }
+        Expr::Lambda(l) => expand_loops_inplace(&mut l.body, consts),
     }
 }
 
@@ -785,6 +877,11 @@ struct SemaExprLoweringCtx<
     /// still be lowered to a stable `(class, index)` slot. When absent, only PC and
     /// numbered registers (whose index is in the name, e.g. `x5`) can be resolved.
     register_indices: Option<&'a HashMap<(String, String), u32>>,
+    /// ISA parameter values (e.g. `VLEN`, `SEW`), used only to const-evaluate a
+    /// vector map's lane count. They are deliberately not consulted for general
+    /// `self.PARAM` lowering, which keeps target-dependent params like `XLEN`
+    /// symbolic in patterns.
+    isa_consts: HashMap<String, i64>,
     next_symbol_id: u32,
     register_symbols: HashMap<(String, u32), u32>,
     variable_symbols: HashMap<String, u32>,
@@ -793,6 +890,10 @@ struct SemaExprLoweringCtx<
     /// References to `dest` lower to the loop accumulator and references to the
     /// induction variable to the loop counter, so the body becomes a `Loop` node.
     loop_ctx: Option<(String, Expr)>,
+    /// Stack of `map`/`reduce` lambda parameter names, innermost last. An `Ident`
+    /// matching a parameter of the innermost lambda lowers to an `Arg` node whose
+    /// index is the parameter's position.
+    lambda_params: Vec<Vec<String>>,
 }
 
 impl<'a, G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>>
@@ -803,11 +904,13 @@ impl<'a, G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_e
             graph,
             params,
             register_indices: None,
+            isa_consts: HashMap::new(),
             next_symbol_id: 0,
             register_symbols: HashMap::new(),
             variable_symbols: HashMap::new(),
             had_error: false,
             loop_ctx: None,
+            lambda_params: Vec::new(),
         }
     }
 
@@ -820,11 +923,13 @@ impl<'a, G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_e
             graph,
             params,
             register_indices: Some(register_indices),
+            isa_consts: HashMap::new(),
             next_symbol_id: 0,
             register_symbols: HashMap::new(),
             variable_symbols: HashMap::new(),
             had_error: false,
             loop_ctx: None,
+            lambda_params: Vec::new(),
         }
     }
 
@@ -884,6 +989,20 @@ impl<'a, G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_e
         let id = self.alloc_variable_symbol();
         self.register_symbols.insert((class, number), id);
         id
+    }
+
+    /// Lower a `map`/`reduce` lambda's body, binding its parameters so that
+    /// references to them become `Arg` nodes. Non-lambda arguments are an error
+    /// (caught by the type checker); lowering them directly keeps the graph valid.
+    fn lower_lambda_body(&mut self, arg: &Expr) -> tir::graph::NodeId {
+        let Expr::Lambda(lambda) = arg else {
+            self.had_error = true;
+            return arg.lower_with_ctx(self);
+        };
+        self.lambda_params.push(lambda.params.clone());
+        let body = lambda.body.lower_with_ctx(self);
+        self.lambda_params.pop();
+        body
     }
 
     fn build_extract(
@@ -1002,6 +1121,17 @@ impl Expr {
             2 => return ctx.graph.add_node(tir::sem_expr::ExprKind::IndVar),
             _ => {}
         }
+        // Inside a `map`/`reduce` lambda, a reference to one of its parameters
+        // lowers to an `Arg` leaf carrying the parameter's position.
+        if let Expr::Ident(id) = self
+            && let Some(params) = ctx.lambda_params.last()
+            && let Some(idx) = params.iter().position(|p| p == &id.name)
+        {
+            return ctx.add_leaf(
+                tir::sem_expr::ExprKind::Arg,
+                tir::sem_expr::ExprPayload::Int(tir::utils::APInt::new(32, idx as u64)),
+            );
+        }
         match self {
             Expr::Assign(x) => x.as_sema_expr(ctx),
             Expr::Binary(x) => x.as_sema_expr(ctx),
@@ -1020,6 +1150,9 @@ impl Expr {
             // backend gives the handlers meaning.
             Expr::Try(x) => x.body.lower_with_ctx(ctx),
             Expr::BuiltinFunction(_) => panic!("builtin functions must be called"),
+            // Lambdas are lowered by the `map`/`reduce` builtins that consume them,
+            // which push their parameters and lower the body directly.
+            Expr::Lambda(_) => panic!("lambda only valid as a map/reduce argument"),
             Expr::Invalid => panic!("cannot convert invalid expression"),
         }
     }
@@ -1058,6 +1191,32 @@ impl Expr {
         params: &HashMap<String, i64>,
     ) -> Option<SemaLowering> {
         let mut ctx = SemaExprLoweringCtx::new(g, params);
+        let root = self.lower_with_ctx(&mut ctx);
+        if ctx.had_error {
+            return None;
+        }
+        Some(SemaLowering {
+            root,
+            variable_symbols: ctx.variable_symbols,
+            register_symbols: ctx.register_symbols,
+        })
+    }
+
+    /// Like [`Expr::lower_to_sema`], but supplies ISA parameter values used to
+    /// const-evaluate a vector map's lane count, so the lowered pattern carries a
+    /// concrete width that instruction selection can match.
+    pub fn lower_to_sema_with_isa(
+        &self,
+        g: &mut impl tir::graph::MutDag<
+            Node = tir::sem_expr::ExprKind,
+            Leaf = tir::sem_expr::ExprPayload,
+        >,
+        params: &HashMap<String, i64>,
+        isa_consts: &HashMap<String, i64>,
+        register_indices: &HashMap<(String, String), u32>,
+    ) -> Option<SemaLowering> {
+        let mut ctx = SemaExprLoweringCtx::new_with_registers(g, params, register_indices);
+        ctx.isa_consts = isa_consts.clone();
         let root = self.lower_with_ctx(&mut ctx);
         if ctx.had_error {
             return None;
@@ -1413,6 +1572,12 @@ impl Call {
                 let input = self.arguments[0].lower_with_ctx(ctx);
                 ctx.add_node(tir::sem_expr::ExprKind::Log2Ceil, &[input])
             }
+            BuiltinFunction::Lane => {
+                assert!(self.arguments.len() == 2, "lane requires 2 arguments");
+                let vector = self.arguments[0].lower_with_ctx(ctx);
+                let index = self.arguments[1].lower_with_ctx(ctx);
+                ctx.add_node(tir::sem_expr::ExprKind::Lane, &[vector, index])
+            }
             BuiltinFunction::SExt => {
                 assert!(self.arguments.len() == 2, "sext requires 2 arguments");
                 let input = self.arguments[0].lower_with_ctx(ctx);
@@ -1452,6 +1617,35 @@ impl Call {
             BuiltinFunction::Trap => {
                 ctx.had_error = true;
                 ctx.add_int_const(tir::utils::APInt::new(64, 0))
+            }
+            BuiltinFunction::Split => {
+                assert!(self.arguments.len() == 2, "split requires 2 arguments");
+                let bits = self.arguments[0].lower_with_ctx(ctx);
+                let n = self.arguments[1].lower_with_ctx(ctx);
+                ctx.add_node(tir::sem_expr::ExprKind::Split, &[bits, n])
+            }
+            BuiltinFunction::Concat => {
+                assert!(self.arguments.len() == 1, "concat requires 1 argument");
+                let iter = self.arguments[0].lower_with_ctx(ctx);
+                ctx.add_node(tir::sem_expr::ExprKind::IterConcat, &[iter])
+            }
+            BuiltinFunction::Zip => {
+                assert!(self.arguments.len() == 2, "zip requires 2 arguments");
+                let lhs = self.arguments[0].lower_with_ctx(ctx);
+                let rhs = self.arguments[1].lower_with_ctx(ctx);
+                ctx.add_node(tir::sem_expr::ExprKind::Zip, &[lhs, rhs])
+            }
+            BuiltinFunction::Map => {
+                assert!(self.arguments.len() == 2, "map requires 2 arguments");
+                let iter = self.arguments[0].lower_with_ctx(ctx);
+                let body = ctx.lower_lambda_body(&self.arguments[1]);
+                ctx.add_node(tir::sem_expr::ExprKind::Map, &[iter, body])
+            }
+            BuiltinFunction::Reduce => {
+                assert!(self.arguments.len() == 2, "reduce requires 2 arguments");
+                let iter = self.arguments[0].lower_with_ctx(ctx);
+                let body = ctx.lower_lambda_body(&self.arguments[1]);
+                ctx.add_node(tir::sem_expr::ExprKind::Reduce, &[iter, body])
             }
         }
     }

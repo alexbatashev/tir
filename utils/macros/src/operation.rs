@@ -1181,11 +1181,37 @@ fn parse_sem_expr(input: &str) -> Option<SemNode> {
 fn sem_node_to_dag_stmts(
     node: &SemNode,
     operand_symbols: &std::collections::HashMap<String, u32>,
+    lambda_params: &mut Vec<Vec<String>>,
     counter: &mut u32,
 ) -> Option<(Vec<proc_macro2::TokenStream>, proc_macro2::Ident)> {
     match node {
         SemNode::Atom(name) => {
-            if let Some(&idx) = operand_symbols.get(name) {
+            if let Some(method) = name.strip_prefix('$') {
+                // `$name` calls the op's inherent `name(&self, g)` method and
+                // splices the subexpression it builds into the graph, letting an op
+                // compute a value (e.g. its vector length) in Rust rather than in
+                // the s-expr.
+                let var = format_ident!("__sem_node_{}", *counter);
+                *counter += 1;
+                let method = format_ident!("{}", method);
+                let stmt = quote! { let #var = self.#method(g); };
+                Some((vec![stmt], var))
+            } else if let Some(idx) = lambda_params
+                .last()
+                .and_then(|ps| ps.iter().position(|p| p == name))
+            {
+                // Inside a `map`/`reduce` lambda, a parameter reference lowers to an
+                // `Arg` leaf carrying its position; only the innermost lambda's
+                // parameters are in scope.
+                let var = format_ident!("__sem_node_{}", *counter);
+                *counter += 1;
+                let idx_lit = proc_macro2::Literal::u64_unsuffixed(idx as u64);
+                let stmt = quote! {
+                    let #var = g.add_node(tir::sem_expr::ExprKind::Arg);
+                    g.set_leaf_data(#var, tir::sem_expr::ExprPayload::Int(tir::utils::APInt::new(32, #idx_lit)));
+                };
+                Some((vec![stmt], var))
+            } else if let Some(&idx) = operand_symbols.get(name) {
                 let var = format_ident!("__sem_node_{}", *counter);
                 *counter += 1;
                 let idx_lit = proc_macro2::Literal::u32_unsuffixed(idx);
@@ -1193,6 +1219,17 @@ fn sem_node_to_dag_stmts(
                     let #var = g.add_node(tir::sem_expr::ExprKind::Symbol);
                     g.set_leaf_data(#var, tir::sem_expr::ExprPayload::SymbolId(#idx_lit));
                 };
+                Some((vec![stmt], var))
+            } else if name == "acc" || name == "indvar" {
+                // The accumulator and induction value of the innermost `(loop ...)`.
+                let kind = if name == "acc" {
+                    quote! { tir::sem_expr::ExprKind::Acc }
+                } else {
+                    quote! { tir::sem_expr::ExprKind::IndVar }
+                };
+                let var = format_ident!("__sem_node_{}", *counter);
+                *counter += 1;
+                let stmt = quote! { let #var = g.add_node(#kind); };
                 Some((vec![stmt], var))
             } else if let Ok(i) = name.parse::<i64>() {
                 let var = format_ident!("__sem_node_{}", *counter);
@@ -1208,6 +1245,23 @@ fn sem_node_to_dag_stmts(
             }
         }
         SemNode::List(items) => {
+            // `(concat iter)` joins an iterator's lanes into one bit value; its
+            // single-operand shape would otherwise be mistaken for a width-changing
+            // op below, so handle it first.
+            if let [SemNode::Atom(op), arg] = items.as_slice()
+                && op == "concat"
+            {
+                let (mut stmts, arg_var) =
+                    sem_node_to_dag_stmts(arg, operand_symbols, lambda_params, counter)?;
+                let var = format_ident!("__sem_node_{}", *counter);
+                *counter += 1;
+                stmts.push(quote! {
+                    let #var = g.add_node(tir::sem_expr::ExprKind::IterConcat);
+                    g.add_edge(#var, #arg_var);
+                });
+                return Some((stmts, var));
+            }
+
             // Unary width-changing ops take the result width from the op's result
             // type (read through the context the generated body already holds), so
             // `(sext x)`/`(zext x)`/`(trunc x)` need no explicit width operand.
@@ -1218,7 +1272,8 @@ fn sem_node_to_dag_stmts(
                     "trunc" => None,
                     _ => return None,
                 };
-                let (mut stmts, arg_var) = sem_node_to_dag_stmts(arg, operand_symbols, counter)?;
+                let (mut stmts, arg_var) =
+                    sem_node_to_dag_stmts(arg, operand_symbols, lambda_params, counter)?;
                 let width_var = format_ident!("__sem_node_{}", *counter);
                 *counter += 1;
                 stmts.push(quote! {
@@ -1271,6 +1326,83 @@ fn sem_node_to_dag_stmts(
                 return Some((stmts, var));
             }
 
+            // `(loop start end init step)` lowers to the IR's first-class `Loop`
+            // node: `init` is the accumulator at entry, `step` is folded over the
+            // half-open range `[start, end)`, reading `acc`/`indvar` for the running
+            // accumulator and induction value.
+            if let [SemNode::Atom(op), start, end, init, step] = items.as_slice()
+                && op == "loop"
+            {
+                let (mut stmts, start_var) =
+                    sem_node_to_dag_stmts(start, operand_symbols, lambda_params, counter)?;
+                let (end_stmts, end_var) =
+                    sem_node_to_dag_stmts(end, operand_symbols, lambda_params, counter)?;
+                let (init_stmts, init_var) =
+                    sem_node_to_dag_stmts(init, operand_symbols, lambda_params, counter)?;
+                let (step_stmts, step_var) =
+                    sem_node_to_dag_stmts(step, operand_symbols, lambda_params, counter)?;
+                stmts.extend(end_stmts);
+                stmts.extend(init_stmts);
+                stmts.extend(step_stmts);
+                let var = format_ident!("__sem_node_{}", *counter);
+                *counter += 1;
+                stmts.push(quote! {
+                    let #var = g.add_node(tir::sem_expr::ExprKind::Loop);
+                    g.add_edge(#var, #start_var);
+                    g.add_edge(#var, #end_var);
+                    g.add_edge(#var, #init_var);
+                    g.add_edge(#var, #step_var);
+                });
+                return Some((stmts, var));
+            }
+
+            // `(map iter (lambda (x) body))` / `(reduce iter (lambda (acc x) body))`
+            // apply a lambda over an iterator's lanes. The lambda's parameters are
+            // pushed so references to them inside `body` lower to `Arg` leaves.
+            if let [SemNode::Atom(op), iter, lambda] = items.as_slice()
+                && (op == "map" || op == "reduce")
+            {
+                let SemNode::List(parts) = lambda else {
+                    return None;
+                };
+                let [SemNode::Atom(lam_kw), SemNode::List(param_nodes), body] = parts.as_slice()
+                else {
+                    return None;
+                };
+                if lam_kw != "lambda" {
+                    return None;
+                }
+                let mut params = Vec::with_capacity(param_nodes.len());
+                for p in param_nodes {
+                    let SemNode::Atom(p) = p else {
+                        return None;
+                    };
+                    params.push(p.clone());
+                }
+
+                let (mut stmts, iter_var) =
+                    sem_node_to_dag_stmts(iter, operand_symbols, lambda_params, counter)?;
+                lambda_params.push(params);
+                let body = sem_node_to_dag_stmts(body, operand_symbols, lambda_params, counter);
+                lambda_params.pop();
+                let (body_stmts, body_var) = body?;
+                stmts.extend(body_stmts);
+
+                let kind = if op == "map" {
+                    quote! { tir::sem_expr::ExprKind::Map }
+                } else {
+                    quote! { tir::sem_expr::ExprKind::Reduce }
+                };
+                let var = format_ident!("__sem_node_{}", *counter);
+                *counter += 1;
+                stmts.push(quote! {
+                    let #var = g.add_node(#kind);
+                    g.add_edge(#var, #iter_var);
+                    g.add_edge(#var, #body_var);
+                });
+                return Some((stmts, var));
+            }
+
             let [SemNode::Atom(op), lhs, rhs] = items.as_slice() else {
                 return None;
             };
@@ -1285,10 +1417,17 @@ fn sem_node_to_dag_stmts(
                 "shl" => quote! { tir::sem_expr::ExprKind::ShiftLeft },
                 "lshr" => quote! { tir::sem_expr::ExprKind::ShiftRightLogic },
                 "ashr" => quote! { tir::sem_expr::ExprKind::ShiftRightArithmetic },
+                // `(zip a b)` pairs two iterators lane-wise; `(split bits n)` cuts a
+                // bit value into `n` lanes. Both are two-child nodes like the binary
+                // arithmetic ops.
+                "zip" => quote! { tir::sem_expr::ExprKind::Zip },
+                "split" => quote! { tir::sem_expr::ExprKind::Split },
                 _ => return None,
             };
-            let (mut stmts, lhs_var) = sem_node_to_dag_stmts(lhs, operand_symbols, counter)?;
-            let (rhs_stmts, rhs_var) = sem_node_to_dag_stmts(rhs, operand_symbols, counter)?;
+            let (mut stmts, lhs_var) =
+                sem_node_to_dag_stmts(lhs, operand_symbols, lambda_params, counter)?;
+            let (rhs_stmts, rhs_var) =
+                sem_node_to_dag_stmts(rhs, operand_symbols, lambda_params, counter)?;
             stmts.extend(rhs_stmts);
             let var = format_ident!("__sem_node_{}", *counter);
             *counter += 1;
@@ -1331,7 +1470,8 @@ fn expr_as_sem_expr_body(expr: &Expr, operands: &[ValueSpec]) -> Option<proc_mac
     }
 
     let mut counter = 0u32;
-    let (stmts, root_var) = sem_node_to_dag_stmts(rhs, &symbols, &mut counter)?;
+    let mut lambda_params: Vec<Vec<String>> = Vec::new();
+    let (stmts, root_var) = sem_node_to_dag_stmts(rhs, &symbols, &mut lambda_params, &mut counter)?;
     Some(quote! {
         #(#stmts)*
         #root_var

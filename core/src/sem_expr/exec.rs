@@ -1,7 +1,7 @@
 use crate::{
     graph::{Dag, NodeId},
     sem_expr::{ExprKind, ExprPayload, Value},
-    utils::APInt,
+    utils::{APInt, RawBits},
 };
 
 /// Memory backend used by semantic expressions containing `LoadMemory` or
@@ -58,7 +58,16 @@ pub fn execute_with_memory<M: Memory>(
     let root = graph.root().expect("cannot execute empty graph");
     let mut cache = vec![None::<Value>; graph.len()];
     let mut frames: Vec<(Value, Value)> = Vec::new();
-    eval_node(graph, root, symbols, &mut cache, &mut frames, memory)
+    let mut args: Vec<Value> = Vec::new();
+    eval_node(
+        graph,
+        root,
+        symbols,
+        &mut cache,
+        &mut frames,
+        &mut args,
+        memory,
+    )
 }
 
 fn child_val(
@@ -82,6 +91,8 @@ macro_rules! as_int {
         match $v {
             Value::Int(i) => i,
             Value::Float(_) => panic!("{} requires integer operands", $op),
+            Value::Iterator(_) => panic!("{} requires scalar operands", $op),
+            Value::RawBits(_) => panic!("{} requires integer operands", $op),
         }
     };
 }
@@ -91,6 +102,8 @@ macro_rules! as_float {
         match $v {
             Value::Float(f) => f,
             Value::Int(_) => panic!("{} requires float operands", $op),
+            Value::Iterator(_) => panic!("{} requires scalar operands", $op),
+            Value::RawBits(_) => panic!("{} requires float operands", $op),
         }
     };
 }
@@ -133,14 +146,15 @@ fn eval_loop<M: Memory>(
     symbols: &[Value],
     cache: &mut Vec<Option<Value>>,
     frames: &mut Vec<(Value, Value)>,
+    args: &mut Vec<Value>,
     memory: &mut M,
 ) -> Result<Value, M::Error> {
     let children: Vec<NodeId> = graph.children(node).collect();
     let (start_n, end_n, init_n, step_n) = (children[0], children[1], children[2], children[3]);
 
-    let start = eval_node(graph, start_n, symbols, cache, frames, memory)?;
-    let end = eval_node(graph, end_n, symbols, cache, frames, memory)?;
-    let mut acc = eval_node(graph, init_n, symbols, cache, frames, memory)?;
+    let start = eval_node(graph, start_n, symbols, cache, frames, args, memory)?;
+    let end = eval_node(graph, end_n, symbols, cache, frames, args, memory)?;
+    let mut acc = eval_node(graph, init_n, symbols, cache, frames, args, memory)?;
 
     let start = as_int!(start, "loop bound").to_i64();
     let end = as_int!(end, "loop bound").to_i64();
@@ -150,11 +164,177 @@ fn eval_loop<M: Memory>(
         // `step` depends on the induction/accumulator values, which change each
         // iteration, so it cannot share the surrounding cache: evaluate it fresh.
         let mut step_cache = vec![None::<Value>; graph.len()];
-        let next = eval_node(graph, step_n, symbols, &mut step_cache, frames, memory);
+        let next = eval_node(
+            graph,
+            step_n,
+            symbols,
+            &mut step_cache,
+            frames,
+            args,
+            memory,
+        );
         frames.pop();
         acc = next?;
     }
     Ok(acc)
+}
+
+/// Evaluate a `Map` node: apply `body` to each lane of `iter`, exposing the lane
+/// (or its components, for a zipped pair) through the lambda-argument stack.
+fn eval_map<M: Memory>(
+    graph: &impl Dag<Node = ExprKind, Leaf = ExprPayload>,
+    node: NodeId,
+    symbols: &[Value],
+    cache: &mut Vec<Option<Value>>,
+    frames: &mut Vec<(Value, Value)>,
+    args: &mut Vec<Value>,
+    memory: &mut M,
+) -> Result<Value, M::Error> {
+    let children: Vec<NodeId> = graph.children(node).collect();
+    let (iter_n, body_n) = (children[0], children[1]);
+
+    let iter = eval_node(graph, iter_n, symbols, cache, frames, args, memory)?;
+    let Value::Iterator(elems) = iter else {
+        panic!("map requires an iterator operand");
+    };
+
+    let mut out = Vec::with_capacity(elems.len());
+    for elem in elems {
+        args.push(elem);
+        // `body` reads the per-lane argument, which changes each lane, so it
+        // cannot share the surrounding cache: evaluate it fresh.
+        let mut body_cache = vec![None::<Value>; graph.len()];
+        let lane = eval_node(
+            graph,
+            body_n,
+            symbols,
+            &mut body_cache,
+            frames,
+            args,
+            memory,
+        );
+        args.pop();
+        out.push(lane?);
+    }
+    Ok(Value::Iterator(out))
+}
+
+/// Evaluate a `Reduce` node: left-fold `body` over the lanes of `iter`, binding
+/// `Arg(0)` to the accumulator and `Arg(1)` to the current lane.
+fn eval_reduce<M: Memory>(
+    graph: &impl Dag<Node = ExprKind, Leaf = ExprPayload>,
+    node: NodeId,
+    symbols: &[Value],
+    cache: &mut Vec<Option<Value>>,
+    frames: &mut Vec<(Value, Value)>,
+    args: &mut Vec<Value>,
+    memory: &mut M,
+) -> Result<Value, M::Error> {
+    let children: Vec<NodeId> = graph.children(node).collect();
+    let (iter_n, body_n) = (children[0], children[1]);
+
+    let iter = eval_node(graph, iter_n, symbols, cache, frames, args, memory)?;
+    let Value::Iterator(elems) = iter else {
+        panic!("reduce requires an iterator operand");
+    };
+    let mut elems = elems.into_iter();
+    let mut acc = elems.next().expect("reduce requires a non-empty iterator");
+    for elem in elems {
+        // The accumulator and lane are read via `Arg(0)`/`Arg(1)`, packed as a
+        // two-element binding on the argument stack.
+        args.push(Value::Iterator(vec![acc, elem]));
+        let mut body_cache = vec![None::<Value>; graph.len()];
+        let next = eval_node(
+            graph,
+            body_n,
+            symbols,
+            &mut body_cache,
+            frames,
+            args,
+            memory,
+        );
+        args.pop();
+        acc = next?;
+    }
+    Ok(acc)
+}
+
+/// Evaluate a `VectorMap` node: build a vector by evaluating `elem` over each
+/// lane index `[0, count)`, exposing the index through the frame stack the same
+/// way `Loop` exposes its induction value.
+fn eval_vector_map<M: Memory>(
+    graph: &impl Dag<Node = ExprKind, Leaf = ExprPayload>,
+    node: NodeId,
+    symbols: &[Value],
+    cache: &mut Vec<Option<Value>>,
+    frames: &mut Vec<(Value, Value)>,
+    args: &mut Vec<Value>,
+    memory: &mut M,
+) -> Result<Value, M::Error> {
+    let children: Vec<NodeId> = graph.children(node).collect();
+    let (count_n, elem_n) = (children[0], children[1]);
+
+    let count = eval_node(graph, count_n, symbols, cache, frames, args, memory)?;
+    let count = as_int!(count, "vector length").to_i64();
+
+    let mut lanes = Vec::with_capacity(count.max(0) as usize);
+    for i in 0..count {
+        // The accumulator slot is unused by a map; the induction value is read by
+        // `IndVar` and by `Lane` indices, and changes each lane, so `elem` cannot
+        // share the surrounding cache.
+        frames.push((
+            Value::Int(APInt::new_signed(64, i)),
+            Value::Int(APInt::new(1, 0)),
+        ));
+        let mut lane_cache = vec![None::<Value>; graph.len()];
+        let lane = eval_node(
+            graph,
+            elem_n,
+            symbols,
+            &mut lane_cache,
+            frames,
+            args,
+            memory,
+        );
+        frames.pop();
+        lanes.push(lane?);
+    }
+    Ok(Value::Iterator(lanes))
+}
+
+/// Evaluate a `Split` node: cut a raw-bits value into `n` equal-width lanes, lane
+/// 0 from the low bits. Each lane is reinterpreted as an integer — the only
+/// element kind the behavior language currently produces; float lanes would read
+/// the raw lanes with [`RawBits::to_apfloat`] instead.
+fn split_bits(value: Value, n: usize) -> Value {
+    let Value::RawBits(bits) = value else {
+        panic!("split requires a raw-bits operand");
+    };
+    let lanes = bits
+        .split(n)
+        .into_iter()
+        .map(|lane| Value::Int(lane.to_apint()))
+        .collect();
+    Value::Iterator(lanes)
+}
+
+/// Evaluate an `IterConcat` node: join an iterator's lanes into one raw-bits
+/// value, lane 0 in the low bits. The inverse of `Split`; each lane is taken back
+/// to its raw bytes according to its runtime type.
+fn concat_lanes(value: Value) -> Value {
+    let Value::Iterator(lanes) = value else {
+        panic!("concat requires an iterator operand");
+    };
+    let raw: Vec<RawBits> = lanes
+        .into_iter()
+        .map(|lane| match lane {
+            Value::Int(i) => RawBits::from_apint(&i),
+            Value::Float(f) => RawBits::from_apfloat(&f),
+            Value::RawBits(b) => b,
+            Value::Iterator(_) => panic!("concat lanes must be scalar"),
+        })
+        .collect();
+    Value::RawBits(RawBits::concat(&raw))
 }
 
 fn eval_node<M: Memory>(
@@ -163,24 +343,44 @@ fn eval_node<M: Memory>(
     symbols: &[Value],
     cache: &mut Vec<Option<Value>>,
     frames: &mut Vec<(Value, Value)>,
+    args: &mut Vec<Value>,
     memory: &mut M,
 ) -> Result<Value, M::Error> {
     if let Some(ref v) = cache[node.index()] {
         return Ok(v.clone());
     }
 
-    // A `Loop` must not have its `step` child pre-evaluated: `step` depends on the
-    // per-iteration induction/accumulator values, so it is evaluated repeatedly,
-    // by hand, below. Intercept before the generic child pre-evaluation.
-    if *graph.get_kind(node) == ExprKind::Loop {
-        let result = eval_loop(graph, node, symbols, cache, frames, memory)?;
-        cache[node.index()] = Some(result.clone());
-        return Ok(result);
+    // `Loop`, `VectorMap`, `Map` and `Reduce` re-evaluate a child once per
+    // iteration with a fresh per-iteration binding (induction value or lambda
+    // argument), so that child must not be pre-evaluated by the generic pass.
+    // Intercept each before the generic child pre-evaluation.
+    match *graph.get_kind(node) {
+        ExprKind::Loop => {
+            let result = eval_loop(graph, node, symbols, cache, frames, args, memory)?;
+            cache[node.index()] = Some(result.clone());
+            return Ok(result);
+        }
+        ExprKind::VectorMap => {
+            let result = eval_vector_map(graph, node, symbols, cache, frames, args, memory)?;
+            cache[node.index()] = Some(result.clone());
+            return Ok(result);
+        }
+        ExprKind::Map => {
+            let result = eval_map(graph, node, symbols, cache, frames, args, memory)?;
+            cache[node.index()] = Some(result.clone());
+            return Ok(result);
+        }
+        ExprKind::Reduce => {
+            let result = eval_reduce(graph, node, symbols, cache, frames, args, memory)?;
+            cache[node.index()] = Some(result.clone());
+            return Ok(result);
+        }
+        _ => {}
     }
 
     for child_id in graph.children(node) {
         if cache[child_id.index()].is_none() {
-            let v = eval_node(graph, child_id, symbols, cache, frames, memory)?;
+            let v = eval_node(graph, child_id, symbols, cache, frames, args, memory)?;
             cache[child_id.index()] = Some(v);
         }
     }
@@ -199,6 +399,50 @@ fn eval_node<M: Memory>(
             .1
             .clone(),
         ExprKind::Loop => unreachable!("Loop handled before child pre-evaluation"),
+        ExprKind::VectorMap | ExprKind::Map | ExprKind::Reduce => {
+            unreachable!("map/reduce handled before child pre-evaluation")
+        }
+        ExprKind::Arg => {
+            let ExprPayload::Int(idx) = graph.get_leaf_data(node).unwrap() else {
+                panic!("Arg node must have Int payload");
+            };
+            let idx = idx.to_u64() as usize;
+            let binding = args.last().expect("Arg evaluated outside a lambda");
+            match binding {
+                // A pair binding (from `Zip` lanes or a `Reduce` acc/lane pack)
+                // exposes its components positionally.
+                Value::Iterator(parts) => parts[idx].clone(),
+                // A scalar binding is the single argument of a unary lambda.
+                scalar => {
+                    assert!(idx == 0, "scalar lambda argument has only index 0");
+                    scalar.clone()
+                }
+            }
+        }
+        ExprKind::Zip => {
+            let (Value::Iterator(lhs), Value::Iterator(rhs)) = (c(0), c(1)) else {
+                panic!("zip requires iterator operands");
+            };
+            assert!(
+                lhs.len() == rhs.len(),
+                "zip requires equal-length iterators"
+            );
+            Value::Iterator(
+                lhs.into_iter()
+                    .zip(rhs)
+                    .map(|(a, b)| Value::Iterator(vec![a, b]))
+                    .collect(),
+            )
+        }
+        ExprKind::Split => split_bits(c(0), as_int!(c(1), "split").to_u64() as usize),
+        ExprKind::IterConcat => concat_lanes(c(0)),
+        ExprKind::Lane => {
+            let Value::Iterator(lanes) = c(0) else {
+                panic!("Lane requires a vector operand");
+            };
+            let index = as_int!(c(1), "lane").to_u64() as usize;
+            lanes[index].clone()
+        }
         ExprKind::Symbol => {
             let ExprPayload::SymbolId(id) = graph.get_leaf_data(node).unwrap() else {
                 panic!("Symbol node must have SymbolId payload");
@@ -218,6 +462,7 @@ fn eval_node<M: Memory>(
                 Value::Int(a.add(&b))
             }
             Value::Float(a) => Value::Float(a.add(&as_float!(c(1), "add"))),
+            Value::Iterator(_) | Value::RawBits(_) => panic!("add requires scalar operands"),
         },
         ExprKind::Sub => match c(0) {
             Value::Int(a) => {
@@ -225,6 +470,7 @@ fn eval_node<M: Memory>(
                 Value::Int(a.sub(&b))
             }
             Value::Float(a) => Value::Float(a.sub(&as_float!(c(1), "sub"))),
+            Value::Iterator(_) | Value::RawBits(_) => panic!("sub requires scalar operands"),
         },
         ExprKind::Mul => match c(0) {
             Value::Int(a) => {
@@ -232,6 +478,7 @@ fn eval_node<M: Memory>(
                 Value::Int(a.mul(&b))
             }
             Value::Float(a) => Value::Float(a.mul(&as_float!(c(1), "mul"))),
+            Value::Iterator(_) | Value::RawBits(_) => panic!("mul requires scalar operands"),
         },
         ExprKind::Div => match c(0) {
             Value::Int(a) => {
@@ -239,6 +486,7 @@ fn eval_node<M: Memory>(
                 Value::Int(a.sdiv(&b))
             }
             Value::Float(a) => Value::Float(a.div(&as_float!(c(1), "div"))),
+            Value::Iterator(_) | Value::RawBits(_) => panic!("div requires scalar operands"),
         },
         ExprKind::UDiv => {
             let (a, b) = coerce_ints(as_int!(c(0), "udiv"), as_int!(c(1), "udiv"));
@@ -298,6 +546,7 @@ fn eval_node<M: Memory>(
                     bool_result(a.slt(&b))
                 }
                 Value::Float(a) => bool_result(a.lt(&as_float!(c(1), "lt"))),
+                Value::Iterator(_) | Value::RawBits(_) => panic!("lt requires scalar operands"),
             },
         )),
         ExprKind::Gt => Value::Int(APInt::new(
@@ -308,6 +557,7 @@ fn eval_node<M: Memory>(
                     bool_result(a.sgt(&b))
                 }
                 Value::Float(a) => bool_result(a.gt(&as_float!(c(1), "gt"))),
+                Value::Iterator(_) | Value::RawBits(_) => panic!("gt requires scalar operands"),
             },
         )),
         ExprKind::Ge => Value::Int(APInt::new(
@@ -318,6 +568,7 @@ fn eval_node<M: Memory>(
                     bool_result(a.sge(&b))
                 }
                 Value::Float(a) => bool_result(a.ge(&as_float!(c(1), "ge"))),
+                Value::Iterator(_) | Value::RawBits(_) => panic!("ge requires scalar operands"),
             },
         )),
         ExprKind::ULt => {
@@ -342,6 +593,7 @@ fn eval_node<M: Memory>(
             let cond_zero = match c(0) {
                 Value::Int(i) => i.is_zero(),
                 Value::Float(f) => f.is_zero(),
+                Value::Iterator(_) | Value::RawBits(_) => panic!("if condition must be scalar"),
             };
             if cond_zero { c(2) } else { c(1) }
         }
@@ -379,6 +631,7 @@ fn eval_node<M: Memory>(
             Value::Float(a) => {
                 Value::Float(a.fma(&as_float!(c(1), "fma"), &as_float!(c(2), "fma")))
             }
+            Value::Iterator(_) | Value::RawBits(_) => panic!("fma requires scalar operands"),
         },
         ExprKind::Sqrt => match c(0) {
             Value::Int(a) => {
@@ -386,6 +639,7 @@ fn eval_node<M: Memory>(
                 Value::Int(APInt::new(a.width(), (v as f64).sqrt() as u64))
             }
             Value::Float(a) => Value::Float(a.sqrt()),
+            Value::Iterator(_) | Value::RawBits(_) => panic!("sqrt requires a scalar operand"),
         },
         ExprKind::Log2Ceil => {
             let a = as_int!(c(0), "log2ceil");
@@ -462,6 +716,7 @@ impl PartialEq for Value {
         match (self, other) {
             (Value::Int(a), Value::Int(b)) => a == b,
             (Value::Float(a), Value::Float(b)) => a == b,
+            (Value::Iterator(a), Value::Iterator(b)) => a == b,
             _ => false,
         }
     }
@@ -544,13 +799,13 @@ mod tests {
     fn as_i64(v: Value) -> i64 {
         match v {
             Value::Int(i) => i.to_i64(),
-            Value::Float(_) => panic!(),
+            _ => panic!(),
         }
     }
     fn as_f64(v: Value) -> f64 {
         match v {
             Value::Float(f) => f.to_f64(),
-            Value::Int(_) => panic!(),
+            _ => panic!(),
         }
     }
 
@@ -927,5 +1182,98 @@ mod tests {
         let b = sym(&mut g, 1);
         inner(&mut g, ExprKind::Lt, &[a, b]);
         assert_eq!(as_i64(execute(&g, &[fv(3.0), fv(2.0)])), 0);
+    }
+
+    fn arg(g: &mut ExprPostGraph, k: u64) -> NodeId {
+        let node = g.add_node(ExprKind::Arg);
+        g.set_leaf_data(node, ExprPayload::Int(APInt::new(32, k)));
+        node
+    }
+    fn rb(bytes: &[u8]) -> Value {
+        Value::RawBits(crate::utils::RawBits::from_bytes(bytes.to_vec()))
+    }
+    fn raw_bytes(v: Value) -> Vec<u8> {
+        match v {
+            Value::RawBits(b) => b.bytes().to_vec(),
+            other => panic!("expected raw bits, got {other:?}"),
+        }
+    }
+    fn int_lanes(v: Value) -> Vec<i64> {
+        match v {
+            Value::Iterator(xs) => xs.into_iter().map(as_i64).collect(),
+            other => panic!("expected iterator, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn split_then_concat_roundtrips_raw_bits() {
+        // split a 16-bit raw value 0xBA21 into two bytes, then concat them back.
+        let mut g = ExprPostGraph::new();
+        let bits = sym(&mut g, 0);
+        let n = int_con(&mut g, 2);
+        let split = inner(&mut g, ExprKind::Split, &[bits, n]);
+
+        // The lanes are the two bytes read as integers.
+        assert_eq!(
+            int_lanes(execute(&g, &[rb(&[0x21, 0xBA])])),
+            vec![0x21, 0xBA]
+        );
+
+        inner(&mut g, ExprKind::IterConcat, &[split]);
+        assert_eq!(
+            raw_bytes(execute(&g, &[rb(&[0x21, 0xBA])])),
+            vec![0x21, 0xBA]
+        );
+    }
+
+    #[test]
+    fn map_applies_unary_lambda_per_lane() {
+        // map(split(0x0201, 2), |x| x + 1) -> [1+1, 2+1] = [2, 3].
+        let mut g = ExprPostGraph::new();
+        let bits = sym(&mut g, 0);
+        let n = int_con(&mut g, 2);
+        let iter = inner(&mut g, ExprKind::Split, &[bits, n]);
+        let x = arg(&mut g, 0);
+        let one = int_con(&mut g, 1);
+        let body = inner(&mut g, ExprKind::Add, &[x, one]);
+        inner(&mut g, ExprKind::Map, &[iter, body]);
+
+        assert_eq!(int_lanes(execute(&g, &[rb(&[0x01, 0x02])])), vec![2, 3]);
+    }
+
+    #[test]
+    fn zip_then_map_lane_wise_add_concats() {
+        // concat(map(zip(split(a, 2), split(b, 2)), |x, y| x + y)) for
+        // a=[1,2], b=[3,4] -> lanes [4, 6] -> raw bytes [0x04, 0x06].
+        let mut g = ExprPostGraph::new();
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
+        let n = int_con(&mut g, 2);
+        let split_a = inner(&mut g, ExprKind::Split, &[a, n]);
+        let split_b = inner(&mut g, ExprKind::Split, &[b, n]);
+        let zip = inner(&mut g, ExprKind::Zip, &[split_a, split_b]);
+        let x = arg(&mut g, 0);
+        let y = arg(&mut g, 1);
+        let body = inner(&mut g, ExprKind::Add, &[x, y]);
+        let map = inner(&mut g, ExprKind::Map, &[zip, body]);
+        inner(&mut g, ExprKind::IterConcat, &[map]);
+
+        let out = execute(&g, &[rb(&[0x01, 0x02]), rb(&[0x03, 0x04])]);
+        assert_eq!(raw_bytes(out), vec![0x04, 0x06]);
+    }
+
+    #[test]
+    fn reduce_folds_to_horizontal_sum() {
+        // reduce(split(0x04030201, 4), |acc, x| acc + x) -> 1+2+3+4 = 10.
+        let mut g = ExprPostGraph::new();
+        let bits = sym(&mut g, 0);
+        let n = int_con(&mut g, 4);
+        let iter = inner(&mut g, ExprKind::Split, &[bits, n]);
+        let acc = arg(&mut g, 0);
+        let x = arg(&mut g, 1);
+        let body = inner(&mut g, ExprKind::Add, &[acc, x]);
+        inner(&mut g, ExprKind::Reduce, &[iter, body]);
+
+        assert_eq!(as_i64(execute(&g, &[rb(&[0x01, 0x02, 0x03, 0x04])])), 10);
     }
 }
