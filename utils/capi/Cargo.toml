@@ -1,0 +1,20 @@
+[package]
+name = "tir-capi"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "tir_capi"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+tir.workspace = true
+tir-targets.workspace = true
+tir-be-common.workspace = true
+
+[dev-dependencies]
+tir.workspace = true
+serde_json = "1"
+
+[build-dependencies]
+cbindgen = "0.28"
