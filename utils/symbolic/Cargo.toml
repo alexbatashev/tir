@@ -1,0 +1,8 @@
+[package]
+name = "tir-symbolic"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tir-graph.workspace = true
+tir-adt.workspace = true

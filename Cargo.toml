@@ -20,17 +20,25 @@ members = [
     "backends/targets",
     "utils/isa-test-suite",
     "utils/capi",
-    "tools", "utils/adt", "utils/graph",
+    "utils/adt",
+    "utils/graph",
+    "utils/symbolic",
+    "tools",
 ]
 
 [workspace.dependencies]
 tir = { path = "core" }
-tir-macros = { path = "utils/macros" }
 tir-targets = { path = "backends/targets" }
 tir-be-common = { path = "backends/common" }
 tir-sim = { path = "simulator/simcore" }
-tir-lit = { path = "utils/lit" }
 tmdl = { path = "tmdl" }
+
+# Common utils
+tir-adt = { path = "utils/adt" }
+tir-graph = { path = "utils/graph" }
+tir-symbolic = { path = "utils/symbolic" }
+tir-macros = { path = "utils/macros" }
+tir-lit = { path = "utils/lit" }
 
 # Per-target crates
 tir-riscv = { path = "backends/riscv" }
