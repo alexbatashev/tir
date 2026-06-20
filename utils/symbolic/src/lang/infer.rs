@@ -50,6 +50,9 @@ pub fn infer_widths<V>(
             | SymKind::Mul
             | SymKind::Div
             | SymKind::UDiv
+            | SymKind::SRem
+            | SymKind::URem
+            | SymKind::Neg
             | SymKind::And
             | SymKind::Or
             | SymKind::Xor
@@ -66,12 +69,19 @@ pub fn infer_widths<V>(
             SymKind::Eq
             | SymKind::Ne
             | SymKind::Lt
+            | SymKind::Le
             | SymKind::Gt
             | SymKind::Ge
             | SymKind::ULt
             | SymKind::ULe
             | SymKind::UGt
             | SymKind::UGe => Some(1),
+
+            // Concatenation sums the operand widths.
+            SymKind::Concat => match (child_width(0), child_width(1)) {
+                (Some(hi), Some(lo)) => Some(hi + lo),
+                _ => None,
+            },
 
             // `If(cond, then, else)` is as wide as its arms.
             SymKind::If => child_width(1),

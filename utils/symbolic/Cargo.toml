@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 tir-graph.workspace = true
 tir-adt.workspace = true
+chumsky.workspace = true

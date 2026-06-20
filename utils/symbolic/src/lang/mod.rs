@@ -14,9 +14,15 @@ pub enum SymKind {
     Mul,
     Div,
     UDiv,
+    /// Signed and unsigned remainder (truncated division).
+    SRem,
+    URem,
+    /// Unary two's-complement negation.
+    Neg,
     Eq,
     Ne,
     Lt,
+    Le,
     Gt,
     Ge,
     ULt,
@@ -30,6 +36,9 @@ pub enum SymKind {
     And,
     Xor,
     Not,
+    /// Bit concatenation: the result width is the sum of both operand widths,
+    /// with the first operand occupying the high bits.
+    Concat,
     /// Arguments are condition, then branch, else branch
     // #[arity = 3]
     If,
