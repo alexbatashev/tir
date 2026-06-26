@@ -1,5 +1,7 @@
 use std::fmt::Debug;
 
+use tir_adt::{APFloat, APInt};
+
 use super::Id;
 
 /// An e-graph node. Operands are child e-class [`Id`]s carried inline; the e-graph
@@ -26,5 +28,19 @@ pub trait ENode: Debug + Clone {
     /// resolve through the e-graph's `find`, like any other node's.
     fn is_unique(&self) -> bool {
         false
+    }
+
+    /// The canonical node for an integer constant, if the language has one.
+    /// Backs [`Var::Int`](super::Var::Int) pattern leaves for both matching and
+    /// instantiation; matching reuses [`matches`](ENode::matches), so this must
+    /// produce the same node the language interns for that constant.
+    fn from_int(_value: APInt) -> Option<Self> {
+        None
+    }
+
+    /// The canonical node for a float constant, if the language has one. Backs
+    /// [`Var::Float`](super::Var::Float) pattern leaves; see [`from_int`](ENode::from_int).
+    fn from_float(_value: APFloat) -> Option<Self> {
+        None
     }
 }

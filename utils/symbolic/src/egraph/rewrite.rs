@@ -52,6 +52,8 @@ impl<N: ENode, S: Clone + PartialEq> Rewrite<N, S> {
 
 #[cfg(test)]
 mod tests {
+    use tir_adt::APInt;
+
     use super::super::test_lang::*;
     use super::*;
     use crate::egraph::Var;
@@ -103,6 +105,29 @@ mod tests {
 
         rule.apply_all(&mut g);
         assert!(g.connected(ab, ba));
+    }
+
+    #[test]
+    fn additive_identity_via_integer_literal() {
+        // add(x, 0) => x
+        let mut lhs: Pattern<Math, &'static str> = Pattern::new();
+        let x = lhs.var(Var::Symbol("x"));
+        let zero = lhs.var(Var::Int(APInt::from_i64(0)));
+        lhs.add(Math::Add([x, zero]));
+
+        let mut rhs: Pattern<Math, &'static str> = Pattern::new();
+        rhs.var(Var::Symbol("x"));
+
+        let rule = Rewrite::new("add-zero", lhs, Rhs::Pattern(rhs));
+
+        let mut g = EGraph::new();
+        let a = sym(&mut g, 0);
+        let z = num(&mut g, 0);
+        let root = add(&mut g, a, z);
+        assert!(!g.connected(root, a));
+
+        rule.apply_all(&mut g);
+        assert!(g.connected(root, a));
     }
 
     #[test]

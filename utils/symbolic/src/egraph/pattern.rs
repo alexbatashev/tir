@@ -52,7 +52,8 @@ pub enum PatternNode<N: ENode, S> {
     /// A template e-node. Its [`ENode::children`] ids are *pattern-local indices*
     /// into the owning pattern's `nodes`, not e-class ids.
     Node(N),
-    /// A hole. A [`Var::Symbol`] matches any e-class and binds it.
+    /// A leaf hole. [`Var::Symbol`] matches any e-class and binds it; [`Var::Int`]
+    /// / [`Var::Float`] match an e-class holding that constant (no binding).
     Var(Var<S>),
 }
 
@@ -147,9 +148,11 @@ impl<N: ENode, S: Clone + PartialEq> Pattern<N, S> {
                     }
                 }
             }
-            // Literal leaves need a per-language constant bridge; not yet supported.
-            PatternNode::Var(Var::Int(_) | Var::Float(_)) => {
-                unimplemented!("literal pattern leaves are not yet supported")
+            PatternNode::Var(Var::Int(v)) => {
+                self.match_const(eg, N::from_int(v.clone()), class, partial)
+            }
+            PatternNode::Var(Var::Float(v)) => {
+                self.match_const(eg, N::from_float(v.clone()), class, partial)
             }
             PatternNode::Node(template) => {
                 let mut out = Vec::new();
@@ -175,6 +178,30 @@ impl<N: ENode, S: Clone + PartialEq> Pattern<N, S> {
         }
     }
 
+    /// Whether `class` holds the constant `target` (a leaf built from a literal).
+    /// Yields the unchanged `partial` once on a hit — a literal binds nothing —
+    /// or nothing if the language can't build the constant (`target` is `None`).
+    fn match_const(
+        &self,
+        eg: &EGraph<N>,
+        target: Option<N>,
+        class: Id,
+        partial: Substitution<S>,
+    ) -> Vec<Substitution<S>> {
+        let Some(target) = target else {
+            return Vec::new();
+        };
+        if eg
+            .nodes(class)
+            .iter()
+            .any(|n| n.children().is_empty() && target.matches(n))
+        {
+            vec![partial]
+        } else {
+            Vec::new()
+        }
+    }
+
     /// Build this pattern into `eg` under `subst`, returning the root e-class.
     pub fn instantiate(&self, eg: &mut EGraph<N>, subst: &Substitution<S>) -> Id {
         let mut ids: Vec<Id> = Vec::with_capacity(self.nodes.len());
@@ -183,8 +210,13 @@ impl<N: ENode, S: Clone + PartialEq> Pattern<N, S> {
                 PatternNode::Var(var @ Var::Symbol(_)) => {
                     subst.get(var).expect("unbound pattern variable")
                 }
-                PatternNode::Var(Var::Int(_) | Var::Float(_)) => {
-                    unimplemented!("literal pattern leaves are not yet supported")
+                PatternNode::Var(Var::Int(v)) => {
+                    let node = N::from_int(v.clone()).expect("language has no integer constants");
+                    eg.add(node)
+                }
+                PatternNode::Var(Var::Float(v)) => {
+                    let node = N::from_float(v.clone()).expect("language has no float constants");
+                    eg.add(node)
                 }
                 PatternNode::Node(template) => {
                     let mut node = template.clone();
@@ -202,6 +234,8 @@ impl<N: ENode, S: Clone + PartialEq> Pattern<N, S> {
 
 #[cfg(test)]
 mod tests {
+    use tir_adt::{APFloat, APInt};
+
     use super::super::test_lang::*;
     use super::*;
 
@@ -272,5 +306,67 @@ mod tests {
         // Hash-consing means rebuilding add(a, b) lands on the original class.
         let original = add(&mut g, a, b);
         assert_eq!(g.find(built), g.find(original));
+    }
+
+    /// `add(x, 0)` with a literal integer leaf.
+    fn add_zero_pattern() -> Pattern<Math, &'static str> {
+        let mut p = Pattern::new();
+        let x = p.var(Var::Symbol("x"));
+        let zero = p.var(Var::Int(APInt::from_i64(0)));
+        p.add(Math::Add([x, zero]));
+        p
+    }
+
+    #[test]
+    fn integer_literal_matches_and_binds_siblings() {
+        let mut g = EGraph::new();
+        let a = sym(&mut g, 0);
+        let z = num(&mut g, 0);
+        let root = add(&mut g, a, z);
+
+        let matches = add_zero_pattern().search(&g);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(g.find(matches[0].root), g.find(root));
+        assert_eq!(matches[0].subst.get(&Var::Symbol("x")), Some(g.find(a)));
+    }
+
+    #[test]
+    fn integer_literal_rejects_other_constant() {
+        let mut g = EGraph::new();
+        let a = sym(&mut g, 0);
+        let one = num(&mut g, 1);
+        add(&mut g, a, one);
+        assert!(add_zero_pattern().search(&g).is_empty());
+    }
+
+    #[test]
+    fn float_literal_matches_constant() {
+        let mut p: Pattern<Math, &'static str> = Pattern::new();
+        p.var(Var::Float(APFloat::from_f64(2.5)));
+
+        let mut g = EGraph::new();
+        let c = fnum(&mut g, 2.5);
+        fnum(&mut g, 1.0);
+
+        let matches = p.search(&g);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(g.find(matches[0].root), g.find(c));
+    }
+
+    #[test]
+    fn instantiate_builds_literal_constants() {
+        let mut g = EGraph::new();
+        let five = num(&mut g, 5);
+        let half = fnum(&mut g, 0.5);
+
+        let mut int_pat: Pattern<Math, &'static str> = Pattern::new();
+        int_pat.var(Var::Int(APInt::from_i64(5)));
+        let built_int = int_pat.instantiate(&mut g, &Substitution::new());
+        assert_eq!(g.find(built_int), g.find(five));
+
+        let mut float_pat: Pattern<Math, &'static str> = Pattern::new();
+        float_pat.var(Var::Float(APFloat::from_f64(0.5)));
+        let built_float = float_pat.instantiate(&mut g, &Substitution::new());
+        assert_eq!(g.find(built_float), g.find(half));
     }
 }
