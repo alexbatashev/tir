@@ -5,7 +5,7 @@ use std::str::FromStr;
 
 /// Arbitrary Precision Integer similar to LLVM's APInt.
 /// Supports integers of arbitrary bit width, both signed and unsigned.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct APInt {
     /// The bit width of this integer
     width: u32,
@@ -522,6 +522,17 @@ impl APInt {
         self.to_i64().cmp(&other.to_i64())
     }
 
+    /// Numeric value as a 128-bit integer: signed values are sign-extended,
+    /// unsigned values zero-extended. Used as the primary ordering key so the
+    /// order reflects magnitude regardless of width/signedness.
+    fn numeric_key(&self) -> i128 {
+        if self.signed {
+            self.to_i64() as i128
+        } else {
+            self.value as i128
+        }
+    }
+
     /// Unsigned less than
     pub fn ult(&self, other: &APInt) -> bool {
         self.ucmp(other) == Ordering::Less
@@ -600,6 +611,24 @@ impl APInt {
 }
 
 // Implement standard traits
+
+impl Ord for APInt {
+    /// Order by numeric value, then by width and signedness so the order is
+    /// total and consistent with the structural `Eq`/`Hash` (constants of
+    /// different width or signedness are distinct keys).
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.numeric_key()
+            .cmp(&other.numeric_key())
+            .then_with(|| self.width.cmp(&other.width))
+            .then_with(|| self.signed.cmp(&other.signed))
+    }
+}
+
+impl PartialOrd for APInt {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
 
 impl fmt::Display for APInt {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -919,5 +948,31 @@ mod tests {
             let res = APInt::from_i64(x).mulhsu(&APInt::from_u64(y));
             prop_assert_eq!(res.to_u64(), ((x as i128 * y as i128) >> 64) as u64);
         }
+
+        #[test]
+        fn test_ord_signed(x in prop::num::i64::ANY, y in prop::num::i64::ANY) {
+            prop_assert_eq!(APInt::from_i64(x).cmp(&APInt::from_i64(y)), x.cmp(&y));
+        }
+
+        #[test]
+        fn test_ord_unsigned(x in prop::num::u64::ANY, y in prop::num::u64::ANY) {
+            prop_assert_eq!(APInt::from_u64(x).cmp(&APInt::from_u64(y)), x.cmp(&y));
+        }
+
+        #[test]
+        fn test_ord_consistent_with_eq(a in arb_apint(), b in arb_apint()) {
+            prop_assert_eq!(a == b, a.cmp(&b) == Ordering::Equal);
+            prop_assert_eq!(a.cmp(&b), b.cmp(&a).reverse());
+        }
+    }
+
+    fn arb_apint() -> impl Strategy<Value = APInt> {
+        (1u32..=64, any::<bool>(), any::<u64>()).prop_map(|(w, signed, v)| {
+            if signed {
+                APInt::new_signed(w, v as i64)
+            } else {
+                APInt::new(w, v)
+            }
+        })
     }
 }

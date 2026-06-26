@@ -4,7 +4,7 @@ use std::fmt;
 /// Arbitrary Precision Floating Point
 /// Supports any combination of exponent and mantissa widths
 /// Can represent IEEE 754, BF16, FP8 variants, x86 extended, and custom formats
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct APFloat {
     /// Number of exponent bits
     exp_width: u32,
@@ -584,11 +584,41 @@ impl APFloat {
             (0, new_low)
         }
     }
+
+    /// IEEE total-order key over sign/exponent/mantissa within this format
+    /// (à la `f64::total_cmp`): -inf < ... < -0 < +0 < ... < +inf, with NaNs at
+    /// the extremes by sign. Only comparable within a single format.
+    fn total_key(&self) -> i128 {
+        let magnitude = (self.to_bits() & ((1u128 << (self.bit_width() - 1)) - 1)) as i128;
+        if self.sign {
+            -magnitude - 1
+        } else {
+            magnitude
+        }
+    }
 }
 
-impl PartialEq for APFloat {
-    fn eq(&self, other: &Self) -> bool {
-        matches!(self.compare(other), Some(Ordering::Equal))
+impl Ord for APFloat {
+    /// Total order: numerically (IEEE total order) within a format, then by the
+    /// remaining fields so it stays total and consistent with the derived
+    /// structural `Eq`/`Hash`. Note this is a structural order, not IEEE
+    /// comparison: `NaN == NaN`, `-0 < +0`. Use [`APFloat::compare`] for IEEE.
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.total_key()
+            .cmp(&other.total_key())
+            .then_with(|| self.exp_width.cmp(&other.exp_width))
+            .then_with(|| self.mant_width.cmp(&other.mant_width))
+            .then_with(|| self.explicit_leading_bit.cmp(&other.explicit_leading_bit))
+            .then_with(|| self.exponent.cmp(&other.exponent))
+            .then_with(|| self.mantissa_high.cmp(&other.mantissa_high))
+            .then_with(|| self.mantissa_low.cmp(&other.mantissa_low))
+            .then_with(|| self.sign.cmp(&other.sign))
+    }
+}
+
+impl PartialOrd for APFloat {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
     }
 }
 
@@ -668,5 +698,34 @@ mod tests {
             let res = APFloat::from_f64(x).compare(&APFloat::from_f64(y));
             prop_assert_eq!(res, x.partial_cmp(&y));
         }
+
+        #[test]
+        fn test_total_order_matches_f64(x in prop::num::f64::ANY, y in prop::num::f64::ANY) {
+            prop_assert_eq!(APFloat::from_f64(x).cmp(&APFloat::from_f64(y)), x.total_cmp(&y));
+        }
+
+        #[test]
+        fn test_ord_consistent_with_eq(x in prop::num::f64::ANY, y in prop::num::f64::ANY) {
+            let a = APFloat::from_f64(x);
+            let b = APFloat::from_f64(y);
+            prop_assert_eq!(a == b, a.cmp(&b) == Ordering::Equal);
+            prop_assert_eq!(a.cmp(&b), b.cmp(&a).reverse());
+        }
+    }
+
+    #[test]
+    fn neg_zero_orders_below_pos_zero() {
+        let pos = APFloat::from_f64(0.0);
+        let neg = APFloat::from_f64(-0.0);
+        assert_ne!(pos, neg);
+        assert_eq!(neg.cmp(&pos), Ordering::Less);
+    }
+
+    #[test]
+    fn nan_is_structurally_equal() {
+        let a = APFloat::from_f64(f64::NAN);
+        let b = APFloat::from_f64(f64::NAN);
+        assert_eq!(a, b);
+        assert_eq!(a.cmp(&b), Ordering::Equal);
     }
 }

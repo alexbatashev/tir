@@ -8,6 +8,10 @@
 
 mod eclass;
 mod enode;
+mod pattern;
+mod rewrite;
+#[cfg(test)]
+mod test_lang;
 
 use std::collections::HashMap;
 
@@ -15,6 +19,8 @@ use tir_adt::DisjointSet;
 
 pub use eclass::*;
 pub use enode::*;
+pub use pattern::*;
+pub use rewrite::*;
 
 /// Identifier of an e-class, and how children reference one. May be non-canonical
 /// after unions — pass through [`EGraph::find`] before comparing.
@@ -280,75 +286,8 @@ impl<L: ENode> EGraph<L> {
 
 #[cfg(test)]
 mod tests {
+    use super::test_lang::*;
     use super::*;
-
-    #[derive(Debug, Clone)]
-    enum Math {
-        Num(i64),
-        Sym(u32),
-        Neg([Id; 1]),
-        Add([Id; 2]),
-        /// A never-shared effectful node: discriminant `kind`, one operand.
-        Effect(u32, [Id; 1]),
-    }
-
-    impl ENode for Math {
-        fn children(&self) -> &[Id] {
-            match self {
-                Math::Num(_) | Math::Sym(_) => &[],
-                Math::Neg(c) | Math::Effect(_, c) => c,
-                Math::Add(c) => c,
-            }
-        }
-
-        fn children_mut(&mut self) -> &mut [Id] {
-            match self {
-                Math::Num(_) | Math::Sym(_) => &mut [],
-                Math::Neg(c) | Math::Effect(_, c) => c,
-                Math::Add(c) => c,
-            }
-        }
-
-        // Buckets by operator only — so e.g. all `Num`s collide, exercising the
-        // matches()+children disambiguation.
-        fn hash_cons(&self) -> u64 {
-            match self {
-                Math::Num(_) => 1,
-                Math::Sym(_) => 2,
-                Math::Neg(_) => 3,
-                Math::Add(_) => 4,
-                Math::Effect(..) => 5,
-            }
-        }
-
-        fn matches(&self, other: &Self) -> bool {
-            match (self, other) {
-                (Math::Num(a), Math::Num(b)) => a == b,
-                (Math::Sym(a), Math::Sym(b)) => a == b,
-                (Math::Neg(_), Math::Neg(_)) => true,
-                (Math::Add(_), Math::Add(_)) => true,
-                (Math::Effect(a, _), Math::Effect(b, _)) => a == b,
-                _ => false,
-            }
-        }
-
-        fn is_unique(&self) -> bool {
-            matches!(self, Math::Effect(..))
-        }
-    }
-
-    fn num(g: &mut EGraph<Math>, n: i64) -> Id {
-        g.add(Math::Num(n))
-    }
-    fn sym(g: &mut EGraph<Math>, s: u32) -> Id {
-        g.add(Math::Sym(s))
-    }
-    fn neg(g: &mut EGraph<Math>, a: Id) -> Id {
-        g.add(Math::Neg([a]))
-    }
-    fn add(g: &mut EGraph<Math>, a: Id, b: Id) -> Id {
-        g.add(Math::Add([a, b]))
-    }
 
     #[test]
     fn hash_consing_shares_identical_expressions() {
