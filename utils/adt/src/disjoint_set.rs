@@ -105,11 +105,37 @@ pub struct DisjointSet {
     uf: DisjointSetImpl,
 }
 
+impl Default for DisjointSet {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
 impl DisjointSet {
     pub fn new(size: usize) -> Self {
         Self {
             uf: DisjointSetImpl::with_size(size),
         }
+    }
+
+    /// An empty set that grows one element at a time via [`Self::push`].
+    pub fn empty() -> Self {
+        Self {
+            uf: DisjointSetImpl::new(),
+        }
+    }
+
+    /// Add a fresh singleton element, returning its id.
+    pub fn push(&mut self) -> u32 {
+        self.uf.push()
+    }
+
+    pub fn len(&self) -> usize {
+        self.uf.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.uf.len() == 0
     }
 
     pub fn find_root(&self, i: u32) -> u32 {
