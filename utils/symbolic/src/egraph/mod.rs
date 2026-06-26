@@ -10,6 +10,7 @@ mod eclass;
 mod enode;
 mod pattern;
 mod rewrite;
+mod runner;
 #[cfg(test)]
 mod test_lang;
 
@@ -21,6 +22,7 @@ pub use eclass::*;
 pub use enode::*;
 pub use pattern::*;
 pub use rewrite::*;
+pub use runner::*;
 
 /// Identifier of an e-class, and how children reference one. May be non-canonical
 /// after unions — pass through [`EGraph::find`] before comparing.
