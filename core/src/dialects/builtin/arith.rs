@@ -281,7 +281,7 @@ mod tests {
     use crate::{
         Context, Operation,
         builtin::{AddIOp, IntegerType, ops},
-        graph::Dag,
+        graph::{Dag, MetaDag},
         parse::ir::parse_ir,
         sem_expr::{AsSemExpr, ExprKind, ExprPayload, ExprPostGraph},
     };

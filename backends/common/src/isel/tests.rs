@@ -1,7 +1,7 @@
 use tir::{
     Context, IRBuilder, IRFormatter, Operation, PassManager, TypeId,
     builtin::{FuncOp, IntegerType, ops},
-    graph::{Dag, MutDag, OperandConstraint},
+    graph::{Dag, MetaMutDag, MutDag, OperandConstraint},
     sem_expr::{ExprKind, ExprPayload, ExprPostGraph},
 };
 

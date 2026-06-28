@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use tir::{
     Context,
-    graph::{Dag, Matchable, NodeId, OperandConstraint, Pattern, PatternExpr},
+    graph::{Dag, Matchable, MetaDag, NodeId, OperandConstraint, Pattern, PatternExpr},
     sem_expr::{ExprKind, ExprPayload, ExprPostGraph},
 };
 

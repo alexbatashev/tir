@@ -10,9 +10,9 @@
 use std::collections::HashMap;
 use std::hash::Hash;
 
-use crate::graph::{Dag, GenericDag, Matchable, MutDag, NodeId};
+use crate::graph::{Dag, GenericDag, Matchable, MetaDag, MetaMutDag, MutDag, NodeId, NodeMeta};
 use crate::utils::ScopedDisjointSet;
-use crate::{OpId, TypeId};
+use crate::{Context, OpId, TypeId};
 
 mod ematch;
 mod print;
@@ -42,7 +42,7 @@ impl EClassId {
 type ENodeMemo<N, L> = HashMap<(N, Vec<EClassId>), Vec<(Option<L>, EClassId)>>;
 
 pub struct EGraph<N, L> {
-    dag: GenericDag<N, L>,
+    dag: GenericDag<N, L, NodeMeta>,
     node_class: Vec<u32>,
     uf: ScopedDisjointSet,
     /// Canonical class id -> its member e-nodes. Maintained on `add`/`union` and
@@ -59,6 +59,7 @@ pub struct EGraph<N, L> {
 impl<N, L> Dag for EGraph<N, L> {
     type Node = N;
     type Leaf = L;
+    type Annotation = NodeMeta;
 
     fn len(&self) -> usize {
         self.dag.len()
@@ -72,12 +73,8 @@ impl<N, L> Dag for EGraph<N, L> {
         self.dag.get_leaf_data(id)
     }
 
-    fn get_original_op(&self, id: NodeId) -> Option<crate::OpId> {
-        self.dag.get_original_op(id)
-    }
-
-    fn get_actual_type(&self, id: NodeId) -> Option<crate::TypeId> {
-        self.dag.get_actual_type(id)
+    fn get_annotation(&self, id: NodeId) -> Option<&Self::Annotation> {
+        self.dag.get_annotation(id)
     }
 
     fn root(&self) -> Option<NodeId> {
@@ -97,13 +94,13 @@ impl<N, L> Dag for EGraph<N, L> {
     }
 }
 
-impl<N: Matchable + Clone + Eq + Hash, L: Clone + PartialEq> Default for EGraph<N, L> {
+impl<N: Matchable<Context> + Clone + Eq + Hash, L: Clone + PartialEq> Default for EGraph<N, L> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<N: Matchable + Clone + Eq + Hash, L: Clone + PartialEq> EGraph<N, L> {
+impl<N: Matchable<Context> + Clone + Eq + Hash, L: Clone + PartialEq> EGraph<N, L> {
     pub fn new() -> Self {
         Self {
             dag: GenericDag::new(),
@@ -124,7 +121,7 @@ impl<N: Matchable + Clone + Eq + Hash, L: Clone + PartialEq> EGraph<N, L> {
         self.node_producer[node.index()] = Some(producer);
     }
 
-    pub fn dag(&self) -> &GenericDag<N, L> {
+    pub fn dag(&self) -> &GenericDag<N, L, NodeMeta> {
         &self.dag
     }
 
@@ -235,12 +232,16 @@ impl<N: Matchable + Clone + Eq + Hash, L: Clone + PartialEq> EGraph<N, L> {
         class
     }
 
-    pub fn add_dag<D: Dag<Node = N, Leaf = L>>(&mut self, dag: &D, root: NodeId) -> EClassId {
+    pub fn add_dag<D: Dag<Node = N, Leaf = L, Annotation = NodeMeta>>(
+        &mut self,
+        dag: &D,
+        root: NodeId,
+    ) -> EClassId {
         let mut memo = HashMap::new();
         self.add_dag_node(dag, root, &mut memo)
     }
 
-    fn add_dag_node<D: Dag<Node = N, Leaf = L>>(
+    fn add_dag_node<D: Dag<Node = N, Leaf = L, Annotation = NodeMeta>>(
         &mut self,
         dag: &D,
         node: NodeId,
@@ -421,7 +422,7 @@ mod tests {
     #[test]
     fn add_dag_seeds_expression_tree() {
         let ctx = crate::Context::default();
-        let mut dag = GenericDag::<ExprKind, ()>::new();
+        let mut dag = GenericDag::<ExprKind, (), NodeMeta>::new();
         let a = dag.add_node(ExprKind::Symbol);
         let b = dag.add_node(ExprKind::Constant);
         let add = dag.add_node(ExprKind::Add);
@@ -446,7 +447,7 @@ mod tests {
         let ty = crate::builtin::IntegerType::new(&ctx, 32);
         let op = crate::builtin::ops::constant(&ctx, 1, ty).build();
 
-        let mut dag = GenericDag::<ExprKind, ()>::new();
+        let mut dag = GenericDag::<ExprKind, (), NodeMeta>::new();
         let a = dag.add_node(ExprKind::Symbol);
         dag.set_original_op(a, op.id());
         dag.set_actual_type(a, ty);

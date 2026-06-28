@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use crate::analysis::DominatorTree;
 use crate::egraph::{EClassId, EGPrinter, EGraph, SaturationLimits};
-use crate::graph::{Dag, GenericDag, MutDag, NodeId};
+use crate::graph::{Dag, GenericDag, MetaDag, MetaMutDag, MutDag, NodeId, NodeMeta};
 use crate::{
     BlockId, Context, OpId, Operation, OperationRef, Pass, PassError, PassTarget, RegionGuard,
     RegionId, Rewriter, TypeId, ValueId,
@@ -258,7 +258,7 @@ impl Driver<'_> {
 /// labels, sharing a node per value so congruent subexpressions hash-cons. Reads ops
 /// generically through their interfaces — no op is named.
 struct Seeder {
-    graph: GenericDag<Term, Leaf>,
+    graph: GenericDag<Term, Leaf, NodeMeta>,
     node_of_value: HashMap<ValueId, NodeId>,
     /// Op results to consider rewriting, in program order.
     op_results: Vec<ValueId>,

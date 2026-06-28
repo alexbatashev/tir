@@ -35,7 +35,7 @@ enum Math {
     Symbol(String),
 }
 
-impl Matchable for Math {
+impl Matchable<Context> for Math {
     fn is_leaf(&self, _: &Context) -> bool {
         matches!(self, Math::Constant(_) | Math::Symbol(_))
     }

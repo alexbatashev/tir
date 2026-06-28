@@ -6,7 +6,7 @@
 //! generic over any op's [`ConstantFold`] interface.
 
 use crate::egraph::{EClassId, EGraph, EMatch, Rewrite};
-use crate::graph::{Dag, NodeId, Pattern, PatternExpr};
+use crate::graph::{Dag, MetaDag, NodeId, Pattern, PatternExpr};
 use crate::sem_expr::Value;
 use crate::utils::APInt;
 use crate::{

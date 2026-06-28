@@ -88,7 +88,7 @@ impl Hash for SemNode {
     }
 }
 
-impl tir::graph::Matchable for SemNode {
+impl tir::graph::Matchable<Context> for SemNode {
     fn is_leaf(&self, ctx: &Context) -> bool {
         self.kind.is_leaf(ctx)
     }

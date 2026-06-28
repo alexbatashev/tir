@@ -14,7 +14,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    BlockId, Context, OpId, Operation, Terminator, TypeId,
+    BlockId, Context, OpId, Operation, Terminator,
     graph::{Dag, MutDag, NodeId, PostOrderDag},
 };
 
@@ -185,6 +185,7 @@ impl DominatorTree {
 impl Dag for DominatorTree {
     type Node = DomNode;
     type Leaf = ();
+    type Annotation = ();
 
     fn len(&self) -> usize {
         self.inner.len()
@@ -198,12 +199,8 @@ impl Dag for DominatorTree {
         self.inner.get_leaf_data(id)
     }
 
-    fn get_original_op(&self, id: NodeId) -> Option<OpId> {
-        self.inner.get_original_op(id)
-    }
-
-    fn get_actual_type(&self, id: NodeId) -> Option<TypeId> {
-        self.inner.get_actual_type(id)
+    fn get_annotation(&self, id: NodeId) -> Option<&Self::Annotation> {
+        self.inner.get_annotation(id)
     }
 
     fn root(&self) -> Option<NodeId> {

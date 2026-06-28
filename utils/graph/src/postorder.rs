@@ -3,21 +3,23 @@ use std::collections::HashMap;
 use crate::{Dag, EMPTY_CHILDREN, MutDag, NodeId};
 
 /// A DAG where nodes are physically stored in strict post order.
-pub struct PostOrderDag<N, L> {
+pub struct PostOrderDag<N, L, A = ()> {
     nodes: Vec<N>,
     edges: HashMap<NodeId, Vec<NodeId>>,
     parents: HashMap<NodeId, Vec<NodeId>>,
     data: HashMap<NodeId, L>,
+    annotations: HashMap<NodeId, A>,
     descendants: Vec<Vec<u64>>,
 }
 
-impl<N, L> PostOrderDag<N, L> {
+impl<N, L, A> PostOrderDag<N, L, A> {
     pub fn new() -> Self {
         Self {
             nodes: Vec::new(),
             edges: HashMap::new(),
             parents: HashMap::new(),
             data: HashMap::new(),
+            annotations: HashMap::new(),
             descendants: Vec::new(),
         }
     }
@@ -29,11 +31,6 @@ impl<N, L> PostOrderDag<N, L> {
     fn mark_descendant(bits: &mut [u64], node: NodeId) {
         let idx = node.index();
         bits[idx / 64] |= 1u64 << (idx % 64);
-    }
-
-    fn contains_reachable(&self, root: NodeId, target: NodeId) -> bool {
-        let idx = target.index();
-        (self.descendants[root.index()][idx / 64] & (1u64 << (idx % 64))) != 0
     }
 
     fn merge_descendants(&mut self, into: NodeId, from: NodeId) -> bool {
@@ -80,43 +77,54 @@ impl<N, L> PostOrderDag<N, L> {
     }
 }
 
-impl<N, L> Default for PostOrderDag<N, L> {
+impl<N, L, A> Default for PostOrderDag<N, L, A> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-pub struct PostOrderDagIter<'a, N, L> {
-    dag: &'a PostOrderDag<N, L>,
-    root: NodeId,
-    next_index: usize,
-    end_index: usize,
+/// Yields a root's reachable set — its post-order traversal, since nodes are
+/// stored in post order — by walking the descendant bitmask directly: it scans
+/// only set bits (skipping empty words) instead of testing every index.
+pub struct PostOrderDagIter<'a> {
+    bits: &'a [u64],
+    word: usize,
+    current: u64,
 }
 
-impl<N, L> Iterator for PostOrderDagIter<'_, N, L> {
-    type Item = NodeId;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        while self.next_index <= self.end_index {
-            let candidate = NodeId::from_index(self.next_index);
-            self.next_index += 1;
-
-            if self.dag.contains_reachable(self.root, candidate) {
-                return Some(candidate);
-            }
+impl<'a> PostOrderDagIter<'a> {
+    fn new(bits: &'a [u64]) -> Self {
+        Self {
+            bits,
+            word: 0,
+            current: bits.first().copied().unwrap_or(0),
         }
-
-        None
     }
 }
 
-pub struct PostOrderDagPreorderIter<'a, N, L> {
-    dag: &'a PostOrderDag<N, L>,
+impl Iterator for PostOrderDagIter<'_> {
+    type Item = NodeId;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.current != 0 {
+                let bit = self.current.trailing_zeros() as usize;
+                self.current &= self.current - 1;
+                return Some(NodeId::from_index(self.word * 64 + bit));
+            }
+            self.word += 1;
+            self.current = *self.bits.get(self.word)?;
+        }
+    }
+}
+
+pub struct PostOrderDagPreorderIter<'a, N, L, A> {
+    dag: &'a PostOrderDag<N, L, A>,
     start: NodeId,
     next_ordinal: usize,
 }
 
-impl<N, L> Iterator for PostOrderDagPreorderIter<'_, N, L> {
+impl<N, L, A> Iterator for PostOrderDagPreorderIter<'_, N, L, A> {
     type Item = NodeId;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -127,9 +135,10 @@ impl<N, L> Iterator for PostOrderDagPreorderIter<'_, N, L> {
     }
 }
 
-impl<N, L> Dag for PostOrderDag<N, L> {
+impl<N, L, A> Dag for PostOrderDag<N, L, A> {
     type Node = N;
     type Leaf = L;
+    type Annotation = A;
 
     fn len(&self) -> usize {
         self.nodes.len()
@@ -141,6 +150,10 @@ impl<N, L> Dag for PostOrderDag<N, L> {
 
     fn get_leaf_data(&self, id: NodeId) -> Option<&Self::Leaf> {
         self.data.get(&id)
+    }
+
+    fn get_annotation(&self, id: NodeId) -> Option<&Self::Annotation> {
+        self.annotations.get(&id)
     }
 
     fn root(&self) -> Option<NodeId> {
@@ -157,12 +170,7 @@ impl<N, L> Dag for PostOrderDag<N, L> {
     }
 
     fn postorder(&self, start: NodeId) -> impl Iterator<Item = NodeId> {
-        PostOrderDagIter {
-            dag: self,
-            root: start,
-            next_index: 0,
-            end_index: start.index(),
-        }
+        PostOrderDagIter::new(&self.descendants[start.index()])
     }
 
     fn preorder(&self, start: NodeId) -> impl Iterator<Item = NodeId> {
@@ -174,7 +182,7 @@ impl<N, L> Dag for PostOrderDag<N, L> {
     }
 }
 
-impl<N, L> MutDag for PostOrderDag<N, L> {
+impl<N, L, A> MutDag for PostOrderDag<N, L, A> {
     fn add_node(&mut self, n: Self::Node) -> NodeId {
         let id = NodeId::from_index(self.nodes.len());
         self.nodes.push(n);
@@ -207,5 +215,59 @@ impl<N, L> MutDag for PostOrderDag<N, L> {
 
     fn set_leaf_data(&mut self, n: NodeId, d: Self::Leaf) {
         self.data.insert(n, d);
+    }
+
+    fn set_annotation(&mut self, n: NodeId, a: Self::Annotation) {
+        self.annotations.insert(n, a);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Dag;
+
+    /// Build the tree `(0+1) + (3+4)` laid out in post order: leaves first, then
+    /// each `Add`, then the root. Returns the dag and its root.
+    fn sample() -> (PostOrderDag<&'static str, ()>, NodeId) {
+        let mut dag = PostOrderDag::new();
+        let a = dag.add_node("0");
+        let b = dag.add_node("1");
+        let left = dag.add_node("+");
+        dag.add_edge(left, a);
+        dag.add_edge(left, b);
+        let c = dag.add_node("3");
+        let d = dag.add_node("4");
+        let right = dag.add_node("+");
+        dag.add_edge(right, c);
+        dag.add_edge(right, d);
+        let root = dag.add_node("+");
+        dag.add_edge(root, left);
+        dag.add_edge(root, right);
+        (dag, root)
+    }
+
+    #[test]
+    fn postorder_at_root_visits_every_node_in_order() {
+        let (dag, root) = sample();
+        let nodes: Vec<_> = dag.postorder(root).collect();
+        let expected: Vec<_> = (0..dag.len()).map(NodeId::from_index).collect();
+        assert_eq!(nodes, expected);
+    }
+
+    #[test]
+    fn postorder_visits_only_the_subtree() {
+        let (dag, _root) = sample();
+        // The right `Add` is node 5; its subtree is nodes 3, 4, 5.
+        let right = NodeId::from_index(5);
+        let nodes: Vec<_> = dag.postorder(right).collect();
+        assert_eq!(
+            nodes,
+            vec![
+                NodeId::from_index(3),
+                NodeId::from_index(4),
+                NodeId::from_index(5),
+            ]
+        );
     }
 }

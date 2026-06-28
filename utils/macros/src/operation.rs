@@ -318,7 +318,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         };
         quote! {
             fn semantic_expr(&self, g: &mut tir::sem_expr::ExprPostGraph) -> Option<tir::graph::NodeId> {
-                use tir::graph::MutDag;
+                use tir::graph::{MutDag, MetaMutDag};
                 let __tir_sem_expr_root = { #body };
                 g.set_original_op(__tir_sem_expr_root, <Self as tir::Operation>::id(self));
                 #actual_type_setter
@@ -341,7 +341,8 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         };
         quote! {
             impl tir::sem_expr::AsSemExpr for #struct_name {
-                fn convert(&self, g: &mut impl tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>) -> tir::graph::NodeId {
+                fn convert(&self, g: &mut impl tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload, Annotation = tir::graph::NodeMeta>) -> tir::graph::NodeId {
+                    use tir::graph::MetaMutDag;
                     let __tir_sem_expr_root = { #body };
                     g.set_original_op(__tir_sem_expr_root, <Self as tir::Operation>::id(self));
                     #actual_type_setter

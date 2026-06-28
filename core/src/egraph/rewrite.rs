@@ -68,7 +68,7 @@ impl Default for SaturationLimits {
     }
 }
 
-impl<N: Matchable + Clone + Eq + std::hash::Hash, L: Clone + PartialEq> EGraph<N, L> {
+impl<N: Matchable<Context> + Clone + Eq + std::hash::Hash, L: Clone + PartialEq> EGraph<N, L> {
     pub fn saturate(
         &mut self,
         ctx: &Context,

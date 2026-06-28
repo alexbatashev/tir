@@ -5,6 +5,7 @@
 use std::fmt::Write;
 use std::hash::Hash;
 
+use crate::Context;
 use crate::graph::{Dag, Matchable};
 
 use super::EGraph;
@@ -19,7 +20,9 @@ pub struct EGPrinter<'a, N, L> {
     eg: &'a EGraph<N, L>,
 }
 
-impl<'a, N: Matchable + Clone + Eq + Hash + DotLabel<L>, L: Clone + PartialEq> EGPrinter<'a, N, L> {
+impl<'a, N: Matchable<Context> + Clone + Eq + Hash + DotLabel<L>, L: Clone + PartialEq>
+    EGPrinter<'a, N, L>
+{
     pub fn new(eg: &'a EGraph<N, L>) -> Self {
         Self { eg }
     }

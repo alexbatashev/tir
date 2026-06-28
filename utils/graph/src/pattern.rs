@@ -4,7 +4,7 @@ use crate::NodeId;
 
 /// Capability a graph-node label needs to take part in pattern matching /
 /// e-matching: leaf classification, equality against a template label, and the
-/// operand-kind predicates. Kept separate from [`crate::graph::Dag`], which is a
+/// operand-kind predicates. Kept separate from [`crate::Dag`], which is a
 /// pure storage view, so analyses that never match patterns (e.g. dominator trees)
 /// owe it nothing.
 pub trait Matchable<C> {

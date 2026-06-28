@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::{
     BlockId, BranchGuard, BranchTerminator, Context, LoopLike, OpId, RegionGuard, RegionId,
-    Terminator, TypeId, ValueId,
+    Terminator, ValueId,
     analysis::DominatorTree,
     graph::{Dag, GenericDag, MutDag, NodeId},
 };
@@ -114,6 +114,7 @@ impl GSA {
 impl Dag for GSA {
     type Node = GateNode;
     type Leaf = ();
+    type Annotation = ();
 
     fn len(&self) -> usize {
         self.inner.len()
@@ -127,12 +128,8 @@ impl Dag for GSA {
         self.inner.get_leaf_data(id)
     }
 
-    fn get_original_op(&self, id: NodeId) -> Option<OpId> {
-        self.inner.get_original_op(id)
-    }
-
-    fn get_actual_type(&self, id: NodeId) -> Option<TypeId> {
-        self.inner.get_actual_type(id)
+    fn get_annotation(&self, id: NodeId) -> Option<&Self::Annotation> {
+        self.inner.get_annotation(id)
     }
 
     fn root(&self) -> Option<NodeId> {
@@ -505,7 +502,7 @@ fn region_yield_value(context: &Context, region: RegionId) -> Option<ValueId> {
 mod tests {
     use super::*;
     use crate::{
-        Context, IRBuilder, Operand, Operation, RegionId,
+        Context, IRBuilder, Operand, Operation, RegionId, TypeId,
         builtin::{IntegerType, UnitType, ops},
     };
 

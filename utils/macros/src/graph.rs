@@ -84,7 +84,7 @@ pub fn construct_simple_node(input: TokenStream) -> TokenStream {
     children_arms.push(quote! { _ => #default_arity, });
 
     quote! {
-        impl ::tir::graph::Matchable for #name {
+        impl ::tir::graph::Matchable<::tir::Context> for #name {
             fn is_leaf(&self, _: &::tir::Context) -> bool {
                 match self {
                     #is_leaf_body

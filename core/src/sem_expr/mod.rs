@@ -1,6 +1,6 @@
 use crate::{
     Operation, ValueId,
-    graph::{MutDag, NodeId, PostOrderDag},
+    graph::{MutDag, NodeId, NodeMeta, PostOrderDag},
     helpers::SimpleNode,
     utils::{APFloat, APInt, RawBits},
 };
@@ -15,7 +15,7 @@ pub use exec::{Memory, execute, execute_with_memory};
 pub use infer::{canonicalize_for_selection, infer_widths};
 pub use unroll::unroll_loops;
 
-pub type ExprPostGraph = PostOrderDag<ExprKind, ExprPayload>;
+pub type ExprPostGraph = PostOrderDag<ExprKind, ExprPayload, NodeMeta>;
 
 /// Fold an operation over constant operand `values` by evaluating its declared
 /// semantic expression. `values[i]` is the value of operand `i` (i.e. `SymbolId(i)`
@@ -28,7 +28,10 @@ pub fn fold_with_sem(op: &dyn Operation, values: &[Value]) -> Option<Value> {
 }
 
 pub trait AsSemExpr: Operation {
-    fn convert(&self, g: &mut impl MutDag<Node = ExprKind, Leaf = ExprPayload>) -> NodeId;
+    fn convert(
+        &self,
+        g: &mut impl MutDag<Node = ExprKind, Leaf = ExprPayload, Annotation = NodeMeta>,
+    ) -> NodeId;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, SimpleNode)]

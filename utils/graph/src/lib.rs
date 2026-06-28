@@ -24,10 +24,13 @@ impl NodeId {
 /// A pure read-only view over a cache-friendly graph store, optimized for a
 /// particular traversal order by the implementor. Deliberately knows nothing about
 /// pattern matching — node labels gain that capability separately via
-/// [`Matchable`], required only by the e-graph.
+/// [`Matchable`], required only by the e-graph. Per-node side data the storage
+/// carries verbatim (e.g. source provenance) is exposed through the opaque
+/// [`Dag::Annotation`] type, which the storage never interprets.
 pub trait Dag {
     type Node;
     type Leaf;
+    type Annotation;
 
     fn len(&self) -> usize;
 
@@ -40,6 +43,7 @@ pub trait Dag {
         self.get_node(id)
     }
     fn get_leaf_data(&self, id: NodeId) -> Option<&Self::Leaf>;
+    fn get_annotation(&self, id: NodeId) -> Option<&Self::Annotation>;
 
     fn root(&self) -> Option<NodeId>;
     fn children(&self, id: NodeId) -> impl Iterator<Item = NodeId>;
@@ -52,26 +56,29 @@ pub trait MutDag: Dag {
     fn add_node(&mut self, n: Self::Node) -> NodeId;
     fn add_edge(&mut self, from: NodeId, to: NodeId);
     fn set_leaf_data(&mut self, n: NodeId, d: Self::Leaf);
+    fn set_annotation(&mut self, n: NodeId, a: Self::Annotation);
 }
 
-pub struct GenericDag<N, L> {
+pub struct GenericDag<N, L, A = ()> {
     nodes: Vec<N>,
     edges: HashMap<NodeId, Vec<NodeId>>,
     data: HashMap<NodeId, L>,
+    annotations: HashMap<NodeId, A>,
 }
 
-impl<N, L> Default for GenericDag<N, L> {
+impl<N, L, A> Default for GenericDag<N, L, A> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<N, L> GenericDag<N, L> {
+impl<N, L, A> GenericDag<N, L, A> {
     pub fn new() -> Self {
         Self {
             nodes: Vec::new(),
             edges: HashMap::new(),
             data: HashMap::new(),
+            annotations: HashMap::new(),
         }
     }
 
@@ -104,13 +111,13 @@ impl<N, L> GenericDag<N, L> {
     }
 }
 
-pub struct GenericDagPostorderIter<'a, N, L> {
-    dag: &'a GenericDag<N, L>,
+pub struct GenericDagPostorderIter<'a, N, L, A> {
+    dag: &'a GenericDag<N, L, A>,
     start: NodeId,
     next_index: usize,
 }
 
-impl<N, L> Iterator for GenericDagPostorderIter<'_, N, L> {
+impl<N, L, A> Iterator for GenericDagPostorderIter<'_, N, L, A> {
     type Item = NodeId;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -127,13 +134,13 @@ impl<N, L> Iterator for GenericDagPostorderIter<'_, N, L> {
     }
 }
 
-pub struct GenericDagPreorderIter<'a, N, L> {
-    dag: &'a GenericDag<N, L>,
+pub struct GenericDagPreorderIter<'a, N, L, A> {
+    dag: &'a GenericDag<N, L, A>,
     start: NodeId,
     next_ordinal: usize,
 }
 
-impl<N, L> Iterator for GenericDagPreorderIter<'_, N, L> {
+impl<N, L, A> Iterator for GenericDagPreorderIter<'_, N, L, A> {
     type Item = NodeId;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -144,10 +151,10 @@ impl<N, L> Iterator for GenericDagPreorderIter<'_, N, L> {
     }
 }
 
-impl<N, L> Dag for GenericDag<N, L> {
+impl<N, L, A> Dag for GenericDag<N, L, A> {
     type Node = N;
-
     type Leaf = L;
+    type Annotation = A;
 
     fn len(&self) -> usize {
         self.nodes.len()
@@ -159,6 +166,10 @@ impl<N, L> Dag for GenericDag<N, L> {
 
     fn get_leaf_data(&self, id: NodeId) -> Option<&Self::Leaf> {
         self.data.get(&id)
+    }
+
+    fn get_annotation(&self, id: NodeId) -> Option<&Self::Annotation> {
+        self.annotations.get(&id)
     }
 
     fn root(&self) -> Option<NodeId> {
@@ -191,7 +202,7 @@ impl<N, L> Dag for GenericDag<N, L> {
     }
 }
 
-impl<N, L> MutDag for GenericDag<N, L> {
+impl<N, L, A> MutDag for GenericDag<N, L, A> {
     fn add_node(&mut self, n: Self::Node) -> NodeId {
         let id = NodeId::from_index(self.nodes.len());
         self.nodes.push(n);
@@ -204,5 +215,9 @@ impl<N, L> MutDag for GenericDag<N, L> {
 
     fn set_leaf_data(&mut self, n: NodeId, d: Self::Leaf) {
         self.data.insert(n, d);
+    }
+
+    fn set_annotation(&mut self, n: NodeId, a: Self::Annotation) {
+        self.annotations.insert(n, a);
     }
 }

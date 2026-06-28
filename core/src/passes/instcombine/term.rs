@@ -90,7 +90,7 @@ impl DotLabel<Leaf> for Term {
     }
 }
 
-impl Matchable for Term {
+impl Matchable<Context> for Term {
     fn is_leaf(&self, _ctx: &Context) -> bool {
         matches!(self, Term::Const | Term::Opaque)
     }

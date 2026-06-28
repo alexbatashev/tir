@@ -2869,6 +2869,7 @@ fn emit_dag_as_code(
 
     let mut stmts: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut node_vars: HashMap<usize, proc_macro2::Ident> = HashMap::new();
+    let mut has_typed_node = false;
     for (counter, node_id) in dag.postorder(root).enumerate() {
         let var = format_ident!("__sem_{}", counter);
 
@@ -2892,6 +2893,7 @@ fn emit_dag_as_code(
             stmts.push(quote! {
                 g.set_actual_type(#var, tir::builtin::IntegerType::new(_context, #width_lit));
             });
+            has_typed_node = true;
         }
 
         let children: Vec<tir::graph::NodeId> = dag.children(node_id).collect();
@@ -2901,6 +2903,13 @@ fn emit_dag_as_code(
         }
 
         node_vars.insert(node_id.index(), var);
+    }
+
+    // `set_actual_type` is the only annotation accessor the generated body uses, and
+    // only typed nodes call it; bring its trait into scope just for those patterns so
+    // type-free patterns don't carry an unused import.
+    if has_typed_node {
+        stmts.insert(0, quote! { use tir::graph::MetaMutDag as _; });
     }
 
     let root_var = node_vars[&root.index()].clone();
