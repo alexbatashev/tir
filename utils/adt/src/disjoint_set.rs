@@ -151,6 +151,101 @@ impl DisjointSet {
     }
 }
 
+/// A union-find with stack-disciplined assumption scopes. The base is the equality
+/// that always holds; each open context layers extra unions on top that
+/// [`Self::pop_context`] discards. With no context open it is exactly a
+/// [`DisjointSet`].
+///
+/// A context relation only ever *coarsens* the base (adds unions, never splits), so
+/// each layer is a [`DisjointSetImpl`] over the same id-space whose unions link the
+/// canonical reps of the layer below it. [`Self::find`] is therefore bottom-up —
+/// canonicalize through the base, then through each layer in turn. A top-down find
+/// (descend to the base first, then re-apply layers) yields false negatives: an
+/// element with no entry in a layer would return its base rep without seeing that
+/// the layer redirected that rep. Every open layer is kept the same length as the
+/// base (grown in lockstep by [`Self::push`]), so all indices stay in range.
+pub struct ScopedDisjointSet {
+    base: DisjointSetImpl,
+    layers: Vec<DisjointSetImpl>,
+}
+
+impl Default for ScopedDisjointSet {
+    fn default() -> Self {
+        Self::new(0)
+    }
+}
+
+impl ScopedDisjointSet {
+    pub fn new(size: usize) -> Self {
+        Self {
+            base: DisjointSetImpl::with_size(size),
+            layers: Vec::new(),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.base.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.base.len() == 0
+    }
+
+    /// Number of open contexts.
+    pub fn depth(&self) -> usize {
+        self.layers.len()
+    }
+
+    /// Add a fresh singleton element, returning its id. Grows the base and every
+    /// open layer so they stay index-aligned.
+    pub fn push(&mut self) -> u32 {
+        let id = self.base.push();
+        for layer in &mut self.layers {
+            layer.push();
+        }
+        id
+    }
+
+    /// Enter an assumption scope. Unions until the matching [`Self::pop_context`]
+    /// are local to it.
+    pub fn push_context(&mut self) {
+        self.layers
+            .push(DisjointSetImpl::with_size(self.base.len()));
+    }
+
+    /// Leave the current assumption scope, discarding its unions.
+    pub fn pop_context(&mut self) {
+        self.layers.pop();
+    }
+
+    /// Canonicalize `x` bottom-up: through the base, then each open layer in order.
+    pub fn find(&self, x: u32) -> u32 {
+        let mut root = self.base.find_root(x);
+        for layer in &self.layers {
+            root = layer.find_root(root);
+        }
+        root
+    }
+
+    /// Merge the classes of `x` and `y` in the innermost open scope (the base when
+    /// none is open), returning the surviving root.
+    pub fn union(&mut self, x: u32, y: u32) -> u32 {
+        let rx = self.find(x);
+        let ry = self.find(y);
+        if rx == ry {
+            return rx;
+        }
+        match self.layers.last_mut() {
+            Some(top) => top.union(rx, ry).1,
+            None => self.base.union(rx, ry).1,
+        }
+    }
+
+    pub fn connected(&self, x: u32, y: u32) -> bool {
+        self.find(x) == self.find(y)
+    }
+}
+
 pub struct DisjointMap<V, F> {
     uf: DisjointSetImpl,
     values: Vec<Option<V>>,
@@ -329,5 +424,100 @@ mod tests {
         map.union(a, c);
         map.set(c, 42);
         assert_eq!(map.get(b), &42);
+    }
+
+    #[test]
+    fn scoped_with_no_context_is_plain_uf() {
+        let mut uf = ScopedDisjointSet::new(5);
+        uf.union(0, 1);
+        uf.union(1, 2);
+        assert!(uf.connected(0, 2));
+        assert!(!uf.connected(0, 3));
+        assert_eq!(uf.find(0), uf.find(2));
+    }
+
+    #[test]
+    fn scoped_context_isolates_unions() {
+        let mut uf = ScopedDisjointSet::new(4);
+        uf.push_context();
+        uf.union(0, 1);
+        assert!(uf.connected(0, 1));
+        uf.pop_context();
+        assert!(!uf.connected(0, 1));
+    }
+
+    #[test]
+    fn scoped_base_then_context_is_transitive() {
+        let mut uf = ScopedDisjointSet::new(3);
+        uf.union(0, 1);
+        uf.push_context();
+        uf.union(1, 2);
+        assert_eq!(uf.find(2), uf.find(0));
+        uf.pop_context();
+        assert!(!uf.connected(0, 2));
+        assert!(uf.connected(0, 1));
+    }
+
+    #[test]
+    fn scoped_nested_contexts_do_not_leak() {
+        let mut uf = ScopedDisjointSet::new(5);
+        uf.push_context();
+        uf.union(0, 1);
+        uf.push_context();
+        uf.union(2, 3);
+        assert!(uf.connected(2, 3));
+        uf.pop_context();
+        assert!(!uf.connected(2, 3));
+        assert!(uf.connected(0, 1));
+        uf.pop_context();
+        assert!(!uf.connected(0, 1));
+    }
+
+    #[test]
+    fn scoped_context_union_sees_base_class_siblings() {
+        // Regression for the top-down find false negative: a base class {2,3}, then
+        // a context union 0≡2. find(3) must re-apply the layer to its base rep 2.
+        let mut uf = ScopedDisjointSet::new(4);
+        uf.union(2, 3);
+        uf.push_context();
+        uf.union(0, 2);
+        assert!(uf.connected(0, 3));
+        assert!(uf.connected(2, 3));
+        assert_eq!(uf.find(0), uf.find(3));
+        uf.pop_context();
+        assert!(!uf.connected(0, 3));
+        assert!(uf.connected(2, 3));
+    }
+
+    #[test]
+    fn scoped_nested_context_closes_across_layers() {
+        // L1: 1≡2. L2: 0≡1 and 2≡3 ⇒ {0,1,2,3} despite the 1≡2 step living a layer
+        // below the unions that close the class.
+        let mut uf = ScopedDisjointSet::new(5);
+        uf.push_context();
+        uf.union(1, 2);
+        uf.push_context();
+        uf.union(0, 1);
+        uf.union(2, 3);
+        let r = uf.find(0);
+        assert_eq!(uf.find(1), r);
+        assert_eq!(uf.find(2), r);
+        assert_eq!(uf.find(3), r);
+        assert!(!uf.connected(0, 4));
+        uf.pop_context();
+        assert!(uf.connected(1, 2));
+        assert!(!uf.connected(0, 1));
+        assert!(!uf.connected(2, 3));
+    }
+
+    #[test]
+    fn scoped_push_grows_open_layers() {
+        let mut uf = ScopedDisjointSet::new(2);
+        uf.push_context();
+        let c = uf.push();
+        uf.union(0, c);
+        assert!(uf.connected(0, c));
+        uf.pop_context();
+        assert!(!uf.connected(0, c));
     }
 }

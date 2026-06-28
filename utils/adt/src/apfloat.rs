@@ -590,11 +590,7 @@ impl APFloat {
     /// the extremes by sign. Only comparable within a single format.
     fn total_key(&self) -> i128 {
         let magnitude = (self.to_bits() & ((1u128 << (self.bit_width() - 1)) - 1)) as i128;
-        if self.sign {
-            -magnitude - 1
-        } else {
-            magnitude
-        }
+        if self.sign { -magnitude - 1 } else { magnitude }
     }
 }
 

@@ -16,7 +16,7 @@ mod test_lang;
 
 use std::collections::HashMap;
 
-use tir_adt::DisjointSet;
+use tir_adt::ScopedDisjointSet;
 
 pub use eclass::*;
 pub use enode::*;
@@ -40,19 +40,30 @@ impl Id {
 }
 
 pub struct EGraph<L: ENode> {
-    /// Equivalence of class ids. The sole authority on what is equal — a future
-    /// colored e-graph layers per-color refinements here without touching `memo`
-    /// or `classes`, since every comparison flows through [`Self::find`].
-    unionfind: DisjointSet,
-    /// Hash-cons index: [`ENode::hash_cons`] bucket -> `[(canonical node, class)]`.
-    /// A node is present iff some entry has `matches` + equal canonical children,
-    /// so collisions only share a bucket and never merge distinct nodes.
+    /// Equivalence of class ids and the sole authority on what is equal: every
+    /// comparison flows through [`Self::find`]. A [`Self::push_context`] scope
+    /// layers extra unions here that [`Self::pop_context`] discards.
+    unionfind: ScopedDisjointSet,
+    /// Base-scope hash-cons index: [`ENode::hash_cons`] bucket ->
+    /// `[(canonical node, class)]`. A node is present iff some entry has `matches`
+    /// and equal canonical children, so collisions only share a bucket and never
+    /// merge distinct nodes.
     memo: HashMap<u64, Vec<(L, Id)>>,
-    /// Canonical class id -> its e-class. Absorbed ids are removed on `union`.
+    /// Canonical base class id -> its e-class. Absorbed ids are removed on `union`.
+    /// Scoped unions never touch it, so a `pop_context` restores it for free.
     classes: HashMap<Id, EClass<L>>,
     /// Classes touched by a `union` since the last `rebuild`, awaiting congruence
-    /// repair.
+    /// repair. Base reps in the base scope, scope reps inside a scope.
     pending: Vec<Id>,
+    /// Scope overlay, live only while a scope is open. `scope_members` and
+    /// `scope_classes` are caches of the current scope partition, rebuilt from the
+    /// base by [`Self::aggregate_scope`]; `scope_memo` is a stack of scope
+    /// hash-cons tables, one per open context, so a nested `pop_context` restores
+    /// the enclosing scope's table instead of discarding it. The base
+    /// `classes`/`memo` stay immutable underneath all of them.
+    scope_members: HashMap<Id, Vec<Id>>,
+    scope_classes: HashMap<Id, EClass<L>>,
+    scope_memo: Vec<HashMap<u64, Vec<(L, Id)>>>,
 }
 
 impl<L: ENode> Default for EGraph<L> {
@@ -64,10 +75,13 @@ impl<L: ENode> Default for EGraph<L> {
 impl<L: ENode> EGraph<L> {
     pub fn new() -> Self {
         Self {
-            unionfind: DisjointSet::empty(),
+            unionfind: ScopedDisjointSet::new(0),
             memo: HashMap::new(),
             classes: HashMap::new(),
             pending: Vec::new(),
+            scope_members: HashMap::new(),
+            scope_classes: HashMap::new(),
+            scope_memo: Vec::new(),
         }
     }
 
@@ -75,18 +89,53 @@ impl<L: ENode> EGraph<L> {
         self.classes.is_empty()
     }
 
-    /// Total number of e-nodes across all classes.
+    /// Total number of e-nodes across all (current-scope) classes.
     pub fn total_size(&self) -> usize {
-        self.classes.values().map(EClass::len).sum()
+        self.current_classes().values().map(EClass::len).sum()
     }
 
     pub fn num_classes(&self) -> usize {
-        self.classes.len()
+        self.current_classes().len()
+    }
+
+    /// Whether an assumption scope is currently open.
+    fn in_scope(&self) -> bool {
+        self.unionfind.depth() > 0
+    }
+
+    /// The class table that reflects the current scope: the scope overlay while a
+    /// scope is open, otherwise the base classes.
+    fn current_classes(&self) -> &HashMap<Id, EClass<L>> {
+        if self.in_scope() {
+            &self.scope_classes
+        } else {
+            &self.classes
+        }
+    }
+
+    /// Enter an assumption scope. Unions until the matching [`Self::pop_context`]
+    /// are local to it; the base scope's classes and hash-cons stay untouched.
+    pub fn push_context(&mut self) {
+        self.unionfind.push_context();
+        self.scope_memo.push(HashMap::new());
+        self.aggregate_scope();
+    }
+
+    /// Leave the current assumption scope, discarding its unions and overlay. The
+    /// enclosing scope (or the base) is restored without a rebuild.
+    pub fn pop_context(&mut self) {
+        self.unionfind.pop_context();
+        self.scope_memo.pop();
+        self.scope_members.clear();
+        self.scope_classes.clear();
+        if self.in_scope() {
+            self.aggregate_scope();
+        }
     }
 
     /// Canonicalize `id` to its class root.
     pub fn find(&self, id: Id) -> Id {
-        Id::from_raw(self.unionfind.find_root(id.0))
+        Id::from_raw(self.unionfind.find(id.0))
     }
 
     pub fn connected(&self, a: Id, b: Id) -> bool {
@@ -94,11 +143,17 @@ impl<L: ENode> EGraph<L> {
     }
 
     pub fn class(&self, id: Id) -> &EClass<L> {
-        self.classes.get(&self.find(id)).expect("live e-class")
+        let root = self.find(id);
+        // Fall back to the base class for a node added since the last scope rebuild
+        // (not yet aggregated into `scope_classes`).
+        self.current_classes()
+            .get(&root)
+            .or_else(|| self.classes.get(&root))
+            .expect("live e-class")
     }
 
     pub fn classes(&self) -> impl Iterator<Item = &EClass<L>> + '_ {
-        self.classes.values()
+        self.current_classes().values()
     }
 
     /// The e-nodes of `id`'s class. Their child ids may be non-canonical after
@@ -142,10 +197,23 @@ impl<L: ENode> EGraph<L> {
         }
         let survivor = Id::from_raw(self.unionfind.union(ra.0, rb.0));
         let absorbed = if survivor == ra { rb } else { ra };
-        let mut taken = self.classes.remove(&absorbed).expect("absorbed e-class");
-        let surv = self.classes.get_mut(&survivor).expect("surviving e-class");
-        surv.nodes.append(&mut taken.nodes);
-        surv.parents.append(&mut taken.parents);
+        if self.in_scope() {
+            // Record the merge in the scope overlay only; the base classes that
+            // `survivor` and `absorbed` denote are left intact for `pop_context`.
+            let taken = self
+                .scope_members
+                .remove(&absorbed)
+                .unwrap_or_else(|| vec![absorbed]);
+            self.scope_members
+                .entry(survivor)
+                .or_insert_with(|| vec![survivor])
+                .extend(taken);
+        } else {
+            let mut taken = self.classes.remove(&absorbed).expect("absorbed e-class");
+            let surv = self.classes.get_mut(&survivor).expect("surviving e-class");
+            surv.nodes.append(&mut taken.nodes);
+            surv.parents.append(&mut taken.parents);
+        }
         self.pending.push(survivor);
         survivor
     }
@@ -153,10 +221,90 @@ impl<L: ENode> EGraph<L> {
     /// Restore the congruence invariant to a fixpoint after a batch of unions, and
     /// re-canonicalize the hash-cons.
     pub fn rebuild(&mut self) {
-        while let Some(id) = self.pending.pop() {
-            let id = self.find(id);
-            self.repair(id);
+        if self.in_scope() {
+            self.rebuild_scope();
+        } else {
+            while let Some(id) = self.pending.pop() {
+                let id = self.find(id);
+                self.repair(id);
+            }
         }
+    }
+
+    /// Congruence repair inside a scope. The base `classes`/`memo` are read-only:
+    /// for every scope class touched since the last rebuild, walk the base parents
+    /// of the base classes it covers, canonicalize them through the scope, and
+    /// union any that collide in a fresh scope hash-cons (which re-queues work).
+    /// Repeats to a fixpoint, then re-aggregates the scope view.
+    fn rebuild_scope(&mut self) {
+        let mut memo: HashMap<u64, Vec<(L, Id)>> = HashMap::new();
+        while let Some(rep) = self.pending.pop() {
+            let rep = self.find(rep);
+            let members = self
+                .scope_members
+                .get(&rep)
+                .cloned()
+                .unwrap_or_else(|| vec![rep]);
+            for base_rep in members {
+                let Some(class) = self.classes.get(&base_rep) else {
+                    continue;
+                };
+                for (mut p_node, p_class) in class.parents.clone() {
+                    if p_node.is_unique() {
+                        continue;
+                    }
+                    self.canonicalize(&mut p_node);
+                    let p_class = self.find(p_class);
+                    let bucket = memo.entry(p_node.hash_cons()).or_default();
+                    let congruent = bucket
+                        .iter()
+                        .find(|(stored, _)| {
+                            stored.matches(&p_node) && stored.children() == p_node.children()
+                        })
+                        .map(|&(_, id)| id);
+                    match congruent {
+                        Some(other) => {
+                            let other = self.find(other);
+                            if other != p_class {
+                                self.union(other, p_class);
+                            }
+                        }
+                        None => bucket.push((p_node, p_class)),
+                    }
+                }
+            }
+        }
+        self.aggregate_scope();
+    }
+
+    /// Rebuild the scope view from the base classes and the current scope unions:
+    /// `scope_members` groups the base reps under each scope rep, and
+    /// `scope_classes` aggregates their e-nodes so the read API works in a scope.
+    fn aggregate_scope(&mut self) {
+        let mut members: HashMap<Id, Vec<Id>> = HashMap::new();
+        let mut nodes: HashMap<Id, Vec<L>> = HashMap::new();
+        for class in self.classes.values() {
+            let root = self.find(class.id);
+            members.entry(root).or_default().push(class.id);
+            nodes
+                .entry(root)
+                .or_default()
+                .extend(class.nodes.iter().cloned());
+        }
+        self.scope_members = members;
+        self.scope_classes = nodes
+            .into_iter()
+            .map(|(id, nodes)| {
+                (
+                    id,
+                    EClass {
+                        id,
+                        nodes,
+                        parents: Vec::new(),
+                    },
+                )
+            })
+            .collect();
     }
 
     fn class_mut(&mut self, id: Id) -> &mut EClass<L> {
@@ -177,18 +325,30 @@ impl<L: ENode> EGraph<L> {
         changed
     }
 
-    /// The class of a canonical `node` already in the memo, or `None`.
+    /// The class of a canonical `node` already in the memo, or `None`. Open scopes
+    /// are consulted innermost-first, then the base hash-cons.
     fn memo_find(&self, node: &L) -> Option<Id> {
-        let bucket = self.memo.get(&node.hash_cons())?;
-        bucket
-            .iter()
-            .find(|(stored, _)| stored.matches(node) && stored.children() == node.children())
-            .map(|&(_, id)| self.find(id))
+        for memo in self.scope_memo.iter().rev() {
+            if let Some(id) = Self::bucket_lookup(memo, node) {
+                return Some(self.find(id));
+            }
+        }
+        Self::bucket_lookup(&self.memo, node).map(|id| self.find(id))
     }
 
-    /// Insert or update the memo entry for a canonical `node`.
+    fn bucket_lookup(memo: &HashMap<u64, Vec<(L, Id)>>, node: &L) -> Option<Id> {
+        memo.get(&node.hash_cons())?
+            .iter()
+            .find(|(stored, _)| stored.matches(node) && stored.children() == node.children())
+            .map(|&(_, id)| id)
+    }
+
+    /// Insert or update the memo entry for a canonical `node`, in the innermost
+    /// open scope's hash-cons while a scope is open (leaving the base one
+    /// untouched).
     fn memo_insert(&mut self, node: L, id: Id) {
-        let bucket = self.memo.entry(node.hash_cons()).or_default();
+        let memo = self.scope_memo.last_mut().unwrap_or(&mut self.memo);
+        let bucket = memo.entry(node.hash_cons()).or_default();
         match bucket
             .iter_mut()
             .find(|(stored, _)| stored.matches(&node) && stored.children() == node.children())
@@ -395,5 +555,170 @@ mod tests {
         assert_ne!(g.find(ua), g.find(ub));
         let child = g.nodes(ua)[0].children()[0];
         assert!(g.connected(child, a));
+    }
+
+    #[test]
+    fn scope_union_is_discarded_on_pop() {
+        let mut g = EGraph::new();
+        let a = sym(&mut g, 0);
+        let b = num(&mut g, 7);
+        g.push_context();
+        g.union(a, b);
+        assert!(g.connected(a, b));
+        g.pop_context();
+        assert!(!g.connected(a, b));
+    }
+
+    #[test]
+    fn scope_congruence_collapses_and_restores() {
+        // neg(a) and neg(b) are distinct at base; assuming a≡b in a scope makes
+        // them congruent, and popping restores the distinction.
+        let mut g = EGraph::new();
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
+        let fa = neg(&mut g, a);
+        let fb = neg(&mut g, b);
+        g.rebuild();
+        assert!(!g.connected(fa, fb));
+
+        g.push_context();
+        g.union(a, b);
+        g.rebuild();
+        assert!(g.connected(a, b));
+        assert!(g.connected(fa, fb));
+
+        g.pop_context();
+        assert!(!g.connected(a, b));
+        assert!(!g.connected(fa, fb));
+    }
+
+    #[test]
+    fn scope_preserves_base_equalities() {
+        let mut g = EGraph::new();
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
+        let c = sym(&mut g, 2);
+        g.union(a, b);
+        g.rebuild();
+
+        g.push_context();
+        assert!(g.connected(a, b));
+        g.union(b, c);
+        g.rebuild();
+        assert!(g.connected(a, c));
+        g.pop_context();
+
+        assert!(g.connected(a, b));
+        assert!(!g.connected(a, c));
+    }
+
+    #[test]
+    fn scope_congruence_propagates_to_fixpoint() {
+        // neg(neg(a)) ≡ a under a≡neg(a): assuming a≡neg(a) collapses the whole
+        // tower of negations into one class.
+        let mut g = EGraph::new();
+        let a = sym(&mut g, 0);
+        let mut cur = a;
+        for _ in 0..5 {
+            cur = neg(&mut g, cur);
+        }
+        let fa = neg(&mut g, a);
+        g.rebuild();
+        let base_classes = g.num_classes();
+
+        g.push_context();
+        g.union(fa, a);
+        g.rebuild();
+        assert_eq!(g.num_classes(), 1);
+        g.pop_context();
+        assert_eq!(g.num_classes(), base_classes);
+    }
+
+    #[test]
+    fn nested_scopes_isolate() {
+        let mut g = EGraph::new();
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
+        let c = sym(&mut g, 2);
+        g.push_context();
+        g.union(a, b);
+        g.push_context();
+        g.union(b, c);
+        g.rebuild();
+        assert!(g.connected(a, c));
+        g.pop_context();
+        assert!(g.connected(a, b));
+        assert!(!g.connected(a, c));
+        g.pop_context();
+        assert!(!g.connected(a, b));
+    }
+
+    #[test]
+    fn scope_add_then_congruence() {
+        // A node built inside a scope participates in scoped congruence.
+        let mut g = EGraph::new();
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
+        let fa = neg(&mut g, a);
+        g.rebuild();
+
+        g.push_context();
+        g.union(a, b);
+        let fb = neg(&mut g, b);
+        g.rebuild();
+        assert!(g.connected(fa, fb));
+        g.pop_context();
+        // fb's base singleton lingers but is no longer equal to fa.
+        assert!(!g.connected(fa, fb));
+    }
+
+    #[test]
+    fn nested_pop_restores_outer_scope_hash_cons() {
+        let mut g = EGraph::new();
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
+        g.rebuild();
+
+        g.push_context();
+        let outer = add(&mut g, a, b); // interned in the outer scope's hash-cons
+        g.push_context();
+        let c = sym(&mut g, 2);
+        g.union(a, c);
+        g.rebuild();
+        g.pop_context();
+
+        // Back in the outer scope: re-adding the node must hit the same class, so
+        // the outer scope's hash-cons survived the nested pop.
+        let again = add(&mut g, a, b);
+        assert_eq!(g.find(again), g.find(outer));
+        assert_eq!(g.nodes(g.find(outer)).len(), 1);
+    }
+
+    #[test]
+    fn rewrite_under_scope_is_discarded_on_pop() {
+        // add(x, y) => add(y, x), applied only inside a scope.
+        let mut lhs: Pattern<Math, &'static str> = Pattern::new();
+        let x = lhs.var(Var::Symbol("x"));
+        let y = lhs.var(Var::Symbol("y"));
+        lhs.add(Math::Add([x, y]));
+        let mut rhs: Pattern<Math, &'static str> = Pattern::new();
+        let rx = rhs.var(Var::Symbol("x"));
+        let ry = rhs.var(Var::Symbol("y"));
+        rhs.add(Math::Add([ry, rx]));
+        let comm = Rewrite::new("add-comm", lhs, Rhs::Pattern(rhs));
+
+        let mut g = EGraph::new();
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
+        let ab = add(&mut g, a, b);
+        let ba = add(&mut g, b, a);
+        g.rebuild();
+        assert!(!g.connected(ab, ba));
+
+        g.push_context();
+        comm.apply_all(&mut g);
+        assert!(g.connected(ab, ba));
+        g.pop_context();
+        assert!(!g.connected(ab, ba));
     }
 }
