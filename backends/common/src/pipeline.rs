@@ -8,6 +8,7 @@
 use tir::{Context, Operation, PassManager, builtin::FuncOp};
 
 use crate::TargetMachine;
+use crate::dce::DeadCodeEliminationPass;
 use crate::lower::OpLoweringPass;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,6 +27,10 @@ pub fn build_pipeline(
 ) -> PassManager {
     let mut pm = PassManager::new();
     pm.nest(FuncOp::name()).add_pass(target.isel_pass(context));
+    // Remove pure instructions left dead by selection (e.g. a value recomputed in
+    // a consumer's block by cross-block fusion). Runs while results are still
+    // virtual registers, so it must precede register allocation.
+    pm.add_pass(DeadCodeEliminationPass::new());
     if stop == StopAfter::ISel {
         return pm;
     }

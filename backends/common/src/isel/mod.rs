@@ -8,6 +8,7 @@
 
 mod builder;
 mod cover;
+mod ematch;
 mod emit;
 mod node;
 mod pattern;
@@ -20,13 +21,15 @@ use std::collections::{HashMap, HashSet};
 use tir::{
     Block, BlockId, Context, OpId, Operation, OperationRef, Pass, PassError, PassTarget, Rewriter,
     TypeId, ValueId,
-    egraph::{EClassId, Rewrite},
-    graph::{Dag, NodeId, OperandConstraint, PatternExpr},
+    graph::{NodeId, OperandConstraint, PatternExpr},
     sem_expr::{ExprKind, ExprPostGraph},
     utils::APInt,
 };
+use tir_symbolic::egraph::{ENode, Id};
 
+pub use ematch::EMatch;
 pub use node::{SemEGraph, SemNode, SemPayload};
+pub use rewrites::{IselRewrite, SaturationLimits};
 
 use builder::SemDagBuilder;
 use cover::{
@@ -197,21 +200,21 @@ impl Rule {
 struct BlockSelectionCache {
     egraph: SemEGraph,
     /// The earliest op whose result each (canonical) e-class produces.
-    op_by_root: HashMap<EClassId, OpId>,
+    op_by_root: HashMap<Id, OpId>,
     /// The canonical e-class of every op's root (total over the block's lowered
     /// ops, unlike `op_by_root`, which keeps one op per merged class).
-    op_root: HashMap<OpId, EClassId>,
+    op_root: HashMap<OpId, Id>,
     /// The IR value each (canonical) e-class computes, so an operand resolving to an
     /// intermediate result can be materialized as that register value at emit time.
-    class_value: HashMap<EClassId, ValueId>,
+    class_value: HashMap<Id, ValueId>,
     /// E-classes used as an operand by more than one consumer. A memory effect in
     /// such a class cannot be internalized into a match; a pure class still can —
     /// each fused instruction recomputes it (duplication).
-    shared_classes: HashSet<EClassId>,
+    shared_classes: HashSet<Id>,
     /// Op-root e-classes whose value some consumer can never internalize — a use
     /// by an op no match reaches (return, branch, an un-lowerable op) or by an op
     /// outside this block — so the defining op must never be consumed.
-    must_materialize: HashSet<EClassId>,
+    must_materialize: HashSet<Id>,
     /// The solved emission plan, or the completeness error explaining why the block
     /// cannot be selected with this rule set.
     plan: Option<Result<BlockPlan, String>>,
@@ -224,7 +227,7 @@ pub struct InstructionSelectPass {
     /// Target-independent algebraic identities the program e-graph is saturated
     /// with before covering (e.g. discovered `sext`/shift bridges). Populated by
     /// rewrite discovery; empty means selection is purely syntactic tiling.
-    rewrites: Vec<Rewrite<SemNode, ()>>,
+    rewrites: Vec<IselRewrite>,
     /// Instructions that define a register implicitly; selection introduces one
     /// ahead of any op whose `implicit_uses` name a matching register.
     definers: Vec<RegisterDefiner>,
@@ -269,7 +272,7 @@ impl InstructionSelectPass {
     /// covering. These are proved equivalences (target-independent bit-vector
     /// lemmas, or sequences discovered against the target's own instructions), so
     /// the rule set stays free of hand-written selection rules.
-    pub fn with_rewrites(mut self, rewrites: Vec<Rewrite<SemNode, ()>>) -> Self {
+    pub fn with_rewrites(mut self, rewrites: Vec<IselRewrite>) -> Self {
         self.rewrites = rewrites;
         self
     }
@@ -314,7 +317,7 @@ impl InstructionSelectPass {
             }
             builder.class_value
         };
-        egraph.saturate(context, &self.rewrites, Default::default());
+        rewrites::saturate(context, &mut egraph, &self.rewrites, Default::default());
 
         // Saturation may merge classes, so canonicalize both maps through `find`.
         // When two value-carrying classes merge (the values are provably equal),
@@ -326,7 +329,7 @@ impl InstructionSelectPass {
             .map(|(position, op)| (*op, position))
             .collect();
 
-        let mut op_by_root: HashMap<EClassId, OpId> = HashMap::new();
+        let mut op_by_root: HashMap<Id, OpId> = HashMap::new();
         for (op, root) in &roots_by_op {
             op_by_root
                 .entry(egraph.find(*root))
@@ -340,7 +343,7 @@ impl InstructionSelectPass {
 
         let value_position =
             |v: ValueId| value_to_def.get(&v).map(|op| op_position[op]).unwrap_or(0);
-        let mut canon_class_value: HashMap<EClassId, ValueId> = HashMap::new();
+        let mut canon_class_value: HashMap<Id, ValueId> = HashMap::new();
         for (class, value) in class_value {
             canon_class_value
                 .entry(egraph.find(class))
@@ -352,7 +355,7 @@ impl InstructionSelectPass {
                 .or_insert(value);
         }
 
-        let op_root: HashMap<OpId, EClassId> = roots_by_op
+        let op_root: HashMap<OpId, Id> = roots_by_op
             .iter()
             .map(|(op, root)| (*op, egraph.find(*root)))
             .collect();
@@ -563,8 +566,8 @@ impl InstructionSelectPass {
 
         // The match chosen as Root for each e-class, and the classes consumed as an
         // interior node of some selected match.
-        let mut root_match: HashMap<EClassId, usize> = HashMap::new();
-        let mut internal_classes: HashSet<EClassId> = HashSet::new();
+        let mut root_match: HashMap<Id, usize> = HashMap::new();
+        let mut internal_classes: HashSet<Id> = HashSet::new();
         for (node, choice) in cover.choices.iter().enumerate() {
             match choice {
                 PbqpIselAlternative::Root { match_id } => {
@@ -694,17 +697,14 @@ impl InstructionSelectPass {
             // the solver's separate Consume decision. A shared *memory effect*
             // must stay materialized — it may be a match root or a boundary
             // operand, never an interior node a larger match would consume.
-            let allowed = |pattern_node: NodeId, class: EClassId| {
+            let allowed = |pattern_node: NodeId, class: Id| {
                 pattern_node == pattern_root
                     || pattern.is_duplicable(pattern_node)
                     || node::class_is_pure(&cache.egraph, class)
                     || !cache.shared_classes.contains(&cache.egraph.find(class))
             };
 
-            for m in cache
-                .egraph
-                .ematch_with_legality(context, pattern, &allowed)
-            {
+            for m in ematch::ematch_with_legality(&cache.egraph, context, pattern, &allowed) {
                 let root = cache.egraph.find(m.root());
                 let op_id = cache.op_by_root.get(&root).copied();
                 // Instructions root at computed values: an original op result, or a
@@ -714,7 +714,7 @@ impl InstructionSelectPass {
                     .egraph
                     .nodes(root)
                     .iter()
-                    .any(|&id| cache.egraph.children(id).next().is_some());
+                    .any(|n| !n.children().is_empty());
                 if op_id.is_none() && !is_computed {
                     continue;
                 }

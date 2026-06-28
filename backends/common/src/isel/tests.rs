@@ -1,7 +1,7 @@
 use tir::{
     Context, IRBuilder, IRFormatter, Operation, PassManager, TypeId,
     builtin::{FuncOp, IntegerType, ops},
-    graph::{Dag, MetaMutDag, MutDag, OperandConstraint},
+    graph::{MetaMutDag, MutDag, OperandConstraint},
     sem_expr::{ExprKind, ExprPayload, ExprPostGraph},
 };
 
@@ -607,7 +607,7 @@ fn internal_node_type_constraint_is_enforced() {
 /// shift by `W - n = 48`, exactly the `srai` of the `add, slli, srai` idiom.
 #[test]
 fn saturation_bridges_sign_extension_to_shift_pair() {
-    use tir::egraph::SaturationLimits;
+    use super::SaturationLimits;
     use tir::graph::{OperandConstraint, Pattern, PatternExpr};
     use tir::sem_expr::{ExprKind, ExprPayload};
     use tir::utils::APInt;
@@ -619,29 +619,24 @@ fn saturation_bridges_sign_extension_to_shift_pair() {
     // SExt(v @ i16, 64), typed i64 — the program graph node no RV64 base
     // instruction can root.
     let mut egraph = SemEGraph::new();
-    let v = egraph.add(
-        template_node(ExprKind::Symbol, Some(ExprPayload::SymbolId(0)), Some(i16)),
-        &[],
+    let v = egraph.add(template_node(
+        ExprKind::Symbol,
+        Some(ExprPayload::SymbolId(0)),
+        Some(i16),
+    ));
+    let width = egraph.add(template_node(
+        ExprKind::Constant,
+        Some(ExprPayload::Int(APInt::new(64, 64))),
         None,
-    );
-    let width = egraph.add(
-        template_node(
-            ExprKind::Constant,
-            Some(ExprPayload::Int(APInt::new(64, 64))),
-            None,
-        ),
-        &[],
-        None,
-    );
-    let sext = egraph.add(
-        template_node(ExprKind::SExt, None, Some(i64)),
-        &[v, width],
-        None,
-    );
+    ));
+    let mut sext_node = template_node(ExprKind::SExt, None, Some(i64));
+    sext_node.children = vec![v, width];
+    let sext = egraph.add(sext_node);
 
     let rewrite = extension_rewrite(ExprKind::SExt, ExprKind::ShiftRightArithmetic);
-    egraph.saturate(
+    super::rewrites::saturate(
         &ctx,
+        &mut egraph,
         std::slice::from_ref(&rewrite),
         SaturationLimits::default(),
     );
@@ -651,7 +646,7 @@ fn saturation_bridges_sign_extension_to_shift_pair() {
         egraph
             .nodes(sext)
             .iter()
-            .any(|&id| egraph.get_node(id).kind == ExprKind::ShiftRightArithmetic),
+            .any(|n| n.kind == ExprKind::ShiftRightArithmetic),
         "saturation should add the arithmetic-shift bridge to the sext class"
     );
 
@@ -671,7 +666,7 @@ fn saturation_bridges_sign_extension_to_shift_pair() {
     srai.add_edge(root, imm);
     srai.set_root(root);
 
-    let matches = egraph.ematch(&ctx, &srai);
+    let matches = super::ematch::ematch(&egraph, &ctx, &srai);
     let m = matches
         .iter()
         .find(|m| egraph.find(m.root()) == egraph.find(sext))
@@ -679,7 +674,7 @@ fn saturation_bridges_sign_extension_to_shift_pair() {
     let shift_amount = egraph
         .nodes(m.binding(imm))
         .iter()
-        .find_map(|&id| match egraph.get_node(id).payload.as_ref() {
+        .find_map(|n| match n.payload.as_ref() {
             Some(super::SemPayload::Expr(ExprPayload::Int(v))) => Some(v.to_u64()),
             _ => None,
         })
@@ -938,7 +933,7 @@ fn memory_ops_select_via_interfaces() {
 /// merged op must still receive a selection decision.
 #[test]
 fn merged_value_classes_resolve_to_earliest_def() {
-    use tir::egraph::Rewrite;
+    use super::{EMatch, IselRewrite};
     use tir::graph::{Pattern, PatternExpr};
 
     let context = Context::with_default_dialects();
@@ -980,22 +975,18 @@ fn merged_value_classes_resolve_to_earliest_def() {
     searcher.add_edge(root, lhs);
     searcher.add_edge(root, rhs);
     searcher.set_root(root);
-    let union_mul_add = Rewrite {
+    let union_mul_add = IselRewrite {
         name: "mul-equals-add".to_string(),
         searcher,
-        apply: Box::new(
-            |_ctx: &Context, egraph: &mut SemEGraph, m: &tir::egraph::EMatch| {
-                let add_class = egraph.classes().find(|&class| {
-                    egraph
-                        .nodes(class)
-                        .iter()
-                        .any(|&id| egraph.get_node(id).kind == ExprKind::Add)
-                });
-                if let Some(add_class) = add_class {
-                    egraph.union(m.root(), add_class);
-                }
-            },
-        ),
+        apply: Box::new(|_ctx: &Context, egraph: &mut SemEGraph, m: &EMatch| {
+            let add_class = egraph
+                .classes()
+                .find(|class| class.nodes().iter().any(|n| n.kind == ExprKind::Add))
+                .map(|class| class.id());
+            if let Some(add_class) = add_class {
+                egraph.union(m.root(), add_class);
+            }
+        }),
     };
 
     fn emit_sub_bound(

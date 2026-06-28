@@ -3,7 +3,8 @@
 
 use std::collections::HashMap;
 
-use tir::{Context, OpId, TypeId, ValueId, builtin::IntegerType, egraph::EClassId};
+use tir::{Context, OpId, TypeId, ValueId, builtin::IntegerType};
+use tir_symbolic::egraph::Id;
 
 use super::RuleMatch;
 use super::cover::PbqpIselMatch;
@@ -52,19 +53,19 @@ pub(crate) struct IntroducedEmit {
 /// IR op) as fresh-valued instructions threaded into their consumers' operands.
 pub(crate) struct EmissionBuilder<'a> {
     pub(crate) egraph: &'a SemEGraph,
-    pub(crate) class_value: &'a HashMap<EClassId, ValueId>,
-    pub(crate) op_by_root: &'a HashMap<EClassId, OpId>,
+    pub(crate) class_value: &'a HashMap<Id, ValueId>,
+    pub(crate) op_by_root: &'a HashMap<Id, OpId>,
     pub(crate) matches: &'a [PbqpIselMatch],
-    pub(crate) root_match: &'a HashMap<EClassId, usize>,
+    pub(crate) root_match: &'a HashMap<Id, usize>,
     pub(crate) context: &'a Context,
     /// Fresh destination value assigned to each introduced class.
-    pub(crate) introduced_dest: HashMap<EClassId, ValueId>,
+    pub(crate) introduced_dest: HashMap<Id, ValueId>,
     pub(crate) introduced: Vec<IntroducedEmit>,
 }
 
 impl EmissionBuilder<'_> {
     /// A Root-covered class with no original op is one the rewrites introduced.
-    fn is_introduced(&self, class: EClassId) -> bool {
+    fn is_introduced(&self, class: Id) -> bool {
         self.root_match.contains_key(&class) && !self.op_by_root.contains_key(&class)
     }
 
@@ -76,7 +77,7 @@ impl EmissionBuilder<'_> {
         anchor: OpId,
         anchor_ty: Option<TypeId>,
     ) -> RuleMatch {
-        let operand_classes: Vec<EClassId> = self.matches[match_id]
+        let operand_classes: Vec<Id> = self.matches[match_id]
             .bindings
             .captures
             .entries
@@ -93,17 +94,12 @@ impl EmissionBuilder<'_> {
 
     /// Ensure an introduced class is emitted (operands first), returning its fresh
     /// destination value.
-    fn emit_introduced(
-        &mut self,
-        class: EClassId,
-        anchor: OpId,
-        anchor_ty: Option<TypeId>,
-    ) -> ValueId {
+    fn emit_introduced(&mut self, class: Id, anchor: OpId, anchor_ty: Option<TypeId>) -> ValueId {
         if let Some(&dest) = self.introduced_dest.get(&class) {
             return dest;
         }
         let match_id = self.root_match[&class];
-        let operand_classes: Vec<EClassId> = self.matches[match_id]
+        let operand_classes: Vec<Id> = self.matches[match_id]
             .bindings
             .captures
             .entries

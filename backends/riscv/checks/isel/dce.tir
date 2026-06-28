@@ -1,0 +1,17 @@
+// RUN: tir mc --march=rv64i --stage=isel %s | filecheck %s
+
+// The selected instruction for an unused computation is pure and defines a
+// virtual register nothing reads, so dead-code elimination removes it after
+// selection. Only the returned argument survives.
+
+module {
+  func @dead(%0: !i32, %1: !i32) -> !i32 {
+    %2 = addi %0, %1 : !i32
+    return %0
+  }
+  module_end
+}
+
+// CHECK-LABEL: asm.symbol {name = "dead"
+// CHECK-NOT: addw
+// CHECK-NOT: riscv.add

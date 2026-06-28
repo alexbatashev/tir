@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 tir.workspace = true
+tir-symbolic.workspace = true
 linkme.workspace = true
 logos.workspace = true
 

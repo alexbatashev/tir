@@ -1,6 +1,7 @@
 use tir::helpers::dialect;
 
 pub mod binary;
+pub mod dce;
 pub mod isel;
 mod lexer;
 pub mod liveness;

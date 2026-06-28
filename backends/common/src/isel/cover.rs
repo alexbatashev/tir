@@ -5,11 +5,11 @@ use std::collections::{HashMap, HashSet};
 
 use tir::{
     OpId, ValueId,
-    egraph::EClassId,
-    graph::{Dag, NodeId},
+    graph::NodeId,
     pbqp::{self, INF_COST, PbqpAlternative, PbqpMatrix, PbqpProblem},
     sem_expr::ExprKind,
 };
+use tir_symbolic::egraph::{ENode, Id};
 
 use super::RuleMatch;
 use super::node::{Binding, SemEGraph, class_binding, class_is_pure};
@@ -17,7 +17,7 @@ use super::pattern::CompiledIselPattern;
 
 #[derive(Clone, Debug)]
 pub(crate) struct CaptureBindings {
-    pub(crate) entries: Vec<(u32, EClassId)>,
+    pub(crate) entries: Vec<(u32, Id)>,
 }
 
 impl CaptureBindings {
@@ -27,7 +27,7 @@ impl CaptureBindings {
         }
     }
 
-    pub(crate) fn bind(&mut self, symbol: u32, class: EClassId) -> bool {
+    pub(crate) fn bind(&mut self, symbol: u32, class: Id) -> bool {
         if let Some((_, existing)) = self.entries.iter().find(|(sym, _)| *sym == symbol) {
             *existing == class
         } else {
@@ -39,7 +39,7 @@ impl CaptureBindings {
     pub(crate) fn to_rule_match(
         &self,
         egraph: &SemEGraph,
-        class_value: &HashMap<EClassId, ValueId>,
+        class_value: &HashMap<Id, ValueId>,
     ) -> RuleMatch {
         let mut int_bindings = Vec::new();
         let mut value_bindings = Vec::new();
@@ -57,7 +57,7 @@ impl CaptureBindings {
 #[derive(Clone, Debug)]
 pub(crate) struct PatternNodeBinding {
     pub(crate) pattern_node: NodeId,
-    pub(crate) class: EClassId,
+    pub(crate) class: Id,
     pub(crate) is_boundary: bool,
 }
 
@@ -83,7 +83,7 @@ pub(crate) enum PbqpIselAlternative {
 pub(crate) struct PbqpIselMatch {
     pub(crate) pattern_index: usize,
     pub(crate) rule_index: usize,
-    pub(crate) root: EClassId,
+    pub(crate) root: Id,
     pub(crate) pattern_root: NodeId,
     pub(crate) bindings: FullMatchBindings,
     pub(crate) cost: u64,
@@ -92,7 +92,7 @@ pub(crate) struct PbqpIselMatch {
 /// each PBQP node stands for (same index).
 pub(crate) struct ClassCover {
     pub(crate) choices: Vec<PbqpIselAlternative>,
-    pub(crate) classes: Vec<EClassId>,
+    pub(crate) classes: Vec<Id>,
 }
 
 /// Build and solve the PBQP cover over the e-graph: one PBQP node per e-class,
@@ -104,21 +104,15 @@ pub(crate) struct ClassCover {
 /// alternative).
 pub(crate) fn build_eclass_cover(
     egraph: &SemEGraph,
-    op_by_root: &HashMap<EClassId, OpId>,
-    must_materialize: &HashSet<EClassId>,
+    op_by_root: &HashMap<Id, OpId>,
+    must_materialize: &HashSet<Id>,
     matches: &[PbqpIselMatch],
 ) -> Option<ClassCover> {
-    let classes: Vec<EClassId> = egraph.classes().map(|c| egraph.find(c)).collect();
-    let index: HashMap<EClassId, usize> =
-        classes.iter().enumerate().map(|(i, &c)| (c, i)).collect();
-    let class_index = |c: EClassId| index[&egraph.find(c)];
+    let classes: Vec<Id> = egraph.classes().map(|c| egraph.find(c.id())).collect();
+    let index: HashMap<Id, usize> = classes.iter().enumerate().map(|(i, &c)| (c, i)).collect();
+    let class_index = |c: Id| index[&egraph.find(c)];
 
-    let is_terminal = |c: EClassId| {
-        egraph
-            .nodes(c)
-            .iter()
-            .any(|&id| egraph.children(id).next().is_none())
-    };
+    let is_terminal = |c: Id| egraph.nodes(c).iter().any(|n| n.children().is_empty());
 
     let mut alternatives_by_node = vec![Vec::<PbqpIselAlternative>::new(); classes.len()];
     for (i, &c) in classes.iter().enumerate() {
@@ -307,11 +301,11 @@ pub(crate) fn prune_dominated_matches(
 /// rule set — even after saturation — so selection fails with a diagnostic.
 pub(crate) fn completeness_error(
     egraph: &SemEGraph,
-    op_by_root: &HashMap<EClassId, OpId>,
+    op_by_root: &HashMap<Id, OpId>,
     matches: &[PbqpIselMatch],
 ) -> Option<String> {
-    let mut has_root: HashSet<EClassId> = HashSet::new();
-    let mut has_internal: HashSet<EClassId> = HashSet::new();
+    let mut has_root: HashSet<Id> = HashSet::new();
+    let mut has_internal: HashSet<Id> = HashSet::new();
     for m in matches {
         has_root.insert(egraph.find(m.root));
         for binding in &m.bindings.pattern_nodes {
@@ -324,20 +318,13 @@ pub(crate) fn completeness_error(
     let mut missing: Vec<ExprKind> = Vec::new();
     for &class in op_by_root.keys() {
         let class = egraph.find(class);
-        if egraph
-            .nodes(class)
-            .iter()
-            .any(|&id| egraph.children(id).next().is_none())
-        {
+        if egraph.nodes(class).iter().any(|n| n.children().is_empty()) {
             continue;
         }
         if has_root.contains(&class) || has_internal.contains(&class) {
             continue;
         }
-        if let Some(kind) = egraph
-            .nodes(class)
-            .first()
-            .map(|&id| egraph.get_node(id).kind)
+        if let Some(kind) = egraph.nodes(class).first().map(|n| n.kind)
             && !missing.contains(&kind)
         {
             missing.push(kind);
@@ -358,7 +345,7 @@ pub(crate) fn completeness_error(
 }
 pub(crate) fn alternatives_compatible(
     egraph: &SemEGraph,
-    child: EClassId,
+    child: Id,
     parent_alt: &PbqpIselAlternative,
     child_alt: &PbqpIselAlternative,
     matches: &[PbqpIselMatch],
@@ -390,7 +377,7 @@ pub(crate) fn alternatives_compatible(
 /// Only a memory-effect internal must belong to exactly this match.
 pub(crate) fn child_requirement(
     egraph: &SemEGraph,
-    child: EClassId,
+    child: Id,
     parent_alt: &PbqpIselAlternative,
     matches: &[PbqpIselMatch],
 ) -> Option<ChildRequirement> {
