@@ -49,30 +49,8 @@ impl<N: ENode> Runner<N> {
         N: 'a,
         S: Clone + PartialEq + 'a,
     {
-        let rules: Vec<&Rewrite<N, S>> = rules.into_iter().collect();
-        let mut iters = 0;
-        loop {
-            if iters >= self.iter_limit || self.egraph.total_size() >= self.node_limit {
-                break;
-            }
-            let before = (self.egraph.num_classes(), self.egraph.total_size());
-
-            let searched: Vec<_> = rules
-                .iter()
-                .map(|rule| (*rule, rule.lhs.search(&self.egraph)))
-                .collect();
-            for (rule, matches) in &searched {
-                for m in matches {
-                    rule.apply_match(&mut self.egraph, m);
-                }
-            }
-            self.egraph.rebuild();
-
-            iters += 1;
-            if (self.egraph.num_classes(), self.egraph.total_size()) == before {
-                break;
-            }
-        }
+        self.egraph
+            .saturate(rules, self.iter_limit, self.node_limit);
     }
 }
 

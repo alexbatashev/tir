@@ -6,6 +6,8 @@ edition = "2024"
 [dependencies]
 tir-macros.workspace = true
 tir-graph.workspace = true
+tir-symbolic.workspace = true
+tir-adt.workspace = true
 linkme.workspace = true
 parking_lot = "0.12.3"
 thiserror = "2.0.12"

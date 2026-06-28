@@ -8,6 +8,7 @@
 
 mod eclass;
 mod enode;
+mod extract;
 mod pattern;
 mod rewrite;
 mod runner;
@@ -20,6 +21,7 @@ use tir_adt::ScopedDisjointSet;
 
 pub use eclass::*;
 pub use enode::*;
+pub use extract::*;
 pub use pattern::*;
 pub use rewrite::*;
 pub use runner::*;
@@ -216,6 +218,47 @@ impl<L: ENode> EGraph<L> {
         }
         self.pending.push(survivor);
         survivor
+    }
+
+    /// Saturate in place with `rules`. Each iteration searches every rule against the
+    /// same snapshot, then applies all matches and rebuilds — so a node born this
+    /// iteration is only visible to the next. Stops at a fixpoint (an iteration that
+    /// changes neither the class nor the node count) or once a limit is reached.
+    /// Borrows `self` so a caller can saturate across [`Self::push_context`] scopes;
+    /// [`Runner::run`] delegates here.
+    pub fn saturate<'a, S>(
+        &mut self,
+        rules: impl IntoIterator<Item = &'a Rewrite<L, S>>,
+        iter_limit: usize,
+        node_limit: usize,
+    ) where
+        L: 'a,
+        S: Clone + PartialEq + 'a,
+    {
+        let rules: Vec<&Rewrite<L, S>> = rules.into_iter().collect();
+        let mut iters = 0;
+        loop {
+            if iters >= iter_limit || self.total_size() >= node_limit {
+                break;
+            }
+            let before = (self.num_classes(), self.total_size());
+
+            let searched: Vec<_> = rules
+                .iter()
+                .map(|rule| (*rule, rule.lhs.search(self)))
+                .collect();
+            for (rule, matches) in &searched {
+                for m in matches {
+                    rule.apply_match(self, m);
+                }
+            }
+            self.rebuild();
+
+            iters += 1;
+            if (self.num_classes(), self.total_size()) == before {
+                break;
+            }
+        }
     }
 
     /// Restore the congruence invariant to a fixpoint after a batch of unions, and
