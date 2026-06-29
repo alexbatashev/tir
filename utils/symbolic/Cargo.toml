@@ -8,6 +8,10 @@ tir-graph.workspace = true
 tir-adt.workspace = true
 chumsky.workspace = true
 
+[[bin]]
+name = "tir-smt"
+path = "src/bin/main.rs"
+
 [dev-dependencies]
 criterion = { workspace = true, features = ["html_reports"] }
 egg = "0.11"
