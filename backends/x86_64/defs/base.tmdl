@@ -202,3 +202,123 @@ instruction Ret for [X86_64] {
         GPR::rsp = GPR::rsp + zext(0b1000, self.XLEN);
     }
 }
+
+instruction MovLoad for [X86_64] {
+    param OPNAME: String = "mov_load";
+    param MNEMONIC: String = "mov";
+
+    operands {
+        dst: GPR,
+        base: GPR,
+    }
+
+    encoding {
+        0 => base[3],
+        1 => 0b0,
+        2 => dst[3],
+        3 => 0b1,
+        4..7 => 0b0100,
+        8..15 => 0x8B,
+        16..18 => base[0..2],
+        19..21 => dst[0..2],
+        22..23 => 0b00,
+    }
+
+    asm {
+        "{self.MNEMONIC} {dst}, [{base}]"
+    }
+
+    behavior {
+        dst = load(base, 8, 0b0);
+    }
+}
+
+instruction MovStore for [X86_64] {
+    param OPNAME: String = "mov_store";
+    param MNEMONIC: String = "mov";
+
+    operands {
+        base: GPR,
+        src: GPR,
+    }
+
+    encoding {
+        0 => base[3],
+        1 => 0b0,
+        2 => src[3],
+        3 => 0b1,
+        4..7 => 0b0100,
+        8..15 => 0x89,
+        16..18 => base[0..2],
+        19..21 => src[0..2],
+        22..23 => 0b00,
+    }
+
+    asm {
+        "{self.MNEMONIC} [{base}], {src}"
+    }
+
+    behavior {
+        store(base, 8, src);
+    }
+}
+
+instruction JmpIndirect for [X86_64] {
+    param OPNAME: String = "jmp_indirect";
+    param MNEMONIC: String = "jmp";
+
+    operands {
+        target: GPR,
+    }
+
+    encoding {
+        0 => target[3],
+        1 => 0b0,
+        2 => 0b0,
+        3 => 0b0,
+        4..7 => 0b0100,
+        8..15 => 0xFF,
+        16..18 => target[0..2],
+        19..21 => 0b100,
+        22..23 => 0b11,
+    }
+
+    asm {
+        "{self.MNEMONIC} *{target}"
+    }
+
+    behavior {
+        PC::pc = target;
+    }
+}
+
+instruction CallIndirect for [X86_64] {
+    param OPNAME: String = "call_indirect";
+    param MNEMONIC: String = "call";
+
+    operands {
+        target: GPR,
+    }
+
+    encoding {
+        0 => target[3],
+        1 => 0b0,
+        2 => 0b0,
+        3 => 0b0,
+        4..7 => 0b0100,
+        8..15 => 0xFF,
+        16..18 => target[0..2],
+        19..21 => 0b010,
+        22..23 => 0b11,
+    }
+
+    asm {
+        "{self.MNEMONIC} *{target}"
+    }
+
+    behavior {
+        GPR::rsp = GPR::rsp - zext(0b1000, self.XLEN);
+        store(GPR::rsp, 8, PC::pc);
+        PC::pc = target;
+    }
+}
