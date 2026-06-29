@@ -3052,11 +3052,13 @@ fn emit_instruction_encoder(
                 let ast::Expr::Ident(id) = &*slc.base else {
                     return Err(bad_value());
                 };
-                if !matches!(ops_map.get(&id.name), Some(Type::Integer | Type::Bits(_))) {
-                    return Err(bad_value());
-                }
+                let dst = match ops_map.get(&id.name) {
+                    Some(Type::Struct(_)) => &mut reg_fields,
+                    Some(Type::Integer | Type::Bits(_)) => &mut int_fields,
+                    _ => return Err(bad_value()),
+                };
                 push_field(
-                    &mut int_fields,
+                    dst,
                     &id.name,
                     IntField {
                         op_lo: slc.start,
@@ -3069,11 +3071,13 @@ fn emit_instruction_encoder(
                 let ast::Expr::Ident(id) = &*idx.base else {
                     return Err(bad_value());
                 };
-                if !matches!(ops_map.get(&id.name), Some(Type::Integer | Type::Bits(_))) {
-                    return Err(bad_value());
-                }
+                let dst = match ops_map.get(&id.name) {
+                    Some(Type::Struct(_)) => &mut reg_fields,
+                    Some(Type::Integer | Type::Bits(_)) => &mut int_fields,
+                    _ => return Err(bad_value()),
+                };
                 push_field(
-                    &mut int_fields,
+                    dst,
                     &id.name,
                     IntField {
                         op_lo: idx.index,
