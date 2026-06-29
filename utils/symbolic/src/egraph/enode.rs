@@ -18,6 +18,20 @@ pub trait ENode: Debug + Clone {
     /// Bucket hash for hash-consing. Not required collision-free.
     fn hash_cons(&self) -> u64;
 
+    /// Bucket key for the operator index that pattern search uses to skip classes a
+    /// concrete-rooted pattern cannot match ([`EGraph::classes_with_op`]).
+    ///
+    /// Contract: if `a.matches(b)` then `a.op_key() == b.op_key()` — *including* when
+    /// `a` is a pattern template that matches loosely (e.g. a wildcard result type).
+    /// So the key must depend only on the fields `matches` compares for strict
+    /// equality, never on a field a template can leave wildcarded. The default is
+    /// [`hash_cons`](ENode::hash_cons), correct whenever `matches` implies equal
+    /// `hash_cons` (no wildcard fields); override it when a template matches more
+    /// nodes than its own `hash_cons` bucket holds.
+    fn op_key(&self) -> u64 {
+        self.hash_cons()
+    }
+
     /// Operator/label equality, ignoring children. Two nodes share an e-class iff
     /// `matches` holds and their canonical children are equal.
     fn matches(&self, other: &Self) -> bool;

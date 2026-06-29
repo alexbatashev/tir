@@ -54,6 +54,13 @@ pub struct EGraph<L: ENode> {
     /// Canonical base class id -> its e-class. Absorbed ids are removed on `union`.
     /// Scoped unions never touch it, so a `pop_context` restores it for free.
     classes: HashMap<Id, EClass<L>>,
+    /// [`ENode::op_key`] bucket -> ids of classes that hold a node with that bucket,
+    /// letting [`Self::classes_with_op`] skip classes a concrete-rooted pattern can
+    /// never match. Append-only: a `union` leaves the absorbed id in place, where
+    /// `find` resolves it to the survivor (which still holds the node), and the
+    /// caller dedups — so the index over-approximates but never misses a live class
+    /// and never needs repair.
+    classes_by_op: HashMap<u64, Vec<Id>>,
     /// Classes touched by a `union` since the last `rebuild`, awaiting congruence
     /// repair. Base reps in the base scope, scope reps inside a scope.
     pending: Vec<Id>,
@@ -80,6 +87,7 @@ impl<L: ENode> EGraph<L> {
             unionfind: ScopedDisjointSet::new(0),
             memo: HashMap::new(),
             classes: HashMap::new(),
+            classes_by_op: HashMap::new(),
             pending: Vec::new(),
             scope_members: HashMap::new(),
             scope_classes: HashMap::new(),
@@ -156,6 +164,21 @@ impl<L: ENode> EGraph<L> {
 
     pub fn classes(&self) -> impl Iterator<Item = &EClass<L>> + '_ {
         self.current_classes().values()
+    }
+
+    /// The canonical (current-scope) classes that hold a node in [`ENode::op_key`]
+    /// bucket `op`, each once. Lets a concrete-rooted pattern visit only plausible
+    /// roots instead of every class; the result still over-approximates, so callers
+    /// confirm with [`ENode::matches`].
+    pub fn classes_with_op(&self, op: u64) -> Vec<Id> {
+        let Some(ids) = self.classes_by_op.get(&op) else {
+            return Vec::new();
+        };
+        let mut seen = std::collections::HashSet::with_capacity(ids.len());
+        ids.iter()
+            .map(|&id| self.find(id))
+            .filter(|&root| seen.insert(root))
+            .collect()
     }
 
     /// The e-nodes of `id`'s class. Their child ids may be non-canonical after
@@ -263,12 +286,26 @@ impl<L: ENode> EGraph<L> {
 
     /// Restore the congruence invariant to a fixpoint after a batch of unions, and
     /// re-canonicalize the hash-cons.
+    ///
+    /// Processes the pending classes in rounds, deduplicating each round to its
+    /// canonical reps first. A `union` may queue the same survivor thousands of
+    /// times in one batch; without the dedup each duplicate would re-`repair` the
+    /// class — reprocessing its whole (growing) parent list — making rebuild
+    /// quadratic in the number of unions. With it, every class is repaired once per
+    /// round, and rounds continue until a round adds nothing (congruence fixpoint).
     pub fn rebuild(&mut self) {
         if self.in_scope() {
             self.rebuild_scope();
-        } else {
-            while let Some(id) = self.pending.pop() {
-                let id = self.find(id);
+            return;
+        }
+        while !self.pending.is_empty() {
+            let mut todo = std::mem::take(&mut self.pending);
+            for id in &mut todo {
+                *id = self.find(*id);
+            }
+            todo.sort_unstable();
+            todo.dedup();
+            for id in todo {
                 self.repair(id);
             }
         }
@@ -280,39 +317,51 @@ impl<L: ENode> EGraph<L> {
     /// union any that collide in a fresh scope hash-cons (which re-queues work).
     /// Repeats to a fixpoint, then re-aggregates the scope view.
     fn rebuild_scope(&mut self) {
+        // `memo` is the scope hash-cons being built; it accumulates across rounds.
+        // Each round is deduplicated to its canonical reps, so a survivor queued many
+        // times by `union` is processed once per round rather than reprocessing its
+        // covered parents every time (the same quadratic the base path avoids).
         let mut memo: HashMap<u64, Vec<(L, Id)>> = HashMap::new();
-        while let Some(rep) = self.pending.pop() {
-            let rep = self.find(rep);
-            let members = self
-                .scope_members
-                .get(&rep)
-                .cloned()
-                .unwrap_or_else(|| vec![rep]);
-            for base_rep in members {
-                let Some(class) = self.classes.get(&base_rep) else {
-                    continue;
-                };
-                for (mut p_node, p_class) in class.parents.clone() {
-                    if p_node.is_unique() {
+        while !self.pending.is_empty() {
+            let mut todo = std::mem::take(&mut self.pending);
+            for rep in &mut todo {
+                *rep = self.find(*rep);
+            }
+            todo.sort_unstable();
+            todo.dedup();
+            for rep in todo {
+                let rep = self.find(rep);
+                let members = self
+                    .scope_members
+                    .get(&rep)
+                    .cloned()
+                    .unwrap_or_else(|| vec![rep]);
+                for base_rep in members {
+                    let Some(class) = self.classes.get(&base_rep) else {
                         continue;
-                    }
-                    self.canonicalize(&mut p_node);
-                    let p_class = self.find(p_class);
-                    let bucket = memo.entry(p_node.hash_cons()).or_default();
-                    let congruent = bucket
-                        .iter()
-                        .find(|(stored, _)| {
-                            stored.matches(&p_node) && stored.children() == p_node.children()
-                        })
-                        .map(|&(_, id)| id);
-                    match congruent {
-                        Some(other) => {
-                            let other = self.find(other);
-                            if other != p_class {
-                                self.union(other, p_class);
-                            }
+                    };
+                    for (mut p_node, p_class) in class.parents.clone() {
+                        if p_node.is_unique() {
+                            continue;
                         }
-                        None => bucket.push((p_node, p_class)),
+                        self.canonicalize(&mut p_node);
+                        let p_class = self.find(p_class);
+                        let bucket = memo.entry(p_node.hash_cons()).or_default();
+                        let congruent = bucket
+                            .iter()
+                            .find(|(stored, _)| {
+                                stored.matches(&p_node) && stored.children() == p_node.children()
+                            })
+                            .map(|&(_, id)| id);
+                        match congruent {
+                            Some(other) => {
+                                let other = self.find(other);
+                                if other != p_class {
+                                    self.union(other, p_class);
+                                }
+                            }
+                            None => bucket.push((p_node, p_class)),
+                        }
                     }
                 }
             }
@@ -422,6 +471,10 @@ impl<L: ENode> EGraph<L> {
     /// a parent of each distinct child class and (unless unique) memoize it.
     fn make_class(&mut self, node: L) -> Id {
         let id = Id::from_raw(self.unionfind.push());
+        self.classes_by_op
+            .entry(node.op_key())
+            .or_default()
+            .push(id);
         let mut seen: Vec<Id> = Vec::new();
         for &child in node.children() {
             let child = self.find(child);

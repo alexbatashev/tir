@@ -115,91 +115,97 @@ impl<N: ENode, S> Pattern<N, S> {
 }
 
 impl<N: ENode, S: Clone + PartialEq> Pattern<N, S> {
-    /// Every match of this pattern across the whole e-graph.
-    pub fn search(&self, eg: &EGraph<N>) -> Vec<EMatch<S>> {
+    /// Every match of this pattern across the whole e-graph. A pattern rooted at a
+    /// concrete operator visits only the classes that hold that operator
+    /// ([`EGraph::classes_with_op`]); a bare-variable root has to consider every
+    /// class.
+    pub fn search<'p>(&'p self, eg: &EGraph<N>) -> Vec<EMatch<S>> {
         let mut out = Vec::new();
-        for class in eg.classes() {
-            let root = class.id();
-            for subst in self.match_node(eg, self.root, root, Substitution::new()) {
-                out.push(EMatch { root, subst });
+        let mut goals: Vec<(Id, Id)> = Vec::new();
+        // Bindings reference the pattern's own `Var`s, so the search never clones a
+        // variable's payload (e.g. a `String` name); the bound names are cloned
+        // once, only when a full match is emitted.
+        let mut subst: Vec<(&'p Var<S>, Id)> = Vec::new();
+        match &self.nodes[self.root.index()] {
+            PatternNode::Node(template) => {
+                for root in eg.classes_with_op(template.op_key()) {
+                    goals.push((self.root, root));
+                    self.solve(eg, root, &mut goals, &mut subst, &mut out);
+                    goals.clear();
+                }
+            }
+            _ => {
+                let roots: Vec<Id> = eg.classes().map(|c| c.id()).collect();
+                for root in roots {
+                    goals.push((self.root, root));
+                    self.solve(eg, root, &mut goals, &mut subst, &mut out);
+                    goals.clear();
+                }
             }
         }
         out
     }
 
-    /// Every substitution under which pattern node `pat` matches e-class `class`,
-    /// extending `partial`.
-    fn match_node(
-        &self,
+    /// Depth-first backtracking e-matcher. `goals` is a stack of `(pattern node,
+    /// e-class)` equalities still to satisfy; `subst` holds the bindings made so
+    /// far, mutated in place. Each call pops one goal, explores every way to satisfy
+    /// it (restoring `goals` and `subst` between branches), then pushes the goal
+    /// back so the caller's state is intact.
+    fn solve<'p>(
+        &'p self,
         eg: &EGraph<N>,
-        pat: Id,
-        class: Id,
-        partial: Substitution<S>,
-    ) -> Vec<Substitution<S>> {
+        root: Id,
+        goals: &mut Vec<(Id, Id)>,
+        subst: &mut Vec<(&'p Var<S>, Id)>,
+        out: &mut Vec<EMatch<S>>,
+    ) {
+        let Some((pat, class)) = goals.pop() else {
+            out.push(EMatch {
+                root,
+                subst: Substitution {
+                    vec: subst.iter().map(|&(v, id)| (v.clone(), id)).collect(),
+                },
+            });
+            return;
+        };
+        let mark = goals.len();
         match &self.nodes[pat.index()] {
             PatternNode::Var(var @ Var::Symbol(_)) => {
-                let mut subst = partial;
-                match subst.get(var) {
-                    Some(bound) if eg.find(bound) != eg.find(class) => Vec::new(),
-                    Some(_) => vec![subst],
+                match subst.iter().find(|(v, _)| *v == var).map(|&(_, id)| id) {
+                    Some(bound) if eg.find(bound) != eg.find(class) => {}
+                    Some(_) => self.solve(eg, root, goals, subst, out),
                     None => {
-                        subst.insert(var.clone(), class);
-                        vec![subst]
+                        subst.push((var, class));
+                        self.solve(eg, root, goals, subst, out);
+                        subst.pop();
                     }
                 }
             }
             PatternNode::Var(Var::Int(v)) => {
-                self.match_const(eg, N::from_int(v.clone()), class, partial)
+                if class_has_const(eg, N::from_int(v.clone()), class) {
+                    self.solve(eg, root, goals, subst, out);
+                }
             }
             PatternNode::Var(Var::Float(v)) => {
-                self.match_const(eg, N::from_float(v.clone()), class, partial)
+                if class_has_const(eg, N::from_float(v.clone()), class) {
+                    self.solve(eg, root, goals, subst, out);
+                }
             }
             PatternNode::Node(template) => {
-                let mut out = Vec::new();
+                let tchildren = template.children();
                 for enode in eg.nodes(class) {
-                    if !template.matches(enode)
-                        || template.children().len() != enode.children().len()
-                    {
+                    if !template.matches(enode) || tchildren.len() != enode.children().len() {
                         continue;
                     }
-                    let mut partials = vec![partial.clone()];
-                    for (pc, ec) in template.children().iter().zip(enode.children()) {
-                        let child = eg.find(*ec);
-                        let mut next = Vec::new();
-                        for p in partials {
-                            next.extend(self.match_node(eg, *pc, child, p));
-                        }
-                        partials = next;
+                    for (pc, ec) in tchildren.iter().zip(enode.children()).rev() {
+                        goals.push((*pc, eg.find(*ec)));
                     }
-                    out.extend(partials);
+                    self.solve(eg, root, goals, subst, out);
+                    goals.truncate(mark);
                 }
-                out
             }
         }
-    }
-
-    /// Whether `class` holds the constant `target` (a leaf built from a literal).
-    /// Yields the unchanged `partial` once on a hit — a literal binds nothing —
-    /// or nothing if the language can't build the constant (`target` is `None`).
-    fn match_const(
-        &self,
-        eg: &EGraph<N>,
-        target: Option<N>,
-        class: Id,
-        partial: Substitution<S>,
-    ) -> Vec<Substitution<S>> {
-        let Some(target) = target else {
-            return Vec::new();
-        };
-        if eg
-            .nodes(class)
-            .iter()
-            .any(|n| n.children().is_empty() && target.matches(n))
-        {
-            vec![partial]
-        } else {
-            Vec::new()
-        }
+        goals.push((pat, class));
     }
 
     /// Build this pattern into `eg` under `subst`, returning the root e-class.
@@ -232,12 +238,86 @@ impl<N: ENode, S: Clone + PartialEq> Pattern<N, S> {
     }
 }
 
+/// Whether `class` holds the constant `target` (a childless leaf). `false` when
+/// the language can't build the constant (`target` is `None`).
+fn class_has_const<N: ENode>(eg: &EGraph<N>, target: Option<N>, class: Id) -> bool {
+    let Some(target) = target else {
+        return false;
+    };
+    eg.nodes(class)
+        .iter()
+        .any(|n| n.children().is_empty() && target.matches(n))
+}
+
 #[cfg(test)]
 mod tests {
     use tir_adt::{APFloat, APInt};
 
     use super::super::test_lang::*;
     use super::*;
+
+    /// A language whose `matches` is looser than its `hash_cons`: an `Op`'s `tag`
+    /// is part of hash-cons identity, but a [`WILD`](Wild::WILD) tag matches any
+    /// tag — exactly instcombine's wildcard result type. The operator index must
+    /// key on [`ENode::op_key`] (tag dropped), not `hash_cons`, or a wildcard
+    /// template would be bucketed away from the concrete nodes it matches.
+    #[derive(Clone, Debug)]
+    enum Wild {
+        Leaf(u32),
+        Op(u32, [Id; 1]),
+    }
+    impl Wild {
+        const WILD: u32 = u32::MAX;
+    }
+    impl ENode for Wild {
+        fn children(&self) -> &[Id] {
+            match self {
+                Wild::Leaf(_) => &[],
+                Wild::Op(_, c) => c,
+            }
+        }
+        fn children_mut(&mut self) -> &mut [Id] {
+            match self {
+                Wild::Leaf(_) => &mut [],
+                Wild::Op(_, c) => c,
+            }
+        }
+        fn hash_cons(&self) -> u64 {
+            match self {
+                Wild::Leaf(s) => *s as u64,
+                Wild::Op(tag, _) => 1 << 32 | *tag as u64,
+            }
+        }
+        fn op_key(&self) -> u64 {
+            match self {
+                Wild::Op(..) => 1 << 32,
+                Wild::Leaf(_) => self.hash_cons(),
+            }
+        }
+        fn matches(&self, other: &Self) -> bool {
+            match (self, other) {
+                (Wild::Leaf(a), Wild::Leaf(b)) => a == b,
+                (Wild::Op(a, _), Wild::Op(b, _)) => a == b || *a == Self::WILD || *b == Self::WILD,
+                _ => false,
+            }
+        }
+    }
+
+    #[test]
+    fn index_finds_wildcard_rooted_match() {
+        let mut g: EGraph<Wild> = EGraph::new();
+        let leaf = g.add(Wild::Leaf(7));
+        let op = g.add(Wild::Op(5, [leaf]));
+
+        let mut p: Pattern<Wild, &'static str> = Pattern::new();
+        let x = p.var(Var::Symbol("x"));
+        p.add(Wild::Op(Wild::WILD, [x]));
+
+        let matches = p.search(&g);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(g.find(matches[0].root), g.find(op));
+        assert_eq!(matches[0].subst.get(&Var::Symbol("x")), Some(g.find(leaf)));
+    }
 
     /// `add(x, y)` with `x`, `y` symbol holes.
     fn add_pattern() -> Pattern<Math, &'static str> {
@@ -351,6 +431,155 @@ mod tests {
         let matches = p.search(&g);
         assert_eq!(matches.len(), 1);
         assert_eq!(g.find(matches[0].root), g.find(c));
+    }
+
+    /// Independent reference matcher: the straightforward recursive enumeration,
+    /// used to cross-check [`Pattern::search`].
+    fn brute_node(
+        p: &Pattern<Math, &'static str>,
+        eg: &EGraph<Math>,
+        pat: Id,
+        class: Id,
+        partial: Substitution<&'static str>,
+    ) -> Vec<Substitution<&'static str>> {
+        match &p.nodes[pat.index()] {
+            PatternNode::Var(var @ Var::Symbol(_)) => {
+                let mut s = partial;
+                match s.get(var) {
+                    Some(b) if eg.find(b) != eg.find(class) => vec![],
+                    Some(_) => vec![s],
+                    None => {
+                        s.insert(var.clone(), eg.find(class));
+                        vec![s]
+                    }
+                }
+            }
+            PatternNode::Var(Var::Int(v)) => {
+                if class_has_const(eg, Math::from_int(v.clone()), class) {
+                    vec![partial]
+                } else {
+                    vec![]
+                }
+            }
+            PatternNode::Var(Var::Float(v)) => {
+                if class_has_const(eg, Math::from_float(v.clone()), class) {
+                    vec![partial]
+                } else {
+                    vec![]
+                }
+            }
+            PatternNode::Node(t) => {
+                let mut out = Vec::new();
+                for enode in eg.nodes(class) {
+                    if !t.matches(enode) || t.children().len() != enode.children().len() {
+                        continue;
+                    }
+                    let mut parts = vec![partial.clone()];
+                    for (pc, ec) in t.children().iter().zip(enode.children()) {
+                        let child = eg.find(*ec);
+                        parts = parts
+                            .into_iter()
+                            .flat_map(|p2| brute_node(p, eg, *pc, child, p2))
+                            .collect();
+                    }
+                    out.extend(parts);
+                }
+                out
+            }
+        }
+    }
+
+    /// A `(root, sorted bindings)` match, canonicalized for order-independent
+    /// comparison between [`Pattern::search`] and the brute-force reference.
+    type Hit = (Id, Vec<(Var<&'static str>, Id)>);
+
+    fn brute(p: &Pattern<Math, &'static str>, eg: &EGraph<Math>) -> Vec<Hit> {
+        let mut out = Vec::new();
+        for class in eg.classes() {
+            let root = eg.find(class.id());
+            for s in brute_node(p, eg, p.root, root, Substitution::new()) {
+                let mut v: Vec<_> = s.vec.into_iter().map(|(k, id)| (k, eg.find(id))).collect();
+                v.sort();
+                out.push((root, v));
+            }
+        }
+        out.sort();
+        out
+    }
+
+    fn via_search(p: &Pattern<Math, &'static str>, eg: &EGraph<Math>) -> Vec<Hit> {
+        let mut out: Vec<_> = p
+            .search(eg)
+            .into_iter()
+            .map(|m| {
+                let mut v: Vec<_> = m
+                    .subst
+                    .vec
+                    .into_iter()
+                    .map(|(k, id)| (k, eg.find(id)))
+                    .collect();
+                v.sort();
+                (eg.find(m.root), v)
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// `search` must return exactly the brute-force match set, even with congruence
+    /// (multiple e-nodes per class, stale ids in the operator index) and nested
+    /// patterns whose subterms have several candidate e-nodes.
+    #[test]
+    fn search_matches_brute_force_with_congruence() {
+        let mut g = EGraph::new();
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
+        let c = sym(&mut g, 2);
+        let z = num(&mut g, 0);
+        // Several adds, then merge two distinct adds into one class so a class holds
+        // multiple Add e-nodes and the operator index carries an absorbed id.
+        let ab = add(&mut g, a, b);
+        let ba = add(&mut g, b, a);
+        let abz = add(&mut g, ab, z);
+        let _nested = add(&mut g, a, ab);
+        let _nested2 = add(&mut g, c, ba);
+        let nn = neg(&mut g, a);
+        let _nnn = neg(&mut g, nn);
+        g.union(ab, ba);
+        g.union(abz, c);
+        g.rebuild();
+
+        let bare = {
+            let mut p = Pattern::new();
+            p.var(Var::Symbol("x"));
+            p
+        };
+        let two = add_pattern();
+        let nested = {
+            let mut p = Pattern::new();
+            let x = p.var(Var::Symbol("x"));
+            let y = p.var(Var::Symbol("y"));
+            let zz = p.var(Var::Symbol("z"));
+            let inner = p.add(Math::Add([y, zz]));
+            p.add(Math::Add([x, inner]));
+            p
+        };
+        let nonlinear = {
+            let mut p = Pattern::new();
+            let x = p.var(Var::Symbol("x"));
+            p.add(Math::Add([x, x]));
+            p
+        };
+        let dneg = {
+            let mut p = Pattern::new();
+            let x = p.var(Var::Symbol("x"));
+            let inner = p.add(Math::Neg([x]));
+            p.add(Math::Neg([inner]));
+            p
+        };
+        for p in [&bare, &two, &nested, &nonlinear, &dneg, &add_zero_pattern()] {
+            assert_eq!(via_search(p, &g), brute(p, &g));
+        }
     }
 
     #[test]

@@ -156,6 +156,27 @@ impl ENode for Node {
         h.finish()
     }
 
+    /// Search-index bucket: like [`hash_cons`](Self::hash_cons) but omits an `Op`'s
+    /// result type, because an LHS template wildcards it ([`any_type`]) yet must land
+    /// in the same bucket as the concrete-typed ops it matches.
+    fn op_key(&self) -> u64 {
+        let Node::Op {
+            dialect,
+            name,
+            attrs,
+            ..
+        } = self
+        else {
+            return self.hash_cons();
+        };
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        1u8.hash(&mut h);
+        dialect.hash(&mut h);
+        name.hash(&mut h);
+        hash_attrs(attrs, &mut h);
+        h.finish()
+    }
+
     /// Operator identity only. `Op` keys on dialect+name, result type (a wildcard type
     /// in a pattern matches anything), and value attributes — so `cmpi slt` and `cmpi
     /// sgt` (different predicate attribute) or `trunci`s to different widths stay
@@ -255,7 +276,7 @@ fn hash_attr_value(value: &AttributeValue, h: &mut impl Hasher) {
 
 #[cfg(test)]
 mod tests {
-    use tir_symbolic::egraph::EGraph;
+    use tir_symbolic::egraph::{EGraph, Pattern, Var};
 
     use super::*;
 
@@ -308,5 +329,45 @@ mod tests {
         let slt2 = g.add(cmpi("slt", vec![x]));
         assert_ne!(g.find(slt), g.find(sgt));
         assert_eq!(g.find(slt), g.find(slt2));
+    }
+
+    // `op_key` drops the result type so a wildcard-typed LHS template buckets with
+    // the concrete ops it matches. That coarser *search* key must never leak into
+    // congruence: `addi i32` and `addi i64` over the same operands share an op_key
+    // bucket (a wildcard search visits and matches both), yet must stay in distinct
+    // classes — merging them would substitute a wrong-typed value (a miscompile).
+    #[test]
+    fn wildcard_search_groups_result_types_without_merging_them() {
+        let mut g: EGraph<Node> = EGraph::new();
+        let x = g.add(konst(32, 0));
+        let addi = |t: TypeId, args: Vec<Id>| Node::Op {
+            dialect: "builtin",
+            name: "addi",
+            ty: t,
+            attrs: vec![],
+            cost: 1,
+            prov: OpProv::Introduced(0),
+            args,
+        };
+        let a32 = g.add(addi(ty(32), vec![x, x]));
+        let a64 = g.add(addi(ty(64), vec![x, x]));
+
+        // hash_cons keeps the two result types in separate classes...
+        assert_ne!(g.find(a32), g.find(a64));
+        // ...even though they collide in the op_key search bucket.
+        assert_eq!(addi(ty(32), vec![]).op_key(), addi(ty(64), vec![]).op_key());
+
+        // A wildcard-typed template (`any_type`) matches both via the index.
+        let mut p: Pattern<Node, u32> = Pattern::new();
+        let v0 = p.var(Var::Symbol(0));
+        let v1 = p.var(Var::Symbol(1));
+        p.add(addi(any_type(), vec![v0, v1]));
+        let roots: std::collections::HashSet<Id> =
+            p.search(&g).iter().map(|m| g.find(m.root)).collect();
+        assert_eq!(roots.len(), 2);
+        assert!(roots.contains(&g.find(a32)) && roots.contains(&g.find(a64)));
+
+        // Searching is read-only: the two classes remain distinct.
+        assert_ne!(g.find(a32), g.find(a64));
     }
 }

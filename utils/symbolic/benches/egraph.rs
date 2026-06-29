@@ -2,11 +2,18 @@
 //! modelled on egg's `tests/math.rs`. The `egg_math` bench runs the identical
 //! workload on egg for comparison; both build their rules from [`shared::RULES`]
 //! and seed the same [`shared::SEED_EXPRS`].
+//!
+//! Symbol and pattern-variable names are interned to `u32` (see [`intern`]) so the
+//! comparison measures the e-matching/saturation algorithm, not string handling:
+//! egg interns every name to a `Copy` `Symbol`/`Var`, and TIR's real callers use a
+//! `Copy` variable type too (instcombine's `Var::Symbol(u32)`). Keying on `String`
+//! would charge TIR per-match name clones that egg never pays.
 
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::hint::black_box;
+use std::sync::{Mutex, OnceLock};
 
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use tir_adt::APInt;
@@ -17,6 +24,16 @@ mod shared;
 use shared::{Cond, PRE_SAT_ITERS, RULES, RuleSpec, SAT_ITERS, SEED_EXPRS};
 
 const NODE_LIMIT: usize = 1_000_000;
+
+/// Intern a symbol or variable name to a stable `u32`, mirroring egg's global
+/// symbol interner so both engines compare `Copy` names by integer equality.
+fn intern(name: &str) -> u32 {
+    static TABLE: OnceLock<Mutex<HashMap<String, u32>>> = OnceLock::new();
+    let table = TABLE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut table = table.lock().unwrap();
+    let next = table.len() as u32;
+    *table.entry(name.to_string()).or_insert(next)
+}
 
 /// The math language label. Operands are child e-class [`Id`]s carried inline;
 /// constants and symbols carry their value/name so hash-consing and matching tell
@@ -35,7 +52,7 @@ enum Math {
     Sin([Id; 1]),
     Cos([Id; 1]),
     Constant(i64),
-    Symbol(String),
+    Symbol(u32),
 }
 
 impl ENode for Math {
@@ -162,7 +179,7 @@ fn add_expr(g: &mut EGraph<Math>, e: &Sexp) -> Id {
             if let Ok(n) = a.parse::<i64>() {
                 g.add(Math::Constant(n))
             } else {
-                g.add(Math::Symbol(a.clone()))
+                g.add(Math::Symbol(intern(a)))
             }
         }
         Sexp::List(items) => {
@@ -173,7 +190,7 @@ fn add_expr(g: &mut EGraph<Math>, e: &Sexp) -> Id {
 }
 
 /// Build a pattern from `e`, reusing one hole per `?var` name.
-fn build_pattern(e: &Sexp) -> Pattern<Math, String> {
+fn build_pattern(e: &Sexp) -> Pattern<Math, u32> {
     let mut p = Pattern::new();
     let mut vars = HashMap::new();
     let root = add_pat(&mut p, e, &mut vars);
@@ -181,17 +198,17 @@ fn build_pattern(e: &Sexp) -> Pattern<Math, String> {
     p
 }
 
-fn add_pat(p: &mut Pattern<Math, String>, e: &Sexp, vars: &mut HashMap<String, Id>) -> Id {
+fn add_pat(p: &mut Pattern<Math, u32>, e: &Sexp, vars: &mut HashMap<String, Id>) -> Id {
     match e {
         Sexp::Atom(a) => {
             if is_var(a) {
                 *vars
                     .entry(a.clone())
-                    .or_insert_with(|| p.var(Var::Symbol(a.clone())))
+                    .or_insert_with(|| p.var(Var::Symbol(intern(a))))
             } else if let Ok(n) = a.parse::<i64>() {
                 p.var(Var::Int(APInt::from_i64(n)))
             } else {
-                p.add(Math::Symbol(a.clone()))
+                p.add(Math::Symbol(intern(a)))
             }
         }
         Sexp::List(items) => {
@@ -205,13 +222,13 @@ fn class_has(g: &EGraph<Math>, class: Id, pred: impl Fn(&Math) -> bool) -> bool 
     g.nodes(class).iter().any(pred)
 }
 
-fn var_class(subst: &Substitution<String>, v: &str) -> Id {
+fn var_class(subst: &Substitution<u32>, v: &str) -> Id {
     subst
-        .get(&Var::Symbol(v.to_string()))
+        .get(&Var::Symbol(intern(v)))
         .expect("condition variable is bound by the searcher")
 }
 
-fn eval_cond(c: &Cond, g: &EGraph<Math>, subst: &Substitution<String>) -> bool {
+fn eval_cond(c: &Cond, g: &EGraph<Math>, subst: &Substitution<u32>) -> bool {
     match *c {
         Cond::NotZero(v) => !class_has(g, var_class(subst, v), |n| matches!(n, Math::Constant(0))),
         Cond::Sym(v) => class_has(g, var_class(subst, v), |n| matches!(n, Math::Symbol(_))),
@@ -225,12 +242,12 @@ fn eval_cond(c: &Cond, g: &EGraph<Math>, subst: &Substitution<String>) -> bool {
     }
 }
 
-fn build_rule(spec: &RuleSpec) -> Rewrite<Math, String> {
+fn build_rule(spec: &RuleSpec) -> Rewrite<Math, u32> {
     let lhs = build_pattern(&parse_sexp(spec.lhs));
     let rhs = build_pattern(&parse_sexp(spec.rhs));
     let conds = spec.conds;
     let apply = Box::new(
-        move |g: &mut EGraph<Math>, subst: &Substitution<String>, root: Id| {
+        move |g: &mut EGraph<Math>, subst: &Substitution<u32>, root: Id| {
             if !conds.iter().all(|c| eval_cond(c, g, subst)) {
                 return;
             }
@@ -241,7 +258,7 @@ fn build_rule(spec: &RuleSpec) -> Rewrite<Math, String> {
     Rewrite::new(spec.name, lhs, Rhs::Apply(apply))
 }
 
-fn build_rules() -> Vec<Rewrite<Math, String>> {
+fn build_rules() -> Vec<Rewrite<Math, u32>> {
     RULES.iter().map(build_rule).collect()
 }
 
