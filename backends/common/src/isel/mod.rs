@@ -22,9 +22,9 @@ use tir::{
     Block, BlockId, Context, OpId, Operation, OperationRef, Pass, PassError, PassTarget, Rewriter,
     TypeId, ValueId,
     graph::{NodeId, OperandConstraint, PatternExpr},
-    sem_expr::{ExprKind, ExprPostGraph},
-    utils::APInt,
+    sem::{SemGraph, SymKind},
 };
+use tir_adt::APInt;
 use tir_symbolic::egraph::{ENode, Id};
 
 pub use ematch::EMatch;
@@ -154,7 +154,7 @@ pub struct RegisterDefiner {
 
 pub struct Rule {
     pub name: &'static str,
-    pub pattern: ExprPostGraph,
+    pub pattern: SemGraph,
     pub base_cost: u32,
     /// Per-operand-symbol constraint (register vs immediate). Symbols absent here
     /// are unconstrained, so hand-written and synthesized rules keep matching any
@@ -167,12 +167,7 @@ pub struct Rule {
 }
 
 impl Rule {
-    pub fn new(
-        name: &'static str,
-        pattern: ExprPostGraph,
-        base_cost: u32,
-        emit_fn: RuleEmitFn,
-    ) -> Self {
+    pub fn new(name: &'static str, pattern: SemGraph, base_cost: u32, emit_fn: RuleEmitFn) -> Self {
         Self {
             name,
             pattern,
@@ -736,7 +731,7 @@ impl InstructionSelectPass {
                         // the cover infeasible.
                         is_boundary: match pattern.get_node(pattern_node) {
                             PatternExpr::Boundary => true,
-                            PatternExpr::Node(node) => node.kind == ExprKind::Constant,
+                            PatternExpr::Node(node) => node.kind == SymKind::Constant,
                             _ => false,
                         },
                     })

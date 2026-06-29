@@ -595,7 +595,7 @@ fn build_smt_encoding<'a>(
 // ---------------------------------------------------------------------------
 
 /// Sort of an emitted SMT expression. Mirrors the width/signedness tracking of
-/// the sem-expr interpreter (`tir::sem_expr::exec`), which evaluates behaviors
+/// the sem-expr interpreter (`tir::sem::exec`), which evaluates behaviors
 /// over `APInt`s of varying width: every value is a bitvector of the
 /// interpreter's width, except comparisons which stay `Bool` until they cross
 /// back into arithmetic.
@@ -769,8 +769,8 @@ impl SmtSymbolResolver<'_> {
 /// Evaluate a symbol-free subtree to a constant, mirroring the interpreter's
 /// width rules. Width expressions like `log2Ceil(self.XLEN) - 1` reach the
 /// emitter unfolded, so structural `Constant` matching is not enough.
-fn eval_const_subtree(graph: &tir::sem_expr::ExprPostGraph, node: NodeId) -> Option<(u64, u32)> {
-    use tir::sem_expr::{ExprKind, ExprPayload};
+fn eval_const_subtree(graph: &tir::sem::SemGraph, node: NodeId) -> Option<(u64, u32)> {
+    use tir::sem::{SymKind, SymPayload};
 
     let child = |idx: usize| eval_const_subtree(graph, graph.children(node).nth(idx)?);
     let arith = |f: fn(u64, u64) -> u64| -> Option<(u64, u32)> {
@@ -782,14 +782,14 @@ fn eval_const_subtree(graph: &tir::sem_expr::ExprPostGraph, node: NodeId) -> Opt
     };
 
     match graph.get_node(node) {
-        ExprKind::Constant => match graph.get_leaf_data(node)? {
-            ExprPayload::Int(i) => Some((i.to_u64(), i.width())),
+        SymKind::Constant => match graph.get_leaf_data(node)? {
+            SymPayload::Int(i) => Some((i.to_u64(), i.width())),
             _ => None,
         },
-        ExprKind::Add => arith(u64::wrapping_add),
-        ExprKind::Sub => arith(u64::wrapping_sub),
-        ExprKind::Mul => arith(u64::wrapping_mul),
-        ExprKind::Log2Ceil => {
+        SymKind::Add => arith(u64::wrapping_add),
+        SymKind::Sub => arith(u64::wrapping_sub),
+        SymKind::Mul => arith(u64::wrapping_mul),
+        SymKind::Log2Ceil => {
             let (v, w) = child(0)?;
             let result = if v <= 1 {
                 0u64
@@ -803,11 +803,11 @@ fn eval_const_subtree(graph: &tir::sem_expr::ExprPostGraph, node: NodeId) -> Opt
 }
 
 fn emit_sem_expr(
-    graph: &tir::sem_expr::ExprPostGraph,
+    graph: &tir::sem::SemGraph,
     node: NodeId,
     resolver: &SmtSymbolResolver<'_>,
 ) -> Option<SmtVal> {
-    use tir::sem_expr::{ExprKind, ExprPayload};
+    use tir::sem::{SymKind, SymPayload};
 
     let child_node = |idx: usize| graph.children(node).nth(idx);
     let child = |idx: usize| emit_sem_expr(graph, child_node(idx)?, resolver);
@@ -840,12 +840,12 @@ fn emit_sem_expr(
     };
 
     match graph.get_node(node) {
-        ExprKind::Symbol => match graph.get_leaf_data(node)? {
-            ExprPayload::SymbolId(id) => resolver.resolve(*id),
+        SymKind::Symbol => match graph.get_leaf_data(node)? {
+            SymPayload::SymbolId(id) => resolver.resolve(*id),
             _ => None,
         },
-        ExprKind::Constant => match graph.get_leaf_data(node)? {
-            ExprPayload::Int(i) => {
+        SymKind::Constant => match graph.get_leaf_data(node)? {
+            SymPayload::Int(i) => {
                 let w = i.width();
                 let mask = if w >= 64 { u64::MAX } else { (1u64 << w) - 1 };
                 Some(SmtVal::bv(
@@ -856,33 +856,33 @@ fn emit_sem_expr(
             }
             _ => None,
         },
-        ExprKind::Add => arith("bvadd"),
-        ExprKind::Sub => arith("bvsub"),
-        ExprKind::Mul => arith("bvmul"),
-        ExprKind::Div => arith("bvsdiv"),
-        ExprKind::UDiv => arith("bvudiv"),
-        ExprKind::Eq => cmp("="),
-        ExprKind::Ne => cmp("distinct"),
-        ExprKind::Lt => cmp("bvslt"),
-        ExprKind::Gt => cmp("bvsgt"),
-        ExprKind::Ge => cmp("bvsge"),
-        ExprKind::ULt => cmp("bvult"),
-        ExprKind::ULe => cmp("bvule"),
-        ExprKind::UGt => cmp("bvugt"),
-        ExprKind::UGe => cmp("bvuge"),
-        ExprKind::ShiftLeft => shift("bvshl", |s| s),
-        ExprKind::ShiftRightLogic => shift("bvlshr", |_| false),
+        SymKind::Add => arith("bvadd"),
+        SymKind::Sub => arith("bvsub"),
+        SymKind::Mul => arith("bvmul"),
+        SymKind::Div => arith("bvsdiv"),
+        SymKind::UDiv => arith("bvudiv"),
+        SymKind::Eq => cmp("="),
+        SymKind::Ne => cmp("distinct"),
+        SymKind::Lt => cmp("bvslt"),
+        SymKind::Gt => cmp("bvsgt"),
+        SymKind::Ge => cmp("bvsge"),
+        SymKind::ULt => cmp("bvult"),
+        SymKind::ULe => cmp("bvule"),
+        SymKind::UGt => cmp("bvugt"),
+        SymKind::UGe => cmp("bvuge"),
+        SymKind::ShiftLeft => shift("bvshl", |s| s),
+        SymKind::ShiftRightLogic => shift("bvlshr", |_| false),
         // An arithmetic shift always treats its operand as signed, like the
         // interpreter, which forces the signedness flag before shifting.
-        ExprKind::ShiftRightArithmetic => shift("bvashr", |_| true),
-        ExprKind::Or => arith("bvor"),
-        ExprKind::And => arith("bvand"),
-        ExprKind::Xor => arith("bvxor"),
-        ExprKind::Not => {
+        SymKind::ShiftRightArithmetic => shift("bvashr", |_| true),
+        SymKind::Or => arith("bvor"),
+        SymKind::And => arith("bvand"),
+        SymKind::Xor => arith("bvxor"),
+        SymKind::Not => {
             let (e, w, s) = child(0)?.as_bv();
             Some(SmtVal::bv(format!("(bvnot {})", e), w, s))
         }
-        ExprKind::If => {
+        SymKind::If => {
             let cond = child(0)?.as_bool();
             let (t, e, w, st, se) = coerce_smt(&child(1)?, &child(2)?);
             Some(SmtVal::bv(
@@ -891,7 +891,7 @@ fn emit_sem_expr(
                 st || se,
             ))
         }
-        ExprKind::ZExt => {
+        SymKind::ZExt => {
             let (e, w, _) = child(0)?.as_bv();
             let target = const_child(1)? as u32;
             if target < w {
@@ -903,7 +903,7 @@ fn emit_sem_expr(
                 false,
             ))
         }
-        ExprKind::SExt => {
+        SymKind::SExt => {
             let (e, w, _) = child(0)?.as_bv();
             let target = const_child(1)? as u32;
             if target < w {
@@ -915,7 +915,7 @@ fn emit_sem_expr(
                 true,
             ))
         }
-        ExprKind::Extract => {
+        SymKind::Extract => {
             let (e, w, _) = child(0)?.as_bv();
             let high = const_child(1)? as u32;
             let low = const_child(2)? as u32;
@@ -923,7 +923,7 @@ fn emit_sem_expr(
                 return None;
             }
             let mul = child_node(0)?;
-            if low >= w && matches!(graph.get_node(mul), ExprKind::Mul) {
+            if low >= w && matches!(graph.get_node(mul), SymKind::Mul) {
                 // `extract(a * b, 2N-1, N)` is the TMDL idiom for the high half
                 // of a full multiply (e.g. RISC-V `mulh`); the interpreter
                 // recomputes it as a signed full-width product.
@@ -951,11 +951,11 @@ fn emit_sem_expr(
                 None
             }
         }
-        ExprKind::Log2Ceil => {
+        SymKind::Log2Ceil => {
             let (v, w) = eval_const_subtree(graph, node)?;
             Some(SmtVal::bv(format!("(_ bv{} {})", v, w), w, false))
         }
-        ExprKind::Clamp => {
+        SymKind::Clamp => {
             let input = child(0)?;
             let (_, _, signed) = input.as_bv();
             let (lt, gt) = if signed {
@@ -981,7 +981,7 @@ fn emit_sem_expr(
                 signed,
             ))
         }
-        ExprKind::LoadMemory => {
+        SymKind::LoadMemory => {
             let (addr, w, s) = child(0)?.as_bv();
             let bytes = const_child(1)? as u16;
             if !MEM_ACCESS_BYTES.contains(&bytes) {
@@ -1000,15 +1000,12 @@ fn emit_sem_expr(
             ))
         }
         // Stores are effect statements, handled by `BehaviorEmitter::store`.
-        ExprKind::StoreMemory | ExprKind::Sqrt | ExprKind::Fma => None,
-        // Loops are eliminated by `unroll_loops` before emission; a surviving one
-        // has symbolic bounds, which SMT-LIB cannot express, so it is unsupported.
-        ExprKind::Loop | ExprKind::IndVar | ExprKind::Acc => None,
-        // Vector values have no scalar SMT-LIB encoding, so a vector map or lane
-        // read is unsupported by the bit-vector backend.
-        ExprKind::VectorMap | ExprKind::Lane => None,
-        ExprKind::Map | ExprKind::Zip | ExprKind::IterConcat => None,
-        ExprKind::Split | ExprKind::Reduce | ExprKind::Arg => None,
+        SymKind::StoreMemory | SymKind::Sqrt | SymKind::Fma => None,
+        SymKind::Map | SymKind::Zip | SymKind::IterConcat => None,
+        SymKind::Split | SymKind::Reduce | SymKind::Arg => None,
+        // The TMDL frontend never lowers to these (no remainder/negation/`Le`/bit
+        // `Concat` operators), so they are unsupported by the bit-vector backend.
+        SymKind::SRem | SymKind::URem | SymKind::Neg | SymKind::Le | SymKind::Concat => None,
     }
 }
 
@@ -1072,11 +1069,6 @@ fn collect_mem_ops<'a>(e: &'a ast::Expr, out: &mut Vec<MemOp<'a>>) -> Option<()>
         ast::Expr::Slice(s) => collect_mem_ops(&s.base, out)?,
         ast::Expr::IndexAccess(i) => collect_mem_ops(&i.base, out)?,
         ast::Expr::Field(f) => collect_mem_ops(&f.base, out)?,
-        ast::Expr::For(f) => {
-            collect_mem_ops(&f.start, out)?;
-            collect_mem_ops(&f.end, out)?;
-            collect_mem_ops(&f.body, out)?;
-        }
         ast::Expr::Lambda(l) => collect_mem_ops(&l.body, out)?,
         ast::Expr::Try(_)
         | ast::Expr::Ident(_)
@@ -1107,16 +1099,14 @@ struct BehaviorEmitter<'a> {
 
 impl BehaviorEmitter<'_> {
     fn emit_val(&self, e: &ast::Expr) -> Option<SmtVal> {
-        let mut graph = tir::sem_expr::ExprPostGraph::new();
+        let mut graph = tir::sem::SemGraph::new();
         let lowering = e
             .lower_to_sema_with_registers(&mut graph, self.numeric_params, self.register_index_map)
             .or_else(|| {
                 self.failed.set(true);
                 None
             })?;
-        // SMT-LIB has no iteration: unroll constant-bound loops to plain
-        // expressions. Symbolic-bound loops survive and fail emission below.
-        let (graph, root) = tir::sem_expr::unroll_loops(&graph, lowering.root);
+        let root = lowering.root;
         let mut symbols = HashMap::new();
         for (name, id) in &lowering.variable_symbols {
             symbols.insert(*id, SmtSymbolInfo::Variable { name: name.clone() });
@@ -1374,8 +1364,7 @@ fn build_smt_behavior<'a>(
         failed: Default::default(),
         writes_pc: Default::default(),
     };
-    let behavior = instruction.behavior.expand_loops(&numeric_params);
-    let body = sem_expr_state::compile_to_state(&behavior, "st", &emitter);
+    let body = sem_expr_state::compile_to_state(&instruction.behavior, "st", &emitter);
     if emitter.failed.get() {
         None
     } else {

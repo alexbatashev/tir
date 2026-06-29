@@ -283,14 +283,14 @@ mod tests {
         builtin::{AddIOp, IntegerType, ops},
         graph::{Dag, MetaDag},
         parse::ir::parse_ir,
-        sem_expr::{AsSemExpr, ExprKind, ExprPayload, ExprPostGraph},
+        sem::{AsSemExpr, SemGraph, SymKind, SymPayload},
     };
 
     #[test]
     fn constant_fold_derived_from_sem() {
         use crate::ConstantFold;
-        use crate::sem_expr::Value;
-        use crate::utils::APInt;
+        use crate::sem::Value;
+        use tir_adt::APInt;
 
         let context = Context::with_default_dialects();
         let i32_ty = IntegerType::new(&context, 32);
@@ -388,19 +388,19 @@ mod tests {
         (context, lhs.id(), rhs.id())
     }
 
-    fn check_binary_sem(g: &ExprPostGraph, root: crate::graph::NodeId, expected_kind: ExprKind) {
+    fn check_binary_sem(g: &SemGraph, root: crate::graph::NodeId, expected_kind: SymKind) {
         assert_eq!(g.len(), 3, "expected 3 nodes: lhs symbol, rhs symbol, op");
         assert_eq!(g.get_kind(root), &expected_kind);
         let children: Vec<_> = g.children(root).collect();
         assert_eq!(children.len(), 2);
-        assert_eq!(g.get_kind(children[0]), &ExprKind::Symbol);
-        assert_eq!(g.get_kind(children[1]), &ExprKind::Symbol);
+        assert_eq!(g.get_kind(children[0]), &SymKind::Symbol);
+        assert_eq!(g.get_kind(children[1]), &SymKind::Symbol);
         assert!(
-            matches!(g.get_leaf_data(children[0]), Some(ExprPayload::SymbolId(0))),
+            matches!(g.get_leaf_data(children[0]), Some(SymPayload::SymbolId(0))),
             "lhs should be symbol 0"
         );
         assert!(
-            matches!(g.get_leaf_data(children[1]), Some(ExprPayload::SymbolId(1))),
+            matches!(g.get_leaf_data(children[1]), Some(SymPayload::SymbolId(1))),
             "rhs should be symbol 1"
         );
     }
@@ -408,7 +408,7 @@ mod tests {
     fn check_sem_metadata(
         context: &Context,
         op: &impl Operation,
-        g: &ExprPostGraph,
+        g: &SemGraph,
         root: crate::graph::NodeId,
         result: crate::ValueId,
     ) {
@@ -423,9 +423,9 @@ mod tests {
     fn addi_sem_expr() {
         let (context, lhs, rhs) = make_binary_op_context();
         let op = ops::addi(&context, lhs, rhs, IntegerType::new(&context, 32)).build();
-        let mut g = ExprPostGraph::new();
+        let mut g = SemGraph::new();
         let root = op.convert(&mut g);
-        check_binary_sem(&g, root, ExprKind::Add);
+        check_binary_sem(&g, root, SymKind::Add);
         check_sem_metadata(&context, &op, &g, root, op.result());
     }
 
@@ -433,80 +433,80 @@ mod tests {
     fn subi_sem_expr() {
         let (context, lhs, rhs) = make_binary_op_context();
         let op = ops::subi(&context, lhs, rhs, IntegerType::new(&context, 32)).build();
-        let mut g = ExprPostGraph::new();
+        let mut g = SemGraph::new();
         let root = op.convert(&mut g);
-        check_binary_sem(&g, root, ExprKind::Sub);
+        check_binary_sem(&g, root, SymKind::Sub);
     }
 
     #[test]
     fn muli_sem_expr() {
         let (context, lhs, rhs) = make_binary_op_context();
         let op = ops::muli(&context, lhs, rhs, IntegerType::new(&context, 32)).build();
-        let mut g = ExprPostGraph::new();
+        let mut g = SemGraph::new();
         let root = op.convert(&mut g);
-        check_binary_sem(&g, root, ExprKind::Mul);
+        check_binary_sem(&g, root, SymKind::Mul);
     }
 
     #[test]
     fn andi_sem_expr() {
         let (context, lhs, rhs) = make_binary_op_context();
         let op = ops::andi(&context, lhs, rhs, IntegerType::new(&context, 32)).build();
-        let mut g = ExprPostGraph::new();
+        let mut g = SemGraph::new();
         let root = op.convert(&mut g);
-        check_binary_sem(&g, root, ExprKind::And);
+        check_binary_sem(&g, root, SymKind::And);
     }
 
     #[test]
     fn ori_sem_expr() {
         let (context, lhs, rhs) = make_binary_op_context();
         let op = ops::ori(&context, lhs, rhs, IntegerType::new(&context, 32)).build();
-        let mut g = ExprPostGraph::new();
+        let mut g = SemGraph::new();
         let root = op.convert(&mut g);
-        check_binary_sem(&g, root, ExprKind::Or);
+        check_binary_sem(&g, root, SymKind::Or);
     }
 
     #[test]
     fn xori_sem_expr() {
         let (context, lhs, rhs) = make_binary_op_context();
         let op = ops::xori(&context, lhs, rhs, IntegerType::new(&context, 32)).build();
-        let mut g = ExprPostGraph::new();
+        let mut g = SemGraph::new();
         let root = op.convert(&mut g);
-        check_binary_sem(&g, root, ExprKind::Xor);
+        check_binary_sem(&g, root, SymKind::Xor);
     }
 
     #[test]
     fn shli_sem_expr() {
         let (context, lhs, rhs) = make_binary_op_context();
         let op = ops::shli(&context, lhs, rhs, IntegerType::new(&context, 32)).build();
-        let mut g = ExprPostGraph::new();
+        let mut g = SemGraph::new();
         let root = op.convert(&mut g);
-        check_binary_sem(&g, root, ExprKind::ShiftLeft);
+        check_binary_sem(&g, root, SymKind::ShiftLeft);
     }
 
     #[test]
     fn shrui_sem_expr() {
         let (context, lhs, rhs) = make_binary_op_context();
         let op = ops::shrui(&context, lhs, rhs, IntegerType::new(&context, 32)).build();
-        let mut g = ExprPostGraph::new();
+        let mut g = SemGraph::new();
         let root = op.convert(&mut g);
-        check_binary_sem(&g, root, ExprKind::ShiftRightLogic);
+        check_binary_sem(&g, root, SymKind::ShiftRightLogic);
     }
 
     #[test]
     fn shrsi_sem_expr() {
         let (context, lhs, rhs) = make_binary_op_context();
         let op = ops::shrsi(&context, lhs, rhs, IntegerType::new(&context, 32)).build();
-        let mut g = ExprPostGraph::new();
+        let mut g = SemGraph::new();
         let root = op.convert(&mut g);
-        check_binary_sem(&g, root, ExprKind::ShiftRightArithmetic);
+        check_binary_sem(&g, root, SymKind::ShiftRightArithmetic);
     }
 
     /// The width-changing ops take their width from the result type via the unary
     /// sem-DSL forms: `extsi -> SExt(x, W)`, `extui -> ZExt(x, W)`,
     /// `trunci -> Extract(x, W-1, 0)`.
-    fn const_value(g: &ExprPostGraph, node: crate::graph::NodeId) -> u64 {
+    fn const_value(g: &SemGraph, node: crate::graph::NodeId) -> u64 {
         match g.get_leaf_data(node) {
-            Some(ExprPayload::Int(v)) => v.to_u64(),
+            Some(SymPayload::Int(v)) => v.to_u64(),
             other => panic!("expected an integer constant, got {other:?}"),
         }
     }
@@ -516,11 +516,11 @@ mod tests {
         let context = Context::with_default_dialects();
         let input = context.create_value(IntegerType::new(&context, 16), None);
         let op = ops::extsi(&context, input.id(), IntegerType::new(&context, 64)).build();
-        let mut g = ExprPostGraph::new();
+        let mut g = SemGraph::new();
         let root = op.convert(&mut g);
-        assert_eq!(g.get_kind(root), &ExprKind::SExt);
+        assert_eq!(g.get_kind(root), &SymKind::SExt);
         let children: Vec<_> = g.children(root).collect();
-        assert_eq!(g.get_kind(children[0]), &ExprKind::Symbol);
+        assert_eq!(g.get_kind(children[0]), &SymKind::Symbol);
         assert_eq!(const_value(&g, children[1]), 64);
     }
 
@@ -529,9 +529,9 @@ mod tests {
         let context = Context::with_default_dialects();
         let input = context.create_value(IntegerType::new(&context, 8), None);
         let op = ops::extui(&context, input.id(), IntegerType::new(&context, 32)).build();
-        let mut g = ExprPostGraph::new();
+        let mut g = SemGraph::new();
         let root = op.convert(&mut g);
-        assert_eq!(g.get_kind(root), &ExprKind::ZExt);
+        assert_eq!(g.get_kind(root), &SymKind::ZExt);
         assert_eq!(const_value(&g, g.children(root).nth(1).unwrap()), 32);
     }
 
@@ -540,11 +540,11 @@ mod tests {
         let context = Context::with_default_dialects();
         let input = context.create_value(IntegerType::new(&context, 64), None);
         let op = ops::trunci(&context, input.id(), IntegerType::new(&context, 16)).build();
-        let mut g = ExprPostGraph::new();
+        let mut g = SemGraph::new();
         let root = op.convert(&mut g);
-        assert_eq!(g.get_kind(root), &ExprKind::Extract);
+        assert_eq!(g.get_kind(root), &SymKind::Extract);
         let children: Vec<_> = g.children(root).collect();
-        assert_eq!(g.get_kind(children[0]), &ExprKind::Symbol);
+        assert_eq!(g.get_kind(children[0]), &SymKind::Symbol);
         assert_eq!(const_value(&g, children[1]), 15); // high = W - 1
         assert_eq!(const_value(&g, children[2]), 0); // low
     }

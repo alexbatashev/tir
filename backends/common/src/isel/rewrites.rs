@@ -4,9 +4,9 @@
 use tir::{
     Context,
     graph::{Pattern, PatternExpr},
-    sem_expr::{ExprKind, ExprPayload, FuzzOracle, confirm_extension_via_shifts},
-    utils::APInt,
+    sem::{FuzzOracle, SymKind, SymPayload, confirm_extension_via_shifts},
 };
+use tir_adt::APInt;
 
 use super::ematch::{EMatch, ematch};
 use super::node::{SemEGraph, SemNode, class_width, template_node};
@@ -82,14 +82,14 @@ pub fn saturate(
 /// proved bit-vector lemma the target's own instructions happen to realize.
 pub(crate) fn discover_rewrites(patterns: &[CompiledIselPattern]) -> Vec<IselRewrite> {
     let atomics = atomic_kinds(patterns);
-    if !atomics.contains(&ExprKind::ShiftLeft) {
+    if !atomics.contains(&SymKind::ShiftLeft) {
         return Vec::new();
     }
     let oracle = FuzzOracle::default();
     let mut rewrites = Vec::new();
     for (ext_kind, shr_kind) in [
-        (ExprKind::SExt, ExprKind::ShiftRightArithmetic),
-        (ExprKind::ZExt, ExprKind::ShiftRightLogic),
+        (SymKind::SExt, SymKind::ShiftRightArithmetic),
+        (SymKind::ZExt, SymKind::ShiftRightLogic),
     ] {
         if atomics.contains(&shr_kind) && confirm_extension_via_shifts(ext_kind, shr_kind, &oracle)
         {
@@ -102,7 +102,7 @@ pub(crate) fn discover_rewrites(patterns: &[CompiledIselPattern]) -> Vec<IselRew
 /// Build the rewrite `ext_kind(v, W) -> shr_kind(shl(v, W - n), W - n)` with
 /// `n = width(v)`. The introduced shift nodes are left untyped so they match the
 /// target's width-agnostic shift patterns, and the shift amount is a fresh constant.
-pub(crate) fn extension_rewrite(ext_kind: ExprKind, shr_kind: ExprKind) -> IselRewrite {
+pub(crate) fn extension_rewrite(ext_kind: SymKind, shr_kind: SymKind) -> IselRewrite {
     let mut searcher = Pattern::<SemNode, ()>::new(());
     let value = searcher.add_node(PatternExpr::Boundary);
     searcher.set_duplicable(value, true);
@@ -129,11 +129,11 @@ pub(crate) fn extension_rewrite(ext_kind: ExprKind, shr_kind: ExprKind) -> IselR
                 return;
             }
             let shift_amount = egraph.add(template_node(
-                ExprKind::Constant,
-                Some(ExprPayload::Int(APInt::new(64, (w - n) as u64))),
+                SymKind::Constant,
+                Some(SymPayload::Int(APInt::new(64, (w - n) as u64))),
                 None,
             ));
-            let mut shl = template_node(ExprKind::ShiftLeft, None, None);
+            let mut shl = template_node(SymKind::ShiftLeft, None, None);
             shl.children = vec![value_class, shift_amount];
             let shl = egraph.add(shl);
             let mut shr = template_node(shr_kind, None, None);

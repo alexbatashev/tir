@@ -153,7 +153,7 @@ fn is_pure_value(instance: &Arc<OpInstance>) -> bool {
         && instance
             .clone()
             .as_dyn_op()
-            .semantic_expr(&mut crate::sem_expr::ExprPostGraph::new())
+            .semantic_expr(&mut crate::sem::SemGraph::new())
             .is_some()
 }
 

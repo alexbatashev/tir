@@ -8,9 +8,9 @@ use std::hash::{Hash, Hasher};
 use tir::{
     Context, TypeId, ValueId,
     builtin::IntegerType,
-    sem_expr::{ExprKind, ExprPayload},
-    utils::APInt,
+    sem::{SymKind, SymPayload},
 };
+use tir_adt::APInt;
 use tir_symbolic::egraph::{EGraph, ENode, Id};
 
 /// The semantic e-graph instruction selection operates over: e-classes of
@@ -31,7 +31,7 @@ pub type SemEGraph = EGraph<SemNode>;
 /// floats), and untyped rules stay width-agnostic.
 #[derive(Clone, Debug)]
 pub struct SemNode {
-    pub kind: ExprKind,
+    pub kind: SymKind,
     pub payload: Option<SemPayload>,
     pub ty: Option<TypeId>,
     pub children: Vec<Id>,
@@ -42,7 +42,7 @@ pub struct SemNode {
 /// two unrelated unknown computations never hash-cons into the same e-class.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SemPayload {
-    Expr(ExprPayload),
+    Expr(SymPayload<ValueId>),
     Opaque(u32),
 }
 
@@ -85,21 +85,21 @@ fn hash_label(node: &SemNode, state: &mut impl Hasher) {
     node.ty.hash(state);
     match &node.payload {
         None => 0u8.hash(state),
-        Some(SemPayload::Expr(ExprPayload::SymbolId(s))) => {
+        Some(SemPayload::Expr(SymPayload::SymbolId(s))) => {
             1u8.hash(state);
             s.hash(state);
         }
-        Some(SemPayload::Expr(ExprPayload::Value(v))) => {
+        Some(SemPayload::Expr(SymPayload::Value(v))) => {
             2u8.hash(state);
             v.number().hash(state);
         }
-        Some(SemPayload::Expr(ExprPayload::Int(i))) => {
+        Some(SemPayload::Expr(SymPayload::Int(i))) => {
             3u8.hash(state);
             i.width().hash(state);
             i.is_signed().hash(state);
             i.to_u64().hash(state);
         }
-        Some(SemPayload::Expr(ExprPayload::Float(f))) => {
+        Some(SemPayload::Expr(SymPayload::Float(f))) => {
             4u8.hash(state);
             f.to_f64().to_bits().hash(state);
         }
@@ -124,7 +124,7 @@ impl tir::graph::Matchable<Context> for SemNode {
     }
 
     fn is_constant(&self) -> bool {
-        self.kind == ExprKind::Constant
+        self.kind == SymKind::Constant
     }
 
     fn matches_pattern(&self, pattern: &Self, _ctx: &Context) -> bool {
@@ -164,12 +164,12 @@ pub(crate) fn class_binding(
 ) -> Option<Binding> {
     let nodes = egraph.nodes(class);
     if let Some(v) = nodes.iter().find_map(|n| match n.payload.as_ref() {
-        Some(SemPayload::Expr(ExprPayload::Int(v))) => Some(v),
+        Some(SemPayload::Expr(SymPayload::Int(v))) => Some(v),
         _ => None,
     }) {
         Some(Binding::Int(v.clone()))
     } else if let Some(v) = nodes.iter().find_map(|n| match n.payload.as_ref() {
-        Some(SemPayload::Expr(ExprPayload::Value(v))) => Some(*v),
+        Some(SemPayload::Expr(SymPayload::Value(v))) => Some(*v),
         _ => None,
     }) {
         Some(Binding::Value(v))
@@ -199,8 +199,8 @@ pub(crate) fn minimal_unsigned_apint(value: u64) -> APInt {
 }
 
 pub(crate) fn template_node(
-    kind: ExprKind,
-    payload: Option<ExprPayload>,
+    kind: SymKind,
+    payload: Option<SymPayload<ValueId>>,
     ty: Option<TypeId>,
 ) -> SemNode {
     SemNode {
@@ -219,7 +219,7 @@ pub(crate) fn class_is_pure(egraph: &SemEGraph, class: Id) -> bool {
     egraph
         .nodes(class)
         .iter()
-        .all(|n| !matches!(n.kind, ExprKind::LoadMemory | ExprKind::StoreMemory))
+        .all(|n| !matches!(n.kind, SymKind::LoadMemory | SymKind::StoreMemory))
 }
 
 /// The integer width of an e-class, taken from whichever member carries a known

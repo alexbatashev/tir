@@ -7,7 +7,7 @@ use tir::{
     OpId, ValueId,
     graph::NodeId,
     pbqp::{self, INF_COST, PbqpAlternative, PbqpMatrix, PbqpProblem},
-    sem_expr::ExprKind,
+    sem::SymKind,
 };
 use tir_symbolic::egraph::{ENode, Id};
 
@@ -315,7 +315,7 @@ pub(crate) fn completeness_error(
         }
     }
 
-    let mut missing: Vec<ExprKind> = Vec::new();
+    let mut missing: Vec<SymKind> = Vec::new();
     for &class in op_by_root.keys() {
         let class = egraph.find(class);
         if egraph.nodes(class).iter().any(|n| n.children().is_empty()) {

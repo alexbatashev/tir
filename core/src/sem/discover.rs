@@ -9,16 +9,15 @@
 //! slotted in later for a soundness proof. Confirmed shapes become e-graph rewrites
 //! at the call site.
 
-use crate::{
-    graph::{MutDag, NodeId},
-    sem_expr::{ExprKind, ExprPayload, ExprPostGraph, Value, execute},
-    utils::APInt,
-};
+use tir_adt::APInt;
+
+use crate::graph::{MutDag, NodeId};
+use crate::sem::{SemGraph, SymKind, SymPayload, Value, execute};
 
 /// Decides whether two single-output expression graphs (over the same symbols)
 /// compute the same value for every input of the given symbol widths.
 pub trait EquivalenceOracle {
-    fn equivalent(&self, lhs: &ExprPostGraph, rhs: &ExprPostGraph, symbol_widths: &[u32]) -> bool;
+    fn equivalent(&self, lhs: &SemGraph, rhs: &SemGraph, symbol_widths: &[u32]) -> bool;
 }
 
 /// Property-testing oracle: evaluates both graphs on boundary values plus a
@@ -37,7 +36,7 @@ impl Default for FuzzOracle {
 }
 
 impl EquivalenceOracle for FuzzOracle {
-    fn equivalent(&self, lhs: &ExprPostGraph, rhs: &ExprPostGraph, symbol_widths: &[u32]) -> bool {
+    fn equivalent(&self, lhs: &SemGraph, rhs: &SemGraph, symbol_widths: &[u32]) -> bool {
         let value_sets: Vec<Vec<APInt>> = symbol_widths
             .iter()
             .map(|&w| sample_values(w, self.samples_per_symbol))
@@ -122,19 +121,19 @@ fn sample_values(width: u32, extra: usize) -> Vec<APInt> {
         .collect()
 }
 
-fn sym(g: &mut ExprPostGraph, id: u32) -> NodeId {
-    let node = g.add_node(ExprKind::Symbol);
-    g.set_leaf_data(node, ExprPayload::SymbolId(id));
+fn sym(g: &mut SemGraph, id: u32) -> NodeId {
+    let node = g.add_node(SymKind::Symbol);
+    g.set_leaf_data(node, SymPayload::SymbolId(id));
     node
 }
 
-fn con(g: &mut ExprPostGraph, value: u64, width: u32) -> NodeId {
-    let node = g.add_node(ExprKind::Constant);
-    g.set_leaf_data(node, ExprPayload::Int(APInt::new(width, value)));
+fn con(g: &mut SemGraph, value: u64, width: u32) -> NodeId {
+    let node = g.add_node(SymKind::Constant);
+    g.set_leaf_data(node, SymPayload::Int(APInt::new(width, value)));
     node
 }
 
-fn op(g: &mut ExprPostGraph, kind: ExprKind, children: &[NodeId]) -> NodeId {
+fn op(g: &mut SemGraph, kind: SymKind, children: &[NodeId]) -> NodeId {
     let node = g.add_node(kind);
     for &child in children {
         g.add_edge(node, child);
@@ -144,23 +143,23 @@ fn op(g: &mut ExprPostGraph, kind: ExprKind, children: &[NodeId]) -> NodeId {
 
 /// The candidate realization of an extension as a shift pair, parameterized by the
 /// source width `n` and register width `w`: `ext_kind(extract(x, n-1, 0), w)`.
-fn ext_of_low_bits(ext_kind: ExprKind, n: u32, w: u32) -> ExprPostGraph {
-    let mut g = ExprPostGraph::new();
+fn ext_of_low_bits(ext_kind: SymKind, n: u32, w: u32) -> SemGraph {
+    let mut g = SemGraph::new();
     let x = sym(&mut g, 0);
     let hi = con(&mut g, (n - 1) as u64, 16);
     let lo = con(&mut g, 0, 16);
-    let extract = op(&mut g, ExprKind::Extract, &[x, hi, lo]);
+    let extract = op(&mut g, SymKind::Extract, &[x, hi, lo]);
     let width = con(&mut g, w as u64, 16);
     op(&mut g, ext_kind, &[extract, width]);
     g
 }
 
 /// `shr_kind(shl(x, k), k)` over `w`-bit values.
-fn shift_pair(shr_kind: ExprKind, k: u32, w: u32) -> ExprPostGraph {
-    let mut g = ExprPostGraph::new();
+fn shift_pair(shr_kind: SymKind, k: u32, w: u32) -> SemGraph {
+    let mut g = SemGraph::new();
     let x = sym(&mut g, 0);
     let amount = con(&mut g, k as u64, w);
-    let shl = op(&mut g, ExprKind::ShiftLeft, &[x, amount]);
+    let shl = op(&mut g, SymKind::ShiftLeft, &[x, amount]);
     let amount2 = con(&mut g, k as u64, w);
     op(&mut g, shr_kind, &[shl, amount2]);
     g
@@ -176,8 +175,8 @@ const EXT_WIDTH_SAMPLES: &[(u32, u32)] = &[(8, 32), (16, 32), (8, 64), (16, 64),
 /// On success the caller may emit a width-parameterized rewrite
 /// `ext_kind(v, w) -> shr_kind(shl(v, w - n), w - n)` with `n = width(v)`.
 pub fn confirm_extension_via_shifts(
-    ext_kind: ExprKind,
-    shr_kind: ExprKind,
+    ext_kind: SymKind,
+    shr_kind: SymKind,
     oracle: &dyn EquivalenceOracle,
 ) -> bool {
     EXT_WIDTH_SAMPLES.iter().all(|&(n, w)| {
@@ -197,8 +196,8 @@ mod tests {
     #[test]
     fn sign_extension_is_a_left_then_arithmetic_right_shift() {
         assert!(confirm_extension_via_shifts(
-            ExprKind::SExt,
-            ExprKind::ShiftRightArithmetic,
+            SymKind::SExt,
+            SymKind::ShiftRightArithmetic,
             &FuzzOracle::default(),
         ));
     }
@@ -206,8 +205,8 @@ mod tests {
     #[test]
     fn zero_extension_is_a_left_then_logical_right_shift() {
         assert!(confirm_extension_via_shifts(
-            ExprKind::ZExt,
-            ExprKind::ShiftRightLogic,
+            SymKind::ZExt,
+            SymKind::ShiftRightLogic,
             &FuzzOracle::default(),
         ));
     }
@@ -216,8 +215,8 @@ mod tests {
     fn sign_extension_is_not_a_logical_right_shift() {
         // The oracle must reject the wrong pairing (srl can't sign-extend).
         assert!(!confirm_extension_via_shifts(
-            ExprKind::SExt,
-            ExprKind::ShiftRightLogic,
+            SymKind::SExt,
+            SymKind::ShiftRightLogic,
             &FuzzOracle::default(),
         ));
     }

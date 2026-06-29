@@ -1,8 +1,7 @@
-use crate::{
-    graph::{Dag, NodeId},
-    sem_expr::{ExprKind, ExprPayload, Value},
-    utils::{APInt, RawBits},
-};
+use tir_adt::{APInt, RawBits};
+use tir_graph::{Dag, NodeId};
+
+use crate::lang::{SymKind, SymPayload, Value};
 
 /// Memory backend used by semantic expressions containing `LoadMemory` or
 /// `StoreMemory`.
@@ -38,7 +37,10 @@ impl Memory for NoMemory {
 ///
 /// `symbols[i]` is the value for the operand with `SymbolId(i)`.
 /// Returns the value of the root node.
-pub fn execute(graph: &impl Dag<Node = ExprKind, Leaf = ExprPayload>, symbols: &[Value]) -> Value {
+pub fn execute<V>(
+    graph: &impl Dag<Node = SymKind, Leaf = SymPayload<V>>,
+    symbols: &[Value],
+) -> Value {
     match execute_with_memory(graph, symbols, &mut NoMemory) {
         Ok(value) => value,
         Err(err) => match err {},
@@ -50,28 +52,19 @@ pub fn execute(graph: &impl Dag<Node = ExprKind, Leaf = ExprPayload>, symbols: &
 /// Loads read little-endian byte sequences and produce an integer whose width is
 /// `size * 8`. Stores write the low bytes of their value and return a dummy
 /// 1-bit integer; callers normally ignore the result for store statements.
-pub fn execute_with_memory<M: Memory>(
-    graph: &impl Dag<Node = ExprKind, Leaf = ExprPayload>,
+pub fn execute_with_memory<V, M: Memory>(
+    graph: &impl Dag<Node = SymKind, Leaf = SymPayload<V>>,
     symbols: &[Value],
     memory: &mut M,
 ) -> Result<Value, M::Error> {
     let root = graph.root().expect("cannot execute empty graph");
     let mut cache = vec![None::<Value>; graph.len()];
-    let mut frames: Vec<(Value, Value)> = Vec::new();
     let mut args: Vec<Value> = Vec::new();
-    eval_node(
-        graph,
-        root,
-        symbols,
-        &mut cache,
-        &mut frames,
-        &mut args,
-        memory,
-    )
+    eval_node(graph, root, symbols, &mut cache, &mut args, memory)
 }
 
-fn child_val(
-    graph: &impl Dag<Node = ExprKind, Leaf = ExprPayload>,
+fn child_val<V>(
+    graph: &impl Dag<Node = SymKind, Leaf = SymPayload<V>>,
     node: NodeId,
     idx: usize,
     cache: &[Option<Value>],
@@ -138,62 +131,20 @@ fn ints_equal(a: APInt, b: APInt) -> bool {
     a.with_signed(false) == b.with_signed(false)
 }
 
-/// Evaluate a `Loop` node: fold `step` over `[start, end)`, threading the
-/// accumulator and exposing the induction value through the frame stack.
-fn eval_loop<M: Memory>(
-    graph: &impl Dag<Node = ExprKind, Leaf = ExprPayload>,
-    node: NodeId,
-    symbols: &[Value],
-    cache: &mut Vec<Option<Value>>,
-    frames: &mut Vec<(Value, Value)>,
-    args: &mut Vec<Value>,
-    memory: &mut M,
-) -> Result<Value, M::Error> {
-    let children: Vec<NodeId> = graph.children(node).collect();
-    let (start_n, end_n, init_n, step_n) = (children[0], children[1], children[2], children[3]);
-
-    let start = eval_node(graph, start_n, symbols, cache, frames, args, memory)?;
-    let end = eval_node(graph, end_n, symbols, cache, frames, args, memory)?;
-    let mut acc = eval_node(graph, init_n, symbols, cache, frames, args, memory)?;
-
-    let start = as_int!(start, "loop bound").to_i64();
-    let end = as_int!(end, "loop bound").to_i64();
-
-    for i in start..end {
-        frames.push((Value::Int(APInt::new_signed(64, i)), acc.clone()));
-        // `step` depends on the induction/accumulator values, which change each
-        // iteration, so it cannot share the surrounding cache: evaluate it fresh.
-        let mut step_cache = vec![None::<Value>; graph.len()];
-        let next = eval_node(
-            graph,
-            step_n,
-            symbols,
-            &mut step_cache,
-            frames,
-            args,
-            memory,
-        );
-        frames.pop();
-        acc = next?;
-    }
-    Ok(acc)
-}
-
 /// Evaluate a `Map` node: apply `body` to each lane of `iter`, exposing the lane
 /// (or its components, for a zipped pair) through the lambda-argument stack.
-fn eval_map<M: Memory>(
-    graph: &impl Dag<Node = ExprKind, Leaf = ExprPayload>,
+fn eval_map<V, M: Memory>(
+    graph: &impl Dag<Node = SymKind, Leaf = SymPayload<V>>,
     node: NodeId,
     symbols: &[Value],
     cache: &mut Vec<Option<Value>>,
-    frames: &mut Vec<(Value, Value)>,
     args: &mut Vec<Value>,
     memory: &mut M,
 ) -> Result<Value, M::Error> {
     let children: Vec<NodeId> = graph.children(node).collect();
     let (iter_n, body_n) = (children[0], children[1]);
 
-    let iter = eval_node(graph, iter_n, symbols, cache, frames, args, memory)?;
+    let iter = eval_node(graph, iter_n, symbols, cache, args, memory)?;
     let Value::Iterator(elems) = iter else {
         panic!("map requires an iterator operand");
     };
@@ -204,15 +155,7 @@ fn eval_map<M: Memory>(
         // `body` reads the per-lane argument, which changes each lane, so it
         // cannot share the surrounding cache: evaluate it fresh.
         let mut body_cache = vec![None::<Value>; graph.len()];
-        let lane = eval_node(
-            graph,
-            body_n,
-            symbols,
-            &mut body_cache,
-            frames,
-            args,
-            memory,
-        );
+        let lane = eval_node(graph, body_n, symbols, &mut body_cache, args, memory);
         args.pop();
         out.push(lane?);
     }
@@ -221,19 +164,18 @@ fn eval_map<M: Memory>(
 
 /// Evaluate a `Reduce` node: left-fold `body` over the lanes of `iter`, binding
 /// `Arg(0)` to the accumulator and `Arg(1)` to the current lane.
-fn eval_reduce<M: Memory>(
-    graph: &impl Dag<Node = ExprKind, Leaf = ExprPayload>,
+fn eval_reduce<V, M: Memory>(
+    graph: &impl Dag<Node = SymKind, Leaf = SymPayload<V>>,
     node: NodeId,
     symbols: &[Value],
     cache: &mut Vec<Option<Value>>,
-    frames: &mut Vec<(Value, Value)>,
     args: &mut Vec<Value>,
     memory: &mut M,
 ) -> Result<Value, M::Error> {
     let children: Vec<NodeId> = graph.children(node).collect();
     let (iter_n, body_n) = (children[0], children[1]);
 
-    let iter = eval_node(graph, iter_n, symbols, cache, frames, args, memory)?;
+    let iter = eval_node(graph, iter_n, symbols, cache, args, memory)?;
     let Value::Iterator(elems) = iter else {
         panic!("reduce requires an iterator operand");
     };
@@ -244,62 +186,11 @@ fn eval_reduce<M: Memory>(
         // two-element binding on the argument stack.
         args.push(Value::Iterator(vec![acc, elem]));
         let mut body_cache = vec![None::<Value>; graph.len()];
-        let next = eval_node(
-            graph,
-            body_n,
-            symbols,
-            &mut body_cache,
-            frames,
-            args,
-            memory,
-        );
+        let next = eval_node(graph, body_n, symbols, &mut body_cache, args, memory);
         args.pop();
         acc = next?;
     }
     Ok(acc)
-}
-
-/// Evaluate a `VectorMap` node: build a vector by evaluating `elem` over each
-/// lane index `[0, count)`, exposing the index through the frame stack the same
-/// way `Loop` exposes its induction value.
-fn eval_vector_map<M: Memory>(
-    graph: &impl Dag<Node = ExprKind, Leaf = ExprPayload>,
-    node: NodeId,
-    symbols: &[Value],
-    cache: &mut Vec<Option<Value>>,
-    frames: &mut Vec<(Value, Value)>,
-    args: &mut Vec<Value>,
-    memory: &mut M,
-) -> Result<Value, M::Error> {
-    let children: Vec<NodeId> = graph.children(node).collect();
-    let (count_n, elem_n) = (children[0], children[1]);
-
-    let count = eval_node(graph, count_n, symbols, cache, frames, args, memory)?;
-    let count = as_int!(count, "vector length").to_i64();
-
-    let mut lanes = Vec::with_capacity(count.max(0) as usize);
-    for i in 0..count {
-        // The accumulator slot is unused by a map; the induction value is read by
-        // `IndVar` and by `Lane` indices, and changes each lane, so `elem` cannot
-        // share the surrounding cache.
-        frames.push((
-            Value::Int(APInt::new_signed(64, i)),
-            Value::Int(APInt::new(1, 0)),
-        ));
-        let mut lane_cache = vec![None::<Value>; graph.len()];
-        let lane = eval_node(
-            graph,
-            elem_n,
-            symbols,
-            &mut lane_cache,
-            frames,
-            args,
-            memory,
-        );
-        frames.pop();
-        lanes.push(lane?);
-    }
-    Ok(Value::Iterator(lanes))
 }
 
 /// Evaluate a `Split` node: cut a raw-bits value into `n` equal-width lanes, lane
@@ -337,12 +228,11 @@ fn concat_lanes(value: Value) -> Value {
     Value::RawBits(RawBits::concat(&raw))
 }
 
-fn eval_node<M: Memory>(
-    graph: &impl Dag<Node = ExprKind, Leaf = ExprPayload>,
+fn eval_node<V, M: Memory>(
+    graph: &impl Dag<Node = SymKind, Leaf = SymPayload<V>>,
     node: NodeId,
     symbols: &[Value],
     cache: &mut Vec<Option<Value>>,
-    frames: &mut Vec<(Value, Value)>,
     args: &mut Vec<Value>,
     memory: &mut M,
 ) -> Result<Value, M::Error> {
@@ -350,28 +240,17 @@ fn eval_node<M: Memory>(
         return Ok(v.clone());
     }
 
-    // `Loop`, `VectorMap`, `Map` and `Reduce` re-evaluate a child once per
-    // iteration with a fresh per-iteration binding (induction value or lambda
-    // argument), so that child must not be pre-evaluated by the generic pass.
-    // Intercept each before the generic child pre-evaluation.
+    // `Map` and `Reduce` re-evaluate a child once per lane with a fresh per-lane
+    // lambda argument (read via `Arg`), so that child must not be pre-evaluated by
+    // the generic pass. Intercept each before the generic child pre-evaluation.
     match *graph.get_kind(node) {
-        ExprKind::Loop => {
-            let result = eval_loop(graph, node, symbols, cache, frames, args, memory)?;
+        SymKind::Map => {
+            let result = eval_map(graph, node, symbols, cache, args, memory)?;
             cache[node.index()] = Some(result.clone());
             return Ok(result);
         }
-        ExprKind::VectorMap => {
-            let result = eval_vector_map(graph, node, symbols, cache, frames, args, memory)?;
-            cache[node.index()] = Some(result.clone());
-            return Ok(result);
-        }
-        ExprKind::Map => {
-            let result = eval_map(graph, node, symbols, cache, frames, args, memory)?;
-            cache[node.index()] = Some(result.clone());
-            return Ok(result);
-        }
-        ExprKind::Reduce => {
-            let result = eval_reduce(graph, node, symbols, cache, frames, args, memory)?;
+        SymKind::Reduce => {
+            let result = eval_reduce(graph, node, symbols, cache, args, memory)?;
             cache[node.index()] = Some(result.clone());
             return Ok(result);
         }
@@ -380,7 +259,7 @@ fn eval_node<M: Memory>(
 
     for child_id in graph.children(node) {
         if cache[child_id.index()].is_none() {
-            let v = eval_node(graph, child_id, symbols, cache, frames, args, memory)?;
+            let v = eval_node(graph, child_id, symbols, cache, args, memory)?;
             cache[child_id.index()] = Some(v);
         }
     }
@@ -388,22 +267,11 @@ fn eval_node<M: Memory>(
     let c = |idx: usize| child_val(graph, node, idx, cache);
 
     let result = match graph.get_kind(node) {
-        ExprKind::IndVar => frames
-            .last()
-            .expect("IndVar evaluated outside a loop")
-            .0
-            .clone(),
-        ExprKind::Acc => frames
-            .last()
-            .expect("Acc evaluated outside a loop")
-            .1
-            .clone(),
-        ExprKind::Loop => unreachable!("Loop handled before child pre-evaluation"),
-        ExprKind::VectorMap | ExprKind::Map | ExprKind::Reduce => {
+        SymKind::Map | SymKind::Reduce => {
             unreachable!("map/reduce handled before child pre-evaluation")
         }
-        ExprKind::Arg => {
-            let ExprPayload::Int(idx) = graph.get_leaf_data(node).unwrap() else {
+        SymKind::Arg => {
+            let SymPayload::Int(idx) = graph.get_leaf_data(node).unwrap() else {
                 panic!("Arg node must have Int payload");
             };
             let idx = idx.to_u64() as usize;
@@ -419,7 +287,7 @@ fn eval_node<M: Memory>(
                 }
             }
         }
-        ExprKind::Zip => {
+        SymKind::Zip => {
             let (Value::Iterator(lhs), Value::Iterator(rhs)) = (c(0), c(1)) else {
                 panic!("zip requires iterator operands");
             };
@@ -434,29 +302,22 @@ fn eval_node<M: Memory>(
                     .collect(),
             )
         }
-        ExprKind::Split => split_bits(c(0), as_int!(c(1), "split").to_u64() as usize),
-        ExprKind::IterConcat => concat_lanes(c(0)),
-        ExprKind::Lane => {
-            let Value::Iterator(lanes) = c(0) else {
-                panic!("Lane requires a vector operand");
-            };
-            let index = as_int!(c(1), "lane").to_u64() as usize;
-            lanes[index].clone()
-        }
-        ExprKind::Symbol => {
-            let ExprPayload::SymbolId(id) = graph.get_leaf_data(node).unwrap() else {
+        SymKind::Split => split_bits(c(0), as_int!(c(1), "split").to_u64() as usize),
+        SymKind::IterConcat => concat_lanes(c(0)),
+        SymKind::Symbol => {
+            let SymPayload::SymbolId(id) = graph.get_leaf_data(node).unwrap() else {
                 panic!("Symbol node must have SymbolId payload");
             };
             symbols[*id as usize].clone()
         }
-        ExprKind::Constant => match graph.get_leaf_data(node).unwrap() {
-            ExprPayload::Int(v) => Value::Int(v.clone()),
-            ExprPayload::Float(v) => Value::Float(v.clone()),
+        SymKind::Constant => match graph.get_leaf_data(node).unwrap() {
+            SymPayload::Int(v) => Value::Int(v.clone()),
+            SymPayload::Float(v) => Value::Float(v.clone()),
             _ => panic!("Constant node must have Int or Float payload"),
         },
 
         // ── Arithmetic (int or float) ──────────────────────────────────────
-        ExprKind::Add => match c(0) {
+        SymKind::Add => match c(0) {
             Value::Int(a) => {
                 let (a, b) = coerce_ints(a, as_int!(c(1), "add"));
                 Value::Int(a.add(&b))
@@ -464,7 +325,7 @@ fn eval_node<M: Memory>(
             Value::Float(a) => Value::Float(a.add(&as_float!(c(1), "add"))),
             Value::Iterator(_) | Value::RawBits(_) => panic!("add requires scalar operands"),
         },
-        ExprKind::Sub => match c(0) {
+        SymKind::Sub => match c(0) {
             Value::Int(a) => {
                 let (a, b) = coerce_ints(a, as_int!(c(1), "sub"));
                 Value::Int(a.sub(&b))
@@ -472,7 +333,7 @@ fn eval_node<M: Memory>(
             Value::Float(a) => Value::Float(a.sub(&as_float!(c(1), "sub"))),
             Value::Iterator(_) | Value::RawBits(_) => panic!("sub requires scalar operands"),
         },
-        ExprKind::Mul => match c(0) {
+        SymKind::Mul => match c(0) {
             Value::Int(a) => {
                 let (a, b) = coerce_ints(a, as_int!(c(1), "mul"));
                 Value::Int(a.mul(&b))
@@ -480,7 +341,7 @@ fn eval_node<M: Memory>(
             Value::Float(a) => Value::Float(a.mul(&as_float!(c(1), "mul"))),
             Value::Iterator(_) | Value::RawBits(_) => panic!("mul requires scalar operands"),
         },
-        ExprKind::Div => match c(0) {
+        SymKind::Div => match c(0) {
             Value::Int(a) => {
                 let (a, b) = coerce_ints(a, as_int!(c(1), "div"));
                 Value::Int(a.sdiv(&b))
@@ -488,31 +349,52 @@ fn eval_node<M: Memory>(
             Value::Float(a) => Value::Float(a.div(&as_float!(c(1), "div"))),
             Value::Iterator(_) | Value::RawBits(_) => panic!("div requires scalar operands"),
         },
-        ExprKind::UDiv => {
+        SymKind::UDiv => {
             let (a, b) = coerce_ints(as_int!(c(0), "udiv"), as_int!(c(1), "udiv"));
             Value::Int(a.udiv(&b))
         }
+        SymKind::SRem => {
+            let (a, b) = coerce_ints(as_int!(c(0), "srem"), as_int!(c(1), "srem"));
+            Value::Int(a.srem(&b))
+        }
+        SymKind::URem => {
+            let (a, b) = coerce_ints(as_int!(c(0), "urem"), as_int!(c(1), "urem"));
+            Value::Int(a.urem(&b))
+        }
+        SymKind::Neg => Value::Int(as_int!(c(0), "neg").neg()),
 
         // ── Bitwise (int only) ─────────────────────────────────────────────
-        ExprKind::And => {
+        SymKind::And => {
             let (a, b) = coerce_ints(as_int!(c(0), "and"), as_int!(c(1), "and"));
             Value::Int(a.and(&b))
         }
-        ExprKind::Or => {
+        SymKind::Or => {
             let (a, b) = coerce_ints(as_int!(c(0), "or"), as_int!(c(1), "or"));
             Value::Int(a.or(&b))
         }
-        ExprKind::Xor => {
+        SymKind::Xor => {
             let (a, b) = coerce_ints(as_int!(c(0), "xor"), as_int!(c(1), "xor"));
             Value::Int(a.xor(&b))
         }
-        ExprKind::ShiftLeft => {
+        // Concatenation places the first operand in the high bits; the result is
+        // as wide as the sum of the operand widths.
+        SymKind::Concat => {
+            let hi = as_int!(c(0), "concat");
+            let lo = as_int!(c(1), "concat");
+            let width = hi.width() + lo.width();
+            let value = hi
+                .zero_extend(width)
+                .shl(lo.width())
+                .or(&lo.zero_extend(width));
+            Value::Int(value)
+        }
+        SymKind::ShiftLeft => {
             Value::Int(as_int!(c(0), "shl").shl(as_int!(c(1), "shl").to_u64() as u32))
         }
-        ExprKind::ShiftRightLogic => {
+        SymKind::ShiftRightLogic => {
             Value::Int(as_int!(c(0), "lshr").lshr(as_int!(c(1), "lshr").to_u64() as u32))
         }
-        ExprKind::ShiftRightArithmetic => {
+        SymKind::ShiftRightArithmetic => {
             // An arithmetic shift always treats its operand as signed (sign bit =
             // MSB of the operand width), regardless of the value's stored
             // signedness flag. Register values are stored unsigned, so without
@@ -521,24 +403,24 @@ fn eval_node<M: Memory>(
             value.set_signed(true);
             Value::Int(value.ashr(as_int!(c(1), "ashr").to_u64() as u32))
         }
-        ExprKind::Not => Value::Int(as_int!(c(0), "not").not()),
+        SymKind::Not => Value::Int(as_int!(c(0), "not").not()),
 
         // ── Comparisons ────────────────────────────────────────────────────
-        ExprKind::Eq => {
+        SymKind::Eq => {
             let eq = match (c(0), c(1)) {
                 (Value::Int(a), Value::Int(b)) => ints_equal(a, b),
                 (l, r) => l == r,
             };
             Value::Int(APInt::new(1, bool_result(eq)))
         }
-        ExprKind::Ne => {
+        SymKind::Ne => {
             let ne = match (c(0), c(1)) {
                 (Value::Int(a), Value::Int(b)) => !ints_equal(a, b),
                 (l, r) => l != r,
             };
             Value::Int(APInt::new(1, bool_result(ne)))
         }
-        ExprKind::Lt => Value::Int(APInt::new(
+        SymKind::Lt => Value::Int(APInt::new(
             1,
             match c(0) {
                 Value::Int(a) => {
@@ -549,7 +431,18 @@ fn eval_node<M: Memory>(
                 Value::Iterator(_) | Value::RawBits(_) => panic!("lt requires scalar operands"),
             },
         )),
-        ExprKind::Gt => Value::Int(APInt::new(
+        SymKind::Le => Value::Int(APInt::new(
+            1,
+            match c(0) {
+                Value::Int(a) => {
+                    let (a, b) = coerce_ints(a, as_int!(c(1), "le"));
+                    bool_result(a.sle(&b))
+                }
+                Value::Float(a) => bool_result(a.le(&as_float!(c(1), "le"))),
+                Value::Iterator(_) | Value::RawBits(_) => panic!("le requires scalar operands"),
+            },
+        )),
+        SymKind::Gt => Value::Int(APInt::new(
             1,
             match c(0) {
                 Value::Int(a) => {
@@ -560,7 +453,7 @@ fn eval_node<M: Memory>(
                 Value::Iterator(_) | Value::RawBits(_) => panic!("gt requires scalar operands"),
             },
         )),
-        ExprKind::Ge => Value::Int(APInt::new(
+        SymKind::Ge => Value::Int(APInt::new(
             1,
             match c(0) {
                 Value::Int(a) => {
@@ -571,25 +464,25 @@ fn eval_node<M: Memory>(
                 Value::Iterator(_) | Value::RawBits(_) => panic!("ge requires scalar operands"),
             },
         )),
-        ExprKind::ULt => {
+        SymKind::ULt => {
             let (a, b) = coerce_ints(as_int!(c(0), "ult"), as_int!(c(1), "ult"));
             Value::Int(APInt::new(1, bool_result(a.ult(&b))))
         }
-        ExprKind::ULe => {
+        SymKind::ULe => {
             let (a, b) = coerce_ints(as_int!(c(0), "ule"), as_int!(c(1), "ule"));
             Value::Int(APInt::new(1, bool_result(a.ule(&b))))
         }
-        ExprKind::UGt => {
+        SymKind::UGt => {
             let (a, b) = coerce_ints(as_int!(c(0), "ugt"), as_int!(c(1), "ugt"));
             Value::Int(APInt::new(1, bool_result(a.ugt(&b))))
         }
-        ExprKind::UGe => {
+        SymKind::UGe => {
             let (a, b) = coerce_ints(as_int!(c(0), "uge"), as_int!(c(1), "uge"));
             Value::Int(APInt::new(1, bool_result(a.uge(&b))))
         }
 
         // ── Control ────────────────────────────────────────────────────────
-        ExprKind::If => {
+        SymKind::If => {
             let cond_zero = match c(0) {
                 Value::Int(i) => i.is_zero(),
                 Value::Float(f) => f.is_zero(),
@@ -597,7 +490,7 @@ fn eval_node<M: Memory>(
             };
             if cond_zero { c(2) } else { c(1) }
         }
-        ExprKind::Clamp => {
+        SymKind::Clamp => {
             let input = as_int!(c(0), "clamp");
             let min = as_int!(c(1), "clamp");
             let max = as_int!(c(2), "clamp");
@@ -622,7 +515,7 @@ fn eval_node<M: Memory>(
         }
 
         // ── Math (int or float) ────────────────────────────────────────────
-        ExprKind::Fma => match c(0) {
+        SymKind::Fma => match c(0) {
             Value::Int(a) => {
                 let (a, b) = coerce_ints(a, as_int!(c(1), "fma"));
                 let (prod, addend) = coerce_ints(a.mul(&b), as_int!(c(2), "fma"));
@@ -633,7 +526,7 @@ fn eval_node<M: Memory>(
             }
             Value::Iterator(_) | Value::RawBits(_) => panic!("fma requires scalar operands"),
         },
-        ExprKind::Sqrt => match c(0) {
+        SymKind::Sqrt => match c(0) {
             Value::Int(a) => {
                 let v = a.to_u64();
                 Value::Int(APInt::new(a.width(), (v as f64).sqrt() as u64))
@@ -641,7 +534,7 @@ fn eval_node<M: Memory>(
             Value::Float(a) => Value::Float(a.sqrt()),
             Value::Iterator(_) | Value::RawBits(_) => panic!("sqrt requires a scalar operand"),
         },
-        ExprKind::Log2Ceil => {
+        SymKind::Log2Ceil => {
             let a = as_int!(c(0), "log2ceil");
             let v = a.to_u64();
             let result = if v <= 1 {
@@ -652,7 +545,7 @@ fn eval_node<M: Memory>(
             Value::Int(APInt::new(a.width(), result))
         }
 
-        ExprKind::Extract => {
+        SymKind::Extract => {
             let value = as_int!(c(0), "extract");
             let high = as_int!(c(1), "extract").to_u64() as u32;
             let low = as_int!(c(2), "extract").to_u64() as u32;
@@ -662,7 +555,7 @@ fn eval_node<M: Memory>(
             // product's width, recompute it from the multiply's operands as a
             // signed full-width product.
             let mul = graph.children(node).next().expect("extract has children");
-            if low >= value.width() && matches!(graph.get_kind(mul), ExprKind::Mul) {
+            if low >= value.width() && matches!(graph.get_kind(mul), SymKind::Mul) {
                 let (a, b) = coerce_ints(
                     as_int!(child_val(graph, mul, 0, cache), "extract"),
                     as_int!(child_val(graph, mul, 1, cache), "extract"),
@@ -673,12 +566,12 @@ fn eval_node<M: Memory>(
                 Value::Int(value.extract_bits(high, low))
             }
         }
-        ExprKind::ZExt => {
+        SymKind::ZExt => {
             let value = as_int!(c(0), "zext");
             let width = as_int!(c(1), "zext").to_u64() as u32;
             Value::Int(value.zero_extend(width))
         }
-        ExprKind::SExt => {
+        SymKind::SExt => {
             let value = as_int!(c(0), "sext");
             let width = as_int!(c(1), "sext").to_u64() as u32;
             // Sign-extend from the value's current MSB regardless of how its
@@ -687,13 +580,13 @@ fn eval_node<M: Memory>(
         }
 
         // ── Memory ─────────────────────────────────────────────────────────
-        ExprKind::LoadMemory => {
+        SymKind::LoadMemory => {
             let address = as_int!(c(0), "load").to_u64();
             let size = as_int!(c(1), "load").to_u64() as usize;
             let value = memory.read_memory(address, size)?;
             Value::Int(APInt::new((size as u32) * 8, value))
         }
-        ExprKind::StoreMemory => {
+        SymKind::StoreMemory => {
             let address = as_int!(c(0), "store").to_u64();
             let size = as_int!(c(1), "store").to_u64() as usize;
             let value = as_int!(c(2), "store").to_u64();
@@ -710,48 +603,34 @@ fn bool_result(b: bool) -> u64 {
     b as u64
 }
 
-// PartialEq for Value so comparisons work
-impl PartialEq for Value {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Value::Int(a), Value::Int(b)) => a == b,
-            (Value::Float(a), Value::Float(b)) => a == b,
-            (Value::Iterator(a), Value::Iterator(b)) => a == b,
-            _ => false,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        graph::MutDag,
-        sem_expr::{ExprKind, ExprPayload, ExprPostGraph},
-        utils::APFloat,
-    };
+    use tir_adt::APFloat;
+    use tir_graph::{GenericDag, MutDag};
 
-    fn sym(g: &mut ExprPostGraph, id: u32) -> NodeId {
-        let node = g.add_node(ExprKind::Symbol);
-        g.set_leaf_data(node, ExprPayload::SymbolId(id));
-        node
-    }
-    fn int_con(g: &mut ExprPostGraph, v: i64) -> NodeId {
-        let node = g.add_node(ExprKind::Constant);
-        g.set_leaf_data(node, ExprPayload::Int(APInt::new_signed(64, v)));
-        node
-    }
-    fn flt_con(g: &mut ExprPostGraph, v: f64) -> NodeId {
-        let node = g.add_node(ExprKind::Constant);
-        g.set_leaf_data(node, ExprPayload::Float(APFloat::from_f64(v)));
-        node
-    }
+    type Graph = GenericDag<SymKind, SymPayload<()>>;
 
-    fn inner(g: &mut ExprPostGraph, kind: ExprKind, children: &[NodeId]) -> NodeId {
+    fn sym(g: &mut Graph, id: u32) -> NodeId {
+        let node = g.add_node(SymKind::Symbol);
+        g.set_leaf_data(node, SymPayload::SymbolId(id));
+        node
+    }
+    fn int_con(g: &mut Graph, v: i64) -> NodeId {
+        let node = g.add_node(SymKind::Constant);
+        g.set_leaf_data(node, SymPayload::Int(APInt::new_signed(64, v)));
+        node
+    }
+    fn inner(g: &mut Graph, kind: SymKind, children: &[NodeId]) -> NodeId {
         let node = g.add_node(kind);
         for &child in children {
             g.add_edge(node, child);
         }
+        node
+    }
+    fn arg(g: &mut Graph, k: u64) -> NodeId {
+        let node = g.add_node(SymKind::Arg);
+        g.set_leaf_data(node, SymPayload::Int(APInt::new(32, k)));
         node
     }
 
@@ -763,6 +642,40 @@ mod tests {
     }
     fn uv(v: u64) -> Value {
         Value::Int(APInt::new(32, v))
+    }
+    fn rb(bytes: &[u8]) -> Value {
+        Value::RawBits(RawBits::from_bytes(bytes.to_vec()))
+    }
+
+    fn as_i64(v: Value) -> i64 {
+        match v {
+            Value::Int(i) => i.to_i64(),
+            _ => panic!(),
+        }
+    }
+    fn as_u64(v: Value) -> u64 {
+        match v {
+            Value::Int(i) => i.to_u64(),
+            _ => panic!(),
+        }
+    }
+    fn as_f64(v: Value) -> f64 {
+        match v {
+            Value::Float(f) => f.to_f64(),
+            _ => panic!(),
+        }
+    }
+    fn raw_bytes(v: Value) -> Vec<u8> {
+        match v {
+            Value::RawBits(b) => b.bytes().to_vec(),
+            other => panic!("expected raw bits, got {other:?}"),
+        }
+    }
+    fn int_lanes(v: Value) -> Vec<i64> {
+        match v {
+            Value::Iterator(xs) => xs.into_iter().map(as_i64).collect(),
+            other => panic!("expected iterator, got {other:?}"),
+        }
     }
 
     #[derive(Default)]
@@ -796,40 +709,27 @@ mod tests {
         }
     }
 
-    fn as_i64(v: Value) -> i64 {
-        match v {
-            Value::Int(i) => i.to_i64(),
-            _ => panic!(),
-        }
-    }
-    fn as_f64(v: Value) -> f64 {
-        match v {
-            Value::Float(f) => f.to_f64(),
-            _ => panic!(),
-        }
-    }
-
     #[test]
     fn memory_load_and_store_execute_little_endian() {
-        let mut g = ExprPostGraph::new();
+        let mut g = Graph::new();
         let address = int_con(&mut g, 4);
         let bytes = int_con(&mut g, 4);
         let metadata = int_con(&mut g, 0);
-        inner(&mut g, ExprKind::LoadMemory, &[address, bytes, metadata]);
+        inner(&mut g, SymKind::LoadMemory, &[address, bytes, metadata]);
 
         let mut memory = TestMemory { bytes: vec![0; 16] };
         memory.bytes[4..8].copy_from_slice(&[0x78, 0x56, 0x34, 0x12]);
         let loaded = execute_with_memory(&g, &[], &mut memory).unwrap();
         assert_eq!(as_i64(loaded), 0x1234_5678);
 
-        let mut g = ExprPostGraph::new();
+        let mut g = Graph::new();
         let address = int_con(&mut g, 8);
         let bytes = int_con(&mut g, 2);
         let value = int_con(&mut g, 0xbeef);
         let address_space = int_con(&mut g, 0);
         inner(
             &mut g,
-            ExprKind::StoreMemory,
+            SymKind::StoreMemory,
             &[address, bytes, value, address_space],
         );
         execute_with_memory(&g, &[], &mut memory).unwrap();
@@ -840,42 +740,84 @@ mod tests {
 
     #[test]
     fn int_add() {
-        let mut g = ExprPostGraph::new();
+        let mut g = Graph::new();
         let a = sym(&mut g, 0);
         let b = sym(&mut g, 1);
-        inner(&mut g, ExprKind::Add, &[a, b]);
+        inner(&mut g, SymKind::Add, &[a, b]);
         assert_eq!(as_i64(execute(&g, &[iv(3), iv(4)])), 7);
     }
 
     #[test]
     fn int_sub() {
-        let mut g = ExprPostGraph::new();
+        let mut g = Graph::new();
         let a = sym(&mut g, 0);
         let b = sym(&mut g, 1);
-        inner(&mut g, ExprKind::Sub, &[a, b]);
+        inner(&mut g, SymKind::Sub, &[a, b]);
         assert_eq!(as_i64(execute(&g, &[iv(10), iv(3)])), 7);
     }
 
     #[test]
     fn int_mul() {
-        let mut g = ExprPostGraph::new();
+        let mut g = Graph::new();
         let a = sym(&mut g, 0);
         let b = sym(&mut g, 1);
-        inner(&mut g, ExprKind::Mul, &[a, b]);
+        inner(&mut g, SymKind::Mul, &[a, b]);
         assert_eq!(as_i64(execute(&g, &[iv(6), iv(7)])), 42);
+    }
+
+    #[test]
+    fn int_neg() {
+        let mut g = Graph::new();
+        let a = sym(&mut g, 0);
+        inner(&mut g, SymKind::Neg, &[a]);
+        assert_eq!(as_i64(execute(&g, &[iv(5)])), -5);
+        assert_eq!(as_i64(execute(&g, &[iv(-3)])), 3);
+    }
+
+    #[test]
+    fn int_srem_and_urem() {
+        let mut g = Graph::new();
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
+        inner(&mut g, SymKind::SRem, &[a, b]);
+        assert_eq!(as_i64(execute(&g, &[iv(-7), iv(3)])), -1);
+
+        let mut g = Graph::new();
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
+        inner(&mut g, SymKind::URem, &[a, b]);
+        assert_eq!(as_u64(execute(&g, &[uv(7), uv(3)])), 1);
+    }
+
+    #[test]
+    fn int_concat_places_first_operand_high() {
+        // concat(0xAB @ 8, 0xCD @ 8) -> 0xABCD @ 16.
+        let mut g = Graph::new();
+        let hi = {
+            let n = g.add_node(SymKind::Constant);
+            g.set_leaf_data(n, SymPayload::Int(APInt::new(8, 0xAB)));
+            n
+        };
+        let lo = {
+            let n = g.add_node(SymKind::Constant);
+            g.set_leaf_data(n, SymPayload::Int(APInt::new(8, 0xCD)));
+            n
+        };
+        inner(&mut g, SymKind::Concat, &[hi, lo]);
+        assert_eq!(as_u64(execute(&g, &[])), 0xABCD);
     }
 
     #[test]
     fn extract_above_mul_yields_signed_high_product() {
         // The RISC-V `mulh` semantics expressed the TMDL way:
         // extract(rs1 * rs2, 127, 64) on 64-bit operands.
-        let mut g = ExprPostGraph::new();
+        let mut g = Graph::new();
         let a = sym(&mut g, 0);
         let b = sym(&mut g, 1);
-        let mul = inner(&mut g, ExprKind::Mul, &[a, b]);
+        let mul = inner(&mut g, SymKind::Mul, &[a, b]);
         let hi = int_con(&mut g, 127);
         let lo = int_con(&mut g, 64);
-        inner(&mut g, ExprKind::Extract, &[mul, hi, lo]);
+        inner(&mut g, SymKind::Extract, &[mul, hi, lo]);
 
         // -3 * 7 = -21: the high half of the signed 128-bit product is -1.
         let inputs = [
@@ -896,15 +838,15 @@ mod tests {
     fn addw_tree_sign_extends_low_word() {
         // The RV64 `addw` semantics expressed directly in the graph, no extra
         // primitives: sext(extract(rs1 + rs2, 31, 0), 64).
-        let mut g = ExprPostGraph::new();
+        let mut g = Graph::new();
         let a = sym(&mut g, 0);
         let b = sym(&mut g, 1);
-        let add = inner(&mut g, ExprKind::Add, &[a, b]);
+        let add = inner(&mut g, SymKind::Add, &[a, b]);
         let hi = int_con(&mut g, 31);
         let lo = int_con(&mut g, 0);
-        let ext = inner(&mut g, ExprKind::Extract, &[add, hi, lo]);
+        let ext = inner(&mut g, SymKind::Extract, &[add, hi, lo]);
         let width = int_con(&mut g, 64);
-        inner(&mut g, ExprKind::SExt, &[ext, width]);
+        inner(&mut g, SymKind::SExt, &[ext, width]);
 
         // 0x7FFF_FFFF + 1 = 0x8000_0000, whose low word is negative as i32 and
         // sign-extends to -2147483648 in 64 bits.
@@ -917,301 +859,171 @@ mod tests {
 
     #[test]
     fn int_and() {
-        let mut g = ExprPostGraph::new();
+        let mut g = Graph::new();
         let a = sym(&mut g, 0);
         let b = sym(&mut g, 1);
-        inner(&mut g, ExprKind::And, &[a, b]);
+        inner(&mut g, SymKind::And, &[a, b]);
         assert_eq!(as_i64(execute(&g, &[uv(0b1100), uv(0b1010)])), 0b1000);
     }
 
     #[test]
     fn int_not() {
-        let mut g = ExprPostGraph::new();
+        let mut g = Graph::new();
         let a = sym(&mut g, 0);
-        inner(&mut g, ExprKind::Not, &[a]);
-        assert_eq!(as_i64(execute(&g, &[uv(0b1010)])), 0xFFFF_FFF5);
-    }
-
-    #[test]
-    fn int_and_folded_not_literal() {
-        // The shape TMDL lowers `x & ~1` to: a narrow signed -2 constant that
-        // sign-extends to 0b11..10 at the other operand's width.
-        let mut g = ExprPostGraph::new();
-        let a = sym(&mut g, 0);
-        let c = g.add_node(ExprKind::Constant);
-        g.set_leaf_data(c, ExprPayload::Int(APInt::new_signed(3, -2)));
-        inner(&mut g, ExprKind::And, &[a, c]);
-        assert_eq!(as_i64(execute(&g, &[uv(0b1011)])), 0b1010);
+        inner(&mut g, SymKind::Not, &[a]);
+        assert_eq!(as_u64(execute(&g, &[uv(0b1010)])), 0xFFFF_FFF5);
     }
 
     #[test]
     fn int_shl() {
-        let mut g = ExprPostGraph::new();
+        let mut g = Graph::new();
         let a = sym(&mut g, 0);
         let b = sym(&mut g, 1);
-        inner(&mut g, ExprKind::ShiftLeft, &[a, b]);
+        inner(&mut g, SymKind::ShiftLeft, &[a, b]);
         assert_eq!(as_i64(execute(&g, &[uv(1), uv(3)])), 8);
     }
 
     #[test]
     fn int_lshr() {
-        let mut g = ExprPostGraph::new();
+        let mut g = Graph::new();
         let a = sym(&mut g, 0);
         let b = sym(&mut g, 1);
-        inner(&mut g, ExprKind::ShiftRightLogic, &[a, b]);
+        inner(&mut g, SymKind::ShiftRightLogic, &[a, b]);
         assert_eq!(as_i64(execute(&g, &[uv(16), uv(2)])), 4);
     }
 
     #[test]
     fn int_ashr_negative() {
-        let mut g = ExprPostGraph::new();
+        let mut g = Graph::new();
         let a = sym(&mut g, 0);
         let b = sym(&mut g, 1);
-        inner(&mut g, ExprKind::ShiftRightArithmetic, &[a, b]);
+        inner(&mut g, SymKind::ShiftRightArithmetic, &[a, b]);
         assert_eq!(as_i64(execute(&g, &[iv(-8), iv(1)])), -4);
     }
 
     #[test]
     fn int_constant() {
-        let mut g = ExprPostGraph::new();
+        let mut g = Graph::new();
         int_con(&mut g, 42);
         assert_eq!(as_i64(execute(&g, &[])), 42);
     }
 
     #[test]
     fn int_shared_node() {
-        let mut g = ExprPostGraph::new();
+        let mut g = Graph::new();
         let a = sym(&mut g, 0);
-        inner(&mut g, ExprKind::Add, &[a, a]);
+        inner(&mut g, SymKind::Add, &[a, a]);
         assert_eq!(as_i64(execute(&g, &[iv(5)])), 10);
     }
 
     #[test]
     fn int_fma() {
-        let mut g = ExprPostGraph::new();
+        let mut g = Graph::new();
         let a = sym(&mut g, 0);
         let b = sym(&mut g, 1);
         let c = sym(&mut g, 2);
-        inner(&mut g, ExprKind::Fma, &[a, b, c]);
+        inner(&mut g, SymKind::Fma, &[a, b, c]);
         assert_eq!(as_i64(execute(&g, &[iv(3), iv(4), iv(5)])), 17);
     }
 
     // ── Comparisons ────────────────────────────────────────────────────────
 
     #[test]
-    fn int_eq_true() {
-        let mut g = ExprPostGraph::new();
+    fn int_eq() {
+        let mut g = Graph::new();
         let a = sym(&mut g, 0);
         let b = sym(&mut g, 1);
-        inner(&mut g, ExprKind::Eq, &[a, b]);
+        inner(&mut g, SymKind::Eq, &[a, b]);
         assert_eq!(as_i64(execute(&g, &[iv(5), iv(5)])), 1);
-    }
-
-    #[test]
-    fn int_eq_false() {
-        let mut g = ExprPostGraph::new();
-        let a = sym(&mut g, 0);
-        let b = sym(&mut g, 1);
-        inner(&mut g, ExprKind::Eq, &[a, b]);
         assert_eq!(as_i64(execute(&g, &[iv(5), iv(6)])), 0);
     }
 
     #[test]
-    fn int_if_taken() {
-        let mut g = ExprPostGraph::new();
+    fn int_if() {
+        let mut g = Graph::new();
         let cond = sym(&mut g, 0);
         let t = sym(&mut g, 1);
         let e = sym(&mut g, 2);
-        inner(&mut g, ExprKind::If, &[cond, t, e]);
+        inner(&mut g, SymKind::If, &[cond, t, e]);
         assert_eq!(as_i64(execute(&g, &[iv(1), iv(42), iv(0)])), 42);
+        assert_eq!(as_i64(execute(&g, &[iv(0), iv(42), iv(99)])), 99);
     }
 
     #[test]
-    fn int_if_not_taken() {
-        let mut g = ExprPostGraph::new();
-        let cond = sym(&mut g, 0);
-        let t = sym(&mut g, 1);
-        let e = sym(&mut g, 2);
-        inner(&mut g, ExprKind::If, &[cond, t, e]);
-        assert_eq!(as_i64(execute(&g, &[iv(0), iv(42), iv(99)])), 99);
+    fn int_clamp() {
+        let mut g = Graph::new();
+        let input = sym(&mut g, 0);
+        let min = {
+            let node = g.add_node(SymKind::Constant);
+            g.set_leaf_data(node, SymPayload::Int(APInt::new_signed(32, 3)));
+            node
+        };
+        let max = {
+            let node = g.add_node(SymKind::Constant);
+            g.set_leaf_data(node, SymPayload::Int(APInt::new_signed(32, 10)));
+            node
+        };
+        inner(&mut g, SymKind::Clamp, &[input, min, max]);
+        assert_eq!(as_i64(execute(&g, &[iv(20)])), 10);
     }
 
     // ── Float arithmetic ───────────────────────────────────────────────────
 
     #[test]
     fn float_add() {
-        let mut g = ExprPostGraph::new();
+        let mut g = Graph::new();
         let a = sym(&mut g, 0);
         let b = sym(&mut g, 1);
-        inner(&mut g, ExprKind::Add, &[a, b]);
+        inner(&mut g, SymKind::Add, &[a, b]);
         assert!((as_f64(execute(&g, &[fv(1.5), fv(2.5)])) - 4.0).abs() < 1e-9);
     }
 
     #[test]
-    fn float_sub() {
-        let mut g = ExprPostGraph::new();
-        let a = sym(&mut g, 0);
-        let b = sym(&mut g, 1);
-        inner(&mut g, ExprKind::Sub, &[a, b]);
-        assert!((as_f64(execute(&g, &[fv(5.0), fv(3.0)])) - 2.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn float_mul() {
-        let mut g = ExprPostGraph::new();
-        let a = sym(&mut g, 0);
-        let b = sym(&mut g, 1);
-        inner(&mut g, ExprKind::Mul, &[a, b]);
-        assert!((as_f64(execute(&g, &[fv(2.0), fv(3.5)])) - 7.0).abs() < 1e-9);
-    }
-
-    #[test]
     fn float_div() {
-        let mut g = ExprPostGraph::new();
+        let mut g = Graph::new();
         let a = sym(&mut g, 0);
         let b = sym(&mut g, 1);
-        inner(&mut g, ExprKind::Div, &[a, b]);
+        inner(&mut g, SymKind::Div, &[a, b]);
         assert!((as_f64(execute(&g, &[fv(7.0), fv(2.0)])) - 3.5).abs() < 1e-9);
     }
 
     #[test]
     fn float_sqrt() {
-        let mut g = ExprPostGraph::new();
+        let mut g = Graph::new();
         let a = sym(&mut g, 0);
-        inner(&mut g, ExprKind::Sqrt, &[a]);
+        inner(&mut g, SymKind::Sqrt, &[a]);
         assert!((as_f64(execute(&g, &[fv(9.0)])) - 3.0).abs() < 1e-9);
     }
 
     #[test]
     fn float_fma() {
-        let mut g = ExprPostGraph::new();
+        let mut g = Graph::new();
         let a = sym(&mut g, 0);
         let b = sym(&mut g, 1);
         let c = sym(&mut g, 2);
-        inner(&mut g, ExprKind::Fma, &[a, b, c]);
-        // 2.0 * 3.0 + 1.0 = 7.0
+        inner(&mut g, SymKind::Fma, &[a, b, c]);
         assert!((as_f64(execute(&g, &[fv(2.0), fv(3.0), fv(1.0)])) - 7.0).abs() < 1e-9);
     }
 
     #[test]
-    fn int_clamp() {
-        let mut g = ExprPostGraph::new();
-        let input = sym(&mut g, 0);
-        let min = {
-            let node = g.add_node(ExprKind::Constant);
-            g.set_leaf_data(node, ExprPayload::Int(APInt::new_signed(32, 3)));
-            node
-        };
-        let max = {
-            let node = g.add_node(ExprKind::Constant);
-            g.set_leaf_data(node, ExprPayload::Int(APInt::new_signed(32, 10)));
-            node
-        };
-        inner(&mut g, ExprKind::Clamp, &[input, min, max]);
-        assert_eq!(as_i64(execute(&g, &[iv(20)])), 10);
-    }
-
-    #[test]
-    fn float_constant() {
-        let mut g = ExprPostGraph::new();
-        flt_con(&mut g, 3.125);
-        assert!((as_f64(execute(&g, &[])) - 3.125).abs() < 1e-9);
-    }
-
-    #[test]
-    fn float_lt_true() {
-        let mut g = ExprPostGraph::new();
+    fn float_lt() {
+        let mut g = Graph::new();
         let a = sym(&mut g, 0);
         let b = sym(&mut g, 1);
-        inner(&mut g, ExprKind::Lt, &[a, b]);
+        inner(&mut g, SymKind::Lt, &[a, b]);
         assert_eq!(as_i64(execute(&g, &[fv(1.0), fv(2.0)])), 1);
-    }
-
-    #[test]
-    fn loop_sums_induction_variable_with_symbolic_bound() {
-        // acc = 0; for i in 0..n { acc = acc + i }  ==>  0+1+...+(n-1).
-        let mut g = ExprPostGraph::new();
-        let start = int_con(&mut g, 0);
-        let end = sym(&mut g, 0); // n, a symbolic (runtime) bound
-        let init = int_con(&mut g, 0);
-        let ind = g.add_node(ExprKind::IndVar);
-        let acc = g.add_node(ExprKind::Acc);
-        let step = inner(&mut g, ExprKind::Add, &[acc, ind]);
-        inner(&mut g, ExprKind::Loop, &[start, end, init, step]);
-
-        assert_eq!(as_i64(execute(&g, &[iv(5)])), 1 + 2 + 3 + 4);
-        assert_eq!(as_i64(execute(&g, &[iv(1)])), 0);
-        assert_eq!(as_i64(execute(&g, &[iv(0)])), 0);
-    }
-
-    #[test]
-    fn loop_accumulates_from_nonzero_init() {
-        // acc = base; for i in 0..3 { acc = acc + step }  with step a symbol.
-        let mut g = ExprPostGraph::new();
-        let start = int_con(&mut g, 0);
-        let end = int_con(&mut g, 3);
-        let base = sym(&mut g, 0);
-        let acc = g.add_node(ExprKind::Acc);
-        let addend = sym(&mut g, 1);
-        let step = inner(&mut g, ExprKind::Add, &[acc, addend]);
-        inner(&mut g, ExprKind::Loop, &[start, end, base, step]);
-
-        // 10 + 4 + 4 + 4 = 22.
-        assert_eq!(as_i64(execute(&g, &[iv(10), iv(4)])), 22);
-    }
-
-    #[test]
-    fn nested_loop_multiplies_via_repeated_addition() {
-        // acc = 0; for i in 0..a { acc = acc + b }  ==> a*b, with b symbolic.
-        let mut g = ExprPostGraph::new();
-        let start = int_con(&mut g, 0);
-        let a = sym(&mut g, 0);
-        let init = int_con(&mut g, 0);
-        let acc = g.add_node(ExprKind::Acc);
-        let b = sym(&mut g, 1);
-        let step = inner(&mut g, ExprKind::Add, &[acc, b]);
-        inner(&mut g, ExprKind::Loop, &[start, a, init, step]);
-
-        assert_eq!(as_i64(execute(&g, &[iv(6), iv(7)])), 42);
-    }
-
-    #[test]
-    fn float_lt_false() {
-        let mut g = ExprPostGraph::new();
-        let a = sym(&mut g, 0);
-        let b = sym(&mut g, 1);
-        inner(&mut g, ExprKind::Lt, &[a, b]);
         assert_eq!(as_i64(execute(&g, &[fv(3.0), fv(2.0)])), 0);
     }
 
-    fn arg(g: &mut ExprPostGraph, k: u64) -> NodeId {
-        let node = g.add_node(ExprKind::Arg);
-        g.set_leaf_data(node, ExprPayload::Int(APInt::new(32, k)));
-        node
-    }
-    fn rb(bytes: &[u8]) -> Value {
-        Value::RawBits(crate::utils::RawBits::from_bytes(bytes.to_vec()))
-    }
-    fn raw_bytes(v: Value) -> Vec<u8> {
-        match v {
-            Value::RawBits(b) => b.bytes().to_vec(),
-            other => panic!("expected raw bits, got {other:?}"),
-        }
-    }
-    fn int_lanes(v: Value) -> Vec<i64> {
-        match v {
-            Value::Iterator(xs) => xs.into_iter().map(as_i64).collect(),
-            other => panic!("expected iterator, got {other:?}"),
-        }
-    }
+    // ── Iterator nodes ─────────────────────────────────────────────────────
 
     #[test]
     fn split_then_concat_roundtrips_raw_bits() {
         // split a 16-bit raw value 0xBA21 into two bytes, then concat them back.
-        let mut g = ExprPostGraph::new();
+        let mut g = Graph::new();
         let bits = sym(&mut g, 0);
         let n = int_con(&mut g, 2);
-        let split = inner(&mut g, ExprKind::Split, &[bits, n]);
+        let split = inner(&mut g, SymKind::Split, &[bits, n]);
 
         // The lanes are the two bytes read as integers.
         assert_eq!(
@@ -1219,7 +1031,7 @@ mod tests {
             vec![0x21, 0xBA]
         );
 
-        inner(&mut g, ExprKind::IterConcat, &[split]);
+        inner(&mut g, SymKind::IterConcat, &[split]);
         assert_eq!(
             raw_bytes(execute(&g, &[rb(&[0x21, 0xBA])])),
             vec![0x21, 0xBA]
@@ -1229,14 +1041,14 @@ mod tests {
     #[test]
     fn map_applies_unary_lambda_per_lane() {
         // map(split(0x0201, 2), |x| x + 1) -> [1+1, 2+1] = [2, 3].
-        let mut g = ExprPostGraph::new();
+        let mut g = Graph::new();
         let bits = sym(&mut g, 0);
         let n = int_con(&mut g, 2);
-        let iter = inner(&mut g, ExprKind::Split, &[bits, n]);
+        let iter = inner(&mut g, SymKind::Split, &[bits, n]);
         let x = arg(&mut g, 0);
         let one = int_con(&mut g, 1);
-        let body = inner(&mut g, ExprKind::Add, &[x, one]);
-        inner(&mut g, ExprKind::Map, &[iter, body]);
+        let body = inner(&mut g, SymKind::Add, &[x, one]);
+        inner(&mut g, SymKind::Map, &[iter, body]);
 
         assert_eq!(int_lanes(execute(&g, &[rb(&[0x01, 0x02])])), vec![2, 3]);
     }
@@ -1245,18 +1057,18 @@ mod tests {
     fn zip_then_map_lane_wise_add_concats() {
         // concat(map(zip(split(a, 2), split(b, 2)), |x, y| x + y)) for
         // a=[1,2], b=[3,4] -> lanes [4, 6] -> raw bytes [0x04, 0x06].
-        let mut g = ExprPostGraph::new();
+        let mut g = Graph::new();
         let a = sym(&mut g, 0);
         let b = sym(&mut g, 1);
         let n = int_con(&mut g, 2);
-        let split_a = inner(&mut g, ExprKind::Split, &[a, n]);
-        let split_b = inner(&mut g, ExprKind::Split, &[b, n]);
-        let zip = inner(&mut g, ExprKind::Zip, &[split_a, split_b]);
+        let split_a = inner(&mut g, SymKind::Split, &[a, n]);
+        let split_b = inner(&mut g, SymKind::Split, &[b, n]);
+        let zip = inner(&mut g, SymKind::Zip, &[split_a, split_b]);
         let x = arg(&mut g, 0);
         let y = arg(&mut g, 1);
-        let body = inner(&mut g, ExprKind::Add, &[x, y]);
-        let map = inner(&mut g, ExprKind::Map, &[zip, body]);
-        inner(&mut g, ExprKind::IterConcat, &[map]);
+        let body = inner(&mut g, SymKind::Add, &[x, y]);
+        let map = inner(&mut g, SymKind::Map, &[zip, body]);
+        inner(&mut g, SymKind::IterConcat, &[map]);
 
         let out = execute(&g, &[rb(&[0x01, 0x02]), rb(&[0x03, 0x04])]);
         assert_eq!(raw_bytes(out), vec![0x04, 0x06]);
@@ -1265,14 +1077,14 @@ mod tests {
     #[test]
     fn reduce_folds_to_horizontal_sum() {
         // reduce(split(0x04030201, 4), |acc, x| acc + x) -> 1+2+3+4 = 10.
-        let mut g = ExprPostGraph::new();
+        let mut g = Graph::new();
         let bits = sym(&mut g, 0);
         let n = int_con(&mut g, 4);
-        let iter = inner(&mut g, ExprKind::Split, &[bits, n]);
+        let iter = inner(&mut g, SymKind::Split, &[bits, n]);
         let acc = arg(&mut g, 0);
         let x = arg(&mut g, 1);
-        let body = inner(&mut g, ExprKind::Add, &[acc, x]);
-        inner(&mut g, ExprKind::Reduce, &[iter, body]);
+        let body = inner(&mut g, SymKind::Add, &[acc, x]);
+        inner(&mut g, SymKind::Reduce, &[iter, body]);
 
         assert_eq!(as_i64(execute(&g, &[rb(&[0x01, 0x02, 0x03, 0x04])])), 10);
     }

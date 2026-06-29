@@ -2,7 +2,7 @@ use tir::{
     Context, IRBuilder, IRFormatter, Operation, PassManager, TypeId,
     builtin::{FuncOp, IntegerType, ops},
     graph::{MetaMutDag, MutDag, OperandConstraint},
-    sem_expr::{ExprKind, ExprPayload, ExprPostGraph},
+    sem::{SemGraph, SymKind, SymPayload},
 };
 
 use super::{
@@ -10,15 +10,15 @@ use super::{
     extension_rewrite, template_node,
 };
 
-fn symbol(g: &mut ExprPostGraph, id: u32) -> tir::graph::NodeId {
-    let node = g.add_node(ExprKind::Symbol);
-    g.set_leaf_data(node, ExprPayload::SymbolId(id));
+fn symbol(g: &mut SemGraph, id: u32) -> tir::graph::NodeId {
+    let node = g.add_node(SymKind::Symbol);
+    g.set_leaf_data(node, SymPayload::SymbolId(id));
     node
 }
 
 fn binary(
-    g: &mut ExprPostGraph,
-    kind: ExprKind,
+    g: &mut SemGraph,
+    kind: SymKind,
     lhs: tir::graph::NodeId,
     rhs: tir::graph::NodeId,
 ) -> tir::graph::NodeId {
@@ -28,21 +28,21 @@ fn binary(
     node
 }
 
-fn atomic_pattern(kind: ExprKind) -> ExprPostGraph {
-    let mut g = ExprPostGraph::new();
+fn atomic_pattern(kind: SymKind) -> SemGraph {
+    let mut g = SemGraph::new();
     let lhs = symbol(&mut g, 0);
     let rhs = symbol(&mut g, 1);
     binary(&mut g, kind, lhs, rhs);
     g
 }
 
-fn add_mul_pattern() -> ExprPostGraph {
-    let mut g = ExprPostGraph::new();
+fn add_mul_pattern() -> SemGraph {
+    let mut g = SemGraph::new();
     let x = symbol(&mut g, 0);
     let y = symbol(&mut g, 1);
-    let mul = binary(&mut g, ExprKind::Mul, x, y);
+    let mul = binary(&mut g, SymKind::Mul, x, y);
     let z = symbol(&mut g, 2);
-    binary(&mut g, ExprKind::Add, mul, z);
+    binary(&mut g, SymKind::Add, mul, z);
     g
 }
 
@@ -107,8 +107,8 @@ fn pbqp_selector_consumes_internal_nodes_of_selected_pattern() {
 
     let rules = vec![
         Rule::new("add-mul", add_mul_pattern(), 1, emit_add),
-        Rule::new("add", atomic_pattern(ExprKind::Add), 10, emit_add),
-        Rule::new("mul", atomic_pattern(ExprKind::Mul), 10, emit_mul),
+        Rule::new("add", atomic_pattern(SymKind::Add), 10, emit_add),
+        Rule::new("mul", atomic_pattern(SymKind::Mul), 10, emit_mul),
     ];
 
     let mut pm = PassManager::new();
@@ -164,12 +164,7 @@ fn rule_validation_rejects_missing_atomic_materializer() {
     mb.insert(func);
     mb.insert(ops::module_end(&context).build());
 
-    let rules = vec![Rule::new(
-        "add",
-        atomic_pattern(ExprKind::Add),
-        10,
-        emit_add,
-    )];
+    let rules = vec![Rule::new("add", atomic_pattern(SymKind::Add), 10, emit_add)];
 
     let mut pm = PassManager::new();
     pm.nest(FuncOp::name())
@@ -218,8 +213,8 @@ fn pbqp_selector_duplicates_shared_pure_internal_nodes() {
 
     let rules = vec![
         Rule::new("add-mul", add_mul_pattern(), 1, emit_add),
-        Rule::new("add", atomic_pattern(ExprKind::Add), 10, emit_add),
-        Rule::new("mul", atomic_pattern(ExprKind::Mul), 10, emit_mul),
+        Rule::new("add", atomic_pattern(SymKind::Add), 10, emit_add),
+        Rule::new("mul", atomic_pattern(SymKind::Mul), 10, emit_mul),
     ];
 
     let mut pm = PassManager::new();
@@ -274,8 +269,8 @@ fn shared_value_with_uncoverable_use_stays_materialized() {
 
     let rules = vec![
         Rule::new("add-mul", add_mul_pattern(), 1, emit_add),
-        Rule::new("add", atomic_pattern(ExprKind::Add), 10, emit_add),
-        Rule::new("mul", atomic_pattern(ExprKind::Mul), 10, emit_mul),
+        Rule::new("add", atomic_pattern(SymKind::Add), 10, emit_add),
+        Rule::new("mul", atomic_pattern(SymKind::Mul), 10, emit_mul),
     ];
 
     let mut pm = PassManager::new();
@@ -296,15 +291,15 @@ fn shared_value_with_uncoverable_use_stays_materialized() {
     assert_eq!(body_ops, vec!["muli", "addi", "return"]);
 }
 
-fn add_mul_add_pattern() -> ExprPostGraph {
-    let mut g = ExprPostGraph::new();
+fn add_mul_add_pattern() -> SemGraph {
+    let mut g = SemGraph::new();
     let a = symbol(&mut g, 0);
     let b = symbol(&mut g, 1);
-    let inner = binary(&mut g, ExprKind::Add, a, b);
+    let inner = binary(&mut g, SymKind::Add, a, b);
     let c = symbol(&mut g, 2);
-    let mul = binary(&mut g, ExprKind::Mul, inner, c);
+    let mul = binary(&mut g, SymKind::Mul, inner, c);
     let d = symbol(&mut g, 3);
-    binary(&mut g, ExprKind::Add, mul, d);
+    binary(&mut g, SymKind::Add, mul, d);
     g
 }
 
@@ -358,8 +353,8 @@ fn cost_model_override_changes_selection() {
 
     let rules = vec![
         Rule::new("add-mul", add_mul_pattern(), 1, emit_add),
-        Rule::new("add", atomic_pattern(ExprKind::Add), 10, emit_add),
-        Rule::new("mul", atomic_pattern(ExprKind::Mul), 10, emit_mul),
+        Rule::new("add", atomic_pattern(SymKind::Add), 10, emit_add),
+        Rule::new("mul", atomic_pattern(SymKind::Mul), 10, emit_mul),
     ];
 
     let mut pm = PassManager::new();
@@ -418,8 +413,8 @@ fn composite_rule_falls_back_to_atomic_cover() {
     // fusion priced high, fall back to the atomic cover.
     let rules = vec![
         Rule::new("add-mul-add", add_mul_add_pattern(), 100, emit_add),
-        Rule::new("add", atomic_pattern(ExprKind::Add), 10, emit_add),
-        Rule::new("mul", atomic_pattern(ExprKind::Mul), 10, emit_mul),
+        Rule::new("add", atomic_pattern(SymKind::Add), 10, emit_add),
+        Rule::new("mul", atomic_pattern(SymKind::Mul), 10, emit_mul),
     ];
 
     let mut pm = PassManager::new();
@@ -442,8 +437,8 @@ fn composite_rule_falls_back_to_atomic_cover() {
 
 /// A binary pattern constrained to a specific result type via the pattern
 /// graph's actual-type annotation (the channel a typed rule would use).
-fn typed_binary_pattern(kind: ExprKind, ty: TypeId) -> ExprPostGraph {
-    let mut g = ExprPostGraph::new();
+fn typed_binary_pattern(kind: SymKind, ty: TypeId) -> SemGraph {
+    let mut g = SemGraph::new();
     let lhs = symbol(&mut g, 0);
     let rhs = symbol(&mut g, 1);
     let root = binary(&mut g, kind, lhs, rhs);
@@ -497,11 +492,11 @@ fn selection_is_type_aware() {
     let rules = vec![
         Rule::new(
             "add.i32",
-            typed_binary_pattern(ExprKind::Add, i32_ty),
+            typed_binary_pattern(SymKind::Add, i32_ty),
             1,
             emit_sub,
         ),
-        Rule::new("add", atomic_pattern(ExprKind::Add), 10, emit_add),
+        Rule::new("add", atomic_pattern(SymKind::Add), 10, emit_add),
     ];
 
     let mut pm = PassManager::new();
@@ -556,19 +551,19 @@ fn run_inner_typed_fusion(inner_width: Option<u32>) -> Vec<&'static str> {
     mb.insert(ops::module_end(&context).build());
 
     // Fused pattern Add(Add(s0, s1), s2); optionally constrain the inner Add.
-    let mut pattern = ExprPostGraph::new();
+    let mut pattern = SemGraph::new();
     let s0 = symbol(&mut pattern, 0);
     let s1 = symbol(&mut pattern, 1);
-    let inner = binary(&mut pattern, ExprKind::Add, s0, s1);
+    let inner = binary(&mut pattern, SymKind::Add, s0, s1);
     let s2 = symbol(&mut pattern, 2);
-    binary(&mut pattern, ExprKind::Add, inner, s2);
+    binary(&mut pattern, SymKind::Add, inner, s2);
     if let Some(width) = inner_width {
         pattern.set_actual_type(inner, IntegerType::new(&context, width));
     }
 
     let rules = vec![
         Rule::new("add-add", pattern, 1, emit_sub),
-        Rule::new("add", atomic_pattern(ExprKind::Add), 10, emit_add),
+        Rule::new("add", atomic_pattern(SymKind::Add), 10, emit_add),
     ];
 
     let mut pm = PassManager::new();
@@ -609,8 +604,8 @@ fn internal_node_type_constraint_is_enforced() {
 fn saturation_bridges_sign_extension_to_shift_pair() {
     use super::SaturationLimits;
     use tir::graph::{OperandConstraint, Pattern, PatternExpr};
-    use tir::sem_expr::{ExprKind, ExprPayload};
-    use tir::utils::APInt;
+    use tir::sem::{SymKind, SymPayload};
+    use tir_adt::APInt;
 
     let ctx = Context::with_default_dialects();
     let i16 = IntegerType::new(&ctx, 16);
@@ -620,20 +615,20 @@ fn saturation_bridges_sign_extension_to_shift_pair() {
     // instruction can root.
     let mut egraph = SemEGraph::new();
     let v = egraph.add(template_node(
-        ExprKind::Symbol,
-        Some(ExprPayload::SymbolId(0)),
+        SymKind::Symbol,
+        Some(SymPayload::SymbolId(0)),
         Some(i16),
     ));
     let width = egraph.add(template_node(
-        ExprKind::Constant,
-        Some(ExprPayload::Int(APInt::new(64, 64))),
+        SymKind::Constant,
+        Some(SymPayload::Int(APInt::new(64, 64))),
         None,
     ));
-    let mut sext_node = template_node(ExprKind::SExt, None, Some(i64));
+    let mut sext_node = template_node(SymKind::SExt, None, Some(i64));
     sext_node.children = vec![v, width];
     let sext = egraph.add(sext_node);
 
-    let rewrite = extension_rewrite(ExprKind::SExt, ExprKind::ShiftRightArithmetic);
+    let rewrite = extension_rewrite(SymKind::SExt, SymKind::ShiftRightArithmetic);
     super::rewrites::saturate(
         &ctx,
         &mut egraph,
@@ -646,7 +641,7 @@ fn saturation_bridges_sign_extension_to_shift_pair() {
         egraph
             .nodes(sext)
             .iter()
-            .any(|n| n.kind == ExprKind::ShiftRightArithmetic),
+            .any(|n| n.kind == SymKind::ShiftRightArithmetic),
         "saturation should add the arithmetic-shift bridge to the sext class"
     );
 
@@ -658,7 +653,7 @@ fn saturation_bridges_sign_extension_to_shift_pair() {
     srai.set_duplicable(imm, true);
     srai.set_operand_constraint(imm, OperandConstraint::Immediate);
     let root = srai.add_node(PatternExpr::Node(template_node(
-        ExprKind::ShiftRightArithmetic,
+        SymKind::ShiftRightArithmetic,
         None,
         None,
     )));
@@ -675,15 +670,15 @@ fn saturation_bridges_sign_extension_to_shift_pair() {
         .nodes(m.binding(imm))
         .iter()
         .find_map(|n| match n.payload.as_ref() {
-            Some(super::SemPayload::Expr(ExprPayload::Int(v))) => Some(v.to_u64()),
+            Some(super::SemPayload::Expr(SymPayload::Int(v))) => Some(v.to_u64()),
             _ => None,
         })
         .expect("the srai shift amount must be a constant");
     assert_eq!(shift_amount, 48);
 }
 
-fn shift_imm_pattern(kind: ExprKind) -> ExprPostGraph {
-    let mut g = ExprPostGraph::new();
+fn shift_imm_pattern(kind: SymKind) -> SemGraph {
+    let mut g = SemGraph::new();
     let rs1 = symbol(&mut g, 0);
     let imm = symbol(&mut g, 1);
     binary(&mut g, kind, rs1, imm);
@@ -691,7 +686,7 @@ fn shift_imm_pattern(kind: ExprKind) -> ExprPostGraph {
 }
 
 fn emit_shift_marker(
-    marker: ExprKind,
+    marker: SymKind,
 ) -> impl Fn(&Context, &EmitRequest, &RuleMatch) -> Result<Box<dyn Operation>, tir::PassError> {
     move |context, req, m| {
         let rs1 = m
@@ -701,7 +696,7 @@ fn emit_shift_marker(
         // The shift amount is an immediate (m.int_binding(1)); operands beyond the
         // mnemonic don't matter for this test, so the source register is reused.
         let built: Box<dyn Operation> = match marker {
-            ExprKind::ShiftLeft => Box::new(ops::shli(context, rs1, rs1, result_ty).build()),
+            SymKind::ShiftLeft => Box::new(ops::shli(context, rs1, rs1, result_ty).build()),
             _ => Box::new(ops::shrsi(context, rs1, rs1, result_ty).build()),
         };
         Ok(built)
@@ -713,7 +708,7 @@ fn emit_slli(
     req: &EmitRequest,
     m: &RuleMatch,
 ) -> Result<Box<dyn Operation>, tir::PassError> {
-    emit_shift_marker(ExprKind::ShiftLeft)(context, req, m)
+    emit_shift_marker(SymKind::ShiftLeft)(context, req, m)
 }
 
 fn emit_srai(
@@ -721,7 +716,7 @@ fn emit_srai(
     req: &EmitRequest,
     m: &RuleMatch,
 ) -> Result<Box<dyn Operation>, tir::PassError> {
-    emit_shift_marker(ExprKind::ShiftRightArithmetic)(context, req, m)
+    emit_shift_marker(SymKind::ShiftRightArithmetic)(context, req, m)
 }
 
 /// End-to-end square: `extsi(addi(a, b) : i16) : i64` lowers to `add, slli, srai`.
@@ -757,12 +752,12 @@ fn square_sign_extension_lowers_to_shift_pair() {
     mb.insert(ops::module_end(&context).build());
 
     let rules = vec![
-        Rule::new("add", atomic_pattern(ExprKind::Add), 1, emit_add),
-        Rule::new("slli", shift_imm_pattern(ExprKind::ShiftLeft), 1, emit_slli)
+        Rule::new("add", atomic_pattern(SymKind::Add), 1, emit_add),
+        Rule::new("slli", shift_imm_pattern(SymKind::ShiftLeft), 1, emit_slli)
             .with_operand_constraints(vec![(1, OperandConstraint::Immediate)]),
         Rule::new(
             "srai",
-            shift_imm_pattern(ExprKind::ShiftRightArithmetic),
+            shift_imm_pattern(SymKind::ShiftRightArithmetic),
             1,
             emit_srai,
         )
@@ -806,11 +801,7 @@ fn opaque_leaves_are_distinct() {
 }
 
 /// A multi-operand pattern node (LoadMemory/StoreMemory shapes).
-fn nary(
-    g: &mut ExprPostGraph,
-    kind: ExprKind,
-    children: &[tir::graph::NodeId],
-) -> tir::graph::NodeId {
+fn nary(g: &mut SemGraph, kind: SymKind, children: &[tir::graph::NodeId]) -> tir::graph::NodeId {
     let node = g.add_node(kind);
     for &child in children {
         g.add_edge(node, child);
@@ -820,29 +811,29 @@ fn nary(
 
 /// `LoadMemory(Add(base, offset), bytes, metadata)` — the shape the builder
 /// gives a zero-offset load, with every operand a boundary.
-fn load_pattern() -> ExprPostGraph {
-    let mut g = ExprPostGraph::new();
+fn load_pattern() -> SemGraph {
+    let mut g = SemGraph::new();
     let base = symbol(&mut g, 0);
     let offset = symbol(&mut g, 1);
-    let addr = nary(&mut g, ExprKind::Add, &[base, offset]);
+    let addr = nary(&mut g, SymKind::Add, &[base, offset]);
     let bytes = symbol(&mut g, 3);
     let metadata = symbol(&mut g, 4);
-    nary(&mut g, ExprKind::LoadMemory, &[addr, bytes, metadata]);
+    nary(&mut g, SymKind::LoadMemory, &[addr, bytes, metadata]);
     g
 }
 
 /// `StoreMemory(Add(base, offset), bytes, value, addrspace)`.
-fn store_pattern() -> ExprPostGraph {
-    let mut g = ExprPostGraph::new();
+fn store_pattern() -> SemGraph {
+    let mut g = SemGraph::new();
     let base = symbol(&mut g, 0);
     let offset = symbol(&mut g, 1);
-    let addr = nary(&mut g, ExprKind::Add, &[base, offset]);
+    let addr = nary(&mut g, SymKind::Add, &[base, offset]);
     let bytes = symbol(&mut g, 3);
     let value = symbol(&mut g, 4);
     let addrspace = symbol(&mut g, 5);
     nary(
         &mut g,
-        ExprKind::StoreMemory,
+        SymKind::StoreMemory,
         &[addr, bytes, value, addrspace],
     );
     g
@@ -971,7 +962,7 @@ fn merged_value_classes_resolve_to_earliest_def() {
     searcher.set_duplicable(lhs, true);
     let rhs = searcher.add_node(PatternExpr::Boundary);
     searcher.set_duplicable(rhs, true);
-    let root = searcher.add_node(PatternExpr::Node(template_node(ExprKind::Mul, None, None)));
+    let root = searcher.add_node(PatternExpr::Node(template_node(SymKind::Mul, None, None)));
     searcher.add_edge(root, lhs);
     searcher.add_edge(root, rhs);
     searcher.set_root(root);
@@ -981,7 +972,7 @@ fn merged_value_classes_resolve_to_earliest_def() {
         apply: Box::new(|_ctx: &Context, egraph: &mut SemEGraph, m: &EMatch| {
             let add_class = egraph
                 .classes()
-                .find(|class| class.nodes().iter().any(|n| n.kind == ExprKind::Add))
+                .find(|class| class.nodes().iter().any(|n| n.kind == SymKind::Add))
                 .map(|class| class.id());
             if let Some(add_class) = add_class {
                 egraph.union(m.root(), add_class);
@@ -1005,9 +996,9 @@ fn merged_value_classes_resolve_to_earliest_def() {
     }
 
     let rules = vec![
-        Rule::new("mul", atomic_pattern(ExprKind::Mul), 1, emit_mul),
-        Rule::new("add", atomic_pattern(ExprKind::Add), 10, emit_add),
-        Rule::new("sub", atomic_pattern(ExprKind::Sub), 1, emit_sub_bound),
+        Rule::new("mul", atomic_pattern(SymKind::Mul), 1, emit_mul),
+        Rule::new("add", atomic_pattern(SymKind::Add), 10, emit_add),
+        Rule::new("sub", atomic_pattern(SymKind::Sub), 1, emit_sub_bound),
     ];
 
     let mut pm = PassManager::new();
@@ -1066,10 +1057,10 @@ fn equal_cost_tie_breaks_to_more_specific_rule() {
     // Same opcode, same cost; only the type constraint differs. The typed rule
     // (subi marker) must be selected.
     let rules = vec![
-        Rule::new("add", atomic_pattern(ExprKind::Add), 10, emit_add),
+        Rule::new("add", atomic_pattern(SymKind::Add), 10, emit_add),
         Rule::new(
             "add.i32",
-            typed_binary_pattern(ExprKind::Add, i32_ty),
+            typed_binary_pattern(SymKind::Add, i32_ty),
             10,
             emit_sub,
         ),

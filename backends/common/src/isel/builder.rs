@@ -7,9 +7,9 @@ use tir::{
     attributes::AttributeValue,
     builtin::IntegerType,
     graph::{Dag, Matchable, NodeId},
-    sem_expr::{ExprKind, ExprPayload, ExprPostGraph, infer_widths},
-    utils::APInt,
+    sem::{SemGraph, SymKind, SymPayload, infer_widths},
 };
+use tir_adt::APInt;
 use tir_symbolic::egraph::Id;
 
 use super::node::{SemEGraph, SemNode, SemPayload, minimal_unsigned_apint, type_width};
@@ -47,7 +47,12 @@ impl<'a> SemDagBuilder<'a> {
         }
     }
 
-    fn add_leaf(&mut self, kind: ExprKind, payload: Option<ExprPayload>, ty: Option<TypeId>) -> Id {
+    fn add_leaf(
+        &mut self,
+        kind: SymKind,
+        payload: Option<SymPayload<ValueId>>,
+        ty: Option<TypeId>,
+    ) -> Id {
         self.egraph.add(SemNode {
             kind,
             payload: payload.map(SemPayload::Expr),
@@ -57,7 +62,7 @@ impl<'a> SemDagBuilder<'a> {
     }
 
     fn add_int(&mut self, value: APInt, ty: Option<TypeId>) -> Id {
-        self.add_leaf(ExprKind::Constant, Some(ExprPayload::Int(value)), ty)
+        self.add_leaf(SymKind::Constant, Some(SymPayload::Int(value)), ty)
     }
 
     fn add_u64_const(&mut self, value: u64) -> Id {
@@ -71,15 +76,15 @@ impl<'a> SemDagBuilder<'a> {
     /// so neither is their addressing context.
     fn zero_offset_address(&mut self, address: Id) -> Id {
         let zero = self.add_u64_const(0);
-        self.add_op_unique(ExprKind::Add, vec![address, zero], None)
+        self.add_op_unique(SymKind::Add, vec![address, zero], None)
     }
 
     fn add_input_value(&mut self, value: ValueId, ty: Option<TypeId>) -> Id {
-        self.add_leaf(ExprKind::Symbol, Some(ExprPayload::Value(value)), ty)
+        self.add_leaf(SymKind::Symbol, Some(SymPayload::Value(value)), ty)
     }
 
     fn add_unknown_symbol(&mut self, symbol: u32, ty: Option<TypeId>) -> Id {
-        self.add_leaf(ExprKind::Symbol, Some(ExprPayload::SymbolId(symbol)), ty)
+        self.add_leaf(SymKind::Symbol, Some(SymPayload::SymbolId(symbol)), ty)
     }
 
     /// A leaf that nothing materializes — the placeholder for an un-lowerable node,
@@ -89,14 +94,14 @@ impl<'a> SemDagBuilder<'a> {
         let serial = self.opaque_serial;
         self.opaque_serial += 1;
         self.egraph.add(SemNode {
-            kind: ExprKind::Symbol,
+            kind: SymKind::Symbol,
             payload: Some(SemPayload::Opaque(serial)),
             ty: None,
             children: Vec::new(),
         })
     }
 
-    fn add_op(&mut self, kind: ExprKind, mut children: Vec<Id>, ty: Option<TypeId>) -> Id {
+    fn add_op(&mut self, kind: SymKind, mut children: Vec<Id>, ty: Option<TypeId>) -> Id {
         // Canonicalize commutative operands so `a op b` and `b op a` hash-cons to the
         // same e-node, mirroring the program's CSE.
         if kind.is_commutative() {
@@ -116,7 +121,7 @@ impl<'a> SemDagBuilder<'a> {
     /// wildcard). Used for memory effects and their addressing arithmetic, which
     /// are not pure values: two loads of the same address are not interchangeable
     /// across an intervening store, so their e-classes must never merge.
-    fn add_op_unique(&mut self, kind: ExprKind, mut children: Vec<Id>, ty: Option<TypeId>) -> Id {
+    fn add_op_unique(&mut self, kind: SymKind, mut children: Vec<Id>, ty: Option<TypeId>) -> Id {
         if kind.is_commutative() {
             children.sort();
         }
@@ -147,7 +152,7 @@ impl<'a> SemDagBuilder<'a> {
         for operand in &op.operands {
             operands.push(self.build_from_value(*operand));
         }
-        let mut graph = ExprPostGraph::new();
+        let mut graph = SemGraph::new();
         let root = op.clone().as_dyn_op().semantic_expr(&mut graph)?;
         let widths = self.infer_local_widths(&graph, &operands);
         let class = self.lower_graph_node(&graph, root, &operands, &widths);
@@ -171,7 +176,7 @@ impl<'a> SemDagBuilder<'a> {
             let bytes = self.add_u64_const(u64::from(bytes));
             let metadata = self.add_u64_const(0);
             let class = self.add_op_unique(
-                ExprKind::LoadMemory,
+                SymKind::LoadMemory,
                 vec![address, bytes, metadata],
                 Some(result_ty),
             );
@@ -193,7 +198,7 @@ impl<'a> SemDagBuilder<'a> {
             let value = self.build_from_value(value);
             let address_space = self.add_u64_const(0);
             return Some(self.add_op_unique(
-                ExprKind::StoreMemory,
+                SymKind::StoreMemory,
                 vec![address, bytes, value, address_space],
                 None,
             ));
@@ -213,7 +218,7 @@ impl<'a> SemDagBuilder<'a> {
             if def.name == "constant" {
                 self.constant_class(&def, value, value_ty)
             } else {
-                let mut graph = ExprPostGraph::new();
+                let mut graph = SemGraph::new();
                 if let Some(root) = def.clone().as_dyn_op().semantic_expr(&mut graph) {
                     let mut operands = Vec::with_capacity(def.operands.len());
                     for operand in &def.operands {
@@ -267,9 +272,9 @@ impl<'a> SemDagBuilder<'a> {
     /// it references, then resolve those widths against the live context. This is
     /// the same width rule TMDL uses for patterns, so the program graph and the
     /// rule patterns end up typed consistently.
-    fn infer_local_widths(&self, graph: &ExprPostGraph, operands: &[Id]) -> Vec<Option<u32>> {
+    fn infer_local_widths(&self, graph: &SemGraph, operands: &[Id]) -> Vec<Option<u32>> {
         infer_widths(graph, |node| match graph.get_leaf_data(node) {
-            Some(ExprPayload::SymbolId(id)) => operands
+            Some(SymPayload::SymbolId(id)) => operands
                 .get(*id as usize)
                 .and_then(|&class| self.class_ty(class))
                 .and_then(|ty| type_width(self.context, ty)),
@@ -287,22 +292,22 @@ impl<'a> SemDagBuilder<'a> {
     /// internal nodes (and the root) take their inferred width resolved to a type.
     fn lower_graph_node(
         &mut self,
-        graph: &ExprPostGraph,
+        graph: &SemGraph,
         node: NodeId,
         operands: &[Id],
         widths: &[Option<u32>],
     ) -> Id {
         let node_ty = widths[node.index()].map(|width| IntegerType::new(self.context, width));
         match graph.get_node(node) {
-            ExprKind::Symbol => match graph.get_leaf_data(node) {
-                Some(ExprPayload::SymbolId(id)) => operands
+            SymKind::Symbol => match graph.get_leaf_data(node) {
+                Some(SymPayload::SymbolId(id)) => operands
                     .get(*id as usize)
                     .copied()
                     .unwrap_or_else(|| self.add_unknown_symbol(*id, node_ty)),
                 _ => self.add_opaque(),
             },
-            ExprKind::Constant => match graph.get_leaf_data(node) {
-                Some(ExprPayload::Int(v)) => self.add_int(v.clone(), node_ty),
+            SymKind::Constant => match graph.get_leaf_data(node) {
+                Some(SymPayload::Int(v)) => self.add_int(v.clone(), node_ty),
                 _ => self.add_opaque(),
             },
             kind => {

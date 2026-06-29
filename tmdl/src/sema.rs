@@ -826,11 +826,6 @@ fn check_behavior(
                     walk_paths(e, out);
                 }
             }
-            ast::Expr::For(f) => {
-                walk_paths(&f.start, out);
-                walk_paths(&f.end, out);
-                walk_paths(&f.body, out);
-            }
             ast::Expr::IndexAccess(i) => walk_paths(&i.base, out),
             ast::Expr::Slice(s) => walk_paths(&s.base, out),
             ast::Expr::Try(t) => {
@@ -867,7 +862,6 @@ fn check_behavior(
                     walk_excepts(e, out);
                 }
             }
-            ast::Expr::For(f) => walk_excepts(&f.body, out),
             _ => {}
         }
     }

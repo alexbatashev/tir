@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use tir::{
     Context,
     graph::{Dag, Matchable, MetaDag, NodeId, OperandConstraint, Pattern, PatternExpr},
-    sem_expr::{ExprKind, ExprPayload, ExprPostGraph},
+    sem::{SemGraph, SymKind, SymPayload},
 };
 
 use super::node::{SemNode, template_node};
@@ -23,7 +23,7 @@ pub(crate) struct CompiledIselPattern {
 
 pub(crate) fn compile_isel_pattern(
     rule_index: usize,
-    expr: &ExprPostGraph,
+    expr: &SemGraph,
     operand_constraints: &[(u32, OperandConstraint)],
 ) -> Option<CompiledIselPattern> {
     let root = expr.root()?;
@@ -56,7 +56,7 @@ pub(crate) fn compile_isel_pattern(
 }
 
 pub(crate) fn compile_isel_pattern_node(
-    expr: &ExprPostGraph,
+    expr: &SemGraph,
     node: NodeId,
     pattern: &mut Pattern<SemNode, usize>,
     boundary_symbols: &mut HashMap<NodeId, u32>,
@@ -67,8 +67,8 @@ pub(crate) fn compile_isel_pattern_node(
     }
 
     let compiled = match expr.get_node(node) {
-        ExprKind::Symbol => {
-            let Some(ExprPayload::SymbolId(symbol)) = expr.get_leaf_data(node) else {
+        SymKind::Symbol => {
+            let Some(SymPayload::SymbolId(symbol)) = expr.get_leaf_data(node) else {
                 return None;
             };
             let compiled = pattern.add_node(PatternExpr::Boundary);
@@ -76,11 +76,11 @@ pub(crate) fn compile_isel_pattern_node(
             boundary_symbols.insert(compiled, *symbol);
             compiled
         }
-        ExprKind::Constant => match expr.get_leaf_data(node) {
-            Some(ExprPayload::Int(value)) => {
+        SymKind::Constant => match expr.get_leaf_data(node) {
+            Some(SymPayload::Int(value)) => {
                 let compiled = pattern.add_node(PatternExpr::Node(template_node(
-                    ExprKind::Constant,
-                    Some(ExprPayload::Int(value.clone())),
+                    SymKind::Constant,
+                    Some(SymPayload::Int(value.clone())),
                     expr.get_actual_type(node),
                 )));
                 // A constant is pure and folds into the encoding, so any number of
@@ -111,7 +111,7 @@ pub(crate) fn compile_isel_pattern_node(
 }
 /// The semantic kinds for which the rule set provides an atomic materializer (a
 /// pattern whose root is that kind with only operand boundaries beneath it).
-pub(crate) fn atomic_kinds(patterns: &[CompiledIselPattern]) -> HashSet<ExprKind> {
+pub(crate) fn atomic_kinds(patterns: &[CompiledIselPattern]) -> HashSet<SymKind> {
     let ctx = Context::default();
     let mut kinds = HashSet::new();
     for compiled in patterns {
