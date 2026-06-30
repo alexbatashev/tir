@@ -19,11 +19,11 @@ fn neg(a: u64) -> u64 {
 }
 
 fn bvudiv(a: u64, b: u64) -> u64 {
-    if b == 0 { MASK } else { (a / b) & MASK }
+    a.checked_div(b).map_or(MASK, |q| q & MASK)
 }
 
 fn bvurem(a: u64, b: u64) -> u64 {
-    if b == 0 { a } else { (a % b) & MASK }
+    a.checked_rem(b).map_or(a, |r| r & MASK)
 }
 
 fn bvsdiv(a: u64, b: u64) -> u64 {
