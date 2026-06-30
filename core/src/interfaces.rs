@@ -1,4 +1,4 @@
-use crate::sem_expr::Value;
+use crate::sem::Value;
 use crate::utils::APInt;
 use crate::{BlockId, Context, Operation, RegionId, ValueId};
 

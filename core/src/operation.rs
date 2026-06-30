@@ -107,10 +107,7 @@ pub trait Operation: 'static + Send + Sync + Any + Verifiable + OpDefVerifiable 
         &[]
     }
 
-    fn semantic_expr(
-        &self,
-        _g: &mut crate::sem_expr::ExprPostGraph,
-    ) -> Option<crate::graph::NodeId> {
+    fn semantic_expr(&self, _g: &mut crate::sem::SemGraph) -> Option<crate::graph::NodeId> {
         None
     }
 

@@ -19,18 +19,26 @@ members = [
     "fcc",
     "backends/targets",
     "utils/isa-test-suite",
-    "tools",
     "utils/capi",
+    "utils/adt",
+    "utils/graph",
+    "utils/symbolic",
+    "tools",
 ]
 
 [workspace.dependencies]
 tir = { path = "core" }
-tir-macros = { path = "utils/macros" }
 tir-targets = { path = "backends/targets" }
 tir-be-common = { path = "backends/common" }
 tir-sim = { path = "simulator/simcore" }
-tir-lit = { path = "utils/lit" }
 tmdl = { path = "tmdl" }
+
+# Common utils
+tir-adt = { path = "utils/adt" }
+tir-graph = { path = "utils/graph" }
+tir-symbolic = { path = "utils/symbolic" }
+tir-macros = { path = "utils/macros" }
+tir-lit = { path = "utils/lit" }
 
 # Per-target crates
 tir-riscv = { path = "backends/riscv" }
@@ -53,6 +61,7 @@ serde = "1.0.228"
 serde_json = "1.0.150"
 regex = "1.12.4"
 libfuzzer-sys = "0.4"
+proptest = "1.11.0"
 
 [profile.bench]
 debug = true

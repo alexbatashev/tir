@@ -15,6 +15,7 @@ chumsky.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 tir.workspace = true
+tir-adt.workspace = true
 
 [[bin]]
 name = "tmdlc"

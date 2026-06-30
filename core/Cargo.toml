@@ -5,6 +5,9 @@ edition = "2024"
 
 [dependencies]
 tir-macros.workspace = true
+tir-graph.workspace = true
+tir-symbolic.workspace = true
+tir-adt.workspace = true
 linkme.workspace = true
 parking_lot = "0.12.3"
 thiserror = "2.0.12"
@@ -12,16 +15,6 @@ ariadne.workspace = true
 
 [dev-dependencies]
 tir-lit = { path = "../utils/lit" }
-criterion = { workspace = true, features = ["html_reports"] }
-egg = "0.11"
-
-[[bench]]
-name = "egraph"
-harness = false
-
-[[bench]]
-name = "egg_math"
-harness = false
 
 [[test]]
 name = "lit"

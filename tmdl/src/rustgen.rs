@@ -550,13 +550,12 @@ fn emit_instructions<'a>(
                 .filter(|(_, op_ty)| matches!(op_ty, Type::Bits(_) | Type::Integer))
                 .filter_map(|(op_name, _)| semantics.variable_symbols.get(op_name).copied())
                 .collect();
-            let (canon_pattern, canon_root, forced_widths) =
-                tir::sem_expr::canonicalize_for_selection(
-                    &semantics.pattern,
-                    semantics.root,
-                    &immediate_symbols,
-                );
-            let mut pattern_widths = tir::sem_expr::infer_widths(&canon_pattern, |_| None);
+            let (canon_pattern, canon_root, forced_widths) = tir::sem::canonicalize_for_selection(
+                &semantics.pattern,
+                semantics.root,
+                &immediate_symbols,
+            );
+            let mut pattern_widths = tir::sem::infer_widths(&canon_pattern, |_| None);
             for (index, forced) in forced_widths.iter().enumerate() {
                 if forced.is_some() {
                     pattern_widths[index] = *forced;
@@ -572,9 +571,9 @@ fn emit_instructions<'a>(
             let base_cost_lit = proc_macro2::Literal::u32_unsuffixed(base_cost);
             let mnemonic_cost_lit = proc_macro2::Literal::string(mnemonic_name);
             isel_rule_emitters.push(quote! {
-                fn #pattern_fn_ident(_context: &tir::Context) -> tir::sem_expr::ExprPostGraph {
+                fn #pattern_fn_ident(_context: &tir::Context) -> tir::sem::SemGraph {
                     use tir::graph::MutDag;
-                    let mut g = tir::sem_expr::ExprPostGraph::new();
+                    let mut g = tir::sem::SemGraph::new();
                     #(#pattern_stmts)*
                     g
                 }
@@ -1848,7 +1847,7 @@ fn emit_register_trait_helpers(files: &[ast::File]) -> Result<proc_macro2::Token
 // ---------------------------------------------------------------------------
 
 struct InstructionSemantics {
-    pattern: tir::sem_expr::ExprPostGraph,
+    pattern: tir::sem::SemGraph,
     root: tir::graph::NodeId,
     variable_symbols: HashMap<String, u32>,
     fixed_register_by_class: HashMap<String, Option<u16>>,
@@ -1867,7 +1866,7 @@ fn analyze_instruction_semantics(
     register_index_map: &HashMap<(String, String), u32>,
 ) -> Option<InstructionSemantics> {
     let rhs = resolve_behavior_rhs(inst, operands, defined_register_operands)?;
-    let mut pattern = tir::sem_expr::ExprPostGraph::new();
+    let mut pattern = tir::sem::SemGraph::new();
     let lowering = rhs.lower_to_sema_with_isa(
         &mut pattern,
         numeric_params,
@@ -1980,11 +1979,6 @@ fn collect_referenced_idents(expr: &ast::Expr, operands: &HashSet<&str>, out: &m
                 collect_referenced_idents(e, operands, out);
             }
         }
-        ast::Expr::For(f) => {
-            collect_referenced_idents(&f.start, operands, out);
-            collect_referenced_idents(&f.end, operands, out);
-            collect_referenced_idents(&f.body, operands, out);
-        }
         ast::Expr::IndexAccess(i) => collect_referenced_idents(&i.base, operands, out),
         ast::Expr::Slice(s) => collect_referenced_idents(&s.base, operands, out),
         ast::Expr::Try(t) => {
@@ -2017,7 +2011,6 @@ fn collect_behavior_assignments<'a>(expr: &'a ast::Expr, out: &mut Vec<(String, 
         }
         // Only the no-trap path defines values; handler writes are trap state.
         ast::Expr::Try(t) => collect_behavior_assignments(&t.body, out),
-        ast::Expr::For(f) => collect_behavior_assignments(&f.body, out),
         _ => {}
     }
 }
@@ -2042,7 +2035,6 @@ fn collect_behavior_assignment_exprs<'a>(
             }
         }
         ast::Expr::Try(t) => collect_behavior_assignment_exprs(&t.body, out),
-        ast::Expr::For(f) => collect_behavior_assignment_exprs(&f.body, out),
         _ => {}
     }
 }
@@ -2158,7 +2150,6 @@ fn find_store_effect_expr(expr: &ast::Expr) -> Option<&ast::Expr> {
         ast::Expr::Call(_) if is_store_call(expr) => Some(expr),
         ast::Expr::Block(b) => b.stmts.iter().find_map(find_store_effect_expr),
         ast::Expr::Try(t) => find_store_effect_expr(&t.body),
-        ast::Expr::For(f) => find_store_effect_expr(&f.body),
         _ => None,
     }
 }
@@ -2400,8 +2391,6 @@ fn pc_writes(e: &ast::Expr) -> (bool, bool) {
         // Control-flow kind reflects the no-trap path; handler PC writes are
         // trap entries, not branches.
         ast::Expr::Try(t) => pc_writes(&t.body),
-        // A loop may run zero times, so it never *always* writes PC.
-        ast::Expr::For(f) => (false, pc_writes(&f.body).1),
         _ => (false, false),
     }
 }
@@ -2411,17 +2400,17 @@ fn emit_as_sem_expr_impl(
     name_ident: &proc_macro2::Ident,
     numeric_params: &HashMap<String, i64>,
 ) -> Option<proc_macro2::TokenStream> {
-    let mut dag = tir::sem_expr::ExprPostGraph::new();
+    let mut dag = tir::sem::SemGraph::new();
     let lowering = rhs.lower_to_sema(&mut dag, numeric_params)?;
     // The AsSemExpr impl carries no type annotations (the program-graph builder
     // infers them), so pass no widths.
     let (stmts, root_var) = emit_dag_as_code(&dag, lowering.root, &[]);
 
     Some(quote! {
-        impl tir::sem_expr::AsSemExpr for #name_ident {
+        impl tir::sem::AsSemExpr for #name_ident {
             fn convert(
                 &self,
-                g: &mut impl tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
+                g: &mut impl tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
             ) -> tir::graph::NodeId {
                 #(#stmts)*
                 #root_var
@@ -2525,7 +2514,6 @@ fn emit_behavior_exec(
                         | ast::Expr::Block(_)
                         | ast::Expr::If(_)
                         | ast::Expr::Try(_)
-                        | ast::Expr::For(_)
                 ) || is_store_call(stmt)
                     || is_trap_call(stmt)
                 {
@@ -2533,36 +2521,6 @@ fn emit_behavior_exec(
                 }
             }
             Some(quote! { #(#steps)* })
-        }
-        ast::Expr::For(f) => {
-            // An accumulator loop writes its folded value to `dest`; the value
-            // lowers to a `Loop` node the runtime interpreter executes (so even
-            // symbolic bounds work). Other loop shapes unroll for constant bounds.
-            if let Some((dest, _)) = f.accumulator() {
-                emit_assignment_exec(
-                    dest,
-                    expr,
-                    ops,
-                    numeric_params,
-                    isa_param_values,
-                    mnemonic_lit,
-                    register_index_map,
-                )
-            } else {
-                let mut consts = numeric_params.clone();
-                for (k, v) in isa_param_values {
-                    consts.entry(k.clone()).or_insert(*v);
-                }
-                let block = ast::unroll_for(f, &consts)?;
-                emit_behavior_exec(
-                    &block,
-                    ops,
-                    numeric_params,
-                    isa_param_values,
-                    mnemonic_lit,
-                    register_index_map,
-                )
-            }
         }
         ast::Expr::If(i) => {
             let cond_eval = emit_value_eval(
@@ -2672,7 +2630,7 @@ fn emit_value_eval(
     mnemonic_lit: &proc_macro2::Literal,
     register_index_map: &HashMap<(String, String), u32>,
 ) -> Option<proc_macro2::TokenStream> {
-    let mut dag = tir::sem_expr::ExprPostGraph::new();
+    let mut dag = tir::sem::SemGraph::new();
     let lowering =
         rhs.lower_to_sema_with_registers(&mut dag, numeric_params, register_index_map)?;
     // Build the semantic graph inline (no type annotations, so no `_context`).
@@ -2682,19 +2640,19 @@ fn emit_value_eval(
 
     Some(quote! {
         let value = {
-            let mut __g = tir::sem_expr::ExprPostGraph::new();
+            let mut __g = tir::sem::SemGraph::new();
             {
                 use tir::graph::MutDag as _;
                 let g = &mut __g;
                 #(#dag_stmts)*
             }
-            let mut __syms: Vec<Option<tir::sem_expr::Value>> = vec![None; #sym_count_lit];
+            let mut __syms: Vec<Option<tir::sem::Value>> = vec![None; #sym_count_lit];
             #(#sym_inits)*
-            let __syms: Vec<tir::sem_expr::Value> = __syms.into_iter()
-                .map(|v| v.unwrap_or_else(|| tir::sem_expr::Value::Int(tir::utils::APInt::new(64, 0))))
+            let __syms: Vec<tir::sem::Value> = __syms.into_iter()
+                .map(|v| v.unwrap_or_else(|| tir::sem::int_value(64, 0)))
                 .collect();
             struct __TmdlMachineMemory<'a>(&'a mut dyn tir_be_common::MachineContext);
-            impl tir::sem_expr::Memory for __TmdlMachineMemory<'_> {
+            impl tir::sem::Memory for __TmdlMachineMemory<'_> {
                 type Error = tir_be_common::SimTrap;
 
                 fn read_memory(&mut self, address: u64, size: usize) -> Result<u64, Self::Error> {
@@ -2711,9 +2669,9 @@ fn emit_value_eval(
                 }
             }
             let mut __memory = __TmdlMachineMemory(machine);
-            match tir::sem_expr::execute_with_memory(&__g, &__syms, &mut __memory)? {
-                tir::sem_expr::Value::Int(i) => i,
-                tir::sem_expr::Value::Float(_) | tir::sem_expr::Value::Iterator(_) | tir::sem_expr::Value::RawBits(_) => {
+            match tir::sem::execute_with_memory(&__g, &__syms, &mut __memory)? {
+                tir::sem::Value::Int(i) => tir::sem::register_from_int(i),
+                tir::sem::Value::Float(_) | tir::sem::Value::Iterator(_) | tir::sem::Value::RawBits(_) => {
                     return Err(tir_be_common::SimTrap::InvalidInstruction {
                         op: #mnemonic_lit,
                         reason: "instruction semantic expression did not evaluate to integer".to_string(),
@@ -2756,7 +2714,7 @@ fn emit_sym_inits(
                                 op: #mnemonic_lit,
                                 attribute: #name_lit,
                             })?;
-                        __syms[#sym_lit] = Some(tir::sem_expr::Value::Int(machine.read_register(&class, index)?));
+                        __syms[#sym_lit] = Some(tir::sem::value_from_register(machine.read_register(&class, index)?));
                     }
                 }),
                 Type::Integer => steps.push(quote! {
@@ -2766,7 +2724,7 @@ fn emit_sym_inits(
                                 op: #mnemonic_lit,
                                 attribute: #name_lit,
                             })?;
-                        __syms[#sym_lit] = Some(tir::sem_expr::Value::Int(tir::utils::APInt::new_signed(64, value)));
+                        __syms[#sym_lit] = Some(tir::sem::int_value_signed(64, value));
                     }
                 }),
                 Type::Bits(width) => {
@@ -2778,7 +2736,7 @@ fn emit_sym_inits(
                                     op: #mnemonic_lit,
                                     attribute: #name_lit,
                                 })?;
-                            __syms[#sym_lit] = Some(tir::sem_expr::Value::Int(tir::utils::APInt::new_signed(#width_lit, value)));
+                            __syms[#sym_lit] = Some(tir::sem::int_value_signed(#width_lit, value));
                         }
                     });
                 }
@@ -2790,9 +2748,7 @@ fn emit_sym_inits(
             // contexts that don't configure ISA params.
             let value_lit = proc_macro2::Literal::i64_unsuffixed(value);
             steps.push(quote! {
-                __syms[#sym_lit] = Some(tir::sem_expr::Value::Int(
-                    tir::utils::APInt::new_signed(64, machine.isa_param(#name_lit).unwrap_or(#value_lit)),
-                ));
+                __syms[#sym_lit] = Some(tir::sem::int_value_signed(64, machine.isa_param(#name_lit).unwrap_or(#value_lit)));
             });
         }
     }
@@ -2801,7 +2757,7 @@ fn emit_sym_inits(
         let class_lit = proc_macro2::Literal::string(class);
         let number_lit = proc_macro2::Literal::u16_unsuffixed(*number as u16);
         steps.push(quote! {
-            __syms[#sym_lit] = Some(tir::sem_expr::Value::Int(machine.read_register(#class_lit, #number_lit)?));
+            __syms[#sym_lit] = Some(tir::sem::value_from_register(machine.read_register(#class_lit, #number_lit)?));
         });
     }
 
@@ -2861,14 +2817,13 @@ fn emit_destination_write(
 }
 
 fn emit_dag_as_code(
-    dag: &tir::sem_expr::ExprPostGraph,
+    dag: &impl tir::graph::Dag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
     root: tir::graph::NodeId,
     widths: &[Option<u32>],
 ) -> (Vec<proc_macro2::TokenStream>, proc_macro2::Ident) {
-    use tir::graph::Dag;
-
     let mut stmts: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut node_vars: HashMap<usize, proc_macro2::Ident> = HashMap::new();
+    let mut has_typed_node = false;
     for (counter, node_id) in dag.postorder(root).enumerate() {
         let var = format_ident!("__sem_{}", counter);
 
@@ -2892,6 +2847,7 @@ fn emit_dag_as_code(
             stmts.push(quote! {
                 g.set_actual_type(#var, tir::builtin::IntegerType::new(_context, #width_lit));
             });
+            has_typed_node = true;
         }
 
         let children: Vec<tir::graph::NodeId> = dag.children(node_id).collect();
@@ -2903,84 +2859,91 @@ fn emit_dag_as_code(
         node_vars.insert(node_id.index(), var);
     }
 
+    // `set_actual_type` is the only annotation accessor the generated body uses, and
+    // only typed nodes call it; bring its trait into scope just for those patterns so
+    // type-free patterns don't carry an unused import.
+    if has_typed_node {
+        stmts.insert(0, quote! { use tir::graph::MetaMutDag as _; });
+    }
+
     let root_var = node_vars[&root.index()].clone();
     (stmts, root_var)
 }
 
-fn emit_expr_kind_ts(kind: &tir::sem_expr::ExprKind) -> proc_macro2::TokenStream {
-    use tir::sem_expr::ExprKind;
+fn emit_expr_kind_ts(kind: &tir::sem::SymKind) -> proc_macro2::TokenStream {
+    use tir::sem::SymKind;
     match kind {
-        ExprKind::Symbol => quote! { tir::sem_expr::ExprKind::Symbol },
-        ExprKind::Constant => quote! { tir::sem_expr::ExprKind::Constant },
-        ExprKind::Add => quote! { tir::sem_expr::ExprKind::Add },
-        ExprKind::Sub => quote! { tir::sem_expr::ExprKind::Sub },
-        ExprKind::Mul => quote! { tir::sem_expr::ExprKind::Mul },
-        ExprKind::Div => quote! { tir::sem_expr::ExprKind::Div },
-        ExprKind::UDiv => quote! { tir::sem_expr::ExprKind::UDiv },
-        ExprKind::Eq => quote! { tir::sem_expr::ExprKind::Eq },
-        ExprKind::Ne => quote! { tir::sem_expr::ExprKind::Ne },
-        ExprKind::Lt => quote! { tir::sem_expr::ExprKind::Lt },
-        ExprKind::Gt => quote! { tir::sem_expr::ExprKind::Gt },
-        ExprKind::Ge => quote! { tir::sem_expr::ExprKind::Ge },
-        ExprKind::ULt => quote! { tir::sem_expr::ExprKind::ULt },
-        ExprKind::ULe => quote! { tir::sem_expr::ExprKind::ULe },
-        ExprKind::UGt => quote! { tir::sem_expr::ExprKind::UGt },
-        ExprKind::UGe => quote! { tir::sem_expr::ExprKind::UGe },
-        ExprKind::ShiftLeft => quote! { tir::sem_expr::ExprKind::ShiftLeft },
-        ExprKind::ShiftRightArithmetic => quote! { tir::sem_expr::ExprKind::ShiftRightArithmetic },
-        ExprKind::ShiftRightLogic => quote! { tir::sem_expr::ExprKind::ShiftRightLogic },
-        ExprKind::Or => quote! { tir::sem_expr::ExprKind::Or },
-        ExprKind::And => quote! { tir::sem_expr::ExprKind::And },
-        ExprKind::Xor => quote! { tir::sem_expr::ExprKind::Xor },
-        ExprKind::Not => quote! { tir::sem_expr::ExprKind::Not },
-        ExprKind::If => quote! { tir::sem_expr::ExprKind::If },
-        ExprKind::Clamp => quote! { tir::sem_expr::ExprKind::Clamp },
-        ExprKind::LoadMemory => quote! { tir::sem_expr::ExprKind::LoadMemory },
-        ExprKind::StoreMemory => quote! { tir::sem_expr::ExprKind::StoreMemory },
-        ExprKind::ZExt => quote! { tir::sem_expr::ExprKind::ZExt },
-        ExprKind::SExt => quote! { tir::sem_expr::ExprKind::SExt },
-        ExprKind::Extract => quote! { tir::sem_expr::ExprKind::Extract },
-        ExprKind::Log2Ceil => quote! { tir::sem_expr::ExprKind::Log2Ceil },
-        ExprKind::Sqrt => quote! { tir::sem_expr::ExprKind::Sqrt },
-        ExprKind::Fma => quote! { tir::sem_expr::ExprKind::Fma },
-        ExprKind::Loop => quote! { tir::sem_expr::ExprKind::Loop },
-        ExprKind::IndVar => quote! { tir::sem_expr::ExprKind::IndVar },
-        ExprKind::Acc => quote! { tir::sem_expr::ExprKind::Acc },
-        ExprKind::VectorMap => quote! { tir::sem_expr::ExprKind::VectorMap },
-        ExprKind::Lane => quote! { tir::sem_expr::ExprKind::Lane },
-        ExprKind::Map => quote! { tir::sem_expr::ExprKind::Map },
-        ExprKind::Zip => quote! { tir::sem_expr::ExprKind::Zip },
-        ExprKind::IterConcat => quote! { tir::sem_expr::ExprKind::IterConcat },
-        ExprKind::Split => quote! { tir::sem_expr::ExprKind::Split },
-        ExprKind::Reduce => quote! { tir::sem_expr::ExprKind::Reduce },
-        ExprKind::Arg => quote! { tir::sem_expr::ExprKind::Arg },
+        SymKind::Symbol => quote! { tir::sem::SymKind::Symbol },
+        SymKind::Constant => quote! { tir::sem::SymKind::Constant },
+        SymKind::Add => quote! { tir::sem::SymKind::Add },
+        SymKind::Sub => quote! { tir::sem::SymKind::Sub },
+        SymKind::Mul => quote! { tir::sem::SymKind::Mul },
+        SymKind::Div => quote! { tir::sem::SymKind::Div },
+        SymKind::UDiv => quote! { tir::sem::SymKind::UDiv },
+        SymKind::SRem => quote! { tir::sem::SymKind::SRem },
+        SymKind::URem => quote! { tir::sem::SymKind::URem },
+        SymKind::Neg => quote! { tir::sem::SymKind::Neg },
+        SymKind::Eq => quote! { tir::sem::SymKind::Eq },
+        SymKind::Ne => quote! { tir::sem::SymKind::Ne },
+        SymKind::Lt => quote! { tir::sem::SymKind::Lt },
+        SymKind::Le => quote! { tir::sem::SymKind::Le },
+        SymKind::Gt => quote! { tir::sem::SymKind::Gt },
+        SymKind::Ge => quote! { tir::sem::SymKind::Ge },
+        SymKind::ULt => quote! { tir::sem::SymKind::ULt },
+        SymKind::ULe => quote! { tir::sem::SymKind::ULe },
+        SymKind::UGt => quote! { tir::sem::SymKind::UGt },
+        SymKind::UGe => quote! { tir::sem::SymKind::UGe },
+        SymKind::ShiftLeft => quote! { tir::sem::SymKind::ShiftLeft },
+        SymKind::ShiftRightArithmetic => quote! { tir::sem::SymKind::ShiftRightArithmetic },
+        SymKind::ShiftRightLogic => quote! { tir::sem::SymKind::ShiftRightLogic },
+        SymKind::Or => quote! { tir::sem::SymKind::Or },
+        SymKind::And => quote! { tir::sem::SymKind::And },
+        SymKind::Xor => quote! { tir::sem::SymKind::Xor },
+        SymKind::Not => quote! { tir::sem::SymKind::Not },
+        SymKind::Concat => quote! { tir::sem::SymKind::Concat },
+        SymKind::If => quote! { tir::sem::SymKind::If },
+        SymKind::Clamp => quote! { tir::sem::SymKind::Clamp },
+        SymKind::LoadMemory => quote! { tir::sem::SymKind::LoadMemory },
+        SymKind::StoreMemory => quote! { tir::sem::SymKind::StoreMemory },
+        SymKind::ZExt => quote! { tir::sem::SymKind::ZExt },
+        SymKind::SExt => quote! { tir::sem::SymKind::SExt },
+        SymKind::Extract => quote! { tir::sem::SymKind::Extract },
+        SymKind::Log2Ceil => quote! { tir::sem::SymKind::Log2Ceil },
+        SymKind::Sqrt => quote! { tir::sem::SymKind::Sqrt },
+        SymKind::Fma => quote! { tir::sem::SymKind::Fma },
+        SymKind::Map => quote! { tir::sem::SymKind::Map },
+        SymKind::Zip => quote! { tir::sem::SymKind::Zip },
+        SymKind::IterConcat => quote! { tir::sem::SymKind::IterConcat },
+        SymKind::Split => quote! { tir::sem::SymKind::Split },
+        SymKind::Reduce => quote! { tir::sem::SymKind::Reduce },
+        SymKind::Arg => quote! { tir::sem::SymKind::Arg },
     }
 }
 
-fn emit_expr_payload_ts(payload: &tir::sem_expr::ExprPayload) -> proc_macro2::TokenStream {
-    use tir::sem_expr::ExprPayload;
+fn emit_expr_payload_ts(payload: &tir::sem::SymPayload<tir::ValueId>) -> proc_macro2::TokenStream {
+    use tir::sem::SymPayload;
     match payload {
-        ExprPayload::SymbolId(id) => {
+        SymPayload::SymbolId(id) => {
             let id_lit = proc_macro2::Literal::u32_unsuffixed(*id);
-            quote! { tir::sem_expr::ExprPayload::SymbolId(#id_lit) }
+            quote! { tir::sem::SymPayload::SymbolId(#id_lit) }
         }
-        ExprPayload::Value(value) => {
+        SymPayload::Value(value) => {
             let value_lit = proc_macro2::Literal::u32_unsuffixed(value.number());
-            quote! { tir::sem_expr::ExprPayload::Value(tir::ValueId::from_number(#value_lit)) }
+            quote! { tir::sem::SymPayload::Value(tir::ValueId::from_number(#value_lit)) }
         }
-        ExprPayload::Int(v) => {
+        SymPayload::Int(v) => {
             let width = proc_macro2::Literal::u32_unsuffixed(v.width());
             if v.is_signed() {
-                let val = proc_macro2::Literal::i64_unsuffixed(v.to_i64());
-                quote! { tir::sem_expr::ExprPayload::Int(tir::utils::APInt::new_signed(#width, #val)) }
+                let val = proc_macro2::Literal::u64_unsuffixed(v.to_i64() as u64);
+                quote! { tir::sem::int_payload(#width, #val, true) }
             } else {
                 let val = proc_macro2::Literal::u64_unsuffixed(v.to_u64());
-                quote! { tir::sem_expr::ExprPayload::Int(tir::utils::APInt::new(#width, #val)) }
+                quote! { tir::sem::int_payload(#width, #val, false) }
             }
         }
-        ExprPayload::Float(f) => {
+        SymPayload::Float(f) => {
             let val = proc_macro2::Literal::f64_unsuffixed(f.to_f64());
-            quote! { tir::sem_expr::ExprPayload::Float(tir::utils::APFloat::from_f64(#val)) }
+            quote! { tir::sem::float_payload(#val) }
         }
     }
 }

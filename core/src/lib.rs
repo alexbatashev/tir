@@ -12,7 +12,6 @@ mod context;
 mod diagnostics;
 mod dialect;
 mod dialects;
-pub mod egraph;
 mod error;
 pub mod graph;
 mod interfaces;
@@ -25,13 +24,13 @@ pub mod pbqp;
 mod region;
 pub mod region_format;
 pub mod schema;
-pub mod sem_expr;
+pub mod sem;
 mod ty;
 pub mod utils;
 mod value;
 
 pub mod helpers {
-    pub use tir_macros::{SimpleNode, TirType, dialect, operation};
+    pub use tir_macros::{TirType, dialect, operation};
 }
 pub mod parse;
 

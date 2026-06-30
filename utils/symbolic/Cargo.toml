@@ -1,0 +1,25 @@
+[package]
+name = "tir-symbolic"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tir-graph.workspace = true
+tir-adt.workspace = true
+chumsky.workspace = true
+
+[[bin]]
+name = "tir-smt"
+path = "src/bin/main.rs"
+
+[dev-dependencies]
+criterion = { workspace = true, features = ["html_reports"] }
+egg = "0.11"
+
+[[bench]]
+name = "egraph"
+harness = false
+
+[[bench]]
+name = "egg_math"
+harness = false

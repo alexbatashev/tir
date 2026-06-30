@@ -344,14 +344,6 @@ fn infer<'a>(
                 }
                 Type::Integer
             }
-            // `lane(vector, index)` reads one element; its width is the vector's
-            // element width, which is not tracked, so it stays a free variable.
-            ast::Expr::BuiltinFunction(ast::BuiltinFunction::Lane) => {
-                for arg in &call.arguments {
-                    infer(arg, env, tvg, subst, cache, diags, file_name);
-                }
-                Type::Var(tvg.fresh())
-            }
             ast::Expr::BuiltinFunction(ast::BuiltinFunction::SExt)
             | ast::Expr::BuiltinFunction(ast::BuiltinFunction::ZExt)
             | ast::Expr::BuiltinFunction(ast::BuiltinFunction::Load) => {
@@ -561,18 +553,6 @@ fn infer<'a>(
                 );
             }
             Type::Integer
-        }
-
-        ast::Expr::For(f) => {
-            infer(&f.start, env, tvg, subst, cache, diags, file_name);
-            infer(&f.end, env, tvg, subst, cache, diags, file_name);
-            let mut body_env = env.clone();
-            body_env.bind(f.var.clone(), TypeScheme::mono(Type::Integer));
-            infer(&f.body, &body_env, tvg, subst, cache, diags, file_name);
-            // A value-producing (map) loop yields a vector assigned to a register,
-            // so its type must unify with `bits<N>` as well as the integer the
-            // statement and accumulator forms produce; a free variable does both.
-            Type::Var(tvg.fresh())
         }
 
         // A bare lambda outside `map`/`reduce` is invalid, but inferring it (with

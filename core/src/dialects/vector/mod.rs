@@ -172,11 +172,11 @@ operation! {
 /// constant); a scalable vector takes it from the dynamic `vl` operand (index 2).
 fn vlen_node(
     op: &tir::OpInstance,
-    g: &mut impl tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
+    g: &mut impl tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
 ) -> tir::graph::NodeId {
     if op.operands.len() > 2 {
-        let n = g.add_node(tir::sem_expr::ExprKind::Symbol);
-        g.set_leaf_data(n, tir::sem_expr::ExprPayload::SymbolId(2));
+        let n = g.add_node(tir::sem::SymKind::Symbol);
+        g.set_leaf_data(n, tir::sem::SymPayload::SymbolId(2));
         return n;
     }
     let context = op.context.upgrade();
@@ -185,10 +185,10 @@ fn vlen_node(
         .downcast_ref::<VectorType>()
         .and_then(|t| t.length())
         .unwrap_or(0) as u64;
-    let n = g.add_node(tir::sem_expr::ExprKind::Constant);
+    let n = g.add_node(tir::sem::SymKind::Constant);
     g.set_leaf_data(
         n,
-        tir::sem_expr::ExprPayload::Int(tir::utils::APInt::new(32, length)),
+        tir::sem::SymPayload::Int(tir_adt::APInt::new(32, length)),
     );
     n
 }
@@ -199,8 +199,8 @@ macro_rules! impl_get_vlen {
             fn get_vlen(
                 &self,
                 g: &mut impl tir::graph::MutDag<
-                    Node = tir::sem_expr::ExprKind,
-                    Leaf = tir::sem_expr::ExprPayload,
+                    Node = tir::sem::SymKind,
+                    Leaf = tir::sem::SymPayload<tir::ValueId>,
                 >,
             ) -> tir::graph::NodeId {
                 vlen_node(&self.0, g)

@@ -16,7 +16,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         results,
         interfaces,
         custom_format,
-        as_sem_expr_body,
+        sem,
         custom_verifier,
     } = parse_macro_input!(item as Operation);
 
@@ -283,7 +283,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
     // An op that declares `sem` can be folded over constant operands by evaluating
     // that expression, so derive `ConstantFold` for it automatically (unless the op
     // already lists the interface, e.g. a hand-written fold).
-    let has_sem = as_sem_expr_body.is_some();
+    let has_sem = sem.is_some();
     let already_lists_fold = interfaces.iter().any(|path| {
         path.segments
             .last()
@@ -293,8 +293,8 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
     let constant_fold_impl = if derive_constant_fold {
         quote! {
             impl tir::ConstantFold for #struct_name {
-                fn fold(&self, operands: &[tir::sem_expr::Value]) -> Option<tir::sem_expr::Value> {
-                    tir::sem_expr::fold_with_sem(self, operands)
+                fn fold(&self, operands: &[tir::sem::Value]) -> Option<tir::sem::Value> {
+                    tir::sem::fold_with_sem(self, operands)
                 }
             }
         }
@@ -306,51 +306,103 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         interfaces.push(syn::parse_quote!(tir::ConstantFold));
     }
 
-    let semantic_expr_method = if let Some(body) = &as_sem_expr_body {
+    // The `sem = "..."` declaration is lowered at run time by tir-symbolic's graph
+    // builder. The op provides the operand-symbol map plus the hooks the builder
+    // needs: `$splice` atoms call op methods, and width-changing ops read the op's
+    // result width.
+    let (sem_hooks_impl, semantic_expr_method, as_sem_expr_impl) = if let Some(sem) = &sem {
+        let src = &sem.src;
+        let sym_pairs: Vec<proc_macro2::TokenStream> = operands
+            .iter()
+            .enumerate()
+            .map(|(i, o)| {
+                let name = &o.name;
+                let idx = i as u32;
+                quote! { (#name, #idx) }
+            })
+            .collect();
+        let splice_arms: Vec<proc_macro2::TokenStream> = sem
+            .splices
+            .iter()
+            .map(|name| {
+                let method = format_ident!("{}", name);
+                quote! { #name => Some(self.#method(g)), }
+            })
+            .collect();
+        let result_width_body = if has_results {
+            quote! {
+                let __ctx = self.0.context.upgrade();
+                let __ty = __ctx.get_value(self.0.results[0]).ty();
+                Some(
+                    (__ctx.get_type_data(__ty).as_ref() as &dyn std::any::Any)
+                        .downcast_ref::<tir::builtin::IntegerType>()
+                        .map(|t| t.width() as u64)
+                        .unwrap_or(0),
+                )
+            }
+        } else {
+            quote! { None }
+        };
         let actual_type_setter = if has_results {
             quote! {
-                let __tir_sem_expr_context = self.0.context.upgrade();
-                let __tir_sem_expr_actual_type = __tir_sem_expr_context.get_value(self.result()).ty();
-                g.set_actual_type(__tir_sem_expr_root, __tir_sem_expr_actual_type);
+                let __tir_ctx = self.0.context.upgrade();
+                let __tir_ty = __tir_ctx.get_value(self.result()).ty();
+                g.set_actual_type(__tir_sem_root, __tir_ty);
             }
         } else {
             quote! {}
         };
-        quote! {
-            fn semantic_expr(&self, g: &mut tir::sem_expr::ExprPostGraph) -> Option<tir::graph::NodeId> {
-                use tir::graph::MutDag;
-                let __tir_sem_expr_root = { #body };
-                g.set_original_op(__tir_sem_expr_root, <Self as tir::Operation>::id(self));
-                #actual_type_setter
-                Some(__tir_sem_expr_root)
-            }
-        }
-    } else {
-        quote! {}
-    };
 
-    let as_sem_expr_impl = if let Some(body) = as_sem_expr_body {
-        let actual_type_setter = if has_results {
-            quote! {
-                let __tir_sem_expr_context = self.0.context.upgrade();
-                let __tir_sem_expr_actual_type = __tir_sem_expr_context.get_value(self.result()).ty();
-                g.set_actual_type(__tir_sem_expr_root, __tir_sem_expr_actual_type);
-            }
-        } else {
-            quote! {}
-        };
-        quote! {
-            impl tir::sem_expr::AsSemExpr for #struct_name {
-                fn convert(&self, g: &mut impl tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>) -> tir::graph::NodeId {
-                    let __tir_sem_expr_root = { #body };
-                    g.set_original_op(__tir_sem_expr_root, <Self as tir::Operation>::id(self));
-                    #actual_type_setter
-                    __tir_sem_expr_root
+        let hooks = quote! {
+            impl<__G> tir_symbolic::lang::SemBuilderHooks<__G> for #struct_name
+            where
+                __G: tir::graph::MutDag<
+                    Node = tir_symbolic::lang::SymKind,
+                    Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+                >,
+            {
+                fn splice(&self, __name: &str, g: &mut __G) -> Option<tir::graph::NodeId> {
+                    match __name {
+                        #(#splice_arms)*
+                        _ => None,
+                    }
+                }
+                fn result_width(&self) -> Option<u64> {
+                    #result_width_body
                 }
             }
-        }
+        };
+        let sem_method = quote! {
+            fn semantic_expr(&self, g: &mut tir::sem::SemGraph) -> Option<tir::graph::NodeId> {
+                use tir::graph::MetaMutDag;
+                let __tir_sem_root = tir_symbolic::lang::build(g, #src, &[#(#sym_pairs),*], self).ok()?;
+                g.set_original_op(__tir_sem_root, <Self as tir::Operation>::id(self));
+                #actual_type_setter
+                Some(__tir_sem_root)
+            }
+        };
+        let as_impl = quote! {
+            impl tir::sem::AsSemExpr for #struct_name {
+                fn convert(
+                    &self,
+                    g: &mut impl tir::graph::MutDag<
+                        Node = tir_symbolic::lang::SymKind,
+                        Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+                        Annotation = tir::graph::NodeMeta,
+                    >,
+                ) -> tir::graph::NodeId {
+                    use tir::graph::MetaMutDag;
+                    let __tir_sem_root = tir_symbolic::lang::build(g, #src, &[#(#sym_pairs),*], self)
+                        .expect("semantic expression should build");
+                    g.set_original_op(__tir_sem_root, <Self as tir::Operation>::id(self));
+                    #actual_type_setter
+                    __tir_sem_root
+                }
+            }
+        };
+        (hooks, sem_method, as_impl)
     } else {
-        quote! {}
+        (quote! {}, quote! {}, quote! {})
     };
 
     let interface_registration_method = if interfaces.is_empty() {
@@ -694,6 +746,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
 
         #(#interface_impls)*
         #verifiable_impl
+        #sem_hooks_impl
         #as_sem_expr_impl
         #constant_fold_impl
 
@@ -987,8 +1040,16 @@ struct Operation {
     results: Vec<ValueSpec>,
     interfaces: Vec<Path>,
     custom_format: bool,
-    as_sem_expr_body: Option<proc_macro2::TokenStream>,
+    sem: Option<Sem>,
     custom_verifier: bool,
+}
+
+/// A parsed `sem = "..."` declaration: the raw s-expression source plus the
+/// `$splice` method names referenced inside it (discovered via tir-symbolic's
+/// parser), which the codegen needs to generate the builder hooks.
+struct Sem {
+    src: String,
+    splices: Vec<String>,
 }
 
 struct Region {
@@ -1162,21 +1223,10 @@ impl Parse for Operation {
             })
             .unwrap_or(false);
 
-        let as_sem_expr_body = struct_
-            .fields
-            .iter()
-            .find_map(|f| match &f.member {
-                Member::Named(ident) => {
-                    if ident.to_string().as_str() == "sem" {
-                        let new = expr_as_sem_expr_body(&f.expr, &operands);
-                        Some(new)
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            })
-            .unwrap_or(None);
+        let sem = struct_.fields.iter().find_map(|f| match &f.member {
+            Member::Named(ident) if ident == "sem" => parse_sem(&f.expr),
+            _ => None,
+        });
 
         Ok(Operation {
             struct_name,
@@ -1189,363 +1239,26 @@ impl Parse for Operation {
             results,
             interfaces,
             custom_format,
-            as_sem_expr_body,
+            sem,
             custom_verifier,
         })
     }
 }
 
-#[derive(Clone)]
-enum SemNode {
-    Atom(String),
-    List(Vec<SemNode>),
-}
-
-fn parse_sem_expr(input: &str) -> Option<SemNode> {
-    fn parse_list(chars: &[char], pos: &mut usize) -> Option<SemNode> {
-        if *pos >= chars.len() || chars[*pos] != '(' {
-            return None;
-        }
-        *pos += 1;
-        let mut items = Vec::new();
-        loop {
-            while *pos < chars.len() && chars[*pos].is_whitespace() {
-                *pos += 1;
-            }
-            if *pos >= chars.len() {
-                return None;
-            }
-            if chars[*pos] == ')' {
-                *pos += 1;
-                break;
-            }
-            if chars[*pos] == '(' {
-                items.push(parse_list(chars, pos)?);
-                continue;
-            }
-            let start = *pos;
-            while *pos < chars.len()
-                && !chars[*pos].is_whitespace()
-                && chars[*pos] != '('
-                && chars[*pos] != ')'
-            {
-                *pos += 1;
-            }
-            items.push(SemNode::Atom(chars[start..*pos].iter().collect()));
-        }
-        Some(SemNode::List(items))
-    }
-
-    let chars: Vec<char> = input.chars().collect();
-    let mut pos = 0usize;
-    while pos < chars.len() && chars[pos].is_whitespace() {
-        pos += 1;
-    }
-    let expr = parse_list(&chars, &mut pos)?;
-    while pos < chars.len() && chars[pos].is_whitespace() {
-        pos += 1;
-    }
-    if pos == chars.len() { Some(expr) } else { None }
-}
-
-fn sem_node_to_dag_stmts(
-    node: &SemNode,
-    operand_symbols: &std::collections::HashMap<String, u32>,
-    lambda_params: &mut Vec<Vec<String>>,
-    counter: &mut u32,
-) -> Option<(Vec<proc_macro2::TokenStream>, proc_macro2::Ident)> {
-    match node {
-        SemNode::Atom(name) => {
-            if let Some(method) = name.strip_prefix('$') {
-                // `$name` calls the op's inherent `name(&self, g)` method and
-                // splices the subexpression it builds into the graph, letting an op
-                // compute a value (e.g. its vector length) in Rust rather than in
-                // the s-expr.
-                let var = format_ident!("__sem_node_{}", *counter);
-                *counter += 1;
-                let method = format_ident!("{}", method);
-                let stmt = quote! { let #var = self.#method(g); };
-                Some((vec![stmt], var))
-            } else if let Some(idx) = lambda_params
-                .last()
-                .and_then(|ps| ps.iter().position(|p| p == name))
-            {
-                // Inside a `map`/`reduce` lambda, a parameter reference lowers to an
-                // `Arg` leaf carrying its position; only the innermost lambda's
-                // parameters are in scope.
-                let var = format_ident!("__sem_node_{}", *counter);
-                *counter += 1;
-                let idx_lit = proc_macro2::Literal::u64_unsuffixed(idx as u64);
-                let stmt = quote! {
-                    let #var = g.add_node(tir::sem_expr::ExprKind::Arg);
-                    g.set_leaf_data(#var, tir::sem_expr::ExprPayload::Int(tir::utils::APInt::new(32, #idx_lit)));
-                };
-                Some((vec![stmt], var))
-            } else if let Some(&idx) = operand_symbols.get(name) {
-                let var = format_ident!("__sem_node_{}", *counter);
-                *counter += 1;
-                let idx_lit = proc_macro2::Literal::u32_unsuffixed(idx);
-                let stmt = quote! {
-                    let #var = g.add_node(tir::sem_expr::ExprKind::Symbol);
-                    g.set_leaf_data(#var, tir::sem_expr::ExprPayload::SymbolId(#idx_lit));
-                };
-                Some((vec![stmt], var))
-            } else if name == "acc" || name == "indvar" {
-                // The accumulator and induction value of the innermost `(loop ...)`.
-                let kind = if name == "acc" {
-                    quote! { tir::sem_expr::ExprKind::Acc }
-                } else {
-                    quote! { tir::sem_expr::ExprKind::IndVar }
-                };
-                let var = format_ident!("__sem_node_{}", *counter);
-                *counter += 1;
-                let stmt = quote! { let #var = g.add_node(#kind); };
-                Some((vec![stmt], var))
-            } else if let Ok(i) = name.parse::<i64>() {
-                let var = format_ident!("__sem_node_{}", *counter);
-                *counter += 1;
-                let val = proc_macro2::Literal::i64_unsuffixed(i);
-                let stmt = quote! {
-                    let #var = g.add_node(tir::sem_expr::ExprKind::Constant);
-                    g.set_leaf_data(#var, tir::sem_expr::ExprPayload::Int(tir::utils::APInt::new_signed(64, #val)));
-                };
-                Some((vec![stmt], var))
-            } else {
-                None
-            }
-        }
-        SemNode::List(items) => {
-            // `(concat iter)` joins an iterator's lanes into one bit value; its
-            // single-operand shape would otherwise be mistaken for a width-changing
-            // op below, so handle it first.
-            if let [SemNode::Atom(op), arg] = items.as_slice()
-                && op == "concat"
-            {
-                let (mut stmts, arg_var) =
-                    sem_node_to_dag_stmts(arg, operand_symbols, lambda_params, counter)?;
-                let var = format_ident!("__sem_node_{}", *counter);
-                *counter += 1;
-                stmts.push(quote! {
-                    let #var = g.add_node(tir::sem_expr::ExprKind::IterConcat);
-                    g.add_edge(#var, #arg_var);
-                });
-                return Some((stmts, var));
-            }
-
-            // Unary width-changing ops take the result width from the op's result
-            // type (read through the context the generated body already holds), so
-            // `(sext x)`/`(zext x)`/`(trunc x)` need no explicit width operand.
-            if let [SemNode::Atom(op), arg] = items.as_slice() {
-                let ext_kind = match op.as_str() {
-                    "sext" => Some(quote! { tir::sem_expr::ExprKind::SExt }),
-                    "zext" => Some(quote! { tir::sem_expr::ExprKind::ZExt }),
-                    "trunc" => None,
-                    _ => return None,
-                };
-                let (mut stmts, arg_var) =
-                    sem_node_to_dag_stmts(arg, operand_symbols, lambda_params, counter)?;
-                let width_var = format_ident!("__sem_node_{}", *counter);
-                *counter += 1;
-                stmts.push(quote! {
-                    let __tir_result_width = {
-                        let __ctx = self.0.context.upgrade();
-                        let __ty = __ctx.get_value(self.0.results[0]).ty();
-                        (__ctx.get_type_data(__ty).as_ref() as &dyn std::any::Any)
-                            .downcast_ref::<tir::builtin::IntegerType>()
-                            .map(|t| t.width())
-                            .unwrap_or(0) as u64
-                    };
-                    let #width_var = g.add_node(tir::sem_expr::ExprKind::Constant);
-                    g.set_leaf_data(
-                        #width_var,
-                        tir::sem_expr::ExprPayload::Int(tir::utils::APInt::new(16, __tir_result_width)),
-                    );
-                });
-                let var = format_ident!("__sem_node_{}", *counter);
-                *counter += 1;
-                if let Some(kind) = ext_kind {
-                    stmts.push(quote! {
-                        let #var = g.add_node(#kind);
-                        g.add_edge(#var, #arg_var);
-                        g.add_edge(#var, #width_var);
-                    });
-                } else {
-                    // trunc x  ==  extract(x, result_width - 1, 0)
-                    let low_var = format_ident!("__sem_node_{}", *counter);
-                    *counter += 1;
-                    stmts.push(quote! {
-                        let #low_var = g.add_node(tir::sem_expr::ExprKind::Constant);
-                        g.set_leaf_data(
-                            #low_var,
-                            tir::sem_expr::ExprPayload::Int(tir::utils::APInt::new(16, 0)),
-                        );
-                        // Reuse the width constant as the (high = width - 1) bound.
-                        g.set_leaf_data(
-                            #width_var,
-                            tir::sem_expr::ExprPayload::Int(tir::utils::APInt::new(
-                                16,
-                                __tir_result_width.saturating_sub(1),
-                            )),
-                        );
-                        let #var = g.add_node(tir::sem_expr::ExprKind::Extract);
-                        g.add_edge(#var, #arg_var);
-                        g.add_edge(#var, #width_var);
-                        g.add_edge(#var, #low_var);
-                    });
-                }
-                return Some((stmts, var));
-            }
-
-            // `(loop start end init step)` lowers to the IR's first-class `Loop`
-            // node: `init` is the accumulator at entry, `step` is folded over the
-            // half-open range `[start, end)`, reading `acc`/`indvar` for the running
-            // accumulator and induction value.
-            if let [SemNode::Atom(op), start, end, init, step] = items.as_slice()
-                && op == "loop"
-            {
-                let (mut stmts, start_var) =
-                    sem_node_to_dag_stmts(start, operand_symbols, lambda_params, counter)?;
-                let (end_stmts, end_var) =
-                    sem_node_to_dag_stmts(end, operand_symbols, lambda_params, counter)?;
-                let (init_stmts, init_var) =
-                    sem_node_to_dag_stmts(init, operand_symbols, lambda_params, counter)?;
-                let (step_stmts, step_var) =
-                    sem_node_to_dag_stmts(step, operand_symbols, lambda_params, counter)?;
-                stmts.extend(end_stmts);
-                stmts.extend(init_stmts);
-                stmts.extend(step_stmts);
-                let var = format_ident!("__sem_node_{}", *counter);
-                *counter += 1;
-                stmts.push(quote! {
-                    let #var = g.add_node(tir::sem_expr::ExprKind::Loop);
-                    g.add_edge(#var, #start_var);
-                    g.add_edge(#var, #end_var);
-                    g.add_edge(#var, #init_var);
-                    g.add_edge(#var, #step_var);
-                });
-                return Some((stmts, var));
-            }
-
-            // `(map iter (lambda (x) body))` / `(reduce iter (lambda (acc x) body))`
-            // apply a lambda over an iterator's lanes. The lambda's parameters are
-            // pushed so references to them inside `body` lower to `Arg` leaves.
-            if let [SemNode::Atom(op), iter, lambda] = items.as_slice()
-                && (op == "map" || op == "reduce")
-            {
-                let SemNode::List(parts) = lambda else {
-                    return None;
-                };
-                let [SemNode::Atom(lam_kw), SemNode::List(param_nodes), body] = parts.as_slice()
-                else {
-                    return None;
-                };
-                if lam_kw != "lambda" {
-                    return None;
-                }
-                let mut params = Vec::with_capacity(param_nodes.len());
-                for p in param_nodes {
-                    let SemNode::Atom(p) = p else {
-                        return None;
-                    };
-                    params.push(p.clone());
-                }
-
-                let (mut stmts, iter_var) =
-                    sem_node_to_dag_stmts(iter, operand_symbols, lambda_params, counter)?;
-                lambda_params.push(params);
-                let body = sem_node_to_dag_stmts(body, operand_symbols, lambda_params, counter);
-                lambda_params.pop();
-                let (body_stmts, body_var) = body?;
-                stmts.extend(body_stmts);
-
-                let kind = if op == "map" {
-                    quote! { tir::sem_expr::ExprKind::Map }
-                } else {
-                    quote! { tir::sem_expr::ExprKind::Reduce }
-                };
-                let var = format_ident!("__sem_node_{}", *counter);
-                *counter += 1;
-                stmts.push(quote! {
-                    let #var = g.add_node(#kind);
-                    g.add_edge(#var, #iter_var);
-                    g.add_edge(#var, #body_var);
-                });
-                return Some((stmts, var));
-            }
-
-            let [SemNode::Atom(op), lhs, rhs] = items.as_slice() else {
-                return None;
-            };
-            let kind = match op.as_str() {
-                "add" => quote! { tir::sem_expr::ExprKind::Add },
-                "sub" => quote! { tir::sem_expr::ExprKind::Sub },
-                "mul" => quote! { tir::sem_expr::ExprKind::Mul },
-                "div" => quote! { tir::sem_expr::ExprKind::Div },
-                "and" => quote! { tir::sem_expr::ExprKind::And },
-                "or" => quote! { tir::sem_expr::ExprKind::Or },
-                "xor" => quote! { tir::sem_expr::ExprKind::Xor },
-                "shl" => quote! { tir::sem_expr::ExprKind::ShiftLeft },
-                "lshr" => quote! { tir::sem_expr::ExprKind::ShiftRightLogic },
-                "ashr" => quote! { tir::sem_expr::ExprKind::ShiftRightArithmetic },
-                // `(zip a b)` pairs two iterators lane-wise; `(split bits n)` cuts a
-                // bit value into `n` lanes. Both are two-child nodes like the binary
-                // arithmetic ops.
-                "zip" => quote! { tir::sem_expr::ExprKind::Zip },
-                "split" => quote! { tir::sem_expr::ExprKind::Split },
-                _ => return None,
-            };
-            let (mut stmts, lhs_var) =
-                sem_node_to_dag_stmts(lhs, operand_symbols, lambda_params, counter)?;
-            let (rhs_stmts, rhs_var) =
-                sem_node_to_dag_stmts(rhs, operand_symbols, lambda_params, counter)?;
-            stmts.extend(rhs_stmts);
-            let var = format_ident!("__sem_node_{}", *counter);
-            *counter += 1;
-            stmts.push(quote! {
-                let #var = g.add_node(#kind);
-                g.add_edge(#var, #lhs_var);
-                g.add_edge(#var, #rhs_var);
-            });
-            Some((stmts, var))
-        }
-    }
-}
-
-fn expr_as_sem_expr_body(expr: &Expr, operands: &[ValueSpec]) -> Option<proc_macro2::TokenStream> {
-    let sem_src = match expr {
-        Expr::Lit(lit) => {
-            if let syn::Lit::Str(s) = &lit.lit {
-                s.value()
-            } else {
-                return None;
-            }
-        }
+/// Parse a `sem = "..."` field into its raw source and the `$splice` names it
+/// references. Validation (and splice discovery) reuses tir-symbolic's parser so
+/// the macro and the runtime builder agree on the grammar.
+fn parse_sem(expr: &Expr) -> Option<Sem> {
+    let src = match expr {
+        Expr::Lit(lit) => match &lit.lit {
+            syn::Lit::Str(s) => s.value(),
+            _ => return None,
+        },
         _ => return None,
     };
-
-    let mut symbols = std::collections::HashMap::new();
-    for (idx, operand) in operands.iter().enumerate() {
-        symbols.insert(operand.name.clone(), idx as u32);
-    }
-
-    let parsed = parse_sem_expr(&sem_src)?;
-    let SemNode::List(items) = parsed else {
-        return None;
-    };
-    let [SemNode::Atom(set_kw), SemNode::Atom(_dst), rhs] = items.as_slice() else {
-        return None;
-    };
-    if set_kw != "set" {
-        return None;
-    }
-
-    let mut counter = 0u32;
-    let mut lambda_params: Vec<Vec<String>> = Vec::new();
-    let (stmts, root_var) = sem_node_to_dag_stmts(rhs, &symbols, &mut lambda_params, &mut counter)?;
-    Some(quote! {
-        #(#stmts)*
-        #root_var
-    })
+    let ast = tir_symbolic::lang::parse(&src)?;
+    let splices = ast.splice_names();
+    Some(Sem { src, splices })
 }
 
 fn get_regions(expr: &Expr) -> Option<Vec<Region>> {

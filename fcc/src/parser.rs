@@ -232,8 +232,8 @@ where
 fn binop<'src, I, C, O>(child: C, op: O) -> impl Parser<'src, I, NodeId, Extra<'src>> + Clone
 where
     I: ValueInput<'src, Token = Token, Span = Span>,
-    C: Parser<'src, I, NodeId, Extra<'src>> + Clone,
-    O: Parser<'src, I, AstKind, Extra<'src>> + Clone,
+    C: Parser<'src, I, NodeId, Extra<'src>> + Clone + 'src,
+    O: Parser<'src, I, AstKind, Extra<'src>> + Clone + 'src,
 {
     child
         .clone()
@@ -250,6 +250,10 @@ where
                     .fold(first, |lhs, (op, rhs)| binary(st, op, lhs, rhs, tok))
             },
         )
+        // Type-erase each precedence level. Without this the levels nest into a
+        // single concrete combinator type whose drop-glue symbol grows to
+        // megabytes and overflows the macOS linker's symbol-name limit.
+        .boxed()
 }
 
 fn binary(st: &mut ParseState, op: AstKind, lhs: NodeId, rhs: NodeId, tok: usize) -> NodeId {

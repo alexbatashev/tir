@@ -360,20 +360,6 @@ pub struct If {
     pub span: Span,
 }
 
-/// `for VAR in START..END { body }`: a statement that runs `body` once for each
-/// integer in the half-open range `[START, END)`, with `VAR` bound to the current
-/// value. Bounds must be compile-time constants; the loop is unrolled before
-/// lowering, so it carries no runtime iteration.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
-pub struct For {
-    pub var: String,
-    pub start: Box<Expr>,
-    pub end: Box<Expr>,
-    pub body: Box<Expr>,
-    #[serde(skip_serializing)]
-    pub span: Span,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct Block {
     pub stmts: Vec<Expr>,
@@ -489,9 +475,6 @@ pub enum BuiltinFunction {
     ZExt,
     Load,
     Store,
-    /// `lane(vector, index)`: read one lane of a vector value. Used inside a
-    /// value-producing `for` loop to express elementwise vector behavior.
-    Lane,
     /// `trap(cause)`: raise a synchronous exception (e.g. ecall/ebreak). An
     /// effect-only builtin handled directly by codegen; it produces no value.
     Trap,
@@ -557,7 +540,6 @@ pub enum Expr {
     Field(Field),
     Ident(Ident),
     If(If),
-    For(For),
     IndexAccess(IndexAccess),
     Path(Path),
     Lit(Lit),
@@ -568,306 +550,6 @@ pub enum Expr {
     Invalid,
 }
 
-/// Evaluate a compile-time integer expression used as a `for` loop bound.
-/// Supports literals, known constants (`consts`: ISA/instruction parameters and
-/// enclosing loop variables), `self.PARAM`, and basic integer arithmetic.
-pub(crate) fn eval_const_int(expr: &Expr, consts: &HashMap<String, i64>) -> Option<i64> {
-    match expr {
-        Expr::Lit(Lit::Int(li)) => Some(li.parse_u64() as i64),
-        Expr::Ident(id) => consts.get(&id.name).copied(),
-        Expr::Field(f) => match &*f.base {
-            Expr::Ident(b) if b.name == "self" => consts.get(&f.member).copied(),
-            _ => None,
-        },
-        Expr::Unary(u) => match u.op {
-            UnOp::BitwiseNot => Some(!eval_const_int(&u.x, consts)?),
-        },
-        Expr::Binary(b) => {
-            let l = eval_const_int(&b.lhs, consts)?;
-            let r = eval_const_int(&b.rhs, consts)?;
-            Some(match b.op {
-                BinOp::Add => l + r,
-                BinOp::Sub => l - r,
-                BinOp::Mul => l * r,
-                BinOp::Div | BinOp::UnsignedDiv if r != 0 => l / r,
-                _ => return None,
-            })
-        }
-        _ => None,
-    }
-}
-
-/// Replace every `Ident` named `var` with the integer literal `value`.
-fn subst_ident(expr: &mut Expr, var: &str, value: i64) {
-    match expr {
-        Expr::Ident(id) if id.name == var => {
-            *expr = Expr::Lit(Lit::Int(LitInt::new(value.to_string(), id.span)));
-        }
-        Expr::Ident(_)
-        | Expr::Lit(_)
-        | Expr::Path(_)
-        | Expr::BuiltinFunction(_)
-        | Expr::Invalid => {}
-        Expr::Assign(a) => {
-            subst_ident(&mut a.dest, var, value);
-            subst_ident(&mut a.value, var, value);
-        }
-        Expr::Binary(b) => {
-            subst_ident(&mut b.lhs, var, value);
-            subst_ident(&mut b.rhs, var, value);
-        }
-        Expr::Unary(u) => subst_ident(&mut u.x, var, value),
-        Expr::Block(b) => {
-            for stmt in &mut b.stmts {
-                subst_ident(stmt, var, value);
-            }
-        }
-        Expr::Call(c) => {
-            subst_ident(&mut c.callee, var, value);
-            for arg in &mut c.arguments {
-                subst_ident(arg, var, value);
-            }
-        }
-        Expr::Field(f) => subst_ident(&mut f.base, var, value),
-        Expr::If(i) => {
-            subst_ident(&mut i.cond, var, value);
-            subst_ident(&mut i.then, var, value);
-            if let Some(e) = &mut i.else_ {
-                subst_ident(e, var, value);
-            }
-        }
-        Expr::For(f) => {
-            subst_ident(&mut f.start, var, value);
-            subst_ident(&mut f.end, var, value);
-            // A nested loop reusing the same variable name shadows the outer one.
-            if f.var != var {
-                subst_ident(&mut f.body, var, value);
-            }
-        }
-        Expr::IndexAccess(i) => subst_ident(&mut i.base, var, value),
-        Expr::Slice(s) => subst_ident(&mut s.base, var, value),
-        Expr::Try(t) => {
-            subst_ident(&mut t.body, var, value);
-            for h in &mut t.handlers {
-                subst_ident(&mut h.body, var, value);
-            }
-        }
-        Expr::Lambda(l) => {
-            // A parameter sharing the substituted name shadows it inside the body.
-            if !l.params.iter().any(|p| p == var) {
-                subst_ident(&mut l.body, var, value);
-            }
-        }
-    }
-}
-
-/// Unroll a `for` loop into a `Block` of its body repeated once per iteration,
-/// each copy binding the loop variable to its concrete value. Returns `None`
-/// when the bounds are not compile-time constants.
-pub(crate) fn unroll_for(f: &For, consts: &HashMap<String, i64>) -> Option<Expr> {
-    let start = eval_const_int(&f.start, consts)?;
-    let end = eval_const_int(&f.end, consts)?;
-    let mut stmts = Vec::new();
-    for i in start..end {
-        let mut body = (*f.body).clone();
-        subst_ident(&mut body, &f.var, i);
-        stmts.push(body);
-    }
-    Some(Expr::Block(Block {
-        stmts,
-        last_expr_return: false,
-        span: f.span,
-    }))
-}
-
-/// Whether two expressions name the same assignment target (register operand,
-/// register path, or status-flag field), ignoring spans.
-fn same_target(a: &Expr, b: &Expr) -> bool {
-    match (a, b) {
-        (Expr::Ident(x), Expr::Ident(y)) => x.name == y.name,
-        (Expr::Path(x), Expr::Path(y)) => x.base == y.base && x.remainder == y.remainder,
-        (Expr::Field(x), Expr::Field(y)) => x.member == y.member && same_target(&x.base, &y.base),
-        _ => false,
-    }
-}
-
-impl For {
-    /// If the body is a single assignment `dest = step` (optionally wrapped in a
-    /// one-statement block), return `(dest, step)`. This accumulator form is what
-    /// lowers to a first-class `Loop` node; other shapes fall back to unrolling.
-    pub(crate) fn accumulator(&self) -> Option<(&Expr, &Expr)> {
-        let body = match &*self.body {
-            Expr::Block(b) if b.stmts.len() == 1 => &b.stmts[0],
-            other => other,
-        };
-        match body {
-            Expr::Assign(a) => Some((&a.dest, &a.value)),
-            _ => None,
-        }
-    }
-
-    /// If the body is a single value-producing expression (not an assignment),
-    /// the loop is a vector map: `elem` is that per-lane expression. This is the
-    /// counterpart of `accumulator`, lowering to a first-class `VectorMap` node.
-    pub(crate) fn map_elem(&self) -> Option<&Expr> {
-        let body = match &*self.body {
-            Expr::Block(b) if b.stmts.len() == 1 => &b.stmts[0],
-            other => other,
-        };
-        match body {
-            Expr::Assign(_) | Expr::Invalid => None,
-            // Effect-only statements (a bare `store`/`trap`) produce no lane value,
-            // so they are unrolled as statements rather than mapped.
-            Expr::Call(c)
-                if matches!(
-                    &*c.callee,
-                    Expr::BuiltinFunction(BuiltinFunction::Store | BuiltinFunction::Trap)
-                ) =>
-            {
-                None
-            }
-            elem => Some(elem),
-        }
-    }
-
-    fn as_sema_expr<
-        G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
-    >(
-        &self,
-        ctx: &mut SemaExprLoweringCtx<'_, G>,
-    ) -> tir::graph::NodeId {
-        let Some((dest, step)) = self.accumulator() else {
-            // A value-producing loop is a vector map: `elem` lowered once with the
-            // loop variable bound to the induction value, building a `VectorMap`
-            // whose lane count is the (zero-based) range length.
-            if let Some(elem) = self.map_elem() {
-                // The lane count must be a compile-time constant so the lowered
-                // pattern carries a concrete vector width that instruction
-                // selection can match. The induction value ranges `0..count`, so
-                // the loop must start at zero for `IndVar` to equal the loop
-                // variable; otherwise fall back to lowering the bound expression.
-                let mut consts = ctx.params.clone();
-                for (name, value) in &ctx.isa_consts {
-                    consts.entry(name.clone()).or_insert(*value);
-                }
-                let count = match (
-                    eval_const_int(&self.start, &consts),
-                    eval_const_int(&self.end, &consts),
-                ) {
-                    (Some(0), Some(end)) if end >= 0 => {
-                        ctx.add_int_const(tir::utils::APInt::new(32, end as u64))
-                    }
-                    _ => self.end.lower_with_ctx(ctx),
-                };
-                let prev = ctx.loop_ctx.take();
-                // A non-matching dest (Invalid) means `Acc` is never produced; only
-                // the loop variable maps to the induction value.
-                ctx.loop_ctx = Some((self.var.clone(), Expr::Invalid));
-                let elem_node = elem.lower_with_ctx(ctx);
-                ctx.loop_ctx = prev;
-                return ctx.add_node(tir::sem_expr::ExprKind::VectorMap, &[count, elem_node]);
-            }
-            // Non-accumulator statement loops are not first-class values: unroll
-            // constant bounds, otherwise the lowering cannot represent them.
-            return match unroll_for(self, ctx.params) {
-                Some(block) => block.lower_with_ctx(ctx),
-                None => {
-                    ctx.had_error = true;
-                    ctx.add_int_const(tir::utils::APInt::new(64, 0))
-                }
-            };
-        };
-
-        let start = self.start.lower_with_ctx(ctx);
-        let end = self.end.lower_with_ctx(ctx);
-        // `init` is the accumulator's value at loop entry, lowered outside the
-        // loop context so the destination reads its surrounding value.
-        let init = dest.lower_with_ctx(ctx);
-
-        let prev = ctx.loop_ctx.take();
-        ctx.loop_ctx = Some((self.var.clone(), dest.clone()));
-        let step_node = step.lower_with_ctx(ctx);
-        ctx.loop_ctx = prev;
-
-        ctx.add_node(
-            tir::sem_expr::ExprKind::Loop,
-            &[start, end, init, step_node],
-        )
-    }
-}
-
-impl Expr {
-    /// Return a clone of this expression with every `for` loop fully unrolled
-    /// (recursively). Loops whose bounds are not constant under `consts` are left
-    /// in place.
-    pub(crate) fn expand_loops(&self, consts: &HashMap<String, i64>) -> Expr {
-        let mut out = self.clone();
-        expand_loops_inplace(&mut out, consts);
-        out
-    }
-}
-
-fn expand_loops_inplace(expr: &mut Expr, consts: &HashMap<String, i64>) {
-    match expr {
-        Expr::For(f) => {
-            expand_loops_inplace(&mut f.start, consts);
-            expand_loops_inplace(&mut f.end, consts);
-            expand_loops_inplace(&mut f.body, consts);
-            // Accumulator loops lower to a `Loop` node and value-producing loops to
-            // a `VectorMap`, so leave both intact; only statement loops are
-            // unrolled here.
-            if f.accumulator().is_none()
-                && f.map_elem().is_none()
-                && let Some(block) = unroll_for(f, consts)
-            {
-                *expr = block;
-            }
-        }
-        Expr::Ident(_)
-        | Expr::Lit(_)
-        | Expr::Path(_)
-        | Expr::BuiltinFunction(_)
-        | Expr::Invalid => {}
-        Expr::Assign(a) => {
-            expand_loops_inplace(&mut a.dest, consts);
-            expand_loops_inplace(&mut a.value, consts);
-        }
-        Expr::Binary(b) => {
-            expand_loops_inplace(&mut b.lhs, consts);
-            expand_loops_inplace(&mut b.rhs, consts);
-        }
-        Expr::Unary(u) => expand_loops_inplace(&mut u.x, consts),
-        Expr::Block(b) => {
-            for stmt in &mut b.stmts {
-                expand_loops_inplace(stmt, consts);
-            }
-        }
-        Expr::Call(c) => {
-            expand_loops_inplace(&mut c.callee, consts);
-            for arg in &mut c.arguments {
-                expand_loops_inplace(arg, consts);
-            }
-        }
-        Expr::Field(f) => expand_loops_inplace(&mut f.base, consts),
-        Expr::If(i) => {
-            expand_loops_inplace(&mut i.cond, consts);
-            expand_loops_inplace(&mut i.then, consts);
-            if let Some(e) = &mut i.else_ {
-                expand_loops_inplace(e, consts);
-            }
-        }
-        Expr::IndexAccess(i) => expand_loops_inplace(&mut i.base, consts),
-        Expr::Slice(s) => expand_loops_inplace(&mut s.base, consts),
-        Expr::Try(t) => {
-            expand_loops_inplace(&mut t.body, consts);
-            for h in &mut t.handlers {
-                expand_loops_inplace(&mut h.body, consts);
-            }
-        }
-        Expr::Lambda(l) => expand_loops_inplace(&mut l.body, consts),
-    }
-}
-
 pub struct SemaLowering {
     pub root: tir::graph::NodeId,
     pub variable_symbols: HashMap<String, u32>,
@@ -876,7 +558,7 @@ pub struct SemaLowering {
 
 struct SemaExprLoweringCtx<
     'a,
-    G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
+    G: tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
 > {
     graph: &'a mut G,
     params: &'a HashMap<String, i64>,
@@ -894,17 +576,13 @@ struct SemaExprLoweringCtx<
     register_symbols: HashMap<(String, u32), u32>,
     variable_symbols: HashMap<String, u32>,
     had_error: bool,
-    /// Active while lowering a loop's `step`: `(induction-variable name, dest)`.
-    /// References to `dest` lower to the loop accumulator and references to the
-    /// induction variable to the loop counter, so the body becomes a `Loop` node.
-    loop_ctx: Option<(String, Expr)>,
     /// Stack of `map`/`reduce` lambda parameter names, innermost last. An `Ident`
     /// matching a parameter of the innermost lambda lowers to an `Arg` node whose
     /// index is the parameter's position.
     lambda_params: Vec<Vec<String>>,
 }
 
-impl<'a, G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>>
+impl<'a, G: tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>>
     SemaExprLoweringCtx<'a, G>
 {
     fn new(graph: &'a mut G, params: &'a HashMap<String, i64>) -> Self {
@@ -917,7 +595,6 @@ impl<'a, G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_e
             register_symbols: HashMap::new(),
             variable_symbols: HashMap::new(),
             had_error: false,
-            loop_ctx: None,
             lambda_params: Vec::new(),
         }
     }
@@ -936,14 +613,13 @@ impl<'a, G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_e
             register_symbols: HashMap::new(),
             variable_symbols: HashMap::new(),
             had_error: false,
-            loop_ctx: None,
             lambda_params: Vec::new(),
         }
     }
 
     fn add_node(
         &mut self,
-        kind: tir::sem_expr::ExprKind,
+        kind: tir::sem::SymKind,
         children: &[tir::graph::NodeId],
     ) -> tir::graph::NodeId {
         let node = self.graph.add_node(kind);
@@ -955,23 +631,23 @@ impl<'a, G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_e
 
     fn add_leaf(
         &mut self,
-        kind: tir::sem_expr::ExprKind,
-        data: tir::sem_expr::ExprPayload,
+        kind: tir::sem::SymKind,
+        data: tir::sem::SymPayload<tir::ValueId>,
     ) -> tir::graph::NodeId {
         let node = self.graph.add_node(kind);
         self.graph.set_leaf_data(node, data);
         node
     }
 
-    fn add_int_const(&mut self, value: tir::utils::APInt) -> tir::graph::NodeId {
+    fn add_int_const(&mut self, value: tir_adt::APInt) -> tir::graph::NodeId {
         self.add_leaf(
-            tir::sem_expr::ExprKind::Constant,
-            tir::sem_expr::ExprPayload::Int(value),
+            tir::sem::SymKind::Constant,
+            tir::sem::SymPayload::Int(value),
         )
     }
 
     fn add_bool_const(&mut self, value: bool) -> tir::graph::NodeId {
-        self.add_int_const(tir::utils::APInt::new(1, value as u64))
+        self.add_int_const(tir_adt::APInt::new(1, value as u64))
     }
 
     fn alloc_variable_symbol(&mut self) -> u32 {
@@ -1024,7 +700,7 @@ impl<'a, G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_e
         // (e.g. addw = sext(extract(rs1+rs2, 31, 0), XLEN)) instead of pattern-
         // matching a fragile arithmetic expansion.
         self.add_node(
-            tir::sem_expr::ExprKind::Extract,
+            tir::sem::SymKind::Extract,
             &[input_node, high_node, low_node],
         )
     }
@@ -1104,31 +780,11 @@ impl From<If> for Expr {
 
 impl Expr {
     fn lower_with_ctx<
-        G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
+        G: tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
     >(
         &self,
         ctx: &mut SemaExprLoweringCtx<'_, G>,
     ) -> tir::graph::NodeId {
-        // Inside a loop's `step`, references to the accumulator and induction
-        // variable become the dedicated leaf nodes the `Loop` reads.
-        let loop_leaf = ctx
-            .loop_ctx
-            .as_ref()
-            .map(|(var, dest)| {
-                if same_target(self, dest) {
-                    1u8
-                } else if matches!(self, Expr::Ident(id) if &id.name == var) {
-                    2
-                } else {
-                    0
-                }
-            })
-            .unwrap_or(0);
-        match loop_leaf {
-            1 => return ctx.graph.add_node(tir::sem_expr::ExprKind::Acc),
-            2 => return ctx.graph.add_node(tir::sem_expr::ExprKind::IndVar),
-            _ => {}
-        }
         // Inside a `map`/`reduce` lambda, a reference to one of its parameters
         // lowers to an `Arg` leaf carrying the parameter's position.
         if let Expr::Ident(id) = self
@@ -1136,8 +792,8 @@ impl Expr {
             && let Some(idx) = params.iter().position(|p| p == &id.name)
         {
             return ctx.add_leaf(
-                tir::sem_expr::ExprKind::Arg,
-                tir::sem_expr::ExprPayload::Int(tir::utils::APInt::new(32, idx as u64)),
+                tir::sem::SymKind::Arg,
+                tir::sem::SymPayload::Int(tir_adt::APInt::new(32, idx as u64)),
             );
         }
         match self {
@@ -1149,7 +805,6 @@ impl Expr {
             Expr::Field(x) => x.as_sema_expr(ctx),
             Expr::Ident(x) => x.as_sema_expr(ctx),
             Expr::If(x) => x.as_sema_expr(ctx),
-            Expr::For(f) => f.as_sema_expr(ctx),
             Expr::IndexAccess(x) => x.as_sema_expr(ctx),
             Expr::Path(x) => x.as_sema_expr(ctx),
             Expr::Lit(x) => x.as_sema_expr(ctx),
@@ -1168,8 +823,8 @@ impl Expr {
     pub fn as_sema_expr(
         &self,
         g: &mut impl tir::graph::MutDag<
-            Node = tir::sem_expr::ExprKind,
-            Leaf = tir::sem_expr::ExprPayload,
+            Node = tir::sem::SymKind,
+            Leaf = tir::sem::SymPayload<tir::ValueId>,
         >,
     ) -> tir::graph::NodeId {
         self.as_sema_expr_with_params(g, &HashMap::new())
@@ -1178,8 +833,8 @@ impl Expr {
     pub(crate) fn as_sema_expr_with_params(
         &self,
         g: &mut impl tir::graph::MutDag<
-            Node = tir::sem_expr::ExprKind,
-            Leaf = tir::sem_expr::ExprPayload,
+            Node = tir::sem::SymKind,
+            Leaf = tir::sem::SymPayload<tir::ValueId>,
         >,
         params: &HashMap<String, i64>,
     ) -> tir::graph::NodeId {
@@ -1193,8 +848,8 @@ impl Expr {
     pub fn lower_to_sema(
         &self,
         g: &mut impl tir::graph::MutDag<
-            Node = tir::sem_expr::ExprKind,
-            Leaf = tir::sem_expr::ExprPayload,
+            Node = tir::sem::SymKind,
+            Leaf = tir::sem::SymPayload<tir::ValueId>,
         >,
         params: &HashMap<String, i64>,
     ) -> Option<SemaLowering> {
@@ -1216,8 +871,8 @@ impl Expr {
     pub fn lower_to_sema_with_isa(
         &self,
         g: &mut impl tir::graph::MutDag<
-            Node = tir::sem_expr::ExprKind,
-            Leaf = tir::sem_expr::ExprPayload,
+            Node = tir::sem::SymKind,
+            Leaf = tir::sem::SymPayload<tir::ValueId>,
         >,
         params: &HashMap<String, i64>,
         isa_consts: &HashMap<String, i64>,
@@ -1244,8 +899,8 @@ impl Expr {
     pub fn lower_to_sema_with_registers(
         &self,
         g: &mut impl tir::graph::MutDag<
-            Node = tir::sem_expr::ExprKind,
-            Leaf = tir::sem_expr::ExprPayload,
+            Node = tir::sem::SymKind,
+            Leaf = tir::sem::SymPayload<tir::ValueId>,
         >,
         params: &HashMap<String, i64>,
         register_indices: &HashMap<(String, String), u32>,
@@ -1265,7 +920,7 @@ impl Expr {
 
 impl Assign {
     fn as_sema_expr<
-        G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
+        G: tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
     >(
         &self,
         ctx: &mut SemaExprLoweringCtx<'_, G>,
@@ -1276,7 +931,7 @@ impl Assign {
 
 impl Lit {
     fn as_sema_expr<
-        G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
+        G: tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
     >(
         &self,
         ctx: &mut SemaExprLoweringCtx<'_, G>,
@@ -1291,7 +946,7 @@ impl Lit {
                     64 - value.leading_zeros()
                 };
 
-                ctx.add_int_const(tir::utils::APInt::new(width, value))
+                ctx.add_int_const(tir_adt::APInt::new(width, value))
             }
             Lit::Str(_) => panic!("string literals are not supported in semantic expressions"),
         }
@@ -1300,7 +955,7 @@ impl Lit {
 
 impl Ident {
     fn as_sema_expr<
-        G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
+        G: tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
     >(
         &self,
         ctx: &mut SemaExprLoweringCtx<'_, G>,
@@ -1321,15 +976,15 @@ impl Ident {
             };
 
             if value < 0 {
-                ctx.add_int_const(tir::utils::APInt::new_signed(width, value))
+                ctx.add_int_const(tir_adt::APInt::new_signed(width, value))
             } else {
-                ctx.add_int_const(tir::utils::APInt::new(width, abs_value))
+                ctx.add_int_const(tir_adt::APInt::new(width, abs_value))
             }
         } else {
             let id = ctx.get_or_create_variable_symbol(self.name.clone());
             ctx.add_leaf(
-                tir::sem_expr::ExprKind::Symbol,
-                tir::sem_expr::ExprPayload::SymbolId(id),
+                tir::sem::SymKind::Symbol,
+                tir::sem::SymPayload::SymbolId(id),
             )
         }
     }
@@ -1337,14 +992,14 @@ impl Ident {
 
 impl Path {
     fn as_sema_expr<
-        G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
+        G: tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
     >(
         &self,
         ctx: &mut SemaExprLoweringCtx<'_, G>,
     ) -> tir::graph::NodeId {
         if self.remainder.len() != 1 {
             ctx.had_error = true;
-            return ctx.add_int_const(tir::utils::APInt::new(64, 0));
+            return ctx.add_int_const(tir_adt::APInt::new(64, 0));
         }
 
         let reg_name = &self.remainder[0];
@@ -1365,20 +1020,20 @@ impl Path {
 
         let Some(number) = number else {
             ctx.had_error = true;
-            return ctx.add_int_const(tir::utils::APInt::new(64, 0));
+            return ctx.add_int_const(tir_adt::APInt::new(64, 0));
         };
 
         let symbol_id = ctx.get_or_create_register_symbol(self.base.clone(), number);
         ctx.add_leaf(
-            tir::sem_expr::ExprKind::Symbol,
-            tir::sem_expr::ExprPayload::SymbolId(symbol_id),
+            tir::sem::SymKind::Symbol,
+            tir::sem::SymPayload::SymbolId(symbol_id),
         )
     }
 }
 
 impl Field {
     fn as_sema_expr<
-        G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
+        G: tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
     >(
         &self,
         ctx: &mut SemaExprLoweringCtx<'_, G>,
@@ -1401,8 +1056,8 @@ impl Field {
             let symbol_id =
                 ctx.get_or_create_register_symbol(base_ident.name.clone(), register_number);
             ctx.add_leaf(
-                tir::sem_expr::ExprKind::Symbol,
-                tir::sem_expr::ExprPayload::SymbolId(symbol_id),
+                tir::sem::SymKind::Symbol,
+                tir::sem::SymPayload::SymbolId(symbol_id),
             )
         } else {
             panic!("register field access requires base to be an identifier")
@@ -1412,7 +1067,7 @@ impl Field {
 
 impl Binary {
     fn as_sema_expr<
-        G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
+        G: tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
     >(
         &self,
         ctx: &mut SemaExprLoweringCtx<'_, G>,
@@ -1420,7 +1075,7 @@ impl Binary {
         let lhs = self.lhs.lower_with_ctx(ctx);
         let rhs = self.rhs.lower_with_ctx(ctx);
 
-        use tir::sem_expr::ExprKind as K;
+        use tir::sem::SymKind as K;
 
         match self.op {
             BinOp::Add => ctx.add_node(K::Add, &[lhs, rhs]),
@@ -1450,12 +1105,12 @@ impl Binary {
 
 impl Unary {
     fn as_sema_expr<
-        G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
+        G: tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
     >(
         &self,
         ctx: &mut SemaExprLoweringCtx<'_, G>,
     ) -> tir::graph::NodeId {
-        use tir::sem_expr::ExprKind as K;
+        use tir::sem::SymKind as K;
 
         match self.op {
             UnOp::BitwiseNot => {
@@ -1470,11 +1125,11 @@ impl Unary {
                     let value = !(lit.parse_u64()) as i64;
                     return if value < 0 {
                         let width = 64 - value.unsigned_abs().leading_zeros() + 1;
-                        ctx.add_int_const(tir::utils::APInt::new_signed(width, value))
+                        ctx.add_int_const(tir_adt::APInt::new_signed(width, value))
                     } else {
                         let v = value as u64;
                         let width = if v == 0 { 1 } else { 64 - v.leading_zeros() };
-                        ctx.add_int_const(tir::utils::APInt::new(width, v))
+                        ctx.add_int_const(tir_adt::APInt::new(width, v))
                     };
                 }
 
@@ -1487,7 +1142,7 @@ impl Unary {
 
 impl If {
     fn as_sema_expr<
-        G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
+        G: tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
     >(
         &self,
         ctx: &mut SemaExprLoweringCtx<'_, G>,
@@ -1500,13 +1155,13 @@ impl If {
             ctx.add_bool_const(false)
         };
 
-        ctx.add_node(tir::sem_expr::ExprKind::If, &[cond, then_, else_])
+        ctx.add_node(tir::sem::SymKind::If, &[cond, then_, else_])
     }
 }
 
 impl Block {
     fn as_sema_expr<
-        G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
+        G: tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
     >(
         &self,
         ctx: &mut SemaExprLoweringCtx<'_, G>,
@@ -1524,7 +1179,7 @@ impl Block {
 
 impl Slice {
     fn as_sema_expr<
-        G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
+        G: tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
     >(
         &self,
         ctx: &mut SemaExprLoweringCtx<'_, G>,
@@ -1538,7 +1193,7 @@ impl Slice {
 
 impl IndexAccess {
     fn as_sema_expr<
-        G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
+        G: tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
     >(
         &self,
         ctx: &mut SemaExprLoweringCtx<'_, G>,
@@ -1551,7 +1206,7 @@ impl IndexAccess {
 
 impl Call {
     fn as_sema_expr<
-        G: tir::graph::MutDag<Node = tir::sem_expr::ExprKind, Leaf = tir::sem_expr::ExprPayload>,
+        G: tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
     >(
         &self,
         ctx: &mut SemaExprLoweringCtx<'_, G>,
@@ -1566,7 +1221,7 @@ impl Call {
                 let input = self.arguments[0].lower_with_ctx(ctx);
                 let min = self.arguments[1].lower_with_ctx(ctx);
                 let max = self.arguments[2].lower_with_ctx(ctx);
-                ctx.add_node(tir::sem_expr::ExprKind::Clamp, &[input, min, max])
+                ctx.add_node(tir::sem::SymKind::Clamp, &[input, min, max])
             }
             BuiltinFunction::Extract => {
                 assert!(self.arguments.len() == 3, "extract requires 3 arguments");
@@ -1578,44 +1233,35 @@ impl Call {
             BuiltinFunction::Log2Ceil => {
                 assert!(self.arguments.len() == 1, "log2Ceil requires 1 argument");
                 let input = self.arguments[0].lower_with_ctx(ctx);
-                ctx.add_node(tir::sem_expr::ExprKind::Log2Ceil, &[input])
-            }
-            BuiltinFunction::Lane => {
-                assert!(self.arguments.len() == 2, "lane requires 2 arguments");
-                let vector = self.arguments[0].lower_with_ctx(ctx);
-                let index = self.arguments[1].lower_with_ctx(ctx);
-                ctx.add_node(tir::sem_expr::ExprKind::Lane, &[vector, index])
+                ctx.add_node(tir::sem::SymKind::Log2Ceil, &[input])
             }
             BuiltinFunction::SExt => {
                 assert!(self.arguments.len() == 2, "sext requires 2 arguments");
                 let input = self.arguments[0].lower_with_ctx(ctx);
                 let width = self.arguments[1].lower_with_ctx(ctx);
-                ctx.add_node(tir::sem_expr::ExprKind::SExt, &[input, width])
+                ctx.add_node(tir::sem::SymKind::SExt, &[input, width])
             }
             BuiltinFunction::ZExt => {
                 assert!(self.arguments.len() == 2, "zext requires 2 arguments");
                 let input = self.arguments[0].lower_with_ctx(ctx);
                 let width = self.arguments[1].lower_with_ctx(ctx);
-                ctx.add_node(tir::sem_expr::ExprKind::ZExt, &[input, width])
+                ctx.add_node(tir::sem::SymKind::ZExt, &[input, width])
             }
             BuiltinFunction::Load => {
                 assert!(self.arguments.len() == 3, "load requires 3 arguments");
                 let address = self.arguments[0].lower_with_ctx(ctx);
                 let bytes = self.arguments[1].lower_with_ctx(ctx);
                 let metadata = self.arguments[2].lower_with_ctx(ctx);
-                ctx.add_node(
-                    tir::sem_expr::ExprKind::LoadMemory,
-                    &[address, bytes, metadata],
-                )
+                ctx.add_node(tir::sem::SymKind::LoadMemory, &[address, bytes, metadata])
             }
             BuiltinFunction::Store => {
                 assert!(self.arguments.len() == 3, "store requires 3 arguments");
                 let address = self.arguments[0].lower_with_ctx(ctx);
                 let bytes = self.arguments[1].lower_with_ctx(ctx);
                 let value = self.arguments[2].lower_with_ctx(ctx);
-                let address_space = ctx.add_int_const(tir::utils::APInt::new(1, 0));
+                let address_space = ctx.add_int_const(tir_adt::APInt::new(1, 0));
                 ctx.add_node(
-                    tir::sem_expr::ExprKind::StoreMemory,
+                    tir::sem::SymKind::StoreMemory,
                     &[address, bytes, value, address_space],
                 )
             }
@@ -1624,36 +1270,36 @@ impl Call {
             // it in a value position.
             BuiltinFunction::Trap => {
                 ctx.had_error = true;
-                ctx.add_int_const(tir::utils::APInt::new(64, 0))
+                ctx.add_int_const(tir_adt::APInt::new(64, 0))
             }
             BuiltinFunction::Split => {
                 assert!(self.arguments.len() == 2, "split requires 2 arguments");
                 let bits = self.arguments[0].lower_with_ctx(ctx);
                 let n = self.arguments[1].lower_with_ctx(ctx);
-                ctx.add_node(tir::sem_expr::ExprKind::Split, &[bits, n])
+                ctx.add_node(tir::sem::SymKind::Split, &[bits, n])
             }
             BuiltinFunction::Concat => {
                 assert!(self.arguments.len() == 1, "concat requires 1 argument");
                 let iter = self.arguments[0].lower_with_ctx(ctx);
-                ctx.add_node(tir::sem_expr::ExprKind::IterConcat, &[iter])
+                ctx.add_node(tir::sem::SymKind::IterConcat, &[iter])
             }
             BuiltinFunction::Zip => {
                 assert!(self.arguments.len() == 2, "zip requires 2 arguments");
                 let lhs = self.arguments[0].lower_with_ctx(ctx);
                 let rhs = self.arguments[1].lower_with_ctx(ctx);
-                ctx.add_node(tir::sem_expr::ExprKind::Zip, &[lhs, rhs])
+                ctx.add_node(tir::sem::SymKind::Zip, &[lhs, rhs])
             }
             BuiltinFunction::Map => {
                 assert!(self.arguments.len() == 2, "map requires 2 arguments");
                 let iter = self.arguments[0].lower_with_ctx(ctx);
                 let body = ctx.lower_lambda_body(&self.arguments[1]);
-                ctx.add_node(tir::sem_expr::ExprKind::Map, &[iter, body])
+                ctx.add_node(tir::sem::SymKind::Map, &[iter, body])
             }
             BuiltinFunction::Reduce => {
                 assert!(self.arguments.len() == 2, "reduce requires 2 arguments");
                 let iter = self.arguments[0].lower_with_ctx(ctx);
                 let body = ctx.lower_lambda_body(&self.arguments[1]);
-                ctx.add_node(tir::sem_expr::ExprKind::Reduce, &[iter, body])
+                ctx.add_node(tir::sem::SymKind::Reduce, &[iter, body])
             }
         }
     }
