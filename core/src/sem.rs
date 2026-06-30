@@ -43,10 +43,8 @@ pub fn fold_with_sem(op: &dyn Operation, values: &[Value]) -> Option<Value> {
 
 // ── APInt boundary helpers ──────────────────────────────────────────────────
 //
-// The interpreter's integer type is `tir_adt::APInt`, but the machine interface
-// (`MachineContext`) and core IR still use `crate::utils::APInt`. These helpers
-// bridge the two so TMDL-generated backend code can construct/consume sem values
-// without depending on `tir-adt` directly.
+// These let TMDL-generated backend code construct and consume sem values without
+// naming `tir-adt` directly.
 
 /// An integer payload literal for graph construction (`signed` picks the
 /// constructor); used by TMDL codegen in place of a raw `APInt`.
@@ -76,11 +74,11 @@ pub fn int_value(width: u32, value: u64) -> Value {
 
 /// Wrap a machine-register `APInt` (e.g. from `MachineContext::read_register`) as
 /// an interpreter value.
-pub fn value_from_register(v: crate::utils::APInt) -> Value {
-    Value::Int(tir_adt::APInt::new(v.width(), v.to_u64()).with_signed(v.is_signed()))
+pub fn value_from_register(v: tir_adt::APInt) -> Value {
+    Value::Int(v)
 }
 
 /// Convert an interpreter integer back to a machine-register `APInt` for write-back.
-pub fn register_from_int(v: tir_adt::APInt) -> crate::utils::APInt {
-    crate::utils::APInt::new(v.width(), v.to_u64()).with_signed(v.is_signed())
+pub fn register_from_int(v: tir_adt::APInt) -> tir_adt::APInt {
+    v
 }

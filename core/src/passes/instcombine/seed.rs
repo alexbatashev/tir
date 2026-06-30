@@ -1,7 +1,5 @@
-//! Seeds the e-graph from gated SSA: each [`GateNode`] maps straight to a [`Node`].
-//! Inputs and gates reuse the `GateNode` verbatim; an op becomes a `Node::Op` keyed on
-//! its value-signature (a constant op becomes a `Node::Const`). The graph's only cycle
-//! is a μ gate's latch back-edge, broken with a placeholder.
+//! Seeds the e-graph from gated SSA: each [`GateNode`] maps to a [`Node`] (op → `Node::Op`,
+//! constant → `Node::Const`). The only cycle, a μ gate's latch back-edge, is broken with a placeholder.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -14,8 +12,7 @@ use crate::{BlockId, Commutative, ConstantLike, Context, OpId, OpInstance, Value
 
 use super::node::Node;
 
-/// The seeded e-graph and the maps the driver needs: the class of each value, and the
-/// block of each block argument (for the write-back dominance check).
+/// The seeded e-graph plus the driver's maps: each value's class, and each block argument's block.
 pub struct Seeded {
     pub eg: EGraph<Node>,
     pub value_class: HashMap<ValueId, Id>,
@@ -107,21 +104,19 @@ impl Seeder<'_> {
             return self.eg.add(Node::seeded(&instance, ty, args));
         }
 
-        // A multi-result or effectful op is an opaque input leaf for the one of its
-        // results this node stands for.
+        // A multi-result or effectful op is an opaque input leaf for the result this node stands for.
         let value = instance
             .results
             .iter()
             .copied()
             .find(|&r| self.gsa.node_of(r) == Some(n))
             .expect("an op node is one of its op's results");
-        self.eg.add(Node::Gate(GateNode::Input(value), Vec::new()))
+        self.eg.add(Node::input(value))
     }
 
-    /// μ gate: pre-register a placeholder so the latch's back-edge resolves to it
-    /// instead of recursing forever, then add the real μ and merge.
+    /// μ gate: pre-register a placeholder so the latch back-edge resolves to it instead of recursing, then add the real μ and merge.
     fn seed_mu(&mut self, n: NodeId, value: ValueId) -> Id {
-        let placeholder = self.eg.add(Node::Gate(GateNode::Input(value), Vec::new()));
+        let placeholder = self.eg.add(Node::input(value));
         self.id_of.insert(n, placeholder);
         let args = self.kids(n);
         let mu = self.eg.add(Node::Gate(GateNode::Mu { value }, args));
@@ -130,8 +125,7 @@ impl Seeder<'_> {
         placeholder
     }
 
-    /// The e-classes of `n`'s children, in edge order. Collected first so the gsa
-    /// borrow is released before the recursive `seed` calls.
+    /// The e-classes of `n`'s children, in edge order; collected first to release the gsa borrow before recursing.
     fn kids(&mut self, n: NodeId) -> Vec<Id> {
         let children: Vec<NodeId> = self.gsa.children(n).collect();
         children.into_iter().map(|c| self.seed(c)).collect()
@@ -145,8 +139,7 @@ impl Seeder<'_> {
     }
 }
 
-/// A pure value op the e-graph may reason about: one result, no regions, and a
-/// declared semantic expression (so it computes a value with no side effects).
+/// A pure value op the e-graph may reason about: one result, no regions, and a declared semantic expression.
 fn is_pure_value(instance: &Arc<OpInstance>) -> bool {
     instance.results.len() == 1
         && instance.regions.is_empty()

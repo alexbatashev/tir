@@ -1,11 +1,5 @@
-//! Bit-blasting: encode a lowered QF_BV + Bool formula graph as CNF over a
-//! [`crate::sat::Solver`].
-//!
-//! Each graph node is given a little-endian vector of literals (`bits[i][0]` is
-//! the least-significant bit). Nodes are processed in index order; the lowering
-//! emits children before parents, so every operand's bits already exist when a
-//! node is reached. The root node is one bit wide — asserting it true is the
-//! satisfiability query.
+//! Bit-blast a lowered QF_BV + Bool formula graph to CNF over a [`crate::sat::Solver`].
+//! Node bit vectors are little-endian (bit 0 = LSB); operands precede their parents.
 
 mod arith;
 #[cfg(test)]
@@ -19,7 +13,6 @@ use tir_graph::{Dag, GenericDag, NodeId};
 use crate::lang::{SymKind, SymPayload};
 use crate::sat::{Lit, SatResult, Solver};
 
-/// Which shift an encoded node performs.
 #[derive(Clone, Copy)]
 pub(crate) enum Shift {
     Left,
@@ -30,11 +23,9 @@ pub(crate) enum Shift {
 /// Why a formula could not be bit-blasted.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BitblastError {
-    /// A node kind outside the QF_BV + Bool subset (iterators, memory, fp).
+    /// Node kind outside the QF_BV + Bool subset (iterators, memory, fp).
     Unsupported(SymKind),
-    /// A node whose width the lowering left undetermined.
     UnknownWidth(usize),
-    /// An index/width operand that was not a concrete constant.
     BadConstant(usize),
 }
 
@@ -50,10 +41,8 @@ impl Display for BitblastError {
 
 impl std::error::Error for BitblastError {}
 
-/// The CNF encoding of a formula: a populated solver, the literal standing for
-/// the (one-bit) root, each free symbol's bit vector keyed by `SymbolId`, and
-/// every node's bit vector indexed by node id (so a caller can read the value
-/// of an arbitrary sub-term back from a satisfying assignment).
+/// CNF encoding: solver, one-bit root literal, per-symbol bits keyed by
+/// `SymbolId`, and per-node bits indexed by node id (to read any sub-term back).
 pub struct Blasted {
     pub solver: Solver,
     pub root_bit: Lit,
@@ -62,8 +51,7 @@ pub struct Blasted {
 }
 
 impl Blasted {
-    /// Assert the root and solve. On `Sat`, reads each symbol's bits back from
-    /// the model into `(SymbolId -> value bits, little-endian)`.
+    /// Assert the root and solve, decoding each symbol's little-endian bits on `Sat`.
     pub fn solve(mut self) -> SolveOutcome {
         self.solver.add_clause(&[self.root_bit]);
         match self.solver.solve() {
@@ -83,7 +71,6 @@ impl Blasted {
         }
     }
 
-    /// The truth value of a literal in the solver's current assignment.
     pub fn lit_value(&self, l: Lit) -> bool {
         self.solver.value(l.var()) ^ l.is_negated()
     }
@@ -173,7 +160,10 @@ impl<'g, V> Blaster<'g, V> {
         self.bits[child.index()].clone()
     }
 
-    /// Encode one node into its bit vector.
+    fn binop_bits(&self, id: NodeId) -> (Vec<Lit>, Vec<Lit>) {
+        (self.child_bits(id, 0), self.child_bits(id, 1))
+    }
+
     fn encode(&mut self, id: NodeId) -> Result<Vec<Lit>, BitblastError> {
         use SymKind::*;
         let kind = *self.graph.get_kind(id);
@@ -185,12 +175,12 @@ impl<'g, V> Blaster<'g, V> {
             Or => self.bitwise(id, |s, a, b| s.gate_or(a, b)),
             Xor => self.bitwise(id, |s, a, b| s.gate_xor(a, b)),
             Add => {
-                let (a, b) = (self.child_bits(id, 0), self.child_bits(id, 1));
+                let (a, b) = self.binop_bits(id);
                 let z = self.zero();
                 Ok(self.adder(&a, &b, z).0)
             }
             Sub => {
-                let (a, b) = (self.child_bits(id, 0), self.child_bits(id, 1));
+                let (a, b) = self.binop_bits(id);
                 Ok(self.subtract(&a, &b))
             }
             Neg => {
@@ -198,7 +188,7 @@ impl<'g, V> Blaster<'g, V> {
                 Ok(self.negate(&a))
             }
             Mul => {
-                let (a, b) = (self.child_bits(id, 0), self.child_bits(id, 1));
+                let (a, b) = self.binop_bits(id);
                 Ok(self.multiply(&a, &b))
             }
             UDiv => self.divrem(id, false, true),
@@ -209,18 +199,17 @@ impl<'g, V> Blaster<'g, V> {
             ShiftRightLogic => self.shift(id, Shift::Logical),
             ShiftRightArithmetic => self.shift(id, Shift::Arithmetic),
             Eq => {
-                let (a, b) = (self.child_bits(id, 0), self.child_bits(id, 1));
+                let (a, b) = self.binop_bits(id);
                 Ok(vec![self.eq_bits(&a, &b)])
             }
             Ne => {
-                let (a, b) = (self.child_bits(id, 0), self.child_bits(id, 1));
+                let (a, b) = self.binop_bits(id);
                 let eq = self.eq_bits(&a, &b);
                 Ok(vec![eq.negate()])
             }
             ULt | ULe | UGt | UGe | Lt | Le | Gt | Ge => self.compare(id, kind),
             Concat => {
-                // Operand 0 occupies the high bits; little-endian result is the
-                // low operand's bits followed by the high operand's bits.
+                // Operand 0 is the high half; little-endian result is low bits then high.
                 let mut out = self.child_bits(id, 1);
                 out.extend(self.child_bits(id, 0));
                 Ok(out)
@@ -256,7 +245,7 @@ impl<'g, V> Blaster<'g, V> {
         id: NodeId,
         gate: impl Fn(&mut Self, Lit, Lit) -> Lit,
     ) -> Result<Vec<Lit>, BitblastError> {
-        let (a, b) = (self.child_bits(id, 0), self.child_bits(id, 1));
+        let (a, b) = self.binop_bits(id);
         Ok(a.iter().zip(&b).map(|(&x, &y)| gate(self, x, y)).collect())
     }
 

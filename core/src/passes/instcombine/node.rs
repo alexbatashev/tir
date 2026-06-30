@@ -1,10 +1,6 @@
-//! The e-node label. Seeded inputs and control-flow gates reuse GSA's [`GateNode`]
-//! verbatim; operations and constants are keyed by their *value-signature* (so two
-//! congruent ops collapse under hash-consing) — `GateNode`'s bare `OpId` can't supply
-//! that without the context, and rewrites also invent constants/ops that have no IR
-//! until extraction. Matching/hash-consing key on identity, including result type and
-//! value-affecting attributes; `cost`/`prov`/`origin` ride the node for extraction and
-//! write-back only.
+//! The e-node label: gates reuse GSA's [`GateNode`]; ops/constants key on their
+//! value-signature for hash-consing, while `cost`/`prov`/`origin` ride as
+//! extraction/write-back payload only.
 
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -14,16 +10,14 @@ use tir_symbolic::egraph::{ENode, Id};
 use crate::analysis::GateNode;
 use crate::attributes::{AttributeValue, NamedAttribute};
 use crate::utils::APInt;
-use crate::{OpCost, OpId, OpInstance, Operation, TypeId};
+use crate::{OpCost, OpId, OpInstance, Operation, TypeId, ValueId};
 
 /// The type sentinel an LHS template uses to mean "match any result type".
 fn any_type() -> TypeId {
     TypeId::from_number(u32::MAX)
 }
 
-/// Write-back source for an op node: an existing IR op (reuse its result) or one a
-/// rewrite invents (built by `Ruleset.emits[idx]` at extraction — never during
-/// saturation).
+/// Write-back source for an op node: reuse a seeded IR op, or a rewrite-introduced one built at extraction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OpProv {
     Seeded(OpId),
@@ -32,11 +26,9 @@ pub enum OpProv {
 
 #[derive(Clone, Debug)]
 pub enum Node {
-    /// A GSA input or gate (never `GateNode::Op`), with its operand classes. Identity
-    /// is the gate kind (and an input's `ValueId`); `args` disambiguate.
+    /// A GSA input or gate (never `GateNode::Op`); identity is the gate kind (+ input's `ValueId`).
     Gate(GateNode, Vec<Id>),
-    /// An operation, seeded or rewrite-introduced. Identity is `(dialect, name, result
-    /// type, value attributes)` + `args`; `cost`/`prov` are payload.
+    /// Identity is `(dialect, name, ty, attrs)` + `args`; `cost`/`prov` are payload.
     Op {
         dialect: &'static str,
         name: &'static str,
@@ -46,14 +38,12 @@ pub enum Node {
         prov: OpProv,
         args: Vec<Id>,
     },
-    /// A constant, seeded or folded. Identity is `(width, bits)`; `origin` reuses a
-    /// seeded constant op rather than rebuilding it.
+    /// Identity is `(width, bits)`; `origin` reuses a seeded constant op at write-back.
     Const { value: APInt, origin: Option<OpId> },
 }
 
 impl Node {
-    /// A seeded op: identity, `ty`, and value attributes from `instance`; `cost` from
-    /// its [`OpCost`] interface; provenance to reuse it at write-back.
+    /// A seeded op: identity/`ty`/attrs from `instance`, `cost` from its [`OpCost`] interface.
     pub fn seeded(instance: &Arc<OpInstance>, ty: TypeId, args: Vec<Id>) -> Self {
         let cost = instance
             .clone()
@@ -70,8 +60,7 @@ impl Node {
         }
     }
 
-    /// An op the rewrite at `idx` introduces (no attributes), with its result `ty` and
-    /// modeled `cost`.
+    /// An op the rewrite at `idx` introduces (no attributes), with result `ty` and modeled `cost`.
     pub fn introduced<O: Operation>(ty: TypeId, cost: u32, idx: usize, args: Vec<Id>) -> Self {
         Self::Op {
             dialect: O::dialect(),
@@ -84,10 +73,14 @@ impl Node {
         }
     }
 
-    /// An LHS-pattern template for op `O`: matched on dialect+name and arity, with a
-    /// wildcard type and no attributes.
+    /// An LHS-pattern template for op `O`: matched on dialect+name and arity, with a wildcard type.
     pub fn pattern<O: Operation>(args: Vec<Id>) -> Self {
         Self::introduced::<O>(any_type(), 0, usize::MAX, args)
+    }
+
+    /// A leaf gate standing for block-argument `value`.
+    pub fn input(value: ValueId) -> Self {
+        Node::Gate(GateNode::Input(value), Vec::new())
     }
 
     pub fn op_type(&self) -> Option<TypeId> {
@@ -98,9 +91,7 @@ impl Node {
     }
 }
 
-/// A gate's extraction cost is high, so whenever its class is proven equal to a
-/// concrete value that value is preferred and the merge is eliminated; when no
-/// equivalent exists the gate is the only node and is chosen regardless.
+/// High so extraction prefers any concrete value proven equal to a gate; chosen only when nothing else exists.
 const GATE_COST: u64 = 1 << 20;
 
 /// Extraction cost: an op's modeled cost, [`GATE_COST`] for gates, zero for constants.
@@ -156,9 +147,7 @@ impl ENode for Node {
         h.finish()
     }
 
-    /// Search-index bucket: like [`hash_cons`](Self::hash_cons) but omits an `Op`'s
-    /// result type, because an LHS template wildcards it ([`any_type`]) yet must land
-    /// in the same bucket as the concrete-typed ops it matches.
+    /// Search-index bucket: like [`hash_cons`](Self::hash_cons) but omits an `Op`'s result type, so a wildcard-typed ([`any_type`]) template buckets with the concrete ops it matches.
     fn op_key(&self) -> u64 {
         let Node::Op {
             dialect,
@@ -177,10 +166,7 @@ impl ENode for Node {
         h.finish()
     }
 
-    /// Operator identity only. `Op` keys on dialect+name, result type (a wildcard type
-    /// in a pattern matches anything), and value attributes — so `cmpi slt` and `cmpi
-    /// sgt` (different predicate attribute) or `trunci`s to different widths stay
-    /// distinct. `Const` on width+bits; a gate on its kind, `args` disambiguating.
+    /// Operator identity: `Op` on dialect+name, result type (a pattern wildcard matches anything), and value attributes; `Const` on width+bits; a gate on its kind.
     fn matches(&self, other: &Self) -> bool {
         match (self, other) {
             (Node::Gate(a, _), Node::Gate(b, _)) => gate_matches(a, b),
@@ -220,8 +206,7 @@ fn type_matches(a: TypeId, b: TypeId) -> bool {
     a == b || a == any_type() || b == any_type()
 }
 
-/// A gate matches another of its kind; an input also matches on its `ValueId`. The
-/// `value`/`cond` payload is ignored — congruent gates over equal `args` are equal.
+/// A gate matches another of its kind (an input also on its `ValueId`); the `value`/`cond` payload is ignored.
 fn gate_matches(a: &GateNode, b: &GateNode) -> bool {
     match (a, b) {
         (GateNode::Input(x), GateNode::Input(y)) => x == y,
@@ -291,10 +276,20 @@ mod tests {
         TypeId::from_number(n)
     }
 
-    // These exercise the `ENode` hash-cons paths that lit can't reach: `cmpi` (whose
-    // predicate attribute distinguishes value identity) is not parseable in `.tir`, and
-    // a constant's width/bits identity has no `.tir`-observable surface. Op result-type
-    // identity *is* covered end-to-end by core/checks/InstCombine/type_in_key.tir.
+    fn op(name: &'static str, ty: TypeId, attrs: Vec<NamedAttribute>, args: Vec<Id>) -> Node {
+        Node::Op {
+            dialect: "builtin",
+            name,
+            ty,
+            attrs,
+            cost: 1,
+            prov: OpProv::Introduced(0),
+            args,
+        }
+    }
+
+    // Exercise the `ENode` hash-cons paths lit can't reach (`cmpi` and constant
+    // width/bits identity); op result-type identity is covered by type_in_key.tir.
 
     #[test]
     fn equal_constants_share_a_class_distinct_widths_do_not() {
@@ -306,23 +301,17 @@ mod tests {
         assert_ne!(g.find(a), g.find(c));
     }
 
-    // `cmpi slt` and `cmpi sgt` over the same operand differ only in the predicate
-    // attribute, so they must not hash-cons together; identical predicates must.
+    // Ops differing only in a value attribute must not hash-cons; identical ones must.
     #[test]
     fn ops_differing_in_attributes_stay_distinct() {
         let mut g: EGraph<Node> = EGraph::new();
         let x = g.add(konst(32, 0));
-        let cmpi = |pred: &str, args: Vec<Id>| Node::Op {
-            dialect: "builtin",
-            name: "cmpi",
-            ty: ty(1),
-            attrs: vec![NamedAttribute::new(
+        let cmpi = |pred: &str, args: Vec<Id>| {
+            let attrs = vec![NamedAttribute::new(
                 "predicate",
                 AttributeValue::Str(pred.to_string()),
-            )],
-            cost: 1,
-            prov: OpProv::Introduced(0),
-            args,
+            )];
+            op("cmpi", ty(1), attrs, args)
         };
         let slt = g.add(cmpi("slt", vec![x]));
         let sgt = g.add(cmpi("sgt", vec![x]));
@@ -331,33 +320,19 @@ mod tests {
         assert_eq!(g.find(slt), g.find(slt2));
     }
 
-    // `op_key` drops the result type so a wildcard-typed LHS template buckets with
-    // the concrete ops it matches. That coarser *search* key must never leak into
-    // congruence: `addi i32` and `addi i64` over the same operands share an op_key
-    // bucket (a wildcard search visits and matches both), yet must stay in distinct
-    // classes — merging them would substitute a wrong-typed value (a miscompile).
+    // `op_key` drops the result type, so `addi i32`/`addi i64` share a search bucket
+    // (a wildcard visits both) yet must stay in distinct classes — merging would miscompile.
     #[test]
     fn wildcard_search_groups_result_types_without_merging_them() {
         let mut g: EGraph<Node> = EGraph::new();
         let x = g.add(konst(32, 0));
-        let addi = |t: TypeId, args: Vec<Id>| Node::Op {
-            dialect: "builtin",
-            name: "addi",
-            ty: t,
-            attrs: vec![],
-            cost: 1,
-            prov: OpProv::Introduced(0),
-            args,
-        };
+        let addi = |t: TypeId, args: Vec<Id>| op("addi", t, vec![], args);
         let a32 = g.add(addi(ty(32), vec![x, x]));
         let a64 = g.add(addi(ty(64), vec![x, x]));
 
-        // hash_cons keeps the two result types in separate classes...
         assert_ne!(g.find(a32), g.find(a64));
-        // ...even though they collide in the op_key search bucket.
         assert_eq!(addi(ty(32), vec![]).op_key(), addi(ty(64), vec![]).op_key());
 
-        // A wildcard-typed template (`any_type`) matches both via the index.
         let mut p: Pattern<Node, u32> = Pattern::new();
         let v0 = p.var(Var::Symbol(0));
         let v1 = p.var(Var::Symbol(1));
@@ -367,7 +342,7 @@ mod tests {
         assert_eq!(roots.len(), 2);
         assert!(roots.contains(&g.find(a32)) && roots.contains(&g.find(a64)));
 
-        // Searching is read-only: the two classes remain distinct.
+        // Searching is read-only: classes remain distinct.
         assert_ne!(g.find(a32), g.find(a64));
     }
 }

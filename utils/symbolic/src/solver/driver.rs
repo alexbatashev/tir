@@ -1,7 +1,5 @@
-//! Command-stream interpreter: runs an SMT-LIB [`Script`] against a [`Solver`]
-//! and writes the responses (sat/unsat/unknown, models, values, echoes) to an
-//! output sink. Declarations and assertions produce no output, matching a
-//! solver with `:print-success false` — the default Z3 behaves like.
+//! Runs an SMT-LIB [`Script`] against a [`Solver`], writing responses to an output sink;
+//! declarations/assertions print nothing (like Z3's default `:print-success false`).
 
 use std::io::{self, Write};
 
@@ -39,9 +37,7 @@ pub fn run_script(script: &Script, out: &mut impl Write) -> io::Result<()> {
             Command::ResetAssertions => solver.reset_assertions(),
             Command::Echo(text) => writeln!(out, "\"{text}\"")?,
             Command::Exit => break,
-            // Unsupported declarations are recorded as no-ops; a check-sat that
-            // depends on them reports `unknown`. Informational commands are
-            // silently accepted.
+            // Unsupported decls are no-ops (a dependent check-sat reports `unknown`); info commands silently accepted.
             _ => {}
         }
     }

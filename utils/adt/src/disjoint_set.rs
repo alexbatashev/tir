@@ -1,14 +1,7 @@
 use std::cell::UnsafeCell;
 
-// Some DisjoinSet implementations chose to perform path compression as part
-// of recursive call chain, which allows them to always keep the main set tidy
-// without really spending much time or memory. Recursion, however, has a hidden
-// cost: if the depth of the node is too large, the recursion will overflow and
-// the program will crash. Another option would be to use a queue or a vector
-// and collect all items in a loop. But in case of large chains re-allocation
-// times would dominate. So, instead we opt in for a partial path compression:
-// only compress path for the first 16 nodes + the node we're looking for.
-// In practice this should be indistinguishable from the recursion path.
+// Partial path compression: compress the first N nodes (avoids recursion stack
+// overflow on deep chains and the re-alloc cost of an unbounded buffer).
 const AUTOCOMPRESS_DEPTH: usize = 16;
 
 struct DisjointSetImpl {
@@ -151,19 +144,10 @@ impl DisjointSet {
     }
 }
 
-/// A union-find with stack-disciplined assumption scopes. The base is the equality
-/// that always holds; each open context layers extra unions on top that
-/// [`Self::pop_context`] discards. With no context open it is exactly a
-/// [`DisjointSet`].
-///
-/// A context relation only ever *coarsens* the base (adds unions, never splits), so
-/// each layer is a [`DisjointSetImpl`] over the same id-space whose unions link the
-/// canonical reps of the layer below it. [`Self::find`] is therefore bottom-up —
-/// canonicalize through the base, then through each layer in turn. A top-down find
-/// (descend to the base first, then re-apply layers) yields false negatives: an
-/// element with no entry in a layer would return its base rep without seeing that
-/// the layer redirected that rep. Every open layer is kept the same length as the
-/// base (grown in lockstep by [`Self::push`]), so all indices stay in range.
+/// Union-find with stack-disciplined assumption scopes: each [`Self::push_context`]
+/// layers unions that [`Self::pop_context`] discards; with none open it is a plain
+/// [`DisjointSet`]. [`Self::find`] must go bottom-up (base, then each layer) — a
+/// top-down find misses a layer redirect for an element with no entry in that layer.
 pub struct ScopedDisjointSet {
     base: DisjointSetImpl,
     layers: Vec<DisjointSetImpl>,
@@ -196,8 +180,7 @@ impl ScopedDisjointSet {
         self.layers.len()
     }
 
-    /// Add a fresh singleton element, returning its id. Grows the base and every
-    /// open layer so they stay index-aligned.
+    /// Add a fresh singleton element, returning its id; grows base and open layers in lockstep.
     pub fn push(&mut self) -> u32 {
         let id = self.base.push();
         for layer in &mut self.layers {
@@ -206,8 +189,7 @@ impl ScopedDisjointSet {
         id
     }
 
-    /// Enter an assumption scope. Unions until the matching [`Self::pop_context`]
-    /// are local to it.
+    /// Enter an assumption scope; unions until the matching [`Self::pop_context`] are local to it.
     pub fn push_context(&mut self) {
         self.layers
             .push(DisjointSetImpl::with_size(self.base.len()));
@@ -227,8 +209,7 @@ impl ScopedDisjointSet {
         root
     }
 
-    /// Merge the classes of `x` and `y` in the innermost open scope (the base when
-    /// none is open), returning the surviving root.
+    /// Merge the classes of `x` and `y` in the innermost open scope (base when none is open).
     pub fn union(&mut self, x: u32, y: u32) -> u32 {
         let rx = self.find(x);
         let ry = self.find(y);
@@ -475,8 +456,7 @@ mod tests {
 
     #[test]
     fn scoped_context_union_sees_base_class_siblings() {
-        // Regression for the top-down find false negative: a base class {2,3}, then
-        // a context union 0≡2. find(3) must re-apply the layer to its base rep 2.
+        // Regression: top-down find false negative; find(3) must re-apply the layer to base rep 2.
         let mut uf = ScopedDisjointSet::new(4);
         uf.union(2, 3);
         uf.push_context();
@@ -491,8 +471,7 @@ mod tests {
 
     #[test]
     fn scoped_nested_context_closes_across_layers() {
-        // L1: 1≡2. L2: 0≡1 and 2≡3 ⇒ {0,1,2,3} despite the 1≡2 step living a layer
-        // below the unions that close the class.
+        // L1: 1≡2. L2: 0≡1 and 2≡3 ⇒ {0,1,2,3}, closing a class across layers.
         let mut uf = ScopedDisjointSet::new(5);
         uf.push_context();
         uf.union(1, 2);

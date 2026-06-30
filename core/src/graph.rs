@@ -1,18 +1,11 @@
-//! The generic graph machinery lives in the `tir-graph` crate; it is re-exported
-//! here as `tir::graph::*`. On top of it this module layers the core-specific
-//! per-node annotation — the originating [`OpId`] and result [`TypeId`] a DAG
-//! node may carry — as the [`Dag::Annotation`] type [`NodeMeta`], with the
-//! [`MetaDag`] / [`MetaMutDag`] accessors that read and write its two fields
-//! independently.
+//! Re-exports the generic `tir-graph` crate as `tir::graph::*` and layers the core-specific per-node
+//! annotation [`NodeMeta`] (originating [`OpId`] + result [`TypeId`]) with [`MetaDag`]/[`MetaMutDag`] accessors.
 
 pub use tir_graph::*;
 
 use crate::{OpId, TypeId};
 
-/// Provenance a [`Dag`] node may carry: the IR operation it came from and the
-/// concrete result type it had there. Kept out of the node label and leaf payload
-/// so it never affects e-node identity. Both fields are optional and set
-/// independently.
+/// Provenance a [`Dag`] node may carry; kept out of the node label/leaf payload so it never affects e-node identity.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct NodeMeta {
     pub original_op: Option<OpId>,

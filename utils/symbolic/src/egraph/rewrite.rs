@@ -1,8 +1,6 @@
 use crate::egraph::{EGraph, EMatch, ENode, Id, Pattern, Substitution};
 
-/// Imperative right-hand side: given the e-graph, a match's bindings, and the
-/// matched root e-class, assert the equivalences the rewrite proves (typically by
-/// building nodes with [`EGraph::add`] and merging with [`EGraph::union`]).
+/// Imperative RHS: given the e-graph, match bindings, and matched root, assert the equivalences the rewrite proves.
 pub type Applier<N, S> = dyn Fn(&mut EGraph<N>, &Substitution<S>, Id) + Send + Sync;
 
 /// The right-hand side of a [`Rewrite`].
@@ -13,8 +11,7 @@ pub enum Rhs<N: ENode, S> {
     Apply(Box<Applier<N, S>>),
 }
 
-/// A rewrite: search the e-graph for `lhs`, then for each match apply `rhs`,
-/// growing the e-graph with the proven equivalences.
+/// Search the e-graph for `lhs`, then apply `rhs` to each match.
 pub struct Rewrite<N: ENode, S> {
     pub name: String,
     pub lhs: Pattern<N, S>,
@@ -52,8 +49,6 @@ impl<N: ENode, S: Clone + PartialEq> Rewrite<N, S> {
 
 #[cfg(test)]
 mod tests {
-    use tir_adt::APInt;
-
     use super::super::test_lang::*;
     use super::*;
     use crate::egraph::Var;
@@ -84,17 +79,7 @@ mod tests {
     #[test]
     fn commutativity_unions_swapped_form() {
         // add(x, y) => add(y, x)
-        let mut lhs: Pattern<Math, &'static str> = Pattern::new();
-        let lx = lhs.var(Var::Symbol("x"));
-        let ly = lhs.var(Var::Symbol("y"));
-        lhs.add(Math::Add([lx, ly]));
-
-        let mut rhs: Pattern<Math, &'static str> = Pattern::new();
-        let rx = rhs.var(Var::Symbol("x"));
-        let ry = rhs.var(Var::Symbol("y"));
-        rhs.add(Math::Add([ry, rx]));
-
-        let rule = Rewrite::new("add-comm", lhs, Rhs::Pattern(rhs));
+        let rule = comm_rule();
 
         let mut g = EGraph::new();
         let a = sym(&mut g, 0);
@@ -110,15 +95,7 @@ mod tests {
     #[test]
     fn additive_identity_via_integer_literal() {
         // add(x, 0) => x
-        let mut lhs: Pattern<Math, &'static str> = Pattern::new();
-        let x = lhs.var(Var::Symbol("x"));
-        let zero = lhs.var(Var::Int(APInt::from_i64(0)));
-        lhs.add(Math::Add([x, zero]));
-
-        let mut rhs: Pattern<Math, &'static str> = Pattern::new();
-        rhs.var(Var::Symbol("x"));
-
-        let rule = Rewrite::new("add-zero", lhs, Rhs::Pattern(rhs));
+        let rule = add_zero_rule();
 
         let mut g = EGraph::new();
         let a = sym(&mut g, 0);

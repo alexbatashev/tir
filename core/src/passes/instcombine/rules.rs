@@ -246,14 +246,14 @@ fn fold_class(context: &Context, eg: &EGraph<Node>, class: Id) -> Option<APInt> 
         };
         let operands: Vec<Value> = args
             .iter()
-            .map(|&c| const_value(eg, c).map(|v| Value::Int(to_adt(&v))))
+            .map(|&c| const_value(eg, c).map(Value::Int))
             .collect::<Option<_>>()?;
         match context
             .get_op(*op)
             .as_interface::<dyn ConstantFold>()?
             .fold(&operands)
         {
-            Some(Value::Int(v)) => Some(to_core(&v)),
+            Some(Value::Int(v)) => Some(v),
             _ => None,
         }
     })
@@ -264,16 +264,4 @@ fn konst(value: APInt) -> Node {
         value,
         origin: None,
     }
-}
-
-/// Core `APInt` to the sem interpreter's `tir_adt::APInt`. The two are distinct
-/// types (core has not yet consolidated onto `tir-adt`), so constant folding
-/// converts at the boundary.
-fn to_adt(v: &APInt) -> tir_adt::APInt {
-    tir_adt::APInt::new(v.width(), v.to_u64()).with_signed(v.is_signed())
-}
-
-/// The sem interpreter's `tir_adt::APInt` back to core `APInt`.
-fn to_core(v: &tir_adt::APInt) -> APInt {
-    APInt::new(v.width(), v.to_u64()).with_signed(v.is_signed())
 }

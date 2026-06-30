@@ -1,10 +1,6 @@
-//! Pattern matching over the semantic e-graph.
-//!
-//! Ported from the retired `core/src/egraph` e-matcher: a DAG [`Pattern`] is solved
-//! against every e-class, producing a binding for *every* pattern node (not just the
-//! variables), which the PBQP cover needs to internalize interior matches. Honors
-//! the operand `Register`/`Immediate` constraints, commutative operators, and a
-//! caller-supplied legality predicate over `(pattern node, e-class)`.
+//! Pattern matching over the semantic e-graph: a DAG [`Pattern`] is solved against every e-class, binding
+//! *every* pattern node (not just variables) so the PBQP cover can internalize interior matches; honors
+//! operand `Register`/`Immediate` constraints, commutative operators, and a legality predicate.
 
 use tir::Context;
 use tir::graph::{Matchable, NodeId, OperandConstraint, Pattern, PatternExpr};
@@ -12,8 +8,7 @@ use tir_symbolic::egraph::{ENode, Id};
 
 use super::node::{SemEGraph, SemNode};
 
-/// One match of a [`Pattern`] against the e-graph: the matched root class and the
-/// e-class bound to each pattern node (indexed by [`NodeId`]).
+/// One match of a [`Pattern`]: the matched root class and the e-class bound to each pattern node.
 #[derive(Clone, Debug)]
 pub struct EMatch {
     root: Id,
@@ -39,9 +34,7 @@ pub(crate) fn ematch<A>(
     ematch_with_legality(eg, ctx, pattern, &|_, _| true)
 }
 
-/// Every match of `pattern`, filtered by `allowed(pattern_node, class)`: an e-class
-/// a pattern node may not bind to (e.g. a shared memory effect a larger match must
-/// not internalize) prunes that branch.
+/// Every match of `pattern`, filtered by `allowed(pattern_node, class)`: a disallowed binding prunes that branch.
 pub(crate) fn ematch_with_legality<A>(
     eg: &SemEGraph,
     ctx: &Context,
@@ -78,31 +71,30 @@ fn solve<A>(
     allowed: &dyn Fn(NodeId, Id) -> bool,
 ) -> Vec<Vec<Option<Id>>> {
     let class = eg.find(class);
-    let empty = || vec![None; pattern.len()];
 
     if !allowed(pattern_node, class) {
         return Vec::new();
     }
 
+    // The single solution that binds this pattern node to `class` and nothing else.
+    let bind_self = || {
+        let mut b = vec![None; pattern.len()];
+        b[pattern_node.index()] = Some(class);
+        vec![b]
+    };
+
     match pattern.get_node(pattern_node) {
         PatternExpr::Boundary => {
-            if !boundary_ok(eg, pattern, pattern_node, class) {
-                return Vec::new();
+            if boundary_ok(eg, pattern, pattern_node, class) {
+                bind_self()
+            } else {
+                Vec::new()
             }
-            let mut b = empty();
-            b[pattern_node.index()] = Some(class);
-            vec![b]
         }
-        PatternExpr::Any => {
-            let mut b = empty();
-            b[pattern_node.index()] = Some(class);
-            vec![b]
-        }
+        PatternExpr::Any => bind_self(),
         PatternExpr::Leaf => {
             if class_has_leaf(eg, ctx, class) {
-                let mut b = empty();
-                b[pattern_node.index()] = Some(class);
-                vec![b]
+                bind_self()
             } else {
                 Vec::new()
             }

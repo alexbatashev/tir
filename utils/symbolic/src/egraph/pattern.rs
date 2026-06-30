@@ -46,23 +46,16 @@ impl<S: PartialEq> Substitution<S> {
     }
 }
 
-/// One node of a [`Pattern`]: either a template operator or a hole.
+/// One node of a [`Pattern`]: a template operator or a hole.
 #[derive(Debug, Clone)]
 pub enum PatternNode<N: ENode, S> {
-    /// A template e-node. Its [`ENode::children`] ids are *pattern-local indices*
-    /// into the owning pattern's `nodes`, not e-class ids.
+    /// Template e-node; child ids are pattern-local indices into `nodes`, not e-class ids.
     Node(N),
-    /// A leaf hole. [`Var::Symbol`] matches any e-class and binds it; [`Var::Int`]
-    /// / [`Var::Float`] match an e-class holding that constant (no binding).
+    /// Leaf hole: `Symbol` binds any class; `Int`/`Float` match that constant unbound.
     Var(Var<S>),
 }
 
-/// A structural pattern over a language `N`, used both as a search template (LHS)
-/// and, via [`Self::instantiate`], to build the right-hand side of a rewrite.
-///
-/// Nodes are stored bottom-up: every node's children were added before it, so a
-/// child's index is always smaller than its parent's. The builder enforces this by
-/// returning the [`Id`] of each added node for the caller to wire as a child.
+/// Structural pattern over `N`: search template (LHS) and, via [`Self::instantiate`], rewrite RHS. Nodes stored bottom-up, so a child's index is always smaller than its parent's.
 #[derive(Debug, Clone)]
 pub struct Pattern<N: ENode, S> {
     nodes: Vec<PatternNode<N, S>>,
@@ -91,8 +84,7 @@ impl<N: ENode, S> Pattern<N, S> {
         }
     }
 
-    /// Add a hole; the returned id is the root until a later `add`/`var` or an
-    /// explicit [`Self::set_root`].
+    /// Add a hole; its id is the root until a later `add`/`var` or [`Self::set_root`].
     pub fn var(&mut self, var: Var<S>) -> Id {
         self.push(PatternNode::Var(var))
     }
@@ -115,42 +107,25 @@ impl<N: ENode, S> Pattern<N, S> {
 }
 
 impl<N: ENode, S: Clone + PartialEq> Pattern<N, S> {
-    /// Every match of this pattern across the whole e-graph. A pattern rooted at a
-    /// concrete operator visits only the classes that hold that operator
-    /// ([`EGraph::classes_with_op`]); a bare-variable root has to consider every
-    /// class.
+    /// Every match across the e-graph; an operator-rooted pattern visits only classes holding that operator ([`EGraph::classes_with_op`]), a bare-variable root every class.
     pub fn search<'p>(&'p self, eg: &EGraph<N>) -> Vec<EMatch<S>> {
         let mut out = Vec::new();
         let mut goals: Vec<(Id, Id)> = Vec::new();
-        // Bindings reference the pattern's own `Var`s, so the search never clones a
-        // variable's payload (e.g. a `String` name); the bound names are cloned
-        // once, only when a full match is emitted.
+        // Bindings borrow the pattern's `Var`s; names are cloned only when a full match is emitted.
         let mut subst: Vec<(&'p Var<S>, Id)> = Vec::new();
-        match &self.nodes[self.root.index()] {
-            PatternNode::Node(template) => {
-                for root in eg.classes_with_op(template.op_key()) {
-                    goals.push((self.root, root));
-                    self.solve(eg, root, &mut goals, &mut subst, &mut out);
-                    goals.clear();
-                }
-            }
-            _ => {
-                let roots: Vec<Id> = eg.classes().map(|c| c.id()).collect();
-                for root in roots {
-                    goals.push((self.root, root));
-                    self.solve(eg, root, &mut goals, &mut subst, &mut out);
-                    goals.clear();
-                }
-            }
+        let roots: Vec<Id> = match &self.nodes[self.root.index()] {
+            PatternNode::Node(template) => eg.classes_with_op(template.op_key()),
+            _ => eg.classes().map(|c| c.id()).collect(),
+        };
+        for root in roots {
+            goals.push((self.root, root));
+            self.solve(eg, root, &mut goals, &mut subst, &mut out);
+            goals.clear();
         }
         out
     }
 
-    /// Depth-first backtracking e-matcher. `goals` is a stack of `(pattern node,
-    /// e-class)` equalities still to satisfy; `subst` holds the bindings made so
-    /// far, mutated in place. Each call pops one goal, explores every way to satisfy
-    /// it (restoring `goals` and `subst` between branches), then pushes the goal
-    /// back so the caller's state is intact.
+    /// Depth-first backtracking e-matcher: pops one goal off the `(pattern node, e-class)` stack, explores every solution restoring `goals`/`subst` between branches, then restores the goal for the caller.
     fn solve<'p>(
         &'p self,
         eg: &EGraph<N>,
@@ -238,8 +213,7 @@ impl<N: ENode, S: Clone + PartialEq> Pattern<N, S> {
     }
 }
 
-/// Whether `class` holds the constant `target` (a childless leaf). `false` when
-/// the language can't build the constant (`target` is `None`).
+/// Whether `class` holds constant `target` (a childless leaf); `false` if `target` is `None`.
 fn class_has_const<N: ENode>(eg: &EGraph<N>, target: Option<N>, class: Id) -> bool {
     let Some(target) = target else {
         return false;
@@ -256,11 +230,7 @@ mod tests {
     use super::super::test_lang::*;
     use super::*;
 
-    /// A language whose `matches` is looser than its `hash_cons`: an `Op`'s `tag`
-    /// is part of hash-cons identity, but a [`WILD`](Wild::WILD) tag matches any
-    /// tag — exactly instcombine's wildcard result type. The operator index must
-    /// key on [`ENode::op_key`] (tag dropped), not `hash_cons`, or a wildcard
-    /// template would be bucketed away from the concrete nodes it matches.
+    /// `matches` looser than `hash_cons`: a `WILD` tag matches any tag, so the operator index must key on [`ENode::op_key`] (tag dropped), not `hash_cons`.
     #[derive(Clone, Debug)]
     enum Wild {
         Leaf(u32),
@@ -433,8 +403,7 @@ mod tests {
         assert_eq!(g.find(matches[0].root), g.find(c));
     }
 
-    /// Independent reference matcher: the straightforward recursive enumeration,
-    /// used to cross-check [`Pattern::search`].
+    /// Reference matcher: straightforward recursive enumeration to cross-check [`Pattern::search`].
     fn brute_node(
         p: &Pattern<Math, &'static str>,
         eg: &EGraph<Math>,
@@ -489,8 +458,7 @@ mod tests {
         }
     }
 
-    /// A `(root, sorted bindings)` match, canonicalized for order-independent
-    /// comparison between [`Pattern::search`] and the brute-force reference.
+    /// `(root, sorted bindings)`, canonicalized for order-independent comparison.
     type Hit = (Id, Vec<(Var<&'static str>, Id)>);
 
     fn brute(p: &Pattern<Math, &'static str>, eg: &EGraph<Math>) -> Vec<Hit> {
@@ -526,9 +494,7 @@ mod tests {
         out
     }
 
-    /// `search` must return exactly the brute-force match set, even with congruence
-    /// (multiple e-nodes per class, stale ids in the operator index) and nested
-    /// patterns whose subterms have several candidate e-nodes.
+    /// `search` must equal the brute-force set even under congruence and nested patterns.
     #[test]
     fn search_matches_brute_force_with_congruence() {
         let mut g = EGraph::new();
@@ -536,8 +502,7 @@ mod tests {
         let b = sym(&mut g, 1);
         let c = sym(&mut g, 2);
         let z = num(&mut g, 0);
-        // Several adds, then merge two distinct adds into one class so a class holds
-        // multiple Add e-nodes and the operator index carries an absorbed id.
+        // Merge two distinct adds so a class holds multiple Add e-nodes and the index carries an absorbed id.
         let ab = add(&mut g, a, b);
         let ba = add(&mut g, b, a);
         let abz = add(&mut g, ab, z);

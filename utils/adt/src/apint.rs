@@ -3,16 +3,11 @@ use std::fmt;
 use std::ops::{Add, BitAnd, BitOr, BitXor, Mul, Neg, Not, Sub};
 use std::str::FromStr;
 
-/// Arbitrary Precision Integer similar to LLVM's APInt.
-/// Supports integers of arbitrary bit width, both signed and unsigned.
+/// Arbitrary-precision integer (à la LLVM's APInt), signed or unsigned, width 1..=64.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct APInt {
-    /// The bit width of this integer
     width: u32,
-    /// Whether this integer is signed
     signed: bool,
-    /// The value, stored as a u64 for widths <= 64 bits
-    /// For widths > 64, we'd extend this to use a `Vec<u64>`.
     value: u64,
 }
 
@@ -62,7 +57,6 @@ impl APInt {
     /// Create the maximum value for the given width
     pub fn max_value(width: u32, signed: bool) -> Self {
         if signed {
-            // For signed: 0111...1 (max positive value)
             let mask = Self::mask_for_width(width);
             let sign_bit = 1u64 << (width - 1);
             APInt {
@@ -71,7 +65,6 @@ impl APInt {
                 value: mask & !sign_bit,
             }
         } else {
-            // For unsigned: 1111...1
             APInt {
                 width,
                 signed: false,
@@ -83,7 +76,6 @@ impl APInt {
     /// Create the minimum value for the given width
     pub fn min_value(width: u32, signed: bool) -> Self {
         if signed {
-            // For signed: 1000...0 (most negative value)
             let sign_bit = 1u64 << (width - 1);
             APInt {
                 width,
@@ -91,7 +83,6 @@ impl APInt {
                 value: sign_bit,
             }
         } else {
-            // For unsigned: 0
             Self::zero(width)
         }
     }
@@ -119,8 +110,7 @@ impl APInt {
     /// Convert to i64, interpreting as signed
     pub fn to_i64(&self) -> i64 {
         if self.signed && self.is_negative() {
-            // Sign extend. At width >= 64 the bit pattern is already the i64, so
-            // there are no upper bits to fill (and `u64::MAX << 64` would panic).
+            // width >= 64: bit pattern is already the i64 (and `u64::MAX << 64` would panic).
             let extension = if self.width >= 64 {
                 0
             } else {
@@ -184,7 +174,6 @@ impl APInt {
     pub fn sign_extend(&self, new_width: u32) -> Self {
         assert!(new_width >= self.width, "Cannot extend to smaller width");
         if self.is_negative() {
-            // Need to extend the sign bit
             let mask = Self::mask_for_width(self.width);
             let extension =
                 (Self::mask_for_width(new_width) ^ mask) & Self::mask_for_width(new_width);
@@ -260,7 +249,6 @@ impl APInt {
             return self.clone();
         }
         if shift >= self.width {
-            // Fill with sign bit
             if self.is_negative() {
                 return APInt {
                     width: self.width,
@@ -273,7 +261,6 @@ impl APInt {
         }
 
         if self.signed && self.is_negative() {
-            // Arithmetic shift: extend sign bit
             let mask = Self::mask_for_width(self.width);
             let sign_extension = (mask << (self.width - shift)) & mask;
             APInt {
@@ -348,8 +335,7 @@ impl APInt {
         }
     }
 
-    /// Multiplication (low N bits of N*N -> 2N multiplication)
-    /// Returns only the lower N bits of the result
+    /// Multiplication, low N bits of the N*N -> 2N product.
     pub fn mul(&self, other: &APInt) -> Self {
         assert_eq!(self.width, other.width, "Widths must match");
         let full_result = (self.value as u128) * (other.value as u128);
@@ -361,8 +347,7 @@ impl APInt {
         }
     }
 
-    /// Multiplication high (upper N bits of N*N -> 2N multiplication)
-    /// Returns the upper N bits of the unsigned result
+    /// Unsigned multiplication high, upper N bits of the N*N -> 2N product.
     pub fn mulhu(&self, other: &APInt) -> Self {
         assert_eq!(self.width, other.width, "Widths must match");
         let full_result = (self.value as u128) * (other.value as u128);
@@ -375,27 +360,10 @@ impl APInt {
         }
     }
 
-    /// Signed multiplication high (upper N bits of signed N*N -> 2N multiplication)
-    /// Returns the upper N bits of the signed result
+    /// Signed multiplication high, upper N bits of the signed N*N -> 2N product.
     pub fn mulh(&self, other: &APInt) -> Self {
         assert_eq!(self.width, other.width, "Widths must match");
-
-        // Sign extend to 128 bits for proper signed multiplication
-        let a_signed = if self.is_negative() {
-            let extension = u128::MAX << self.width;
-            (self.value as u128) | extension
-        } else {
-            self.value as u128
-        };
-
-        let b_signed = if other.is_negative() {
-            let extension = u128::MAX << other.width;
-            (other.value as u128) | extension
-        } else {
-            other.value as u128
-        };
-
-        let full_result = (a_signed as i128).wrapping_mul(b_signed as i128);
+        let full_result = (self.sext_u128() as i128).wrapping_mul(other.sext_u128() as i128);
         let high_bits = ((full_result as u128) >> self.width) as u64;
         let mask = Self::mask_for_width(self.width);
 
@@ -406,21 +374,11 @@ impl APInt {
         }
     }
 
-    /// Signed-unsigned multiplication high
-    /// Returns the upper N bits of signed * unsigned multiplication
+    /// Signed-unsigned multiplication high, upper N bits of signed * unsigned.
     pub fn mulhsu(&self, other: &APInt) -> Self {
         assert_eq!(self.width, other.width, "Widths must match");
-
-        // Sign extend self if negative
-        let a_signed = if self.is_negative() {
-            let extension = u128::MAX << self.width;
-            (self.value as u128) | extension
-        } else {
-            self.value as u128
-        };
-
         let b_unsigned = other.value as u128;
-        let full_result = (a_signed as i128).wrapping_mul(b_unsigned as i128);
+        let full_result = (self.sext_u128() as i128).wrapping_mul(b_unsigned as i128);
         let high_bits = ((full_result as u128) >> self.width) as u64;
         let mask = Self::mask_for_width(self.width);
 
@@ -431,14 +389,12 @@ impl APInt {
         }
     }
 
-    /// Full multiplication returning both low and high parts
-    /// Returns (low, high) where low contains lower N bits and high contains upper N bits
+    /// Full unsigned multiplication as `(low N bits, high N bits)`.
     pub fn mul_full(&self, other: &APInt) -> (Self, Self) {
         (self.mul(other), self.mulhu(other))
     }
 
-    /// Full signed multiplication returning both low and high parts
-    /// Returns (low, high) where low contains lower N bits and high contains upper N bits
+    /// Full signed multiplication as `(low N bits, high N bits)`.
     pub fn mul_full_signed(&self, other: &APInt) -> (Self, Self) {
         (self.mul(other), self.mulh(other))
     }
@@ -522,9 +478,7 @@ impl APInt {
         self.to_i64().cmp(&other.to_i64())
     }
 
-    /// Numeric value as a 128-bit integer: signed values are sign-extended,
-    /// unsigned values zero-extended. Used as the primary ordering key so the
-    /// order reflects magnitude regardless of width/signedness.
+    /// Primary ordering key: magnitude as i128 (signed sign-extended, unsigned zero-extended).
     fn numeric_key(&self) -> i128 {
         if self.signed {
             self.to_i64() as i128
@@ -581,7 +535,6 @@ impl APInt {
         let mask = Self::mask_for_width(self.width);
         let effective_value = self.value & mask;
         let leading_zeros = effective_value.leading_zeros();
-        // Adjust for the actual width
         leading_zeros - (64 - self.width)
     }
 
@@ -600,7 +553,16 @@ impl APInt {
         (self.value & mask).count_ones()
     }
 
-    /// Helper function to get the mask for a given width
+    /// Value sign-extended to a full 128-bit pattern (negatives fill the high bits).
+    fn sext_u128(&self) -> u128 {
+        if self.is_negative() {
+            (self.value as u128) | (u128::MAX << self.width)
+        } else {
+            self.value as u128
+        }
+    }
+
+    /// Low-`width`-bits mask.
     fn mask_for_width(width: u32) -> u64 {
         if width >= 64 {
             u64::MAX
@@ -610,12 +572,8 @@ impl APInt {
     }
 }
 
-// Implement standard traits
-
 impl Ord for APInt {
-    /// Order by numeric value, then by width and signedness so the order is
-    /// total and consistent with the structural `Eq`/`Hash` (constants of
-    /// different width or signedness are distinct keys).
+    /// Numeric value, then width/signedness, so the order is total and consistent with `Eq`/`Hash`.
     fn cmp(&self, other: &Self) -> Ordering {
         self.numeric_key()
             .cmp(&other.numeric_key())
@@ -663,14 +621,7 @@ impl fmt::UpperHex for APInt {
 impl FromStr for APInt {
     type Err = String;
 
-    /// Parse an integer literal in the style of Rust/C integer literals.
-    /// Supports:
-    ///   - decimal:     `42`, `1_000`
-    ///   - hexadecimal: `0x1F`, `0X1F`
-    ///   - octal:       `0o77`, `0O77`
-    ///   - binary:      `0b1010`, `0B1010`
-    ///
-    /// Underscores are allowed as digit separators and are ignored.
+    /// Parse a Rust/C-style integer literal: decimal or `0x`/`0o`/`0b` prefixed, `_` separators ignored.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let s = s.trim();
         if s.is_empty() {
@@ -715,119 +666,50 @@ impl FromStr for APInt {
     }
 }
 
-// Operator overloading
+macro_rules! impl_binop {
+    ($trait:ident, $method:ident, $imp:ident) => {
+        impl $trait for APInt {
+            type Output = APInt;
+            fn $method(self, other: APInt) -> APInt {
+                APInt::$imp(&self, &other)
+            }
+        }
 
-impl Add for APInt {
-    type Output = APInt;
-    fn add(self, other: APInt) -> APInt {
-        APInt::add(&self, &other)
-    }
+        impl $trait for &APInt {
+            type Output = APInt;
+            fn $method(self, other: &APInt) -> APInt {
+                APInt::$imp(self, other)
+            }
+        }
+    };
 }
 
-impl Add for &APInt {
-    type Output = APInt;
-    fn add(self, other: &APInt) -> APInt {
-        APInt::add(self, other)
-    }
+macro_rules! impl_unop {
+    ($trait:ident, $method:ident, $imp:ident) => {
+        impl $trait for APInt {
+            type Output = APInt;
+            fn $method(self) -> APInt {
+                APInt::$imp(&self)
+            }
+        }
+
+        impl $trait for &APInt {
+            type Output = APInt;
+            fn $method(self) -> APInt {
+                APInt::$imp(self)
+            }
+        }
+    };
 }
 
-impl Sub for APInt {
-    type Output = APInt;
-    fn sub(self, other: APInt) -> APInt {
-        APInt::sub(&self, &other)
-    }
-}
-
-impl Sub for &APInt {
-    type Output = APInt;
-    fn sub(self, other: &APInt) -> APInt {
-        APInt::sub(self, other)
-    }
-}
-
-impl Mul for APInt {
-    type Output = APInt;
-    fn mul(self, other: APInt) -> APInt {
-        APInt::mul(&self, &other)
-    }
-}
-
-impl Mul for &APInt {
-    type Output = APInt;
-    fn mul(self, other: &APInt) -> APInt {
-        APInt::mul(self, other)
-    }
-}
-
-impl BitAnd for APInt {
-    type Output = APInt;
-    fn bitand(self, other: APInt) -> APInt {
-        self.and(&other)
-    }
-}
-
-impl BitAnd for &APInt {
-    type Output = APInt;
-    fn bitand(self, other: &APInt) -> APInt {
-        self.and(other)
-    }
-}
-
-impl BitOr for APInt {
-    type Output = APInt;
-    fn bitor(self, other: APInt) -> APInt {
-        self.or(&other)
-    }
-}
-
-impl BitOr for &APInt {
-    type Output = APInt;
-    fn bitor(self, other: &APInt) -> APInt {
-        self.or(other)
-    }
-}
-
-impl BitXor for APInt {
-    type Output = APInt;
-    fn bitxor(self, other: APInt) -> APInt {
-        self.xor(&other)
-    }
-}
-
-impl BitXor for &APInt {
-    type Output = APInt;
-    fn bitxor(self, other: &APInt) -> APInt {
-        self.xor(other)
-    }
-}
-
-impl Not for APInt {
-    type Output = APInt;
-    fn not(self) -> APInt {
-        APInt::not(&self)
-    }
-}
-
-impl Not for &APInt {
-    type Output = APInt;
-    fn not(self) -> APInt {
-        APInt::not(self)
-    }
-}
-
-impl Neg for APInt {
-    type Output = APInt;
-    fn neg(self) -> APInt {
-        APInt::neg(&self)
-    }
-}
-
-impl Neg for &APInt {
-    type Output = APInt;
-    fn neg(self) -> APInt {
-        APInt::neg(self)
-    }
-}
+impl_binop!(Add, add, add);
+impl_binop!(Sub, sub, sub);
+impl_binop!(Mul, mul, mul);
+impl_binop!(BitAnd, bitand, and);
+impl_binop!(BitOr, bitor, or);
+impl_binop!(BitXor, bitxor, xor);
+impl_unop!(Not, not, not);
+impl_unop!(Neg, neg, neg);
 
 #[cfg(test)]
 mod tests {

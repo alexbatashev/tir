@@ -1,10 +1,7 @@
-//! Lowering: SMT-LIB terms and scripts into the [`crate::lang`] graph.
-//!
-//! The graph is built bottom-up so every child has a lower node index than its
-//! parent, matching the post-order invariant the graph library relies on.
-//! Operand widths are tracked during construction (mirroring `infer_widths` for
-//! the produced subset) because `zero_extend`/`sign_extend`/`rotate` need the
-//! operand width to emit the dedicated node, and inference only runs afterwards.
+//! Lowering: SMT-LIB terms and scripts into the [`crate::lang`] graph, built
+//! bottom-up (post-order). Widths are tracked during construction because
+//! `zero_extend`/`sign_extend`/`rotate` need the operand width before the
+//! standalone `infer_widths` pass would run.
 
 use std::collections::HashMap;
 
@@ -15,8 +12,8 @@ use super::{ConvertError, SymbolInfo};
 use crate::lang::{SymKind, SymPayload};
 use crate::smtlib::ast::*;
 
-/// The result of lowering a script: a graph rooted at the conjunction of all
-/// assertions, plus the per-`SymbolId` table and per-node widths.
+/// A graph rooted at the conjunction of all assertions, plus the per-`SymbolId`
+/// table and per-node widths.
 pub struct Lowered<V> {
     pub graph: GenericDag<SymKind, SymPayload<V>>,
     pub root: NodeId,
@@ -24,9 +21,8 @@ pub struct Lowered<V> {
     pub widths: Vec<Option<u32>>,
 }
 
-/// Lower a full script. `declare-const`/nullary `declare-fun` introduce free
-/// symbols; `define-fun` introduces non-recursive macros that are inlined;
-/// assertions are conjoined into the root. Other commands are ignored.
+/// Lower a full script: `declare-const`/nullary `declare-fun` are free symbols,
+/// `define-fun` is an inlined macro, assertions are conjoined into the root.
 pub fn lower_script<V>(script: &Script) -> Result<Lowered<V>, ConvertError> {
     let mut lw = Lowerer::<V>::new();
     let mut assertions = Vec::new();
@@ -114,8 +110,7 @@ impl<V> Lowerer<V> {
         id
     }
 
-    /// Binary node whose width follows its kind: concatenation sums operand
-    /// widths, everything else takes the left operand's width.
+    /// Width follows kind: `concat` sums operands, else takes the left operand.
     fn bin(&mut self, kind: SymKind, a: NodeId, b: NodeId) -> NodeId {
         let width = match kind {
             SymKind::Concat => match (self.w(a), self.w(b)) {
@@ -406,43 +401,23 @@ impl<V> Lowerer<V> {
     }
 
     fn chain_eq(&mut self, a: &[NodeId]) -> Result<NodeId, ConvertError> {
-        if a.len() < 2 {
-            return Err(ConvertError::BadArity {
-                op: "=".into(),
-                expected: "at least 2".into(),
-                got: a.len(),
-            });
-        }
-        let mut acc: Option<NodeId> = None;
+        require_min_arity("=", a.len(), 2)?;
+        let mut eqs = Vec::with_capacity(a.len() - 1);
         for pair in a.windows(2) {
-            let eq = self.cmp(SymKind::Eq, pair[0], pair[1]);
-            acc = Some(match acc {
-                None => eq,
-                Some(prev) => self.bin(SymKind::And, prev, eq),
-            });
+            eqs.push(self.cmp(SymKind::Eq, pair[0], pair[1]));
         }
-        Ok(acc.unwrap())
+        Ok(self.combine_and(&eqs))
     }
 
     fn distinct(&mut self, a: &[NodeId]) -> Result<NodeId, ConvertError> {
-        if a.len() < 2 {
-            return Err(ConvertError::BadArity {
-                op: "distinct".into(),
-                expected: "at least 2".into(),
-                got: a.len(),
-            });
-        }
-        let mut acc: Option<NodeId> = None;
+        require_min_arity("distinct", a.len(), 2)?;
+        let mut nes = Vec::new();
         for i in 0..a.len() {
             for j in (i + 1)..a.len() {
-                let ne = self.cmp(SymKind::Ne, a[i], a[j]);
-                acc = Some(match acc {
-                    None => ne,
-                    Some(prev) => self.bin(SymKind::And, prev, ne),
-                });
+                nes.push(self.cmp(SymKind::Ne, a[i], a[j]));
             }
         }
-        Ok(acc.unwrap())
+        Ok(self.combine_and(&nes))
     }
 
     fn lower_extract(&mut self, hi: u128, lo: u128, a: &[NodeId]) -> Result<NodeId, ConvertError> {
@@ -530,8 +505,7 @@ impl<V> Lowerer<V> {
 /// The widest bit-vector the `u64`-backed `APInt` can represent.
 const MAX_WIDTH: u32 = 64;
 
-/// Returns `(width, is_bool)`. `Bool` is a 1-bit boolean; `(_ BitVec n)` is `n`
-/// bits. Any other sort is unsupported.
+/// Returns `(width, is_bool)`: `Bool` -> `(1, true)`, `(_ BitVec n)` -> `(n, false)`.
 fn sort_width(sort: &Sort) -> Result<(u32, bool), ConvertError> {
     if !sort.params.is_empty() {
         return Err(ConvertError::Unsupported(format!(
@@ -560,8 +534,7 @@ fn bv_literal(name: &str, indices: &[Index]) -> Option<(u64, u128)> {
     }
 }
 
-/// Reject widths the `APInt` backing cannot hold, before they reach `APInt::new`
-/// (which would otherwise panic).
+/// Reject widths outside `1..=MAX_WIDTH` before they reach `APInt::new` (panic).
 fn checked_width(width: u128, what: &str) -> Result<u32, ConvertError> {
     if width == 0 || width > MAX_WIDTH as u128 {
         Err(ConvertError::BadLiteral(format!(
@@ -584,6 +557,18 @@ fn require_arity(op: &str, got: usize, expected: usize) -> Result<(), ConvertErr
         Err(ConvertError::BadArity {
             op: op.into(),
             expected: expected.to_string(),
+            got,
+        })
+    }
+}
+
+fn require_min_arity(op: &str, got: usize, min: usize) -> Result<(), ConvertError> {
+    if got >= min {
+        Ok(())
+    } else {
+        Err(ConvertError::BadArity {
+            op: op.into(),
+            expected: format!("at least {min}"),
             got,
         })
     }

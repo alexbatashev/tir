@@ -1,8 +1,6 @@
 use crate::egraph::{EGraph, ENode, Id, Rewrite};
 
-/// Drives equality saturation: repeatedly applies a rule set to the e-graph until
-/// it reaches a fixpoint or a configured limit, then hands the saturated
-/// [`EGraph`] and canonical roots back for the caller to extract from.
+/// Drives equality saturation to a fixpoint or limit, then hands back the saturated [`EGraph`] and canonical roots.
 pub struct Runner<N: ENode> {
     egraph: EGraph<N>,
     roots: Vec<Id>,
@@ -39,11 +37,7 @@ impl<N: ENode> Runner<N> {
         self.roots.iter().map(|&r| self.egraph.find(r)).collect()
     }
 
-    /// Saturate the e-graph with `rules`. Each iteration searches every rule
-    /// against the same snapshot, then applies all matches and rebuilds — so a
-    /// node born this iteration is only visible to the next one. Stops at a
-    /// fixpoint (an iteration that changes neither the class nor the node count),
-    /// or once the iteration or node limit is reached.
+    /// Saturate with `rules`; each iteration searches against one snapshot, so a node born this iteration is visible only to the next. Stops at a fixpoint or the iter/node limit.
     pub fn run<'a, S>(&mut self, rules: impl IntoIterator<Item = &'a Rewrite<N, S>>)
     where
         N: 'a,
@@ -56,39 +50,9 @@ impl<N: ENode> Runner<N> {
 
 #[cfg(test)]
 mod tests {
-    use tir_adt::APInt;
-
     use super::super::test_lang::*;
     use super::Runner;
-    use crate::egraph::{EGraph, Pattern, Rewrite, Rhs, Var};
-
-    /// `add(x, y) => add(y, x)`.
-    fn comm() -> Rewrite<Math, &'static str> {
-        let mut lhs: Pattern<Math, &'static str> = Pattern::new();
-        let x = lhs.var(Var::Symbol("x"));
-        let y = lhs.var(Var::Symbol("y"));
-        lhs.add(Math::Add([x, y]));
-
-        let mut rhs: Pattern<Math, &'static str> = Pattern::new();
-        let rx = rhs.var(Var::Symbol("x"));
-        let ry = rhs.var(Var::Symbol("y"));
-        rhs.add(Math::Add([ry, rx]));
-
-        Rewrite::new("add-comm", lhs, Rhs::Pattern(rhs))
-    }
-
-    /// `add(x, 0) => x`.
-    fn add_zero() -> Rewrite<Math, &'static str> {
-        let mut lhs: Pattern<Math, &'static str> = Pattern::new();
-        let x = lhs.var(Var::Symbol("x"));
-        let zero = lhs.var(Var::Int(APInt::from_i64(0)));
-        lhs.add(Math::Add([x, zero]));
-
-        let mut rhs: Pattern<Math, &'static str> = Pattern::new();
-        rhs.var(Var::Symbol("x"));
-
-        Rewrite::new("add-zero", lhs, Rhs::Pattern(rhs))
-    }
+    use crate::egraph::EGraph;
 
     #[test]
     fn saturates_and_applies_a_rule() {
@@ -100,7 +64,7 @@ mod tests {
         assert!(!g.connected(ab, ba));
 
         let mut runner = Runner::new(g, vec![]);
-        runner.run(&[comm()]);
+        runner.run(&[comm_rule()]);
         assert!(runner.egraph().connected(ab, ba));
     }
 
@@ -114,7 +78,7 @@ mod tests {
         assert!(!g.connected(root, a));
 
         let mut runner = Runner::new(g, vec![]);
-        runner.run(&[comm(), add_zero()]);
+        runner.run(&[comm_rule(), add_zero_rule()]);
         assert!(runner.egraph().connected(root, a));
     }
 
@@ -128,7 +92,7 @@ mod tests {
         let classes = g.num_classes();
 
         let mut runner = Runner::new(g, vec![]).with_iter_limit(0);
-        runner.run(&[comm()]);
+        runner.run(&[comm_rule()]);
         assert!(!runner.egraph().connected(ab, ba));
         assert_eq!(runner.egraph().num_classes(), classes);
     }
@@ -143,7 +107,7 @@ mod tests {
         let size = g.total_size();
 
         let mut runner = Runner::new(g, vec![]).with_node_limit(size);
-        runner.run(&[comm()]);
+        runner.run(&[comm_rule()]);
         assert_eq!(runner.egraph().total_size(), size);
     }
 
@@ -156,7 +120,7 @@ mod tests {
         let ba = add(&mut g, b, a);
 
         let mut runner = Runner::new(g, vec![ab, ba]);
-        runner.run(&[comm()]);
+        runner.run(&[comm_rule()]);
         let roots = runner.roots();
         assert_eq!(roots[0], roots[1]);
     }

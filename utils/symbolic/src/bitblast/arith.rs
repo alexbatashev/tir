@@ -1,5 +1,4 @@
-//! Arithmetic, shift and comparison circuits for the bit-blaster. All vectors
-//! are little-endian (index 0 = least-significant bit).
+//! Arithmetic, shift and comparison circuits; all vectors little-endian (bit 0 = LSB).
 
 use tir_graph::NodeId;
 
@@ -13,10 +12,8 @@ impl<V> Blaster<'_, V> {
         let mut carry = carry_in;
         let mut sum = Vec::with_capacity(a.len());
         for (&ai, &bi) in a.iter().zip(b) {
-            // sum = ai ⊕ bi ⊕ carry
             let axb = self.gate_xor(ai, bi);
             let s = self.gate_xor(axb, carry);
-            // carry' = (ai ∧ bi) ∨ (carry ∧ (ai ⊕ bi))
             let ab = self.gate_and(ai, bi);
             let cx = self.gate_and(carry, axb);
             carry = self.gate_or(ab, cx);
@@ -29,11 +26,17 @@ impl<V> Blaster<'_, V> {
         bits.iter().map(|l| l.negate()).collect()
     }
 
-    /// `a - b` (two's complement, width preserved).
-    pub(super) fn subtract(&mut self, a: &[Lit], b: &[Lit]) -> Vec<Lit> {
+    /// `a - b` two's complement: returns the difference and the carry-out, where
+    /// the carry-out is the unsigned `a >= b` predicate.
+    fn sub_carry(&mut self, a: &[Lit], b: &[Lit]) -> (Vec<Lit>, Lit) {
         let nb = Self::invert(b);
         let one = self.one;
-        self.adder(a, &nb, one).0
+        self.adder(a, &nb, one)
+    }
+
+    /// `a - b` (two's complement, width preserved).
+    pub(super) fn subtract(&mut self, a: &[Lit], b: &[Lit]) -> Vec<Lit> {
+        self.sub_carry(a, b).0
     }
 
     /// `-a` (two's complement negation).
@@ -62,15 +65,12 @@ impl<V> Blaster<'_, V> {
 
     /// `a >= b` for equal-width unsigned vectors: the carry-out of `a - b`.
     fn uge(&mut self, a: &[Lit], b: &[Lit]) -> Lit {
-        let nb = Self::invert(b);
-        let one = self.one;
-        self.adder(a, &nb, one).1
+        self.sub_carry(a, b).1
     }
 
     /// Encode a comparison node into its one-bit result.
     pub(super) fn compare(&mut self, id: NodeId, kind: SymKind) -> Result<Vec<Lit>, BitblastError> {
-        let a = self.child_bits(id, 0);
-        let b = self.child_bits(id, 1);
+        let (a, b) = self.binop_bits(id);
         // Signed comparisons reduce to unsigned ones with the sign bit flipped.
         let flip = |v: &[Lit]| {
             let mut v = v.to_vec();
@@ -92,18 +92,16 @@ impl<V> Blaster<'_, V> {
         Ok(vec![bit])
     }
 
-    /// Encode `bvudiv`/`bvurem`/`bvsdiv`/`bvsrem`. `want_quotient` selects the
-    /// quotient (else remainder); `signed` handles the two's-complement sign
-    /// rules. SMT-LIB division-by-zero (`bvudiv x 0 = ~0`, `bvurem x 0 = x`)
-    /// falls out of the unsigned core for free.
+    /// Encode bvudiv/bvurem/bvsdiv/bvsrem; `want_quotient` picks the quotient,
+    /// `signed` applies the two's-complement sign rules. SMT-LIB div-by-zero
+    /// (`bvudiv x 0 = ~0`, `bvurem x 0 = x`) falls out of the unsigned core.
     pub(super) fn divrem(
         &mut self,
         id: NodeId,
         signed: bool,
         want_quotient: bool,
     ) -> Result<Vec<Lit>, BitblastError> {
-        let a = self.child_bits(id, 0);
-        let b = self.child_bits(id, 1);
+        let (a, b) = self.binop_bits(id);
         if !signed {
             let (q, r) = self.udivrem(&a, &b);
             return Ok(if want_quotient { q } else { r });
@@ -147,8 +145,7 @@ impl<V> Blaster<'_, V> {
             }
             rem[0] = a[i];
 
-            let ge = self.uge(&rem, &b_ext);
-            let diff = self.subtract(&rem, &b_ext);
+            let (diff, ge) = self.sub_carry(&rem, &b_ext);
             rem = self.mux_bits(ge, &diff, &rem);
             quot[i] = ge;
         }
@@ -158,16 +155,14 @@ impl<V> Blaster<'_, V> {
 
     /// Barrel shifter for `bvshl`/`bvlshr`/`bvashr`.
     pub(super) fn shift(&mut self, id: NodeId, kind: Shift) -> Result<Vec<Lit>, BitblastError> {
-        let a = self.child_bits(id, 0);
-        let amount = self.child_bits(id, 1);
+        let (a, amount) = self.binop_bits(id);
         let w = a.len();
         let fill = match kind {
             Shift::Arithmetic => *a.last().expect("non-empty operand"),
             _ => self.zero(),
         };
 
-        // Stages 2^0, 2^1, ... up to the largest power below the width handle
-        // every in-range shift; higher amount bits force an out-of-range result.
+        // Stages 2^0..up to the width cover every in-range shift; higher amount bits overflow.
         let mut stages = 0usize;
         while (1usize << stages) < w {
             stages += 1;
@@ -180,8 +175,7 @@ impl<V> Blaster<'_, V> {
             cur = self.mux_bits(amount_bit, &shifted, &cur);
         }
 
-        // If any higher amount bit is set the shift is >= w: produce the fill
-        // pattern (zeros, or the sign for arithmetic right shifts).
+        // Any higher amount bit set means shift >= w: produce the fill pattern.
         let mut overflow = self.zero();
         for &bit in &amount[stages..] {
             overflow = self.gate_or(overflow, bit);
@@ -190,8 +184,7 @@ impl<V> Blaster<'_, V> {
         Ok(self.mux_bits(overflow, &saturated, &cur))
     }
 
-    /// Shift `bits` by the constant `by`, filling vacated positions with `fill`
-    /// (for left and logical-right shifts `fill` is zero).
+    /// Shift `bits` by constant `by`, filling vacated positions with `fill`.
     fn shift_const(&self, bits: &[Lit], by: usize, kind: Shift, fill: Lit) -> Vec<Lit> {
         let w = bits.len();
         (0..w)

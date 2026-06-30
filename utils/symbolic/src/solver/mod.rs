@@ -1,8 +1,5 @@
-//! The stateful SMT solver: accumulates declarations and assertions, and decides
-//! `check-sat` by lowering the active formula, bit-blasting it and running the
-//! CDCL backend. `get-model`/`get-value` read concrete values back out of a
-//! satisfying assignment. Solving is non-incremental — each `check-sat` rebuilds
-//! the formula from the current assertion stack.
+//! Stateful QF_BV + Bool SMT solver: each `check-sat` lowers the current assertion
+//! stack, bit-blasts it and runs the CDCL backend (non-incremental).
 
 mod driver;
 #[cfg(test)]
@@ -134,8 +131,7 @@ impl Solver {
         }
     }
 
-    /// The model as an SMT-LIB `(define-fun ...)` list, available after a `sat`
-    /// check. Each declared constant is reported with its value.
+    /// Model as an SMT-LIB `(define-fun ...)` list (one per constant), after a `sat` check.
     pub fn get_model(&self) -> Option<String> {
         let model = self.model.as_ref()?;
         let mut out = String::from("(");
@@ -143,20 +139,18 @@ impl Solver {
             let value = model
                 .get(name)
                 .cloned()
-                .unwrap_or_else(|| APInt::new(sort_bits(sort).map(|(w, _)| w).unwrap_or(1), 0));
-            let is_bool = sort_bits(sort).map(|(_, b)| b).unwrap_or(false);
+                .unwrap_or_else(|| APInt::new(sort_width(sort), 0));
             out.push_str(&format!(
                 "\n  (define-fun {name} () {sort} {})",
-                format_value(&value, is_bool)
+                format_value(&value, sort_is_bool(sort))
             ));
         }
         out.push_str("\n)");
         Some(out)
     }
 
-    /// The values of `terms` under the current model, as an SMT-LIB
-    /// `((term value) ...)` list. Returns `None` if there is no model or a term
-    /// falls outside the supported subset.
+    /// Values of `terms` under the current model as `((term value) ...)`, or `None` if no model
+    /// or a term is outside the supported subset.
     pub fn get_value(&self, terms: &[Term]) -> Option<String> {
         let mut parts = Vec::with_capacity(terms.len());
         for t in terms {
@@ -166,17 +160,22 @@ impl Solver {
         Some(format!("({})", parts.join(" ")))
     }
 
-    fn build_script(&self, extra: &[Term]) -> Script {
-        let mut cmds = Vec::new();
-        if let Some(l) = &self.logic {
-            cmds.push(Command::SetLogic(Symbol(l.clone())));
-        }
+    /// Push `declare-const`/`define-fun` commands for the current environment.
+    fn push_env(&self, cmds: &mut Vec<Command>) {
         for (name, sort) in &self.decls {
             cmds.push(Command::DeclareConst(Symbol(name.clone()), sort.clone()));
         }
         for def in &self.defines {
             cmds.push(Command::DefineFun(def.clone()));
         }
+    }
+
+    fn build_script(&self, extra: &[Term]) -> Script {
+        let mut cmds = Vec::new();
+        if let Some(l) = &self.logic {
+            cmds.push(Command::SetLogic(Symbol(l.clone())));
+        }
+        self.push_env(&mut cmds);
         for a in self.asserts.iter().chain(extra) {
             cmds.push(Command::Assert(a.clone()));
         }
@@ -197,16 +196,14 @@ impl Solver {
         // Declared but unconstrained symbols default to zero.
         for (name, sort) in &self.decls {
             if !model.contains_key(name) {
-                let width = sort_bits(sort).map(|(w, _)| w).unwrap_or(1);
-                model.insert(name.clone(), APInt::new(width, 0));
+                model.insert(name.clone(), APInt::new(sort_width(sort), 0));
             }
         }
         model
     }
 
-    /// Evaluate a term under the cached model by pinning every symbol to its
-    /// model value and reading the term's bits back from the bit-blaster. This
-    /// keeps `get-value` semantics identical to `check-sat`'s.
+    /// Evaluate a term by pinning every symbol to its model value and re-reading the term's bits
+    /// from the bit-blaster, keeping `get-value` identical to `check-sat`.
     fn eval_term(&self, t: &Term) -> Option<(APInt, bool)> {
         let model = self.model.as_ref()?;
 
@@ -216,12 +213,7 @@ impl Solver {
             vec![t.clone(), t.clone()],
         );
         let mut cmds = Vec::new();
-        for (name, sort) in &self.decls {
-            cmds.push(Command::DeclareConst(Symbol(name.clone()), sort.clone()));
-        }
-        for def in &self.defines {
-            cmds.push(Command::DefineFun(def.clone()));
-        }
+        self.push_env(&mut cmds);
         cmds.push(Command::Assert(probe));
         let lo = lower_script::<()>(&Script(cmds)).ok()?;
         let mut blasted = blast(&lo.graph, &lo.widths).ok()?;
@@ -264,18 +256,23 @@ impl Solver {
         }
     }
 
+    /// `Some(is_bool)` when `name` is a defined function, else `None`.
+    fn defined_is_bool(&self, name: &str) -> Option<bool> {
+        self.defines
+            .iter()
+            .find(|d| d.name.0 == name)
+            .map(|d| sort_is_bool(&d.return_sort))
+    }
+
     fn ident_is_bool(&self, id: &Identifier) -> bool {
         let name = id.symbol.0.as_str();
         if name == "true" || name == "false" {
             return true;
         }
         if let Some((_, sort)) = self.decls.iter().find(|(n, _)| n == name) {
-            return sort_bits(sort).map(|(_, b)| b).unwrap_or(false);
+            return sort_is_bool(sort);
         }
-        if let Some(def) = self.defines.iter().find(|d| d.name.0 == name) {
-            return sort_bits(&def.return_sort).map(|(_, b)| b).unwrap_or(false);
-        }
-        false
+        self.defined_is_bool(name).unwrap_or(false)
     }
 
     fn app_is_bool(&self, id: &Identifier, args: &[Term]) -> bool {
@@ -295,10 +292,7 @@ impl Solver {
         if name == "ite" {
             return args.get(1).map(|a| self.term_is_bool(a)).unwrap_or(false);
         }
-        if let Some(def) = self.defines.iter().find(|d| d.name.0 == name) {
-            return sort_bits(&def.return_sort).map(|(_, b)| b).unwrap_or(false);
-        }
-        false
+        self.defined_is_bool(name).unwrap_or(false)
     }
 }
 
@@ -317,6 +311,14 @@ fn sort_bits(sort: &Sort) -> Option<(u32, bool)> {
     }
 }
 
+fn sort_is_bool(sort: &Sort) -> bool {
+    sort_bits(sort).map(|(_, b)| b).unwrap_or(false)
+}
+
+fn sort_width(sort: &Sort) -> u32 {
+    sort_bits(sort).map(|(w, _)| w).unwrap_or(1)
+}
+
 fn bits_to_apint(width: u32, bits: &[bool]) -> APInt {
     let value = bits
         .iter()
@@ -325,8 +327,7 @@ fn bits_to_apint(width: u32, bits: &[bool]) -> APInt {
     APInt::new(width, value)
 }
 
-/// Format a value as an SMT-LIB constant: `true`/`false` for booleans, `#x..`
-/// for widths that are a multiple of four, otherwise `#b..`.
+/// Format a value as an SMT-LIB constant: `true`/`false`, `#x..` for nibble widths, else `#b..`.
 fn format_value(value: &APInt, is_bool: bool) -> String {
     if is_bool {
         return if value.to_u64() & 1 == 1 {

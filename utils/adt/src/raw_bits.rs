@@ -2,11 +2,8 @@ use crate::{APFloat, APInt};
 
 const BYTE_SIZE: usize = 8;
 
-/// An untyped, byte-granular sequence of bits — the raw contents of a value
-/// before it is interpreted as an integer or a float. Vector registers are
-/// represented this way: they can be wider than a machine word (so they do not
-/// fit an [`APInt`]) and the same bits may be read as integer or floating-point
-/// lanes. Bytes are stored little-endian: `storage[0]` is the least significant.
+/// Untyped, byte-granular bits backing a value (e.g. a vector register wider than a
+/// word, readable as integer or float lanes). Stored little-endian: `storage[0]` is least significant.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct RawBits {
     storage: Vec<u8>,
@@ -49,8 +46,7 @@ impl RawBits {
         RawBits { storage }
     }
 
-    /// Reinterpret these bits as an unsigned integer of the same width. The width
-    /// must fit a machine word, which holds for individual lanes.
+    /// Reinterpret these bits as an unsigned integer of the same width (must fit a word).
     pub fn to_apint(&self) -> APInt {
         assert!(
             self.width() <= 64,
@@ -87,8 +83,7 @@ impl RawBits {
         APFloat::from_bits(exp_width, mant_width, explicit_leading_bit, bits)
     }
 
-    /// Split into `lanes` equal-width pieces, lane 0 taken from the low bits. The
-    /// width must divide evenly into byte-aligned lanes.
+    /// Split into `lanes` equal byte-aligned pieces, lane 0 from the low bits.
     pub fn split(&self, lanes: usize) -> Vec<RawBits> {
         assert!(lanes > 0, "RawBits split requires a positive lane count");
         assert!(
@@ -105,8 +100,7 @@ impl RawBits {
             .collect()
     }
 
-    /// Concatenate lanes into one value, lane 0 in the low bits. The inverse of
-    /// [`RawBits::split`].
+    /// Concatenate lanes, lane 0 in the low bits; inverse of [`RawBits::split`].
     pub fn concat(lanes: &[RawBits]) -> RawBits {
         let storage = lanes
             .iter()
@@ -140,8 +134,6 @@ mod tests {
 
     #[test]
     fn float_reinterpretation_roundtrips() {
-        // The same bits a lane holds can be read as a float: a vector is not
-        // committed to an integer interpretation.
         let value = APFloat::from_f32(1.5);
         let raw = RawBits::from_apfloat(&value);
         assert_eq!(raw.width(), 32);

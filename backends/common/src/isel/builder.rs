@@ -12,7 +12,9 @@ use tir::{
 use tir_adt::APInt;
 use tir_symbolic::egraph::Id;
 
-use super::node::{SemEGraph, SemNode, SemPayload, minimal_unsigned_apint, type_width};
+use super::node::{
+    SemEGraph, SemNode, SemPayload, minimal_unsigned_apint, template_node, type_width,
+};
 
 /// Builds a block's semantic expressions straight into the e-graph: every lowered
 /// node is hash-consed by [`SemEGraph::add`], so the e-graph *is* the interned DAG
@@ -53,12 +55,13 @@ impl<'a> SemDagBuilder<'a> {
         payload: Option<SymPayload<ValueId>>,
         ty: Option<TypeId>,
     ) -> Id {
-        self.egraph.add(SemNode {
-            kind,
-            payload: payload.map(SemPayload::Expr),
-            ty,
-            children: Vec::new(),
-        })
+        self.egraph.add(template_node(kind, payload, ty))
+    }
+
+    fn next_opaque_serial(&mut self) -> u32 {
+        let serial = self.opaque_serial;
+        self.opaque_serial += 1;
+        serial
     }
 
     fn add_int(&mut self, value: APInt, ty: Option<TypeId>) -> Id {
@@ -91,8 +94,7 @@ impl<'a> SemDagBuilder<'a> {
     /// so a partial semantic expansion still yields a well-formed graph. Each call
     /// mints a distinct leaf: two unknown computations are never assumed equal.
     pub(crate) fn add_opaque(&mut self) -> Id {
-        let serial = self.opaque_serial;
-        self.opaque_serial += 1;
+        let serial = self.next_opaque_serial();
         self.egraph.add(SemNode {
             kind: SymKind::Symbol,
             payload: Some(SemPayload::Opaque(serial)),
@@ -101,18 +103,28 @@ impl<'a> SemDagBuilder<'a> {
         })
     }
 
-    fn add_op(&mut self, kind: SymKind, mut children: Vec<Id>, ty: Option<TypeId>) -> Id {
-        // Canonicalize commutative operands so `a op b` and `b op a` hash-cons to the
-        // same e-node, mirroring the program's CSE.
+    /// Build an operator node, canonicalizing commutative operands so `a op b` and
+    /// `b op a` hash-cons to the same e-node (mirroring the program's CSE).
+    fn add_op_node(
+        &mut self,
+        kind: SymKind,
+        mut children: Vec<Id>,
+        ty: Option<TypeId>,
+        payload: Option<SemPayload>,
+    ) -> Id {
         if kind.is_commutative() {
             children.sort();
         }
         self.egraph.add(SemNode {
             kind,
-            payload: None,
+            payload,
             ty,
             children,
         })
+    }
+
+    fn add_op(&mut self, kind: SymKind, children: Vec<Id>, ty: Option<TypeId>) -> Id {
+        self.add_op_node(kind, children, ty, None)
     }
 
     /// Like [`Self::add_op`], but never hash-conses with another node: the opaque
@@ -121,18 +133,9 @@ impl<'a> SemDagBuilder<'a> {
     /// wildcard). Used for memory effects and their addressing arithmetic, which
     /// are not pure values: two loads of the same address are not interchangeable
     /// across an intervening store, so their e-classes must never merge.
-    fn add_op_unique(&mut self, kind: SymKind, mut children: Vec<Id>, ty: Option<TypeId>) -> Id {
-        if kind.is_commutative() {
-            children.sort();
-        }
-        let serial = self.opaque_serial;
-        self.opaque_serial += 1;
-        self.egraph.add(SemNode {
-            kind,
-            payload: Some(SemPayload::Opaque(serial)),
-            ty,
-            children,
-        })
+    fn add_op_unique(&mut self, kind: SymKind, children: Vec<Id>, ty: Option<TypeId>) -> Id {
+        let payload = Some(SemPayload::Opaque(self.next_opaque_serial()));
+        self.add_op_node(kind, children, ty, payload)
     }
 
     /// Record that `class` computes IR `value` (idempotent; first writer wins, which
@@ -148,18 +151,27 @@ impl<'a> SemDagBuilder<'a> {
             return Some(class);
         }
 
-        let mut operands = Vec::with_capacity(op.operands.len());
-        for operand in &op.operands {
-            operands.push(self.build_from_value(*operand));
-        }
+        let operands = self.build_operands(&op.operands);
         let mut graph = SemGraph::new();
         let root = op.clone().as_dyn_op().semantic_expr(&mut graph)?;
-        let widths = self.infer_local_widths(&graph, &operands);
-        let class = self.lower_graph_node(&graph, root, &operands, &widths);
+        let class = self.lower_with_widths(&graph, root, &operands);
         if let Some(result) = op.results.first() {
             self.set_value(class, *result);
         }
         Some(class)
+    }
+
+    fn build_operands(&mut self, operands: &[ValueId]) -> Vec<Id> {
+        operands
+            .iter()
+            .map(|&operand| self.build_from_value(operand))
+            .collect()
+    }
+
+    /// Infer node widths from `operands` and lower `graph` rooted at `root`.
+    fn lower_with_widths(&mut self, graph: &SemGraph, root: NodeId, operands: &[Id]) -> Id {
+        let widths = self.infer_local_widths(graph, operands);
+        self.lower_graph_node(graph, root, operands, &widths)
     }
 
     fn build_memory_effect(&mut self, op: &std::sync::Arc<OpInstance>) -> Option<Id> {
@@ -220,12 +232,8 @@ impl<'a> SemDagBuilder<'a> {
             } else {
                 let mut graph = SemGraph::new();
                 if let Some(root) = def.clone().as_dyn_op().semantic_expr(&mut graph) {
-                    let mut operands = Vec::with_capacity(def.operands.len());
-                    for operand in &def.operands {
-                        operands.push(self.build_from_value(*operand));
-                    }
-                    let widths = self.infer_local_widths(&graph, &operands);
-                    let class = self.lower_graph_node(&graph, root, &operands, &widths);
+                    let operands = self.build_operands(&def.operands);
+                    let class = self.lower_with_widths(&graph, root, &operands);
                     self.set_value(class, value);
                     class
                 } else {

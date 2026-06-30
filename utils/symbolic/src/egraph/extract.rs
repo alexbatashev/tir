@@ -2,28 +2,24 @@ use std::collections::HashMap;
 
 use crate::egraph::{EGraph, ENode, Id};
 
-/// The cheapest representative e-node chosen for each e-class by
-/// [`EGraph::extract_best`].
+/// Cheapest representative e-node per e-class, chosen by [`EGraph::extract_best`].
 pub struct Extraction<L: ENode> {
     best: HashMap<Id, L>,
 }
 
 impl<L: ENode> Extraction<L> {
-    /// The chosen node for `id`'s class, or `None` if the class has no node with a
-    /// finite cost (e.g. an unreachable pure cycle). `id` must be canonical
-    /// ([`EGraph::find`]).
+    /// Chosen node for `id`'s class, or `None` if no node has finite cost. `id` must
+    /// be canonical ([`EGraph::find`]).
     pub fn node(&self, id: Id) -> Option<&L> {
         self.best.get(&id)
     }
 }
 
 impl<L: ENode> EGraph<L> {
-    /// Greedy bottom-up extraction: the node minimizing `cost_of(node)` plus the
-    /// chosen cost of each child class, per class. `cost_of` scores a node's own
-    /// cost; the extractor sums children. Cycle-tolerant — a node whose children are
-    /// not yet costed is skipped and revisited until the costs reach a fixpoint, so a
-    /// μ loop is costed through its non-cyclic input. Scope-aware: reads the current
-    /// scope's classes via [`EGraph::classes`]/[`EGraph::find`].
+    /// Greedy bottom-up extraction: per class, the node minimizing `cost_of(node)`
+    /// plus each child's chosen cost. Cycle-tolerant — a node with un-costed children
+    /// is skipped and revisited to a fixpoint, so a cycle is costed through its
+    /// non-cyclic input. Scope-aware via [`EGraph::classes`]/[`EGraph::find`].
     pub fn extract_best(&self, cost_of: impl Fn(&L) -> u64) -> Extraction<L> {
         let mut cost: HashMap<Id, u64> = HashMap::new();
         let mut best: HashMap<Id, L> = HashMap::new();
@@ -49,8 +45,7 @@ impl<L: ENode> EGraph<L> {
         Extraction { best }
     }
 
-    /// `cost_of(node)` plus the current best cost of every child class, or `None` if
-    /// a child class has no finite cost yet.
+    /// `cost_of(node)` plus each child class's best cost, or `None` if any is un-costed.
     fn node_cost(
         &self,
         node: &L,

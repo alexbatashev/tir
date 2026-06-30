@@ -1,14 +1,6 @@
-//! Whole-function dead-code elimination over machine IR.
-//!
-//! Instruction selection may recompute a pure value inside a consumer's block
-//! (cross-block fusion by duplication), leaving the original definition unused.
-//! This pass deletes pure machine instructions whose every defined virtual
-//! register is unused, iterating to a fixpoint so a chain of newly-dead
-//! definitions collapses in full.
-//!
-//! It runs *before* register allocation, while results are still virtual
-//! registers: an op that writes a physical register is treated as having a side
-//! effect and is never removed, so once allocation has run nothing is eligible.
+//! Whole-function DCE over machine IR: deletes pure ops whose every defined virtual register is unused,
+//! to a fixpoint. Must run before regalloc — a physical-register write counts as a side effect, so nothing
+//! is eligible after allocation.
 
 use std::collections::HashSet;
 
@@ -92,9 +84,8 @@ impl Pass for DeadCodeEliminationPass {
     }
 }
 
-/// Whether `op_id` is a pure value-producing op whose every defined virtual
-/// register is unused. Conservative: an op with nested regions, a terminator, a
-/// memory write, or any physical-register write (a clobber/implicit def) is kept.
+/// A pure value-producing op whose every defined virtual register is unused; nested regions, a terminator,
+/// a memory write, or any physical-register write keep it.
 fn is_dead(context: &Context, op_id: OpId, used: &HashSet<u32>) -> bool {
     let instance = context.get_op(op_id);
     if !instance.regions.is_empty()
@@ -122,7 +113,6 @@ fn is_dead(context: &Context, op_id: OpId, used: &HashSet<u32>) -> bool {
             }
         }
     }
-    // Only a value-producing op is a DCE candidate; a def-less pure op (if any)
-    // is left alone.
+    // Only a value-producing op is a DCE candidate; a def-less pure op is left alone.
     defines
 }

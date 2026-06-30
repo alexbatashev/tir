@@ -1,8 +1,5 @@
-//! A small CDCL SAT solver — the decision-procedure backend for bit-blasted
-//! QF_BV queries. It is a textbook MiniSat-style core: two-watched-literal
-//! propagation, 1-UIP conflict analysis with learned clauses, non-chronological
-//! backjumping, VSIDS decision heuristic and Luby restarts. Speed is explicitly
-//! not a goal; clarity and correctness are.
+//! Textbook MiniSat-style CDCL SAT solver backing bit-blasted QF_BV queries:
+//! two-watched-literal propagation, 1-UIP learning, VSIDS, Luby restarts.
 
 #[cfg(test)]
 mod tests;
@@ -51,7 +48,6 @@ impl Lit {
     }
 }
 
-/// The outcome of [`Solver::solve`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SatResult {
     /// Satisfiable; the vector holds the value of each variable by index.
@@ -66,12 +62,10 @@ struct Clause {
     lits: Vec<Lit>,
 }
 
-/// A CDCL SAT solver. Build a problem with [`Solver::new_var`] and
-/// [`Solver::add_clause`], then call [`Solver::solve`].
+/// CDCL SAT solver: build with [`Solver::new_var`]/[`Solver::add_clause`], then [`Solver::solve`].
 pub struct Solver {
     clauses: Vec<Clause>,
-    /// Per-literal watch lists: `watches[l]` holds every clause that currently
-    /// watches literal `l`, processed when `l` becomes false.
+    /// `watches[l]`: clauses watching literal `l`, processed when `l` becomes false.
     watches: Vec<Vec<usize>>,
     /// Current truth value of each variable, `None` if unassigned.
     assign: Vec<Option<bool>>,
@@ -134,8 +128,7 @@ impl Solver {
         v
     }
 
-    /// Add a clause. Literals are deduplicated; a tautology (`l` and `¬l`) is
-    /// dropped; the empty clause makes the problem unsatisfiable.
+    /// Add a clause; literals dedup, tautologies drop, the empty clause is unsat.
     pub fn add_clause(&mut self, lits: &[Lit]) {
         if self.unsat {
             return;
@@ -157,10 +150,7 @@ impl Solver {
                 }
             }
             _ => {
-                let cref = self.clauses.len();
-                self.watches[cl[0].index()].push(cref);
-                self.watches[cl[1].index()].push(cref);
-                self.clauses.push(Clause { lits: cl });
+                self.add_watched_clause(cl);
             }
         }
     }
@@ -170,8 +160,7 @@ impl Solver {
         self.solve_with_budget(None)
     }
 
-    /// Solve, giving up with [`SatResult::Unknown`] after `max_conflicts`
-    /// conflicts (if set).
+    /// Solve, giving up with [`SatResult::Unknown`] after `max_conflicts` conflicts.
     pub fn solve_with_budget(&mut self, max_conflicts: Option<u64>) -> SatResult {
         if self.unsat {
             return SatResult::Unsat;
@@ -244,8 +233,7 @@ impl Solver {
         }
     }
 
-    /// Propagate all unit consequences, returning a conflicting clause if one
-    /// arises.
+    /// Propagate unit consequences, returning a conflicting clause if one arises.
     fn propagate(&mut self) -> Option<usize> {
         while self.qhead < self.trail.len() {
             let p = self.trail[self.qhead];
@@ -314,8 +302,7 @@ impl Solver {
         None
     }
 
-    /// 1-UIP conflict analysis. Returns the learned clause (asserting literal at
-    /// index 0) and the level to backjump to.
+    /// 1-UIP analysis: returns the learned clause (asserting literal at index 0) and backjump level.
     fn analyze(&mut self, conflict: usize) -> (Vec<Lit>, usize) {
         let mut seen = vec![false; self.num_vars()];
         let mut learnt: Vec<Lit> = vec![Lit(0)]; // slot 0: asserting literal
@@ -359,8 +346,7 @@ impl Solver {
         }
         learnt[0] = p.unwrap().negate();
 
-        // Backjump to the second-highest level in the clause; move that literal
-        // to slot 1 so the learned clause is correctly watched.
+        // Backjump to the second-highest level; move that literal to slot 1 for watching.
         let bt_level = if learnt.len() == 1 {
             0
         } else {
@@ -382,13 +368,17 @@ impl Solver {
             self.enqueue(learnt[0], None);
             return;
         }
-        let cref = self.clauses.len();
-        self.watches[learnt[0].index()].push(cref);
-        self.watches[learnt[1].index()].push(cref);
-        self.clauses.push(Clause {
-            lits: learnt.to_vec(),
-        });
+        let cref = self.add_watched_clause(learnt.to_vec());
         self.enqueue(learnt[0], Some(cref));
+    }
+
+    /// Store a clause with two or more literals, watching `lits[0]` and `lits[1]`.
+    fn add_watched_clause(&mut self, lits: Vec<Lit>) -> usize {
+        let cref = self.clauses.len();
+        self.watches[lits[0].index()].push(cref);
+        self.watches[lits[1].index()].push(cref);
+        self.clauses.push(Clause { lits });
+        cref
     }
 
     /// Undo assignments made above decision level `level`.

@@ -1,12 +1,6 @@
-//! A faithful abstract syntax tree for the SMT-LIB 2.7 concrete syntax.
-//!
-//! The tree mirrors the grammar rather than any particular theory: operators are
-//! plain identifiers and applications are `(qual_identifier term+)`. Theory
-//! meaning (bit-vectors, Core, ...) is resolved later, at conversion time, not
-//! baked into the node set here. This keeps the parser theory-agnostic and the
-//! AST stable as new operators appear.
+//! AST mirroring SMT-LIB 2.7 grammar; theory meaning is resolved at conversion, not baked in here.
 
-/// The non-alphanumeric characters permitted in a simple (unquoted) symbol.
+/// Non-alphanumeric characters permitted in a simple (unquoted) symbol.
 pub const SYMBOL_CHARS: &str = "+-/*=%?!.$_~&^<>@";
 
 /// Whether `name` is a valid simple symbol and so needs no `|...|` quoting.
@@ -19,15 +13,7 @@ pub fn is_simple_symbol(name: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || SYMBOL_CHARS.contains(c))
 }
 
-/// A literal token: `<spec_constant>` in the grammar.
-///
-/// `Hexadecimal`/`Binary` keep their digit strings (without the `#x`/`#b`
-/// prefix) so the encoded bit-width survives round-tripping — `#x0f` is an
-/// 8-bit value, `#xf` a 4-bit one. `Decimal` is likewise kept verbatim.
-///
-/// Numerals are capped at `u128` deliberately; SMT-LIB numerals are formally
-/// unbounded, but `u128` covers every realistic width/index/value and the
-/// parser reports an out-of-range error rather than overflowing.
+/// `<spec_constant>`. Hex/Binary keep prefix-less digits so width survives round-trip; numerals capped at u128.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SpecConstant {
     Numeral(u128),
@@ -37,9 +23,7 @@ pub enum SpecConstant {
     String(String),
 }
 
-/// A `<symbol>`, stored as its logical name without surrounding `|...|` quotes.
-/// Whether quoting is needed on output is a printing concern, not stored here:
-/// `|foo|` and `foo` denote the same symbol when `foo` is already simple.
+/// A `<symbol>`: logical name without `|...|` quotes; quoting is a printing concern.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Symbol(pub String);
 
@@ -55,7 +39,6 @@ pub enum Index {
 }
 
 /// An `<identifier>`: a bare symbol, or an indexed `(_ symbol index+)`.
-/// `indices` empty means the plain form.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Identifier {
     pub symbol: Symbol,
@@ -75,8 +58,7 @@ impl Identifier {
     }
 }
 
-/// A `<sort>`: an identifier optionally applied to argument sorts, e.g.
-/// `Bool`, `(_ BitVec 32)`, `(Array (_ BitVec 8) (_ BitVec 8))`.
+/// A `<sort>`: an identifier optionally applied to argument sorts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Sort {
     pub id: Identifier,
@@ -92,8 +74,7 @@ impl Sort {
     }
 }
 
-/// A `<qual_identifier>`: an identifier, optionally annotated with a result sort
-/// via `(as id sort)` to disambiguate overloads.
+/// A `<qual_identifier>`: an identifier, optionally `(as id sort)`-annotated to disambiguate overloads.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum QualIdentifier {
     Plain(Identifier),
@@ -108,8 +89,7 @@ impl QualIdentifier {
     }
 }
 
-/// An `<s_expr>`: the generic untyped form used for attribute values and other
-/// places the grammar allows arbitrary nested expressions.
+/// An `<s_expr>`: the generic untyped form for attribute values and other nested expressions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SExpr {
     Constant(SpecConstant),
@@ -161,8 +141,7 @@ pub struct MatchCase {
     pub body: Term,
 }
 
-/// A `<term>`. Quantifiers and `match` are kept for grammar fidelity even though
-/// they have no evaluatable counterpart in `SymKind`; conversion rejects them.
+/// A `<term>`. Quantifiers and `match` exist for grammar fidelity only; conversion rejects them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Term {
     Constant(SpecConstant),
@@ -175,8 +154,7 @@ pub enum Term {
     Annotated(Box<Term>, Vec<Attribute>),
 }
 
-/// A `function_def`: `symbol (sorted_var*) sort term`, shared by `define-fun`
-/// and `define-fun-rec`.
+/// A `function_def`: `symbol (sorted_var*) sort term`, shared by `define-fun`/`define-fun-rec`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FunctionDef {
     pub name: Symbol,
@@ -185,8 +163,7 @@ pub struct FunctionDef {
     pub body: Term,
 }
 
-/// A `function_dec`: the signature half `(symbol (sorted_var*) sort)` used by
-/// `define-funs-rec`.
+/// A `function_dec`: the signature half `(symbol (sorted_var*) sort)` used by `define-funs-rec`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FunctionDec {
     pub name: Symbol,
@@ -201,8 +178,7 @@ pub struct PropLiteral {
     pub negated: bool,
 }
 
-/// A top-level `<command>`. Datatype, array and string declarations are
-/// deliberately out of scope and are not modelled.
+/// A top-level `<command>`. Datatype, array and string declarations are out of scope.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
     SetLogic(Symbol),

@@ -1,7 +1,6 @@
 use super::*;
 
-/// A tiny deterministic PRNG so the randomized tests are reproducible without a
-/// dependency.
+/// Deterministic PRNG so randomized tests are reproducible without a dependency.
 struct Rng(u64);
 
 impl Rng {
@@ -37,8 +36,7 @@ fn brute(n: usize, clauses: &[Vec<Lit>]) -> bool {
 }
 
 fn solve_clauses(n: usize, clauses: &[Vec<Lit>]) -> SatResult {
-    // `new_var` hands out Var(0), Var(1), ... in order, matching the indices the
-    // clause literals were built against.
+    // `new_var` hands out Var(0), Var(1), ... matching the clause literals' indices.
     let mut s = Solver::new();
     for _ in 0..n {
         s.new_var();
@@ -112,7 +110,6 @@ fn unit_propagation_chain() {
 
 #[test]
 fn pigeonhole_3_into_2_is_unsat() {
-    // 3 pigeons, 2 holes: classic unsatisfiable instance.
     let (pigeons, holes) = (3usize, 2usize);
     let mut s = Solver::new();
     let mut x = vec![vec![Var(0); holes]; pigeons];

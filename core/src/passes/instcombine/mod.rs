@@ -223,7 +223,7 @@ impl Driver<'_> {
             .value_class
             .get(&value)
             .copied()
-            .unwrap_or_else(|| self.eg.add(Node::Gate(GateNode::Input(value), Vec::new())));
+            .unwrap_or_else(|| self.eg.add(Node::input(value)));
         let constant = self.eg.add(Node::Const {
             value: APInt::new(1, holds as u64),
             origin: None,

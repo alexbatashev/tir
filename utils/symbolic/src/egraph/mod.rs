@@ -1,10 +1,5 @@
-//! A hash-consing e-graph with congruence closure
-//! Mostly based on egg (<https://github.com/egraphs-good/egg>,
-//! MIT License, Copyright Max Willsey) and <https://www.philipzucker.com/egraph-1/>.
-//!
-//! E-nodes ([`ENode`]) carry their operands as child [`Id`]s; the e-graph interns
-//! them ([`EGraph::add`]) so structurally identical nodes share an e-class, and
-//! restores congruence after [`EGraph::union`] via deferred [`EGraph::rebuild`].
+//! Hash-consing e-graph with congruence closure. Based on egg
+//! (<https://github.com/egraphs-good/egg>, MIT License, Copyright Max Willsey).
 
 mod eclass;
 mod enode;
@@ -26,8 +21,7 @@ pub use pattern::*;
 pub use rewrite::*;
 pub use runner::*;
 
-/// Identifier of an e-class, and how children reference one. May be non-canonical
-/// after unions — pass through [`EGraph::find`] before comparing.
+/// E-class id. Non-canonical after unions — pass through [`EGraph::find`] before comparing.
 #[derive(Clone, Copy, Hash, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub struct Id(u32);
 
@@ -42,34 +36,25 @@ impl Id {
 }
 
 pub struct EGraph<L: ENode> {
-    /// Equivalence of class ids and the sole authority on what is equal: every
-    /// comparison flows through [`Self::find`]. A [`Self::push_context`] scope
-    /// layers extra unions here that [`Self::pop_context`] discards.
+    /// Class-id equivalence; the sole authority on equality (all comparison flows
+    /// through [`Self::find`]). Scoped unions layer here, discarded by `pop_context`.
     unionfind: ScopedDisjointSet,
-    /// Base-scope hash-cons index: [`ENode::hash_cons`] bucket ->
-    /// `[(canonical node, class)]`. A node is present iff some entry has `matches`
-    /// and equal canonical children, so collisions only share a bucket and never
-    /// merge distinct nodes.
+    /// Base hash-cons: [`ENode::hash_cons`] bucket -> `[(canonical node, class)]`.
+    /// Collisions only share a bucket; identity is `matches` + equal children.
     memo: HashMap<u64, Vec<(L, Id)>>,
-    /// Canonical base class id -> its e-class. Absorbed ids are removed on `union`.
-    /// Scoped unions never touch it, so a `pop_context` restores it for free.
+    /// Canonical base class id -> e-class; absorbed ids removed on `union`. Scoped
+    /// unions never touch it, so `pop_context` restores it for free.
     classes: HashMap<Id, EClass<L>>,
-    /// [`ENode::op_key`] bucket -> ids of classes that hold a node with that bucket,
-    /// letting [`Self::classes_with_op`] skip classes a concrete-rooted pattern can
-    /// never match. Append-only: a `union` leaves the absorbed id in place, where
-    /// `find` resolves it to the survivor (which still holds the node), and the
-    /// caller dedups — so the index over-approximates but never misses a live class
-    /// and never needs repair.
+    /// [`ENode::op_key`] bucket -> class ids holding such a node, so
+    /// [`Self::classes_with_op`] skips classes a concrete-rooted pattern can't match.
+    /// Append-only, caller-dedup'd: over-approximates, never misses a live class.
     classes_by_op: HashMap<u64, Vec<Id>>,
-    /// Classes touched by a `union` since the last `rebuild`, awaiting congruence
-    /// repair. Base reps in the base scope, scope reps inside a scope.
+    /// Classes touched by a `union` since the last `rebuild`, awaiting repair.
     pending: Vec<Id>,
-    /// Scope overlay, live only while a scope is open. `scope_members` and
-    /// `scope_classes` are caches of the current scope partition, rebuilt from the
-    /// base by [`Self::aggregate_scope`]; `scope_memo` is a stack of scope
-    /// hash-cons tables, one per open context, so a nested `pop_context` restores
-    /// the enclosing scope's table instead of discarding it. The base
-    /// `classes`/`memo` stay immutable underneath all of them.
+    /// Scope overlay, live only inside a scope. `scope_members`/`scope_classes` cache
+    /// the scope partition (rebuilt by [`Self::aggregate_scope`]); `scope_memo` stacks
+    /// one hash-cons per open context so a nested `pop_context` restores the enclosing
+    /// table. Base `classes`/`memo` stay immutable underneath.
     scope_members: HashMap<Id, Vec<Id>>,
     scope_classes: HashMap<Id, EClass<L>>,
     scope_memo: Vec<HashMap<u64, Vec<(L, Id)>>>,
@@ -108,13 +93,11 @@ impl<L: ENode> EGraph<L> {
         self.current_classes().len()
     }
 
-    /// Whether an assumption scope is currently open.
     fn in_scope(&self) -> bool {
         self.unionfind.depth() > 0
     }
 
-    /// The class table that reflects the current scope: the scope overlay while a
-    /// scope is open, otherwise the base classes.
+    /// Class table for the current scope: the overlay while open, else the base.
     fn current_classes(&self) -> &HashMap<Id, EClass<L>> {
         if self.in_scope() {
             &self.scope_classes
@@ -123,16 +106,16 @@ impl<L: ENode> EGraph<L> {
         }
     }
 
-    /// Enter an assumption scope. Unions until the matching [`Self::pop_context`]
-    /// are local to it; the base scope's classes and hash-cons stay untouched.
+    /// Enter an assumption scope: unions until the matching `pop_context` are local;
+    /// base classes and hash-cons stay untouched.
     pub fn push_context(&mut self) {
         self.unionfind.push_context();
         self.scope_memo.push(HashMap::new());
         self.aggregate_scope();
     }
 
-    /// Leave the current assumption scope, discarding its unions and overlay. The
-    /// enclosing scope (or the base) is restored without a rebuild.
+    /// Leave the scope, discarding its unions and overlay; the enclosing scope (or
+    /// base) is restored without a rebuild.
     pub fn pop_context(&mut self) {
         self.unionfind.pop_context();
         self.scope_memo.pop();
@@ -154,8 +137,7 @@ impl<L: ENode> EGraph<L> {
 
     pub fn class(&self, id: Id) -> &EClass<L> {
         let root = self.find(id);
-        // Fall back to the base class for a node added since the last scope rebuild
-        // (not yet aggregated into `scope_classes`).
+        // Fall back to base for a node added since the last scope rebuild.
         self.current_classes()
             .get(&root)
             .or_else(|| self.classes.get(&root))
@@ -166,10 +148,8 @@ impl<L: ENode> EGraph<L> {
         self.current_classes().values()
     }
 
-    /// The canonical (current-scope) classes that hold a node in [`ENode::op_key`]
-    /// bucket `op`, each once. Lets a concrete-rooted pattern visit only plausible
-    /// roots instead of every class; the result still over-approximates, so callers
-    /// confirm with [`ENode::matches`].
+    /// Canonical current-scope classes holding a node in `op` bucket, each once.
+    /// Over-approximates — callers confirm with [`ENode::matches`].
     pub fn classes_with_op(&self, op: u64) -> Vec<Id> {
         let Some(ids) = self.classes_by_op.get(&op) else {
             return Vec::new();
@@ -181,16 +161,13 @@ impl<L: ENode> EGraph<L> {
             .collect()
     }
 
-    /// The e-nodes of `id`'s class. Their child ids may be non-canonical after
-    /// unions — resolve with [`Self::find`].
+    /// E-nodes of `id`'s class; child ids may be non-canonical — resolve with [`Self::find`].
     pub fn nodes(&self, id: Id) -> &[L] {
         self.class(id).nodes()
     }
 
-    /// Intern `node`, returning its e-class. Canonicalizes children, then
-    /// hash-conses: a non-unique node structurally equal to an existing one shares
-    /// its class; otherwise (and always for [`ENode::is_unique`] nodes) a fresh
-    /// class is made.
+    /// Intern `node`, returning its e-class. A non-unique node equal to an existing
+    /// one shares its class; otherwise (always for unique nodes) a fresh class.
     pub fn add(&mut self, mut node: L) -> Id {
         self.canonicalize(&mut node);
         if !node.is_unique()
@@ -201,8 +178,7 @@ impl<L: ENode> EGraph<L> {
         self.make_class(node)
     }
 
-    /// The class of an already-interned `node`, or `None`. Never inserts; always
-    /// `None` for a unique node.
+    /// Class of an already-interned `node`, or `None` (never inserts; always `None` for unique).
     pub fn lookup(&self, node: &L) -> Option<Id> {
         if node.is_unique() {
             return None;
@@ -212,8 +188,8 @@ impl<L: ENode> EGraph<L> {
         self.memo_find(&node)
     }
 
-    /// Merge the classes of `a` and `b`, returning the surviving canonical id.
-    /// Congruence repair is deferred to [`Self::rebuild`].
+    /// Merge the classes of `a` and `b`, returning the survivor. Congruence repair
+    /// deferred to [`Self::rebuild`].
     pub fn union(&mut self, a: Id, b: Id) -> Id {
         let ra = self.find(a);
         let rb = self.find(b);
@@ -223,8 +199,7 @@ impl<L: ENode> EGraph<L> {
         let survivor = Id::from_raw(self.unionfind.union(ra.0, rb.0));
         let absorbed = if survivor == ra { rb } else { ra };
         if self.in_scope() {
-            // Record the merge in the scope overlay only; the base classes that
-            // `survivor` and `absorbed` denote are left intact for `pop_context`.
+            // Scope overlay only; base classes stay intact for `pop_context`.
             let taken = self
                 .scope_members
                 .remove(&absorbed)
@@ -243,12 +218,9 @@ impl<L: ENode> EGraph<L> {
         survivor
     }
 
-    /// Saturate in place with `rules`. Each iteration searches every rule against the
-    /// same snapshot, then applies all matches and rebuilds — so a node born this
-    /// iteration is only visible to the next. Stops at a fixpoint (an iteration that
-    /// changes neither the class nor the node count) or once a limit is reached.
-    /// Borrows `self` so a caller can saturate across [`Self::push_context`] scopes;
-    /// [`Runner::run`] delegates here.
+    /// Saturate in place with `rules`. Each iteration searches all rules against one
+    /// snapshot, then applies and rebuilds — a node born this iteration is visible
+    /// only to the next. Stops at a fixpoint (no class/node-count change) or a limit.
     pub fn saturate<'a, S>(
         &mut self,
         rules: impl IntoIterator<Item = &'a Rewrite<L, S>>,
@@ -284,15 +256,10 @@ impl<L: ENode> EGraph<L> {
         }
     }
 
-    /// Restore the congruence invariant to a fixpoint after a batch of unions, and
-    /// re-canonicalize the hash-cons.
-    ///
-    /// Processes the pending classes in rounds, deduplicating each round to its
-    /// canonical reps first. A `union` may queue the same survivor thousands of
-    /// times in one batch; without the dedup each duplicate would re-`repair` the
-    /// class — reprocessing its whole (growing) parent list — making rebuild
-    /// quadratic in the number of unions. With it, every class is repaired once per
-    /// round, and rounds continue until a round adds nothing (congruence fixpoint).
+    /// Restore congruence to a fixpoint after a batch of unions, re-canonicalizing
+    /// the hash-cons. Each round dedups pending to canonical reps first: without it a
+    /// survivor queued many times by `union` would re-`repair` its growing parent
+    /// list each time, making rebuild quadratic. Rounds run until one adds nothing.
     pub fn rebuild(&mut self) {
         if self.in_scope() {
             self.rebuild_scope();
@@ -311,16 +278,12 @@ impl<L: ENode> EGraph<L> {
         }
     }
 
-    /// Congruence repair inside a scope. The base `classes`/`memo` are read-only:
-    /// for every scope class touched since the last rebuild, walk the base parents
-    /// of the base classes it covers, canonicalize them through the scope, and
-    /// union any that collide in a fresh scope hash-cons (which re-queues work).
-    /// Repeats to a fixpoint, then re-aggregates the scope view.
+    /// Congruence repair inside a scope, base `classes`/`memo` read-only: walk the
+    /// base parents each touched scope class covers, canonicalize through the scope,
+    /// and union collisions in a fresh scope hash-cons. Fixpoint, then re-aggregate.
     fn rebuild_scope(&mut self) {
-        // `memo` is the scope hash-cons being built; it accumulates across rounds.
-        // Each round is deduplicated to its canonical reps, so a survivor queued many
-        // times by `union` is processed once per round rather than reprocessing its
-        // covered parents every time (the same quadratic the base path avoids).
+        // Scope hash-cons accumulated across rounds; per-round dedup avoids the same
+        // quadratic the base path avoids.
         let mut memo: HashMap<u64, Vec<(L, Id)>> = HashMap::new();
         while !self.pending.is_empty() {
             let mut todo = std::mem::take(&mut self.pending);
@@ -349,9 +312,7 @@ impl<L: ENode> EGraph<L> {
                         let bucket = memo.entry(p_node.hash_cons()).or_default();
                         let congruent = bucket
                             .iter()
-                            .find(|(stored, _)| {
-                                stored.matches(&p_node) && stored.children() == p_node.children()
-                            })
+                            .find(|(stored, _)| is_congruent(stored, &p_node))
                             .map(|&(_, id)| id);
                         match congruent {
                             Some(other) => {
@@ -369,9 +330,8 @@ impl<L: ENode> EGraph<L> {
         self.aggregate_scope();
     }
 
-    /// Rebuild the scope view from the base classes and the current scope unions:
-    /// `scope_members` groups the base reps under each scope rep, and
-    /// `scope_classes` aggregates their e-nodes so the read API works in a scope.
+    /// Rebuild the scope view: `scope_members` groups base reps under each scope rep,
+    /// `scope_classes` aggregates their e-nodes for the read API.
     fn aggregate_scope(&mut self) {
         let mut members: HashMap<Id, Vec<Id>> = HashMap::new();
         let mut nodes: HashMap<Id, Vec<L>> = HashMap::new();
@@ -417,8 +377,8 @@ impl<L: ENode> EGraph<L> {
         changed
     }
 
-    /// The class of a canonical `node` already in the memo, or `None`. Open scopes
-    /// are consulted innermost-first, then the base hash-cons.
+    /// Class of a canonical `node` in the memo, or `None`. Scopes innermost-first,
+    /// then the base hash-cons.
     fn memo_find(&self, node: &L) -> Option<Id> {
         for memo in self.scope_memo.iter().rev() {
             if let Some(id) = Self::bucket_lookup(memo, node) {
@@ -431,19 +391,18 @@ impl<L: ENode> EGraph<L> {
     fn bucket_lookup(memo: &HashMap<u64, Vec<(L, Id)>>, node: &L) -> Option<Id> {
         memo.get(&node.hash_cons())?
             .iter()
-            .find(|(stored, _)| stored.matches(node) && stored.children() == node.children())
+            .find(|(stored, _)| is_congruent(stored, node))
             .map(|&(_, id)| id)
     }
 
-    /// Insert or update the memo entry for a canonical `node`, in the innermost
-    /// open scope's hash-cons while a scope is open (leaving the base one
-    /// untouched).
+    /// Insert/update the memo entry for a canonical `node`, in the innermost open
+    /// scope's hash-cons while scoped (base untouched).
     fn memo_insert(&mut self, node: L, id: Id) {
         let memo = self.scope_memo.last_mut().unwrap_or(&mut self.memo);
         let bucket = memo.entry(node.hash_cons()).or_default();
         match bucket
             .iter_mut()
-            .find(|(stored, _)| stored.matches(&node) && stored.children() == node.children())
+            .find(|(stored, _)| is_congruent(stored, &node))
         {
             Some(slot) => slot.1 = id,
             None => bucket.push((node, id)),
@@ -458,7 +417,7 @@ impl<L: ENode> EGraph<L> {
         };
         if let Some(pos) = bucket
             .iter()
-            .position(|(stored, _)| stored.matches(node) && stored.children() == node.children())
+            .position(|(stored, _)| is_congruent(stored, node))
         {
             bucket.swap_remove(pos);
         }
@@ -467,8 +426,8 @@ impl<L: ENode> EGraph<L> {
         }
     }
 
-    /// Make a fresh singleton class for an already-canonical `node`: register it as
-    /// a parent of each distinct child class and (unless unique) memoize it.
+    /// Fresh singleton class for a canonical `node`: register it as a parent of each
+    /// distinct child class and (unless unique) memoize it.
     fn make_class(&mut self, node: L) -> Id {
         let id = Id::from_raw(self.unionfind.push());
         self.classes_by_op
@@ -494,9 +453,8 @@ impl<L: ENode> EGraph<L> {
         id
     }
 
-    /// Congruence repair for one class: re-canonicalize the e-nodes that reference
-    /// it (its `parents`), refresh their memo entries, and union any that have
-    /// become structurally equal (which queues more work via `union`).
+    /// Congruence repair for one class: re-canonicalize its `parents`, refresh their
+    /// memo entries, and union any now structurally equal (queuing more via `union`).
     fn repair(&mut self, id: Id) {
         let id = self.find(id);
         let parents = std::mem::take(&mut self.class_mut(id).parents);
@@ -517,10 +475,10 @@ impl<L: ENode> EGraph<L> {
                 continue;
             }
             let slot = index.entry(p_node.hash_cons()).or_default();
-            let congruent = slot.iter().copied().find(|&i| {
-                new_parents[i].0.matches(&p_node)
-                    && new_parents[i].0.children() == p_node.children()
-            });
+            let congruent = slot
+                .iter()
+                .copied()
+                .find(|&i| is_congruent(&new_parents[i].0, &p_node));
             match congruent {
                 Some(i) => {
                     let kept = new_parents[i].1;
@@ -534,12 +492,16 @@ impl<L: ENode> EGraph<L> {
             }
         }
 
-        // Extend rather than assign: a `union` above may merge into this very
-        // class and append parents to it; those would be lost by an assignment.
-        // The merge re-queued this class, so the duplicates dedup on the next pass.
+        // Extend, don't assign: a `union` above may have appended parents to this
+        // class; an assignment would drop them. Duplicates dedup on the next pass.
         let root = self.find(id);
         self.class_mut(root).parents.extend(new_parents);
     }
+}
+
+/// Structural congruence: same operator ([`ENode::matches`]) and equal canonical children.
+fn is_congruent<L: ENode>(stored: &L, probe: &L) -> bool {
+    stored.matches(probe) && stored.children() == probe.children()
 }
 
 #[cfg(test)]
@@ -793,15 +755,7 @@ mod tests {
     #[test]
     fn rewrite_under_scope_is_discarded_on_pop() {
         // add(x, y) => add(y, x), applied only inside a scope.
-        let mut lhs: Pattern<Math, &'static str> = Pattern::new();
-        let x = lhs.var(Var::Symbol("x"));
-        let y = lhs.var(Var::Symbol("y"));
-        lhs.add(Math::Add([x, y]));
-        let mut rhs: Pattern<Math, &'static str> = Pattern::new();
-        let rx = rhs.var(Var::Symbol("x"));
-        let ry = rhs.var(Var::Symbol("y"));
-        rhs.add(Math::Add([ry, rx]));
-        let comm = Rewrite::new("add-comm", lhs, Rhs::Pattern(rhs));
+        let comm = comm_rule();
 
         let mut g = EGraph::new();
         let a = sym(&mut g, 0);

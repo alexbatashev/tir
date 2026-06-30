@@ -41,17 +41,14 @@ pub enum SymKind {
     And,
     Xor,
     Not,
-    /// Bit concatenation: the result width is the sum of both operand widths,
-    /// with the first operand occupying the high bits.
+    /// Bit concatenation; first operand occupies the high bits, width is the sum.
     Concat,
     /// Arguments are condition, then branch, else branch
     // #[arity = 3]
     If,
     // #[arity = 3]
     Clamp,
-    /// Arguments are address, bytes read, signedness/address-space metadata.
-    /// The third operand is nonsemantic for raw memory execution; explicit
-    /// `SExt`/`ZExt` nodes model signedness.
+    /// Args: address, bytes read, metadata. Metadata is nonsemantic; `SExt`/`ZExt` model signedness.
     // #[arity = 3]
     LoadMemory,
     /// Arguments are address, bytes written, value, address-space metadata.
@@ -59,10 +56,8 @@ pub enum SymKind {
     StoreMemory,
     ZExt,
     SExt,
-    /// Bit-field extract: arguments are value, high bit, low bit (both inclusive).
-    /// The result is the `high - low + 1` low bits. This is the single canonical
-    /// representation of truncation/bit-slicing — there is deliberately no separate
-    /// `Trunc` (`Trunc(x, n) == Extract(x, n-1, 0)`).
+    /// Bit-field extract: args value, high, low (inclusive) -> `high-low+1` bits. The
+    /// canonical truncation/slice; no separate `Trunc` (`Trunc(x,n) == Extract(x,n-1,0)`).
     // #[arity = 3]
     Extract,
     // #[arity = 1]
@@ -71,42 +66,28 @@ pub enum SymKind {
     Sqrt,
     // #[arity = 3]
     Fma,
-    /// Apply a function to each lane of an iterator. Arguments are `[iter, body]`:
-    /// `body` is evaluated once per element with the element bound as the lambda's
-    /// argument, read via `Arg(0)` (or `Arg(0)`/`Arg(1)` when the element is a pair
-    /// produced by `Zip`). The node's value is the iterator of results.
+    /// `[iter, body]`: map `body` over each lane, element bound via `Arg(0)` (or
+    /// `Arg(0)`/`Arg(1)` for a `Zip` pair); value is the iterator of results.
     // #[arity = 2]
     Map,
-    /// Pair two iterators lane-wise. Arguments are `[lhs, rhs]`; the value is an
-    /// iterator whose element `i` is the two-element iterator `[lhs[i], rhs[i]]`.
-    /// Feeding a `Zip` into a `Map` lets a binary lambda read both sides via
-    /// `Arg(0)`/`Arg(1)`.
+    /// `[lhs, rhs]`: pair two iterators lane-wise into element `i` = `[lhs[i], rhs[i]]`.
     // #[arity = 2]
     Zip,
-    /// Concatenate the lanes of an iterator into a single bit value, lane 0 in the
-    /// low bits. The inverse of `Split`. One argument: the iterator.
+    /// Concatenate an iterator's lanes into one bit value, lane 0 low. Inverse of `Split`.
     // #[arity = 1]
     IterConcat,
-    /// Split a bit value into `n` equal-width lanes. Arguments are `[bits, n]`;
-    /// the value is an iterator of `n` elements, lane 0 taken from the low bits.
-    /// The inverse of `IterConcat`.
+    /// `[bits, n]`: split into `n` equal lanes, lane 0 low. Inverse of `IterConcat`.
     // #[arity = 2]
     Split,
-    /// Left-fold a function over an iterator's lanes. Arguments are `[iter, body]`:
-    /// the accumulator starts at lane 0 and, for each later lane, is replaced by
-    /// `body` evaluated with `Arg(0)` bound to the accumulator and `Arg(1)` to the
-    /// lane. The node's value is the final accumulator (e.g. a horizontal add).
+    /// `[iter, body]`: left-fold from lane 0, `Arg(0)`=acc, `Arg(1)`=lane; value is final acc.
     // #[arity = 2]
     Reduce,
-    /// The k-th parameter of the innermost enclosing `Map`/`Reduce` lambda. A leaf
-    /// carrying its index as an `Int` payload; only meaningful inside that lambda's
-    /// `body` subexpression.
+    /// The k-th parameter of the innermost enclosing `Map`/`Reduce` lambda (`Int` payload).
     Arg,
 }
 
 impl SymKind {
-    /// Whether the operator is commutative in its two operands, so a builder may
-    /// canonicalize operand order and the matcher may match either order.
+    /// Whether the operator is commutative in its two operands.
     pub fn is_commutative(&self) -> bool {
         matches!(
             self,
@@ -114,7 +95,7 @@ impl SymKind {
         )
     }
 
-    /// Number of operand children this node carries — its structural arity.
+    /// Structural arity: number of operand children.
     pub fn arity(&self) -> usize {
         match self {
             SymKind::Symbol | SymKind::Constant | SymKind::Arg => 0,
@@ -134,9 +115,7 @@ impl SymKind {
     }
 }
 
-/// The leaf/arity/operand-kind facts the program-DAG matcher needs. Structural
-/// and context-independent, so the context type `C` is ignored — this lets the
-/// same node label match in any context (e.g. an isel `tir::Context`).
+/// Structural matcher facts; context `C` is ignored so a label matches in any context.
 impl<C> Matchable<C> for SymKind {
     fn is_leaf(&self, _: &C) -> bool {
         self.arity() == 0
@@ -166,13 +145,11 @@ pub enum SymPayload<V> {
 /// A runtime value produced by the expression interpreter.
 #[derive(Clone, Debug)]
 pub enum Value {
-    /// Arbitrary-precision integers
     Int(APInt),
-    /// Arbitrary-precision floats
     Float(APFloat),
-    /// A fixed-size array of other values, like a vector
+    /// A fixed-size array of values, like a vector.
     Iterator(Vec<Value>),
-    /// An untyped bag of bits
+    /// An untyped bag of bits.
     RawBits(RawBits),
 }
 

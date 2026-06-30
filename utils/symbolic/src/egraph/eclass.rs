@@ -1,12 +1,10 @@
 use super::{ENode, Id};
 
-/// An equivalence class: the e-nodes proven equal, plus back-edges to the e-nodes
-/// that reference this class as an operand (used to repair congruence after unions).
+/// An equivalence class: e-nodes proven equal, plus back-edges (parents) for congruence repair.
 pub struct EClass<L: ENode> {
     pub(super) id: Id,
     pub(super) nodes: Vec<L>,
-    /// `(parent enode, the parent's own class)` for every e-node with a child in
-    /// this class.
+    /// `(parent enode, parent's class)` for every e-node with a child here.
     pub(super) parents: Vec<(L, Id)>,
 }
 

@@ -5,9 +5,7 @@ use tir_graph::{MutDag, NodeId};
 
 use crate::lang::{SymKind, SymPayload};
 
-/// A parsed s-expression: either a bare token or a parenthesised list. This is
-/// the surface syntax of an operation's `sem = "..."` declaration; [`build`]
-/// lowers it into a [`SymKind`] graph.
+/// Parsed s-expression: surface syntax of an op's `sem = "..."`; [`build`] lowers it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SemExpr {
     Atom(String),
@@ -15,9 +13,7 @@ pub enum SemExpr {
 }
 
 impl SemExpr {
-    /// Collect the names of every `$splice` atom referenced anywhere in the
-    /// expression, in first-seen order. A macro uses this to wire up the
-    /// [`SemBuilderHooks::splice`] arms it must generate.
+    /// Names of every `$splice` atom, in first-seen order.
     pub fn splice_names(&self) -> Vec<String> {
         let mut out = Vec::new();
         self.collect_splices(&mut out);
@@ -42,8 +38,7 @@ impl SemExpr {
     }
 }
 
-/// Parse an s-expression. Tokens are whitespace/paren delimited; there are no
-/// quotes or escapes — the behavior language is deliberately tiny.
+/// Parse an s-expression; tokens are whitespace/paren delimited, no quotes or escapes.
 pub fn parse(input: &str) -> Option<SemExpr> {
     fn parse_list(chars: &[char], pos: &mut usize) -> Option<SemExpr> {
         if *pos >= chars.len() || chars[*pos] != '(' {
@@ -91,19 +86,12 @@ pub fn parse(input: &str) -> Option<SemExpr> {
     if pos == chars.len() { Some(expr) } else { None }
 }
 
-/// Op-specific callbacks the builder needs to resolve context-dependent atoms.
-///
-/// `$name` atoms splice a subexpression an op computes in Rust (e.g. a vector's
-/// active lane count), and the width-changing ops `sext`/`zext`/`trunc` take
-/// their target width from the op's result type. Both are unknown to the
-/// structural builder, so the op supplies them here.
+/// Op-specific callbacks resolving context-dependent atoms: `$splice` subexprs and result width.
 pub trait SemBuilderHooks<G> {
-    /// Build the subexpression a `$name` atom stands for into `g`, returning its
-    /// root, or `None` if the op does not provide that splice.
+    /// Build the subexpr a `$name` atom stands for, or `None` if unprovided.
     fn splice(&self, name: &str, g: &mut G) -> Option<NodeId>;
 
-    /// The width `sext`/`zext`/`trunc` extend to, taken from the op's result
-    /// type. `None` if the op has no result width.
+    /// Width `sext`/`zext`/`trunc` extend to; `None` if op has no result width.
     fn result_width(&self) -> Option<u64>;
 }
 
@@ -135,9 +123,7 @@ impl fmt::Display for BuildError {
 
 impl std::error::Error for BuildError {}
 
-/// Lower an operation's `sem = "(set <dst> <rhs>)"` declaration into a [`SymKind`]
-/// graph rooted at the returned node. `symbols` maps operand names to their
-/// `SymbolId`; `hooks` resolves `$splice` atoms and the result width.
+/// Lower a `sem = "(set <dst> <rhs>)"` declaration into a [`SymKind`] graph.
 pub fn build<V, G, H>(
     g: &mut G,
     sem: &str,
@@ -203,8 +189,7 @@ where
                 .last()
                 .and_then(|ps| ps.iter().position(|p| p == name))
             {
-                // Inside a `map`/`reduce` lambda, a parameter reference lowers to
-                // an `Arg` leaf carrying its position.
+                // Lambda param reference lowers to an `Arg` leaf carrying its position.
                 Ok(leaf(
                     g,
                     SymKind::Arg,
@@ -237,8 +222,7 @@ where
     G: MutDag<Node = SymKind, Leaf = SymPayload<V>>,
     H: SemBuilderHooks<G>,
 {
-    // `(concat iter)` joins an iterator's lanes into one bit value; its
-    // single-operand shape would otherwise be mistaken for a width-changing op.
+    // `(concat iter)`: matched before width-changing ops to avoid the single-operand clash.
     if let [SemExpr::Atom(op), arg] = items
         && op == "concat"
     {
@@ -246,8 +230,7 @@ where
         return Ok(node(g, SymKind::IterConcat, &[inner]));
     }
 
-    // Unary width-changing ops take their width from the op's result type, so
-    // `(sext x)`/`(zext x)`/`(trunc x)` need no explicit width operand.
+    // Unary width-changing ops take width from the result type, not an operand.
     if let [SemExpr::Atom(op), arg] = items {
         let kind = match op.as_str() {
             "sext" => Some(SymKind::SExt),
@@ -324,8 +307,7 @@ where
         "shl" => SymKind::ShiftLeft,
         "lshr" => SymKind::ShiftRightLogic,
         "ashr" => SymKind::ShiftRightArithmetic,
-        // `(zip a b)` pairs two iterators lane-wise; `(split bits n)` cuts a bit
-        // value into `n` lanes. Both are two-child nodes like the binary ops.
+        // zip pairs iterators lane-wise; split cuts a bit value into n lanes.
         "zip" => SymKind::Zip,
         "split" => SymKind::Split,
         other => return Err(BuildError::UnknownAtom(other.to_string())),
@@ -344,8 +326,7 @@ mod tests {
 
     type Graph = GenericDag<SymKind, SymPayload<()>>;
 
-    /// A hooks impl whose `$get_vlen` splices a constant lane count and whose
-    /// result width is fixed — mirrors the vector dialect's real hooks.
+    /// Hooks whose `$get_vlen` splices a constant lane count; mirrors the vector dialect.
     struct TestHooks {
         vlen: u64,
         width: Option<u64>,
@@ -435,7 +416,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(*g.get_kind(root), SymKind::SExt);
-        // sext of a negative i8 widens to 64 bits preserving sign.
         let out = execute(&g, &[Value::Int(APInt::new_signed(8, -5))]);
         match out {
             Value::Int(v) => assert_eq!(v.to_i64(), -5),

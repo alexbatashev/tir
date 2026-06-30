@@ -1,13 +1,9 @@
-//! `Display` implementations that render the AST back to SMT-LIB 2.7 text.
-//!
-//! Output is canonical, not byte-identical to the input: symbols are quoted only
-//! when their characters demand it, and a script prints one command per line.
+//! `Display` impls rendering the AST to canonical (not byte-identical) SMT-LIB 2.7 text.
 
 use std::fmt::{self, Display, Formatter};
 
 use super::ast::*;
 
-/// Write `items` separated by single spaces.
 fn join<T: Display>(f: &mut Formatter<'_>, items: &[T]) -> fmt::Result {
     for (i, item) in items.iter().enumerate() {
         if i > 0 {
@@ -292,7 +288,6 @@ impl Display for Script {
 mod tests {
     use super::super::parser::{parse_script, parse_term};
 
-    /// Parsing the printed form of a term yields the same AST (round-trip).
     fn term_roundtrips(src: &str) {
         let a = parse_term(src).unwrap();
         let printed = a.to_string();

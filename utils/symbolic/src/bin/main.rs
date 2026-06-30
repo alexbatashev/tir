@@ -1,6 +1,4 @@
-//! `tir-smt`: a standalone SMT-LIB solver for the QF_BV + Core subset, a fallback
-//! for hosts without Z3. Reads a script from a file argument or stdin and prints
-//! the responses, mirroring `z3 -smt2 <file>`.
+//! `tir-smt`: standalone SMT-LIB solver (QF_BV + Core), a Z3 fallback; reads a script from file arg or stdin.
 
 use std::io::{self, Read, Write};
 use std::process::ExitCode;
@@ -10,8 +8,7 @@ use tir_symbolic::solver::run_script;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    // Accept and ignore option flags (e.g. `-smt2`); the first bare argument is
-    // the input file, and `-` or no file means stdin.
+    // Ignore option flags (e.g. `-smt2`); first bare arg is the input file, else stdin.
     let file = args.iter().find(|a| !a.starts_with('-'));
 
     let src = match file {

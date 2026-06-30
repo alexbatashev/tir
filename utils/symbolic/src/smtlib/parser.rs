@@ -1,10 +1,5 @@
-//! A chumsky parser from SMT-LIB 2.7 concrete syntax to [`crate::smtlib::ast`].
-//!
-//! The grammar is built from one small parser per production. Each lexical token
-//! parser consumes its own *trailing* whitespace and comments; the script parser
-//! strips the single leading run. Tokens are matched whole (a keyword check
-//! parses an entire symbol token, then compares), so command/operator names with
-//! shared prefixes — `check-sat` vs `check-sat-assuming` — need no ordering care.
+//! chumsky parser for SMT-LIB 2.7. Each token parser eats its trailing whitespace; `kw` matches a
+//! whole symbol token, so shared-prefix names (`check-sat` vs `check-sat-assuming`) need no ordering care.
 
 use chumsky::prelude::*;
 
@@ -31,8 +26,9 @@ fn rparen<'a>() -> impl Parser<'a, &'a str, (), Extra<'a>> + Clone {
     just(')').then_ignore(ws()).ignored()
 }
 
-fn symbol_p<'a>() -> impl Parser<'a, &'a str, Symbol, Extra<'a>> + Clone {
-    let simple = any()
+/// A simple (unquoted) symbol's character run: a non-digit initial char then alnum/symbol chars.
+fn simple_symbol_p<'a>() -> impl Parser<'a, &'a str, String, Extra<'a>> + Clone {
+    any()
         .filter(|c: &char| c.is_ascii_alphabetic() || SYMBOL_CHARS.contains(*c))
         .then(
             any()
@@ -45,11 +41,16 @@ fn symbol_p<'a>() -> impl Parser<'a, &'a str, Symbol, Extra<'a>> + Clone {
             name.push(first);
             name.push_str(&rest);
             name
-        });
+        })
+}
+
+fn symbol_p<'a>() -> impl Parser<'a, &'a str, Symbol, Extra<'a>> + Clone {
     let quoted = just('|')
         .ignore_then(none_of("|\\").repeated().collect::<String>())
         .then_ignore(just('|'));
-    choice((simple, quoted)).map(Symbol).then_ignore(ws())
+    choice((simple_symbol_p(), quoted))
+        .map(Symbol)
+        .then_ignore(ws())
 }
 
 /// Match one reserved word, tokenised as a whole symbol to avoid prefix clashes.
@@ -63,8 +64,7 @@ fn kw<'a>(word: &'static str) -> impl Parser<'a, &'a str, (), Extra<'a>> + Clone
     })
 }
 
-/// A `<numeral>` digit run, enforcing the grammar's no-leading-zero rule
-/// (`0 | [1-9][0-9]*`). Returns the digits unparsed.
+/// A `<numeral>` digit run (`0 | [1-9][0-9]*`, no leading zero), returned unparsed.
 fn numeral_digits<'a>() -> impl Parser<'a, &'a str, String, Extra<'a>> + Clone {
     any()
         .filter(|c: &char| c.is_ascii_digit())
@@ -80,16 +80,20 @@ fn numeral_digits<'a>() -> impl Parser<'a, &'a str, String, Extra<'a>> + Clone {
         })
 }
 
-fn numeral_p<'a>() -> impl Parser<'a, &'a str, u128, Extra<'a>> + Clone {
-    numeral_digits()
-        .try_map(|s: String, span| {
-            s.parse::<u128>()
-                .map_err(|_| Rich::custom(span, "numeral out of range"))
-        })
-        .then_ignore(ws())
+/// `numeral_digits` parsed into a `u128`, without trailing whitespace.
+fn numeral_value<'a>() -> impl Parser<'a, &'a str, u128, Extra<'a>> + Clone {
+    numeral_digits().try_map(|s: String, span| {
+        s.parse::<u128>()
+            .map_err(|_| Rich::custom(span, "numeral out of range"))
+    })
 }
 
-fn string_lit_p<'a>() -> impl Parser<'a, &'a str, String, Extra<'a>> + Clone {
+fn numeral_p<'a>() -> impl Parser<'a, &'a str, u128, Extra<'a>> + Clone {
+    numeral_value().then_ignore(ws())
+}
+
+/// A `"..."` string literal body with doubled-`""` escaping, without trailing whitespace.
+fn string_lit_body<'a>() -> impl Parser<'a, &'a str, String, Extra<'a>> + Clone {
     just('"')
         .ignore_then(
             choice((just("\"\"").to('"'), none_of("\"")))
@@ -97,7 +101,10 @@ fn string_lit_p<'a>() -> impl Parser<'a, &'a str, String, Extra<'a>> + Clone {
                 .collect::<String>(),
         )
         .then_ignore(just('"'))
-        .then_ignore(ws())
+}
+
+fn string_lit_p<'a>() -> impl Parser<'a, &'a str, String, Extra<'a>> + Clone {
+    string_lit_body().then_ignore(ws())
 }
 
 fn spec_constant_p<'a>() -> impl Parser<'a, &'a str, SpecConstant, Extra<'a>> + Clone {
@@ -108,10 +115,6 @@ fn spec_constant_p<'a>() -> impl Parser<'a, &'a str, SpecConstant, Extra<'a>> + 
             .at_least(1)
             .collect::<String>()
     };
-    let numeral = numeral_digits().try_map(|s: String, span| {
-        s.parse::<u128>()
-            .map_err(|_| Rich::custom(span, "numeral out of range"))
-    });
     let decimal = numeral_digits()
         .then_ignore(just('.'))
         .then(digits())
@@ -124,40 +127,21 @@ fn spec_constant_p<'a>() -> impl Parser<'a, &'a str, SpecConstant, Extra<'a>> + 
             .collect::<String>(),
     );
     let binary = just("#b").ignore_then(one_of("01").repeated().at_least(1).collect::<String>());
-    let string = just('"')
-        .ignore_then(
-            choice((just("\"\"").to('"'), none_of("\"")))
-                .repeated()
-                .collect::<String>(),
-        )
-        .then_ignore(just('"'));
     choice((
         hex.map(SpecConstant::Hexadecimal),
         binary.map(SpecConstant::Binary),
         decimal.map(SpecConstant::Decimal),
-        numeral.map(SpecConstant::Numeral),
-        string.map(SpecConstant::String),
+        numeral_value().map(SpecConstant::Numeral),
+        string_lit_body().map(SpecConstant::String),
     ))
     .then_ignore(ws())
 }
 
 fn keyword_p<'a>() -> impl Parser<'a, &'a str, Keyword, Extra<'a>> + Clone {
-    // A keyword is `:` followed by a simple symbol: the first character cannot
-    // be a digit.
-    let first = any().filter(|c: &char| c.is_ascii_alphabetic() || SYMBOL_CHARS.contains(*c));
-    let rest = any()
-        .filter(|c: &char| c.is_ascii_alphanumeric() || SYMBOL_CHARS.contains(*c))
-        .repeated()
-        .collect::<String>();
+    // Keyword: `:` then a simple symbol; first char cannot be a digit.
     just(':')
-        .ignore_then(first)
-        .then(rest)
-        .map(|(first, rest): (char, String)| {
-            let mut name = String::with_capacity(rest.len() + 1);
-            name.push(first);
-            name.push_str(&rest);
-            Keyword(name)
-        })
+        .ignore_then(simple_symbol_p())
+        .map(Keyword)
         .then_ignore(ws())
 }
 
@@ -190,8 +174,7 @@ fn sort_p<'a>() -> impl Parser<'a, &'a str, Sort, Extra<'a>> + Clone {
             .then(sort.repeated().at_least(1).collect::<Vec<_>>())
             .then_ignore(rparen())
             .map(|(id, params)| Sort { id, params });
-        // `simple` first so an indexed identifier `(_ BitVec 32)` is read as a
-        // sort, not mistaken for a sort application.
+        // `simple` first so `(_ BitVec 32)` reads as a sort, not a sort application.
         choice((simple, app))
     })
 }
@@ -317,8 +300,7 @@ fn term_p<'a>() -> impl Parser<'a, &'a str, Term, Extra<'a>> + Clone {
             qual_identifier_p().map(Term::Ident),
         ));
 
-        // `atom` before `app_form` so `(_ bv13 8)` and `(as c S)` read as
-        // qualified-identifier terms, not as applications headed by `_`/`as`.
+        // `atom` before `app_form` so `(_ bv13 8)`/`(as c S)` read as qual-identifier terms, not apps.
         choice((
             let_form,
             forall_form,
@@ -331,7 +313,9 @@ fn term_p<'a>() -> impl Parser<'a, &'a str, Term, Extra<'a>> + Clone {
     })
 }
 
-fn function_def_p<'a>() -> impl Parser<'a, &'a str, FunctionDef, Extra<'a>> + Clone {
+/// The `symbol (sorted_var*) sort` signature shared by function definitions and declarations.
+fn function_sig_p<'a>()
+-> impl Parser<'a, &'a str, (Symbol, Vec<SortedVar>, Sort), Extra<'a>> + Clone {
     symbol_p()
         .then(
             lparen()
@@ -339,8 +323,13 @@ fn function_def_p<'a>() -> impl Parser<'a, &'a str, FunctionDef, Extra<'a>> + Cl
                 .then_ignore(rparen()),
         )
         .then(sort_p())
+        .map(|((name, params), return_sort)| (name, params, return_sort))
+}
+
+fn function_def_p<'a>() -> impl Parser<'a, &'a str, FunctionDef, Extra<'a>> + Clone {
+    function_sig_p()
         .then(term_p())
-        .map(|(((name, params), return_sort), body)| FunctionDef {
+        .map(|((name, params, return_sort), body)| FunctionDef {
             name,
             params,
             return_sort,
@@ -350,15 +339,9 @@ fn function_def_p<'a>() -> impl Parser<'a, &'a str, FunctionDef, Extra<'a>> + Cl
 
 fn function_dec_p<'a>() -> impl Parser<'a, &'a str, FunctionDec, Extra<'a>> + Clone {
     lparen()
-        .ignore_then(symbol_p())
-        .then(
-            lparen()
-                .ignore_then(sorted_var_p().repeated().collect::<Vec<_>>())
-                .then_ignore(rparen()),
-        )
-        .then(sort_p())
+        .ignore_then(function_sig_p())
         .then_ignore(rparen())
-        .map(|((name, params), return_sort)| FunctionDec {
+        .map(|(name, params, return_sort)| FunctionDec {
             name,
             params,
             return_sort,

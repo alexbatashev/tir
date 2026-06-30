@@ -1,24 +1,18 @@
 use std::cmp::Ordering;
 use std::fmt;
 
-/// Arbitrary Precision Floating Point
-/// Supports any combination of exponent and mantissa widths
-/// Can represent IEEE 754, BF16, FP8 variants, x86 extended, and custom formats
+/// Arbitrary-precision float over any exponent/mantissa widths: IEEE 754, BF16, FP8,
+/// x86 extended, and custom formats.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct APFloat {
-    /// Number of exponent bits
     exp_width: u32,
-    /// Number of mantissa bits (excluding implicit leading bit, unless explicit)
+    /// Excludes the implicit leading bit unless `explicit_leading_bit`.
     mant_width: u32,
-    /// Whether the mantissa has an explicit leading bit (like x86 80-bit)
     explicit_leading_bit: bool,
-    /// Sign bit (false = positive, true = negative)
     sign: bool,
-    /// Biased exponent value
     exponent: u32,
-    /// Mantissa bits (stored in lower bits, may need 128 bits for large formats)
-    mantissa_high: u64, // Upper 64 bits of mantissa
-    mantissa_low: u64, // Lower 64 bits of mantissa
+    mantissa_high: u64,
+    mantissa_low: u64,
 }
 
 impl APFloat {
@@ -100,8 +94,6 @@ impl APFloat {
         }
     }
 
-    // ============ Common Format Constructors ============
-
     /// IEEE 754 binary16 (half precision): 1 sign, 5 exp, 10 mantissa
     pub fn half() -> Self {
         Self::new(5, 10, false)
@@ -142,8 +134,6 @@ impl APFloat {
         Self::new(5, 2, false)
     }
 
-    // ============ Getters ============
-
     /// Get the exponent width
     pub fn exp_width(&self) -> u32 {
         self.exp_width
@@ -168,8 +158,6 @@ impl APFloat {
     pub fn exponent_bias(&self) -> i32 {
         (1i32 << (self.exp_width - 1)) - 1
     }
-
-    // ============ Value Construction ============
 
     /// Create a zero value
     pub fn zero(
@@ -211,7 +199,6 @@ impl APFloat {
     /// Create NaN (quiet NaN with highest mantissa bit set)
     pub fn nan(exp_width: u32, mant_width: u32, explicit_leading_bit: bool) -> Self {
         let exp_max = (1u32 << exp_width) - 1;
-        // Set the highest mantissa bit for quiet NaN
         let (mant_high, mant_low) = if mant_width > 64 {
             (1u64 << (mant_width - 64 - 1), 0)
         } else {
@@ -228,8 +215,6 @@ impl APFloat {
             mantissa_low: mant_low,
         }
     }
-
-    // ============ Conversions ============
 
     /// Convert to raw bit representation
     pub fn to_bits(&self) -> u128 {
@@ -259,23 +244,18 @@ impl APFloat {
 
     /// Convert to f32 (may lose precision or be inaccurate for non-standard formats)
     pub fn to_f32(&self) -> f32 {
-        // For single precision, direct conversion
         if self.exp_width == 8 && self.mant_width == 23 && !self.explicit_leading_bit {
             return f32::from_bits(self.to_bits() as u32);
         }
-
-        // For other formats, convert to double first if possible, then to single
         self.to_f64() as f32
     }
 
     /// Convert to f64 (may lose precision for quad/extended formats)
     pub fn to_f64(&self) -> f64 {
-        // For double precision, direct conversion
         if self.exp_width == 11 && self.mant_width == 52 && !self.explicit_leading_bit {
             return f64::from_bits(self.to_bits() as u64);
         }
 
-        // Handle special cases
         if self.is_nan() {
             return f64::NAN;
         }
@@ -290,15 +270,12 @@ impl APFloat {
             return if self.sign { -0.0 } else { 0.0 };
         }
 
-        // Convert to double precision format
-        // This is approximate and may lose precision
         let converted = self.convert(11, 52, false);
         f64::from_bits(converted.to_bits() as u64)
     }
 
     /// Convert to a different floating-point format
     pub fn convert(&self, new_exp_width: u32, new_mant_width: u32, new_explicit: bool) -> Self {
-        // If same format, return clone
         if self.exp_width == new_exp_width
             && self.mant_width == new_mant_width
             && self.explicit_leading_bit == new_explicit
@@ -306,7 +283,6 @@ impl APFloat {
             return self.clone();
         }
 
-        // Handle special values
         if self.is_nan() {
             return Self::nan(new_exp_width, new_mant_width, new_explicit);
         }
@@ -317,32 +293,25 @@ impl APFloat {
             return Self::zero(new_exp_width, new_mant_width, new_explicit, self.sign);
         }
 
-        // Convert the exponent
         let source_bias = self.exponent_bias();
         let target_bias = (1i32 << (new_exp_width - 1)) - 1;
 
         let unbiased_exp = (self.exponent as i32) - source_bias;
         let new_biased_exp = unbiased_exp + target_bias;
 
-        // Check for overflow/underflow
         let target_exp_max = (1i32 << new_exp_width) - 1;
         let new_exponent = if new_biased_exp <= 0 {
-            // Underflow - becomes zero or denormal
-            0
+            0 // underflow to zero/denormal
         } else if new_biased_exp >= target_exp_max {
-            // Overflow - becomes infinity
             return Self::infinity(new_exp_width, new_mant_width, new_explicit, self.sign);
         } else {
             new_biased_exp as u32
         };
 
-        // Convert the mantissa
         let (new_mant_high, new_mant_low) = if new_mant_width > self.mant_width {
-            // Extending mantissa - shift left and zero-fill
             let shift = new_mant_width - self.mant_width;
             self.shift_mantissa_left(shift)
         } else if new_mant_width < self.mant_width {
-            // Truncating mantissa - shift right (with rounding if desired)
             let shift = self.mant_width - new_mant_width;
             self.shift_mantissa_right(shift)
         } else {
@@ -359,8 +328,6 @@ impl APFloat {
             mantissa_low: new_mant_low,
         }
     }
-
-    // ============ Predicates ============
 
     /// Check if this is zero
     pub fn is_zero(&self) -> bool {
@@ -389,8 +356,6 @@ impl APFloat {
         self.exponent == 0 && (self.mantissa_high != 0 || self.mantissa_low != 0)
     }
 
-    // ============ Arithmetic Operations ============
-
     /// Negate the value
     pub fn neg(&self) -> Self {
         APFloat {
@@ -417,22 +382,10 @@ impl APFloat {
         }
     }
 
-    /// Add two floating-point numbers
-    /// Note: This uses native f64 arithmetic, which may lose precision for some formats
+    /// Add via native f64 arithmetic; may lose precision for non-f64 formats.
     pub fn add(&self, other: &APFloat) -> Self {
-        assert_eq!(
-            self.exp_width, other.exp_width,
-            "Exponent widths must match"
-        );
-        assert_eq!(
-            self.mant_width, other.mant_width,
-            "Mantissa widths must match"
-        );
-
-        // Use native arithmetic through f64
-        let result = self.to_f64() + other.to_f64();
-        let result_float = Self::from_f64(result);
-        result_float.convert(self.exp_width, self.mant_width, self.explicit_leading_bit)
+        self.assert_same_format(other);
+        self.with_native(self.to_f64() + other.to_f64())
     }
 
     /// Subtract two floating-point numbers
@@ -442,70 +395,38 @@ impl APFloat {
 
     /// Multiply two floating-point numbers
     pub fn mul(&self, other: &APFloat) -> Self {
-        assert_eq!(
-            self.exp_width, other.exp_width,
-            "Exponent widths must match"
-        );
-        assert_eq!(
-            self.mant_width, other.mant_width,
-            "Mantissa widths must match"
-        );
-
-        let result = self.to_f64() * other.to_f64();
-        let result_float = Self::from_f64(result);
-        result_float.convert(self.exp_width, self.mant_width, self.explicit_leading_bit)
+        self.assert_same_format(other);
+        self.with_native(self.to_f64() * other.to_f64())
     }
 
     /// Divide two floating-point numbers
     pub fn div(&self, other: &APFloat) -> Self {
-        assert_eq!(
-            self.exp_width, other.exp_width,
-            "Exponent widths must match"
-        );
-        assert_eq!(
-            self.mant_width, other.mant_width,
-            "Mantissa widths must match"
-        );
-
-        let result = self.to_f64() / other.to_f64();
-        let result_float = Self::from_f64(result);
-        result_float.convert(self.exp_width, self.mant_width, self.explicit_leading_bit)
+        self.assert_same_format(other);
+        self.with_native(self.to_f64() / other.to_f64())
     }
 
     /// Square root
     pub fn sqrt(&self) -> Self {
-        let result = self.to_f64().sqrt();
-        let result_float = Self::from_f64(result);
-        result_float.convert(self.exp_width, self.mant_width, self.explicit_leading_bit)
+        self.with_native(self.to_f64().sqrt())
     }
 
     /// Fused multiply-add: (self * b) + c
     pub fn fma(&self, b: &APFloat, c: &APFloat) -> Self {
-        assert_eq!(self.exp_width, b.exp_width, "Exponent widths must match");
-        assert_eq!(self.mant_width, b.mant_width, "Mantissa widths must match");
-        assert_eq!(self.exp_width, c.exp_width, "Exponent widths must match");
-        assert_eq!(self.mant_width, c.mant_width, "Mantissa widths must match");
-
-        let result = self.to_f64().mul_add(b.to_f64(), c.to_f64());
-        let result_float = Self::from_f64(result);
-        result_float.convert(self.exp_width, self.mant_width, self.explicit_leading_bit)
+        self.assert_same_format(b);
+        self.assert_same_format(c);
+        self.with_native(self.to_f64().mul_add(b.to_f64(), c.to_f64()))
     }
 
-    // ============ Comparison ============
-
-    /// Compare two floating-point numbers
+    /// IEEE compare: `None` when either is NaN. May lose precision for non-f64 formats.
     pub fn compare(&self, other: &APFloat) -> Option<Ordering> {
-        // NaN comparisons are unordered
         if self.is_nan() || other.is_nan() {
             return None;
         }
 
-        // Handle zeros
         if self.is_zero() && other.is_zero() {
             return Some(Ordering::Equal);
         }
 
-        // Handle infinities
         if self.is_infinity() && other.is_infinity() {
             if self.sign == other.sign {
                 return Some(Ordering::Equal);
@@ -518,7 +439,6 @@ impl APFloat {
             }
         }
 
-        // Use f64 comparison (may lose precision for some formats)
         self.to_f64().partial_cmp(&other.to_f64())
     }
 
@@ -544,8 +464,6 @@ impl APFloat {
             Some(Ordering::Greater | Ordering::Equal)
         )
     }
-
-    // ============ Helper Functions ============
 
     fn shift_mantissa_left(&self, shift: u32) -> (u64, u64) {
         if shift == 0 {
@@ -585,9 +503,24 @@ impl APFloat {
         }
     }
 
-    /// IEEE total-order key over sign/exponent/mantissa within this format
-    /// (à la `f64::total_cmp`): -inf < ... < -0 < +0 < ... < +inf, with NaNs at
-    /// the extremes by sign. Only comparable within a single format.
+    /// Assert two values share exponent and mantissa widths.
+    fn assert_same_format(&self, other: &APFloat) {
+        assert_eq!(
+            self.exp_width, other.exp_width,
+            "Exponent widths must match"
+        );
+        assert_eq!(
+            self.mant_width, other.mant_width,
+            "Mantissa widths must match"
+        );
+    }
+
+    /// Wrap a native-f64 result back into this value's format.
+    fn with_native(&self, value: f64) -> Self {
+        Self::from_f64(value).convert(self.exp_width, self.mant_width, self.explicit_leading_bit)
+    }
+
+    /// IEEE total-order key (à la `f64::total_cmp`); only comparable within one format.
     fn total_key(&self) -> i128 {
         let magnitude = (self.to_bits() & ((1u128 << (self.bit_width() - 1)) - 1)) as i128;
         if self.sign { -magnitude - 1 } else { magnitude }
@@ -595,10 +528,7 @@ impl APFloat {
 }
 
 impl Ord for APFloat {
-    /// Total order: numerically (IEEE total order) within a format, then by the
-    /// remaining fields so it stays total and consistent with the derived
-    /// structural `Eq`/`Hash`. Note this is a structural order, not IEEE
-    /// comparison: `NaN == NaN`, `-0 < +0`. Use [`APFloat::compare`] for IEEE.
+    /// Structural total order (not IEEE: `NaN == NaN`, `-0 < +0`); use [`APFloat::compare`] for IEEE.
     fn cmp(&self, other: &Self) -> Ordering {
         self.total_key()
             .cmp(&other.total_key())

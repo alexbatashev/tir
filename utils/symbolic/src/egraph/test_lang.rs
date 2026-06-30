@@ -2,7 +2,7 @@
 
 use tir_adt::{APFloat, APInt};
 
-use super::{EGraph, ENode, Id};
+use super::{EGraph, ENode, Id, Pattern, Rewrite, Rhs, Var};
 
 #[derive(Debug, Clone)]
 pub(crate) enum Math {
@@ -32,8 +32,7 @@ impl ENode for Math {
         }
     }
 
-    // Buckets by operator only — so e.g. all `Num`s collide, exercising the
-    // matches()+children disambiguation.
+    // Buckets by operator only, so all `Num`s collide — exercises matches()+children disambiguation.
     fn hash_cons(&self) -> u64 {
         match self {
             Math::Num(_) => 1,
@@ -84,4 +83,32 @@ pub(crate) fn neg(g: &mut EGraph<Math>, a: Id) -> Id {
 }
 pub(crate) fn add(g: &mut EGraph<Math>, a: Id, b: Id) -> Id {
     g.add(Math::Add([a, b]))
+}
+
+/// `add(x, y) => add(y, x)`.
+pub(crate) fn comm_rule() -> Rewrite<Math, &'static str> {
+    let mut lhs: Pattern<Math, &'static str> = Pattern::new();
+    let x = lhs.var(Var::Symbol("x"));
+    let y = lhs.var(Var::Symbol("y"));
+    lhs.add(Math::Add([x, y]));
+
+    let mut rhs: Pattern<Math, &'static str> = Pattern::new();
+    let rx = rhs.var(Var::Symbol("x"));
+    let ry = rhs.var(Var::Symbol("y"));
+    rhs.add(Math::Add([ry, rx]));
+
+    Rewrite::new("add-comm", lhs, Rhs::Pattern(rhs))
+}
+
+/// `add(x, 0) => x`.
+pub(crate) fn add_zero_rule() -> Rewrite<Math, &'static str> {
+    let mut lhs: Pattern<Math, &'static str> = Pattern::new();
+    let x = lhs.var(Var::Symbol("x"));
+    let zero = lhs.var(Var::Int(APInt::from_i64(0)));
+    lhs.add(Math::Add([x, zero]));
+
+    let mut rhs: Pattern<Math, &'static str> = Pattern::new();
+    rhs.var(Var::Symbol("x"));
+
+    Rewrite::new("add-zero", lhs, Rhs::Pattern(rhs))
 }

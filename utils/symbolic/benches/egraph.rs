@@ -1,13 +1,6 @@
-//! Symbolic-math equality-saturation benchmark for the `tir-symbolic` e-graph,
-//! modelled on egg's `tests/math.rs`. The `egg_math` bench runs the identical
-//! workload on egg for comparison; both build their rules from [`shared::RULES`]
-//! and seed the same [`shared::SEED_EXPRS`].
-//!
-//! Symbol and pattern-variable names are interned to `u32` (see [`intern`]) so the
-//! comparison measures the e-matching/saturation algorithm, not string handling:
-//! egg interns every name to a `Copy` `Symbol`/`Var`, and TIR's real callers use a
-//! `Copy` variable type too (instcombine's `Var::Symbol(u32)`). Keying on `String`
-//! would charge TIR per-match name clones that egg never pays.
+//! Symbolic-math equality-saturation benchmark for `tir-symbolic`, vs egg's `tests/math.rs`
+//! on the same [`shared::RULES`]/[`shared::SEED_EXPRS`]. Names intern to `u32` (see [`intern`])
+//! so the comparison measures e-matching, not string handling — matching egg's `Copy` names.
 
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
@@ -25,8 +18,7 @@ use shared::{Cond, PRE_SAT_ITERS, RULES, RuleSpec, SAT_ITERS, SEED_EXPRS};
 
 const NODE_LIMIT: usize = 1_000_000;
 
-/// Intern a symbol or variable name to a stable `u32`, mirroring egg's global
-/// symbol interner so both engines compare `Copy` names by integer equality.
+/// Intern a name to a stable `u32`, mirroring egg's global symbol interner.
 fn intern(name: &str) -> u32 {
     static TABLE: OnceLock<Mutex<HashMap<String, u32>>> = OnceLock::new();
     let table = TABLE.get_or_init(|| Mutex::new(HashMap::new()));
@@ -35,9 +27,7 @@ fn intern(name: &str) -> u32 {
     *table.entry(name.to_string()).or_insert(next)
 }
 
-/// The math language label. Operands are child e-class [`Id`]s carried inline;
-/// constants and symbols carry their value/name so hash-consing and matching tell
-/// `0` from `2` and `x` from `y` by ordinary label equality.
+/// The math language label; constants/symbols carry their value/name for label-equality matching.
 #[derive(Clone, Debug)]
 enum Math {
     Diff([Id; 2]),
@@ -55,9 +45,10 @@ enum Math {
     Symbol(u32),
 }
 
-impl ENode for Math {
-    fn children(&self) -> &[Id] {
-        match self {
+// Shared match body for the children/children_mut accessors; `$empty` is the leaf slice.
+macro_rules! math_children {
+    ($val:expr, $empty:expr) => {
+        match $val {
             Math::Diff(a)
             | Math::Integral(a)
             | Math::Add(a)
@@ -66,22 +57,18 @@ impl ENode for Math {
             | Math::Div(a)
             | Math::Pow(a) => a,
             Math::Ln(a) | Math::Sqrt(a) | Math::Sin(a) | Math::Cos(a) => a,
-            Math::Constant(_) | Math::Symbol(_) => &[],
+            Math::Constant(_) | Math::Symbol(_) => $empty,
         }
+    };
+}
+
+impl ENode for Math {
+    fn children(&self) -> &[Id] {
+        math_children!(self, &[])
     }
 
     fn children_mut(&mut self) -> &mut [Id] {
-        match self {
-            Math::Diff(a)
-            | Math::Integral(a)
-            | Math::Add(a)
-            | Math::Sub(a)
-            | Math::Mul(a)
-            | Math::Div(a)
-            | Math::Pow(a) => a,
-            Math::Ln(a) | Math::Sqrt(a) | Math::Sin(a) | Math::Cos(a) => a,
-            Math::Constant(_) | Math::Symbol(_) => &mut [],
-        }
+        math_children!(self, &mut [])
     }
 
     fn hash_cons(&self) -> u64 {
@@ -270,6 +257,13 @@ fn seed_all() -> EGraph<Math> {
     g
 }
 
+fn pre_saturated() -> (Vec<Rewrite<Math, u32>>, EGraph<Math>) {
+    let rules = build_rules();
+    let mut g = seed_all();
+    g.saturate(&rules, PRE_SAT_ITERS, NODE_LIMIT);
+    (rules, g)
+}
+
 fn extract_cost(node: &Math) -> u64 {
     match node {
         Math::Diff(_) | Math::Integral(_) => 100,
@@ -296,9 +290,7 @@ fn bench_saturate(c: &mut Criterion) {
 }
 
 fn bench_ematch(c: &mut Criterion) {
-    let rules = build_rules();
-    let mut g = seed_all();
-    g.saturate(&rules, PRE_SAT_ITERS, NODE_LIMIT);
+    let (rules, g) = pre_saturated();
     let mut group = c.benchmark_group("tir_math/ematch");
     group.bench_function("all_rules", |b| {
         b.iter(|| {
@@ -313,9 +305,7 @@ fn bench_ematch(c: &mut Criterion) {
 }
 
 fn bench_extract(c: &mut Criterion) {
-    let rules = build_rules();
-    let mut g = seed_all();
-    g.saturate(&rules, PRE_SAT_ITERS, NODE_LIMIT);
+    let (_, g) = pre_saturated();
     let mut group = c.benchmark_group("tir_math/extract");
     group.bench_function("best", |b| {
         b.iter(|| black_box(g.extract_best(extract_cost)));

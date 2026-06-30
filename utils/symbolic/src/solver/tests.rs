@@ -117,8 +117,7 @@ fn get_value_of_expression() {
 
 #[test]
 fn check_sat_assuming_uses_literals() {
-    // Prop literals are `symbol` or `(not symbol)`. Under `p` the formula is
-    // unsatisfiable; under `(not p)` it is satisfiable.
+    // Under `p` the formula is unsat; under `(not p)` it is sat.
     let out = lines(
         "(declare-const p Bool)(declare-const q Bool)\
          (assert (=> p q))(assert (not q))\

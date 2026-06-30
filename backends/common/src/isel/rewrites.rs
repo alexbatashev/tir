@@ -133,12 +133,13 @@ pub(crate) fn extension_rewrite(ext_kind: SymKind, shr_kind: SymKind) -> IselRew
                 Some(SymPayload::Int(APInt::new(64, (w - n) as u64))),
                 None,
             ));
-            let mut shl = template_node(SymKind::ShiftLeft, None, None);
-            shl.children = vec![value_class, shift_amount];
-            let shl = egraph.add(shl);
-            let mut shr = template_node(shr_kind, None, None);
-            shr.children = vec![shl, shift_amount];
-            let shr = egraph.add(shr);
+            let mut add_binop = |kind, children| {
+                let mut node = template_node(kind, None, None);
+                node.children = children;
+                egraph.add(node)
+            };
+            let shl = add_binop(SymKind::ShiftLeft, vec![value_class, shift_amount]);
+            let shr = add_binop(shr_kind, vec![shl, shift_amount]);
             egraph.union(root_class, shr);
         }),
     }

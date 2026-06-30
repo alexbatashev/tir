@@ -1,12 +1,7 @@
-//! Lifting: the [`crate::lang`] graph back into SMT-LIB AST.
-//!
-//! The graph blurs Bool and 1-bit bit-vectors, so a structural pass decides
-//! which nodes are boolean: comparisons and `Bool`-sorted symbols are boolean;
-//! `and`/`or`/`xor`/`not` are boolean iff any operand is; `ite` iff an arm is;
-//! a 1-bit constant is neutral and adapts to its context. Boolean context flows
-//! down so a 1-bit constant in a boolean position prints as `true`/`false` and
-//! the enclosing operator is emitted as `and` vs `bvand` accordingly. Symbols
-//! re-declare with their original sort (`Bool` or `(_ BitVec n)`).
+//! Lifting: the [`crate::lang`] graph back into SMT-LIB AST. The graph blurs
+//! Bool and 1-bit bit-vectors, so a structural pass (see [`Lifter::is_bool`])
+//! decides which nodes are boolean and boolean context flows down to pick
+//! `and`/`true` vs `bvand`/`#b1`.
 
 use std::collections::{HashMap, HashSet};
 
@@ -27,9 +22,8 @@ pub fn lift_term<V>(
     Ok(lifter.lift(root, ctx)?.0)
 }
 
-/// Lift the graph into a script: a `declare-const` for every reachable symbol
-/// followed by `(assert root)`, ready to hand to a solver. `assert` is a
-/// boolean position, so the root is lifted in boolean context.
+/// Lift the graph into a `declare-const`s + `(assert root)` script. `assert` is
+/// a boolean position, so the root is lifted in boolean context.
 pub fn lift_script<V>(
     graph: &impl Dag<Node = SymKind, Leaf = SymPayload<V>>,
     root: NodeId,
@@ -91,8 +85,8 @@ where
         self.graph.children(id).collect()
     }
 
-    /// Whether `id` definitely denotes a boolean. A 1-bit constant is *not*
-    /// definite (it is neutral and adapts to context), so it returns `false`.
+    /// Whether `id` *definitely* denotes a boolean; a neutral 1-bit constant
+    /// adapts to context and so returns `false`.
     fn is_bool(&mut self, id: NodeId) -> bool {
         if let Some(&b) = self.bool_cache.get(&id) {
             return b;
@@ -201,12 +195,23 @@ where
         }
     }
 
-    fn bv_app(&mut self, op: &str, id: NodeId) -> Result<(Term, bool), ConvertError> {
+    /// Lift every child in non-boolean context and apply `op`; `result_bool`
+    /// is the sort of the result (boolean for comparisons, else bit-vector).
+    fn nary(
+        &mut self,
+        op: &str,
+        id: NodeId,
+        result_bool: bool,
+    ) -> Result<(Term, bool), ConvertError> {
         let mut terms = Vec::new();
         for child in self.children(id) {
             terms.push(self.lift(child, false)?.0);
         }
-        Ok((app(op, terms), false))
+        Ok((app(op, terms), result_bool))
+    }
+
+    fn bv_app(&mut self, op: &str, id: NodeId) -> Result<(Term, bool), ConvertError> {
+        self.nary(op, id, false)
     }
 
     fn logical(
@@ -237,8 +242,7 @@ where
         Ok((app(op, vec![term]), node_bool))
     }
 
-    /// `=` / `(not (= ..))`. Equality operands may be boolean (e.g. `(= p q)`),
-    /// so their context is set from whether any operand is boolean.
+    /// `=` / `(not (= ..))`; operand context is boolean iff any operand is.
     fn equality(&mut self, id: NodeId, negate: bool) -> Result<(Term, bool), ConvertError> {
         let children = self.children(id);
         let operand_ctx = children.iter().any(|&c| self.is_bool(c));
@@ -253,11 +257,7 @@ where
 
     /// Signed/unsigned ordered comparisons take bit-vector operands.
     fn ordered(&mut self, op: &str, id: NodeId) -> Result<(Term, bool), ConvertError> {
-        let mut terms = Vec::new();
-        for child in self.children(id) {
-            terms.push(self.lift(child, false)?.0);
-        }
-        Ok((app(op, terms), true))
+        self.nary(op, id, true)
     }
 
     fn ite(&mut self, id: NodeId) -> Result<(Term, bool), ConvertError> {

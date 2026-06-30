@@ -3,8 +3,7 @@ use tir_graph::{Dag, NodeId};
 
 use crate::lang::{SymKind, SymPayload, Value};
 
-/// Memory backend used by semantic expressions containing `LoadMemory` or
-/// `StoreMemory`.
+/// Memory backend for `LoadMemory`/`StoreMemory` nodes.
 pub trait Memory {
     type Error;
 
@@ -33,10 +32,7 @@ impl Memory for NoMemory {
     }
 }
 
-/// Evaluate the expression DAG given concrete values for each symbol.
-///
-/// `symbols[i]` is the value for the operand with `SymbolId(i)`.
-/// Returns the value of the root node.
+/// Evaluate the expression DAG; `symbols[i]` is the value for `SymbolId(i)`.
 pub fn execute<V>(
     graph: &impl Dag<Node = SymKind, Leaf = SymPayload<V>>,
     symbols: &[Value],
@@ -47,11 +43,7 @@ pub fn execute<V>(
     }
 }
 
-/// Evaluate the expression DAG with a memory backend for load/store nodes.
-///
-/// Loads read little-endian byte sequences and produce an integer whose width is
-/// `size * 8`. Stores write the low bytes of their value and return a dummy
-/// 1-bit integer; callers normally ignore the result for store statements.
+/// Like [`execute`] but routes load/store nodes through `memory`; stores yield a dummy 1-bit value.
 pub fn execute_with_memory<V, M: Memory>(
     graph: &impl Dag<Node = SymKind, Leaf = SymPayload<V>>,
     symbols: &[Value],
@@ -101,8 +93,58 @@ macro_rules! as_float {
     };
 }
 
-/// Widen `v` to `width`, sign-extending signed values and zero-extending unsigned
-/// ones; a no-op when it is already at least that wide.
+/// Binary arithmetic over int (width-coerced) or float; `$c(0)` selects the type.
+macro_rules! arith_op {
+    ($c:ident, $int_m:ident, $float_m:ident, $op:literal) => {
+        match $c(0) {
+            Value::Int(a) => {
+                let (a, b) = coerce_ints(a, as_int!($c(1), $op));
+                Value::Int(a.$int_m(&b))
+            }
+            Value::Float(a) => Value::Float(a.$float_m(&as_float!($c(1), $op))),
+            Value::Iterator(_) | Value::RawBits(_) => {
+                panic!(concat!($op, " requires scalar operands"))
+            }
+        }
+    };
+}
+
+/// Integer-only binary op: coerce widths, apply one `APInt` method.
+macro_rules! int_binop {
+    ($c:ident, $m:ident, $op:literal) => {{
+        let (a, b) = coerce_ints(as_int!($c(0), $op), as_int!($c(1), $op));
+        Value::Int(a.$m(&b))
+    }};
+}
+
+/// Signed/float comparison yielding a 1-bit `Int`.
+macro_rules! cmp_op {
+    ($c:ident, $int_m:ident, $float_m:ident, $op:literal) => {
+        Value::Int(APInt::new(
+            1,
+            match $c(0) {
+                Value::Int(a) => {
+                    let (a, b) = coerce_ints(a, as_int!($c(1), $op));
+                    bool_result(a.$int_m(&b))
+                }
+                Value::Float(a) => bool_result(a.$float_m(&as_float!($c(1), $op))),
+                Value::Iterator(_) | Value::RawBits(_) => {
+                    panic!(concat!($op, " requires scalar operands"))
+                }
+            },
+        ))
+    };
+}
+
+/// Unsigned integer comparison yielding a 1-bit `Int`.
+macro_rules! ucmp_op {
+    ($c:ident, $m:ident, $op:literal) => {{
+        let (a, b) = coerce_ints(as_int!($c(0), $op), as_int!($c(1), $op));
+        Value::Int(APInt::new(1, bool_result(a.$m(&b))))
+    }};
+}
+
+/// Widen `v` to `width` (sign- or zero-extend per its signedness); no-op if already wide enough.
 fn widen(v: APInt, width: u32) -> APInt {
     if v.width() >= width {
         v
@@ -113,26 +155,37 @@ fn widen(v: APInt, width: u32) -> APInt {
     }
 }
 
-/// Bring two integers to a common width before a binary operation. Behavior
-/// expressions freely mix a wide value (a register, `XLEN`) with a bare narrow
-/// literal (`- 1`, `<< 2`, a `zext`-ed constant), so the interpreter extends the
-/// narrower operand rather than requiring exactly matching widths. Equal-width
-/// operands — the common case — pass through unchanged.
+/// Widen the narrower of two operands to a common width; behavior expressions mix
+/// wide values with bare narrow literals rather than matching widths exactly.
 fn coerce_ints(a: APInt, b: APInt) -> (APInt, APInt) {
     let width = a.width().max(b.width());
     (widen(a, width), widen(b, width))
 }
 
-/// Equality of two integers independent of width and signedness: operands are
-/// widened to a common width and compared by value, so e.g. a 64-bit register
-/// equals a narrow literal of the same magnitude.
+/// Compare two integers by value, ignoring width and signedness.
 fn ints_equal(a: APInt, b: APInt) -> bool {
     let (a, b) = coerce_ints(a, b);
     a.with_signed(false) == b.with_signed(false)
 }
 
-/// Evaluate a `Map` node: apply `body` to each lane of `iter`, exposing the lane
-/// (or its components, for a zipped pair) through the lambda-argument stack.
+/// Evaluate `body` with `binding` pushed as the innermost lambda argument, under a
+/// fresh cache so each lane's `Arg` reads its own value rather than a stale cached one.
+fn eval_lambda_body<V, M: Memory>(
+    graph: &impl Dag<Node = SymKind, Leaf = SymPayload<V>>,
+    body: NodeId,
+    symbols: &[Value],
+    args: &mut Vec<Value>,
+    memory: &mut M,
+    binding: Value,
+) -> Result<Value, M::Error> {
+    args.push(binding);
+    let mut body_cache = vec![None::<Value>; graph.len()];
+    let result = eval_node(graph, body, symbols, &mut body_cache, args, memory);
+    args.pop();
+    result
+}
+
+/// Evaluate a `Map` node: apply `body` to each lane of `iter` via the lambda-argument stack.
 fn eval_map<V, M: Memory>(
     graph: &impl Dag<Node = SymKind, Leaf = SymPayload<V>>,
     node: NodeId,
@@ -151,19 +204,14 @@ fn eval_map<V, M: Memory>(
 
     let mut out = Vec::with_capacity(elems.len());
     for elem in elems {
-        args.push(elem);
-        // `body` reads the per-lane argument, which changes each lane, so it
-        // cannot share the surrounding cache: evaluate it fresh.
-        let mut body_cache = vec![None::<Value>; graph.len()];
-        let lane = eval_node(graph, body_n, symbols, &mut body_cache, args, memory);
-        args.pop();
-        out.push(lane?);
+        out.push(eval_lambda_body(
+            graph, body_n, symbols, args, memory, elem,
+        )?);
     }
     Ok(Value::Iterator(out))
 }
 
-/// Evaluate a `Reduce` node: left-fold `body` over the lanes of `iter`, binding
-/// `Arg(0)` to the accumulator and `Arg(1)` to the current lane.
+/// Evaluate a `Reduce` node: left-fold `body` over `iter`, `Arg(0)`=acc, `Arg(1)`=lane.
 fn eval_reduce<V, M: Memory>(
     graph: &impl Dag<Node = SymKind, Leaf = SymPayload<V>>,
     node: NodeId,
@@ -182,21 +230,14 @@ fn eval_reduce<V, M: Memory>(
     let mut elems = elems.into_iter();
     let mut acc = elems.next().expect("reduce requires a non-empty iterator");
     for elem in elems {
-        // The accumulator and lane are read via `Arg(0)`/`Arg(1)`, packed as a
-        // two-element binding on the argument stack.
-        args.push(Value::Iterator(vec![acc, elem]));
-        let mut body_cache = vec![None::<Value>; graph.len()];
-        let next = eval_node(graph, body_n, symbols, &mut body_cache, args, memory);
-        args.pop();
-        acc = next?;
+        // Pack acc/lane as a two-element binding read via `Arg(0)`/`Arg(1)`.
+        let binding = Value::Iterator(vec![acc, elem]);
+        acc = eval_lambda_body(graph, body_n, symbols, args, memory, binding)?;
     }
     Ok(acc)
 }
 
-/// Evaluate a `Split` node: cut a raw-bits value into `n` equal-width lanes, lane
-/// 0 from the low bits. Each lane is reinterpreted as an integer — the only
-/// element kind the behavior language currently produces; float lanes would read
-/// the raw lanes with [`RawBits::to_apfloat`] instead.
+/// Evaluate a `Split` node: cut raw bits into `n` integer lanes, lane 0 from the low bits.
 fn split_bits(value: Value, n: usize) -> Value {
     let Value::RawBits(bits) = value else {
         panic!("split requires a raw-bits operand");
@@ -209,9 +250,7 @@ fn split_bits(value: Value, n: usize) -> Value {
     Value::Iterator(lanes)
 }
 
-/// Evaluate an `IterConcat` node: join an iterator's lanes into one raw-bits
-/// value, lane 0 in the low bits. The inverse of `Split`; each lane is taken back
-/// to its raw bytes according to its runtime type.
+/// Evaluate an `IterConcat` node: join lanes into one raw-bits value, lane 0 low. Inverse of `Split`.
 fn concat_lanes(value: Value) -> Value {
     let Value::Iterator(lanes) = value else {
         panic!("concat requires an iterator operand");
@@ -240,9 +279,8 @@ fn eval_node<V, M: Memory>(
         return Ok(v.clone());
     }
 
-    // `Map` and `Reduce` re-evaluate a child once per lane with a fresh per-lane
-    // lambda argument (read via `Arg`), so that child must not be pre-evaluated by
-    // the generic pass. Intercept each before the generic child pre-evaluation.
+    // Intercept before generic child pre-evaluation: Map/Reduce re-evaluate their
+    // body per lane with a fresh `Arg`, so it must not be pre-evaluated here.
     match *graph.get_kind(node) {
         SymKind::Map => {
             let result = eval_map(graph, node, symbols, cache, args, memory)?;
@@ -277,10 +315,9 @@ fn eval_node<V, M: Memory>(
             let idx = idx.to_u64() as usize;
             let binding = args.last().expect("Arg evaluated outside a lambda");
             match binding {
-                // A pair binding (from `Zip` lanes or a `Reduce` acc/lane pack)
-                // exposes its components positionally.
+                // Pair binding (Zip lanes or Reduce acc/lane pack): index positionally.
                 Value::Iterator(parts) => parts[idx].clone(),
-                // A scalar binding is the single argument of a unary lambda.
+                // Scalar binding: the single argument of a unary lambda.
                 scalar => {
                     assert!(idx == 0, "scalar lambda argument has only index 0");
                     scalar.clone()
@@ -317,67 +354,20 @@ fn eval_node<V, M: Memory>(
         },
 
         // ── Arithmetic (int or float) ──────────────────────────────────────
-        SymKind::Add => match c(0) {
-            Value::Int(a) => {
-                let (a, b) = coerce_ints(a, as_int!(c(1), "add"));
-                Value::Int(a.add(&b))
-            }
-            Value::Float(a) => Value::Float(a.add(&as_float!(c(1), "add"))),
-            Value::Iterator(_) | Value::RawBits(_) => panic!("add requires scalar operands"),
-        },
-        SymKind::Sub => match c(0) {
-            Value::Int(a) => {
-                let (a, b) = coerce_ints(a, as_int!(c(1), "sub"));
-                Value::Int(a.sub(&b))
-            }
-            Value::Float(a) => Value::Float(a.sub(&as_float!(c(1), "sub"))),
-            Value::Iterator(_) | Value::RawBits(_) => panic!("sub requires scalar operands"),
-        },
-        SymKind::Mul => match c(0) {
-            Value::Int(a) => {
-                let (a, b) = coerce_ints(a, as_int!(c(1), "mul"));
-                Value::Int(a.mul(&b))
-            }
-            Value::Float(a) => Value::Float(a.mul(&as_float!(c(1), "mul"))),
-            Value::Iterator(_) | Value::RawBits(_) => panic!("mul requires scalar operands"),
-        },
-        SymKind::Div => match c(0) {
-            Value::Int(a) => {
-                let (a, b) = coerce_ints(a, as_int!(c(1), "div"));
-                Value::Int(a.sdiv(&b))
-            }
-            Value::Float(a) => Value::Float(a.div(&as_float!(c(1), "div"))),
-            Value::Iterator(_) | Value::RawBits(_) => panic!("div requires scalar operands"),
-        },
-        SymKind::UDiv => {
-            let (a, b) = coerce_ints(as_int!(c(0), "udiv"), as_int!(c(1), "udiv"));
-            Value::Int(a.udiv(&b))
-        }
-        SymKind::SRem => {
-            let (a, b) = coerce_ints(as_int!(c(0), "srem"), as_int!(c(1), "srem"));
-            Value::Int(a.srem(&b))
-        }
-        SymKind::URem => {
-            let (a, b) = coerce_ints(as_int!(c(0), "urem"), as_int!(c(1), "urem"));
-            Value::Int(a.urem(&b))
-        }
+        SymKind::Add => arith_op!(c, add, add, "add"),
+        SymKind::Sub => arith_op!(c, sub, sub, "sub"),
+        SymKind::Mul => arith_op!(c, mul, mul, "mul"),
+        SymKind::Div => arith_op!(c, sdiv, div, "div"),
+        SymKind::UDiv => int_binop!(c, udiv, "udiv"),
+        SymKind::SRem => int_binop!(c, srem, "srem"),
+        SymKind::URem => int_binop!(c, urem, "urem"),
         SymKind::Neg => Value::Int(as_int!(c(0), "neg").neg()),
 
         // ── Bitwise (int only) ─────────────────────────────────────────────
-        SymKind::And => {
-            let (a, b) = coerce_ints(as_int!(c(0), "and"), as_int!(c(1), "and"));
-            Value::Int(a.and(&b))
-        }
-        SymKind::Or => {
-            let (a, b) = coerce_ints(as_int!(c(0), "or"), as_int!(c(1), "or"));
-            Value::Int(a.or(&b))
-        }
-        SymKind::Xor => {
-            let (a, b) = coerce_ints(as_int!(c(0), "xor"), as_int!(c(1), "xor"));
-            Value::Int(a.xor(&b))
-        }
-        // Concatenation places the first operand in the high bits; the result is
-        // as wide as the sum of the operand widths.
+        SymKind::And => int_binop!(c, and, "and"),
+        SymKind::Or => int_binop!(c, or, "or"),
+        SymKind::Xor => int_binop!(c, xor, "xor"),
+        // First operand occupies the high bits.
         SymKind::Concat => {
             let hi = as_int!(c(0), "concat");
             let lo = as_int!(c(1), "concat");
@@ -395,10 +385,7 @@ fn eval_node<V, M: Memory>(
             Value::Int(as_int!(c(0), "lshr").lshr(as_int!(c(1), "lshr").to_u64() as u32))
         }
         SymKind::ShiftRightArithmetic => {
-            // An arithmetic shift always treats its operand as signed (sign bit =
-            // MSB of the operand width), regardless of the value's stored
-            // signedness flag. Register values are stored unsigned, so without
-            // forcing this `>>>` would silently degrade to a logical shift.
+            // Force signed: register values are stored unsigned, else `>>>` degrades to logical.
             let mut value = as_int!(c(0), "ashr");
             value.set_signed(true);
             Value::Int(value.ashr(as_int!(c(1), "ashr").to_u64() as u32))
@@ -420,66 +407,14 @@ fn eval_node<V, M: Memory>(
             };
             Value::Int(APInt::new(1, bool_result(ne)))
         }
-        SymKind::Lt => Value::Int(APInt::new(
-            1,
-            match c(0) {
-                Value::Int(a) => {
-                    let (a, b) = coerce_ints(a, as_int!(c(1), "lt"));
-                    bool_result(a.slt(&b))
-                }
-                Value::Float(a) => bool_result(a.lt(&as_float!(c(1), "lt"))),
-                Value::Iterator(_) | Value::RawBits(_) => panic!("lt requires scalar operands"),
-            },
-        )),
-        SymKind::Le => Value::Int(APInt::new(
-            1,
-            match c(0) {
-                Value::Int(a) => {
-                    let (a, b) = coerce_ints(a, as_int!(c(1), "le"));
-                    bool_result(a.sle(&b))
-                }
-                Value::Float(a) => bool_result(a.le(&as_float!(c(1), "le"))),
-                Value::Iterator(_) | Value::RawBits(_) => panic!("le requires scalar operands"),
-            },
-        )),
-        SymKind::Gt => Value::Int(APInt::new(
-            1,
-            match c(0) {
-                Value::Int(a) => {
-                    let (a, b) = coerce_ints(a, as_int!(c(1), "gt"));
-                    bool_result(a.sgt(&b))
-                }
-                Value::Float(a) => bool_result(a.gt(&as_float!(c(1), "gt"))),
-                Value::Iterator(_) | Value::RawBits(_) => panic!("gt requires scalar operands"),
-            },
-        )),
-        SymKind::Ge => Value::Int(APInt::new(
-            1,
-            match c(0) {
-                Value::Int(a) => {
-                    let (a, b) = coerce_ints(a, as_int!(c(1), "ge"));
-                    bool_result(a.sge(&b))
-                }
-                Value::Float(a) => bool_result(a.ge(&as_float!(c(1), "ge"))),
-                Value::Iterator(_) | Value::RawBits(_) => panic!("ge requires scalar operands"),
-            },
-        )),
-        SymKind::ULt => {
-            let (a, b) = coerce_ints(as_int!(c(0), "ult"), as_int!(c(1), "ult"));
-            Value::Int(APInt::new(1, bool_result(a.ult(&b))))
-        }
-        SymKind::ULe => {
-            let (a, b) = coerce_ints(as_int!(c(0), "ule"), as_int!(c(1), "ule"));
-            Value::Int(APInt::new(1, bool_result(a.ule(&b))))
-        }
-        SymKind::UGt => {
-            let (a, b) = coerce_ints(as_int!(c(0), "ugt"), as_int!(c(1), "ugt"));
-            Value::Int(APInt::new(1, bool_result(a.ugt(&b))))
-        }
-        SymKind::UGe => {
-            let (a, b) = coerce_ints(as_int!(c(0), "uge"), as_int!(c(1), "uge"));
-            Value::Int(APInt::new(1, bool_result(a.uge(&b))))
-        }
+        SymKind::Lt => cmp_op!(c, slt, lt, "lt"),
+        SymKind::Le => cmp_op!(c, sle, le, "le"),
+        SymKind::Gt => cmp_op!(c, sgt, gt, "gt"),
+        SymKind::Ge => cmp_op!(c, sge, ge, "ge"),
+        SymKind::ULt => ucmp_op!(c, ult, "ult"),
+        SymKind::ULe => ucmp_op!(c, ule, "ule"),
+        SymKind::UGt => ucmp_op!(c, ugt, "ugt"),
+        SymKind::UGe => ucmp_op!(c, uge, "uge"),
 
         // ── Control ────────────────────────────────────────────────────────
         SymKind::If => {
@@ -549,11 +484,9 @@ fn eval_node<V, M: Memory>(
             let value = as_int!(c(0), "extract");
             let high = as_int!(c(1), "extract").to_u64() as u32;
             let low = as_int!(c(2), "extract").to_u64() as u32;
-            // `extract(a * b, 2N-1, N)` is the TMDL idiom for the high half of a
-            // full multiply (e.g. RISC-V `mulh`). The `Mul` node itself only
-            // keeps the low N bits, so when the slice lies entirely past the
-            // product's width, recompute it from the multiply's operands as a
-            // signed full-width product.
+            // `extract(a*b, 2N-1, N)` is the TMDL idiom for a full-multiply high half
+            // (e.g. `mulh`); `Mul` keeps only the low N bits, so when the slice lies
+            // wholly past the product width, recompute it as a signed full-width product.
             let mul = graph.children(node).next().expect("extract has children");
             if low >= value.width() && matches!(graph.get_kind(mul), SymKind::Mul) {
                 let (a, b) = coerce_ints(
@@ -574,8 +507,7 @@ fn eval_node<V, M: Memory>(
         SymKind::SExt => {
             let value = as_int!(c(0), "sext");
             let width = as_int!(c(1), "sext").to_u64() as u32;
-            // Sign-extend from the value's current MSB regardless of how its
-            // signedness flag happens to be set (e.g. `extract` yields unsigned).
+            // Force signed: `extract` yields unsigned, but sext must use the current MSB.
             Value::Int(value.with_signed(true).sign_extend(width))
         }
 
@@ -1025,7 +957,6 @@ mod tests {
         let n = int_con(&mut g, 2);
         let split = inner(&mut g, SymKind::Split, &[bits, n]);
 
-        // The lanes are the two bytes read as integers.
         assert_eq!(
             int_lanes(execute(&g, &[rb(&[0x21, 0xBA])])),
             vec![0x21, 0xBA]

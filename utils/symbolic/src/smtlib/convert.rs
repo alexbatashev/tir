@@ -1,9 +1,5 @@
-//! Conversion between the SMT-LIB AST and the evaluatable [`crate::lang`] graph.
-//!
-//! Scope is the Core (Bool) and FixedSizeBitVectors theories: bit-vectors map to
-//! [`tir_adt::APInt`]-backed `Constant`/`Symbol` nodes, booleans are treated as
-//! 1-bit values. Quantifiers, `match`, uninterpreted functions and any other
-//! theory are rejected — they have no single-constant evaluation.
+//! Conversion between the SMT-LIB AST and the evaluatable [`crate::lang`] graph,
+//! over Core (Bool, as 1-bit) + FixedSizeBitVectors only.
 
 mod lift;
 mod lower;
@@ -18,8 +14,7 @@ use std::fmt::{self, Display, Formatter};
 pub struct SymbolInfo {
     pub name: String,
     pub width: Option<u32>,
-    /// True when the symbol's sort was `Bool` rather than a bit-vector, so the
-    /// reverse direction can re-emit `Bool` and treat it as a boolean operand.
+    /// Sort was `Bool`, not a 1-bit bit-vector; re-emitted as `Bool` when lifting.
     pub is_bool: bool,
 }
 
@@ -28,19 +23,15 @@ pub struct SymbolInfo {
 pub enum ConvertError {
     /// `forall`/`exists` cannot be reduced to a constant by substitution.
     Quantifier,
-    /// A free symbol with no declaration in scope.
     UnknownSymbol(String),
-    /// An operator, sort or construct outside the Core + BitVec subset.
+    /// A construct outside the Core + BitVec subset.
     Unsupported(String),
-    /// An operator applied to the wrong number of arguments.
     BadArity {
         op: String,
         expected: String,
         got: usize,
     },
-    /// A literal that does not fit the backing representation.
     BadLiteral(String),
-    /// An operation needed an operand width that could not be determined.
     UnknownWidth(String),
 }
 
@@ -76,8 +67,8 @@ mod tests {
         lower_script::<()>(&parse_script(src).unwrap()).unwrap()
     }
 
-    /// Structural isomorphism, ignoring node ordering, sharing and `SymbolId`
-    /// numbering (symbols compared by name).
+    /// Structural isomorphism ignoring sharing and `SymbolId` numbering (symbols
+    /// compared by name).
     fn iso(
         g1: &Graph,
         n1: NodeId,

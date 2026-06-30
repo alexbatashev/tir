@@ -1,7 +1,5 @@
-//! Oracle tests: random width-4 QF_BV formulas are bit-blasted and solved, and
-//! the verdict is cross-checked against an independent reference evaluator that
-//! implements the SMT-LIB FixedSizeBitVectors semantics directly (including the
-//! division-by-zero rules, which the `lang` interpreter deliberately does not).
+//! Oracle tests: random width-4 QF_BV formulas bit-blasted, solved, and checked
+//! against a direct SMT-LIB reference evaluator (including div-by-zero rules).
 
 use super::*;
 use crate::smtlib::convert::lower_script;
@@ -360,8 +358,7 @@ fn random_formulas_match_reference() {
     }
 }
 
-/// Width-changing ops (concat/extract/extend/ite) the random generator keeps at
-/// a fixed width, checked with hand-computed expectations.
+/// Width-changing ops (concat/extract/extend/ite) the random generator never produces.
 #[test]
 fn width_changing_ops() {
     let sat = |src: &str| matches!(solve_src(src).0, SolveOutcome::Sat(_));

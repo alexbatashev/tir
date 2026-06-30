@@ -5,35 +5,15 @@ use tir_graph::{Dag, GenericDag, MutDag, NodeId};
 
 use crate::lang::{SymKind, SymPayload};
 
-/// Infer the integer bit-width of every node of a semantic-expression graph,
-/// bottom-up, from the widths of its leaf operands.
-///
-/// `leaf_width(node)` supplies the width of a `Symbol` leaf (an operand — e.g. a
-/// register is XLEN-wide, an immediate is its encoded width). `Constant` widths
-/// come from the literal itself. Every internal node follows its kind's width
-/// rule. `None` means "unknown" and propagates, so a partially-known graph still
-/// infers everything it can.
-///
-/// This is the single shared width rule used by both the program-graph builder
-/// (so the program is fully typed) and TMDL pattern generation (so rules carry
-/// type constraints) — keeping the two sides consistent is what lets typed
-/// patterns match.
-///
-/// The result is indexed by node index; it relies on children having lower
-/// indices than their parent, which holds for the post-order graphs used here.
+/// Infer each node's integer bit-width bottom-up; `leaf_width` supplies `Symbol`
+/// widths, `None` means unknown and propagates. Relies on children having lower
+/// indices than parents (holds for post-order graphs); result indexed by node index.
 pub fn infer_widths<V>(
     graph: &impl Dag<Node = SymKind, Leaf = SymPayload<V>>,
     leaf_width: impl Fn(NodeId) -> Option<u32>,
 ) -> Vec<Option<u32>> {
     let count = graph.len();
     let mut widths = vec![None; count];
-
-    let const_value = |id: NodeId| -> Option<u64> {
-        match graph.get_leaf_data(id)? {
-            SymPayload::<V>::Int(value) => Some(value.to_u64()),
-            _ => None,
-        }
-    };
 
     for index in 0..count {
         let id = NodeId::from_index(index);
@@ -47,7 +27,7 @@ pub fn infer_widths<V>(
                 _ => None,
             },
 
-            // Arithmetic / logic / shifts produce a value as wide as their (left) input.
+            // Arithmetic/logic/shifts: as wide as the left input.
             SymKind::Add
             | SymKind::Sub
             | SymKind::Mul
@@ -68,7 +48,6 @@ pub fn infer_widths<V>(
             | SymKind::Sqrt
             | SymKind::Fma => child_width(0),
 
-            // Comparisons produce a 1-bit boolean.
             SymKind::Eq
             | SymKind::Ne
             | SymKind::Lt
@@ -80,40 +59,36 @@ pub fn infer_widths<V>(
             | SymKind::UGt
             | SymKind::UGe => Some(1),
 
-            // Concatenation sums the operand widths.
             SymKind::Concat => match (child_width(0), child_width(1)) {
                 (Some(hi), Some(lo)) => Some(hi + lo),
                 _ => None,
             },
 
-            // `If(cond, then, else)` is as wide as its arms.
+            // As wide as its arms (the then-branch).
             SymKind::If => child_width(1),
 
-            // `Extract(value, high, low)` yields `high - low + 1` bits.
             SymKind::Extract => {
                 match (
-                    children.get(1).and_then(|&c| const_value(c)),
-                    children.get(2).and_then(|&c| const_value(c)),
+                    children.get(1).and_then(|&c| const_u64(graph, c)),
+                    children.get(2).and_then(|&c| const_u64(graph, c)),
                 ) {
                     (Some(high), Some(low)) if high >= low => Some((high - low + 1) as u32),
                     _ => None,
                 }
             }
 
-            // Extensions widen to their target-width argument.
             SymKind::SExt | SymKind::ZExt => children
                 .get(1)
-                .and_then(|&c| const_value(c))
+                .and_then(|&c| const_u64(graph, c))
                 .map(|w| w as u32),
 
             SymKind::LoadMemory => children
                 .get(1)
-                .and_then(|&c| const_value(c))
+                .and_then(|&c| const_u64(graph, c))
                 .map(|bytes| (bytes as u32) * 8),
             SymKind::StoreMemory => None,
 
-            // Iterator-valued nodes and lambda arguments carry no scalar width:
-            // their element widths come from the runtime value, not the structure.
+            // No scalar width: element widths come from the runtime value, not structure.
             SymKind::Map
             | SymKind::Zip
             | SymKind::IterConcat
@@ -128,23 +103,9 @@ pub fn infer_widths<V>(
     widths
 }
 
-/// Rewrite a behavior-derived pattern into the form instruction selection should
-/// match against, returning the new graph, its root, and forced node widths
-/// (indexed by the new node's index). `immediate_symbols` names the operand
-/// symbols that are encoded immediates rather than registers.
-///
-/// The rewrites bridge "how the hardware computes" to "what the IR looks like":
-/// - **Result-extension collapse:** `SExt(Extract(x, hi, 0), _)` becomes `x`, with
-///   `x` forced to width `hi + 1`. So `addw`'s `sext(extract(a+b, 31, 0), XLEN)` is
-///   an i32 `Add`, not a literal structure to match.
-/// - **Shift-amount mask strip:** a shift whose amount is `Extract(amt, k, 0)` (the
-///   encoding's 5/6-bit field) matches the plain `amt`.
-/// - **Extension-of-load collapse:** `sext/zext(load(...), XLEN)` becomes the typed
-///   load itself, since source IR types the load result instead of wrapping it.
-/// - **Immediate-extension collapse:** `sext/zext(imm, XLEN)` becomes the bare
-///   `imm` symbol, since source IR carries constants at their use width.
-///
-/// Execution semantics are untouched — only the selection pattern is simplified.
+/// Rewrite a behavior-derived pattern into the form isel matches against, returning
+/// the new graph, root, and forced widths (indexed by new node index). The rewrites
+/// (see `canon_rebuild`) only simplify the selection pattern, never execution semantics.
 pub fn canonicalize_for_selection<V: Clone>(
     graph: &impl Dag<Node = SymKind, Leaf = SymPayload<V>>,
     root: NodeId,
@@ -171,7 +132,7 @@ pub fn canonicalize_for_selection<V: Clone>(
     (out, new_root, widths)
 }
 
-fn canon_const_u64<V>(
+fn const_u64<V>(
     graph: &impl Dag<Node = SymKind, Leaf = SymPayload<V>>,
     node: NodeId,
 ) -> Option<u64> {
@@ -196,10 +157,10 @@ fn extract_from_zero_hi<V>(
         return None;
     }
     let children: Vec<NodeId> = graph.children(node).collect();
-    if children.len() != 3 || canon_const_u64(graph, children[2]) != Some(0) {
+    if children.len() != 3 || const_u64(graph, children[2]) != Some(0) {
         return None;
     }
-    canon_const_u64(graph, children[1]).map(|hi| (children[0], hi))
+    const_u64(graph, children[1]).map(|hi| (children[0], hi))
 }
 
 fn is_immediate_leaf<V>(
@@ -229,14 +190,8 @@ fn canon_rebuild<V: Clone>(
     let kind = *graph.get_node(node);
     let children: Vec<NodeId> = graph.children(node).collect();
 
-    // Extension-of-load collapse: lb/lh/lw-style behaviors extend the raw memory
-    // bytes to XLEN (`sext(load(addr, 4, _), XLEN)`), but source IR types the
-    // load result instead of wrapping it. Match the typed `LoadMemory` itself —
-    // its width is inferred from the bytes operand.
-    //
-    // Immediate-extension collapse: behaviors widen an encoded immediate to the
-    // computation width (`sext(imm, XLEN)`), but source IR carries constants at
-    // their use width, so the canonical pattern binds the bare immediate.
+    // Collapse `sext/zext(load/imm, XLEN)` to the bare load or immediate: source IR
+    // types the load result and carries constants at use width, rather than wrapping.
     if matches!(kind, SymKind::SExt | SymKind::ZExt)
         && children.len() == 2
         && (*graph.get_node(children[0]) == SymKind::LoadMemory
@@ -247,7 +202,7 @@ fn canon_rebuild<V: Clone>(
         return inner;
     }
 
-    // Result-extension collapse: SExt(Extract(inner, hi, 0), _) -> inner @ width hi+1.
+    // SExt(Extract(inner, hi, 0), _) -> inner forced to width hi+1.
     if kind == SymKind::SExt
         && children.len() == 2
         && let Some((source, hi)) = extract_from_zero_hi(graph, children[0])
@@ -258,9 +213,8 @@ fn canon_rebuild<V: Clone>(
         return inner;
     }
 
-    // Shift-amount mask strip: the encoding's amount mask is implicit, so
-    //   Shift(value, Extract(amt, k, 0))  -> Shift(value, amt)
-    //   Shift(value, Clamp(amt, _, _))    -> Shift(value, amt)
+    // Shift-amount mask strip (mask is implicit in the encoding):
+    //   Shift(v, Extract(amt, k, 0)) / Shift(v, Clamp(amt, _, _)) -> Shift(v, amt)
     if is_shift(kind) && children.len() == 2 {
         let value = canon_rebuild(graph, children[0], immediate_symbols, out, memo, forced);
         let amount = {
@@ -268,7 +222,7 @@ fn canon_rebuild<V: Clone>(
             let stripped = match *graph.get_node(src) {
                 SymKind::Extract => {
                     let ec: Vec<NodeId> = graph.children(src).collect();
-                    (ec.len() == 3 && canon_const_u64(graph, ec[2]) == Some(0)).then_some(ec[0])
+                    (ec.len() == 3 && const_u64(graph, ec[2]) == Some(0)).then_some(ec[0])
                 }
                 SymKind::Clamp => graph.children(src).next(),
                 _ => None,
@@ -289,11 +243,8 @@ fn canon_rebuild<V: Clone>(
         return new_node;
     }
 
-    // The third `load` operand records signedness/address-space metadata. The raw
-    // memory value is unsigned bytes; explicit `SExt`/`ZExt` nodes carry
-    // signedness for both isel and execution. Normalize the metadata child so
-    // source IR loads can match signed and unsigned target load forms by their
-    // surrounding extension.
+    // Normalize the load's metadata child to 0 so source IR loads match both signed
+    // and unsigned target forms; signedness lives in the surrounding SExt/ZExt.
     if kind == SymKind::LoadMemory && children.len() == 3 {
         let address = canon_rebuild(graph, children[0], immediate_symbols, out, memo, forced);
         let bytes = canon_rebuild(graph, children[1], immediate_symbols, out, memo, forced);
@@ -307,10 +258,8 @@ fn canon_rebuild<V: Clone>(
         return new_node;
     }
 
-    // Stores usually truncate the source register explicitly:
-    // `store(addr, 4, extract(rs, 31, 0))`. Source IR already carries the stored
-    // value's width, so canonicalize that extract to the inner value and force the
-    // width on the matched operand.
+    // Collapse the explicit store truncation `extract(rs, 31, 0)` to the inner value,
+    // forcing its width; source IR already carries the stored value's width.
     if kind == SymKind::StoreMemory && children.len() == 4 {
         let address = canon_rebuild(graph, children[0], immediate_symbols, out, memo, forced);
         let bytes = canon_rebuild(graph, children[1], immediate_symbols, out, memo, forced);
@@ -332,7 +281,7 @@ fn canon_rebuild<V: Clone>(
         return new_node;
     }
 
-    // Default: copy leaves verbatim, rebuild operations from canonicalized children.
+    // Default: copy leaves, rebuild operations from canonicalized children.
     let new_node = if children.is_empty() {
         let new_node = out.add_node(kind);
         if let Some(data) = graph.get_leaf_data(node) {
