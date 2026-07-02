@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand};
 mod common;
 
 pub mod axioms;
+pub mod llvm_import;
 pub mod mc;
 pub mod opt;
 pub mod readobj;
@@ -19,6 +20,7 @@ pub fn tools_main() -> Result<(), Box<dyn Error>> {
         Command::Opt(args) => opt::run(args),
         Command::Readobj(args) => readobj::run(args),
         Command::Sched(args) => sched::run(args),
+        Command::LlvmImport(args) => llvm_import::run(args),
     }
 }
 
@@ -34,6 +36,8 @@ pub enum Command {
     Readobj(readobj::ToolArgs),
     /// Print the data dependence graph of machine IR
     Sched(sched::ToolArgs),
+    /// Import LLVM textual IR into TIR
+    LlvmImport(llvm_import::ToolArgs),
 }
 
 #[derive(Parser)]
