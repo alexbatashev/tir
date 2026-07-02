@@ -1056,7 +1056,7 @@ where
                 .collect::<Vec<_>>(),
         )
         .then_ignore(just(Token::RBracket))
-        .map(|traits| {
+        .validate(|traits, e, emitter| {
             traits
                 .into_iter()
                 .filter_map(|t| match t.as_str() {
@@ -1072,7 +1072,13 @@ where
                     "return_value" => Some(RegisterTrait::ReturnValue),
                     "temporary" => Some(RegisterTrait::Temporary),
                     "saved" => Some(RegisterTrait::Saved),
-                    _ => None,
+                    _ => {
+                        emitter.emit(Rich::custom(
+                            e.span(),
+                            format!("unknown register trait '{t}'"),
+                        ));
+                        None
+                    }
                 })
                 .collect()
         })

@@ -1273,10 +1273,20 @@ impl Call {
                 ctx.add_int_const(tir_adt::APInt::new(64, 0))
             }
             BuiltinFunction::Split => {
-                assert!(self.arguments.len() == 2, "split requires 2 arguments");
-                let bits = self.arguments[0].lower_with_ctx(ctx);
-                let n = self.arguments[1].lower_with_ctx(ctx);
-                ctx.add_node(tir::sem::SymKind::Split, &[bits, n])
+                // `split(x, n)` cuts x into n equal lanes; `split(x, n, w)`
+                // takes n lanes of w bits from the low end (the RVV shape,
+                // where `vl`/SEW bound the active elements independent of the
+                // register's total width).
+                assert!(
+                    matches!(self.arguments.len(), 2 | 3),
+                    "split requires 2 or 3 arguments"
+                );
+                let children: Vec<_> = self
+                    .arguments
+                    .iter()
+                    .map(|arg| arg.lower_with_ctx(ctx))
+                    .collect();
+                ctx.add_node(tir::sem::SymKind::Split, &children)
             }
             BuiltinFunction::Concat => {
                 assert!(self.arguments.len() == 1, "concat requires 1 argument");

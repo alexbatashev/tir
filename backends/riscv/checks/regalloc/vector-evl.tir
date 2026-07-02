@@ -1,0 +1,21 @@
+// RUN: tir mc --march=rv64iv --stage=regalloc %s | filecheck %s
+
+// Dynamic (EVL-style) vector length: scalable vector ops take an explicit vl
+// operand, which binds the ops' `vl` demand to a register. Both ops demand the
+// same SSA value, so one `vsetvli x0, <avl>` configures the unit for both.
+
+module {
+  func @dyn(%0: !vector.vec<i32>, %1: !vector.vec<i32>, %2: !index) -> !vector.vec<i32> {
+    %3 = vector.add %0, %1, %2 : !vector.vec<i32>
+    %4 = vector.mul %3, %1, %2 : !vector.vec<i32>
+    return %4
+  }
+  module_end
+}
+
+// CHECK: asm.symbol {name = "dyn"
+// CHECK: riscv.vsetvli {rd = x0, avl = x10, vtypei = 208}
+// CHECK-NEXT: riscv.vadd.vv
+// CHECK-NOT: riscv.vsetvli
+// CHECK: riscv.vmul.vv
+// CHECK: riscv.vret

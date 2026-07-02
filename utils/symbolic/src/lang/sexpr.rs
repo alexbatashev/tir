@@ -350,7 +350,7 @@ where
         return Err(BuildError::BadForm("expression".to_string()));
     };
     let kind = op_kind(op).ok_or_else(|| BuildError::UnknownAtom(op.to_string()))?;
-    if args.len() != kind.arity() {
+    if !kind.accepts_arity(args.len()) {
         return Err(BuildError::BadForm(op.to_string()));
     }
     let children = args

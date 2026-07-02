@@ -22,9 +22,6 @@ pub(crate) enum BlockDecision {
 pub(crate) struct BlockPlan {
     pub(crate) op_decisions: HashMap<OpId, BlockDecision>,
     pub(crate) introduced: Vec<IntroducedEmit>,
-    /// Definer instructions to insert ahead of an op for the implicit register
-    /// uses in its behavior (e.g. `vsetvli` defining `VCSR::vl` that `vadd` reads).
-    pub(crate) definers: Vec<DefinerEmit>,
     /// How each control-flow terminator is lowered (only when the target
     /// installed branch emitters).
     pub(crate) terminators: Vec<TerminatorPlan>,
@@ -56,16 +53,6 @@ pub(crate) enum TerminatorPlan {
 pub(crate) enum GuardBranch {
     Fused { rule_index: usize, m: RuleMatch },
     Nonzero { condition: ValueId, dest: BlockId },
-}
-
-/// A definer instruction to materialize just before `anchor`: it defines a
-/// register the anchor implicitly reads, consuming the value that read bound to.
-/// It has no SSA destination of its own (its emitter hardwires one, e.g. `x0`).
-#[derive(Clone, Debug)]
-pub(crate) struct DefinerEmit {
-    pub(crate) definer_index: usize,
-    pub(crate) m: RuleMatch,
-    pub(crate) anchor: OpId,
 }
 
 /// An instruction to materialize for an introduced e-class: emitted with a fresh

@@ -13,7 +13,7 @@ use crate::{Context, Error, IRFormatter, Type, TypeId, dialect, operation, parse
 use crate as tir;
 
 pub mod ops {
-    pub use super::{AddOp, MulOp, SubOp, add, mul, sub};
+    pub use super::{AddOp, MulOp, SubOp, VectorLenOp, add, mul, sub, vector_len};
 }
 
 dialect! {
@@ -23,6 +23,7 @@ dialect! {
             AddOp,
             SubOp,
             MulOp,
+            VectorLenOp,
         ],
         types: [VectorType],
     }
@@ -131,7 +132,7 @@ operation! {
         results: R {
             result: "crate::vector::VectorType",
         },
-        sem: "(set result (concat (map (zip (split lhs $get_vlen) (split rhs $get_vlen)) (lambda (a b) (add a b)))))",
+        sem: "(set result (concat (map (zip (split lhs $get_vlen $get_sew) (split rhs $get_vlen $get_sew)) (lambda (a b) (add a b)))))",
     }
 }
 
@@ -147,7 +148,7 @@ operation! {
         results: R {
             result: "crate::vector::VectorType",
         },
-        sem: "(set result (concat (map (zip (split lhs $get_vlen) (split rhs $get_vlen)) (lambda (a b) (sub a b)))))",
+        sem: "(set result (concat (map (zip (split lhs $get_vlen $get_sew) (split rhs $get_vlen $get_sew)) (lambda (a b) (sub a b)))))",
     }
 }
 
@@ -163,7 +164,30 @@ operation! {
         results: R {
             result: "crate::vector::VectorType",
         },
-        sem: "(set result (concat (map (zip (split lhs $get_vlen) (split rhs $get_vlen)) (lambda (a b) (mul a b)))))",
+        sem: "(set result (concat (map (zip (split lhs $get_vlen $get_sew) (split rhs $get_vlen $get_sew)) (lambda (a b) (mul a b)))))",
+    }
+}
+
+// `vector_len(avl)` yields the number of lanes the target grants for a request
+// of `avl` — `min(avl, VLMAX)` on RVV, where it selects as `vsetvli rd, avl`.
+// The strip-mine primitive: a loop asks for the remaining trip count and
+// advances by however many lanes the hardware grants, feeding the result to its
+// elementwise ops' `vl` operands (EVL-style tail folding, no epilogue loop).
+// The `sew` attribute names the element width the grant is for — how many
+// lanes fit is a function of it (VLMAX = VLEN / SEW · LMUL).
+operation! {
+    VectorLenOp {
+        name: "vector_len",
+        dialect: "vector",
+        operands: O {
+            avl: "crate::builtin::IndexType",
+        },
+        results: R {
+            result: "crate::builtin::IndexType",
+        },
+        attributes: A {
+            sew: Integer,
+        },
     }
 }
 
@@ -193,7 +217,31 @@ fn vlen_node(
     n
 }
 
-macro_rules! impl_get_vlen {
+/// The lane width for `$get_sew`: the result type's element width, a constant
+/// for fixed and scalable vectors alike (scalability varies the lane count, not
+/// the element width). On RVV this is the demanded SEW.
+fn sew_node(
+    op: &tir::OpInstance,
+    g: &mut impl tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
+) -> tir::graph::NodeId {
+    let context = op.context.upgrade();
+    let ty = context.get_value(op.results[0]).ty();
+    let width = (context.get_type_data(ty).as_ref() as &dyn Any)
+        .downcast_ref::<VectorType>()
+        .map(|t| t.element(&context))
+        .map(|elem| {
+            (context.get_type_data(elem).as_ref() as &dyn Any)
+                .downcast_ref::<crate::builtin::IntegerType>()
+                .map(|i| i.width())
+                .unwrap_or(0)
+        })
+        .unwrap_or(0) as u64;
+    let n = g.add_node(tir::sem::SymKind::Constant);
+    g.set_leaf_data(n, tir::sem::SymPayload::Int(tir_adt::APInt::new(32, width)));
+    n
+}
+
+macro_rules! impl_vlen_hooks {
     ($op:ty) => {
         impl $op {
             fn get_vlen(
@@ -205,10 +253,20 @@ macro_rules! impl_get_vlen {
             ) -> tir::graph::NodeId {
                 vlen_node(&self.0, g)
             }
+
+            fn get_sew(
+                &self,
+                g: &mut impl tir::graph::MutDag<
+                    Node = tir::sem::SymKind,
+                    Leaf = tir::sem::SymPayload<tir::ValueId>,
+                >,
+            ) -> tir::graph::NodeId {
+                sew_node(&self.0, g)
+            }
         }
     };
 }
 
-impl_get_vlen!(AddOp);
-impl_get_vlen!(SubOp);
-impl_get_vlen!(MulOp);
+impl_vlen_hooks!(AddOp);
+impl_vlen_hooks!(SubOp);
+impl_vlen_hooks!(MulOp);

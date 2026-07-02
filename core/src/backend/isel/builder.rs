@@ -6,7 +6,7 @@ use tir::{
     Context, MemoryRead, MemoryWrite, OpId, OpInstance, TypeId, ValueId,
     attributes::AttributeValue,
     builtin::IntegerType,
-    graph::{Dag, Matchable, NodeId},
+    graph::{Dag, NodeId},
     sem::{SemGraph, SymKind, SymPayload, infer_widths},
 };
 use tir_adt::APInt;
@@ -361,7 +361,7 @@ impl<'a> SemDagBuilder<'a> {
                     .children(node)
                     .map(|child| self.lower_graph_node(graph, child, operands, widths))
                     .collect();
-                if kind.num_children(self.context) == children.len() {
+                if kind.accepts_arity(children.len()) {
                     self.add_op(*kind, children, node_ty)
                 } else {
                     self.add_opaque()

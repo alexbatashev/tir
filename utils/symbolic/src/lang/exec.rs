@@ -238,12 +238,31 @@ fn eval_reduce<V, M: Memory>(
 }
 
 /// Evaluate a `Split` node: cut raw bits into `n` integer lanes, lane 0 from the low bits.
+/// Reinterpret a value as raw bits: integers (e.g. a register file entry) are
+/// their two's-complement bit pattern.
+fn as_raw_bits(value: Value) -> RawBits {
+    match value {
+        Value::RawBits(bits) => bits,
+        Value::Int(i) => RawBits::from_apint(&i),
+        Value::Float(f) => RawBits::from_apfloat(&f),
+        Value::Iterator(_) => panic!("split requires a raw-bits operand"),
+    }
+}
+
 fn split_bits(value: Value, n: usize) -> Value {
-    let Value::RawBits(bits) = value else {
-        panic!("split requires a raw-bits operand");
-    };
+    let bits = as_raw_bits(value);
     let lanes = bits
         .split(n)
+        .into_iter()
+        .map(|lane| Value::Int(lane.to_apint()))
+        .collect();
+    Value::Iterator(lanes)
+}
+
+fn split_bits_lanes(value: Value, n: usize, width: usize) -> Value {
+    let bits = as_raw_bits(value);
+    let lanes = bits
+        .split_lanes(n, width)
         .into_iter()
         .map(|lane| Value::Int(lane.to_apint()))
         .collect();
@@ -339,7 +358,19 @@ fn eval_node<V, M: Memory>(
                     .collect(),
             )
         }
-        SymKind::Split => split_bits(c(0), as_int!(c(1), "split").to_u64() as usize),
+        SymKind::Split => {
+            let count = as_int!(c(1), "split").to_u64() as usize;
+            // A third child fixes the lane width (`split(x, n, w)`), so only the
+            // low `n * w` bits participate — the RVV shape, where the active
+            // element count and element width come from `vl`/`vtype`, not from
+            // the register's total width. Without it, lanes are `total / n`.
+            if graph.children(node).count() > 2 {
+                let width = as_int!(c(2), "split").to_u64() as usize;
+                split_bits_lanes(c(0), count, width)
+            } else {
+                split_bits(c(0), count)
+            }
+        }
         SymKind::IterConcat => concat_lanes(c(0)),
         SymKind::Symbol => {
             let SymPayload::SymbolId(id) = graph.get_leaf_data(node).unwrap() else {
@@ -966,6 +997,31 @@ mod tests {
         assert_eq!(
             raw_bytes(execute(&g, &[rb(&[0x21, 0xBA])])),
             vec![0x21, 0xBA]
+        );
+    }
+
+    #[test]
+    fn split_with_lane_width_takes_low_lanes_and_zero_pads() {
+        // split(x, 2, 16): two 16-bit lanes from the low bits. A 3-byte value
+        // supplies lane 0 fully and lane 1 zero-padded — a stored value is the
+        // low bits of a conceptually wider register. An integer operand (a
+        // register-file read) is reinterpreted as its bit pattern.
+        let mut g = Graph::new();
+        let bits = sym(&mut g, 0);
+        let n = int_con(&mut g, 2);
+        let w = int_con(&mut g, 16);
+        inner(&mut g, SymKind::Split, &[bits, n, w]);
+
+        assert_eq!(
+            int_lanes(execute(&g, &[rb(&[0x21, 0xBA, 0x07])])),
+            vec![0xBA21, 0x07]
+        );
+        assert_eq!(
+            int_lanes(execute(
+                &g,
+                &[Value::Int(APInt::new(64, 0x0004_0003_0002_0001))]
+            )),
+            vec![1, 2]
         );
     }
 

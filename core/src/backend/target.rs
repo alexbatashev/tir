@@ -94,6 +94,14 @@ pub trait TargetMachine {
         Vec::new()
     }
 
+    /// Target-specific machine passes run between instruction selection and
+    /// register allocation. Unlike an [`OpLowering`] these are full passes and
+    /// can carry dataflow state across instructions (e.g. RISC-V `vsetvli`
+    /// insertion tracking the vector unit's configuration).
+    fn machine_passes(&self) -> Vec<Box<dyn crate::pass::Pass>> {
+        Vec::new()
+    }
+
     /// Lowerings that finalize virtual ops after register allocation
     /// (e.g. `vret` into the target's return instruction).
     fn finalize_lowerings(&self) -> Vec<OpLowering> {
