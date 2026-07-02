@@ -39,8 +39,36 @@ pub enum CType {
     Int,
     Void,
     Char,
+    Bool,
+    Float,
+    Double,
+    Builtin(String),
+    Named(String),
+    Record(RecordKind, Option<String>),
+    Enum(Option<String>),
     Const(Box<CType>),
+    Volatile(Box<CType>),
+    Restrict(Box<CType>),
     Pointer(Box<CType>),
+    Array(Box<CType>, Option<String>),
+    Function {
+        ret: Box<CType>,
+        params: Vec<CParam>,
+        varargs: bool,
+    },
+    Attributed(Box<CType>, Vec<String>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordKind {
+    Struct,
+    Union,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CParam {
+    pub name: String,
+    pub ty: CType,
 }
 
 /// The structural kind of an AST node. How its children are interpreted depends
@@ -49,6 +77,14 @@ pub enum CType {
 pub enum AstKind {
     /// Children: the translation unit's functions.
     TranslationUnit,
+    /// Children: declarations parsed from one C declaration statement.
+    DeclGroup,
+    /// Children: field declarations.
+    RecordDecl,
+    Typedef,
+    Global,
+    Field,
+    Attribute,
     /// Children: parameters.
     Prototype,
     /// Children: parameters, then body statements.
@@ -106,9 +142,35 @@ pub enum AstKind {
 /// [`AstKind::Return`], the binary operators) have none.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AstLeaf {
-    Function { name: String, ret: CType },
-    Param { name: String, ty: CType },
-    Decl { name: String, ty: CType },
+    Record {
+        kind: RecordKind,
+        name: Option<String>,
+    },
+    Typedef {
+        name: String,
+        ty: CType,
+    },
+    Global {
+        name: String,
+        ty: CType,
+    },
+    Field {
+        name: String,
+        ty: CType,
+    },
+    Attribute(String),
+    Function {
+        name: String,
+        ret: CType,
+    },
+    Param {
+        name: String,
+        ty: CType,
+    },
+    Decl {
+        name: String,
+        ty: CType,
+    },
     Assign(String),
     Call(String),
     Var(String),
@@ -121,8 +183,48 @@ fn render_ctype(ty: &CType) -> String {
         CType::Int => "Int".to_string(),
         CType::Void => "Void".to_string(),
         CType::Char => "Char".to_string(),
+        CType::Bool => "Bool".to_string(),
+        CType::Float => "Float".to_string(),
+        CType::Double => "Double".to_string(),
+        CType::Builtin(name) => format!("Builtin({name})"),
+        CType::Named(name) => format!("Named({name})"),
+        CType::Record(kind, name) => {
+            let kind = match kind {
+                RecordKind::Struct => "struct",
+                RecordKind::Union => "union",
+            };
+            match name {
+                Some(name) => format!("Record({kind} {name})"),
+                None => format!("Record({kind})"),
+            }
+        }
+        CType::Enum(name) => match name {
+            Some(name) => format!("Enum({name})"),
+            None => "Enum".to_string(),
+        },
         CType::Const(inner) => format!("Const({})", render_ctype(inner)),
+        CType::Volatile(inner) => format!("Volatile({})", render_ctype(inner)),
+        CType::Restrict(inner) => format!("Restrict({})", render_ctype(inner)),
         CType::Pointer(inner) => format!("Ptr({})", render_ctype(inner)),
+        CType::Array(inner, Some(len)) => format!("Array({}, {len})", render_ctype(inner)),
+        CType::Array(inner, None) => format!("Array({})", render_ctype(inner)),
+        CType::Function {
+            ret,
+            params,
+            varargs,
+        } => {
+            let mut parts = params
+                .iter()
+                .map(|p| render_ctype(&p.ty))
+                .collect::<Vec<_>>();
+            if *varargs {
+                parts.push("...".to_string());
+            }
+            format!("Fn({}) -> {}", parts.join(", "), render_ctype(ret))
+        }
+        CType::Attributed(inner, attrs) => {
+            format!("Attr({}; {})", attrs.join(", "), render_ctype(inner))
+        }
     }
 }
 
@@ -140,6 +242,45 @@ fn render_node(ast: &Ast, id: NodeId, depth: usize, out: &mut String) {
 
     let label = match ast.get_node(id).kind {
         AstKind::TranslationUnit => "TranslationUnit".to_string(),
+        AstKind::DeclGroup => "DeclGroup".to_string(),
+        AstKind::RecordDecl => match ast.get_leaf_data(id) {
+            Some(AstLeaf::Record { kind, name }) => {
+                let kind = match kind {
+                    RecordKind::Struct => "Struct",
+                    RecordKind::Union => "Union",
+                };
+                match name {
+                    Some(name) => format!("{kind} {name:?}"),
+                    None => kind.to_string(),
+                }
+            }
+            _ => unreachable!(),
+        },
+        AstKind::Typedef => match ast.get_leaf_data(id) {
+            Some(AstLeaf::Typedef { name, ty }) => {
+                format!("Typedef {name:?}: {}", render_ctype(ty))
+            }
+            _ => unreachable!(),
+        },
+        AstKind::Global => match ast.get_leaf_data(id) {
+            Some(AstLeaf::Global { name, ty }) => {
+                format!("Global {name:?}: {}", render_ctype(ty))
+            }
+            _ => unreachable!(),
+        },
+        AstKind::Field => match ast.get_leaf_data(id) {
+            Some(AstLeaf::Field { name, ty }) if name.is_empty() => {
+                format!("Field _: {}", render_ctype(ty))
+            }
+            Some(AstLeaf::Field { name, ty }) => {
+                format!("Field {name:?}: {}", render_ctype(ty))
+            }
+            _ => unreachable!(),
+        },
+        AstKind::Attribute => match ast.get_leaf_data(id) {
+            Some(AstLeaf::Attribute(value)) => format!("Attribute {value:?}"),
+            _ => unreachable!(),
+        },
         AstKind::Prototype => match ast.get_leaf_data(id) {
             Some(AstLeaf::Function { name, ret }) => {
                 format!("Prototype {name:?} -> {}", render_ctype(ret))

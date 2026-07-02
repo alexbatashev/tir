@@ -57,6 +57,11 @@ pub fn codegen(context: &Context, ast: &Ast) -> Result<ModuleOp, Diagnostic> {
                 let (name, sig) = lower_signature(context, ast, item)?;
                 signatures.insert(name, sig);
             }
+            AstKind::DeclGroup
+            | AstKind::RecordDecl
+            | AstKind::Typedef
+            | AstKind::Global
+            | AstKind::Attribute => {}
             _ => return Err(unsupported(ast, item, "top-level item".to_string())),
         }
     }
@@ -74,6 +79,11 @@ pub fn codegen(context: &Context, ast: &Ast) -> Result<ModuleOp, Diagnostic> {
                 let func_op = lower_function(context, ast, item, &signatures)?;
                 module_builder.insert(func_op);
             }
+            AstKind::DeclGroup
+            | AstKind::RecordDecl
+            | AstKind::Typedef
+            | AstKind::Global
+            | AstKind::Attribute => {}
             _ => unreachable!("top-level item was checked before emission"),
         }
     }
@@ -96,8 +106,18 @@ fn lower_ctype(context: &Context, ty: &CType) -> TypeId {
         CType::Int => IntegerType::new(context, 32),
         CType::Void => UnitType::new(context),
         CType::Char => IntegerType::new(context, 8),
+        CType::Bool => IntegerType::new(context, 1),
+        CType::Float | CType::Double | CType::Builtin(_) | CType::Named(_) => {
+            IntegerType::new(context, 64)
+        }
+        CType::Record(_, _) | CType::Enum(_) => IntegerType::new(context, 64),
         CType::Const(inner) => lower_ctype(context, inner),
+        CType::Volatile(inner) => lower_ctype(context, inner),
+        CType::Restrict(inner) => lower_ctype(context, inner),
         CType::Pointer(inner) => PtrType::typed(context, lower_ctype(context, inner)),
+        CType::Array(inner, _) => PtrType::typed(context, lower_ctype(context, inner)),
+        CType::Function { .. } => IntegerType::new(context, 64),
+        CType::Attributed(inner, _) => lower_ctype(context, inner),
     }
 }
 

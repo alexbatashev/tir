@@ -8,6 +8,9 @@ use tir::utils::APInt;
 pub enum Token {
     #[regex(r"[ \t\n\r\f]+", |lex| lex.slice().to_string())]
     Whitespace(String),
+    #[regex(r"//[^\n]*", |lex| lex.slice().to_string(), allow_greedy = true)]
+    #[regex(r"/\*([^*]|\*[^/])*\*/", |lex| lex.slice().to_string())]
+    Comment(String),
 
     #[token("alignas")]
     KwAlignas,
@@ -129,10 +132,18 @@ pub enum Token {
     LBrace,
     #[token("}")]
     RBrace,
+    #[token("[")]
+    LBracket,
+    #[token("]")]
+    RBracket,
     #[token(";")]
     Semicolon,
     #[token(",")]
     Comma,
+    #[token(".")]
+    Dot,
+    #[token("->")]
+    Arrow,
     #[token("=")]
     Assign,
     #[token("+")]
@@ -145,6 +156,18 @@ pub enum Token {
     Slash,
     #[token("%")]
     Percent,
+    #[token("&")]
+    Amp,
+    #[token("|")]
+    Pipe,
+    #[token("^")]
+    Caret,
+    #[token("~")]
+    Tilde,
+    #[token("?")]
+    Question,
+    #[token(":")]
+    Colon,
     #[token("==")]
     EqEq,
     #[token("!=")]
@@ -169,6 +192,7 @@ impl fmt::Display for Token {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Token::Whitespace(s) => f.write_str(s),
+            Token::Comment(s) => f.write_str(s),
             Token::KwAlignas => f.write_str("alignas"),
             Token::KwAlignof => f.write_str("alignof"),
             Token::KwAuto => f.write_str("auto"),
@@ -224,14 +248,24 @@ impl fmt::Display for Token {
             Token::RParen => f.write_str(")"),
             Token::LBrace => f.write_str("{"),
             Token::RBrace => f.write_str("}"),
+            Token::LBracket => f.write_str("["),
+            Token::RBracket => f.write_str("]"),
             Token::Semicolon => f.write_str(";"),
             Token::Comma => f.write_str(","),
+            Token::Dot => f.write_str("."),
+            Token::Arrow => f.write_str("->"),
             Token::Assign => f.write_str("="),
             Token::Plus => f.write_str("+"),
             Token::Minus => f.write_str("-"),
             Token::Star => f.write_str("*"),
             Token::Slash => f.write_str("/"),
             Token::Percent => f.write_str("%"),
+            Token::Amp => f.write_str("&"),
+            Token::Pipe => f.write_str("|"),
+            Token::Caret => f.write_str("^"),
+            Token::Tilde => f.write_str("~"),
+            Token::Question => f.write_str("?"),
+            Token::Colon => f.write_str(":"),
             Token::EqEq => f.write_str("=="),
             Token::BangEq => f.write_str("!="),
             Token::Lt => f.write_str("<"),

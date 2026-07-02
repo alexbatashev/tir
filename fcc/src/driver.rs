@@ -183,7 +183,33 @@ fn fcc_context() -> tir::Context {
 }
 
 fn default_include_paths() -> Vec<PathBuf> {
-    vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("include")]
+    let mut paths = Vec::new();
+    if let Ok(sdkroot) = std::env::var("SDKROOT") {
+        paths.push(PathBuf::from(sdkroot).join("usr/include"));
+    }
+    if let Ok(output) = std::process::Command::new("xcrun")
+        .args(["--sdk", "macosx", "--show-sdk-path"])
+        .output()
+        && output.status.success()
+    {
+        let sdkroot = String::from_utf8_lossy(&output.stdout);
+        paths.push(PathBuf::from(sdkroot.trim()).join("usr/include"));
+    }
+    paths.extend([
+        PathBuf::from("/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include"),
+        PathBuf::from(
+            "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include",
+        ),
+        PathBuf::from("/usr/include"),
+    ]);
+
+    let mut existing = Vec::new();
+    for path in paths {
+        if path.is_dir() && !existing.contains(&path) {
+            existing.push(path);
+        }
+    }
+    existing
 }
 
 /// Run the backend pipeline (mem2reg, instruction selection, register
@@ -249,11 +275,41 @@ fn emit_machine_code(args: &CompileArgs, name: &str, source: &str) -> Vec<u8> {
 
 /// Preprocess `source`, reporting any `#error`/`#warning` diagnostics. Exits if
 /// any of them is an error.
+fn add_default_defines(defines: &mut HashMap<String, Token>) {
+    use logos::Logos;
+    for (name, value) in [
+        ("__GNUC__", "4"),
+        ("__GNUC_MINOR__", "2"),
+        ("__GNUC_PATCHLEVEL__", "1"),
+        ("__APPLE__", "1"),
+        ("__MACH__", "1"),
+        ("__STDC__", "1"),
+        ("__STDC_VERSION__", "201710L"),
+        ("__LP64__", "1"),
+    ] {
+        defines.entry(name.to_string()).or_insert_with(|| {
+            Token::lexer(value)
+                .next()
+                .and_then(|r| r.ok())
+                .unwrap_or(Token::Hash)
+        });
+    }
+    let arch_define = match std::env::consts::ARCH {
+        "aarch64" => "__arm64__",
+        "x86_64" => "__x86_64__",
+        _ => return,
+    };
+    defines
+        .entry(arch_define.to_string())
+        .or_insert(Token::Hash);
+}
+
 fn preprocess(
     name: &str,
     source: &str,
-    defines: HashMap<String, Token>,
+    mut defines: HashMap<String, Token>,
 ) -> Vec<(Token, crate::diagnostics::Span)> {
+    add_default_defines(&mut defines);
     let include_paths = default_include_paths();
     let mut stream = preprocessed(name, source, defines, &include_paths);
     let tokens = stream.collect_tokens();
