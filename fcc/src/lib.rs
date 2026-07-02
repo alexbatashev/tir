@@ -5,6 +5,7 @@ use tir_riscv as _;
 use tir_x86_64 as _;
 
 pub mod ast;
+pub mod cir;
 pub mod codegen;
 pub mod diagnostics;
 pub mod driver;

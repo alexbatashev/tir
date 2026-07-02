@@ -135,7 +135,7 @@ fn run_compile(args: CompileArgs) {
             }
             CompileStage::Ir => {
                 let unit = parse_source(&name, &source);
-                let context = tir::Context::with_default_dialects();
+                let context = fcc_context();
                 let module = lower_to_ir(&context, &unit);
                 let mut ir = String::new();
                 let mut fmt = tir::IRFormatter::new(&mut ir);
@@ -176,6 +176,16 @@ fn lower_to_ir(context: &tir::Context, unit: &crate::ast::Ast) -> tir::builtin::
     })
 }
 
+fn fcc_context() -> tir::Context {
+    let context = tir::Context::with_default_dialects();
+    context.register_dialect::<crate::cir::CirDialect>();
+    context
+}
+
+fn default_include_paths() -> Vec<PathBuf> {
+    vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("include")]
+}
+
 /// Run the backend pipeline (mem2reg, instruction selection, register
 /// allocation, finalization) and render assembly or an ELF object.
 fn emit_machine_code(args: &CompileArgs, name: &str, source: &str) -> Vec<u8> {
@@ -193,7 +203,7 @@ fn emit_machine_code(args: &CompileArgs, name: &str, source: &str) -> Vec<u8> {
         });
 
     let unit = parse_source(name, source);
-    let context = tir::Context::with_default_dialects();
+    let context = fcc_context();
     target.register_dialects(&context);
     let module = lower_to_ir(&context, &unit);
 
@@ -244,7 +254,8 @@ fn preprocess(
     source: &str,
     defines: HashMap<String, Token>,
 ) -> Vec<(Token, crate::diagnostics::Span)> {
-    let mut stream = preprocessed(name, source, defines, &[]);
+    let include_paths = default_include_paths();
+    let mut stream = preprocessed(name, source, defines, &include_paths);
     let tokens = stream.collect_tokens();
     let mut had_error = false;
     for diag in stream.diagnostics() {

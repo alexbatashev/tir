@@ -113,7 +113,14 @@ pub enum Token {
     Identifier(String),
     #[regex("[0-9][0-9_]*|0[xX][0-9a-fA-F][0-9a-fA-F_]*|0[oO][0-7][0-7_]*|0[bB][01][01_]*", |lex| lex.slice().parse::<APInt>().ok())]
     IntegerLiteral(APInt),
+    #[regex(r#""([^"\\]|\\.)*""#, |lex| {
+        let s = lex.slice();
+        s[1..s.len() - 1].to_string()
+    })]
+    StringLiteral(String),
 
+    #[token("...")]
+    Ellipsis,
     #[token("(")]
     LParen,
     #[token(")")]
@@ -211,6 +218,8 @@ impl fmt::Display for Token {
             Token::Hash => f.write_str("#"),
             Token::Identifier(s) => f.write_str(s),
             Token::IntegerLiteral(n) => write!(f, "{n}"),
+            Token::StringLiteral(s) => write!(f, "\"{s}\""),
+            Token::Ellipsis => f.write_str("..."),
             Token::LParen => f.write_str("("),
             Token::RParen => f.write_str(")"),
             Token::LBrace => f.write_str("{"),

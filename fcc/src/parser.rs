@@ -106,10 +106,34 @@ fn ctype<'src, I>() -> impl Parser<'src, I, CType, Extra<'src>> + Clone
 where
     I: ValueInput<'src, Token = Token, Span = Span>,
 {
-    select! {
+    let qualifier = choice((
+        just(Token::KwConst).to(true),
+        just(Token::KwRestrict).to(false),
+        just(Token::KwVolatile).to(false),
+    ));
+    let base = select! {
         Token::KwInt => CType::Int,
         Token::KwVoid => CType::Void,
-    }
+        Token::KwChar => CType::Char,
+    };
+    let pointer = just(Token::Star)
+        .ignore_then(qualifier.clone().repeated().ignored())
+        .to(());
+
+    qualifier
+        .repeated()
+        .collect::<Vec<_>>()
+        .then(base)
+        .then(pointer.repeated().collect::<Vec<_>>())
+        .map(|((qualifiers, mut ty), pointers)| {
+            if qualifiers.iter().any(|&is_const| is_const) {
+                ty = CType::Const(Box::new(ty));
+            }
+            for _ in pointers {
+                ty = CType::Pointer(Box::new(ty));
+            }
+            ty
+        })
 }
 
 fn ident<'src, I>() -> impl Parser<'src, I, String, Extra<'src>> + Clone
@@ -130,6 +154,15 @@ where
                 let st = &mut e.state().0;
                 let id = st.add(AstKind::Int, tok);
                 st.ast.set_leaf_data(id, AstLeaf::Int(n));
+                id
+            },
+        );
+        let string = select! { Token::StringLiteral(s) => s }.map_with(
+            |s, e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
+                let tok = e.span().start;
+                let st = &mut e.state().0;
+                let id = st.add(AstKind::String, tok);
+                st.ast.set_leaf_data(id, AstLeaf::String(s));
                 id
             },
         );
@@ -164,6 +197,7 @@ where
 
         let primary = choice((
             literal,
+            string,
             call,
             var,
             expr.delimited_by(just(Token::LParen), just(Token::RParen)),
@@ -494,21 +528,33 @@ fn function<'src, I>() -> impl Parser<'src, I, NodeId, Extra<'src>> + Clone
 where
     I: ValueInput<'src, Token = Token, Span = Span>,
 {
-    let param =
-        ctype()
-            .then(ident())
-            .map_with(|(ty, name), e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
-                let tok = e.span().start;
-                let st = &mut e.state().0;
-                let id = st.add(AstKind::Param, tok);
-                st.ast.set_leaf_data(id, AstLeaf::Param { name, ty });
-                id
-            });
+    let param = ctype().then(ident().or_not()).map_with(
+        |(ty, name), e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
+            let tok = e.span().start;
+            let st = &mut e.state().0;
+            let id = st.add(AstKind::Param, tok);
+            st.ast.set_leaf_data(
+                id,
+                AstLeaf::Param {
+                    name: name.unwrap_or_default(),
+                    ty,
+                },
+            );
+            id
+        },
+    );
+    let varargs =
+        just(Token::Ellipsis).map_with(|_, e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
+            let tok = e.span().start;
+            e.state().0.add(AstKind::VarArgs, tok)
+        });
 
     // `(void)` is an explicit empty parameter list; `()` is also accepted.
     let params = choice((
         just(Token::KwVoid).to(Vec::new()),
-        param.separated_by(just(Token::Comma)).collect::<Vec<_>>(),
+        choice((param, varargs))
+            .separated_by(just(Token::Comma))
+            .collect::<Vec<_>>(),
     ))
     .delimited_by(just(Token::LParen), just(Token::RParen));
 
@@ -517,7 +563,8 @@ where
         .collect::<Vec<_>>()
         .delimited_by(just(Token::LBrace), just(Token::RBrace));
 
-    ctype().then(ident()).then(params).then(body).map_with(
+    let header = ctype().then(ident()).then(params);
+    let definition = header.clone().then(body).map_with(
         |(((ret, name), params), body), e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
             let tok = e.span().start;
             let st = &mut e.state().0;
@@ -528,7 +575,21 @@ where
             }
             id
         },
-    )
+    );
+    let prototype = header.then_ignore(just(Token::Semicolon)).map_with(
+        |((ret, name), params), e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
+            let tok = e.span().start;
+            let st = &mut e.state().0;
+            let id = st.add(AstKind::Prototype, tok);
+            st.ast.set_leaf_data(id, AstLeaf::Function { name, ret });
+            for param in params {
+                st.ast.add_edge(id, param);
+            }
+            id
+        },
+    );
+
+    choice((definition, prototype))
 }
 
 fn translation_unit<'src, I>() -> impl Parser<'src, I, NodeId, Extra<'src>>

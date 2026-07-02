@@ -38,6 +38,9 @@ impl AstNode {
 pub enum CType {
     Int,
     Void,
+    Char,
+    Const(Box<CType>),
+    Pointer(Box<CType>),
 }
 
 /// The structural kind of an AST node. How its children are interpreted depends
@@ -46,9 +49,12 @@ pub enum CType {
 pub enum AstKind {
     /// Children: the translation unit's functions.
     TranslationUnit,
+    /// Children: parameters.
+    Prototype,
     /// Children: parameters, then body statements.
     Function,
     Param,
+    VarArgs,
     /// Child: the optional initializer expression.
     Decl,
     /// Child: the assigned value expression.
@@ -91,6 +97,7 @@ pub enum AstKind {
     /// Children: the argument expressions. Callee name lives in [`AstLeaf::Call`].
     Call,
     Var,
+    String,
     Int,
 }
 
@@ -105,7 +112,18 @@ pub enum AstLeaf {
     Assign(String),
     Call(String),
     Var(String),
+    String(String),
     Int(i64),
+}
+
+fn render_ctype(ty: &CType) -> String {
+    match ty {
+        CType::Int => "Int".to_string(),
+        CType::Void => "Void".to_string(),
+        CType::Char => "Char".to_string(),
+        CType::Const(inner) => format!("Const({})", render_ctype(inner)),
+        CType::Pointer(inner) => format!("Ptr({})", render_ctype(inner)),
+    }
 }
 
 /// Render the tree as an indented outline, used by the `--stage ast` output.
@@ -122,16 +140,28 @@ fn render_node(ast: &Ast, id: NodeId, depth: usize, out: &mut String) {
 
     let label = match ast.get_node(id).kind {
         AstKind::TranslationUnit => "TranslationUnit".to_string(),
+        AstKind::Prototype => match ast.get_leaf_data(id) {
+            Some(AstLeaf::Function { name, ret }) => {
+                format!("Prototype {name:?} -> {}", render_ctype(ret))
+            }
+            _ => unreachable!(),
+        },
         AstKind::Function => match ast.get_leaf_data(id) {
-            Some(AstLeaf::Function { name, ret }) => format!("Function {name:?} -> {ret:?}"),
+            Some(AstLeaf::Function { name, ret }) => {
+                format!("Function {name:?} -> {}", render_ctype(ret))
+            }
             _ => unreachable!(),
         },
         AstKind::Param => match ast.get_leaf_data(id) {
-            Some(AstLeaf::Param { name, ty }) => format!("Param {name:?}: {ty:?}"),
+            Some(AstLeaf::Param { name, ty }) if name.is_empty() => {
+                format!("Param _: {}", render_ctype(ty))
+            }
+            Some(AstLeaf::Param { name, ty }) => format!("Param {name:?}: {}", render_ctype(ty)),
             _ => unreachable!(),
         },
+        AstKind::VarArgs => "VarArgs".to_string(),
         AstKind::Decl => match ast.get_leaf_data(id) {
-            Some(AstLeaf::Decl { name, ty }) => format!("Decl {name:?}: {ty:?}"),
+            Some(AstLeaf::Decl { name, ty }) => format!("Decl {name:?}: {}", render_ctype(ty)),
             _ => unreachable!(),
         },
         AstKind::Assign => match ast.get_leaf_data(id) {
@@ -169,6 +199,10 @@ fn render_node(ast: &Ast, id: NodeId, depth: usize, out: &mut String) {
         },
         AstKind::Var => match ast.get_leaf_data(id) {
             Some(AstLeaf::Var(name)) => format!("Var {name:?}"),
+            _ => unreachable!(),
+        },
+        AstKind::String => match ast.get_leaf_data(id) {
+            Some(AstLeaf::String(value)) => format!("String {value:?}"),
             _ => unreachable!(),
         },
         AstKind::Int => match ast.get_leaf_data(id) {
