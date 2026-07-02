@@ -7,7 +7,7 @@ use tir::{
 
 use super::{
     BranchEmitters, EmitRequest, InstructionSelectPass, IselCostModel, Rule, RuleKind, RuleMatch,
-    SemEGraph, SemNode, extension_rewrite, template_node,
+    SemEGraph, SemNode, template_node,
 };
 
 fn symbol(g: &mut SemGraph, id: u32) -> tir::graph::NodeId {
@@ -629,7 +629,12 @@ fn saturation_bridges_sign_extension_to_shift_pair() {
     sext_node.children = vec![v, width];
     let sext = egraph.add(sext_node);
 
-    let rewrite = extension_rewrite(SymKind::SExt, SymKind::ShiftRightArithmetic);
+    let texts = super::synthesis::synthesize_bridge_texts(
+        SymKind::SExt,
+        &std::collections::HashSet::from([SymKind::ShiftLeft, SymKind::ShiftRightArithmetic]),
+    );
+    let text = texts.first().expect("sext bridge discovered");
+    let rewrite = super::axioms::parse_axiom(text).unwrap().compile();
     super::rewrites::saturate(
         &ctx,
         &mut egraph,
@@ -766,9 +771,12 @@ fn square_sign_extension_lowers_to_shift_pair() {
         .with_operand_constraints(vec![(1, OperandConstraint::Immediate)]),
     ];
 
+    // The dev-utility flow: discover the bridge axioms for this rule set
+    // offline, then install the rendered file on the pass.
+    let axioms = super::render_axioms_file(&super::discover_axioms(&rules));
     let mut pm = PassManager::new();
     pm.nest(FuncOp::name())
-        .add_pass(InstructionSelectPass::new(rules));
+        .add_pass(InstructionSelectPass::new(rules).with_axioms(&axioms));
     pm.run(&context, context.get_op(module.id()))
         .expect("square should select");
 
