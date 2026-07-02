@@ -169,6 +169,39 @@ pub struct RegisterDefiner {
     pub emit_fn: RuleEmitFn,
 }
 
+/// An immediate operand's encoding range: the field's bit width and whether the
+/// instruction sign-extends it. A constant outside the range must not bind — its
+/// encoding would silently truncate to a different value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ImmRange {
+    pub width: u32,
+    pub signed: bool,
+}
+
+impl ImmRange {
+    /// Whether `value` is representable in the field: its 64-bit register
+    /// pattern must survive the encode/decode roundtrip (truncate to the
+    /// field, extend back per the field's signedness). So `4096` is rejected
+    /// by a signed 12-bit field (it would decode as `-2048`), while the
+    /// all-ones register constant fits any signed field as `-1`.
+    pub fn contains(&self, value: &APInt) -> bool {
+        let bits = if value.is_signed() {
+            value.to_i64() as u64
+        } else {
+            value.to_u64()
+        };
+        if self.width >= 64 {
+            return true;
+        }
+        if self.signed {
+            let shift = 64 - self.width;
+            (((bits << shift) as i64) >> shift) as u64 == bits
+        } else {
+            bits >> self.width == 0
+        }
+    }
+}
+
 /// What a rule selects. A `Value` rule computes its pattern's value into a
 /// destination register. A `CondBranch` rule is a conditional branch whose
 /// pattern is the *branch condition* (from the instruction's guarded PC write);
@@ -193,6 +226,10 @@ pub struct Rule {
     /// upper bits reach the result, so a narrower value must not bind. Symbols
     /// absent here match any width.
     pub operand_widths: Vec<(u32, u32)>,
+    /// Per-operand-symbol immediate encoding range. A constant outside the field's
+    /// representable range must not bind (its encoding would truncate). Symbols
+    /// absent here accept any constant.
+    pub operand_imm_ranges: Vec<(u32, ImmRange)>,
     /// Registers this instruction reads implicitly (from its behavior, not its
     /// encoded operands); selection introduces each one's definer ahead of this op.
     pub implicit_uses: Vec<ImplicitUse>,
@@ -208,6 +245,7 @@ impl Rule {
             kind: RuleKind::Value,
             operand_constraints: Vec::new(),
             operand_widths: Vec::new(),
+            operand_imm_ranges: Vec::new(),
             implicit_uses: Vec::new(),
             emit_fn,
         }
@@ -225,6 +263,13 @@ impl Rule {
     /// intermediates carrying no IR type — still match.
     pub fn with_operand_widths(mut self, widths: Vec<(u32, u32)>) -> Self {
         self.operand_widths = widths;
+        self
+    }
+
+    /// Restrict immediate operand symbols to constants their encoding field can
+    /// represent (see [`Rule::operand_imm_ranges`]).
+    pub fn with_operand_imm_ranges(mut self, ranges: Vec<(u32, ImmRange)>) -> Self {
+        self.operand_imm_ranges = ranges;
         self
     }
 
@@ -362,6 +407,7 @@ impl InstructionSelectPass {
                     &rule.pattern,
                     &rule.operand_constraints,
                     &rule.operand_widths,
+                    &rule.operand_imm_ranges,
                 )
             })
             .collect();
