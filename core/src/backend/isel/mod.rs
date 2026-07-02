@@ -19,8 +19,9 @@ mod tests;
 use std::collections::{HashMap, HashSet};
 
 use tir::{
-    Block, BlockId, BranchGuard, BranchTerminator, Context, OpId, Operation, OperationRef, Pass,
-    PassError, PassTarget, Rewriter, Terminator, TypeId, ValueId,
+    AnalysisManager, Block, BlockId, BranchGuard, BranchTerminator, Context, OpId, Operation,
+    OperationRef, Pass, PassError, PassTarget, PreservedAnalyses, Rewriter, Terminator, TypeId,
+    ValueId,
     graph::OperandConstraint,
     sem::{SemGraph, SymKind},
 };
@@ -1306,7 +1307,8 @@ impl Pass for InstructionSelectPass {
         op: &OperationRef,
         context: &Context,
         rewriter: &mut Rewriter,
-    ) -> Result<(), PassError> {
+        _analyses: &AnalysisManager,
+    ) -> Result<PreservedAnalyses, PassError> {
         // The function op is visited before any of its blocks' ops: record its
         // CFG, then solve every block up front — a dominating-edge assumption
         // reads the guard condition's *defining op*, which a dominator's commit
@@ -1325,16 +1327,17 @@ impl Pass for InstructionSelectPass {
 
         for lowering in &self.op_lowerings {
             if lowering(context, op, rewriter)? {
-                return Ok(());
+                return Ok(PreservedAnalyses::none());
             }
         }
 
         // Result-less ops still participate: a store must trigger its block's
         // selection even when no value-producing op precedes it.
         let Some(block) = op.block() else {
-            return Ok(());
+            return Ok(PreservedAnalyses::all());
         };
 
-        self.commit_block_solution(context, block, rewriter)
+        self.commit_block_solution(context, block, rewriter)?;
+        Ok(PreservedAnalyses::none())
     }
 }
