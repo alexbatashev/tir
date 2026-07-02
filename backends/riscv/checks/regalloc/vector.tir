@@ -1,0 +1,25 @@
+// RUN: tir mc --march=rv64iv --stage=regalloc %s | filecheck %s
+
+// vsetvli insertion and vector register allocation. Consecutive vector ops
+// demanding the same vector length share one configuration instruction: the
+// insertion pass tracks the configured state through the block and only emits
+// vset{i}vli where the demand changes. The vtypei immediate packs the demanded
+// element width: 208 = 0xd0 = e32/m1/ta/ma. Vector arguments land in v8/v9 and the
+// result is returned in v8 (RVV psABI); the fixed lane count becomes a vsetivli
+// immediate, while a dynamic vl operand becomes a vsetvli register AVL.
+
+module {
+  func @fixed(%0: !vector.vec<4xi32>, %1: !vector.vec<4xi32>) -> !vector.vec<4xi32> {
+    %2 = vector.add %0, %1 : !vector.vec<4xi32>
+    %3 = vector.mul %2, %1 : !vector.vec<4xi32>
+    return %3
+  }
+  module_end
+}
+
+// CHECK: asm.symbol {name = "fixed"
+// CHECK: riscv.vsetivli {rd = x0, avl = 4, vtypei = 208}
+// CHECK-NEXT: riscv.vadd.vv {vd = {{v[0-9]+}}, vs2 = v8, vs1 = v9
+// CHECK-NOT: riscv.vsetivli
+// CHECK: riscv.vmul.vv {vd = v8
+// CHECK: riscv.vret

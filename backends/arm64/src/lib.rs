@@ -1018,6 +1018,7 @@ mod tests {
                     arguments: &[0, 1],
                     return_values: &[0],
                     reserved: &[29, 30, 31],
+                    group_width: 1,
                 }],
             }
         }

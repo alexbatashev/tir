@@ -230,8 +230,6 @@ fn emit_instructions<'a>(
     let mut instruction_printer_map_inits: Vec<proc_macro2::TokenStream> = vec![];
     let mut isel_rule_emitters: Vec<proc_macro2::TokenStream> = vec![];
     let mut isel_rule_inits: Vec<proc_macro2::TokenStream> = vec![];
-    let mut isel_definer_emitters: Vec<proc_macro2::TokenStream> = vec![];
-    let mut isel_definer_inits: Vec<proc_macro2::TokenStream> = vec![];
     let mut machine_instruction_impls: Vec<proc_macro2::TokenStream> = vec![];
     let mut instruction_custom_format_impls: Vec<proc_macro2::TokenStream> = vec![];
     let mut as_sem_expr_impls: Vec<proc_macro2::TokenStream> = vec![];
@@ -252,6 +250,20 @@ fn emit_instructions<'a>(
                 .map(move |(name, idx)| ((class.clone(), name), u32::from(idx)))
         })
         .collect();
+
+    // The inverse mapping, used to name a demand attribute after the register a
+    // behavior reads implicitly (`VCSR::vl` -> attribute `vl`). Declaration names
+    // precede ABI aliases in `register_indices`, so first-wins keeps the
+    // declaration name.
+    let register_name_map: HashMap<(String, u32), String> = {
+        let mut map = HashMap::new();
+        for rc in files.iter().flat_map(|f| f.register_classes()) {
+            for (name, idx) in rc.register_indices() {
+                map.entry((rc.name.clone(), u32::from(idx))).or_insert(name);
+            }
+        }
+        map
+    };
 
     // Register classes holding the program counter. An instruction whose behavior
     // reads or writes the PC cannot be selected as a value rule: the pattern only
@@ -316,6 +328,68 @@ fn emit_instructions<'a>(
             quote! { #(#items,)* }
         };
 
+        let numeric_params: HashMap<String, i64> = resolve_params_for_instruction(inst, item_cache)
+            .into_iter()
+            .filter_map(|(name, (_ty, value))| match value {
+                Some(ast::Expr::Lit(ast::Lit::Int(li))) => {
+                    Some((name, parse_literal_value(&li) as i64))
+                }
+                _ => None,
+            })
+            .collect();
+
+        // `execute()` binds ISA parameters (e.g. `XLEN`) from here at runtime.
+        let isa_param_values: HashMap<String, i64> = resolve_isa_param_values(inst, item_cache);
+
+        // Value-rule semantics, computed ahead of the op declaration so the
+        // registers the behavior reads implicitly (e.g. `VCSR::vl`) can surface
+        // as demand attributes with a `Use` role. Instructions defining several
+        // register operands (e.g. CSR ops writing both `rd` and `csr`) cannot be
+        // modeled by a single-value DAG pattern; emitting one for the last
+        // assignment would let isel match an unrelated expression, so they get no
+        // selection rule. The same goes for instructions touching the PC
+        // (jal/jalr/auipc): their pattern would hide the control-flow effect and
+        // match unrelated arithmetic.
+        let semantics = if defined_register_operands.len() <= 1
+            && !behavior_references_pc(&inst.behavior, &pc_classes)
+        {
+            analyze_instruction_semantics(
+                inst,
+                &ops,
+                &defined_register_operands,
+                &numeric_params,
+                &isa_param_values,
+                &register_index_map,
+            )
+        } else {
+            None
+        };
+
+        // The registers the behavior reads by path, resolved to attribute names.
+        // Each becomes a demand attribute on the emitted op: the value the read
+        // bound to (an immediate or a virtual register), consumed later by a
+        // target machine pass that materializes the register's definer (e.g.
+        // RISC-V `vsetvli` insertion satisfying `vl` demands).
+        let implicit_reads: Vec<(String, u32)> = {
+            let mut reads: Vec<(String, u32)> = semantics
+                .as_ref()
+                .map(|s| {
+                    s.register_symbols
+                        .iter()
+                        .filter_map(|((class, index), sym)| {
+                            let name = register_name_map.get(&(class.clone(), *index))?;
+                            if ops.iter().any(|(op_name, _)| op_name == name) {
+                                return None;
+                            }
+                            Some((name.clone(), *sym))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            reads.sort();
+            reads
+        };
+
         // Build roles from behavior assignments so we don't depend on naming
         // conventions. An operand both written and read (e.g. the two-address x86
         // `dst = dst + src`) is ReadWrite; its isel-emitted op additionally carries
@@ -344,6 +418,10 @@ fn emit_instructions<'a>(
                         items.push(quote! { #tied_ident: Use });
                     }
                 }
+            }
+            for (name, _) in &implicit_reads {
+                let field_ident = format_ident!("{}", name);
+                items.push(quote! { #field_ident: Use });
             }
             quote! { #(#items,)* }
         };
@@ -387,6 +465,25 @@ fn emit_instructions<'a>(
                     }
                 });
             }
+        }
+        // A demand attribute holds a value register whose class is only known at
+        // run time (the attribute value carries it), so it prints through the
+        // class-dispatching `register_name`.
+        for (name, _) in &implicit_reads {
+            let attr_name_lit = proc_macro2::Literal::string(name);
+            register_attr_print_arms.push(quote! {
+                #attr_name_lit => {
+                    if let tir::attributes::AttributeValue::Register(tir::attributes::RegisterAttr::Physical { class, index }) = &attr.value {
+                        if let Some(name) = register_name(class, *index, false) {
+                            fmt.write(name)?;
+                        } else {
+                            attr.value.print(fmt, &context)?;
+                        }
+                    } else {
+                        attr.value.print(fmt, &context)?;
+                    }
+                }
+            });
         }
         let custom_print_attr_body = if register_attr_print_arms.is_empty() {
             quote! {
@@ -438,36 +535,7 @@ fn emit_instructions<'a>(
             }
         });
 
-        let numeric_params: HashMap<String, i64> = resolve_params_for_instruction(inst, item_cache)
-            .into_iter()
-            .filter_map(|(name, (_ty, value))| match value {
-                Some(ast::Expr::Lit(ast::Lit::Int(li))) => {
-                    Some((name, parse_literal_value(&li) as i64))
-                }
-                _ => None,
-            })
-            .collect();
-
-        // `execute()` binds ISA parameters (e.g. `XLEN`) from here at runtime.
-        let isa_param_values: HashMap<String, i64> = resolve_isa_param_values(inst, item_cache);
-
-        // Instructions defining several register operands (e.g. CSR ops writing
-        // both `rd` and `csr`) cannot be modeled by a single-value DAG pattern;
-        // emitting one for the last assignment would let isel match an
-        // unrelated expression, so they get no selection rule. The same goes for
-        // instructions touching the PC (jal/jalr/auipc): their pattern would hide
-        // the control-flow effect and match unrelated arithmetic.
-        if defined_register_operands.len() <= 1
-            && !behavior_references_pc(&inst.behavior, &pc_classes)
-            && let Some(semantics) = analyze_instruction_semantics(
-                inst,
-                &ops,
-                &defined_register_operands,
-                &numeric_params,
-                &isa_param_values,
-                &register_index_map,
-            )
-        {
+        if let Some(semantics) = &semantics {
             let emit_fn_ident = format_ident!("emit_isel_{}", inst.name.to_lowercase());
             let pattern_fn_ident = format_ident!("isel_pattern_{}", inst.name.to_lowercase());
             let rule_name_lit = proc_macro2::Literal::string(&inst.name.to_lowercase());
@@ -646,6 +714,34 @@ fn emit_instructions<'a>(
             };
             let base_cost_lit = proc_macro2::Literal::u32_unsuffixed(base_cost);
             let mnemonic_cost_lit = proc_macro2::Literal::string(mnemonic_name);
+
+            // The registers the behavior reads by path (e.g. `VCSR::vl`) are real
+            // dependencies not among the encoded operands. Each becomes a demand
+            // attribute on the emitted op — the immediate or virtual register the
+            // read bound to — satisfied later by a target machine pass that
+            // materializes the register's definer (e.g. `vsetvli` insertion).
+            for (name, sym) in &implicit_reads {
+                let name_lit = proc_macro2::Literal::string(name);
+                let sym_lit = proc_macro2::Literal::u32_unsuffixed(*sym);
+                emit_attr_steps.push(quote! {
+                    if let Some(v) = m.int_binding(#sym_lit) {
+                        builder = builder.attr(#name_lit, tir::attributes::AttributeValue::Int(v));
+                    } else {
+                        let src = m.value_binding(#sym_lit)
+                            .ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
+                        builder = builder.attr(
+                            #name_lit,
+                            tir::attributes::AttributeValue::Register(
+                                tir::attributes::RegisterAttr::Virtual {
+                                    id: src.number(),
+                                    class: None,
+                                },
+                            ),
+                        );
+                    }
+                });
+            }
+
             isel_rule_emitters.push(quote! {
                 fn #pattern_fn_ident(_context: &tir::Context) -> tir::sem::SemGraph {
                     use tir::graph::MutDag;
@@ -666,28 +762,6 @@ fn emit_instructions<'a>(
                 }
             });
 
-            // The registers the behavior reads by path (e.g. `VCSR::vl`) are implicit
-            // uses: real dependencies not among the encoded operands. Selection
-            // introduces each one's definer ahead of this instruction.
-            let mut implicit_reads: Vec<(&(String, u32), &u32)> =
-                semantics.register_symbols.iter().collect();
-            implicit_reads.sort_by_key(|((class, index), _)| (class.clone(), *index));
-            let implicit_use_entries: Vec<proc_macro2::TokenStream> = implicit_reads
-                .iter()
-                .map(|((class, index), sym)| {
-                    let class_lit = proc_macro2::Literal::string(class);
-                    let index_lit = proc_macro2::Literal::u32_unsuffixed(*index);
-                    let sym_lit = proc_macro2::Literal::u32_unsuffixed(**sym);
-                    quote! {
-                        tir::backend::isel::ImplicitUse {
-                            symbol: #sym_lit,
-                            register_class: #class_lit,
-                            register_index: #index_lit,
-                        }
-                    }
-                })
-                .collect();
-
             let inst_features = feature_slice(&inst.for_isas);
             isel_rule_inits.push(quote! {
                 if features_enabled(features, #inst_features) {
@@ -703,8 +777,7 @@ fn emit_instructions<'a>(
                         )
                         .with_operand_constraints(vec![#(#operand_constraint_entries),*])
                         #operand_width_call
-                        #operand_imm_range_call
-                        .with_implicit_uses(vec![#(#implicit_use_entries),*]),
+                        #operand_imm_range_call,
                     );
                 }
             });
@@ -862,103 +935,6 @@ fn emit_instructions<'a>(
                     );
                 }
             });
-        }
-
-        // A pure register definer (e.g. `vsetvli`) gets no matching rule; instead it
-        // is registered as the definer of the registers its behavior writes, to be
-        // introduced ahead of instructions that read them. Its emitter hardwires the
-        // discardable destination(s) to `x0` and takes the written value from the
-        // def/use binding (symbol 0).
-        let definer_writes = definer_writes(
-            inst,
-            &ops,
-            &defined_register_operands,
-            &register_index_map,
-            &pc_classes,
-        );
-        if !definer_writes.is_empty() {
-            let definer_emit_fn_ident = format_ident!("emit_definer_{}", inst.name.to_lowercase());
-
-            let mut definer_emit_steps = Vec::new();
-            for (op_name, op_ty) in &ops {
-                let op_name_lit = proc_macro2::Literal::string(op_name);
-                let is_value = definer_writes.iter().any(|w| &w.value_operand == op_name);
-                match op_ty {
-                    Type::Struct(class_name) => {
-                        let class_lit = proc_macro2::Literal::string(class_name);
-                        if is_value {
-                            definer_emit_steps.push(quote! {
-                                let src = m.value_binding(0)
-                                    .ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
-                                builder = builder.attr(
-                                    #op_name_lit,
-                                    tir::attributes::AttributeValue::Register(
-                                        tir::attributes::RegisterAttr::Virtual {
-                                            id: src.number(),
-                                            class: Some(#class_lit.to_string()),
-                                        },
-                                    ),
-                                );
-                            });
-                        } else {
-                            // A discardable destination register, hardwired to x0.
-                            definer_emit_steps.push(quote! {
-                                builder = builder.attr(
-                                    #op_name_lit,
-                                    tir::attributes::AttributeValue::Register(
-                                        tir::attributes::RegisterAttr::Physical {
-                                            class: #class_lit.to_string(),
-                                            index: 0,
-                                        },
-                                    ),
-                                );
-                            });
-                        }
-                    }
-                    Type::Integer | Type::Bits(_) if is_value => {
-                        definer_emit_steps.push(quote! {
-                            let v = m.int_binding(0)
-                                .ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
-                            builder = builder.attr(
-                                #op_name_lit,
-                                tir::attributes::AttributeValue::Int(v),
-                            );
-                        });
-                    }
-                    _ => {}
-                }
-            }
-
-            isel_definer_emitters.push(quote! {
-                fn #definer_emit_fn_ident(
-                    context: &tir::Context,
-                    req: &tir::backend::isel::EmitRequest,
-                    m: &tir::backend::isel::RuleMatch,
-                ) -> Result<Box<dyn tir::Operation>, tir::PassError> {
-                    let _ = (req, m);
-                    let mut builder = #builder_ident::new(context);
-                    #(#definer_emit_steps)*
-                    Ok(Box::new(builder.build()))
-                }
-            });
-
-            let definer_features = feature_slice(&inst.for_isas);
-            for write in &definer_writes {
-                let class_lit = proc_macro2::Literal::string(&write.register_class);
-                let index_lit = proc_macro2::Literal::u32_unsuffixed(write.register_index);
-                let immediate = write.value_is_immediate;
-                isel_definer_inits.push(quote! {
-                    if features_enabled(features, #definer_features) {
-                        definers.push(tir::backend::isel::RegisterDefiner {
-                            register_class: #class_lit,
-                            register_index: #index_lit,
-                            value_is_immediate: #immediate,
-                            value_symbol: 0,
-                            emit_fn: #definer_emit_fn_ident,
-                        });
-                    }
-                });
-            }
         }
 
         let encoding_arms = get_encoding_arms(inst, item_cache);
@@ -1430,17 +1406,6 @@ fn emit_instructions<'a>(
             #(#isel_rule_inits)*
             rules
         }
-
-        #(#isel_definer_emitters)*
-
-        /// Instructions that define a register implicitly (e.g. `vsetvli` defining
-        /// `VCSR::vl`), introduced ahead of ops that read those registers.
-        pub fn get_register_definers(context: &tir::Context, features: &[Feature]) -> Vec<tir::backend::isel::RegisterDefiner> {
-            let _ = (&context, &features);
-            let mut definers = Vec::new();
-            #(#isel_definer_inits)*
-            definers
-        }
     })
 }
 
@@ -1600,6 +1565,14 @@ fn emit_register_info(files: &[ast::File]) -> Result<proc_macro2::TokenStream, T
         let arguments = slice(&meta.arguments);
         let return_values = slice(&meta.return_values);
         let reserved = slice(&meta.reserved);
+        // A `GROUP_SIZE` class param declares how many consecutive file indices
+        // one register covers (RVV LMUL>1 group classes); default 1.
+        let group_width = match rc.parameters.get("GROUP_SIZE") {
+            Some((_ty, Some(ast::Expr::Lit(ast::Lit::Int(li))))) => {
+                proc_macro2::Literal::u16_unsuffixed(parse_literal_value(li).max(1) as u16)
+            }
+            _ => proc_macro2::Literal::u16_unsuffixed(1),
+        };
         class_entries.push(quote! {
             tir::backend::regalloc::RegClassInfo {
                 name: #name_lit,
@@ -1610,6 +1583,7 @@ fn emit_register_info(files: &[ast::File]) -> Result<proc_macro2::TokenStream, T
                 arguments: #arguments,
                 return_values: #return_values,
                 reserved: #reserved,
+                group_width: #group_width,
             }
         });
     }
@@ -2600,95 +2574,6 @@ fn collect_behavior_assignments<'a>(expr: &'a ast::Expr, out: &mut Vec<(String, 
     }
 }
 
-/// Like [`collect_behavior_assignments`] but keeps the destination expression, so
-/// a register-path write (`VCSR::vl = …`) can be resolved to its `(class, name)`.
-fn collect_behavior_assignment_exprs<'a>(
-    expr: &'a ast::Expr,
-    out: &mut Vec<(&'a ast::Expr, &'a ast::Expr)>,
-) {
-    match expr {
-        ast::Expr::Assign(a) => out.push((a.dest.as_ref(), a.value.as_ref())),
-        ast::Expr::Block(b) => {
-            for stmt in &b.stmts {
-                collect_behavior_assignment_exprs(stmt, out);
-            }
-        }
-        ast::Expr::If(i) => {
-            collect_behavior_assignment_exprs(i.then.as_ref(), out);
-            if let Some(else_expr) = &i.else_ {
-                collect_behavior_assignment_exprs(else_expr.as_ref(), out);
-            }
-        }
-        ast::Expr::Try(t) => collect_behavior_assignment_exprs(&t.body, out),
-        _ => {}
-    }
-}
-
-/// A register a definer instruction writes implicitly: `(class, index)` and the
-/// operand feeding it, with whether that operand is an immediate. Derived from an
-/// instruction whose behavior assigns fixed registers and no encoded result.
-struct DefinerWrite {
-    register_class: String,
-    register_index: u32,
-    value_operand: String,
-    value_is_immediate: bool,
-}
-
-/// The fixed-register writes that make `inst` a register definer, or empty if it
-/// is not one (it assigns an encoded result, or writes no fixed register).
-fn definer_writes(
-    inst: &ast::Instruction,
-    ops: &[(String, Type)],
-    defined_register_operands: &[String],
-    register_index_map: &HashMap<(String, String), u32>,
-    pc_classes: &HashSet<String>,
-) -> Vec<DefinerWrite> {
-    // A pure definer assigns no encoded result operand; an instruction that also
-    // produces a normal result (e.g. a CSR op writing `rd`) is matched by value.
-    if !defined_register_operands.is_empty() {
-        return Vec::new();
-    }
-    let operand_names: HashSet<&str> = ops.iter().map(|(name, _)| name.as_str()).collect();
-    let ops_by_name: HashMap<&str, &Type> =
-        ops.iter().map(|(name, ty)| (name.as_str(), ty)).collect();
-
-    let mut assignments = Vec::new();
-    collect_behavior_assignment_exprs(&inst.behavior, &mut assignments);
-
-    let mut writes = Vec::new();
-    for (dest, rhs) in assignments {
-        let Some((class, name)) = assignment_dest_register_path(dest) else {
-            continue;
-        };
-        // A PC write is control flow, not a register definition: a branch must
-        // never be introduced as the "definer" of the program counter.
-        if pc_classes.contains(&class) {
-            continue;
-        }
-        if operand_names.contains(name.as_str()) {
-            continue;
-        }
-        let Some(&index) = register_index_map.get(&(class.clone(), name.clone())) else {
-            continue;
-        };
-        let referenced = referenced_operands(rhs, &operand_names);
-        let Some(value_operand) = referenced.into_iter().next() else {
-            continue;
-        };
-        let value_is_immediate = matches!(
-            ops_by_name.get(value_operand.as_str()),
-            Some(Type::Bits(_)) | Some(Type::Integer)
-        );
-        writes.push(DefinerWrite {
-            register_class: class,
-            register_index: index,
-            value_operand,
-            value_is_immediate,
-        });
-    }
-    writes
-}
-
 /// Register operands the behavior *reads*: referenced anywhere outside an
 /// assignment-destination position. An operand that is also defined is a tied
 /// (two-address) operand, e.g. the x86 `dst = dst + src`.
@@ -3306,7 +3191,10 @@ fn emit_value_eval(
             let mut __memory = __TmdlMachineMemory(machine);
             match tir::sem::execute_with_memory(&__g, &__syms, &mut __memory)? {
                 tir::sem::Value::Int(i) => tir::sem::register_from_int(i),
-                tir::sem::Value::Float(_) | tir::sem::Value::Iterator(_) | tir::sem::Value::RawBits(_) => {
+                // A lane concatenation (e.g. an OPIVV destination) is raw bits;
+                // store its bit pattern.
+                tir::sem::Value::RawBits(b) => tir::sem::register_from_int(b.to_apint()),
+                tir::sem::Value::Float(_) | tir::sem::Value::Iterator(_) => {
                     return Err(tir::backend::SimTrap::InvalidInstruction {
                         op: #mnemonic_lit,
                         reason: "instruction semantic expression did not evaluate to integer".to_string(),

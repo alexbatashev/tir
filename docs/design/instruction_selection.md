@@ -383,8 +383,22 @@ hand-written rule.
 
 Instructions that read or write the PC *unconditionally* (`jal`, `jalr`,
 `auipc`) get **no value rule**: their pattern would hide the control-flow
-effect (a `jal` rule would match a plain `x + 4`). They also never register as
-register definers. Returns and calls remain per-target op lowerings.
+effect (a `jal` rule would match a plain `x + 4`). Returns and calls remain
+per-target op lowerings.
+
+## Implicit register reads (demand attributes)
+
+A register a behavior reads by path without it being an encoded operand (RVV
+`VCSR::vl`, `VCFG::sew`) is a real dependency. The read becomes a pattern
+symbol like any operand, and the generated emitter stamps whatever the symbol
+bound — an immediate or a virtual register — onto the selected op as a
+*demand attribute* named after the register (`vl = 4`, `sew = 32`, with a
+`Use` role for register values). Selection never materializes the register's
+definer; a target machine pass does (RISC-V `riscv-insert-vsetvli` tracks the
+configured state forward through each block and inserts `vset{i}vli` exactly
+where the demanded configuration changes). Demand attributes are to that pass
+what virtual registers are to allocation: a recorded obligation, concretized
+later.
 
 ## Dominating-edge assumptions (scoped e-graph)
 

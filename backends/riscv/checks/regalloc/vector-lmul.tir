@@ -1,0 +1,24 @@
+// RUN: tir mc --march=rv64iv --stage=regalloc %s | filecheck %s
+
+// LMUL legalization: a vec<8xi32> is 256 bits, two registers at the guaranteed
+// minimum VLEN of 128, so its values live in the VRM2 group class. Arguments
+// take aligned group registers (v8m2, v10m2 -- the psABI vector convention),
+// the result returns in v8m2, and vtypei packs e32/m2/ta/ma = 209. Group
+// operands still print as their base register (the architecturally encoded
+// number).
+
+module {
+  func @m2(%0: !vector.vec<8xi32>, %1: !vector.vec<8xi32>) -> !vector.vec<8xi32> {
+    %2 = vector.add %0, %1 : !vector.vec<8xi32>
+    %3 = vector.mul %2, %1 : !vector.vec<8xi32>
+    return %3
+  }
+  module_end
+}
+
+// CHECK: asm.symbol {name = "m2", arg_regs = [%virt0:VRM2, %virt1:VRM2]}
+// CHECK: riscv.vsetivli {rd = x0, avl = 8, vtypei = 209}
+// CHECK-NEXT: riscv.vadd.vv {vd = {{v[0-9]+}}, vs2 = v8, vs1 = v10
+// CHECK-NOT: riscv.vsetivli
+// CHECK: riscv.vmul.vv {vd = v8
+// CHECK: riscv.vret

@@ -47,34 +47,25 @@ impl<'src> Parser<'src> {
             .or_else(|| name.parse::<u32>().ok().map(ValueId::from_number))
     }
 
+    // `position` is a byte offset; every scan below works on the byte-indexed
+    // remainder of the source (`&src[position..]`), never on `chars().nth`,
+    // which counts characters and drifts after any multi-byte character.
     pub fn peek_char(&self) -> Option<char> {
-        self.src.chars().nth(self.position as usize)
+        self.src.get(self.position as usize..)?.chars().next()
     }
 
     pub fn parse_ident(&mut self) -> Option<&'src str> {
         let start = self.position as usize;
-
-        if self
-            .src
-            .chars()
-            .nth(start)
-            .map(|c| c.is_alphabetic())
-            .unwrap_or(false)
-        {
-            let mut last = start + 1;
-            while let Some(c) = self.src.chars().nth(last) {
-                if !c.is_alphanumeric() && c != '_' {
-                    break;
-                }
-                last += 1;
-            }
-
-            self.position = last as u32;
-            self.skip_trivia();
-            Some(&self.src[start..last])
-        } else {
-            None
+        let rest = self.src.get(start..)?;
+        if !rest.chars().next()?.is_alphabetic() {
+            return None;
         }
+        let len = rest
+            .find(|c: char| !c.is_alphanumeric() && c != '_')
+            .unwrap_or(rest.len());
+        self.position = (start + len) as u32;
+        self.skip_trivia();
+        Some(&self.src[start..start + len])
     }
 
     pub fn parse_token(&mut self, token: &str) -> bool {
@@ -93,22 +84,14 @@ impl<'src> Parser<'src> {
     }
 
     pub fn parse_string(&mut self) -> Option<&'src str> {
-        if self.src.get(self.position as usize..)?.starts_with('"') {
-            let start = self.position as usize + 1;
-            let mut i = start;
-            while let Some(c) = self.src.chars().nth(i) {
-                if c == '"' {
-                    break;
-                }
-                i += 1;
-            }
-            if self.src.chars().nth(i)? == '"' {
-                self.position = (i + 1) as u32;
-                self.skip_trivia();
-                return Some(&self.src[start..i]);
-            }
+        if !self.src.get(self.position as usize..)?.starts_with('"') {
+            return None;
         }
-        None
+        let start = self.position as usize + 1;
+        let len = self.src[start..].find('"')?;
+        self.position = (start + len + 1) as u32;
+        self.skip_trivia();
+        Some(&self.src[start..start + len])
     }
 
     pub fn parse_number(&mut self) -> Option<i64> {
@@ -137,31 +120,21 @@ impl<'src> Parser<'src> {
     }
 
     pub fn parse_value_ref(&mut self) -> Option<&'src str> {
-        if self
-            .src
-            .get(self.position as usize..)
-            .map(|s| s.starts_with('%'))
-            .unwrap_or(false)
-        {
-            let start = self.position as usize + 1;
-            let mut last = start;
-            while let Some(c) = self.src.chars().nth(last) {
-                if !c.is_alphanumeric() && c != '_' {
-                    break;
-                }
-                last += 1;
-            }
-            if last > start {
-                self.position = last as u32;
-                let result = &self.src[start..last];
-                self.skip_trivia();
-                Some(result)
-            } else {
-                None
-            }
-        } else {
-            None
+        if !self.src.get(self.position as usize..)?.starts_with('%') {
+            return None;
         }
+        let start = self.position as usize + 1;
+        let rest = &self.src[start..];
+        let len = rest
+            .find(|c: char| !c.is_alphanumeric() && c != '_')
+            .unwrap_or(rest.len());
+        if len == 0 {
+            return None;
+        }
+        self.position = (start + len) as u32;
+        let result = &self.src[start..start + len];
+        self.skip_trivia();
+        Some(result)
     }
 
     pub fn parse_type(

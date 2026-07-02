@@ -45,6 +45,10 @@ pub struct RegClassInfo {
     pub return_values: &'static [u16],
     /// Indices reserved by the ABI and never allocated.
     pub reserved: &'static [u16],
+    /// How many consecutive file indices one register of this class covers.
+    /// 1 for ordinary classes; an RVV LMUL>1 group class covers 2/4/8 (e.g.
+    /// `VRM2` index 8 is the architectural pair v8..v9).
+    pub group_width: u16,
 }
 
 impl RegClassInfo {
@@ -83,6 +87,24 @@ impl RegisterInfo {
     pub fn phys_key<'a>(&'a self, p: &'a PhysReg) -> (&'a str, u16) {
         let file = self.class(&p.0).map_or(p.0.as_str(), |c| c.file);
         (file, p.1)
+    }
+
+    /// The span of file indices `p` covers: its file, start index, and its
+    /// class's group width.
+    pub fn phys_span<'a>(&'a self, p: &'a PhysReg) -> (&'a str, u16, u16) {
+        let (file, width) = self
+            .class(&p.0)
+            .map_or((p.0.as_str(), 1), |c| (c.file, c.group_width.max(1)));
+        (file, p.1, width)
+    }
+
+    /// Whether two physical registers overlap: same file and intersecting index
+    /// spans. For width-1 classes this is exactly `phys_key` equality; a group
+    /// register (RVV `VRM2` v8..v9) overlaps every register it covers.
+    pub fn phys_overlap(&self, a: &PhysReg, b: &PhysReg) -> bool {
+        let (fa, sa, wa) = self.phys_span(a);
+        let (fb, sb, wb) = self.phys_span(b);
+        fa == fb && sa < sb + wb && sb < sa + wa
     }
 
     /// The class that owns the calling convention's argument registers — the
@@ -278,19 +300,15 @@ fn node_costs(
                     // a call) is unsatisfiable: every alternative goes infinite so
                     // allocation fails loudly instead of silently producing a
                     // clobbered value.
-                    let conflict = forbidden.is_some_and(|set| {
-                        set.iter()
-                            .any(|f| info.phys_key(f) == info.phys_key(target))
-                    });
-                    return if !conflict && info.phys_key(p) == info.phys_key(target) {
+                    let conflict = forbidden
+                        .is_some_and(|set| set.iter().any(|f| info.phys_overlap(f, target)));
+                    return if !conflict && info.phys_span(p) == info.phys_span(target) {
                         0
                     } else {
                         INF_COST
                     };
                 }
-                if forbidden
-                    .is_some_and(|set| set.iter().any(|f| info.phys_key(f) == info.phys_key(p)))
-                {
+                if forbidden.is_some_and(|set| set.iter().any(|f| info.phys_overlap(f, p))) {
                     return INF_COST;
                 }
                 if class.is_callee_saved(p.1) {
@@ -325,10 +343,10 @@ fn interference_matrix(
     for (i, l) in left.iter().enumerate() {
         for (j, r) in right.iter().enumerate() {
             if let (Alternative::Phys(lp), Alternative::Phys(rp)) = (l, r) {
-                // Conflict when the two alternatives are the same physical register,
-                // comparing by register file so aliasing classes (e.g. `GPR` and
-                // `GPRsp` sharing index 7) correctly interfere.
-                if info.phys_key(lp) == info.phys_key(rp) {
+                // Conflict when the two alternatives overlap: the same register
+                // through aliasing classes (`GPR`/`GPRsp` index 7), or a group
+                // register covering another (`VRM2` v8..v9 vs `VR` v9).
+                if info.phys_overlap(lp, rp) {
                     matrix.set(i, j, INF_COST);
                     any = true;
                 }
@@ -765,34 +783,89 @@ fn abi_precolor(
     blocks: &[BlockId],
 ) -> HashMap<u32, PhysReg> {
     let mut precolor = HashMap::new();
-    let Some(class) = info.default_integer_class() else {
-        return precolor;
-    };
 
-    // Argument vregs: the entry block's arguments, in order.
-    if let Some(&entry) = blocks.first() {
-        let args = context.get_block(entry).arguments().to_vec();
-        for (arg, &reg) in args.iter().zip(class.arguments.iter()) {
-            precolor.insert(arg.id().number(), (class.name.to_string(), reg));
+    // Argument vregs: the symbol's `arg_regs` attribute carries each argument's
+    // register class (assigned by the target's function lowering, e.g. vectors
+    // in `VR`, everything else in `GPR`). Each argument takes the next
+    // calling-convention register of its class.
+    let mut next_slot: HashMap<&str, usize> = HashMap::new();
+    if let Some(AttributeValue::Array(args)) = op
+        .op()
+        .attributes
+        .iter()
+        .find(|a| a.name == "arg_regs")
+        .map(|a| &a.value)
+    {
+        for attr in args {
+            let AttributeValue::Register(RegisterAttr::Virtual { id, class }) = attr else {
+                continue;
+            };
+            let Some(rc) = class
+                .as_deref()
+                .and_then(|c| info.class(c))
+                .or_else(|| info.default_integer_class())
+            else {
+                continue;
+            };
+            let slot = next_slot.entry(rc.name).or_insert(0);
+            if let Some(&reg) = rc.arguments.get(*slot) {
+                precolor.insert(*id, (rc.name.to_string(), reg));
+                *slot += 1;
+            }
         }
     }
 
-    // Return value: the operand of the `vret` terminator.
-    if let Some(&ret_reg) = class.return_values.first() {
-        for &block_id in blocks {
-            for op_id in context.get_block(block_id).op_ids() {
-                let body_op = context.get_op(op_id);
-                if body_op.name == "vret"
-                    && let Some(value) = body_op.operands.first()
-                {
-                    precolor.insert(value.number(), (class.name.to_string(), ret_reg));
+    // Return value: the operand of the `vret` terminator, in the first return
+    // register of the value's class.
+    for &block_id in blocks {
+        for op_id in context.get_block(block_id).op_ids() {
+            let body_op = context.get_op(op_id);
+            if body_op.name == "vret"
+                && let Some(value) = body_op.operands.first()
+            {
+                let vreg = value.number();
+                let class = vreg_class_in(context, blocks, vreg);
+                let Some(rc) = class
+                    .as_deref()
+                    .and_then(|c| info.class(c))
+                    .or_else(|| info.default_integer_class())
+                else {
+                    continue;
+                };
+                if let Some(&ret_reg) = rc.return_values.first() {
+                    precolor.insert(vreg, (rc.name.to_string(), ret_reg));
                 }
             }
         }
     }
 
-    let _ = op;
     precolor
+}
+
+/// The register class a virtual register is referenced with, from the first
+/// class-qualified register attribute naming it.
+fn vreg_class_in(context: &Context, blocks: &[BlockId], vreg: u32) -> Option<String> {
+    let class_of = |value: &AttributeValue| match value {
+        AttributeValue::Register(RegisterAttr::Virtual { id, class: Some(c) }) if *id == vreg => {
+            Some(c.clone())
+        }
+        _ => None,
+    };
+    for &block_id in blocks {
+        for op_id in context.get_block(block_id).op_ids() {
+            for attr in &context.get_op(op_id).attributes {
+                if let Some(c) = class_of(&attr.value) {
+                    return Some(c);
+                }
+                if let AttributeValue::Array(items) = &attr.value
+                    && let Some(c) = items.iter().find_map(&class_of)
+                {
+                    return Some(c);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Count how many times each virtual register is referenced (def or use) across the
@@ -898,6 +971,7 @@ mod tests {
                 arguments: &[0, 1],
                 return_values: &[0],
                 reserved: &[],
+                group_width: 1,
             }],
         }
     }
@@ -1072,6 +1146,7 @@ mod tests {
             arguments: &[0],
             return_values: &[],
             reserved: &[],
+            group_width: 1,
         },
         RegClassInfo {
             name: "GPRsp",
@@ -1082,6 +1157,7 @@ mod tests {
             arguments: &[],
             return_values: &[],
             reserved: &[],
+            group_width: 1,
         },
     ];
 
@@ -1134,6 +1210,7 @@ mod tests {
                 arguments: &[],
                 return_values: &[],
                 reserved: &[],
+                group_width: 1,
             },
             RegClassInfo {
                 name: "B",
@@ -1144,6 +1221,7 @@ mod tests {
                 arguments: &[],
                 return_values: &[],
                 reserved: &[],
+                group_width: 1,
             },
         ];
         let info = RegisterInfo { classes: CLASSES };
@@ -1163,6 +1241,55 @@ mod tests {
     }
 
     #[test]
+    fn group_registers_interfere_by_span() {
+        // An RVV-style LMUL=2 group class: a `VRM2` register covers two `VR`
+        // indices, so an interfering single-register vreg must land outside the
+        // group's span. With only v0..v2 available, the group takes (VRM2, 0)
+        // = v0..v1 and the scalar is pushed to v2 (not v1, which overlaps).
+        static CLASSES: &[RegClassInfo] = &[
+            RegClassInfo {
+                name: "VR",
+                file: "VR",
+                allocation_order: &[0, 1, 2],
+                caller_saved: &[0, 1, 2],
+                callee_saved: &[],
+                arguments: &[],
+                return_values: &[],
+                reserved: &[],
+                group_width: 1,
+            },
+            RegClassInfo {
+                name: "VRM2",
+                file: "VR",
+                allocation_order: &[0],
+                caller_saved: &[0],
+                callee_saved: &[],
+                arguments: &[],
+                return_values: &[],
+                reserved: &[],
+                group_width: 2,
+            },
+        ];
+        let info = RegisterInfo { classes: CLASSES };
+        assert!(info.phys_overlap(&("VRM2".to_string(), 0), &("VR".to_string(), 1)));
+        assert!(!info.phys_overlap(&("VRM2".to_string(), 0), &("VR".to_string(), 2)));
+
+        let liveness = two_class_liveness("VRM2", "VR");
+        let precolor = HashMap::new();
+        let result = allocate(&AllocConfig {
+            info: &info,
+            liveness: &liveness,
+            precolor: &precolor,
+            spill_cost: &|_| 100,
+        })
+        .unwrap();
+
+        let map = assigned(result);
+        assert_eq!(map[&1], ("VRM2".to_string(), 0));
+        assert_eq!(map[&2], ("VR".to_string(), 2));
+    }
+
+    #[test]
     fn forbidden_register_aliases_across_classes() {
         // A `GPRsp` vreg forbidding `("GPR", 0)` — a clobber expressed through the
         // aliasing base class — must avoid index 0 and take the other register.
@@ -1176,6 +1303,7 @@ mod tests {
                 arguments: &[],
                 return_values: &[],
                 reserved: &[],
+                group_width: 1,
             },
             RegClassInfo {
                 name: "GPRsp",
@@ -1186,6 +1314,7 @@ mod tests {
                 arguments: &[],
                 return_values: &[],
                 reserved: &[],
+                group_width: 1,
             },
         ];
         let info = RegisterInfo { classes: CLASSES };

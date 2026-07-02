@@ -23,6 +23,23 @@ register_class VCSR for [RVV] {
     }
 }
 
+// Decomposed `vtype` fields. Architecturally `vtype` is one packed CSR, but
+// instruction behaviors must never decode packed bitfields: a structural
+// pattern over bit-slicing would not match the dialect ops' clean semantic
+// shape. Instead each field the behaviors consume is its own register —
+// `vset{i}vli` writes both the packed CSR (what the architecture shows) and
+// these fields (what the semantics read), and the simulator carries them like
+// any other register. Reads of `VCFG::sew` surface as `sew` demand attributes
+// on selected instructions, exactly like `VCSR::vl` reads surface as `vl`.
+register_class VCFG for [RVV] {
+    param ENCODING_LEN: Integer = 3;
+    param WIDTH: Integer = self.XLEN;
+
+    registers {
+        sew => { index = 0 },
+    }
+}
+
 // The 32 architectural vector registers v0..v31. Their physical width is the
 // implementation's VLEN, the same fixed quantity `vlenb` reports; how those bits
 // are partitioned into elements is governed dynamically by `vtype`.
@@ -35,32 +52,110 @@ register_class VR for [RVV] {
     // by the register, the same way one physical file is reused across SEWs.
     param WIDTH: Integer = VCSR::vlenb;
 
+    // The standard calling convention preserves no vector state: every vector
+    // register is caller-saved, so all 32 are allocatable scratch registers.
+    // Vector arguments are passed in v8..v23 and results returned in v8..v9
+    // (RISC-V psABI, vector register calling convention).
     registers {
-        v0..v31 => { traits = [vector] },
+        v0..v7 => { traits = [caller_saved] },
+        v8..v9 => { traits = [argument, return_value, caller_saved] },
+        v10..v23 => { traits = [argument, caller_saved] },
+        v24..v31 => { traits = [caller_saved] },
     }
 }
 
-// `vset{i}vli` define `VCSR::vl`, the active element count every OPIVV
-// instruction reads in its behavior. They are never selected by value matching —
-// their behavior assigns only `VCSR::vl`, not an encoded result operand, so
-// rustgen emits no matching rule. Instead instruction selection honors the OPIVV
-// ops' implicit read of `VCSR::vl` by introducing the definer ahead of them, with
-// `rd` hardwired to `x0` (the granted `vl` is discarded). The element width is
-// `total / vl` in this functional model, so no SEW operand is needed; the packed
-// `vtype` encoding is a fixed placeholder, left as a follow-up.
+
+// LMUL>1 register groups: allocation views of the same physical file. A group
+// register names its base (the architecturally encoded register number) and
+// covers GROUP_SIZE consecutive VR indices, which the allocator honors as a
+// span (`RegisterInfo::phys_overlap`): v8m2 conflicts with v8, v9, and v8m4.
+// Only aligned bases exist, so alignment falls out of the register list.
+// Instruction operands stay declared `VR` -- the LMUL legalization step in the
+// riscv-insert-vsetvli pass rewrites a vector op's register attributes to the
+// group class its demanded configuration implies, the way virtual registers
+// await allocation. Argument/return traits follow the psABI: vector arguments
+// in v8..v23 (aligned groups), return values from v8.
+
+register_class VRM2 for [RVV] {
+    file = VR;
+    param GROUP_SIZE: Integer = 2;
+    param ENCODING_LEN: Integer = 5;
+    param WIDTH: Integer = VCSR::vlenb;
+
+    registers {
+        v0m2 => { index = 0, traits = [caller_saved] },
+        v2m2 => { index = 2, traits = [caller_saved] },
+        v4m2 => { index = 4, traits = [caller_saved] },
+        v6m2 => { index = 6, traits = [caller_saved] },
+        v8m2 => { index = 8, traits = [argument, return_value, caller_saved] },
+        v10m2 => { index = 10, traits = [argument, caller_saved] },
+        v12m2 => { index = 12, traits = [argument, caller_saved] },
+        v14m2 => { index = 14, traits = [argument, caller_saved] },
+        v16m2 => { index = 16, traits = [argument, caller_saved] },
+        v18m2 => { index = 18, traits = [argument, caller_saved] },
+        v20m2 => { index = 20, traits = [argument, caller_saved] },
+        v22m2 => { index = 22, traits = [argument, caller_saved] },
+        v24m2 => { index = 24, traits = [caller_saved] },
+        v26m2 => { index = 26, traits = [caller_saved] },
+        v28m2 => { index = 28, traits = [caller_saved] },
+        v30m2 => { index = 30, traits = [caller_saved] },
+    }
+}
+
+register_class VRM4 for [RVV] {
+    file = VR;
+    param GROUP_SIZE: Integer = 4;
+    param ENCODING_LEN: Integer = 5;
+    param WIDTH: Integer = VCSR::vlenb;
+
+    registers {
+        v0m4 => { index = 0, traits = [caller_saved] },
+        v4m4 => { index = 4, traits = [caller_saved] },
+        v8m4 => { index = 8, traits = [argument, return_value, caller_saved] },
+        v12m4 => { index = 12, traits = [argument, caller_saved] },
+        v16m4 => { index = 16, traits = [argument, caller_saved] },
+        v20m4 => { index = 20, traits = [argument, caller_saved] },
+        v24m4 => { index = 24, traits = [caller_saved] },
+        v28m4 => { index = 28, traits = [caller_saved] },
+    }
+}
+
+register_class VRM8 for [RVV] {
+    file = VR;
+    param GROUP_SIZE: Integer = 8;
+    param ENCODING_LEN: Integer = 5;
+    param WIDTH: Integer = VCSR::vlenb;
+
+    registers {
+        v0m8 => { index = 0, traits = [caller_saved] },
+        v8m8 => { index = 8, traits = [argument, return_value, caller_saved] },
+        v16m8 => { index = 16, traits = [argument, caller_saved] },
+        v24m8 => { index = 24, traits = [caller_saved] },
+    }
+}
+
+// `vset{i}vli` configure the vector unit: they write `VCSR::vl` (the active
+// element count, granted in full in this model: `rd = avl`), the packed
+// `VCSR::vtype` CSR from the `vtypei` immediate, and the decomposed
+// `VCFG::sew` field the OPIVV behaviors read. Tail/mask policy bits and LMUL
+// are carried in `vtypei` but not yet consumed by any behavior.
 //
-// `vsetvli` takes the requested length (AVL) from a register; `vsetivli` from a
-// 5-bit immediate. Selection picks between them by whether the lane count is a
-// constant (fixed vector) or a value (scalable vector).
+// Instruction selection never introduces these by value matching. The OPIVV
+// ops' implicit `VCSR::vl`/`VCFG::sew` reads surface as `vl`/`sew` demand
+// attributes on each selected op, and the riscv-insert-vsetvli machine pass
+// materializes a `vsetivli` (constant AVL) or `vsetvli` (register AVL) exactly
+// where the configured state changes. A `vector.vector_len` op lowers directly
+// to `vsetvli` with a live `rd`, both granting the count and establishing the
+// configuration.
 instruction VSetVli for [RVV] {
     param MNEMONIC: String = "vsetvli";
     param OPCODE: bits<7> = 0b1010111;
     param FUNCT3: bits<3> = 0b111;
-    param VTYPEI: bits<11> = 0;
 
     operands {
         rd: GPR,
         avl: GPR,
+        vtypei: bits<11>,
     }
 
     encoding {
@@ -68,16 +163,19 @@ instruction VSetVli for [RVV] {
         7..11 => rd,
         12..14 => FUNCT3,
         15..19 => avl,
-        20..30 => VTYPEI,
+        20..30 => vtypei,
         31 => 0b0,
     }
 
     asm {
-        "{self.MNEMONIC} {rd}, {avl}"
+        "{self.MNEMONIC} {rd}, {avl}, {vtypei}"
     }
 
     behavior {
+        rd = avl;
         VCSR::vl = avl;
+        VCSR::vtype = zext(vtypei, self.XLEN);
+        VCFG::sew = zext(0b1000, self.XLEN) << zext(extract(vtypei, 5, 3), self.XLEN);
     }
 
     schedule { units = [WriteIALU]; }
@@ -87,11 +185,11 @@ instruction VSetIVli for [RVV] {
     param MNEMONIC: String = "vsetivli";
     param OPCODE: bits<7> = 0b1010111;
     param FUNCT3: bits<3> = 0b111;
-    param VTYPEI: bits<10> = 0;
 
     operands {
         rd: GPR,
         avl: bits<5>,
+        vtypei: bits<10>,
     }
 
     encoding {
@@ -99,16 +197,23 @@ instruction VSetIVli for [RVV] {
         7..11 => rd,
         12..14 => FUNCT3,
         15..19 => avl,
-        20..29 => VTYPEI,
+        20..29 => vtypei,
         30..31 => 0b11,
     }
 
     asm {
-        "{self.MNEMONIC} {rd}, {avl}"
+        "{self.MNEMONIC} {rd}, {avl}, {vtypei}"
     }
 
+    // No `rd` write here: a `rd = zext(avl, XLEN)` behavior would generate a
+    // value rule whose pattern matches real zero-extensions of small constants,
+    // letting selection materialize scalar constants through the vector unit.
+    // The insertion pass always discards vsetivli's grant (`rd = x0`), and the
+    // grant equals the immediate anyway in this full-grant model.
     behavior {
         VCSR::vl = zext(avl, self.XLEN);
+        VCSR::vtype = zext(vtypei, self.XLEN);
+        VCFG::sew = zext(0b1000, self.XLEN) << zext(extract(vtypei, 5, 3), self.XLEN);
     }
 
     schedule { units = [WriteIALU]; }
@@ -145,21 +250,21 @@ template VArithVV for [RVV] {
     schedule { units = [WriteIALU]; }
 }
 
-// Each OPIVV instruction maps over the `vl` active elements: it splits each
-// source register into `VCSR::vl` lanes, pairs them, applies the elementwise
-// operation, and concatenates the results back into the destination register.
-// The lane width is not named here; it is whatever `vtype` selects, so the same
-// description serves every SEW. This is the same split/map/concat shape the
-// target-independent `vector` dialect ops produce, so instruction selection can
-// match a `vector.add` against `vadd.vv`, the `VCSR::vl` read binding to the
-// dialect op's `vl` operand.
+// Each OPIVV instruction maps over the `vl` active elements of `VCFG::sew`
+// bits each: it splits each source register into that many lanes, pairs them,
+// applies the elementwise operation, and concatenates the results back into
+// the destination register. This is the same split/map/concat shape the
+// target-independent `vector` dialect ops produce, so instruction selection
+// matches a `vector.add` against `vadd.vv` structurally: the `VCSR::vl` read
+// binds to the dialect op's lane count (its `vl` demand) and the `VCFG::sew`
+// read binds to the element width from the vector type (its `sew` demand).
 
 instruction VAdd for [RVV] : VArithVV {
     param MNEMONIC: String = "vadd.vv";
     param FUNCT6: bits<6> = 0b000000;
 
     behavior {
-        vd = concat(map(zip(split(vs2, VCSR::vl), split(vs1, VCSR::vl)), |a, b| a + b));
+        vd = concat(map(zip(split(vs2, VCSR::vl, VCFG::sew), split(vs1, VCSR::vl, VCFG::sew)), |a, b| a + b));
     }
 }
 
@@ -168,7 +273,7 @@ instruction VSub for [RVV] : VArithVV {
     param FUNCT6: bits<6> = 0b000010;
 
     behavior {
-        vd = concat(map(zip(split(vs2, VCSR::vl), split(vs1, VCSR::vl)), |a, b| a - b));
+        vd = concat(map(zip(split(vs2, VCSR::vl, VCFG::sew), split(vs1, VCSR::vl, VCFG::sew)), |a, b| a - b));
     }
 }
 
@@ -177,6 +282,6 @@ instruction VMul for [RVV] : VArithVV {
     param FUNCT6: bits<6> = 0b100101;
 
     behavior {
-        vd = concat(map(zip(split(vs2, VCSR::vl), split(vs1, VCSR::vl)), |a, b| a * b));
+        vd = concat(map(zip(split(vs2, VCSR::vl, VCFG::sew), split(vs1, VCSR::vl, VCFG::sew)), |a, b| a * b));
     }
 }

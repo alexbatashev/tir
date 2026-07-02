@@ -113,6 +113,16 @@ impl SymKind {
             _ => 2,
         }
     }
+
+    /// Whether a node of this kind may take `n` children. `Split` is the one
+    /// variadic form: `split(x, n)` cuts into equal lanes, `split(x, n, w)`
+    /// takes `n` lanes of `w` bits from the low end.
+    pub fn accepts_arity(&self, n: usize) -> bool {
+        match self {
+            SymKind::Split => n == 2 || n == 3,
+            _ => n == self.arity(),
+        }
+    }
 }
 
 /// Structural matcher facts; context `C` is ignored so a label matches in any context.

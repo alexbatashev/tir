@@ -2,6 +2,7 @@ use tir::helpers::{dialect, operation};
 use tir::{Any, Operation};
 
 mod obj;
+mod vsetvli;
 
 include!(concat!(env!("OUT_DIR"), "/riscv.rs"));
 
@@ -508,17 +509,33 @@ fn lower_func_and_return_to_asm_symbol(
             })
             .unwrap_or_else(|| "unknown".to_string());
 
-        let arg_regs = func
-            .body()
-            .arguments()
-            .iter()
-            .map(|arg| {
-                AttributeValue::Register(RegisterAttr::Virtual {
-                    id: arg.id().number(),
-                    class: Some("GPR".to_string()),
-                })
-            })
-            .collect::<Vec<_>>();
+        // Argument register class follows the value's type: vectors live in the
+        // vector register file (in the LMUL group class their size implies),
+        // everything else in GPRs.
+        let mut arg_regs = Vec::new();
+        for arg in func.body().arguments().iter() {
+            let ty = context.get_type_data(arg.ty());
+            let class = match (ty.as_ref() as &dyn std::any::Any)
+                .downcast_ref::<tir::vector::VectorType>()
+            {
+                Some(vec_ty) => {
+                    let elem = context.get_type_data(vec_ty.element(context));
+                    let elem_bits = (elem.as_ref() as &dyn std::any::Any)
+                        .downcast_ref::<tir::builtin::IntegerType>()
+                        .map(|i| i.width())
+                        .unwrap_or(0) as i64;
+                    match vec_ty.length() {
+                        Some(lanes) => vsetvli::vr_class_for_bits(lanes as i64 * elem_bits)?,
+                        None => "VR",
+                    }
+                }
+                None => "GPR",
+            };
+            arg_regs.push(AttributeValue::Register(RegisterAttr::Virtual {
+                id: arg.id().number(),
+                class: Some(class.to_string()),
+            }));
+        }
 
         let lowered = tir::backend::SymbolOpBuilder::new(context)
             .body(op.op().regions[0])
@@ -540,6 +557,45 @@ fn lower_func_and_return_to_asm_symbol(
     }
 
     Ok(false)
+}
+
+/// Lower `vector.vector_len` to `vsetvli rd, avl`: the one instruction that both
+/// produces a value (the granted element count) and configures the vector unit.
+/// The vsetvli-insertion pass recognizes it as establishing the configuration,
+/// so ops demanding the granted count need no further vset{i}vli.
+fn lower_vector_len(
+    context: &tir::Context,
+    op: &tir::OperationRef,
+    rewriter: &mut tir::Rewriter,
+) -> Result<bool, tir::PassError> {
+    use tir::attributes::AttributeValue;
+
+    if op.as_op::<tir::vector::VectorLenOp>().is_none() {
+        return Ok(false);
+    }
+    let inner = op.op();
+    let (Some(&result), Some(&avl)) = (inner.results.first(), inner.operands.first()) else {
+        return Err(tir::PassError::RewriteFailed(inner.id));
+    };
+    // The grant is element-width-specific (VLMAX depends on SEW), so the op
+    // names the width it configures for.
+    let Some(AttributeValue::Int(sew)) = inner
+        .attributes
+        .iter()
+        .find(|a| a.name == "sew")
+        .map(|a| a.value.clone())
+    else {
+        return Err(tir::PassError::InvalidRuleSet(
+            "vector.vector_len requires a `sew` attribute".to_string(),
+        ));
+    };
+    let lowered = VSetVliOpBuilder::new(context)
+        .attr("rd", virt(result.number(), "GPR"))
+        .attr("avl", virt(avl.number(), "GPR"))
+        .attr("vtypei", AttributeValue::Int(vsetvli::vtypei_for(sew, 1)?))
+        .build();
+    rewriter.replace_op(op, &lowered)?;
+    Ok(true)
 }
 
 /// Emit the deferred unconditional branch (`vbr`, finalized to `jal x0` after
@@ -714,13 +770,13 @@ fn create_isel_pass_for(
 ) -> tir::backend::isel::InstructionSelectPass {
     tir::backend::isel::InstructionSelectPass::new(get_isel_rules(context, features))
         .with_axioms(include_str!("isel.axioms"))
-        .with_register_definers(get_register_definers(context, features))
         .with_branch_emitters(tir::backend::isel::BranchEmitters {
             uncond: emit_uncond_branch,
             cond_nonzero: emit_branch_nonzero,
         })
         .with_op_lowering(lower_func_and_return_to_asm_symbol)
         .with_op_lowering(lower_calls)
+        .with_op_lowering(lower_vector_len)
 }
 
 /// The RISC-V stack pointer (`sp` = `x2`).
@@ -898,6 +954,14 @@ impl tir::backend::TargetMachine for RiscvTarget {
             ]);
         }
         counters
+    }
+
+    fn machine_passes(&self) -> Vec<Box<dyn tir::Pass>> {
+        if self.config.features.contains(&Feature::RVV) {
+            vec![Box::new(vsetvli::InsertVsetvliPass::new(self.config.xlen))]
+        } else {
+            Vec::new()
+        }
     }
 
     fn pre_ra_lowerings(&self) -> Vec<tir::backend::isel::OpLowering> {
@@ -1883,6 +1947,7 @@ mod tests {
                     arguments: &[10, 11],
                     return_values: &[10],
                     reserved: &[0, 1, 2, 3, 4],
+                    group_width: 1,
                 }],
             }
         }
@@ -2288,11 +2353,23 @@ mod target_parser_tests {
         // so it carries no static width here; its size is supplied by the machine.
         assert_eq!(
             crate::register_widths(&[Feature::RV32I]),
-            vec![("PC", 32), ("GPR", 32), ("CSR", 32), ("VCSR", 32)]
+            vec![
+                ("PC", 32),
+                ("GPR", 32),
+                ("CSR", 32),
+                ("VCSR", 32),
+                ("VCFG", 32)
+            ]
         );
         assert_eq!(
             crate::register_widths(&[Feature::RV64I]),
-            vec![("PC", 64), ("GPR", 64), ("CSR", 64), ("VCSR", 64)]
+            vec![
+                ("PC", 64),
+                ("GPR", 64),
+                ("CSR", 64),
+                ("VCSR", 64),
+                ("VCFG", 64)
+            ]
         );
         // Extensions alone resolve nothing; the base supplies XLEN.
         assert_eq!(crate::isa_params(&[Feature::RVM]), vec![]);

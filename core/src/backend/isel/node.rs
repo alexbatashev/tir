@@ -140,10 +140,10 @@ fn hash_label(node: &SemNode, state: &mut impl Hasher) {
     }
 }
 
-/// The concrete operand a capture e-class resolves to.
+/// The kind of operand a capture e-class resolves to.
 pub(crate) enum Binding {
-    Int(APInt),
-    Value(ValueId),
+    Int,
+    Value,
 }
 
 /// The constant a class is proven to hold, if any member is an integer literal.
@@ -182,8 +182,8 @@ pub(crate) fn class_binding(
     class: Id,
 ) -> Option<Binding> {
     class_int_binding(egraph, class)
-        .map(Binding::Int)
-        .or_else(|| class_value_binding(egraph, class_value, class).map(Binding::Value))
+        .map(|_| Binding::Int)
+        .or_else(|| class_value_binding(egraph, class_value, class).map(|_| Binding::Value))
 }
 
 /// The negated comparison at the same operand order (`!(a < b)` is `a >= b`).
