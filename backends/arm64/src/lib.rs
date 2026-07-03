@@ -479,6 +479,14 @@ fn lower_calls(
     for arg in &args {
         fresh_args.push(detach(rewriter, *arg)?);
     }
+
+    let lr = ("GPR".to_string(), LR);
+    let saved_lr = context
+        .create_value(tir::builtin::IntegerType::new(context, 64), None)
+        .id();
+    let save = mv(context, virt(saved_lr.number(), "GPR"), phys(&lr));
+    rewriter.insert_op_before(op, save.as_ref())?;
+
     for (&fresh, &reg) in fresh_args.iter().zip(class.arguments.iter()) {
         let copy = mv(context, phys(&("GPR".to_string(), reg)), virt(fresh, "GPR"));
         rewriter.insert_op_before(op, copy.as_ref())?;
@@ -502,12 +510,6 @@ fn lower_calls(
         ),
     };
 
-    let lr = ("GPR".to_string(), LR);
-    let saved_lr = context
-        .create_value(tir::builtin::IntegerType::new(context, 64), None)
-        .id();
-    let save = mv(context, virt(saved_lr.number(), "GPR"), phys(&lr));
-    rewriter.insert_op_before(op, save.as_ref())?;
     rewriter.insert_op_before(op, virtual_call.as_ref())?;
     let restore = mv(context, phys(&lr), virt(saved_lr.number(), "GPR"));
 
@@ -559,9 +561,9 @@ fn create_isel_pass_for(
         .with_op_lowering(lower_calls)
 }
 
-/// The AArch64 frame base register (`x29`/`fp`), reserved from allocation and used
-/// as the base for spill slots.
-const FP: (&str, u16) = ("GPR", 29);
+/// The AArch64 stack pointer, reserved from allocation and used as the base for
+/// spill slots after the frame has been reserved.
+const SP: (&str, u16) = ("GPRsp", 31);
 
 fn phys(reg: &(String, u16)) -> tir::attributes::AttributeValue {
     tir::attributes::AttributeValue::Register(tir::attributes::RegisterAttr::Physical {
@@ -578,7 +580,7 @@ fn virt(value: u32, class: &str) -> tir::attributes::AttributeValue {
 }
 
 /// AArch64 register allocation target: the generated register file plus `str`/`ldr`
-/// spill code and a `sub fp, fp, #frame` / `add fp, fp, #frame` prologue/epilogue.
+/// spill code and a `sub sp, sp, #frame` / `add sp, sp, #frame` prologue/epilogue.
 pub struct Arm64RegAlloc;
 
 impl tir::backend::regalloc::TargetRegAlloc for Arm64RegAlloc {
@@ -586,8 +588,12 @@ impl tir::backend::regalloc::TargetRegAlloc for Arm64RegAlloc {
         register_info()
     }
 
+    fn frame_align(&self) -> u32 {
+        16
+    }
+
     fn frame_register(&self) -> (String, u16) {
-        (FP.0.to_string(), FP.1)
+        (SP.0.to_string(), SP.1)
     }
 
     fn emit_spill_store(
@@ -627,8 +633,8 @@ impl tir::backend::regalloc::TargetRegAlloc for Arm64RegAlloc {
     fn emit_prologue(&self, context: &tir::Context, size: u32) -> Vec<Box<dyn Operation>> {
         vec![Box::new(
             SubImmediateOpBuilder::new(context)
-                .attr("rd", phys(&(FP.0.to_string(), FP.1)))
-                .attr("rn", phys(&(FP.0.to_string(), FP.1)))
+                .attr("rd", phys(&(SP.0.to_string(), SP.1)))
+                .attr("rn", phys(&(SP.0.to_string(), SP.1)))
                 .attr("imm", tir::attributes::AttributeValue::Int(size as i64))
                 .build(),
         )]
@@ -637,8 +643,8 @@ impl tir::backend::regalloc::TargetRegAlloc for Arm64RegAlloc {
     fn emit_epilogue(&self, context: &tir::Context, size: u32) -> Vec<Box<dyn Operation>> {
         vec![Box::new(
             AddImmediateOpBuilder::new(context)
-                .attr("rd", phys(&(FP.0.to_string(), FP.1)))
-                .attr("rn", phys(&(FP.0.to_string(), FP.1)))
+                .attr("rd", phys(&(SP.0.to_string(), SP.1)))
+                .attr("rn", phys(&(SP.0.to_string(), SP.1)))
                 .attr("imm", tir::attributes::AttributeValue::Int(size as i64))
                 .build(),
         )]
@@ -714,7 +720,7 @@ impl tir::backend::TargetMachine for Arm64Target {
     }
 
     fn pre_ra_lowerings(&self) -> Vec<tir::backend::isel::OpLowering> {
-        vec![obj::lower_constant]
+        vec![obj::lower_constant, obj::lower_addr_of]
     }
 
     fn finalize_lowerings(&self) -> Vec<tir::backend::isel::OpLowering> {
@@ -1250,7 +1256,7 @@ mod tests {
         assert_eq!(
             names.first(),
             Some(&"sub_imm"),
-            "the frame prologue (sub fp) should lead the block, got {names:?}"
+            "the frame prologue (sub sp) should lead the block, got {names:?}"
         );
     }
 
@@ -1776,22 +1782,22 @@ mod tests {
             .map(|id| context.get_op(id).name)
             .collect();
         // The lr save has no callee-saved register to live in (the modeled
-        // register file marks x0..x28 and x30 caller-saved), so it spills: a
-        // frame is opened, lr is stored before the call and reloaded after.
+        // register file marks x0..x28 and x30 caller-saved), so it spills
+        // before the final ABI argument copy.
         assert_eq!(
             names,
             vec![
                 "sub_imm",
                 "orr",
                 "orr",
-                "orr",
                 "store_doubleword",
+                "orr",
                 "bl",
                 "load_doubleword",
                 "orr",
                 "orr",
-                "ret",
                 "add_imm",
+                "ret",
                 "symbol_end"
             ]
         );

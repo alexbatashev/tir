@@ -7,11 +7,12 @@ use tir::attributes::AttributeValue;
 use tir::backend::binary::{EM_AARCH64, ElfClass, ObjectFormatInfo, RelocKind};
 
 use crate::{
-    BranchImmediateOpBuilder, BranchLinkOpBuilder, BranchLinkRegOpBuilder, MoveWideZeroOpBuilder,
-    ReturnOpBuilder, VirtualBranchOp, VirtualCallOp, VirtualIndirectCallOp, VirtualReturnOp, phys,
-    virt,
+    AddressPCRelOpBuilder, BranchImmediateOpBuilder, BranchLinkOpBuilder, BranchLinkRegOpBuilder,
+    MoveWideZeroOpBuilder, ReturnOpBuilder, VirtualBranchOp, VirtualCallOp, VirtualIndirectCallOp,
+    VirtualReturnOp, phys, virt,
 };
 
+const R_AARCH64_ADR_PREL_LO21: u32 = 274;
 const R_AARCH64_CONDBR19: u32 = 280;
 const R_AARCH64_JUMP26: u32 = 282;
 const R_AARCH64_CALL26: u32 = 283;
@@ -22,6 +23,10 @@ pub(crate) fn object_format() -> ObjectFormatInfo {
         elf_class: ElfClass::Elf64,
         elf_flags: 0,
         reloc_for: |op| match op {
+            "adr" => Some(RelocKind {
+                r_type: R_AARCH64_ADR_PREL_LO21,
+                addend: 0,
+            }),
             "bl" => Some(RelocKind {
                 r_type: R_AARCH64_CALL26,
                 addend: 0,
@@ -36,8 +41,8 @@ pub(crate) fn object_format() -> ObjectFormatInfo {
             }),
             _ => None,
         },
-        // AArch64 branch immediates are word offsets: byte delta >> 2.
-        pc_rel_scale: |_| 2,
+        // AArch64 branch immediates are word offsets; adr uses byte offsets.
+        pc_rel_scale: |op| if op == "adr" { 0 } else { 2 },
         pc_rel_from_end: |_| false,
     }
 }
@@ -68,6 +73,26 @@ pub(crate) fn lower_constant(
         .attr("imm", AttributeValue::Int(value))
         .build();
     rewriter.replace_op(op, &movz)?;
+    Ok(true)
+}
+
+/// Pre-RA: materialize an `addr_of` symbol address as `adr rd, sym`. The
+/// encoder leaves the immediate as a fixup emitted with R_AARCH64_ADR_PREL_LO21.
+pub(crate) fn lower_addr_of(
+    context: &tir::Context,
+    op: &tir::OperationRef,
+    rewriter: &mut tir::Rewriter,
+) -> Result<bool, tir::PassError> {
+    use tir::builtin::AddressOfOp;
+
+    let Some(addr_of) = op.as_op::<AddressOfOp>() else {
+        return Ok(false);
+    };
+    let adr = AddressPCRelOpBuilder::new(context)
+        .attr("rd", virt(addr_of.result().number(), "GPR"))
+        .attr("imm", AttributeValue::Str(addr_of.sym_name()))
+        .build();
+    rewriter.replace_op(op, &adr)?;
     Ok(true)
 }
 
