@@ -4,7 +4,7 @@
 //! SSA" shape a C frontend emits before any mem2reg pass): every parameter and
 //! local lives in a stack slot produced by `ptr.alloca`, reads become
 //! `ptr.load` and writes become `ptr.store`. Arithmetic uses the `builtin`
-//! integer ops. Only `int` (lowered to `i32`) and `void` are supported.
+//! integer ops; C-only literals and variadic markers use the local `cir` dialect.
 
 use std::collections::HashMap;
 
@@ -14,6 +14,7 @@ use tir::ptr::{PtrType, ops as p};
 use tir::{Context, IRBuilder, Operand, Operation, TypeId, ValueId};
 
 use crate::ast::*;
+use crate::cir::{self, VarArgsType};
 use crate::diagnostics::{
     Diagnostic, EmptyTranslationUnit, UndeclaredIdentifier, UnsupportedConstruct,
 };
@@ -30,10 +31,17 @@ struct FnCodegen<'a> {
     ast: &'a Ast,
     builder: IRBuilder,
     locals: HashMap<String, Slot>,
+    signatures: &'a HashMap<String, Signature>,
     /// Scratch holding the lowered SSA value of each node in the expression
     /// subtree currently being lowered, indexed by `node.index() - base`. Reused
     /// across expressions to avoid reallocating.
     values: Vec<ValueId>,
+}
+
+#[derive(Clone)]
+struct Signature {
+    ret: TypeId,
+    args: Vec<TypeId>,
 }
 
 /// Lower a translation unit into a `builtin.module` in `context`.
@@ -42,9 +50,42 @@ pub fn codegen(context: &Context, ast: &Ast) -> Result<ModuleOp, Diagnostic> {
     let mut module_builder = IRBuilder::new(module.body());
 
     let root = ast.root().ok_or_else(EmptyTranslationUnit::new)?;
-    for func in ast.children(root) {
-        let func_op = lower_function(context, ast, func)?;
-        module_builder.insert(func_op);
+    let mut signatures = HashMap::new();
+    for item in ast.children(root) {
+        match ast.get_node(item).kind {
+            AstKind::Prototype | AstKind::Function => {
+                let (name, sig) = lower_signature(context, ast, item)?;
+                signatures.insert(name, sig);
+            }
+            AstKind::DeclGroup
+            | AstKind::RecordDecl
+            | AstKind::Typedef
+            | AstKind::Global
+            | AstKind::Attribute => {}
+            _ => return Err(unsupported(ast, item, "top-level item".to_string())),
+        }
+    }
+
+    for item in ast.children(root) {
+        match ast.get_node(item).kind {
+            AstKind::Prototype => {
+                let AstLeaf::Function { name, .. } = ast.get_leaf_data(item).unwrap() else {
+                    unreachable!("prototype node carries a function payload");
+                };
+                let sig = signatures.get(name).unwrap();
+                module_builder.insert(b::declare_op(context, name, sig.ret, &sig.args));
+            }
+            AstKind::Function => {
+                let func_op = lower_function(context, ast, item, &signatures)?;
+                module_builder.insert(func_op);
+            }
+            AstKind::DeclGroup
+            | AstKind::RecordDecl
+            | AstKind::Typedef
+            | AstKind::Global
+            | AstKind::Attribute => {}
+            _ => unreachable!("top-level item was checked before emission"),
+        }
     }
     module_builder.insert(b::module_end(context).build());
     Ok(module)
@@ -64,13 +105,57 @@ fn lower_ctype(context: &Context, ty: &CType) -> TypeId {
     match ty {
         CType::Int => IntegerType::new(context, 32),
         CType::Void => UnitType::new(context),
+        CType::Char => IntegerType::new(context, 8),
+        CType::Bool => IntegerType::new(context, 1),
+        CType::Float | CType::Double | CType::Builtin(_) | CType::Named(_) => {
+            IntegerType::new(context, 64)
+        }
+        CType::Record(_, _) | CType::Enum(_) => IntegerType::new(context, 64),
+        CType::Const(inner) => lower_ctype(context, inner),
+        CType::Volatile(inner) => lower_ctype(context, inner),
+        CType::Restrict(inner) => lower_ctype(context, inner),
+        CType::Pointer(inner) => PtrType::typed(context, lower_ctype(context, inner)),
+        CType::Array(inner, _) => PtrType::typed(context, lower_ctype(context, inner)),
+        CType::Function { .. } => IntegerType::new(context, 64),
+        CType::Attributed(inner, _) => lower_ctype(context, inner),
     }
+}
+
+fn lower_signature(
+    context: &Context,
+    ast: &Ast,
+    item: NodeId,
+) -> Result<(String, Signature), Diagnostic> {
+    let AstLeaf::Function { name, ret } = ast.get_leaf_data(item).unwrap() else {
+        unreachable!("function-like node carries a function payload");
+    };
+    let mut args = Vec::new();
+    for child in ast.children(item) {
+        match ast.get_node(child).kind {
+            AstKind::Param => {
+                let AstLeaf::Param { ty, .. } = ast.get_leaf_data(child).unwrap() else {
+                    unreachable!("param node carries a param payload");
+                };
+                args.push(lower_ctype(context, ty));
+            }
+            AstKind::VarArgs => args.push(VarArgsType::new(context)),
+            _ => break,
+        }
+    }
+    Ok((
+        name.clone(),
+        Signature {
+            ret: lower_ctype(context, ret),
+            args,
+        },
+    ))
 }
 
 fn lower_function(
     context: &Context,
     ast: &Ast,
     func: NodeId,
+    signatures: &HashMap<String, Signature>,
 ) -> Result<impl Operation, Diagnostic> {
     let AstLeaf::Function { name, ret } = ast.get_leaf_data(func).unwrap() else {
         unreachable!("function node carries a function payload");
@@ -102,6 +187,7 @@ fn lower_function(
         ast,
         builder: IRBuilder::new(func_op.body()),
         locals: HashMap::new(),
+        signatures,
         values: Vec::new(),
     };
     cg.lower_body(func, &param_ids)?;
@@ -188,6 +274,12 @@ impl FnCodegen<'_> {
                     .insert(b::r#return(self.context, operand).build());
                 Ok(())
             }
+            AstKind::ExprStmt => {
+                if let Some(expr) = ast.children(stmt).next() {
+                    self.lower_expr(expr)?;
+                }
+                Ok(())
+            }
             // Control flow and expression statements are parsed but not yet
             // lowered; codegen for them is stubbed out for now.
             kind => Err(unsupported(ast, stmt, format!("statement {kind:?}"))),
@@ -224,6 +316,16 @@ impl FnCodegen<'_> {
                         .insert(b::constant(self.context, *n, i32_ty).build())
                         .result()
                 }
+                AstKind::String => {
+                    let AstLeaf::String(value) = ast.get_leaf_data(node).unwrap() else {
+                        unreachable!("string node carries a string payload");
+                    };
+                    let i8_ty = IntegerType::new(self.context, 8);
+                    let ptr_ty = PtrType::typed(self.context, i8_ty);
+                    self.builder
+                        .insert(cir::string_op(self.context, value, ptr_ty))
+                        .result()
+                }
                 AstKind::Var => {
                     let AstLeaf::Var(name) = ast.get_leaf_data(node).unwrap() else {
                         unreachable!("var node carries a var payload");
@@ -234,6 +336,22 @@ impl FnCodegen<'_> {
                         .ok_or_else(|| undeclared(ast, node, name))?;
                     self.builder
                         .insert(p::load(self.context, slot.ptr, slot.elem).build())
+                        .result()
+                }
+                AstKind::Call => {
+                    let AstLeaf::Call(name) = ast.get_leaf_data(node).unwrap() else {
+                        unreachable!("call node carries a call payload");
+                    };
+                    let sig = self
+                        .signatures
+                        .get(name)
+                        .ok_or_else(|| undeclared(ast, node, name))?;
+                    let args = ast
+                        .children(node)
+                        .map(|arg| self.values[arg.index() - base])
+                        .collect::<Vec<_>>();
+                    self.builder
+                        .insert(b::call(self.context, args, name.as_str(), sig.ret).build())
                         .result()
                 }
                 kind @ (AstKind::Add | AstKind::Sub | AstKind::Mul) => {

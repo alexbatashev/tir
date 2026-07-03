@@ -474,10 +474,20 @@ impl TokenStream {
     /// `source_len - remainder.len()` recovers the absolute position even
     /// though `remainder` was originally sliced from `source[offset..]`.
     fn skip_line(&mut self, source_len: usize, remainder: &str) {
-        let new_offset = match remainder.find('\n') {
-            Some(i) => source_len - remainder.len() + i + 1,
-            None => source_len,
-        };
+        let mut consumed = 0;
+        loop {
+            let rest = &remainder[consumed..];
+            let Some(i) = rest.find('\n') else {
+                consumed = remainder.len();
+                break;
+            };
+            let line_end = consumed + i;
+            consumed = line_end + 1;
+            if !remainder[..line_end].ends_with('\\') {
+                break;
+            }
+        }
+        let new_offset = source_len - remainder.len() + consumed;
         if let Some(frame) = self.frames.last_mut() {
             frame.offset = new_offset;
         }
@@ -506,6 +516,10 @@ impl TokenStream {
                     }
                 };
                 let remainder = pp.remainder();
+                if remainder.starts_with('(') {
+                    self.skip_line(source.len(), remainder);
+                    return;
+                }
                 let body_end = remainder.find('\n').unwrap_or(remainder.len());
                 // Lex the replacement body to get its token value.
                 // Token::Hash is the sentinel for "no replacement text".

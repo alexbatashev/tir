@@ -1,6 +1,7 @@
 mod arith;
 mod call;
 mod control;
+mod declare;
 mod float;
 mod func;
 mod module;
@@ -16,6 +17,7 @@ use crate as tir;
 pub use arith::*;
 pub use call::*;
 pub use control::*;
+pub use declare::*;
 pub use float::*;
 pub use func::*;
 pub use module::*;
@@ -24,6 +26,7 @@ pub mod ops {
     pub use super::arith::*;
     pub use super::call::*;
     pub use super::control::*;
+    pub use super::declare::*;
     pub use super::float::*;
     pub use super::func::*;
     pub use super::module::*;
@@ -60,6 +63,7 @@ dialect! {
             CondBranchOp,
             CallOp,
             IndirectCallOp,
+            DeclareOp,
         ],
         types: [IntegerType, FloatType, IndexType, UnitType, TokenType],
     }
