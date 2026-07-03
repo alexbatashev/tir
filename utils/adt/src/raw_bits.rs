@@ -100,6 +100,28 @@ impl RawBits {
             .collect()
     }
 
+    /// Split into `lanes` byte-aligned pieces of `lane_bits` each, lane 0 from
+    /// the low bits. Bits beyond `lanes * lane_bits` (a register wider than the
+    /// active element group) are ignored; missing high bits read as zero — a
+    /// stored value is the low bits of a conceptually wider register.
+    pub fn split_lanes(&self, lanes: usize, lane_bits: usize) -> Vec<RawBits> {
+        assert!(lanes > 0, "RawBits split requires a positive lane count");
+        assert!(
+            lane_bits > 0 && lane_bits.is_multiple_of(BYTE_SIZE),
+            "RawBits lanes must be a positive whole number of bytes, got {lane_bits} bits"
+        );
+        let lane_bytes = lane_bits / BYTE_SIZE;
+        let mut storage = self.storage.clone();
+        storage.resize(lanes * lane_bytes, 0);
+        storage
+            .chunks(lane_bytes)
+            .take(lanes)
+            .map(|chunk| RawBits {
+                storage: chunk.to_vec(),
+            })
+            .collect()
+    }
+
     /// Concatenate lanes, lane 0 in the low bits; inverse of [`RawBits::split`].
     pub fn concat(lanes: &[RawBits]) -> RawBits {
         let storage = lanes

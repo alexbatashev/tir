@@ -21,6 +21,14 @@ pub enum RegisterTrait {
     ReturnValue,
     Temporary,
     Saved,
+    /// A condition-code bit (x86 EFLAGS `zf`, AArch64 PSTATE `z`): written as a
+    /// side effect by compare-style instructions and read by conditional-branch
+    /// guards. Marks the class for flag-branch rule derivation.
+    StatusFlag,
+    /// Holds IEEE binary floating-point values. Marks the class so instruction
+    /// selection types its patterns with float types and keeps float and
+    /// integer operands from binding across register files.
+    Float,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -492,6 +500,12 @@ pub enum BuiltinFunction {
     /// `zip(a, b)`: pair two iterators lane-wise so a `map` lambda can read both
     /// sides as separate parameters.
     Zip,
+    /// IEEE 754 binary floating-point arithmetic over register bits; the format
+    /// is the binary32/binary64 interchange format of the operand width.
+    FAdd,
+    FSub,
+    FMul,
+    FDiv,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
@@ -891,6 +905,40 @@ impl Expr {
         })
     }
 
+    /// Lower several expressions into one graph through a single shared symbol
+    /// table, so an operand referenced by more than one expression binds the
+    /// same symbol id in each (a flag definer's per-flag semantics all read the
+    /// same `rn`/`rm`). Returns each expression's root in order.
+    pub fn lower_all_to_sema_with_isa(
+        exprs: &[&Expr],
+        g: &mut impl tir::graph::MutDag<
+            Node = tir::sem::SymKind,
+            Leaf = tir::sem::SymPayload<tir::ValueId>,
+        >,
+        params: &HashMap<String, i64>,
+        isa_consts: &HashMap<String, i64>,
+        register_indices: &HashMap<(String, String), u32>,
+    ) -> Option<(Vec<tir::graph::NodeId>, SemaLowering)> {
+        let mut ctx = SemaExprLoweringCtx::new_with_registers(g, params, register_indices);
+        ctx.isa_consts = isa_consts.clone();
+        let roots: Vec<_> = exprs
+            .iter()
+            .map(|expr| expr.lower_with_ctx(&mut ctx))
+            .collect();
+        if ctx.had_error {
+            return None;
+        }
+        let root = *roots.last()?;
+        Some((
+            roots,
+            SemaLowering {
+                root,
+                variable_symbols: ctx.variable_symbols,
+                register_symbols: ctx.register_symbols,
+            },
+        ))
+    }
+
     /// Like [`Expr::lower_to_sema`], but resolves index-less register paths (e.g.
     /// status flags such as `PSTATE::z`) through `register_indices`, a
     /// `(class, register-name) -> index` table derived from the register-class
@@ -1273,10 +1321,20 @@ impl Call {
                 ctx.add_int_const(tir_adt::APInt::new(64, 0))
             }
             BuiltinFunction::Split => {
-                assert!(self.arguments.len() == 2, "split requires 2 arguments");
-                let bits = self.arguments[0].lower_with_ctx(ctx);
-                let n = self.arguments[1].lower_with_ctx(ctx);
-                ctx.add_node(tir::sem::SymKind::Split, &[bits, n])
+                // `split(x, n)` cuts x into n equal lanes; `split(x, n, w)`
+                // takes n lanes of w bits from the low end (the RVV shape,
+                // where `vl`/SEW bound the active elements independent of the
+                // register's total width).
+                assert!(
+                    matches!(self.arguments.len(), 2 | 3),
+                    "split requires 2 or 3 arguments"
+                );
+                let children: Vec<_> = self
+                    .arguments
+                    .iter()
+                    .map(|arg| arg.lower_with_ctx(ctx))
+                    .collect();
+                ctx.add_node(tir::sem::SymKind::Split, &children)
             }
             BuiltinFunction::Concat => {
                 assert!(self.arguments.len() == 1, "concat requires 1 argument");
@@ -1300,6 +1358,24 @@ impl Call {
                 let iter = self.arguments[0].lower_with_ctx(ctx);
                 let body = ctx.lower_lambda_body(&self.arguments[1]);
                 ctx.add_node(tir::sem::SymKind::Reduce, &[iter, body])
+            }
+            BuiltinFunction::FAdd
+            | BuiltinFunction::FSub
+            | BuiltinFunction::FMul
+            | BuiltinFunction::FDiv => {
+                let kind = match builtin {
+                    BuiltinFunction::FAdd => tir::sem::SymKind::FAdd,
+                    BuiltinFunction::FSub => tir::sem::SymKind::FSub,
+                    BuiltinFunction::FMul => tir::sem::SymKind::FMul,
+                    _ => tir::sem::SymKind::FDiv,
+                };
+                assert!(
+                    self.arguments.len() == 2,
+                    "float arithmetic requires 2 arguments"
+                );
+                let lhs = self.arguments[0].lower_with_ctx(ctx);
+                let rhs = self.arguments[1].lower_with_ctx(ctx);
+                ctx.add_node(kind, &[lhs, rhs])
             }
         }
     }
@@ -1427,6 +1503,18 @@ impl RegisterClass {
     pub fn has_program_counter(&self) -> bool {
         self.resolve_registers()
             .any(|reg| reg.traits.contains(&RegisterTrait::ProgramCounter))
+    }
+
+    /// Whether this class holds condition-code bits (`status_flag` registers).
+    pub fn has_status_flags(&self) -> bool {
+        self.resolve_registers()
+            .any(|reg| reg.traits.contains(&RegisterTrait::StatusFlag))
+    }
+
+    /// Whether this class holds floating-point values (`float` registers).
+    pub fn has_float_registers(&self) -> bool {
+        self.resolve_registers()
+            .any(|reg| reg.traits.contains(&RegisterTrait::Float))
     }
 
     pub fn hardwired_zero_register_index(&self) -> Option<u16> {

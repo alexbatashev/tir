@@ -12,9 +12,12 @@ module {
   module_end
 }
 
-// The vector.add reads VCSR::vl implicitly, so selection introduces its definer
-// vsetivli (lane count 4 as the immediate AVL) ahead of the vadd.vv.
+// The vector.add reads VCSR::vl and VCFG::sew implicitly; the reads bind to the
+// lane count and element width and surface as `vl`/`sew` demand attributes on
+// the selected op. The demands are satisfied later by vsetvli insertion (a
+// machine pass), not by selection itself -- like virtual registers awaiting
+// allocation.
 // CHECK: asm.symbol {name = "vadd"
-// CHECK: riscv.vsetivli {rd = x0, avl = 4}
-// CHECK: riscv.vadd.vv {vd = %virt2:VR, vs2 = %virt0:VR, vs1 = %virt1:VR}
+// CHECK-NOT: riscv.vsetivli
+// CHECK: riscv.vadd.vv {vd = %virt2:VR, vs2 = %virt0:VR, vs1 = %virt1:VR, sew = 32, vl = 4}
 // CHECK: riscv.vret

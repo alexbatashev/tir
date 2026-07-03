@@ -66,6 +66,14 @@ pub enum SymKind {
     Sqrt,
     // #[arity = 3]
     Fma,
+    /// IEEE 754 binary floating-point arithmetic. Distinct from the integer
+    /// kinds so integer rewrites and untyped integer instruction patterns can
+    /// never apply to float values. Over `Int` operands the bits are
+    /// reinterpreted in the binary format of the operand width.
+    FAdd,
+    FSub,
+    FMul,
+    FDiv,
     /// `[iter, body]`: map `body` over each lane, element bound via `Arg(0)` (or
     /// `Arg(0)`/`Arg(1)` for a `Zip` pair); value is the iterator of results.
     // #[arity = 2]
@@ -91,7 +99,13 @@ impl SymKind {
     pub fn is_commutative(&self) -> bool {
         matches!(
             self,
-            SymKind::Add | SymKind::Mul | SymKind::And | SymKind::Or | SymKind::Xor
+            SymKind::Add
+                | SymKind::Mul
+                | SymKind::And
+                | SymKind::Or
+                | SymKind::Xor
+                | SymKind::FAdd
+                | SymKind::FMul
         )
     }
 
@@ -111,6 +125,16 @@ impl SymKind {
             | SymKind::Fma => 3,
             SymKind::StoreMemory => 4,
             _ => 2,
+        }
+    }
+
+    /// Whether a node of this kind may take `n` children. `Split` is the one
+    /// variadic form: `split(x, n)` cuts into equal lanes, `split(x, n, w)`
+    /// takes `n` lanes of `w` bits from the low end.
+    pub fn accepts_arity(&self, n: usize) -> bool {
+        match self {
+            SymKind::Split => n == 2 || n == 3,
+            _ => n == self.arity(),
         }
     }
 }

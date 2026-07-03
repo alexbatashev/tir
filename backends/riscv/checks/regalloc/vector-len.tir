@@ -1,0 +1,28 @@
+// RUN: tir mc --march=rv64iv --stage=isel %s | filecheck %s --check-prefix=ISEL
+// RUN: tir mc --march=rv64iv --stage=regalloc %s | filecheck %s
+
+// `vector.vector_len` is the strip-mine primitive: it lowers to `vsetvli` with
+// a live `rd` -- the one instruction that both produces a value (the granted
+// element count) and configures the vector unit. The insertion pass recognizes
+// the grant, so ops demanding the granted count need no further vset{i}vli.
+
+module {
+  func @evl_body(%0: !vector.vec<i32>, %1: !vector.vec<i32>, %2: !index) -> !vector.vec<i32> {
+    %3 = vector.vector_len %2 {sew = 32} : !index
+    %4 = vector.add %0, %1, %3 : !vector.vec<i32>
+    %5 = vector.mul %4, %1, %3 : !vector.vec<i32>
+    return %5
+  }
+  module_end
+}
+
+// ISEL: riscv.vsetvli {rd = %virt3:GPR, avl = %virt2:GPR, vtypei = 208}
+// ISEL-NEXT: riscv.vadd.vv {vd = %virt4:VR, vs2 = %virt0:VR, vs1 = %virt1:VR, sew = 32, vl = %virt3}
+// ISEL-NEXT: riscv.vmul.vv {vd = %virt5:VR, vs2 = %virt4:VR, vs1 = %virt1:VR, sew = 32, vl = %virt3}
+
+// CHECK: riscv.vsetvli {rd = {{x[0-9]+}}, avl = x10, vtypei = 208}
+// CHECK-NOT: riscv.vsetvli
+// CHECK-NOT: riscv.vsetivli
+// CHECK: riscv.vadd.vv
+// CHECK: riscv.vmul.vv
+// CHECK: riscv.vret

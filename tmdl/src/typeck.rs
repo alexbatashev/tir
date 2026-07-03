@@ -352,6 +352,21 @@ fn infer<'a>(
                 }
                 Type::Var(tvg.fresh())
             }
+            // Float arithmetic: both operands and the result share one type
+            // (the register bits reinterpreted as the width's binary format).
+            ast::Expr::BuiltinFunction(
+                ast::BuiltinFunction::FAdd
+                | ast::BuiltinFunction::FSub
+                | ast::BuiltinFunction::FMul
+                | ast::BuiltinFunction::FDiv,
+            ) => {
+                let lhs_ty = infer(&call.arguments[0], env, tvg, subst, cache, diags, file_name);
+                for arg in &call.arguments[1..] {
+                    let arg_ty = infer(arg, env, tvg, subst, cache, diags, file_name);
+                    constrain(&arg_ty, &lhs_ty, subst, call.span, diags, file_name);
+                }
+                lhs_ty.apply(subst)
+            }
             ast::Expr::BuiltinFunction(ast::BuiltinFunction::Store)
             | ast::Expr::BuiltinFunction(ast::BuiltinFunction::Trap) => {
                 for arg in &call.arguments {
@@ -668,7 +683,7 @@ mod tests {
         register_class VR for [RVV] {
             param ENCODING_LEN: Integer = 5;
             param WIDTH: Integer = self.VLEN;
-            registers { v0..v31 => { traits = [vector] }, }
+            registers { v0..v31 => { traits = [caller_saved] }, }
         }
         template VArithVV for [RVV] {
             param MNEMONIC: String;

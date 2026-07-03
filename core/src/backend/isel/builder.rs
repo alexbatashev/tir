@@ -5,15 +5,15 @@ use std::collections::HashMap;
 use tir::{
     Context, MemoryRead, MemoryWrite, OpId, OpInstance, TypeId, ValueId,
     attributes::AttributeValue,
-    builtin::IntegerType,
-    graph::{Dag, Matchable, NodeId},
+    graph::{Dag, NodeId},
     sem::{SemGraph, SymKind, SymPayload, infer_widths},
 };
 use tir_adt::APInt;
 use tir_symbolic::egraph::Id;
 
 use super::node::{
-    SemEGraph, SemNode, SemPayload, minimal_unsigned_apint, template_node, type_width,
+    SemEGraph, SemNode, SemPayload, minimal_unsigned_apint, template_node, type_for_kind_width,
+    type_width,
 };
 
 /// Builds a block's semantic expressions straight into the e-graph: every lowered
@@ -335,7 +335,9 @@ impl<'a> SemDagBuilder<'a> {
 
     /// Lower one node of a semantic-expression graph, typing each node from its
     /// inferred width. Operand leaves keep the IR type they were built with;
-    /// internal nodes (and the root) take their inferred width resolved to a type.
+    /// internal nodes (and the root) take their inferred width resolved to a
+    /// type — a float type for the float kinds, so float-typed rule patterns
+    /// match them exactly.
     fn lower_graph_node(
         &mut self,
         graph: &SemGraph,
@@ -343,7 +345,8 @@ impl<'a> SemDagBuilder<'a> {
         operands: &[Id],
         widths: &[Option<u32>],
     ) -> Id {
-        let node_ty = widths[node.index()].map(|width| IntegerType::new(self.context, width));
+        let node_ty = widths[node.index()]
+            .and_then(|width| type_for_kind_width(self.context, *graph.get_node(node), width));
         match graph.get_node(node) {
             SymKind::Symbol => match graph.get_leaf_data(node) {
                 Some(SymPayload::SymbolId(id)) => operands
@@ -361,7 +364,7 @@ impl<'a> SemDagBuilder<'a> {
                     .children(node)
                     .map(|child| self.lower_graph_node(graph, child, operands, widths))
                     .collect();
-                if kind.num_children(self.context) == children.len() {
+                if kind.accepts_arity(children.len()) {
                     self.add_op(*kind, children, node_ty)
                 } else {
                     self.add_opaque()

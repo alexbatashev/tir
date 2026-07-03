@@ -47,34 +47,25 @@ impl<'src> Parser<'src> {
             .or_else(|| name.parse::<u32>().ok().map(ValueId::from_number))
     }
 
+    // `position` is a byte offset; every scan below works on the byte-indexed
+    // remainder of the source (`&src[position..]`), never on `chars().nth`,
+    // which counts characters and drifts after any multi-byte character.
     pub fn peek_char(&self) -> Option<char> {
-        self.src.chars().nth(self.position as usize)
+        self.src.get(self.position as usize..)?.chars().next()
     }
 
     pub fn parse_ident(&mut self) -> Option<&'src str> {
         let start = self.position as usize;
-
-        if self
-            .src
-            .chars()
-            .nth(start)
-            .map(|c| c.is_alphabetic())
-            .unwrap_or(false)
-        {
-            let mut last = start + 1;
-            while let Some(c) = self.src.chars().nth(last) {
-                if !c.is_alphanumeric() && c != '_' {
-                    break;
-                }
-                last += 1;
-            }
-
-            self.position = last as u32;
-            self.skip_trivia();
-            Some(&self.src[start..last])
-        } else {
-            None
+        let rest = self.src.get(start..)?;
+        if !rest.chars().next()?.is_alphabetic() {
+            return None;
         }
+        let len = rest
+            .find(|c: char| !c.is_alphanumeric() && c != '_')
+            .unwrap_or(rest.len());
+        self.position = (start + len) as u32;
+        self.skip_trivia();
+        Some(&self.src[start..start + len])
     }
 
     pub fn parse_token(&mut self, token: &str) -> bool {
@@ -93,22 +84,14 @@ impl<'src> Parser<'src> {
     }
 
     pub fn parse_string(&mut self) -> Option<&'src str> {
-        if self.src.get(self.position as usize..)?.starts_with('"') {
-            let start = self.position as usize + 1;
-            let mut i = start;
-            while let Some(c) = self.src.chars().nth(i) {
-                if c == '"' {
-                    break;
-                }
-                i += 1;
-            }
-            if self.src.chars().nth(i)? == '"' {
-                self.position = (i + 1) as u32;
-                self.skip_trivia();
-                return Some(&self.src[start..i]);
-            }
+        if !self.src.get(self.position as usize..)?.starts_with('"') {
+            return None;
         }
-        None
+        let start = self.position as usize + 1;
+        let len = self.src[start..].find('"')?;
+        self.position = (start + len + 1) as u32;
+        self.skip_trivia();
+        Some(&self.src[start..start + len])
     }
 
     pub fn parse_number(&mut self) -> Option<i64> {
@@ -136,32 +119,72 @@ impl<'src> Parser<'src> {
         Some(val)
     }
 
-    pub fn parse_value_ref(&mut self) -> Option<&'src str> {
-        if self
-            .src
-            .get(self.position as usize..)
-            .map(|s| s.starts_with('%'))
-            .unwrap_or(false)
-        {
-            let start = self.position as usize + 1;
-            let mut last = start;
-            while let Some(c) = self.src.chars().nth(last) {
-                if !c.is_alphanumeric() && c != '_' {
-                    break;
-                }
-                last += 1;
+    /// Parse a float literal in Rust `{:?}` notation: a decimal point is
+    /// required (`3.0`, `-2.5e-3`), so plain integers are left for
+    /// [`Self::parse_number`]; `inf`/`-inf`/`NaN` cover the specials.
+    pub fn parse_float(&mut self) -> Option<f64> {
+        for (text, value) in [
+            ("-inf", f64::NEG_INFINITY),
+            ("inf", f64::INFINITY),
+            ("NaN", f64::NAN),
+        ] {
+            if self.parse_token(text) {
+                return Some(value);
             }
-            if last > start {
-                self.position = last as u32;
-                let result = &self.src[start..last];
-                self.skip_trivia();
-                Some(result)
-            } else {
-                None
-            }
-        } else {
-            None
         }
+
+        let start = self.position as usize;
+        let bytes = self.src.as_bytes();
+        let mut i = start;
+        if i < bytes.len() && bytes[i] == b'-' {
+            i += 1;
+        }
+        let int_start = i;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i == int_start || i >= bytes.len() || bytes[i] != b'.' {
+            return None;
+        }
+        i += 1;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i < bytes.len() && (bytes[i] == b'e' || bytes[i] == b'E') {
+            let mut j = i + 1;
+            if j < bytes.len() && (bytes[j] == b'+' || bytes[j] == b'-') {
+                j += 1;
+            }
+            let exp_start = j;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j > exp_start {
+                i = j;
+            }
+        }
+        let val: f64 = self.src[start..i].parse().ok()?;
+        self.position = i as u32;
+        self.skip_trivia();
+        Some(val)
+    }
+
+    pub fn parse_value_ref(&mut self) -> Option<&'src str> {
+        if !self.src.get(self.position as usize..)?.starts_with('%') {
+            return None;
+        }
+        let start = self.position as usize + 1;
+        let rest = &self.src[start..];
+        let len = rest
+            .find(|c: char| !c.is_alphanumeric() && c != '_')
+            .unwrap_or(rest.len());
+        if len == 0 {
+            return None;
+        }
+        self.position = (start + len) as u32;
+        let result = &self.src[start..start + len];
+        self.skip_trivia();
+        Some(result)
     }
 
     pub fn parse_type(

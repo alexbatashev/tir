@@ -39,6 +39,9 @@ pub fn build_pipeline(
     if !pre_ra.is_empty() {
         pm.add_pass(OpLoweringPass::new("pre-ra-lowering", pre_ra));
     }
+    for pass in target.machine_passes() {
+        pm.add_boxed_pass(pass);
+    }
     pm.add_pass(target.regalloc_pass());
     if stop == StopAfter::RegAlloc {
         return pm;

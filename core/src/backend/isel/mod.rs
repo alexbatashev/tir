@@ -40,7 +40,7 @@ use cover::{
     CaptureBindings, FullMatchBindings, PatternNodeBinding, PbqpIselAlternative, PbqpIselMatch,
     build_eclass_cover, completeness_error, prune_dominated_matches,
 };
-use emit::{BlockDecision, BlockPlan, DefinerEmit, EmissionBuilder, GuardBranch, TerminatorPlan};
+use emit::{BlockDecision, BlockPlan, EmissionBuilder, GuardBranch, TerminatorPlan};
 use node::{Binding, class_binding, class_int_binding, template_node};
 use pattern::{CompiledIselPattern, compile_isel_pattern};
 use rewrites::discover_rewrites;
@@ -143,32 +143,6 @@ impl IselCostModel for DefaultIselCostModel {}
 pub type RuleEmitFn =
     fn(&Context, &EmitRequest, &RuleMatch) -> Result<Box<dyn Operation>, PassError>;
 
-/// A register an instruction reads implicitly — declared in its behavior but not
-/// among its encoded operands (e.g. `vadd` reading `VCSR::vl`). The read is a real
-/// dependency: selection introduces the register's definer ahead of the reader,
-/// passing the value bound to `symbol`.
-#[derive(Clone, Debug)]
-pub struct ImplicitUse {
-    pub symbol: u32,
-    pub register_class: &'static str,
-    pub register_index: u32,
-}
-
-/// An instruction that defines a register implicitly (writes it in its behavior
-/// with no encoded result, e.g. `vsetvli`/`vsetivli` defining `VCSR::vl`). It is
-/// never selected by value matching; selection introduces it ahead of a reader of
-/// `register_index`, binding `value_symbol` to the value that read bound to (an
-/// immediate when `value_is_immediate`, else a register value). Its `emit_fn`
-/// hardwires the destination to `x0`. Nothing here is target-specific: the
-/// definer's input is exactly the value flowing across the register def/use.
-pub struct RegisterDefiner {
-    pub register_class: &'static str,
-    pub register_index: u32,
-    pub value_is_immediate: bool,
-    pub value_symbol: u32,
-    pub emit_fn: RuleEmitFn,
-}
-
 /// An immediate operand's encoding range: the field's bit width and whether the
 /// instruction sign-extends it. A constant outside the range must not bind — its
 /// encoding would silently truncate to a different value.
@@ -217,6 +191,12 @@ pub struct Rule {
     pub pattern: SemGraph,
     pub base_cost: u32,
     pub kind: RuleKind,
+    /// A companion instruction emitted immediately before the rule's own — a
+    /// flag-setting compare (`cmp`, x86 `cmp`/`test`) whose status-register
+    /// writes the branch instruction's condition reads. TMDL derives such rules
+    /// by composing the definer's flag semantics into the branch guard, so the
+    /// pair selects as one condition pattern but emits two real instructions.
+    pub prelude_emit: Option<RuleEmitFn>,
     /// Per-operand-symbol constraint (register vs immediate). Symbols absent here
     /// are unconstrained, so hand-written and synthesized rules keep matching any
     /// value.
@@ -230,9 +210,12 @@ pub struct Rule {
     /// representable range must not bind (its encoding would truncate). Symbols
     /// absent here accept any constant.
     pub operand_imm_ranges: Vec<(u32, ImmRange)>,
-    /// Registers this instruction reads implicitly (from its behavior, not its
-    /// encoded operands); selection introduces each one's definer ahead of this op.
-    pub implicit_uses: Vec<ImplicitUse>,
+    /// Per-operand-symbol float requirement: `true` for operands living in a
+    /// float register class, `false` for integer ones. A value whose IR type is
+    /// known to be of the other kind must not bind — an integer store must not
+    /// consume a float value and vice versa. Symbols absent here (and values of
+    /// unknown type) match either.
+    pub operand_floats: Vec<(u32, bool)>,
     pub emit_fn: RuleEmitFn,
 }
 
@@ -243,10 +226,11 @@ impl Rule {
             pattern,
             base_cost,
             kind: RuleKind::Value,
+            prelude_emit: None,
             operand_constraints: Vec::new(),
             operand_widths: Vec::new(),
             operand_imm_ranges: Vec::new(),
-            implicit_uses: Vec::new(),
+            operand_floats: Vec::new(),
             emit_fn,
         }
     }
@@ -273,16 +257,24 @@ impl Rule {
         self
     }
 
-    /// Declare the registers this instruction reads implicitly, so selection
-    /// introduces their definers ahead of it.
-    pub fn with_implicit_uses(mut self, uses: Vec<ImplicitUse>) -> Self {
-        self.implicit_uses = uses;
+    /// Require operand symbols to bind float (or non-float) values (see
+    /// [`Rule::operand_floats`]).
+    pub fn with_operand_floats(mut self, floats: Vec<(u32, bool)>) -> Self {
+        self.operand_floats = floats;
         self
     }
 
     /// Mark this rule as a conditional branch (see [`RuleKind::CondBranch`]).
     pub fn with_kind(mut self, kind: RuleKind) -> Self {
         self.kind = kind;
+        self
+    }
+
+    /// Emit a companion instruction ahead of the rule's own (see
+    /// [`Rule::prelude_emit`]). The prelude emitter reads the same [`RuleMatch`]
+    /// bindings as the rule's emitter.
+    pub fn with_prelude_emitter(mut self, emit_fn: RuleEmitFn) -> Self {
+        self.prelude_emit = Some(emit_fn);
         self
     }
 }
@@ -297,9 +289,13 @@ pub struct BranchEmitters {
     /// Emit an unconditional branch to `dest`, forwarding `args` to its block
     /// arguments (typically a virtual branch finalized after regalloc).
     pub uncond: fn(&Context, BlockId, &[ValueId]) -> Box<dyn Operation>,
-    /// Emit a branch to `dest` taken when `condition` (an i1 in a register) is
-    /// nonzero — the fallback when no branch rule matches the guard condition.
-    pub cond_nonzero: fn(&Context, ValueId, BlockId) -> Box<dyn Operation>,
+    /// Emit the instruction(s) branching to `dest` when `condition` (an i1 in a
+    /// register) is nonzero — the fallback when no branch rule matches the
+    /// guard condition. One instruction on targets that compare against a zero
+    /// register (`bne cond, x0`); a flag-setting test plus the conditional
+    /// branch on flag targets (`test cond, cond` + `jne`, `cmp cond, xzr` +
+    /// `b.ne`).
+    pub cond_nonzero: fn(&Context, ValueId, BlockId) -> Vec<Box<dyn Operation>>,
 }
 struct BlockSelectionCache {
     egraph: SemEGraph,
@@ -380,7 +376,6 @@ pub struct InstructionSelectPass {
     rewrites: Vec<IselRewrite>,
     /// Instructions that define a register implicitly; selection introduces one
     /// ahead of any op whose `implicit_uses` name a matching register.
-    definers: Vec<RegisterDefiner>,
     /// Target hooks for terminator lowering; branch selection is off without them
     /// (terminators are then left to the target's op lowerings).
     branch_emitters: Option<BranchEmitters>,
@@ -408,6 +403,7 @@ impl InstructionSelectPass {
                     &rule.operand_constraints,
                     &rule.operand_widths,
                     &rule.operand_imm_ranges,
+                    &rule.operand_floats,
                 )
             })
             .collect();
@@ -418,7 +414,6 @@ impl InstructionSelectPass {
             rules,
             compiled_patterns,
             rewrites,
-            definers: Vec::new(),
             branch_emitters: None,
             cost_model: Box::new(DefaultIselCostModel),
             op_lowerings: vec![],
@@ -433,13 +428,6 @@ impl InstructionSelectPass {
     /// of conditional branches (and generic lowering of unconditional ones).
     pub fn with_branch_emitters(mut self, emitters: BranchEmitters) -> Self {
         self.branch_emitters = Some(emitters);
-        self
-    }
-
-    /// Install the instructions that define registers implicitly (e.g.
-    /// `vsetvli`/`vsetivli`), introduced ahead of ops that read those registers.
-    pub fn with_register_definers(mut self, definers: Vec<RegisterDefiner>) -> Self {
-        self.definers = definers;
         self
     }
 
@@ -826,24 +814,6 @@ impl InstructionSelectPass {
             rewriter.insert_op_before(&anchor, new_op.as_ref())?;
         }
 
-        // Insert the definer of each implicit register use just before the op that
-        // reads it. The definer has no destination value (its emitter hardwires one).
-        for definer in &plan.definers {
-            let request = EmitRequest {
-                op: None,
-                results: &[],
-                result_ty: None,
-            };
-            let emit_fn = self.definers[definer.definer_index].emit_fn;
-            let new_op = emit_fn(context, &request, &definer.m)?;
-            let anchor = OperationRef::new(
-                context.get_op(definer.anchor),
-                Some(block_arc.clone()),
-                None,
-            );
-            rewriter.insert_op_before(&anchor, new_op.as_ref())?;
-        }
-
         // Lower the terminators first: a fused conditional branch reads its
         // operand *values* (not the condition register), so the condition's
         // defining op — possibly erased as Dead below — must lose its last use
@@ -858,20 +828,31 @@ impl InstructionSelectPass {
                     } => {
                         let op_ref =
                             OperationRef::new(context.get_op(*op), Some(block_arc.clone()), None);
-                        let branch_op: Box<dyn Operation> = match branch {
+                        let branch_ops: Vec<Box<dyn Operation>> = match branch {
                             GuardBranch::Fused { rule_index, m } => {
                                 let request = EmitRequest {
                                     op: None,
                                     results: &[],
                                     result_ty: None,
                                 };
-                                (self.rules[*rule_index].emit_fn)(context, &request, m)?
+                                let rule = &self.rules[*rule_index];
+                                // A flag-mediated branch rule emits its
+                                // flag-setting definer right before the branch
+                                // instruction that reads the flags.
+                                let mut ops = Vec::new();
+                                if let Some(prelude) = rule.prelude_emit {
+                                    ops.push(prelude(context, &request, m)?);
+                                }
+                                ops.push((rule.emit_fn)(context, &request, m)?);
+                                ops
                             }
                             GuardBranch::Nonzero { condition, dest } => {
                                 (emitters.cond_nonzero)(context, *condition, *dest)
                             }
                         };
-                        rewriter.insert_op_before(&op_ref, branch_op.as_ref())?;
+                        for branch_op in &branch_ops {
+                            rewriter.insert_op_before(&op_ref, branch_op.as_ref())?;
+                        }
                         let fallthrough = (emitters.uncond)(context, *false_dest, &[]);
                         rewriter.replace_op(&op_ref, fallthrough.as_ref())?;
                     }
@@ -1118,66 +1099,9 @@ impl InstructionSelectPass {
             }
         }
 
-        // Honor each selected op's implicit register reads: introduce the register's
-        // definer ahead of it, passing exactly the value that read bound to. This is
-        // the register def/use edge declared in the instruction's behavior; the
-        // value crossing it is the only thing threaded — nothing here inspects the
-        // operands' types.
-        let mut definers = Vec::new();
-        for op_id in block.op_ids() {
-            let Some(BlockDecision::Emit { rule_index, .. }) = op_decisions.get(&op_id) else {
-                continue;
-            };
-            let rule = &self.rules[*rule_index];
-            if rule.implicit_uses.is_empty() {
-                continue;
-            }
-            let Some(class) = cache.op_root.get(&op_id).map(|c| cache.egraph.find(*c)) else {
-                continue;
-            };
-            let Some(&match_id) = root_match.get(&class) else {
-                continue;
-            };
-            for implicit_use in &rule.implicit_uses {
-                let Some((_, bound)) = matches[match_id]
-                    .bindings
-                    .captures
-                    .entries
-                    .iter()
-                    .find(|(sym, _)| *sym == implicit_use.symbol)
-                else {
-                    continue;
-                };
-                let bound = cache.egraph.find(*bound);
-                let Some(binding) = class_binding(&cache.egraph, &cache.class_value, bound) else {
-                    continue;
-                };
-                let value_immediate = matches!(binding, Binding::Int(_));
-                let Some((definer_index, definer)) =
-                    self.definers.iter().enumerate().find(|(_, d)| {
-                        d.register_class == implicit_use.register_class
-                            && d.register_index == implicit_use.register_index
-                            && d.value_is_immediate == value_immediate
-                    })
-                else {
-                    continue;
-                };
-                let m = match binding {
-                    Binding::Int(v) => RuleMatch::new(vec![(definer.value_symbol, v)], vec![]),
-                    Binding::Value(v) => RuleMatch::new(vec![], vec![(definer.value_symbol, v)]),
-                };
-                definers.push(DefinerEmit {
-                    definer_index,
-                    m,
-                    anchor: op_id,
-                });
-            }
-        }
-
         Ok(BlockPlan {
             op_decisions,
             introduced: emit.introduced,
-            definers,
             terminators,
         })
     }
@@ -1216,8 +1140,8 @@ impl InstructionSelectPass {
                 let mut boundary_classes = Vec::new();
                 let resolvable = captures.entries.iter().all(|(_, class)| {
                     match class_binding(&cache.egraph, &cache.class_value, *class) {
-                        Some(Binding::Int(_)) => true,
-                        Some(Binding::Value(_)) => {
+                        Some(Binding::Int) => true,
+                        Some(Binding::Value) => {
                             boundary_classes.push(*class);
                             true
                         }
