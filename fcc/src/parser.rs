@@ -973,6 +973,13 @@ impl<'a> DeclParser<'a> {
             }
         }
         self.consume_attrs()?;
+
+        while self.eat(&Token::LBracket) {
+            let len = self.collect_until_matching(Token::LBracket, Token::RBracket)?;
+            let len = (!len.is_empty()).then_some(tokens_text(&len));
+            base = CType::Array(Box::new(base), len);
+        }
+
         if !matches!(self.peek(), Some(Token::Comma | Token::RParen)) {
             return Err("expected abstract declarator".to_string());
         }
@@ -1035,6 +1042,10 @@ impl<'a> DeclParser<'a> {
         let name = match self.next() {
             Some(Token::Identifier(name)) => name,
             _ => unreachable!(),
+        };
+        let name = match name.as_str() {
+            "__restrict" | "__restrict__" => "restrict".to_string(),
+            _ => name,
         };
         if self.eat(&Token::LParen) {
             let args = self.collect_until_matching(Token::LParen, Token::RParen)?;
@@ -1100,6 +1111,16 @@ fn is_decl_attr_name(name: &str) -> bool {
         "_Nullable"
             | "_Nonnull"
             | "_Null_unspecified"
+            | "__restrict"
+            | "__restrict__"
+            | "__THROW"
+            | "__THROWNL"
+            | "__wur"
+            | "__nonnull"
+            | "__attribute_malloc__"
+            | "__attr_dealloc"
+            | "__COLD"
+            | "__fortified_attr_access"
             | "__attribute__"
             | "__asm"
             | "__asm__"
@@ -1122,8 +1143,9 @@ fn tokens_text(tokens: &[Token]) -> String {
         .join(" ")
 }
 
-fn add_param_node(st: &mut ParseState, tok: usize, param: CParam) -> NodeId {
+fn add_param_node(st: &mut ParseState, tok: usize, mut param: CParam) -> NodeId {
     let id = st.add(AstKind::Param, tok);
+    param.name.clear();
     st.ast.set_leaf_data(
         id,
         AstLeaf::Param {
@@ -1203,6 +1225,19 @@ where
             );
             id
         })
+}
+
+fn top_level_marker<'src, I>() -> impl Parser<'src, I, (), Extra<'src>> + Clone
+where
+    I: ValueInput<'src, Token = Token, Span = Span>,
+{
+    select! { Token::Identifier(name) => name }
+        .try_map(|name, span| {
+            is_top_level_marker(&name)
+                .then_some(())
+                .ok_or_else(|| Rich::custom(span, "expected top-level marker"))
+        })
+        .then_ignore(just(Token::Semicolon).or_not())
 }
 
 fn parse_external_tokens(
@@ -1434,6 +1469,7 @@ where
     I: ValueInput<'src, Token = Token, Span = Span>,
 {
     choice((
+        top_level_marker().to(None),
         top_level_attr().map(Some),
         external_decl().map(Some),
         function().map(Some),
@@ -1450,6 +1486,10 @@ where
         }
         id
     })
+}
+
+fn is_top_level_marker(name: &str) -> bool {
+    matches!(name, "__BEGIN_DECLS" | "__END_DECLS")
 }
 
 #[cfg(test)]
