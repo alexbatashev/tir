@@ -373,6 +373,11 @@ pub trait TargetRegAlloc: Send + Sync {
         8
     }
 
+    /// Stack frame alignment in bytes.
+    fn frame_align(&self) -> u32 {
+        self.slot_size()
+    }
+
     /// The physical register spill loads/stores are addressed relative to (the
     /// stack pointer, after the prologue has reserved the frame).
     fn frame_register(&self) -> PhysReg;
@@ -506,8 +511,9 @@ impl Pass for RegisterAllocationPass {
 
         rewrite_registers(context, &blocks, &assignment);
 
-        if frame.size() > 0 {
-            self.insert_frame(context, rewriter, &blocks, frame.size())?;
+        let frame_size = frame.size(self.target.frame_align());
+        if frame_size > 0 {
+            self.insert_frame(context, rewriter, &blocks, frame_size)?;
         }
 
         Ok(PreservedAnalyses::none())
@@ -679,9 +685,11 @@ impl RegisterAllocationPass {
             }
         }
         for &block_id in blocks {
-            let op_ids = context.get_block(block_id).op_ids();
-            if let Some(&term) = op_ids.last() {
-                let target = op_ref_in(context, block_id, term);
+            for op_id in context.get_block(block_id).op_ids() {
+                if context.get_op(op_id).name != "vret" {
+                    continue;
+                }
+                let target = op_ref_in(context, block_id, op_id);
                 for op in self.target.emit_epilogue(context, size) {
                     rewriter.insert_op_before(&target, op.as_ref())?;
                 }
@@ -719,8 +727,13 @@ impl FrameState {
         offset
     }
 
-    fn size(&self) -> u32 {
-        self.next_offset as u32
+    fn size(&self, align: u32) -> u32 {
+        let size = self.next_offset as u32;
+        if size == 0 {
+            return 0;
+        }
+        let align = align.max(1);
+        size.div_ceil(align) * align
     }
 }
 

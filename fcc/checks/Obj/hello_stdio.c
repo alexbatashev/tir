@@ -1,5 +1,7 @@
 // RUN: fcc compile --stage obj --march riscv64 -o - %S/../Inputs/hello_stdio.c | tir readobj - | filecheck %s
 // RUN: fcc compile --stage asm --march riscv64 -o - %S/../Inputs/hello_stdio.c | filecheck %s --check-prefix=ASM
+// RUN: fcc compile --stage obj --march arm64 -o - %S/../Inputs/hello_stdio.c | tir readobj - | filecheck %s --check-prefix=ARM
+// RUN: fcc compile --stage asm --march arm64 -o - %S/../Inputs/hello_stdio.c | filecheck %s --check-prefix=ARMASM
 
 // The string literal lands in .rodata as a local object symbol; its address
 // materializes as an absolute lui/addi pair relocated against the symbol, and
@@ -23,3 +25,21 @@
 // ASM: .section .rodata
 // ASM: .L.str0:
 // ASM: .asciz "hello, world\n"
+
+// ARM: File: ELF64 LSB REL
+// ARM: Machine: EM_AARCH64 (183)
+// ARM: Section .text: type=PROGBITS flags=AX
+// ARM: Section .rodata: type=PROGBITS flags=A size=0xe align=1
+// ARM: Symbol .L.str0: value=0x0 size=0xe bind=LOCAL type=OBJECT section=.rodata
+// ARM: Symbol main: value=0x0 size={{0x[0-9a-f]+}} bind=GLOBAL type=FUNC section=.text
+// ARM: Symbol printf: value=0x0 size=0x0 bind=GLOBAL type=NOTYPE section=UND
+// ARM: Reloc .text+0x4: R_AARCH64_ADR_PREL_LO21 .L.str0 + 0
+// ARM: Reloc .text+{{0x[0-9a-f]+}}: R_AARCH64_CALL26 printf + 0
+
+// ARMASM: .global main
+// ARMASM: main:
+// ARMASM: adr {{x[0-9]+}}, .L.str0
+// ARMASM: bl printf
+// ARMASM: .section .rodata
+// ARMASM: .L.str0:
+// ARMASM: .asciz "hello, world\n"
