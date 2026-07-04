@@ -269,6 +269,35 @@ instruction CompareNegImmediate for [ARMv8A64] : CmpImmTemplate {
     }
 }
 
+// Flag-setting subtract immediate (`subs Xd, Xn, #imm`): writes the difference
+// AND the NZCV flags of `rn - imm` (the same flag logic as `cmp`, but with a
+// real destination). Declared after CompareImmediate so `cmp` (rd = xzr) is
+// preferred when decoding a word whose rd field is 31.
+instruction SubsImmediate for [ARMv8A64] : AddSubImm {
+    param MNEMONIC: String = "subs";
+    param OPNAME: String = "subs_imm";
+    param OP: bits<1> = 0b1;
+    param SETFLAGS: bits<1> = 0b1;
+
+    behavior {
+        PSTATE::n = extract(rn - zext(imm, self.XLEN), self.XLEN - 1, self.XLEN - 1);
+        PSTATE::z = if rn == zext(imm, self.XLEN) {
+            zext(0b1, 1)
+        } else {
+            zext(0b0, 1)
+        };
+        PSTATE::c = if rn ~>= zext(imm, self.XLEN) {
+            zext(0b1, 1)
+        } else {
+            zext(0b0, 1)
+        };
+        PSTATE::v = extract(
+            (rn ^ zext(imm, self.XLEN)) & (rn ^ (rn - zext(imm, self.XLEN))),
+            self.XLEN - 1, self.XLEN - 1);
+        rd = rn - zext(imm, self.XLEN);
+    }
+}
+
 // MOVN with hw = 0 (no shift): rd = NOT(imm16).
 instruction MoveWideNot for [ARMv8A64] {
     param MNEMONIC: String = "movn";

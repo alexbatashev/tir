@@ -242,3 +242,30 @@ instruction TestBitBranchNonZero for [ARMv8A64] : TestBitBranch {
         }
     }
 }
+
+// Supervisor call: raises a synchronous exception routed to the simulator's
+// exception handler for syscall emulation. Linux ignores imm16 and takes the
+// syscall number from x8, so the behavior just traps.
+instruction Supervisor for [ARMv8A64] {
+    schedule { units = [WriteIALU]; }
+    param MNEMONIC: String = "svc";
+
+    operands {
+        imm: bits<16>,
+    }
+
+    encoding {
+        0..4 => 0b00001,
+        5..20 => imm,
+        21..23 => 0b000,
+        24..31 => 0b11010100,
+    }
+
+    asm {
+        "{self.MNEMONIC} {imm}"
+    }
+
+    behavior {
+        trap(0);
+    }
+}

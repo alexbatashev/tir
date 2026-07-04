@@ -215,6 +215,7 @@ dialect! {
             TestOp,
             CompareImmediateOp,
             CompareNegImmediateOp,
+            SubsImmediateOp,
             MoveWideZeroOp,
             MoveWideNotOp,
             MoveWideKeepOp,
@@ -294,6 +295,7 @@ dialect! {
             CompareBranchNonZeroOp,
             TestBitBranchZeroOp,
             TestBitBranchNonZeroOp,
+            SupervisorOp,
         ],
     }
 }
@@ -736,6 +738,14 @@ impl tir::backend::TargetMachine for Arm64Target {
             get_instruction_encoders(),
             get_instruction_patchers(),
         ))
+    }
+
+    fn instruction_decoder(&self) -> Option<tir::backend::InstructionDecoder> {
+        Some(decode_instruction)
+    }
+
+    fn hardwired_zero_registers(&self) -> &'static [(&'static str, u16)] {
+        hardwired_zero_registers()
     }
 }
 
@@ -1347,6 +1357,46 @@ mod tests {
             .attr("imm", AttributeValue::Int(42))
             .build();
         assert_eq!(word(movz.id()), 0xD2800540, "movz x0, #42");
+    }
+
+    #[test]
+    fn decoder_round_trips_golden_words() {
+        let context = Context::with_default_dialects();
+        context.register_dialect::<AsmDialect>();
+        context.register_dialect::<Arm64Dialect>();
+
+        // The encoder is golden-verified against llvm-mc (see the test above), so
+        // `decode(word) -> op` is correct iff re-encoding that op reproduces the
+        // original word. This exercises operand extraction (registers, immediates,
+        // split fields) and fixed-opcode matching across the instruction classes
+        // the benchmark ELFs execute, plus the newly-added `svc`.
+        let encoders = crate::get_instruction_encoders();
+        let reencode = |id: tir::OpId| -> u32 {
+            let inst = context.get_op(id);
+            let enc = encoders[inst.name](&inst)
+                .unwrap_or_else(|| panic!("'{}' failed to re-encode", inst.name));
+            u32::from_le_bytes(enc.bytes.try_into().unwrap())
+        };
+
+        let cases: &[(u32, &str)] = &[
+            (0x8B020020, "add x0, x1, x2"),
+            (0x9AC22020, "lslv x0, x1, x2"),
+            (0xEB02003F, "cmp x1, x2"),
+            (0xF9400020, "ldr x0, [x1]"),
+            (0xF9000062, "str x2, [x3]"),
+            (0x54000080, "b.eq +16"),
+            (0x14000003, "b +12"),
+            (0x94000002, "bl +8"),
+            (0xD65F03C0, "ret"),
+            (0xD2800540, "movz x0, #42"),
+            (0xD4000001, "svc #0"),
+            (0xF1000400, "subs x0, x0, #1"),
+        ];
+        for &(w, asm) in cases {
+            let id = crate::decode_instruction(&context, w)
+                .unwrap_or_else(|| panic!("failed to decode {asm} ({w:#010x})"));
+            assert_eq!(reencode(id), w, "round-trip mismatch for {asm}");
+        }
     }
 
     #[test]

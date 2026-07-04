@@ -27,6 +27,12 @@ pub use printer::{AsmInstructionPrinter, AsmPrintError, AsmPrinter};
 use tir::attributes::{AttributeValue, RegisterAttr};
 use tir::utils::APInt;
 
+/// Decodes a 32-bit little-endian machine word into a freshly-built op in the
+/// given `Context`, returning its id, or `None` if no instruction matches. The
+/// inverse of a [`binary::InstructionEncoder`], generated per backend from the
+/// same TMDL encoding tables and used to execute raw machine code (e.g. an ELF).
+pub type InstructionDecoder = fn(&tir::Context, u32) -> Option<tir::OpId>;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SimTrap {
     MissingRegister {

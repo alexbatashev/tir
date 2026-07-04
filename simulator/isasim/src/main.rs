@@ -15,6 +15,7 @@ use tir_riscv as _;
 use tir_x86_64 as _;
 
 mod dump;
+mod elf;
 mod konata;
 mod memory;
 
@@ -36,8 +37,10 @@ struct Cli {
     mem_start_address: u64,
     #[arg(long)]
     entry: Option<String>,
+    /// Address or symbol to stop at. Required for assembly snippets; optional for
+    /// ELF images (which run until an exit syscall).
     #[arg(long)]
-    until_pc: String,
+    until_pc: Option<String>,
     /// JSON memory image with `regions`: `{ "regions": [{"start":"0x80001000", "hex":"efbeadde"}] }`.
     #[arg(long)]
     memory_config: Option<String>,
@@ -79,7 +82,7 @@ struct Cli {
 
 fn main() {
     let args = Cli::parse();
-    let src = std::fs::read_to_string(&args.program).expect("failed to read program path");
+    let bytes = std::fs::read(&args.program).expect("failed to read program path");
 
     let target =
         tir::backend::select_target(&args.march, args.mcpu.as_deref(), args.mattr.as_deref())
@@ -90,6 +93,15 @@ fn main() {
 
     let context = tir::Context::with_default_dialects();
     target.register_dialects(&context);
+
+    // An ELF image is executed by decode-on-fetch; anything else is an assembly
+    // snippet parsed into a program image.
+    if bytes.starts_with(b"\x7fELF") {
+        run_elf(&args, target.as_ref(), &context, &bytes);
+        return;
+    }
+
+    let src = String::from_utf8(bytes).expect("program is neither ELF nor UTF-8 assembly");
     let asm_parser = target.asm_parser(&context);
     let module = asm_parser
         .parse_asm(&context, &src)
@@ -105,7 +117,11 @@ fn main() {
 
     // `--until-pc` accepts either a symbol name or a numeric address, so tests
     // can stop at a label without hand-computing its address.
-    let until_pc = resolve_pc(&args.until_pc, &program.symbols);
+    let until_arg = args.until_pc.as_deref().unwrap_or_else(|| {
+        eprintln!("--until-pc is required for assembly snippets");
+        std::process::exit(2);
+    });
+    let until_pc = resolve_pc(until_arg, &program.symbols);
     let mut executor = Executor::new_at(args.mem_size, args.mem_start_address);
     // Teach the executor which register classes share a physical file so, e.g.,
     // a value written via AArch64 `GPRsp` reads back through `GPR`.
@@ -116,6 +132,7 @@ fn main() {
         .map(|c| (c.name.to_string(), c.file.to_string()))
         .collect();
     executor.set_register_files(register_files);
+    executor.set_hardwired_zero_registers(target.hardwired_zero_registers().iter().copied());
 
     // Install the selected ISA's parameters and register widths so behaviors
     // execute with the configured XLEN (e.g. rv32 arithmetic wraps at 32 bits).
@@ -143,32 +160,7 @@ fn main() {
     }
 
     // Pick the timing model up front so a bad `--machine` fails before running.
-    let model = if args.timing {
-        let name = args
-            .machine
-            .as_deref()
-            .or_else(|| target.default_machine())
-            .unwrap_or_else(|| {
-                eprintln!(
-                    "--timing requires --machine or --mcpu (one of: {})",
-                    target.machines().join(", "),
-                );
-                std::process::exit(2);
-            });
-        let m = target.machine_model(name).unwrap_or_else(|| {
-            eprintln!(
-                "unknown machine '{}' for target '{}' (one of: {})",
-                name,
-                target.name(),
-                target.machines().join(", "),
-            );
-            std::process::exit(2);
-        });
-        executor.enable_trace_recording();
-        Some(m)
-    } else {
-        None
-    };
+    let model = select_timing_model(&args, target.as_ref(), &mut executor);
 
     executor.load(program).expect("failed to load program");
     let trace = TraceOptions {
@@ -182,61 +174,243 @@ fn main() {
         .expect("program execution failed");
 
     if let Some(model) = model {
-        let mut predictor = tir_sim::predictor::by_name(&args.predictor).unwrap_or_else(|| {
-            eprintln!(
-                "unknown predictor '{}' (expected: not-taken, btfn)",
-                args.predictor
-            );
-            std::process::exit(2);
-        });
-        let config = TimingConfig::for_model(&model);
-        let prf = Prf::for_target(&register_info, &model);
-        let mut konata_view = args.konata.as_ref().map(|_| {
-            let printer = target.asm_printer(&context);
-            let labels = executor
-                .trace()
-                .iter()
-                .map(|(id, pc)| {
-                    let op = context.get_op(*id);
-                    let text = printer
-                        .print_instruction(&op)
-                        .expect("failed to print instruction")
-                        .unwrap_or_else(|| op.name().to_string());
-                    format!("{pc:#x}: {text}")
-                })
-                .collect();
-            konata::KonataView::new(labels)
-        });
-        let result = timing::simulate(
-            &model,
+        report_timing(
+            &args,
+            target.as_ref(),
             &context,
-            executor.trace(),
-            &config,
-            predictor.as_mut(),
-            Some(&prf),
-            konata_view.as_mut().map(|v| v as &mut dyn EventHandler),
-        );
-        if let (Some(path), Some(view)) = (&args.konata, &konata_view) {
-            let log = view.render();
-            if path == "-" {
-                print!("{log}");
-            } else {
-                std::fs::write(path, log).expect("failed to write konata log");
-            }
-        }
-        println!(
-            "timing[{} / {}]: {} instructions, {} cycles, IPC {:.3}, {} mispredicts",
-            model.name,
-            predictor.name(),
-            result.instructions,
-            result.cycles,
-            result.ipc(),
-            result.mispredicts,
+            &register_info,
+            &model,
+            &executor,
         );
     }
 
     if let Some(path) = &args.dump_state {
         dump::write_state_dump(&executor, path, &args.dump_mem);
+    }
+}
+
+/// Select and validate the `--timing` machine model (defaulting from `--mcpu`),
+/// enabling trace recording on the executor. Returns `None` when `--timing` is
+/// off; exits on an unknown model.
+fn select_timing_model(
+    args: &Cli,
+    target: &dyn tir::backend::TargetMachine,
+    executor: &mut Executor,
+) -> Option<tir::backend::sched::MachineModel> {
+    if !args.timing {
+        return None;
+    }
+    let name = args
+        .machine
+        .as_deref()
+        .or_else(|| target.default_machine())
+        .unwrap_or_else(|| {
+            eprintln!(
+                "--timing requires --machine or --mcpu (one of: {})",
+                target.machines().join(", "),
+            );
+            std::process::exit(2);
+        });
+    let model = target.machine_model(name).unwrap_or_else(|| {
+        eprintln!(
+            "unknown machine '{}' for target '{}' (one of: {})",
+            name,
+            target.name(),
+            target.machines().join(", "),
+        );
+        std::process::exit(2);
+    });
+    executor.enable_trace_recording();
+    Some(model)
+}
+
+/// Replay the recorded trace through `model` and print a cycle-approximate
+/// timing summary (plus an optional Konata pipeline log).
+fn report_timing(
+    args: &Cli,
+    target: &dyn tir::backend::TargetMachine,
+    context: &tir::Context,
+    register_info: &tir::backend::regalloc::RegisterInfo,
+    model: &tir::backend::sched::MachineModel,
+    executor: &Executor,
+) {
+    let mut predictor = tir_sim::predictor::by_name(&args.predictor).unwrap_or_else(|| {
+        eprintln!(
+            "unknown predictor '{}' (expected: not-taken, btfn)",
+            args.predictor
+        );
+        std::process::exit(2);
+    });
+    let config = TimingConfig::for_model(model);
+    let prf = Prf::for_target(register_info, model);
+    let mut konata_view = args.konata.as_ref().map(|_| {
+        let printer = target.asm_printer(context);
+        let labels = executor
+            .trace()
+            .iter()
+            .map(|(id, pc)| {
+                let op = context.get_op(*id);
+                let text = printer
+                    .print_instruction(&op)
+                    .expect("failed to print instruction")
+                    .unwrap_or_else(|| op.name().to_string());
+                format!("{pc:#x}: {text}")
+            })
+            .collect();
+        konata::KonataView::new(labels)
+    });
+    let result = timing::simulate(
+        model,
+        context,
+        executor.trace(),
+        &config,
+        predictor.as_mut(),
+        Some(&prf),
+        konata_view.as_mut().map(|v| v as &mut dyn EventHandler),
+    );
+    if let (Some(path), Some(view)) = (&args.konata, &konata_view) {
+        let log = view.render();
+        if path == "-" {
+            print!("{log}");
+        } else {
+            std::fs::write(path, log).expect("failed to write konata log");
+        }
+    }
+    println!(
+        "timing[{} / {}]: {} instructions, {} cycles, IPC {:.3}, {} mispredicts",
+        model.name,
+        predictor.name(),
+        result.instructions,
+        result.cycles,
+        result.ipc(),
+        result.mispredicts,
+    );
+}
+
+/// Load a statically-linked ELF64 executable into guest memory and run it by
+/// decode-on-fetch, servicing the handful of Linux AArch64 syscalls the
+/// freestanding benchmark runner uses. Stops at the exit syscall (or `--until-pc`
+/// / `--max-cycles`), then reports the exit status.
+fn run_elf(
+    args: &Cli,
+    target: &dyn tir::backend::TargetMachine,
+    context: &tir::Context,
+    bytes: &[u8],
+) {
+    use tir::backend::MachineContext;
+    let loaded = elf::load_executable(bytes).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(2);
+    });
+    let decoder = target.instruction_decoder().unwrap_or_else(|| {
+        eprintln!("target '{}' has no machine-code decoder", target.name());
+        std::process::exit(2);
+    });
+
+    // Lay out a single flat region covering every PT_LOAD segment plus a stack
+    // above them.
+    let page = 0x1000u64;
+    let base = loaded.min_vaddr & !(page - 1);
+    let seg_top = (loaded.max_vaddr_end + page - 1) & !(page - 1);
+    let stack_size = 1u64 << 20;
+    let mem_size = (seg_top - base + stack_size) as usize;
+    let mut executor = Executor::new_at(mem_size, base);
+
+    let register_info = target.register_info();
+    let register_files = register_info
+        .classes
+        .iter()
+        .map(|c| (c.name.to_string(), c.file.to_string()))
+        .collect();
+    executor.set_register_files(register_files);
+    executor.set_hardwired_zero_registers(target.hardwired_zero_registers().iter().copied());
+    executor.set_isa_params(target.isa_params());
+    executor.set_register_widths(target.register_widths());
+    executor.set_counter_registers(target.counter_registers());
+
+    for seg in &loaded.segments {
+        let start = seg.offset as usize;
+        let end = start + seg.filesz as usize;
+        executor
+            .write_bytes(seg.vaddr, &bytes[start..end])
+            .expect("ELF segment does not fit in guest memory");
+    }
+
+    // Stack pointer at the top of the region, 16-byte aligned (AArch64 requires
+    // 16-byte SP alignment).
+    let sp = (base + mem_size as u64 - 16) & !0xF;
+    executor
+        .write_register("GPRsp", 31, tir::utils::APInt::new(64, sp))
+        .expect("failed to initialize stack pointer");
+
+    executor.set_decoder(context.clone(), decoder);
+    executor.set_entry(loaded.entry);
+
+    let exit_code = std::rc::Rc::new(std::cell::Cell::new(0i32));
+    executor.set_exception_handler(Box::new({
+        let exit_code = exit_code.clone();
+        move |ex, _cause, _pc| syscall(ex, &exit_code)
+    }));
+
+    let model = select_timing_model(args, target, &mut executor);
+
+    let until_pc = args.until_pc.as_deref().map(parse_addr).unwrap_or(u64::MAX);
+    let trace = TraceOptions {
+        instructions: args.trace_instructions,
+        registers_after_each_instruction: args.trace_registers_each,
+        registers_at_end: args.trace_registers_end,
+    };
+    let mut stdout = std::io::stdout();
+    executor
+        .run_with_trace(until_pc, args.max_cycles, trace, &mut stdout)
+        .expect("program execution failed");
+
+    println!("exit: {}", exit_code.get());
+
+    if let Some(model) = model {
+        report_timing(args, target, context, &register_info, &model, &executor);
+    }
+
+    if let Some(path) = &args.dump_state {
+        dump::write_state_dump(&executor, path, &args.dump_mem);
+    }
+}
+
+/// Service a Linux AArch64 syscall raised by `svc` (syscall number in x8, args
+/// in x0-x5). Implements only what the freestanding benchmark runner uses.
+fn syscall(
+    ex: &mut Executor,
+    exit_code: &std::rc::Rc<std::cell::Cell<i32>>,
+) -> tir_sim::ExceptionAction {
+    use tir::backend::MachineContext;
+    let reg = |ex: &Executor, i: u16| ex.read_register("GPR", i).map(|v| v.to_u64()).unwrap_or(0);
+    let num = reg(ex, 8);
+    match num {
+        // exit / exit_group
+        93 | 94 => {
+            exit_code.set(reg(ex, 0) as i32);
+            tir_sim::ExceptionAction::Halt
+        }
+        // write(fd, buf, len)
+        64 => {
+            use std::io::Write;
+            let (fd, buf, len) = (reg(ex, 0), reg(ex, 1), reg(ex, 2));
+            let mut out = Vec::with_capacity(len as usize);
+            for i in 0..len {
+                out.push(ex.read_memory(buf + i, 1).map(|v| v as u8).unwrap_or(0));
+            }
+            if fd == 2 {
+                let _ = std::io::stderr().write_all(&out);
+            } else {
+                let _ = std::io::stdout().write_all(&out);
+            }
+            let _ = ex.write_register("GPR", 0, tir::utils::APInt::new(64, len));
+            tir_sim::ExceptionAction::Continue
+        }
+        other => {
+            eprintln!("unimplemented syscall {other}");
+            tir_sim::ExceptionAction::Halt
+        }
     }
 }
 

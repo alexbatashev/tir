@@ -236,6 +236,8 @@ fn emit_instructions<'a>(
     let mut instruction_encoder_impls: Vec<proc_macro2::TokenStream> = vec![];
     let mut instruction_encoder_map_inits: Vec<proc_macro2::TokenStream> = vec![];
     let mut instruction_patcher_map_inits: Vec<proc_macro2::TokenStream> = vec![];
+    let mut instruction_decoder_impls: Vec<proc_macro2::TokenStream> = vec![];
+    let mut instruction_decoder_dispatch: Vec<proc_macro2::TokenStream> = vec![];
 
     // `(class, register-name) -> encoding index` over every register class, so the
     // simulator can lower register paths that carry no numeric index in their name
@@ -1415,6 +1417,21 @@ fn emit_instructions<'a>(
                 });
             }
         }
+
+        if let Some((decoder, decode_fn_ident)) = emit_instruction_decoder(
+            inst,
+            &encoding_arms,
+            &ops_map,
+            &resolved_params,
+            width_bytes,
+        ) {
+            instruction_decoder_impls.push(decoder);
+            instruction_decoder_dispatch.push(quote! {
+                if let Some(id) = #decode_fn_ident(context, word) {
+                    return Some(id);
+                }
+            });
+        }
     }
 
     // Flag-mediated conditional branches: definer + branch pairs composed and
@@ -1477,6 +1494,17 @@ fn emit_instructions<'a>(
             #(#instruction_patcher_map_inits)*
 
             map
+        }
+
+        #(#instruction_decoder_impls)*
+
+        /// Decode a 32-bit little-endian machine word into a freshly-built op in
+        /// `context`, returning its id, or `None` if no instruction matches.
+        /// Instructions are tried in declaration order; each matches on its fixed
+        /// opcode bits and reconstructs its operands from the word.
+        pub fn decode_instruction(context: &tir::Context, word: u32) -> Option<tir::OpId> {
+            #(#instruction_decoder_dispatch)*
+            None
         }
 
         #(#isel_rule_emitters)*
@@ -2127,6 +2155,7 @@ fn emit_register_trait_helpers(files: &[ast::File]) -> Result<proc_macro2::Token
             hardwired_patterns.push(quote! { (#class_lit, #idx_lit) });
         }
     }
+    let list = hardwired_patterns.clone();
     let hardwired_body = if hardwired_patterns.is_empty() {
         quote! {
             let _ = (class, index);
@@ -2139,6 +2168,14 @@ fn emit_register_trait_helpers(files: &[ast::File]) -> Result<proc_macro2::Token
     Ok(quote! {
         pub fn register_has_trait_hardwired_zero(class: &str, index: u16) -> bool {
             #hardwired_body
+        }
+
+        /// Every `(class, index)` that reads as a hardwired zero (e.g. AArch64
+        /// `xzr`). The simulator zeroes these on read so a value stored in an
+        /// aliasing slot (e.g. `sp` sharing the file index with `xzr`) never
+        /// leaks through the zero register.
+        pub fn hardwired_zero_registers() -> &'static [(&'static str, u16)] {
+            &[#(#list),*]
         }
     })
 }
@@ -4711,4 +4748,194 @@ fn emit_instruction_encoder(
     };
 
     Ok(Some((encoder, patcher)))
+}
+
+/// Compile an instruction's encoding arms into a `decode_*_inst` function — the
+/// inverse of [`emit_instruction_encoder`]. Given a 32-bit little-endian
+/// instruction word it matches the fixed opcode bits, reconstructs each operand
+/// from its (possibly split) bit-fields, builds the corresponding op in the
+/// `Context`, and returns its id.
+///
+/// Best-effort: returns `None` (no decoder emitted) for instructions without an
+/// encoding, not exactly 32 bits wide, or using an encoding form this generator
+/// cannot invert — so enabling decoding never breaks a backend's build.
+fn emit_instruction_decoder(
+    inst: &ast::Instruction,
+    encoding_arms: &[ast::EncodingArm],
+    ops_map: &HashMap<String, Type>,
+    resolved_params: &HashMap<String, (Type, Option<ast::Expr>)>,
+    width_bytes: u64,
+) -> Option<(proc_macro2::TokenStream, proc_macro2::Ident)> {
+    if encoding_arms.is_empty() || width_bytes != 4 {
+        return None;
+    }
+
+    let mut const_word: u128 = 0;
+    let mut fixed_mask: u128 = 0;
+    let mut reg_fields: Vec<(String, Vec<IntField>)> = Vec::new();
+    let mut int_fields: Vec<(String, Vec<IntField>)> = Vec::new();
+
+    let push_field = |dst: &mut Vec<(String, Vec<IntField>)>, name: &str, field: IntField| match dst
+        .iter_mut()
+        .find(|(n, _)| n == name)
+    {
+        Some((_, fields)) => fields.push(field),
+        None => dst.push((name.to_string(), vec![field])),
+    };
+
+    for arm in encoding_arms {
+        let word_lo = arm.start;
+        let width = arm.end.unwrap_or(arm.start) - arm.start + 1;
+        match &arm.value {
+            ast::Expr::Lit(ast::Lit::Int(li)) => {
+                const_word |=
+                    (u128::from(parse_literal_value(li)) & encoding_mask(width)) << word_lo;
+                fixed_mask |= encoding_mask(width) << word_lo;
+            }
+            ast::Expr::Ident(id) => match ops_map.get(&id.name) {
+                Some(Type::Struct(_)) => push_field(
+                    &mut reg_fields,
+                    &id.name,
+                    IntField {
+                        op_lo: 0,
+                        word_lo,
+                        width,
+                    },
+                ),
+                Some(Type::Integer | Type::Bits(_)) => push_field(
+                    &mut int_fields,
+                    &id.name,
+                    IntField {
+                        op_lo: 0,
+                        word_lo,
+                        width,
+                    },
+                ),
+                Some(_) => return None,
+                None => match resolved_params.get(&id.name) {
+                    Some((_, Some(ast::Expr::Lit(ast::Lit::Int(li))))) => {
+                        const_word |=
+                            (u128::from(parse_literal_value(li)) & encoding_mask(width)) << word_lo;
+                        fixed_mask |= encoding_mask(width) << word_lo;
+                    }
+                    _ => return None,
+                },
+            },
+            ast::Expr::Slice(slc) => {
+                let ast::Expr::Ident(id) = &*slc.base else {
+                    return None;
+                };
+                let dst = match ops_map.get(&id.name) {
+                    Some(Type::Struct(_)) => &mut reg_fields,
+                    Some(Type::Integer | Type::Bits(_)) => &mut int_fields,
+                    _ => return None,
+                };
+                push_field(
+                    dst,
+                    &id.name,
+                    IntField {
+                        op_lo: slc.start,
+                        word_lo,
+                        width,
+                    },
+                );
+            }
+            ast::Expr::IndexAccess(idx) => {
+                let ast::Expr::Ident(id) = &*idx.base else {
+                    return None;
+                };
+                let dst = match ops_map.get(&id.name) {
+                    Some(Type::Struct(_)) => &mut reg_fields,
+                    Some(Type::Integer | Type::Bits(_)) => &mut int_fields,
+                    _ => return None,
+                };
+                push_field(
+                    dst,
+                    &id.name,
+                    IntField {
+                        op_lo: idx.index,
+                        word_lo,
+                        width: 1,
+                    },
+                );
+            }
+            _ => return None,
+        }
+    }
+
+    // Reassemble one operand from its pieces: for each (word_lo, op_lo, width)
+    // run, place word bits `[word_lo, word_lo+width)` at operand bits `op_lo`.
+    let gather = |fields: &[IntField]| -> proc_macro2::TokenStream {
+        let pieces: Vec<proc_macro2::TokenStream> = fields
+            .iter()
+            .map(|f| {
+                let mask = proc_macro2::Literal::u64_suffixed(encoding_mask(f.width) as u64);
+                let extract = if f.word_lo > 0 {
+                    let word_lo = proc_macro2::Literal::u32_suffixed(f.word_lo as u32);
+                    quote! { (word >> #word_lo) as u64 & #mask }
+                } else {
+                    quote! { word as u64 & #mask }
+                };
+                if f.op_lo > 0 {
+                    let op_lo = proc_macro2::Literal::u32_suffixed(f.op_lo as u32);
+                    quote! { value |= (#extract) << #op_lo; }
+                } else {
+                    quote! { value |= #extract; }
+                }
+            })
+            .collect();
+        quote! {{ let mut value: u64 = 0; #(#pieces)* value }}
+    };
+
+    let mut attr_steps: Vec<proc_macro2::TokenStream> = Vec::new();
+    for (name, fields) in &reg_fields {
+        let class = match ops_map.get(name) {
+            Some(Type::Struct(c)) => c,
+            _ => return None,
+        };
+        let name_lit = proc_macro2::Literal::string(name);
+        let class_lit = proc_macro2::Literal::string(class);
+        let g = gather(fields);
+        attr_steps.push(quote! {
+            .attr(
+                #name_lit,
+                tir::attributes::AttributeValue::Register(
+                    tir::attributes::RegisterAttr::Physical {
+                        class: #class_lit.to_string(),
+                        index: (#g) as u16,
+                    },
+                ),
+            )
+        });
+    }
+    for (name, fields) in &int_fields {
+        let name_lit = proc_macro2::Literal::string(name);
+        let g = gather(fields);
+        attr_steps.push(quote! {
+            .attr(#name_lit, tir::attributes::AttributeValue::Int((#g) as i64))
+        });
+    }
+
+    let decode_fn_ident = format_ident!("decode_{}_inst", inst.name.to_lowercase());
+    let builder_ident = format_ident!("{}OpBuilder", &inst.name);
+    let const_word_lit = proc_macro2::Literal::u32_suffixed(const_word as u32);
+    // An operand-less instruction fixes every bit, making the mask an identity.
+    let guard = if fixed_mask as u32 == u32::MAX {
+        quote! { if word != #const_word_lit { return None; } }
+    } else {
+        let fixed_mask_lit = proc_macro2::Literal::u32_suffixed(fixed_mask as u32);
+        quote! { if word & #fixed_mask_lit != #const_word_lit { return None; } }
+    };
+
+    let decoder = quote! {
+        fn #decode_fn_ident(context: &tir::Context, word: u32) -> Option<tir::OpId> {
+            #guard
+            let op = #builder_ident::new(context)
+                #(#attr_steps)*
+                .build();
+            Some(op.id())
+        }
+    };
+
+    Some((decoder, decode_fn_ident))
 }
