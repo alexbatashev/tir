@@ -72,9 +72,57 @@ pub enum SimTrap {
     },
 }
 
+/// A value written back to a register by instruction semantics: a scalar
+/// (`APInt`, ≤64 bits) or a vector (`RawBits`, byte lanes) result.
+pub enum RegisterValue {
+    Int(APInt),
+    Bits(tir::utils::RawBits),
+}
+
+impl RegisterValue {
+    /// The low 64 bits (for a PC write, which is always scalar).
+    pub fn to_u64(&self) -> u64 {
+        match self {
+            RegisterValue::Int(v) => v.to_u64(),
+            RegisterValue::Bits(b) => b.resized(64).to_apint().to_u64(),
+        }
+    }
+}
+
 pub trait MachineContext {
     fn read_register(&self, class: &str, index: u16) -> Result<APInt, SimTrap>;
     fn write_register(&mut self, class: &str, index: u16, value: APInt) -> Result<(), SimTrap>;
+    /// Read a register wider than a word (e.g. a 128-bit SIMD register) as raw
+    /// byte lanes. The default handles ≤64-bit classes by widening the scalar
+    /// value; register files with >64-bit classes override this.
+    fn read_register_bits(&self, class: &str, index: u16) -> Result<tir::utils::RawBits, SimTrap> {
+        Ok(tir::utils::RawBits::from_apint(
+            &self.read_register(class, index)?,
+        ))
+    }
+    /// Write a register from raw byte lanes (a vector result). The default narrows
+    /// to a scalar for ≤64-bit classes; wide register files override this.
+    fn write_register_bits(
+        &mut self,
+        class: &str,
+        index: u16,
+        value: tir::utils::RawBits,
+    ) -> Result<(), SimTrap> {
+        self.write_register(class, index, value.to_apint())
+    }
+    /// Write either a scalar or vector interpreter result, dispatching to the
+    /// matching typed method.
+    fn write_register_value(
+        &mut self,
+        class: &str,
+        index: u16,
+        value: RegisterValue,
+    ) -> Result<(), SimTrap> {
+        match value {
+            RegisterValue::Int(v) => self.write_register(class, index, v),
+            RegisterValue::Bits(b) => self.write_register_bits(class, index, b),
+        }
+    }
     fn read_memory(&self, address: u64, size: usize) -> Result<u64, SimTrap>;
     fn write_memory(&mut self, address: u64, size: usize, value: u64) -> Result<(), SimTrap>;
     fn read_pc(&self) -> u64;

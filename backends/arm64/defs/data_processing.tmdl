@@ -298,6 +298,35 @@ instruction SubsImmediate for [ARMv8A64] : AddSubImm {
     }
 }
 
+// Flag-setting add immediate (`adds Xd, Xn, #imm`): writes the sum AND the NZCV
+// flags of `rn + imm` (the same flag logic as `cmn`, but with a real
+// destination). Declared after CompareNegImmediate so `cmn` (rd = xzr) is
+// preferred when decoding a word whose rd field is 31.
+instruction AddsImmediate for [ARMv8A64] : AddSubImm {
+    param MNEMONIC: String = "adds";
+    param OPNAME: String = "adds_imm";
+    param OP: bits<1> = 0b0;
+    param SETFLAGS: bits<1> = 0b1;
+
+    behavior {
+        PSTATE::n = extract(rn + zext(imm, self.XLEN), self.XLEN - 1, self.XLEN - 1);
+        PSTATE::z = if rn + zext(imm, self.XLEN) == zext(0b0, self.XLEN) {
+            zext(0b1, 1)
+        } else {
+            zext(0b0, 1)
+        };
+        PSTATE::c = if rn + zext(imm, self.XLEN) ~< rn {
+            zext(0b1, 1)
+        } else {
+            zext(0b0, 1)
+        };
+        PSTATE::v = extract(
+            ~(rn ^ zext(imm, self.XLEN)) & (rn ^ (rn + zext(imm, self.XLEN))),
+            self.XLEN - 1, self.XLEN - 1);
+        rd = rn + zext(imm, self.XLEN);
+    }
+}
+
 // MOVN with hw = 0 (no shift): rd = NOT(imm16).
 instruction MoveWideNot for [ARMv8A64] {
     param MNEMONIC: String = "movn";
@@ -351,6 +380,65 @@ instruction MoveWideKeep for [ARMv8A64] {
 
     behavior {
         rd = (rd & ~zext(0b1111111111111111, self.XLEN)) | zext(imm, self.XLEN);
+    }
+}
+
+// MOVK with a halfword shift (`movk rd, #imm, lsl #hw*16`): insert imm16 into
+// the hw-th 16-bit lane of rd, keeping the other lanes. `hw` is an operand, so
+// this one instruction covers lsl #16/#32/#48; declared after the hw = 0
+// MoveWideKeep so plain `movk` still decodes to that simpler form.
+instruction MoveWideKeepShifted for [ARMv8A64] {
+    param MNEMONIC: String = "movk";
+    param OPNAME: String = "movk_shifted";
+    schedule { units = [WriteIALU]; }
+
+    operands {
+        rd: GPR,
+        imm: bits<16>,
+        hw: bits<2>,
+    }
+
+    encoding {
+        0..4 => rd,
+        5..20 => imm,
+        21..22 => hw,
+        23..28 => 0b100101,
+        29..30 => 0b11,
+        31 => 0b1,
+    }
+
+    asm {
+        "{self.MNEMONIC} {rd}, {imm}, {hw}"
+    }
+
+    behavior {
+        rd = (rd & ~(zext(0b1111111111111111, self.XLEN) << (zext(hw, self.XLEN) << 4)))
+            | (zext(imm, self.XLEN) << (zext(hw, self.XLEN) << 4));
+    }
+}
+
+// Logical shifted-register `eor` with a non-zero shift amount (the xorshift RNG
+// pattern `eor rd, rn, rm, lsr/lsl #s`). Declared after the plain `Xor` so a
+// zero-shift `eor` still decodes to that simpler form.
+instruction XorShiftedLsl for [ARMv8A64] : LogicalShiftedReg {
+    param MNEMONIC: String = "eor";
+    param OPNAME: String = "eor_lsl";
+    param OPC: bits<2> = 0b10;
+    param SHIFT: bits<2> = 0b00;
+
+    behavior {
+        rd = rn ^ (rm << zext(imm, self.XLEN));
+    }
+}
+
+instruction XorShiftedLsr for [ARMv8A64] : LogicalShiftedReg {
+    param MNEMONIC: String = "eor";
+    param OPNAME: String = "eor_lsr";
+    param OPC: bits<2> = 0b10;
+    param SHIFT: bits<2> = 0b01;
+
+    behavior {
+        rd = rn ^ (rm >> zext(imm, self.XLEN));
     }
 }
 
@@ -485,6 +573,526 @@ instruction SignExtendWord for [ARMv8A64] : BitfieldFixed {
 
     behavior {
         rd = sext(extract(rn, 31, 0), self.XLEN);
+    }
+}
+
+// UBFM (unsigned bitfield move) with both immr and imms as operands — the
+// general form the `lsl #n` immediate alias needs (its immr/imms are derived
+// from the shift amount and so cannot be a fixed encoding). Declared after the
+// fixed-imms UBFM alias (`lsr`, imms = 63) so that still decodes to its simpler
+// op. Implements the standard bitfield move avoiding any shift >= 64:
+//   imms >= immr : zero-extended extract of bits [imms:immr]  (lsr/ubfx)
+//   imms <  immr : low (imms+1) bits placed at bit (64 - immr)  (the lsl case)
+instruction UnsignedBitfieldMove for [ARMv8A64] {
+    param MNEMONIC: String = "ubfm";
+    schedule { units = [WriteIALU]; }
+
+    operands {
+        rd: GPR,
+        rn: GPR,
+        immr: bits<6>,
+        imms: bits<6>,
+    }
+
+    encoding {
+        0..4 => rd,
+        5..9 => rn,
+        10..15 => imms,
+        16..21 => immr,
+        22 => 0b1,
+        23..28 => 0b100110,
+        29..30 => 0b10,
+        31 => 0b1,
+    }
+
+    asm {
+        "{self.MNEMONIC} {rd}, {rn}, {immr}, {imms}"
+    }
+
+    behavior {
+        rd = if zext(imms, self.XLEN) ~>= zext(immr, self.XLEN) {
+            (rn << (zext(0b111111, self.XLEN) - zext(imms, self.XLEN)))
+                >> ((zext(immr, self.XLEN) + zext(0b111111, self.XLEN)) - zext(imms, self.XLEN))
+        } else {
+            (rn & ((zext(0b1, self.XLEN) << (zext(imms, self.XLEN) + zext(0b1, self.XLEN)))
+                - zext(0b1, self.XLEN)))
+                << (zext(0b1000000, self.XLEN) - zext(immr, self.XLEN))
+        };
+    }
+}
+
+// 32-bit MOVZ (`movz Wd, #imm` / `mov Wd, #imm`): sf = 0. Writing a W register
+// zeroes the upper 32 bits, so for a hw = 0 imm16 the result is the same
+// zero-extended value as the 64-bit form.
+instruction MoveWideZero32 for [ARMv8A64] {
+    param MNEMONIC: String = "movz";
+    param OPNAME: String = "movz_w";
+    schedule { units = [WriteIALU]; }
+
+    operands {
+        rd: GPR,
+        imm: bits<16>,
+    }
+
+    encoding {
+        0..4 => rd,
+        5..20 => imm,
+        21..22 => 0b00,
+        23..28 => 0b100101,
+        29..30 => 0b10,
+        31 => 0b0,
+    }
+
+    asm {
+        "{self.MNEMONIC} {rd}, {imm}"
+    }
+
+    behavior {
+        rd = zext(imm, self.XLEN);
+    }
+}
+
+// AND (immediate). The immediate is a bitmask encoded as N:immr:imms; we model
+// the common non-replicated case where the element size equals the register
+// width, i.e. the mask is a single run of (imms+1) ones rotated right by immr.
+// (Replicated sub-word patterns — element size < datasize — are not modeled.)
+instruction AndImmediate for [ARMv8A64] {
+    param MNEMONIC: String = "and";
+    param OPNAME: String = "and_imm";
+    schedule { units = [WriteIALU]; }
+
+    operands {
+        rd: GPR,
+        rn: GPR,
+        immr: bits<6>,
+        imms: bits<6>,
+    }
+
+    encoding {
+        0..4 => rd,
+        5..9 => rn,
+        10..15 => imms,
+        16..21 => immr,
+        22 => 0b1,
+        23..28 => 0b100100,
+        29..30 => 0b00,
+        31 => 0b1,
+    }
+
+    asm {
+        "{self.MNEMONIC} {rd}, {rn}, {immr}, {imms}"
+    }
+
+    // mask = ROR(2^(imms+1) - 1, immr) over 64 bits; the rotate's left-shift
+    // amount is reduced mod 64 so immr = 0 shifts by 0 (never by 64).
+    behavior {
+        rd = rn & (
+            (((zext(0b1, self.XLEN) << (zext(imms, self.XLEN) + zext(0b1, self.XLEN)))
+                - zext(0b1, self.XLEN)) >> zext(immr, self.XLEN))
+            | (((zext(0b1, self.XLEN) << (zext(imms, self.XLEN) + zext(0b1, self.XLEN)))
+                - zext(0b1, self.XLEN))
+                << ((zext(0b1000000, self.XLEN) - zext(immr, self.XLEN)) & zext(0b111111, self.XLEN))));
+    }
+}
+
+// 32-bit AND (immediate): sf = 0, N = 0, element size 32; the mask rotates
+// within 32 bits and the result zero-extends to 64.
+instruction AndImmediate32 for [ARMv8A64] {
+    param MNEMONIC: String = "and";
+    param OPNAME: String = "and_imm_w";
+    schedule { units = [WriteIALU]; }
+
+    operands {
+        rd: GPR,
+        rn: GPR,
+        immr: bits<6>,
+        imms: bits<6>,
+    }
+
+    encoding {
+        0..4 => rd,
+        5..9 => rn,
+        10..15 => imms,
+        16..21 => immr,
+        22 => 0b0,
+        23..28 => 0b100100,
+        29..30 => 0b00,
+        31 => 0b0,
+    }
+
+    asm {
+        "{self.MNEMONIC} {rd}, {rn}, {immr}, {imms}"
+    }
+
+    behavior {
+        rd = zext(extract(rn, 31, 0), self.XLEN) & extract(
+            (((zext(0b1, self.XLEN) << (zext(imms, self.XLEN) + zext(0b1, self.XLEN)))
+                - zext(0b1, self.XLEN)) >> zext(immr, self.XLEN))
+            | (((zext(0b1, self.XLEN) << (zext(imms, self.XLEN) + zext(0b1, self.XLEN)))
+                - zext(0b1, self.XLEN))
+                << ((zext(0b100000, self.XLEN) - zext(immr, self.XLEN)) & zext(0b11111, self.XLEN))),
+            31, 0);
+    }
+}
+
+// Scalar double-precision floating point. The semantic engine interprets a
+// float-typed register's bits as an APFloat (exp/mant from the class width), so
+// `fadd`/`fmul` on FPR64 operands compute real binary64 results.
+
+instruction FAddDouble for [ARMv8A64] : FPArith64 {
+    param MNEMONIC: String = "fadd";
+    param OPCODE: bits<4> = 0b0010;
+
+    behavior {
+        fd = fadd(fa, fb);
+    }
+}
+
+instruction FSubDouble for [ARMv8A64] : FPArith64 {
+    param MNEMONIC: String = "fsub";
+    param OPCODE: bits<4> = 0b0011;
+
+    behavior {
+        fd = fsub(fa, fb);
+    }
+}
+
+instruction FMulDouble for [ARMv8A64] : FPArith64 {
+    param MNEMONIC: String = "fmul";
+    param OPCODE: bits<4> = 0b0000;
+
+    behavior {
+        fd = fmul(fa, fb);
+    }
+}
+
+instruction FDivDouble for [ARMv8A64] : FPArith64 {
+    param MNEMONIC: String = "fdiv";
+    param OPCODE: bits<4> = 0b0001;
+
+    behavior {
+        fd = fdiv(fa, fb);
+    }
+}
+
+// FMOV (scalar, immediate), double. The 8-bit imm expands to a binary64 value
+// (VFPExpandImm): sign=imm<7>, exp = NOT(imm<6>):Replicate(imm<6>,8):imm<5:4>,
+// frac = imm<3:0>:Zeros(48). We build that 64-bit pattern and move it into the
+// (float) destination as raw bits, as the hardware does.
+instruction FMovImmediateDouble for [ARMv8A64] {
+    param MNEMONIC: String = "fmov";
+    schedule { units = [WriteIALU]; }
+
+    operands {
+        fd: FPR64,
+        imm: bits<8>,
+    }
+
+    encoding {
+        0..4 => fd,
+        5..9 => 0b00000,
+        10..12 => 0b100,
+        13..20 => imm,
+        21 => 0b1,
+        22..23 => 0b01,
+        24..28 => 0b11110,
+        29 => 0b0,
+        30 => 0b0,
+        31 => 0b0,
+    }
+
+    asm {
+        "{self.MNEMONIC} {fd}, {imm}"
+    }
+
+    behavior {
+        fd = (zext(extract(imm, 7, 7), self.XLEN) << 63)
+            | ((zext(0b1, self.XLEN) - zext(extract(imm, 6, 6), self.XLEN)) << 62)
+            | (((zext(0b0, self.XLEN) - zext(extract(imm, 6, 6), self.XLEN)) & zext(0b11111111, self.XLEN)) << 54)
+            | (zext(extract(imm, 5, 4), self.XLEN) << 52)
+            | (zext(extract(imm, 3, 0), self.XLEN) << 48);
+    }
+}
+
+// FMOV Xd, Dn — copy the raw 64-bit pattern of a double register into a GPR
+// (used here to read an FP result back for verification / integer handoff).
+instruction FMovDoubleToGeneral for [ARMv8A64] {
+    param MNEMONIC: String = "fmov";
+    param OPNAME: String = "fmov_x_d";
+    schedule { units = [WriteIALU]; }
+
+    operands {
+        rd: GPR,
+        fa: FPR64,
+    }
+
+    encoding {
+        0..4 => rd,
+        5..9 => fa,
+        10..15 => 0b000000,
+        16..18 => 0b110,
+        19..20 => 0b00,
+        21 => 0b1,
+        22..23 => 0b01,
+        24..28 => 0b11110,
+        29 => 0b0,
+        30 => 0b0,
+        31 => 0b1,
+    }
+
+    asm {
+        "{self.MNEMONIC} {rd}, {fa}"
+    }
+
+    behavior {
+        rd = extract(fa, 63, 0);
+    }
+}
+
+// --- Advanced SIMD (NEON), 128-bit register-to-register ------------------
+// V registers are read as raw byte lanes; each instruction splits them into
+// lanes, acts lane-wise (map/zip), and reassembles (concat), so no carry or
+// rounding crosses a lane and no whole vector is forced through a scalar.
+
+// DUP Vd.2D, Xn — broadcast a 64-bit GPR into both doubleword lanes. The
+// `split(rn, 2, 32)` just yields a two-element iterator; each lane is `rn`.
+instruction DupGeneral2D for [ARMv8A64] {
+    param MNEMONIC: String = "dup";
+    param OPNAME: String = "dup_2d";
+    schedule { units = [WriteIALU]; }
+
+    operands {
+        vd: VPR,
+        rn: GPR,
+    }
+
+    encoding {
+        0..4 => vd,
+        5..9 => rn,
+        10..15 => 0b000011,
+        16..20 => 0b01000,
+        21..28 => 0b01110000,
+        29 => 0b0,
+        30 => 0b1,
+        31 => 0b0,
+    }
+
+    asm {
+        "{self.MNEMONIC} {vd}, {rn}"
+    }
+
+    behavior {
+        vd = concat(map(split(rn, 2, 32), |lane| rn));
+    }
+}
+
+instruction AddVector2D for [ARMv8A64] {
+    param MNEMONIC: String = "add";
+    param OPNAME: String = "add_v2d";
+    schedule { units = [WriteIALU]; }
+
+    operands {
+        vd: VPR,
+        vn: VPR,
+        vm: VPR,
+    }
+
+    encoding {
+        0..4 => vd,
+        5..9 => vn,
+        10 => 0b1,
+        11..15 => 0b10000,
+        16..20 => vm,
+        21 => 0b1,
+        22..23 => 0b11,
+        24..28 => 0b01110,
+        29 => 0b0,
+        30 => 0b1,
+        31 => 0b0,
+    }
+
+    asm {
+        "{self.MNEMONIC} {vd}, {vn}, {vm}"
+    }
+
+    behavior {
+        vd = concat(map(zip(split(vn, 2, 64), split(vm, 2, 64)), |a, b| a + b));
+    }
+}
+
+instruction AddVector4S for [ARMv8A64] {
+    param MNEMONIC: String = "add";
+    param OPNAME: String = "add_v4s";
+    schedule { units = [WriteIALU]; }
+
+    operands {
+        vd: VPR,
+        vn: VPR,
+        vm: VPR,
+    }
+
+    encoding {
+        0..4 => vd,
+        5..9 => vn,
+        10 => 0b1,
+        11..15 => 0b10000,
+        16..20 => vm,
+        21 => 0b1,
+        22..23 => 0b10,
+        24..28 => 0b01110,
+        29 => 0b0,
+        30 => 0b1,
+        31 => 0b0,
+    }
+
+    asm {
+        "{self.MNEMONIC} {vd}, {vn}, {vm}"
+    }
+
+    behavior {
+        vd = concat(map(zip(split(vn, 4, 32), split(vm, 4, 32)), |a, b| a + b));
+    }
+}
+
+instruction FAddVector2D for [ARMv8A64] {
+    param MNEMONIC: String = "fadd";
+    param OPNAME: String = "fadd_v2d";
+    schedule { units = [WriteIALU]; }
+
+    operands {
+        vd: VPR,
+        vn: VPR,
+        vm: VPR,
+    }
+
+    encoding {
+        0..4 => vd,
+        5..9 => vn,
+        10..15 => 0b110101,
+        16..20 => vm,
+        21 => 0b1,
+        22 => 0b1,
+        23 => 0b0,
+        24..28 => 0b01110,
+        29 => 0b0,
+        30 => 0b1,
+        31 => 0b0,
+    }
+
+    asm {
+        "{self.MNEMONIC} {vd}, {vn}, {vm}"
+    }
+
+    behavior {
+        vd = concat(map(zip(split(vn, 2, 64), split(vm, 2, 64)), |a, b| fadd(a, b)));
+    }
+}
+
+instruction FMulVector2D for [ARMv8A64] {
+    param MNEMONIC: String = "fmul";
+    param OPNAME: String = "fmul_v2d";
+    schedule { units = [WriteIALU]; }
+
+    operands {
+        vd: VPR,
+        vn: VPR,
+        vm: VPR,
+    }
+
+    encoding {
+        0..4 => vd,
+        5..9 => vn,
+        10..15 => 0b110111,
+        16..20 => vm,
+        21 => 0b1,
+        22 => 0b1,
+        23 => 0b0,
+        24..28 => 0b01110,
+        29 => 0b1,
+        30 => 0b1,
+        31 => 0b0,
+    }
+
+    asm {
+        "{self.MNEMONIC} {vd}, {vn}, {vm}"
+    }
+
+    behavior {
+        vd = concat(map(zip(split(vn, 2, 64), split(vm, 2, 64)), |a, b| fmul(a, b)));
+    }
+}
+
+// MOVI Vd.4S, #imm8 (cmode = 0000): broadcast a zero-extended 8-bit immediate
+// into four 32-bit lanes. `split(vd, 4, 32)` just supplies the four-lane shape.
+instruction MoveImmediateVector4S for [ARMv8A64] {
+    param MNEMONIC: String = "movi";
+    param OPNAME: String = "movi_v4s";
+    schedule { units = [WriteIALU]; }
+
+    operands {
+        vd: VPR,
+        imm: bits<8>,
+    }
+
+    encoding {
+        0..4 => vd,
+        5..9 => imm[0..4],
+        10..11 => 0b01,
+        12..15 => 0b0000,
+        16..18 => imm[5..7],
+        19..23 => 0b00000,
+        24..28 => 0b01111,
+        29 => 0b0,
+        30 => 0b1,
+        31 => 0b0,
+    }
+
+    asm {
+        "{self.MNEMONIC} {vd}, {imm}"
+    }
+
+    behavior {
+        vd = concat(map(split(vd, 4, 32), |lane| zext(imm, 32)));
+    }
+}
+
+// FMOV Vd.2D, #imm8 (cmode = 1111): broadcast the VFPExpandImm binary64 value
+// into both doubleword lanes (the same 8-bit float immediate as scalar `fmov`).
+instruction FMoveImmediateVector2D for [ARMv8A64] {
+    param MNEMONIC: String = "fmov";
+    param OPNAME: String = "fmov_v2d";
+    schedule { units = [WriteIALU]; }
+
+    operands {
+        vd: VPR,
+        imm: bits<8>,
+    }
+
+    encoding {
+        0..4 => vd,
+        5..9 => imm[0..4],
+        10..11 => 0b01,
+        12..15 => 0b1111,
+        16..18 => imm[5..7],
+        19..23 => 0b00000,
+        24..28 => 0b01111,
+        29 => 0b1,
+        30 => 0b1,
+        31 => 0b0,
+    }
+
+    asm {
+        "{self.MNEMONIC} {vd}, {imm}"
+    }
+
+    behavior {
+        vd = concat(map(split(vd, 2, 64), |lane|
+            (zext(extract(imm, 7, 7), self.XLEN) << 63)
+                | ((zext(0b1, self.XLEN) - zext(extract(imm, 6, 6), self.XLEN)) << 62)
+                | (((zext(0b0, self.XLEN) - zext(extract(imm, 6, 6), self.XLEN))
+                    & zext(0b11111111, self.XLEN)) << 54)
+                | (zext(extract(imm, 5, 4), self.XLEN) << 52)
+                | (zext(extract(imm, 3, 0), self.XLEN) << 48)));
     }
 }
 

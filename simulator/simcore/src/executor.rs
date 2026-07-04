@@ -42,7 +42,13 @@ pub type ExceptionHandler = Box<dyn FnMut(&mut Executor, u64, u64) -> ExceptionA
 #[derive(Default)]
 pub struct Executor {
     program: Option<Rc<ProgramImage>>,
-    registers: HashMap<(String, u16), tir::utils::APInt>,
+    /// All architectural registers, stored as raw byte lanes. Interpretation is
+    /// routed by type at execution: an integer operand reads an `APInt`, a float
+    /// operand an `APFloat`, a vector operand the lanes themselves — so a value
+    /// is never forced through the wrong representation (e.g. a 128-bit vector
+    /// through a 64-bit `APInt`). Keyed by physical file; sub-word classes (1-bit
+    /// flags) occupy a whole byte. Absent keys read as zero.
+    registers: HashMap<(String, u16), tir::utils::RawBits>,
     /// Map from register class name to its physical register file. Classes that
     /// share a file (e.g. AArch64 `GPR` and `GPRsp`) alias index-for-index, so
     /// register storage is keyed by file rather than by class. Classes absent
@@ -256,6 +262,54 @@ impl Executor {
             .unwrap_or(class)
     }
 
+    /// A register class's architectural width in bits (64 if unregistered).
+    fn class_bit_width(&self, class: &str) -> u32 {
+        self.register_widths.get(class).copied().unwrap_or(64)
+    }
+
+    /// The class width rounded up to a whole number of bytes (the byte-lane size
+    /// its stored value occupies; a 1-bit flag still uses one byte).
+    fn class_byte_bits(&self, class: &str) -> usize {
+        (self.class_bit_width(class).div_ceil(8) * 8) as usize
+    }
+
+    /// The class-width byte lanes of a register, honoring the special reads
+    /// (PC, hardwired-zero, performance counters). Absent registers read zero.
+    fn read_register_raw(&self, class: &str, index: u16) -> Result<tir::utils::RawBits, SimTrap> {
+        let byte_bits = self.class_byte_bits(class);
+        if class == "PC" {
+            return Ok(
+                tir::utils::RawBits::from_apint(&tir::utils::APInt::new(64, self.pc))
+                    .resized(byte_bits),
+            );
+        }
+        if self.hardwired_zero.contains(&(class.to_string(), index)) {
+            return Ok(tir::utils::RawBits::new(byte_bits));
+        }
+        if let Some(&counter) = self.counter_registers.get(&(class.to_string(), index)) {
+            let value = self.counter_value(counter);
+            return Ok(
+                tir::utils::RawBits::from_apint(&tir::utils::APInt::new(64, value))
+                    .resized(byte_bits),
+            );
+        }
+        let key = (self.register_file(class).to_string(), index);
+        Ok(self
+            .registers
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(|| tir::utils::RawBits::new(byte_bits))
+            .resized(byte_bits))
+    }
+
+    /// Store `bytes` into a register's file slot at the class byte width.
+    fn store_register_raw(&mut self, class: &str, index: u16, bytes: tir::utils::RawBits) {
+        let byte_bits = self.class_byte_bits(class);
+        let file = self.register_file(class).to_string();
+        self.registers
+            .insert((file, index), bytes.resized(byte_bits));
+    }
+
     /// The recorded dynamic instruction stream as `(op, pc)` pairs, in execution
     /// order. The PC lets a timing model reconstruct branch directions/outcomes.
     pub fn trace(&self) -> &[(tir::OpId, u64)] {
@@ -447,7 +501,7 @@ impl Executor {
         }
     }
 
-    pub fn register_snapshot(&self) -> Vec<(String, u16, tir::utils::APInt)> {
+    pub fn register_snapshot(&self) -> Vec<(String, u16, tir::utils::RawBits)> {
         let mut regs = self
             .registers
             .iter()
@@ -487,13 +541,20 @@ impl Executor {
             return;
         }
         for (class, index, value) in snapshot {
+            // Byte lanes are stored little-endian; print most-significant first.
+            let hex: String = value
+                .bytes()
+                .iter()
+                .rev()
+                .map(|b| format!("{b:02x}"))
+                .collect();
             Self::emit_trace_line(
                 out,
                 &format!(
-                    "  {}[{}] = 0x{:x} (width={})",
+                    "  {}[{}] = 0x{} (width={})",
                     class,
                     index,
-                    value.to_u64(),
+                    hex,
                     value.width()
                 ),
             );
@@ -507,25 +568,14 @@ impl Executor {
 
 impl MachineContext for Executor {
     fn read_register(&self, class: &str, index: u16) -> Result<tir::utils::APInt, SimTrap> {
-        // The program counter is held specially (it drives instruction fetch), but
-        // semantics reference it as the `PC` register class (e.g. `PC::pc`).
-        if class == "PC" {
-            return Ok(self.resize_to_class_width(class, tir::utils::APInt::new(64, self.pc)));
-        }
-        // A hardwired-zero register (e.g. xzr) reads 0 regardless of what an
-        // aliasing class (e.g. sp) stored in the shared slot.
-        if self.hardwired_zero.contains(&(class.to_string(), index)) {
-            return Ok(self.resize_to_class_width(class, tir::utils::APInt::new(64, 0)));
-        }
-        if let Some(&counter) = self.counter_registers.get(&(class.to_string(), index)) {
-            let value = self.counter_value(counter);
-            return Ok(self.resize_to_class_width(class, tir::utils::APInt::new(64, value)));
-        }
-        let key = (self.register_file(class).to_string(), index);
-        if let Some(value) = self.registers.get(&key) {
-            return Ok(self.resize_to_class_width(class, value.clone()));
-        }
-        Ok(self.resize_to_class_width(class, tir::utils::APInt::new(64, 0)))
+        // Interpret the stored byte lanes as an integer at the class width. Only
+        // scalar (<=64-bit) classes take this path; wider classes read as bits.
+        let bytes = self.read_register_raw(class, index)?;
+        Ok(self.resize_to_class_width(class, bytes.to_apint()))
+    }
+
+    fn read_register_bits(&self, class: &str, index: u16) -> Result<tir::utils::RawBits, SimTrap> {
+        self.read_register_raw(class, index)
     }
 
     fn write_register(
@@ -547,8 +597,27 @@ impl MachineContext for Executor {
         {
             return Ok(());
         }
-        let file = self.register_file(class).to_string();
-        self.registers.insert((file, index), value);
+        self.store_register_raw(class, index, tir::utils::RawBits::from_apint(&value));
+        Ok(())
+    }
+
+    fn write_register_bits(
+        &mut self,
+        class: &str,
+        index: u16,
+        value: tir::utils::RawBits,
+    ) -> Result<(), SimTrap> {
+        if class == "PC" {
+            self.write_pc(value.resized(64).to_apint().to_u64());
+            return Ok(());
+        }
+        if self
+            .counter_registers
+            .contains_key(&(class.to_string(), index))
+        {
+            return Ok(());
+        }
+        self.store_register_raw(class, index, value);
         Ok(())
     }
 
