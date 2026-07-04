@@ -120,6 +120,19 @@ pub trait TargetMachine {
         let _ = context;
         None
     }
+
+    /// The machine-code decoder (bytes → op) that lets the simulator execute a
+    /// raw ELF image, or `None` if this target has no decoder yet.
+    fn instruction_decoder(&self) -> Option<crate::backend::InstructionDecoder> {
+        None
+    }
+
+    /// Registers that read as a hardwired zero (e.g. AArch64 `xzr`). The
+    /// simulator zeroes these on read, so a value stored in an aliasing slot
+    /// (e.g. `sp` sharing a file index with `xzr`) never leaks through.
+    fn hardwired_zero_registers(&self) -> &'static [(&'static str, u16)] {
+        &[]
+    }
 }
 
 /// A target made selectable by `--march`/`--mcpu`.

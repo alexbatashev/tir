@@ -49,6 +49,73 @@ register_class PSTATE for [ARMv8A64] {
     }
 }
 
+// SIMD&FP register file (v0..v31), 128 bits. Scalar FP instructions view the
+// low 64/32 bits through the `FPR64` (`d`) / `FPR32` (`s`) classes, which share
+// this file index-for-index (like the RISC-V FPR32/FPR64 aliasing). The `float`
+// trait keeps float and integer operands from mixing in instruction selection.
+register_class VPR for [ARMv8A64] {
+    param ENCODING_LEN: Integer = 5;
+    param WIDTH: Integer = 128;
+
+    registers {
+        v0..v31 => { traits = [float, caller_saved] },
+    }
+}
+
+register_class FPR64 for [ARMv8A64] {
+    file = VPR;
+    param ENCODING_LEN: Integer = 5;
+    param WIDTH: Integer = 64;
+
+    registers {
+        d0..d31 => { traits = [float, caller_saved] },
+    }
+}
+
+register_class FPR32 for [ARMv8A64] {
+    file = VPR;
+    param ENCODING_LEN: Integer = 5;
+    param WIDTH: Integer = 32;
+
+    registers {
+        s0..s31 => { traits = [float, caller_saved] },
+    }
+}
+
+// FP data-processing (2 source), double precision. OPCODE selects the operation
+// (fmul 0000, fadd 0010, fsub 0011, fdiv 0001); ptype = 01 (binary64).
+template FPArith64 for [ARMv8A64] {
+    // No dedicated FP pipe in the model yet; account it on the ALU (timing of FP
+    // is not yet calibrated — functional support first).
+    schedule { units = [WriteIALU]; }
+    param MNEMONIC: String;
+    param OPCODE: bits<4>;
+
+    operands {
+        fd: FPR64,
+        fa: FPR64,
+        fb: FPR64,
+    }
+
+    encoding {
+        0..4 => fd,
+        5..9 => fa,
+        10..11 => 0b10,
+        12..15 => OPCODE,
+        16..20 => fb,
+        21 => 0b1,
+        22..23 => 0b01,
+        24..28 => 0b11110,
+        29 => 0b0,
+        30 => 0b0,
+        31 => 0b0,
+    }
+
+    asm {
+        "{self.MNEMONIC} {fd}, {fa}, {fb}"
+    }
+}
+
 // Data Processing -- Register (add/sub, shifted register)
 template AddSubReg for [ARMv8A64] {
     schedule { units = [WriteIALU]; }
@@ -766,6 +833,47 @@ template LoadStoreUnscaled for [ARMv8A64] {
     }
 }
 
+// Loads/Stores -- register offset (`ldr`/`str Xt, [Xn, Xm{, lsl #s}]`). OPTION
+// is fixed to LSL/UXTX (0b011): the index `rm` is a full 64-bit register used
+// as the offset, either unscaled (S = 0) or scaled by log2(access size)
+// (S = 1). The effective address is formed in each instruction's behavior, so
+// this class covers the array-indexed and pointer-chase addressing that
+// compiled loops emit but the immediate-offset forms cannot express.
+template LoadStoreRegOffset for [ARMv8A64] {
+    schedule { units = [WriteLoad]; }
+    param MNEMONIC: String;
+    param SIZE: bits<2>;
+    param OPC: bits<2>;
+    param OPTION: bits<3> = 0b011;
+    param S: bits<1>;
+    param V: bits<1> = 0b0;
+
+    operands {
+        rt: GPR,
+        rn: GPRsp,
+        rm: GPR,
+    }
+
+    encoding {
+        0..4 => rt,
+        5..9 => rn,
+        10..11 => 0b10,
+        12 => S,
+        13..15 => OPTION,
+        16..20 => rm,
+        21 => 0b1,
+        22..23 => OPC,
+        24..25 => 0b00,
+        26 => V,
+        27..29 => 0b111,
+        30..31 => SIZE,
+    }
+
+    asm {
+        "{self.MNEMONIC} {rt}, [{rn}, {rm}]"
+    }
+}
+
 // Loads/Stores -- register pair, signed 7-bit scaled offset (`ldp`/`stp`,
 // 64-bit, no writeback). The operand is the byte offset; the field stores it
 // scaled down by 8, so only multiples of 8 in [-512, 504] are representable,
@@ -797,5 +905,141 @@ template LoadStorePair for [ARMv8A64] {
 
     asm {
         "{self.MNEMONIC} {rt}, {rt2}, [{rn}, {imm}]"
+    }
+}
+
+// Loads/Stores -- register, unscaled 9-bit signed offset with base writeback.
+// Post-indexed ([11:10] = 0b01): access at the original `rn`, then rn += imm.
+// The offset is byte-granular (not scaled), as in the ldur/stur family.
+template LoadStorePostIndex for [ARMv8A64] {
+    schedule { units = [WriteLoad]; }
+    param MNEMONIC: String;
+    param SIZE: bits<2>;
+    param OPC: bits<2>;
+    param V: bits<1> = 0b0;
+
+    operands {
+        rt: GPR,
+        rn: GPRsp,
+        imm: bits<9>,
+    }
+
+    encoding {
+        0..4 => rt,
+        5..9 => rn,
+        10..11 => 0b01,
+        12..20 => imm,
+        21 => 0b0,
+        22..23 => OPC,
+        24..25 => 0b00,
+        26 => V,
+        27..29 => 0b111,
+        30..31 => SIZE,
+    }
+
+    asm {
+        "{self.MNEMONIC} {rt}, [{rn}], {imm}"
+    }
+}
+
+// Pre-indexed ([11:10] = 0b11): rn += imm first, then access at the new rn.
+template LoadStorePreIndex for [ARMv8A64] {
+    schedule { units = [WriteLoad]; }
+    param MNEMONIC: String;
+    param SIZE: bits<2>;
+    param OPC: bits<2>;
+    param V: bits<1> = 0b0;
+
+    operands {
+        rt: GPR,
+        rn: GPRsp,
+        imm: bits<9>,
+    }
+
+    encoding {
+        0..4 => rt,
+        5..9 => rn,
+        10..11 => 0b11,
+        12..20 => imm,
+        21 => 0b0,
+        22..23 => OPC,
+        24..25 => 0b00,
+        26 => V,
+        27..29 => 0b111,
+        30..31 => SIZE,
+    }
+
+    asm {
+        "{self.MNEMONIC} {rt}, [{rn}, {imm}]!"
+    }
+}
+
+// Loads/Stores -- register pair, signed scaled offset with base writeback.
+// INDEX selects the mode: 0b001 post-indexed, 0b011 pre-indexed (0b010 is the
+// no-writeback offset form in `LoadStorePair`). Each instruction spells the
+// exact addressing in its behavior; rn is updated by the (unscaled) byte offset.
+template LoadStorePairWriteback for [ARMv8A64] {
+    schedule { units = [WriteLoad]; }
+    param MNEMONIC: String;
+    param L: bits<1>;
+    param INDEX: bits<3>;
+    param V: bits<1> = 0b0;
+
+    operands {
+        rt: GPR,
+        rt2: GPR,
+        rn: GPRsp,
+        imm: bits<10>,
+    }
+
+    encoding {
+        0..4 => rt,
+        5..9 => rn,
+        10..14 => rt2,
+        15..21 => imm[3..9],
+        22 => L,
+        23..25 => INDEX,
+        26 => V,
+        27..29 => 0b101,
+        30..31 => 0b10,
+    }
+
+    asm {
+        "{self.MNEMONIC} {rt}, {rt2}, [{rn}], {imm}"
+    }
+}
+
+// Data Processing -- Register (logical shifted register) with a non-zero shift
+// amount. Same class as `LogicalReg` but the 6-bit shift amount is an operand
+// and SHIFT selects the shift type; each instruction applies it in behavior.
+template LogicalShiftedReg for [ARMv8A64] {
+    schedule { units = [WriteIALU]; }
+    param MNEMONIC: String;
+    param SF: bits<1> = 0b1;
+    param OPC: bits<2>;
+    param N: bits<1> = 0b0;
+    param SHIFT: bits<2>;
+
+    operands {
+        rd: GPR,
+        rn: GPR,
+        rm: GPR,
+        imm: bits<6>,
+    }
+
+    encoding {
+        0..4 => rd,
+        5..9 => rn,
+        10..15 => imm,
+        16..20 => rm,
+        21 => N,
+        22..23 => SHIFT,
+        24..28 => 0b01010,
+        29..30 => OPC,
+        31 => SF,
+    }
+
+    asm {
+        "{self.MNEMONIC} {rd}, {rn}, {rm}, {imm}"
     }
 }

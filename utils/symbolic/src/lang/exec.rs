@@ -9,6 +9,44 @@ pub trait Memory {
 
     fn read_memory(&mut self, address: u64, size: usize) -> Result<u64, Self::Error>;
     fn write_memory(&mut self, address: u64, size: usize, value: u64) -> Result<(), Self::Error>;
+
+    /// Read `size` bytes as raw lanes (for accesses wider than a word, e.g. a
+    /// 128-bit vector load). The default composes word-sized reads little-endian.
+    fn read_memory_bytes(&mut self, address: u64, size: usize) -> Result<RawBits, Self::Error> {
+        let mut bytes = Vec::with_capacity(size);
+        let mut offset = 0;
+        while offset < size {
+            let chunk = (size - offset).min(8);
+            let word = self.read_memory(address + offset as u64, chunk)?;
+            for i in 0..chunk {
+                bytes.push((word >> (i * 8)) as u8);
+            }
+            offset += chunk;
+        }
+        Ok(RawBits::from_bytes(bytes))
+    }
+
+    /// Write `size` raw byte lanes (e.g. a 128-bit vector store). The default
+    /// decomposes into word-sized writes little-endian.
+    fn write_memory_bytes(
+        &mut self,
+        address: u64,
+        size: usize,
+        value: RawBits,
+    ) -> Result<(), Self::Error> {
+        let bytes = value.bytes();
+        let mut offset = 0;
+        while offset < size {
+            let chunk = (size - offset).min(8);
+            let mut word = 0u64;
+            for i in 0..chunk {
+                word |= u64::from(bytes.get(offset + i).copied().unwrap_or(0)) << (i * 8);
+            }
+            self.write_memory(address + offset as u64, chunk, word)?;
+            offset += chunk;
+        }
+        Ok(())
+    }
 }
 
 enum NoMemoryError {}
@@ -579,14 +617,22 @@ fn eval_node<V, M: Memory>(
         SymKind::LoadMemory => {
             let address = as_int!(c(0), "load").to_u64();
             let size = as_int!(c(1), "load").to_u64() as usize;
-            let value = memory.read_memory(address, size)?;
-            Value::Int(APInt::new((size as u32) * 8, value))
+            // Accesses wider than a word (a vector load) read as raw byte lanes.
+            if size > 8 {
+                Value::RawBits(memory.read_memory_bytes(address, size)?)
+            } else {
+                let value = memory.read_memory(address, size)?;
+                Value::Int(APInt::new((size as u32) * 8, value))
+            }
         }
         SymKind::StoreMemory => {
             let address = as_int!(c(0), "store").to_u64();
             let size = as_int!(c(1), "store").to_u64() as usize;
-            let value = as_int!(c(2), "store").to_u64();
-            memory.write_memory(address, size, value)?;
+            if size > 8 {
+                memory.write_memory_bytes(address, size, as_raw_bits(c(2)))?;
+            } else {
+                memory.write_memory(address, size, as_int!(c(2), "store").to_u64())?;
+            }
             Value::Int(APInt::new(1, 0))
         }
     };

@@ -1,1 +1,1 @@
-pub use tir_adt::{APFloat, APInt};
+pub use tir_adt::{APFloat, APInt, RawBits};

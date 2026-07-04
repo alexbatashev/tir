@@ -258,6 +258,139 @@ instruction StoreWordUnscaled for [ARMv8A64] : LoadStoreUnscaled {
     schedule { units = [WriteStore]; }
 }
 
+// Register-offset addressing (`ldr`/`str Xt, [Xn, Xm{, lsl #3}]`), doubleword
+// forms. The index is a full 64-bit register (option = UXTX); the scaled form
+// shifts it left by 3 (log2 of the 8-byte access). This is the pointer-chase
+// hot-loop load (`ldr Xt, [Xn, Xm]`) and the u64-array-indexed access
+// (`ldr Xt, [Xn, Xm, lsl #3]`) the compiler emits for real memory benchmarks.
+
+instruction LoadDoublewordRegOffset for [ARMv8A64] : LoadStoreRegOffset {
+    param MNEMONIC: String = "ldr";
+    param OPNAME: String = "load_doubleword_reg";
+    param SIZE: bits<2> = 0b11;
+    param OPC: bits<2> = 0b01;
+    param S: bits<1> = 0b0;
+
+    behavior {
+        rt = load(rn + rm, 8, 0b0);
+    }
+}
+
+instruction LoadDoublewordRegOffsetScaled for [ARMv8A64] : LoadStoreRegOffset {
+    param MNEMONIC: String = "ldr";
+    param OPNAME: String = "load_doubleword_reg_scaled";
+    param SIZE: bits<2> = 0b11;
+    param OPC: bits<2> = 0b01;
+    param S: bits<1> = 0b1;
+
+    asm {
+        "{self.MNEMONIC} {rt}, [{rn}, {rm}, lsl #3]"
+    }
+
+    behavior {
+        rt = load(rn + (rm << 3), 8, 0b0);
+    }
+}
+
+instruction StoreDoublewordRegOffset for [ARMv8A64] : LoadStoreRegOffset {
+    param MNEMONIC: String = "str";
+    param OPNAME: String = "store_doubleword_reg";
+    param SIZE: bits<2> = 0b11;
+    param OPC: bits<2> = 0b00;
+    param S: bits<1> = 0b0;
+
+    behavior {
+        store(rn + rm, 8, rt);
+    }
+
+    schedule { units = [WriteStore]; }
+}
+
+instruction StoreDoublewordRegOffsetScaled for [ARMv8A64] : LoadStoreRegOffset {
+    param MNEMONIC: String = "str";
+    param OPNAME: String = "store_doubleword_reg_scaled";
+    param SIZE: bits<2> = 0b11;
+    param OPC: bits<2> = 0b00;
+    param S: bits<1> = 0b1;
+
+    asm {
+        "{self.MNEMONIC} {rt}, [{rn}, {rm}, lsl #3]"
+    }
+
+    behavior {
+        store(rn + (rm << 3), 8, rt);
+    }
+
+    schedule { units = [WriteStore]; }
+}
+
+// 128-bit SIMD load/store, unsigned scaled offset (`ldr/str Qt, [Xn{, #imm}]`).
+// The whole vector moves as raw byte lanes (the `load`/`store` size is 16), so
+// it never passes through a scalar. The field holds the byte offset scaled by
+// 16 (imm[15:4]), as in hardware.
+
+instruction LoadVector128 for [ARMv8A64] {
+    param MNEMONIC: String = "ldr";
+    param OPNAME: String = "load_vector_128";
+    schedule { units = [WriteLoad]; }
+
+    operands {
+        vt: VPR,
+        rn: GPRsp,
+        imm: bits<16>,
+    }
+
+    encoding {
+        0..4 => vt,
+        5..9 => rn,
+        10..21 => imm[4..15],
+        22..23 => 0b11,
+        24..25 => 0b01,
+        26 => 0b1,
+        27..29 => 0b111,
+        30..31 => 0b00,
+    }
+
+    asm {
+        "{self.MNEMONIC} {vt}, [{rn}, {imm}]"
+    }
+
+    behavior {
+        vt = load(rn + zext(imm, self.XLEN), 16, 0b0);
+    }
+}
+
+instruction StoreVector128 for [ARMv8A64] {
+    param MNEMONIC: String = "str";
+    param OPNAME: String = "store_vector_128";
+    schedule { units = [WriteStore]; }
+
+    operands {
+        vt: VPR,
+        rn: GPRsp,
+        imm: bits<16>,
+    }
+
+    encoding {
+        0..4 => vt,
+        5..9 => rn,
+        10..21 => imm[4..15],
+        22..23 => 0b10,
+        24..25 => 0b01,
+        26 => 0b1,
+        27..29 => 0b111,
+        30..31 => 0b00,
+    }
+
+    asm {
+        "{self.MNEMONIC} {vt}, [{rn}, {imm}]"
+    }
+
+    behavior {
+        store(rn + zext(imm, self.XLEN), 16, vt);
+    }
+}
+
 // 64-bit register pair, signed scaled offset, no writeback.
 
 instruction LoadPair for [ARMv8A64] : LoadStorePair {
@@ -277,6 +410,121 @@ instruction StorePair for [ARMv8A64] : LoadStorePair {
     behavior {
         store(rn + sext(imm, self.XLEN), 8, rt);
         store(rn + sext(imm, self.XLEN) + zext(0b1000, self.XLEN), 8, rt2);
+    }
+
+    schedule { units = [WriteStore]; }
+}
+
+// Base-writeback addressing (doubleword). Used by function prologues/epilogues
+// (`str x30,[sp,#-16]!` / `ldr x30,[sp],#16`) and post-increment array walks.
+// The offset is the unscaled byte delta; rn is updated to rn + offset.
+
+instruction LoadDoublewordPostIndex for [ARMv8A64] : LoadStorePostIndex {
+    param MNEMONIC: String = "ldr";
+    param OPNAME: String = "load_doubleword_postidx";
+    param SIZE: bits<2> = 0b11;
+    param OPC: bits<2> = 0b01;
+
+    behavior {
+        rt = load(rn, 8, 0b0);
+        rn = rn + sext(imm, self.XLEN);
+    }
+}
+
+instruction LoadDoublewordPreIndex for [ARMv8A64] : LoadStorePreIndex {
+    param MNEMONIC: String = "ldr";
+    param OPNAME: String = "load_doubleword_preidx";
+    param SIZE: bits<2> = 0b11;
+    param OPC: bits<2> = 0b01;
+
+    behavior {
+        rn = rn + sext(imm, self.XLEN);
+        rt = load(rn, 8, 0b0);
+    }
+}
+
+instruction StoreDoublewordPostIndex for [ARMv8A64] : LoadStorePostIndex {
+    param MNEMONIC: String = "str";
+    param OPNAME: String = "store_doubleword_postidx";
+    param SIZE: bits<2> = 0b11;
+    param OPC: bits<2> = 0b00;
+
+    behavior {
+        store(rn, 8, rt);
+        rn = rn + sext(imm, self.XLEN);
+    }
+
+    schedule { units = [WriteStore]; }
+}
+
+instruction StoreDoublewordPreIndex for [ARMv8A64] : LoadStorePreIndex {
+    param MNEMONIC: String = "str";
+    param OPNAME: String = "store_doubleword_preidx";
+    param SIZE: bits<2> = 0b11;
+    param OPC: bits<2> = 0b00;
+
+    behavior {
+        rn = rn + sext(imm, self.XLEN);
+        store(rn, 8, rt);
+    }
+
+    schedule { units = [WriteStore]; }
+}
+
+// Base-writeback register pair (`ldp`/`stp` pre/post-indexed) — the pair
+// prologue/epilogue forms (`stp x29,x30,[sp,#-16]!` / `ldp x29,x30,[sp],#16`).
+
+instruction LoadPairPostIndex for [ARMv8A64] : LoadStorePairWriteback {
+    param MNEMONIC: String = "ldp";
+    param OPNAME: String = "load_pair_postidx";
+    param L: bits<1> = 0b1;
+    param INDEX: bits<3> = 0b001;
+
+    behavior {
+        rt = load(rn, 8, 0b0);
+        rt2 = load(rn + zext(0b1000, self.XLEN), 8, 0b0);
+        rn = rn + sext(imm, self.XLEN);
+    }
+}
+
+instruction LoadPairPreIndex for [ARMv8A64] : LoadStorePairWriteback {
+    param MNEMONIC: String = "ldp";
+    param OPNAME: String = "load_pair_preidx";
+    param L: bits<1> = 0b1;
+    param INDEX: bits<3> = 0b011;
+
+    behavior {
+        rn = rn + sext(imm, self.XLEN);
+        rt = load(rn, 8, 0b0);
+        rt2 = load(rn + zext(0b1000, self.XLEN), 8, 0b0);
+    }
+}
+
+instruction StorePairPostIndex for [ARMv8A64] : LoadStorePairWriteback {
+    param MNEMONIC: String = "stp";
+    param OPNAME: String = "store_pair_postidx";
+    param L: bits<1> = 0b0;
+    param INDEX: bits<3> = 0b001;
+
+    behavior {
+        store(rn, 8, rt);
+        store(rn + zext(0b1000, self.XLEN), 8, rt2);
+        rn = rn + sext(imm, self.XLEN);
+    }
+
+    schedule { units = [WriteStore]; }
+}
+
+instruction StorePairPreIndex for [ARMv8A64] : LoadStorePairWriteback {
+    param MNEMONIC: String = "stp";
+    param OPNAME: String = "store_pair_preidx";
+    param L: bits<1> = 0b0;
+    param INDEX: bits<3> = 0b011;
+
+    behavior {
+        rn = rn + sext(imm, self.XLEN);
+        store(rn, 8, rt);
+        store(rn + zext(0b1000, self.XLEN), 8, rt2);
     }
 
     schedule { units = [WriteStore]; }

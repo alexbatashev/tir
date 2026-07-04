@@ -4,12 +4,12 @@
 //! cycles — timing is recovered later by replaying the recorded trace against
 //! a machine model (see [`crate::timing`]).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::rc::Rc;
 
 use tir::Context;
-use tir::backend::{MachineContext, MachineInstruction, PerfCounter, SimTrap};
+use tir::backend::{InstructionDecoder, MachineContext, MachineInstruction, PerfCounter, SimTrap};
 
 use crate::error::Error;
 use crate::program::{MachineBlock, ProgramImage};
@@ -42,7 +42,13 @@ pub type ExceptionHandler = Box<dyn FnMut(&mut Executor, u64, u64) -> ExceptionA
 #[derive(Default)]
 pub struct Executor {
     program: Option<Rc<ProgramImage>>,
-    registers: HashMap<(String, u16), tir::utils::APInt>,
+    /// All architectural registers, stored as raw byte lanes. Interpretation is
+    /// routed by type at execution: an integer operand reads an `APInt`, a float
+    /// operand an `APFloat`, a vector operand the lanes themselves — so a value
+    /// is never forced through the wrong representation (e.g. a 128-bit vector
+    /// through a 64-bit `APInt`). Keyed by physical file; sub-word classes (1-bit
+    /// flags) occupy a whole byte. Absent keys read as zero.
+    registers: HashMap<(String, u16), tir::utils::RawBits>,
     /// Map from register class name to its physical register file. Classes that
     /// share a file (e.g. AArch64 `GPR` and `GPRsp`) alias index-for-index, so
     /// register storage is keyed by file rather than by class. Classes absent
@@ -72,6 +78,17 @@ pub struct Executor {
     retired_instructions: u64,
     exception_handler: Option<ExceptionHandler>,
     halted: bool,
+    /// Decode-on-fetch state, used to execute raw machine code (an ELF loaded
+    /// into `memory`) instead of a pre-built [`ProgramImage`]. The decoder turns
+    /// the word at PC into an op built in `decode_context`; results are cached by
+    /// address so a hot loop decodes each instruction once.
+    decoder: Option<InstructionDecoder>,
+    decode_context: Option<Context>,
+    decode_cache: HashMap<u64, tir::OpId>,
+    /// `(class, index)` pairs that read as a hardwired zero (e.g. AArch64 `xzr`).
+    /// Checked on the *original* class before file aliasing, so `GPR[31]` (xzr)
+    /// reads 0 even though it shares a storage slot with `GPRsp[31]` (sp).
+    hardwired_zero: HashSet<(String, u16)>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -103,6 +120,47 @@ impl Executor {
         Ok(())
     }
 
+    /// Configure decode-on-fetch execution of raw machine code already present in
+    /// `memory`: `decoder` turns the word at PC into an op built in `context`.
+    /// Used instead of [`Executor::load`] to run an ELF image (see
+    /// [`Executor::set_entry`]).
+    pub fn set_decoder(&mut self, context: Context, decoder: InstructionDecoder) {
+        self.decode_context = Some(context);
+        self.decoder = Some(decoder);
+    }
+
+    /// Set the program counter (the entry point of a decode-on-fetch run).
+    pub fn set_entry(&mut self, pc: u64) {
+        self.pc = pc;
+    }
+
+    /// Copy `bytes` into guest memory starting at `address` (e.g. an ELF
+    /// segment). Bounds-checked against the backing region.
+    pub fn write_bytes(&mut self, address: u64, bytes: &[u8]) -> Result<(), SimTrap> {
+        let offset = address
+            .checked_sub(self.memory_base)
+            .ok_or(SimTrap::BadAddress {
+                address,
+                size: bytes.len(),
+            })?;
+        let start = usize::try_from(offset).map_err(|_| SimTrap::BadAddress {
+            address,
+            size: bytes.len(),
+        })?;
+        let end = start.checked_add(bytes.len()).ok_or(SimTrap::BadAddress {
+            address,
+            size: bytes.len(),
+        })?;
+        if end > self.memory.len() {
+            return Err(SimTrap::BadAddress {
+                address,
+                size: bytes.len(),
+            });
+        }
+        self.memory[start..end].copy_from_slice(bytes);
+        Ok(())
+    }
+
     /// Record the dynamic instruction stream (the executed op ids, in order) so a
     /// timing model can replay it. Off by default to avoid the memory cost.
     pub fn enable_trace_recording(&mut self) {
@@ -115,6 +173,18 @@ impl Executor {
     /// `GPR`/`GPRsp`). Without it, each class is its own independent file.
     pub fn set_register_files(&mut self, register_files: HashMap<String, String>) {
         self.register_files = register_files;
+    }
+
+    /// Configure which `(class, index)` registers read as a hardwired zero (from
+    /// `TargetMachine::hardwired_zero_registers`).
+    pub fn set_hardwired_zero_registers(
+        &mut self,
+        registers: impl IntoIterator<Item = (&'static str, u16)>,
+    ) {
+        self.hardwired_zero = registers
+            .into_iter()
+            .map(|(class, index)| (class.to_string(), index))
+            .collect();
     }
 
     /// Configure architectural register widths per class (from
@@ -192,6 +262,54 @@ impl Executor {
             .unwrap_or(class)
     }
 
+    /// A register class's architectural width in bits (64 if unregistered).
+    fn class_bit_width(&self, class: &str) -> u32 {
+        self.register_widths.get(class).copied().unwrap_or(64)
+    }
+
+    /// The class width rounded up to a whole number of bytes (the byte-lane size
+    /// its stored value occupies; a 1-bit flag still uses one byte).
+    fn class_byte_bits(&self, class: &str) -> usize {
+        (self.class_bit_width(class).div_ceil(8) * 8) as usize
+    }
+
+    /// The class-width byte lanes of a register, honoring the special reads
+    /// (PC, hardwired-zero, performance counters). Absent registers read zero.
+    fn read_register_raw(&self, class: &str, index: u16) -> Result<tir::utils::RawBits, SimTrap> {
+        let byte_bits = self.class_byte_bits(class);
+        if class == "PC" {
+            return Ok(
+                tir::utils::RawBits::from_apint(&tir::utils::APInt::new(64, self.pc))
+                    .resized(byte_bits),
+            );
+        }
+        if self.hardwired_zero.contains(&(class.to_string(), index)) {
+            return Ok(tir::utils::RawBits::new(byte_bits));
+        }
+        if let Some(&counter) = self.counter_registers.get(&(class.to_string(), index)) {
+            let value = self.counter_value(counter);
+            return Ok(
+                tir::utils::RawBits::from_apint(&tir::utils::APInt::new(64, value))
+                    .resized(byte_bits),
+            );
+        }
+        let key = (self.register_file(class).to_string(), index);
+        Ok(self
+            .registers
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(|| tir::utils::RawBits::new(byte_bits))
+            .resized(byte_bits))
+    }
+
+    /// Store `bytes` into a register's file slot at the class byte width.
+    fn store_register_raw(&mut self, class: &str, index: u16, bytes: tir::utils::RawBits) {
+        let byte_bits = self.class_byte_bits(class);
+        let file = self.register_file(class).to_string();
+        self.registers
+            .insert((file, index), bytes.resized(byte_bits));
+    }
+
     /// The recorded dynamic instruction stream as `(op, pc)` pairs, in execution
     /// order. The PC lets a timing model reconstruct branch directions/outcomes.
     pub fn trace(&self) -> &[(tir::OpId, u64)] {
@@ -210,11 +328,84 @@ impl Executor {
         trace: TraceOptions,
         out: &mut dyn Write,
     ) -> Result<(), Error> {
-        let result = self.run_inner(until_pc, max_cycles, trace, out);
+        let result = if self.program.is_some() {
+            self.run_inner(until_pc, max_cycles, trace, out)
+        } else {
+            self.run_decoded_inner(until_pc, max_cycles, trace, out)
+        };
         if trace.registers_at_end {
             self.emit_register_dump(out, "final registers");
         }
         result
+    }
+
+    /// Decode-on-fetch fetch loop: read the 4-byte word at PC, decode it into an
+    /// op (cached by address), execute it, and advance. Runs raw machine code
+    /// loaded into `memory` (an ELF), stopping on `until_pc`, an exception
+    /// handler's halt (e.g. an exit syscall), or the `max_cycles` fuse.
+    fn run_decoded_inner(
+        &mut self,
+        until_pc: u64,
+        max_cycles: u64,
+        trace: TraceOptions,
+        out: &mut dyn Write,
+    ) -> Result<(), Error> {
+        let context = self.decode_context.clone().ok_or(Error::ProgramNotLoaded)?;
+        let decoder = self.decoder.ok_or(Error::ProgramNotLoaded)?;
+        for _ in 0..max_cycles {
+            let pc = self.pc;
+            if pc == until_pc {
+                return Ok(());
+            }
+            let op_id = match self.decode_cache.get(&pc) {
+                Some(&id) => id,
+                None => {
+                    let word = self.read_memory(pc, 4)? as u32;
+                    let id = decoder(&context, word).ok_or(SimTrap::InvalidInstruction {
+                        op: "<decode>",
+                        reason: format!("no instruction matches word 0x{word:08x} at pc 0x{pc:x}"),
+                    })?;
+                    self.decode_cache.insert(pc, id);
+                    id
+                }
+            };
+            let op = context.get_op(op_id);
+            let machine_inst = op
+                .clone()
+                .as_interface::<dyn MachineInstruction>()
+                .ok_or_else(|| SimTrap::InvalidInstruction {
+                    op: op.name,
+                    reason: "operation does not implement MachineInstruction".to_string(),
+                })?;
+            if trace.instructions {
+                let line = format!(
+                    "pc=0x{pc:016x}  {}",
+                    Self::format_instruction_line(&context, &op, machine_inst.as_ref())
+                );
+                Self::emit_trace_line(out, &line);
+            }
+            if self.record_trace {
+                self.trace.push((op_id, pc));
+            }
+            self.pc = pc;
+            self.pc_explicitly_written = false;
+            machine_inst.execute(self)?;
+            self.retired_instructions += 1;
+            if trace.registers_after_each_instruction {
+                self.emit_register_dump(out, "registers");
+            }
+            if self.halted {
+                return Ok(());
+            }
+            if !self.pc_explicitly_written {
+                self.pc = pc.wrapping_add(u64::from(machine_inst.width_bytes()));
+            }
+        }
+        Err(SimTrap::MaxCyclesExceeded {
+            max_cycles,
+            until_pc,
+        }
+        .into())
     }
 
     /// The fetch loop: resolve PC to a block, execute it, repeat. `max_cycles`
@@ -310,7 +501,7 @@ impl Executor {
         }
     }
 
-    pub fn register_snapshot(&self) -> Vec<(String, u16, tir::utils::APInt)> {
+    pub fn register_snapshot(&self) -> Vec<(String, u16, tir::utils::RawBits)> {
         let mut regs = self
             .registers
             .iter()
@@ -356,7 +547,7 @@ impl Executor {
                     "  {}[{}] = 0x{:x} (width={})",
                     class,
                     index,
-                    value.to_u64(),
+                    value.to_apint(),
                     value.width()
                 ),
             );
@@ -370,20 +561,14 @@ impl Executor {
 
 impl MachineContext for Executor {
     fn read_register(&self, class: &str, index: u16) -> Result<tir::utils::APInt, SimTrap> {
-        // The program counter is held specially (it drives instruction fetch), but
-        // semantics reference it as the `PC` register class (e.g. `PC::pc`).
-        if class == "PC" {
-            return Ok(self.resize_to_class_width(class, tir::utils::APInt::new(64, self.pc)));
-        }
-        if let Some(&counter) = self.counter_registers.get(&(class.to_string(), index)) {
-            let value = self.counter_value(counter);
-            return Ok(self.resize_to_class_width(class, tir::utils::APInt::new(64, value)));
-        }
-        let key = (self.register_file(class).to_string(), index);
-        if let Some(value) = self.registers.get(&key) {
-            return Ok(self.resize_to_class_width(class, value.clone()));
-        }
-        Ok(self.resize_to_class_width(class, tir::utils::APInt::new(64, 0)))
+        // Interpret the stored byte lanes as an integer at the class width. Only
+        // scalar (<=64-bit) classes take this path; wider classes read as bits.
+        let bytes = self.read_register_raw(class, index)?;
+        Ok(self.resize_to_class_width(class, bytes.to_apint()))
+    }
+
+    fn read_register_bits(&self, class: &str, index: u16) -> Result<tir::utils::RawBits, SimTrap> {
+        self.read_register_raw(class, index)
     }
 
     fn write_register(
@@ -405,8 +590,27 @@ impl MachineContext for Executor {
         {
             return Ok(());
         }
-        let file = self.register_file(class).to_string();
-        self.registers.insert((file, index), value);
+        self.store_register_raw(class, index, tir::utils::RawBits::from_apint(&value));
+        Ok(())
+    }
+
+    fn write_register_bits(
+        &mut self,
+        class: &str,
+        index: u16,
+        value: tir::utils::RawBits,
+    ) -> Result<(), SimTrap> {
+        if class == "PC" {
+            self.write_pc(value.resized(64).to_apint().to_u64());
+            return Ok(());
+        }
+        if self
+            .counter_registers
+            .contains_key(&(class.to_string(), index))
+        {
+            return Ok(());
+        }
+        self.store_register_raw(class, index, value);
         Ok(())
     }
 

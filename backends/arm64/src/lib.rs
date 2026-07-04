@@ -210,14 +210,36 @@ dialect! {
             SignExtendByteOp,
             SignExtendHalfwordOp,
             SignExtendWordOp,
+            UnsignedBitfieldMoveOp,
+            MoveWideZero32Op,
+            AndImmediateOp,
+            AndImmediate32Op,
+            FAddDoubleOp,
+            FSubDoubleOp,
+            FMulDoubleOp,
+            FDivDoubleOp,
+            FMovImmediateDoubleOp,
+            FMovDoubleToGeneralOp,
+            DupGeneral2DOp,
+            AddVector2DOp,
+            AddVector4SOp,
+            FAddVector2DOp,
+            FMulVector2DOp,
+            MoveImmediateVector4SOp,
+            FMoveImmediateVector2DOp,
             CompareOp,
             CompareNegativeOp,
             TestOp,
             CompareImmediateOp,
             CompareNegImmediateOp,
+            SubsImmediateOp,
+            AddsImmediateOp,
             MoveWideZeroOp,
             MoveWideNotOp,
             MoveWideKeepOp,
+            MoveWideKeepShiftedOp,
+            XorShiftedLslOp,
+            XorShiftedLsrOp,
             AddressPCRelOp,
             AddressPCRelPageOp,
             MultiplyAddOp,
@@ -269,8 +291,22 @@ dialect! {
             StoreHalfwordUnscaledOp,
             StoreWordUnscaledOp,
             StoreDoublewordUnscaledOp,
+            LoadDoublewordRegOffsetOp,
+            LoadDoublewordRegOffsetScaledOp,
+            StoreDoublewordRegOffsetOp,
+            StoreDoublewordRegOffsetScaledOp,
+            LoadDoublewordPostIndexOp,
+            LoadDoublewordPreIndexOp,
+            StoreDoublewordPostIndexOp,
+            StoreDoublewordPreIndexOp,
+            LoadVector128Op,
+            StoreVector128Op,
             LoadPairOp,
             StorePairOp,
+            LoadPairPostIndexOp,
+            LoadPairPreIndexOp,
+            StorePairPostIndexOp,
+            StorePairPreIndexOp,
             BranchImmediateOp,
             BranchLinkOp,
             BranchRegisterOp,
@@ -294,6 +330,8 @@ dialect! {
             CompareBranchNonZeroOp,
             TestBitBranchZeroOp,
             TestBitBranchNonZeroOp,
+            SupervisorOp,
+            NoOperationOp,
         ],
     }
 }
@@ -736,6 +774,14 @@ impl tir::backend::TargetMachine for Arm64Target {
             get_instruction_encoders(),
             get_instruction_patchers(),
         ))
+    }
+
+    fn instruction_decoder(&self) -> Option<tir::backend::InstructionDecoder> {
+        Some(decode_instruction)
+    }
+
+    fn hardwired_zero_registers(&self) -> &'static [(&'static str, u16)] {
+        hardwired_zero_registers()
     }
 }
 
@@ -1347,6 +1393,81 @@ mod tests {
             .attr("imm", AttributeValue::Int(42))
             .build();
         assert_eq!(word(movz.id()), 0xD2800540, "movz x0, #42");
+    }
+
+    #[test]
+    fn decoder_round_trips_golden_words() {
+        let context = Context::with_default_dialects();
+        context.register_dialect::<AsmDialect>();
+        context.register_dialect::<Arm64Dialect>();
+
+        // The encoder is golden-verified against llvm-mc (see the test above), so
+        // `decode(word) -> op` is correct iff re-encoding that op reproduces the
+        // original word. This exercises operand extraction (registers, immediates,
+        // split fields) and fixed-opcode matching across the instruction classes
+        // the benchmark ELFs execute, plus the newly-added `svc`.
+        let encoders = crate::get_instruction_encoders();
+        let reencode = |id: tir::OpId| -> u32 {
+            let inst = context.get_op(id);
+            let enc = encoders[inst.name](&inst)
+                .unwrap_or_else(|| panic!("'{}' failed to re-encode", inst.name));
+            u32::from_le_bytes(enc.bytes.try_into().unwrap())
+        };
+
+        let cases: &[(u32, &str)] = &[
+            (0x8B020020, "add x0, x1, x2"),
+            (0x9AC22020, "lslv x0, x1, x2"),
+            (0xEB02003F, "cmp x1, x2"),
+            (0xF9400020, "ldr x0, [x1]"),
+            (0xF9000062, "str x2, [x3]"),
+            (0x54000080, "b.eq +16"),
+            (0x14000003, "b +12"),
+            (0x94000002, "bl +8"),
+            (0xD65F03C0, "ret"),
+            (0xD2800540, "movz x0, #42"),
+            (0xD4000001, "svc #0"),
+            (0xF1000400, "subs x0, x0, #1"),
+            (0xB100094A, "adds x10, x10, #2"),
+            (0xF8616801, "ldr x1, [x0, x1]"),
+            (0xF860790D, "ldr x13, [x8, x0, lsl #3]"),
+            (0xF82D696E, "str x14, [x11, x13]"),
+            (0xF82B790D, "str x13, [x8, x11, lsl #3]"),
+            (0xF81F0FFE, "str x30, [sp, #-16]!"),
+            (0xF84107FE, "ldr x30, [sp], #16"),
+            (0xF802050A, "str x10, [x8], #32"),
+            (0xF8408C20, "ldr x0, [x1, #8]!"),
+            (0xA9BF7BFD, "stp x29, x30, [sp, #-16]!"),
+            (0xA8C17BFD, "ldp x29, x30, [sp], #16"),
+            (0xD503201F, "nop"),
+            (0xF2BBD5A9, "movk x9, #0xdead, lsl #16"),
+            (0xF2C24689, "movk x9, #0x1234, lsl #32"),
+            (0xF2F4B4A9, "movk x9, #0xa5a5, lsl #48"),
+            (0xCA493129, "eor x9, x9, x9, lsr #12"),
+            (0xCA096529, "eor x9, x9, x9, lsl #25"),
+            (0xD37AE5AD, "lsl x13, x13, #6"),
+            (0x52807D02, "movz w2, #1000"),
+            (0x12001C00, "and w0, w0, #0xff"),
+            (0x92401C41, "and x1, x2, #0xff"),
+            (0x92402C83, "and x3, x4, #0xfff"),
+            (0x1E612802, "fadd d2, d0, d1"),
+            (0x1E600843, "fmul d3, d2, d0"),
+            (0x1E601000, "fmov d0, #2.0"),
+            (0x9E660064, "fmov x4, d3"),
+            (0x4E080C00, "dup v0.2d, x0"),
+            (0x4EE18402, "add v2.2d, v0.2d, v1.2d"),
+            (0x4EA18403, "add v3.4s, v0.4s, v1.4s"),
+            (0x4E61D404, "fadd v4.2d, v0.2d, v1.2d"),
+            (0x6E61DC05, "fmul v5.2d, v0.2d, v1.2d"),
+            (0x3DC00008, "ldr q8, [x0]"),
+            (0x3D800009, "str q9, [x0]"),
+            (0x4F000426, "movi v6.4s, #1"),
+            (0x6F00F407, "fmov v7.2d, #2.0"),
+        ];
+        for &(w, asm) in cases {
+            let id = crate::decode_instruction(&context, w)
+                .unwrap_or_else(|| panic!("failed to decode {asm} ({w:#010x})"));
+            assert_eq!(reencode(id), w, "round-trip mismatch for {asm}");
+        }
     }
 
     #[test]

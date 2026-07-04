@@ -82,6 +82,13 @@ pub fn value_from_register(v: tir_adt::APInt) -> Value {
     Value::Int(v)
 }
 
+/// Wrap raw register byte lanes (e.g. a vector register from
+/// `MachineContext::read_register_bits`) as an interpreter value; behaviors then
+/// split it into lanes.
+pub fn value_from_raw_bits(v: tir_adt::RawBits) -> Value {
+    Value::RawBits(v)
+}
+
 /// Convert an interpreter integer back to a machine-register `APInt` for write-back.
 pub fn register_from_int(v: tir_adt::APInt) -> tir_adt::APInt {
     v

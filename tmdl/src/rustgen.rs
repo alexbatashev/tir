@@ -236,6 +236,8 @@ fn emit_instructions<'a>(
     let mut instruction_encoder_impls: Vec<proc_macro2::TokenStream> = vec![];
     let mut instruction_encoder_map_inits: Vec<proc_macro2::TokenStream> = vec![];
     let mut instruction_patcher_map_inits: Vec<proc_macro2::TokenStream> = vec![];
+    let mut instruction_decoder_impls: Vec<proc_macro2::TokenStream> = vec![];
+    let mut instruction_decoder_dispatch: Vec<proc_macro2::TokenStream> = vec![];
 
     // `(class, register-name) -> encoding index` over every register class, so the
     // simulator can lower register paths that carry no numeric index in their name
@@ -297,6 +299,19 @@ fn emit_instructions<'a>(
         .flat_map(|f| f.register_classes())
         .filter(|rc| rc.has_float_registers())
         .map(|rc| rc.name.clone())
+        .collect();
+
+    // Per-class execution read routing: `(is_float, width)`. A vector operand
+    // (width > 64) is read as raw byte lanes, a scalar float as an `APFloat`,
+    // and everything else as an `APInt` — so no value crosses the register
+    // interface in the wrong representation.
+    let reg_kinds: HashMap<String, (bool, u32)> = files
+        .iter()
+        .flat_map(|f| f.register_classes())
+        .map(|rc| {
+            let width = literal_register_class_width(files, &rc.name).unwrap_or(64);
+            (rc.name.clone(), (float_classes.contains(&rc.name), width))
+        })
         .collect();
 
     for inst in files.iter().flat_map(|f| f.instructions()) {
@@ -1024,6 +1039,7 @@ fn emit_instructions<'a>(
                 &isa_param_values,
                 &mnemonic_lit,
                 &register_index_map,
+                &reg_kinds,
             ) {
                 Some(eval) => quote! {
                     #eval
@@ -1040,6 +1056,7 @@ fn emit_instructions<'a>(
                 &isa_param_values,
                 &mnemonic_lit,
                 &register_index_map,
+                &reg_kinds,
             ) {
                 Some(body) => quote! {
                     #body
@@ -1415,6 +1432,21 @@ fn emit_instructions<'a>(
                 });
             }
         }
+
+        if let Some((decoder, decode_fn_ident)) = emit_instruction_decoder(
+            inst,
+            &encoding_arms,
+            &ops_map,
+            &resolved_params,
+            width_bytes,
+        ) {
+            instruction_decoder_impls.push(decoder);
+            instruction_decoder_dispatch.push(quote! {
+                if let Some(id) = #decode_fn_ident(context, word) {
+                    return Some(id);
+                }
+            });
+        }
     }
 
     // Flag-mediated conditional branches: definer + branch pairs composed and
@@ -1477,6 +1509,17 @@ fn emit_instructions<'a>(
             #(#instruction_patcher_map_inits)*
 
             map
+        }
+
+        #(#instruction_decoder_impls)*
+
+        /// Decode a 32-bit little-endian machine word into a freshly-built op in
+        /// `context`, returning its id, or `None` if no instruction matches.
+        /// Instructions are tried in declaration order; each matches on its fixed
+        /// opcode bits and reconstructs its operands from the word.
+        pub fn decode_instruction(context: &tir::Context, word: u32) -> Option<tir::OpId> {
+            #(#instruction_decoder_dispatch)*
+            None
         }
 
         #(#isel_rule_emitters)*
@@ -1682,8 +1725,12 @@ fn emit_register_info(files: &[ast::File]) -> Result<proc_macro2::TokenStream, T
         let name_lit = proc_macro2::Literal::string(&rc.name);
         let width_ts = match rc.parameters.get("WIDTH") {
             Some((_ty, Some(ast::Expr::Lit(ast::Lit::Int(li))))) => {
+                // Cap at 128 so 128-bit SIMD/FP register files (AArch64 V
+                // registers) keep their true width. Values wider than 64 bits are
+                // carried as `RawBits` (byte lanes) through the register interface,
+                // never as a single `APInt`, so this width is safe.
                 let lit =
-                    proc_macro2::Literal::u32_unsuffixed(parse_literal_value(li).min(64) as u32);
+                    proc_macro2::Literal::u32_unsuffixed(parse_literal_value(li).min(128) as u32);
                 quote! { #lit }
             }
             Some((_ty, Some(ast::Expr::Field(field)))) if matches!(&*field.base, ast::Expr::Ident(id) if id.name == "self") =>
@@ -2127,6 +2174,7 @@ fn emit_register_trait_helpers(files: &[ast::File]) -> Result<proc_macro2::Token
             hardwired_patterns.push(quote! { (#class_lit, #idx_lit) });
         }
     }
+    let list = hardwired_patterns.clone();
     let hardwired_body = if hardwired_patterns.is_empty() {
         quote! {
             let _ = (class, index);
@@ -2139,6 +2187,14 @@ fn emit_register_trait_helpers(files: &[ast::File]) -> Result<proc_macro2::Token
     Ok(quote! {
         pub fn register_has_trait_hardwired_zero(class: &str, index: u16) -> bool {
             #hardwired_body
+        }
+
+        /// Every `(class, index)` that reads as a hardwired zero (e.g. AArch64
+        /// `xzr`). The simulator zeroes these on read so a value stored in an
+        /// aliasing slot (e.g. `sp` sharing the file index with `xzr`) never
+        /// leaks through the zero register.
+        pub fn hardwired_zero_registers() -> &'static [(&'static str, u16)] {
+            &[#(#list),*]
         }
     })
 }
@@ -3873,6 +3929,7 @@ fn emit_behavior_exec(
     isa_param_values: &HashMap<String, i64>,
     mnemonic_lit: &proc_macro2::Literal,
     register_index_map: &HashMap<(String, String), u32>,
+    reg_kinds: &HashMap<String, (bool, u32)>,
 ) -> Option<proc_macro2::TokenStream> {
     match expr {
         ast::Expr::Assign(a) => emit_assignment_exec(
@@ -3883,6 +3940,7 @@ fn emit_behavior_exec(
             isa_param_values,
             mnemonic_lit,
             register_index_map,
+            reg_kinds,
         ),
         ast::Expr::Call(_) if is_store_call(expr) => emit_effect_exec(
             expr,
@@ -3891,6 +3949,7 @@ fn emit_behavior_exec(
             isa_param_values,
             mnemonic_lit,
             register_index_map,
+            reg_kinds,
         ),
         ast::Expr::Call(_) if is_trap_call(expr) => {
             let cause = trap_call_cause(expr)?;
@@ -3908,6 +3967,7 @@ fn emit_behavior_exec(
             isa_param_values,
             mnemonic_lit,
             register_index_map,
+            reg_kinds,
         ),
         ast::Expr::Block(b) => {
             let mut steps = Vec::new();
@@ -3919,6 +3979,7 @@ fn emit_behavior_exec(
                     isa_param_values,
                     mnemonic_lit,
                     register_index_map,
+                    reg_kinds,
                 ) {
                     steps.push(step);
                 } else if matches!(
@@ -3943,6 +4004,7 @@ fn emit_behavior_exec(
                 isa_param_values,
                 mnemonic_lit,
                 register_index_map,
+                reg_kinds,
             )?;
             let then_body = emit_behavior_exec(
                 i.then.as_ref(),
@@ -3951,6 +4013,7 @@ fn emit_behavior_exec(
                 isa_param_values,
                 mnemonic_lit,
                 register_index_map,
+                reg_kinds,
             )?;
             let else_body = if let Some(else_expr) = &i.else_ {
                 emit_behavior_exec(
@@ -3960,6 +4023,7 @@ fn emit_behavior_exec(
                     isa_param_values,
                     mnemonic_lit,
                     register_index_map,
+                    reg_kinds,
                 )?
             } else {
                 quote! {}
@@ -3982,6 +4046,7 @@ fn emit_behavior_exec(
 /// Emit one assignment from a behavior: evaluate its value, then write it to the
 /// destination (a register operand, a fixed/status register named by class, or PC).
 /// Returns `None` if the value cannot be lowered or the destination is unrecognized.
+#[allow(clippy::too_many_arguments)]
 fn emit_assignment_exec(
     dest: &ast::Expr,
     rhs: &ast::Expr,
@@ -3990,6 +4055,7 @@ fn emit_assignment_exec(
     isa_param_values: &HashMap<String, i64>,
     mnemonic_lit: &proc_macro2::Literal,
     register_index_map: &HashMap<(String, String), u32>,
+    reg_kinds: &HashMap<String, (bool, u32)>,
 ) -> Option<proc_macro2::TokenStream> {
     let eval = emit_value_eval(
         rhs,
@@ -3998,6 +4064,7 @@ fn emit_assignment_exec(
         isa_param_values,
         mnemonic_lit,
         register_index_map,
+        reg_kinds,
     )?;
     let write = emit_destination_write(dest, ops, register_index_map, mnemonic_lit)?;
     Some(quote! {
@@ -4015,6 +4082,7 @@ fn emit_effect_exec(
     isa_param_values: &HashMap<String, i64>,
     mnemonic_lit: &proc_macro2::Literal,
     register_index_map: &HashMap<(String, String), u32>,
+    reg_kinds: &HashMap<String, (bool, u32)>,
 ) -> Option<proc_macro2::TokenStream> {
     let eval = emit_value_eval(
         expr,
@@ -4023,6 +4091,7 @@ fn emit_effect_exec(
         isa_param_values,
         mnemonic_lit,
         register_index_map,
+        reg_kinds,
     )?;
     Some(quote! {
         {
@@ -4042,13 +4111,15 @@ fn emit_value_eval(
     isa_param_values: &HashMap<String, i64>,
     mnemonic_lit: &proc_macro2::Literal,
     register_index_map: &HashMap<(String, String), u32>,
+    reg_kinds: &HashMap<String, (bool, u32)>,
 ) -> Option<proc_macro2::TokenStream> {
     let mut dag = tir::sem::SemGraph::new();
     let lowering =
         rhs.lower_to_sema_with_registers(&mut dag, numeric_params, register_index_map)?;
     // Build the semantic graph inline (no type annotations, so no `_context`).
     let (dag_stmts, _root) = emit_dag_as_code(&dag, lowering.root, &[], &HashSet::new());
-    let (max_sym_id, sym_inits) = emit_sym_inits(&lowering, ops, isa_param_values, mnemonic_lit);
+    let (max_sym_id, sym_inits) =
+        emit_sym_inits(&lowering, ops, isa_param_values, mnemonic_lit, reg_kinds);
     let sym_count_lit = proc_macro2::Literal::usize_unsuffixed(max_sym_id + 1);
 
     Some(quote! {
@@ -4083,14 +4154,18 @@ fn emit_value_eval(
             }
             let mut __memory = __TmdlMachineMemory(machine);
             match tir::sem::execute_with_memory(&__g, &__syms, &mut __memory)? {
-                tir::sem::Value::Int(i) => tir::sem::register_from_int(i),
-                // A lane concatenation (e.g. an OPIVV destination) is raw bits;
-                // store its bit pattern.
-                tir::sem::Value::RawBits(b) => tir::sem::register_from_int(b.to_apint()),
-                tir::sem::Value::Float(_) | tir::sem::Value::Iterator(_) => {
+                tir::sem::Value::Int(i) => tir::backend::RegisterValue::Int(i),
+                // A float result (e.g. `fadd`) and a lane concatenation (a vector
+                // destination) are written back as raw bytes; the destination
+                // register's storage keeps the bit pattern.
+                tir::sem::Value::Float(f) => {
+                    tir::backend::RegisterValue::Bits(tir::utils::RawBits::from_apfloat(&f))
+                }
+                tir::sem::Value::RawBits(b) => tir::backend::RegisterValue::Bits(b),
+                tir::sem::Value::Iterator(_) => {
                     return Err(tir::backend::SimTrap::InvalidInstruction {
                         op: #mnemonic_lit,
-                        reason: "instruction semantic expression did not evaluate to integer".to_string(),
+                        reason: "instruction semantic expression did not evaluate to a register value".to_string(),
                     });
                 }
             }
@@ -4107,6 +4182,7 @@ fn emit_sym_inits(
     ops: &[(String, Type)],
     isa_param_values: &HashMap<String, i64>,
     mnemonic_lit: &proc_macro2::Literal,
+    reg_kinds: &HashMap<String, (bool, u32)>,
 ) -> (usize, Vec<proc_macro2::TokenStream>) {
     let max_sym_id = [
         lowering.variable_symbols.values().copied().max(),
@@ -4123,16 +4199,36 @@ fn emit_sym_inits(
         let name_lit = proc_macro2::Literal::string(name);
         if let Some((_, ty)) = ops.iter().find(|(n, _)| n == name) {
             match ty {
-                Type::Struct(_) => steps.push(quote! {
-                    {
-                        let (class, index) = tir::backend::register_attr(self.attributes(), #name_lit)
-                            .ok_or(tir::backend::SimTrap::MissingAttribute {
-                                op: #mnemonic_lit,
-                                attribute: #name_lit,
-                            })?;
-                        __syms[#sym_lit] = Some(tir::sem::value_from_register(machine.read_register(&class, index)?));
-                    }
-                }),
+                Type::Struct(class_name) => {
+                    let (_is_float, width) =
+                        reg_kinds.get(class_name).copied().unwrap_or((false, 64));
+                    // A vector operand (wider than a word) is read as raw byte
+                    // lanes; the behavior splits it into lanes and interprets each
+                    // as int or float. Scalar operands — integer and float alike —
+                    // read as an `APInt` bit pattern: float operations reinterpret
+                    // those bits via the node's float type, so a float value is
+                    // never forced whole through the wrong representation, and a
+                    // bit move (`fmov Xd,Dn`) reads the pattern directly.
+                    let read = if width > 64 {
+                        quote! {
+                            tir::sem::value_from_raw_bits(machine.read_register_bits(&class, index)?)
+                        }
+                    } else {
+                        quote! {
+                            tir::sem::value_from_register(machine.read_register(&class, index)?)
+                        }
+                    };
+                    steps.push(quote! {
+                        {
+                            let (class, index) = tir::backend::register_attr(self.attributes(), #name_lit)
+                                .ok_or(tir::backend::SimTrap::MissingAttribute {
+                                    op: #mnemonic_lit,
+                                    attribute: #name_lit,
+                                })?;
+                            __syms[#sym_lit] = Some(#read);
+                        }
+                    });
+                }
                 Type::Integer => steps.push(quote! {
                     {
                         let value = tir::backend::int_attr(self.attributes(), #name_lit)
@@ -4207,7 +4303,7 @@ fn emit_destination_write(
                 },
             )?;
             if !register_has_trait_hardwired_zero(&dst_class, dst_idx) {
-                machine.write_register(&dst_class, dst_idx, value)?;
+                machine.write_register_value(&dst_class, dst_idx, value)?;
             }
         });
     }
@@ -4223,7 +4319,7 @@ fn emit_destination_write(
             let index_lit = proc_macro2::Literal::u16_unsuffixed(index as u16);
             return Some(quote! {
                 if !register_has_trait_hardwired_zero(#class_lit, #index_lit) {
-                    machine.write_register(#class_lit, #index_lit, value)?;
+                    machine.write_register_value(#class_lit, #index_lit, value)?;
                 }
             });
         }
@@ -4711,4 +4807,194 @@ fn emit_instruction_encoder(
     };
 
     Ok(Some((encoder, patcher)))
+}
+
+/// Compile an instruction's encoding arms into a `decode_*_inst` function — the
+/// inverse of [`emit_instruction_encoder`]. Given a 32-bit little-endian
+/// instruction word it matches the fixed opcode bits, reconstructs each operand
+/// from its (possibly split) bit-fields, builds the corresponding op in the
+/// `Context`, and returns its id.
+///
+/// Best-effort: returns `None` (no decoder emitted) for instructions without an
+/// encoding, not exactly 32 bits wide, or using an encoding form this generator
+/// cannot invert — so enabling decoding never breaks a backend's build.
+fn emit_instruction_decoder(
+    inst: &ast::Instruction,
+    encoding_arms: &[ast::EncodingArm],
+    ops_map: &HashMap<String, Type>,
+    resolved_params: &HashMap<String, (Type, Option<ast::Expr>)>,
+    width_bytes: u64,
+) -> Option<(proc_macro2::TokenStream, proc_macro2::Ident)> {
+    if encoding_arms.is_empty() || width_bytes != 4 {
+        return None;
+    }
+
+    let mut const_word: u128 = 0;
+    let mut fixed_mask: u128 = 0;
+    let mut reg_fields: Vec<(String, Vec<IntField>)> = Vec::new();
+    let mut int_fields: Vec<(String, Vec<IntField>)> = Vec::new();
+
+    let push_field = |dst: &mut Vec<(String, Vec<IntField>)>, name: &str, field: IntField| match dst
+        .iter_mut()
+        .find(|(n, _)| n == name)
+    {
+        Some((_, fields)) => fields.push(field),
+        None => dst.push((name.to_string(), vec![field])),
+    };
+
+    for arm in encoding_arms {
+        let word_lo = arm.start;
+        let width = arm.end.unwrap_or(arm.start) - arm.start + 1;
+        match &arm.value {
+            ast::Expr::Lit(ast::Lit::Int(li)) => {
+                const_word |=
+                    (u128::from(parse_literal_value(li)) & encoding_mask(width)) << word_lo;
+                fixed_mask |= encoding_mask(width) << word_lo;
+            }
+            ast::Expr::Ident(id) => match ops_map.get(&id.name) {
+                Some(Type::Struct(_)) => push_field(
+                    &mut reg_fields,
+                    &id.name,
+                    IntField {
+                        op_lo: 0,
+                        word_lo,
+                        width,
+                    },
+                ),
+                Some(Type::Integer | Type::Bits(_)) => push_field(
+                    &mut int_fields,
+                    &id.name,
+                    IntField {
+                        op_lo: 0,
+                        word_lo,
+                        width,
+                    },
+                ),
+                Some(_) => return None,
+                None => match resolved_params.get(&id.name) {
+                    Some((_, Some(ast::Expr::Lit(ast::Lit::Int(li))))) => {
+                        const_word |=
+                            (u128::from(parse_literal_value(li)) & encoding_mask(width)) << word_lo;
+                        fixed_mask |= encoding_mask(width) << word_lo;
+                    }
+                    _ => return None,
+                },
+            },
+            ast::Expr::Slice(slc) => {
+                let ast::Expr::Ident(id) = &*slc.base else {
+                    return None;
+                };
+                let dst = match ops_map.get(&id.name) {
+                    Some(Type::Struct(_)) => &mut reg_fields,
+                    Some(Type::Integer | Type::Bits(_)) => &mut int_fields,
+                    _ => return None,
+                };
+                push_field(
+                    dst,
+                    &id.name,
+                    IntField {
+                        op_lo: slc.start,
+                        word_lo,
+                        width,
+                    },
+                );
+            }
+            ast::Expr::IndexAccess(idx) => {
+                let ast::Expr::Ident(id) = &*idx.base else {
+                    return None;
+                };
+                let dst = match ops_map.get(&id.name) {
+                    Some(Type::Struct(_)) => &mut reg_fields,
+                    Some(Type::Integer | Type::Bits(_)) => &mut int_fields,
+                    _ => return None,
+                };
+                push_field(
+                    dst,
+                    &id.name,
+                    IntField {
+                        op_lo: idx.index,
+                        word_lo,
+                        width: 1,
+                    },
+                );
+            }
+            _ => return None,
+        }
+    }
+
+    // Reassemble one operand from its pieces: for each (word_lo, op_lo, width)
+    // run, place word bits `[word_lo, word_lo+width)` at operand bits `op_lo`.
+    let gather = |fields: &[IntField]| -> proc_macro2::TokenStream {
+        let pieces: Vec<proc_macro2::TokenStream> = fields
+            .iter()
+            .map(|f| {
+                let mask = proc_macro2::Literal::u64_suffixed(encoding_mask(f.width) as u64);
+                let extract = if f.word_lo > 0 {
+                    let word_lo = proc_macro2::Literal::u32_suffixed(f.word_lo as u32);
+                    quote! { (word >> #word_lo) as u64 & #mask }
+                } else {
+                    quote! { word as u64 & #mask }
+                };
+                if f.op_lo > 0 {
+                    let op_lo = proc_macro2::Literal::u32_suffixed(f.op_lo as u32);
+                    quote! { value |= (#extract) << #op_lo; }
+                } else {
+                    quote! { value |= #extract; }
+                }
+            })
+            .collect();
+        quote! {{ let mut value: u64 = 0; #(#pieces)* value }}
+    };
+
+    let mut attr_steps: Vec<proc_macro2::TokenStream> = Vec::new();
+    for (name, fields) in &reg_fields {
+        let class = match ops_map.get(name) {
+            Some(Type::Struct(c)) => c,
+            _ => return None,
+        };
+        let name_lit = proc_macro2::Literal::string(name);
+        let class_lit = proc_macro2::Literal::string(class);
+        let g = gather(fields);
+        attr_steps.push(quote! {
+            .attr(
+                #name_lit,
+                tir::attributes::AttributeValue::Register(
+                    tir::attributes::RegisterAttr::Physical {
+                        class: #class_lit.to_string(),
+                        index: (#g) as u16,
+                    },
+                ),
+            )
+        });
+    }
+    for (name, fields) in &int_fields {
+        let name_lit = proc_macro2::Literal::string(name);
+        let g = gather(fields);
+        attr_steps.push(quote! {
+            .attr(#name_lit, tir::attributes::AttributeValue::Int((#g) as i64))
+        });
+    }
+
+    let decode_fn_ident = format_ident!("decode_{}_inst", inst.name.to_lowercase());
+    let builder_ident = format_ident!("{}OpBuilder", &inst.name);
+    let const_word_lit = proc_macro2::Literal::u32_suffixed(const_word as u32);
+    // An operand-less instruction fixes every bit, making the mask an identity.
+    let guard = if fixed_mask as u32 == u32::MAX {
+        quote! { if word != #const_word_lit { return None; } }
+    } else {
+        let fixed_mask_lit = proc_macro2::Literal::u32_suffixed(fixed_mask as u32);
+        quote! { if word & #fixed_mask_lit != #const_word_lit { return None; } }
+    };
+
+    let decoder = quote! {
+        fn #decode_fn_ident(context: &tir::Context, word: u32) -> Option<tir::OpId> {
+            #guard
+            let op = #builder_ident::new(context)
+                #(#attr_steps)*
+                .build();
+            Some(op.id())
+        }
+    };
+
+    Some((decoder, decode_fn_ident))
 }

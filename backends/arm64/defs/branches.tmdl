@@ -242,3 +242,55 @@ instruction TestBitBranchNonZero for [ARMv8A64] : TestBitBranch {
         }
     }
 }
+
+// Supervisor call: raises a synchronous exception routed to the simulator's
+// exception handler for syscall emulation. Linux ignores imm16 and takes the
+// syscall number from x8, so the behavior just traps.
+instruction Supervisor for [ARMv8A64] {
+    schedule { units = [WriteIALU]; }
+    param MNEMONIC: String = "svc";
+
+    operands {
+        imm: bits<16>,
+    }
+
+    encoding {
+        0..4 => 0b00001,
+        5..20 => imm,
+        21..23 => 0b000,
+        24..31 => 0b11010100,
+    }
+
+    asm {
+        "{self.MNEMONIC} {imm}"
+    }
+
+    behavior {
+        trap(0);
+    }
+}
+
+// NOP hint (`d503201f`): no architectural effect. The empty behavior touches no
+// register and leaves PC to auto-advance.
+instruction NoOperation for [ARMv8A64] {
+    schedule { units = [WriteIALU]; }
+    param MNEMONIC: String = "nop";
+
+    operands {
+    }
+
+    encoding {
+        0..4 => 0b11111,
+        5..11 => 0b0000000,
+        12..15 => 0b0010,
+        16..23 => 0b00000011,
+        24..31 => 0b11010101,
+    }
+
+    asm {
+        "{self.MNEMONIC}"
+    }
+
+    behavior {
+    }
+}

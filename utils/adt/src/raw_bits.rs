@@ -36,6 +36,19 @@ impl RawBits {
         self.storage.len() * BYTE_SIZE
     }
 
+    /// Truncate or zero-extend to `bits` (a whole number of bytes); the low bits
+    /// are preserved. Used to normalize a stored value to a register class's
+    /// width — e.g. reading `v0` (128) after a `d0` (64) write zero-extends.
+    pub fn resized(&self, bits: usize) -> Self {
+        assert!(
+            bits.is_multiple_of(BYTE_SIZE),
+            "RawBits width must be byte-aligned"
+        );
+        let mut storage = self.storage.clone();
+        storage.resize(bits / BYTE_SIZE, 0);
+        RawBits { storage }
+    }
+
     /// Reinterpret an integer as raw bits, widened to a whole number of bytes.
     pub fn from_apint(value: &APInt) -> Self {
         let num_bytes = value.width().div_ceil(BYTE_SIZE as u32) as usize;
