@@ -541,20 +541,13 @@ impl Executor {
             return;
         }
         for (class, index, value) in snapshot {
-            // Byte lanes are stored little-endian; print most-significant first.
-            let hex: String = value
-                .bytes()
-                .iter()
-                .rev()
-                .map(|b| format!("{b:02x}"))
-                .collect();
             Self::emit_trace_line(
                 out,
                 &format!(
-                    "  {}[{}] = 0x{} (width={})",
+                    "  {}[{}] = 0x{:x} (width={})",
                     class,
                     index,
-                    hex,
+                    value.to_apint(),
                     value.width()
                 ),
             );
