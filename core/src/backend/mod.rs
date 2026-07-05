@@ -226,6 +226,22 @@ pub fn print_branch(
     fmt.write("\n")
 }
 
+/// The successor blocks a branch-shaped op transfers control to: every block
+/// referenced by one of its attributes. Target branch instructions store their
+/// destination as an `AttributeValue::Block` (the immediate operand rewritten by
+/// branch selection); the virtual branch op carries its `dest` the same way. A
+/// register-indirect or return transfer references no block and so has no static
+/// successors. Shared by the generated `Terminator` impls.
+pub fn branch_successors(op: &dyn tir::Operation) -> Vec<tir::BlockId> {
+    op.attributes()
+        .iter()
+        .filter_map(|attr| match &attr.value {
+            AttributeValue::Block(block) => Some(*block),
+            _ => None,
+        })
+        .collect()
+}
+
 pub fn int_attr(attrs: &[tir::attributes::NamedAttribute], name: &str) -> Option<i64> {
     attrs.iter().find_map(|attr| {
         if attr.name != name {

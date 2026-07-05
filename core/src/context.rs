@@ -279,6 +279,52 @@ impl Context {
         }
     }
 
+    /// Replace a single operation's SSA operand at `index`, keeping the
+    /// context-owned def-use lists in sync. Used by register allocation to
+    /// retarget a terminator's return value onto a freshly copied register.
+    pub fn set_op_operand(&self, id: OpId, index: usize, new: ValueId) {
+        let mut inner = self.0.write();
+        let old = match slab_get(&inner.operations, id.index())
+            .and_then(|op| op.operands.get(index).copied())
+        {
+            Some(old) if old != new => old,
+            _ => return,
+        };
+        if let Some(op) = slab_get_mut(&mut inner.operations, id.index()) {
+            Arc::make_mut(op).operands[index] = new;
+        }
+        if let Some(old_value) = slab_get_mut(&mut inner.values, old.index()) {
+            Arc::make_mut(old_value).remove_use(id, crate::UseSite::Operand(index));
+        }
+        if let Some(new_value) = slab_get_mut(&mut inner.values, new.index()) {
+            Arc::make_mut(new_value).add_use(id, crate::UseSite::Operand(index));
+        }
+    }
+
+    /// Replace all of an operation's SSA operands, keeping the def-use lists in
+    /// sync. Register allocation uses this to clear a branch's forwarded block
+    /// arguments once they have been lowered to explicit copies.
+    pub fn set_op_operands(&self, id: OpId, operands: Vec<ValueId>) {
+        let mut inner = self.0.write();
+        let old = match slab_get(&inner.operations, id.index()) {
+            Some(op) => op.operands.clone(),
+            None => return,
+        };
+        for (index, value) in old.iter().enumerate() {
+            if let Some(v) = slab_get_mut(&mut inner.values, value.index()) {
+                Arc::make_mut(v).remove_use(id, crate::UseSite::Operand(index));
+            }
+        }
+        if let Some(op) = slab_get_mut(&mut inner.operations, id.index()) {
+            Arc::make_mut(op).operands = operands.clone();
+        }
+        for (index, value) in operands.iter().enumerate() {
+            if let Some(v) = slab_get_mut(&mut inner.values, value.index()) {
+                Arc::make_mut(v).add_use(id, crate::UseSite::Operand(index));
+            }
+        }
+    }
+
     pub fn create_value(&self, ty: TypeId, defining_op: Option<OpId>) -> Value {
         let mut inner = self.0.write();
 

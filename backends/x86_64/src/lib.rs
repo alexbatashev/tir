@@ -21,8 +21,11 @@ mod isa {
             name: "vret",
             dialect: "x86_64",
             operands: [value],
+            interfaces: [tir::Terminator],
         }
     }
+
+    impl tir::Terminator for VirtualReturnOp {}
 
     // Virtual unconditional branch: emitted by selection for `builtin.br` and
     // conditional-branch fallthroughs, finalized to `jmp` after register
@@ -38,6 +41,13 @@ mod isa {
             attributes: A {
                 dest: "Block",
             },
+            interfaces: [tir::Terminator],
+        }
+    }
+
+    impl tir::Terminator for VirtualBranchOp {
+        fn successors(&self) -> Vec<tir::BlockId> {
+            tir::backend::branch_successors(self)
         }
     }
 
@@ -734,23 +744,70 @@ mod isa {
             }
         }
 
-        fn emit_prologue(&self, context: &tir::Context, size: u32) -> Vec<Box<dyn Operation>> {
-            vec![Box::new(
-                AddImmOpBuilder::new(context)
-                    .attr("dst", phys(SP.0, SP.1))
-                    .attr("imm", AttributeValue::Int(-(size as i64)))
-                    .build(),
-            )]
+        // Callee-saved registers are preserved with `push`/`pop`, not frame slots.
+        fn saves_on_frame(&self) -> bool {
+            false
         }
 
-        fn emit_epilogue(&self, context: &tir::Context, size: u32) -> Vec<Box<dyn Operation>> {
-            vec![Box::new(
-                AddImmOpBuilder::new(context)
-                    .attr("dst", phys(SP.0, SP.1))
-                    .attr("imm", AttributeValue::Int(size as i64))
-                    .build(),
-            )]
+        fn emit_prologue(
+            &self,
+            context: &tir::Context,
+            size: u32,
+            saves: &[(tir::backend::liveness::PhysReg, i64)],
+        ) -> Vec<Box<dyn Operation>> {
+            let mut ops: Vec<Box<dyn Operation>> = Vec::new();
+            for ((class, index), _) in saves {
+                ops.push(Box::new(
+                    PushOpBuilder::new(context)
+                        .attr("reg", phys(class, *index))
+                        .build(),
+                ));
+            }
+            // Each `push` shifts `rsp` by 8; pad so the total prologue adjustment
+            // stays a multiple of 16, keeping `rsp` 16-byte aligned at call sites.
+            let total = size as i64 + saved_frame_pad(saves.len());
+            if total > 0 {
+                ops.push(Box::new(
+                    AddImmOpBuilder::new(context)
+                        .attr("dst", phys(SP.0, SP.1))
+                        .attr("imm", AttributeValue::Int(-total))
+                        .build(),
+                ));
+            }
+            ops
         }
+
+        fn emit_epilogue(
+            &self,
+            context: &tir::Context,
+            size: u32,
+            saves: &[(tir::backend::liveness::PhysReg, i64)],
+        ) -> Vec<Box<dyn Operation>> {
+            let mut ops: Vec<Box<dyn Operation>> = Vec::new();
+            let total = size as i64 + saved_frame_pad(saves.len());
+            if total > 0 {
+                ops.push(Box::new(
+                    AddImmOpBuilder::new(context)
+                        .attr("dst", phys(SP.0, SP.1))
+                        .attr("imm", AttributeValue::Int(total))
+                        .build(),
+                ));
+            }
+            for ((class, index), _) in saves.iter().rev() {
+                ops.push(Box::new(
+                    PopOpBuilder::new(context)
+                        .attr("reg", phys(class, *index))
+                        .build(),
+                ));
+            }
+            ops
+        }
+    }
+
+    /// Extra stack padding (0 or 8 bytes) so `push`ing `count` callee-saved
+    /// registers leaves the total prologue adjustment 16-byte aligned.
+    fn saved_frame_pad(count: usize) -> i64 {
+        if count % 2 == 1 { 8 } else { 0 }
     }
 
     // R_X86_64_PC32 = 2, R_X86_64_PLT32 = 4. Both scatter `S + A - P` into a
