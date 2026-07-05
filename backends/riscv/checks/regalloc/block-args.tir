@@ -1,0 +1,31 @@
+// RUN: tir mc --march=rv64i --stage=regalloc %s | filecheck %s
+
+// A diamond whose two arms forward different values into the merge block's
+// parameter on unconditional edges. Register allocation lowers each forwarded
+// value to an explicit copy into the parameter's register, so the merge sees one
+// consistently-colored parameter: both arms copy into the same register (a0, the
+// return register, since the merge value is returned).
+
+module {
+  func @sel(%c: !i64, %d: !i64, %a: !i64, %b: !i64) -> !i64 {
+    %cond = cmpi %c, %d {predicate = "slt"} : !i1
+    cond_br %cond, ^bb1, ^bb2
+  ^bb1:
+    br ^bb3(%a : !i64)
+  ^bb2:
+    br ^bb3(%b : !i64)
+  ^bb3(%r: !i64):
+    return %r
+  }
+  module_end
+}
+
+// CHECK: riscv.blt {rs1 = x10, rs2 = x11, imm = ^bb1}
+// CHECK: riscv.vbr ^bb2
+// The taken arm forwards %a into the merge parameter's register (a0 = x10).
+// CHECK: riscv.addi {rd = x10, rs1 = x12, imm = 0}
+// CHECK: riscv.vbr ^bb3
+// The fallthrough arm forwards %b into the very same register.
+// CHECK: riscv.addi {rd = x10, rs1 = x13, imm = 0}
+// CHECK: riscv.vbr ^bb3
+// CHECK: riscv.vret

@@ -76,9 +76,10 @@ fn ordered(a: u32, b: u32) -> (u32, u32) {
 }
 
 /// Analyze liveness over `blocks` (in program order), using `successors` for the
-/// inter-block dataflow. Current functions are single-block, so `successors`
-/// typically returns empty; the fixpoint loop generalizes once branch
-/// terminators wire up the CFG.
+/// inter-block dataflow: `successors(b)` returns the control-flow successor blocks
+/// of `b`. A value defined in one block and used in another is live across the
+/// edge between them, so the backward fixpoint carries it into every block on the
+/// path — giving it the interference edges that keep it from being clobbered.
 pub fn analyze(
     context: &Context,
     blocks: &[BlockId],
@@ -160,6 +161,21 @@ pub fn analyze(
         .enumerate()
         .map(|(i, b)| (b.block, i))
         .collect();
+
+    // Blocks reached by a control-flow edge. A non-entry block's parameters are
+    // defined by its predecessors (each forwards them through the copies that
+    // `lower_block_args` inserts before the branch), so they are live on entry to
+    // the block and must flow back into every predecessor as live-out — otherwise
+    // those copies would look dead and their registers could be reused. The entry
+    // block's parameters are the function arguments: defined by the ABI, pinned by
+    // pre-coloring, and never live-in.
+    let entry = blocks.first().copied();
+    let mut has_pred: HashSet<BlockId> = HashSet::new();
+    for &block_id in blocks {
+        for succ in successors(block_id) {
+            has_pred.insert(succ);
+        }
+    }
     let mut live_in: Vec<BTreeSet<u32>> = vec![BTreeSet::new(); block_infos.len()];
     let mut live_out: Vec<BTreeSet<u32>> = vec![BTreeSet::new(); block_infos.len()];
 
@@ -173,12 +189,16 @@ pub fn analyze(
                     out.extend(live_in[j].iter().copied());
                 }
             }
-            // live_in = exposed_uses ∪ (live_out − defs)
+            // live_in = params ∪ exposed_uses ∪ (live_out − defs), where params
+            // contribute only for a non-entry block reached by an edge.
             let mut in_set = info.exposed_uses.clone();
             for v in &out {
                 if !info.defs.contains(v) {
                     in_set.insert(*v);
                 }
+            }
+            if Some(info.block) != entry && has_pred.contains(&info.block) {
+                in_set.extend(info.params.iter().copied());
             }
             if out != live_out[i] {
                 live_out[i] = out;
@@ -245,5 +265,140 @@ pub fn analyze(
 fn record_class(result: &mut Liveness, id: u32, class: &Option<String>) {
     if let Some(class) = class {
         result.vreg_class.entry(id).or_insert_with(|| class.clone());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use tir::builtin::{IntegerType, ops};
+    use tir::{Block, IRBuilder, TypeId, ValueId};
+
+    // `addi %a, %b` whose fresh result names a new virtual register (a def), with
+    // its two operands read as uses — enough for liveness, which resolves builtin
+    // SSA ops positionally.
+    fn addi(context: &Context, block: &Arc<Block>, a: ValueId, b: ValueId, ty: TypeId) -> ValueId {
+        let mut builder = IRBuilder::new(block.clone());
+        builder
+            .insert(ops::addi(context, a, b, ty).build())
+            .result()
+    }
+
+    // Two defs in the entry block where the first is used only in a successor
+    // block: the two entry defs interfere iff the successor edge is wired, because
+    // that is what keeps the first value live across the second's def. With the
+    // edge dropped (the old `|_| Vec::new()`), the first value looks dead at its
+    // def and the allocator is free to reuse its register — the miscompile.
+    #[test]
+    fn cross_block_def_interferes_only_with_wired_successors() {
+        let context = Context::with_default_dialects();
+        let ty = IntegerType::new(&context, 64);
+        let a = context.create_value(ty, None);
+        let a_id = a.id();
+        let entry = context.create_block(vec![a]);
+        let succ = context.create_block(vec![]);
+
+        // `v` is used only in the successor (so it is live across the edge); `w`
+        // is defined after `v` and dies inside the entry block (consumed by `u`).
+        // Their interference therefore hinges entirely on `v` being live-out.
+        let v = addi(&context, &entry, a_id, a_id, ty);
+        let w = addi(&context, &entry, a_id, a_id, ty);
+        addi(&context, &entry, w, w, ty);
+        addi(&context, &succ, v, a_id, ty);
+
+        let blocks = [entry.id(), succ.id()];
+        let with_edge = analyze(&context, &blocks, |blk| {
+            if blk == entry.id() {
+                vec![succ.id()]
+            } else {
+                vec![]
+            }
+        });
+        assert!(
+            with_edge.interferes(v.number(), w.number()),
+            "a value live across a later def must interfere with it",
+        );
+        assert!(
+            with_edge.live_in[&succ.id()].contains(&v.number()),
+            "the cross-block value is live into its using block",
+        );
+
+        let no_edge = analyze(&context, &blocks, |_| Vec::new());
+        assert!(
+            !no_edge.interferes(v.number(), w.number()),
+            "without the CFG edge the bug hides the interference (regression guard)",
+        );
+    }
+
+    // Diamond: entry defines a value used only at the merge, so it is live-through
+    // both arms and must interfere with every def on either arm.
+    #[test]
+    fn diamond_live_through_interferes_on_both_arms() {
+        let context = Context::with_default_dialects();
+        let ty = IntegerType::new(&context, 64);
+        let a = context.create_value(ty, None);
+        let a_id = a.id();
+        let entry = context.create_block(vec![a]);
+        let left = context.create_block(vec![]);
+        let right = context.create_block(vec![]);
+        let merge = context.create_block(vec![]);
+
+        let v = addi(&context, &entry, a_id, a_id, ty);
+        let la = addi(&context, &left, a_id, a_id, ty);
+        let ra = addi(&context, &right, a_id, a_id, ty);
+        addi(&context, &merge, v, a_id, ty);
+
+        let blocks = [entry.id(), left.id(), right.id(), merge.id()];
+        let liveness = analyze(&context, &blocks, |blk| {
+            if blk == entry.id() {
+                vec![left.id(), right.id()]
+            } else if blk == left.id() || blk == right.id() {
+                vec![merge.id()]
+            } else {
+                vec![]
+            }
+        });
+
+        assert!(liveness.live_in[&left.id()].contains(&v.number()));
+        assert!(liveness.live_in[&right.id()].contains(&v.number()));
+        assert!(
+            liveness.interferes(v.number(), la.number()),
+            "live-through value must interfere with the left arm's def",
+        );
+        assert!(
+            liveness.interferes(v.number(), ra.number()),
+            "live-through value must interfere with the right arm's def",
+        );
+    }
+
+    // A back edge (a loop): the fixpoint must converge, and a value defined in the
+    // header and read inside the body stays live around the edge.
+    #[test]
+    fn loop_back_edge_converges() {
+        let context = Context::with_default_dialects();
+        let ty = IntegerType::new(&context, 64);
+        let a = context.create_value(ty, None);
+        let a_id = a.id();
+        let header = context.create_block(vec![a]);
+        let body = context.create_block(vec![]);
+
+        let carried = addi(&context, &header, a_id, a_id, ty);
+        addi(&context, &body, carried, a_id, ty);
+
+        // header -> body -> header (back edge).
+        let blocks = [header.id(), body.id()];
+        let liveness = analyze(&context, &blocks, |blk| {
+            if blk == header.id() {
+                vec![body.id()]
+            } else {
+                vec![header.id()]
+            }
+        });
+
+        assert!(
+            liveness.live_in[&body.id()].contains(&carried.number()),
+            "the header-defined value is live into the loop body",
+        );
     }
 }

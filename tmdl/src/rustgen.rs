@@ -463,6 +463,28 @@ fn emit_instructions<'a>(
             quote! { #(#items,)* }
         };
 
+        // An instruction that writes `PC::pc` transfers control, so it is a
+        // terminator: its successors are the blocks its attributes reference
+        // (a branch target rewritten to a `Block` by branch selection). This
+        // makes the CFG queryable post-isel — the register allocator's liveness
+        // needs real successors, and dominance becomes valid on machine IR.
+        let (uncond_pc, cond_pc) = pc_writes(&inst.behavior);
+        let is_terminator = uncond_pc || cond_pc;
+        let (interfaces_list, terminator_impl) = if is_terminator {
+            (
+                quote! { [tir::backend::MachineInstruction, tir::Terminator] },
+                quote! {
+                    impl tir::Terminator for #name_ident {
+                        fn successors(&self) -> Vec<tir::BlockId> {
+                            tir::backend::branch_successors(self)
+                        }
+                    }
+                },
+            )
+        } else {
+            (quote! { [tir::backend::MachineInstruction] }, quote! {})
+        };
+
         instruction_defs.push(quote! {
             operation! {
                 #name_ident {
@@ -470,10 +492,12 @@ fn emit_instructions<'a>(
                     dialect: #dialect,
                     attributes: A { #attrs_schema },
                     roles: R { #roles_schema },
-                    interfaces: [tir::backend::MachineInstruction],
+                    interfaces: #interfaces_list,
                     format: custom,
                 }
             }
+
+            #terminator_impl
         });
 
         let op_display_name = format!("{}.{}", dialect, op_name);
@@ -1074,7 +1098,7 @@ fn emit_instructions<'a>(
         // Control-flow kind, derived from the behavior's `PC::pc` writes: every
         // path writes PC → unconditional transfer; some paths → conditional
         // branch. The trait default covers sequential instructions.
-        let control_flow_method = match pc_writes(&inst.behavior) {
+        let control_flow_method = match (uncond_pc, cond_pc) {
             (true, _) => quote! {
                 fn control_flow(&self) -> tir::backend::ControlFlow {
                     tir::backend::ControlFlow::Unconditional

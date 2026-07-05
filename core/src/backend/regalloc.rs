@@ -411,14 +411,36 @@ pub trait TargetRegAlloc: Send + Sync {
         unimplemented!("this target has tied operands but no copy emitter")
     }
 
+    /// Whether callee-saved registers are preserved in the spill frame (each at its
+    /// `[frame + offset]` slot, so the generic code reserves a slot per saved
+    /// register). Targets that save via a dedicated mechanism (x86-64 `push`/`pop`)
+    /// return `false`: no frame slot is reserved and the `offset` field of each
+    /// save is unused.
+    fn saves_on_frame(&self) -> bool {
+        true
+    }
+
     /// Prologue instructions reserving a frame of `size` bytes (e.g. `addi sp, sp,
-    /// -size`). Inserted at the top of the entry block when any vreg spills.
-    fn emit_prologue(&self, _context: &Context, _size: u32) -> Vec<Box<dyn Operation>> {
+    /// -size`) and saving the callee-saved registers the allocation used, each at
+    /// its reserved `[frame + offset]` slot. Inserted at the top of the entry block
+    /// when the frame is non-empty.
+    fn emit_prologue(
+        &self,
+        _context: &Context,
+        _size: u32,
+        _saves: &[(PhysReg, i64)],
+    ) -> Vec<Box<dyn Operation>> {
         Vec::new()
     }
 
-    /// Epilogue instructions releasing the frame, inserted before each terminator.
-    fn emit_epilogue(&self, _context: &Context, _size: u32) -> Vec<Box<dyn Operation>> {
+    /// Epilogue instructions restoring the saved callee-saved registers and
+    /// releasing the frame, inserted before each terminator.
+    fn emit_epilogue(
+        &self,
+        _context: &Context,
+        _size: u32,
+        _saves: &[(PhysReg, i64)],
+    ) -> Vec<Box<dyn Operation>> {
         Vec::new()
     }
 }
@@ -466,12 +488,18 @@ impl Pass for RegisterAllocationPass {
         }
 
         self.lower_tied_operands(context, rewriter, &blocks)?;
+        self.lower_block_args(context, rewriter, &blocks)?;
 
-        let precolor = abi_precolor(context, op, &info, &blocks);
+        let precolor = abi_precolor(context, op, &info, self.target.as_ref(), rewriter, &blocks)?;
 
         let mut frame = FrameState::new(self.target.slot_size());
         let assignment = loop {
-            let liveness = liveness::analyze(context, &blocks, |_| Vec::new());
+            // Recomputed each round: spills insert ops within blocks but never add
+            // or remove edges, so the CFG is stable across rounds.
+            let successors = block_successors(context, &blocks);
+            let liveness = liveness::analyze(context, &blocks, |b| {
+                successors.get(&b).cloned().unwrap_or_default()
+            });
             let use_counts = reference_counts(context, &blocks);
             // Spill the least-used value first. Reload/store temps are unspillable:
             // they have single-instruction ranges and must occupy a register, so
@@ -511,9 +539,15 @@ impl Pass for RegisterAllocationPass {
 
         rewrite_registers(context, &blocks, &assignment);
 
+        // Preserve the callee-saved registers the allocation used for this
+        // function's caller. Frame-based targets reserve a slot per register;
+        // push/pop targets handle framing themselves.
+        let saves =
+            callee_saved_slots(&info, &assignment, &mut frame, self.target.saves_on_frame());
+
         let frame_size = frame.size(self.target.frame_align());
-        if frame_size > 0 {
-            self.insert_frame(context, rewriter, &blocks, frame_size)?;
+        if frame_size > 0 || !saves.is_empty() {
+            self.insert_frame(context, rewriter, &blocks, frame_size, &saves)?;
         }
 
         Ok(PreservedAnalyses::none())
@@ -577,6 +611,82 @@ impl RegisterAllocationPass {
                 let mut attrs = op.attributes.clone();
                 attrs.retain(|a| !ties.iter().any(|(name, ..)| a.name == *name));
                 context.set_op_attributes(op_id, attrs);
+            }
+        }
+        Ok(())
+    }
+
+    /// Lower forwarded block arguments on unconditional branches to explicit
+    /// copies ahead of allocation. A `vbr` carries the values forwarded to its
+    /// destination's block parameters as SSA operands (`dest_args`); nothing
+    /// otherwise connects a predecessor's forwarded value to the successor's
+    /// parameter register. For each edge, insert `copy param <- arg` before the
+    /// branch and clear `dest_args`, leaving the parameter defined in every
+    /// predecessor. The copies of one edge form a parallel copy (all sources read
+    /// before any destination is written), so they are sequentialized with a fresh
+    /// temporary per cycle (e.g. a loop edge that swaps two parameters).
+    fn lower_block_args(
+        &self,
+        context: &Context,
+        rewriter: &mut Rewriter,
+        blocks: &[BlockId],
+    ) -> Result<(), PassError> {
+        let info = self.target.register_info();
+        let default_class = info.default_integer_class().map(|c| c.name);
+        for &block_id in blocks {
+            for op_id in context.get_block(block_id).op_ids() {
+                let op = context.get_op(op_id);
+                if op.name != "vbr" || op.operands.is_empty() {
+                    continue;
+                }
+                let args: Vec<u32> = op.operands.iter().map(|v| v.number()).collect();
+                let Some(dest) = op.attributes.iter().find_map(|a| match &a.value {
+                    AttributeValue::Block(b) if a.name == "dest" => Some(*b),
+                    _ => None,
+                }) else {
+                    return Err(PassError::InvalidRuleSet(
+                        "vbr with block arguments is missing its 'dest' target".to_string(),
+                    ));
+                };
+                let params: Vec<u32> = context
+                    .get_block(dest)
+                    .arguments()
+                    .iter()
+                    .map(|v| v.id().number())
+                    .collect();
+                if params.len() != args.len() {
+                    return Err(PassError::InvalidRuleSet(format!(
+                        "branch forwards {} argument(s) to a block with {} parameter(s)",
+                        args.len(),
+                        params.len()
+                    )));
+                }
+
+                // Pair each parameter with its forwarded value and the register
+                // class to copy it in (from either endpoint's uses, else the
+                // default integer class).
+                let mut pairs: Vec<(u32, u32, String)> = Vec::new();
+                for (&param, &arg) in params.iter().zip(args.iter()) {
+                    if param == arg {
+                        continue;
+                    }
+                    let class = vreg_class_in(context, blocks, arg)
+                        .or_else(|| vreg_class_in(context, blocks, param))
+                        .or_else(|| default_class.map(str::to_string))
+                        .ok_or_else(|| {
+                            PassError::InvalidRuleSet(format!(
+                                "block argument vreg {arg} has no register class"
+                            ))
+                        })?;
+                    pairs.push((param, arg, class));
+                }
+
+                let op_ref = op_ref_in(context, block_id, op_id);
+                for (dst, src, class) in sequence_parallel_copies(context, pairs) {
+                    let copy = self.target.emit_copy(context, &class, dst, src);
+                    rewriter.insert_op_before(&op_ref, copy.as_ref())?;
+                }
+                context.set_op_operands(op_id, Vec::new());
             }
         }
         Ok(())
@@ -667,19 +777,20 @@ impl RegisterAllocationPass {
     }
 
     /// Insert the prologue at the entry block's top and an epilogue before every
-    /// terminator, once the frame size is known.
+    /// terminator, once the frame size and callee-saved set are known.
     fn insert_frame(
         &self,
         context: &Context,
         rewriter: &mut Rewriter,
         blocks: &[BlockId],
         size: u32,
+        saves: &[(PhysReg, i64)],
     ) -> Result<(), PassError> {
         if let Some(&entry) = blocks.first() {
             let op_ids = context.get_block(entry).op_ids();
             if let Some(&first) = op_ids.first() {
                 let target = op_ref_in(context, entry, first);
-                for op in self.target.emit_prologue(context, size) {
+                for op in self.target.emit_prologue(context, size, saves) {
                     rewriter.insert_op_before(&target, op.as_ref())?;
                 }
             }
@@ -690,7 +801,7 @@ impl RegisterAllocationPass {
                     continue;
                 }
                 let target = op_ref_in(context, block_id, op_id);
-                for op in self.target.emit_epilogue(context, size) {
+                for op in self.target.emit_epilogue(context, size, saves) {
                     rewriter.insert_op_before(&target, op.as_ref())?;
                 }
             }
@@ -747,6 +858,30 @@ fn is_vreg(r: &liveness::RegRef, vreg: u32) -> bool {
     matches!(r, liveness::RegRef::Virtual { id, .. } if *id == vreg)
 }
 
+/// The control-flow successors of each block, for liveness's inter-block
+/// dataflow. A machine block may hold several branch-shaped ops — a mid-block
+/// conditional jump for the taken edge plus a trailing virtual branch for the
+/// fallthrough — so a block's successors are the union of `Terminator::successors`
+/// over every op it contains, not just its last op's.
+fn block_successors(context: &Context, blocks: &[BlockId]) -> HashMap<BlockId, Vec<BlockId>> {
+    let mut map = HashMap::new();
+    for &block_id in blocks {
+        let mut succs = Vec::new();
+        for op_id in context.get_block(block_id).op_ids() {
+            let op = context.get_op(op_id);
+            if let Some(term) = op.as_interface::<dyn tir::Terminator>() {
+                for succ in term.successors() {
+                    if !succs.contains(&succ) {
+                        succs.push(succ);
+                    }
+                }
+            }
+        }
+        map.insert(block_id, succs);
+    }
+    map
+}
+
 /// The blocks of an `asm.symbol` op's body region, in program order.
 fn symbol_body_blocks(context: &Context, op: &OperationRef) -> Vec<BlockId> {
     let Some(&region_id) = op.op().regions.first() else {
@@ -787,15 +922,83 @@ fn insert_after(
     }
 }
 
+/// The callee-saved physical registers the allocation actually used, each paired
+/// with a freshly reserved frame slot. A callee-saved register belongs to the
+/// caller; if this function colors a value into one it must save and restore it
+/// around the body. Deterministic order (by class then index) keeps codegen
+/// stable.
+fn callee_saved_slots(
+    info: &RegisterInfo,
+    assignment: &HashMap<u32, PhysReg>,
+    frame: &mut FrameState,
+    on_frame: bool,
+) -> Vec<(PhysReg, i64)> {
+    let mut regs: Vec<PhysReg> = assignment
+        .values()
+        .filter(|p| info.class(&p.0).is_some_and(|c| c.is_callee_saved(p.1)))
+        .cloned()
+        .collect();
+    regs.sort();
+    regs.dedup();
+    regs.into_iter()
+        .map(|p| (p, if on_frame { frame.alloc_slot() } else { 0 }))
+        .collect()
+}
+
+/// Sequentialize a parallel copy: a set of `dst <- src` moves (destinations
+/// unique) whose sources are all read before any destination is written. Emit a
+/// copy whose destination is not still needed as a source first; when only cycles
+/// remain, save one destination into a fresh temporary and reroute the reads of it
+/// through the temporary, which frees that destination and breaks the cycle. Each
+/// tuple carries the register class to copy the destination in; a temporary
+/// inherits the class and type of the value it saves.
+fn sequence_parallel_copies(
+    context: &Context,
+    mut copies: Vec<(u32, u32, String)>,
+) -> Vec<(u32, u32, String)> {
+    let mut result = Vec::new();
+    while !copies.is_empty() {
+        if let Some(i) = copies
+            .iter()
+            .position(|(dst, _, _)| !copies.iter().any(|(_, src, _)| src == dst))
+        {
+            result.push(copies.remove(i));
+        } else {
+            // Only cycles remain: break one by saving its destination.
+            let (dst, _, class) = copies[0].clone();
+            let ty = context.get_value(ValueId::from_number(dst)).ty();
+            let temp = context.create_value(ty, None).id().number();
+            result.push((temp, dst, class));
+            for (_, src, _) in copies.iter_mut() {
+                if *src == dst {
+                    *src = temp;
+                }
+            }
+        }
+    }
+    result
+}
+
 /// Compute the calling-convention pre-coloring: each argument register pinned in
 /// order, and the returned value pinned to the first return register.
+///
+/// A physical-register constraint applies at a program point, not to a whole live
+/// range: an argument register pins the value at entry, a return register pins it
+/// at the `vret`. When the same vreg carries both constraints with *different*
+/// registers (e.g. an identity function whose argument register differs from the
+/// return register), pinning it twice would silently overwrite one constraint and
+/// miscompile. Such a return is broken with a copy (`fresh <- vreg`) inserted
+/// before the `vret`, so the argument keeps its entry pin while `fresh` takes the
+/// return pin. This mutates the IR, so it runs once, outside the spill loop.
 fn abi_precolor(
     context: &Context,
     op: &OperationRef,
     info: &RegisterInfo,
+    target: &dyn TargetRegAlloc,
+    rewriter: &mut Rewriter,
     blocks: &[BlockId],
-) -> HashMap<u32, PhysReg> {
-    let mut precolor = HashMap::new();
+) -> Result<HashMap<u32, PhysReg>, PassError> {
+    let mut precolor: HashMap<u32, PhysReg> = HashMap::new();
 
     // Argument vregs: the symbol's `arg_regs` attribute carries each argument's
     // register class (assigned by the target's function lowering, e.g. vectors
@@ -824,7 +1027,14 @@ fn abi_precolor(
             };
             let slot = next_slot.entry(rc.file).or_insert(0);
             if let Some(&reg) = rc.arguments.get(*slot) {
-                precolor.insert(*id, (rc.name.to_string(), reg));
+                let pin = (rc.name.to_string(), reg);
+                if let Some(prev) = precolor.insert(*id, pin.clone())
+                    && prev != pin
+                {
+                    return Err(PassError::InvalidRuleSet(format!(
+                        "argument vreg {id} pinned to conflicting registers {prev:?} and {pin:?}"
+                    )));
+                }
                 *slot += 1;
             }
         }
@@ -835,26 +1045,50 @@ fn abi_precolor(
     for &block_id in blocks {
         for op_id in context.get_block(block_id).op_ids() {
             let body_op = context.get_op(op_id);
-            if body_op.name == "vret"
-                && let Some(value) = body_op.operands.first()
-            {
-                let vreg = value.number();
-                let class = vreg_class_in(context, blocks, vreg);
-                let Some(rc) = class
-                    .as_deref()
-                    .and_then(|c| info.class(c))
-                    .or_else(|| info.default_integer_class())
-                else {
-                    continue;
-                };
-                if let Some(&ret_reg) = rc.return_values.first() {
-                    precolor.insert(vreg, (rc.name.to_string(), ret_reg));
+            if body_op.name != "vret" {
+                continue;
+            }
+            let Some(value) = body_op.operands.first().copied() else {
+                continue;
+            };
+            let vreg = value.number();
+            let class = vreg_class_in(context, blocks, vreg);
+            let Some(rc) = class
+                .as_deref()
+                .and_then(|c| info.class(c))
+                .or_else(|| info.default_integer_class())
+            else {
+                continue;
+            };
+            let Some(&ret_reg) = rc.return_values.first() else {
+                continue;
+            };
+            let ret_pin = (rc.name.to_string(), ret_reg);
+
+            match precolor.get(&vreg) {
+                // Already pinned to exactly the return register (or returned by
+                // several `vret`s): nothing to do.
+                Some(existing) if *existing == ret_pin => {}
+                // Pinned elsewhere (an argument register): break the point
+                // conflict with a copy into a fresh vreg that takes the return
+                // pin, and retarget the `vret` at it.
+                Some(_) => {
+                    let ty = context.get_value(value).ty();
+                    let fresh = context.create_value(ty, None).id().number();
+                    let copy = target.emit_copy(context, rc.name, fresh, vreg);
+                    let op_ref = op_ref_in(context, block_id, op_id);
+                    rewriter.insert_op_before(&op_ref, copy.as_ref())?;
+                    context.set_op_operand(op_id, 0, ValueId::from_number(fresh));
+                    precolor.insert(fresh, ret_pin);
+                }
+                None => {
+                    precolor.insert(vreg, ret_pin);
                 }
             }
         }
     }
 
-    precolor
+    Ok(precolor)
 }
 
 /// The register class a virtual register is referenced with, from the first
@@ -974,6 +1208,9 @@ fn role_of(op: &tir::OpInstance, name: &str) -> AttributeRole {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+    use std::sync::Arc;
+    use tir::builtin::{IntegerType, ops};
+    use tir::{Block, IRBuilder};
 
     fn three_reg_info() -> RegisterInfo {
         RegisterInfo {
@@ -1008,6 +1245,116 @@ mod tests {
             AllocResult::Assigned(map) => map,
             other => panic!("expected an assignment, got {other:?}"),
         }
+    }
+
+    fn addi(context: &Context, block: &Arc<Block>, a: ValueId, b: ValueId, ty: tir::TypeId) -> u32 {
+        let mut builder = IRBuilder::new(block.clone());
+        builder
+            .insert(ops::addi(context, a, b, ty).build())
+            .result()
+            .number()
+    }
+
+    // A value defined in the entry block and read in a successor block must not
+    // share a register with a temporary defined in the entry block after it: the
+    // cross-block liveness edge forces distinct registers. Without real CFG
+    // successors the two look non-interfering and the allocator may coalesce them,
+    // clobbering the cross-block value.
+    #[test]
+    fn cross_block_liveness_forces_distinct_registers() {
+        let context = Context::with_default_dialects();
+        let ty = IntegerType::new(&context, 64);
+        let a = context.create_value(ty, None);
+        let a_id = a.id();
+        let entry = context.create_block(vec![a]);
+        let succ = context.create_block(vec![]);
+
+        let v = addi(&context, &entry, a_id, a_id, ty);
+        let w = ValueId::from_number(addi(&context, &entry, a_id, a_id, ty));
+        addi(&context, &entry, w, w, ty); // `w` dies in the entry block
+        addi(&context, &succ, ValueId::from_number(v), a_id, ty); // `v` read across the edge
+
+        let blocks = [entry.id(), succ.id()];
+        let liveness = liveness::analyze(&context, &blocks, |blk| {
+            if blk == entry.id() {
+                vec![succ.id()]
+            } else {
+                vec![]
+            }
+        });
+
+        let info = three_reg_info();
+        let precolor = HashMap::new();
+        let map = assigned(
+            allocate(&AllocConfig {
+                info: &info,
+                liveness: &liveness,
+                precolor: &precolor,
+                spill_cost: &|_| 100,
+            })
+            .unwrap(),
+        );
+        assert_ne!(
+            map[&v],
+            map[&w.number()],
+            "a value live across a block edge must not reuse a later entry-block register",
+        );
+    }
+
+    // Sequentializing a parallel copy that swaps two registers (a loop edge
+    // forwarding `^loop(%b, %a)` from within `^loop(%a, %b)`) needs one temporary
+    // to break the cycle: naive `a<-b; b<-a` would lose a's value.
+    #[test]
+    fn parallel_copy_swap_uses_a_temporary() {
+        let context = Context::with_default_dialects();
+        let ty = IntegerType::new(&context, 64);
+        let a = context.create_value(ty, None).id().number();
+        let b = context.create_value(ty, None).id().number();
+
+        let seq = sequence_parallel_copies(
+            &context,
+            vec![(a, b, "R".to_string()), (b, a, "R".to_string())],
+        );
+        assert_eq!(seq.len(), 3, "a swap needs a saving temporary");
+
+        // Simulate: each register starts holding its own original value; applying
+        // the emitted copies in order must swap a and b.
+        let mut regs: HashMap<u32, u32> = HashMap::new();
+        regs.insert(a, a);
+        regs.insert(b, b);
+        for (dst, src, _) in &seq {
+            let v = *regs.get(src).expect("source read before it is written");
+            regs.insert(*dst, v);
+        }
+        assert_eq!(regs[&a], b, "a receives b's original value");
+        assert_eq!(regs[&b], a, "b receives a's original value");
+    }
+
+    // A non-cyclic parallel copy is ordered so a value is never overwritten before
+    // it is read: `c<-a` must precede `a<-b`.
+    #[test]
+    fn parallel_copy_orders_reads_before_writes() {
+        let context = Context::with_default_dialects();
+        let ty = IntegerType::new(&context, 64);
+        let a = context.create_value(ty, None).id().number();
+        let b = context.create_value(ty, None).id().number();
+        let c = context.create_value(ty, None).id().number();
+
+        let seq = sequence_parallel_copies(
+            &context,
+            vec![(a, b, "R".to_string()), (c, a, "R".to_string())],
+        );
+        assert_eq!(seq.len(), 2, "no cycle, no temporary");
+        let mut regs: HashMap<u32, u32> = HashMap::new();
+        regs.insert(a, a);
+        regs.insert(b, b);
+        regs.insert(c, c);
+        for (dst, src, _) in &seq {
+            let v = *regs.get(src).unwrap();
+            regs.insert(*dst, v);
+        }
+        assert_eq!(regs[&a], b);
+        assert_eq!(regs[&c], a, "c must capture a's original value, not b's");
     }
 
     #[test]

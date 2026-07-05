@@ -119,14 +119,102 @@ fn conditional_branch() {
     assert_eq!(lt(-8, -1), 1);
 }
 
+#[test]
+fn value_live_across_branch() {
+    // %v is computed in the entry block but only used in ^bb1, so it is live
+    // across the conditional branch. Register allocation must keep it intact
+    // through the branch and the ^bb1 temporary; a miscompile here (from empty
+    // CFG successors in liveness) returns a clobbered value.
+    let ir = r#"
+        module {
+          func @cross(%0: !i64, %1: !i64) -> !i64 {
+            %v = addi %0, %1 : !i64
+            %c = cmpi %0, %1 {predicate = "slt"} : !i1
+            cond_br %c, ^bb1, ^bb2
+          ^bb1:
+            %t = addi %0, %0 : !i64
+            %r = addi %v, %t : !i64
+            return %r
+          ^bb2:
+            %s = addi %1, %1 : !i64
+            return %s
+          }
+          module_end
+        }
+    "#;
+
+    let jit = Jit::host().expect("host target");
+    let module = jit.compile(ir).expect("compile");
+    let cross: extern "C" fn(i64, i64) -> i64 =
+        unsafe { module.get("cross") }.expect("cross symbol");
+    // a < b  => (a + b) + 2a = 3a + b ; else => 2b
+    assert_eq!(cross(3, 10), 19);
+    assert_eq!(cross(20, 4), 8);
+    assert_eq!(cross(-8, -1), -25);
+}
+
+#[test]
+fn returns_first_argument_directly() {
+    // f(a, b) = a returns its first argument directly. The argument register
+    // (rdi on SysV x86-64) differs from the return register (rax), so pinning the
+    // same vreg to both silently overwrote the argument pin and the function
+    // returned whatever happened to be in rax. The fix breaks the point conflict
+    // with a copy into the return register.
+    let ir = r#"
+        module {
+          func @first(%0: !i64, %1: !i64) -> !i64 {
+            return %0
+          }
+          module_end
+        }
+    "#;
+
+    let jit = Jit::host().expect("host target");
+    let module = jit.compile(ir).expect("compile");
+    let f: extern "C" fn(i64, i64) -> i64 = unsafe { module.get("first") }.expect("first symbol");
+    assert_eq!(f(42, 7), 42);
+    assert_eq!(f(-3, 100), -3);
+}
+
+#[test]
+fn block_argument_diamond() {
+    // A diamond whose two arms forward different values (%a, %b) into the merge
+    // block's parameter %r on unconditional edges. Register allocation lowers each
+    // forwarded value to an explicit copy into %r's register, so the merge sees a
+    // single consistently-colored parameter regardless of the path taken.
+    let ir = r#"
+        module {
+          func @sel(%c: !i64, %d: !i64, %a: !i64, %b: !i64) -> !i64 {
+            %cond = cmpi %c, %d {predicate = "slt"} : !i1
+            cond_br %cond, ^bb1, ^bb2
+          ^bb1:
+            br ^bb3(%a : !i64)
+          ^bb2:
+            br ^bb3(%b : !i64)
+          ^bb3(%r: !i64):
+            return %r
+          }
+          module_end
+        }
+    "#;
+
+    let jit = Jit::host().expect("host target");
+    let module = jit.compile(ir).expect("compile");
+    let sel: extern "C" fn(i64, i64, i64, i64) -> i64 =
+        unsafe { module.get("sel") }.expect("sel symbol");
+    // sel(c, d, a, b) = if c < d { a } else { b }
+    assert_eq!(sel(1, 2, 42, 7), 42);
+    assert_eq!(sel(5, 2, 42, 7), 7);
+    assert_eq!(sel(-9, 0, 100, 200), 100);
+}
+
 extern "C" fn host_triple(x: i64) -> i64 {
     x * 3
 }
 
 #[test]
 fn external_host_call() {
-    // A value live across a call would need a callee-saved register, which the
-    // backend's regalloc does not yet support; the call is the tail expression.
+    // The call is the tail expression: nothing is live across it.
     let ir = r#"
         module {
           declare @host_triple(!i64) -> !i64
@@ -145,6 +233,35 @@ fn external_host_call() {
     // via_host(x) = host_triple(x) = 3x
     assert_eq!(f(5), 15);
     assert_eq!(f(-3), -9);
+}
+
+#[test]
+fn value_live_across_host_call() {
+    // %a is computed, passed to host_triple, and read again after the call, so it
+    // is live across it and must occupy a callee-saved register. The function must
+    // preserve that register for its own caller: the prologue/epilogue now save and
+    // restore the assigned callee-saved registers (and, on riscv/arm64, the return
+    // address saved across the call rides the same mechanism).
+    let ir = r#"
+        module {
+          declare @host_triple(!i64) -> !i64
+          func @f(%0: !i64) -> !i64 {
+            %a = addi %0, %0 : !i64
+            %1 = call @host_triple(%a : !i64) -> !i64
+            %2 = addi %a, %1 : !i64
+            return %2
+          }
+          module_end
+        }
+    "#;
+
+    let mut jit = Jit::host().expect("host target");
+    jit.define_symbol("host_triple", host_triple as *const c_void);
+    let module = jit.compile(ir).expect("compile");
+    let f: extern "C" fn(i64) -> i64 = unsafe { module.get("f") }.expect("f symbol");
+    // f(x) = 2x + host_triple(2x) = 2x + 6x = 8x
+    assert_eq!(f(5), 40);
+    assert_eq!(f(-3), -24);
 }
 
 // Cross-compile to AArch64 and load (map + patch relocations + mprotect) without

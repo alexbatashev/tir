@@ -117,8 +117,11 @@ operation! {
         name: "vret",
         dialect: "arm64",
         operands: [value],
+        interfaces: [tir::Terminator],
     }
 }
+
+impl tir::Terminator for VirtualReturnOp {}
 
 // Virtual control-flow ops: the lowered form of `builtin.br`/`builtin.cond_br`.
 // They carry the successor block references and the values forwarded to each
@@ -135,6 +138,13 @@ operation! {
         attributes: A {
             dest: "Block",
         },
+        interfaces: [tir::Terminator],
+    }
+}
+
+impl tir::Terminator for VirtualBranchOp {
+    fn successors(&self) -> Vec<tir::BlockId> {
+        tir::backend::branch_successors(self)
     }
 }
 
@@ -668,24 +678,72 @@ impl tir::backend::regalloc::TargetRegAlloc for Arm64RegAlloc {
         )
     }
 
-    fn emit_prologue(&self, context: &tir::Context, size: u32) -> Vec<Box<dyn Operation>> {
-        vec![Box::new(
-            SubImmediateOpBuilder::new(context)
-                .attr("rd", phys(&(SP.0.to_string(), SP.1)))
-                .attr("rn", phys(&(SP.0.to_string(), SP.1)))
-                .attr("imm", tir::attributes::AttributeValue::Int(size as i64))
-                .build(),
-        )]
+    fn emit_copy(
+        &self,
+        context: &tir::Context,
+        class: &str,
+        dst: u32,
+        src: u32,
+    ) -> Box<dyn Operation> {
+        match class {
+            "GPR" => mv(context, virt(dst, "GPR"), virt(src, "GPR")),
+            other => unimplemented!(
+                "arm64 register copy for class {other} is not implemented (no float/vector move op)"
+            ),
+        }
     }
 
-    fn emit_epilogue(&self, context: &tir::Context, size: u32) -> Vec<Box<dyn Operation>> {
-        vec![Box::new(
-            AddImmediateOpBuilder::new(context)
-                .attr("rd", phys(&(SP.0.to_string(), SP.1)))
-                .attr("rn", phys(&(SP.0.to_string(), SP.1)))
+    fn emit_prologue(
+        &self,
+        context: &tir::Context,
+        size: u32,
+        saves: &[(tir::backend::liveness::PhysReg, i64)],
+    ) -> Vec<Box<dyn Operation>> {
+        let sp = (SP.0.to_string(), SP.1);
+        let mut ops: Vec<Box<dyn Operation>> = vec![Box::new(
+            SubImmediateOpBuilder::new(context)
+                .attr("rd", phys(&sp))
+                .attr("rn", phys(&sp))
                 .attr("imm", tir::attributes::AttributeValue::Int(size as i64))
                 .build(),
-        )]
+        )];
+        for (reg, offset) in saves {
+            ops.push(Box::new(
+                StoreDoublewordOpBuilder::new(context)
+                    .attr("rt", phys(reg))
+                    .attr("rn", phys(&sp))
+                    .attr("imm", tir::attributes::AttributeValue::Int(*offset))
+                    .build(),
+            ));
+        }
+        ops
+    }
+
+    fn emit_epilogue(
+        &self,
+        context: &tir::Context,
+        size: u32,
+        saves: &[(tir::backend::liveness::PhysReg, i64)],
+    ) -> Vec<Box<dyn Operation>> {
+        let sp = (SP.0.to_string(), SP.1);
+        let mut ops: Vec<Box<dyn Operation>> = Vec::new();
+        for (reg, offset) in saves {
+            ops.push(Box::new(
+                LoadDoublewordOpBuilder::new(context)
+                    .attr("rt", phys(reg))
+                    .attr("rn", phys(&sp))
+                    .attr("imm", tir::attributes::AttributeValue::Int(*offset))
+                    .build(),
+            ));
+        }
+        ops.push(Box::new(
+            AddImmediateOpBuilder::new(context)
+                .attr("rd", phys(&sp))
+                .attr("rn", phys(&sp))
+                .attr("imm", tir::attributes::AttributeValue::Int(size as i64))
+                .build(),
+        ));
+        ops
     }
 }
 
@@ -1203,11 +1261,21 @@ mod tests {
         ) -> Box<dyn Operation> {
             self.0.emit_spill_reload(c, v, class, f, o)
         }
-        fn emit_prologue(&self, c: &tir::Context, s: u32) -> Vec<Box<dyn Operation>> {
-            self.0.emit_prologue(c, s)
+        fn emit_prologue(
+            &self,
+            c: &tir::Context,
+            s: u32,
+            saves: &[(tir::backend::liveness::PhysReg, i64)],
+        ) -> Vec<Box<dyn Operation>> {
+            self.0.emit_prologue(c, s, saves)
         }
-        fn emit_epilogue(&self, c: &tir::Context, s: u32) -> Vec<Box<dyn Operation>> {
-            self.0.emit_epilogue(c, s)
+        fn emit_epilogue(
+            &self,
+            c: &tir::Context,
+            s: u32,
+            saves: &[(tir::backend::liveness::PhysReg, i64)],
+        ) -> Vec<Box<dyn Operation>> {
+            self.0.emit_epilogue(c, s, saves)
         }
     }
 

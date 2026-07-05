@@ -374,8 +374,11 @@ operation! {
         name: "vret",
         dialect: "riscv",
         operands: [value],
+        interfaces: [tir::Terminator],
     }
 }
+
+impl tir::Terminator for VirtualReturnOp {}
 
 // Virtual control-flow ops: the lowered form of `builtin.br`/`builtin.cond_br`.
 // They carry the successor block references and the values forwarded to each
@@ -392,6 +395,13 @@ operation! {
         attributes: A {
             dest: "Block",
         },
+        interfaces: [tir::Terminator],
+    }
+}
+
+impl tir::Terminator for VirtualBranchOp {
+    fn successors(&self) -> Vec<tir::BlockId> {
+        tir::backend::branch_successors(self)
     }
 }
 
@@ -959,6 +969,75 @@ fn virt(value: u32, class: &str) -> tir::attributes::AttributeValue {
     })
 }
 
+/// Store a physical register to `[frame + offset]`, dispatching on its file
+/// (`fsw`/`fsd` for the float files, `sd` otherwise). Used to preserve
+/// callee-saved registers in the prologue.
+fn reg_store(
+    context: &tir::Context,
+    reg: &(String, u16),
+    frame: &(String, u16),
+    offset: i64,
+) -> Box<dyn Operation> {
+    let offset = tir::attributes::AttributeValue::Int(offset);
+    match reg.0.as_str() {
+        "FPR32" => Box::new(
+            FStoreWordOpBuilder::new(context)
+                .attr("rs1", phys(frame))
+                .attr("fs2", phys(reg))
+                .attr("imm", offset)
+                .build(),
+        ),
+        "FPR64" => Box::new(
+            FStoreDoubleOpBuilder::new(context)
+                .attr("rs1", phys(frame))
+                .attr("fs2", phys(reg))
+                .attr("imm", offset)
+                .build(),
+        ),
+        _ => Box::new(
+            StoreDoubleWordOpBuilder::new(context)
+                .attr("rs1", phys(frame))
+                .attr("rs2", phys(reg))
+                .attr("imm", offset)
+                .build(),
+        ),
+    }
+}
+
+/// Reload a physical register from `[frame + offset]`, the inverse of
+/// [`reg_store`].
+fn reg_reload(
+    context: &tir::Context,
+    reg: &(String, u16),
+    frame: &(String, u16),
+    offset: i64,
+) -> Box<dyn Operation> {
+    let offset = tir::attributes::AttributeValue::Int(offset);
+    match reg.0.as_str() {
+        "FPR32" => Box::new(
+            FLoadWordOpBuilder::new(context)
+                .attr("fd", phys(reg))
+                .attr("rs1", phys(frame))
+                .attr("imm", offset)
+                .build(),
+        ),
+        "FPR64" => Box::new(
+            FLoadDoubleOpBuilder::new(context)
+                .attr("fd", phys(reg))
+                .attr("rs1", phys(frame))
+                .attr("imm", offset)
+                .build(),
+        ),
+        _ => Box::new(
+            LoadDoubleWordOpBuilder::new(context)
+                .attr("rd", phys(reg))
+                .attr("rs1", phys(frame))
+                .attr("imm", offset)
+                .build(),
+        ),
+    }
+}
+
 /// RISC-V register allocation target: the generated register file plus `sd`/`ld`
 /// spill code and an `addi sp, sp, ±frame` prologue/epilogue.
 pub struct RiscvRegAlloc;
@@ -1040,24 +1119,60 @@ impl tir::backend::regalloc::TargetRegAlloc for RiscvRegAlloc {
         }
     }
 
-    fn emit_prologue(&self, context: &tir::Context, size: u32) -> Vec<Box<dyn Operation>> {
-        vec![Box::new(
-            AddImmOpBuilder::new(context)
-                .attr("rd", phys(&(SP.0.to_string(), SP.1)))
-                .attr("rs1", phys(&(SP.0.to_string(), SP.1)))
-                .attr("imm", tir::attributes::AttributeValue::Int(-(size as i64)))
-                .build(),
-        )]
+    fn emit_copy(
+        &self,
+        context: &tir::Context,
+        class: &str,
+        dst: u32,
+        src: u32,
+    ) -> Box<dyn Operation> {
+        match class {
+            "GPR" => mv(context, virt(dst, "GPR"), virt(src, "GPR")),
+            other => unimplemented!(
+                "riscv register copy for class {other} is not implemented (no float/vector move op)"
+            ),
+        }
     }
 
-    fn emit_epilogue(&self, context: &tir::Context, size: u32) -> Vec<Box<dyn Operation>> {
-        vec![Box::new(
+    fn emit_prologue(
+        &self,
+        context: &tir::Context,
+        size: u32,
+        saves: &[(tir::backend::liveness::PhysReg, i64)],
+    ) -> Vec<Box<dyn Operation>> {
+        let sp = (SP.0.to_string(), SP.1);
+        let mut ops: Vec<Box<dyn Operation>> = vec![Box::new(
             AddImmOpBuilder::new(context)
-                .attr("rd", phys(&(SP.0.to_string(), SP.1)))
-                .attr("rs1", phys(&(SP.0.to_string(), SP.1)))
+                .attr("rd", phys(&sp))
+                .attr("rs1", phys(&sp))
+                .attr("imm", tir::attributes::AttributeValue::Int(-(size as i64)))
+                .build(),
+        )];
+        for (reg, offset) in saves {
+            ops.push(reg_store(context, reg, &sp, *offset));
+        }
+        ops
+    }
+
+    fn emit_epilogue(
+        &self,
+        context: &tir::Context,
+        size: u32,
+        saves: &[(tir::backend::liveness::PhysReg, i64)],
+    ) -> Vec<Box<dyn Operation>> {
+        let sp = (SP.0.to_string(), SP.1);
+        let mut ops: Vec<Box<dyn Operation>> = Vec::new();
+        for (reg, offset) in saves {
+            ops.push(reg_reload(context, reg, &sp, *offset));
+        }
+        ops.push(Box::new(
+            AddImmOpBuilder::new(context)
+                .attr("rd", phys(&sp))
+                .attr("rs1", phys(&sp))
                 .attr("imm", tir::attributes::AttributeValue::Int(size as i64))
                 .build(),
-        )]
+        ));
+        ops
     }
 }
 
@@ -2062,17 +2177,24 @@ mod tests {
         pm.run(&context, context.get_op(module.id()))
             .expect("pipeline should lower the call");
 
+        // The prologue reserves the frame and saves the callee-saved register
+        // holding the return address across the call (`addi sp`, `sd`); the
+        // epilogue restores it (`ld`, `addi sp`) before the `jalr` return.
         let names = body_op_names(&context, region.id());
         assert_eq!(
             names,
             vec![
+                "addi", // prologue: reserve frame
+                "sd",   // prologue: save the callee-saved register (return address)
                 "addi",
                 "addi",
+                "addi", // detach arg + move into a0 + save ra
+                "jal",  // the call
                 "addi",
-                "jal",
-                "addi",
-                "addi",
-                "jalr",
+                "addi", // restore ra + copy the result out of a0
+                "ld",   // epilogue: reload the callee-saved register
+                "addi", // epilogue: release frame
+                "jalr", // return
                 "symbol_end"
             ]
         );
@@ -2202,11 +2324,21 @@ mod tests {
         ) -> Box<dyn Operation> {
             self.0.emit_spill_reload(c, v, class, f, o)
         }
-        fn emit_prologue(&self, c: &tir::Context, s: u32) -> Vec<Box<dyn Operation>> {
-            self.0.emit_prologue(c, s)
+        fn emit_prologue(
+            &self,
+            c: &tir::Context,
+            s: u32,
+            saves: &[(tir::backend::liveness::PhysReg, i64)],
+        ) -> Vec<Box<dyn Operation>> {
+            self.0.emit_prologue(c, s, saves)
         }
-        fn emit_epilogue(&self, c: &tir::Context, s: u32) -> Vec<Box<dyn Operation>> {
-            self.0.emit_epilogue(c, s)
+        fn emit_epilogue(
+            &self,
+            c: &tir::Context,
+            s: u32,
+            saves: &[(tir::backend::liveness::PhysReg, i64)],
+        ) -> Vec<Box<dyn Operation>> {
+            self.0.emit_epilogue(c, s, saves)
         }
     }
 
@@ -2367,11 +2499,21 @@ mod tests {
         ) -> Box<dyn Operation> {
             self.0.emit_spill_reload(c, v, class, f, o)
         }
-        fn emit_prologue(&self, c: &tir::Context, s: u32) -> Vec<Box<dyn Operation>> {
-            self.0.emit_prologue(c, s)
+        fn emit_prologue(
+            &self,
+            c: &tir::Context,
+            s: u32,
+            saves: &[(tir::backend::liveness::PhysReg, i64)],
+        ) -> Vec<Box<dyn Operation>> {
+            self.0.emit_prologue(c, s, saves)
         }
-        fn emit_epilogue(&self, c: &tir::Context, s: u32) -> Vec<Box<dyn Operation>> {
-            self.0.emit_epilogue(c, s)
+        fn emit_epilogue(
+            &self,
+            c: &tir::Context,
+            s: u32,
+            saves: &[(tir::backend::liveness::PhysReg, i64)],
+        ) -> Vec<Box<dyn Operation>> {
+            self.0.emit_epilogue(c, s, saves)
         }
     }
 
