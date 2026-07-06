@@ -149,581 +149,66 @@ register_class GPR8H for [X86] {
 
 // `op dst, src`: REX.W + opcode + ModR/M(mod=11, reg=src, rm=dst). The REX byte
 // is 0100 WRXB: REX.B carries dst's 4th bit, REX.R carries src's.
-template RegReg for [X86_64] {
-    param MNEMONIC: String;
-    param OPCODE: bits<8>;
-
-    operands {
-        dst: GPR,
-        src: GPR,
-    }
-
-    encoding {
-        0 => dst[3],
-        1 => 0b0,
-        2 => src[3],
-        3 => 0b1,
-        4..7 => 0b0100,
-        8..15 => OPCODE,
-        16..18 => dst[0..2],
-        19..21 => src[0..2],
-        22..23 => 0b11,
-    }
-
-    asm {
-        "{self.MNEMONIC} {dst}, {src}"
-    }
-}
+tmpl_rr!(RegReg, X86_64, GPR, rexw = 0b1)
 
 // `op dst, imm32`: REX.W + opcode + ModR/M(mod=11, reg=EXT, rm=dst) + imm32. The
 // reg field holds the /digit extension, so only REX.B (dst's 4th bit) varies.
-template RegImm for [X86_64] {
-    param MNEMONIC: String;
-    param OPCODE: bits<8>;
-    param EXT: bits<3>;
-
-    operands {
-        dst: GPR,
-        imm: bits<32>,
-    }
-
-    encoding {
-        0 => dst[3],
-        1 => 0b0,
-        2 => 0b0,
-        3 => 0b1,
-        4..7 => 0b0100,
-        8..15 => OPCODE,
-        16..18 => dst[0..2],
-        19..21 => EXT,
-        22..23 => 0b11,
-        24..55 => imm,
-    }
-
-    asm {
-        "{self.MNEMONIC} {dst}, {imm}"
-    }
-}
+tmpl_ri!(RegImm, X86_64, GPR, rexw = 0b1)
 
 // Three-operand `imul r64, r/m64, imm32` (0x69 /r id): the non-destructive
 // immediate multiply. ModR/M.reg carries dst (REX.R), rm carries src (REX.B) —
 // the `RegRegExt` layout, but with a single-byte opcode and a trailing imm32.
-template RegRegImm for [X86_64] {
-    param MNEMONIC: String;
-    param OPCODE: bits<8>;
-
-    operands {
-        dst: GPR,
-        src: GPR,
-        imm: bits<32>,
-    }
-
-    encoding {
-        0 => src[3],
-        1 => 0b0,
-        2 => dst[3],
-        3 => 0b1,
-        4..7 => 0b0100,
-        8..15 => OPCODE,
-        16..18 => src[0..2],
-        19..21 => dst[0..2],
-        22..23 => 0b11,
-        24..55 => imm,
-    }
-
-    asm {
-        "{self.MNEMONIC} {dst}, {src}, {imm}"
-    }
-}
+tmpl_rrimm!(RegRegImm, X86_64, GPR, rexw = 0b1)
 
 // `op dst, imm8`: REX.W + 0xC1 + ModR/M(mod=11, reg=EXT, rm=dst) + imm8.
-template RegShift for [X86_64] {
-    param MNEMONIC: String;
-    param EXT: bits<3>;
-
-    operands {
-        dst: GPR,
-        imm: bits<8>,
-    }
-
-    encoding {
-        0 => dst[3],
-        1 => 0b0,
-        2 => 0b0,
-        3 => 0b1,
-        4..7 => 0b0100,
-        8..15 => 0xC1,
-        16..18 => dst[0..2],
-        19..21 => EXT,
-        22..23 => 0b11,
-        24..31 => imm,
-    }
-
-    asm {
-        "{self.MNEMONIC} {dst}, {imm}"
-    }
-}
+tmpl_rs!(RegShift, X86_64, GPR, rexw = 0b1, opcode = 0xC1)
 
 // `op dst, cl`: REX.W + 0xD3 + ModR/M(mod=11, reg=EXT, rm=dst). The count is
 // the low bits of rcx, masked to the operand width as in hardware. The cl
 // forms must be declared before the matching immediate forms: an immediate
 // operand also accepts a bare identifier (as a symbol reference), so the
 // immediate form would otherwise swallow the literal `cl`.
-template RegShiftCl for [X86_64] {
-    param MNEMONIC: String;
-    param EXT: bits<3>;
+tmpl_rscl!(RegShiftCl, X86_64, GPR, rexw = 0b1)
 
-    operands {
-        dst: GPR,
-    }
-
-    encoding {
-        0 => dst[3],
-        1 => 0b0,
-        2 => 0b0,
-        3 => 0b1,
-        4..7 => 0b0100,
-        8..15 => 0xD3,
-        16..18 => dst[0..2],
-        19..21 => EXT,
-        22..23 => 0b11,
-    }
-
-    asm {
-        "{self.MNEMONIC} {dst}, cl"
-    }
-}
-
-template RegShiftCl32 for [X86] {
-    param MNEMONIC: String;
-    param EXT: bits<3>;
-
-    operands {
-        dst: GPR32,
-    }
-
-    encoding {
-        0 => dst[3],
-        1 => 0b0,
-        2 => 0b0,
-        3 => 0b0,
-        4..7 => 0b0100,
-        8..15 => 0xD3,
-        16..18 => dst[0..2],
-        19..21 => EXT,
-        22..23 => 0b11,
-    }
-
-    asm {
-        "{self.MNEMONIC} {dst}, cl"
-    }
-}
+tmpl_rscl!(RegShiftCl32, X86, GPR32, rexw = 0b0)
 
 // `op dst, src` behind the 0x0F opcode escape, with the ModR/M fields swapped
 // relative to `RegReg`: reg carries dst (REX.R), rm carries src (REX.B) — the
 // `imul r64, r/m64` layout.
-template RegRegExt for [X86_64] {
-    param MNEMONIC: String;
-    param OPCODE: bits<8>;
+tmpl_rrext!(RegRegExt, X86_64, GPR, rexw = 0b1)
 
-    operands {
-        dst: GPR,
-        src: GPR,
-    }
+tmpl_rrext!(RegRegExt32, X86, GPR32, rexw = 0b0)
 
-    encoding {
-        0 => src[3],
-        1 => 0b0,
-        2 => dst[3],
-        3 => 0b1,
-        4..7 => 0b0100,
-        8..15 => 0x0F,
-        16..23 => OPCODE,
-        24..26 => src[0..2],
-        27..29 => dst[0..2],
-        30..31 => 0b11,
-    }
+tmpl_rr!(RegReg32, X86, GPR32, rexw = 0b0)
 
-    asm {
-        "{self.MNEMONIC} {dst}, {src}"
-    }
-}
-
-template RegRegExt32 for [X86] {
-    param MNEMONIC: String;
-    param OPCODE: bits<8>;
-
-    operands {
-        dst: GPR32,
-        src: GPR32,
-    }
-
-    encoding {
-        0 => src[3],
-        1 => 0b0,
-        2 => dst[3],
-        3 => 0b0,
-        4..7 => 0b0100,
-        8..15 => 0x0F,
-        16..23 => OPCODE,
-        24..26 => src[0..2],
-        27..29 => dst[0..2],
-        30..31 => 0b11,
-    }
-
-    asm {
-        "{self.MNEMONIC} {dst}, {src}"
-    }
-}
-
-template RegReg32 for [X86] {
-    param MNEMONIC: String;
-    param OPCODE: bits<8>;
-
-    operands {
-        dst: GPR32,
-        src: GPR32,
-    }
-
-    encoding {
-        0 => dst[3],
-        1 => 0b0,
-        2 => src[3],
-        3 => 0b0,
-        4..7 => 0b0100,
-        8..15 => OPCODE,
-        16..18 => dst[0..2],
-        19..21 => src[0..2],
-        22..23 => 0b11,
-    }
-
-    asm {
-        "{self.MNEMONIC} {dst}, {src}"
-    }
-}
-
-template RegImm32 for [X86] {
-    param MNEMONIC: String;
-    param OPCODE: bits<8>;
-    param EXT: bits<3>;
-
-    operands {
-        dst: GPR32,
-        imm: bits<32>,
-    }
-
-    encoding {
-        0 => dst[3],
-        1 => 0b0,
-        2 => 0b0,
-        3 => 0b0,
-        4..7 => 0b0100,
-        8..15 => OPCODE,
-        16..18 => dst[0..2],
-        19..21 => EXT,
-        22..23 => 0b11,
-        24..55 => imm,
-    }
-
-    asm {
-        "{self.MNEMONIC} {dst}, {imm}"
-    }
-}
+tmpl_ri!(RegImm32, X86, GPR32, rexw = 0b0)
 
 // 32-bit `imul r32, r/m32, imm32` (0x69 /r id, no REX.W).
-template RegRegImm32 for [X86] {
-    param MNEMONIC: String;
-    param OPCODE: bits<8>;
+tmpl_rrimm!(RegRegImm32, X86, GPR32, rexw = 0b0)
 
-    operands {
-        dst: GPR32,
-        src: GPR32,
-        imm: bits<32>,
-    }
-
-    encoding {
-        0 => src[3],
-        1 => 0b0,
-        2 => dst[3],
-        3 => 0b0,
-        4..7 => 0b0100,
-        8..15 => OPCODE,
-        16..18 => src[0..2],
-        19..21 => dst[0..2],
-        22..23 => 0b11,
-        24..55 => imm,
-    }
-
-    asm {
-        "{self.MNEMONIC} {dst}, {src}, {imm}"
-    }
-}
-
-template RegShift32 for [X86] {
-    param MNEMONIC: String;
-    param EXT: bits<3>;
-
-    operands {
-        dst: GPR32,
-        imm: bits<8>,
-    }
-
-    encoding {
-        0 => dst[3],
-        1 => 0b0,
-        2 => 0b0,
-        3 => 0b0,
-        4..7 => 0b0100,
-        8..15 => 0xC1,
-        16..18 => dst[0..2],
-        19..21 => EXT,
-        22..23 => 0b11,
-        24..31 => imm,
-    }
-
-    asm {
-        "{self.MNEMONIC} {dst}, {imm}"
-    }
-}
+tmpl_rs!(RegShift32, X86, GPR32, rexw = 0b0, opcode = 0xC1)
 
 // 16-bit forms prepend the 0x66 operand-size prefix to the 32-bit encoding.
-template RegReg16 for [X86] {
-    param MNEMONIC: String;
-    param OPCODE: bits<8>;
+tmpl_rr!(RegReg16, GPR16, prefix66)
 
-    operands {
-        dst: GPR16,
-        src: GPR16,
-    }
+tmpl_ri!(RegImm16, GPR16, prefix66)
 
-    encoding {
-        0..7 => 0x66,
-        8 => dst[3],
-        9 => 0b0,
-        10 => src[3],
-        11 => 0b0,
-        12..15 => 0b0100,
-        16..23 => OPCODE,
-        24..26 => dst[0..2],
-        27..29 => src[0..2],
-        30..31 => 0b11,
-    }
-
-    asm {
-        "{self.MNEMONIC} {dst}, {src}"
-    }
-}
-
-template RegImm16 for [X86] {
-    param MNEMONIC: String;
-    param OPCODE: bits<8>;
-    param EXT: bits<3>;
-
-    operands {
-        dst: GPR16,
-        imm: bits<16>,
-    }
-
-    encoding {
-        0..7 => 0x66,
-        8 => dst[3],
-        9 => 0b0,
-        10 => 0b0,
-        11 => 0b0,
-        12..15 => 0b0100,
-        16..23 => OPCODE,
-        24..26 => dst[0..2],
-        27..29 => EXT,
-        30..31 => 0b11,
-        32..47 => imm,
-    }
-
-    asm {
-        "{self.MNEMONIC} {dst}, {imm}"
-    }
-}
-
-template RegShift16 for [X86] {
-    param MNEMONIC: String;
-    param EXT: bits<3>;
-
-    operands {
-        dst: GPR16,
-        imm: bits<8>,
-    }
-
-    encoding {
-        0..7 => 0x66,
-        8 => dst[3],
-        9 => 0b0,
-        10 => 0b0,
-        11 => 0b0,
-        12..15 => 0b0100,
-        16..23 => 0xC1,
-        24..26 => dst[0..2],
-        27..29 => EXT,
-        30..31 => 0b11,
-        32..39 => imm,
-    }
-
-    asm {
-        "{self.MNEMONIC} {dst}, {imm}"
-    }
-}
+tmpl_rs!(RegShift16, GPR16, prefix66)
 
 // 8-bit forms reuse the 32-bit layout with the byte-sized opcode.
-template RegReg8 for [X86] {
-    param MNEMONIC: String;
-    param OPCODE: bits<8>;
+tmpl_rr!(RegReg8, X86, GPR8, rexw = 0b0)
 
-    operands {
-        dst: GPR8,
-        src: GPR8,
-    }
+tmpl_ri!(RegImm8, GPR8, byte)
 
-    encoding {
-        0 => dst[3],
-        1 => 0b0,
-        2 => src[3],
-        3 => 0b0,
-        4..7 => 0b0100,
-        8..15 => OPCODE,
-        16..18 => dst[0..2],
-        19..21 => src[0..2],
-        22..23 => 0b11,
-    }
-
-    asm {
-        "{self.MNEMONIC} {dst}, {src}"
-    }
-}
-
-template RegImm8 for [X86] {
-    param MNEMONIC: String;
-    param OPCODE: bits<8>;
-    param EXT: bits<3>;
-
-    operands {
-        dst: GPR8,
-        imm: bits<8>,
-    }
-
-    encoding {
-        0 => dst[3],
-        1 => 0b0,
-        2 => 0b0,
-        3 => 0b0,
-        4..7 => 0b0100,
-        8..15 => OPCODE,
-        16..18 => dst[0..2],
-        19..21 => EXT,
-        22..23 => 0b11,
-        24..31 => imm,
-    }
-
-    asm {
-        "{self.MNEMONIC} {dst}, {imm}"
-    }
-}
-
-template RegShift8 for [X86] {
-    param MNEMONIC: String;
-    param EXT: bits<3>;
-
-    operands {
-        dst: GPR8,
-        imm: bits<8>,
-    }
-
-    encoding {
-        0 => dst[3],
-        1 => 0b0,
-        2 => 0b0,
-        3 => 0b0,
-        4..7 => 0b0100,
-        8..15 => 0xC0,
-        16..18 => dst[0..2],
-        19..21 => EXT,
-        22..23 => 0b11,
-        24..31 => imm,
-    }
-
-    asm {
-        "{self.MNEMONIC} {dst}, {imm}"
-    }
-}
+tmpl_rs!(RegShift8, X86, GPR8, rexw = 0b0, opcode = 0xC0)
 
 // No REX prefix: just opcode + ModR/M. The field's high bit turns the register
 // index (0..3) into its ModR/M number (4..7).
-template RegReg8H for [X86] {
-    param MNEMONIC: String;
-    param OPCODE: bits<8>;
+tmpl_rr!(RegReg8H, GPR8H, high8)
 
-    operands {
-        dst: GPR8H,
-        src: GPR8H,
-    }
+tmpl_ri!(RegImm8H, GPR8H, high8)
 
-    encoding {
-        0..7 => OPCODE,
-        8..9 => dst[0..1],
-        10 => 0b1,
-        11..12 => src[0..1],
-        13 => 0b1,
-        14..15 => 0b11,
-    }
-
-    asm {
-        "{self.MNEMONIC} {dst}, {src}"
-    }
-}
-
-template RegImm8H for [X86] {
-    param MNEMONIC: String;
-    param OPCODE: bits<8>;
-    param EXT: bits<3>;
-
-    operands {
-        dst: GPR8H,
-        imm: bits<8>,
-    }
-
-    encoding {
-        0..7 => OPCODE,
-        8..9 => dst[0..1],
-        10 => 0b1,
-        11..13 => EXT,
-        14..15 => 0b11,
-        16..23 => imm,
-    }
-
-    asm {
-        "{self.MNEMONIC} {dst}, {imm}"
-    }
-}
-
-template RegShift8H for [X86] {
-    param MNEMONIC: String;
-    param EXT: bits<3>;
-
-    operands {
-        dst: GPR8H,
-        imm: bits<8>,
-    }
-
-    encoding {
-        0..7 => 0xC0,
-        8..9 => dst[0..1],
-        10 => 0b1,
-        11..13 => EXT,
-        14..15 => 0b11,
-        16..23 => imm,
-    }
-
-    asm {
-        "{self.MNEMONIC} {dst}, {imm}"
-    }
-}
+tmpl_rs!(RegShift8H, GPR8H, high8)
 
 // `jcc rel32`: the 0x0F opcode escape, 0x80|cc, then a 32-bit displacement
 // measured from the end of the 6-byte instruction (RIP already points past the
@@ -826,5 +311,283 @@ macro shift_imm {
                param EXT: bits<3> = $ext;
                behavior { $($b)* }
            } )*
+    };
+}
+
+// Template-family macros. x86 width variants share a ModR/M scaffold but the
+// encoding *shape* changes with width: REX.W is a bit param (64 vs 32/8), the
+// 0x66 operand-size prefix (16-bit) shifts every offset by 8, and the 8-bit
+// high-byte forms drop REX entirely. One arm per shape, each writing its offsets
+// once. Templates emit no code themselves, so only the derived instructions
+// matter for output.
+
+macro tmpl_rr {
+    ( $name:ident, $dia:ident, $cls:ident, rexw = $rexw:literal ) => {
+        template $name for [$dia] {
+            param MNEMONIC: String;
+            param OPCODE: bits<8>;
+            operands { dst: $cls, src: $cls, }
+            encoding {
+                0 => dst[3],
+                1 => 0b0,
+                2 => src[3],
+                3 => $rexw,
+                4..7 => 0b0100,
+                8..15 => OPCODE,
+                16..18 => dst[0..2],
+                19..21 => src[0..2],
+                22..23 => 0b11,
+            }
+            asm { "{self.MNEMONIC} {dst}, {src}" }
+        }
+    };
+    ( $name:ident, $cls:ident, prefix66 ) => {
+        template $name for [X86] {
+            param MNEMONIC: String;
+            param OPCODE: bits<8>;
+            operands { dst: $cls, src: $cls, }
+            encoding {
+                0..7 => 0x66,
+                8 => dst[3],
+                9 => 0b0,
+                10 => src[3],
+                11 => 0b0,
+                12..15 => 0b0100,
+                16..23 => OPCODE,
+                24..26 => dst[0..2],
+                27..29 => src[0..2],
+                30..31 => 0b11,
+            }
+            asm { "{self.MNEMONIC} {dst}, {src}" }
+        }
+    };
+    ( $name:ident, $cls:ident, high8 ) => {
+        template $name for [X86] {
+            param MNEMONIC: String;
+            param OPCODE: bits<8>;
+            operands { dst: $cls, src: $cls, }
+            encoding {
+                0..7 => OPCODE,
+                8..9 => dst[0..1],
+                10 => 0b1,
+                11..12 => src[0..1],
+                13 => 0b1,
+                14..15 => 0b11,
+            }
+            asm { "{self.MNEMONIC} {dst}, {src}" }
+        }
+    };
+}
+
+macro tmpl_ri {
+    ( $name:ident, $dia:ident, $cls:ident, rexw = $rexw:literal ) => {
+        template $name for [$dia] {
+            param MNEMONIC: String;
+            param OPCODE: bits<8>;
+            param EXT: bits<3>;
+            operands { dst: $cls, imm: bits<32>, }
+            encoding {
+                0 => dst[3],
+                1 => 0b0,
+                2 => 0b0,
+                3 => $rexw,
+                4..7 => 0b0100,
+                8..15 => OPCODE,
+                16..18 => dst[0..2],
+                19..21 => EXT,
+                22..23 => 0b11,
+                24..55 => imm,
+            }
+            asm { "{self.MNEMONIC} {dst}, {imm}" }
+        }
+    };
+    ( $name:ident, $cls:ident, byte ) => {
+        template $name for [X86] {
+            param MNEMONIC: String;
+            param OPCODE: bits<8>;
+            param EXT: bits<3>;
+            operands { dst: $cls, imm: bits<8>, }
+            encoding {
+                0 => dst[3],
+                1 => 0b0,
+                2 => 0b0,
+                3 => 0b0,
+                4..7 => 0b0100,
+                8..15 => OPCODE,
+                16..18 => dst[0..2],
+                19..21 => EXT,
+                22..23 => 0b11,
+                24..31 => imm,
+            }
+            asm { "{self.MNEMONIC} {dst}, {imm}" }
+        }
+    };
+    ( $name:ident, $cls:ident, prefix66 ) => {
+        template $name for [X86] {
+            param MNEMONIC: String;
+            param OPCODE: bits<8>;
+            param EXT: bits<3>;
+            operands { dst: $cls, imm: bits<16>, }
+            encoding {
+                0..7 => 0x66,
+                8 => dst[3],
+                9 => 0b0,
+                10 => 0b0,
+                11 => 0b0,
+                12..15 => 0b0100,
+                16..23 => OPCODE,
+                24..26 => dst[0..2],
+                27..29 => EXT,
+                30..31 => 0b11,
+                32..47 => imm,
+            }
+            asm { "{self.MNEMONIC} {dst}, {imm}" }
+        }
+    };
+    ( $name:ident, $cls:ident, high8 ) => {
+        template $name for [X86] {
+            param MNEMONIC: String;
+            param OPCODE: bits<8>;
+            param EXT: bits<3>;
+            operands { dst: $cls, imm: bits<8>, }
+            encoding {
+                0..7 => OPCODE,
+                8..9 => dst[0..1],
+                10 => 0b1,
+                11..13 => EXT,
+                14..15 => 0b11,
+                16..23 => imm,
+            }
+            asm { "{self.MNEMONIC} {dst}, {imm}" }
+        }
+    };
+}
+
+macro tmpl_rs {
+    ( $name:ident, $dia:ident, $cls:ident, rexw = $rexw:literal, opcode = $opc:literal ) => {
+        template $name for [$dia] {
+            param MNEMONIC: String;
+            param EXT: bits<3>;
+            operands { dst: $cls, imm: bits<8>, }
+            encoding {
+                0 => dst[3],
+                1 => 0b0,
+                2 => 0b0,
+                3 => $rexw,
+                4..7 => 0b0100,
+                8..15 => $opc,
+                16..18 => dst[0..2],
+                19..21 => EXT,
+                22..23 => 0b11,
+                24..31 => imm,
+            }
+            asm { "{self.MNEMONIC} {dst}, {imm}" }
+        }
+    };
+    ( $name:ident, $cls:ident, prefix66 ) => {
+        template $name for [X86] {
+            param MNEMONIC: String;
+            param EXT: bits<3>;
+            operands { dst: $cls, imm: bits<8>, }
+            encoding {
+                0..7 => 0x66,
+                8 => dst[3],
+                9 => 0b0,
+                10 => 0b0,
+                11 => 0b0,
+                12..15 => 0b0100,
+                16..23 => 0xC1,
+                24..26 => dst[0..2],
+                27..29 => EXT,
+                30..31 => 0b11,
+                32..39 => imm,
+            }
+            asm { "{self.MNEMONIC} {dst}, {imm}" }
+        }
+    };
+    ( $name:ident, $cls:ident, high8 ) => {
+        template $name for [X86] {
+            param MNEMONIC: String;
+            param EXT: bits<3>;
+            operands { dst: $cls, imm: bits<8>, }
+            encoding {
+                0..7 => 0xC0,
+                8..9 => dst[0..1],
+                10 => 0b1,
+                11..13 => EXT,
+                14..15 => 0b11,
+                16..23 => imm,
+            }
+            asm { "{self.MNEMONIC} {dst}, {imm}" }
+        }
+    };
+}
+
+// Single-shape families (only 64-bit and 32-bit variants, both no-prefix).
+macro tmpl_rscl {
+    ( $name:ident, $dia:ident, $cls:ident, rexw = $rexw:literal ) => {
+        template $name for [$dia] {
+            param MNEMONIC: String;
+            param EXT: bits<3>;
+            operands { dst: $cls, }
+            encoding {
+                0 => dst[3],
+                1 => 0b0,
+                2 => 0b0,
+                3 => $rexw,
+                4..7 => 0b0100,
+                8..15 => 0xD3,
+                16..18 => dst[0..2],
+                19..21 => EXT,
+                22..23 => 0b11,
+            }
+            asm { "{self.MNEMONIC} {dst}, cl" }
+        }
+    };
+}
+
+macro tmpl_rrext {
+    ( $name:ident, $dia:ident, $cls:ident, rexw = $rexw:literal ) => {
+        template $name for [$dia] {
+            param MNEMONIC: String;
+            param OPCODE: bits<8>;
+            operands { dst: $cls, src: $cls, }
+            encoding {
+                0 => src[3],
+                1 => 0b0,
+                2 => dst[3],
+                3 => $rexw,
+                4..7 => 0b0100,
+                8..15 => 0x0F,
+                16..23 => OPCODE,
+                24..26 => src[0..2],
+                27..29 => dst[0..2],
+                30..31 => 0b11,
+            }
+            asm { "{self.MNEMONIC} {dst}, {src}" }
+        }
+    };
+}
+
+macro tmpl_rrimm {
+    ( $name:ident, $dia:ident, $cls:ident, rexw = $rexw:literal ) => {
+        template $name for [$dia] {
+            param MNEMONIC: String;
+            param OPCODE: bits<8>;
+            operands { dst: $cls, src: $cls, imm: bits<32>, }
+            encoding {
+                0 => src[3],
+                1 => 0b0,
+                2 => dst[3],
+                3 => $rexw,
+                4..7 => 0b0100,
+                8..15 => OPCODE,
+                16..18 => src[0..2],
+                19..21 => dst[0..2],
+                22..23 => 0b11,
+                24..55 => imm,
+            }
+            asm { "{self.MNEMONIC} {dst}, {src}, {imm}" }
+        }
     };
 }
