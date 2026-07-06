@@ -62,6 +62,7 @@ serde_json = "1.0.150"
 regex = "1.12.4"
 libfuzzer-sys = "0.4"
 proptest = "1.11.0"
+typed-arena = "2"
 
 [profile.bench]
 debug = true

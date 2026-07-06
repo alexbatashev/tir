@@ -1,0 +1,24 @@
+// This file was generated with ./utils/scripts/update_checks.py. Do not modify CHECKs manually.
+
+// RUN: tmdlc --action=emit-expanded-tokens --output=- %s | filecheck %s
+
+macro greet {
+    ($who:ident) => { hello $who };
+}
+
+greet!(world)
+
+// CHECK: [
+// CHECK-NEXT:     (
+// CHECK-NEXT:         Identifier(
+// CHECK-NEXT:             "hello",
+// CHECK-NEXT:         ),
+// CHECK-NEXT:         225..615,
+// CHECK-NEXT:     ),
+// CHECK-NEXT:     (
+// CHECK-NEXT:         Identifier(
+// CHECK-NEXT:             "world",
+// CHECK-NEXT:         ),
+// CHECK-NEXT:         225..615,
+// CHECK-NEXT:     ),
+// CHECK-NEXT: ]

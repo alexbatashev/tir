@@ -16,6 +16,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 tir.workspace = true
 tir-adt.workspace = true
+typed-arena.workspace = true
 
 [[bin]]
 name = "tmdlc"
@@ -31,6 +32,10 @@ harness = false
 
 [[bench]]
 name = "parser"
+harness = false
+
+[[bench]]
+name = "expander"
 harness = false
 
 [[test]]

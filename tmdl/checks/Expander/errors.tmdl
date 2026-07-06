@@ -1,0 +1,10 @@
+// RUN: tmdlc --action=emit-expanded-tokens --output=- %s | filecheck %s
+
+macro one {
+    ($x:ident) => { $x };
+}
+
+// Wrong fragment kind: literal passed where ident required -> no arm matches.
+one!(42)
+
+// CHECK: no matching macro arm

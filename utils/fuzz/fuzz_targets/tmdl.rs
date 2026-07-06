@@ -15,6 +15,19 @@ fuzz_target!(|data: &[u8]| {
             return;
         }
 
+        // Macro-expand between lex and parse. Arena is stack-local (no leaks).
+        let arena = tmdl::StringArena::new();
+        let mut table = tmdl::MacroTable::new();
+        let mut diags = Vec::new();
+        let tokens = tmdl::collect_macros("<fuzz>", tokens, &mut table, &mut diags);
+        if !diags.is_empty() {
+            return;
+        }
+        let (tokens, diags) = tmdl::expand("<fuzz>", tokens, &table, &arena);
+        if !diags.is_empty() {
+            return;
+        }
+
         let (file, errors) = tmdl::parse(input, &tokens, "<fuzz>");
         if !errors.is_empty() {
             return;

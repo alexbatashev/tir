@@ -1,0 +1,9 @@
+macro alu {
+    ($name:ident, $mn:literal, $opc:literal) => {
+        instruction ${concat($name, 32)} for [TestIsa32] : Base {
+            param MNEMONIC: String = $mn;
+            param OPCODE: bits<7> = $opc;
+            behavior { rd = rs1 + rs2; }
+        }
+    };
+}
