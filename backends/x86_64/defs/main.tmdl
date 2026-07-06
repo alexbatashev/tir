@@ -591,3 +591,53 @@ macro tmpl_rrimm {
         }
     };
 }
+
+// Condition-code families. Each row carries its guard expression verbatim as a
+// `{ ... }` token fragment, so original parenthesization is preserved. jcc
+// writes PC, setcc writes an 8-bit 0/1, cmovcc selects src/dst.
+
+macro jcc_ops {
+    ( $( ( $name:ident, $mn:literal, $cc:literal, { $($cond:tt)* } ) ),* ) => {
+        $( instruction $name for [X86_64] : JccRel32 {
+               param MNEMONIC: String = $mn;
+               param CC: bits<8> = $cc;
+               behavior {
+                   if $($cond)* {
+                       PC::pc = PC::pc + sext(imm, self.XLEN) + zext(0b110, self.XLEN);
+                   }
+               }
+           } )*
+    };
+}
+
+macro setcc_ops {
+    ( $( ( $name:ident, $mn:literal, $cc:literal, { $($cond:tt)* } ) ),* ) => {
+        $( instruction $name for [X86] : SetccReg {
+               param MNEMONIC: String = $mn;
+               param CC: bits<8> = $cc;
+               behavior {
+                   dst = if $($cond)* {
+                       zext(0b1, 8)
+                   } else {
+                       zext(0b0, 8)
+                   };
+               }
+           } )*
+    };
+}
+
+macro cmovcc_ops {
+    ( $( ( $name:ident, $mn:literal, $opc:literal, { $($cond:tt)* } ) ),* ) => {
+        $( instruction $name for [X86_64] : RegRegExt {
+               param MNEMONIC: String = $mn;
+               param OPCODE: bits<8> = $opc;
+               behavior {
+                   dst = if $($cond)* {
+                       src
+                   } else {
+                       dst
+                   };
+               }
+           } )*
+    };
+}

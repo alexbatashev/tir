@@ -151,71 +151,14 @@ instruction Jmp for [X86_64] {
 // Conditional jumps: EFLAGS-guarded PC writes. Selection derives cmp/test +
 // jcc branch rules from these guards composed with the flag definers above.
 
-instruction JumpEq for [X86_64] : JccRel32 {
-    param MNEMONIC: String = "je";
-    param CC: bits<8> = 0x84;
-
-    behavior {
-        if EFLAGS::zf == zext(0b1, 1) {
-            PC::pc = PC::pc + sext(imm, self.XLEN) + zext(0b110, self.XLEN);
-        }
-    }
-}
-
-instruction JumpNotEq for [X86_64] : JccRel32 {
-    param MNEMONIC: String = "jne";
-    param CC: bits<8> = 0x85;
-
-    behavior {
-        if EFLAGS::zf == zext(0b0, 1) {
-            PC::pc = PC::pc + sext(imm, self.XLEN) + zext(0b110, self.XLEN);
-        }
-    }
-}
-
-instruction JumpLess for [X86_64] : JccRel32 {
-    param MNEMONIC: String = "jl";
-    param CC: bits<8> = 0x8C;
-
-    behavior {
-        if EFLAGS::sf != EFLAGS::of {
-            PC::pc = PC::pc + sext(imm, self.XLEN) + zext(0b110, self.XLEN);
-        }
-    }
-}
-
-instruction JumpGreaterEq for [X86_64] : JccRel32 {
-    param MNEMONIC: String = "jge";
-    param CC: bits<8> = 0x8D;
-
-    behavior {
-        if EFLAGS::sf == EFLAGS::of {
-            PC::pc = PC::pc + sext(imm, self.XLEN) + zext(0b110, self.XLEN);
-        }
-    }
-}
-
-instruction JumpBelow for [X86_64] : JccRel32 {
-    param MNEMONIC: String = "jb";
-    param CC: bits<8> = 0x82;
-
-    behavior {
-        if EFLAGS::cf == zext(0b1, 1) {
-            PC::pc = PC::pc + sext(imm, self.XLEN) + zext(0b110, self.XLEN);
-        }
-    }
-}
-
-instruction JumpAboveEq for [X86_64] : JccRel32 {
-    param MNEMONIC: String = "jae";
-    param CC: bits<8> = 0x83;
-
-    behavior {
-        if EFLAGS::cf == zext(0b0, 1) {
-            PC::pc = PC::pc + sext(imm, self.XLEN) + zext(0b110, self.XLEN);
-        }
-    }
-}
+jcc_ops!(
+    (JumpEq,        "je",  0x84, { EFLAGS::zf == zext(0b1, 1) }),
+    (JumpNotEq,     "jne", 0x85, { EFLAGS::zf == zext(0b0, 1) }),
+    (JumpLess,      "jl",  0x8C, { EFLAGS::sf != EFLAGS::of }),
+    (JumpGreaterEq, "jge", 0x8D, { EFLAGS::sf == EFLAGS::of }),
+    (JumpBelow,     "jb",  0x82, { EFLAGS::cf == zext(0b1, 1) }),
+    (JumpAboveEq,   "jae", 0x83, { EFLAGS::cf == zext(0b0, 1) })
+)
 
 instruction Call for [X86_64] {
     param MNEMONIC: String = "call";
