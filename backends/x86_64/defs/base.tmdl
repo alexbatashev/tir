@@ -18,20 +18,9 @@ instruction Cmp for [X86_64] : RegReg {
     param OPCODE: bits<8> = 0x39;
 
     behavior {
-        EFLAGS::cf = if dst ~< src {
-            zext(0b1, 1)
-        } else {
-            zext(0b0, 1)
-        };
-        EFLAGS::zf = if dst == src {
-            zext(0b1, 1)
-        } else {
-            zext(0b0, 1)
-        };
-        EFLAGS::sf = extract(dst - src, self.XLEN - 1, self.XLEN - 1);
         // Signed overflow of dst - src: operands differ in sign and the
         // result's sign differs from dst's.
-        EFLAGS::of = extract((dst ^ src) & (dst ^ (dst - src)), self.XLEN - 1, self.XLEN - 1);
+        sub_flags!({ src }, { self.XLEN - 1 })
     }
 }
 
@@ -41,14 +30,7 @@ instruction Test for [X86_64] : RegReg {
     param OPCODE: bits<8> = 0x85;
 
     behavior {
-        EFLAGS::cf = zext(0b0, 1);
-        EFLAGS::zf = if (dst & src) == zext(0b0, self.XLEN) {
-            zext(0b1, 1)
-        } else {
-            zext(0b0, 1)
-        };
-        EFLAGS::sf = extract(dst & src, self.XLEN - 1, self.XLEN - 1);
-        EFLAGS::of = zext(0b0, 1);
+        test_flags!({ src }, { self.XLEN }, { self.XLEN - 1 })
     }
 }
 
