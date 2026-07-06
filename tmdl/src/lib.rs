@@ -1,6 +1,7 @@
 mod ast;
 mod compiler;
 mod error;
+mod expander;
 mod lexer;
 mod parser;
 mod rustgen;
@@ -18,6 +19,7 @@ pub type Spanned<T> = (T, Span);
 
 pub use compiler::{Action, Compiler, OutputKind, compiler_main};
 
+pub use expander::{Diag, MacroTable, StringArena, collect_macros, expand};
 pub use lexer::lex;
 pub use parser::parse;
 pub use sema::analyze as sema_analyze;

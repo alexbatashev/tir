@@ -37,6 +37,8 @@ pub enum Token<'a> {
     Bang,
     /// `~`
     Tilde,
+    /// `$`
+    Dollar,
 
     /// `.`
     Dot,
@@ -125,6 +127,8 @@ pub enum Token<'a> {
     KwTry,
     /// `except`
     KwExcept,
+    /// `macro`
+    KwMacro,
 }
 
 impl<'a> Token<'a> {
@@ -187,6 +191,7 @@ pub(crate) fn lexer<'src>()
         just('.').to(Token::Dot),
         just('&').to(Token::Ampersand),
         just('^').to(Token::Hat),
+        just('$').to(Token::Dollar),
     ));
 
     let ident = text::ascii::ident().map(|ident: &str| match ident {
@@ -218,6 +223,7 @@ pub(crate) fn lexer<'src>()
         "reg_file" => Token::KwRegFile,
         "try" => Token::KwTry,
         "except" => Token::KwExcept,
+        "macro" => Token::KwMacro,
         _ => Token::Identifier(ident),
     });
 
@@ -262,6 +268,7 @@ impl<'a> fmt::Display for Token<'a> {
             Token::Hat => f.write_char('^'),
             Token::Bang => f.write_char('!'),
             Token::Tilde => f.write_char('~'),
+            Token::Dollar => f.write_char('$'),
             Token::LBracket => f.write_str("["),
             Token::RBracket => f.write_str("]"),
             Token::LParen => f.write_str("("),
@@ -296,6 +303,7 @@ impl<'a> fmt::Display for Token<'a> {
             Token::KwRegFile => f.write_str("reg_file"),
             Token::KwTry => f.write_str("try"),
             Token::KwExcept => f.write_str("except"),
+            Token::KwMacro => f.write_str("macro"),
         }
     }
 }
