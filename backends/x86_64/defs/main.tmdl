@@ -746,3 +746,85 @@ template JccRel32 for [X86_64] {
         "{self.MNEMONIC} {imm}"
     }
 }
+
+// Width-family macros for the group-1 ALU / immediate / shift instructions.
+// Each family has a width-suffixed arm (for [X86], carries an OPNAME derived by
+// ${concat}) and a 64-bit arm (for [X86_64], no width suffix). One invocation
+// per width group keeps generated items in their original declaration order.
+// Opcodes differ per width (e.g. Add 0x01 vs Add8 0x00), so they stay per row.
+
+macro alu_rr {
+    ( $nsuf:literal, $osuf:literal, $tmpl:ident, $( ( $name:ident, $mn:literal, $opc:literal, { $($b:tt)* } ) ),* ) => {
+        $( instruction ${concat($name, $nsuf)} for [X86] : $tmpl {
+               param OPNAME: String = ${concat($mn, $osuf)};
+               param MNEMONIC: String = $mn;
+               param OPCODE: bits<8> = $opc;
+               behavior { $($b)* }
+           } )*
+    };
+    ( $tmpl:ident, $( ( $name:ident, $mn:literal, $opc:literal, { $($b:tt)* } ) ),* ) => {
+        $( instruction $name for [X86_64] : $tmpl {
+               param MNEMONIC: String = $mn;
+               param OPCODE: bits<8> = $opc;
+               behavior { $($b)* }
+           } )*
+    };
+}
+
+macro alu_ri {
+    ( $nsuf:literal, $osuf:literal, $tmpl:ident, $( ( $name:ident, $ostem:literal, $mn:literal, $opc:literal, $ext:literal, { $($b:tt)* } ) ),* ) => {
+        $( instruction ${concat($name, $nsuf)} for [X86] : $tmpl {
+               param OPNAME: String = ${concat($ostem, $osuf)};
+               param MNEMONIC: String = $mn;
+               param OPCODE: bits<8> = $opc;
+               param EXT: bits<3> = $ext;
+               behavior { $($b)* }
+           } )*
+    };
+    ( $tmpl:ident, $( ( $name:ident, $opname:literal, $mn:literal, $opc:literal, $ext:literal, { $($b:tt)* } ) ),* ) => {
+        $( instruction $name for [X86_64] : $tmpl {
+               param OPNAME: String = $opname;
+               param MNEMONIC: String = $mn;
+               param OPCODE: bits<8> = $opc;
+               param EXT: bits<3> = $ext;
+               behavior { $($b)* }
+           } )*
+    };
+}
+
+macro shift_cl {
+    ( $nsuf:literal, $osuf:literal, $tmpl:ident, $( ( $name:ident, $ostem:literal, $mn:literal, $ext:literal, { $($b:tt)* } ) ),* ) => {
+        $( instruction ${concat($name, $nsuf)} for [X86] : $tmpl {
+               param OPNAME: String = ${concat($ostem, $osuf)};
+               param MNEMONIC: String = $mn;
+               param EXT: bits<3> = $ext;
+               behavior { $($b)* }
+           } )*
+    };
+    ( $tmpl:ident, $( ( $name:ident, $opname:literal, $mn:literal, $ext:literal, { $($b:tt)* } ) ),* ) => {
+        $( instruction $name for [X86_64] : $tmpl {
+               param OPNAME: String = $opname;
+               param MNEMONIC: String = $mn;
+               param EXT: bits<3> = $ext;
+               behavior { $($b)* }
+           } )*
+    };
+}
+
+macro shift_imm {
+    ( $nsuf:literal, $osuf:literal, $tmpl:ident, $( ( $name:ident, $mn:literal, $ext:literal, { $($b:tt)* } ) ),* ) => {
+        $( instruction ${concat($name, $nsuf)} for [X86] : $tmpl {
+               param OPNAME: String = ${concat($mn, $osuf)};
+               param MNEMONIC: String = $mn;
+               param EXT: bits<3> = $ext;
+               behavior { $($b)* }
+           } )*
+    };
+    ( $tmpl:ident, $( ( $name:ident, $mn:literal, $ext:literal, { $($b:tt)* } ) ),* ) => {
+        $( instruction $name for [X86_64] : $tmpl {
+               param MNEMONIC: String = $mn;
+               param EXT: bits<3> = $ext;
+               behavior { $($b)* }
+           } )*
+    };
+}
