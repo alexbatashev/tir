@@ -225,7 +225,16 @@ fn emit_instructions<'a>(
 ) -> Result<proc_macro2::TokenStream, TMDLError> {
     let mut instruction_defs = vec![];
     let mut instruction_parsers_impls: Vec<proc_macro2::TokenStream> = vec![];
-    let mut instruction_parser_map_inits: Vec<proc_macro2::TokenStream> = vec![];
+    // Each entry carries its specificity key (operand count, total immediate
+    // bit-width, sum of register-class sizes) so same-mnemonic candidates can be
+    // ordered most-constrained-first, independent of declaration order.
+    let mut instruction_parser_candidates: Vec<(
+        String,
+        usize,
+        u32,
+        usize,
+        proc_macro2::TokenStream,
+    )> = vec![];
     let mut instruction_printers_impls: Vec<proc_macro2::TokenStream> = vec![];
     let mut instruction_printer_map_inits: Vec<proc_macro2::TokenStream> = vec![];
     let mut isel_rule_emitters: Vec<proc_macro2::TokenStream> = vec![];
@@ -237,7 +246,7 @@ fn emit_instructions<'a>(
     let mut instruction_encoder_map_inits: Vec<proc_macro2::TokenStream> = vec![];
     let mut instruction_patcher_map_inits: Vec<proc_macro2::TokenStream> = vec![];
     let mut instruction_decoder_impls: Vec<proc_macro2::TokenStream> = vec![];
-    let mut instruction_decoder_dispatch: Vec<proc_macro2::TokenStream> = vec![];
+    let mut instruction_decoder_dispatch: Vec<(u128, proc_macro2::Ident)> = vec![];
 
     // `(class, register-name) -> encoding index` over every register class, so the
     // simulator can lower register paths that carry no numeric index in their name
@@ -251,6 +260,15 @@ fn emit_instructions<'a>(
                 .into_iter()
                 .map(move |(name, idx)| ((class.clone(), name), u32::from(idx)))
         })
+        .collect();
+
+    // Register count per class, used to sort same-mnemonic asm parser candidates
+    // by specificity: a form over a small class (e.g. 2-register `GPRsib`) is more
+    // constrained than one over a large class (16-register `GPR`) and is tried first.
+    let class_sizes: HashMap<String, usize> = files
+        .iter()
+        .flat_map(|f| f.register_classes())
+        .map(|rc| (rc.name.clone(), rc.resolve_registers().count()))
         .collect();
 
     // The inverse mapping, used to name a demand attribute after the register a
@@ -535,7 +553,7 @@ fn emit_instructions<'a>(
             register_attr_print_arms.push(quote! {
                 #attr_name_lit => {
                     if let tir::attributes::AttributeValue::Register(tir::attributes::RegisterAttr::Physical { class, index }) = &attr.value {
-                        if let Some(name) = register_name(class, *index, false) {
+                        if let Some(name) = register_name(class.name(), *index, false) {
                             fmt.write(name)?;
                         } else {
                             attr.value.print(fmt, &context)?;
@@ -624,7 +642,7 @@ fn emit_instructions<'a>(
                 let op_name_lit = proc_macro2::Literal::string(op_name);
                 match op_ty {
                     Type::Struct(class_name) => {
-                        let class_lit = proc_macro2::Literal::string(class_name);
+                        let class_id = reg_class_id(class_name);
                         if let Some(def_pos) = defined_register_operands
                             .iter()
                             .position(|name| name == op_name)
@@ -646,7 +664,7 @@ fn emit_instructions<'a>(
                                     tir::attributes::AttributeValue::Register(
                                         tir::attributes::RegisterAttr::Virtual {
                                             id: dst,
-                                            class: Some(#class_lit.to_string()),
+                                            class: Some(#class_id),
                                         },
                                     ),
                                 );
@@ -667,7 +685,7 @@ fn emit_instructions<'a>(
                                         tir::attributes::AttributeValue::Register(
                                             tir::attributes::RegisterAttr::Virtual {
                                                 id: tied.number(),
-                                                class: Some(#class_lit.to_string()),
+                                                class: Some(#class_id),
                                             },
                                         ),
                                     );
@@ -682,7 +700,7 @@ fn emit_instructions<'a>(
                                     tir::attributes::AttributeValue::Register(
                                         tir::attributes::RegisterAttr::Virtual {
                                             id: src.number(),
-                                            class: Some(#class_lit.to_string()),
+                                            class: Some(#class_id),
                                         },
                                     ),
                                 );
@@ -696,7 +714,7 @@ fn emit_instructions<'a>(
                                     #op_name_lit,
                                     tir::attributes::AttributeValue::Register(
                                         tir::attributes::RegisterAttr::Physical {
-                                            class: #class_lit.to_string(),
+                                            class: #class_id,
                                             index: #idx_lit,
                                         },
                                     ),
@@ -908,7 +926,7 @@ fn emit_instructions<'a>(
                 let symbol_lit = proc_macro2::Literal::u32_unsuffixed(symbol);
                 match op_ty {
                     Type::Struct(class_name) => {
-                        let class_lit = proc_macro2::Literal::string(class_name);
+                        let class_id = reg_class_id(class_name);
                         operand_constraint_entries.push(
                             quote! { (#symbol_lit, tir::graph::OperandConstraint::Register) },
                         );
@@ -921,7 +939,7 @@ fn emit_instructions<'a>(
                                 tir::attributes::AttributeValue::Register(
                                     tir::attributes::RegisterAttr::Virtual {
                                         id: src.number(),
-                                        class: Some(#class_lit.to_string()),
+                                        class: Some(#class_id),
                                     },
                                 ),
                             );
@@ -1177,14 +1195,14 @@ fn emit_instructions<'a>(
                                 Type::Struct(class_name) => {
                                     let fn_ident =
                                         format_ident!("parse_{}", class_name.to_lowercase());
-                                    let class_lit = proc_macro2::Literal::string(class_name);
+                                    let class_id = reg_class_id(class_name);
                                     parse_steps.push(quote! {
                                         let idx = #fn_ident(parser).ok_or(())?;
                                         op_builder = op_builder.attr(
                                             #op_name_lit,
                                             tir::attributes::AttributeValue::Register(
                                                 tir::attributes::RegisterAttr::Physical {
-                                                    class: #class_lit.to_string(),
+                                                    class: #class_id,
                                                     index: idx,
                                                 },
                                             ),
@@ -1192,13 +1210,32 @@ fn emit_instructions<'a>(
                                     });
                                 }
                                 Type::Integer | Type::Bits(_) => {
+                                    // Reject integers that do not fit the operand's
+                                    // `bits<N>` width so the per-mnemonic dispatch
+                                    // backtracks to a wider form instead of failing
+                                    // later in the encoder. Mirrors the encoder's
+                                    // union of the signed and unsigned N-bit ranges:
+                                    // [-(2^(N-1)), 2^N - 1].
+                                    let imm_guard = match ty {
+                                        Type::Bits(n) if *n < 64 => {
+                                            let min = proc_macro2::Literal::i64_suffixed(
+                                                -(1i64 << (n - 1)),
+                                            );
+                                            let max = proc_macro2::Literal::i64_suffixed(1i64 << n);
+                                            Some(
+                                                quote! { if !(#min..#max).contains(&value) { return Err(()); } },
+                                            )
+                                        }
+                                        _ => None,
+                                    };
                                     parse_steps.push(quote! {
                                         let val = if let Some(tok) = parser.peek() {
                                             match tok {
                                                 tir::backend::Token::DecNumber(n) => {
-                                                    let parsed = (*n).parse::<i64>().map_err(|_| ())?;
+                                                    let value = (*n).parse::<i64>().map_err(|_| ())?;
+                                                    #imm_guard
                                                     let _ = parser.bump();
-                                                    tir::attributes::AttributeValue::Int(parsed)
+                                                    tir::attributes::AttributeValue::Int(value)
                                                 }
                                                 tir::backend::Token::HexNumber(h) => {
                                                     let s = *h;
@@ -1207,9 +1244,10 @@ fn emit_instructions<'a>(
                                                     let s = if s.starts_with("0x") || s.starts_with("0X") { &s[2..] } else { s };
                                                     let v = i128::from_str_radix(s, 16).map_err(|_| ())?;
                                                     let v = if neg { -v } else { v };
-                                                    let v_i64: i64 = v.try_into().map_err(|_| ())?;
+                                                    let value: i64 = v.try_into().map_err(|_| ())?;
+                                                    #imm_guard
                                                     let _ = parser.bump();
-                                                    tir::attributes::AttributeValue::Int(v_i64)
+                                                    tir::attributes::AttributeValue::Int(value)
                                                 }
                                                 // A bare identifier in an immediate position is a
                                                 // symbol reference, resolved at object emission.
@@ -1356,6 +1394,19 @@ fn emit_instructions<'a>(
                                             tir::attributes::AttributeValue::Str(symbol) => {
                                                 out.push_str(symbol);
                                             }
+                                            // A local branch target: print the block's label,
+                                            // falling back to `.L<n>` for unnamed blocks.
+                                            tir::attributes::AttributeValue::Block(block) => {
+                                                match _ctx.get_block(*block).attr("name") {
+                                                    Some(tir::attributes::AttributeValue::Str(label)) => {
+                                                        out.push_str(&label);
+                                                    }
+                                                    _ => {
+                                                        out.push_str(".L");
+                                                        out.push_str(&block.number().to_string());
+                                                    }
+                                                }
+                                            }
                                             _ => return None,
                                         }
                                     });
@@ -1386,7 +1437,7 @@ fn emit_instructions<'a>(
                 (quote! { _op }, quote! {})
             };
             instruction_printers_impls.push(quote! {
-                fn #print_fn_ident(#op_param: &tir::OpInstance) -> Option<String> {
+                fn #print_fn_ident(_ctx: &tir::Context, #op_param: &tir::OpInstance) -> Option<String> {
                     #attrs_binding
                     let mut out = String::new();
                     #(#print_steps)*
@@ -1423,14 +1474,39 @@ fn emit_instructions<'a>(
             if let Some(mn) = mnemonic.as_deref().or(Some(op_name)) {
                 let mn_lit = proc_macro2::Literal::string(mn);
                 let inst_features = feature_slice(&inst.for_isas);
-                instruction_parser_map_inits.push(quote! {
-                    if features_enabled(features, #inst_features) {
-                        let f: tir::backend::AsmInstructionParser = #parse_fn_ident;
-                        map.entry(#mn_lit.to_string()).or_default().push(f);
-                    } else {
-                        disabled.insert(#mn_lit.to_string());
+                let mut arity = 0usize;
+                let mut reg_specificity = 0usize;
+                let mut imm_bits = 0u32;
+                for ty in ops_map.values() {
+                    match ty {
+                        Type::Struct(class) => {
+                            arity += 1;
+                            reg_specificity = reg_specificity.saturating_add(
+                                class_sizes.get(class).copied().unwrap_or(usize::MAX),
+                            );
+                        }
+                        Type::Bits(n) => {
+                            arity += 1;
+                            imm_bits += u32::from(*n);
+                        }
+                        Type::Integer => arity += 1,
+                        _ => {}
                     }
-                });
+                }
+                instruction_parser_candidates.push((
+                    mn.to_string(),
+                    arity,
+                    imm_bits,
+                    reg_specificity,
+                    quote! {
+                        if features_enabled(features, #inst_features) {
+                            let f: tir::backend::AsmInstructionParser = #parse_fn_ident;
+                            map.entry(#mn_lit.to_string()).or_default().push(f);
+                        } else {
+                            disabled.insert(#mn_lit.to_string());
+                        }
+                    },
+                ));
             }
         }
 
@@ -1457,7 +1533,7 @@ fn emit_instructions<'a>(
             }
         }
 
-        if let Some((decoder, decode_fn_ident)) = emit_instruction_decoder(
+        if let Some((decoder, decode_fn_ident, fixed_mask)) = emit_instruction_decoder(
             inst,
             &encoding_arms,
             &ops_map,
@@ -1465,11 +1541,7 @@ fn emit_instructions<'a>(
             width_bytes,
         ) {
             instruction_decoder_impls.push(decoder);
-            instruction_decoder_dispatch.push(quote! {
-                if let Some(id) = #decode_fn_ident(context, word) {
-                    return Some(id);
-                }
-            });
+            instruction_decoder_dispatch.push((fixed_mask, decode_fn_ident));
         }
     }
 
@@ -1484,6 +1556,44 @@ fn emit_instructions<'a>(
         &mut isel_rule_emitters,
         &mut isel_rule_inits,
     )?;
+
+    // Most-specific-wins: try encodings that fix more opcode bits first, so a
+    // more-general encoding declared earlier cannot shadow a specific one that
+    // should claim the word. `sort_by_key` is stable, preserving declaration
+    // order among equally-specific encodings.
+    instruction_decoder_dispatch.sort_by_key(|d| std::cmp::Reverse(d.0.count_ones()));
+    let instruction_decoder_dispatch: Vec<proc_macro2::TokenStream> = instruction_decoder_dispatch
+        .into_iter()
+        .map(|(_, ident)| {
+            quote! {
+                if let Some(id) = #ident(context, word) {
+                    return Some(id);
+                }
+            }
+        })
+        .collect();
+
+    // Order same-mnemonic asm parser candidates most-constrained-first so the
+    // per-mnemonic dispatch tries a tighter form before a looser one, regardless
+    // of declaration order. Keys, in order:
+    //   1. total immediate bit-width, ascending — an immediate operand is the loosest
+    //      match (it accepts a bare register identifier or keyword as a symbol), so a
+    //      form without an immediate precedes one with, and among immediate forms imm8
+    //      precedes imm32. This keeps register/keyword forms ahead of the immediate
+    //      form that would swallow them (arm64 `add x,x,x`; x86 `shl dst, cl`);
+    //   2. operand count, descending — with equal immediate width, a longer form is
+    //      tried before a shorter one it shares a prefix with, so `imul rax, rbx` is
+    //      not stolen by the 1-operand `imul rax`;
+    //   3. register-class-size sum, ascending — a smaller class (2-register `GPRsib`)
+    //      precedes a larger one (16-register `GPR`).
+    // The stable sort keeps declaration order among equally specific candidates.
+    instruction_parser_candidates.sort_by(|a, b| {
+        (&a.0, a.2, std::cmp::Reverse(a.1), a.3).cmp(&(&b.0, b.2, std::cmp::Reverse(b.1), b.3))
+    });
+    let instruction_parser_map_inits: Vec<proc_macro2::TokenStream> = instruction_parser_candidates
+        .into_iter()
+        .map(|(.., tokens)| tokens)
+        .collect();
 
     Ok(quote! {
         #(#instruction_defs)*
@@ -1539,8 +1649,9 @@ fn emit_instructions<'a>(
 
         /// Decode a 32-bit little-endian machine word into a freshly-built op in
         /// `context`, returning its id, or `None` if no instruction matches.
-        /// Instructions are tried in declaration order; each matches on its fixed
-        /// opcode bits and reconstructs its operands from the word.
+        /// Instructions are tried most-specific-first (by count of fixed opcode
+        /// bits); each matches on its fixed opcode bits and reconstructs its
+        /// operands from the word.
         pub fn decode_instruction(context: &tir::Context, word: u32) -> Option<tir::OpId> {
             #(#instruction_decoder_dispatch)*
             None
@@ -1693,6 +1804,13 @@ fn emit_register_parsers_and_printers(
 /// [`tir::backend::regalloc::RegisterInfo`] the allocator consumes: per class, the
 /// allocatable order plus the caller/callee-saved, argument, return-value, and
 /// reserved index sets, all derived from each register's TMDL traits.
+/// The `RegClassId` expression for a statically-known register class, referencing
+/// the generated per-dialect `RegClass` enum emitted alongside `register_info()`.
+fn reg_class_id(class_name: &str) -> proc_macro2::TokenStream {
+    let variant = format_ident!("{}", class_name);
+    quote! { RegClass::#variant.id() }
+}
+
 fn emit_register_info(files: &[ast::File]) -> Result<proc_macro2::TokenStream, TMDLError> {
     let slice = |indices: &[u16]| {
         let lits = indices
@@ -1708,7 +1826,9 @@ fn emit_register_info(files: &[ast::File]) -> Result<proc_macro2::TokenStream, T
         .collect();
 
     let mut class_entries = Vec::new();
+    let mut class_variants = Vec::new();
     for rc in files.iter().flat_map(|f| f.register_classes()) {
+        class_variants.push(format_ident!("{}", rc.name));
         let name_lit = proc_macro2::Literal::string(&rc.name);
         let file_lit = proc_macro2::Literal::string(rc.register_file(&classes));
         let meta = rc.allocation_metadata();
@@ -1780,10 +1900,56 @@ fn emit_register_info(files: &[ast::File]) -> Result<proc_macro2::TokenStream, T
         width_entries.push(quote! { (#name_lit, #width_ts) });
     }
 
+    // Sub-register view of each class: bit offset into its storage element and
+    // whether narrow writes merge (preserve untouched bits) or zero-extend. Only
+    // classes departing from the default (offset 0, zero-extend) get an entry.
+    let mut view_entries = Vec::new();
+    for rc in files.iter().flat_map(|f| f.register_classes()) {
+        let bit_offset = match rc.parameters.get("BIT_OFFSET") {
+            Some((_ty, Some(ast::Expr::Lit(ast::Lit::Int(li))))) => parse_literal_value(li) as u32,
+            _ => 0,
+        };
+        let merge = matches!(
+            rc.parameters.get("WRITE_POLICY"),
+            Some((_ty, Some(ast::Expr::Lit(ast::Lit::Str(s))))) if s.value() == "merge"
+        );
+        if bit_offset == 0 && !merge {
+            continue;
+        }
+        let name_lit = proc_macro2::Literal::string(&rc.name);
+        let off_lit = proc_macro2::Literal::u32_unsuffixed(bit_offset);
+        view_entries.push(quote! {
+            (#name_lit, tir::backend::regalloc::RegisterView { bit_offset: #off_lit, merge: #merge })
+        });
+    }
+
+    let class_count = class_entries.len();
+
     Ok(quote! {
+        /// The target's register classes, as a single `'static` table so a
+        /// [`tir::backend::regalloc::RegClassId`] can point stably into it.
+        static REG_CLASSES: [tir::backend::regalloc::RegClassInfo; #class_count] =
+            [#(#class_entries),*];
+
+        /// The register classes of this target. Each variant's `id()` and
+        /// `register_info().classes` name the same `REG_CLASSES` entry, so a class's
+        /// identity is a stable pointer.
+        #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+        #[allow(dead_code)]
+        pub enum RegClass {
+            #(#class_variants),*
+        }
+
+        impl RegClass {
+            #[allow(dead_code)]
+            pub fn id(self) -> tir::backend::regalloc::RegClassId {
+                tir::backend::regalloc::RegClassId::new(&REG_CLASSES[self as usize])
+            }
+        }
+
         pub fn register_info() -> tir::backend::regalloc::RegisterInfo {
             tir::backend::regalloc::RegisterInfo {
-                classes: &[#(#class_entries),*],
+                classes: &REG_CLASSES,
             }
         }
 
@@ -1792,6 +1958,13 @@ fn emit_register_info(files: &[ast::File]) -> Result<proc_macro2::TokenStream, T
             let params = isa_params(features);
             let _ = &params;
             vec![#(#width_entries),*]
+        }
+
+        /// Sub-register views (bit offset + write policy) of classes that depart
+        /// from the default of offset 0 and zero-extending writes.
+        pub fn register_views(features: &[Feature]) -> Vec<(&'static str, tir::backend::regalloc::RegisterView)> {
+            let _ = features;
+            vec![#(#view_entries),*]
         }
     })
 }
@@ -2991,7 +3164,7 @@ fn emit_flag_branch_rules<'a>(
                     continue;
                 };
                 let op_name_lit = proc_macro2::Literal::string(op_name);
-                let class_lit = proc_macro2::Literal::string(class_name);
+                let class_id = reg_class_id(class_name);
                 let symbol_lit = proc_macro2::Literal::u32_unsuffixed(symbol);
                 operand_constraint_entries
                     .push(quote! { (#symbol_lit, tir::graph::OperandConstraint::Register) });
@@ -3004,7 +3177,7 @@ fn emit_flag_branch_rules<'a>(
                         tir::attributes::AttributeValue::Register(
                             tir::attributes::RegisterAttr::Virtual {
                                 id: src.number(),
-                                class: Some(#class_lit.to_string()),
+                                class: Some(#class_id),
                             },
                         ),
                     );
@@ -4039,27 +4212,29 @@ fn emit_behavior_exec(
                 register_index_map,
                 reg_kinds,
             )?;
-            let else_body = if let Some(else_expr) = &i.else_ {
-                emit_behavior_exec(
-                    else_expr.as_ref(),
-                    ops,
-                    numeric_params,
-                    isa_param_values,
-                    mnemonic_lit,
-                    register_index_map,
-                    reg_kinds,
-                )?
-            } else {
-                quote! {}
+            // Omit the `else` arm for a guard with no else clause (e.g. a
+            // guarded CSR write), so codegen emits no empty `else {}`.
+            let else_arm = match &i.else_ {
+                Some(else_expr) => {
+                    let else_body = emit_behavior_exec(
+                        else_expr.as_ref(),
+                        ops,
+                        numeric_params,
+                        isa_param_values,
+                        mnemonic_lit,
+                        register_index_map,
+                        reg_kinds,
+                    )?;
+                    quote! { else { #else_body } }
+                }
+                None => quote! {},
             };
             Some(quote! {
                 {
                     #cond_eval
                     if value.to_u64() != 0 {
                         #then_body
-                    } else {
-                        #else_body
-                    }
+                    } #else_arm
                 }
             })
         }
@@ -4211,6 +4386,7 @@ fn emit_sym_inits(
     let max_sym_id = [
         lowering.variable_symbols.values().copied().max(),
         lowering.register_symbols.values().copied().max(),
+        lowering.regnum_symbols.values().copied().max(),
     ]
     .into_iter()
     .flatten()
@@ -4235,11 +4411,11 @@ fn emit_sym_inits(
                     // bit move (`fmov Xd,Dn`) reads the pattern directly.
                     let read = if width > 64 {
                         quote! {
-                            tir::sem::value_from_raw_bits(machine.read_register_bits(&class, index)?)
+                            tir::sem::value_from_raw_bits(machine.read_register_bits(class.name(), index)?)
                         }
                     } else {
                         quote! {
-                            tir::sem::value_from_register(machine.read_register(&class, index)?)
+                            tir::sem::value_from_register(machine.read_register(class.name(), index)?)
                         }
                     };
                     steps.push(quote! {
@@ -4297,6 +4473,24 @@ fn emit_sym_inits(
         });
     }
 
+    // `regnum(op)` binds a symbol to the operand's encoding index. The index is
+    // an identity, not an arithmetic value; comparisons coerce by value and
+    // ignore width, so a plain 64-bit integer holds it.
+    for (name, &sym_id) in &lowering.regnum_symbols {
+        let sym_lit = proc_macro2::Literal::usize_unsuffixed(sym_id as usize);
+        let name_lit = proc_macro2::Literal::string(name);
+        steps.push(quote! {
+            {
+                let (_, index) = tir::backend::register_attr(self.attributes(), #name_lit)
+                    .ok_or(tir::backend::SimTrap::MissingAttribute {
+                        op: #mnemonic_lit,
+                        attribute: #name_lit,
+                    })?;
+                __syms[#sym_lit] = Some(tir::sem::int_value(64, index as u64));
+            }
+        });
+    }
+
     (max_sym_id, steps)
 }
 
@@ -4326,8 +4520,8 @@ fn emit_destination_write(
                     attribute: #name_lit,
                 },
             )?;
-            if !register_has_trait_hardwired_zero(&dst_class, dst_idx) {
-                machine.write_register_value(&dst_class, dst_idx, value)?;
+            if !register_has_trait_hardwired_zero(dst_class.name(), dst_idx) {
+                machine.write_register_value(dst_class.name(), dst_idx, value)?;
             }
         });
     }
@@ -4848,7 +5042,7 @@ fn emit_instruction_decoder(
     ops_map: &HashMap<String, Type>,
     resolved_params: &HashMap<String, (Type, Option<ast::Expr>)>,
     width_bytes: u64,
-) -> Option<(proc_macro2::TokenStream, proc_macro2::Ident)> {
+) -> Option<(proc_macro2::TokenStream, proc_macro2::Ident, u128)> {
     if encoding_arms.is_empty() || width_bytes != 4 {
         return None;
     }
@@ -4977,14 +5171,14 @@ fn emit_instruction_decoder(
             _ => return None,
         };
         let name_lit = proc_macro2::Literal::string(name);
-        let class_lit = proc_macro2::Literal::string(class);
+        let class_id = reg_class_id(class);
         let g = gather(fields);
         attr_steps.push(quote! {
             .attr(
                 #name_lit,
                 tir::attributes::AttributeValue::Register(
                     tir::attributes::RegisterAttr::Physical {
-                        class: #class_lit.to_string(),
+                        class: #class_id,
                         index: (#g) as u16,
                     },
                 ),
@@ -5020,5 +5214,5 @@ fn emit_instruction_decoder(
         }
     };
 
-    Some((decoder, decode_fn_ident))
+    Some((decoder, decode_fn_ident, fixed_mask))
 }

@@ -1,7 +1,7 @@
 //! x86-64 backend prototype, generated from the TMDL descriptions in `defs/`.
 
 pub use isa::X86_64Dialect;
-pub use isa::{Feature, get_isel_rules};
+pub use isa::{Feature, get_isel_rules, register_info, register_views, register_widths};
 
 mod isa {
     // Generated code: not everything is used by this asm-focused prototype.
@@ -120,6 +120,10 @@ mod isa {
                 // Memory operands
                 MovLoadOp,
                 MovStoreOp,
+                MovLoadSibOp,
+                MovLoadRbpOp,
+                MovStoreSibOp,
+                MovStoreRbpOp,
                 // EFLAGS definers
                 CmpOp,
                 TestOp,
@@ -178,6 +182,114 @@ mod isa {
                 ShrImm8Op,
                 SarImm8Op,
                 VirtualBranchOp,
+                Add32NorexOp,
+                Sub32NorexOp,
+                And32NorexOp,
+                Or32NorexOp,
+                Xor32NorexOp,
+                Mov32NorexOp,
+                Add16NorexOp,
+                Sub16NorexOp,
+                And16NorexOp,
+                Or16NorexOp,
+                Xor16NorexOp,
+                Mov16NorexOp,
+                Add8NorexOp,
+                Sub8NorexOp,
+                And8NorexOp,
+                Or8NorexOp,
+                Xor8NorexOp,
+                Mov8NorexOp,
+                AddImm32NorexOp,
+                OrImm32NorexOp,
+                AndImm32NorexOp,
+                XorImm32NorexOp,
+                SubImm32NorexOp,
+                CmpImm32NorexOp,
+                TestImm32NorexOp,
+                MovImm32NorexOp,
+                AddImm16NorexOp,
+                OrImm16NorexOp,
+                AndImm16NorexOp,
+                XorImm16NorexOp,
+                MovImm16NorexOp,
+                AddImm8NorexOp,
+                OrImm8NorexOp,
+                AndImm8NorexOp,
+                XorImm8NorexOp,
+                MovImm8NorexOp,
+                AddImm8sOp,
+                OrImm8sOp,
+                AndImm8sOp,
+                XorImm8sOp,
+                SubImm8sOp,
+                CmpImm8sOp,
+                AddImm8s32Op,
+                OrImm8s32Op,
+                AndImm8s32Op,
+                XorImm8s32Op,
+                SubImm8s32Op,
+                CmpImm8s32Op,
+                AddImm8s32NorexOp,
+                OrImm8s32NorexOp,
+                AndImm8s32NorexOp,
+                XorImm8s32NorexOp,
+                SubImm8s32NorexOp,
+                CmpImm8s32NorexOp,
+                AddImm8s16Op,
+                OrImm8s16Op,
+                AndImm8s16Op,
+                XorImm8s16Op,
+                AddImm8s16NorexOp,
+                OrImm8s16NorexOp,
+                AndImm8s16NorexOp,
+                XorImm8s16NorexOp,
+                ShlImm32NorexOp,
+                ShrImm32NorexOp,
+                SarImm32NorexOp,
+                ShlImm16NorexOp,
+                ShrImm16NorexOp,
+                SarImm16NorexOp,
+                ShlImm8NorexOp,
+                ShrImm8NorexOp,
+                SarImm8NorexOp,
+                SetEqNorexOp,
+                SetNotEqNorexOp,
+                SetLessNorexOp,
+                SetGreaterEqNorexOp,
+                SetLessEqNorexOp,
+                SetGreaterNorexOp,
+                SetBelowNorexOp,
+                SetAboveEqNorexOp,
+                SetBelowEqNorexOp,
+                SetAboveNorexOp,
+                PushNorexOp,
+                PopNorexOp,
+                JmpIndirectNorexOp,
+                CallIndirectNorexOp,
+                Cmp32NorexOp,
+                Test32NorexOp,
+                Cmp16NorexOp,
+                Test16NorexOp,
+                Cmp8NorexOp,
+                Test8NorexOp,
+                Neg32NorexOp,
+                Not32NorexOp,
+                Neg16NorexOp,
+                Not16NorexOp,
+                Neg8NorexOp,
+                Not8NorexOp,
+                ShlCl32NorexOp,
+                ShrCl32NorexOp,
+                SarCl32NorexOp,
+                ShlCl16NorexOp,
+                ShrCl16NorexOp,
+                SarCl16NorexOp,
+                ShlCl8NorexOp,
+                ShrCl8NorexOp,
+                SarCl8NorexOp,
+                RolImm32NorexOp,
+                RorImm32NorexOp,
                 Add8HOp,
                 Sub8HOp,
                 And8HOp,
@@ -267,6 +379,27 @@ mod isa {
                 Mov8StoreOp,
                 MovLoadDispOp,
                 MovStoreDispOp,
+                // ModR/M-escape variants (base rsp/rbp/r12/r13)
+                Movzx8LoadSibOp,
+                Movzx8LoadRbpOp,
+                Movzx16LoadSibOp,
+                Movzx16LoadRbpOp,
+                Movsx8LoadSibOp,
+                Movsx8LoadRbpOp,
+                Movsx16LoadSibOp,
+                Movsx16LoadRbpOp,
+                MovsxdLoadSibOp,
+                MovsxdLoadRbpOp,
+                Mov32LoadSibOp,
+                Mov32LoadRbpOp,
+                Mov32StoreSibOp,
+                Mov32StoreRbpOp,
+                Mov16StoreSibOp,
+                Mov16StoreRbpOp,
+                Mov8StoreSibOp,
+                Mov8StoreRbpOp,
+                MovLoadDispSibOp,
+                MovStoreDispSibOp,
                 PushOp,
                 PopOp,
                 LeaRipOp,
@@ -276,6 +409,11 @@ mod isa {
                 MulsdOp,
                 DivsdOp,
                 MovsdOp,
+                AddsdNorexOp,
+                SubsdNorexOp,
+                MulsdNorexOp,
+                DivsdNorexOp,
+                MovsdNorexOp,
                 VirtualCallOp,
                 VirtualIndirectCallOp,
                 VirtualReturnOp
@@ -321,7 +459,7 @@ mod isa {
                 .map(|arg| {
                     AttributeValue::Register(RegisterAttr::Virtual {
                         id: arg.id().number(),
-                        class: Some("GPR".to_string()),
+                        class: Some(RegClass::GPR.id()),
                     })
                 })
                 .collect::<Vec<_>>();
@@ -354,10 +492,10 @@ mod isa {
         }
     }
 
-    fn virt(value: u32, class: &str) -> AttributeValue {
+    fn virt(value: u32, class: tir::backend::regalloc::RegClassId) -> AttributeValue {
         AttributeValue::Register(RegisterAttr::Virtual {
             id: value,
-            class: Some(class.to_string()),
+            class: Some(class),
         })
     }
 
@@ -386,8 +524,8 @@ mod isa {
         vec![
             Box::new(
                 TestOpBuilder::new(context)
-                    .attr("dst", virt(condition.number(), "GPR"))
-                    .attr("src", virt(condition.number(), "GPR"))
+                    .attr("dst", virt(condition.number(), RegClass::GPR.id()))
+                    .attr("src", virt(condition.number(), RegClass::GPR.id()))
                     .build(),
             ),
             Box::new(
@@ -413,14 +551,18 @@ mod isa {
         let value = tir::backend::int_attr(constant.attributes(), "value").ok_or_else(|| {
             tir::PassError::InvalidRuleSet("constant op without an integer value".to_string())
         })?;
+        let dst = virt(constant.result().number(), RegClass::GPR.id());
         if i32::try_from(value).is_err() {
-            return Err(tir::PassError::InvalidRuleSet(format!(
-                "constant {value} does not fit mov imm32; wide constant materialization is not implemented"
-            )));
+            let movabs = MovAbsOpBuilder::new(context)
+                .attr("dst", dst)
+                .attr("imm", AttributeValue::Int(value))
+                .build();
+            rewriter.replace_op(op, &movabs)?;
+            return Ok(true);
         }
 
         let mov = MovImmOpBuilder::new(context)
-            .attr("dst", virt(constant.result().number(), "GPR"))
+            .attr("dst", dst)
             .attr("imm", AttributeValue::Int(value))
             .build();
         rewriter.replace_op(op, &mov)?;
@@ -440,7 +582,7 @@ mod isa {
             return Ok(false);
         };
         let lea = LeaRipOpBuilder::new(context)
-            .attr("dst", virt(addr_of.result().number(), "GPR"))
+            .attr("dst", virt(addr_of.result().number(), RegClass::GPR.id()))
             .attr("imm", AttributeValue::Str(addr_of.sym_name()))
             .build();
         rewriter.replace_op(op, &lea)?;
@@ -465,7 +607,7 @@ mod isa {
             class
                 .caller_saved
                 .iter()
-                .map(|&index| phys("GPR", index))
+                .map(|&index| phys(RegClass::GPR.id(), index))
                 .collect(),
         )
     }
@@ -504,7 +646,11 @@ mod isa {
         let detach = |rewriter: &mut tir::Rewriter, value: tir::ValueId| {
             let ty = context.get_value(value).ty();
             let fresh = context.create_value(ty, None).id().number();
-            let copy = mv(context, virt(fresh, "GPR"), virt(value.number(), "GPR"));
+            let copy = mv(
+                context,
+                virt(fresh, RegClass::GPR.id()),
+                virt(value.number(), RegClass::GPR.id()),
+            );
             rewriter.insert_op_before(op, copy.as_ref()).map(|()| fresh)
         };
         let fresh_callee = callee_value
@@ -518,7 +664,7 @@ mod isa {
         // Reserve 8 bytes to realign the stack for the call.
         let realign = |rewriter: &mut tir::Rewriter, delta: i64| -> Result<(), tir::PassError> {
             let adj = AddImmOpBuilder::new(context)
-                .attr("dst", phys(SP.0, SP.1))
+                .attr("dst", phys(sp().0, sp().1))
                 .attr("imm", AttributeValue::Int(delta))
                 .build();
             rewriter.insert_op_before(op, &adj)
@@ -526,13 +672,17 @@ mod isa {
         realign(rewriter, -8)?;
 
         for (&fresh, &reg) in fresh_args.iter().zip(class.arguments.iter()) {
-            let copy = mv(context, phys("GPR", reg), virt(fresh, "GPR"));
+            let copy = mv(
+                context,
+                phys(RegClass::GPR.id(), reg),
+                virt(fresh, RegClass::GPR.id()),
+            );
             rewriter.insert_op_before(op, copy.as_ref())?;
         }
 
         // Variadic ABI: `al` counts vector registers used; zero it (no float args).
         let zero_eax = MovImm32OpBuilder::new(context)
-            .attr("dst", phys("GPR32", 0))
+            .attr("dst", phys(RegClass::GPR32.id(), 0))
             .attr("imm", AttributeValue::Int(0))
             .build();
         rewriter.insert_op_before(op, &zero_eax)?;
@@ -549,7 +699,7 @@ mod isa {
             }
             Some(fresh) => Box::new(
                 VirtualIndirectCallOpBuilder::new(context)
-                    .attr("callee_reg", virt(fresh, "GPR"))
+                    .attr("callee_reg", virt(fresh, RegClass::GPR.id()))
                     .attr("clobbers", caller_saved_clobbers())
                     .build(),
             ),
@@ -561,10 +711,421 @@ mod isa {
         if context.get_value(result).ty() == UnitType::new(context) {
             rewriter.erase_op(op)?;
         } else {
-            let copy = mv(context, virt(result.number(), "GPR"), phys("GPR", ret_reg));
+            let copy = mv(
+                context,
+                virt(result.number(), RegClass::GPR.id()),
+                phys(RegClass::GPR.id(), ret_reg),
+            );
             rewriter.replace_op(op, copy.as_ref())?;
         }
         Ok(true)
+    }
+
+    /// Post-RA: a memory operand whose allocated base is rsp/r12 (ModR/M rm=100)
+    /// or rbp/r13 with mod=00 (rm=101) needs an escape the generic encoding
+    /// omits — a SIB byte for the former, a mod=01 zero disp8 for the latter —
+    /// or the byte stream desyncs. Rewrite each affected op to its `_sib`/`_rbp`
+    /// variant now that the base is physical. The disp (mod=10) forms only need
+    /// the SIB variant; rbp/r13 are already legal there.
+    fn canonicalize_encodings(
+        context: &tir::Context,
+        op: &tir::OperationRef,
+        rewriter: &mut tir::Rewriter,
+    ) -> Result<bool, tir::PassError> {
+        fn base_index(op: &dyn Operation) -> Option<u16> {
+            op.attributes().iter().find_map(|a| match &a.value {
+                AttributeValue::Register(RegisterAttr::Physical { index, .. })
+                    if a.name == "base" =>
+                {
+                    Some(*index)
+                }
+                _ => None,
+            })
+        }
+        fn attr(op: &dyn Operation, name: &str) -> AttributeValue {
+            op.attributes()
+                .iter()
+                .find(|a| a.name == name)
+                .map(|a| a.value.clone())
+                .expect("memory op operand attribute present")
+        }
+        // The allocated index of a physical register operand, or None if the
+        // operand is still virtual (canonicalization runs post-RA, so a virtual
+        // operand simply means "not this op" and is left unchanged).
+        fn reg_index(op: &dyn Operation, name: &str) -> Option<u16> {
+            op.attributes().iter().find_map(|a| match &a.value {
+                AttributeValue::Register(RegisterAttr::Physical { index, .. })
+                    if a.name == name =>
+                {
+                    Some(*index)
+                }
+                _ => None,
+            })
+        }
+        // An immediate operand's integer value, or None for a symbol reference
+        // (a relocation that cannot fold to the sign-extended imm8 form).
+        fn imm_int(op: &dyn Operation, name: &str) -> Option<i64> {
+            op.attributes().iter().find_map(|a| match &a.value {
+                AttributeValue::Int(v) if a.name == name => Some(*v),
+                _ => None,
+            })
+        }
+        let replace = |rewriter: &mut tir::Rewriter, new_op: Box<dyn Operation>| {
+            rewriter.replace_op(op, new_op.as_ref()).map(|()| true)
+        };
+
+        macro_rules! escape {
+            ($Op:ty, $Sib:ident, $Rbp:ident, [$($a:literal),*]) => {
+                if let Some(inner) = op.as_op::<$Op>() {
+                    let Some(idx) = base_index(&inner) else { return Ok(false); };
+                    return match idx {
+                        4 | 12 => replace(
+                            rewriter,
+                            Box::new($Sib::new(context)$(.attr($a, attr(&inner, $a)))*.build()),
+                        ),
+                        5 | 13 => replace(
+                            rewriter,
+                            Box::new($Rbp::new(context)$(.attr($a, attr(&inner, $a)))*.build()),
+                        ),
+                        _ => Ok(false),
+                    };
+                }
+            };
+            (sib $Op:ty, $Sib:ident, [$($a:literal),*]) => {
+                if let Some(inner) = op.as_op::<$Op>() {
+                    let Some(idx) = base_index(&inner) else { return Ok(false); };
+                    if matches!(idx, 4 | 12) {
+                        return replace(
+                            rewriter,
+                            Box::new($Sib::new(context)$(.attr($a, attr(&inner, $a)))*.build()),
+                        );
+                    }
+                    return Ok(false);
+                }
+            };
+        }
+
+        escape!(
+            MovLoadOp,
+            MovLoadSibOpBuilder,
+            MovLoadRbpOpBuilder,
+            ["dst", "base"]
+        );
+        escape!(
+            MovStoreOp,
+            MovStoreSibOpBuilder,
+            MovStoreRbpOpBuilder,
+            ["base", "src"]
+        );
+        escape!(
+            Movzx8LoadOp,
+            Movzx8LoadSibOpBuilder,
+            Movzx8LoadRbpOpBuilder,
+            ["dst", "base"]
+        );
+        escape!(
+            Movzx16LoadOp,
+            Movzx16LoadSibOpBuilder,
+            Movzx16LoadRbpOpBuilder,
+            ["dst", "base"]
+        );
+        escape!(
+            Movsx8LoadOp,
+            Movsx8LoadSibOpBuilder,
+            Movsx8LoadRbpOpBuilder,
+            ["dst", "base"]
+        );
+        escape!(
+            Movsx16LoadOp,
+            Movsx16LoadSibOpBuilder,
+            Movsx16LoadRbpOpBuilder,
+            ["dst", "base"]
+        );
+        escape!(
+            MovsxdLoadOp,
+            MovsxdLoadSibOpBuilder,
+            MovsxdLoadRbpOpBuilder,
+            ["dst", "base"]
+        );
+        escape!(
+            Mov32LoadOp,
+            Mov32LoadSibOpBuilder,
+            Mov32LoadRbpOpBuilder,
+            ["dst", "base"]
+        );
+        escape!(
+            Mov32StoreOp,
+            Mov32StoreSibOpBuilder,
+            Mov32StoreRbpOpBuilder,
+            ["base", "src"]
+        );
+        escape!(
+            Mov16StoreOp,
+            Mov16StoreSibOpBuilder,
+            Mov16StoreRbpOpBuilder,
+            ["base", "src"]
+        );
+        escape!(
+            Mov8StoreOp,
+            Mov8StoreSibOpBuilder,
+            Mov8StoreRbpOpBuilder,
+            ["base", "src"]
+        );
+        escape!(sib MovLoadDispOp, MovLoadDispSibOpBuilder, ["dst", "base", "imm"]);
+        escape!(sib MovStoreDispOp, MovStoreDispSibOpBuilder, ["base", "imm", "src"]);
+
+        // REX-free canonicalization: drop the REX byte GNU as omits when every
+        // register index is low (< 8, or < 4 for the 8-bit forms that must avoid
+        // the spl/bpl/sil/dil encodings), and fold group-1 immediates that fit a
+        // sign-extended i8 into the 0x83 short form. Each op maps to exactly one
+        // behavior-free variant, so selection is unaffected.
+        const LO: u16 = 8;
+        const B: u16 = 4;
+
+        // Register/register: `op → op_norex` when both operands are low.
+        macro_rules! rr_norex {
+            ($Op:ty, $Norex:ident, $t:expr) => {
+                if let Some(inner) = op.as_op::<$Op>() {
+                    return match (reg_index(&inner, "dst"), reg_index(&inner, "src")) {
+                        (Some(d), Some(s)) if d < $t && s < $t => replace(
+                            rewriter,
+                            Box::new(
+                                $Norex::new(context)
+                                    .attr("dst", attr(&inner, "dst"))
+                                    .attr("src", attr(&inner, "src"))
+                                    .build(),
+                            ),
+                        ),
+                        _ => Ok(false),
+                    };
+                }
+            };
+        }
+        // Single register + immediate: `op → op_norex` when the register is low.
+        macro_rules! ri_norex {
+            ($Op:ty, $Norex:ident, $t:expr) => {
+                if let Some(inner) = op.as_op::<$Op>() {
+                    return match reg_index(&inner, "dst") {
+                        Some(d) if d < $t => replace(
+                            rewriter,
+                            Box::new(
+                                $Norex::new(context)
+                                    .attr("dst", attr(&inner, "dst"))
+                                    .attr("imm", attr(&inner, "imm"))
+                                    .build(),
+                            ),
+                        ),
+                        _ => Ok(false),
+                    };
+                }
+            };
+        }
+        // Group-1 32/16-bit immediate: pick imm8/imm8-norex/imm32-norex.
+        macro_rules! g1_imm {
+            ($Op:ty, $Imm8:ident, $Imm8N:ident, $Imm32N:ident) => {
+                if let Some(inner) = op.as_op::<$Op>() {
+                    let low = matches!(reg_index(&inner, "dst"), Some(d) if d < LO);
+                    let small = matches!(imm_int(&inner, "imm"), Some(v) if (-128..=127).contains(&v));
+                    let d = attr(&inner, "dst");
+                    let i = attr(&inner, "imm");
+                    let new: Box<dyn Operation> = match (small, low) {
+                        (true, true) => {
+                            Box::new($Imm8N::new(context).attr("dst", d).attr("imm", i).build())
+                        }
+                        (true, false) => {
+                            Box::new($Imm8::new(context).attr("dst", d).attr("imm", i).build())
+                        }
+                        (false, true) => {
+                            Box::new($Imm32N::new(context).attr("dst", d).attr("imm", i).build())
+                        }
+                        (false, false) => return Ok(false),
+                    };
+                    return replace(rewriter, new);
+                }
+            };
+        }
+        // Group-1 64-bit immediate: only the 0x83 imm8 fold (REX.W stays).
+        macro_rules! g1_imm64 {
+            ($Op:ty, $Imm8:ident) => {
+                if let Some(inner) = op.as_op::<$Op>() {
+                    return match imm_int(&inner, "imm") {
+                        Some(v) if (-128..=127).contains(&v) => replace(
+                            rewriter,
+                            Box::new(
+                                $Imm8::new(context)
+                                    .attr("dst", attr(&inner, "dst"))
+                                    .attr("imm", attr(&inner, "imm"))
+                                    .build(),
+                            ),
+                        ),
+                        _ => Ok(false),
+                    };
+                }
+            };
+        }
+        // A single register operand named `$n` (setcc dst, push/pop reg, indirect
+        // jmp/call target): `op → op_norex` when that register is low.
+        macro_rules! reg1_norex {
+            ($Op:ty, $Norex:ident, $n:literal, $t:expr) => {
+                if let Some(inner) = op.as_op::<$Op>() {
+                    return match reg_index(&inner, $n) {
+                        Some(d) if d < $t => replace(
+                            rewriter,
+                            Box::new($Norex::new(context).attr($n, attr(&inner, $n)).build()),
+                        ),
+                        _ => Ok(false),
+                    };
+                }
+            };
+        }
+
+        rr_norex!(Add32Op, Add32NorexOpBuilder, LO);
+        rr_norex!(Sub32Op, Sub32NorexOpBuilder, LO);
+        rr_norex!(And32Op, And32NorexOpBuilder, LO);
+        rr_norex!(Or32Op, Or32NorexOpBuilder, LO);
+        rr_norex!(Xor32Op, Xor32NorexOpBuilder, LO);
+        rr_norex!(Mov32Op, Mov32NorexOpBuilder, LO);
+        rr_norex!(Add16Op, Add16NorexOpBuilder, LO);
+        rr_norex!(Sub16Op, Sub16NorexOpBuilder, LO);
+        rr_norex!(And16Op, And16NorexOpBuilder, LO);
+        rr_norex!(Or16Op, Or16NorexOpBuilder, LO);
+        rr_norex!(Xor16Op, Xor16NorexOpBuilder, LO);
+        rr_norex!(Mov16Op, Mov16NorexOpBuilder, LO);
+        rr_norex!(Add8Op, Add8NorexOpBuilder, B);
+        rr_norex!(Sub8Op, Sub8NorexOpBuilder, B);
+        rr_norex!(And8Op, And8NorexOpBuilder, B);
+        rr_norex!(Or8Op, Or8NorexOpBuilder, B);
+        rr_norex!(Xor8Op, Xor8NorexOpBuilder, B);
+        rr_norex!(Mov8Op, Mov8NorexOpBuilder, B);
+
+        g1_imm!(
+            AddImm32Op,
+            AddImm8s32OpBuilder,
+            AddImm8s32NorexOpBuilder,
+            AddImm32NorexOpBuilder
+        );
+        g1_imm!(
+            OrImm32Op,
+            OrImm8s32OpBuilder,
+            OrImm8s32NorexOpBuilder,
+            OrImm32NorexOpBuilder
+        );
+        g1_imm!(
+            AndImm32Op,
+            AndImm8s32OpBuilder,
+            AndImm8s32NorexOpBuilder,
+            AndImm32NorexOpBuilder
+        );
+        g1_imm!(
+            XorImm32Op,
+            XorImm8s32OpBuilder,
+            XorImm8s32NorexOpBuilder,
+            XorImm32NorexOpBuilder
+        );
+        g1_imm!(
+            SubImm32Op,
+            SubImm8s32OpBuilder,
+            SubImm8s32NorexOpBuilder,
+            SubImm32NorexOpBuilder
+        );
+        g1_imm!(
+            CmpImm32Op,
+            CmpImm8s32OpBuilder,
+            CmpImm8s32NorexOpBuilder,
+            CmpImm32NorexOpBuilder
+        );
+        g1_imm!(
+            AddImm16Op,
+            AddImm8s16OpBuilder,
+            AddImm8s16NorexOpBuilder,
+            AddImm16NorexOpBuilder
+        );
+        g1_imm!(
+            OrImm16Op,
+            OrImm8s16OpBuilder,
+            OrImm8s16NorexOpBuilder,
+            OrImm16NorexOpBuilder
+        );
+        g1_imm!(
+            AndImm16Op,
+            AndImm8s16OpBuilder,
+            AndImm8s16NorexOpBuilder,
+            AndImm16NorexOpBuilder
+        );
+        g1_imm!(
+            XorImm16Op,
+            XorImm8s16OpBuilder,
+            XorImm8s16NorexOpBuilder,
+            XorImm16NorexOpBuilder
+        );
+
+        g1_imm64!(AddImmOp, AddImm8sOpBuilder);
+        g1_imm64!(OrImmOp, OrImm8sOpBuilder);
+        g1_imm64!(AndImmOp, AndImm8sOpBuilder);
+        g1_imm64!(XorImmOp, XorImm8sOpBuilder);
+        g1_imm64!(SubImmOp, SubImm8sOpBuilder);
+        g1_imm64!(CmpImmOp, CmpImm8sOpBuilder);
+
+        // mov/test immediates: no 0x83 form, only the REX-free downgrade.
+        ri_norex!(MovImm32Op, MovImm32NorexOpBuilder, LO);
+        ri_norex!(TestImm32Op, TestImm32NorexOpBuilder, LO);
+        ri_norex!(MovImm16Op, MovImm16NorexOpBuilder, LO);
+        // 8-bit group-1 + mov immediates: REX-free when in al/cl/dl/bl.
+        ri_norex!(AddImm8Op, AddImm8NorexOpBuilder, B);
+        ri_norex!(OrImm8Op, OrImm8NorexOpBuilder, B);
+        ri_norex!(AndImm8Op, AndImm8NorexOpBuilder, B);
+        ri_norex!(XorImm8Op, XorImm8NorexOpBuilder, B);
+        ri_norex!(MovImm8Op, MovImm8NorexOpBuilder, B);
+
+        ri_norex!(ShlImm32Op, ShlImm32NorexOpBuilder, LO);
+        ri_norex!(ShrImm32Op, ShrImm32NorexOpBuilder, LO);
+        ri_norex!(SarImm32Op, SarImm32NorexOpBuilder, LO);
+        ri_norex!(ShlImm16Op, ShlImm16NorexOpBuilder, LO);
+        ri_norex!(ShrImm16Op, ShrImm16NorexOpBuilder, LO);
+        ri_norex!(SarImm16Op, SarImm16NorexOpBuilder, LO);
+        ri_norex!(ShlImm8Op, ShlImm8NorexOpBuilder, B);
+        ri_norex!(ShrImm8Op, ShrImm8NorexOpBuilder, B);
+        ri_norex!(SarImm8Op, SarImm8NorexOpBuilder, B);
+
+        reg1_norex!(SetEqOp, SetEqNorexOpBuilder, "dst", B);
+        reg1_norex!(SetNotEqOp, SetNotEqNorexOpBuilder, "dst", B);
+        reg1_norex!(SetLessOp, SetLessNorexOpBuilder, "dst", B);
+        reg1_norex!(SetGreaterEqOp, SetGreaterEqNorexOpBuilder, "dst", B);
+        reg1_norex!(SetLessEqOp, SetLessEqNorexOpBuilder, "dst", B);
+        reg1_norex!(SetGreaterOp, SetGreaterNorexOpBuilder, "dst", B);
+        reg1_norex!(SetBelowOp, SetBelowNorexOpBuilder, "dst", B);
+        reg1_norex!(SetAboveEqOp, SetAboveEqNorexOpBuilder, "dst", B);
+        reg1_norex!(SetBelowEqOp, SetBelowEqNorexOpBuilder, "dst", B);
+        reg1_norex!(SetAboveOp, SetAboveNorexOpBuilder, "dst", B);
+
+        reg1_norex!(PushOp, PushNorexOpBuilder, "reg", LO);
+        reg1_norex!(PopOp, PopNorexOpBuilder, "reg", LO);
+        // The indirect jmp/call forms are not produced before this pass: `jmp
+        // *reg` reaches its `_norex` form through the assembler, and the codegen
+        // indirect call is materialized REX-free directly in `finalize_virtual_ops`
+        // (it is created there, after this pass would have run).
+
+        // cmp/test reg-reg, neg/not, by-cl shifts and rotate immediates: the
+        // 32-bit width is the only one with a generic (so the only one reachable
+        // here); the 16/8-bit `_norex` forms exist for the assembler only.
+        rr_norex!(Cmp32Op, Cmp32NorexOpBuilder, LO);
+        rr_norex!(Test32Op, Test32NorexOpBuilder, LO);
+        reg1_norex!(Neg32Op, Neg32NorexOpBuilder, "dst", LO);
+        reg1_norex!(Not32Op, Not32NorexOpBuilder, "dst", LO);
+        reg1_norex!(ShlCl32Op, ShlCl32NorexOpBuilder, "dst", LO);
+        reg1_norex!(ShrCl32Op, ShrCl32NorexOpBuilder, "dst", LO);
+        reg1_norex!(SarCl32Op, SarCl32NorexOpBuilder, "dst", LO);
+        ri_norex!(RolImm32Op, RolImm32NorexOpBuilder, LO);
+        ri_norex!(RorImm32Op, RorImm32NorexOpBuilder, LO);
+
+        // Low-xmm SSE: drop the empty REX when both xmm operands are xmm0..xmm7.
+        rr_norex!(AddsdOp, AddsdNorexOpBuilder, LO);
+        rr_norex!(SubsdOp, SubsdNorexOpBuilder, LO);
+        rr_norex!(MulsdOp, MulsdNorexOpBuilder, LO);
+        rr_norex!(DivsdOp, DivsdNorexOpBuilder, LO);
+        rr_norex!(MovsdOp, MovsdNorexOpBuilder, LO);
+
+        Ok(false)
     }
 
     /// Post-RA: `vret` becomes `ret`; `vbr` becomes `jmp dest`.
@@ -640,10 +1201,27 @@ mod isa {
                         "vcall_indirect is missing its 'callee_reg'".to_string(),
                     )
                 })?;
-            let real = CallIndirectOpBuilder::new(context)
-                .attr("target", target)
-                .build();
-            rewriter.replace_op(op, &real)?;
+            // `call *reg` needs no REX when the target is rax..rdi; emit the
+            // REX-free form directly (this op is created after
+            // `canonicalize_encodings` would run).
+            let low = matches!(
+                &target,
+                AttributeValue::Register(RegisterAttr::Physical { index, .. }) if *index < 8
+            );
+            let real: Box<dyn Operation> = if low {
+                Box::new(
+                    CallIndirectNorexOpBuilder::new(context)
+                        .attr("target", target)
+                        .build(),
+                )
+            } else {
+                Box::new(
+                    CallIndirectOpBuilder::new(context)
+                        .attr("target", target)
+                        .build(),
+                )
+            };
+            rewriter.replace_op(op, real.as_ref())?;
             return Ok(true);
         }
 
@@ -651,13 +1229,12 @@ mod isa {
     }
 
     /// The x86-64 stack pointer (`rsp`, GPR index 4).
-    const SP: (&str, u16) = ("GPR", 4);
+    fn sp() -> tir::backend::liveness::PhysReg {
+        (RegClass::GPR.id(), 4)
+    }
 
-    fn phys(class: &str, index: u16) -> AttributeValue {
-        AttributeValue::Register(RegisterAttr::Physical {
-            class: class.to_string(),
-            index,
-        })
+    fn phys(class: tir::backend::regalloc::RegClassId, index: u16) -> AttributeValue {
+        AttributeValue::Register(RegisterAttr::Physical { class, index })
     }
 
     /// Register allocation target. Frame adjustment is `add rsp, ±size`; spill
@@ -670,8 +1247,8 @@ mod isa {
             register_info()
         }
 
-        fn frame_register(&self) -> (String, u16) {
-            (SP.0.to_string(), SP.1)
+        fn frame_register(&self) -> tir::backend::liveness::PhysReg {
+            sp()
         }
 
         // Keep the frame a multiple of 16 so `rsp` stays ≡ 8 mod 16 at call sites
@@ -684,8 +1261,8 @@ mod isa {
             &self,
             _context: &tir::Context,
             _value: u32,
-            _class: &str,
-            _frame: &(String, u16),
+            _class: tir::backend::regalloc::RegClassId,
+            _frame: &tir::backend::liveness::PhysReg,
             _offset: i64,
         ) -> Box<dyn Operation> {
             unimplemented!("x86-64 spilling needs memory operands, out of prototype scope")
@@ -695,8 +1272,8 @@ mod isa {
             &self,
             _context: &tir::Context,
             _value: u32,
-            _class: &str,
-            _frame: &(String, u16),
+            _class: tir::backend::regalloc::RegClassId,
+            _frame: &tir::backend::liveness::PhysReg,
             _offset: i64,
         ) -> Box<dyn Operation> {
             unimplemented!("x86-64 spilling needs memory operands, out of prototype scope")
@@ -705,17 +1282,17 @@ mod isa {
         fn emit_copy(
             &self,
             context: &tir::Context,
-            class: &str,
+            class: tir::backend::regalloc::RegClassId,
             dst: u32,
             src: u32,
         ) -> Box<dyn Operation> {
             let virt = |id: u32| {
                 AttributeValue::Register(RegisterAttr::Virtual {
                     id,
-                    class: Some(class.to_string()),
+                    class: Some(class),
                 })
             };
-            match class {
+            match class.name() {
                 "GPR" => Box::new(
                     MovOpBuilder::new(context)
                         .attr("dst", virt(dst))
@@ -771,7 +1348,7 @@ mod isa {
             for ((class, index), _) in saves {
                 ops.push(Box::new(
                     PushOpBuilder::new(context)
-                        .attr("reg", phys(class, *index))
+                        .attr("reg", phys(*class, *index))
                         .build(),
                 ));
             }
@@ -781,7 +1358,7 @@ mod isa {
             if total > 0 {
                 ops.push(Box::new(
                     AddImmOpBuilder::new(context)
-                        .attr("dst", phys(SP.0, SP.1))
+                        .attr("dst", phys(sp().0, sp().1))
                         .attr("imm", AttributeValue::Int(-total))
                         .build(),
                 ));
@@ -800,7 +1377,7 @@ mod isa {
             if total > 0 {
                 ops.push(Box::new(
                     AddImmOpBuilder::new(context)
-                        .attr("dst", phys(SP.0, SP.1))
+                        .attr("dst", phys(sp().0, sp().1))
                         .attr("imm", AttributeValue::Int(total))
                         .build(),
                 ));
@@ -808,7 +1385,7 @@ mod isa {
             for ((class, index), _) in saves.iter().rev() {
                 ops.push(Box::new(
                     PopOpBuilder::new(context)
-                        .attr("reg", phys(class, *index))
+                        .attr("reg", phys(*class, *index))
                         .build(),
                 ));
             }
@@ -846,6 +1423,19 @@ mod isa {
                     r_type: R_X86_64_PC32,
                     addend: -4,
                     field_offset: 3,
+                }),
+                // `jmp rel32` (E9 + disp32): the disp32 follows the 1-byte opcode.
+                "jmp" => Some(RelocKind {
+                    r_type: R_X86_64_PC32,
+                    addend: -4,
+                    field_offset: 1,
+                }),
+                // `jcc rel32` (0F 8x + disp32): the disp32 follows the 2-byte opcode.
+                "je" | "jne" | "jl" | "jge" | "jb" | "jae" | "jle" | "jg" | "jbe" | "ja" | "js"
+                | "jns" | "jo" | "jno" => Some(RelocKind {
+                    r_type: R_X86_64_PC32,
+                    addend: -4,
+                    field_offset: 2,
                 }),
                 _ => None,
             },
@@ -886,6 +1476,7 @@ mod isa {
         fn register_dialects(&self, context: &tir::Context) {
             context.register_dialect::<tir::backend::AsmDialect>();
             context.register_dialect::<X86_64Dialect>();
+            context.register_reg_classes(register_info().classes);
         }
 
         fn isel_pass(&self, context: &tir::Context) -> tir::backend::isel::InstructionSelectPass {
@@ -908,7 +1499,7 @@ mod isa {
         }
 
         fn finalize_lowerings(&self) -> Vec<tir::backend::isel::OpLowering> {
-            vec![finalize_virtual_ops]
+            vec![canonicalize_encodings, finalize_virtual_ops]
         }
 
         fn register_info(&self) -> tir::backend::regalloc::RegisterInfo {
@@ -943,6 +1534,10 @@ mod isa {
             register_widths(Feature::ALL)
         }
 
+        fn register_views(&self) -> Vec<(&'static str, tir::backend::regalloc::RegisterView)> {
+            register_views(Feature::ALL)
+        }
+
         fn register_name(&self, class: &str, index: u16, prefer_abi: bool) -> Option<String> {
             register_name(class, index, prefer_abi)
         }
@@ -974,6 +1569,168 @@ mod isa {
     }
 
     tir::register_target!(select_x86_64, ["x86_64"]);
+
+    #[cfg(test)]
+    mod canonicalize_tests {
+        use super::*;
+        use tir::backend::lower::OpLoweringPass;
+        use tir::builtin::{ModuleEndOpBuilder, ModuleOpBuilder};
+        use tir::{IRBuilder, IRFormatter, PassManager};
+
+        /// Rewrite a `mov_load` whose base is the physical register `base_index`
+        /// and return the printed IR of the (single) resulting op.
+        fn rewrite_load(base_index: u16) -> String {
+            let context = tir::Context::with_default_dialects();
+            context.register_dialect::<X86_64Dialect>();
+            let module = ModuleOpBuilder::new(&context).build();
+            let mut b = IRBuilder::new(module.body());
+            b.insert(
+                MovLoadOpBuilder::new(&context)
+                    .attr("dst", phys(RegClass::GPR.id(), 0))
+                    .attr("base", phys(RegClass::GPR.id(), base_index))
+                    .build(),
+            );
+            b.insert(ModuleEndOpBuilder::new(&context).build());
+
+            let mut pm = PassManager::new();
+            pm.add_pass(OpLoweringPass::new(
+                "canonicalize-encodings",
+                vec![canonicalize_encodings],
+            ));
+            pm.run(&context, context.get_op(module.id()))
+                .expect("canonicalize pass runs");
+
+            let mut buf = String::new();
+            let mut fmt = IRFormatter::new(&mut buf);
+            module.print(&mut fmt).expect("print module");
+            buf
+        }
+
+        #[test]
+        fn rsp_and_r12_bases_take_the_sib_form() {
+            assert!(rewrite_load(4).contains("mov_load_sib"));
+            assert!(rewrite_load(12).contains("mov_load_sib"));
+        }
+
+        #[test]
+        fn rbp_and_r13_bases_take_the_rbp_form() {
+            assert!(rewrite_load(5).contains("mov_load_rbp"));
+            assert!(rewrite_load(13).contains("mov_load_rbp"));
+        }
+
+        #[test]
+        fn ordinary_bases_are_left_generic() {
+            let ir = rewrite_load(3);
+            assert!(ir.contains("mov_load"));
+            assert!(!ir.contains("mov_load_sib"));
+            assert!(!ir.contains("mov_load_rbp"));
+        }
+
+        /// Run `canonicalize_encodings` over a single op and return the printed IR.
+        macro_rules! canon {
+            ($build:expr) => {{
+                let context = tir::Context::with_default_dialects();
+                context.register_dialect::<X86_64Dialect>();
+                let module = ModuleOpBuilder::new(&context).build();
+                let mut b = IRBuilder::new(module.body());
+                b.insert($build(&context));
+                b.insert(ModuleEndOpBuilder::new(&context).build());
+                let mut pm = PassManager::new();
+                pm.add_pass(OpLoweringPass::new("c", vec![canonicalize_encodings]));
+                pm.run(&context, context.get_op(module.id()))
+                    .expect("pass runs");
+                let mut buf = String::new();
+                module
+                    .print(&mut IRFormatter::new(&mut buf))
+                    .expect("print module");
+                buf
+            }};
+        }
+
+        fn g32(index: u16) -> AttributeValue {
+            phys(RegClass::GPR32.id(), index)
+        }
+
+        #[test]
+        fn rr_low_becomes_norex_high_stays() {
+            let low = canon!(|c| Add32OpBuilder::new(c)
+                .attr("dst", g32(0))
+                .attr("src", g32(1))
+                .build());
+            assert!(low.contains("add32_norex"));
+            let high = canon!(|c| Add32OpBuilder::new(c)
+                .attr("dst", g32(8))
+                .attr("src", g32(1))
+                .build());
+            assert!(high.contains("x86_64.add32 "));
+            assert!(!high.contains("norex"));
+        }
+
+        #[test]
+        fn byte_forms_use_the_al_cl_dl_bl_threshold() {
+            let al = canon!(|c| Add8OpBuilder::new(c)
+                .attr("dst", phys(RegClass::GPR8.id(), 3))
+                .attr("src", phys(RegClass::GPR8.id(), 0))
+                .build());
+            assert!(al.contains("add8_norex"));
+            // spl (index 4) requires an empty REX, so it stays on the REX form.
+            let spl = canon!(|c| Add8OpBuilder::new(c)
+                .attr("dst", phys(RegClass::GPR8.id(), 4))
+                .attr("src", phys(RegClass::GPR8.id(), 0))
+                .build());
+            assert!(spl.contains("x86_64.add8 "));
+            assert!(!spl.contains("norex"));
+        }
+
+        #[test]
+        fn group1_imm_selects_imm8_norex_imm32_by_range_and_register() {
+            let mk = |imm: i64, reg: u16| {
+                canon!(|c: &tir::Context| AddImm32OpBuilder::new(c)
+                    .attr("dst", g32(reg))
+                    .attr("imm", AttributeValue::Int(imm))
+                    .build())
+            };
+            assert!(mk(42, 1).contains("add_imm8s32_norex"));
+            assert!(mk(42, 9).contains("add_imm8s32")); // high reg keeps REX
+            assert!(mk(300, 1).contains("add_imm32_norex")); // out of i8 range
+            assert!(mk(300, 9).contains("x86_64.add_imm32 ")); // neither applies
+        }
+
+        #[test]
+        fn group1_imm64_folds_only_the_imm8() {
+            let small = canon!(|c| AddImmOpBuilder::new(c)
+                .attr("dst", phys(RegClass::GPR.id(), 1))
+                .attr("imm", AttributeValue::Int(42))
+                .build());
+            assert!(small.contains("add_imm8s"));
+            let big = canon!(|c| AddImmOpBuilder::new(c)
+                .attr("dst", phys(RegClass::GPR.id(), 1))
+                .attr("imm", AttributeValue::Int(300))
+                .build());
+            assert!(big.contains("x86_64.add_imm "));
+        }
+
+        #[test]
+        fn singletons_drop_rex_when_low() {
+            let push = canon!(|c| PushOpBuilder::new(c)
+                .attr("reg", phys(RegClass::GPR.id(), 3))
+                .build());
+            assert!(push.contains("push_norex"));
+            let push_hi = canon!(|c| PushOpBuilder::new(c)
+                .attr("reg", phys(RegClass::GPR.id(), 12))
+                .build());
+            assert!(push_hi.contains("x86_64.push ") && !push_hi.contains("norex"));
+            let sete = canon!(|c| SetEqOpBuilder::new(c)
+                .attr("dst", phys(RegClass::GPR8.id(), 0))
+                .build());
+            assert!(sete.contains("sete_norex"));
+            let shl = canon!(|c| ShlImm32OpBuilder::new(c)
+                .attr("dst", g32(0))
+                .attr("imm", AttributeValue::Int(3))
+                .build());
+            assert!(shl.contains("shl32_norex"));
+        }
+    }
 }
 
 #[cfg(test)]

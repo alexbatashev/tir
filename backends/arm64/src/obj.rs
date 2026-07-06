@@ -13,6 +13,7 @@ use crate::{
 };
 
 const R_AARCH64_ADR_PREL_LO21: u32 = 274;
+const R_AARCH64_TSTBR14: u32 = 279;
 const R_AARCH64_CONDBR19: u32 = 280;
 const R_AARCH64_JUMP26: u32 = 282;
 const R_AARCH64_CALL26: u32 = 283;
@@ -38,8 +39,14 @@ pub(crate) fn object_format() -> ObjectFormatInfo {
                 addend: 0,
                 field_offset: 0,
             }),
-            "b.eq" | "b.ne" | "b.lt" | "b.ge" | "b.lo" | "b.hs" => Some(RelocKind {
+            "b.eq" | "b.ne" | "b.lt" | "b.ge" | "b.lo" | "b.hs" | "b.gt" | "b.le" | "b.hi"
+            | "b.ls" | "b.mi" | "b.pl" | "b.vs" | "b.vc" | "cbz" | "cbnz" => Some(RelocKind {
                 r_type: R_AARCH64_CONDBR19,
+                addend: 0,
+                field_offset: 0,
+            }),
+            "tbz" | "tbnz" => Some(RelocKind {
+                r_type: R_AARCH64_TSTBR14,
                 addend: 0,
                 field_offset: 0,
             }),
@@ -73,7 +80,10 @@ pub(crate) fn lower_constant(
     }
 
     let movz = MoveWideZeroOpBuilder::new(context)
-        .attr("rd", virt(constant.result().number(), "GPR"))
+        .attr(
+            "rd",
+            virt(constant.result().number(), crate::RegClass::GPR.id()),
+        )
         .attr("imm", AttributeValue::Int(value))
         .build();
     rewriter.replace_op(op, &movz)?;
@@ -93,7 +103,10 @@ pub(crate) fn lower_addr_of(
         return Ok(false);
     };
     let adr = AddressPCRelOpBuilder::new(context)
-        .attr("rd", virt(addr_of.result().number(), "GPR"))
+        .attr(
+            "rd",
+            virt(addr_of.result().number(), crate::RegClass::GPR.id()),
+        )
         .attr("imm", AttributeValue::Str(addr_of.sym_name()))
         .build();
     rewriter.replace_op(op, &adr)?;
@@ -120,7 +133,7 @@ pub(crate) fn finalize_virtual_ops(
 ) -> Result<bool, tir::PassError> {
     if op.as_op::<VirtualReturnOp>().is_some() {
         let ret = ReturnOpBuilder::new(context)
-            .attr("rn", phys(&("GPR".to_string(), 30)))
+            .attr("rn", phys(&(crate::RegClass::GPR.id(), 30)))
             .build();
         rewriter.replace_op(op, &ret)?;
         return Ok(true);

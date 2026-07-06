@@ -185,6 +185,112 @@ instruction Ret for [X86_64] {
     }
 }
 
+// ModR/M-escape variants of the mov load/store. Declared before the generic
+// forms so the assembler tries them first: a `_sib`/`_rbp` candidate parses its
+// base only in the narrow class (rsp/r12, rbp/r13), falling through to the
+// generic for every other base. Post-RA `canonicalize_encodings` selects them
+// for codegen. Behavior-free (canonicalize-only), so they root no isel rules.
+
+instruction MovLoadSib for [X86_64] {
+    param OPNAME: String = "mov_load_sib";
+    param MNEMONIC: String = "mov";
+
+    operands {
+        dst: GPR,
+        base: GPRsib,
+    }
+
+    encoding {
+        rex!({ base[3] }, { dst[3] }, 0b1)
+        8..15 => 0x8B,
+        16..18 => 0b100,
+        19..21 => dst[0..2],
+        22..23 => 0b00,
+        24..31 => 0x24,
+    }
+
+    asm {
+        "{self.MNEMONIC} {dst}, [{base}]"
+    }
+
+    behavior { }
+}
+
+instruction MovLoadRbp for [X86_64] {
+    param OPNAME: String = "mov_load_rbp";
+    param MNEMONIC: String = "mov";
+
+    operands {
+        dst: GPR,
+        base: GPRrbp,
+    }
+
+    encoding {
+        rex!({ base[3] }, { dst[3] }, 0b1)
+        8..15 => 0x8B,
+        16..18 => 0b101,
+        19..21 => dst[0..2],
+        22..23 => 0b01,
+        24..31 => 0x00,
+    }
+
+    asm {
+        "{self.MNEMONIC} {dst}, [{base}]"
+    }
+
+    behavior { }
+}
+
+instruction MovStoreSib for [X86_64] {
+    param OPNAME: String = "mov_store_sib";
+    param MNEMONIC: String = "mov";
+
+    operands {
+        base: GPRsib,
+        src: GPR,
+    }
+
+    encoding {
+        rex!({ base[3] }, { src[3] }, 0b1)
+        8..15 => 0x89,
+        16..18 => 0b100,
+        19..21 => src[0..2],
+        22..23 => 0b00,
+        24..31 => 0x24,
+    }
+
+    asm {
+        "{self.MNEMONIC} [{base}], {src}"
+    }
+
+    behavior { }
+}
+
+instruction MovStoreRbp for [X86_64] {
+    param OPNAME: String = "mov_store_rbp";
+    param MNEMONIC: String = "mov";
+
+    operands {
+        base: GPRrbp,
+        src: GPR,
+    }
+
+    encoding {
+        rex!({ base[3] }, { src[3] }, 0b1)
+        8..15 => 0x89,
+        16..18 => 0b101,
+        19..21 => src[0..2],
+        22..23 => 0b01,
+        24..31 => 0x00,
+    }
+
+    asm {
+        "{self.MNEMONIC} [{base}], {src}"
+    }
+
+    behavior { }
+}
+
 instruction MovLoad for [X86_64] {
     param OPNAME: String = "mov_load";
     param MNEMONIC: String = "mov";
@@ -292,6 +398,52 @@ instruction CallIndirect for [X86_64] {
     }
 }
 
+// No-REX indirect jmp/call (target in rax..rdi): 0xFF + ModR/M, no REX prefix.
+// Behavior-free (canonicalize-only), so they root no isel/terminator handling.
+instruction JmpIndirectNorex for [X86_64] {
+    param OPNAME: String = "jmp_indirect_norex";
+    param MNEMONIC: String = "jmp";
+
+    operands {
+        target: GPRlow,
+    }
+
+    encoding {
+        0..7 => 0xFF,
+        8..10 => target[0..2],
+        11..13 => 0b100,
+        14..15 => 0b11,
+    }
+
+    asm {
+        "{self.MNEMONIC} *{target}"
+    }
+
+    behavior { }
+}
+
+instruction CallIndirectNorex for [X86_64] {
+    param OPNAME: String = "call_indirect_norex";
+    param MNEMONIC: String = "call";
+
+    operands {
+        target: GPRlow,
+    }
+
+    encoding {
+        0..7 => 0xFF,
+        8..10 => target[0..2],
+        11..13 => 0b010,
+        14..15 => 0b11,
+    }
+
+    asm {
+        "{self.MNEMONIC} *{target}"
+    }
+
+    behavior { }
+}
+
 alu_rr!("32", "32", RegReg32,
     (Add, "add", 0x01, { dst = dst + src; }),
     (Sub, "sub", 0x29, { dst = dst - src; }),
@@ -374,6 +526,130 @@ alu_rr!("8H", "8h", RegReg8H,
     (Or,  "or",  0x08, { dst = dst | src; }),
     (Xor, "xor", 0x30, { dst = dst ^ src; }),
     (Mov, "mov", 0x88, { dst = src; })
+)
+
+// No-REX register/register forms (low subclasses); opcodes match the width
+// above. cmp (0x39/0x38) and test (0x85/0x84) join the ALU rows: the 32-bit
+// forms canonicalize Cmp32/Test32, the 16/8-bit forms are assembler-only.
+alu_rr_norex!("32", RegReg32Norex,
+    (Add, "add", 0x01), (Sub, "sub", 0x29), (And, "and", 0x21),
+    (Or, "or", 0x09), (Xor, "xor", 0x31), (Mov, "mov", 0x89),
+    (Cmp, "cmp", 0x39), (Test, "test", 0x85)
+)
+
+alu_rr_norex!("16", RegReg16Norex,
+    (Add, "add", 0x01), (Sub, "sub", 0x29), (And, "and", 0x21),
+    (Or, "or", 0x09), (Xor, "xor", 0x31), (Mov, "mov", 0x89),
+    (Cmp, "cmp", 0x39), (Test, "test", 0x85)
+)
+
+alu_rr_norex!("8", RegReg8Norex,
+    (Add, "add", 0x00), (Sub, "sub", 0x28), (And, "and", 0x20),
+    (Or, "or", 0x08), (Xor, "xor", 0x30), (Mov, "mov", 0x88),
+    (Cmp, "cmp", 0x38), (Test, "test", 0x84)
+)
+
+// No-REX register/immediate imm32 forms (low subclasses).
+alu_ri_norex!(RegImm32Norex,
+    (AddImm32Norex,  "add_imm32_norex",  "add",  0x81, 0b000),
+    (OrImm32Norex,   "or_imm32_norex",   "or",   0x81, 0b001),
+    (AndImm32Norex,  "and_imm32_norex",  "and",  0x81, 0b100),
+    (XorImm32Norex,  "xor_imm32_norex",  "xor",  0x81, 0b110),
+    (SubImm32Norex,  "sub_imm32_norex",  "sub",  0x81, 0b101),
+    (CmpImm32Norex,  "cmp_imm32_norex",  "cmp",  0x81, 0b111),
+    (TestImm32Norex, "test_imm32_norex", "test", 0xF7, 0b000),
+    (MovImm32Norex,  "mov_imm32_norex",  "mov",  0xC7, 0b000)
+)
+
+alu_ri_norex!(RegImm16Norex,
+    (AddImm16Norex, "add_imm16_norex", "add", 0x81, 0b000),
+    (OrImm16Norex,  "or_imm16_norex",  "or",  0x81, 0b001),
+    (AndImm16Norex, "and_imm16_norex", "and", 0x81, 0b100),
+    (XorImm16Norex, "xor_imm16_norex", "xor", 0x81, 0b110),
+    (MovImm16Norex, "mov_imm16_norex", "mov", 0xC7, 0b000)
+)
+
+alu_ri_norex!(RegImm8Norex,
+    (AddImm8Norex, "add_imm8_norex", "add", 0x80, 0b000),
+    (OrImm8Norex,  "or_imm8_norex",  "or",  0x80, 0b001),
+    (AndImm8Norex, "and_imm8_norex", "and", 0x80, 0b100),
+    (XorImm8Norex, "xor_imm8_norex", "xor", 0x80, 0b110),
+    (MovImm8Norex, "mov_imm8_norex", "mov", 0xC6, 0b000)
+)
+
+// Group-1 0x83 imm8 short forms. 64-bit REX.W and 32/16-bit REX + REX-free.
+alu_ri8!(RegImm8s, X86_64,
+    (AddImm8s, "add_imm8s", "add", 0b000),
+    (OrImm8s,  "or_imm8s",  "or",  0b001),
+    (AndImm8s, "and_imm8s", "and", 0b100),
+    (XorImm8s, "xor_imm8s", "xor", 0b110),
+    (SubImm8s, "sub_imm8s", "sub", 0b101),
+    (CmpImm8s, "cmp_imm8s", "cmp", 0b111)
+)
+
+alu_ri8!(RegImm8s32, X86,
+    (AddImm8s32, "add_imm8s32", "add", 0b000),
+    (OrImm8s32,  "or_imm8s32",  "or",  0b001),
+    (AndImm8s32, "and_imm8s32", "and", 0b100),
+    (XorImm8s32, "xor_imm8s32", "xor", 0b110),
+    (SubImm8s32, "sub_imm8s32", "sub", 0b101),
+    (CmpImm8s32, "cmp_imm8s32", "cmp", 0b111)
+)
+
+alu_ri8!(RegImm8s32Norex, X86,
+    (AddImm8s32Norex, "add_imm8s32_norex", "add", 0b000),
+    (OrImm8s32Norex,  "or_imm8s32_norex",  "or",  0b001),
+    (AndImm8s32Norex, "and_imm8s32_norex", "and", 0b100),
+    (XorImm8s32Norex, "xor_imm8s32_norex", "xor", 0b110),
+    (SubImm8s32Norex, "sub_imm8s32_norex", "sub", 0b101),
+    (CmpImm8s32Norex, "cmp_imm8s32_norex", "cmp", 0b111)
+)
+
+alu_ri8!(RegImm8s16, X86,
+    (AddImm8s16, "add_imm8s16", "add", 0b000),
+    (OrImm8s16,  "or_imm8s16",  "or",  0b001),
+    (AndImm8s16, "and_imm8s16", "and", 0b100),
+    (XorImm8s16, "xor_imm8s16", "xor", 0b110)
+)
+
+alu_ri8!(RegImm8s16Norex, X86,
+    (AddImm8s16Norex, "add_imm8s16_norex", "add", 0b000),
+    (OrImm8s16Norex,  "or_imm8s16_norex",  "or",  0b001),
+    (AndImm8s16Norex, "and_imm8s16_norex", "and", 0b100),
+    (XorImm8s16Norex, "xor_imm8s16_norex", "xor", 0b110)
+)
+
+// No-REX shift-by-immediate forms (low subclasses).
+shift_imm_norex!("32", RegShift32Norex,
+    (ShlImm, "shl", 0b100), (ShrImm, "shr", 0b101), (SarImm, "sar", 0b111)
+)
+
+shift_imm_norex!("16", RegShift16Norex,
+    (ShlImm, "shl", 0b100), (ShrImm, "shr", 0b101), (SarImm, "sar", 0b111)
+)
+
+shift_imm_norex!("8", RegShift8Norex,
+    (ShlImm, "shl", 0b100), (ShrImm, "shr", 0b101), (SarImm, "sar", 0b111)
+)
+
+// No-REX by-cl shift forms (low subclasses). The 32-bit forms canonicalize
+// ShlCl32/ShrCl32/SarCl32; the 16/8-bit forms are assembler-only.
+reg_ext_norex!(RegShiftCl32Norex,
+    (ShlCl32Norex, "shl_cl32_norex", "shl", 0b100),
+    (ShrCl32Norex, "shr_cl32_norex", "shr", 0b101),
+    (SarCl32Norex, "sar_cl32_norex", "sar", 0b111)
+)
+
+reg_ext_norex!(RegShiftCl16Norex,
+    (ShlCl16Norex, "shl_cl16_norex", "shl", 0b100),
+    (ShrCl16Norex, "shr_cl16_norex", "shr", 0b101),
+    (SarCl16Norex, "sar_cl16_norex", "sar", 0b111)
+)
+
+reg_ext_norex!(RegShiftCl8Norex,
+    (ShlCl8Norex, "shl_cl8_norex", "shl", 0b100),
+    (ShrCl8Norex, "shr_cl8_norex", "shr", 0b101),
+    (SarCl8Norex, "sar_cl8_norex", "sar", 0b111)
 )
 
 alu_ri!("8H", "8h", RegImm8H,

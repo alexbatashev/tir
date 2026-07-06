@@ -151,6 +151,7 @@ fn main() {
     // execute with the configured XLEN (e.g. rv32 arithmetic wraps at 32 bits).
     executor.set_isa_params(target.isa_params());
     executor.set_register_widths(target.register_widths());
+    executor.set_register_views(target.register_views());
     // Route reads of counter-backed registers (e.g. the RISC-V cycle/instret
     // CSRs) to the executor's performance counters.
     executor.set_counter_registers(target.counter_registers());
@@ -258,7 +259,7 @@ fn report_timing(
     let disasm = |id: tir::OpId, pc: u64| {
         let op = context.get_op(id);
         let text = printer
-            .print_instruction(&op)
+            .print_instruction(context, &op)
             .ok()
             .flatten()
             .unwrap_or_else(|| op.name().to_string());
@@ -524,6 +525,7 @@ fn run_elf(
     executor.set_hardwired_zero_registers(target.hardwired_zero_registers().iter().copied());
     executor.set_isa_params(target.isa_params());
     executor.set_register_widths(target.register_widths());
+    executor.set_register_views(target.register_views());
     executor.set_counter_registers(target.counter_registers());
 
     for seg in &loaded.segments {
