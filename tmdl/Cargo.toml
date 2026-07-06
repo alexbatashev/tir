@@ -34,6 +34,10 @@ harness = false
 name = "parser"
 harness = false
 
+[[bench]]
+name = "expander"
+harness = false
+
 [[test]]
 name = "lit"
 harness = false
