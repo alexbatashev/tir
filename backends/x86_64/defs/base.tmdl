@@ -195,11 +195,7 @@ instruction MovLoad for [X86_64] {
     }
 
     encoding {
-        0 => base[3],
-        1 => 0b0,
-        2 => dst[3],
-        3 => 0b1,
-        4..7 => 0b0100,
+        rex!({ base[3] }, { dst[3] }, 0b1)
         8..15 => 0x8B,
         16..18 => base[0..2],
         19..21 => dst[0..2],
@@ -225,11 +221,7 @@ instruction MovStore for [X86_64] {
     }
 
     encoding {
-        0 => base[3],
-        1 => 0b0,
-        2 => src[3],
-        3 => 0b1,
-        4..7 => 0b0100,
+        rex!({ base[3] }, { src[3] }, 0b1)
         8..15 => 0x89,
         16..18 => base[0..2],
         19..21 => src[0..2],
@@ -254,11 +246,7 @@ instruction JmpIndirect for [X86_64] {
     }
 
     encoding {
-        0 => target[3],
-        1 => 0b0,
-        2 => 0b0,
-        3 => 0b0,
-        4..7 => 0b0100,
+        rex!({ target[3] }, { 0b0 }, 0b0)
         8..15 => 0xFF,
         16..18 => target[0..2],
         19..21 => 0b100,
@@ -283,11 +271,7 @@ instruction CallIndirect for [X86_64] {
     }
 
     encoding {
-        0 => target[3],
-        1 => 0b0,
-        2 => 0b0,
-        3 => 0b0,
-        4..7 => 0b0100,
+        rex!({ target[3] }, { 0b0 }, 0b0)
         8..15 => 0xFF,
         16..18 => target[0..2],
         19..21 => 0b010,

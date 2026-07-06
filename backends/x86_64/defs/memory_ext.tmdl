@@ -16,11 +16,7 @@ template ExtendLoad for [X86_64] {
     }
 
     encoding {
-        0 => base[3],
-        1 => 0b0,
-        2 => dst[3],
-        3 => 0b1,
-        4..7 => 0b0100,
+        rex!({ base[3] }, { dst[3] }, 0b1)
         8..15 => 0x0F,
         16..23 => OPCODE,
         24..26 => base[0..2],
@@ -100,11 +96,7 @@ instruction MovsxdLoad for [X86_64] {
     }
 
     encoding {
-        0 => base[3],
-        1 => 0b0,
-        2 => dst[3],
-        3 => 0b1,
-        4..7 => 0b0100,
+        rex!({ base[3] }, { dst[3] }, 0b1)
         8..15 => 0x63,
         16..18 => base[0..2],
         19..21 => dst[0..2],
@@ -134,11 +126,7 @@ instruction Mov32Load for [X86] {
     }
 
     encoding {
-        0 => base[3],
-        1 => 0b0,
-        2 => dst[3],
-        3 => 0b0,
-        4..7 => 0b0100,
+        rex!({ base[3] }, { dst[3] }, 0b0)
         8..15 => 0x8B,
         16..18 => base[0..2],
         19..21 => dst[0..2],
@@ -164,11 +152,7 @@ instruction Mov32Store for [X86] {
     }
 
     encoding {
-        0 => base[3],
-        1 => 0b0,
-        2 => src[3],
-        3 => 0b0,
-        4..7 => 0b0100,
+        rex!({ base[3] }, { src[3] }, 0b0)
         8..15 => 0x89,
         16..18 => base[0..2],
         19..21 => src[0..2],
@@ -225,11 +209,7 @@ instruction Mov8Store for [X86] {
     }
 
     encoding {
-        0 => base[3],
-        1 => 0b0,
-        2 => src[3],
-        3 => 0b0,
-        4..7 => 0b0100,
+        rex!({ base[3] }, { src[3] }, 0b0)
         8..15 => 0x88,
         16..18 => base[0..2],
         19..21 => src[0..2],
@@ -258,11 +238,7 @@ instruction MovLoadDisp for [X86_64] {
     }
 
     encoding {
-        0 => base[3],
-        1 => 0b0,
-        2 => dst[3],
-        3 => 0b1,
-        4..7 => 0b0100,
+        rex!({ base[3] }, { dst[3] }, 0b1)
         8..15 => 0x8B,
         16..18 => base[0..2],
         19..21 => dst[0..2],
@@ -290,11 +266,7 @@ instruction MovStoreDisp for [X86_64] {
     }
 
     encoding {
-        0 => base[3],
-        1 => 0b0,
-        2 => src[3],
-        3 => 0b1,
-        4..7 => 0b0100,
+        rex!({ base[3] }, { src[3] }, 0b1)
         8..15 => 0x89,
         16..18 => base[0..2],
         19..21 => src[0..2],
@@ -325,11 +297,7 @@ instruction LeaRip for [X86_64] {
     }
 
     encoding {
-        0 => 0b0,
-        1 => 0b0,
-        2 => dst[3],
-        3 => 0b1,
-        4..7 => 0b0100,
+        rex!({ 0b0 }, { dst[3] }, 0b1)
         8..15 => 0x8D,
         16..18 => 0b101,
         19..21 => dst[0..2],
@@ -357,11 +325,7 @@ template PushPop for [X86_64] {
     }
 
     encoding {
-        0 => reg[3],
-        1 => 0b0,
-        2 => 0b0,
-        3 => 0b0,
-        4..7 => 0b0100,
+        rex!({ reg[3] }, { 0b0 }, 0b0)
         8..10 => reg[0..2],
         11..15 => OPCODE,
     }

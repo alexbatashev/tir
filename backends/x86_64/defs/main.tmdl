@@ -724,6 +724,20 @@ macro tmpl_extend {
     };
 }
 
+// REX-prefix scaffold: the 0100 WRXB byte laid out little-endian. `$b0` is the
+// rm/base 4th-bit source, `$b2` the reg 4th-bit source (each a slice like
+// `base[3]` or a literal `0b0`), `$w` the REX.W bit. Expands to the five encoding
+// arms (with a trailing comma) so the remaining arms follow directly.
+macro rex {
+    ( { $($b0:tt)* }, { $($b2:tt)* }, $w:literal ) => {
+        0 => $($b0)*,
+        1 => 0b0,
+        2 => $($b2)*,
+        3 => $w,
+        4..7 => 0b0100,
+    };
+}
+
 // movzx/movsx register extensions. Source width picks the template, so it is a
 // per-row parameter rather than a width group.
 macro extend_ops {
