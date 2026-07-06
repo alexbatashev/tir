@@ -319,7 +319,9 @@ macro shift_imm {
 // 0x66 operand-size prefix (16-bit) shifts every offset by 8, and the 8-bit
 // high-byte forms drop REX entirely. One arm per shape, each writing its offsets
 // once. Templates emit no code themselves, so only the derived instructions
-// matter for output.
+// matter for output. The rex! fragment is not used here: it covers only the
+// plain no-prefix REX layout, while these shapes vary the REX bits' sources,
+// drop the byte, or shift offsets past a prefix.
 
 macro tmpl_rr {
     ( $name:ident, $dia:ident, $cls:ident, rexw = $rexw:literal ) => {
