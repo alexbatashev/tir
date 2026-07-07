@@ -329,6 +329,19 @@ fn emit_instructions<'a>(
         .map(|rc| rc.name.clone())
         .collect();
 
+    // Register classes with a hardwired-zero register (RISC-V `x0`, AArch64
+    // `xzr`), mapping the class name to that register's index. A two-register
+    // comparison branch over such a class gets extra zero-form rule variants that
+    // wire one operand to the zero register (see the zero-form derivation below).
+    let hardwired_zero_index: HashMap<String, u16> = files
+        .iter()
+        .flat_map(|f| f.register_classes())
+        .filter_map(|rc| {
+            rc.hardwired_zero_register_index()
+                .map(|idx| (rc.name.clone(), idx))
+        })
+        .collect();
+
     // Per-class execution read routing: `(is_float, width)`. A vector operand
     // (width > 64) is read as raw byte lanes, a scalar float as an `APFloat`,
     // and everything else as an `APInt` — so no value crosses the register
@@ -425,6 +438,7 @@ fn emit_instructions<'a>(
             && defined_register_operands.len() <= 1
             && !behavior_references_pc(&inst.behavior, &pc_classes)
             && !behavior_has_atomic_ops(&inst.behavior)
+            && !behavior_reads_flag_register(&inst.behavior, &flag_classes)
         {
             analyze_instruction_semantics(
                 inst,
@@ -934,147 +948,107 @@ fn emit_instructions<'a>(
                 &pc_classes,
             )
         {
-            let emit_fn_ident = format_ident!("emit_isel_{}", inst.name.to_lowercase());
-            let pattern_fn_ident = format_ident!("isel_pattern_{}", inst.name.to_lowercase());
-            let rule_name_lit = proc_macro2::Literal::string(&inst.name.to_lowercase());
-            let target_symbol_lit = proc_macro2::Literal::u32_unsuffixed(branch.target_symbol);
-
-            let mut operand_constraint_entries: Vec<proc_macro2::TokenStream> = Vec::new();
-            let mut emit_attr_steps: Vec<proc_macro2::TokenStream> = Vec::new();
-            for (op_name, op_ty) in &ops {
-                let op_name_lit = proc_macro2::Literal::string(op_name);
-                if op_name == &branch.target_operand {
-                    emit_attr_steps.push(quote! {
-                        let dest = m
-                            .block_binding(#target_symbol_lit)
-                            .ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
-                        builder = builder.attr(
-                            #op_name_lit,
-                            tir::attributes::AttributeValue::Block(dest),
-                        );
-                    });
-                    continue;
-                }
-                let Some(&symbol) = branch.variable_symbols.get(op_name) else {
-                    continue;
-                };
-                let symbol_lit = proc_macro2::Literal::u32_unsuffixed(symbol);
-                match op_ty {
-                    Type::Struct(class_name) => {
-                        let class_id = reg_class_id(class_name);
-                        operand_constraint_entries.push(
-                            quote! { (#symbol_lit, tir::graph::OperandConstraint::Register) },
-                        );
-                        emit_attr_steps.push(quote! {
-                            let src = m
-                                .value_binding(#symbol_lit)
-                                .ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
-                            builder = builder.attr(
-                                #op_name_lit,
-                                tir::attributes::AttributeValue::Register(
-                                    tir::attributes::RegisterAttr::Virtual {
-                                        id: src.number(),
-                                        class: Some(#class_id),
-                                    },
-                                ),
-                            );
-                        });
-                    }
-                    Type::Integer | Type::Bits(_) => {
-                        operand_constraint_entries.push(
-                            quote! { (#symbol_lit, tir::graph::OperandConstraint::Immediate) },
-                        );
-                        emit_attr_steps.push(quote! {
-                            let v = m
-                                .int_binding(#symbol_lit)
-                                .ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
-                            builder = builder.attr(
-                                #op_name_lit,
-                                tir::attributes::AttributeValue::Int(v),
-                            );
-                        });
-                    }
-                    _ => {}
-                }
-            }
-
-            let immediate_symbols: std::collections::HashSet<u32> = ops
-                .iter()
-                .filter(|(_, op_ty)| matches!(op_ty, Type::Bits(_) | Type::Integer))
-                .filter_map(|(op_name, _)| branch.variable_symbols.get(op_name).copied())
-                .collect();
-            let (canon_pattern, canon_root, forced_widths) = tir::sem::canonicalize_for_selection(
+            let inst_features = feature_slice(&inst.for_isas);
+            let no_zero_slots = HashMap::new();
+            let (emitter, init) = emit_cond_branch_rule(
+                &inst.name.to_lowercase(),
+                &builder_ident,
+                mnemonic_name,
+                &inst_features,
+                &ops,
                 &branch.pattern,
                 branch.root,
-                &immediate_symbols,
+                &branch.variable_symbols,
+                &branch.target_operand,
+                branch.target_symbol,
+                &no_zero_slots,
+                &float_classes,
             );
-            let mut pattern_widths = tir::sem::infer_widths(&canon_pattern, |_| None);
-            for (index, forced) in forced_widths.iter().enumerate() {
-                if forced.is_some() {
-                    pattern_widths[index] = *forced;
+            isel_rule_emitters.push(emitter);
+            isel_rule_inits.push(init);
+
+            // Zero-form variants: when the branch condition is a two-register
+            // comparison whose operands belong to a class with a hardwired-zero
+            // register (RISC-V `x0`), derive one rule per slot that wires that slot
+            // to the zero register, so `cmpi x, 0`-style guards (and bare i1
+            // conditions the bridge rewrites to `x != 0`) select the branch
+            // directly instead of materializing the constant. The zeroed slot is
+            // lowered as `zext(0b0, W)` — the shape the arm64 cbz/cbnz path and the
+            // bare-i1 bridge produce, so all three unify in the program e-graph.
+            let (root_kind, root_children) = {
+                use tir::graph::Dag;
+                (
+                    *branch.pattern.get_node(branch.root),
+                    branch.pattern.children(branch.root).collect::<Vec<_>>(),
+                )
+            };
+            let root_is_comparison = {
+                use tir::sem::SymKind::*;
+                matches!(
+                    root_kind,
+                    Eq | Ne | Lt | Le | Gt | Ge | ULt | ULe | UGt | UGe
+                )
+            };
+            // Both comparison operands must be distinct register operands of a
+            // hardwired-zero class; otherwise there is nothing to substitute (e.g.
+            // a pattern already comparing against a literal zero).
+            let operand_slots: Option<Vec<(String, String, u32)>> = (root_is_comparison
+                && root_children.len() == 2)
+                .then(|| {
+                    use tir::graph::Dag;
+                    root_children
+                        .iter()
+                        .map(|&child| {
+                            let symbol = match branch.pattern.get_leaf_data(child) {
+                                Some(tir::sem::SymPayload::SymbolId(s)) => *s,
+                                _ => return None,
+                            };
+                            let (name, class) = ops.iter().find_map(|(name, ty)| {
+                                let Type::Struct(class) = ty else { return None };
+                                (branch.variable_symbols.get(name) == Some(&symbol)
+                                    && hardwired_zero_index.contains_key(class))
+                                .then(|| (name.clone(), class.clone()))
+                            })?;
+                            Some((name, class, symbol))
+                        })
+                        .collect::<Option<Vec<_>>>()
+                })
+                .flatten();
+            if let Some(slots) = operand_slots {
+                for (slot_index, (op_name, class_name, reg_symbol)) in slots.iter().enumerate() {
+                    let width_symbol = branch.target_symbol + 1;
+                    let (zero_pattern, zero_root) = branch_pattern_with_zero(
+                        &branch.pattern,
+                        branch.root,
+                        *reg_symbol,
+                        width_symbol,
+                    );
+                    let mut zero_variable_symbols = branch.variable_symbols.clone();
+                    zero_variable_symbols.remove(op_name);
+                    let mut zero_slots = HashMap::new();
+                    zero_slots.insert(
+                        op_name.clone(),
+                        (class_name.clone(), hardwired_zero_index[class_name]),
+                    );
+                    let rule_name = format!("{}_zero{}", inst.name.to_lowercase(), slot_index);
+                    let (emitter, init) = emit_cond_branch_rule(
+                        &rule_name,
+                        &builder_ident,
+                        mnemonic_name,
+                        &inst_features,
+                        &ops,
+                        &zero_pattern,
+                        zero_root,
+                        &zero_variable_symbols,
+                        &branch.target_operand,
+                        branch.target_symbol,
+                        &zero_slots,
+                        &float_classes,
+                    );
+                    isel_rule_emitters.push(emitter);
+                    isel_rule_inits.push(init);
                 }
             }
-            let (pattern_stmts, _root_var) =
-                emit_dag_as_code(&canon_pattern, canon_root, &pattern_widths, &HashSet::new());
-            let operand_width_call = emit_operand_width_call(
-                &ops,
-                &branch.variable_symbols,
-                &width_sensitive_symbols(&canon_pattern, &pattern_widths),
-            );
-            let operand_imm_range_call = emit_operand_imm_range_call(&immediate_operand_ranges(
-                &branch.pattern,
-                &ops,
-                &branch.variable_symbols,
-            ));
-            let operand_float_call =
-                emit_operand_float_call(&ops, &branch.variable_symbols, &float_classes);
-            let base_cost = {
-                use tir::graph::Dag;
-                (canon_pattern.len() as u32).max(1)
-            };
-            let base_cost_lit = proc_macro2::Literal::u32_unsuffixed(base_cost);
-            let mnemonic_cost_lit = proc_macro2::Literal::string(mnemonic_name);
-
-            isel_rule_emitters.push(quote! {
-                fn #pattern_fn_ident(_context: &tir::Context) -> tir::sem::SemGraph {
-                    use tir::graph::MutDag;
-                    let mut g = tir::sem::SemGraph::new();
-                    #(#pattern_stmts)*
-                    g
-                }
-
-                fn #emit_fn_ident(
-                    context: &tir::Context,
-                    req: &tir::backend::isel::EmitRequest,
-                    m: &tir::backend::isel::RuleMatch,
-                ) -> Result<Box<dyn tir::Operation>, tir::PassError> {
-                    let _ = (req, m);
-                    let mut builder = #builder_ident::new(context);
-                    #(#emit_attr_steps)*
-                    Ok(Box::new(builder.build()))
-                }
-            });
-
-            let inst_features = feature_slice(&inst.for_isas);
-            isel_rule_inits.push(quote! {
-                if features_enabled(features, #inst_features) {
-                    rules.push(
-                        tir::backend::isel::Rule::new(
-                            #rule_name_lit,
-                            #pattern_fn_ident(context),
-                            (#base_cost_lit).max(instruction_cost(#mnemonic_cost_lit)),
-                            #emit_fn_ident,
-                        )
-                        .with_kind(tir::backend::isel::RuleKind::CondBranch {
-                            target_symbol: #target_symbol_lit,
-                        })
-                        .with_operand_constraints(vec![#(#operand_constraint_entries),*])
-                        #operand_width_call
-                        #operand_imm_range_call
-                        #operand_float_call,
-                    );
-                }
-            });
         }
 
         let encoding_arms = get_encoding_arms(inst, item_cache);
@@ -1639,9 +1613,9 @@ fn emit_instructions<'a>(
         }
     }
 
-    // Flag-mediated conditional branches: definer + branch pairs composed and
-    // proved into single-comparison rules.
-    emit_flag_branch_rules(
+    // Flag-mediated rules: definer + branch pairs composed into conditional
+    // branch rules, and definer + reader pairs into boolean value rules.
+    emit_flag_rules(
         files,
         item_cache,
         &register_index_map,
@@ -2695,6 +2669,22 @@ struct FlagBranchSemantics {
     target_operand: String,
 }
 
+/// A flag-reading value materializer (`cset`, `setcc`): defines one register as
+/// `if <flags> { c1 } else { c0 }` over one class's status flags, with constant
+/// arms. Composed with a flag definer it yields a boolean materializer value
+/// rule (see `emit_flag_reader_rules`).
+struct FlagReaderSemantics {
+    class: String,
+    graph: tir::sem::SemGraph,
+    /// The `if`'s condition, then, and else subgraphs.
+    cond_root: tir::graph::NodeId,
+    then_root: tir::graph::NodeId,
+    else_root: tir::graph::NodeId,
+    /// Condition symbol id -> the flag register index it reads.
+    flag_symbols: HashMap<u32, u32>,
+    dest_operand: String,
+}
+
 /// The statement list of a behavior body (peeling wrapper blocks).
 fn behavior_statements(behavior: &ast::Expr) -> Vec<&ast::Expr> {
     let mut body = behavior;
@@ -2755,11 +2745,21 @@ fn analyze_flag_definer_semantics(
         flag_exprs.push((index, &assign.value));
     }
 
-    // Composition binds each operand to a pattern symbol the emitted pair
-    // reads back as a register; immediate-operand definers are not derived.
-    if operands
+    // Composition binds each register operand to a pattern symbol the emitted
+    // pair reads back as a register, and at most one immediate operand to a
+    // constant symbol feeding the composed comparison. Any other operand shape
+    // is not derived.
+    let immediate_operands = operands
         .iter()
-        .any(|(_, ty)| !matches!(ty, Type::Struct(_) | Type::String))
+        .filter(|(_, ty)| matches!(ty, Type::Bits(_) | Type::Integer))
+        .count();
+    if immediate_operands > 1
+        || operands.iter().any(|(_, ty)| {
+            !matches!(
+                ty,
+                Type::Struct(_) | Type::String | Type::Bits(_) | Type::Integer
+            )
+        })
     {
         return None;
     }
@@ -2857,6 +2857,110 @@ fn analyze_flag_branch_semantics(
     })
 }
 
+/// Recognize a flag-reading value materializer: one register defined as `if
+/// <cond> { c1 } else { c0 }` whose condition reads only status-flag registers
+/// of one class and whose arms are functions of those flags alone. Selects
+/// (`csel`, arms reading encoded operands) are rejected by the operand-read
+/// check.
+///
+/// The value is lowered exactly as a plain value rule would be — `self.XLEN`
+/// kept as a width symbol rather than const-folded — so the emitted arms are
+/// the width-polymorphic `slt`-style form the bool-materialize bridge matches.
+fn analyze_flag_reader_semantics(
+    inst: &ast::Instruction,
+    operands: &[(String, Type)],
+    numeric_params: &HashMap<String, i64>,
+    isa_param_values: &HashMap<String, i64>,
+    register_index_map: &HashMap<(String, String), u32>,
+    flag_classes: &HashSet<String>,
+    pc_classes: &HashSet<String>,
+) -> Option<FlagReaderSemantics> {
+    use tir::graph::Dag;
+    if flag_classes.is_empty() {
+        return None;
+    }
+    let defined_register_operands = infer_defined_register_operands(&inst.behavior, operands);
+    let [dest] = defined_register_operands.as_slice() else {
+        return None;
+    };
+    let stmts = behavior_statements(&inst.behavior);
+    let [stmt] = stmts.as_slice() else {
+        return None;
+    };
+    let ast::Expr::Assign(assign) = stmt else {
+        return None;
+    };
+    if assignment_dest_name(&assign.dest).as_deref() != Some(dest.as_str()) {
+        return None;
+    }
+    let ast::Expr::If(if_expr) = &*assign.value else {
+        return None;
+    };
+    // The arms carry the materialized value: they must not themselves read flags
+    // (the composition only substitutes the condition's reads).
+    if if_expr.else_.is_none()
+        || behavior_references_pc(&assign.value, pc_classes)
+        || behavior_reads_flag_register(&if_expr.then, flag_classes)
+        || if_expr
+            .else_
+            .as_ref()
+            .is_some_and(|e| behavior_reads_flag_register(e, flag_classes))
+    {
+        return None;
+    }
+
+    let mut graph = tir::sem::SemGraph::new();
+    let lowering = assign.value.lower_to_sema_with_isa(
+        &mut graph,
+        numeric_params,
+        isa_param_values,
+        register_index_map,
+    )?;
+    // No encoded operand feeds the value (that would be a select, not a boolean
+    // materializer); `self.XLEN` is an ISA param, not an operand, so it may still
+    // appear as a width symbol. It must actually read a flag.
+    if operands
+        .iter()
+        .any(|(name, _)| lowering.variable_symbols.contains_key(name))
+        || lowering.register_symbols.is_empty()
+    {
+        return None;
+    }
+
+    let root = lowering.root;
+    if *graph.get_node(root) != tir::sem::SymKind::If {
+        return None;
+    }
+    let children: Vec<tir::graph::NodeId> = graph.children(root).collect();
+    let [cond_root, then_root, else_root] = children.as_slice() else {
+        return None;
+    };
+
+    let mut class: Option<String> = None;
+    let mut flag_symbols = HashMap::new();
+    for ((reg_class, index), symbol) in &lowering.register_symbols {
+        if !flag_classes.contains(reg_class) {
+            return None;
+        }
+        match &class {
+            Some(existing) if existing != reg_class => return None,
+            None => class = Some(reg_class.clone()),
+            _ => {}
+        }
+        flag_symbols.insert(*symbol, *index);
+    }
+
+    Some(FlagReaderSemantics {
+        class: class?,
+        graph,
+        cond_root: *cond_root,
+        then_root: *then_root,
+        else_root: *else_root,
+        flag_symbols,
+        dest_operand: dest.clone(),
+    })
+}
+
 /// Copy `node`'s subgraph from `src` into `dst`, preserving payloads. Children
 /// are copied first, keeping `dst` in post order.
 fn copy_subgraph(
@@ -2877,6 +2981,48 @@ fn copy_subgraph(
     let copied = dst.add_node(*src.get_node(node));
     if let Some(data) = src.get_leaf_data(node) {
         dst.set_leaf_data(copied, data.clone());
+    }
+    for child in copied_children {
+        dst.add_edge(copied, child);
+    }
+    memo.insert(node.index(), copied);
+    copied
+}
+
+/// Copy `node`'s subgraph, renumbering each distinct symbol id through `remap`
+/// to a fresh id from `next`. Used to lift a reader's arm symbols (its `XLEN`
+/// width var) above the two comparison-operand symbols they are spliced beside,
+/// so the two symbol spaces do not collide.
+fn copy_subgraph_remap_symbols(
+    dst: &mut tir::sem::SemGraph,
+    src: &tir::sem::SemGraph,
+    node: tir::graph::NodeId,
+    memo: &mut HashMap<usize, tir::graph::NodeId>,
+    remap: &mut HashMap<u32, u32>,
+    next: &mut u32,
+) -> tir::graph::NodeId {
+    use tir::graph::{Dag, MutDag};
+    if let Some(&copied) = memo.get(&node.index()) {
+        return copied;
+    }
+    let children: Vec<tir::graph::NodeId> = src.children(node).collect();
+    let copied_children: Vec<tir::graph::NodeId> = children
+        .into_iter()
+        .map(|child| copy_subgraph_remap_symbols(dst, src, child, memo, remap, next))
+        .collect();
+    let copied = dst.add_node(*src.get_node(node));
+    if let Some(data) = src.get_leaf_data(node) {
+        let data = if let tir::sem::SymPayload::SymbolId(id) = data {
+            let new_id = *remap.entry(*id).or_insert_with(|| {
+                let assigned = *next;
+                *next += 1;
+                assigned
+            });
+            tir::sem::SymPayload::SymbolId(new_id)
+        } else {
+            data.clone()
+        };
+        dst.set_leaf_data(copied, data);
     }
     for child in copied_children {
         dst.add_edge(copied, child);
@@ -3122,13 +3268,141 @@ fn register_class_width_with_isa(
     }
 }
 
-/// Derive conditional-branch rules for flag-mediated ISAs (x86 EFLAGS, AArch64
-/// PSTATE). Each flag definer's per-flag semantics substitute into each
-/// flag-guarded branch's condition; when the composition is provably one
-/// canonical comparison over the definer's operands, the pair registers a
-/// [`RuleKind::CondBranch`] rule whose emission is the definer followed by the
-/// branch — two real instructions selected from TMDL semantics alone.
-fn emit_flag_branch_rules<'a>(
+/// The architectural bit-width of each of a definer's comparison-operand
+/// symbols. A register operand's width comes from its class; the immediate
+/// operand shares it — comparison operands are the same architectural width, so
+/// the composed condition proves against a canonical comparison over full-width
+/// symbols. `None` if a register width is unresolved or a symbol is untyped.
+fn definer_symbol_widths(
+    files: &[ast::File],
+    d: &FlagInst<'_>,
+    d_sem: &FlagDefinerSemantics,
+) -> Option<Vec<u32>> {
+    let mut widths = vec![0u32; d_sem.variable_symbols.len()];
+    let mut imm_symbol: Option<u32> = None;
+    let mut register_width: Option<u32> = None;
+    for (op_name, op_ty) in &d.ops {
+        let Some(&symbol) = d_sem.variable_symbols.get(op_name) else {
+            continue;
+        };
+        match op_ty {
+            Type::Struct(class_name) => {
+                let width = register_class_width_with_isa(files, class_name, &d.isa_param_values)?;
+                widths[symbol as usize] = width;
+                register_width = Some(width);
+            }
+            Type::Bits(_) | Type::Integer => imm_symbol = Some(symbol),
+            _ => {}
+        }
+    }
+    if let Some(symbol) = imm_symbol {
+        widths[symbol as usize] = register_width?;
+    }
+    if widths.contains(&0) {
+        return None;
+    }
+    Some(widths)
+}
+
+/// The pattern symbols bound to a definer's immediate operands (there is at most
+/// one), for canonicalization and immediate-range enforcement.
+fn definer_immediate_symbols(d: &FlagInst<'_>, d_sem: &FlagDefinerSemantics) -> HashSet<u32> {
+    d.ops
+        .iter()
+        .filter(|(_, ty)| matches!(ty, Type::Bits(_) | Type::Integer))
+        .filter_map(|(name, _)| d_sem.variable_symbols.get(name).copied())
+        .collect()
+}
+
+/// A flag-mediated instruction's resolved shape, shared by definer, branch and
+/// reader analysis.
+struct FlagInst<'a> {
+    inst: &'a ast::Instruction,
+    ops: Vec<(String, Type)>,
+    mnemonic: String,
+    isa_param_values: HashMap<String, i64>,
+}
+
+/// Emit an flag-definer prelude function (materializing the flag-setting
+/// instruction ahead of its consumer) once per definer, and return its ident
+/// plus the definer's operand register constraints. Shared by branch and reader
+/// pair emission, deduping through `emitted_preludes`.
+fn emit_flag_definer_prelude(
+    d: &FlagInst<'_>,
+    d_sem: &FlagDefinerSemantics,
+    emitted_preludes: &mut HashSet<String>,
+    isel_rule_emitters: &mut Vec<proc_macro2::TokenStream>,
+) -> (proc_macro2::Ident, Vec<proc_macro2::TokenStream>) {
+    let prelude_fn_ident = format_ident!("emit_isel_flag_definer_{}", d.inst.name.to_lowercase());
+    let d_builder_ident = format_ident!("{}OpBuilder", &d.inst.name);
+
+    let mut operand_constraint_entries: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut prelude_attr_steps: Vec<proc_macro2::TokenStream> = Vec::new();
+    for (op_name, op_ty) in &d.ops {
+        let Some(&symbol) = d_sem.variable_symbols.get(op_name) else {
+            continue;
+        };
+        let op_name_lit = proc_macro2::Literal::string(op_name);
+        let symbol_lit = proc_macro2::Literal::u32_unsuffixed(symbol);
+        match op_ty {
+            Type::Struct(class_name) => {
+                let class_id = reg_class_id(class_name);
+                operand_constraint_entries
+                    .push(quote! { (#symbol_lit, tir::graph::OperandConstraint::Register) });
+                prelude_attr_steps.push(quote! {
+                    let src = m
+                        .value_binding(#symbol_lit)
+                        .ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
+                    builder = builder.attr(
+                        #op_name_lit,
+                        tir::attributes::AttributeValue::Register(
+                            tir::attributes::RegisterAttr::Virtual {
+                                id: src.number(),
+                                class: Some(#class_id),
+                            },
+                        ),
+                    );
+                });
+            }
+            Type::Bits(_) | Type::Integer => {
+                operand_constraint_entries
+                    .push(quote! { (#symbol_lit, tir::graph::OperandConstraint::Immediate) });
+                prelude_attr_steps.push(quote! {
+                    let v = m
+                        .int_binding(#symbol_lit)
+                        .ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
+                    builder = builder.attr(
+                        #op_name_lit,
+                        tir::attributes::AttributeValue::Int(v),
+                    );
+                });
+            }
+            _ => continue,
+        }
+    }
+
+    if emitted_preludes.insert(d.inst.name.clone()) {
+        isel_rule_emitters.push(quote! {
+            fn #prelude_fn_ident(
+                context: &tir::Context,
+                req: &tir::backend::isel::EmitRequest,
+                m: &tir::backend::isel::RuleMatch,
+            ) -> Result<Box<dyn tir::Operation>, tir::PassError> {
+                let _ = (req, m);
+                let mut builder = #d_builder_ident::new(context);
+                #(#prelude_attr_steps)*
+                Ok(Box::new(builder.build()))
+            }
+        });
+    }
+
+    (prelude_fn_ident, operand_constraint_entries)
+}
+
+/// Derive the flag-mediated selection rules for an ISA (x86 EFLAGS, AArch64
+/// PSTATE): flag definers compose with flag-guarded branches into conditional
+/// branch rules and with flag-reading materializers into boolean value rules.
+fn emit_flag_rules<'a>(
     files: &'a [ast::File],
     item_cache: &HashMap<&'a str, &'a ast::Item>,
     register_index_map: &HashMap<(String, String), u32>,
@@ -3141,15 +3415,9 @@ fn emit_flag_branch_rules<'a>(
         return Ok(());
     }
 
-    struct FlagInst<'a> {
-        inst: &'a ast::Instruction,
-        ops: Vec<(String, Type)>,
-        mnemonic: String,
-        isa_param_values: HashMap<String, i64>,
-    }
-
     let mut definers: Vec<(FlagInst<'a>, FlagDefinerSemantics)> = Vec::new();
     let mut branches: Vec<(FlagInst<'a>, FlagBranchSemantics)> = Vec::new();
+    let mut readers: Vec<(FlagInst<'a>, FlagReaderSemantics)> = Vec::new();
     for inst in files.iter().flat_map(|f| f.instructions()) {
         // Unmodeled (`todo()`) semantics produce no rules of any kind.
         if behavior_uses_todo(&inst.behavior) {
@@ -3203,12 +3471,61 @@ fn emit_flag_branch_rules<'a>(
             pc_classes,
         ) {
             branches.push((info, sem));
+        } else if let Some(sem) = analyze_flag_reader_semantics(
+            inst,
+            &info.ops,
+            &numeric_params,
+            &info.isa_param_values,
+            register_index_map,
+            flag_classes,
+            pc_classes,
+        ) {
+            readers.push((info, sem));
         }
     }
 
     let mut emitted_preludes: HashSet<String> = HashSet::new();
-    for (b, b_sem) in &branches {
-        for (d, d_sem) in &definers {
+    emit_flag_branch_rules(
+        files,
+        &definers,
+        &branches,
+        &mut emitted_preludes,
+        isel_rule_emitters,
+        isel_rule_inits,
+    );
+    emit_flag_reader_rules(
+        files,
+        &definers,
+        &readers,
+        &mut emitted_preludes,
+        isel_rule_emitters,
+        isel_rule_inits,
+    );
+    emit_aliased_zero_branch_rules(
+        files,
+        &definers,
+        &branches,
+        isel_rule_emitters,
+        isel_rule_inits,
+    );
+    Ok(())
+}
+
+/// Compose each flag definer with each flag-guarded branch: the definer's
+/// per-flag semantics substitute into the branch's condition, and when the
+/// composition is provably one canonical comparison over the definer's operands
+/// the pair registers a [`RuleKind::CondBranch`] rule whose emission is the
+/// definer followed by the branch — two real instructions from TMDL alone.
+fn emit_flag_branch_rules(
+    files: &[ast::File],
+    definers: &[(FlagInst<'_>, FlagDefinerSemantics)],
+    branches: &[(FlagInst<'_>, FlagBranchSemantics)],
+    emitted_preludes: &mut HashSet<String>,
+    isel_rule_emitters: &mut Vec<proc_macro2::TokenStream>,
+    isel_rule_inits: &mut Vec<proc_macro2::TokenStream>,
+) {
+    for (b, b_sem) in branches {
+        for (d, d_sem) in definers {
             if d_sem.class != b_sem.class {
                 continue;
             }
@@ -3233,22 +3550,9 @@ fn emit_flag_branch_rules<'a>(
             if d_sem.variable_symbols.len() != 2 {
                 continue;
             }
-            let mut symbol_widths = vec![0u32; d_sem.variable_symbols.len()];
-            let mut widths_ok = true;
-            for (op_name, op_ty) in &d.ops {
-                let (Type::Struct(class_name), Some(&symbol)) =
-                    (op_ty, d_sem.variable_symbols.get(op_name))
-                else {
-                    continue;
-                };
-                match register_class_width_with_isa(files, class_name, &d.isa_param_values) {
-                    Some(width) => symbol_widths[symbol as usize] = width,
-                    None => widths_ok = false,
-                }
-            }
-            if !widths_ok || symbol_widths.contains(&0) {
+            let Some(symbol_widths) = definer_symbol_widths(files, d, d_sem) else {
                 continue;
-            }
+            };
 
             let mut spliced = tir::sem::SemGraph::new();
             let substitute: HashMap<u32, tir::graph::NodeId> = b_sem
@@ -3273,9 +3577,12 @@ fn emit_flag_branch_rules<'a>(
                 continue;
             };
 
-            let no_immediates: HashSet<u32> = HashSet::new();
-            let (canon_pattern, canon_root, forced_widths) =
-                tir::sem::canonicalize_for_selection(&candidate, candidate_root, &no_immediates);
+            let immediate_symbols = definer_immediate_symbols(d, d_sem);
+            let (canon_pattern, canon_root, forced_widths) = tir::sem::canonicalize_for_selection(
+                &candidate,
+                candidate_root,
+                &immediate_symbols,
+            );
             let mut pattern_widths = tir::sem::infer_widths(&canon_pattern, |_| None);
             for (index, forced) in forced_widths.iter().enumerate() {
                 if forced.is_some() {
@@ -3289,6 +3596,11 @@ fn emit_flag_branch_rules<'a>(
                 &d_sem.variable_symbols,
                 &width_sensitive_symbols(&canon_pattern, &pattern_widths),
             );
+            let operand_imm_range_call = emit_operand_imm_range_call(&immediate_operand_ranges(
+                &d_sem.graph,
+                &d.ops,
+                &d_sem.variable_symbols,
+            ));
 
             let target_symbol = d_sem
                 .variable_symbols
@@ -3299,63 +3611,22 @@ fn emit_flag_branch_rules<'a>(
             let b_lower = b.inst.name.to_lowercase();
             let pattern_fn_ident = format_ident!("isel_pattern_{}_via_{}", b_lower, d_lower);
             let emit_fn_ident = format_ident!("emit_isel_{}_via_{}", b_lower, d_lower);
-            let prelude_fn_ident = format_ident!("emit_isel_flag_definer_{}", d_lower);
             let rule_name_lit =
                 proc_macro2::Literal::string(&format!("{}+{}", d.mnemonic, b.mnemonic));
             let target_symbol_lit = proc_macro2::Literal::u32_unsuffixed(target_symbol);
             let b_builder_ident = format_ident!("{}OpBuilder", &b.inst.name);
-            let d_builder_ident = format_ident!("{}OpBuilder", &d.inst.name);
             let target_name_lit = proc_macro2::Literal::string(&b_sem.target_operand);
 
-            let mut operand_constraint_entries: Vec<proc_macro2::TokenStream> = Vec::new();
-            let mut prelude_attr_steps: Vec<proc_macro2::TokenStream> = Vec::new();
-            for (op_name, op_ty) in &d.ops {
-                let Type::Struct(class_name) = op_ty else {
-                    continue;
-                };
-                let Some(&symbol) = d_sem.variable_symbols.get(op_name) else {
-                    continue;
-                };
-                let op_name_lit = proc_macro2::Literal::string(op_name);
-                let class_id = reg_class_id(class_name);
-                let symbol_lit = proc_macro2::Literal::u32_unsuffixed(symbol);
-                operand_constraint_entries
-                    .push(quote! { (#symbol_lit, tir::graph::OperandConstraint::Register) });
-                prelude_attr_steps.push(quote! {
-                    let src = m
-                        .value_binding(#symbol_lit)
-                        .ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
-                    builder = builder.attr(
-                        #op_name_lit,
-                        tir::attributes::AttributeValue::Register(
-                            tir::attributes::RegisterAttr::Virtual {
-                                id: src.number(),
-                                class: Some(#class_id),
-                            },
-                        ),
-                    );
-                });
-            }
-
-            if emitted_preludes.insert(d.inst.name.clone()) {
-                isel_rule_emitters.push(quote! {
-                    fn #prelude_fn_ident(
-                        context: &tir::Context,
-                        req: &tir::backend::isel::EmitRequest,
-                        m: &tir::backend::isel::RuleMatch,
-                    ) -> Result<Box<dyn tir::Operation>, tir::PassError> {
-                        let _ = (req, m);
-                        let mut builder = #d_builder_ident::new(context);
-                        #(#prelude_attr_steps)*
-                        Ok(Box::new(builder.build()))
-                    }
-                });
-            }
+            let (prelude_fn_ident, operand_constraint_entries) =
+                emit_flag_definer_prelude(d, d_sem, emitted_preludes, isel_rule_emitters);
 
             let base_cost = {
                 use tir::graph::Dag;
-                // The condition pattern plus the definer instruction.
-                canon_pattern.len() as u32 + 1
+                // The condition pattern plus the two emitted instructions (the
+                // definer and the branch): a fused compare-and-branch is never
+                // cheaper than a single-instruction direct branch (e.g. arm64
+                // `cbz`) that covers the same guard.
+                canon_pattern.len() as u32 + 2
             };
             let base_cost_lit = proc_macro2::Literal::u32_unsuffixed(base_cost);
             let d_mnemonic_lit = proc_macro2::Literal::string(&d.mnemonic);
@@ -3406,14 +3677,547 @@ fn emit_flag_branch_rules<'a>(
                         })
                         .with_prelude_emitter(#prelude_fn_ident)
                         .with_operand_constraints(vec![#(#operand_constraint_entries),*])
-                        #operand_width_call,
+                        #operand_width_call
+                        #operand_imm_range_call,
                     );
                 }
             });
         }
     }
+}
 
-    Ok(())
+/// Copy `node`'s subgraph into `dst`, rewriting every symbol id found in `map`
+/// to its mapped id. Unlike `copy_subgraph_remap_symbols` the mapping is fixed
+/// (not fresh-per-symbol), so two operand symbols can be aliased onto one.
+fn copy_subgraph_alias(
+    dst: &mut tir::sem::SemGraph,
+    src: &tir::sem::SemGraph,
+    node: tir::graph::NodeId,
+    map: &HashMap<u32, u32>,
+    memo: &mut HashMap<usize, tir::graph::NodeId>,
+) -> tir::graph::NodeId {
+    use tir::graph::{Dag, MutDag};
+    if let Some(&copied) = memo.get(&node.index()) {
+        return copied;
+    }
+    let children: Vec<tir::graph::NodeId> = src.children(node).collect();
+    let copied_children: Vec<tir::graph::NodeId> = children
+        .into_iter()
+        .map(|child| copy_subgraph_alias(dst, src, child, map, memo))
+        .collect();
+    let copied = dst.add_node(*src.get_node(node));
+    if let Some(data) = src.get_leaf_data(node) {
+        let data = match data {
+            tir::sem::SymPayload::SymbolId(id) if map.contains_key(id) => {
+                tir::sem::SymPayload::SymbolId(map[id])
+            }
+            other => other.clone(),
+        };
+        dst.set_leaf_data(copied, data);
+    }
+    for child in copied_children {
+        dst.add_edge(copied, child);
+    }
+    memo.insert(node.index(), copied);
+    copied
+}
+
+/// A single-symbol comparison against a literal zero (`Ne(s0, 0)`/`Eq(s0, 0)`),
+/// the SMT candidate an aliased flag definer's condition proves against.
+fn zero_vs_candidate(
+    kind: tir::sem::SymKind,
+    width: u32,
+) -> (tir::sem::SemGraph, tir::graph::NodeId) {
+    use tir::graph::MutDag;
+    let mut g = tir::sem::SemGraph::new();
+    let s = g.add_node(tir::sem::SymKind::Symbol);
+    g.set_leaf_data(s, tir::sem::SymPayload::SymbolId(0));
+    let z = g.add_node(tir::sem::SymKind::Constant);
+    g.set_leaf_data(z, tir::sem::int_payload(width, 0, false));
+    let root = g.add_node(kind);
+    g.add_edge(root, s);
+    g.add_edge(root, z);
+    (g, root)
+}
+
+/// The `Eq`/`Ne`-vs-zero comparison the composed aliased condition is provably
+/// equivalent to, proven at the operand's architectural width.
+fn zero_equivalent(
+    composed: &tir::sem::SemGraph,
+    symbol_widths: &[u32],
+) -> Option<tir::sem::SymKind> {
+    use tir::sem::{EquivalenceOracle, FuzzOracle, SmtOracle, SymKind};
+    let fuzz = FuzzOracle::default();
+    for kind in [SymKind::Ne, SymKind::Eq] {
+        let (candidate, _) = zero_vs_candidate(kind, symbol_widths[0]);
+        if fuzz.equivalent(composed, &candidate, symbol_widths)
+            && SmtOracle.equivalent(composed, &candidate, symbol_widths)
+        {
+            return Some(kind);
+        }
+    }
+    None
+}
+
+/// The emitted zero-branch pattern in the `zext(0b0, W)` shape the bare-i1
+/// bridge injects: `Ne(s0, zext(0, Wsym))` / `Eq(s0, zext(0, Wsym))`, so the
+/// derived `test c, c` + `jne`/`je` rule covers a bare boolean guard.
+fn zero_branch_pattern(
+    kind: tir::sem::SymKind,
+    width_symbol: u32,
+) -> (tir::sem::SemGraph, tir::graph::NodeId) {
+    use tir::graph::MutDag;
+    let mut g = tir::sem::SemGraph::new();
+    let s = g.add_node(tir::sem::SymKind::Symbol);
+    g.set_leaf_data(s, tir::sem::SymPayload::SymbolId(0));
+    let zero = g.add_node(tir::sem::SymKind::Constant);
+    g.set_leaf_data(zero, tir::sem::int_payload(1, 0, false));
+    let wsym = g.add_node(tir::sem::SymKind::Symbol);
+    g.set_leaf_data(wsym, tir::sem::SymPayload::SymbolId(width_symbol));
+    let zext = g.add_node(tir::sem::SymKind::ZExt);
+    g.add_edge(zext, zero);
+    g.add_edge(zext, wsym);
+    let root = g.add_node(kind);
+    g.add_edge(root, s);
+    g.add_edge(root, zext);
+    (g, root)
+}
+
+/// Compose each flag-guarded branch with a two-register flag definer whose
+/// operands are aliased to one symbol: `test c, c` sets the flags of `c & c`,
+/// so with `jne`/`je` the condition is provably `Ne(c, 0)`/`Eq(c, 0)`. Emitted
+/// in the bare-i1 bridge's `zext(0b0, W)` zero shape, the pair covers a bare
+/// boolean guard with a real derived rule — retiring the hand-written
+/// branch-if-nonzero fallback on targets (x86) with no direct zero-branch. The
+/// definer's two operand slots both bind from the single matched value.
+fn emit_aliased_zero_branch_rules(
+    files: &[ast::File],
+    definers: &[(FlagInst<'_>, FlagDefinerSemantics)],
+    branches: &[(FlagInst<'_>, FlagBranchSemantics)],
+    isel_rule_emitters: &mut Vec<proc_macro2::TokenStream>,
+    isel_rule_inits: &mut Vec<proc_macro2::TokenStream>,
+) {
+    use tir::graph::Dag;
+    let mut emitted_preludes: HashSet<String> = HashSet::new();
+    for (b, b_sem) in branches {
+        for (d, d_sem) in definers {
+            if d_sem.class != b_sem.class {
+                continue;
+            }
+            let shared_isas: Vec<String> = b
+                .inst
+                .for_isas
+                .iter()
+                .filter(|isa| d.inst.for_isas.contains(isa))
+                .cloned()
+                .collect();
+            if shared_isas.is_empty() {
+                continue;
+            }
+            if !b_sem
+                .flag_symbols
+                .values()
+                .all(|index| d_sem.flag_roots.contains_key(index))
+            {
+                continue;
+            }
+            // Exactly two register operands of one class (no immediate): the
+            // aliased pair `test c, c`.
+            if d_sem.variable_symbols.len() != 2 {
+                continue;
+            }
+            let reg_ops: Vec<(&String, &String, u32)> = d
+                .ops
+                .iter()
+                .filter_map(|(name, ty)| {
+                    let Type::Struct(class) = ty else { return None };
+                    let &sym = d_sem.variable_symbols.get(name)?;
+                    Some((name, class, sym))
+                })
+                .collect();
+            if reg_ops.len() != 2 {
+                continue;
+            }
+            let (name_a, class_a, sym_a) = reg_ops[0];
+            let (name_b, class_b, sym_b) = reg_ops[1];
+            if class_a != class_b {
+                continue;
+            }
+            let Some(width) = register_class_width_with_isa(files, class_a, &d.isa_param_values)
+            else {
+                continue;
+            };
+
+            let map = HashMap::from([(sym_a, 0u32), (sym_b, 0u32)]);
+            let mut aliased_graph = tir::sem::SemGraph::new();
+            let mut alias_memo: HashMap<usize, tir::graph::NodeId> = HashMap::new();
+            let aliased_roots: HashMap<u32, tir::graph::NodeId> = d_sem
+                .flag_roots
+                .iter()
+                .map(|(&index, &root)| {
+                    (
+                        index,
+                        copy_subgraph_alias(
+                            &mut aliased_graph,
+                            &d_sem.graph,
+                            root,
+                            &map,
+                            &mut alias_memo,
+                        ),
+                    )
+                })
+                .collect();
+
+            let mut spliced = tir::sem::SemGraph::new();
+            let substitute: HashMap<u32, tir::graph::NodeId> = b_sem
+                .flag_symbols
+                .iter()
+                .map(|(symbol, index)| (*symbol, aliased_roots[index]))
+                .collect();
+            let spliced_root = compose_guard_with_definer(
+                &mut spliced,
+                &b_sem.graph,
+                b_sem.root,
+                &substitute,
+                &aliased_graph,
+                &mut HashMap::new(),
+                &mut HashMap::new(),
+            );
+            let (composed, _) = fold_constant_subtrees(&spliced, spliced_root);
+
+            let Some(kind) = zero_equivalent(&composed, &[width]) else {
+                continue;
+            };
+
+            let width_symbol = 1u32;
+            let (pattern, root) = zero_branch_pattern(kind, width_symbol);
+            let no_immediates: HashSet<u32> = HashSet::new();
+            let (canon_pattern, canon_root, forced_widths) =
+                tir::sem::canonicalize_for_selection(&pattern, root, &no_immediates);
+            let mut pattern_widths = tir::sem::infer_widths(&canon_pattern, |_| None);
+            for (index, forced) in forced_widths.iter().enumerate() {
+                if forced.is_some() {
+                    pattern_widths[index] = *forced;
+                }
+            }
+            let (pattern_stmts, _root_var) =
+                emit_dag_as_code(&canon_pattern, canon_root, &pattern_widths, &HashSet::new());
+
+            let prelude_fn_ident = format_ident!(
+                "emit_isel_flag_definer_{}_aliased",
+                d.inst.name.to_lowercase()
+            );
+            let d_builder_ident = format_ident!("{}OpBuilder", &d.inst.name);
+            let class_id = reg_class_id(class_a);
+            let name_a_lit = proc_macro2::Literal::string(name_a);
+            let name_b_lit = proc_macro2::Literal::string(name_b);
+            if emitted_preludes.insert(d.inst.name.clone()) {
+                isel_rule_emitters.push(quote! {
+                    fn #prelude_fn_ident(
+                        context: &tir::Context,
+                        req: &tir::backend::isel::EmitRequest,
+                        m: &tir::backend::isel::RuleMatch,
+                    ) -> Result<Box<dyn tir::Operation>, tir::PassError> {
+                        let src = m
+                            .value_binding(0)
+                            .ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
+                        let reg = tir::attributes::AttributeValue::Register(
+                            tir::attributes::RegisterAttr::Virtual {
+                                id: src.number(),
+                                class: Some(#class_id),
+                            },
+                        );
+                        let builder = #d_builder_ident::new(context)
+                            .attr(#name_a_lit, reg.clone())
+                            .attr(#name_b_lit, reg);
+                        Ok(Box::new(builder.build()))
+                    }
+                });
+            }
+
+            let target_symbol = 2u32;
+            let target_symbol_lit = proc_macro2::Literal::u32_unsuffixed(target_symbol);
+            let b_builder_ident = format_ident!("{}OpBuilder", &b.inst.name);
+            let target_name_lit = proc_macro2::Literal::string(&b_sem.target_operand);
+            let b_lower = b.inst.name.to_lowercase();
+            let d_lower = d.inst.name.to_lowercase();
+            let pattern_fn_ident =
+                format_ident!("isel_pattern_{}_via_{}_selfzero", b_lower, d_lower);
+            let emit_fn_ident = format_ident!("emit_isel_{}_via_{}_selfzero", b_lower, d_lower);
+            let rule_name_lit =
+                proc_macro2::Literal::string(&format!("{}+{}(self-zero)", d.mnemonic, b.mnemonic));
+            let base_cost = canon_pattern.len() as u32 + 2;
+            let base_cost_lit = proc_macro2::Literal::u32_unsuffixed(base_cost);
+            let d_mnemonic_lit = proc_macro2::Literal::string(&d.mnemonic);
+            let b_mnemonic_lit = proc_macro2::Literal::string(&b.mnemonic);
+            let pair_features = feature_slice(&shared_isas);
+
+            isel_rule_emitters.push(quote! {
+                fn #pattern_fn_ident(_context: &tir::Context) -> tir::sem::SemGraph {
+                    use tir::graph::MutDag;
+                    let mut g = tir::sem::SemGraph::new();
+                    #(#pattern_stmts)*
+                    g
+                }
+
+                fn #emit_fn_ident(
+                    context: &tir::Context,
+                    req: &tir::backend::isel::EmitRequest,
+                    m: &tir::backend::isel::RuleMatch,
+                ) -> Result<Box<dyn tir::Operation>, tir::PassError> {
+                    let mut builder = #b_builder_ident::new(context);
+                    let dest = m
+                        .block_binding(#target_symbol_lit)
+                        .ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
+                    builder = builder.attr(
+                        #target_name_lit,
+                        tir::attributes::AttributeValue::Block(dest),
+                    );
+                    Ok(Box::new(builder.build()))
+                }
+            });
+
+            isel_rule_inits.push(quote! {
+                if features_enabled(features, #pair_features) {
+                    rules.push(
+                        tir::backend::isel::Rule::new(
+                            #rule_name_lit,
+                            #pattern_fn_ident(context),
+                            (#base_cost_lit).max(
+                                instruction_cost(#d_mnemonic_lit)
+                                    + instruction_cost(#b_mnemonic_lit),
+                            ),
+                            #emit_fn_ident,
+                        )
+                        .with_kind(tir::backend::isel::RuleKind::CondBranch {
+                            target_symbol: #target_symbol_lit,
+                        })
+                        .with_prelude_emitter(#prelude_fn_ident)
+                        .with_operand_constraints(vec![
+                            (0, tir::graph::OperandConstraint::Register)
+                        ]),
+                    );
+                }
+            });
+        }
+    }
+}
+
+/// Compose each flag definer with each flag-reading materializer into a boolean
+/// value rule: the definer's per-flag semantics substitute into the reader's
+/// condition, and when the composition is provably one canonical comparison the
+/// pair registers an `If`-rooted value rule whose prelude emits the definer and
+/// whose emitter is the reader (`cset`/`setcc`), materializing the comparison in
+/// a destination register — the value analog of the flag-branch rules.
+fn emit_flag_reader_rules(
+    files: &[ast::File],
+    definers: &[(FlagInst<'_>, FlagDefinerSemantics)],
+    readers: &[(FlagInst<'_>, FlagReaderSemantics)],
+    emitted_preludes: &mut HashSet<String>,
+    isel_rule_emitters: &mut Vec<proc_macro2::TokenStream>,
+    isel_rule_inits: &mut Vec<proc_macro2::TokenStream>,
+) {
+    use tir::graph::{Dag, MutDag};
+    for (r, r_sem) in readers {
+        for (d, d_sem) in definers {
+            if d_sem.class != r_sem.class {
+                continue;
+            }
+            let shared_isas: Vec<String> = r
+                .inst
+                .for_isas
+                .iter()
+                .filter(|isa| d.inst.for_isas.contains(isa))
+                .cloned()
+                .collect();
+            if shared_isas.is_empty() {
+                continue;
+            }
+            if !r_sem
+                .flag_symbols
+                .values()
+                .all(|index| d_sem.flag_roots.contains_key(index))
+            {
+                continue;
+            }
+            // The canonical comparisons are binary: exactly two operands.
+            if d_sem.variable_symbols.len() != 2 {
+                continue;
+            }
+            let Some(symbol_widths) = definer_symbol_widths(files, d, d_sem) else {
+                continue;
+            };
+
+            let mut spliced = tir::sem::SemGraph::new();
+            let substitute: HashMap<u32, tir::graph::NodeId> = r_sem
+                .flag_symbols
+                .iter()
+                .map(|(symbol, index)| (*symbol, d_sem.flag_roots[index]))
+                .collect();
+            let spliced_root = compose_guard_with_definer(
+                &mut spliced,
+                &r_sem.graph,
+                r_sem.cond_root,
+                &substitute,
+                &d_sem.graph,
+                &mut HashMap::new(),
+                &mut HashMap::new(),
+            );
+            let (composed, _) = fold_constant_subtrees(&spliced, spliced_root);
+
+            let Some((candidate, candidate_root)) =
+                find_equivalent_comparison(&composed, &symbol_widths)
+            else {
+                continue;
+            };
+
+            // The value pattern is `if <canonical comparison> { <then> } else {
+            // <else> }`, reusing the reader's arms so it is structurally the
+            // `slt`-style materializer the bool-materialize bridge knows. The
+            // arms' symbols (the `XLEN` width var) renumber above the two
+            // comparison-operand symbols they now sit beside.
+            let mut pattern = tir::sem::SemGraph::new();
+            let cmp = copy_subgraph(
+                &mut pattern,
+                &candidate,
+                candidate_root,
+                &mut HashMap::new(),
+            );
+            let mut arm_remap: HashMap<u32, u32> = HashMap::new();
+            let mut next_symbol = d_sem.variable_symbols.len() as u32;
+            let then_ = copy_subgraph_remap_symbols(
+                &mut pattern,
+                &r_sem.graph,
+                r_sem.then_root,
+                &mut HashMap::new(),
+                &mut arm_remap,
+                &mut next_symbol,
+            );
+            let else_ = copy_subgraph_remap_symbols(
+                &mut pattern,
+                &r_sem.graph,
+                r_sem.else_root,
+                &mut HashMap::new(),
+                &mut arm_remap,
+                &mut next_symbol,
+            );
+            let if_root = pattern.add_node(tir::sem::SymKind::If);
+            pattern.add_edge(if_root, cmp);
+            pattern.add_edge(if_root, then_);
+            pattern.add_edge(if_root, else_);
+
+            let immediate_symbols = definer_immediate_symbols(d, d_sem);
+            let (canon_pattern, canon_root, forced_widths) =
+                tir::sem::canonicalize_for_selection(&pattern, if_root, &immediate_symbols);
+            let mut pattern_widths = tir::sem::infer_widths(&canon_pattern, |_| None);
+            for (index, forced) in forced_widths.iter().enumerate() {
+                if forced.is_some() {
+                    pattern_widths[index] = *forced;
+                }
+            }
+            let (pattern_stmts, _root_var) =
+                emit_dag_as_code(&canon_pattern, canon_root, &pattern_widths, &HashSet::new());
+            let operand_width_call = emit_operand_width_call(
+                &d.ops,
+                &d_sem.variable_symbols,
+                &width_sensitive_symbols(&canon_pattern, &pattern_widths),
+            );
+            let operand_imm_range_call = emit_operand_imm_range_call(&immediate_operand_ranges(
+                &d_sem.graph,
+                &d.ops,
+                &d_sem.variable_symbols,
+            ));
+
+            let Some((_, dest_class)) = r
+                .ops
+                .iter()
+                .find(|(name, _)| name == &r_sem.dest_operand)
+                .and_then(|(name, ty)| match ty {
+                    Type::Struct(class) => Some((name, class.clone())),
+                    _ => None,
+                })
+            else {
+                continue;
+            };
+            let dest_class_id = reg_class_id(&dest_class);
+            let dest_name_lit = proc_macro2::Literal::string(&r_sem.dest_operand);
+
+            let r_lower = r.inst.name.to_lowercase();
+            let d_lower = d.inst.name.to_lowercase();
+            let pattern_fn_ident = format_ident!("isel_pattern_{}_via_{}", r_lower, d_lower);
+            let emit_fn_ident = format_ident!("emit_isel_{}_via_{}", r_lower, d_lower);
+            let rule_name_lit =
+                proc_macro2::Literal::string(&format!("{}+{}", d.mnemonic, r.mnemonic));
+            let r_builder_ident = format_ident!("{}OpBuilder", &r.inst.name);
+
+            let (prelude_fn_ident, operand_constraint_entries) =
+                emit_flag_definer_prelude(d, d_sem, emitted_preludes, isel_rule_emitters);
+
+            let base_cost = {
+                // The comparison pattern plus the definer instruction.
+                canon_pattern.len() as u32 + 1
+            };
+            let base_cost_lit = proc_macro2::Literal::u32_unsuffixed(base_cost);
+            let d_mnemonic_lit = proc_macro2::Literal::string(&d.mnemonic);
+            let r_mnemonic_lit = proc_macro2::Literal::string(&r.mnemonic);
+
+            isel_rule_emitters.push(quote! {
+                fn #pattern_fn_ident(_context: &tir::Context) -> tir::sem::SemGraph {
+                    use tir::graph::MutDag;
+                    let mut g = tir::sem::SemGraph::new();
+                    #(#pattern_stmts)*
+                    g
+                }
+
+                fn #emit_fn_ident(
+                    context: &tir::Context,
+                    req: &tir::backend::isel::EmitRequest,
+                    m: &tir::backend::isel::RuleMatch,
+                ) -> Result<Box<dyn tir::Operation>, tir::PassError> {
+                    let _ = m;
+                    let mut builder = #r_builder_ident::new(context);
+                    let dst = req
+                        .results
+                        .first()
+                        .ok_or(tir::PassError::RewriteFailed(req.op_id()))?
+                        .number();
+                    builder = builder.attr(
+                        #dest_name_lit,
+                        tir::attributes::AttributeValue::Register(
+                            tir::attributes::RegisterAttr::Virtual {
+                                id: dst,
+                                class: Some(#dest_class_id),
+                            },
+                        ),
+                    );
+                    Ok(Box::new(builder.build()))
+                }
+            });
+
+            let pair_features = feature_slice(&shared_isas);
+            isel_rule_inits.push(quote! {
+                if features_enabled(features, #pair_features) {
+                    rules.push(
+                        tir::backend::isel::Rule::new(
+                            #rule_name_lit,
+                            #pattern_fn_ident(context),
+                            // Structural proxy or the TMDL-modeled cost of the
+                            // two emitted instructions, whichever is larger.
+                            (#base_cost_lit).max(
+                                instruction_cost(#d_mnemonic_lit)
+                                    + instruction_cost(#r_mnemonic_lit),
+                            ),
+                            #emit_fn_ident,
+                        )
+                        .with_prelude_emitter(#prelude_fn_ident)
+                        .with_operand_constraints(vec![#(#operand_constraint_entries),*])
+                        #operand_width_call
+                        #operand_imm_range_call,
+                    );
+                }
+            });
+        }
+    }
 }
 
 fn analyze_instruction_semantics(
@@ -3828,6 +4632,60 @@ fn behavior_references_pc(expr: &ast::Expr, pc_classes: &HashSet<String>) -> boo
                     .any(|h| behavior_references_pc(&h.body, pc_classes))
         }
         ast::Expr::Lambda(l) => behavior_references_pc(&l.body, pc_classes),
+    }
+}
+
+/// Whether a behavior *reads* a status-flag register (a `flag_classes` register
+/// path in a value position). Such readers (`cset`, `csel`) compute from
+/// condition-code bits a plain value rule cannot see: lifting the flag reads
+/// into free symbolic operands yields a pattern structurally identical to an
+/// integer comparison, so it would match `cmpi` and drop the operand bindings.
+/// They instead materialize through composed definer+reader rules (see
+/// `emit_flag_reader_rules`). A flag-path assignment *destination* is a write,
+/// not a read, so definers (`cmp`) are not caught.
+fn behavior_reads_flag_register(expr: &ast::Expr, flag_classes: &HashSet<String>) -> bool {
+    match expr {
+        ast::Expr::Path(path) => flag_classes.contains(&path.base),
+        ast::Expr::Ident(_) | ast::Expr::Lit(_) | ast::Expr::BuiltinFunction(_) => false,
+        ast::Expr::Invalid => false,
+        ast::Expr::Assign(a) => {
+            let dest_is_flag_write =
+                matches!(&*a.dest, ast::Expr::Path(p) if flag_classes.contains(&p.base));
+            behavior_reads_flag_register(&a.value, flag_classes)
+                || (!dest_is_flag_write && behavior_reads_flag_register(&a.dest, flag_classes))
+        }
+        ast::Expr::Binary(b) => {
+            behavior_reads_flag_register(&b.lhs, flag_classes)
+                || behavior_reads_flag_register(&b.rhs, flag_classes)
+        }
+        ast::Expr::Unary(u) => behavior_reads_flag_register(&u.x, flag_classes),
+        ast::Expr::Block(b) => b
+            .stmts
+            .iter()
+            .any(|stmt| behavior_reads_flag_register(stmt, flag_classes)),
+        ast::Expr::Call(c) => {
+            behavior_reads_flag_register(&c.callee, flag_classes)
+                || c.arguments
+                    .iter()
+                    .any(|arg| behavior_reads_flag_register(arg, flag_classes))
+        }
+        ast::Expr::Field(f) => behavior_reads_flag_register(&f.base, flag_classes),
+        ast::Expr::If(i) => {
+            behavior_reads_flag_register(&i.cond, flag_classes)
+                || behavior_reads_flag_register(&i.then, flag_classes)
+                || i.else_
+                    .as_ref()
+                    .is_some_and(|e| behavior_reads_flag_register(e, flag_classes))
+        }
+        ast::Expr::IndexAccess(i) => behavior_reads_flag_register(&i.base, flag_classes),
+        ast::Expr::Slice(s) => behavior_reads_flag_register(&s.base, flag_classes),
+        ast::Expr::Try(t) => {
+            behavior_reads_flag_register(&t.body, flag_classes)
+                || t.handlers
+                    .iter()
+                    .any(|h| behavior_reads_flag_register(&h.body, flag_classes))
+        }
+        ast::Expr::Lambda(l) => behavior_reads_flag_register(&l.body, flag_classes),
     }
 }
 
@@ -4823,6 +5681,240 @@ fn emit_destination_write(
     }
 
     None
+}
+
+/// Emit the pattern function, emit function, and rule registration for one
+/// conditional-branch rule. Operands named in `zero_slots` are wired to a fixed
+/// physical register (a class's hardwired-zero register) instead of bound from
+/// the match — the mechanism behind the zero-form branch variants; every other
+/// register/immediate operand binds from the match as usual.
+#[allow(clippy::too_many_arguments)]
+fn emit_cond_branch_rule(
+    rule_name: &str,
+    builder_ident: &proc_macro2::Ident,
+    mnemonic_name: &str,
+    inst_features: &proc_macro2::TokenStream,
+    ops: &[(String, Type)],
+    pattern: &tir::sem::SemGraph,
+    root: tir::graph::NodeId,
+    variable_symbols: &HashMap<String, u32>,
+    target_operand: &str,
+    target_symbol: u32,
+    zero_slots: &HashMap<String, (String, u16)>,
+    float_classes: &HashSet<String>,
+) -> (proc_macro2::TokenStream, proc_macro2::TokenStream) {
+    let emit_fn_ident = format_ident!("emit_isel_{}", rule_name);
+    let pattern_fn_ident = format_ident!("isel_pattern_{}", rule_name);
+    let rule_name_lit = proc_macro2::Literal::string(rule_name);
+    let target_symbol_lit = proc_macro2::Literal::u32_unsuffixed(target_symbol);
+
+    let mut operand_constraint_entries: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut emit_attr_steps: Vec<proc_macro2::TokenStream> = Vec::new();
+    for (op_name, op_ty) in ops {
+        let op_name_lit = proc_macro2::Literal::string(op_name);
+        if op_name == target_operand {
+            emit_attr_steps.push(quote! {
+                let dest = m
+                    .block_binding(#target_symbol_lit)
+                    .ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
+                builder = builder.attr(
+                    #op_name_lit,
+                    tir::attributes::AttributeValue::Block(dest),
+                );
+            });
+            continue;
+        }
+        if let Some((class_name, index)) = zero_slots.get(op_name) {
+            let class_id = reg_class_id(class_name);
+            let index_lit = proc_macro2::Literal::u16_unsuffixed(*index);
+            emit_attr_steps.push(quote! {
+                builder = builder.attr(
+                    #op_name_lit,
+                    tir::attributes::AttributeValue::Register(
+                        tir::attributes::RegisterAttr::Physical {
+                            class: #class_id,
+                            index: #index_lit,
+                        },
+                    ),
+                );
+            });
+            continue;
+        }
+        let Some(&symbol) = variable_symbols.get(op_name) else {
+            continue;
+        };
+        let symbol_lit = proc_macro2::Literal::u32_unsuffixed(symbol);
+        match op_ty {
+            Type::Struct(class_name) => {
+                let class_id = reg_class_id(class_name);
+                operand_constraint_entries
+                    .push(quote! { (#symbol_lit, tir::graph::OperandConstraint::Register) });
+                emit_attr_steps.push(quote! {
+                    let src = m
+                        .value_binding(#symbol_lit)
+                        .ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
+                    builder = builder.attr(
+                        #op_name_lit,
+                        tir::attributes::AttributeValue::Register(
+                            tir::attributes::RegisterAttr::Virtual {
+                                id: src.number(),
+                                class: Some(#class_id),
+                            },
+                        ),
+                    );
+                });
+            }
+            Type::Integer | Type::Bits(_) => {
+                operand_constraint_entries
+                    .push(quote! { (#symbol_lit, tir::graph::OperandConstraint::Immediate) });
+                emit_attr_steps.push(quote! {
+                    let v = m
+                        .int_binding(#symbol_lit)
+                        .ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
+                    builder = builder.attr(
+                        #op_name_lit,
+                        tir::attributes::AttributeValue::Int(v),
+                    );
+                });
+            }
+            _ => {}
+        }
+    }
+
+    let immediate_symbols: HashSet<u32> = ops
+        .iter()
+        .filter(|(_, op_ty)| matches!(op_ty, Type::Bits(_) | Type::Integer))
+        .filter_map(|(op_name, _)| variable_symbols.get(op_name).copied())
+        .collect();
+    let (canon_pattern, canon_root, forced_widths) =
+        tir::sem::canonicalize_for_selection(pattern, root, &immediate_symbols);
+    let mut pattern_widths = tir::sem::infer_widths(&canon_pattern, |_| None);
+    for (index, forced) in forced_widths.iter().enumerate() {
+        if forced.is_some() {
+            pattern_widths[index] = *forced;
+        }
+    }
+    let (pattern_stmts, _root_var) =
+        emit_dag_as_code(&canon_pattern, canon_root, &pattern_widths, &HashSet::new());
+    let operand_width_call = emit_operand_width_call(
+        ops,
+        variable_symbols,
+        &width_sensitive_symbols(&canon_pattern, &pattern_widths),
+    );
+    let operand_imm_range_call =
+        emit_operand_imm_range_call(&immediate_operand_ranges(pattern, ops, variable_symbols));
+    let operand_float_call = emit_operand_float_call(ops, variable_symbols, float_classes);
+    let base_cost = {
+        use tir::graph::Dag;
+        (canon_pattern.len() as u32).max(1)
+    };
+    let base_cost_lit = proc_macro2::Literal::u32_unsuffixed(base_cost);
+    let mnemonic_cost_lit = proc_macro2::Literal::string(mnemonic_name);
+
+    let emitter = quote! {
+        fn #pattern_fn_ident(_context: &tir::Context) -> tir::sem::SemGraph {
+            use tir::graph::MutDag;
+            let mut g = tir::sem::SemGraph::new();
+            #(#pattern_stmts)*
+            g
+        }
+
+        fn #emit_fn_ident(
+            context: &tir::Context,
+            req: &tir::backend::isel::EmitRequest,
+            m: &tir::backend::isel::RuleMatch,
+        ) -> Result<Box<dyn tir::Operation>, tir::PassError> {
+            let _ = (req, m);
+            let mut builder = #builder_ident::new(context);
+            #(#emit_attr_steps)*
+            Ok(Box::new(builder.build()))
+        }
+    };
+
+    let init = quote! {
+        if features_enabled(features, #inst_features) {
+            rules.push(
+                tir::backend::isel::Rule::new(
+                    #rule_name_lit,
+                    #pattern_fn_ident(context),
+                    (#base_cost_lit).max(instruction_cost(#mnemonic_cost_lit)),
+                    #emit_fn_ident,
+                )
+                .with_kind(tir::backend::isel::RuleKind::CondBranch {
+                    target_symbol: #target_symbol_lit,
+                })
+                .with_operand_constraints(vec![#(#operand_constraint_entries),*])
+                #operand_width_call
+                #operand_imm_range_call
+                #operand_float_call,
+            );
+        }
+    };
+    (emitter, init)
+}
+
+/// Clone `pattern` with the register-operand symbol `reg_symbol` replaced by the
+/// `zext(0b0, W)` zero shape. `width_symbol` is the fresh wildcard the extension
+/// width binds to — matched but never read by the emitter.
+fn branch_pattern_with_zero(
+    pattern: &tir::sem::SemGraph,
+    root: tir::graph::NodeId,
+    reg_symbol: u32,
+    width_symbol: u32,
+) -> (tir::sem::SemGraph, tir::graph::NodeId) {
+    let mut out = tir::sem::SemGraph::new();
+    let mut memo: HashMap<usize, tir::graph::NodeId> = HashMap::new();
+    let new_root =
+        clone_pattern_with_zero(pattern, root, reg_symbol, width_symbol, &mut out, &mut memo);
+    (out, new_root)
+}
+
+fn clone_pattern_with_zero(
+    pattern: &tir::sem::SemGraph,
+    node: tir::graph::NodeId,
+    reg_symbol: u32,
+    width_symbol: u32,
+    out: &mut tir::sem::SemGraph,
+    memo: &mut HashMap<usize, tir::graph::NodeId>,
+) -> tir::graph::NodeId {
+    use tir::graph::{Dag, MutDag};
+    if let Some(&existing) = memo.get(&node.index()) {
+        return existing;
+    }
+    if *pattern.get_node(node) == tir::sem::SymKind::Symbol
+        && matches!(
+            pattern.get_leaf_data(node),
+            Some(tir::sem::SymPayload::SymbolId(s)) if *s == reg_symbol
+        )
+    {
+        let zero = out.add_node(tir::sem::SymKind::Constant);
+        out.set_leaf_data(zero, tir::sem::int_payload(1, 0, false));
+        let width = out.add_node(tir::sem::SymKind::Symbol);
+        out.set_leaf_data(width, tir::sem::SymPayload::SymbolId(width_symbol));
+        let zext = out.add_node(tir::sem::SymKind::ZExt);
+        out.add_edge(zext, zero);
+        out.add_edge(zext, width);
+        memo.insert(node.index(), zext);
+        return zext;
+    }
+    // Children first: the store keeps strict post-order (a child's index must
+    // precede its parent's).
+    let kind = *pattern.get_node(node);
+    let new_children: Vec<tir::graph::NodeId> = pattern
+        .children(node)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .map(|child| clone_pattern_with_zero(pattern, child, reg_symbol, width_symbol, out, memo))
+        .collect();
+    let new_node = out.add_node(kind);
+    if let Some(data) = pattern.get_leaf_data(node) {
+        out.set_leaf_data(new_node, data.clone());
+    }
+    for new_child in new_children {
+        out.add_edge(new_node, new_child);
+    }
+    memo.insert(node.index(), new_node);
+    new_node
 }
 
 fn emit_dag_as_code(

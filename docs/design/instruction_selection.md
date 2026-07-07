@@ -58,7 +58,7 @@ guards against re-emitting), so building and solving each happen once.
 ## 1. Building the semantic e-graph
 
 `SemDagBuilder` lowers every op of the **whole function** into one shared
-`SemEGraph = EGraph<SemNode, ()>`. There is no separate DAG arena: the e-graph
+`SemEGraph = EGraph<SemNode>`. There is no separate DAG arena: the e-graph
 hash-conses, so it *is* the interned semantic DAG, and identical sub-expressions
 across ops — and across blocks — collapse to one e-class (CSE for free). A single
 builder instance lowers every block, so its per-value memoization
@@ -75,18 +75,20 @@ An e-node is a **label** plus its **operand e-classes**. The label is a
 `SemNode`:
 
 ```rust
-struct SemNode { kind: ExprKind, payload: Option<SemPayload>, ty: Option<TypeId> }
+struct SemNode { kind: SymKind, payload: Option<SemPayload>, ty: Option<TypeId>, children: Vec<Id> }
 
 enum SemPayload {
-    Expr(ExprPayload), // a semantic constant / symbol / value
-    Opaque(u32),       // a unique, never-merging marker (see below)
+    Expr(SymPayload<ValueId>), // a semantic constant / symbol / value
+    Opaque(u32),               // a unique, never-merging marker (see below)
 }
 ```
 
-Structure (the operands) lives in the e-node's child classes, never in the label.
-So two e-nodes are congruent iff they share a label *and* the same operand classes
-— exactly what `PartialEq`/`Hash` compare. `ty` is the verbatim IR type (no width
-normalization), so every target can constrain on the widths it distinguishes.
+The operands live inline in `children`, but the label — `(kind, payload, ty)` —
+ignores them: `PartialEq`/`Hash` compare only the label, so two e-nodes are
+congruent iff they share a label *and* the same canonical operand classes (the
+`ENode` contract, which pairs the label with the children). `ty` is the verbatim
+IR type (no width normalization), so every target can constrain on the widths it
+distinguishes.
 
 ```
    add : i32                       a SemNode label is just (kind, payload, ty);
@@ -96,7 +98,7 @@ normalization), so every target can constrain on the widths it distinguishes.
    └──────────┘   └──► class[y]    (symbol, ty=i32)
 ```
 
-`ExprKind` / `ExprPayload` come from each op's `semantic_expr` (the sem-DSL), so a
+`SymKind` / `SymPayload<ValueId>` come from each op's `semantic_expr` (the sem-DSL), so a
 multi-node expansion (e.g. a load becomes `LoadMemory(add(addr, 0), bytes,
 meta)`) lands as several e-nodes.
 
@@ -120,7 +122,9 @@ Ops implementing `MemoryRead` / `MemoryWrite` are lowered by
 `build_memory_effect` into `LoadMemory` / `StoreMemory` nodes whose address is
 wrapped as `addr + 0` so the targets' base+offset addressing patterns
 match a bare pointer. The interfaces are the only trigger; there is no op-name
-matching.
+matching. `class_is_pure` also treats the atomic and synchronization kinds
+(`LoadReserved`, `StoreConditional`, `AtomicRmw`, `Fence`) as impure, so like
+plain loads and stores their classes never merge or duplicate.
 
 ### Side tables produced by the build
 
@@ -256,6 +260,18 @@ compare fuses into `blt` on rv32 but is *refused* on rv64 (a 64-bit compare
 would read undefined upper bits) instead of miscompiling.
 Low-bits-preserving operators (add/and/shl/mul-low) stay width-agnostic.
 
+### Float operands
+
+A boundary may carry a **float requirement** (`Rule::with_operand_floats`,
+compiled to `Pattern::operand_floats`): the bound class must not hold a value
+whose IR type kind is the opposite — an integer operand refuses a float value
+and a float operand refuses an integer one, so a store never consumes a float
+and an `fadd` never consumes an integer. `class_is_float` reads the kind off
+whichever member carries a known integer or float type; a class of unknown type
+(a rewrite-introduced intermediate) matches either. Rewrite-introduced float
+nodes get their type from `type_for_kind_width`, which maps the arithmetic float
+kinds (`FAdd`/`FSub`/`FMul`/`FDiv`) at width 32/64 to `f32`/`f64`.
+
 ### Immediate ranges
 
 An immediate boundary additionally carries its **encoding range**
@@ -376,7 +392,7 @@ both records both.
 `completeness_error` runs **before** solving and checks only **B's** op-root
 classes: each non-terminal one must be a Root or interior of *some* match (or an
 exempt fused-branch condition), else selection fails naming the unsupported
-`ExprKind` ("missing atomic materializer rule for semantic kind …"). This is how an
+`SymKind` ("missing atomic materializer rule for semantic kind …"). This is how an
 incomplete rule set is rejected instead of silently dropping an op.
 
 ## 6. Committing
@@ -399,10 +415,13 @@ incomplete rule set is rejected instead of silently dropping an op.
 
 Terminators select through the same rule machinery when the target installs
 `BranchEmitters` (`with_branch_emitters`): an `uncond` emitter (e.g. `vbr`,
-finalized to `jal x0` post-RA) and a `cond_nonzero` fallback returning the
-instruction(s) that branch on a nonzero register (one op on targets with a
+finalized to `jal x0` post-RA) and a `cond_nonzero` **safety fallback** returning
+the instruction(s) that branch on a nonzero register (one op on targets with a
 zero register — `bne cond, x0`; a flag-setting test plus the branch on flag
-targets — `test cond, cond` + `jne`, `cmp cond, xzr` + `b.ne`).
+targets — `test cond, cond` + `jne`, `cmp cond, xzr` + `b.ne`). Every target now
+*derives* an equivalent zero-compare branch (see [Zero-compare
+branches](#zero-compare-branches)), so `cond_nonzero` is unreachable in practice
+— it stays installed only as a last resort.
 
 TMDL derives a **branch rule** (`RuleKind::CondBranch { target_symbol }`) from
 any instruction whose behavior is a guarded PC write:
@@ -426,15 +445,18 @@ at its condition class whose operands all resolve at B (tie → most specific):
   condition class gets a `Dead` alternative — if nothing else needs the value,
   the compare op is Consumed; a boundary edge from any chosen match forbids
   `Dead`, so a multi-use compare is still materialized (`slt`) *and* fused.
-- **Fallback**: no branch rule matches (e.g. a bare i1 block argument) — the
-  condition is forced materialized and `cond_nonzero` emits the branch.
+- **Fallback**: no branch rule matches — the condition is forced materialized
+  and `cond_nonzero` emits the branch. A bare i1 condition (block/function
+  argument, no comparison) no longer reaches here: the bridge below hands it a
+  derived zero-compare branch, so the fallback is reserved for conditions no
+  derived rule covers.
 
 Either way the terminator is replaced by the branch (inserted ahead of it)
 plus `uncond` to the false successor; a plain `br` lowers through `uncond`
 directly. `cmpi` participates via its predicate-dependent semantic expression
 (canonicalized so only `Eq/Ne/Lt/Ge/ULt/UGe` appear — `sgt`/`sle`/… swap
 operands), and a proved width-1 identity
-`c == If(c, zext(1,1), zext(0,1))` bridges a bare comparison class to the
+`c == If(c, 1, 0)` (any 1-bit `c`) bridges a bare comparison class to the
 `slt`-style `If`-patterns so a compare used as a *value* materializes with no
 hand-written rule.
 
@@ -442,6 +464,42 @@ Instructions that read or write the PC *unconditionally* (`jal`, `jalr`,
 `auipc`) get **no value rule**: their pattern would hide the control-flow
 effect (a `jal` rule would match a plain `x + 4`). Returns and calls remain
 per-target op lowerings.
+
+### Zero-compare branches
+
+Two idioms branch on whether a value is zero without materializing the zero: a
+bare i1 condition and a `cmpi x, 0` guard. Both are served by *derived* rules,
+so `cond_nonzero` is now a fallback of last resort.
+
+`bridge_zero_branch_guards` (`isel/mod.rs`) runs after saturation, over
+guard-condition classes only, and injects the shape the derived rules match:
+
+- a bare 1-bit class with no comparison to fuse gains `Ne(c, zext(0b0, 1))`
+  (trivially true for a 1-bit value) — a lone `Symbol` leaf otherwise roots no
+  `CondBranch` pattern;
+- a comparison against a proven-zero constant `Cmp(a, 0)` gains `Cmp(a,
+  zext(0b0, W))`, the zero operand replaced so the surviving operand binds from
+  the match while the zero wires to a zero register.
+
+Restricting the injection to guard classes keeps unrelated width-1 classes from
+gaining a spurious comparison member; a target with no matching rule leaves the
+extra member unmatched.
+
+TMDL derives the rules these unify with. On a register class carrying a
+**hardwired-zero** register (the `hardwired_zero` trait — RISC-V `x0`), every
+two-register comparison branch also yields per-slot **zero-form** variants that
+wire one operand to that physical register, the zeroed slot lowered as
+`zext(0b0, W)`; so `beq/bne/blt/… x0` all derive and cover both idioms directly.
+On arm64 the `cbz`/`cbnz` path emits the same `zext(0b0, W)` shape, so `cmpi x,
+0` and a bare i1 both select `cbz`/`cbnz`.
+
+Branch-rule matching additionally lets a width-1 class bind a register-width
+operand: `CompiledIselPattern::search` (`isel/pattern.rs`) passes
+`bool_binds_wide` through `boundary_ok_impl`, relaxing the width check for a
+1-bit class. A materialized i1 occupies its register as 0/1 and the branch reads
+the same bits the fallback would test, so a bare i1 reaches the register-width
+zero-compare rule. The relaxation is scoped to branch-rule search, not general
+boundary filtering.
 
 ### Flag-mediated branches (x86 EFLAGS, AArch64 PSTATE)
 
@@ -479,6 +537,49 @@ same machinery as the fused single-instruction path.
 
 A guard matching no canonical comparison (e.g. a branch on overflow alone)
 derives no rule; the instruction still assembles, encodes, and simulates.
+
+The same composition also materializes a flag *reader* (`cset`, `setcc`) — an
+instruction that computes a value from the condition-code bits. Such an
+instruction derives **no plain value rule** (`behavior_reads_flag_register`
+gates it in `rustgen.rs`): lifting its flag reads into free operands yields a
+pattern structurally identical to a comparison (`If(Eq(s0, s1), 1, 0)`), and —
+value rules get no SMT proof — it would match `cmpi` and bind the flag operands
+to garbage (this was a real arm64 miscompile: a bogus `cset_ge` value rule
+matched integer `Eq` and dropped its operands). Instead `emit_flag_reader_rules`
+composes each definer with each reader — the definer's per-flag semantics
+substitute into the reader's condition, and when the composite SMT-proves equal
+to one canonical comparison the pair registers an `If`-rooted **value** rule
+whose prelude emits the definer (`cmp`) ahead of the reader (`cset.<cc>`). The
+value-commit path honours `prelude_emit` for value rules (`isel/mod.rs`),
+inserting the definer before the materializer. The reader's arms are reused
+verbatim, so the pattern is the width-polymorphic `slt`-style `If` the
+bool-materialize bridge already matches — the flag-arch analog of a compare
+materializing with no hand-written rule. A two-register `cmpi` as a value now
+emits `cmp` + `cset.<cc>`.
+
+**Immediate definers.** `analyze_flag_definer_semantics` accepts one `Bits`/
+`Integer` operand alongside the register operands, so `cmp r, imm` composes into
+an immediate compare-and-branch (and, through the reader path, an immediate
+materializer). The immediate binds the operand directly (an `Immediate` operand
+constraint), its SMT proof width taken from the paired register operand (the
+shared architectural width). A #204 imm-range constraint on both the branch and
+reader composition paths refuses a constant outside the field's signed range —
+falling back to a hard error rather than truncating. The fused-branch base cost
+now counts both emitted instructions (`+2`), so a single-instruction direct
+branch (`cbz`) still wins the zero case. Result: x86 `cmp x, K` + jcc and arm64
+`cmp Xn, #imm12` + b.cc derive.
+
+**Aliased test-zero branches.** A two-register definer whose slots are *both*
+bound from one matched value (`test c, c`, setting the flags of `c & c`)
+composes with a flag-guarded branch into a single-symbol-vs-zero condition
+(`Ne(c, 0)` / `Eq(c, 0)`), SMT-proved at the operand width
+(`emit_aliased_zero_branch_rules`). Emitted in the bridge's `zext(0b0, W)` zero
+shape, the pair covers a bare boolean guard with a derived `test c, c` + `jne`/
+`je`, so x86 selects a bare i1 with no hand-written fallback. Its larger pattern
+costs more than the immediate compare, so `cmpi x, 0` keeps selecting `cmp x, 0`;
+only a bare i1 (nothing to fuse) uses the `test` form. With this every target's
+bare-i1 path is derived, and the `cond_nonzero` hooks are unreachable safety
+fallbacks.
 
 ## Implicit register reads (demand attributes)
 

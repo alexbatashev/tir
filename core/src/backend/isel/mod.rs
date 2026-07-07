@@ -1,11 +1,12 @@
 //! Instruction selection over semantic e-graphs.
 //!
-//! Each block's operations are lowered into an e-graph of semantic expressions
-//! ([`builder`]), saturated with proved algebraic rewrites ([`rewrites`]), and
-//! covered by the target's instruction patterns ([`pattern`]) — e-matched by
-//! the shared [`tir_symbolic::egraph`] engine — via a PBQP instance over
-//! e-classes ([`cover`]). The solved cover becomes an emission plan ([`emit`])
-//! the pass commits through the rewriter.
+//! The whole function's operations are lowered into one shared e-graph of
+//! semantic expressions ([`builder`]), saturated with proved algebraic rewrites
+//! ([`rewrites`]), and then covered *per block* — each inside its own
+//! dominating-edge assumption scope — by the target's instruction patterns
+//! ([`pattern`]), e-matched by the shared [`tir_symbolic::egraph`] engine, via a
+//! PBQP instance over e-classes ([`cover`]). The solved cover becomes an emission
+//! plan ([`emit`]) the pass commits through the rewriter.
 
 mod axioms;
 mod builder;
@@ -41,7 +42,7 @@ use cover::{
     build_eclass_cover, completeness_error, prune_dominated_matches,
 };
 use emit::{BlockDecision, BlockPlan, EmissionBuilder, GuardBranch, TerminatorPlan};
-use node::{class_int_binding, template_node};
+use node::{class_int_binding, class_width, is_comparison, template_node};
 use pattern::{CompiledIselPattern, compile_isel_pattern};
 use rewrites::discover_rewrites;
 
@@ -804,6 +805,8 @@ impl InstructionSelectPass {
 
         rewrites::saturate(context, &mut egraph, &self.rewrites, Default::default());
 
+        bridge_zero_branch_guards(context, &mut egraph, &guards);
+
         // Canonicalize the side tables through `find`: saturation may merge classes,
         // so every id recorded against the pre-saturation graph is re-resolved here.
         let mut ops_by_root: HashMap<Id, Vec<OpId>> = HashMap::new();
@@ -1060,6 +1063,13 @@ impl InstructionSelectPass {
                 BlockDecision::Emit { rule_index, m } => {
                     let rule = &self.rules[*rule_index];
                     let request = EmitRequest::for_op(&op_ref, context);
+                    // A materializer with a prelude (a flag-mediated `cset`/
+                    // `setcc`) emits its flag-setting definer immediately ahead
+                    // of the value instruction that reads the flags.
+                    if let Some(prelude) = rule.prelude_emit {
+                        let prelude_op = prelude(context, &request, m)?;
+                        rewriter.insert_op_before(&op_ref, prelude_op.as_ref())?;
+                    }
                     let new_op = (rule.emit_fn)(context, &request, m)?;
                     rewriter.replace_op(&op_ref, new_op.as_ref())?;
                 }
@@ -1636,6 +1646,84 @@ fn assert_fact(context: &Context, egraph: &mut SemEGraph, expr: &ConditionExpr, 
             egraph.union(lhs, rhs);
         }
     }
+}
+
+/// Bridge each guard condition class to the `zext(0b0, W)` zero shape the
+/// TMDL-derived zero-compare branch rules match — arm64 `cbz`/`cbnz` and the
+/// RISC-V `beq/bne … x0` zero-forms — so a branch fuses without materializing the
+/// zero:
+///
+/// * a bare 1-bit condition `c` (no comparison to fuse) gains `Ne(c, zext(0b0,
+///   1))`, trivially true for a 1-bit value; a bare leaf never matches the rules'
+///   `Ne(x, ZExt(0, W))` root;
+/// * a comparison against a proven-zero constant `Cmp(a, 0)` gains `Cmp(a,
+///   zext(0b0, W))`, the zero operand replaced so the surviving operand binds
+///   from the match while the zero wires to the hardwired-zero register.
+///
+/// Injected after saturation and only into guard-condition classes, so no
+/// unrelated class gains a spurious member; a target with no matching zero-form
+/// rule leaves the extra member unmatched and falls back as before.
+fn bridge_zero_branch_guards(
+    context: &Context,
+    egraph: &mut SemEGraph,
+    guards: &HashMap<BlockId, Vec<BlockGuard>>,
+) {
+    let i1 = tir::builtin::IntegerType::new(context, 1);
+    // A fresh `zext(0b0, _)`: the width operand is a wildcard in the matching
+    // rules, so any constant serves as its placeholder.
+    let zext_zero = |egraph: &mut SemEGraph| {
+        let zero = egraph.add(template_node(
+            SymKind::Constant,
+            Some(SymPayload::Int(APInt::new(1, 0))),
+            None,
+        ));
+        let one = egraph.add(template_node(
+            SymKind::Constant,
+            Some(SymPayload::Int(APInt::new(1, 1))),
+            None,
+        ));
+        let mut zext = template_node(SymKind::ZExt, None, None);
+        zext.children = vec![zero, one];
+        egraph.add(zext)
+    };
+    for guard in guards.values().flatten() {
+        let class = egraph.find(guard.class);
+        let comparisons: Vec<(SymKind, Option<TypeId>, Vec<Id>)> = egraph
+            .nodes(class)
+            .iter()
+            .filter(|n| is_comparison(n.kind))
+            .map(|n| (n.kind, n.ty, n.children.clone()))
+            .collect();
+
+        // Case 1: a bare 1-bit condition with no comparison to fuse.
+        if comparisons.is_empty() && class_width(context, egraph, class) == Some(1) {
+            let zext = zext_zero(egraph);
+            let mut ne = template_node(SymKind::Ne, None, Some(i1));
+            ne.children = vec![class, zext];
+            let ne = egraph.add(ne);
+            egraph.union(class, ne);
+        }
+
+        // Case 2: a comparison against a proven-zero constant operand.
+        for (kind, ty, children) in comparisons {
+            if children.len() != 2 {
+                continue;
+            }
+            for slot in 0..2 {
+                let operand = egraph.find(children[slot]);
+                if !matches!(class_int_binding(egraph, operand), Some(v) if v.to_u64() == 0) {
+                    continue;
+                }
+                let zext = zext_zero(egraph);
+                let mut replaced = template_node(kind, None, ty);
+                replaced.children = children.iter().map(|&c| egraph.find(c)).collect();
+                replaced.children[slot] = zext;
+                let replaced = egraph.add(replaced);
+                egraph.union(class, replaced);
+            }
+        }
+    }
+    egraph.rebuild();
 }
 
 /// The closure of B's op-root and guard-condition classes under the bindings of
