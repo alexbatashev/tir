@@ -140,12 +140,6 @@ fn hash_label(node: &SemNode, state: &mut impl Hasher) {
     }
 }
 
-/// The kind of operand a capture e-class resolves to.
-pub(crate) enum Binding {
-    Int,
-    Value,
-}
-
 /// The constant a class is proven to hold, if any member is an integer literal.
 pub(crate) fn class_int_binding(egraph: &SemEGraph, class: Id) -> Option<APInt> {
     egraph.nodes(class).iter().find_map(|n| match &n.payload {
@@ -154,12 +148,12 @@ pub(crate) fn class_int_binding(egraph: &SemEGraph, class: Id) -> Option<APInt> 
     })
 }
 
-/// The register value carrying a class: an input value, then the IR value an
-/// intermediate result produces (looked up in `class_value`, the map recording
-/// which class computes which op result).
+/// The register value carrying a class: an input value, then the first IR value
+/// the class computes (from `class_values`, the map recording which values a
+/// class stands for). The representative feeds cost-model approximation only.
 pub(crate) fn class_value_binding(
     egraph: &SemEGraph,
-    class_value: &HashMap<Id, ValueId>,
+    class_values: &HashMap<Id, Vec<ValueId>>,
     class: Id,
 ) -> Option<ValueId> {
     egraph
@@ -169,21 +163,11 @@ pub(crate) fn class_value_binding(
             Some(SemPayload::Expr(SymPayload::Value(v))) => Some(*v),
             _ => None,
         })
-        .or_else(|| class_value.get(&egraph.find(class)).copied())
-}
-
-/// Resolve one capture e-class to its operand binding: a constant immediate, then
-/// an input value, then the IR value an intermediate result produces. `None` if
-/// the class carries no materializable operand. This is the single resolution rule
-/// used by both match collection and emission.
-pub(crate) fn class_binding(
-    egraph: &SemEGraph,
-    class_value: &HashMap<Id, ValueId>,
-    class: Id,
-) -> Option<Binding> {
-    class_int_binding(egraph, class)
-        .map(|_| Binding::Int)
-        .or_else(|| class_value_binding(egraph, class_value, class).map(|_| Binding::Value))
+        .or_else(|| {
+            class_values
+                .get(&egraph.find(class))
+                .and_then(|values| values.first().copied())
+        })
 }
 
 /// The negated comparison at the same operand order (`!(a < b)` is `a >= b`).
