@@ -22,8 +22,6 @@ pub struct AsmParser {
     /// maps to a list tried in turn with backtracking.
     instruction_parsers: HashMap<String, Vec<AsmInstructionParser>>,
     /// Mnemonics the target defines but the selected ISA/extension set disables.
-    /// These are parse errors, unlike genuinely unknown identifiers which are
-    /// still skipped.
     disabled_mnemonics: std::collections::HashSet<String>,
 }
 
@@ -199,8 +197,7 @@ impl AsmParser {
                         // set does not include it.
                         return Err(());
                     } else {
-                        // Unknown ident in text section; skip it for now
-                        let _ = parser.bump();
+                        return Err(());
                     }
                 }
                 _ => {
@@ -263,4 +260,19 @@ fn parse_hex(text: &str) -> Result<i64, ()> {
     let value = i128::from_str_radix(digits, 16).map_err(|_| ())?;
     let value = if neg { -value } else { value };
     i64::try_from(value).map_err(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::AsmParser;
+
+    #[test]
+    fn rejects_unknown_mnemonic() {
+        let context = tir::Context::with_default_dialects();
+        let parser = AsmParser::new(HashMap::new());
+
+        assert!(parser.parse_asm(&context, "foobar r0, r1").is_err());
+    }
 }
