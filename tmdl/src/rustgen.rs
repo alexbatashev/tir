@@ -50,6 +50,20 @@ pub fn generate_rust<'a>(
     Ok(())
 }
 
+pub fn generate_operation_list(
+    files: &[ast::File],
+    mut output: Box<dyn Write>,
+) -> Result<(), TMDLError> {
+    writeln!(output, "[")?;
+    for inst in files.iter().flat_map(|f| f.instructions()) {
+        let name = format_ident!("{}Op", &inst.name);
+        writeln!(output, "    {name},")?;
+    }
+    writeln!(output, "]")?;
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Top-level emitters
 // ---------------------------------------------------------------------------
@@ -255,9 +269,6 @@ fn emit_instructions<'a>(
     // Data-driven assembly syntax (text-only targets): one entry per instruction,
     // consumed by a target-specific front-end to parse/print instruction bodies.
     let mut asm_syntax_entries: Vec<proc_macro2::TokenStream> = vec![];
-    // Op struct idents, for a generated `dialect!` registration (text-only).
-    let mut dialect_op_idents: Vec<proc_macro2::Ident> = vec![];
-
     // `(class, register-name) -> encoding index` over every register class, so the
     // simulator can lower register paths that carry no numeric index in their name
     // (e.g. status flags `PSTATE::z`) to a stable slot.
@@ -357,7 +368,6 @@ fn emit_instructions<'a>(
 
     for inst in files.iter().flat_map(|f| f.instructions()) {
         let name_ident = format_ident!("{}Op", &inst.name);
-        dialect_op_idents.push(name_ident.clone());
         let builder_ident = format_ident!("{}OpBuilder", &inst.name);
         let resolved_params = resolve_params_for_instruction(inst, item_cache);
         let mnemonic = resolved_params
@@ -1663,25 +1673,14 @@ fn emit_instructions<'a>(
         .map(|(.., tokens)| tokens)
         .collect();
 
-    // Data-driven assembly syntax table plus a dialect registration, emitted only
-    // for text-only targets; their front-end parses/prints instruction bodies
-    // from the table, and the dialect makes the ops IR-printable.
+    // Data-driven assembly syntax table, emitted only for text-only targets;
+    // their front-end parses/prints instruction bodies from the table.
     let syntax_section = if text_only {
-        let dialect_ident =
-            format_ident!("{}{}Dialect", dialect[..1].to_uppercase(), &dialect[1..]);
-        let dialect_name = proc_macro2::Literal::string(dialect);
         quote! {
             /// The assembly syntax of every instruction, for a text-only target's
             /// front-end parser and printer.
             pub fn asm_syntax() -> &'static [tir::backend::asm_syntax::InstrSyntax] {
                 &[#(#asm_syntax_entries),*]
-            }
-
-            tir::helpers::dialect! {
-                #dialect_ident {
-                    name: #dialect_name,
-                    operations: [ #(#dialect_op_idents),* ],
-                }
             }
         }
     } else {

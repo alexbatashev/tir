@@ -12,7 +12,7 @@ use crate::error::TMDLError;
 use crate::expander::{Diag, MacroTable, StringArena, collect_macros, expand};
 use crate::lexer::{Token, lex};
 use crate::parser::parse;
-use crate::rustgen::generate_rust;
+use crate::rustgen::{generate_operation_list, generate_rust};
 use crate::sema_analyze;
 use crate::smtlibgen::generate_smtlib;
 use crate::{Span, Spanned};
@@ -49,6 +49,7 @@ pub enum Action {
     EmitAst,
     EmitAstJson,
     EmitRust,
+    EmitOperationList,
     EmitSmtlib,
 }
 
@@ -85,7 +86,9 @@ impl Compiler {
 
     pub fn compile(&self) -> Result<(), TMDLError> {
         match self.action {
-            Action::EmitRust | Action::EmitSmtlib => self.compile_whole_program(),
+            Action::EmitRust | Action::EmitOperationList | Action::EmitSmtlib => {
+                self.compile_whole_program()
+            }
             Action::EmitExpandedTokens => self.compile_expanded_tokens(),
             _ => self.compile_per_file(),
         }
@@ -268,6 +271,10 @@ impl Compiler {
                     self.text_only,
                     output,
                 )?
+            }
+            Action::EmitOperationList => {
+                let output: Box<dyn Write> = self.create_output_writer()?;
+                generate_operation_list(&parsed_files, output)?;
             }
             Action::EmitSmtlib => {
                 let writer: Box<dyn Write> = self.create_output_writer()?;

@@ -4,31 +4,39 @@ use tmdl::{Action, Compiler, OutputKind};
 
 fn main() -> Result<(), Box<dyn Error>> {
     println!("cargo:rerun-if-changed=defs");
-    let compiler = Compiler::builder()
-        .add_input("./defs/ptx/main.tmdl")
-        .add_input("./defs/ptx/versions.tmdl")
-        .add_input("./defs/ptx/integer.tmdl")
-        .add_input("./defs/ptx/logic.tmdl")
-        .add_input("./defs/ptx/float.tmdl")
-        .add_input("./defs/ptx/compare.tmdl")
-        .add_input("./defs/ptx/movement.tmdl")
-        .add_input("./defs/ptx/memory.tmdl")
-        .add_input("./defs/ptx/control.tmdl")
-        .add_input("./defs/ptx/sync.tmdl")
-        .add_input("./defs/ptx/video.tmdl")
-        .add_input("./defs/ptx/async.tmdl")
-        .add_input("./defs/ptx/tensor.tmdl")
-        .add_input("./defs/ptx/texture.tmdl")
-        .output(OutputKind::File(format!(
-            "{}/ptx.rs",
-            std::env::var("OUT_DIR")?
-        )))
-        .dialect(Some("ptx".to_string()))
-        .action(Action::EmitRust)
-        // PTX is a text pseudo-ISA: its instructions have assembly syntax but no
-        // binary encoding.
-        .text_only(true)
-        .build();
+    let out_dir = std::env::var("OUT_DIR")?;
+    let inputs = [
+        "./defs/ptx/main.tmdl",
+        "./defs/ptx/versions.tmdl",
+        "./defs/ptx/integer.tmdl",
+        "./defs/ptx/logic.tmdl",
+        "./defs/ptx/float.tmdl",
+        "./defs/ptx/compare.tmdl",
+        "./defs/ptx/movement.tmdl",
+        "./defs/ptx/memory.tmdl",
+        "./defs/ptx/control.tmdl",
+        "./defs/ptx/sync.tmdl",
+        "./defs/ptx/video.tmdl",
+        "./defs/ptx/async.tmdl",
+        "./defs/ptx/tensor.tmdl",
+        "./defs/ptx/texture.tmdl",
+    ];
+    let compile = |action, output| {
+        let mut builder = Compiler::builder()
+            .output(OutputKind::File(format!("{out_dir}/{output}")))
+            .dialect(Some("ptx".to_string()))
+            .action(action)
+            // PTX is a text pseudo-ISA: its instructions have assembly syntax but no
+            // binary encoding.
+            .text_only(true);
+        for input in inputs {
+            builder = builder.add_input(input);
+        }
+        builder.build().compile()
+    };
 
-    Ok(compiler.compile()?)
+    compile(Action::EmitRust, "ptx.rs")?;
+    compile(Action::EmitOperationList, "ptx_ops.rs")?;
+
+    Ok(())
 }

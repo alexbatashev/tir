@@ -4,20 +4,28 @@ use tmdl::{Action, Compiler, OutputKind};
 
 fn main() -> Result<(), Box<dyn Error>> {
     println!("cargo:rerun-if-changed=defs");
-    let compiler = Compiler::builder()
-        .add_input("./defs/main.tmdl")
-        .add_input("./defs/base.tmdl")
-        .add_input("./defs/arith_ext.tmdl")
-        .add_input("./defs/conditional.tmdl")
-        .add_input("./defs/memory_ext.tmdl")
-        .add_input("./defs/float.tmdl")
-        .output(OutputKind::File(format!(
-            "{}/x86_64.rs",
-            std::env::var("OUT_DIR")?
-        )))
-        .dialect(Some("x86_64".to_string()))
-        .action(Action::EmitRust)
-        .build();
+    let out_dir = std::env::var("OUT_DIR")?;
+    let inputs = [
+        "./defs/main.tmdl",
+        "./defs/base.tmdl",
+        "./defs/arith_ext.tmdl",
+        "./defs/conditional.tmdl",
+        "./defs/memory_ext.tmdl",
+        "./defs/float.tmdl",
+    ];
+    let compile = |action, output| {
+        let mut builder = Compiler::builder()
+            .output(OutputKind::File(format!("{out_dir}/{output}")))
+            .dialect(Some("x86_64".to_string()))
+            .action(action);
+        for input in inputs {
+            builder = builder.add_input(input);
+        }
+        builder.build().compile()
+    };
 
-    Ok(compiler.compile()?)
+    compile(Action::EmitRust, "x86_64.rs")?;
+    compile(Action::EmitOperationList, "x86_64_ops.rs")?;
+
+    Ok(())
 }
