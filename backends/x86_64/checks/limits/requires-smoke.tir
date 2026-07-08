@@ -1,0 +1,15 @@
+// REQUIRES: x86_64
+// RUN: tir mc --march=x86_64 --filetype=obj-ascii %s | filecheck %s
+
+// Smoke test for the feature-gating directive: this host is x86_64, so it
+// must run.
+
+module {
+  func @loadq(%0: !ptr.p<!i64>) -> !i64 {
+    %1 = ptr.load %0 : !i64
+    return %1
+  }
+  module_end
+}
+
+// CHECK: loadq:

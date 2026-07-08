@@ -1,0 +1,18 @@
+// RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s
+// XFAIL: *
+
+// FINDING F4 (miscompile): i128 is treated as a single 64-bit register. SysV
+// passes each i128 in a register pair, so two i128 params need four arg regs and
+// the add needs a low add + high adc. Selection emits one 64-bit add with only
+// two arg regs, so this CHECK (four arg regs) fails (XFAIL). tir-jit confirms
+// the result is scrambled in both the low and high 64-bit words.
+
+module {
+  func @f(%0:!i128,%1:!i128) -> !i128 {
+    %2 = addi %0, %1 : !i128
+    return %2
+  }
+  module_end
+}
+
+// CHECK: arg_regs = [%virt0:GPR, %virt1:GPR, %virt2:GPR, %virt3:GPR

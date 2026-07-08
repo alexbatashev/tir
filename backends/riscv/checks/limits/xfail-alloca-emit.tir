@@ -1,0 +1,22 @@
+// XFAIL: *
+// RUN: tir mc --march=rv64i --filetype=obj-ascii %s | filecheck %s
+
+// BUG: `ptr.alloca` is never lowered to stack-frame arithmetic. It selects its
+// load/store users to lw/sw at --stage=isel (see isel/memory.tir) but the
+// alloca op itself survives every stage; emitting an object aborts with "cannot
+// encode 'alloca' into an object file" (and --filetype=asm with "cannot print
+// 'alloca' as assembly"). No function that uses a stack slot can produce an
+// object or assembly. The regalloc stage even reads the slot through an
+// undefined base register with no sp-relative frame set up.
+
+module {
+  func @sum(%0: !i32) -> !i32 {
+    %p = ptr.alloca : !ptr.p<!i32>
+    ptr.store %0, %p
+    %v = ptr.load %p : !i32
+    return %v
+  }
+  module_end
+}
+
+// CHECK: sum:

@@ -1,0 +1,19 @@
+// XFAIL: *
+// RUN: tir mc --march=rv64i --stage=isel %s | filecheck %s
+
+// BUG: `trunci` (i64 -> i32) never selects. Instruction selection aborts with
+// "missing atomic materializer rule for semantic kind Extract" on both rv32
+// and rv64. A truncation to a narrower integer should be a no-op or a mask;
+// here it is unsupported, so any function that narrows an integer cannot be
+// compiled.
+
+module {
+  func @t(%0: !i64) -> !i32 {
+    %1 = trunci %0 : !i32
+    return %1
+  }
+  module_end
+}
+
+// CHECK: asm.symbol {name = "t"
+// CHECK: riscv.vret

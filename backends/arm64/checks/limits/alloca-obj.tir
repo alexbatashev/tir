@@ -1,0 +1,20 @@
+// RUN: tir mc --march=arm64 --filetype=obj-ascii %s | filecheck %s
+// XFAIL: *
+
+// UNSUPPORTED (end-to-end): `ptr.alloca` selects at --stage=isel (see
+// checks/isel/memory.tir) but is never lowered to a frame slot + address, so it
+// survives to object emission and fails with
+//   "cannot encode 'alloca' into an object file".
+// The entire stack-memory path therefore does not reach an object file.
+
+module {
+  func @f(%0: !i64) -> !i64 {
+    %p = ptr.alloca : !ptr.p<!i64>
+    ptr.store %0, %p
+    %v = ptr.load %p : !i64
+    return %v
+  }
+  module_end
+}
+
+// CHECK: .section .text

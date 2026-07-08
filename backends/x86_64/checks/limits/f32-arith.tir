@@ -1,0 +1,14 @@
+// RUN: not tir mc --march=x86_64 --stage=isel %s
+
+// FINDING G1 (isel-gap): f32 float arithmetic has no materializer rule (only
+// f64 selects). Selection fails: "missing atomic materializer rule for semantic
+// kind FAdd/FMul".
+
+module {
+  func @f(%0:!f32, %1:!f32) -> !f32 {
+    %2 = addf %0, %1 : !f32
+    %3 = mulf %2, %1 : !f32
+    return %3
+  }
+  module_end
+}

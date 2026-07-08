@@ -21,8 +21,20 @@
 //! exit status) and a `| filecheck %s ...` final stage which is executed
 //! in-process via the [`filecheck`] library rather than as a subprocess. It also
 //! supports unconditional `XFAIL: *` expected failures.
+//!
+//! Tests can be gated on host platform features with `REQUIRES:` and
+//! `UNSUPPORTED:` lines, each a comma-separated list of feature tokens (a
+//! leading `!` negates a token). A test runs only if every `REQUIRES` token is
+//! available and no `UNSUPPORTED` token is available; multiple directive lines
+//! in one file combine (all `REQUIRES` lines must pass, any `UNSUPPORTED` line
+//! can skip). Gated-out tests are reported as ignored, not passed or failed.
+//! The available feature tokens are the host OS (`linux`, `macos`, `windows`)
+//! and architecture (`x86_64`, `riscv64`, or `aarch64`/`arm64` as aliases on
+//! ARM64).
+//!
+//! Both `//` and `#` comment styles are recognized for all directives.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -38,6 +50,66 @@ struct TestCase {
     path: PathBuf,
     run_lines: Vec<String>,
     xfail: bool,
+    ignored: bool,
+}
+
+/// Whether a test should run or be skipped as unavailable on this host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Gate {
+    Run,
+    Ignore,
+}
+
+/// Compute the set of platform feature tokens available on this host.
+fn host_features() -> HashSet<String> {
+    let mut features = HashSet::new();
+    features.insert(std::env::consts::OS.to_string());
+    match std::env::consts::ARCH {
+        "aarch64" => {
+            features.insert("aarch64".to_string());
+            features.insert("arm64".to_string());
+        }
+        other => {
+            features.insert(other.to_string());
+        }
+    }
+    features
+}
+
+/// Whether a (possibly `!`-negated) feature token is satisfied by `features`.
+fn token_satisfied(features: &HashSet<String>, token: &str) -> bool {
+    match token.strip_prefix('!') {
+        Some(negated) => !features.contains(negated),
+        None => features.contains(token),
+    }
+}
+
+/// Collect the comma-separated feature tokens of every line containing
+/// `directive` (e.g. `"REQUIRES:"`), regardless of comment prefix.
+fn collect_directive_tokens(contents: &str, directive: &str) -> Vec<String> {
+    contents
+        .lines()
+        .filter_map(|line| {
+            line.find(directive)
+                .map(|idx| &line[idx + directive.len()..])
+        })
+        .flat_map(split_csv)
+        .collect()
+}
+
+/// Decide whether a test file should run on a host with the given features.
+fn gating_decision(features: &HashSet<String>, contents: &str) -> Gate {
+    let requires = collect_directive_tokens(contents, "REQUIRES:");
+    if !requires.iter().all(|t| token_satisfied(features, t)) {
+        return Gate::Ignore;
+    }
+
+    let unsupported = collect_directive_tokens(contents, "UNSUPPORTED:");
+    if unsupported.iter().any(|t| token_satisfied(features, t)) {
+        return Gate::Ignore;
+    }
+
+    Gate::Run
 }
 
 /// Build a workspace binary and snapshot it beside the current test executable
@@ -152,7 +224,8 @@ pub fn harness_main_with_tools(manifest_dir: &str, checks_subdir: &str, tools: &
         .map(|(k, v)| (k.to_string(), v.clone()))
         .collect();
 
-    let cases = match discover(&checks_dir) {
+    let features = host_features();
+    let cases = match discover(&checks_dir, &features) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("tir-lit: failed to discover tests in {checks_dir:?}: {e}");
@@ -164,7 +237,9 @@ pub fn harness_main_with_tools(manifest_dir: &str, checks_subdir: &str, tools: &
         .into_iter()
         .map(|case| {
             let tool_map = tool_map.clone();
+            let ignored = case.ignored;
             Trial::test(case.name.clone(), move || run_case(&case, &tool_map))
+                .with_ignored_flag(ignored)
         })
         .collect();
 
@@ -172,14 +247,19 @@ pub fn harness_main_with_tools(manifest_dir: &str, checks_subdir: &str, tools: &
 }
 
 /// Recursively find test files that contain at least one `RUN:` line.
-fn discover(dir: &Path) -> std::io::Result<Vec<TestCase>> {
+fn discover(dir: &Path, features: &HashSet<String>) -> std::io::Result<Vec<TestCase>> {
     let mut cases = Vec::new();
-    visit(dir, dir, &mut cases)?;
+    visit(dir, dir, features, &mut cases)?;
     cases.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(cases)
 }
 
-fn visit(root: &Path, dir: &Path, cases: &mut Vec<TestCase>) -> std::io::Result<()> {
+fn visit(
+    root: &Path,
+    dir: &Path,
+    features: &HashSet<String>,
+    cases: &mut Vec<TestCase>,
+) -> std::io::Result<()> {
     if !dir.exists() {
         return Ok(());
     }
@@ -192,9 +272,9 @@ fn visit(root: &Path, dir: &Path, cases: &mut Vec<TestCase>) -> std::io::Result<
             if path.file_name() == Some(OsStr::new("Inputs")) {
                 continue;
             }
-            visit(root, &path, cases)?;
+            visit(root, &path, features, cases)?;
         } else if file_type.is_file() {
-            if let Some(case) = load_case(root, &path)? {
+            if let Some(case) = load_case(root, &path, features)? {
                 cases.push(case);
             }
         }
@@ -202,13 +282,18 @@ fn visit(root: &Path, dir: &Path, cases: &mut Vec<TestCase>) -> std::io::Result<
     Ok(())
 }
 
-fn load_case(root: &Path, path: &Path) -> std::io::Result<Option<TestCase>> {
+fn load_case(
+    root: &Path,
+    path: &Path,
+    features: &HashSet<String>,
+) -> std::io::Result<Option<TestCase>> {
     let contents = std::fs::read_to_string(path)?;
     let run_lines = extract_run_lines(&contents);
     if run_lines.is_empty() {
         return Ok(None);
     }
     let xfail = has_unconditional_xfail(&contents);
+    let ignored = gating_decision(features, &contents) == Gate::Ignore;
     let name = path
         .strip_prefix(root)
         .unwrap_or(path)
@@ -219,6 +304,7 @@ fn load_case(root: &Path, path: &Path) -> std::io::Result<Option<TestCase>> {
         path: path.to_path_buf(),
         run_lines,
         xfail,
+        ignored,
     }))
 }
 
@@ -468,6 +554,7 @@ mod tests {
             path: PathBuf::from("xfail.tir"),
             run_lines: vec!["missing-tir-lit-test-tool".to_string()],
             xfail: true,
+            ignored: false,
         };
 
         assert!(run_case(&case, &HashMap::new()).is_ok());
@@ -480,9 +567,125 @@ mod tests {
             path: PathBuf::from("xpass.tir"),
             run_lines: Vec::new(),
             xfail: true,
+            ignored: false,
         };
 
         let err = run_case(&case, &HashMap::new()).unwrap_err();
         assert_eq!(err.message(), Some("XPASS: xpass.tir"));
+    }
+
+    fn features(tokens: &[&str]) -> HashSet<String> {
+        tokens.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn requires_met_runs() {
+        let f = features(&["linux", "x86_64"]);
+        assert_eq!(
+            gating_decision(&f, "// REQUIRES: linux\n// RUN: tool"),
+            Gate::Run
+        );
+    }
+
+    #[test]
+    fn requires_unmet_ignores() {
+        let f = features(&["linux", "x86_64"]);
+        assert_eq!(
+            gating_decision(&f, "// REQUIRES: windows\n// RUN: tool"),
+            Gate::Ignore
+        );
+    }
+
+    #[test]
+    fn requires_multiple_features_is_and() {
+        let f = features(&["linux", "x86_64"]);
+        assert_eq!(
+            gating_decision(&f, "// REQUIRES: linux, x86_64\n// RUN: tool"),
+            Gate::Run
+        );
+        assert_eq!(
+            gating_decision(&f, "// REQUIRES: linux, riscv64\n// RUN: tool"),
+            Gate::Ignore
+        );
+    }
+
+    #[test]
+    fn requires_multiple_lines_combine_with_and() {
+        let f = features(&["linux", "x86_64"]);
+        let contents = "// REQUIRES: linux\n// REQUIRES: x86_64\n// RUN: tool";
+        assert_eq!(gating_decision(&f, contents), Gate::Run);
+
+        let contents = "// REQUIRES: linux\n// REQUIRES: riscv64\n// RUN: tool";
+        assert_eq!(gating_decision(&f, contents), Gate::Ignore);
+    }
+
+    #[test]
+    fn requires_negation() {
+        let f = features(&["linux", "x86_64"]);
+        assert_eq!(
+            gating_decision(&f, "// REQUIRES: !windows\n// RUN: tool"),
+            Gate::Run
+        );
+        assert_eq!(
+            gating_decision(&f, "// REQUIRES: !linux\n// RUN: tool"),
+            Gate::Ignore
+        );
+    }
+
+    #[test]
+    fn unsupported_skips_when_present() {
+        let f = features(&["linux", "x86_64"]);
+        assert_eq!(
+            gating_decision(&f, "// UNSUPPORTED: x86_64\n// RUN: tool"),
+            Gate::Ignore
+        );
+    }
+
+    #[test]
+    fn unsupported_runs_when_absent() {
+        let f = features(&["linux", "x86_64"]);
+        assert_eq!(
+            gating_decision(&f, "// UNSUPPORTED: riscv64\n// RUN: tool"),
+            Gate::Run
+        );
+    }
+
+    #[test]
+    fn unsupported_negation() {
+        let f = features(&["linux", "x86_64"]);
+        assert_eq!(
+            gating_decision(&f, "// UNSUPPORTED: !windows\n// RUN: tool"),
+            Gate::Ignore
+        );
+        assert_eq!(
+            gating_decision(&f, "// UNSUPPORTED: !linux\n// RUN: tool"),
+            Gate::Run
+        );
+    }
+
+    #[test]
+    fn directive_parsing_is_comment_prefix_agnostic() {
+        let f = features(&["linux", "x86_64"]);
+        assert_eq!(
+            gating_decision(&f, "# REQUIRES: windows\n# RUN: tool"),
+            gating_decision(&f, "// REQUIRES: windows\n// RUN: tool")
+        );
+        assert_eq!(
+            gating_decision(&f, "# UNSUPPORTED: x86_64\n# RUN: tool"),
+            gating_decision(&f, "// UNSUPPORTED: x86_64\n// RUN: tool")
+        );
+    }
+
+    #[test]
+    fn no_directives_runs() {
+        let f = features(&["linux", "x86_64"]);
+        assert_eq!(gating_decision(&f, "// RUN: tool"), Gate::Run);
+    }
+
+    #[test]
+    fn host_features_includes_os_and_arch() {
+        let f = host_features();
+        assert!(f.contains(std::env::consts::OS));
+        assert!(!f.is_empty());
     }
 }

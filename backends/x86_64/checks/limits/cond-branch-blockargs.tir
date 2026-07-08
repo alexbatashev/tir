@@ -1,0 +1,17 @@
+// RUN: not tir mc --march=x86_64 --stage=isel %s
+
+// FINDING G7 (isel-gap): block arguments on conditional-branch edges are
+// unsupported: "block arguments on conditional branch edges are not supported
+// by codegen yet". Unconditional br with block args works; this blocks loops
+// whose loop-carried phi rides the back-edge cond_br.
+
+module {
+  func @f(%0:!i64, %1:!i1) -> !i64 {
+    cond_br %1, ^bb1(%0 : !i64), ^bb2(%0 : !i64)
+  ^bb1(%a: !i64):
+    return %a
+  ^bb2(%b: !i64):
+    return %b
+  }
+  module_end
+}

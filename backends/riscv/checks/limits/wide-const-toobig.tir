@@ -1,0 +1,13 @@
+// RUN: not tir mc --march=rv64i --filetype=asm %s
+
+// 0x80000000 is a valid i64 but needs bit 31 set with a zero upper half, which
+// the lui+addiw materializer cannot build. Selection fails loudly ("wide
+// constant materialization is not implemented") rather than miscompiling.
+
+module {
+  func @too_big() -> !i64 {
+    %0 = constant {value = 2147483648} : !i64
+    return %0
+  }
+  module_end
+}

@@ -1,0 +1,16 @@
+// RUN: tir mc --march=rv64im --stage=isel %s | filecheck %s
+// RUN: not tir mc --march=rv64i --stage=isel %s
+
+// Correct extension gating: `muli` selects `mul` under rv64im, and without the
+// M extension selection fails loudly ("missing atomic materializer rule for
+// semantic kind Mul") instead of miscompiling.
+
+module {
+  func @m(%0: !i64, %1: !i64) -> !i64 {
+    %2 = muli %0, %1 : !i64
+    return %2
+  }
+  module_end
+}
+
+// CHECK: riscv.mul {rd = %virt2:GPR, rs1 = %virt0:GPR, rs2 = %virt1:GPR}

@@ -1,0 +1,19 @@
+// XFAIL: *
+// RUN: tir mc --march=rv64i --stage=isel %s | filecheck %s
+
+// BUG: `subi %x, const` fails selection with "missing atomic materializer rule
+// for semantic kind Sub". Register/register subtraction selects `sub` fine, but
+// a constant right operand has no folding rule (RISC-V has no subi; it should
+// fold to `addi %x, -const`). So subtracting an immediate is uncompilable.
+
+module {
+  func @s(%0: !i64) -> !i64 {
+    %1 = constant {value = 10} : !i64
+    %2 = subi %0, %1 : !i64
+    return %2
+  }
+  module_end
+}
+
+// The desired lowering folds the constant into an addi with a negated immediate.
+// CHECK: riscv.addi {rd = %virt2:GPR, rs1 = %virt0:GPR, imm = -10}
