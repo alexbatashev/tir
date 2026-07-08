@@ -4,25 +4,33 @@ use tmdl::{Action, Compiler, OutputKind};
 
 fn main() -> Result<(), Box<dyn Error>> {
     println!("cargo:rerun-if-changed=defs");
-    let compiler = Compiler::builder()
-        .add_input("./defs/main.tmdl")
-        .add_input("./defs/base.tmdl")
-        .add_input("./defs/multiplication.tmdl")
-        .add_input("./defs/float.tmdl")
-        .add_input("./defs/compressed.tmdl")
-        .add_input("./defs/atomics.tmdl")
-        .add_input("./defs/zifencei.tmdl")
-        .add_input("./defs/zicsr.tmdl")
-        .add_input("./defs/perf.tmdl")
-        .add_input("./defs/vector.tmdl")
-        .add_input("./defs/syntacore_scr1.tmdl")
-        .output(OutputKind::File(format!(
-            "{}/riscv.rs",
-            std::env::var("OUT_DIR")?
-        )))
-        .dialect(Some("riscv".to_string()))
-        .action(Action::EmitRust)
-        .build();
+    let out_dir = std::env::var("OUT_DIR")?;
+    let inputs = [
+        "./defs/main.tmdl",
+        "./defs/base.tmdl",
+        "./defs/multiplication.tmdl",
+        "./defs/float.tmdl",
+        "./defs/compressed.tmdl",
+        "./defs/atomics.tmdl",
+        "./defs/zifencei.tmdl",
+        "./defs/zicsr.tmdl",
+        "./defs/perf.tmdl",
+        "./defs/vector.tmdl",
+        "./defs/syntacore_scr1.tmdl",
+    ];
+    let compile = |action, output| {
+        let mut builder = Compiler::builder()
+            .output(OutputKind::File(format!("{out_dir}/{output}")))
+            .dialect(Some("riscv".to_string()))
+            .action(action);
+        for input in inputs {
+            builder = builder.add_input(input);
+        }
+        builder.build().compile()
+    };
 
-    Ok(compiler.compile()?)
+    compile(Action::EmitRust, "riscv.rs")?;
+    compile(Action::EmitOperationList, "riscv_ops.rs")?;
+
+    Ok(())
 }

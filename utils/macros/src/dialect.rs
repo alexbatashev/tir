@@ -1,6 +1,11 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{ExprStruct, Ident, Member, parse::Parse, parse_macro_input};
+use syn::parse::Parser;
+use syn::punctuated::Punctuated;
+use syn::{
+    Expr, ExprArray, ExprLit, ExprMacro, ExprStruct, Ident, Lit, Member, Token, parse::Parse,
+    parse_macro_input,
+};
 
 use crate::utils::{expr_as_ident_vec, expr_as_string};
 
@@ -88,7 +93,7 @@ impl Parse for Dialect {
             })
             .unwrap();
 
-        let operations = struct_
+        let mut operations = struct_
             .fields
             .iter()
             .find_map(|f| match &f.member {
@@ -102,6 +107,19 @@ impl Parse for Dialect {
                 _ => None,
             })
             .unwrap_or_default();
+        let operation_file = struct_.fields.iter().find_map(|f| match &f.member {
+            Member::Named(ident) => {
+                if ident.to_string().as_str() == "operation_file" {
+                    Some(&f.expr)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        });
+        if let Some(operation_file) = operation_file {
+            operations.extend(read_operation_file(operation_file)?);
+        }
 
         let types = struct_
             .fields
@@ -124,6 +142,58 @@ impl Parse for Dialect {
             operations,
             types,
         })
+    }
+}
+
+fn read_operation_file(expr: &Expr) -> syn::Result<Vec<Ident>> {
+    let path = expr_as_file_path(expr)?;
+    let content = std::fs::read_to_string(&path).map_err(|err| {
+        syn::Error::new_spanned(
+            expr,
+            format!("failed to read operation_file '{path}': {err}"),
+        )
+    })?;
+    let expr_array: ExprArray = syn::parse_str(&content).map_err(|err| {
+        syn::Error::new_spanned(
+            expr,
+            format!("failed to parse operation_file '{path}': {err}"),
+        )
+    })?;
+
+    expr_as_ident_vec(&Expr::Array(expr_array))
+        .into_iter()
+        .map(Ok)
+        .collect()
+}
+
+fn expr_as_file_path(expr: &Expr) -> syn::Result<String> {
+    match expr {
+        Expr::Lit(ExprLit {
+            lit: Lit::Str(path),
+            ..
+        }) => Ok(path.value()),
+        Expr::Macro(ExprMacro { mac, .. }) if mac.path.is_ident("concat") => {
+            let parser = Punctuated::<Expr, Token![,]>::parse_terminated;
+            let parts = parser.parse2(mac.tokens.clone())?;
+            let mut path = String::new();
+            for part in parts {
+                path.push_str(&expr_as_file_path(&part)?);
+            }
+            Ok(path)
+        }
+        Expr::Macro(ExprMacro { mac, .. }) if mac.path.is_ident("env") => {
+            let key: Lit = syn::parse2(mac.tokens.clone())?;
+            let Lit::Str(key) = key else {
+                return Err(syn::Error::new_spanned(expr, "env! key must be a string"));
+            };
+            std::env::var(key.value()).map_err(|err| {
+                syn::Error::new_spanned(expr, format!("failed to read env var: {err}"))
+            })
+        }
+        _ => Err(syn::Error::new_spanned(
+            expr,
+            "operation_file must be a string path",
+        )),
     }
 }
 

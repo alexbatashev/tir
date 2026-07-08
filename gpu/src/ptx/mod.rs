@@ -1,8 +1,15 @@
-use tir::helpers::operation;
+use tir::helpers::{dialect, operation};
 
 mod ptx_asm;
 
 include!(concat!(env!("OUT_DIR"), "/ptx.rs"));
+
+dialect! {
+    PtxDialect {
+        name: "ptx",
+        operation_file: concat!(env!("OUT_DIR"), "/ptx_ops.rs"),
+    }
+}
 
 /// The PTX target, selected via `--march=ptx`. PTX is a text pseudo-ISA: the
 /// front-end in [`ptx_asm`] parses `.ptx` kernels into a module and prints them
