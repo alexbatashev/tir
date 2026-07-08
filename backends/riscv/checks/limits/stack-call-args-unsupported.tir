@@ -1,0 +1,15 @@
+// RUN: not tir mc --march=rv64i --filetype=asm %s
+
+// A call with more than eight integer arguments needs stack-passed arguments,
+// which codegen rejects cleanly ("stack-passed call arguments are not supported
+// by codegen yet"). Note the *function-definition* side of the same limit is
+// NOT rejected and instead miscompiles: see xfail-many-params-abi.tir.
+
+module {
+  declare @ext(!i64,!i64,!i64,!i64,!i64,!i64,!i64,!i64,!i64,!i64) -> !i64
+  func @a(%0: !i64) -> !i64 {
+    %r = call @ext(%0,%0,%0,%0,%0,%0,%0,%0,%0,%0 : !i64,!i64,!i64,!i64,!i64,!i64,!i64,!i64,!i64,!i64) -> !i64
+    return %r
+  }
+  module_end
+}

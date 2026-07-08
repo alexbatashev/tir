@@ -1,0 +1,6 @@
+// UNSUPPORTED: x86_64
+// RUN: this-tool-does-not-exist
+
+// Smoke test for the feature-gating directive: this host is x86_64, so this
+// test must be skipped rather than run. The command above would fail if it
+// ever executed.

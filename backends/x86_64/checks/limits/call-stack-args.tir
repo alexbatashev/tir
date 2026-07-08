@@ -1,0 +1,15 @@
+// RUN: not tir mc --march=x86_64 --filetype=obj-ascii %s
+
+// FINDING G8 (isel-gap): calls with more than 6 register arguments are
+// unsupported: "stack-passed call arguments are not supported by codegen yet".
+// 6-arg calls work. (Graceful error, unlike the callee-side stack-arg
+// miscompile in stack-args.tir.)
+
+module {
+  declare @g(!i64, !i64, !i64, !i64, !i64, !i64, !i64) -> !i64
+  func @f(%0:!i64) -> !i64 {
+    %r = call @g(%0, %0, %0, %0, %0, %0, %0 : !i64, !i64, !i64, !i64, !i64, !i64, !i64) -> !i64
+    return %r
+  }
+  module_end
+}

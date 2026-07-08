@@ -1,0 +1,20 @@
+// RUN: tir mc --march=arm64 --stage=isel %s | filecheck %s
+// XFAIL: *
+
+// MISCOMPILE: a 128-bit add lowers to a single 64-bit `arm64.add` and the two
+// i128 arguments occupy one GPR each (arg_regs has only %virt0/%virt1). The high
+// 64 bits are silently dropped; a correct lowering needs a register pair per
+// value and an adds/adc carry chain. Same defect for any width > 64 (e.g. i256).
+//
+// This test asserts the correct carry-propagating lowering, which is not
+// produced, so it XFAILs and documents the miscompile.
+
+module {
+  func @f(%0: !i128, %1: !i128) -> !i128 {
+    %2 = addi %0, %1 : !i128
+    return %2
+  }
+  module_end
+}
+
+// CHECK: arm64.adc

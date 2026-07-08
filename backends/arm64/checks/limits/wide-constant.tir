@@ -1,0 +1,19 @@
+// RUN: tir mc --march=arm64 --stage=isel %s | filecheck %s
+// XFAIL: *
+
+// UNSUPPORTED: constant materialization only emits a single MOVZ, so any value
+// that does not fit imm16 fails. isel aborts with
+//   "constant 65536 does not fit movz #imm16; wide constant materialization is
+//    not implemented".
+// The multi-instruction MOVZ/MOVK (and MOVN for negatives) sequence is missing,
+// so even `constant -1` cannot be produced.
+
+module {
+  func @f() -> !i64 {
+    %0 = constant {value = 65536} : !i64
+    return %0
+  }
+  module_end
+}
+
+// CHECK: arm64.movk

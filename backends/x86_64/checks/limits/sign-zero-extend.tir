@@ -1,0 +1,23 @@
+// RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s
+// XFAIL: *
+
+// FINDING F6 (miscompile): sign/zero extension (extsi/extui) lowers to a shift
+// pair, but the constant shift count (32) is routed through the CL-count form
+// (shl_cl/shr_cl/sar_cl with `rcx = 32`) which the encoder emits as `shl cl` -
+// reading CL, not 32. So the extension shifts by garbage. tir-jit confirms:
+// extsi(i32::MIN) and extui(-1) return wrong values. A correct lowering must not
+// stuff a constant count into the CL form; CHECK-NOT flags it (XFAIL today).
+
+module {
+  func @se(%0: !i32) -> !i64 {
+    %1 = extsi %0 : !i64
+    return %1
+  }
+  func @ze(%0: !i32) -> !i64 {
+    %1 = extui %0 : !i64
+    return %1
+  }
+  module_end
+}
+
+// CHECK-NOT: rcx = 32

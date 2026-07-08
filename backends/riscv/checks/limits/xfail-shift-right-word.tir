@@ -1,0 +1,18 @@
+// XFAIL: *
+// RUN: tir mc --march=rv64i --stage=isel %s | filecheck %s
+
+// BUG: on rv64 an i32 (word-width) logical/arithmetic right shift fails to
+// select: "missing atomic materializer rule for semantic kind ShiftRightLogic"
+// (and ShiftRightArithmetic for shrsi). The word-form left shift `sllw` IS
+// selected for i32 shli, and the full-width srl/sra work for i64, so only the
+// srlw/sraw word forms are missing from the rule set. Asymmetric with sllw.
+
+module {
+  func @sr(%0: !i32, %1: !i32) -> !i32 {
+    %2 = shrui %0, %1 : !i32
+    return %2
+  }
+  module_end
+}
+
+// CHECK: riscv.srlw {rd = %virt2:GPR, rs1 = %virt0:GPR, rs2 = %virt1:GPR}

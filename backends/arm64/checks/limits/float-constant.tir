@@ -1,0 +1,17 @@
+// RUN: tir mc --march=arm64 --filetype=obj-ascii %s | filecheck %s
+// XFAIL: *
+
+// UNSUPPORTED: `constantf` is never selected into an arm64 op; it survives to
+// object emission where it fails with
+//   "cannot encode 'constantf' into an object file".
+// So no floating-point literal can be materialized end-to-end.
+
+module {
+  func @f() -> !f64 {
+    %0 = constantf {value = 1.5} : !f64
+    return %0
+  }
+  module_end
+}
+
+// CHECK: .section .text

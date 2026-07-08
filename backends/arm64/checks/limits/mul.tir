@@ -1,0 +1,17 @@
+// RUN: tir mc --march=arm64 --stage=isel %s | filecheck %s
+// XFAIL: *
+
+// ISEL GAP: integer multiply has no atomic materializer rule even though the
+// TMDL defines `mul`/`madd`/`msub`/`mneg`/`smulh`. isel aborts with
+//   "invalid rule set: missing atomic materializer rule for semantic kind Mul"
+// so no integer multiply can be lowered on arm64.
+
+module {
+  func @f(%0: !i64, %1: !i64) -> !i64 {
+    %2 = muli %0, %1 : !i64
+    return %2
+  }
+  module_end
+}
+
+// CHECK: arm64.mul

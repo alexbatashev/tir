@@ -1,0 +1,15 @@
+// RUN: tir mc --march=rv64i --filetype=asm %s | filecheck %s
+
+// A constant inside the signed 32-bit range materializes with lui+addiw.
+// The out-of-range boundary is covered by wide-const-toobig.tir.
+
+module {
+  func @in_range() -> !i64 {
+    %0 = constant {value = 2147483647} : !i64
+    return %0
+  }
+  module_end
+}
+
+// CHECK: lui x10, 524288
+// CHECK: addiw x10, x10, -1

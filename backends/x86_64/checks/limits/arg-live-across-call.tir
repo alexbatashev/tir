@@ -1,0 +1,16 @@
+// RUN: not tir mc --march=x86_64 --stage=regalloc %s
+
+// FINDING F5 (crash): register allocation aborts with "Infeasible" when a raw
+// function argument is live across a call (used after it). A fresh computed
+// value in the same position allocates fine, so the failure is specific to
+// argument-valued live ranges spanning a call. Expected to fail today.
+
+module {
+  declare @g(!i64) -> !i64
+  func @f(%0:!i64) -> !i64 {
+    %r = call @g(%0 : !i64) -> !i64
+    %res = muli %0, %r : !i64
+    return %res
+  }
+  module_end
+}

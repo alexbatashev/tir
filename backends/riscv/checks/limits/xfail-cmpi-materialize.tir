@@ -1,0 +1,21 @@
+// XFAIL: *
+// RUN: tir mc --march=rv64i --stage=isel %s | filecheck %s
+
+// BUG: materializing a comparison *value* (result escapes, not fused into a
+// branch) only works for slt/sgt/ult/ugt (bare slt/sltu). The predicates that
+// need a composite (eq/ne via xor+sltiu/sltu, and sle/sge/ule/uge via slt+xori)
+// have no materializer: selection aborts with "missing atomic materializer rule
+// for semantic kind Eq" (likewise Ne / Ge / UGe). Six of ten cmpi predicates
+// cannot produce a boolean value. Branch fusion of these predicates DOES work
+// (see isel/branch.tir); only value materialization is broken.
+
+module {
+  func @eq(%0: !i64, %1: !i64) -> !i1 {
+    %2 = cmpi %0, %1 {predicate = "eq"} : !i1
+    return %2
+  }
+  module_end
+}
+
+// CHECK: asm.symbol {name = "eq"
+// CHECK: riscv.vret
