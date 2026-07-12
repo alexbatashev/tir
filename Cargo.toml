@@ -21,6 +21,7 @@ members = [
     "utils/adt",
     "utils/graph",
     "utils/symbolic",
+    "utils/verify",
     "utils/llvm",
     "utils/jit",
     "tools",

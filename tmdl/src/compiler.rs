@@ -277,14 +277,23 @@ impl Compiler {
                 generate_operation_list(&parsed_files, output)?;
             }
             Action::EmitSmtlib => {
+                let metadata_path = match &self.output {
+                    OutputKind::File(path) => {
+                        Some(PathBuf::from(path).with_extension("metadata.json"))
+                    }
+                    _ => None,
+                };
                 let writer: Box<dyn Write> = self.create_output_writer()?;
-                generate_smtlib(
+                let metadata = generate_smtlib(
                     self.dialect.as_ref().unwrap(),
                     self.isa.as_ref().unwrap(),
                     &parsed_files,
                     &item_cache,
                     writer,
                 )?;
+                if let Some(path) = metadata_path {
+                    fs::write(path, serde_json::to_vec_pretty(&metadata)?)?;
+                }
             }
             _ => unreachable!("Only complex actions should use this path"),
         }

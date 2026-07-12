@@ -1,7 +1,8 @@
 # isla config for the Sail x86 model (translated from the ACL2 X86ISA model)
-# used by `cargo xtask verify x86_64`. The footprint wrapper (spliced into the
-# snapshot) puts the model in the application view and 64-bit mode; here we pin
-# the instruction pointer to a concrete, canonical address so the fetch reads
+# used by `cargo xtask verify x86_64`. The published snapshot includes the
+# footprint wrapper that puts the model in the application view and 64-bit mode;
+# here we pin the instruction pointer to a concrete, canonical address so the
+# fetch reads
 # and opcode writes land at concrete addresses (told apart from the symbolic,
 # register-derived data accesses) and disable register-write logging so it does
 # not fork every path.
