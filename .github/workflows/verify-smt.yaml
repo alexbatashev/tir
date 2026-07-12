@@ -10,26 +10,23 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # Pin the isla revision and the Sail model snapshot ref together; bump them
-  # in sync. `cargo xtask verify` clones/downloads them on demand.
-  TIR_ISLA_REF: master
-  TIR_ISLA_SNAPSHOTS_REF: refs/heads/master
 
 jobs:
   verify:
     strategy:
       fail-fast: false
       matrix:
-        isa: [riscv64, riscv32, armv8]
+        isa: [riscv64, riscv32, armv8, x86_64]
+        shard: [0, 1, 2, 3]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install z3 and binutils stubs
+      - name: Install solver build dependencies and binutils stubs
         run: |
           sudo apt-get update
-          sudo apt-get install -y z3 libz3-dev
+          sudo apt-get install -y z3 libz3-dev meson ninja-build pkg-config libgmp-dev libmpfr-dev
           # The isla config only checks for the toolchain's presence; raw
           # opcodes never invoke it.
           mkdir -p "$HOME/bin"
@@ -39,18 +36,65 @@ jobs:
             done
           done
           echo "$HOME/bin" >> "$GITHUB_PATH"
-      - name: Cache isla and the Sail model snapshot
+      - name: Cache Bitwuzla
+        id: cache-bitwuzla
         uses: actions/cache@v4
         with:
-          path: |
-            target/isla
-            target/verify/snapshots
-          key: isla-${{ matrix.isa }}-${{ env.TIR_ISLA_REF }}-${{ env.TIR_ISLA_SNAPSHOTS_REF }}
+          path: target/verify/bitwuzla
+          key: bitwuzla-8d1eb01093ae54d9b4586456b69c3bf31000a4c2
+      - name: Build Bitwuzla
+        if: steps.cache-bitwuzla.outputs.cache-hit != 'true'
+        run: |
+          git clone https://github.com/bitwuzla/bitwuzla target/verify/bitwuzla-src
+          git -C target/verify/bitwuzla-src checkout 8d1eb01093ae54d9b4586456b69c3bf31000a4c2
+          cd target/verify/bitwuzla-src
+          ./configure.py --prefix="$GITHUB_WORKSPACE/target/verify/bitwuzla"
+          ninja -C build install
+          cd "$GITHUB_WORKSPACE"
+          rm -rf target/verify/bitwuzla-src
+      - name: Configure Bitwuzla
+        run: |
+          echo "$GITHUB_WORKSPACE/target/verify/bitwuzla/bin" >> "$GITHUB_PATH"
+          echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/target/verify/bitwuzla/lib:$GITHUB_WORKSPACE/target/verify/bitwuzla/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+      - name: Cache the Sail model snapshot
+        uses: actions/cache@v4
+        with:
+          path: target/verify/snapshots
+          key: isla-snapshot-${{ matrix.isa }}-d8b31014643035a3b11071e56ef30001de3f52ab
+      - name: Cache Sail traces
+        uses: actions/cache@v4
+        with:
+          path: target/verify/smt/${{ matrix.isa }}/cache
+          key: smt-traces-${{ matrix.isa }}-${{ matrix.shard }}-${{ hashFiles('Cargo.lock', 'utils/verify/**', format('xtask/verify-smt-{0}.toml', matrix.isa)) }}
       - name: Verify
-        run: cargo xtask verify ${{ matrix.isa }}
+        run: cargo xtask verify ${{ matrix.isa }} --shard ${{ matrix.shard }}/4
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smt-report-${{ matrix.isa }}-${{ matrix.shard }}
+          path: target/verify/smt/${{ matrix.isa }}/report.json
       - name: Upload counterexample queries
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: smt-queries-${{ matrix.isa }}
+          name: smt-queries-${{ matrix.isa }}-${{ matrix.shard }}
           path: target/verify/smt/${{ matrix.isa }}/queries/
+
+  aggregate:
+    if: always()
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: smt-report-*
+          path: reports
+      - name: Aggregate reports
+        run: |
+          mapfile -t files < <(find reports -name report.json -print | sort)
+          jq -s '{reports: ., totals: {verified: (map(.verified) | add), divergences: (map(.failed) | add), unknown: (map(.unknown) | add), excluded: (map(.excluded_paths) | add), wall_ms_max: (map(.wall_ms) | max)}}' "${files[@]}" > smt-report.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: smt-report
+          path: smt-report.json

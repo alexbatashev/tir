@@ -20,7 +20,7 @@ fn main() -> anyhow::Result<()> {
         Some("verify") => {
             let isa = env::args().nth(2);
             match isa.as_deref() {
-                Some(isa) => verify_smt::verify_smt(&sh, isa)?,
+                Some(isa) => verify_smt::verify_smt(&sh, isa, env::args().skip(3))?,
                 _ => print_help(),
             }
         }
@@ -171,7 +171,8 @@ build            builds TIR project
 check            builds project and runs check tests
 check-only       only runs check tests without building the project
 axioms           checks generated instruction-selection axioms in release mode
-verify <isa>     run formal ISA verification. Available ISAs: riscv64, riscv32, armv8, x86_64
+verify <isa> [--shard k/N]
+                 run formal ISA verification. Available ISAs: riscv64, riscv32, armv8, x86_64
 isa-test-suite   run differential ISA tests against a golden oracle (riscv/Spike)
 capi-smoke       check the C ABI header is current and run the C smoke test
 python-smoke     build the C ABI and run the Python test suite

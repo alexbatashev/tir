@@ -3,7 +3,7 @@ use std::fmt;
 use tir_adt::APInt;
 use tir_graph::{MutDag, NodeId};
 
-use crate::lang::{SymKind, SymPayload};
+use crate::lang::{SymKind, SymPayload, scalar_op, scalar_op_named};
 
 /// The fixed-arity operator vocabulary of the s-expression surface, shared by
 /// the op-sem builder and the isel axiom DSL; operand count is
@@ -11,53 +11,35 @@ use crate::lang::{SymKind, SymPayload};
 /// itself (unary `sext`/`zext`/`trunc` taking the result width, `(concat
 /// iter)`, `map`/`reduce` lambdas).
 const OP_VOCABULARY: &[(&str, SymKind)] = &[
-    ("add", SymKind::Add),
-    ("sub", SymKind::Sub),
-    ("mul", SymKind::Mul),
-    ("div", SymKind::Div),
     ("fadd", SymKind::FAdd),
     ("fsub", SymKind::FSub),
     ("fmul", SymKind::FMul),
     ("fdiv", SymKind::FDiv),
-    ("and", SymKind::And),
-    ("or", SymKind::Or),
-    ("xor", SymKind::Xor),
-    ("shl", SymKind::ShiftLeft),
-    ("lshr", SymKind::ShiftRightLogic),
-    ("ashr", SymKind::ShiftRightArithmetic),
     ("zip", SymKind::Zip),
     ("split", SymKind::Split),
-    ("not", SymKind::Not),
-    ("neg", SymKind::Neg),
     ("sext", SymKind::SExt),
     ("zext", SymKind::ZExt),
     ("if", SymKind::If),
-    ("eq", SymKind::Eq),
-    ("ne", SymKind::Ne),
-    ("lt", SymKind::Lt),
-    ("le", SymKind::Le),
-    ("gt", SymKind::Gt),
-    ("ge", SymKind::Ge),
-    ("ult", SymKind::ULt),
-    ("ule", SymKind::ULe),
-    ("ugt", SymKind::UGt),
-    ("uge", SymKind::UGe),
 ];
 
 /// The [`SymKind`] an operator atom names, if any.
 pub fn op_kind(name: &str) -> Option<SymKind> {
-    OP_VOCABULARY
-        .iter()
-        .find(|(n, _)| *n == name)
-        .map(|&(_, k)| k)
+    scalar_op_named(name).map(|op| op.kind).or_else(|| {
+        OP_VOCABULARY
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|&(_, k)| k)
+    })
 }
 
 /// The operator atom naming a [`SymKind`]; inverse of [`op_kind`].
 pub fn op_name(kind: SymKind) -> Option<&'static str> {
-    OP_VOCABULARY
-        .iter()
-        .find(|&&(_, k)| k == kind)
-        .map(|&(n, _)| n)
+    scalar_op(kind).map(|op| op.name).or_else(|| {
+        OP_VOCABULARY
+            .iter()
+            .find(|&&(_, k)| k == kind)
+            .map(|&(n, _)| n)
+    })
 }
 
 /// Parsed s-expression: surface syntax of an op's `sem = "..."`; [`build`] lowers it.

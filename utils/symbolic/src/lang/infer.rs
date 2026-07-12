@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use tir_adt::APInt;
 use tir_graph::{Dag, GenericDag, MutDag, NodeId};
 
-use crate::lang::{SymKind, SymPayload};
+use crate::lang::{SymKind, SymPayload, WidthRule, scalar_op};
 
 /// Infer each node's integer bit-width bottom-up; `leaf_width` supplies `Symbol`
 /// widths, `None` means unknown and propagates. Relies on children having lower
@@ -20,96 +20,77 @@ pub fn infer_widths<V>(
         let children: Vec<NodeId> = graph.children(id).collect();
         let child_width = |slot: usize| children.get(slot).and_then(|c| widths[c.index()]);
 
-        let width = match *graph.get_kind(id) {
-            SymKind::Symbol => leaf_width(id),
-            SymKind::Constant => match graph.get_leaf_data(id) {
-                Some(SymPayload::<V>::Int(value)) => Some(value.width()),
-                _ => None,
-            },
-
-            // Arithmetic/logic/shifts: as wide as the left input.
-            SymKind::Add
-            | SymKind::Sub
-            | SymKind::Mul
-            | SymKind::Div
-            | SymKind::UDiv
-            | SymKind::SRem
-            | SymKind::URem
-            | SymKind::Neg
-            | SymKind::And
-            | SymKind::Or
-            | SymKind::Xor
-            | SymKind::ShiftLeft
-            | SymKind::ShiftRightLogic
-            | SymKind::ShiftRightArithmetic
-            | SymKind::Not
-            | SymKind::Clamp
-            | SymKind::Log2Ceil
-            | SymKind::Sqrt
-            | SymKind::Fma
-            | SymKind::FAdd
-            | SymKind::FSub
-            | SymKind::FMul
-            | SymKind::FDiv => child_width(0),
-
-            SymKind::Eq
-            | SymKind::Ne
-            | SymKind::Lt
-            | SymKind::Le
-            | SymKind::Gt
-            | SymKind::Ge
-            | SymKind::ULt
-            | SymKind::ULe
-            | SymKind::UGt
-            | SymKind::UGe => Some(1),
-
-            SymKind::Concat => match (child_width(0), child_width(1)) {
-                (Some(hi), Some(lo)) => Some(hi + lo),
-                _ => None,
-            },
-
-            // As wide as its arms (the then-branch).
-            SymKind::If => child_width(1),
-
-            SymKind::Extract => {
-                match (
-                    children.get(1).and_then(|&c| const_u64(graph, c)),
-                    children.get(2).and_then(|&c| const_u64(graph, c)),
-                ) {
-                    (Some(high), Some(low)) if high >= low => Some((high - low + 1) as u32),
+        let kind = *graph.get_kind(id);
+        let width = if let Some(op) = scalar_op(kind) {
+            match op.width {
+                WidthRule::First => child_width(0),
+                WidthRule::Bool => Some(1),
+                WidthRule::Sum => match (child_width(0), child_width(1)) {
+                    (Some(lhs), Some(rhs)) => Some(lhs + rhs),
                     _ => None,
-                }
+                },
             }
+        } else {
+            match kind {
+                SymKind::Symbol => leaf_width(id),
+                SymKind::Constant => match graph.get_leaf_data(id) {
+                    Some(SymPayload::<V>::Int(value)) => Some(value.width()),
+                    _ => None,
+                },
 
-            SymKind::SExt | SymKind::ZExt => children
-                .get(1)
-                .and_then(|&c| const_u64(graph, c))
-                .map(|w| w as u32),
+                SymKind::Clamp
+                | SymKind::Log2Ceil
+                | SymKind::Sqrt
+                | SymKind::Fma
+                | SymKind::FAdd
+                | SymKind::FSub
+                | SymKind::FMul
+                | SymKind::FDiv => child_width(0),
 
-            SymKind::LoadMemory => children
-                .get(1)
-                .and_then(|&c| const_u64(graph, c))
-                .map(|bytes| (bytes as u32) * 8),
-            SymKind::StoreMemory => None,
+                // As wide as its arms (the then-branch).
+                SymKind::If => child_width(1),
 
-            SymKind::LoadReserved => children
-                .get(1)
-                .and_then(|&c| const_u64(graph, c))
-                .map(|bytes| (bytes as u32) * 8),
-            SymKind::AtomicRmw => children
-                .get(2)
-                .and_then(|&c| const_u64(graph, c))
-                .map(|bytes| (bytes as u32) * 8),
-            SymKind::StoreConditional => Some(1),
-            SymKind::Fence => None,
+                SymKind::Extract => {
+                    match (
+                        children.get(1).and_then(|&c| const_u64(graph, c)),
+                        children.get(2).and_then(|&c| const_u64(graph, c)),
+                    ) {
+                        (Some(high), Some(low)) if high >= low => Some((high - low + 1) as u32),
+                        _ => None,
+                    }
+                }
 
-            // No scalar width: element widths come from the runtime value, not structure.
-            SymKind::Map
-            | SymKind::Zip
-            | SymKind::IterConcat
-            | SymKind::Split
-            | SymKind::Reduce
-            | SymKind::Arg => None,
+                SymKind::SExt | SymKind::ZExt => children
+                    .get(1)
+                    .and_then(|&c| const_u64(graph, c))
+                    .map(|w| w as u32),
+
+                SymKind::LoadMemory => children
+                    .get(1)
+                    .and_then(|&c| const_u64(graph, c))
+                    .map(|bytes| (bytes as u32) * 8),
+                SymKind::StoreMemory => None,
+
+                SymKind::LoadReserved => children
+                    .get(1)
+                    .and_then(|&c| const_u64(graph, c))
+                    .map(|bytes| (bytes as u32) * 8),
+                SymKind::AtomicRmw => children
+                    .get(2)
+                    .and_then(|&c| const_u64(graph, c))
+                    .map(|bytes| (bytes as u32) * 8),
+                SymKind::StoreConditional => Some(1),
+                SymKind::Fence => None,
+
+                // No scalar width: element widths come from the runtime value, not structure.
+                SymKind::Map
+                | SymKind::Zip
+                | SymKind::IterConcat
+                | SymKind::Split
+                | SymKind::Reduce
+                | SymKind::Arg => None,
+                _ => unreachable!("operator has no width rule"),
+            }
         };
 
         widths[index] = width;

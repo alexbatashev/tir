@@ -6,6 +6,7 @@ use quote::{format_ident, quote};
 use crate::Type;
 use crate::ast;
 use crate::error::TMDLError;
+use crate::sem_expr_state;
 use crate::utils::{
     get_encoding_arms, parse_literal_value, resolve_effective_asm_for_instruction,
     resolve_isa_param_values, resolve_operand_widths, resolve_operands_for_instruction,
@@ -1025,6 +1026,14 @@ fn emit_instructions<'a>(
                 })
                 .flatten();
             if let Some(slots) = operand_slots {
+                // Equality and inequality are commutative. Prefer the form with
+                // the zero register in the second operand, which is the
+                // conventional spelling for RISC-V zero comparisons.
+                let slots = if matches!(root_kind, tir::sem::SymKind::Eq | tir::sem::SymKind::Ne) {
+                    slots.into_iter().rev().collect::<Vec<_>>()
+                } else {
+                    slots
+                };
                 for (slot_index, (op_name, class_name, reg_symbol)) in slots.iter().enumerate() {
                     let width_symbol = branch.target_symbol + 1;
                     let (zero_pattern, zero_root) = branch_pattern_with_zero(
@@ -5134,31 +5143,6 @@ fn is_store_call(expr: &ast::Expr) -> bool {
     )
 }
 
-fn is_trap_call(expr: &ast::Expr) -> bool {
-    matches!(
-        expr,
-        ast::Expr::Call(ast::Call {
-            callee,
-            ..
-        }) if matches!(callee.as_ref(), ast::Expr::BuiltinFunction(ast::BuiltinFunction::Trap))
-    )
-}
-
-/// A `fence`/`fence_i` call: an effect statement, lowered like a store so the
-/// executor reaches `MachineContext::fence`.
-fn is_fence_call(expr: &ast::Expr) -> bool {
-    matches!(
-        expr,
-        ast::Expr::Call(ast::Call {
-            callee,
-            ..
-        }) if matches!(
-            callee.as_ref(),
-            ast::Expr::BuiltinFunction(ast::BuiltinFunction::Fence | ast::BuiltinFunction::FenceI)
-        )
-    )
-}
-
 /// Whether the behavior contains any atomic/fence builtin. Such behaviors are
 /// excluded from instruction selection and op-sem pattern generation.
 fn behavior_has_atomic_ops(expr: &ast::Expr) -> bool {
@@ -5229,10 +5213,31 @@ fn emit_behavior_exec(
     register_index_map: &HashMap<(String, String), u32>,
     reg_kinds: &HashMap<String, (bool, u32)>,
 ) -> Option<proc_macro2::TokenStream> {
-    match expr {
-        ast::Expr::Assign(a) => emit_assignment_exec(
-            a.dest.as_ref(),
-            a.value.as_ref(),
+    let effect = sem_expr_state::lower_effect(expr)?;
+    emit_behavior_effect(
+        &effect,
+        ops,
+        numeric_params,
+        isa_param_values,
+        mnemonic_lit,
+        register_index_map,
+        reg_kinds,
+    )
+}
+
+fn emit_behavior_effect(
+    effect: &sem_expr_state::Effect<'_>,
+    ops: &[(String, Type)],
+    numeric_params: &HashMap<String, i64>,
+    isa_param_values: &HashMap<String, i64>,
+    mnemonic_lit: &proc_macro2::Literal,
+    register_index_map: &HashMap<(String, String), u32>,
+    reg_kinds: &HashMap<String, (bool, u32)>,
+) -> Option<proc_macro2::TokenStream> {
+    match effect {
+        sem_expr_state::Effect::Assign(assign) => emit_assignment_exec(
+            assign.dest.as_ref(),
+            assign.value.as_ref(),
             ops,
             numeric_params,
             isa_param_values,
@@ -5240,7 +5245,9 @@ fn emit_behavior_exec(
             register_index_map,
             reg_kinds,
         ),
-        ast::Expr::Call(_) if is_store_call(expr) || is_fence_call(expr) => emit_effect_exec(
+        sem_expr_state::Effect::Store(expr)
+        | sem_expr_state::Effect::StoreConditional(expr)
+        | sem_expr_state::Effect::Fence(expr) => emit_effect_exec(
             expr,
             ops,
             numeric_params,
@@ -5249,7 +5256,7 @@ fn emit_behavior_exec(
             register_index_map,
             reg_kinds,
         ),
-        ast::Expr::Call(_) if is_trap_call(expr) => {
+        sem_expr_state::Effect::Trap(expr) => {
             let cause = trap_call_cause(expr)?;
             let cause_lit = proc_macro2::Literal::u64_unsuffixed(cause);
             Some(quote! {
@@ -5258,8 +5265,8 @@ fn emit_behavior_exec(
         }
         // The simulator executes the no-trap path; alignment exceptions are
         // not modeled here (the SMT backend gives the handlers meaning).
-        ast::Expr::Try(t) => emit_behavior_exec(
-            &t.body,
+        sem_expr_state::Effect::Try { body, .. } => emit_behavior_effect(
+            body,
             ops,
             numeric_params,
             isa_param_values,
@@ -5267,37 +5274,28 @@ fn emit_behavior_exec(
             register_index_map,
             reg_kinds,
         ),
-        ast::Expr::Block(b) => {
+        sem_expr_state::Effect::Block(effects) => {
             let mut steps = Vec::new();
-            for stmt in &b.stmts {
-                if let Some(step) = emit_behavior_exec(
-                    stmt,
+            for effect in effects {
+                steps.push(emit_behavior_effect(
+                    effect,
                     ops,
                     numeric_params,
                     isa_param_values,
                     mnemonic_lit,
                     register_index_map,
                     reg_kinds,
-                ) {
-                    steps.push(step);
-                } else if matches!(
-                    stmt,
-                    ast::Expr::Assign(_)
-                        | ast::Expr::Block(_)
-                        | ast::Expr::If(_)
-                        | ast::Expr::Try(_)
-                ) || is_store_call(stmt)
-                    || is_fence_call(stmt)
-                    || is_trap_call(stmt)
-                {
-                    return None;
-                }
+                )?);
             }
             Some(quote! { #(#steps)* })
         }
-        ast::Expr::If(i) => {
+        sem_expr_state::Effect::If {
+            cond,
+            then_effect,
+            else_effect,
+        } => {
             let cond_eval = emit_value_eval(
-                i.cond.as_ref(),
+                cond,
                 ops,
                 numeric_params,
                 isa_param_values,
@@ -5305,8 +5303,8 @@ fn emit_behavior_exec(
                 register_index_map,
                 reg_kinds,
             )?;
-            let then_body = emit_behavior_exec(
-                i.then.as_ref(),
+            let then_body = emit_behavior_effect(
+                then_effect,
                 ops,
                 numeric_params,
                 isa_param_values,
@@ -5316,10 +5314,10 @@ fn emit_behavior_exec(
             )?;
             // Omit the `else` arm for a guard with no else clause (e.g. a
             // guarded CSR write), so codegen emits no empty `else {}`.
-            let else_arm = match &i.else_ {
-                Some(else_expr) => {
-                    let else_body = emit_behavior_exec(
-                        else_expr.as_ref(),
+            let else_arm = match else_effect {
+                Some(else_effect) => {
+                    let else_body = emit_behavior_effect(
+                        else_effect,
                         ops,
                         numeric_params,
                         isa_param_values,
@@ -5340,7 +5338,6 @@ fn emit_behavior_exec(
                 }
             })
         }
-        _ => Some(quote! {}),
     }
 }
 
@@ -5987,61 +5984,8 @@ fn emit_dag_as_code(
 }
 
 fn emit_expr_kind_ts(kind: &tir::sem::SymKind) -> proc_macro2::TokenStream {
-    use tir::sem::SymKind;
-    match kind {
-        SymKind::Symbol => quote! { tir::sem::SymKind::Symbol },
-        SymKind::Constant => quote! { tir::sem::SymKind::Constant },
-        SymKind::Add => quote! { tir::sem::SymKind::Add },
-        SymKind::Sub => quote! { tir::sem::SymKind::Sub },
-        SymKind::Mul => quote! { tir::sem::SymKind::Mul },
-        SymKind::Div => quote! { tir::sem::SymKind::Div },
-        SymKind::UDiv => quote! { tir::sem::SymKind::UDiv },
-        SymKind::SRem => quote! { tir::sem::SymKind::SRem },
-        SymKind::URem => quote! { tir::sem::SymKind::URem },
-        SymKind::Neg => quote! { tir::sem::SymKind::Neg },
-        SymKind::Eq => quote! { tir::sem::SymKind::Eq },
-        SymKind::Ne => quote! { tir::sem::SymKind::Ne },
-        SymKind::Lt => quote! { tir::sem::SymKind::Lt },
-        SymKind::Le => quote! { tir::sem::SymKind::Le },
-        SymKind::Gt => quote! { tir::sem::SymKind::Gt },
-        SymKind::Ge => quote! { tir::sem::SymKind::Ge },
-        SymKind::ULt => quote! { tir::sem::SymKind::ULt },
-        SymKind::ULe => quote! { tir::sem::SymKind::ULe },
-        SymKind::UGt => quote! { tir::sem::SymKind::UGt },
-        SymKind::UGe => quote! { tir::sem::SymKind::UGe },
-        SymKind::ShiftLeft => quote! { tir::sem::SymKind::ShiftLeft },
-        SymKind::ShiftRightArithmetic => quote! { tir::sem::SymKind::ShiftRightArithmetic },
-        SymKind::ShiftRightLogic => quote! { tir::sem::SymKind::ShiftRightLogic },
-        SymKind::Or => quote! { tir::sem::SymKind::Or },
-        SymKind::And => quote! { tir::sem::SymKind::And },
-        SymKind::Xor => quote! { tir::sem::SymKind::Xor },
-        SymKind::Not => quote! { tir::sem::SymKind::Not },
-        SymKind::Concat => quote! { tir::sem::SymKind::Concat },
-        SymKind::If => quote! { tir::sem::SymKind::If },
-        SymKind::Clamp => quote! { tir::sem::SymKind::Clamp },
-        SymKind::LoadMemory => quote! { tir::sem::SymKind::LoadMemory },
-        SymKind::StoreMemory => quote! { tir::sem::SymKind::StoreMemory },
-        SymKind::ZExt => quote! { tir::sem::SymKind::ZExt },
-        SymKind::SExt => quote! { tir::sem::SymKind::SExt },
-        SymKind::Extract => quote! { tir::sem::SymKind::Extract },
-        SymKind::Log2Ceil => quote! { tir::sem::SymKind::Log2Ceil },
-        SymKind::Sqrt => quote! { tir::sem::SymKind::Sqrt },
-        SymKind::Fma => quote! { tir::sem::SymKind::Fma },
-        SymKind::FAdd => quote! { tir::sem::SymKind::FAdd },
-        SymKind::FSub => quote! { tir::sem::SymKind::FSub },
-        SymKind::FMul => quote! { tir::sem::SymKind::FMul },
-        SymKind::FDiv => quote! { tir::sem::SymKind::FDiv },
-        SymKind::Map => quote! { tir::sem::SymKind::Map },
-        SymKind::Zip => quote! { tir::sem::SymKind::Zip },
-        SymKind::IterConcat => quote! { tir::sem::SymKind::IterConcat },
-        SymKind::Split => quote! { tir::sem::SymKind::Split },
-        SymKind::Reduce => quote! { tir::sem::SymKind::Reduce },
-        SymKind::Arg => quote! { tir::sem::SymKind::Arg },
-        SymKind::LoadReserved => quote! { tir::sem::SymKind::LoadReserved },
-        SymKind::StoreConditional => quote! { tir::sem::SymKind::StoreConditional },
-        SymKind::AtomicRmw => quote! { tir::sem::SymKind::AtomicRmw },
-        SymKind::Fence => quote! { tir::sem::SymKind::Fence },
-    }
+    let variant = format_ident!("{kind:?}");
+    quote! { tir::sem::SymKind::#variant }
 }
 
 fn emit_expr_payload_ts(payload: &tir::sem::SymPayload<tir::ValueId>) -> proc_macro2::TokenStream {

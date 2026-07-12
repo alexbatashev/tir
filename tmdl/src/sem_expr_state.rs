@@ -1,39 +1,68 @@
 use crate::ast;
 
+/// Target-independent statement/control-flow form for an instruction behavior.
+/// Value expressions stay as AST references until the target printer lowers
+/// them to SemGraph; statement classification happens once here.
+pub enum Effect<'a> {
+    Assign(&'a ast::Assign),
+    Store(&'a ast::Expr),
+    StoreConditional(&'a ast::Expr),
+    Fence(&'a ast::Expr),
+    Trap(&'a ast::Expr),
+    Block(Vec<Effect<'a>>),
+    If {
+        cond: &'a ast::Expr,
+        then_effect: Box<Effect<'a>>,
+        else_effect: Option<Box<Effect<'a>>>,
+    },
+    Try {
+        source: &'a ast::TryExcept,
+        body: Box<Effect<'a>>,
+    },
+}
+
 /// Statement-level hooks invoked by [`compile_to_state`] while folding a
 /// behavior into a single state expression. `None` from a hook marks the
 /// statement unsupported.
 pub trait StateEmitter {
+    type State: Clone;
+    type Condition;
+
     /// Boolean condition of an `if`.
-    fn cond(&self, e: &ast::Expr) -> String;
-    fn assign(&self, a: &ast::Assign, st_name: &str) -> Option<String>;
+    fn cond(&self, e: &ast::Expr) -> Self::Condition;
+    fn assign(&self, a: &ast::Assign, state: &Self::State) -> Option<Self::State>;
     /// A bare `store(addr, size, value)` effect statement.
-    fn store(&self, c: &ast::Call, st_name: &str) -> Option<String>;
+    fn store(&self, c: &ast::Call, state: &Self::State) -> Option<Self::State>;
     /// A bare `store_conditional(...)` effect statement: the reservation-gated
     /// memory write applies, the `bits<1>` success value is discarded.
-    fn store_conditional(&self, c: &ast::Call, st_name: &str) -> Option<String>;
+    fn store_conditional(&self, c: &ast::Call, state: &Self::State) -> Option<Self::State>;
     /// A `fence(pred, succ)`/`fence_i()` effect statement.
-    fn fence(&self, c: &ast::Call, st_name: &str) -> Option<String>;
+    fn fence(&self, c: &ast::Call, state: &Self::State) -> Option<Self::State>;
     /// A `trap(args...)` statement: the ISA's trap-entry sequence, compiled
     /// against the current state via `compile`.
     fn trap(
         &self,
         c: &ast::Call,
-        st_name: &str,
-        compile: &dyn Fn(&ast::Expr, &str) -> String,
-    ) -> Option<String>;
-    fn ite(&self, cond: &str, then_state: &str, else_state: &str) -> String;
+        state: &Self::State,
+        compile: &dyn Fn(&ast::Expr, &Self::State) -> Self::State,
+    ) -> Option<Self::State>;
+    fn ite(
+        &self,
+        cond: &Self::Condition,
+        then_state: &Self::State,
+        else_state: &Self::State,
+    ) -> Self::State;
     /// Assemble a try/except from the already-compiled no-trap `body_state`;
     /// handler bodies are compiled against the entry state via `compile`,
     /// giving them precise-trap semantics.
     fn try_except(
         &self,
         t: &ast::TryExcept,
-        st_name: &str,
-        body_state: &str,
-        compile: &dyn Fn(&ast::Expr, &str) -> String,
-    ) -> Option<String>;
-    fn unsupported(&self, e: &ast::Expr);
+        state: &Self::State,
+        body_state: &Self::State,
+        compile: &dyn Fn(&ast::Expr, &Self::State) -> Self::State,
+    ) -> Option<Self::State>;
+    fn unsupported(&self);
 }
 
 fn is_store_call(e: &ast::Expr) -> bool {
@@ -76,63 +105,102 @@ fn is_fence_call(e: &ast::Expr) -> bool {
     )
 }
 
-pub fn compile_to_state(expr: &ast::Expr, st_name: &str, em: &dyn StateEmitter) -> String {
-    let or_unsupported = |state: Option<String>| {
-        state.unwrap_or_else(|| {
-            em.unsupported(expr);
-            st_name.to_string()
+pub fn lower_effect(expr: &ast::Expr) -> Option<Effect<'_>> {
+    match expr {
+        ast::Expr::Assign(assign) => Some(Effect::Assign(assign)),
+        ast::Expr::Call(_) if is_store_call(expr) => Some(Effect::Store(expr)),
+        ast::Expr::Call(_) if is_store_conditional_call(expr) => {
+            Some(Effect::StoreConditional(expr))
+        }
+        ast::Expr::Call(_) if is_fence_call(expr) => Some(Effect::Fence(expr)),
+        ast::Expr::Call(_) if is_trap_call(expr) => Some(Effect::Trap(expr)),
+        ast::Expr::Block(block) => Some(Effect::Block(
+            block
+                .stmts
+                .iter()
+                .map(lower_effect)
+                .collect::<Option<Vec<_>>>()?,
+        )),
+        ast::Expr::If(if_expr) => Some(Effect::If {
+            cond: &if_expr.cond,
+            then_effect: Box::new(lower_effect(&if_expr.then)?),
+            else_effect: match if_expr.else_.as_deref() {
+                Some(expr) => Some(Box::new(lower_effect(expr)?)),
+                None => None,
+            },
+        }),
+        ast::Expr::Try(try_expr) => Some(Effect::Try {
+            source: try_expr,
+            body: Box::new(lower_effect(&try_expr.body)?),
+        }),
+        _ => None,
+    }
+}
+
+pub fn compile_to_state<E: StateEmitter>(
+    expr: &ast::Expr,
+    state: &E::State,
+    emitter: &E,
+) -> E::State {
+    let Some(effect) = lower_effect(expr) else {
+        emitter.unsupported();
+        return state.clone();
+    };
+    compile_effect_to_state(&effect, state, emitter)
+}
+
+fn compile_effect_to_state<E: StateEmitter>(
+    effect: &Effect<'_>,
+    state: &E::State,
+    emitter: &E,
+) -> E::State {
+    let or_unsupported = |result: Option<E::State>| {
+        result.unwrap_or_else(|| {
+            emitter.unsupported();
+            state.clone()
         })
     };
-    match expr {
-        ast::Expr::Assign(a) => or_unsupported(em.assign(a, st_name)),
-        ast::Expr::Call(c) if is_store_call(expr) => or_unsupported(em.store(c, st_name)),
-        ast::Expr::Call(c) if is_store_conditional_call(expr) => {
-            or_unsupported(em.store_conditional(c, st_name))
+    match effect {
+        Effect::Assign(assign) => or_unsupported(emitter.assign(assign, state)),
+        Effect::Store(ast::Expr::Call(call)) => or_unsupported(emitter.store(call, state)),
+        Effect::StoreConditional(ast::Expr::Call(call)) => {
+            or_unsupported(emitter.store_conditional(call, state))
         }
-        ast::Expr::Call(c) if is_fence_call(expr) => or_unsupported(em.fence(c, st_name)),
-        ast::Expr::Call(c) if is_trap_call(expr) => {
-            or_unsupported(em.trap(c, st_name, &|e, st| compile_to_state(e, st, em)))
+        Effect::Fence(ast::Expr::Call(call)) => or_unsupported(emitter.fence(call, state)),
+        Effect::Trap(ast::Expr::Call(call)) => {
+            or_unsupported(emitter.trap(call, state, &|expr, state| {
+                compile_to_state(expr, state, emitter)
+            }))
         }
-        ast::Expr::Block(b) => {
-            let mut current = st_name.to_string();
-            for stmt in &b.stmts {
-                if matches!(
-                    stmt,
-                    ast::Expr::Assign(_)
-                        | ast::Expr::Block(_)
-                        | ast::Expr::If(_)
-                        | ast::Expr::Try(_)
-                ) || is_store_call(stmt)
-                    || is_store_conditional_call(stmt)
-                    || is_fence_call(stmt)
-                    || is_trap_call(stmt)
-                {
-                    current = compile_to_state(stmt, &current, em);
-                } else {
-                    em.unsupported(stmt);
-                }
+        Effect::Block(effects) => {
+            let mut current = state.clone();
+            for effect in effects {
+                current = compile_effect_to_state(effect, &current, emitter);
             }
             current
         }
-        ast::Expr::If(i) => {
-            let cond = em.cond(&i.cond);
-            let then_state = compile_to_state(&i.then, st_name, em);
-            let else_state = if let Some(e) = &i.else_ {
-                compile_to_state(e, st_name, em)
+        Effect::If {
+            cond,
+            then_effect,
+            else_effect,
+        } => {
+            let cond = emitter.cond(cond);
+            let then_state = compile_effect_to_state(then_effect, state, emitter);
+            let else_state = if let Some(effect) = else_effect {
+                compile_effect_to_state(effect, state, emitter)
             } else {
-                st_name.to_string()
+                state.clone()
             };
-            em.ite(&cond, &then_state, &else_state)
+            emitter.ite(&cond, &then_state, &else_state)
         }
-        ast::Expr::Try(t) => {
-            let body_state = compile_to_state(&t.body, st_name, em);
-            or_unsupported(em.try_except(t, st_name, &body_state, &|e, st| {
-                compile_to_state(e, st, em)
-            }))
+        Effect::Try { source, body } => {
+            let body_state = compile_effect_to_state(body, state, emitter);
+            or_unsupported(
+                emitter.try_except(source, state, &body_state, &|expr, state| {
+                    compile_to_state(expr, state, emitter)
+                }),
+            )
         }
-        _ => {
-            em.unsupported(expr);
-            st_name.to_string()
-        }
+        _ => unreachable!("call effects are always backed by call expressions"),
     }
 }

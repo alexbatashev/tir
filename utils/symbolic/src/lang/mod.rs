@@ -3,10 +3,12 @@ use tir_graph::Matchable;
 
 mod exec;
 mod infer;
+mod ops;
 mod sexpr;
 
 pub use exec::{Memory, execute, execute_with_memory};
 pub use infer::{canonicalize_for_selection, infer_widths};
+pub use ops::{SCALAR_OPS, ScalarOp, SmtTemplate, WidthRule, scalar_op, scalar_op_named};
 pub use sexpr::{BuildError, SemBuilderHooks, SemExpr, build, op_kind, op_name, parse};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -114,6 +116,9 @@ pub enum SymKind {
 impl SymKind {
     /// Whether the operator is commutative in its two operands.
     pub fn is_commutative(&self) -> bool {
+        if let Some(op) = scalar_op(*self) {
+            return op.commutative;
+        }
         matches!(
             self,
             SymKind::Add
@@ -128,6 +133,9 @@ impl SymKind {
 
     /// Structural arity: number of operand children.
     pub fn arity(&self) -> usize {
+        if let Some(op) = scalar_op(*self) {
+            return op.arity;
+        }
         match self {
             SymKind::Symbol | SymKind::Constant | SymKind::Arg => 0,
             SymKind::Not

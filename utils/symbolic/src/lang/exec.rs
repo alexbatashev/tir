@@ -1,7 +1,7 @@
 use tir_adt::{APFloat, APInt, RawBits};
 use tir_graph::{Dag, NodeId};
 
-use crate::lang::{AtomicRmwOp, MemOrdering, SymKind, SymPayload, Value};
+use crate::lang::{AtomicRmwOp, MemOrdering, SymKind, SymPayload, Value, scalar_op};
 
 /// Memory backend for `LoadMemory`/`StoreMemory` nodes.
 pub trait Memory {
@@ -193,14 +193,6 @@ macro_rules! arith_op {
     };
 }
 
-/// Integer-only binary op: coerce widths, apply one `APInt` method.
-macro_rules! int_binop {
-    ($c:ident, $m:ident, $op:literal) => {{
-        let (a, b) = coerce_ints(as_int!($c(0), $op), as_int!($c(1), $op));
-        Value::Int(a.$m(&b))
-    }};
-}
-
 /// Signed/float comparison yielding a 1-bit `Int`.
 macro_rules! cmp_op {
     ($c:ident, $int_m:ident, $float_m:ident, $op:literal) => {
@@ -220,14 +212,6 @@ macro_rules! cmp_op {
     };
 }
 
-/// Unsigned integer comparison yielding a 1-bit `Int`.
-macro_rules! ucmp_op {
-    ($c:ident, $m:ident, $op:literal) => {{
-        let (a, b) = coerce_ints(as_int!($c(0), $op), as_int!($c(1), $op));
-        Value::Int(APInt::new(1, bool_result(a.$m(&b))))
-    }};
-}
-
 /// Widen `v` to `width` (sign- or zero-extend per its signedness); no-op if already wide enough.
 fn widen(v: APInt, width: u32) -> APInt {
     if v.width() >= width {
@@ -244,12 +228,6 @@ fn widen(v: APInt, width: u32) -> APInt {
 fn coerce_ints(a: APInt, b: APInt) -> (APInt, APInt) {
     let width = a.width().max(b.width());
     (widen(a, width), widen(b, width))
-}
-
-/// Compare two integers by value, ignoring width and signedness.
-fn ints_equal(a: APInt, b: APInt) -> bool {
-    let (a, b) = coerce_ints(a, b);
-    a.with_signed(false) == b.with_signed(false)
 }
 
 /// The IEEE binary format of a `width`-bit register value, for the float kinds'
@@ -434,6 +412,20 @@ fn eval_node<V, M: Memory>(
 
     let c = |idx: usize| child_val(graph, node, idx, cache);
 
+    if let Some(op) = scalar_op(*graph.get_kind(node)) {
+        let operands = (0..op.arity)
+            .map(|index| match c(index) {
+                Value::Int(value) => Some(value),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>();
+        if let Some(operands) = operands {
+            let result = Value::Int(op.eval_int(&operands));
+            cache[node.index()] = Some(result.clone());
+            return Ok(result);
+        }
+    }
+
     let result = match graph.get_kind(node) {
         SymKind::Map | SymKind::Reduce => {
             unreachable!("map/reduce handled before child pre-evaluation")
@@ -500,10 +492,6 @@ fn eval_node<V, M: Memory>(
         SymKind::Sub => arith_op!(c, sub, sub, "sub"),
         SymKind::Mul => arith_op!(c, mul, mul, "mul"),
         SymKind::Div => arith_op!(c, sdiv, div, "div"),
-        SymKind::UDiv => int_binop!(c, udiv, "udiv"),
-        SymKind::SRem => int_binop!(c, srem, "srem"),
-        SymKind::URem => int_binop!(c, urem, "urem"),
-        SymKind::Neg => Value::Int(as_int!(c(0), "neg").neg()),
 
         // ── Floating point ─────────────────────────────────────────────────
         SymKind::FAdd => float_binop(c(0), c(1), APFloat::add, "fadd"),
@@ -512,57 +500,12 @@ fn eval_node<V, M: Memory>(
         SymKind::FDiv => float_binop(c(0), c(1), APFloat::div, "fdiv"),
 
         // ── Bitwise (int only) ─────────────────────────────────────────────
-        SymKind::And => int_binop!(c, and, "and"),
-        SymKind::Or => int_binop!(c, or, "or"),
-        SymKind::Xor => int_binop!(c, xor, "xor"),
-        // First operand occupies the high bits.
-        SymKind::Concat => {
-            let hi = as_int!(c(0), "concat");
-            let lo = as_int!(c(1), "concat");
-            let width = hi.width() + lo.width();
-            let value = hi
-                .zero_extend(width)
-                .shl(lo.width())
-                .or(&lo.zero_extend(width));
-            Value::Int(value)
-        }
-        SymKind::ShiftLeft => {
-            Value::Int(as_int!(c(0), "shl").shl(as_int!(c(1), "shl").to_u64() as u32))
-        }
-        SymKind::ShiftRightLogic => {
-            Value::Int(as_int!(c(0), "lshr").lshr(as_int!(c(1), "lshr").to_u64() as u32))
-        }
-        SymKind::ShiftRightArithmetic => {
-            // Force signed: register values are stored unsigned, else `>>>` degrades to logical.
-            let mut value = as_int!(c(0), "ashr");
-            value.set_signed(true);
-            Value::Int(value.ashr(as_int!(c(1), "ashr").to_u64() as u32))
-        }
-        SymKind::Not => Value::Int(as_int!(c(0), "not").not()),
-
-        // ── Comparisons ────────────────────────────────────────────────────
-        SymKind::Eq => {
-            let eq = match (c(0), c(1)) {
-                (Value::Int(a), Value::Int(b)) => ints_equal(a, b),
-                (l, r) => l == r,
-            };
-            Value::Int(APInt::new(1, bool_result(eq)))
-        }
-        SymKind::Ne => {
-            let ne = match (c(0), c(1)) {
-                (Value::Int(a), Value::Int(b)) => !ints_equal(a, b),
-                (l, r) => l != r,
-            };
-            Value::Int(APInt::new(1, bool_result(ne)))
-        }
+        SymKind::Eq => Value::Int(APInt::new(1, bool_result(c(0) == c(1)))),
+        SymKind::Ne => Value::Int(APInt::new(1, bool_result(c(0) != c(1)))),
         SymKind::Lt => cmp_op!(c, slt, lt, "lt"),
         SymKind::Le => cmp_op!(c, sle, le, "le"),
         SymKind::Gt => cmp_op!(c, sgt, gt, "gt"),
         SymKind::Ge => cmp_op!(c, sge, ge, "ge"),
-        SymKind::ULt => ucmp_op!(c, ult, "ult"),
-        SymKind::ULe => ucmp_op!(c, ule, "ule"),
-        SymKind::UGt => ucmp_op!(c, ugt, "ugt"),
-        SymKind::UGe => ucmp_op!(c, uge, "uge"),
 
         // ── Control ────────────────────────────────────────────────────────
         SymKind::If => {
@@ -727,6 +670,7 @@ fn eval_node<V, M: Memory>(
             memory.fence(pred, succ, kind)?;
             Value::Int(APInt::new(1, 0))
         }
+        _ => unreachable!("operator has no concrete evaluator"),
     };
 
     cache[node.index()] = Some(result.clone());
