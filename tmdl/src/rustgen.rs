@@ -430,6 +430,10 @@ fn emit_instructions<'a>(
 
         // `execute()` binds ISA parameters (e.g. `XLEN`) from here at runtime.
         let isa_param_values: HashMap<String, i64> = resolve_isa_param_values(inst, item_cache);
+        let trap_handler = inst
+            .for_isas
+            .iter()
+            .find_map(|isa| find_trap_handler(isa, item_cache));
 
         // A `todo()` behavior declares the instruction's semantics unmodeled: it
         // produces no selection rule and its `execute()` traps. The op still
@@ -1100,25 +1104,45 @@ fn emit_instructions<'a>(
             as_sem_expr_impls.push(impl_ts);
         }
 
+        let behavior_ctx = RustBehaviorCtx {
+            ops: &ops,
+            isa_param_values: &isa_param_values,
+            mnemonic: &mnemonic_lit,
+            reg_kinds: &reg_kinds,
+        };
         let execute_body = if let Some(branch_val) = branch_value.as_ref() {
             // Conditional control transfer: `synthesize_branch_value` folds the
             // condition into one value (taken target or fall-through) written to PC
             // every cycle.
-            match emit_value_eval(
-                branch_val,
-                &ops,
+            let ast::Expr::If(branch_if) = branch_val else {
+                unreachable!("synthesized branch value is an if expression")
+            };
+            let normalized = ast::Expr::Assign(ast::Assign {
+                dest: Box::new(ast::Expr::Path(ast::Path {
+                    base: "PC".to_string(),
+                    remainder: vec!["pc".to_string()],
+                    span: branch_if.span,
+                })),
+                value: Box::new(branch_val.clone()),
+                span: branch_if.span,
+            });
+            match emit_behavior_exec(
+                &normalized,
+                trap_handler,
                 &numeric_params,
-                &isa_param_values,
-                &mnemonic_lit,
                 &register_index_map,
-                &reg_kinds,
+                &behavior_ctx,
             ) {
-                Some(eval) => quote! {
-                    #eval
-                    machine.write_pc(value.to_u64());
+                Some(body) => quote! {
+                    #body
                     Ok(())
                 },
-                None => quote! { Ok(()) },
+                None => quote! {
+                    Err(tir::backend::SimTrap::InvalidInstruction {
+                        op: #mnemonic_lit,
+                        reason: "failed to convert behavior to executable expression".to_string(),
+                    })
+                },
             }
         } else if uses_todo {
             quote! {
@@ -1130,12 +1154,10 @@ fn emit_instructions<'a>(
         } else {
             match emit_behavior_exec(
                 &inst.behavior,
-                &ops,
+                trap_handler,
                 &numeric_params,
-                &isa_param_values,
-                &mnemonic_lit,
                 &register_index_map,
-                &reg_kinds,
+                &behavior_ctx,
             ) {
                 Some(body) => quote! {
                     #body
@@ -1786,6 +1808,33 @@ fn emit_instructions<'a>(
             rules
         }
     })
+}
+
+fn find_trap_handler<'a>(
+    isa: &str,
+    item_cache: &HashMap<&'a str, &'a ast::Item>,
+) -> Option<&'a ast::TrapHandler> {
+    let mut pending = vec![isa];
+    let mut visited = HashSet::new();
+    while let Some(name) = pending.pop() {
+        if !visited.insert(name) {
+            continue;
+        }
+        let Some(ast::Item::Isa(isa)) = item_cache.get(name) else {
+            continue;
+        };
+        if let Some(handler) = &isa.trap_handler {
+            return Some(handler);
+        }
+        match &isa.requires {
+            None => {}
+            Some(ast::IsaRequirement::Single(parent)) => pending.push(parent),
+            Some(ast::IsaRequirement::Any(parents)) | Some(ast::IsaRequirement::All(parents)) => {
+                pending.extend(parents.iter().map(String::as_str));
+            }
+        }
+    }
+    None
 }
 
 fn emit_register_parsers_and_printers(
@@ -5190,141 +5239,111 @@ fn behavior_has_atomic_ops(expr: &ast::Expr) -> bool {
     }
 }
 
-/// The constant cause code of a `trap(cause, ...)` call. `None` when the
-/// first argument is not an integer literal. Further arguments (the trap
-/// value payload) only matter to the SMT model; the machine's exception
-/// handling owns that state here.
-fn trap_call_cause(expr: &ast::Expr) -> Option<u64> {
-    let ast::Expr::Call(call) = expr else {
-        return None;
-    };
-    match call.arguments.first() {
-        Some(ast::Expr::Lit(ast::Lit::Int(li))) => Some(parse_literal_value(li)),
-        _ => None,
-    }
-}
-
 fn emit_behavior_exec(
     expr: &ast::Expr,
-    ops: &[(String, Type)],
+    trap_handler: Option<&ast::TrapHandler>,
     numeric_params: &HashMap<String, i64>,
-    isa_param_values: &HashMap<String, i64>,
-    mnemonic_lit: &proc_macro2::Literal,
     register_index_map: &HashMap<(String, String), u32>,
-    reg_kinds: &HashMap<String, (bool, u32)>,
+    ctx: &RustBehaviorCtx<'_>,
 ) -> Option<proc_macro2::TokenStream> {
-    let effect = sem_expr_state::lower_effect(expr)?;
-    emit_behavior_effect(
-        &effect,
-        ops,
+    let behavior = sem_expr_state::lower_behavior(
+        expr,
+        trap_handler,
         numeric_params,
-        isa_param_values,
-        mnemonic_lit,
+        ctx.isa_param_values,
         register_index_map,
-        reg_kinds,
-    )
+    )?;
+    emit_behavior_effect(&behavior, behavior.root, ctx)
+}
+
+struct RustBehaviorCtx<'a> {
+    ops: &'a [(String, Type)],
+    isa_param_values: &'a HashMap<String, i64>,
+    mnemonic: &'a proc_macro2::Literal,
+    reg_kinds: &'a HashMap<String, (bool, u32)>,
 }
 
 fn emit_behavior_effect(
-    effect: &sem_expr_state::Effect<'_>,
-    ops: &[(String, Type)],
-    numeric_params: &HashMap<String, i64>,
-    isa_param_values: &HashMap<String, i64>,
-    mnemonic_lit: &proc_macro2::Literal,
-    register_index_map: &HashMap<(String, String), u32>,
-    reg_kinds: &HashMap<String, (bool, u32)>,
+    behavior: &sem_expr_state::BehaviorGraph,
+    effect: tir::graph::NodeId,
+    ctx: &RustBehaviorCtx<'_>,
 ) -> Option<proc_macro2::TokenStream> {
-    match effect {
-        sem_expr_state::Effect::Assign(assign) => emit_assignment_exec(
-            assign.dest.as_ref(),
-            assign.value.as_ref(),
-            ops,
-            numeric_params,
-            isa_param_values,
-            mnemonic_lit,
-            register_index_map,
-            reg_kinds,
-        ),
-        sem_expr_state::Effect::Store(expr)
-        | sem_expr_state::Effect::StoreConditional(expr)
-        | sem_expr_state::Effect::Fence(expr) => emit_effect_exec(
-            expr,
-            ops,
-            numeric_params,
-            isa_param_values,
-            mnemonic_lit,
-            register_index_map,
-            reg_kinds,
-        ),
-        sem_expr_state::Effect::Trap(expr) => {
-            let cause = trap_call_cause(expr)?;
-            let cause_lit = proc_macro2::Literal::u64_unsuffixed(cause);
-            Some(quote! {
-                machine.raise_exception(#cause_lit)?;
-            })
+    use tir::graph::Dag as _;
+
+    let children: Vec<_> = behavior.graph.children(effect).collect();
+    match behavior.graph.get_node(effect) {
+        tir::sem::SymKind::StateAssign => {
+            let sem_expr_state::EffectPayload::Assign { destination } =
+                behavior.effect_payload(effect)?
+            else {
+                return None;
+            };
+            let eval = emit_behavior_value_eval(
+                behavior,
+                *children.first()?,
+                ctx.ops,
+                ctx.isa_param_values,
+                ctx.mnemonic,
+                ctx.reg_kinds,
+            )?;
+            let write = emit_graph_destination_write(destination, ctx.ops, ctx.mnemonic)?;
+            Some(quote! {{ #eval #write }})
         }
-        // The simulator executes the no-trap path; alignment exceptions are
-        // not modeled here (the SMT backend gives the handlers meaning).
-        sem_expr_state::Effect::Try { body, .. } => emit_behavior_effect(
-            body,
-            ops,
-            numeric_params,
-            isa_param_values,
-            mnemonic_lit,
-            register_index_map,
-            reg_kinds,
-        ),
-        sem_expr_state::Effect::Block(effects) => {
+        tir::sem::SymKind::StateStore
+        | tir::sem::SymKind::StateStoreConditional
+        | tir::sem::SymKind::StateFence => {
+            let eval = emit_behavior_value_eval(
+                behavior,
+                *children.first()?,
+                ctx.ops,
+                ctx.isa_param_values,
+                ctx.mnemonic,
+                ctx.reg_kinds,
+            )?;
+            Some(quote! {{ #eval let _ = value; }})
+        }
+        tir::sem::SymKind::StateTrap => {
+            let sem_expr_state::EffectPayload::Trap { argument_count, .. } =
+                behavior.effect_payload(effect)?
+            else {
+                return None;
+            };
+            let cause = *children.get((0..*argument_count).next()?)?;
+            let eval = emit_behavior_value_eval(
+                behavior,
+                cause,
+                ctx.ops,
+                ctx.isa_param_values,
+                ctx.mnemonic,
+                ctx.reg_kinds,
+            )?;
+            Some(quote! { #eval machine.raise_exception(value.to_u64())?; })
+        }
+        // The simulator executes the no-trap path. Handler state is modeled by
+        // the SMT printer, while machine exception handling owns trap entry.
+        tir::sem::SymKind::StateTry => emit_behavior_effect(behavior, *children.first()?, ctx),
+        tir::sem::SymKind::StateBlock => {
             let mut steps = Vec::new();
-            for effect in effects {
-                steps.push(emit_behavior_effect(
-                    effect,
-                    ops,
-                    numeric_params,
-                    isa_param_values,
-                    mnemonic_lit,
-                    register_index_map,
-                    reg_kinds,
-                )?);
+            for effect in children {
+                steps.push(emit_behavior_effect(behavior, effect, ctx)?);
             }
             Some(quote! { #(#steps)* })
         }
-        sem_expr_state::Effect::If {
-            cond,
-            then_effect,
-            else_effect,
-        } => {
-            let cond_eval = emit_value_eval(
-                cond,
-                ops,
-                numeric_params,
-                isa_param_values,
-                mnemonic_lit,
-                register_index_map,
-                reg_kinds,
+        tir::sem::SymKind::StateIf => {
+            let cond_eval = emit_behavior_value_eval(
+                behavior,
+                *children.first()?,
+                ctx.ops,
+                ctx.isa_param_values,
+                ctx.mnemonic,
+                ctx.reg_kinds,
             )?;
-            let then_body = emit_behavior_effect(
-                then_effect,
-                ops,
-                numeric_params,
-                isa_param_values,
-                mnemonic_lit,
-                register_index_map,
-                reg_kinds,
-            )?;
+            let then_body = emit_behavior_effect(behavior, *children.get(1)?, ctx)?;
             // Omit the `else` arm for a guard with no else clause (e.g. a
             // guarded CSR write), so codegen emits no empty `else {}`.
-            let else_arm = match else_effect {
+            let else_arm = match children.get(2) {
                 Some(else_effect) => {
-                    let else_body = emit_behavior_effect(
-                        else_effect,
-                        ops,
-                        numeric_params,
-                        isa_param_values,
-                        mnemonic_lit,
-                        register_index_map,
-                        reg_kinds,
-                    )?;
+                    let else_body = emit_behavior_effect(behavior, *else_effect, ctx)?;
                     quote! { else { #else_body } }
                 }
                 None => quote! {},
@@ -5338,86 +5357,56 @@ fn emit_behavior_effect(
                 }
             })
         }
+        tir::sem::SymKind::StateHandler => None,
+        _ => None,
     }
 }
 
-/// Emit one assignment from a behavior: evaluate its value, then write it to the
-/// destination (a register operand, a fixed/status register named by class, or PC).
-/// Returns `None` if the value cannot be lowered or the destination is unrecognized.
+fn emit_behavior_value_eval(
+    behavior: &sem_expr_state::BehaviorGraph,
+    root: tir::graph::NodeId,
+    ops: &[(String, Type)],
+    isa_param_values: &HashMap<String, i64>,
+    mnemonic_lit: &proc_macro2::Literal,
+    reg_kinds: &HashMap<String, (bool, u32)>,
+) -> Option<proc_macro2::TokenStream> {
+    let (values, root) = behavior.value_graph(root)?;
+    emit_lowered_value_eval(
+        &values,
+        root,
+        &behavior.variable_symbols,
+        &behavior.register_symbols,
+        &behavior.regnum_symbols,
+        ops,
+        isa_param_values,
+        mnemonic_lit,
+        reg_kinds,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
-fn emit_assignment_exec(
-    dest: &ast::Expr,
-    rhs: &ast::Expr,
+fn emit_lowered_value_eval(
+    dag: &impl tir::graph::Dag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
+    root: tir::graph::NodeId,
+    variable_symbols: &HashMap<String, u32>,
+    register_symbols: &HashMap<(String, u32), u32>,
+    regnum_symbols: &HashMap<String, u32>,
     ops: &[(String, Type)],
-    numeric_params: &HashMap<String, i64>,
     isa_param_values: &HashMap<String, i64>,
     mnemonic_lit: &proc_macro2::Literal,
-    register_index_map: &HashMap<(String, String), u32>,
     reg_kinds: &HashMap<String, (bool, u32)>,
 ) -> Option<proc_macro2::TokenStream> {
-    let eval = emit_value_eval(
-        rhs,
-        ops,
-        numeric_params,
-        isa_param_values,
-        mnemonic_lit,
-        register_index_map,
-        reg_kinds,
-    )?;
-    let write = emit_destination_write(dest, ops, register_index_map, mnemonic_lit)?;
-    Some(quote! {
-        {
-            #eval
-            #write
-        }
-    })
-}
-
-fn emit_effect_exec(
-    expr: &ast::Expr,
-    ops: &[(String, Type)],
-    numeric_params: &HashMap<String, i64>,
-    isa_param_values: &HashMap<String, i64>,
-    mnemonic_lit: &proc_macro2::Literal,
-    register_index_map: &HashMap<(String, String), u32>,
-    reg_kinds: &HashMap<String, (bool, u32)>,
-) -> Option<proc_macro2::TokenStream> {
-    let eval = emit_value_eval(
-        expr,
-        ops,
-        numeric_params,
-        isa_param_values,
-        mnemonic_lit,
-        register_index_map,
-        reg_kinds,
-    )?;
-    Some(quote! {
-        {
-            #eval
-            let _ = value;
-        }
-    })
-}
-
-/// Emit the statements that bind `value` to the result of evaluating `rhs` against
-/// the machine state (reading operands, fixed/status registers, and ISA params).
-/// Returns `None` if the expression cannot be lowered (e.g. it loads memory).
-fn emit_value_eval(
-    rhs: &ast::Expr,
-    ops: &[(String, Type)],
-    numeric_params: &HashMap<String, i64>,
-    isa_param_values: &HashMap<String, i64>,
-    mnemonic_lit: &proc_macro2::Literal,
-    register_index_map: &HashMap<(String, String), u32>,
-    reg_kinds: &HashMap<String, (bool, u32)>,
-) -> Option<proc_macro2::TokenStream> {
-    let mut dag = tir::sem::SemGraph::new();
-    let lowering =
-        rhs.lower_to_sema_with_registers(&mut dag, numeric_params, register_index_map)?;
     // Build the semantic graph inline (no type annotations, so no `_context`).
-    let (dag_stmts, _root) = emit_dag_as_code(&dag, lowering.root, &[], &HashSet::new());
-    let (max_sym_id, sym_inits) =
-        emit_sym_inits(&lowering, ops, isa_param_values, mnemonic_lit, reg_kinds);
+    let (dag_stmts, _root) = emit_dag_as_code(dag, root, &[], &HashSet::new());
+    let (max_sym_id, sym_inits) = emit_sym_inits(
+        variable_symbols,
+        register_symbols,
+        regnum_symbols,
+        ops,
+        isa_param_values,
+        mnemonic_lit,
+        reg_kinds,
+    );
     let sym_count_lit = proc_macro2::Literal::usize_unsuffixed(max_sym_id + 1);
 
     Some(quote! {
@@ -5510,16 +5499,18 @@ fn emit_value_eval(
 /// parameters are bound to constants. Returns the highest symbol id (to size the
 /// table) and the steps.
 fn emit_sym_inits(
-    lowering: &ast::SemaLowering,
+    variable_symbols: &HashMap<String, u32>,
+    register_symbols: &HashMap<(String, u32), u32>,
+    regnum_symbols: &HashMap<String, u32>,
     ops: &[(String, Type)],
     isa_param_values: &HashMap<String, i64>,
     mnemonic_lit: &proc_macro2::Literal,
     reg_kinds: &HashMap<String, (bool, u32)>,
 ) -> (usize, Vec<proc_macro2::TokenStream>) {
     let max_sym_id = [
-        lowering.variable_symbols.values().copied().max(),
-        lowering.register_symbols.values().copied().max(),
-        lowering.regnum_symbols.values().copied().max(),
+        variable_symbols.values().copied().max(),
+        register_symbols.values().copied().max(),
+        regnum_symbols.values().copied().max(),
     ]
     .into_iter()
     .flatten()
@@ -5527,7 +5518,7 @@ fn emit_sym_inits(
     .unwrap_or(0) as usize;
 
     let mut steps: Vec<proc_macro2::TokenStream> = Vec::new();
-    for (name, &sym_id) in &lowering.variable_symbols {
+    for (name, &sym_id) in variable_symbols {
         let sym_lit = proc_macro2::Literal::usize_unsuffixed(sym_id as usize);
         let name_lit = proc_macro2::Literal::string(name);
         if let Some((_, ty)) = ops.iter().find(|(n, _)| n == name) {
@@ -5597,7 +5588,7 @@ fn emit_sym_inits(
             });
         }
     }
-    for ((class, number), &sym_id) in &lowering.register_symbols {
+    for ((class, number), &sym_id) in register_symbols {
         let sym_lit = proc_macro2::Literal::usize_unsuffixed(sym_id as usize);
         let class_lit = proc_macro2::Literal::string(class);
         let number_lit = proc_macro2::Literal::u16_unsuffixed(*number as u16);
@@ -5609,7 +5600,7 @@ fn emit_sym_inits(
     // `regnum(op)` binds a symbol to the operand's encoding index. The index is
     // an identity, not an arithmetic value; comparisons coerce by value and
     // ignore width, so a plain 64-bit integer holds it.
-    for (name, &sym_id) in &lowering.regnum_symbols {
+    for (name, &sym_id) in regnum_symbols {
         let sym_lit = proc_macro2::Literal::usize_unsuffixed(sym_id as usize);
         let name_lit = proc_macro2::Literal::string(name);
         steps.push(quote! {
@@ -5627,25 +5618,36 @@ fn emit_sym_inits(
     (max_sym_id, steps)
 }
 
-/// Emit the write that stores `value` to an assignment's destination: PC, a register
-/// operand resolved from the instruction's attributes (honoring hard-wired-zero
-/// registers), or a register named directly by class (e.g. a status flag
-/// `PSTATE::z`). Returns `None` for an unrecognized destination.
-fn emit_destination_write(
-    dest: &ast::Expr,
+fn emit_graph_destination_write(
+    dest: &sem_expr_state::Destination,
     ops: &[(String, Type)],
-    register_index_map: &HashMap<(String, String), u32>,
     mnemonic_lit: &proc_macro2::Literal,
 ) -> Option<proc_macro2::TokenStream> {
-    if is_pc_dest(dest) {
+    use sem_expr_state::Destination;
+
+    if matches!(dest, Destination::Path { base, members } if base == "PC" && members == &["pc"]) {
         return Some(quote! { machine.write_pc(value.to_u64()); });
     }
 
-    let name = assignment_dest_name(dest)?;
+    if let Destination::FixedRegister { class, index, .. } = dest {
+        let class_lit = proc_macro2::Literal::string(class);
+        let index_lit = proc_macro2::Literal::u16_unsuffixed(*index as u16);
+        return Some(quote! {
+            if !register_has_trait_hardwired_zero(#class_lit, #index_lit) {
+                machine.write_register_value(#class_lit, #index_lit, value)?;
+            }
+        });
+    }
 
-    // A register operand: its concrete `(class, index)` comes from the attributes.
-    if let Some((_, Type::Struct(_))) = ops.iter().find(|(n, _)| *n == name) {
-        let name_lit = proc_macro2::Literal::string(&name);
+    let name = match dest {
+        Destination::Ident(name) => name,
+        Destination::Path { members, .. } if members.len() == 1 => &members[0],
+        Destination::FixedRegister { .. }
+        | Destination::Path { .. }
+        | Destination::Field { .. } => return None,
+    };
+    if let Some((_, Type::Struct(_))) = ops.iter().find(|(n, _)| n == name) {
+        let name_lit = proc_macro2::Literal::string(name);
         return Some(quote! {
             let (dst_class, dst_idx) = tir::backend::register_attr(self.attributes(), #name_lit).ok_or(
                 tir::backend::SimTrap::MissingAttribute {
@@ -5657,23 +5659,6 @@ fn emit_destination_write(
                 machine.write_register_value(dst_class.name(), dst_idx, value)?;
             }
         });
-    }
-
-    // A register named directly by class, e.g. a status flag `PSTATE::z` or a fixed
-    // register like `GPR::x30`; its index is fixed at compile time.
-    if let ast::Expr::Path(path) = dest
-        && path.remainder.len() == 1
-    {
-        let key = (path.base.clone(), path.remainder[0].clone());
-        if let Some(&index) = register_index_map.get(&key) {
-            let class_lit = proc_macro2::Literal::string(&path.base);
-            let index_lit = proc_macro2::Literal::u16_unsuffixed(index as u16);
-            return Some(quote! {
-                if !register_has_trait_hardwired_zero(#class_lit, #index_lit) {
-                    machine.write_register_value(#class_lit, #index_lit, value)?;
-                }
-            });
-        }
     }
 
     None
@@ -5984,7 +5969,10 @@ fn emit_dag_as_code(
 }
 
 fn emit_expr_kind_ts(kind: &tir::sem::SymKind) -> proc_macro2::TokenStream {
-    let variant = format_ident!("{kind:?}");
+    let variant = tir::sem::scalar_op(*kind).map_or_else(
+        || format_ident!("{kind:?}"),
+        |op| format_ident!("{}", op.rust),
+    );
     quote! { tir::sem::SymKind::#variant }
 }
 
