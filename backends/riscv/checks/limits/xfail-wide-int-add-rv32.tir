@@ -1,10 +1,6 @@
-// XFAIL: *
 // RUN: not tir mc --march=rv32i --stage=isel %s
 
-// MISCOMPILE: an i64 add on rv32 (double the register width) silently selects a
-// single `riscv.add`, truncating to 32 bits with no carry propagation and no
-// diagnostic. Should reject or legalize into a two-register add-with-carry
-// sequence; instead it miscompiles, so `not` currently fails.
+// i64 is wider than rv32 XLEN and is rejected before selection.
 
 module {
   func @a(%0: !i64, %1: !i64) -> !i64 {

@@ -79,6 +79,17 @@ pub trait Commutative {
     }
 }
 
+/// An arithmetic operation over integer values.
+pub trait IntegerArithmetic {
+    fn verify_interface(
+        &self,
+        _this: &dyn Operation,
+        _context: &Context,
+    ) -> Result<(), crate::Error> {
+        Ok(())
+    }
+}
+
 pub trait Terminator {
     fn is_terminator(&self) -> bool {
         true

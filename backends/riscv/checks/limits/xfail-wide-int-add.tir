@@ -1,12 +1,6 @@
-// XFAIL: *
 // RUN: not tir mc --march=rv64i --stage=isel %s
 
-// MISCOMPILE: an i128 add on rv64 (double the register width) silently selects
-// a single `riscv.add`, truncating the operation to 64 bits, and the i128
-// arguments are each placed in a single GPR. There is no double-word
-// expansion and no diagnostic. The same class affects i64 on rv32 (see
-// xfail-wide-int-add-rv32.tir). Selection should reject or legalize the wide
-// type; instead it miscompiles, so `not` currently fails (the tool succeeds).
+// i128 is wider than the selected XLEN and is rejected before selection.
 
 module {
   func @a(%0: !i128, %1: !i128) -> !i128 {
