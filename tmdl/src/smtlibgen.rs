@@ -702,18 +702,12 @@ fn build_instructions<'a>(
                 .iter()
                 .enumerate()
                 .filter_map(|(index, (operand_name, ty))| {
-                    let Type::Struct(class) = ty else {
+                    let Type::Struct(_) = ty else {
                         return None;
                     };
-                    let read = format!(
-                        "(read_{} st {})",
-                        class.to_lowercase(),
-                        operand_name.to_lowercase()
-                    );
                     behavior
-                        .pc_values
-                        .iter()
-                        .any(|value| value.contains(&read))
+                        .pc_source_names
+                        .contains(&operand_name.to_lowercase())
                         .then_some(index)
                 })
                 .collect()
@@ -1383,7 +1377,10 @@ impl SmtSymbolResolver<'_> {
 /// Evaluate a symbol-free subtree to a constant, mirroring the interpreter's
 /// width rules. Width expressions like `log2Ceil(self.XLEN) - 1` reach the
 /// emitter unfolded, so structural `Constant` matching is not enough.
-fn eval_const_subtree(graph: &tir::sem::SemGraph, node: NodeId) -> Option<(u64, u32)> {
+fn eval_const_subtree(
+    graph: &impl Dag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
+    node: NodeId,
+) -> Option<(u64, u32)> {
     use tir::sem::{SymKind, SymPayload};
 
     let child = |idx: usize| eval_const_subtree(graph, graph.children(node).nth(idx)?);
@@ -1441,7 +1438,7 @@ fn amo_combine(op: u8, old: &str, val: &str) -> Option<String> {
 }
 
 fn emit_sem_expr(
-    graph: &tir::sem::SemGraph,
+    graph: &impl Dag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
     node: NodeId,
     resolver: &SmtSymbolResolver<'_>,
 ) -> Option<SmtVal> {
@@ -1664,242 +1661,69 @@ enum MemOpKind {
     Store,
 }
 
-struct MemOp<'a> {
-    kind: MemOpKind,
-    addr: &'a ast::Expr,
-    bytes: u64,
-    reservation: bool,
-}
-
-fn ast_int_lit(e: &ast::Expr) -> Option<u64> {
-    match e {
-        ast::Expr::Lit(ast::Lit::Int(li)) => Some(parse_literal_value(li)),
-        _ => None,
-    }
-}
-
-/// Memory operations on the no-trap path of `e`, in syntactic order. `None`
-/// when an access size is not a literal (no exception condition can be built
-/// for it). Nested try blocks own their accesses and are not descended into.
-fn collect_mem_ops<'a>(e: &'a ast::Expr, out: &mut Vec<MemOp<'a>>) -> Option<()> {
-    collect_mem_ops_inner(e, out, false)
-}
-
-fn collect_all_mem_ops<'a>(e: &'a ast::Expr, out: &mut Vec<MemOp<'a>>) -> Option<()> {
-    collect_mem_ops_inner(e, out, true)
-}
-
-fn collect_mem_ops_inner<'a>(
-    e: &'a ast::Expr,
-    out: &mut Vec<MemOp<'a>>,
-    descend_try: bool,
-) -> Option<()> {
-    match e {
-        ast::Expr::Call(c) => {
-            for arg in &c.arguments {
-                collect_mem_ops_inner(arg, out, descend_try)?;
-            }
-            // `(kind, address-arg index, bytes-arg index)`. Atomics classify
-            // like plain accesses for alignment (`atomic_rmw`'s first argument
-            // is its op selector, so its address and size sit one later).
-            let mem = match &*c.callee {
-                ast::Expr::BuiltinFunction(ast::BuiltinFunction::Load) => {
-                    Some((MemOpKind::Load, 0, 1, false))
-                }
-                ast::Expr::BuiltinFunction(ast::BuiltinFunction::LoadReserved) => {
-                    Some((MemOpKind::Load, 0, 1, true))
-                }
-                ast::Expr::BuiltinFunction(ast::BuiltinFunction::Store) => {
-                    Some((MemOpKind::Store, 0, 1, false))
-                }
-                ast::Expr::BuiltinFunction(ast::BuiltinFunction::StoreConditional) => {
-                    Some((MemOpKind::Store, 0, 1, true))
-                }
-                ast::Expr::BuiltinFunction(ast::BuiltinFunction::AtomicRmw) => {
-                    Some((MemOpKind::Store, 1, 2, true))
-                }
-                _ => None,
-            };
-            if let Some((kind, addr_idx, bytes_idx, reservation)) = mem {
-                let addr = c.arguments.get(addr_idx)?;
-                let bytes = ast_int_lit(c.arguments.get(bytes_idx)?)?;
-                out.push(MemOp {
-                    kind,
-                    addr,
-                    bytes,
-                    reservation,
-                });
-            }
-        }
-        ast::Expr::Assign(a) => collect_mem_ops_inner(&a.value, out, descend_try)?,
-        ast::Expr::Binary(b) => {
-            collect_mem_ops_inner(&b.lhs, out, descend_try)?;
-            collect_mem_ops_inner(&b.rhs, out, descend_try)?;
-        }
-        ast::Expr::Unary(u) => collect_mem_ops_inner(&u.x, out, descend_try)?,
-        ast::Expr::Block(b) => {
-            for stmt in &b.stmts {
-                collect_mem_ops_inner(stmt, out, descend_try)?;
-            }
-        }
-        ast::Expr::If(i) => {
-            collect_mem_ops_inner(&i.cond, out, descend_try)?;
-            collect_mem_ops_inner(&i.then, out, descend_try)?;
-            if let Some(else_) = &i.else_ {
-                collect_mem_ops_inner(else_, out, descend_try)?;
-            }
-        }
-        ast::Expr::Slice(s) => collect_mem_ops_inner(&s.base, out, descend_try)?,
-        ast::Expr::IndexAccess(i) => collect_mem_ops_inner(&i.base, out, descend_try)?,
-        ast::Expr::Field(f) => collect_mem_ops_inner(&f.base, out, descend_try)?,
-        ast::Expr::Lambda(l) => collect_mem_ops_inner(&l.body, out, descend_try)?,
-        ast::Expr::Try(t) if descend_try => {
-            collect_mem_ops_inner(&t.body, out, true)?;
-            for handler in &t.handlers {
-                collect_mem_ops_inner(&handler.body, out, true)?;
-            }
-        }
-        ast::Expr::Try(_)
-        | ast::Expr::Ident(_)
-        | ast::Expr::Path(_)
-        | ast::Expr::Lit(_)
-        | ast::Expr::BuiltinFunction(_)
-        | ast::Expr::Invalid => {}
-    }
-    Some(())
-}
-
-fn collect_trap_kinds(e: &ast::Expr, out: &mut BTreeSet<String>) {
-    match e {
-        ast::Expr::Call(c) => {
-            if matches!(
-                &*c.callee,
-                ast::Expr::BuiltinFunction(ast::BuiltinFunction::Trap)
-            ) {
-                out.insert("trap".to_string());
-            }
-            for arg in &c.arguments {
-                collect_trap_kinds(arg, out);
-            }
-        }
-        ast::Expr::Assign(a) => collect_trap_kinds(&a.value, out),
-        ast::Expr::Binary(b) => {
-            collect_trap_kinds(&b.lhs, out);
-            collect_trap_kinds(&b.rhs, out);
-        }
-        ast::Expr::Unary(u) => collect_trap_kinds(&u.x, out),
-        ast::Expr::Block(b) => {
-            for stmt in &b.stmts {
-                collect_trap_kinds(stmt, out);
-            }
-        }
-        ast::Expr::If(i) => {
-            collect_trap_kinds(&i.cond, out);
-            collect_trap_kinds(&i.then, out);
-            if let Some(else_) = &i.else_ {
-                collect_trap_kinds(else_, out);
-            }
-        }
-        ast::Expr::Try(t) => {
-            collect_trap_kinds(&t.body, out);
-            for handler in &t.handlers {
-                out.insert(handler.kind.clone());
-                collect_trap_kinds(&handler.body, out);
-            }
-        }
-        ast::Expr::Slice(s) => collect_trap_kinds(&s.base, out),
-        ast::Expr::IndexAccess(i) => collect_trap_kinds(&i.base, out),
-        ast::Expr::Field(f) => collect_trap_kinds(&f.base, out),
-        ast::Expr::Lambda(l) => collect_trap_kinds(&l.body, out),
-        ast::Expr::Ident(_)
-        | ast::Expr::Path(_)
-        | ast::Expr::Lit(_)
-        | ast::Expr::BuiltinFunction(_)
-        | ast::Expr::Invalid => {}
-    }
-}
-
 /// The single atomic call (LR/SC/AMO) inside a behavior expression. sema
 /// guarantees at most one per statement, so the first found is the only one.
-enum AtomicOp<'a> {
+enum AtomicOp {
     LoadReserved {
-        addr: &'a ast::Expr,
+        addr: NodeId,
     },
     StoreConditional {
-        addr: &'a ast::Expr,
+        addr: NodeId,
         bytes: u64,
-        value: &'a ast::Expr,
+        value: NodeId,
     },
     AtomicRmw {
         op: u8,
-        addr: &'a ast::Expr,
+        addr: NodeId,
         bytes: u64,
-        value: &'a ast::Expr,
+        value: NodeId,
     },
 }
 
-/// Classify a call as an atomic, reading its arguments (see the builtin arity
-/// table in the design document).
-fn atomic_of_call(c: &ast::Call) -> Option<AtomicOp<'_>> {
-    match &*c.callee {
-        ast::Expr::BuiltinFunction(ast::BuiltinFunction::LoadReserved) => {
-            Some(AtomicOp::LoadReserved {
-                addr: c.arguments.first()?,
-            })
-        }
-        ast::Expr::BuiltinFunction(ast::BuiltinFunction::StoreConditional) => {
-            Some(AtomicOp::StoreConditional {
-                addr: c.arguments.first()?,
-                bytes: ast_int_lit(c.arguments.get(1)?)?,
-                value: c.arguments.get(2)?,
-            })
-        }
-        ast::Expr::BuiltinFunction(ast::BuiltinFunction::AtomicRmw) => {
-            let op = match c.arguments.first()? {
-                ast::Expr::Ident(id) => ast::atomic_rmw_op_code(&id.name)?,
-                _ => return None,
-            };
-            Some(AtomicOp::AtomicRmw {
-                op,
-                addr: c.arguments.get(1)?,
-                bytes: ast_int_lit(c.arguments.get(2)?)?,
-                value: c.arguments.get(3)?,
-            })
-        }
+fn atomic_of_node(
+    graph: &impl Dag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
+    node: NodeId,
+) -> Option<AtomicOp> {
+    let children = graph.children(node).collect::<Vec<_>>();
+    let constant = |index: usize| eval_const_subtree(graph, *children.get(index)?).map(|v| v.0);
+    match graph.get_node(node) {
+        tir::sem::SymKind::LoadReserved => Some(AtomicOp::LoadReserved {
+            addr: *children.first()?,
+        }),
+        tir::sem::SymKind::StoreConditional => Some(AtomicOp::StoreConditional {
+            addr: *children.first()?,
+            bytes: constant(1)?,
+            value: *children.get(2)?,
+        }),
+        tir::sem::SymKind::AtomicRmw => Some(AtomicOp::AtomicRmw {
+            op: constant(0)? as u8,
+            addr: *children.get(1)?,
+            bytes: constant(2)?,
+            value: *children.get(3)?,
+        }),
         _ => None,
     }
 }
 
 /// The atomic call within `e`, descending through pure wrappers
 /// (`sext`/`zext`/`extract`/`if`/...) as sema permits.
-fn find_atomic(e: &ast::Expr) -> Option<AtomicOp<'_>> {
-    if let ast::Expr::Call(c) = e
-        && let Some(op) = atomic_of_call(c)
-    {
+fn find_atomic(
+    graph: &impl Dag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
+    node: NodeId,
+) -> Option<AtomicOp> {
+    if let Some(op) = atomic_of_node(graph, node) {
         return Some(op);
     }
-    match e {
-        ast::Expr::Call(c) => c.arguments.iter().find_map(find_atomic),
-        ast::Expr::Assign(a) => find_atomic(&a.value),
-        ast::Expr::Binary(b) => find_atomic(&b.lhs).or_else(|| find_atomic(&b.rhs)),
-        ast::Expr::Unary(u) => find_atomic(&u.x),
-        ast::Expr::If(i) => find_atomic(&i.cond)
-            .or_else(|| find_atomic(&i.then))
-            .or_else(|| i.else_.as_deref().and_then(find_atomic)),
-        ast::Expr::Block(b) => b.stmts.iter().find_map(find_atomic),
-        ast::Expr::Field(f) => find_atomic(&f.base),
-        ast::Expr::Slice(s) => find_atomic(&s.base),
-        ast::Expr::IndexAccess(ix) => find_atomic(&ix.base),
-        _ => None,
-    }
+    graph
+        .children(node)
+        .find_map(|child| find_atomic(graph, child))
 }
 
 /// Statement emitter folding a behavior into a TMDLState transition.
 struct BehaviorEmitter<'a> {
     ctx: &'a SmtCtx<'a>,
     operands: &'a HashMap<String, Type>,
-    numeric_params: &'a HashMap<String, i64>,
-    register_index_map: &'a HashMap<(String, String), u32>,
+    behavior: &'a sem_expr_state::BehaviorGraph,
     /// Exception payloads visible while a handler body is compiled.
     locals: std::cell::RefCell<HashMap<String, SmtVal>>,
     /// Uniquifies exception-payload `let` bindings across nested trys.
@@ -1910,28 +1734,20 @@ struct BehaviorEmitter<'a> {
     failed: std::cell::Cell<bool>,
     writes_pc: std::cell::Cell<bool>,
     write_classes: std::cell::RefCell<BTreeSet<String>>,
-    pc_values: std::cell::RefCell<Vec<String>>,
+    pc_value_roots: std::cell::RefCell<Vec<NodeId>>,
 }
 
 impl BehaviorEmitter<'_> {
-    fn emit_val(&self, e: &ast::Expr) -> Option<SmtVal> {
-        self.emit_val_in(e, SmtStateRef::Datatype("st"))
+    fn emit_val(&self, root: NodeId) -> Option<SmtVal> {
+        self.emit_val_in(root, SmtStateRef::Datatype("st"))
     }
 
-    fn emit_val_in(&self, e: &ast::Expr, state: SmtStateRef<'_>) -> Option<SmtVal> {
-        let mut graph = tir::sem::SemGraph::new();
-        let lowering = e
-            .lower_to_sema_with_registers(&mut graph, self.numeric_params, self.register_index_map)
-            .or_else(|| {
-                self.failed.set(true);
-                None
-            })?;
-        let root = lowering.root;
+    fn emit_val_in(&self, root: NodeId, state: SmtStateRef<'_>) -> Option<SmtVal> {
         let mut symbols = HashMap::new();
-        for (name, id) in &lowering.variable_symbols {
+        for (name, id) in &self.behavior.variable_symbols {
             symbols.insert(*id, SmtSymbolInfo::Variable { name: name.clone() });
         }
-        for ((class, number), id) in &lowering.register_symbols {
+        for ((class, number), id) in &self.behavior.register_symbols {
             symbols.insert(
                 *id,
                 SmtSymbolInfo::Register {
@@ -1940,7 +1756,7 @@ impl BehaviorEmitter<'_> {
                 },
             );
         }
-        for (name, id) in &lowering.regnum_symbols {
+        for (name, id) in &self.behavior.regnum_symbols {
             symbols.insert(*id, SmtSymbolInfo::RegNum { name: name.clone() });
         }
         let locals = self.locals.borrow();
@@ -1956,7 +1772,8 @@ impl BehaviorEmitter<'_> {
             state,
             ctx: self.ctx,
         };
-        emit_sem_expr(&graph, root, &resolver).or_else(|| {
+        let (values, root) = self.behavior.value_graph(root)?;
+        emit_sem_expr(&values, root, &resolver).or_else(|| {
             self.failed.set(true);
             None
         })
@@ -1968,12 +1785,12 @@ impl BehaviorEmitter<'_> {
     /// success predicate here matches the value facet emitted for the RHS.
     fn atomic_effect(&self, op: &AtomicOp, w: &str) -> Option<String> {
         let xlen = self.ctx.xlen as u32;
-        let addr = |a: &ast::Expr| -> Option<String> {
+        let addr = |a: NodeId| -> Option<String> {
             let (e, wa, sa) = self.emit_val(a)?.as_bv();
             Some(fit_smt(&e, wa, sa, xlen))
         };
         match op {
-            AtomicOp::LoadReserved { addr: a } => Some(format!("(set_res {} {})", w, addr(a)?)),
+            AtomicOp::LoadReserved { addr: a } => Some(format!("(set_res {} {})", w, addr(*a)?)),
             AtomicOp::StoreConditional {
                 addr: a,
                 bytes,
@@ -1982,8 +1799,8 @@ impl BehaviorEmitter<'_> {
                 if !MEM_ACCESS_BYTES.contains(&(*bytes as u16)) {
                     return None;
                 }
-                let addr = addr(a)?;
-                let (v, wv, sv) = self.emit_val(value)?.as_bv();
+                let addr = addr(*a)?;
+                let (v, wv, sv) = self.emit_val(*value)?.as_bv();
                 let val = fit_smt(&v, wv, sv, *bytes as u32 * 8);
                 Some(format!(
                     "(ite {succ} (write_mem_{bytes} (clear_res {w}) {addr} {val}) (clear_res {w}))",
@@ -2000,9 +1817,9 @@ impl BehaviorEmitter<'_> {
                     return None;
                 }
                 let width = *bytes as u32 * 8;
-                let addr = addr(a)?;
+                let addr = addr(*a)?;
                 let old = format!("(read_mem_{} st {})", bytes, addr);
-                let (v, wv, sv) = self.emit_val(value)?.as_bv();
+                let (v, wv, sv) = self.emit_val(*value)?.as_bv();
                 let val = fit_smt(&v, wv, sv, width);
                 let new = amo_combine(*op, &old, &val)?;
                 Some(format!("(write_mem_{} {} {} {})", bytes, w, addr, new))
@@ -2011,37 +1828,42 @@ impl BehaviorEmitter<'_> {
     }
 }
 
-impl sem_expr_state::StateEmitter for BehaviorEmitter<'_> {
+impl sem_expr_state::BehaviorEmitter for BehaviorEmitter<'_> {
     type State = String;
-    type Condition = String;
 
-    fn cond(&self, e: &ast::Expr) -> String {
-        self.emit_val(e)
-            .map(|v| v.as_bool())
-            .unwrap_or_else(|| "false".to_string())
-    }
-
-    fn assign(&self, a: &ast::Assign, st_name: &String) -> Option<String> {
+    fn assign(
+        &self,
+        destination: &sem_expr_state::Destination,
+        value: NodeId,
+        st_name: &String,
+    ) -> Option<String> {
         let ctx = self.ctx;
-        let rhs = self.emit_val(&a.value)?;
+        let rhs = self.emit_val(value)?;
         let (expr, width, signed) = rhs.as_bv();
         let fit = |target: u16| fit_smt(&expr, width, signed, target as u32);
         let write_pc = || {
             if !self.in_handler.get() {
                 self.writes_pc.set(true);
-                self.pc_values.borrow_mut().push(fit(ctx.xlen));
+                self.pc_value_roots.borrow_mut().push(value);
             }
             format!("(write_pc {} {})", st_name, fit(ctx.xlen))
         };
         // An atomic RHS threads its memory/reservation effect around the
         // register write (`w`); a plain assignment is just `w`.
-        let wrap = |w: String| match find_atomic(&a.value) {
+        let wrap = |w: String| match self
+            .behavior
+            .value_graph(value)
+            .and_then(|(g, r)| find_atomic(&g, r))
+        {
             Some(op) => self.atomic_effect(&op, &w),
             None => Some(w),
         };
-        let dest_name = match &*a.dest {
-            ast::Expr::Ident(id) => Some(id.name.as_str()),
-            ast::Expr::Path(p) if p.remainder.len() == 1 => Some(p.remainder[0].as_str()),
+        let dest_name = match destination {
+            sem_expr_state::Destination::Ident(name) => Some(name.as_str()),
+            sem_expr_state::Destination::Path { members, .. } if members.len() == 1 => {
+                Some(members[0].as_str())
+            }
+            sem_expr_state::Destination::FixedRegister { name, .. } => Some(name.as_str()),
             _ => None,
         };
         if dest_name == Some("pc") {
@@ -2067,19 +1889,14 @@ impl sem_expr_state::StateEmitter for BehaviorEmitter<'_> {
         }
         // Writes to a fixed register named by class path (`GPR::x30`,
         // `PSTATE::n`).
-        if let ast::Expr::Path(p) = &*a.dest
-            && p.remainder.len() == 1
-            && let Some(idx) = self
-                .register_index_map
-                .get(&(p.base.clone(), p.remainder[0].clone()))
-        {
-            let class = p.base.to_lowercase();
+        if let sem_expr_state::Destination::FixedRegister { class, index, .. } = destination {
+            let class = class.to_lowercase();
             self.write_classes.borrow_mut().insert(class.clone());
             return wrap(format!(
                 "(write_{} {} (_ bv{} {}) {})",
                 class,
                 st_name,
-                idx,
+                index,
                 ctx.idx_width(&class),
                 fit(ctx.val_width(&class))
             ));
@@ -2087,47 +1904,49 @@ impl sem_expr_state::StateEmitter for BehaviorEmitter<'_> {
         None
     }
 
-    fn store(&self, c: &ast::Call, st_name: &String) -> Option<String> {
-        let bytes = ast_int_lit(c.arguments.get(1)?)? as u16;
+    fn value_effect(
+        &self,
+        kind: tir::sem::SymKind,
+        value: NodeId,
+        st_name: &String,
+    ) -> Option<String> {
+        if kind == tir::sem::SymKind::StateFence {
+            return Some(st_name.clone());
+        }
+        if kind == tir::sem::SymKind::StateStoreConditional {
+            let (values, root) = self.behavior.value_graph(value)?;
+            return self.atomic_effect(&atomic_of_node(&values, root)?, st_name);
+        }
+        let (values, root) = self.behavior.value_graph(value)?;
+        let children = values.children(root).collect::<Vec<_>>();
+        let bytes = eval_const_subtree(&values, *children.get(1)?)?.0 as u16;
         if !MEM_ACCESS_BYTES.contains(&bytes) {
             return None;
         }
-        let xlen = self.ctx.xlen as u32;
-        let (addr, wa, sa) = self.emit_val(c.arguments.first()?)?.as_bv();
-        let (val, wv, sv) = self.emit_val(c.arguments.get(2)?)?.as_bv();
+        let (addr, wa, sa) = self.emit_val(*children.first()?)?.as_bv();
+        let (val, wv, sv) = self.emit_val(*children.get(2)?)?.as_bv();
         Some(format!(
-            "(write_mem_{} {} {} {})",
-            bytes,
-            st_name,
-            fit_smt(&addr, wa, sa, xlen),
+            "(write_mem_{bytes} {st_name} {} {})",
+            fit_smt(&addr, wa, sa, self.ctx.xlen as u32),
             fit_smt(&val, wv, sv, bytes as u32 * 8)
         ))
     }
 
-    fn store_conditional(&self, c: &ast::Call, st_name: &String) -> Option<String> {
-        // A bare statement: the effect applies, the success value is discarded.
-        self.atomic_effect(&atomic_of_call(c)?, st_name)
-    }
-
-    fn fence(&self, _c: &ast::Call, st_name: &String) -> Option<String> {
-        // One instruction is one SMT transition, so a fence is the identity.
-        Some(st_name.to_string())
-    }
-
     fn trap(
         &self,
-        c: &ast::Call,
+        arguments: &[NodeId],
+        params: &[String],
+        handler: Option<NodeId>,
         st_name: &String,
-        compile: &dyn Fn(&ast::Expr, &String) -> String,
+        compile: &dyn Fn(NodeId, &String) -> String,
     ) -> Option<String> {
-        let handler = self.ctx.trap_handler?;
         let xlen = self.ctx.xlen as u32;
         // Bind handler parameters to the call arguments; missing trailing
         // arguments (ecall has no tval) read as zero.
         let mut shadowed = Vec::new();
-        for (i, param) in handler.params.iter().enumerate() {
-            let value = match c.arguments.get(i) {
-                Some(arg) => self.emit_val(arg)?,
+        for (i, param) in params.iter().enumerate() {
+            let value = match arguments.get(i) {
+                Some(arg) => self.emit_val(*arg)?,
                 None => SmtVal::bv(format!("(_ bv0 {})", xlen), xlen, false),
             };
             shadowed.push((
@@ -2135,7 +1954,7 @@ impl sem_expr_state::StateEmitter for BehaviorEmitter<'_> {
                 self.locals.borrow_mut().insert(param.clone(), value),
             ));
         }
-        let state = compile(&handler.body, st_name);
+        let state = compile(handler?, st_name);
         for (param, previous) in shadowed {
             let mut locals = self.locals.borrow_mut();
             match previous {
@@ -2146,76 +1965,89 @@ impl sem_expr_state::StateEmitter for BehaviorEmitter<'_> {
         Some(state)
     }
 
-    fn ite(&self, cond: &String, then_state: &String, else_state: &String) -> String {
-        format!("(ite {} {} {})", cond, then_state, else_state)
+    fn branch(
+        &self,
+        condition: NodeId,
+        _entry: &String,
+        then_state: &String,
+        else_state: &String,
+    ) -> String {
+        let cond = self
+            .emit_val(condition)
+            .map(|value| value.as_bool())
+            .unwrap_or_else(|| "false".to_string());
+        format!("(ite {cond} {then_state} {else_state})")
     }
 
     fn try_except(
         &self,
-        t: &ast::TryExcept,
+        body: NodeId,
+        handlers: &[NodeId],
         st_name: &String,
-        body_state: &String,
-        compile: &dyn Fn(&ast::Expr, &String) -> String,
+        compile: &dyn Fn(NodeId, &String) -> String,
     ) -> Option<String> {
-        let mut ops = Vec::new();
-        collect_mem_ops(&t.body, &mut ops)?;
-        // Exception conditions are evaluated against the entry state, which
-        // is only sound while at most one access can raise.
-        if ops.len() > 1 {
+        let operations = effect_memory_operations(self.behavior, body)?;
+        if operations.len() > 1 {
             return None;
         }
-        let op = ops.first();
+        let operation = operations.first();
         let xlen = self.ctx.xlen;
-        let var = format!("exc_addr{}", self.let_counter.get());
-        let mut arms: Vec<(String, String)> = Vec::new();
-        for handler in &t.handlers {
-            let wanted = match handler.kind.as_str() {
+        let variable = format!("exc_addr{}", self.let_counter.get());
+        let mut arms = Vec::new();
+        for &handler in handlers {
+            let Some(sem_expr_state::EffectPayload::Handler { kind, binding }) =
+                self.behavior.effect_payload(handler)
+            else {
+                return None;
+            };
+            let wanted = match kind.as_str() {
                 "misaligned_load" => MemOpKind::Load,
                 "misaligned_store" => MemOpKind::Store,
-                // Unknown kinds are already a sema diagnostic.
                 _ => return None,
             };
-            let Some(op) = op.filter(|o| o.kind == wanted) else {
+            let Some(operation) = operation.filter(|operation| operation.kind == wanted) else {
                 continue;
             };
-            // A byte access never misaligns: the clause is statically dead.
-            if op.bytes <= 1 {
+            if operation.bytes <= 1 {
                 continue;
             }
-            if !op.bytes.is_power_of_two() {
+            if !operation.bytes.is_power_of_two() {
                 return None;
             }
-            let cond = format!(
-                "(distinct (bvand {var} (_ bv{} {xlen})) (_ bv0 {xlen}))",
-                op.bytes - 1
+            let condition = format!(
+                "(distinct (bvand {variable} (_ bv{} {xlen})) (_ bv0 {xlen}))",
+                operation.bytes - 1
             );
-            if let Some(binding) = &handler.binding {
-                self.locals
-                    .borrow_mut()
-                    .insert(binding.clone(), SmtVal::bv(var.clone(), xlen as u32, false));
+            if let Some(binding) = binding {
+                self.locals.borrow_mut().insert(
+                    binding.clone(),
+                    SmtVal::bv(variable.clone(), xlen as u32, false),
+                );
             }
+            let child = self.behavior.graph.children(handler).next()?;
             let was_in_handler = self.in_handler.replace(true);
-            let state = compile(&handler.body, st_name);
+            let handler_state = compile(child, st_name);
             self.in_handler.set(was_in_handler);
-            if let Some(binding) = &handler.binding {
+            if let Some(binding) = binding {
                 self.locals.borrow_mut().remove(binding);
             }
-            arms.push((cond, state));
+            arms.push((condition, handler_state));
         }
+        let body_state = compile(body, st_name);
         if arms.is_empty() {
-            return Some(body_state.to_string());
+            return Some(body_state);
         }
-        let op = op.expect("a live clause implies an access");
-        let (addr, wa, sa) = self.emit_val(op.addr)?.as_bv();
-        let addr = fit_smt(&addr, wa, sa, xlen as u32);
+        let operation = operation?;
+        let (address, width, signed) = self.emit_val(operation.addr)?.as_bv();
+        let address = fit_smt(&address, width, signed, xlen as u32);
         self.let_counter.set(self.let_counter.get() + 1);
         let folded = arms
             .into_iter()
             .rev()
-            .fold(body_state.to_string(), |else_state, (cond, state)| {
-                format!("(ite {} {} {})", cond, state, else_state)
+            .fold(body_state, |otherwise, (condition, handler)| {
+                format!("(ite {condition} {handler} {otherwise})")
             });
-        Some(format!("(let (({} {})) {})", var, addr, folded))
+        Some(format!("(let (({variable} {address})) {folded})"))
     }
 
     fn unsupported(&self) {
@@ -2229,40 +2061,47 @@ struct FlatBehaviorEmitter<'a> {
 }
 
 impl FlatBehaviorEmitter<'_> {
-    fn emit_val(&self, expression: &ast::Expr) -> Option<SmtVal> {
+    fn emit_val(&self, expression: NodeId) -> Option<SmtVal> {
         self.values
             .emit_val_in(expression, SmtStateRef::Flat(&self.initial))
     }
 }
 
-impl sem_expr_state::StateEmitter for FlatBehaviorEmitter<'_> {
+impl sem_expr_state::BehaviorEmitter for FlatBehaviorEmitter<'_> {
     type State = FlatState;
-    type Condition = String;
 
-    fn cond(&self, expression: &ast::Expr) -> String {
-        self.emit_val(expression)
-            .map(|value| value.as_bool())
-            .unwrap_or_else(|| "false".to_string())
-    }
-
-    fn assign(&self, assignment: &ast::Assign, state: &FlatState) -> Option<FlatState> {
-        if find_atomic(&assignment.value).is_some() {
+    fn assign(
+        &self,
+        destination: &sem_expr_state::Destination,
+        value: NodeId,
+        state: &FlatState,
+    ) -> Option<FlatState> {
+        if self
+            .values
+            .behavior
+            .value_graph(value)
+            .and_then(|(g, r)| find_atomic(&g, r))
+            .is_some()
+        {
             return None;
         }
         let ctx = self.values.ctx;
-        let (expression, width, signed) = self.emit_val(&assignment.value)?.as_bv();
+        let (expression, width, signed) = self.emit_val(value)?.as_bv();
         let fit = |target: u16| fit_smt(&expression, width, signed, target as u32);
-        let destination = match &*assignment.dest {
-            ast::Expr::Ident(id) => Some(id.name.as_str()),
-            ast::Expr::Path(path) if path.remainder.len() == 1 => Some(path.remainder[0].as_str()),
+        let destination_name = match destination {
+            sem_expr_state::Destination::Ident(name) => Some(name.as_str()),
+            sem_expr_state::Destination::Path { members, .. } if members.len() == 1 => {
+                Some(members[0].as_str())
+            }
+            sem_expr_state::Destination::FixedRegister { name, .. } => Some(name.as_str()),
             _ => None,
         };
-        if destination == Some("pc") {
+        if destination_name == Some("pc") {
             let mut next = state.clone();
             next.fields.insert("pc".to_string(), fit(ctx.xlen));
             return Some(next);
         }
-        if let Some(name) = destination {
+        if let Some(name) = destination_name {
             match self.values.operands.get(name) {
                 Some(Type::Struct(class)) if ctx.pc_classes.contains(&class.to_lowercase()) => {
                     let mut next = state.clone();
@@ -2281,14 +2120,8 @@ impl sem_expr_state::StateEmitter for FlatBehaviorEmitter<'_> {
                 _ => {}
             }
         }
-        if let ast::Expr::Path(path) = &*assignment.dest
-            && path.remainder.len() == 1
-            && let Some(index) = self
-                .values
-                .register_index_map
-                .get(&(path.base.clone(), path.remainder[0].clone()))
-        {
-            let class = path.base.to_lowercase();
+        if let sem_expr_state::Destination::FixedRegister { class, index, .. } = destination {
+            let class = class.to_lowercase();
             return Some(state.write_register(
                 ctx,
                 &class,
@@ -2299,15 +2132,27 @@ impl sem_expr_state::StateEmitter for FlatBehaviorEmitter<'_> {
         None
     }
 
-    fn store(&self, call: &ast::Call, state: &FlatState) -> Option<FlatState> {
-        let bytes = ast_int_lit(call.arguments.get(1)?)? as u16;
+    fn value_effect(
+        &self,
+        kind: tir::sem::SymKind,
+        value: NodeId,
+        state: &FlatState,
+    ) -> Option<FlatState> {
+        if kind == tir::sem::SymKind::StateFence {
+            return Some(state.clone());
+        }
+        if kind == tir::sem::SymKind::StateStoreConditional {
+            return None;
+        }
+        let (values, root) = self.values.behavior.value_graph(value)?;
+        let children = values.children(root).collect::<Vec<_>>();
+        let bytes = eval_const_subtree(&values, *children.get(1)?)?.0 as u16;
         if !MEM_ACCESS_BYTES.contains(&bytes) {
             return None;
         }
         let xlen = self.values.ctx.xlen;
-        let (address, address_width, address_signed) =
-            self.emit_val(call.arguments.first()?)?.as_bv();
-        let (value, value_width, value_signed) = self.emit_val(call.arguments.get(2)?)?.as_bv();
+        let (address, address_width, address_signed) = self.emit_val(*children.first()?)?.as_bv();
+        let (value, value_width, value_signed) = self.emit_val(*children.get(2)?)?.as_bv();
         Some(state.write_memory(
             xlen,
             bytes,
@@ -2316,26 +2161,19 @@ impl sem_expr_state::StateEmitter for FlatBehaviorEmitter<'_> {
         ))
     }
 
-    fn store_conditional(&self, _call: &ast::Call, _state: &FlatState) -> Option<FlatState> {
-        None
-    }
-
-    fn fence(&self, _call: &ast::Call, state: &FlatState) -> Option<FlatState> {
-        Some(state.clone())
-    }
-
     fn trap(
         &self,
-        call: &ast::Call,
+        arguments: &[NodeId],
+        params: &[String],
+        handler: Option<NodeId>,
         state: &FlatState,
-        compile: &dyn Fn(&ast::Expr, &FlatState) -> FlatState,
+        compile: &dyn Fn(NodeId, &FlatState) -> FlatState,
     ) -> Option<FlatState> {
-        let handler = self.values.ctx.trap_handler?;
         let xlen = u32::from(self.values.ctx.xlen);
         let mut shadowed = Vec::new();
-        for (index, parameter) in handler.params.iter().enumerate() {
-            let value = match call.arguments.get(index) {
-                Some(argument) => self.emit_val(argument)?,
+        for (index, parameter) in params.iter().enumerate() {
+            let value = match arguments.get(index) {
+                Some(argument) => self.emit_val(*argument)?,
                 None => SmtVal::bv(format!("(_ bv0 {xlen})"), xlen, false),
             };
             shadowed.push((
@@ -2346,7 +2184,7 @@ impl sem_expr_state::StateEmitter for FlatBehaviorEmitter<'_> {
                     .insert(parameter.clone(), value),
             ));
         }
-        let result = compile(&handler.body, state);
+        let result = compile(handler?, state);
         for (parameter, previous) in shadowed {
             let mut locals = self.values.locals.borrow_mut();
             match previous {
@@ -2357,19 +2195,28 @@ impl sem_expr_state::StateEmitter for FlatBehaviorEmitter<'_> {
         Some(result)
     }
 
-    fn ite(&self, condition: &String, then_state: &FlatState, else_state: &FlatState) -> FlatState {
-        FlatState::select(condition, then_state, else_state)
+    fn branch(
+        &self,
+        condition: NodeId,
+        _entry: &FlatState,
+        then_state: &FlatState,
+        else_state: &FlatState,
+    ) -> FlatState {
+        let condition = self
+            .emit_val(condition)
+            .map(|value| value.as_bool())
+            .unwrap_or_else(|| "false".to_string());
+        FlatState::select(&condition, then_state, else_state)
     }
 
     fn try_except(
         &self,
-        try_expr: &ast::TryExcept,
+        body: NodeId,
+        handlers: &[NodeId],
         state: &FlatState,
-        body_state: &FlatState,
-        compile: &dyn Fn(&ast::Expr, &FlatState) -> FlatState,
+        compile: &dyn Fn(NodeId, &FlatState) -> FlatState,
     ) -> Option<FlatState> {
-        let mut operations = Vec::new();
-        collect_mem_ops(&try_expr.body, &mut operations)?;
+        let operations = effect_memory_operations(self.values.behavior, body)?;
         if operations.len() > 1 {
             return None;
         }
@@ -2377,8 +2224,13 @@ impl sem_expr_state::StateEmitter for FlatBehaviorEmitter<'_> {
         let xlen = self.values.ctx.xlen;
         let variable = format!("exc_addr{}", self.values.let_counter.get());
         let mut arms = Vec::new();
-        for handler in &try_expr.handlers {
-            let wanted = match handler.kind.as_str() {
+        for &handler in handlers {
+            let Some(sem_expr_state::EffectPayload::Handler { kind, binding }) =
+                self.values.behavior.effect_payload(handler)
+            else {
+                return None;
+            };
+            let wanted = match kind.as_str() {
                 "misaligned_load" => MemOpKind::Load,
                 "misaligned_store" => MemOpKind::Store,
                 _ => return None,
@@ -2396,30 +2248,31 @@ impl sem_expr_state::StateEmitter for FlatBehaviorEmitter<'_> {
                 "(distinct (bvand {variable} (_ bv{} {xlen})) (_ bv0 {xlen}))",
                 operation.bytes - 1
             );
-            if let Some(binding) = &handler.binding {
+            if let Some(binding) = binding {
                 self.values.locals.borrow_mut().insert(
                     binding.clone(),
                     SmtVal::bv(variable.clone(), u32::from(xlen), false),
                 );
             }
-            let handler_state = compile(&handler.body, state);
-            if let Some(binding) = &handler.binding {
+            let child = self.values.behavior.graph.children(handler).next()?;
+            let handler_state = compile(child, state);
+            if let Some(binding) = binding {
                 self.values.locals.borrow_mut().remove(binding);
             }
             arms.push((condition, handler_state));
         }
+        let mut result = compile(body, state);
         if arms.is_empty() {
-            return Some(body_state.clone());
+            return Some(result);
         }
-        let operation = operation.expect("a live handler requires a memory operation");
+        let operation = operation?;
         let (address, width, signed) = self.emit_val(operation.addr)?.as_bv();
         let address = fit_smt(&address, width, signed, u32::from(xlen));
         self.values
             .let_counter
             .set(self.values.let_counter.get() + 1);
-        let mut result = body_state.clone();
-        for (condition, handler_state) in arms.into_iter().rev() {
-            result = FlatState::select(&condition, &handler_state, &result);
+        for (condition, handler) in arms.into_iter().rev() {
+            result = FlatState::select(&condition, &handler, &result);
         }
         for expression in result.fields.values_mut() {
             *expression = format!("(let (({variable} {address})) {expression})");
@@ -2440,11 +2293,107 @@ struct BehaviorMetadata {
     body: String,
     writes_pc: bool,
     write_classes: Vec<String>,
-    pc_values: Vec<String>,
+    pc_source_names: BTreeSet<String>,
     memory_accesses: Vec<MemoryAccessMetadata>,
     uses_reservation: bool,
     trap_kinds: Vec<String>,
     flat_execute: Option<BTreeMap<String, String>>,
+}
+
+struct GraphMemOp {
+    kind: MemOpKind,
+    addr: NodeId,
+    bytes: u64,
+    reservation: bool,
+}
+
+fn graph_memory_operations(behavior: &sem_expr_state::BehaviorGraph) -> Option<Vec<GraphMemOp>> {
+    let mut operations = Vec::new();
+    let nodes = behavior
+        .value_roots()
+        .into_iter()
+        .flat_map(|root| behavior.graph.preorder(root))
+        .collect::<std::collections::HashSet<_>>();
+    for node in nodes {
+        let children = behavior.graph.children(node).collect::<Vec<_>>();
+        let (kind, address, bytes, reservation) = match behavior.graph.get_node(node) {
+            tir::sem::SymKind::LoadMemory => (MemOpKind::Load, 0, 1, false),
+            tir::sem::SymKind::LoadReserved => (MemOpKind::Load, 0, 1, true),
+            tir::sem::SymKind::StoreMemory => (MemOpKind::Store, 0, 1, false),
+            tir::sem::SymKind::StoreConditional => (MemOpKind::Store, 0, 1, true),
+            tir::sem::SymKind::AtomicRmw => (MemOpKind::Store, 1, 2, true),
+            _ => continue,
+        };
+        operations.push(GraphMemOp {
+            kind,
+            addr: *children.get(address)?,
+            bytes: {
+                let (values, root) = behavior.value_graph(*children.get(bytes)?)?;
+                eval_const_subtree(&values, root)?.0
+            },
+            reservation,
+        });
+    }
+    Some(operations)
+}
+
+fn effect_memory_operations(
+    behavior: &sem_expr_state::BehaviorGraph,
+    effect: NodeId,
+) -> Option<Vec<GraphMemOp>> {
+    let mut value_nodes = std::collections::HashSet::new();
+    for node in behavior.graph.preorder(effect) {
+        let children: Vec<_> = behavior.graph.children(node).collect();
+        let roots: Vec<NodeId> = match behavior.graph.get_node(node) {
+            tir::sem::SymKind::StateAssign
+            | tir::sem::SymKind::StateStore
+            | tir::sem::SymKind::StateStoreConditional
+            | tir::sem::SymKind::StateFence
+            | tir::sem::SymKind::StateIf => children.into_iter().take(1).collect(),
+            tir::sem::SymKind::StateTrap => match behavior.effect_payload(node) {
+                Some(sem_expr_state::EffectPayload::Trap { argument_count, .. }) => {
+                    children.into_iter().take(*argument_count).collect()
+                }
+                _ => Vec::new(),
+            },
+            _ => Vec::new(),
+        };
+        for root in roots {
+            value_nodes.extend(behavior.graph.preorder(root));
+        }
+    }
+    let mut operations = Vec::new();
+    for node in value_nodes {
+        let children = behavior.graph.children(node).collect::<Vec<_>>();
+        let (kind, address, bytes, reservation) = match behavior.graph.get_node(node) {
+            tir::sem::SymKind::LoadMemory => (MemOpKind::Load, 0, 1, false),
+            tir::sem::SymKind::LoadReserved => (MemOpKind::Load, 0, 1, true),
+            tir::sem::SymKind::StoreMemory => (MemOpKind::Store, 0, 1, false),
+            tir::sem::SymKind::StoreConditional => (MemOpKind::Store, 0, 1, true),
+            tir::sem::SymKind::AtomicRmw => (MemOpKind::Store, 1, 2, true),
+            _ => continue,
+        };
+        operations.push(GraphMemOp {
+            kind,
+            addr: *children.get(address)?,
+            bytes: {
+                let (values, root) = behavior.value_graph(*children.get(bytes)?)?;
+                eval_const_subtree(&values, root)?.0
+            },
+            reservation,
+        });
+    }
+    Some(operations)
+}
+
+fn graph_trap_kinds(behavior: &sem_expr_state::BehaviorGraph) -> BTreeSet<String> {
+    behavior
+        .effect_nodes()
+        .filter_map(|node| match behavior.effect_payload(node) {
+            Some(sem_expr_state::EffectPayload::Handler { kind, .. }) => Some(kind.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 fn build_smt_behavior<'a>(
@@ -2470,45 +2419,48 @@ fn build_smt_behavior<'a>(
                 _ => None,
             }),
     );
+    let behavior_graph = sem_expr_state::lower_behavior(
+        &instruction.behavior,
+        ctx.trap_handler,
+        &numeric_params,
+        &ctx.isa_params,
+        register_index_map,
+    )?;
 
     let emitter = BehaviorEmitter {
         ctx,
         operands: &operands,
-        numeric_params: &numeric_params,
-        register_index_map,
+        behavior: &behavior_graph,
         locals: Default::default(),
         let_counter: Default::default(),
         in_handler: Default::default(),
         failed: Default::default(),
         writes_pc: Default::default(),
         write_classes: Default::default(),
-        pc_values: Default::default(),
+        pc_value_roots: Default::default(),
     };
-    let body = sem_expr_state::compile_to_state(&instruction.behavior, &"st".to_string(), &emitter);
-    let mut mem_ops = Vec::new();
-    collect_all_mem_ops(&instruction.behavior, &mut mem_ops)?;
+    let body = sem_expr_state::fold_behavior(&behavior_graph, &"st".to_string(), &emitter);
+    let mem_ops = graph_memory_operations(&behavior_graph)?;
     let uses_reservation = mem_ops.iter().any(|op| op.reservation);
-    let mut trap_kinds = BTreeSet::new();
-    collect_trap_kinds(&instruction.behavior, &mut trap_kinds);
+    let trap_kinds = graph_trap_kinds(&behavior_graph);
     let initial_flat_state = FlatState::initial(ctx);
     let flat_emitter = FlatBehaviorEmitter {
         values: BehaviorEmitter {
             ctx,
             operands: &operands,
-            numeric_params: &numeric_params,
-            register_index_map,
+            behavior: &behavior_graph,
             locals: Default::default(),
             let_counter: Default::default(),
             in_handler: Default::default(),
             failed: Default::default(),
             writes_pc: Default::default(),
             write_classes: Default::default(),
-            pc_values: Default::default(),
+            pc_value_roots: Default::default(),
         },
         initial: initial_flat_state.clone(),
     };
     let flat_state =
-        sem_expr_state::compile_to_state(&instruction.behavior, &initial_flat_state, &flat_emitter);
+        sem_expr_state::fold_behavior(&behavior_graph, &initial_flat_state, &flat_emitter);
     let flat_execute = (!flat_emitter.values.failed.get()).then_some(flat_state.fields);
     let memory_accesses = mem_ops
         .iter()
@@ -2534,7 +2486,21 @@ fn build_smt_behavior<'a>(
             body,
             writes_pc: emitter.writes_pc.get(),
             write_classes: emitter.write_classes.into_inner().into_iter().collect(),
-            pc_values: emitter.pc_values.into_inner(),
+            pc_source_names: behavior_graph
+                .variable_symbols
+                .iter()
+                .filter(|(_, symbol)| {
+                    emitter.pc_value_roots.borrow().iter().any(|root| {
+                        behavior_graph.graph.preorder(*root).any(|node| {
+                            matches!(
+                                behavior_graph.graph.get_leaf_data(node),
+                                Some(sem_expr_state::BehaviorPayload::Value(tir::sem::SymPayload::SymbolId(id))) if *id == **symbol
+                            )
+                        })
+                    })
+                })
+                .map(|(name, _)| name.to_lowercase())
+                .collect(),
             memory_accesses,
             uses_reservation,
             trap_kinds: trap_kinds.into_iter().collect(),

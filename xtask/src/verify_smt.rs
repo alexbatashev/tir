@@ -397,6 +397,14 @@ pub fn verify_smt(sh: &Shell, isa: &str, args: impl Iterator<Item = String>) -> 
     generate_tmdl_smt(sh, spec, &root, &smt_path)?;
     let metadata_path = smt_path.with_extension("metadata.json");
     let inventory = parse_inventory(&std::fs::read_to_string(metadata_path)?)?;
+    anyhow::ensure!(
+        inventory.isa == spec.tmdl_isa && inventory.dialect == spec.dialect,
+        "SMT metadata target mismatch: expected {}/{}, got {}/{}",
+        spec.tmdl_isa,
+        spec.dialect,
+        inventory.isa,
+        inventory.dialect
+    );
     let instructions = inventory.instructions;
     let filter: Option<Vec<String>> = std::env::var("TIR_VERIFY_SMT_FILTER")
         .ok()
@@ -653,6 +661,8 @@ struct EncodingField {
 #[derive(Deserialize)]
 struct MetadataFile {
     version: u32,
+    isa: String,
+    dialect: String,
     flat_state: Vec<FlatStateField>,
     register_classes: Vec<RegisterClassMetadata>,
     instructions: Vec<RawInstruction>,
@@ -669,6 +679,7 @@ struct RawInstruction {
     uses_reservation: bool,
     pc_source_operands: Vec<usize>,
     memory_accesses: Vec<MemoryAccessMetadata>,
+    trap_kinds: Vec<String>,
     encoding: Vec<RawEncodingField>,
     flat_execute: Option<HashMap<String, String>>,
 }
@@ -714,6 +725,8 @@ impl Instruction {
 }
 
 struct Inventory {
+    isa: String,
+    dialect: String,
     flat: FlatModel,
     instructions: Vec<Instruction>,
 }
@@ -731,6 +744,11 @@ fn parse_inventory(json: &str) -> anyhow::Result<Inventory> {
         .instructions
         .into_iter()
         .map(|raw| {
+            anyhow::ensure!(
+                raw.trap_kinds.iter().all(|kind| !kind.is_empty()),
+                "instruction {} has an empty trap kind",
+                raw.name
+            );
             let operands = raw
                 .operands
                 .into_iter()
@@ -789,6 +807,8 @@ fn parse_inventory(json: &str) -> anyhow::Result<Inventory> {
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
     Ok(Inventory {
+        isa: metadata.isa,
+        dialect: metadata.dialect,
         flat: FlatModel {
             fields: metadata.flat_state,
             classes: metadata
@@ -2009,6 +2029,8 @@ mod tests {
     fn parses_structured_instruction_metadata() {
         let json = r#"{
           "version": 1,
+          "isa": "TestIsa",
+          "dialect": "test",
           "smt_prelude": "(set-logic ALL)",
           "flat_state": [
             {"name": "gpr", "sort": "(Array (_ BitVec 5) (_ BitVec 64))"},
@@ -2043,6 +2065,8 @@ mod tests {
         let inventory = parse_inventory(json).unwrap();
         let instruction = &inventory.instructions[0];
         assert_eq!(instruction.name, "load");
+        assert_eq!(inventory.isa, "TestIsa");
+        assert_eq!(inventory.dialect, "test");
         assert_eq!(instruction.write_classes, ["gpr"]);
         assert_eq!(
             instruction.memory_accesses[0].flat_address,

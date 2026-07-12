@@ -44,6 +44,7 @@ enum EvalRule {
     Or,
     And,
     Xor,
+    Xnor,
     Not,
     Concat,
 }
@@ -56,6 +57,7 @@ pub struct ScalarOp {
     pub commutative: bool,
     pub width: WidthRule,
     pub smt: SmtTemplate,
+    /// Rust spelling of the [`SymKind`] variant used by graph printers.
     pub rust: &'static str,
     eval: EvalRule,
 }
@@ -84,7 +86,7 @@ pub const SCALAR_OPS: &[ScalarOp] = &[
         true,
         First,
         SmtTemplate::Binary("bvadd"),
-        "add",
+        "Add",
         Add
     ),
     op!(
@@ -94,7 +96,7 @@ pub const SCALAR_OPS: &[ScalarOp] = &[
         false,
         First,
         SmtTemplate::Binary("bvsub"),
-        "sub",
+        "Sub",
         Sub
     ),
     op!(
@@ -104,7 +106,7 @@ pub const SCALAR_OPS: &[ScalarOp] = &[
         true,
         First,
         SmtTemplate::Binary("bvmul"),
-        "mul",
+        "Mul",
         Mul
     ),
     op!(
@@ -114,7 +116,7 @@ pub const SCALAR_OPS: &[ScalarOp] = &[
         false,
         First,
         SmtTemplate::Binary("bvsdiv"),
-        "sdiv",
+        "Div",
         SDiv
     ),
     op!(
@@ -124,7 +126,7 @@ pub const SCALAR_OPS: &[ScalarOp] = &[
         false,
         First,
         SmtTemplate::Binary("bvudiv"),
-        "udiv",
+        "UDiv",
         UDiv
     ),
     op!(
@@ -134,7 +136,7 @@ pub const SCALAR_OPS: &[ScalarOp] = &[
         false,
         First,
         SmtTemplate::Binary("bvsrem"),
-        "srem",
+        "SRem",
         SRem
     ),
     op!(
@@ -144,7 +146,7 @@ pub const SCALAR_OPS: &[ScalarOp] = &[
         false,
         First,
         SmtTemplate::Binary("bvurem"),
-        "urem",
+        "URem",
         URem
     ),
     op!(
@@ -154,10 +156,10 @@ pub const SCALAR_OPS: &[ScalarOp] = &[
         false,
         First,
         SmtTemplate::Unary("bvneg"),
-        "neg",
+        "Neg",
         Neg
     ),
-    op!(Eq, "eq", 2, true, Bool, SmtTemplate::Compare("="), "eq", Eq),
+    op!(Eq, "eq", 2, true, Bool, SmtTemplate::Compare("="), "Eq", Eq),
     op!(
         Ne,
         "ne",
@@ -165,7 +167,7 @@ pub const SCALAR_OPS: &[ScalarOp] = &[
         true,
         Bool,
         SmtTemplate::Compare("distinct"),
-        "ne",
+        "Ne",
         Ne
     ),
     op!(
@@ -175,7 +177,7 @@ pub const SCALAR_OPS: &[ScalarOp] = &[
         false,
         Bool,
         SmtTemplate::Compare("bvslt"),
-        "slt",
+        "Lt",
         SLt
     ),
     op!(
@@ -185,7 +187,7 @@ pub const SCALAR_OPS: &[ScalarOp] = &[
         false,
         Bool,
         SmtTemplate::Compare("bvsle"),
-        "sle",
+        "Le",
         SLe
     ),
     op!(
@@ -195,7 +197,7 @@ pub const SCALAR_OPS: &[ScalarOp] = &[
         false,
         Bool,
         SmtTemplate::Compare("bvsgt"),
-        "sgt",
+        "Gt",
         SGt
     ),
     op!(
@@ -205,7 +207,7 @@ pub const SCALAR_OPS: &[ScalarOp] = &[
         false,
         Bool,
         SmtTemplate::Compare("bvsge"),
-        "sge",
+        "Ge",
         SGe
     ),
     op!(
@@ -215,7 +217,7 @@ pub const SCALAR_OPS: &[ScalarOp] = &[
         false,
         Bool,
         SmtTemplate::Compare("bvult"),
-        "ult",
+        "ULt",
         ULt
     ),
     op!(
@@ -225,7 +227,7 @@ pub const SCALAR_OPS: &[ScalarOp] = &[
         false,
         Bool,
         SmtTemplate::Compare("bvule"),
-        "ule",
+        "ULe",
         ULe
     ),
     op!(
@@ -235,7 +237,7 @@ pub const SCALAR_OPS: &[ScalarOp] = &[
         false,
         Bool,
         SmtTemplate::Compare("bvugt"),
-        "ugt",
+        "UGt",
         UGt
     ),
     op!(
@@ -245,7 +247,7 @@ pub const SCALAR_OPS: &[ScalarOp] = &[
         false,
         Bool,
         SmtTemplate::Compare("bvuge"),
-        "uge",
+        "UGe",
         UGe
     ),
     op!(
@@ -255,7 +257,7 @@ pub const SCALAR_OPS: &[ScalarOp] = &[
         false,
         First,
         SmtTemplate::Shift("bvshl"),
-        "shl",
+        "ShiftLeft",
         Shl
     ),
     op!(
@@ -265,7 +267,7 @@ pub const SCALAR_OPS: &[ScalarOp] = &[
         false,
         First,
         SmtTemplate::Shift("bvashr"),
-        "ashr",
+        "ShiftRightArithmetic",
         AShr
     ),
     op!(
@@ -275,7 +277,7 @@ pub const SCALAR_OPS: &[ScalarOp] = &[
         false,
         First,
         SmtTemplate::Shift("bvlshr"),
-        "lshr",
+        "ShiftRightLogic",
         LShr
     ),
     op!(
@@ -285,7 +287,7 @@ pub const SCALAR_OPS: &[ScalarOp] = &[
         true,
         First,
         SmtTemplate::Binary("bvor"),
-        "or",
+        "Or",
         Or
     ),
     op!(
@@ -295,7 +297,7 @@ pub const SCALAR_OPS: &[ScalarOp] = &[
         true,
         First,
         SmtTemplate::Binary("bvand"),
-        "and",
+        "And",
         And
     ),
     op!(
@@ -305,8 +307,18 @@ pub const SCALAR_OPS: &[ScalarOp] = &[
         true,
         First,
         SmtTemplate::Binary("bvxor"),
-        "xor",
+        "Xor",
         Xor
+    ),
+    op!(
+        Xnor,
+        "xnor",
+        2,
+        true,
+        First,
+        SmtTemplate::Binary("bvxnor"),
+        "Xnor",
+        Xnor
     ),
     op!(
         Not,
@@ -315,7 +327,7 @@ pub const SCALAR_OPS: &[ScalarOp] = &[
         false,
         First,
         SmtTemplate::Unary("bvnot"),
-        "not",
+        "Not",
         Not
     ),
     op!(
@@ -325,7 +337,7 @@ pub const SCALAR_OPS: &[ScalarOp] = &[
         false,
         Sum,
         SmtTemplate::Concat,
-        "concat",
+        "Concat",
         Concat
     ),
 ];
@@ -390,6 +402,7 @@ impl ScalarOp {
             EvalRule::Or => lhs.or(&rhs),
             EvalRule::And => lhs.and(&rhs),
             EvalRule::Xor => lhs.xor(&rhs),
+            EvalRule::Xnor => lhs.xor(&rhs).not(),
             EvalRule::Concat => {
                 let width = operands[0].width() + operands[1].width();
                 operands[0]
@@ -413,5 +426,19 @@ mod tests {
             assert!(!SCALAR_OPS[..index].iter().any(|prev| prev.name == op.name));
             assert!(!op.rust.is_empty());
         }
+    }
+
+    #[test]
+    fn xnor_row_drives_every_scalar_consumer_field() {
+        let op = scalar_op_named("xnor").unwrap();
+        assert_eq!(op.kind, SymKind::Xnor);
+        assert_eq!(op.arity, 2);
+        assert_eq!(op.width, WidthRule::First);
+        assert_eq!(op.smt, SmtTemplate::Binary("bvxnor"));
+        assert_eq!(op.rust, "Xnor");
+        assert_eq!(
+            op.eval_int(&[APInt::new(4, 0b1010), APInt::new(4, 0b1100)]),
+            APInt::new(4, 0b1001)
+        );
     }
 }

@@ -42,6 +42,7 @@ pub enum SymKind {
     Or,
     And,
     Xor,
+    Xnor,
     Not,
     /// Bit concatenation; first operand occupies the high bits, width is the sum.
     Concat,
@@ -111,6 +112,18 @@ pub enum SymKind {
     /// 1 = instruction fence. `pred`/`succ` are target-defined ordering bit sets.
     // #[arity = 3]
     Fence,
+    /// Effectful state transition nodes. These share the semantic graph with
+    /// scalar value nodes; their children encode control flow and referenced
+    /// value terms.
+    StateAssign,
+    StateStore,
+    StateStoreConditional,
+    StateFence,
+    StateTrap,
+    StateBlock,
+    StateIf,
+    StateTry,
+    StateHandler,
 }
 
 impl SymKind {
@@ -162,6 +175,15 @@ impl SymKind {
     pub fn accepts_arity(&self, n: usize) -> bool {
         match self {
             SymKind::Split => n == 2 || n == 3,
+            SymKind::StateAssign
+            | SymKind::StateStore
+            | SymKind::StateStoreConditional
+            | SymKind::StateFence
+            | SymKind::StateTrap
+            | SymKind::StateBlock
+            | SymKind::StateIf
+            | SymKind::StateTry
+            | SymKind::StateHandler => true,
             _ => n == self.arity(),
         }
     }
