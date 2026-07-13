@@ -142,6 +142,29 @@ fn hash_label(node: &SemNode, state: &mut impl Hasher) {
     }
 }
 
+/// If the class is a low-bit truncation `Extract(v, hi, 0)`, its operand class
+/// `v`. Such a value *is* the low `hi+1` bits of `v`'s register — the framework's
+/// value model (a width-n value occupies the low n bits, upper bits undefined) —
+/// so it computes nothing: consumers read `v`'s register directly. No
+/// materializer, no instruction, and no cross-width union (the i32 view and any
+/// explicit i64 widening stay distinct classes, kept apart by the width matcher).
+pub(crate) fn low_extract_source(egraph: &SemEGraph, class: Id) -> Option<Id> {
+    egraph.nodes(class).iter().find_map(|n| {
+        (n.kind == SymKind::Extract
+            && n.children().len() == 3
+            && class_int_binding(egraph, egraph.find(n.children()[2]))
+                .as_ref()
+                .map(APInt::to_u64)
+                == Some(0))
+        .then(|| egraph.find(n.children()[0]))
+    })
+}
+
+/// Whether the class is a low-bit truncation (see [`low_extract_source`]).
+pub(crate) fn is_low_extract_view(egraph: &SemEGraph, class: Id) -> bool {
+    low_extract_source(egraph, class).is_some()
+}
+
 /// The constant a class is proven to hold, if any member is an integer literal.
 pub(crate) fn class_int_binding(egraph: &SemEGraph, class: Id) -> Option<APInt> {
     egraph.nodes(class).iter().find_map(|n| match &n.payload {

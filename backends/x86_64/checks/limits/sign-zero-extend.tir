@@ -1,12 +1,10 @@
 // RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s
-// XFAIL: *
 
-// FINDING F6 (miscompile): sign/zero extension (extsi/extui) lowers to a shift
-// pair, but the constant shift count (32) is routed through the CL-count form
-// (shl_cl/shr_cl/sar_cl with `rcx = 32`) which the encoder emits as `shl cl` -
-// reading CL, not 32. So the extension shifts by garbage. tir-jit confirms:
-// extsi(i32::MIN) and extui(-1) return wrong values. A correct lowering must not
-// stuff a constant count into the CL form; CHECK-NOT flags it (XFAIL today).
+// A constant shift count (32) in the extension shift pair uses the immediate
+// form (`shl dst, 32`), not the by-`cl` form: a register the behavior reads by
+// path (`GPR::rcx`) reads that register's value, so it must bind a register,
+// leaving a constant count to the immediate form. Previously the count was
+// stuffed into the CL form as a dead `rcx = 32` attribute, emitting `shl cl`.
 
 module {
   func @se(%0: !i32) -> !i64 {
@@ -21,3 +19,5 @@ module {
 }
 
 // CHECK-NOT: rcx = 32
+// CHECK: x86_64.shl {{.*}}imm = 32
+// CHECK: x86_64.sar {{.*}}imm = 32

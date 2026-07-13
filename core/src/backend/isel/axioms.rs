@@ -10,8 +10,10 @@
 //! (axiom <name>
 //!   (vars (<var> <width>)...)    ; pattern vars whose class width binds <width>
 //!   (root <width|int>)           ; the matched root class's width
-//!   (where (< <a> <b>)...)       ; guards over bound widths
-//!   (lhs (<kind> <operand>...))  ; matched shape; undeclared atoms are wildcards
+//!   (where (< <a> <b>) (= <a> <b>)...) ; guards over bound widths
+//!   (lhs (<kind> <operand>...))  ; matched shape; undeclared atoms are wildcards,
+//!                                ;   integer/`(- ..)`/`(ones ..)` operands match a
+//!                                ;   `Constant` class equal to the expression
 //!   (rhs <template>))            ; equivalent form unioned with the root
 //! ```
 //!
@@ -37,14 +39,16 @@ use tir::{
     Context,
     graph::NodeId,
     sem::{
-        EquivalenceOracle, SemExpr, SemGraph, SmtOracle, SymKind, SymPayload, con, op, op_kind,
-        parse, sym,
+        EquivalenceOracle, SemExpr, SemGraph, SmtOracle, SymKind, SymPayload, Value, con, execute,
+        op, op_kind, parse, sym,
     },
 };
 use tir_adt::APInt;
 use tir_symbolic::egraph::{EMatch, Id, Pattern, Var};
 
-use super::node::{SemEGraph, SemNode, class_width, template_node};
+use super::node::{
+    SemEGraph, SemNode, class_int_binding, class_width, is_comparison, template_node,
+};
 use super::rewrites::IselRewrite;
 
 /// A width position in `vars`/`root`: a literal to check or a name to bind.
@@ -104,6 +108,7 @@ impl WidthExpr {
 
 enum Guard {
     Lt(WidthExpr, WidthExpr),
+    Eq(WidthExpr, WidthExpr),
 }
 
 impl Guard {
@@ -112,6 +117,10 @@ impl Guard {
             Guard::Lt(a, b) => matches!(
                 (a.eval(widths), b.eval(widths)),
                 (Some(a), Some(b)) if a < b
+            ),
+            Guard::Eq(a, b) => matches!(
+                (a.eval(widths), b.eval(widths)),
+                (Some(a), Some(b)) if a == b
             ),
         }
     }
@@ -138,6 +147,9 @@ enum AxNode {
     Root,
     /// An integer expression materialized as a constant (RHS only).
     Const(WidthExpr, ConstWidth),
+    /// An LHS constant operand: matches only a class holding a `Constant` equal
+    /// to the expression, evaluated after widths resolve.
+    ConstMatch(WidthExpr),
     Node(SymKind, Vec<AxNode>),
 }
 
@@ -155,6 +167,10 @@ pub(crate) struct Axiom {
     /// Declared pattern vars (name, class-width binding); a var's `SymbolId` in
     /// proof graphs is its index here.
     vars: Vec<(String, WidthBinding)>,
+    /// Indices into `vars` of operands that must match a `Constant` class — so a
+    /// rule fires only on the immediate form. The proof treats them as ordinary
+    /// symbols (the identity holds for any value); the applier checks constness.
+    const_vars: Vec<usize>,
     root_width: WidthBinding,
     guards: Vec<Guard>,
     lhs: AxNode,
@@ -226,6 +242,7 @@ pub(crate) fn parse_axiom(text: &str) -> Result<Axiom, String> {
     };
 
     let mut vars: Vec<(String, WidthBinding)> = Vec::new();
+    let mut const_vars: Vec<usize> = Vec::new();
     let mut root_width = None;
     let mut guards = Vec::new();
     let mut lhs_expr = None;
@@ -239,15 +256,18 @@ pub(crate) fn parse_axiom(text: &str) -> Result<Axiom, String> {
             return Err("axiom section must start with a keyword".into());
         };
         match section_head.as_str() {
-            "vars" => {
+            "vars" | "consts" => {
                 for entry in rest {
                     let SemExpr::List(pair) = entry else {
-                        return Err("vars entries must be (<var> <width>)".into());
+                        return Err("var entries must be (<var> <width>)".into());
                     };
                     let [SemExpr::Atom(v), SemExpr::Atom(w)] = pair.as_slice() else {
-                        return Err("vars entries must be (<var> <width>)".into());
+                        return Err("var entries must be (<var> <width>)".into());
                     };
                     let w = binding(w, &mut width_names);
+                    if section_head == "consts" {
+                        const_vars.push(vars.len());
+                    }
                     vars.push((v.clone(), w));
                 }
             }
@@ -265,13 +285,13 @@ pub(crate) fn parse_axiom(text: &str) -> Result<Axiom, String> {
                     let [SemExpr::Atom(cmp), a, b] = parts.as_slice() else {
                         return Err("guards must be (< <a> <b>)".into());
                     };
-                    if cmp != "<" {
-                        return Err(format!("unknown guard `{cmp}`"));
-                    }
-                    guards.push(Guard::Lt(
-                        parse_width_expr(a, &width_names)?,
-                        parse_width_expr(b, &width_names)?,
-                    ));
+                    let a = parse_width_expr(a, &width_names)?;
+                    let b = parse_width_expr(b, &width_names)?;
+                    guards.push(match cmp.as_str() {
+                        "<" => Guard::Lt(a, b),
+                        "=" => Guard::Eq(a, b),
+                        other => return Err(format!("unknown guard `{other}`")),
+                    });
                 }
             }
             "lhs" => {
@@ -333,6 +353,7 @@ pub(crate) fn parse_axiom(text: &str) -> Result<Axiom, String> {
         name,
         width_names,
         vars,
+        const_vars,
         root_width,
         guards,
         lhs,
@@ -392,7 +413,7 @@ fn parse_node(
             let var = vars.iter().position(|(v, _)| v == a);
             match side {
                 Side::Lhs if a.parse::<u64>().is_ok() => {
-                    Err("integer literals cannot be lhs operands".into())
+                    Ok(AxNode::ConstMatch(parse_width_expr(e, width_names)?))
                 }
                 Side::Lhs => Ok(AxNode::Hole(a.clone(), var)),
                 Side::Rhs => match var {
@@ -409,6 +430,9 @@ fn parse_node(
                 return Err("template nodes must be (<kind> <operand>...)".into());
             };
             match head.as_str() {
+                "-" | "ones" if side == Side::Lhs => {
+                    Ok(AxNode::ConstMatch(parse_width_expr(e, width_names)?))
+                }
                 "-" | "ones" if side == Side::Rhs => Ok(AxNode::Const(
                     parse_width_expr(e, width_names)?,
                     ConstWidth::Register,
@@ -448,7 +472,7 @@ fn references(node: &AxNode, uses_root: &mut bool, vars: &mut HashSet<usize>) {
         AxNode::Hole(_, Some(i)) => {
             vars.insert(*i);
         }
-        AxNode::Hole(_, None) | AxNode::Const(..) => {}
+        AxNode::Hole(_, None) | AxNode::Const(..) | AxNode::ConstMatch(..) => {}
         AxNode::Node(_, children) => {
             for c in children {
                 references(c, uses_root, vars);
@@ -465,14 +489,22 @@ fn holes_of(node: &AxNode, out: &mut Vec<(String, Option<usize>)>) {
                 holes_of(c, out);
             }
         }
-        AxNode::Root | AxNode::Const(..) => {}
+        AxNode::Root | AxNode::Const(..) | AxNode::ConstMatch(..) => {}
     }
 }
 
 impl Axiom {
-    #[cfg(test)]
     pub(crate) fn name(&self) -> &str {
         &self.name
+    }
+
+    /// The semantic kind the LHS matches at its root — the kind this axiom
+    /// bridges (covers).
+    pub(crate) fn lhs_kind(&self) -> Option<SymKind> {
+        match &self.lhs {
+            AxNode::Node(kind, _) => Some(*kind),
+            _ => None,
+        }
     }
 
     /// Every node kind the RHS introduces, for target-capability gating.
@@ -497,7 +529,20 @@ impl Axiom {
     pub(crate) fn compile(self) -> IselRewrite {
         let mut searcher = Pattern::<SemNode, u32>::new();
         let mut holes: HashMap<String, Id> = HashMap::new();
-        compile_lhs(&self.lhs, &mut searcher, &mut holes, &mut 0);
+        let mut const_matches: Vec<(Id, WidthExpr)> = Vec::new();
+        compile_lhs(
+            &self.lhs,
+            &mut searcher,
+            &mut holes,
+            &mut const_matches,
+            &mut 0,
+        );
+
+        let const_var_ids: Vec<Id> = self
+            .const_vars
+            .iter()
+            .map(|&i| holes[&self.vars[i].0])
+            .collect();
 
         let name = format!("axiom-{}", self.name);
         let proofs: Mutex<HashMap<Vec<u64>, bool>> = Mutex::default();
@@ -510,6 +555,22 @@ impl Axiom {
                 };
                 if !self.guards.iter().all(|g| g.holds(&widths)) {
                     return;
+                }
+                // Constant-operand vars fire only on the immediate form.
+                if const_var_ids
+                    .iter()
+                    .any(|&id| class_int_binding(eg, m.binding(id)).is_none())
+                {
+                    return;
+                }
+                for (id, expr) in &const_matches {
+                    let Some(expected) = expr.eval(&widths) else {
+                        return;
+                    };
+                    match class_int_binding(eg, m.binding(*id)) {
+                        Some(bound) if bound.to_u64() == expected => {}
+                        _ => return,
+                    }
                 }
                 let proven = {
                     let mut proofs = proofs.lock().unwrap();
@@ -525,7 +586,7 @@ impl Axiom {
                 if !proven {
                     return;
                 }
-                if let Some(id) = self.instantiate(&self.rhs, eg, m, &holes, &widths) {
+                if let Some(id) = self.instantiate(ctx, &self.rhs, eg, m, &holes, &widths) {
                     eg.union(m.root, id);
                 }
             }),
@@ -559,7 +620,15 @@ impl Axiom {
     /// Prove one width instantiation with the [`SmtOracle`]; `widths` follows
     /// the width names' declaration order (`vars` first, then `root`).
     pub(crate) fn prove(&self, widths: &[u64]) -> bool {
-        let register_width = self.root_width.value(widths) as u32;
+        // The register the proof realizes over must hold every operand and the
+        // root: widest for extensions (the root), or a var for a narrowing lhs.
+        let register_width = self
+            .vars
+            .iter()
+            .map(|(_, binding)| binding.value(widths))
+            .chain([self.root_width.value(widths)])
+            .max()
+            .unwrap_or_else(|| self.root_width.value(widths)) as u32;
         let mut lhs = SemGraph::new();
         let mut rhs = SemGraph::new();
         let (built, symbol_count) = if self.uses_root {
@@ -635,6 +704,7 @@ impl Axiom {
                 };
                 Some(con(g, e.eval(widths)?, width))
             }
+            AxNode::ConstMatch(e) => Some(con(g, e.eval(widths)?, 16)),
             AxNode::Node(kind, children) => {
                 let children = children
                     .iter()
@@ -648,6 +718,7 @@ impl Axiom {
     /// Build the RHS in the e-graph from a match's bindings.
     fn instantiate(
         &self,
+        ctx: &Context,
         node: &AxNode,
         eg: &mut SemEGraph,
         m: &EMatch<u32>,
@@ -656,6 +727,7 @@ impl Axiom {
     ) -> Option<Id> {
         Some(match node {
             AxNode::Root => m.root,
+            AxNode::ConstMatch(..) => unreachable!("const-match holes are lhs-only"),
             AxNode::Hole(name, _) => m.binding(holes[name]),
             AxNode::Const(e, width) => {
                 let width = match width {
@@ -671,14 +743,61 @@ impl Axiom {
             AxNode::Node(kind, children) => {
                 let children = children
                     .iter()
-                    .map(|c| self.instantiate(c, eg, m, holes, widths))
+                    .map(|c| self.instantiate(ctx, c, eg, m, holes, widths))
                     .collect::<Option<Vec<_>>>()?;
-                let mut n = template_node(*kind, None, None);
-                n.children = children;
-                eg.add(n)
+                fold_constant_op(*kind, &children, eg).unwrap_or_else(|| {
+                    // A comparison always yields i1; type it so a typed
+                    // materializer pattern (e.g. `sltiu`) still matches an
+                    // introduced condition, not only a program-typed one.
+                    let ty = is_comparison(*kind).then(|| tir::builtin::IntegerType::new(ctx, 1));
+                    let mut n = template_node(*kind, None, ty);
+                    n.children = children;
+                    eg.add(n)
+                })
             }
         })
     }
+}
+
+/// Fold a pure op whose operands are all constants into a single constant, so an
+/// immediate consumer can bind the result — e.g. `Sub(x, c) -> Add(x, neg(c))`
+/// yields `neg(const)`, which folds to the negated immediate `addi` reads.
+/// `None` when an operand is not constant or the kind is not a foldable pure op.
+fn fold_constant_op(kind: SymKind, children: &[Id], eg: &mut SemEGraph) -> Option<Id> {
+    use SymKind::*;
+    if !matches!(
+        kind,
+        Add | Sub
+            | Mul
+            | And
+            | Or
+            | Xor
+            | ShiftLeft
+            | ShiftRightLogic
+            | ShiftRightArithmetic
+            | Neg
+            | Not
+    ) {
+        return None;
+    }
+    let consts: Vec<APInt> = children
+        .iter()
+        .map(|&c| class_int_binding(eg, c))
+        .collect::<Option<Vec<_>>>()?;
+    let mut g = SemGraph::new();
+    let operands: Vec<NodeId> = consts
+        .iter()
+        .map(|v| con(&mut g, v.to_u64(), v.width()))
+        .collect();
+    op(&mut g, kind, &operands);
+    let Value::Int(result) = execute(&g, &[]) else {
+        return None;
+    };
+    Some(eg.add(template_node(
+        SymKind::Constant,
+        Some(SymPayload::Int(result)),
+        None,
+    )))
 }
 
 /// Lower the LHS into a search pattern: holes become capture vars (one per
@@ -688,6 +807,7 @@ fn compile_lhs(
     node: &AxNode,
     searcher: &mut Pattern<SemNode, u32>,
     holes: &mut HashMap<String, Id>,
+    const_matches: &mut Vec<(Id, WidthExpr)>,
     next_symbol: &mut u32,
 ) -> Id {
     match node {
@@ -700,10 +820,16 @@ fn compile_lhs(
             holes.insert(name.clone(), id);
             id
         }
+        AxNode::ConstMatch(e) => {
+            let id = searcher.var(Var::Symbol(*next_symbol));
+            *next_symbol += 1;
+            const_matches.push((id, e.clone()));
+            id
+        }
         AxNode::Node(kind, children) => {
             let children: Vec<Id> = children
                 .iter()
-                .map(|c| compile_lhs(c, searcher, holes, next_symbol))
+                .map(|c| compile_lhs(c, searcher, holes, const_matches, next_symbol))
                 .collect();
             let mut n = template_node(*kind, None, None);
             n.children = children;
@@ -730,6 +856,46 @@ pub(crate) fn bool_materialize_axioms() -> Vec<Axiom> {
         .expect("builtin axiom must parse")
     })
     .collect()
+}
+
+/// Bridge the six comparison values a `slt`/`sltu`-class target cannot root
+/// directly onto the four it can (`lt`/`gt`/`ult`/`ugt`) plus `xor`:
+///   `eq(a,b)  == ult(xor(a,b), 1)`   `ne(a,b)  == xor(ult(xor(a,b), 1), 1)`
+///   `ge(a,b)  == xor(lt(a,b), 1)`    `le(a,b)  == xor(lt(b,a), 1)`
+///   `uge(a,b) == xor(ult(a,b), 1)`   `ule(a,b) == xor(ult(b,a), 1)`
+/// Each a proved identity; the introduced `lt`/`ult` in turn materialize through
+/// the boolean `via-if` bridges. `ne` is `not(eq)` — a constant in the `ult`
+/// low operand would match neither `sltu` (register) nor `sltiu` (imm is high).
+/// Emitted only when the target roots `xor`.
+pub(crate) fn comparison_materialize_axioms() -> Vec<Axiom> {
+    [
+        ("eq", "(ult (xor a b) 1)"),
+        ("ne", "(xor (ult (xor a b) 1) (const 1 1))"),
+        ("ge", "(xor (lt a b) (const 1 1))"),
+        ("le", "(xor (lt b a) (const 1 1))"),
+        ("uge", "(xor (ult a b) (const 1 1))"),
+        ("ule", "(xor (ult b a) (const 1 1))"),
+    ]
+    .iter()
+    .map(|(kind, rhs)| {
+        parse_axiom(&format!(
+            "(axiom {kind}-via-cmp (vars (a w) (b w)) (root 1)
+               (lhs ({kind} a b)) (rhs {rhs}))"
+        ))
+        .expect("builtin axiom must parse")
+    })
+    .collect()
+}
+
+/// `x - c == x + (-c)` for a constant `c`: a target without a subtract-immediate
+/// covers `sub` with an immediate operand through `add`, since `neg(const)` folds
+/// to the negated immediate. The `consts` operand keeps it off register `sub`.
+pub(crate) fn sub_via_add_neg_axiom() -> Axiom {
+    parse_axiom(
+        "(axiom sub-via-add-neg (vars (a w)) (consts (c w)) (root w)
+           (lhs (sub a c)) (rhs (add a (neg c))))",
+    )
+    .expect("builtin axiom must parse")
 }
 
 #[cfg(test)]
@@ -864,6 +1030,199 @@ mod tests {
             .unwrap();
         apply_all(&ctx, &mut eg, &axiom.compile());
         assert!(class_kinds(&eg, root).contains(&SymKind::If));
+    }
+
+    /// `extract(symbol : i32, hi, lo)` with the width-16 constant convention;
+    /// the result type carries the `hi - lo + 1` narrowed width.
+    fn extract_egraph(ctx: &Context, hi: u64, lo: u64) -> (SemEGraph, Id) {
+        let i32 = IntegerType::new(ctx, 32);
+        let result_ty = IntegerType::new(ctx, (hi - lo + 1) as u32);
+        let mut eg = SemEGraph::new();
+        let x = eg.add(template_node(
+            SymKind::Symbol,
+            Some(SymPayload::SymbolId(0)),
+            Some(i32),
+        ));
+        let hi_c = eg.add(template_node(
+            SymKind::Constant,
+            Some(SymPayload::Int(APInt::new(16, hi))),
+            None,
+        ));
+        let lo_c = eg.add(template_node(
+            SymKind::Constant,
+            Some(SymPayload::Int(APInt::new(16, lo))),
+            None,
+        ));
+        let mut ex = template_node(SymKind::Extract, None, Some(result_ty));
+        ex.children = vec![x, hi_c, lo_c];
+        let root = eg.add(ex);
+        (eg, root)
+    }
+
+    fn narrowing_axiom() -> Axiom {
+        parse_axiom(
+            "(axiom trunc-and-ones
+               (vars (x w)) (root n) (where (< n w))
+               (lhs (extract x (- n 1) 0))
+               (rhs (extract (and x (ones n)) (- n 1) 0)))",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn narrowing_axiom_unions_a_masked_form() {
+        let ctx = Context::with_default_dialects();
+        let (mut eg, root) = extract_egraph(&ctx, 15, 0);
+        assert_eq!(eg.nodes(root).len(), 1);
+        apply_all(&ctx, &mut eg, &narrowing_axiom().compile());
+        assert!(
+            eg.nodes(root).len() > 1,
+            "the proved masked form must union into the low-extract class"
+        );
+    }
+
+    /// `sub(symbol : i64, right)` where `right` is a constant or a symbol.
+    fn sub_egraph(ctx: &Context, right_const: bool) -> (SemEGraph, Id) {
+        let i64 = IntegerType::new(ctx, 64);
+        let mut eg = SemEGraph::new();
+        let a = eg.add(template_node(
+            SymKind::Symbol,
+            Some(SymPayload::SymbolId(0)),
+            Some(i64),
+        ));
+        let right = if right_const {
+            eg.add(template_node(
+                SymKind::Constant,
+                Some(SymPayload::Int(APInt::new(64, 10))),
+                Some(i64),
+            ))
+        } else {
+            eg.add(template_node(
+                SymKind::Symbol,
+                Some(SymPayload::SymbolId(1)),
+                Some(i64),
+            ))
+        };
+        let mut sub = template_node(SymKind::Sub, None, Some(i64));
+        sub.children = vec![a, right];
+        let root = eg.add(sub);
+        (eg, root)
+    }
+
+    #[test]
+    fn equality_bridges_to_a_typed_xor_slt_composite() {
+        // `eq(a,b) == ult(xor(a,b), 1)`; the introduced `ult` must be typed i1
+        // so the `sltiu`-class materializer pattern still matches it.
+        let ctx = Context::with_default_dialects();
+        let i1 = IntegerType::new(&ctx, 1);
+        let i64 = IntegerType::new(&ctx, 64);
+        let mut eg = SemEGraph::new();
+        let a = eg.add(template_node(
+            SymKind::Symbol,
+            Some(SymPayload::SymbolId(0)),
+            Some(i64),
+        ));
+        let b = eg.add(template_node(
+            SymKind::Symbol,
+            Some(SymPayload::SymbolId(1)),
+            Some(i64),
+        ));
+        let mut eq = template_node(SymKind::Eq, None, Some(i1));
+        eq.children = vec![a, b];
+        let root = eg.add(eq);
+
+        let axiom = comparison_materialize_axioms()
+            .into_iter()
+            .find(|a| a.name() == "eq-via-cmp")
+            .unwrap();
+        apply_all(&ctx, &mut eg, &axiom.compile());
+        let ult = eg
+            .nodes(root)
+            .iter()
+            .find(|n| n.kind == SymKind::ULt)
+            .expect("eq must bridge to ult(xor, 1)");
+        assert_eq!(
+            ult.ty,
+            Some(i1),
+            "the introduced comparison must be typed i1"
+        );
+    }
+
+    #[test]
+    fn constant_operand_axiom_bridges_only_a_constant() {
+        let ctx = Context::with_default_dialects();
+
+        let (mut const_eg, root) = sub_egraph(&ctx, true);
+        apply_all(&ctx, &mut const_eg, &sub_via_add_neg_axiom().compile());
+        assert!(
+            class_kinds(&const_eg, root).contains(&SymKind::Add),
+            "a constant operand bridges `sub` to `add`"
+        );
+
+        let (mut reg_eg, root) = sub_egraph(&ctx, false);
+        apply_all(&ctx, &mut reg_eg, &sub_via_add_neg_axiom().compile());
+        assert!(
+            !class_kinds(&reg_eg, root).contains(&SymKind::Add),
+            "a register operand is left as `sub`"
+        );
+    }
+
+    #[test]
+    fn equality_guard_gates_on_a_width() {
+        // `(= n 16)` fires only when the narrowed width is 16.
+        let axiom = || {
+            parse_axiom(
+                "(axiom trunc-when-16
+                   (vars (x w)) (root n) (where (< n w) (= n 16))
+                   (lhs (extract x (- n 1) 0))
+                   (rhs (extract (and x (ones n)) (- n 1) 0)))",
+            )
+            .unwrap()
+        };
+        let ctx = Context::with_default_dialects();
+
+        let (mut blocked, root) = extract_egraph(&ctx, 7, 0);
+        apply_all(&ctx, &mut blocked, &axiom().compile());
+        assert_eq!(blocked.nodes(root).len(), 1, "width 8 fails `(= n 16)`");
+
+        let (mut fired, root) = extract_egraph(&ctx, 15, 0);
+        apply_all(&ctx, &mut fired, &axiom().compile());
+        assert!(fired.nodes(root).len() > 1, "width 16 satisfies `(= n 16)`");
+    }
+
+    #[test]
+    fn unsound_narrowing_axiom_is_refused() {
+        // Masking to `n - 1` bits drops bit `n - 1`, so it does not equal the
+        // low `n` bits: the instantiation proof fails and nothing unions.
+        let axiom = parse_axiom(
+            "(axiom trunc-off-by-one
+               (vars (x w)) (root n) (where (< n w))
+               (lhs (extract x (- n 1) 0))
+               (rhs (extract (and x (ones (- n 1))) (- n 1) 0)))",
+        )
+        .unwrap();
+        let ctx = Context::with_default_dialects();
+        let (mut eg, root) = extract_egraph(&ctx, 15, 0);
+        apply_all(&ctx, &mut eg, &axiom.compile());
+        assert_eq!(
+            eg.nodes(root).len(),
+            1,
+            "a refuted instantiation must leave the class untouched"
+        );
+    }
+
+    #[test]
+    fn narrowing_axiom_skips_a_non_low_slice() {
+        // `extract(x, 16, 1)` is a slice, not a low truncation: the `0` const
+        // hole must reject `lo = 1`, so nothing unions.
+        let ctx = Context::with_default_dialects();
+        let (mut eg, root) = extract_egraph(&ctx, 16, 1);
+        apply_all(&ctx, &mut eg, &narrowing_axiom().compile());
+        assert_eq!(
+            eg.nodes(root).len(),
+            1,
+            "a slice must not match the low-extract axiom"
+        );
     }
 
     #[test]

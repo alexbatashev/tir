@@ -699,6 +699,31 @@ fn emit_instructions<'a>(
                 };
                 operand_constraint_entries.push(quote! { (#symbol_lit, #constraint) });
             }
+            // A data register the behavior reads by path (e.g. the x86 shift count
+            // in `GPR::rcx`, whose class is also a value-operand class) reads that
+            // register's *value*, so it must bind a register, never a folded
+            // constant — a constant count belongs to the immediate form. Without
+            // this the count is stuffed into the reg as a dead attribute and the
+            // encoder emits the by-`cl` form reading garbage. A config-register
+            // demand (e.g. RISC-V `VCSR::vl`) is a different class and unaffected.
+            let value_reg_classes: std::collections::HashSet<&str> = ops
+                .iter()
+                .filter_map(|(_, ty)| match ty {
+                    Type::Struct(class) => Some(class.as_str()),
+                    _ => None,
+                })
+                .collect();
+            for ((class, index), symbol) in &semantics.register_symbols {
+                let is_implicit = register_name_map
+                    .get(&(class.clone(), *index))
+                    .map(|name| !ops.iter().any(|(op_name, _)| op_name == name))
+                    .unwrap_or(false);
+                if is_implicit && value_reg_classes.contains(class.as_str()) {
+                    let symbol_lit = proc_macro2::Literal::u32_unsuffixed(*symbol);
+                    operand_constraint_entries
+                        .push(quote! { (#symbol_lit, tir::graph::OperandConstraint::Register) });
+                }
+            }
 
             let mut emit_attr_steps = Vec::new();
             for (op_name, op_ty) in &ops {
@@ -3088,6 +3113,44 @@ fn copy_subgraph_remap_symbols(
     copied
 }
 
+/// Copy a boolean value materializer's arm (`zext(0/1, W)`), replacing the
+/// widen-to width with a fresh capture symbol so the pattern matches the boolean
+/// regardless of the destination register width. Without this an 8-bit `setcc`
+/// arm (`zext(1, 8)`) fails to match the width-1 boolean the bridge produces,
+/// while an `XLEN`-symbol arm (arm64 `cset`) already generalizes — the value is a
+/// boolean 0/1, the register width is not part of what selects it.
+fn copy_reader_arm(
+    dst: &mut tir::sem::SemGraph,
+    src: &tir::sem::SemGraph,
+    arm_root: tir::graph::NodeId,
+    remap: &mut HashMap<u32, u32>,
+    next: &mut u32,
+) -> tir::graph::NodeId {
+    use tir::graph::{Dag, MutDag};
+    let kind = *src.get_node(arm_root);
+    if matches!(kind, tir::sem::SymKind::ZExt | tir::sem::SymKind::SExt) {
+        let children: Vec<tir::graph::NodeId> = src.children(arm_root).collect();
+        if children.len() == 2 {
+            let value = copy_subgraph_remap_symbols(
+                dst,
+                src,
+                children[0],
+                &mut HashMap::new(),
+                remap,
+                next,
+            );
+            let width = dst.add_node(tir::sem::SymKind::Symbol);
+            dst.set_leaf_data(width, tir::sem::SymPayload::SymbolId(*next));
+            *next += 1;
+            let widened = dst.add_node(kind);
+            dst.add_edge(widened, value);
+            dst.add_edge(widened, width);
+            return widened;
+        }
+    }
+    copy_subgraph_remap_symbols(dst, src, arm_root, &mut HashMap::new(), remap, next)
+}
+
 /// Copy the branch guard from `guard` into `dst`, replacing each status-flag
 /// read (a symbol in `substitute`) with a copy of the definer's expression for
 /// that flag. The definer's operand symbols survive verbatim, so the composed
@@ -4066,6 +4129,68 @@ fn emit_aliased_zero_branch_rules(
 /// pair registers an `If`-rooted value rule whose prelude emits the definer and
 /// whose emitter is the reader (`cset`/`setcc`), materializing the comparison in
 /// a destination register — the value analog of the flag-branch rules.
+/// Each ISA's transitive `requires` set. An instruction tagged with ISA `a`
+/// where `requires[a]` contains `b` is available wherever `b` is (e.g. `X86`
+/// requires `X86_64`), so two such instructions can co-occur even without a
+/// shared tag — needed to pair an `[X86]` `setcc` with an `[X86_64]` `cmp`.
+fn isa_requires_closure(files: &[ast::File]) -> HashMap<String, HashSet<String>> {
+    let mut closure: HashMap<String, HashSet<String>> = HashMap::new();
+    for isa in files.iter().flat_map(|f| f.isas()) {
+        let direct = match &isa.requires {
+            Some(ast::IsaRequirement::Single(s)) => vec![s.clone()],
+            // `All` is a conjunction: every listed ISA is guaranteed present.
+            Some(ast::IsaRequirement::All(v)) => v.clone(),
+            // A single-element `Any` (`requires [X86_64]`) is an exact
+            // requirement. A multi-element `Any` is a disjunction (`[RV32I |
+            // RV64I]`): no single ISA is guaranteed, so it can imply nothing
+            // for the closure — assuming all would falsely pair instructions
+            // that never share a machine.
+            Some(ast::IsaRequirement::Any(v)) if v.len() == 1 => v.clone(),
+            Some(ast::IsaRequirement::Any(_)) => vec![],
+            None => vec![],
+        };
+        closure.entry(isa.name.clone()).or_default().extend(direct);
+    }
+    let names: Vec<String> = closure.keys().cloned().collect();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for name in &names {
+            for req in closure[name].iter().cloned().collect::<Vec<_>>() {
+                for transitively in closure.get(&req).cloned().unwrap_or_default() {
+                    if closure.get_mut(name).unwrap().insert(transitively) {
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+    closure
+}
+
+/// The ISAs a rule composing `reader`- and `definer`-tagged instructions is valid
+/// for: a shared tag, or the more-restrictive tag when one ISA requires the other
+/// (so both are available). Empty when the two can never co-occur.
+fn flag_rule_isas(
+    reader: &[String],
+    definer: &[String],
+    closure: &HashMap<String, HashSet<String>>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for ri in reader {
+        for di in definer {
+            if ri == di || closure.get(ri).is_some_and(|c| c.contains(di)) {
+                out.push(ri.clone());
+            } else if closure.get(di).is_some_and(|c| c.contains(ri)) {
+                out.push(di.clone());
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 fn emit_flag_reader_rules(
     files: &[ast::File],
     definers: &[(FlagInst<'_>, FlagDefinerSemantics)],
@@ -4075,18 +4200,13 @@ fn emit_flag_reader_rules(
     isel_rule_inits: &mut Vec<proc_macro2::TokenStream>,
 ) {
     use tir::graph::{Dag, MutDag};
+    let isa_closure = isa_requires_closure(files);
     for (r, r_sem) in readers {
         for (d, d_sem) in definers {
             if d_sem.class != r_sem.class {
                 continue;
             }
-            let shared_isas: Vec<String> = r
-                .inst
-                .for_isas
-                .iter()
-                .filter(|isa| d.inst.for_isas.contains(isa))
-                .cloned()
-                .collect();
+            let shared_isas = flag_rule_isas(&r.inst.for_isas, &d.inst.for_isas, &isa_closure);
             if shared_isas.is_empty() {
                 continue;
             }
@@ -4142,19 +4262,17 @@ fn emit_flag_reader_rules(
             );
             let mut arm_remap: HashMap<u32, u32> = HashMap::new();
             let mut next_symbol = d_sem.variable_symbols.len() as u32;
-            let then_ = copy_subgraph_remap_symbols(
+            let then_ = copy_reader_arm(
                 &mut pattern,
                 &r_sem.graph,
                 r_sem.then_root,
-                &mut HashMap::new(),
                 &mut arm_remap,
                 &mut next_symbol,
             );
-            let else_ = copy_subgraph_remap_symbols(
+            let else_ = copy_reader_arm(
                 &mut pattern,
                 &r_sem.graph,
                 r_sem.else_root,
-                &mut HashMap::new(),
                 &mut arm_remap,
                 &mut next_symbol,
             );

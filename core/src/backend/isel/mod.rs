@@ -11,6 +11,7 @@
 mod axioms;
 mod builder;
 mod cover;
+mod coverage;
 mod emit;
 mod node;
 mod pattern;
@@ -31,6 +32,7 @@ use tir::{
 use tir_adt::APInt;
 use tir_symbolic::egraph::{ENode, Id, Var};
 
+pub use coverage::{CoverageRow, CoverageStatus, discover_coverage, render_coverage_file};
 pub use node::{SemEGraph, SemNode, SemPayload};
 pub use rewrites::{IselRewrite, SaturationLimits};
 pub use synthesis::{discover_axioms, render_axioms_file};
@@ -42,7 +44,10 @@ use cover::{
     build_eclass_cover, completeness_error, prune_dominated_matches,
 };
 use emit::{BlockDecision, BlockPlan, EmissionBuilder, GuardBranch, TerminatorPlan};
-use node::{class_int_binding, class_width, is_comparison, template_node};
+use node::{
+    class_int_binding, class_width, is_comparison, is_low_extract_view, low_extract_source,
+    template_node,
+};
 use pattern::{CompiledIselPattern, compile_isel_pattern};
 use rewrites::discover_rewrites;
 
@@ -430,6 +435,12 @@ impl FunctionSelection {
         block: BlockId,
         consumer: OpId,
     ) -> Option<ValueId> {
+        // A low-bit truncation re-views its operand's register: bind the operand
+        // (chasing a chain of truncations), never the erased truncation itself.
+        let mut class = self.egraph.find(class);
+        while let Some(source) = low_extract_source(&self.egraph, class) {
+            class = source;
+        }
         let mut best: Option<((u8, usize, u32), ValueId)> = None;
         for member in self.base_members(class) {
             let Some(candidates) = self.class_values.get(&member) else {
@@ -1076,6 +1087,19 @@ impl InstructionSelectPass {
                 BlockDecision::Consume => {
                     rewriter.erase_op(&op_ref)?;
                 }
+                BlockDecision::ForwardOperand => {
+                    // Read the operand now, not at plan time: `replace_value_uses`
+                    // keeps every live op's operand list current, so a forward-order
+                    // commit sees the already-chased value and a reverse-order commit
+                    // sees the still-live intermediate whose own forward re-chases.
+                    let op = context.get_op(*op_id);
+                    if let (Some(&result), Some(&operand)) =
+                        (op.results.first(), op.operands.first())
+                    {
+                        context.replace_value_uses(result, operand);
+                    }
+                    rewriter.erase_op(&op_ref)?;
+                }
             }
         }
 
@@ -1248,6 +1272,10 @@ impl InstructionSelectPass {
                     && class_int_binding(&fs.egraph, class).is_some()
                 {
                     op_decisions.insert(op_id, BlockDecision::Consume);
+                } else if is_low_extract_view(&fs.egraph, class)
+                    && !context.get_op(op_id).operands.is_empty()
+                {
+                    op_decisions.insert(op_id, BlockDecision::ForwardOperand);
                 }
             }
             return Ok(BlockPlan {
@@ -1330,6 +1358,12 @@ impl InstructionSelectPass {
                 // consumers fold the immediate (or read the merged input value's
                 // register), so the defining op is erased.
                 op_decisions.insert(op_id, BlockDecision::Consume);
+            } else if is_low_extract_view(&fs.egraph, class)
+                && !context.get_op(op_id).operands.is_empty()
+            {
+                // A low-bit truncation re-views its operand's register: forward
+                // the operand to consumers and erase the op (zero instructions).
+                op_decisions.insert(op_id, BlockDecision::ForwardOperand);
             }
         }
 
@@ -1663,6 +1697,15 @@ fn assert_fact(context: &Context, egraph: &mut SemEGraph, expr: &ConditionExpr, 
 /// Injected after saturation and only into guard-condition classes, so no
 /// unrelated class gains a spurious member; a target with no matching zero-form
 /// rule leaves the extra member unmatched and falls back as before.
+///
+/// CF-structural — kept, not an axiom (plan §2, no-escape-hatch/plan.md §1.5).
+/// Both shapes are true value equivalences, but the trigger is *structural
+/// position* ("this class is a branch guard"), which an e-matcher cannot key
+/// on: the bare-condition case would have to match every 1-bit class in the
+/// function, and the zero-compare case would inject the synthetic `zext(0)`
+/// into every `Cmp(a, 0)` rather than only guards — global e-graph bloat whose
+/// only purpose is `cbz`/`beq-x0` fusion at branches. It belongs here as a
+/// targeted post-saturation injection, not a saturation axiom.
 fn bridge_zero_branch_guards(
     context: &Context,
     egraph: &mut SemEGraph,

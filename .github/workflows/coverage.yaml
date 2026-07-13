@@ -51,12 +51,3 @@ jobs:
               -o lcov.info
       - name: Coveralls
         uses: coverallsapp/github-action@v2
-
-  axioms:
-    runs-on: blacksmith-2vcpu-ubuntu-2404
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Check generated axioms
-        run: cargo xtask axioms

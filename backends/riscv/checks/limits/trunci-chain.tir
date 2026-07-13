@@ -1,0 +1,22 @@
+// RUN: tir mc --march=rv64i --stage=isel %s | filecheck %s
+
+// A chain of truncations spanning basic blocks: each `trunci` is a low-bit
+// re-view of its operand's register, so the whole chain collapses to the
+// original argument. The cross-block case is the regression guard: block plans
+// are solved before any commit, so the forwarded value must be resolved at
+// commit time from the op's live operand, not captured at plan time (a stale
+// capture would leave the return reading an erased intermediate).
+
+module {
+  func @t(%0: !i64) -> !i16 {
+    %1 = trunci %0 : !i32
+    br ^bb1
+  ^bb1:
+    %2 = trunci %1 : !i16
+    return %2
+  }
+  module_end
+}
+
+// CHECK: asm.symbol {name = "t"
+// CHECK: riscv.vret %0

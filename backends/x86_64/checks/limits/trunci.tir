@@ -1,8 +1,8 @@
-// RUN: not tir mc --march=x86_64 --stage=isel %s
+// RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s
 
-// FINDING G2 (isel-gap): trunci has no materializer: "missing atomic
-// materializer rule for semantic kind Extract". (extsi/extui do lower, but
-// miscompile - see sign-zero-extend.tir.)
+// A truncation is the low-bit re-view of its operand's register (a width-n value
+// is the low n bits of a register), so `trunci` selects with zero instructions
+// and forwards its operand. The same target-independent rule covers all targets.
 
 module {
   func @tr(%0: !i64) -> !i32 {
@@ -11,3 +11,8 @@ module {
   }
   module_end
 }
+
+// CHECK: asm.symbol {name = "tr"
+// CHECK-NOT: mov
+// CHECK-NOT: and
+// CHECK: x86_64.vret %0

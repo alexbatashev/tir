@@ -19,6 +19,7 @@ const OP_VOCABULARY: &[(&str, SymKind)] = &[
     ("split", SymKind::Split),
     ("sext", SymKind::SExt),
     ("zext", SymKind::ZExt),
+    ("extract", SymKind::Extract),
     ("if", SymKind::If),
 ];
 

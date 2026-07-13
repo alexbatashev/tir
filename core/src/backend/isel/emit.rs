@@ -13,8 +13,17 @@ use super::node::class_width;
 
 #[derive(Clone, Debug)]
 pub(crate) enum BlockDecision {
-    Emit { rule_index: usize, m: RuleMatch },
+    Emit {
+        rule_index: usize,
+        m: RuleMatch,
+    },
     Consume,
+    /// A low-bit truncation: forward the operand's register to the result (a
+    /// re-view, not a computation) and erase the op. Consumers read the operand,
+    /// which is resolved from the op's live operand list at commit time (not
+    /// captured at plan time) so a cross-block truncation chain chases the
+    /// already-remapped value regardless of block commit order.
+    ForwardOperand,
 }
 /// The emission plan for a block: how each original op is rewritten, plus the extra
 /// instructions to insert for rewrite-introduced e-classes that have no original op
