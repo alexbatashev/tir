@@ -145,6 +145,27 @@ fn is_shift(kind: SymKind) -> bool {
     )
 }
 
+/// The shift-amount operand's source with its implicit encoding mask stripped:
+/// `Extract(amt, k, 0)` / `Clamp(amt, _, _)` -> `amt` (the shift encoding masks
+/// the amount, so the mask is redundant for matching).
+fn shift_amount_src<V>(
+    graph: &impl Dag<Node = SymKind, Leaf = SymPayload<V>>,
+    src: NodeId,
+) -> NodeId {
+    match *graph.get_node(src) {
+        SymKind::Extract => {
+            let ec: Vec<NodeId> = graph.children(src).collect();
+            if ec.len() == 3 && const_u64(graph, ec[2]) == Some(0) {
+                ec[0]
+            } else {
+                src
+            }
+        }
+        SymKind::Clamp => graph.children(src).next().unwrap_or(src),
+        _ => src,
+    }
+}
+
 fn extract_from_zero_hi<V>(
     graph: &impl Dag<Node = SymKind, Leaf = SymPayload<V>>,
     node: NodeId,
@@ -157,6 +178,15 @@ fn extract_from_zero_hi<V>(
         return None;
     }
     const_u64(graph, children[1]).map(|hi| (children[0], hi))
+}
+
+/// Whether `node` is a low slice `Extract(x, hi, 0)` (lo == 0), a re-view of the
+/// low bits of `x`. The hi bound may be constant or symbolic (`XLEN - 1`).
+fn is_low_extract<V>(graph: &impl Dag<Node = SymKind, Leaf = SymPayload<V>>, node: NodeId) -> bool {
+    *graph.get_node(node) == SymKind::Extract && {
+        let children: Vec<NodeId> = graph.children(node).collect();
+        children.len() == 3 && const_u64(graph, children[2]) == Some(0)
+    }
 }
 
 fn is_immediate_leaf<V>(
@@ -209,29 +239,78 @@ fn canon_rebuild<V: Clone>(
         return inner;
     }
 
-    // Shift-amount mask strip (mask is implicit in the encoding):
-    //   Shift(v, Extract(amt, k, 0)) / Shift(v, Clamp(amt, _, _)) -> Shift(v, amt)
-    if is_shift(kind) && children.len() == 2 {
-        let value = canon_rebuild(graph, children[0], immediate_symbols, out, memo, forced);
-        let amount = {
-            let src = children[1];
-            let stripped = match *graph.get_node(src) {
-                SymKind::Extract => {
-                    let ec: Vec<NodeId> = graph.children(src).collect();
-                    (ec.len() == 3 && const_u64(graph, ec[2]) == Some(0)).then_some(ec[0])
-                }
-                SymKind::Clamp => graph.children(src).next(),
-                _ => None,
-            };
-            canon_rebuild(
+    // SExt(shr(Extract(v, hi, 0), amt), _) -> shr(v, amt) forced to width hi+1:
+    // a word right shift computes the low hi+1 bits of its narrowed operand,
+    // held sign-extended in the register (the register form), so matching sees
+    // the narrow shift — the mirror of the `SExt(Extract(shl ...))` collapse
+    // that covers the word left shift (`sllw`), whose extract sits outside.
+    if kind == SymKind::SExt
+        && children.len() == 2
+        && matches!(
+            *graph.get_node(children[0]),
+            SymKind::ShiftRightLogic | SymKind::ShiftRightArithmetic
+        )
+    {
+        let shift = children[0];
+        let sc: Vec<NodeId> = graph.children(shift).collect();
+        if sc.len() == 2
+            && let Some((value_src, hi)) = extract_from_zero_hi(graph, sc[0])
+        {
+            let value = canon_rebuild(graph, value_src, immediate_symbols, out, memo, forced);
+            forced.insert(value.index(), (hi + 1) as u32);
+            let amount = canon_rebuild(
                 graph,
-                stripped.unwrap_or(src),
+                shift_amount_src(graph, sc[1]),
                 immediate_symbols,
                 out,
                 memo,
                 forced,
-            )
-        };
+            );
+            let new_node = out.add_node(*graph.get_node(shift));
+            out.add_edge(new_node, value);
+            out.add_edge(new_node, amount);
+            forced.insert(new_node.index(), (hi + 1) as u32);
+            memo.insert(node.index(), new_node);
+            return new_node;
+        }
+    }
+
+    // Extract(x, hi, 0) -> x (the value model: a low slice is the low hi+1 bits
+    // of x, so the pattern matches the narrow value directly) — e.g. arm64 `mul`
+    // = `extract(rn * rm, XLEN - 1, 0)` roots the same-width `Mul`. A constant hi
+    // forces the width; a symbolic hi (`XLEN - 1`, a full-width identity) leaves
+    // it to inference. A high slice (`lo > 0`, e.g. `smulh`) is left intact.
+    //
+    // Sound today because every symbolic-hi slice in the model is a full-width
+    // identity (hi + 1 == the register width), so dropping it changes nothing.
+    // It would be unsound for a symbolic *partial* slice — e.g. a hypothetical
+    // `extract(x, vl - 1, 0)` with `vl` a dynamic sub-width — which this would
+    // mis-collapse to the full value; add a width guard here if such a behavior
+    // is introduced.
+    if is_low_extract(graph, node) {
+        let mut ch = graph.children(node);
+        let source = ch.next().expect("extract has a value operand");
+        let hi = const_u64(graph, ch.next().expect("extract has a hi operand"));
+        let inner = canon_rebuild(graph, source, immediate_symbols, out, memo, forced);
+        if let Some(hi) = hi {
+            forced.insert(inner.index(), (hi + 1) as u32);
+        }
+        memo.insert(node.index(), inner);
+        return inner;
+    }
+
+    // Shift-amount mask strip (mask is implicit in the encoding):
+    //   Shift(v, Extract(amt, k, 0)) / Shift(v, Clamp(amt, _, _)) -> Shift(v, amt)
+    if is_shift(kind) && children.len() == 2 {
+        let value = canon_rebuild(graph, children[0], immediate_symbols, out, memo, forced);
+        let amount = canon_rebuild(
+            graph,
+            shift_amount_src(graph, children[1]),
+            immediate_symbols,
+            out,
+            memo,
+            forced,
+        );
         let new_node = out.add_node(kind);
         out.add_edge(new_node, value);
         out.add_edge(new_node, amount);

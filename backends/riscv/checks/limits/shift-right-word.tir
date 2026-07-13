@@ -1,0 +1,21 @@
+// RUN: tir mc --march=rv64i --stage=isel %s | filecheck %s
+
+// On rv64 an i32 (word-width) logical/arithmetic right shift selects to the
+// word form: the instruction holds its low-32 result sign-extended in the
+// register (the register form), so canonicalization sees the narrow shift, the
+// same way `sllw` covers the word left shift.
+
+module {
+  func @srl(%0: !i32, %1: !i32) -> !i32 {
+    %2 = shrui %0, %1 : !i32
+    return %2
+  }
+  func @sra(%0: !i32, %1: !i32) -> !i32 {
+    %2 = shrsi %0, %1 : !i32
+    return %2
+  }
+  module_end
+}
+
+// CHECK: riscv.srlw {rd = %virt2:GPR, rs1 = %virt0:GPR, rs2 = %virt1:GPR}
+// CHECK: riscv.sraw {rd = %virt5:GPR, rs1 = %virt3:GPR, rs2 = %virt4:GPR}

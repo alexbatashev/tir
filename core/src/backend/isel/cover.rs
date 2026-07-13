@@ -11,7 +11,9 @@ use tir::{
 use tir_symbolic::egraph::{ENode, Id};
 
 use super::RuleMatch;
-use super::node::{SemEGraph, class_int_binding, class_is_pure, class_value_binding};
+use super::node::{
+    SemEGraph, class_int_binding, class_is_pure, class_value_binding, is_low_extract_view,
+};
 use super::pattern::CompiledIselPattern;
 
 #[derive(Clone, Debug)]
@@ -161,7 +163,9 @@ pub(crate) fn build_eclass_cover(
     }
 
     for (i, &c) in classes.iter().enumerate() {
-        if alternatives_by_node[i].is_empty() && (is_terminal(c) || !op_roots.contains(&c)) {
+        if alternatives_by_node[i].is_empty()
+            && (is_terminal(c) || !op_roots.contains(&c) || is_low_extract_view(egraph, c))
+        {
             alternatives_by_node[i].push(PbqpIselAlternative::External);
         }
     }
@@ -350,6 +354,11 @@ pub(crate) fn completeness_error(
     for &class in op_roots {
         let class = egraph.find(class);
         if egraph.nodes(class).iter().any(|n| n.children().is_empty()) {
+            continue;
+        }
+        // A low-bit truncation is a re-view of its operand's register, covered
+        // as External with zero instructions (see `is_low_extract_view`).
+        if is_low_extract_view(egraph, class) {
             continue;
         }
         if has_root.contains(&class) || has_internal.contains(&class) || exempt.contains(&class) {

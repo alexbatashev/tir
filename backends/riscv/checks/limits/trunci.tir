@@ -1,0 +1,20 @@
+// RUN: tir mc --march=rv64i --stage=isel %s | filecheck %s
+
+// A truncation to a narrower integer is the low-bit re-view of its operand's
+// register: a width-n value *is* the low n bits of a register, so `trunci`
+// computes nothing and selects with zero instructions on every target. It must
+// NOT emit a sign/zero-extension (that is the job of the explicit widening ops).
+
+module {
+  func @t(%0: !i64) -> !i32 {
+    %1 = trunci %0 : !i32
+    return %1
+  }
+  module_end
+}
+
+// CHECK: asm.symbol {name = "t"
+// CHECK-NOT: addiw
+// CHECK-NOT: slli
+// CHECK-NOT: andi
+// CHECK: riscv.vret

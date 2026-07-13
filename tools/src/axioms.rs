@@ -7,7 +7,9 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use tir::Context;
-use tir::backend::isel::{Rule, discover_axioms, render_axioms_file};
+use tir::backend::isel::{
+    Rule, discover_axioms, discover_coverage, render_axioms_file, render_coverage_file,
+};
 
 const TARGETS: &[&str] = &["riscv", "arm64", "x86_64"];
 
@@ -20,6 +22,10 @@ pub struct ToolArgs {
     /// Write `backends/<target>/src/isel.axioms` instead of printing.
     #[arg(long)]
     write: bool,
+
+    /// Also emit the coverage matrix (`backends/<target>/src/isel.coverage`).
+    #[arg(long)]
+    report: bool,
 }
 
 fn rules_for(target: &str, context: &Context) -> Result<Vec<Rule>, Box<dyn Error>> {
@@ -40,18 +46,32 @@ pub fn run(args: ToolArgs) -> Result<(), Box<dyn Error>> {
     for target in targets {
         let context = Context::with_default_dialects();
         let rules = rules_for(target, &context)?;
-        let file = render_axioms_file(&discover_axioms(&rules));
+        let axioms = discover_axioms(&rules);
+        let file = render_axioms_file(&axioms);
+        let coverage = args
+            .report
+            .then(|| render_coverage_file(&discover_coverage(target, &rules, &axioms)));
+
         if args.write {
             // The utility is always run from the workspace it was built in.
-            let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("../backends")
                 .join(target)
-                .join("src/isel.axioms");
+                .join("src");
+            let path = src.join("isel.axioms");
             std::fs::write(&path, &file)?;
             println!("wrote {}", path.display());
+            if let Some(coverage) = &coverage {
+                let path = src.join("isel.coverage");
+                std::fs::write(&path, coverage)?;
+                println!("wrote {}", path.display());
+            }
         } else {
             println!("; --- {target} ---");
             print!("{file}");
+            if let Some(coverage) = &coverage {
+                print!("{coverage}");
+            }
         }
     }
     Ok(())

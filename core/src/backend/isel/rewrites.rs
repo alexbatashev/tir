@@ -4,7 +4,9 @@
 use tir::{Context, sem::SymKind};
 use tir_symbolic::egraph::{EMatch, Pattern, PatternNode};
 
-use super::axioms::bool_materialize_axioms;
+use super::axioms::{
+    bool_materialize_axioms, comparison_materialize_axioms, sub_via_add_neg_axiom,
+};
 use super::node::{SemEGraph, SemNode};
 use super::pattern::CompiledIselPattern;
 
@@ -78,18 +80,25 @@ pub fn saturate(
 /// through [`super::InstructionSelectPass::with_axioms`]. Every axiom still
 /// proves each width instantiation before it unions (see [`super::axioms`]).
 pub(crate) fn discover_rewrites(patterns: &[CompiledIselPattern]) -> Vec<IselRewrite> {
-    let has_if_materializer = patterns.iter().any(|compiled| {
-        matches!(
-            compiled.pattern.node(compiled.pattern.root()),
-            PatternNode::Node(node) if node.kind == SymKind::If
-        )
-    });
-    if has_if_materializer {
-        bool_materialize_axioms()
-            .into_iter()
-            .map(|a| a.compile())
-            .collect()
-    } else {
-        Vec::new()
+    let roots = |kind: SymKind| {
+        patterns.iter().any(|compiled| {
+            matches!(
+                compiled.pattern.node(compiled.pattern.root()),
+                PatternNode::Node(node) if node.kind == kind
+            )
+        })
+    };
+    let mut axioms = Vec::new();
+    if roots(SymKind::If) {
+        axioms.extend(bool_materialize_axioms());
+        if roots(SymKind::Xor) {
+            axioms.extend(comparison_materialize_axioms());
+        }
     }
+    // `x - c == x + (-c)`: covers an immediate `sub` operand through `add` where
+    // the target roots `add` (the `neg(const)` folds to the negated immediate).
+    if roots(SymKind::Add) {
+        axioms.push(sub_via_add_neg_axiom());
+    }
+    axioms.into_iter().map(|a| a.compile()).collect()
 }

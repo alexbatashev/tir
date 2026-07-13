@@ -1,8 +1,8 @@
 // RUN: tir mc --march=arm64 --stage=isel %s | filecheck %s
-// XFAIL: *
 
-// ISEL GAP: `trunci` has no materializer. isel aborts with
-//   "invalid rule set: missing atomic materializer rule for semantic kind Extract".
+// A truncation is the low-bit re-view of its operand's register (a width-n value
+// is the low n bits of a register), so `trunci` selects with zero instructions
+// and forwards its operand. The same target-independent rule covers all targets.
 
 module {
   func @f(%0: !i64) -> !i32 {
@@ -12,4 +12,7 @@ module {
   module_end
 }
 
-// CHECK: arm64
+// CHECK: asm.symbol {name = "f"
+// CHECK-NOT: ubfm
+// CHECK-NOT: and
+// CHECK: arm64.vret %0
