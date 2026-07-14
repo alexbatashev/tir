@@ -15,9 +15,8 @@ use tir::{Context, IRBuilder, Operand, Operation, TypeId, ValueId};
 
 use crate::ast::*;
 use crate::cir::{self, VarArgsType};
-use crate::diagnostics::{
-    Diagnostic, EmptyTranslationUnit, UndeclaredIdentifier, UnsupportedConstruct,
-};
+use crate::diagnostics::{Diagnostic, EmptyTranslationUnit, UnsupportedConstruct};
+use crate::sema::{EntityId, QualType, TypeKind, TypedAst};
 
 /// A local variable: the pointer to its stack slot and the slot's element type.
 #[derive(Clone, Copy)]
@@ -28,10 +27,11 @@ struct Slot {
 
 struct FnCodegen<'a> {
     context: &'a Context,
+    typed: &'a TypedAst,
     ast: &'a Ast,
     builder: IRBuilder,
-    locals: HashMap<String, Slot>,
-    signatures: &'a HashMap<String, Signature>,
+    locals: HashMap<EntityId, Slot>,
+    signatures: &'a HashMap<EntityId, Signature>,
     /// Scratch holding the lowered SSA value of each node in the expression
     /// subtree currently being lowered, indexed by `node.index() - base`. Reused
     /// across expressions to avoid reallocating.
@@ -45,7 +45,8 @@ struct Signature {
 }
 
 /// Lower a translation unit into a `builtin.module` in `context`.
-pub fn codegen(context: &Context, ast: &Ast) -> Result<ModuleOp, Diagnostic> {
+pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnostic> {
+    let ast = typed.ast();
     let module = b::module(context, None).build();
     let mut module_builder = IRBuilder::new(module.body());
 
@@ -54,8 +55,8 @@ pub fn codegen(context: &Context, ast: &Ast) -> Result<ModuleOp, Diagnostic> {
     for item in ast.children(root) {
         match ast.get_node(item).kind {
             AstKind::Prototype | AstKind::Function => {
-                let (name, sig) = lower_signature(context, ast, item)?;
-                signatures.insert(name, sig);
+                let (entity, sig) = lower_signature(context, typed, item)?;
+                signatures.insert(entity, sig);
             }
             AstKind::DeclGroup
             | AstKind::RecordDecl
@@ -72,11 +73,12 @@ pub fn codegen(context: &Context, ast: &Ast) -> Result<ModuleOp, Diagnostic> {
                 let AstLeaf::Function { name, .. } = ast.get_leaf_data(item).unwrap() else {
                     unreachable!("prototype node carries a function payload");
                 };
-                let sig = signatures.get(name).unwrap();
+                let entity = node_entity(typed, item);
+                let sig = signatures.get(&entity).unwrap();
                 module_builder.insert(b::declare_op(context, name, sig.ret, &sig.args));
             }
             AstKind::Function => {
-                let func_op = lower_function(context, ast, item, &signatures)?;
+                let func_op = lower_function(context, typed, item, &signatures)?;
                 module_builder.insert(func_op);
             }
             AstKind::DeclGroup
@@ -91,61 +93,70 @@ pub fn codegen(context: &Context, ast: &Ast) -> Result<ModuleOp, Diagnostic> {
     Ok(module)
 }
 
-/// Use of a name with no declaration in scope, spanned at the offending node.
-fn undeclared(ast: &Ast, node: NodeId, name: &str) -> Diagnostic {
-    UndeclaredIdentifier::new(ast.get_node(node).span, name).into()
-}
-
 /// A construct the parser accepts but codegen does not lower yet.
 fn unsupported(ast: &Ast, node: NodeId, what: String) -> Diagnostic {
     UnsupportedConstruct::new(ast.get_node(node).span, what).into()
 }
 
-fn lower_ctype(context: &Context, ty: &CType) -> TypeId {
-    match ty {
-        CType::Int => IntegerType::new(context, 32),
-        CType::Void => UnitType::new(context),
-        CType::Char => IntegerType::new(context, 8),
-        CType::Bool => IntegerType::new(context, 1),
-        CType::Float | CType::Double | CType::Builtin(_) | CType::Named(_) => {
-            IntegerType::new(context, 64)
+fn lower_type(context: &Context, typed: &TypedAst, ty: QualType) -> TypeId {
+    match typed.types().kind(ty) {
+        TypeKind::Void => UnitType::new(context),
+        TypeKind::Integer(_) => IntegerType::new(context, typed.integer_width(ty).unwrap()),
+        TypeKind::Pointer(pointee) | TypeKind::Array(pointee, _) => {
+            PtrType::typed(context, lower_type(context, typed, *pointee))
         }
-        CType::Record(_, _) | CType::Enum(_) => IntegerType::new(context, 64),
-        CType::Const(inner) => lower_ctype(context, inner),
-        CType::Volatile(inner) => lower_ctype(context, inner),
-        CType::Restrict(inner) => lower_ctype(context, inner),
-        CType::Pointer(inner) => PtrType::typed(context, lower_ctype(context, inner)),
-        CType::Array(inner, _) => PtrType::typed(context, lower_ctype(context, inner)),
-        CType::Function { .. } => IntegerType::new(context, 64),
-        CType::Attributed(inner, _) => lower_ctype(context, inner),
+        TypeKind::Enum(_) => IntegerType::new(context, 32),
+        TypeKind::Error
+        | TypeKind::Float
+        | TypeKind::Double
+        | TypeKind::LongDouble
+        | TypeKind::Function { .. }
+        | TypeKind::Record(_, _) => IntegerType::new(context, 64),
     }
+}
+
+fn node_type(typed: &TypedAst, node: NodeId) -> QualType {
+    typed
+        .ast()
+        .get_annotation(node)
+        .and_then(|info| info.ty)
+        .expect("semantic analysis annotates codegen nodes")
+}
+
+fn node_entity(typed: &TypedAst, node: NodeId) -> EntityId {
+    typed
+        .ast()
+        .get_annotation(node)
+        .and_then(|info| info.entity)
+        .expect("semantic analysis resolves codegen names")
 }
 
 fn lower_signature(
     context: &Context,
-    ast: &Ast,
+    typed: &TypedAst,
     item: NodeId,
-) -> Result<(String, Signature), Diagnostic> {
-    let AstLeaf::Function { name, ret } = ast.get_leaf_data(item).unwrap() else {
+) -> Result<(EntityId, Signature), Diagnostic> {
+    let ast = typed.ast();
+    let AstLeaf::Function { .. } = ast.get_leaf_data(item).unwrap() else {
         unreachable!("function-like node carries a function payload");
     };
     let mut args = Vec::new();
     for child in ast.children(item) {
         match ast.get_node(child).kind {
             AstKind::Param => {
-                let AstLeaf::Param { ty, .. } = ast.get_leaf_data(child).unwrap() else {
-                    unreachable!("param node carries a param payload");
-                };
-                args.push(lower_ctype(context, ty));
+                args.push(lower_type(context, typed, node_type(typed, child)));
             }
             AstKind::VarArgs => args.push(VarArgsType::new(context)),
             _ => break,
         }
     }
     Ok((
-        name.clone(),
+        node_entity(typed, item),
         Signature {
-            ret: lower_ctype(context, ret),
+            ret: match typed.types().kind(node_type(typed, item)) {
+                TypeKind::Function { ret, .. } => lower_type(context, typed, *ret),
+                _ => unreachable!("function node has function semantic type"),
+            },
             args,
         },
     ))
@@ -153,14 +164,18 @@ fn lower_signature(
 
 fn lower_function(
     context: &Context,
-    ast: &Ast,
+    typed: &TypedAst,
     func: NodeId,
-    signatures: &HashMap<String, Signature>,
+    signatures: &HashMap<EntityId, Signature>,
 ) -> Result<impl Operation, Diagnostic> {
-    let AstLeaf::Function { name, ret } = ast.get_leaf_data(func).unwrap() else {
+    let ast = typed.ast();
+    let AstLeaf::Function { name, .. } = ast.get_leaf_data(func).unwrap() else {
         unreachable!("function node carries a function payload");
     };
-    let ret_ty = lower_ctype(context, ret);
+    let ret_ty = match typed.types().kind(node_type(typed, func)) {
+        TypeKind::Function { ret, .. } => lower_type(context, typed, *ret),
+        _ => unreachable!("function node has function semantic type"),
+    };
 
     // Entry block arguments carry the incoming parameter values; parameters are
     // the function node's leading children.
@@ -169,10 +184,8 @@ fn lower_function(
         .children(func)
         .take_while(|&c| matches!(ast.get_node(c).kind, AstKind::Param))
     {
-        let AstLeaf::Param { ty, .. } = ast.get_leaf_data(param).unwrap() else {
-            unreachable!("param node carries a param payload");
-        };
-        param_values.push(context.create_value(lower_ctype(context, ty), None));
+        param_values
+            .push(context.create_value(lower_type(context, typed, node_type(typed, param)), None));
     }
     let param_ids: Vec<ValueId> = param_values.iter().map(|v| v.id()).collect();
 
@@ -184,6 +197,7 @@ fn lower_function(
 
     let mut cg = FnCodegen {
         context,
+        typed,
         ast,
         builder: IRBuilder::new(func_op.body()),
         locals: HashMap::new(),
@@ -205,6 +219,37 @@ impl FnCodegen<'_> {
         }
     }
 
+    fn apply_conversions(&mut self, node: NodeId, mut value: ValueId) -> ValueId {
+        let semantics = self.ast.get_annotation(node).unwrap();
+        let mut source = semantics.ty.unwrap();
+        for &target in &semantics.conversions {
+            if let (Some(source_width), Some(target_width)) = (
+                self.typed.integer_width(source),
+                self.typed.integer_width(target),
+            ) {
+                let target_ty = lower_type(self.context, self.typed, target);
+                if source_width < target_width {
+                    value = if self.typed.integer_is_signed(source).unwrap() {
+                        self.builder
+                            .insert(b::extsi(self.context, value, target_ty).build())
+                            .result()
+                    } else {
+                        self.builder
+                            .insert(b::extui(self.context, value, target_ty).build())
+                            .result()
+                    };
+                } else if source_width > target_width {
+                    value = self
+                        .builder
+                        .insert(b::trunci(self.context, value, target_ty).build())
+                        .result();
+                }
+            }
+            source = target;
+        }
+        value
+    }
+
     /// Lower a function: spill parameters into stack slots, then lower each body
     /// statement in source order (statement order is a side-effect ordering, so it
     /// stays top-down; only the expressions within use the post-order iterator).
@@ -216,15 +261,15 @@ impl FnCodegen<'_> {
             .children(func)
             .take_while(|&c| matches!(ast.get_node(c).kind, AstKind::Param))
         {
-            let AstLeaf::Param { name, ty } = ast.get_leaf_data(param).unwrap() else {
+            let AstLeaf::Param { .. } = ast.get_leaf_data(param).unwrap() else {
                 unreachable!("param node carries a param payload");
             };
-            let elem = lower_ctype(self.context, ty);
+            let elem = lower_type(self.context, self.typed, node_type(self.typed, param));
             let slot = self.alloca(elem);
             self.builder
                 .insert(p::store(self.context, param_ids[idx], slot.ptr).build());
             idx += 1;
-            self.locals.insert(name.clone(), slot);
+            self.locals.insert(node_entity(self.typed, param), slot);
         }
 
         for stmt in ast.children(func).skip(idx) {
@@ -238,27 +283,24 @@ impl FnCodegen<'_> {
         let ast = self.ast;
         match ast.get_node(stmt).kind {
             AstKind::Decl => {
-                let AstLeaf::Decl { name, ty } = ast.get_leaf_data(stmt).unwrap() else {
+                let AstLeaf::Decl { .. } = ast.get_leaf_data(stmt).unwrap() else {
                     unreachable!("decl node carries a decl payload");
                 };
-                let elem = lower_ctype(self.context, ty);
+                let elem = lower_type(self.context, self.typed, node_type(self.typed, stmt));
                 let slot = self.alloca(elem);
                 if let Some(init) = ast.children(stmt).next() {
                     let value = self.lower_expr(init)?;
                     self.builder
                         .insert(p::store(self.context, value, slot.ptr).build());
                 }
-                self.locals.insert(name.clone(), slot);
+                self.locals.insert(node_entity(self.typed, stmt), slot);
                 Ok(())
             }
             AstKind::Assign => {
-                let AstLeaf::Assign(name) = ast.get_leaf_data(stmt).unwrap() else {
+                let AstLeaf::Assign(_) = ast.get_leaf_data(stmt).unwrap() else {
                     unreachable!("assign node carries an assign payload");
                 };
-                let slot = *self
-                    .locals
-                    .get(name)
-                    .ok_or_else(|| undeclared(ast, stmt, name))?;
+                let slot = self.locals[&node_entity(self.typed, stmt)];
                 let value = ast.children(stmt).next().unwrap();
                 let v = self.lower_expr(value)?;
                 self.builder
@@ -293,7 +335,6 @@ impl FnCodegen<'_> {
     /// without hashing.
     fn lower_expr(&mut self, root: NodeId) -> Result<ValueId, Diagnostic> {
         let ast = self.ast;
-        let i32_ty = IntegerType::new(self.context, 32);
         self.values.clear();
         let mut base = root.index();
 
@@ -312,8 +353,9 @@ impl FnCodegen<'_> {
                     let AstLeaf::Int(n) = ast.get_leaf_data(node).unwrap() else {
                         unreachable!("int node carries an int payload");
                     };
+                    let ty = lower_type(self.context, self.typed, node_type(self.typed, node));
                     self.builder
-                        .insert(b::constant(self.context, *n, i32_ty).build())
+                        .insert(b::constant(self.context, n.value.to_i64(), ty).build())
                         .result()
                 }
                 AstKind::String => {
@@ -327,13 +369,10 @@ impl FnCodegen<'_> {
                         .result()
                 }
                 AstKind::Var => {
-                    let AstLeaf::Var(name) = ast.get_leaf_data(node).unwrap() else {
+                    let AstLeaf::Var(_) = ast.get_leaf_data(node).unwrap() else {
                         unreachable!("var node carries a var payload");
                     };
-                    let slot = *self
-                        .locals
-                        .get(name)
-                        .ok_or_else(|| undeclared(ast, node, name))?;
+                    let slot = self.locals[&node_entity(self.typed, node)];
                     self.builder
                         .insert(p::load(self.context, slot.ptr, slot.elem).build())
                         .result()
@@ -342,10 +381,7 @@ impl FnCodegen<'_> {
                     let AstLeaf::Call(name) = ast.get_leaf_data(node).unwrap() else {
                         unreachable!("call node carries a call payload");
                     };
-                    let sig = self
-                        .signatures
-                        .get(name)
-                        .ok_or_else(|| undeclared(ast, node, name))?;
+                    let sig = &self.signatures[&node_entity(self.typed, node)];
                     let args = ast
                         .children(node)
                         .map(|arg| self.values[arg.index() - base])
@@ -358,18 +394,19 @@ impl FnCodegen<'_> {
                     let mut children = ast.children(node);
                     let l = self.values[children.next().unwrap().index() - base];
                     let r = self.values[children.next().unwrap().index() - base];
+                    let ty = lower_type(self.context, self.typed, node_type(self.typed, node));
                     match kind {
                         AstKind::Add => self
                             .builder
-                            .insert(b::addi(self.context, l, r, i32_ty).build())
+                            .insert(b::addi(self.context, l, r, ty).build())
                             .result(),
                         AstKind::Sub => self
                             .builder
-                            .insert(b::subi(self.context, l, r, i32_ty).build())
+                            .insert(b::subi(self.context, l, r, ty).build())
                             .result(),
                         _ => self
                             .builder
-                            .insert(b::muli(self.context, l, r, i32_ty).build())
+                            .insert(b::muli(self.context, l, r, ty).build())
                             .result(),
                     }
                 }
@@ -379,6 +416,7 @@ impl FnCodegen<'_> {
                     return Err(unsupported(ast, node, format!("expression {kind:?}")));
                 }
             };
+            let value = self.apply_conversions(node, value);
             self.values.push(value);
         }
 

@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
+use crate::lang_options::LangOptions;
 use crate::lexer::Token;
 use crate::preprocessor::preprocessed;
 
@@ -26,6 +27,9 @@ pub enum Commands {
 
 #[derive(Debug, Args)]
 pub struct CompileArgs {
+    /// C language dialect, e.g. c17, gnu17, or c23.
+    #[arg(long = "std", value_name = "STANDARD", default_value_t)]
+    lang_options: LangOptions,
     #[arg(long, value_enum, default_value_t = CompileStage::Preprocess)]
     stage: CompileStage,
     /// Target architecture (required for the asm and obj stages).
@@ -77,7 +81,7 @@ pub enum CompileStage {
 }
 
 pub fn compiler_main() {
-    let cli = Cli::parse();
+    let cli = parse_cli(std::env::args_os()).unwrap_or_else(|error| error.exit());
 
     if let Some(code) = cli.explain {
         match crate::diagnostics::explain(&code) {
@@ -99,6 +103,24 @@ pub fn compiler_main() {
     }
 }
 
+fn parse_cli<I, T>(args: I) -> Result<Cli, clap::Error>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString>,
+{
+    let args = args.into_iter().map(|arg| {
+        let arg = arg.into();
+        if arg == "-std" {
+            OsString::from("--std")
+        } else if let Some(value) = arg.to_str().and_then(|arg| arg.strip_prefix("-std=")) {
+            OsString::from(format!("--std={value}"))
+        } else {
+            arg
+        }
+    });
+    Cli::try_parse_from(args)
+}
+
 fn run_compile(args: CompileArgs) {
     let mut out: Box<dyn Write> = if args.output == "-" {
         Box::new(BufWriter::new(io::stdout()))
@@ -118,25 +140,35 @@ fn run_compile(args: CompileArgs) {
 
         match args.stage {
             CompileStage::Preprocess => {
-                for (tok, _) in preprocess(&name, &source, build_defines(&args.defines)) {
+                for (tok, _) in preprocess(
+                    &name,
+                    &source,
+                    build_defines(&args.defines),
+                    args.lang_options,
+                ) {
                     write!(out, "{tok}").unwrap();
                 }
             }
             CompileStage::Tokens => {
-                let tokens: Vec<Token> = preprocess(&name, &source, build_defines(&args.defines))
-                    .into_iter()
-                    .map(|(tok, _)| tok)
-                    .collect();
+                let tokens: Vec<Token> = preprocess(
+                    &name,
+                    &source,
+                    build_defines(&args.defines),
+                    args.lang_options,
+                )
+                .into_iter()
+                .map(|(tok, _)| tok)
+                .collect();
                 writeln!(out, "{tokens:#?}").unwrap();
             }
             CompileStage::Ast => {
-                let unit = parse_source(&name, &source);
+                let unit = parse_source(&name, &source, &args.defines, args.lang_options);
                 write!(out, "{}", crate::ast::render(&unit)).unwrap();
             }
             CompileStage::Ir => {
-                let unit = parse_source(&name, &source);
+                let unit = parse_source(&name, &source, &args.defines, args.lang_options);
                 let context = fcc_context();
-                let module = lower_to_ir(&context, &unit);
+                let module = lower_to_ir(&context, unit, args.lang_options, args.march.as_deref());
                 let mut ir = String::new();
                 let mut fmt = tir::IRFormatter::new(&mut ir);
                 use tir::Operation;
@@ -169,8 +201,28 @@ fn read_input(input: &OsString) -> (String, String) {
     }
 }
 
-fn lower_to_ir(context: &tir::Context, unit: &crate::ast::Ast) -> tir::builtin::ModuleOp {
-    crate::codegen::codegen(context, unit).unwrap_or_else(|d| {
+fn lower_to_ir(
+    context: &tir::Context,
+    unit: crate::ast::Ast,
+    options: LangOptions,
+    march: Option<&str>,
+) -> tir::builtin::ModuleOp {
+    let target = match march {
+        Some(march) => crate::sema::TargetProfile::for_march(march),
+        None => crate::sema::TargetProfile::host(),
+    }
+    .unwrap_or_else(|error| {
+        eprintln!("fcc: {error}; pass --march explicitly");
+        std::process::exit(1);
+    });
+    let typed =
+        crate::sema::analyze_with_target(unit, options, target).unwrap_or_else(|diagnostics| {
+            for diagnostic in diagnostics {
+                diagnostic.eprint();
+            }
+            std::process::exit(1);
+        });
+    crate::codegen::codegen(context, &typed).unwrap_or_else(|d| {
         d.eprint();
         std::process::exit(1);
     })
@@ -228,10 +280,10 @@ fn emit_machine_code(args: &CompileArgs, name: &str, source: &str) -> Vec<u8> {
             std::process::exit(1);
         });
 
-    let unit = parse_source(name, source);
+    let unit = parse_source(name, source, &args.defines, args.lang_options);
     let context = fcc_context();
     target.register_dialects(&context);
-    let module = lower_to_ir(&context, &unit);
+    let module = lower_to_ir(&context, unit, args.lang_options, Some(march));
 
     let mut pm = tir::PassManager::new();
     pm.nest(tir::builtin::FuncOp::name())
@@ -280,7 +332,7 @@ fn emit_machine_code(args: &CompileArgs, name: &str, source: &str) -> Vec<u8> {
 
 /// Preprocess `source`, reporting any `#error`/`#warning` diagnostics. Exits if
 /// any of them is an error.
-fn add_default_defines(defines: &mut HashMap<String, Token>) {
+fn add_default_defines(defines: &mut HashMap<String, Token>, options: LangOptions) {
     use logos::Logos;
     for (name, value) in [
         ("__GNUC__", "4"),
@@ -289,7 +341,6 @@ fn add_default_defines(defines: &mut HashMap<String, Token>) {
         ("__APPLE__", "1"),
         ("__MACH__", "1"),
         ("__STDC__", "1"),
-        ("__STDC_VERSION__", "201710L"),
         ("__LP64__", "1"),
     ] {
         defines.entry(name.to_string()).or_insert_with(|| {
@@ -298,6 +349,23 @@ fn add_default_defines(defines: &mut HashMap<String, Token>) {
                 .and_then(|r| r.ok())
                 .unwrap_or(Token::Hash)
         });
+    }
+    let stdc_version = match options.std_version {
+        crate::lang_options::StdVersion::C89 => None,
+        crate::lang_options::StdVersion::C99 => Some("199901L"),
+        crate::lang_options::StdVersion::C11 => Some("201112L"),
+        crate::lang_options::StdVersion::C17 => Some("201710L"),
+        crate::lang_options::StdVersion::C23 => Some("202311L"),
+    };
+    if let Some(value) = stdc_version {
+        defines
+            .entry("__STDC_VERSION__".to_string())
+            .or_insert_with(|| {
+                Token::lexer(value)
+                    .next()
+                    .and_then(|result| result.ok())
+                    .unwrap()
+            });
     }
     let arch_define = match std::env::consts::ARCH {
         "aarch64" => "__arm64__",
@@ -313,8 +381,9 @@ fn preprocess(
     name: &str,
     source: &str,
     mut defines: HashMap<String, Token>,
+    options: LangOptions,
 ) -> Vec<(Token, crate::diagnostics::Span)> {
-    add_default_defines(&mut defines);
+    add_default_defines(&mut defines, options);
     let include_paths = default_include_paths();
     let mut stream = preprocessed(name, source, defines, &include_paths);
     let tokens = stream.collect_tokens();
@@ -329,12 +398,81 @@ fn preprocess(
     tokens
 }
 
-fn parse_source(name: &str, source: &str) -> crate::ast::Ast {
-    let tokens = preprocess(name, source, HashMap::new());
-    crate::parser::parse(&tokens).unwrap_or_else(|diags| {
+fn parse_source(
+    name: &str,
+    source: &str,
+    defines: &[String],
+    options: LangOptions,
+) -> crate::ast::Ast {
+    let tokens = preprocess(name, source, build_defines(defines), options);
+    crate::parser::parse(&tokens, options).unwrap_or_else(|diags| {
         for diag in &diags {
             diag.eprint();
         }
         std::process::exit(1);
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::{Commands, add_default_defines, parse_cli};
+    use crate::lang_options::{LangOptions, StdVersion};
+
+    #[test]
+    fn accepts_gcc_attached_std_option() {
+        let cli = parse_cli(["fcc", "compile", "-std=c99", "input.c"]).unwrap();
+        let Some(Commands::Compile(args)) = cli.command else {
+            panic!("compile command was not parsed");
+        };
+        assert_eq!(
+            args.lang_options,
+            LangOptions {
+                std_version: StdVersion::C99,
+                gnu_extensions: false,
+            }
+        );
+    }
+
+    #[test]
+    fn accepts_gcc_separate_std_option() {
+        assert!(parse_cli(["fcc", "compile", "-std", "c99", "input.c"]).is_ok());
+    }
+
+    #[test]
+    fn accepts_long_attached_std_option() {
+        assert!(parse_cli(["fcc", "compile", "--std=c99", "input.c"]).is_ok());
+    }
+
+    #[test]
+    fn accepts_long_separate_std_option() {
+        assert!(parse_cli(["fcc", "compile", "--std", "c99", "input.c"]).is_ok());
+    }
+
+    #[test]
+    fn c89_omits_stdc_version() {
+        let mut defines = HashMap::new();
+        add_default_defines(
+            &mut defines,
+            LangOptions {
+                std_version: StdVersion::C89,
+                gnu_extensions: false,
+            },
+        );
+        assert!(!defines.contains_key("__STDC_VERSION__"));
+    }
+
+    #[test]
+    fn c99_sets_stdc_version() {
+        let mut defines = HashMap::new();
+        add_default_defines(
+            &mut defines,
+            LangOptions {
+                std_version: StdVersion::C99,
+                gnu_extensions: false,
+            },
+        );
+        assert_eq!(defines["__STDC_VERSION__"].to_string(), "199901L");
+    }
 }

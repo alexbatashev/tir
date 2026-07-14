@@ -1,0 +1,26 @@
+name: fcc GCC torture parser
+
+on:
+  merge_group:
+  pull_request:
+    branches: ["master"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  parser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/cache@v4
+        with:
+          path: target/test-suites/gcc
+          key: gcc-torture-9aab80ddc5b2fa0eef80008e718067ab45f42c50
+      - run: cargo xtask fcc-torture

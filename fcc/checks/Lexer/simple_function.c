@@ -24,10 +24,13 @@
 // CHECK-NEXT:         " ",
 // CHECK-NEXT:     ),
 // CHECK-NEXT:     IntegerLiteral(
-// CHECK-NEXT:         APInt {
-// CHECK-NEXT:             width: 1,
-// CHECK-NEXT:             signed: false,
-// CHECK-NEXT:             value: 0,
+// CHECK-NEXT:         IntegerLiteral {
+// CHECK-NEXT:             value: APInt {
+// CHECK-NEXT:                 width: 1,
+// CHECK-NEXT:                 signed: false,
+// CHECK-NEXT:                 value: 0,
+// CHECK-NEXT:             },
+// CHECK-NEXT:             spelling: "0",
 // CHECK-NEXT:         },
 // CHECK-NEXT:     ),
 // CHECK-NEXT:     Semicolon,

@@ -1,10 +1,6 @@
-//! A small C abstract syntax tree covering a C89/C99 subset: `int`/`void`
-//! functions, local `int` variables, control flow (`if`/`else`, `while`,
-//! `do`/`while`, `for`, `break`, `continue`), compound blocks, the usual
-//! arithmetic/relational/logical operators and function calls. There are no
-//! types beyond `int`/`void` and no pointers at the source level. Codegen
-//! currently lowers only the original arithmetic subset; the rest is parsed
-//! and stubbed.
+//! The C frontend's post-order abstract syntax tree. It preserves scalar type
+//! ranks, declarators, literal spelling, expressions, and control-flow syntax;
+//! codegen still lowers only its original subset.
 //!
 //! The tree is stored in core's [`PostOrderDag`], the same cache-friendly,
 //! post-order layout the semantic-expression graph uses: node *kinds* live in a
@@ -15,10 +11,11 @@
 use tir::graph::{Dag, NodeId, PostOrderDag};
 
 use crate::diagnostics::Span;
+use crate::lexer::IntegerLiteral;
 
 /// The AST: node payloads ([`AstNode`], kind + source span) live in the DAG's
 /// dense vector, while the variable-sized leaf payload sits in its side table.
-pub type Ast = PostOrderDag<AstNode, AstLeaf>;
+pub type Ast = PostOrderDag<AstNode, AstLeaf, crate::sema::NodeSemantics>;
 
 /// A node's dense payload: its structural [`AstKind`] and the source [`Span`]
 /// where the construct begins, used to point diagnostics at the offending code.
@@ -36,12 +33,23 @@ impl AstNode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CType {
+    Invalid(String),
     Int,
     Void,
     Char,
+    SignedChar,
+    UnsignedChar,
+    Short,
+    UnsignedShort,
+    UnsignedInt,
+    Long,
+    UnsignedLong,
+    LongLong,
+    UnsignedLongLong,
     Bool,
     Float,
     Double,
+    LongDouble,
     Builtin(String),
     Named(String),
     Record(RecordKind, Option<String>),
@@ -55,11 +63,12 @@ pub enum CType {
         ret: Box<CType>,
         params: Vec<CParam>,
         varargs: bool,
+        has_parameter_type_list: bool,
     },
     Attributed(Box<CType>, Vec<String>),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RecordKind {
     Struct,
     Union,
@@ -95,6 +104,17 @@ pub enum AstKind {
     Decl,
     /// Child: the assigned value expression.
     Assign,
+    AssignExpr,
+    AddAssign,
+    SubAssign,
+    MulAssign,
+    DivAssign,
+    ModAssign,
+    ShlAssign,
+    ShrAssign,
+    AndAssign,
+    XorAssign,
+    OrAssign,
     /// Child: the optional returned expression.
     Return,
     /// Children: the block's statements.
@@ -109,6 +129,11 @@ pub enum AstKind {
     DoWhile,
     /// Children: init, condition, step, body. Omitted clauses are [`AstKind::Empty`].
     For,
+    Switch,
+    Case,
+    Default,
+    Goto,
+    Label,
     Break,
     Continue,
     /// A placeholder for an omitted `for` clause or a null statement.
@@ -119,22 +144,39 @@ pub enum AstKind {
     Mul,
     Div,
     Mod,
+    Shl,
+    Shr,
     Lt,
     Gt,
     Le,
     Ge,
     Eq,
     Ne,
+    BitAnd,
+    BitXor,
+    BitOr,
     LogAnd,
     LogOr,
+    Conditional,
+    Comma,
+    Cast,
+    SizeofExpr,
+    SizeofType,
     /// Child: the single operand.
     Neg,
+    Pos,
     Not,
+    BitNot,
+    PreInc,
+    PreDec,
+    PostInc,
+    PostDec,
     /// Children: the argument expressions. Callee name lives in [`AstLeaf::Call`].
     Call,
     Var,
     String,
     Int,
+    Character,
 }
 
 /// Payload for the nodes that carry one. Indexed by node id through
@@ -162,6 +204,7 @@ pub enum AstLeaf {
     Function {
         name: String,
         ret: CType,
+        has_parameter_type_list: bool,
     },
     Param {
         name: String,
@@ -172,20 +215,34 @@ pub enum AstLeaf {
         ty: CType,
     },
     Assign(String),
+    Label(String),
     Call(String),
     Var(String),
     String(String),
-    Int(i64),
+    Int(IntegerLiteral),
+    Character(String),
+    Type(CType),
 }
 
 fn render_ctype(ty: &CType) -> String {
     match ty {
+        CType::Invalid(spelling) => format!("Invalid({spelling})"),
         CType::Int => "Int".to_string(),
         CType::Void => "Void".to_string(),
         CType::Char => "Char".to_string(),
+        CType::SignedChar => "SignedChar".to_string(),
+        CType::UnsignedChar => "UnsignedChar".to_string(),
+        CType::Short => "Short".to_string(),
+        CType::UnsignedShort => "UnsignedShort".to_string(),
+        CType::UnsignedInt => "UnsignedInt".to_string(),
+        CType::Long => "Long".to_string(),
+        CType::UnsignedLong => "UnsignedLong".to_string(),
+        CType::LongLong => "LongLong".to_string(),
+        CType::UnsignedLongLong => "UnsignedLongLong".to_string(),
         CType::Bool => "Bool".to_string(),
         CType::Float => "Float".to_string(),
         CType::Double => "Double".to_string(),
+        CType::LongDouble => "LongDouble".to_string(),
         CType::Builtin(name) => format!("Builtin({name})"),
         CType::Named(name) => format!("Named({name})"),
         CType::Record(kind, name) => {
@@ -212,6 +269,7 @@ fn render_ctype(ty: &CType) -> String {
             ret,
             params,
             varargs,
+            ..
         } => {
             let mut parts = params
                 .iter()
@@ -282,13 +340,13 @@ fn render_node(ast: &Ast, id: NodeId, depth: usize, out: &mut String) {
             _ => unreachable!(),
         },
         AstKind::Prototype => match ast.get_leaf_data(id) {
-            Some(AstLeaf::Function { name, ret }) => {
+            Some(AstLeaf::Function { name, ret, .. }) => {
                 format!("Prototype {name:?} -> {}", render_ctype(ret))
             }
             _ => unreachable!(),
         },
         AstKind::Function => match ast.get_leaf_data(id) {
-            Some(AstLeaf::Function { name, ret }) => {
+            Some(AstLeaf::Function { name, ret, .. }) => {
                 format!("Function {name:?} -> {}", render_ctype(ret))
             }
             _ => unreachable!(),
@@ -309,6 +367,17 @@ fn render_node(ast: &Ast, id: NodeId, depth: usize, out: &mut String) {
             Some(AstLeaf::Assign(name)) => format!("Assign {name:?}"),
             _ => unreachable!(),
         },
+        AstKind::AssignExpr => "AssignExpr".to_string(),
+        AstKind::AddAssign => "AddAssign".to_string(),
+        AstKind::SubAssign => "SubAssign".to_string(),
+        AstKind::MulAssign => "MulAssign".to_string(),
+        AstKind::DivAssign => "DivAssign".to_string(),
+        AstKind::ModAssign => "ModAssign".to_string(),
+        AstKind::ShlAssign => "ShlAssign".to_string(),
+        AstKind::ShrAssign => "ShrAssign".to_string(),
+        AstKind::AndAssign => "AndAssign".to_string(),
+        AstKind::XorAssign => "XorAssign".to_string(),
+        AstKind::OrAssign => "OrAssign".to_string(),
         AstKind::Return => "Return".to_string(),
         AstKind::Block => "Block".to_string(),
         AstKind::ExprStmt => "ExprStmt".to_string(),
@@ -316,6 +385,17 @@ fn render_node(ast: &Ast, id: NodeId, depth: usize, out: &mut String) {
         AstKind::While => "While".to_string(),
         AstKind::DoWhile => "DoWhile".to_string(),
         AstKind::For => "For".to_string(),
+        AstKind::Switch => "Switch".to_string(),
+        AstKind::Case => "Case".to_string(),
+        AstKind::Default => "Default".to_string(),
+        AstKind::Goto => match ast.get_leaf_data(id) {
+            Some(AstLeaf::Label(name)) => format!("Goto {name:?}"),
+            _ => unreachable!(),
+        },
+        AstKind::Label => match ast.get_leaf_data(id) {
+            Some(AstLeaf::Label(name)) => format!("Label {name:?}"),
+            _ => unreachable!(),
+        },
         AstKind::Break => "Break".to_string(),
         AstKind::Continue => "Continue".to_string(),
         AstKind::Empty => "Empty".to_string(),
@@ -324,16 +404,38 @@ fn render_node(ast: &Ast, id: NodeId, depth: usize, out: &mut String) {
         AstKind::Mul => "Mul".to_string(),
         AstKind::Div => "Div".to_string(),
         AstKind::Mod => "Mod".to_string(),
+        AstKind::Shl => "Shl".to_string(),
+        AstKind::Shr => "Shr".to_string(),
         AstKind::Lt => "Lt".to_string(),
         AstKind::Gt => "Gt".to_string(),
         AstKind::Le => "Le".to_string(),
         AstKind::Ge => "Ge".to_string(),
         AstKind::Eq => "Eq".to_string(),
         AstKind::Ne => "Ne".to_string(),
+        AstKind::BitAnd => "BitAnd".to_string(),
+        AstKind::BitXor => "BitXor".to_string(),
+        AstKind::BitOr => "BitOr".to_string(),
         AstKind::LogAnd => "LogAnd".to_string(),
         AstKind::LogOr => "LogOr".to_string(),
+        AstKind::Conditional => "Conditional".to_string(),
+        AstKind::Comma => "Comma".to_string(),
+        AstKind::Cast => match ast.get_leaf_data(id) {
+            Some(AstLeaf::Type(ty)) => format!("Cast {}", render_ctype(ty)),
+            _ => unreachable!(),
+        },
+        AstKind::SizeofExpr => "SizeofExpr".to_string(),
+        AstKind::SizeofType => match ast.get_leaf_data(id) {
+            Some(AstLeaf::Type(ty)) => format!("SizeofType {}", render_ctype(ty)),
+            _ => unreachable!(),
+        },
         AstKind::Neg => "Neg".to_string(),
+        AstKind::Pos => "Pos".to_string(),
         AstKind::Not => "Not".to_string(),
+        AstKind::BitNot => "BitNot".to_string(),
+        AstKind::PreInc => "PreInc".to_string(),
+        AstKind::PreDec => "PreDec".to_string(),
+        AstKind::PostInc => "PostInc".to_string(),
+        AstKind::PostDec => "PostDec".to_string(),
         AstKind::Call => match ast.get_leaf_data(id) {
             Some(AstLeaf::Call(name)) => format!("Call {name:?}"),
             _ => unreachable!(),
@@ -347,7 +449,11 @@ fn render_node(ast: &Ast, id: NodeId, depth: usize, out: &mut String) {
             _ => unreachable!(),
         },
         AstKind::Int => match ast.get_leaf_data(id) {
-            Some(AstLeaf::Int(value)) => format!("Int {value}"),
+            Some(AstLeaf::Int(value)) => format!("Int {}", value.spelling),
+            _ => unreachable!(),
+        },
+        AstKind::Character => match ast.get_leaf_data(id) {
+            Some(AstLeaf::Character(value)) => format!("Character {value}"),
             _ => unreachable!(),
         },
     };

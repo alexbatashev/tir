@@ -4,6 +4,32 @@ use logos::Logos;
 
 use tir::utils::APInt;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntegerLiteral {
+    pub value: APInt,
+    pub spelling: String,
+}
+
+fn parse_integer_literal(spelling: &str) -> Option<IntegerLiteral> {
+    let suffix_start = spelling.trim_end_matches(['u', 'U', 'l', 'L']).len();
+    let digits = spelling[..suffix_start].replace('\'', "");
+    let normalized = if digits.len() > 1
+        && digits.starts_with('0')
+        && !digits.starts_with("0x")
+        && !digits.starts_with("0X")
+        && !digits.starts_with("0b")
+        && !digits.starts_with("0B")
+    {
+        format!("0o{}", &digits[1..])
+    } else {
+        digits
+    };
+    normalized.parse().ok().map(|value| IntegerLiteral {
+        value,
+        spelling: spelling.to_string(),
+    })
+}
+
 #[derive(Logos, Debug, Clone, PartialEq)]
 pub enum Token {
     #[regex(r"[ \t\n\r\f]+", |lex| lex.slice().to_string())]
@@ -20,6 +46,8 @@ pub enum Token {
     KwAuto,
     #[token("bool")]
     KwBool,
+    #[token("_Bool")]
+    KwUnderscoreBool,
     #[token("break")]
     KwBreak,
     #[token("case")]
@@ -114,8 +142,10 @@ pub enum Token {
     // Or regular expressions.
     #[regex("[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice().to_string())]
     Identifier(String),
-    #[regex("[0-9][0-9_]*|0[xX][0-9a-fA-F][0-9a-fA-F_]*|0[oO][0-7][0-7_]*|0[bB][01][01_]*", |lex| lex.slice().parse::<APInt>().ok())]
-    IntegerLiteral(APInt),
+    #[regex("0[xX][0-9a-fA-F'][0-9a-fA-F']*[uUlL]*|0[bB][01'][01']*[uUlL]*|[0-9][0-9']*[uUlL]*", |lex| parse_integer_literal(lex.slice()))]
+    IntegerLiteral(IntegerLiteral),
+    #[regex(r#"(u8|u|U|L)?'([^'\\]|\\.)+'"#, |lex| lex.slice().to_string())]
+    CharacterLiteral(String),
     #[regex(r#""([^"\\]|\\.)*""#, |lex| {
         let s = lex.slice();
         s[1..s.len() - 1].to_string()
@@ -146,6 +176,30 @@ pub enum Token {
     Arrow,
     #[token("=")]
     Assign,
+    #[token("+=")]
+    PlusAssign,
+    #[token("-=")]
+    MinusAssign,
+    #[token("*=")]
+    StarAssign,
+    #[token("/=")]
+    SlashAssign,
+    #[token("%=")]
+    PercentAssign,
+    #[token("&=")]
+    AmpAssign,
+    #[token("|=")]
+    PipeAssign,
+    #[token("^=")]
+    CaretAssign,
+    #[token("<<=")]
+    ShlAssign,
+    #[token(">>=")]
+    ShrAssign,
+    #[token("++")]
+    PlusPlus,
+    #[token("--")]
+    MinusMinus,
     #[token("+")]
     Plus,
     #[token("-")]
@@ -164,6 +218,10 @@ pub enum Token {
     Caret,
     #[token("~")]
     Tilde,
+    #[token("<<")]
+    Shl,
+    #[token(">>")]
+    Shr,
     #[token("?")]
     Question,
     #[token(":")]
@@ -197,6 +255,7 @@ impl fmt::Display for Token {
             Token::KwAlignof => f.write_str("alignof"),
             Token::KwAuto => f.write_str("auto"),
             Token::KwBool => f.write_str("bool"),
+            Token::KwUnderscoreBool => f.write_str("_Bool"),
             Token::KwBreak => f.write_str("break"),
             Token::KwCase => f.write_str("case"),
             Token::KwChar => f.write_str("char"),
@@ -241,7 +300,8 @@ impl fmt::Display for Token {
             Token::HashHash => f.write_str("##"),
             Token::Hash => f.write_str("#"),
             Token::Identifier(s) => f.write_str(s),
-            Token::IntegerLiteral(n) => write!(f, "{n}"),
+            Token::IntegerLiteral(n) => f.write_str(&n.spelling),
+            Token::CharacterLiteral(s) => f.write_str(s),
             Token::StringLiteral(s) => write!(f, "\"{s}\""),
             Token::Ellipsis => f.write_str("..."),
             Token::LParen => f.write_str("("),
@@ -255,6 +315,18 @@ impl fmt::Display for Token {
             Token::Dot => f.write_str("."),
             Token::Arrow => f.write_str("->"),
             Token::Assign => f.write_str("="),
+            Token::PlusAssign => f.write_str("+="),
+            Token::MinusAssign => f.write_str("-="),
+            Token::StarAssign => f.write_str("*="),
+            Token::SlashAssign => f.write_str("/="),
+            Token::PercentAssign => f.write_str("%="),
+            Token::AmpAssign => f.write_str("&="),
+            Token::PipeAssign => f.write_str("|="),
+            Token::CaretAssign => f.write_str("^="),
+            Token::ShlAssign => f.write_str("<<="),
+            Token::ShrAssign => f.write_str(">>="),
+            Token::PlusPlus => f.write_str("++"),
+            Token::MinusMinus => f.write_str("--"),
             Token::Plus => f.write_str("+"),
             Token::Minus => f.write_str("-"),
             Token::Star => f.write_str("*"),
@@ -264,6 +336,8 @@ impl fmt::Display for Token {
             Token::Pipe => f.write_str("|"),
             Token::Caret => f.write_str("^"),
             Token::Tilde => f.write_str("~"),
+            Token::Shl => f.write_str("<<"),
+            Token::Shr => f.write_str(">>"),
             Token::Question => f.write_str("?"),
             Token::Colon => f.write_str(":"),
             Token::EqEq => f.write_str("=="),
