@@ -1,0 +1,8 @@
+// RUN: not tir opt --verify %s
+
+module {
+  func @bad(%0: !token) {
+    return
+  }
+  module_end
+}

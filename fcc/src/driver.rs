@@ -286,11 +286,14 @@ fn emit_machine_code(args: &CompileArgs, name: &str, source: &str) -> Vec<u8> {
     let module = lower_to_ir(&context, unit, args.lang_options, Some(march));
 
     let mut pm = tir::PassManager::new();
-    pm.nest(tir::builtin::FuncOp::name())
-        .add_pass(tir::passes::Mem2RegPass::new());
+    let function_pipeline = pm.nest(tir::builtin::FuncOp::name());
+    function_pipeline.add_pass(crate::passes::LowerCirControlFlowPass::new());
+    function_pipeline.add_pass(tir::passes::Mem2RegPass::new());
+    function_pipeline.add_pass(tir::passes::InstCombinePass::new());
+    function_pipeline.add_pass(tir::passes::ScfToCfgPass::new());
     let module_op = context.get_op(module.id());
     pm.run(&context, module_op.clone()).unwrap_or_else(|e| {
-        eprintln!("fcc: mem2reg failed: {e}");
+        eprintln!("fcc: control-flow lowering failed: {e}");
         std::process::exit(1);
     });
 

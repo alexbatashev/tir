@@ -394,4 +394,12 @@ mod tests {
         // A token is distinct from the unit type despite both being empty.
         assert_ne!(UnitType::new(&context), token);
     }
+
+    #[test]
+    fn token_is_not_an_arbitrary_data_type() {
+        let context = Context::with_default_dialects();
+        let token = context.get_type_data(TokenType::new(&context));
+
+        assert!(!crate::Any::satisfies(token.as_ref()));
+    }
 }

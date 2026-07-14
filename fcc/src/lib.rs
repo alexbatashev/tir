@@ -12,6 +12,7 @@ pub mod driver;
 pub mod lang_options;
 pub mod lexer;
 pub mod parser;
+pub mod passes;
 pub mod preprocessor;
 pub mod sema;
 

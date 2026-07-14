@@ -41,6 +41,9 @@ pub(crate) struct PatternNodeMeta {
     pub(crate) constraint: Option<OperandConstraint>,
     /// Storage capability and bit demand of a physical register operand.
     pub(crate) register: Option<RegisterRequirement>,
+    /// A store's source register may be produced by a separate constant
+    /// materializer; other register operands keep preferring immediate forms.
+    pub(crate) materialized_constant: bool,
     /// Encoding range of an immediate operand (see `Rule::operand_imm_ranges`).
     pub(crate) imm_range: Option<ImmRange>,
     /// The symbolic value type inferred from the semantic operator signatures.
@@ -77,8 +80,9 @@ impl CompiledIselPattern {
     /// a value *known* to be of a different width than the instruction operates
     /// at (a rewrite-introduced class of unknown width is produced at register
     /// width, so it still matches), an immediate range rejects a constant the
-    /// encoding field cannot represent, and a register/immediate constraint
-    /// requires a non-constant/constant member.
+    /// encoding field cannot represent, and an immediate constraint requires a
+    /// constant member. A store source register may bind a constant because the
+    /// cover must then choose a materializing instruction for that class.
     pub(crate) fn boundary_ok(
         &self,
         egraph: &SemEGraph,
@@ -114,10 +118,13 @@ impl CompiledIselPattern {
             return false;
         }
         match meta.constraint {
-            Some(OperandConstraint::Register) => egraph
-                .nodes(class)
-                .iter()
-                .any(|n| n.kind != SymKind::Constant),
+            Some(OperandConstraint::Register) => {
+                meta.materialized_constant
+                    || egraph
+                        .nodes(class)
+                        .iter()
+                        .any(|n| n.kind != SymKind::Constant)
+            }
             Some(OperandConstraint::Immediate) => egraph
                 .nodes(class)
                 .iter()
@@ -181,6 +188,13 @@ pub(crate) fn compile_isel_pattern(
         operand_imm_ranges,
     )?;
     pattern.set_root(pattern_root);
+
+    if *expr.get_node(root) == SymKind::StoreMemory
+        && let Some(value) = expr.children(root).nth(2)
+        && let Some(pattern_value) = memo.get(&value)
+    {
+        node_meta[pattern_value.index()].materialized_constant = true;
+    }
 
     // A pattern that is a bare operand symbol — a register-to-register copy like
     // x86 `mov dst, src` — selects nothing: it would match every e-class as
