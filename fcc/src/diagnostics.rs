@@ -19,15 +19,21 @@
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use ariadne::{Color, Config, IndexType, Label, Report, ReportKind, Source};
+use ariadne::{Color, Config, IndexType, Label, Report, ReportKind, sources};
 
 // ---------------------------------------------------------------------------
 // Source files and spans
 // ---------------------------------------------------------------------------
 
 /// Handle to an interned source file (its name and text). See [`intern_file`].
-#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default, Debug)]
 pub struct FileId(u32);
+
+impl std::fmt::Display for FileId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&file_name(*self))
+    }
+}
 
 /// A source position: an interned file in the high 32 bits, a byte offset into
 /// that file in the low 32 bits. One `u64` covers every position fcc reports.
@@ -204,7 +210,7 @@ supported extension, or rewrite the construct for the selected standard.",
     /// `E0200`: a name is used without any declaration in scope.
     UndeclaredIdentifier = "E0200" {
         title: "use of undeclared identifier",
-        reference: Some("C17 6.5.1: an identifier must be visibly declared before it is used"),
+        reference: None,
         explain: "\
 A variable was read or assigned before any declaration introduced it into
 scope. C has no implicit declarations: a name must be declared with a type
@@ -212,11 +218,273 @@ before it is used.
 
 Declare the variable before the statement that uses it, e.g. `int total = 0;`,
 and check the spelling of the identifier.",
-        fields: { span: Span, name: String },
+        fields: { span: Span, name: String, reference: String },
         build: |d| Diagnostic::of(Code::UndeclaredIdentifier)
             .message(format!("use of undeclared identifier '{}'", d.name))
             .label(d.span, "not declared in this scope")
-            .help(format!("declare '{}' with a type before using it", d.name)),
+            .help(format!("declare '{}' with a type before using it", d.name))
+            .reference(d.reference),
+    }
+
+    /// `E0201`: a declaration introduces a second entity in the same scope.
+    Redefinition = "E0201" {
+        title: "redefinition",
+        reference: None,
+        explain: "\
+An identifier with no linkage can be declared only once in the same scope.
+Rename or remove the second declaration.",
+        fields: { span: Span, previous: Span, name: String, reference: String },
+        build: |d| Diagnostic::of(Code::Redefinition)
+            .message(format!("redefinition of '{}'", d.name))
+            .label(d.span, format!("this declaration redefines '{}'", d.name))
+            .related(d.previous, "previous declaration is here")
+            .reference(d.reference),
+    }
+
+    /// `E0202`: declarations of one entity specify incompatible types.
+    ConflictingDeclaration = "E0202" {
+        title: "conflicting declaration",
+        reference: None,
+        explain: "Declarations of the same object or function must specify compatible types.",
+        fields: { span: Span, previous: Span, name: String, reference: String },
+        build: |d| Diagnostic::of(Code::ConflictingDeclaration)
+            .message(format!("conflicting declarations for '{}'", d.name))
+            .label(d.span, "this declaration has an incompatible type")
+            .related(d.previous, "previous declaration is here")
+            .reference(d.reference),
+    }
+
+    /// `E0203`: a label name is defined twice in one function.
+    DuplicateLabel = "E0203" {
+        title: "duplicate label",
+        reference: None,
+        explain: "Label names have function scope and must be unique within a function.",
+        fields: { span: Span, previous: Span, name: String, reference: String },
+        build: |d| Diagnostic::of(Code::DuplicateLabel)
+            .message(format!("duplicate label '{}'", d.name))
+            .label(d.span, "label is defined again here")
+            .related(d.previous, "previous definition is here")
+            .reference(d.reference),
+    }
+
+    /// `E0204`: goto names no label in the enclosing function.
+    UnknownLabel = "E0204" {
+        title: "use of undeclared label",
+        reference: None,
+        explain: "A goto target must be a label in the same function.",
+        fields: { span: Span, name: String, reference: String },
+        build: |d| Diagnostic::of(Code::UnknownLabel)
+            .message(format!("use of undeclared label '{}'", d.name))
+            .label(d.span, "no label with this name exists in the function")
+            .reference(d.reference),
+    }
+
+    /// `E0402`: an operator's operands do not satisfy its constraints.
+    InvalidOperands = "E0402" {
+        title: "invalid operands",
+        reference: None,
+        explain: "\
+An operator was applied to values whose types do not satisfy the operator's
+constraints. Change an operand or add an appropriate explicit conversion.",
+        fields: { span: Span, message: String, reference: String },
+        build: |d| Diagnostic::of(Code::InvalidOperands)
+            .message(d.message.clone())
+            .label(d.span, d.message)
+            .reference(d.reference),
+    }
+
+    /// `E0400`: declaration specifiers do not form a C type.
+    InvalidTypeSpecifiers = "E0400" {
+        title: "invalid type specifiers",
+        reference: None,
+        explain: "Declaration type specifiers must form one of the combinations permitted by C.",
+        fields: { span: Span, spelling: String, reference: String },
+        build: |d| Diagnostic::of(Code::InvalidTypeSpecifiers)
+            .message(format!("invalid type specifier combination '{}'", d.spelling))
+            .label(d.span, "these specifiers do not form a type")
+            .reference(d.reference),
+    }
+
+    /// `E0401`: an integer constant has an invalid suffix or no representable type.
+    InvalidIntegerLiteral = "E0401" {
+        title: "invalid integer literal",
+        reference: None,
+        explain: "An integer suffix must be a valid combination of u/U and l/L or ll/LL.",
+        fields: { span: Span, message: String, reference: String },
+        build: |d| Diagnostic::of(Code::InvalidIntegerLiteral)
+            .message(d.message.clone())
+            .label(d.span, d.message)
+            .reference(d.reference),
+    }
+
+    /// `E0403`: an operation requires a modifiable lvalue.
+    ModifiableLvalueRequired = "E0403" {
+        title: "modifiable lvalue required",
+        reference: None,
+        explain: "\
+Assignments and increment or decrement operators can only update an object
+designated by a modifiable lvalue.",
+        fields: { span: Span, message: String, reference: String },
+        build: |d| Diagnostic::of(Code::ModifiableLvalueRequired)
+            .message(d.message.clone())
+            .label(d.span, d.message)
+            .reference(d.reference),
+    }
+
+    /// `E0404`: an implicit assignment conversion is not permitted.
+    IncompatibleConversion = "E0404" {
+        title: "incompatible conversion",
+        reference: None,
+        explain: "The source value cannot be implicitly converted to the destination type.",
+        fields: { span: Span, previous: Option<Span>, message: String, reference: String },
+        build: |d| {
+            let diagnostic = Diagnostic::of(Code::IncompatibleConversion)
+                .message(d.message.clone())
+                .label(d.span, d.message)
+                .reference(d.reference);
+            if let Some(previous) = d.previous {
+                diagnostic.related(previous, "previous declaration is here")
+            } else {
+                diagnostic
+            }
+        },
+    }
+
+    /// `E0405`: a call designator does not have function type.
+    CalledObjectNotFunction = "E0405" {
+        title: "called object is not a function",
+        reference: None,
+        explain: "The expression before a call's parentheses must designate a function.",
+        fields: { span: Span, previous: Span, name: String, reference: String },
+        build: |d| Diagnostic::of(Code::CalledObjectNotFunction)
+            .message(format!("called object '{}' is not a function", d.name))
+            .label(d.span, "called here")
+            .related(d.previous, "previous declaration is here")
+            .reference(d.reference),
+    }
+
+    /// `E0406`: a call supplies the wrong number of arguments.
+    ArgumentMismatch = "E0406" {
+        title: "function argument mismatch",
+        reference: None,
+        explain: "A function call must supply the parameters required by its declaration.",
+        fields: { span: Span, previous: Span, message: String, reference: String },
+        build: |d| Diagnostic::of(Code::ArgumentMismatch)
+            .message(d.message.clone())
+            .label(d.span, d.message)
+            .related(d.previous, "previous declaration is here")
+            .reference(d.reference),
+    }
+
+    /// `E0407`: a context requires an integer constant expression.
+    IntegerConstantRequired = "E0407" {
+        title: "integer constant expression required",
+        reference: None,
+        explain: "This context requires a value computable as an integer during translation.",
+        fields: { span: Span, reference: String },
+        build: |d| Diagnostic::of(Code::IntegerConstantRequired)
+            .message("case label is not an integer constant expression")
+            .label(d.span, "not an integer constant expression")
+            .reference(d.reference),
+    }
+
+    /// `E0408`: a type qualifier is applied where C does not permit it.
+    InvalidTypeQualifier = "E0408" {
+        title: "invalid type qualifier",
+        reference: None,
+        explain: "Type qualifiers have constraints based on the type they qualify.",
+        fields: { span: Span, message: String, reference: String },
+        build: |d| Diagnostic::of(Code::InvalidTypeQualifier)
+            .message(d.message.clone())
+            .label(d.span, d.message)
+            .reference(d.reference),
+    }
+
+    /// `E0409`: an operation requires a complete object type.
+    CompleteObjectTypeRequired = "E0409" {
+        title: "complete object type required",
+        reference: None,
+        explain: "Some operations, including sizeof, require a complete object type.",
+        fields: { span: Span, message: String, reference: String },
+        build: |d| Diagnostic::of(Code::CompleteObjectTypeRequired)
+            .message(d.message.clone())
+            .label(d.span, d.message)
+            .reference(d.reference),
+    }
+
+    /// `E0505`: a return statement does not match its function return type.
+    InvalidReturn = "E0505" {
+        title: "invalid return statement",
+        reference: None,
+        explain: "\
+A void function cannot return a value, and a function returning a value cannot
+use a bare return statement.",
+        fields: { span: Span, message: String, reference: String },
+        build: |d| Diagnostic::of(Code::InvalidReturn)
+            .message(d.message.clone())
+            .label(d.span, d.message)
+            .reference(d.reference),
+    }
+
+    /// `E0503`: break appears outside a loop or switch.
+    MisplacedBreak = "E0503" {
+        title: "misplaced break statement",
+        reference: None,
+        explain: "A break statement can only appear in a loop or switch body.",
+        fields: { span: Span, reference: String },
+        build: |d| Diagnostic::of(Code::MisplacedBreak)
+            .message("break statement is not inside a loop or switch")
+            .label(d.span, "no enclosing loop or switch")
+            .reference(d.reference),
+    }
+
+    /// `E0504`: continue appears outside a loop.
+    MisplacedContinue = "E0504" {
+        title: "misplaced continue statement",
+        reference: None,
+        explain: "A continue statement can only appear in a loop body.",
+        fields: { span: Span, reference: String },
+        build: |d| Diagnostic::of(Code::MisplacedContinue)
+            .message("continue statement is not inside a loop")
+            .label(d.span, "no enclosing loop")
+            .reference(d.reference),
+    }
+
+    /// `E0500`: a selection or iteration condition has the wrong type.
+    InvalidControllingExpression = "E0500" {
+        title: "invalid controlling expression",
+        reference: None,
+        explain: "Selection and loop conditions require scalar types; switch requires an integer type.",
+        fields: { span: Span, message: String, reference: String },
+        build: |d| Diagnostic::of(Code::InvalidControllingExpression)
+            .message(d.message.clone())
+            .label(d.span, d.message)
+            .reference(d.reference),
+    }
+
+    /// `E0501`: case or default appears outside a switch.
+    MisplacedSwitchLabel = "E0501" {
+        title: "misplaced switch label",
+        reference: None,
+        explain: "A case or default label must appear within a switch statement.",
+        fields: { span: Span, reference: String },
+        build: |d| Diagnostic::of(Code::MisplacedSwitchLabel)
+            .message("case or default label is not inside a switch")
+            .label(d.span, "no enclosing switch")
+            .reference(d.reference),
+    }
+
+    /// `E0502`: a switch repeats a case value or default label.
+    DuplicateSwitchLabel = "E0502" {
+        title: "duplicate switch label",
+        reference: None,
+        explain: "One switch cannot contain duplicate converted case values or more than one default.",
+        fields: { span: Span, previous: Span, message: String, reference: String },
+        build: |d| Diagnostic::of(Code::DuplicateSwitchLabel)
+            .message(d.message.clone())
+            .label(d.span, d.message)
+            .related(d.previous, "previous case is here")
+            .reference(d.reference),
     }
 
     /// `E0300`: an active `#error` directive.
@@ -320,8 +588,9 @@ fn directive_message(code: Code, text: String) -> String {
 pub struct Diagnostic {
     code: Code,
     message: String,
-    label: Option<(Span, String)>,
+    labels: Vec<(Span, String)>,
     help: Option<String>,
+    reference: Option<String>,
 }
 
 impl Diagnostic {
@@ -330,8 +599,9 @@ impl Diagnostic {
         Diagnostic {
             code,
             message: code.title().to_string(),
-            label: None,
+            labels: Vec::new(),
             help: None,
+            reference: None,
         }
     }
 
@@ -341,12 +611,22 @@ impl Diagnostic {
     }
 
     fn label(mut self, span: Span, message: impl Into<String>) -> Self {
-        self.label = Some((span, message.into()));
+        self.labels.push((span, message.into()));
+        self
+    }
+
+    fn related(mut self, span: Span, message: impl Into<String>) -> Self {
+        self.labels.push((span, message.into()));
         self
     }
 
     fn help(mut self, help: impl Into<String>) -> Self {
         self.help = Some(help.into());
+        self
+    }
+
+    fn reference(mut self, reference: impl Into<String>) -> Self {
+        self.reference = Some(reference.into());
         self
     }
 
@@ -366,20 +646,13 @@ impl Diagnostic {
     /// Render to an arbitrary writer; `color` toggles ANSI styling (off for
     /// tests and non-terminal output).
     pub fn write(&self, w: &mut dyn Write, color: bool) -> io::Result<()> {
-        match &self.label {
-            Some((span, label)) => self.write_report(*span, label, w, color),
+        match self.labels.first() {
+            Some((span, _)) => self.write_report(*span, w, color),
             None => self.write_compact(w, color),
         }
     }
 
-    fn write_report(
-        &self,
-        span: Span,
-        label: &str,
-        w: &mut dyn Write,
-        color: bool,
-    ) -> io::Result<()> {
-        let name = file_name(span.file());
+    fn write_report(&self, span: Span, w: &mut dyn Write, color: bool) -> io::Result<()> {
         let source = file_source(span.file());
         // Point spans carry only a start; underline the first byte so the caret
         // has something to sit under, clamping at end of file.
@@ -390,26 +663,42 @@ impl Diagnostic {
             Severity::Error => (ReportKind::Error, Color::Red),
             Severity::Warning => (ReportKind::Warning, Color::Yellow),
         };
-        let mut report = Report::build(kind, (name.clone(), range.clone()))
+        let mut report = Report::build(kind, (span.file(), range.clone()))
             .with_config(
                 Config::new()
                     .with_index_type(IndexType::Byte)
                     .with_color(color),
             )
             .with_code(self.code.as_str())
-            .with_message(&self.message)
-            .with_label(
-                Label::new((name.clone(), range))
-                    .with_message(label)
-                    .with_color(accent),
+            .with_message(&self.message);
+        for (index, (label_span, message)) in self.labels.iter().enumerate() {
+            let label_source = file_source(label_span.file());
+            let off = label_span.offset();
+            let label_range = off..(off + 1).min(label_source.len()).max(off);
+            report = report.with_label(
+                Label::new((label_span.file(), label_range))
+                    .with_message(message)
+                    .with_color(if index == 0 { accent } else { Color::Blue }),
             );
+        }
         if let Some(help) = &self.help {
             report = report.with_help(help);
         }
-        if let Some(reference) = self.code.reference() {
+        if let Some(reference) = self.reference.as_deref().or_else(|| self.code.reference()) {
             report = report.with_note(reference);
         }
-        report.finish().write((name, Source::from(&*source)), w)
+        let mut source_files = Vec::new();
+        for (label_span, _) in &self.labels {
+            if !source_files.contains(&label_span.file()) {
+                source_files.push(label_span.file());
+            }
+        }
+        let cache = sources(
+            source_files
+                .into_iter()
+                .map(|file| (file, file_source(file))),
+        );
+        report.finish().write(cache, w)
     }
 
     /// Spanless rendering: `kind[CODE]: message` plus help/note lines, matching
@@ -424,7 +713,7 @@ impl Diagnostic {
         if let Some(help) = &self.help {
             writeln!(w, "  = help: {help}")?;
         }
-        if let Some(reference) = self.code.reference() {
+        if let Some(reference) = self.reference.as_deref().or_else(|| self.code.reference()) {
             writeln!(w, "  = note: {reference}")?;
         }
         Ok(())
@@ -522,11 +811,29 @@ mod tests {
         let src = "int main(void) { return x; }";
         let file = intern_file("<undeclared-test>", src);
         let at = src.find('x').unwrap();
-        let out = render(UndeclaredIdentifier::new(Span::new(file, at), "x").into());
+        let out = render(UndeclaredIdentifier::new(Span::new(file, at), "x", "C17 6.5.1").into());
         assert!(out.contains("[E0200]"), "{out}");
         assert!(out.contains("undeclared identifier 'x'"), "{out}");
         assert!(out.contains("not declared in this scope"), "{out}");
         assert!(out.contains("Help"), "{out}");
+    }
+
+    #[test]
+    fn related_label_can_point_into_another_file() {
+        let first = intern_file("first.h", "int value;\n");
+        let second = intern_file("second.c", "int value;\n");
+        let diagnostic: Diagnostic = Redefinition::new(
+            Span::new(second, 4),
+            Span::new(first, 4),
+            "value",
+            "C23 6.7.1",
+        )
+        .into();
+        let output = render(diagnostic);
+
+        assert!(output.contains("second.c"), "{output}");
+        assert!(output.contains("first.h"), "{output}");
+        assert!(output.contains("previous declaration is here"), "{output}");
     }
 
     #[test]

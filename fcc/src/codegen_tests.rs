@@ -3,6 +3,7 @@ mod tests {
     use crate::codegen::codegen;
     use crate::diagnostics::{Span, intern_file};
     use crate::parser::parse;
+    use crate::sema::analyze;
     use logos::Logos;
 
     use crate::lexer::Token;
@@ -19,7 +20,9 @@ mod tests {
             .spanned()
             .map(|(r, span)| (r.unwrap(), Span::new(file, span.start)))
             .collect();
-        let unit = parse(&tokens, Default::default()).expect("parse");
+        let options = Default::default();
+        let unit = parse(&tokens, options).expect("parse");
+        let unit = analyze(unit, options).expect("sema");
         let context = fcc_context();
         let module = codegen(&context, &unit).expect("codegen");
         let mut out = String::new();

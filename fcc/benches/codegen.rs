@@ -9,11 +9,11 @@ use std::hint::black_box;
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use logos::Logos;
 
-use fcc::ast::Ast;
 use fcc::codegen::codegen;
 use fcc::diagnostics::{Span, intern_file};
 use fcc::lexer::Token;
 use fcc::parser::parse;
+use fcc::sema::{TypedAst, analyze};
 use tir::{Context, Operation};
 
 /// Build a translation unit with `funcs` functions, each declaring `stmts`
@@ -58,13 +58,15 @@ fn gen_expr_heavy(funcs: usize, depth: usize) -> String {
     src
 }
 
-fn parse_src(src: &str) -> Ast {
+fn parse_src(src: &str) -> TypedAst {
     let file = intern_file("<bench>", src);
     let tokens: Vec<_> = Token::lexer(src)
         .spanned()
         .map(|(r, span)| (r.unwrap(), Span::new(file, span.start)))
         .collect();
-    parse(&tokens, Default::default()).expect("parse")
+    let options = Default::default();
+    let ast = parse(&tokens, options).expect("parse");
+    analyze(ast, options).expect("sema")
 }
 
 fn bench_codegen(c: &mut Criterion) {

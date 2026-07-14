@@ -306,9 +306,9 @@ where
     I: ValueInput<'src, Token = Token, Span = Span>,
 {
     let qualifier = choice((
-        just(Token::KwConst).to(true),
-        just(Token::KwRestrict).to(false),
-        just(Token::KwVolatile).to(false),
+        just(Token::KwConst),
+        just(Token::KwRestrict),
+        just(Token::KwVolatile),
     ));
     let builtin_atom = select! {
         tok @ Token::KwInt => tok,
@@ -338,9 +338,7 @@ where
         },
     );
     let base = choice((builtin, named));
-    let pointer = just(Token::Star)
-        .ignore_then(qualifier.clone().repeated().ignored())
-        .to(());
+    let pointer = just(Token::Star).ignore_then(qualifier.clone().repeated().collect::<Vec<_>>());
 
     qualifier
         .repeated()
@@ -348,14 +346,26 @@ where
         .then(base)
         .then(pointer.repeated().collect::<Vec<_>>())
         .map(|((qualifiers, mut ty), pointers)| {
-            if qualifiers.iter().any(|&is_const| is_const) {
-                ty = CType::Const(Box::new(ty));
-            }
-            for _ in pointers {
+            ty = apply_qualifiers(ty, &qualifiers);
+            for qualifiers in pointers {
                 ty = CType::Pointer(Box::new(ty));
+                ty = apply_qualifiers(ty, &qualifiers);
             }
             ty
         })
+}
+
+fn apply_qualifiers(mut ty: CType, qualifiers: &[Token]) -> CType {
+    if qualifiers.iter().any(|token| token == &Token::KwConst) {
+        ty = CType::Const(Box::new(ty));
+    }
+    if qualifiers.iter().any(|token| token == &Token::KwVolatile) {
+        ty = CType::Volatile(Box::new(ty));
+    }
+    if qualifiers.iter().any(|token| token == &Token::KwRestrict) {
+        ty = CType::Restrict(Box::new(ty));
+    }
+    ty
 }
 
 fn ident<'src, I>() -> impl Parser<'src, I, String, Extra<'src>> + Clone
@@ -1013,7 +1023,15 @@ where
             let tok = e.span().start;
             let st = &mut e.state().0;
             let id = st.add(AstKind::Function, tok);
-            st.ast.set_leaf_data(id, AstLeaf::Function { name, ret });
+            let has_parameter_type_list = !params.is_empty();
+            st.ast.set_leaf_data(
+                id,
+                AstLeaf::Function {
+                    name,
+                    ret,
+                    has_parameter_type_list,
+                },
+            );
             let params = params
                 .into_iter()
                 .filter(|&param| !is_void_param(&st.ast, param))
@@ -1029,7 +1047,15 @@ where
             let tok = e.span().start;
             let st = &mut e.state().0;
             let id = st.add(AstKind::Prototype, tok);
-            st.ast.set_leaf_data(id, AstLeaf::Function { name, ret });
+            let has_parameter_type_list = !params.is_empty();
+            st.ast.set_leaf_data(
+                id,
+                AstLeaf::Function {
+                    name,
+                    ret,
+                    has_parameter_type_list,
+                },
+            );
             let params = params
                 .into_iter()
                 .filter(|&param| !is_void_param(&st.ast, param))
@@ -1286,11 +1312,12 @@ impl<'a> DeclParser<'a> {
                 let name = self.parse_name()?;
                 self.expect(&Token::RParen)?;
                 let ty = if self.eat(&Token::LParen) {
-                    let (params, varargs) = self.parse_param_list()?;
+                    let (params, varargs, has_parameter_type_list) = self.parse_param_list()?;
                     CType::Pointer(Box::new(CType::Function {
                         ret: Box::new(base),
                         params,
                         varargs,
+                        has_parameter_type_list,
                     }))
                 } else {
                     CType::Pointer(Box::new(base))
@@ -1319,11 +1346,12 @@ impl<'a> DeclParser<'a> {
                 let len = (!len.is_empty()).then_some(tokens_text(&len));
                 decl.ty = CType::Array(Box::new(decl.ty), len);
             } else if self.eat(&Token::LParen) {
-                let (params, varargs) = self.parse_param_list()?;
+                let (params, varargs, has_parameter_type_list) = self.parse_param_list()?;
                 decl.ty = CType::Function {
                     ret: Box::new(decl.ty),
                     params,
                     varargs,
+                    has_parameter_type_list,
                 };
             } else {
                 break;
@@ -1342,11 +1370,11 @@ impl<'a> DeclParser<'a> {
         }
     }
 
-    fn parse_param_list(&mut self) -> Result<(Vec<CParam>, bool), String> {
+    fn parse_param_list(&mut self) -> Result<(Vec<CParam>, bool, bool), String> {
         let mut params = Vec::new();
         let mut varargs = false;
         if self.eat(&Token::RParen) {
-            return Ok((params, varargs));
+            return Ok((params, varargs, false));
         }
         loop {
             if self.eat(&Token::Ellipsis) {
@@ -1384,7 +1412,7 @@ impl<'a> DeclParser<'a> {
             self.expect(&Token::RParen)?;
             break;
         }
-        Ok((params, varargs))
+        Ok((params, varargs, true))
     }
 
     fn parse_abstract_declarator(&mut self, mut base: CType) -> Result<Declarator, String> {
@@ -1516,6 +1544,9 @@ impl<'a> DeclParser<'a> {
 }
 
 fn builtin_type(tokens: &[Token]) -> CType {
+    if !valid_builtin_type(tokens) {
+        return CType::Invalid(tokens_text(tokens));
+    }
     let unsigned = tokens.iter().any(|tok| matches!(tok, Token::KwUnsigned));
     let signed = tokens.iter().any(|tok| matches!(tok, Token::KwSigned));
     let long_count = tokens
@@ -1575,6 +1606,40 @@ fn builtin_type(tokens: &[Token]) -> CType {
     }
 }
 
+fn valid_builtin_type(tokens: &[Token]) -> bool {
+    let count = |needle: &Token| tokens.iter().filter(|token| *token == needle).count();
+    let void = count(&Token::KwVoid);
+    let boolean = count(&Token::KwUnderscoreBool) + count(&Token::KwBool);
+    let float = count(&Token::KwFloat);
+    let double = count(&Token::KwDouble);
+    let char_ = count(&Token::KwChar);
+    let short = count(&Token::KwShort);
+    let long = count(&Token::KwLong);
+    let signed = count(&Token::KwSigned);
+    let unsigned = count(&Token::KwUnsigned);
+    let int = count(&Token::KwInt);
+
+    if signed > 1 || unsigned > 1 || signed + unsigned > 1 || int > 1 || short > 1 || long > 2 {
+        return false;
+    }
+    if void + boolean + float > 0 {
+        return tokens.len() == 1;
+    }
+    if double > 0 {
+        return double == 1 && long <= 1 && tokens.len() == 1 + long;
+    }
+    if char_ > 0 {
+        return char_ == 1 && tokens.len() == 1 + signed + unsigned;
+    }
+    if short > 0 {
+        return long == 0 && tokens.len() == short + signed + unsigned + int;
+    }
+    if long > 0 {
+        return tokens.len() == long + signed + unsigned + int;
+    }
+    !tokens.is_empty() && tokens.len() == signed + unsigned + int
+}
+
 fn is_decl_attr_name(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     matches!(
@@ -1631,19 +1696,26 @@ fn add_varargs_node(st: &mut ParseState, tok: usize) -> NodeId {
     st.add(AstKind::VarArgs, tok)
 }
 
-fn split_function_type(ty: CType) -> Result<(CType, Vec<CParam>, bool), CType> {
+fn split_function_type(ty: CType) -> Result<(CType, Vec<CParam>, bool, bool), CType> {
     match ty {
         CType::Function {
             ret,
             params,
             varargs,
-        } => Ok((*ret, params, varargs)),
+            has_parameter_type_list,
+        } => Ok((*ret, params, varargs, has_parameter_type_list)),
         CType::Attributed(inner, attrs) => match *inner {
             CType::Function {
                 ret,
                 params,
                 varargs,
-            } => Ok((CType::Attributed(ret, attrs), params, varargs)),
+                has_parameter_type_list,
+            } => Ok((
+                CType::Attributed(ret, attrs),
+                params,
+                varargs,
+                has_parameter_type_list,
+            )),
             other => Err(CType::Attributed(Box::new(other), attrs)),
         },
         other => Err(other),
@@ -1749,7 +1821,10 @@ fn parse_external_tokens(
         parser.consume_attrs()?;
         decl.ty = parser.take_attrs(decl.ty);
         let ty = decl.ty;
-        if !is_typedef && let Ok((ret, params, varargs)) = split_function_type(ty.clone()) {
+        if !is_typedef
+            && let Ok((ret, params, varargs, has_parameter_type_list)) =
+                split_function_type(ty.clone())
+        {
             let params = params
                 .into_iter()
                 .map(|param| add_param_node(st, tok, param))
@@ -1761,6 +1836,7 @@ fn parse_external_tokens(
                 AstLeaf::Function {
                     name: decl.name,
                     ret,
+                    has_parameter_type_list,
                 },
             );
             for param in params {

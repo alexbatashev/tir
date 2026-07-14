@@ -168,7 +168,7 @@ fn run_compile(args: CompileArgs) {
             CompileStage::Ir => {
                 let unit = parse_source(&name, &source, &args.defines, args.lang_options);
                 let context = fcc_context();
-                let module = lower_to_ir(&context, &unit);
+                let module = lower_to_ir(&context, unit, args.lang_options, args.march.as_deref());
                 let mut ir = String::new();
                 let mut fmt = tir::IRFormatter::new(&mut ir);
                 use tir::Operation;
@@ -201,8 +201,28 @@ fn read_input(input: &OsString) -> (String, String) {
     }
 }
 
-fn lower_to_ir(context: &tir::Context, unit: &crate::ast::Ast) -> tir::builtin::ModuleOp {
-    crate::codegen::codegen(context, unit).unwrap_or_else(|d| {
+fn lower_to_ir(
+    context: &tir::Context,
+    unit: crate::ast::Ast,
+    options: LangOptions,
+    march: Option<&str>,
+) -> tir::builtin::ModuleOp {
+    let target = match march {
+        Some(march) => crate::sema::TargetProfile::for_march(march),
+        None => crate::sema::TargetProfile::host(),
+    }
+    .unwrap_or_else(|error| {
+        eprintln!("fcc: {error}; pass --march explicitly");
+        std::process::exit(1);
+    });
+    let typed =
+        crate::sema::analyze_with_target(unit, options, target).unwrap_or_else(|diagnostics| {
+            for diagnostic in diagnostics {
+                diagnostic.eprint();
+            }
+            std::process::exit(1);
+        });
+    crate::codegen::codegen(context, &typed).unwrap_or_else(|d| {
         d.eprint();
         std::process::exit(1);
     })
@@ -263,7 +283,7 @@ fn emit_machine_code(args: &CompileArgs, name: &str, source: &str) -> Vec<u8> {
     let unit = parse_source(name, source, &args.defines, args.lang_options);
     let context = fcc_context();
     target.register_dialects(&context);
-    let module = lower_to_ir(&context, &unit);
+    let module = lower_to_ir(&context, unit, args.lang_options, Some(march));
 
     let mut pm = tir::PassManager::new();
     pm.nest(tir::builtin::FuncOp::name())
