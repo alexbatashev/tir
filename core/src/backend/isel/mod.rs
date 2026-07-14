@@ -11,7 +11,6 @@
 mod axioms;
 mod builder;
 mod cover;
-mod coverage;
 mod emit;
 mod node;
 mod pattern;
@@ -19,6 +18,7 @@ mod rewrites;
 mod synthesis;
 #[cfg(test)]
 mod tests;
+mod theory;
 
 use std::collections::{HashMap, HashSet};
 
@@ -32,7 +32,6 @@ use tir::{
 use tir_adt::APInt;
 use tir_symbolic::egraph::{ENode, Id, Var};
 
-pub use coverage::{CoverageRow, CoverageStatus, discover_coverage, render_coverage_file};
 pub use node::{SemEGraph, SemNode, SemPayload};
 pub use rewrites::{IselRewrite, SaturationLimits};
 pub use synthesis::{discover_axioms, render_axioms_file};
@@ -158,6 +157,103 @@ pub struct ImmRange {
     pub signed: bool,
 }
 
+/// The semantic value representations a physical register class can store.
+/// This is deliberately separate from the value's type: overlapping banks may
+/// accept both integer and floating-point interpretations of the same bits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RegisterCapability {
+    width: u32,
+    integer: bool,
+    float: bool,
+}
+
+/// A register operand's storage capability and whether its instruction reads
+/// the value's full architectural width rather than only its defined low bits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RegisterRequirement {
+    capability: RegisterCapability,
+    whole: bool,
+}
+
+impl RegisterRequirement {
+    pub fn low_bits(capability: RegisterCapability) -> Self {
+        Self {
+            capability,
+            whole: false,
+        }
+    }
+
+    pub fn whole(capability: RegisterCapability) -> Self {
+        Self {
+            capability,
+            whole: true,
+        }
+    }
+
+    pub fn accepts(&self, ty: &tir::sem::SemType) -> bool {
+        use tir::sem::{SemType, Width};
+        if !self.capability.accepts(ty) {
+            return false;
+        }
+        !self.whole
+            || !matches!(
+                ty,
+                SemType::Bits(Width::Const(width)) | SemType::RawBits(Width::Const(width))
+                    if *width != self.capability.width
+            )
+    }
+
+    fn accepts_low_bits(&self, ty: &tir::sem::SemType) -> bool {
+        self.capability.accepts(ty)
+    }
+}
+
+impl RegisterCapability {
+    pub fn integer(width: u32) -> Self {
+        Self {
+            width,
+            integer: true,
+            float: false,
+        }
+    }
+
+    pub fn float(width: u32) -> Self {
+        Self {
+            width,
+            integer: false,
+            float: true,
+        }
+    }
+
+    pub fn any(width: u32) -> Self {
+        Self {
+            width,
+            integer: true,
+            float: true,
+        }
+    }
+
+    pub fn accepts(&self, ty: &tir::sem::SemType) -> bool {
+        use tir::sem::{SemType, Width};
+        match ty {
+            SemType::Bits(Width::Const(width)) | SemType::RawBits(Width::Const(width)) => {
+                self.integer && *width <= self.width
+            }
+            SemType::Float(format) => {
+                let (Width::Const(exponent), Width::Const(mantissa)) =
+                    (&format.exponent, &format.mantissa)
+                else {
+                    return self.float;
+                };
+                self.float && 1 + exponent + mantissa == self.width
+            }
+            SemType::Var(_) => true,
+            SemType::Iterator(_) | SemType::Pair(_, _) | SemType::State | SemType::Unit => false,
+            SemType::Bits(_) | SemType::RawBits(_) => self.integer,
+        }
+    }
+}
+
 impl ImmRange {
     /// Whether `value` is representable in the field: its 64-bit register
     /// pattern must survive the encode/decode roundtrip (truncate to the
@@ -207,21 +303,14 @@ pub struct Rule {
     /// are unconstrained, so hand-written and synthesized rules keep matching any
     /// value.
     pub operand_constraints: Vec<(u32, OperandConstraint)>,
-    /// Per-operand-symbol required value width, for operands the instruction is
-    /// width-sensitive in (comparisons, right shifts, division): the operand's
-    /// upper bits reach the result, so a narrower value must not bind. Symbols
-    /// absent here match any width.
-    pub operand_widths: Vec<(u32, u32)>,
+    /// Per-register-operand storage and bit-demand requirements.
+    pub operand_registers: Vec<(u32, RegisterRequirement)>,
+    /// Storage capability of the register receiving this rule's result.
+    pub result_register: Option<RegisterRequirement>,
     /// Per-operand-symbol immediate encoding range. A constant outside the field's
     /// representable range must not bind (its encoding would truncate). Symbols
     /// absent here accept any constant.
     pub operand_imm_ranges: Vec<(u32, ImmRange)>,
-    /// Per-operand-symbol float requirement: `true` for operands living in a
-    /// float register class, `false` for integer ones. A value whose IR type is
-    /// known to be of the other kind must not bind — an integer store must not
-    /// consume a float value and vice versa. Symbols absent here (and values of
-    /// unknown type) match either.
-    pub operand_floats: Vec<(u32, bool)>,
     pub emit_fn: RuleEmitFn,
 }
 
@@ -234,9 +323,9 @@ impl Rule {
             kind: RuleKind::Value,
             prelude_emit: None,
             operand_constraints: Vec::new(),
-            operand_widths: Vec::new(),
+            operand_registers: Vec::new(),
+            result_register: None,
             operand_imm_ranges: Vec::new(),
-            operand_floats: Vec::new(),
             emit_fn,
         }
     }
@@ -248,11 +337,20 @@ impl Rule {
         self
     }
 
-    /// Require operand symbols to bind values of exactly the given width (see
-    /// [`Rule::operand_widths`]). Values of unknown width — rewrite-introduced
-    /// intermediates carrying no IR type — still match.
-    pub fn with_operand_widths(mut self, widths: Vec<(u32, u32)>) -> Self {
-        self.operand_widths = widths;
+    /// Describe which semantic values each physical register operand can store
+    /// and whether the instruction consumes all of their architectural bits.
+    pub fn with_operand_registers(mut self, registers: Vec<(u32, RegisterRequirement)>) -> Self {
+        self.operand_registers = registers;
+        self
+    }
+
+    pub fn with_result_register(mut self, register: RegisterRequirement) -> Self {
+        self.result_register = Some(register);
+        self
+    }
+
+    pub fn with_optional_result_register(mut self, register: Option<RegisterRequirement>) -> Self {
+        self.result_register = register;
         self
     }
 
@@ -260,13 +358,6 @@ impl Rule {
     /// represent (see [`Rule::operand_imm_ranges`]).
     pub fn with_operand_imm_ranges(mut self, ranges: Vec<(u32, ImmRange)>) -> Self {
         self.operand_imm_ranges = ranges;
-        self
-    }
-
-    /// Require operand symbols to bind float (or non-float) values (see
-    /// [`Rule::operand_floats`]).
-    pub fn with_operand_floats(mut self, floats: Vec<(u32, bool)>) -> Self {
-        self.operand_floats = floats;
         self
     }
 
@@ -566,9 +657,9 @@ impl InstructionSelectPass {
                     rule_index,
                     &rule.pattern,
                     &rule.operand_constraints,
-                    &rule.operand_widths,
+                    &rule.operand_registers,
                     &rule.operand_imm_ranges,
-                    &rule.operand_floats,
+                    rule.result_register,
                 )
             })
             .collect();
@@ -684,11 +775,9 @@ impl InstructionSelectPass {
                     return Vec::new();
                 }
                 let pattern_root = compiled.pattern.root();
-                compiled
-                    .pattern
-                    .search_with_legality(&fs.egraph, &|node, class| {
-                        value_match_allowed(fs, context, compiled, pattern_root, node, class)
-                    })
+                compiled.search_with_legality(&fs.egraph, context, &|node, class| {
+                    value_match_allowed(fs, context, compiled, pattern_root, node, class)
+                })
             })
             .collect()
     }
@@ -1519,11 +1608,9 @@ impl InstructionSelectPass {
             let raw: &[EMatch<u32>] = if let Some(cache) = base_matches {
                 &cache[pattern_index]
             } else {
-                fresh = compiled
-                    .pattern
-                    .search_with_legality(&fs.egraph, &|node, class| {
-                        value_match_allowed(fs, context, compiled, pattern_root, node, class)
-                    });
+                fresh = compiled.search_with_legality(&fs.egraph, context, &|node, class| {
+                    value_match_allowed(fs, context, compiled, pattern_root, node, class)
+                });
                 &fresh
             };
 

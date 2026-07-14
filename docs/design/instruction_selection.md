@@ -21,8 +21,9 @@ does the rest.
 | `isel/builder.rs` | `SemDagBuilder`: the function's IR ops → one shared semantic e-graph, including memory effects |
 | `isel/pattern.rs` | `compile_isel_pattern`: rule semantics → `tir_symbolic::egraph::Pattern`s + per-node metadata |
 | `isel/axioms.rs` | s-expression axioms and their compilation into proved rewrites |
-| `isel/synthesis.rs` | offline discovery of bridge axioms by enumeration (`discover_axioms`) |
-| `isel/rewrites.rs` | the built-in boolean bridges (`discover_rewrites`), saturation driver |
+| `defs/isel.sexp` | checked discovery search space, goals, samples, and built-in axiom families |
+| `isel/synthesis.rs` | generic offline enumeration engine (`discover_axioms`) |
+| `isel/rewrites.rs` | theory-family selection and saturation driver |
 | `isel/cover.rs` | PBQP construction, match dominance pruning, completeness check |
 | `isel/emit.rs` | `BlockPlan` and `EmissionBuilder`: cover → per-op decisions |
 
@@ -168,13 +169,108 @@ as s-expression axioms (`isel/axioms.rs`):
   (rhs (ashr (shl x (- w n)) (- w n))))
 ```
 
-Nobody writes these by hand either: the `tir axioms` developer utility
-*discovers* them (`isel/synthesis.rs`) whenever a backend's instruction set
-changes. Discovery enumerates candidate terms over the target's atomic
-instruction kinds, directly in the axiom language (constant leaves are width
-expressions, so candidates are width-parameterized by construction), prunes by
-behavioral fingerprint over sampled inputs at several `(n, w)` pairs, and
-accepts the smallest candidate the `SmtOracle` proves at every sampled pair.
+The checked `core/defs/isel.sexp` theory declares the candidate operators,
+search bounds, goals, leaves, width samples, and capability-gated built-in
+families. The generic `isel/synthesis.rs` engine interprets that data whenever
+the `tir axioms` developer utility runs after a backend instruction change. It
+enumerates terms over the target's atomic instruction kinds, prunes by
+behavioral fingerprint, and accepts the smallest candidate the `SmtOracle`
+proves at every declared sample.
+
+### `isel.sexp` syntax
+
+The file contains one `theory` form with one `search` section and any
+number of built-in axiom families:
+
+```scheme
+(theory
+  (search
+    (max-ops 3)
+    (candidates-per-class 4)
+    (operators add sub and shl lshr ashr)
+    (goal sext extension
+      (leaves zero one n w w-minus-n ones-n)
+      (widths (8 32) (16 32) (8 64) (16 64)))
+    (goal neg unary
+      (leaves zero one w ones-w)
+      (widths (8 8) (32 32) (64 64))))
+
+  (family sub-immediate
+    (requires add)
+    (axiom sub-via-add-neg
+      (vars (a w)) (consts (c w)) (root w)
+      (lhs (sub a c))
+      (rhs (add a (neg c))))))
+```
+
+Full-line comments begin with `;`. Unknown sections, operators, goal shapes,
+or leaf names reject the theory when it is loaded.
+
+The `search` fields are:
+
+- `max-ops`: maximum operator-node count in an enumerated candidate. Leaves do
+  not count.
+- `candidates-per-class`: representatives retained for one observational
+  fingerprint, providing fallbacks when an SMT proof rejects the first term.
+- `operators`: semantic operators the enumerator may use. A target contributes
+  an operator only when its rule set has an atomic materializer for it.
+- `goal`: a semantic operator to bridge, followed by `extension` or `unary`.
+  An extension goal treats each width sample as `(source-width result-width)`;
+  a unary goal uses equal widths.
+- `widths`: concrete `(n w)` pairs used for fingerprints and proof checks.
+  These samples filter candidates; every rewrite application is still proved
+  again at its actual widths.
+
+Candidate leaf names expand as follows:
+
+| leaf | value for sample `(n w)` |
+|------|--------------------------|
+| `zero` | `0` |
+| `one` | `1` |
+| `n` | source width |
+| `w` | result/register width |
+| `w-minus-n` | `w - n` |
+| `ones-n` | `2^n - 1` |
+| `ones-w` | `2^w - 1` |
+
+A `family` is installed only when every kind in `(requires ...)` is rooted by
+the target's instruction rules. Its remaining children are ordinary `axiom`
+forms:
+
+```scheme
+(axiom name
+  (vars (value width) ...)
+  (consts (value width) ...)
+  (root width-or-literal)
+  (where (< width-expr width-expr) (= width-expr width-expr) ...)
+  (lhs pattern)
+  (rhs template))
+```
+
+- `vars` is optional; it declares captured values and binds their e-class
+  widths. Reusing a width name requires equal widths.
+- `consts` is optional and works like `vars`, but the matched e-class must
+  contain a constant.
+- `root` binds or checks the matched root width.
+- `where` is optional and accepts `<` and `=` guards over width expressions.
+- `lhs` is the e-matched semantic pattern. Declared variables are captures;
+  undeclared atoms are anonymous wildcards. Integer and width-expression
+  operands match constants of that value.
+- `rhs` may reference declared variables, `root`, semantic operator forms,
+  bare width-expression constants, or `(const value-expr width)` for a
+  specifically sized constant.
+
+Width expressions are integer literals, bound width names, `(- a b)`, and
+`(ones e)`. Semantic operator names use the same fixed-arity vocabulary as the
+op semantic-expression DSL.
+
+After changing the theory or target instructions, regenerate and validate the
+committed artifacts with:
+
+```sh
+cargo run -p tir-tools --bin tir -- axioms --write
+```
+
 The result is committed as `backends/<t>/src/isel.axioms`, installed by the
 backend through `with_axioms`, and guarded by a per-backend freshness test
 that re-runs discovery and diffs the file. `with_axioms` drops any axiom whose
@@ -245,32 +341,26 @@ graph: its patterns are searched once for the whole function
 (`base_value_matches`) and each such block reuses that superset, narrowing it to
 its own op-roots. A **fact-bearing** block re-searches under its scope.
 
-### Width-sensitive operands
+### Semantic types and register storage
 
-A boundary may carry a **width requirement** (`Rule::with_operand_widths`,
-compiled to `Pattern::operand_width`): the bound class must hold a value of
-exactly that width, or one of *unknown* width (a rewrite-introduced
-intermediate, produced at register width by whatever materializes it). TMDL
-derives these for operands whose upper register bits reach the result —
-comparison operands always; right-shift values and division/remainder operands
-under an *untyped* node (a typed word form like `sraw` already pins its
-operands through width inference) — resolving the width from the operand's
-register class per enabled features (XLEN: 64 on rv64, 32 on rv32). So an i32
-compare fuses into `blt` on rv32 but is *refused* on rv64 (a 64-bit compare
-would read undefined upper bits) instead of miscompiling.
-Low-bits-preserving operators (add/and/shl/mul-low) stay width-agnostic.
+Every semantic pattern is assigned a type by unifying operator signatures.
+Integer operators are polymorphic over a bit width; floating operators preserve
+an exact exponent/mantissa format. Matching unifies those inferred types with
+the ground types carried by e-classes, so integer and floating expressions do
+not cross-match.
 
-### Float operands
+This value type is separate from a physical register operand's
+`RegisterCapability`. Integer-only and float-only banks admit their respective
+semantic domains; a TMDL `polymorphic` register class admits both, covering
+overlapping Arm SIMD/FP banks and RISC-V integer-register floating-point
+extensions. The register still has one storage width: narrower integer values
+fit in its low bits, while a floating format must occupy the bank exactly.
 
-A boundary may carry a **float requirement** (`Rule::with_operand_floats`,
-compiled to `Pattern::operand_floats`): the bound class must not hold a value
-whose IR type kind is the opposite — an integer operand refuses a float value
-and a float operand refuses an integer one, so a store never consumes a float
-and an `fadd` never consumes an integer. `class_is_float` reads the kind off
-whichever member carries a known integer or float type; a class of unknown type
-(a rewrite-introduced intermediate) matches either. Rewrite-introduced float
-nodes get their type from `type_for_kind_width`, which maps the arithmetic float
-kinds (`FAdd`/`FSub`/`FMul`/`FDiv`) at width 32/64 to `f32`/`f64`.
+A `RegisterRequirement` additionally records whether an instruction reads only
+those defined low bits or consumes the whole architectural register. TMDL marks
+comparison, untyped right-shift, division, and remainder operands as whole-width
+consumers. Thus an i32 compare is refused by a 64-bit compare instruction, while
+an i32 add may still use a 64-bit register bank.
 
 ### Immediate ranges
 

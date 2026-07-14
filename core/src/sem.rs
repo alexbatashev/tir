@@ -10,16 +10,18 @@ use crate::graph::{MutDag, NodeId, NodeMeta, PostOrderDag};
 use crate::{Operation, ValueId};
 
 pub use tir_symbolic::lang::{
-    AtomicRmwOp, BuildError, MemOrdering, Memory, SCALAR_OPS, ScalarOp, SemBuilderHooks, SemExpr,
-    SmtTemplate, SymKind, SymPayload, Value, WidthRule, build, canonicalize_for_selection, execute,
-    execute_with_memory, infer_widths, op_kind, op_name, parse, scalar_op, scalar_op_named,
+    AtomicRmwOp, BuildError, FloatFormat, MemOrdering, Memory, SCALAR_OPS, ScalarOp,
+    SemBuilderHooks, SemExpr, SemType, SmtTemplate, SymKind, SymPayload, TypeError, TypeUnifier,
+    TypeVar, Value, Width, WidthRule, WidthVar, build, canonicalize_for_selection, execute,
+    execute_with_memory, infer_types, infer_widths, op_kind, op_name, parse, scalar_op,
+    scalar_op_named,
 };
 
 mod discover;
-pub(crate) use discover::{EXT_WIDTH_SAMPLES, con, op, sample_values, sym};
 pub use discover::{
     EquivalenceOracle, FuzzOracle, SmtOracle, confirm_bool_via_if, confirm_extension_via_shifts,
 };
+pub(crate) use discover::{con, op, sample_values, sym};
 
 /// The post-order graph core builds semantic expressions into: [`SymKind`] nodes
 /// over `SymPayload<ValueId>` leaves, annotated with [`NodeMeta`] so a node can
