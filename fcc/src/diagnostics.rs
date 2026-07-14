@@ -186,6 +186,21 @@ Make sure every `{`, `(` and statement is closed before the end of the file.",
             .help("a brace, parenthesis or statement is left unclosed"),
     }
 
+    /// `E0003`: valid syntax requires a newer selected language standard.
+    LanguageFeatureUnavailable = "E0003" {
+        title: "language feature unavailable",
+        reference: None,
+        explain: "\
+The source uses syntax that is not part of the selected C language standard.
+Select a newer standard with -std, use a GNU dialect when the construct is a
+supported extension, or rewrite the construct for the selected standard.",
+        fields: { span: Span, feature: String, standard: String },
+        build: |d| Diagnostic::of(Code::LanguageFeatureUnavailable)
+            .message(format!("{} is unavailable in {}", d.feature, d.standard))
+            .label(d.span, format!("{} requires a newer language mode", d.feature))
+            .help("select a newer language standard with -std"),
+    }
+
     /// `E0200`: a name is used without any declaration in scope.
     UndeclaredIdentifier = "E0200" {
         title: "use of undeclared identifier",

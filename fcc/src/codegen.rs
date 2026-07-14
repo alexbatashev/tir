@@ -106,8 +106,14 @@ fn lower_ctype(context: &Context, ty: &CType) -> TypeId {
         CType::Int => IntegerType::new(context, 32),
         CType::Void => UnitType::new(context),
         CType::Char => IntegerType::new(context, 8),
+        CType::SignedChar | CType::UnsignedChar => IntegerType::new(context, 8),
+        CType::Short | CType::UnsignedShort => IntegerType::new(context, 16),
+        CType::UnsignedInt => IntegerType::new(context, 32),
+        CType::Long | CType::UnsignedLong | CType::LongLong | CType::UnsignedLongLong => {
+            IntegerType::new(context, 64)
+        }
         CType::Bool => IntegerType::new(context, 1),
-        CType::Float | CType::Double | CType::Builtin(_) | CType::Named(_) => {
+        CType::Float | CType::Double | CType::LongDouble | CType::Builtin(_) | CType::Named(_) => {
             IntegerType::new(context, 64)
         }
         CType::Record(_, _) | CType::Enum(_) => IntegerType::new(context, 64),
@@ -313,7 +319,7 @@ impl FnCodegen<'_> {
                         unreachable!("int node carries an int payload");
                     };
                     self.builder
-                        .insert(b::constant(self.context, *n, i32_ty).build())
+                        .insert(b::constant(self.context, n.value.to_i64(), i32_ty).build())
                         .result()
                 }
                 AstKind::String => {

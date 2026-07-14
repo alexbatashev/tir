@@ -386,7 +386,7 @@ impl<'a> IfExpr<'a> {
             Some(PreprocToken::Identifier(_)) => {
                 if let Some(PreprocToken::Identifier(name)) = self.bump() {
                     match self.defines.get(name.as_str()) {
-                        Some(Token::IntegerLiteral(n)) => n.to_i64(),
+                        Some(Token::IntegerLiteral(n)) => n.value.to_i64(),
                         _ => 0, // undefined or non-integer macro
                     }
                 } else {

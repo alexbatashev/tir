@@ -1,3 +1,4 @@
+mod fcc_torture;
 pub mod utils;
 mod verify_smt;
 
@@ -25,6 +26,10 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Some("isa-test-suite") => isa_test_suite(&sh)?,
+        Some("fcc-torture") => {
+            let bless = env::args().skip(2).any(|arg| arg == "--bless");
+            fcc_torture::run(&sh, &project_root(), bless)?;
+        }
         Some("capi-smoke") => capi_smoke(&sh)?,
         Some("python-smoke") => python_smoke(&sh)?,
         Some("haskell-smoke") => haskell_smoke(&sh)?,
@@ -174,6 +179,8 @@ axioms           checks generated instruction-selection axioms in release mode
 verify <isa> [--shard k/N]
                  run formal ISA verification. Available ISAs: riscv64, riscv32, armv8, x86_64
 isa-test-suite   run differential ISA tests against a golden oracle (riscv/Spike)
+fcc-torture [--bless]
+                 run the pinned GCC C torture corpus through the fcc parser
 capi-smoke       check the C ABI header is current and run the C smoke test
 python-smoke     build the C ABI and run the Python test suite
 haskell-smoke    build the C ABI and run the Haskell bindings smoke test (needs ghc)

@@ -19,7 +19,7 @@ mod tests {
             .spanned()
             .map(|(r, span)| (r.unwrap(), Span::new(file, span.start)))
             .collect();
-        let unit = parse(&tokens).expect("parse");
+        let unit = parse(&tokens, Default::default()).expect("parse");
         let context = fcc_context();
         let module = codegen(&context, &unit).expect("codegen");
         let mut out = String::new();

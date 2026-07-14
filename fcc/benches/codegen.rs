@@ -64,7 +64,7 @@ fn parse_src(src: &str) -> Ast {
         .spanned()
         .map(|(r, span)| (r.unwrap(), Span::new(file, span.start)))
         .collect();
-    parse(&tokens).expect("parse")
+    parse(&tokens, Default::default()).expect("parse")
 }
 
 fn bench_codegen(c: &mut Criterion) {
