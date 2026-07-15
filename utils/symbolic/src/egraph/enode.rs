@@ -11,17 +11,15 @@ pub trait ENode: Debug + Clone {
     fn children(&self) -> &[Id];
     fn children_mut(&mut self) -> &mut [Id];
 
-    /// Bucket hash for hash-consing. Not required collision-free.
+    /// Hash of the complete node, including its children. Congruent nodes must have
+    /// equal hashes; collisions are allowed.
     fn hash_cons(&self) -> u64;
 
     /// Operator-index bucket for pattern search ([`EGraph::classes_with_op`]).
     /// Contract: `a.matches(b)` implies `a.op_key() == b.op_key()`, even when `a` is a
     /// loosely-matching template — so the key must use only fields `matches` compares
-    /// strictly, never a wildcardable one. Default [`hash_cons`](ENode::hash_cons);
-    /// override when a template matches beyond its own bucket.
-    fn op_key(&self) -> u64 {
-        self.hash_cons()
-    }
+    /// strictly, never children or a wildcardable field.
+    fn op_key(&self) -> u64;
 
     /// Operator/label equality, ignoring children. Two nodes share a class iff this
     /// holds and their canonical children are equal.

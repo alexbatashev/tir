@@ -589,6 +589,16 @@ mod tests {
     }
 
     #[test]
+    fn hash_cons_includes_children() {
+        let a = Id::from_raw(1);
+        let b = Id::from_raw(2);
+        let c = Id::from_raw(3);
+
+        assert_eq!(Math::Add([a, b]).hash_cons(), Math::Add([a, b]).hash_cons());
+        assert_ne!(Math::Add([a, b]).hash_cons(), Math::Add([a, c]).hash_cons());
+    }
+
+    #[test]
     fn lookup_probes_without_inserting() {
         let mut g = EGraph::new();
         let a = sym(&mut g, 0);

@@ -334,15 +334,19 @@ mod tests {
             }
         }
         fn hash_cons(&self) -> u64 {
-            match self {
+            let mut hash = match self {
                 Wild::Leaf(s) => *s as u64,
                 Wild::Op(tag, _) => 1 << 32 | *tag as u64,
+            };
+            for child in self.children() {
+                hash = hash.rotate_left(5) ^ child.index() as u64;
             }
+            hash
         }
         fn op_key(&self) -> u64 {
             match self {
+                Wild::Leaf(s) => *s as u64,
                 Wild::Op(..) => 1 << 32,
-                Wild::Leaf(_) => self.hash_cons(),
             }
         }
         fn matches(&self, other: &Self) -> bool {

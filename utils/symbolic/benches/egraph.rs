@@ -3,13 +3,12 @@
 //! so the comparison measures e-matching, not string handling — matching egg's `Copy` names.
 
 use std::collections::HashMap;
-use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::hint::black_box;
 use std::sync::{Mutex, OnceLock};
 
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
-use tir_adt::APInt;
+use tir_adt::{APInt, FxHasher};
 use tir_symbolic::egraph::{EGraph, ENode, Id, Pattern, Rewrite, Rhs, Substitution, Var};
 
 #[path = "math_shared.rs"]
@@ -72,13 +71,15 @@ impl ENode for Math {
     }
 
     fn hash_cons(&self) -> u64 {
-        let mut h = DefaultHasher::new();
-        std::mem::discriminant(self).hash(&mut h);
-        match self {
-            Math::Constant(n) => n.hash(&mut h),
-            Math::Symbol(s) => s.hash(&mut h),
-            _ => {}
-        }
+        let mut h = FxHasher::default();
+        hash_label(self, &mut h);
+        self.children().hash(&mut h);
+        h.finish()
+    }
+
+    fn op_key(&self) -> u64 {
+        let mut h = FxHasher::default();
+        hash_label(self, &mut h);
         h.finish()
     }
 
@@ -92,6 +93,15 @@ impl ENode for Math {
 
     fn from_int(value: APInt) -> Option<Self> {
         Some(Math::Constant(value.to_i64()))
+    }
+}
+
+fn hash_label(node: &Math, h: &mut impl Hasher) {
+    std::mem::discriminant(node).hash(h);
+    match node {
+        Math::Constant(n) => n.hash(h),
+        Math::Symbol(s) => s.hash(h),
+        _ => {}
     }
 }
 
