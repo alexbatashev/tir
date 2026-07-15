@@ -4,6 +4,7 @@ mod error;
 mod expander;
 mod json;
 mod lexer;
+mod markdown;
 mod parser;
 mod rustgen;
 mod sem_expr_state;

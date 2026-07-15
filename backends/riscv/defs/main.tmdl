@@ -1,3 +1,5 @@
+//! RISC-V instruction sets, architectural registers, and calling conventions implemented by TIR.
+
 isa RV32I {
     param XLEN: Integer = 32;
 

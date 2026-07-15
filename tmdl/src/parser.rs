@@ -25,21 +25,52 @@ where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
     let fname = file_name.to_string();
-    choice((
-        isa_def().map(Item::Isa),
-        abi_def().map(Item::Abi),
-        register_class_def().map(Item::RegisterClass),
-        template_def().map(Item::Template),
-        instruction_def().map(Item::Instruction),
-        unit_def().map(Item::Unit),
-        machine_def().map(Item::Machine),
-    ))
+    documentation(true)
+        .then(
+            documentation(false)
+                .then(choice((
+                    isa_def().map(Item::Isa),
+                    abi_def().map(Item::Abi),
+                    register_class_def().map(Item::RegisterClass),
+                    template_def().map(Item::Template),
+                    instruction_def().map(Item::Instruction),
+                    unit_def().map(Item::Unit),
+                    machine_def().map(Item::Machine),
+                )))
+                .map(|(doc, mut item)| {
+                    item.set_doc(doc);
+                    item
+                })
+                .repeated()
+                .collect(),
+        )
+        .map(move |(doc, items)| File {
+            doc,
+            items,
+            file_name: fname.clone(),
+        })
+}
+
+fn documentation<'src, I>(
+    inner: bool,
+) -> impl Parser<'src, I, Option<String>, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    select! {
+        Token::InnerDocComment(text) if inner => text,
+        Token::OuterDocComment(text) if !inner => text,
+    }
     .repeated()
-    .at_least(0)
-    .collect()
-    .map(move |items| File {
-        items,
-        file_name: fname.clone(),
+    .collect::<Vec<_>>()
+    .map(|lines| {
+        (!lines.is_empty()).then(|| {
+            lines
+                .into_iter()
+                .map(str::trim)
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
     })
 }
 
@@ -106,6 +137,7 @@ where
                 }
             }
             Abi {
+                doc: None,
                 name,
                 alias,
                 for_isas,
@@ -370,6 +402,7 @@ where
                 }
             }
             Isa {
+                doc: None,
                 name,
                 requires,
                 parameters,
@@ -440,6 +473,7 @@ where
                 _ => None,
             });
             RegisterClass {
+                doc: None,
                 name,
                 for_isas,
                 base,
@@ -544,6 +578,7 @@ where
             });
 
             Template {
+                doc: None,
                 name,
                 for_isas: for_isas.unwrap_or_default(),
                 parent_template,
@@ -640,6 +675,7 @@ where
             });
 
             Instruction {
+                doc: None,
                 name,
                 for_isas: for_isas.unwrap_or_default(),
                 parent_template,
@@ -790,6 +826,7 @@ where
                 }
             }
             SchedClassDecl {
+                doc: None,
                 name,
                 default_latency,
                 default_throughput,
@@ -1104,6 +1141,7 @@ where
                 }
             }
             Machine {
+                doc: None,
                 name,
                 alias,
                 for_isas,

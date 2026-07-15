@@ -1,0 +1,29 @@
+// RUN: tmdlc --action=emit-markdown --dialect=test --output=- %s | filecheck %s
+
+isa TestIsa {}
+register_class GPR for [TestIsa] { registers { x0..x31 => {}, } }
+
+/// Test calling convention.
+abi LP64("lp64") for [TestIsa] {
+    stack { align = 16; grows = down; red_zone = 0; slot_size = 8; }
+    sp = GPR::x2;
+    args int -> [GPR::x10..GPR::x17], then stack;
+    rets int -> [GPR::x10, GPR::x11];
+    callee_saved = [GPR::x8..GPR::x9];
+    reserved = [GPR::x0];
+    classifier = riscv;
+}
+
+// CHECK: ## Calling conventions
+// CHECK: ### `LP64` (`lp64`)
+// CHECK: Test calling convention.
+// CHECK: **Available in:** `TestIsa`
+// CHECK: | Stack alignment | Growth | Red zone | Slot size |
+// CHECK: | `16` | down | `0` | `8` |
+// CHECK: | Role | Register |
+// CHECK: | Stack pointer | `GPR::x2` |
+// CHECK: | Values | Registers | Overflow |
+// CHECK: | Integer arguments | `GPR::x10`–`GPR::x17` | stack |
+// CHECK: | Integer results | `GPR::x10`, `GPR::x11` |  |
+// CHECK: **Callee-saved:** `GPR::x8`–`GPR::x9`
+// CHECK: **Reserved:** `GPR::x0`

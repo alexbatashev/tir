@@ -1,3 +1,5 @@
+//! x86-64 architectural registers and System V calling convention, using Intel syntax.
+
 // x86-64 prototype, Intel syntax. Scope: the sixteen 64-bit GPRs with a fixed
 // REX.W prefix. r8..r15 carry the 4th register-number bit in the REX prefix
 // (REX.R for the ModR/M reg field, REX.B for the rm field); the low three bits

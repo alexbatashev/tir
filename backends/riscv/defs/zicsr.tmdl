@@ -1,3 +1,5 @@
+//! Control and status register instructions from the Zicsr extension.
+
 // Zicsr extension: control and status register instructions, plus the
 // user-level counter CSRs backing basic performance monitoring.
 

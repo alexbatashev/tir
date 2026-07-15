@@ -1,6 +1,9 @@
 name: Deploy docs
 
 on:
+  merge_group:
+  pull_request:
+    branches: ["master"]
   push:
     branches: ["master"]
   workflow_dispatch:
@@ -23,9 +26,11 @@ jobs:
       - name: Build docs
         run: cargo xtask docs
       - uses: actions/upload-pages-artifact@v3.0.1
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         with:
           path: book
   deploy:
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     needs: build
     permissions:
       contents: read

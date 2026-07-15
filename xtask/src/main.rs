@@ -3,6 +3,7 @@ pub mod utils;
 mod verify_smt;
 
 use std::{env, path::PathBuf};
+use tmdl::{Action, Compiler, OutputKind};
 use xshell::{cmd, Shell};
 
 fn main() -> anyhow::Result<()> {
@@ -88,7 +89,108 @@ fn build_docs(sh: &Shell) -> anyhow::Result<()> {
     let api_src = root.join("target/doc");
     std::fs::rename(api_src, api_dest)?;
 
+    build_isa_reference(&root)?;
+
     cmd!(sh, "mdbook build").run()?;
+
+    Ok(())
+}
+
+fn build_isa_reference(root: &std::path::Path) -> anyhow::Result<()> {
+    let output = root.join("docs/generated/isa");
+    if output.exists() {
+        std::fs::remove_dir_all(&output)?;
+    }
+    std::fs::create_dir_all(&output)?;
+    std::fs::write(
+        output.join("index.md"),
+        "# ISA Programmer's Reference\n\n\
+         - [RISC-V](./riscv/index.md)\n\
+         - [AArch64](./aarch64/index.md)\n\
+         - [x86-64](./x86-64/index.md)\n\
+         - [PTX](./ptx/index.md)\n",
+    )?;
+
+    let targets: &[(&str, &str, bool, &[&str])] = &[
+        (
+            "riscv",
+            "riscv",
+            false,
+            &[
+                "backends/riscv/defs/main.tmdl",
+                "backends/riscv/defs/base.tmdl",
+                "backends/riscv/defs/multiplication.tmdl",
+                "backends/riscv/defs/float.tmdl",
+                "backends/riscv/defs/compressed.tmdl",
+                "backends/riscv/defs/atomics.tmdl",
+                "backends/riscv/defs/zifencei.tmdl",
+                "backends/riscv/defs/zicsr.tmdl",
+                "backends/riscv/defs/perf.tmdl",
+                "backends/riscv/defs/vector.tmdl",
+                "backends/riscv/defs/syntacore_scr1.tmdl",
+            ],
+        ),
+        (
+            "arm64",
+            "aarch64",
+            false,
+            &[
+                "backends/arm64/defs/main.tmdl",
+                "backends/arm64/defs/data_processing.tmdl",
+                "backends/arm64/defs/loads_stores.tmdl",
+                "backends/arm64/defs/branches.tmdl",
+                "backends/arm64/defs/perf.tmdl",
+            ],
+        ),
+        (
+            "x86_64",
+            "x86-64",
+            false,
+            &[
+                "backends/x86_64/defs/main.tmdl",
+                "backends/x86_64/defs/base.tmdl",
+                "backends/x86_64/defs/arith_ext.tmdl",
+                "backends/x86_64/defs/conditional.tmdl",
+                "backends/x86_64/defs/memory_ext.tmdl",
+                "backends/x86_64/defs/float.tmdl",
+            ],
+        ),
+        (
+            "ptx",
+            "ptx",
+            true,
+            &[
+                "gpu/defs/ptx/main.tmdl",
+                "gpu/defs/ptx/versions.tmdl",
+                "gpu/defs/ptx/integer.tmdl",
+                "gpu/defs/ptx/logic.tmdl",
+                "gpu/defs/ptx/float.tmdl",
+                "gpu/defs/ptx/compare.tmdl",
+                "gpu/defs/ptx/movement.tmdl",
+                "gpu/defs/ptx/memory.tmdl",
+                "gpu/defs/ptx/control.tmdl",
+                "gpu/defs/ptx/sync.tmdl",
+                "gpu/defs/ptx/video.tmdl",
+                "gpu/defs/ptx/async.tmdl",
+                "gpu/defs/ptx/tensor.tmdl",
+                "gpu/defs/ptx/texture.tmdl",
+            ],
+        ),
+    ];
+
+    for (dialect, directory, text_only, inputs) in targets {
+        let mut compiler = Compiler::builder()
+            .action(Action::EmitMarkdown)
+            .dialect(Some((*dialect).to_string()))
+            .text_only(*text_only)
+            .output(OutputKind::Batch(
+                output.join(directory).display().to_string(),
+            ));
+        for input in *inputs {
+            compiler = compiler.add_input(&root.join(input).display().to_string());
+        }
+        compiler.build().compile()?;
+    }
 
     Ok(())
 }

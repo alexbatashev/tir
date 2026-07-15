@@ -1,3 +1,5 @@
+//! Branch, call, return, and conditional control-flow instructions.
+
 // ARMv8-A A64 branch, call, and return instructions
 
 instruction BranchImmediate for [ARMv8A64] : BranchImm {

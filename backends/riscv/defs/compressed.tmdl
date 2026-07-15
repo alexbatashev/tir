@@ -1,3 +1,5 @@
+//! Sixteen-bit instructions from the compressed C extension.
+
 // RISC-V C standard extension: 16-bit compressed instructions.
 //
 // Every compressed instruction expands to a base-ISA instruction; behaviors

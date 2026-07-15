@@ -1,0 +1,33 @@
+// RUN: tmdlc --action=emit-markdown --dialect=test --output=- %s | filecheck %s
+
+isa TestIsa { param XLEN: Integer = 64; }
+
+register_class GPR for [TestIsa] {
+    param ENCODING_LEN: Integer = 5;
+    param WIDTH: Integer = self.XLEN;
+    registers { x0..x31 => {}, }
+}
+
+template RType for [TestIsa] {
+    param MNEMONIC: String;
+    operands { rd: GPR, rs1: GPR, rs2: GPR, }
+    encoding { 0..4 => rd, 5..9 => rs1, 10..14 => rs2, 15..31 => 0, }
+    asm { "{self.MNEMONIC} {rd}, {rs1}, {rs2}" }
+}
+
+/// Add register values.
+instruction Add for [TestIsa] : RType {
+    param MNEMONIC: String = "add";
+    behavior { rd = rs1 + rs2; }
+}
+
+// CHECK: ## Instructions
+// CHECK: ### `add`
+// CHECK: #### `Add`
+// CHECK: Add register values.
+// CHECK: **Available in:** `TestIsa`
+// CHECK: **Syntax:** `add rd, rs1, rs2`
+// CHECK: | Operand | Type |
+// CHECK: | `rd` | `GPR` |
+// CHECK: | `rs1` | `GPR` |
+// CHECK: | `rs2` | `GPR` |

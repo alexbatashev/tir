@@ -11,6 +11,7 @@ use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, ValueEnum};
 use crate::error::TMDLError;
 use crate::expander::{Diag, MacroTable, StringArena, collect_macros, expand};
 use crate::lexer::{Token, lex};
+use crate::markdown::{generate_markdown, generate_markdown_book};
 use crate::parser::parse;
 use crate::rustgen::{generate_operation_list, generate_rust, generate_rust_modules};
 use crate::sema_analyze;
@@ -56,6 +57,7 @@ pub enum Action {
     EmitRust,
     EmitOperationList,
     EmitSmtlib,
+    EmitMarkdown,
 }
 
 #[derive(Debug, Parser)]
@@ -125,9 +127,10 @@ impl Compiler {
             ));
         }
         match self.action {
-            Action::EmitRust | Action::EmitOperationList | Action::EmitSmtlib => {
-                self.compile_whole_program()
-            }
+            Action::EmitRust
+            | Action::EmitOperationList
+            | Action::EmitSmtlib
+            | Action::EmitMarkdown => self.compile_whole_program(),
             Action::EmitExpandedTokens => self.compile_expanded_tokens(),
             _ => self.compile_per_file(),
         }
@@ -292,6 +295,14 @@ impl Compiler {
             )
             .exit();
         }
+        if matches!(self.action, Action::EmitMarkdown) && self.dialect.is_none() {
+            let mut cmd = Cli::command();
+            cmd.error(
+                clap::error::ErrorKind::ArgumentConflict,
+                "--dialect must be specified with --action=emit-markdown",
+            )
+            .exit();
+        }
 
         let Some(parsed_files) = self.parse_and_check()? else {
             return Ok(());
@@ -368,6 +379,17 @@ impl Compiler {
                     fs::write(path, serde_json::to_vec_pretty(&metadata)?)?;
                 }
             }
+            Action::EmitMarkdown => match &self.output {
+                OutputKind::Batch(path) => generate_markdown_book(
+                    self.dialect.as_ref().unwrap(),
+                    &parsed_files,
+                    std::path::Path::new(path),
+                )?,
+                _ => {
+                    let output: Box<dyn Write> = self.create_output_writer()?;
+                    generate_markdown(self.dialect.as_ref().unwrap(), &parsed_files, output)?;
+                }
+            },
             _ => unreachable!("Only complex actions should use this path"),
         }
 

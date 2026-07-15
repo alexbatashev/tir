@@ -1,3 +1,5 @@
+//! Logic and shift instructions.
+
 // PTX Logic and shift (9.7.6) instructions.
 // Behaviors are `todo()`; ops exist to parse and print via asm_syntax().
 // Each instruction is scoped to the PTX ISA version that introduced it.

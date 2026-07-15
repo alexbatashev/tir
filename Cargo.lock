@@ -2606,6 +2606,7 @@ dependencies = [
  "serde_json",
  "tir-isa-test-suite",
  "tir-verify",
+ "tmdl",
  "xshell",
 ]
 

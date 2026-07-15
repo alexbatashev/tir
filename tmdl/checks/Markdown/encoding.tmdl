@@ -1,0 +1,14 @@
+// RUN: tmdlc --action=emit-markdown --dialect=test --output=- %s | filecheck %s
+
+isa TestIsa {}
+
+instruction Nop for [TestIsa] {
+    param MNEMONIC: String = "nop";
+    encoding { 0..31 => 0, }
+    asm { "{self.MNEMONIC}" }
+    behavior { todo(); }
+}
+
+// CHECK: **Encoding**
+// CHECK: | Bits | Value |
+// CHECK: | 31–0 | `0` |

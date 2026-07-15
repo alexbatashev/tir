@@ -1,0 +1,13 @@
+// RUN: tmdlc --action=emit-markdown --dialect=test --output=- %s | filecheck %s
+
+isa TestIsa {}
+sched_class ALU { latency = 1; }
+instruction Nop for [TestIsa] {
+    param MNEMONIC: String = "nop";
+    encoding { 0..31 => 0, }
+    asm { "{self.MNEMONIC}" }
+    schedule { units = [ALU]; }
+    behavior { todo(); }
+}
+
+// CHECK: **Scheduling class:** `ALU`
