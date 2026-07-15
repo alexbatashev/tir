@@ -367,6 +367,7 @@ mod tests {
 
     fn isa(name: &str, requires: Option<ast::IsaRequirement>) -> ast::Item {
         ast::Item::Isa(ast::Isa {
+            doc: None,
             name: name.to_string(),
             requires,
             parameters: Default::default(),

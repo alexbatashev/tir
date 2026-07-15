@@ -1,0 +1,16 @@
+// RUN: tmdlc --action=emit-markdown --dialect=test --output=- %s | filecheck %s
+
+//! Test ISA reference.
+
+/// Base test architecture.
+isa TestIsa {
+    param XLEN: Integer = 64;
+}
+
+// CHECK: # test ISA Reference
+// CHECK: Test ISA reference.
+// CHECK: ## Instruction sets
+// CHECK: ### `TestIsa`
+// CHECK: Base test architecture.
+// CHECK: | Parameter | Type | Default |
+// CHECK: | `XLEN` | `Integer` | `64` |

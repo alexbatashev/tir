@@ -1,3 +1,5 @@
+//! Atomic memory operations and load-reserved/store-conditional instructions from the A extension.
+
 // RISC-V A standard extension: LR/SC and atomic memory operations.
 //
 // Every mnemonic has four static ordering variants (plain/.aq/.rl/.aqrl) that

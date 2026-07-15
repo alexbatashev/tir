@@ -1,3 +1,5 @@
+//! Comparison and selection instructions.
+
 // PTX Comparison and selection (9.7.4) instructions.
 // Behaviors are `todo()`; ops exist to parse and print via asm_syntax().
 // Each instruction is scoped to the PTX ISA version that introduced it.

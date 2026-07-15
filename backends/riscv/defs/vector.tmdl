@@ -1,3 +1,5 @@
+//! Vector configuration and arithmetic instructions from the RISC-V Vector extension.
+
 // A slice of the RISC-V Vector extension (RVV). The vector unit's shape is
 // architectural state, not spec-time constants: `vtype` holds the selected
 // element width (SEW) and register-group multiplier (LMUL), `vl` holds the

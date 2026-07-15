@@ -1,3 +1,5 @@
+//! Base integer instructions shared by RV32I and RV64I.
+
 // RISC-V Base ISA instructions
 
 template ALUOp for [RV32I, RV64I] : RType {

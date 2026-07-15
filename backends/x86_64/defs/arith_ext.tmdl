@@ -1,3 +1,5 @@
+//! Extended scalar integer arithmetic, shifts, multiplication, and widening moves.
+
 // Scalar integer extensions beyond the base ALU set: immediate compare/test,
 // group-3 unary ops, CL-count and rotate shifts, widening multiply, and the
 // movzx/movsx register extensions. Division is not modeled: idiv's 128-bit

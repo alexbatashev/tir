@@ -1,0 +1,21 @@
+// RUN: tmdlc --action=emit-markdown --dialect=test --output=- %s | filecheck %s
+
+isa TestIsa {}
+
+/// General-purpose registers.
+register_class GPR for [TestIsa] {
+    param ENCODING_LEN: Integer = 5;
+    param WIDTH: Integer = 64;
+    registers {
+        x0("zero") => { traits = [hardwired_zero] },
+        x1..x31 => {},
+    }
+}
+
+// CHECK: ## Registers
+// CHECK: ### `GPR`
+// CHECK: General-purpose registers.
+// CHECK: **Available in:** `TestIsa`
+// CHECK: | Register | Encoding | Alias | Traits |
+// CHECK: | `x0` | 0 | `zero` | hardwired zero |
+// CHECK: | `x1`–`x31` | 1–31 |  |  |

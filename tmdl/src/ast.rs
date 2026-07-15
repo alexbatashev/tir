@@ -56,6 +56,7 @@ pub enum RegisterDef {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RegisterClass {
+    pub doc: Option<String>,
     pub name: String,
     pub for_isas: Vec<String>,
     /// Name of the register class this one inherits from, if any. A derived class
@@ -151,6 +152,7 @@ pub struct AbiStack {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Abi {
+    pub doc: Option<String>,
     pub name: String,
     pub alias: Option<String>,
     pub for_isas: Vec<String>,
@@ -186,6 +188,7 @@ pub struct TrapHandler {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Isa {
+    pub doc: Option<String>,
     pub name: String,
     pub requires: Option<IsaRequirement>,
     pub parameters: StableHashMap<String, (Type, Option<Expr>)>,
@@ -195,6 +198,7 @@ pub struct Isa {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Template {
+    pub doc: Option<String>,
     pub name: String,
     pub for_isas: Vec<String>,
     pub parent_template: Option<String>,
@@ -211,6 +215,7 @@ pub struct Template {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Instruction {
+    pub doc: Option<String>,
     pub name: String,
     pub for_isas: Vec<String>,
     pub parent_template: Option<String>,
@@ -241,6 +246,7 @@ pub struct Schedule {
 /// no specific machine is selected.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchedClassDecl {
+    pub doc: Option<String>,
     pub name: String,
     pub default_latency: Option<i64>,
     pub default_throughput: Option<i64>,
@@ -324,6 +330,7 @@ pub struct Forward {
 /// bindings for a set of ISAs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Machine {
+    pub doc: Option<String>,
     pub name: String,
     /// Optional friendly name used to select this machine (e.g. `in-order`),
     /// declared as `machine Name ("alias") for [...]`. Keeps tool-facing names
@@ -809,8 +816,35 @@ impl<'a, G: tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPay
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct File {
+    pub doc: Option<String>,
     pub items: Vec<Item>,
     pub file_name: String,
+}
+
+impl Item {
+    pub fn doc(&self) -> Option<&str> {
+        match self {
+            Item::Isa(item) => item.doc.as_deref(),
+            Item::Abi(item) => item.doc.as_deref(),
+            Item::RegisterClass(item) => item.doc.as_deref(),
+            Item::Template(item) => item.doc.as_deref(),
+            Item::Instruction(item) => item.doc.as_deref(),
+            Item::Unit(item) => item.doc.as_deref(),
+            Item::Machine(item) => item.doc.as_deref(),
+        }
+    }
+
+    pub fn set_doc(&mut self, doc: Option<String>) {
+        match self {
+            Item::Isa(item) => item.doc = doc,
+            Item::Abi(item) => item.doc = doc,
+            Item::RegisterClass(item) => item.doc = doc,
+            Item::Template(item) => item.doc = doc,
+            Item::Instruction(item) => item.doc = doc,
+            Item::Unit(item) => item.doc = doc,
+            Item::Machine(item) => item.doc = doc,
+        }
+    }
 }
 
 impl LitInt {

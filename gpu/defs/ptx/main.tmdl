@@ -1,3 +1,5 @@
+//! PTX virtual ISA versions, register banks, and common operand forms.
+
 // PTX (NVIDIA Parallel Thread Execution): a text virtual ISA with assembly
 // syntax and no binary object form. Modeled as a TMDL `--text-only` target; all
 // instruction semantics are `todo()` (unmodeled), so the ops exist purely to

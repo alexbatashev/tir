@@ -9,6 +9,8 @@ use crate::Spanned;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token<'a> {
     Comment(&'a str),
+    InnerDocComment(&'a str),
+    OuterDocComment(&'a str),
     Identifier(&'a str),
     Number(&'a str),
     StringLit(&'a str),
@@ -230,9 +232,23 @@ pub(crate) fn lexer<'src>()
         _ => Token::Identifier(ident),
     });
 
-    let token = str_.or(num).or(control).or(op).or(ident);
+    let inner_doc = just("//!")
+        .ignore_then(any().and_is(just('\n').not()).repeated().to_slice())
+        .map(Token::InnerDocComment);
+    let outer_doc = just("///")
+        .ignore_then(any().and_is(just('\n').not()).repeated().to_slice())
+        .map(Token::OuterDocComment);
+
+    let token = inner_doc
+        .or(outer_doc)
+        .or(str_)
+        .or(num)
+        .or(control)
+        .or(op)
+        .or(ident);
 
     let comment = just("//")
+        .then(one_of("/!").not())
         .then(any().and_is(just('\n').not()).repeated())
         .padded();
 
@@ -255,6 +271,8 @@ impl<'a> fmt::Display for Token<'a> {
             Token::RBrace => f.write_str("}"),
             Token::KwParameters => f.write_str("parameters"),
             Token::Comment(s) => write!(f, "#{}", s),
+            Token::InnerDocComment(s) => write!(f, "//!{}", s),
+            Token::OuterDocComment(s) => write!(f, "///{}", s),
             Token::Number(n) => write!(f, "{}", n),
             Token::StringLit(s) => write!(f, "\"{}\"", s),
             Token::FatArrow => f.write_str("=>"),

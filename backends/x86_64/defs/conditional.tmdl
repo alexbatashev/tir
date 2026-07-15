@@ -1,3 +1,5 @@
+//! Conditional branches, conditional moves, and condition-code materialization.
+
 // The rest of the EFLAGS consumers: the remaining jcc conditions, setcc
 // (cset/slt parity) and cmovcc (csel parity). Condition guards mirror the
 // jcc family in base.tmdl; only cf/zf/sf/of are modeled.

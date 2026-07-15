@@ -3,9 +3,11 @@
 // RUN: tmdlc --action=emit-ast --output=- %S/../Inputs/simple.tmdl | filecheck %s
 
 // CHECK: File {
+// CHECK-NEXT:     doc: None,
 // CHECK-NEXT:     items: [
 // CHECK-NEXT:         Isa(
 // CHECK-NEXT:             Isa {
+// CHECK-NEXT:                 doc: None,
 // CHECK-NEXT:                 name: "TestIsa32",
 // CHECK-NEXT:                 requires: None,
 // CHECK-NEXT:                 parameters: {
@@ -42,6 +44,7 @@
 // CHECK-NEXT:         ),
 // CHECK-NEXT:         Isa(
 // CHECK-NEXT:             Isa {
+// CHECK-NEXT:                 doc: None,
 // CHECK-NEXT:                 name: "TestIsa64",
 // CHECK-NEXT:                 requires: None,
 // CHECK-NEXT:                 parameters: {
@@ -78,6 +81,7 @@
 // CHECK-NEXT:         ),
 // CHECK-NEXT:         RegisterClass(
 // CHECK-NEXT:             RegisterClass {
+// CHECK-NEXT:                 doc: None,
 // CHECK-NEXT:                 name: "GPR",
 // CHECK-NEXT:                 for_isas: [
 // CHECK-NEXT:                     "TestIsa32",
@@ -161,6 +165,7 @@
 // CHECK-NEXT:         ),
 // CHECK-NEXT:         Template(
 // CHECK-NEXT:             Template {
+// CHECK-NEXT:                 doc: None,
 // CHECK-NEXT:                 name: "ParentInst",
 // CHECK-NEXT:                 for_isas: [
 // CHECK-NEXT:                     "TestIsa32",
@@ -292,6 +297,7 @@
 // CHECK-NEXT:         ),
 // CHECK-NEXT:         Instruction(
 // CHECK-NEXT:             Instruction {
+// CHECK-NEXT:                 doc: None,
 // CHECK-NEXT:                 name: "Add",
 // CHECK-NEXT:                 for_isas: [
 // CHECK-NEXT:                     "TestIsa32",

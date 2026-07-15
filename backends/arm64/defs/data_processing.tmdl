@@ -1,3 +1,5 @@
+//! Integer and floating-point data-processing instructions.
+
 // ARMv8-A A64 data processing instructions (RV base semantic parity set)
 
 instruction Add for [ARMv8A64] : AddSubReg {

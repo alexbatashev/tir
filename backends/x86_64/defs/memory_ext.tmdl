@@ -1,3 +1,5 @@
+//! Narrow and displacement-based memory operations plus stack push/pop instructions.
+
 // Memory-access extensions: sub-64-bit loads/stores (lb/lh/lw parity through
 // movzx/movsx and narrow mov), a disp32 addressing form for the 64-bit mov,
 // and the stack push/pop pair. Like the base mov load/store, addressing is

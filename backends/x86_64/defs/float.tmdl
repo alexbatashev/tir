@@ -1,3 +1,5 @@
+//! SSE2 scalar double-precision floating-point instructions.
+
 // SSE2 scalar double-precision floating point. The sixteen XMM registers are
 // modeled at their low 64 bits only (the scalar-double view); the semantic
 // engine reads a float-typed register's bits as a binary64 APFloat, so

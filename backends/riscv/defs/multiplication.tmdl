@@ -1,3 +1,5 @@
+//! Integer multiplication and division extensions.
+
 isa Zmmul requires [RV32I | RV64I] {}
 isa RVM requires [RV32I | RV64I] {}
 

@@ -1,3 +1,5 @@
+//! Integer, floating-point, and vector load/store instructions.
+
 // ARMv8-A A64 load/store integer instructions. The `imm` operand is the
 // architectural byte offset; the encoding templates store it scaled down by
 // the access size (the imm12 field of LDR Wt holds offset/4), so offsets

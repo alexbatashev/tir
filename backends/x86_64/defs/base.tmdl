@@ -1,3 +1,5 @@
+//! Base scalar integer arithmetic, movement, memory, and control-flow instructions.
+
 // Reg/reg and reg/imm forms share a mnemonic; the assembler tries forms in
 // declaration order, so register forms precede the matching immediate forms.
 

@@ -1,3 +1,5 @@
+//! AArch64 architectural registers and the AAPCS64 calling convention.
+
 isa ARMv8A64 {
     param XLEN: Integer = 64;
     param FLAG_WIDTH: Integer = 1;

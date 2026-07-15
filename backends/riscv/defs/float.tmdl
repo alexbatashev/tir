@@ -1,3 +1,5 @@
+//! Single- and double-precision floating-point instructions from the F and D extensions.
+
 // RISC-V F and D standard extensions: single/double-precision IEEE 754
 // binary floating point over the f0..f31 register file.
 

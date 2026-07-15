@@ -1,3 +1,5 @@
+//! Warp-level matrix and tensor-core instructions.
+
 // PTX Warp-level matrix: wmma / mma tensor-core (9.7.14) instructions.
 // Behaviors are `todo()`; ops exist to parse and print via asm_syntax().
 // Each instruction is scoped to the PTX ISA version that introduced it.
