@@ -1,17 +1,17 @@
 use std::{borrow::Borrow, collections::HashMap, hash::Hash, marker::PhantomData};
 
-use crate::AsIndex;
+use crate::{AsIndex, FxBuildHasher};
 
 #[derive(Clone, Debug, Default)]
 pub struct IndexMap<K: Eq + Hash, V: Clone, I: AsIndex = u32> {
-    indices: HashMap<K, I>,
+    indices: HashMap<K, I, FxBuildHasher>,
     data: Vec<Option<V>>,
 }
 
 impl<K: Eq + Hash, V: Clone, I: AsIndex> IndexMap<K, V, I> {
     pub fn new() -> Self {
         Self {
-            indices: HashMap::new(),
+            indices: HashMap::with_hasher(FxBuildHasher::default()),
             data: Vec::new(),
         }
     }
@@ -243,7 +243,7 @@ impl<'a, K: Eq + Hash, V: Clone, I: AsIndex> OccupiedEntry<'a, K, V, I> {
 
 pub struct VacantEntry<'a, K, V, I: AsIndex> {
     key: K,
-    indices: &'a mut HashMap<K, I>,
+    indices: &'a mut HashMap<K, I, FxBuildHasher>,
     data: &'a mut Vec<Option<V>>,
     _marker: PhantomData<I>,
 }
@@ -274,7 +274,14 @@ impl<'a, K: Eq + Hash, V: Clone, I: AsIndex> VacantEntry<'a, K, V, I> {
 
 #[cfg(test)]
 mod tests {
-    use super::IndexMap;
+    use super::{FxBuildHasher, IndexMap};
+
+    #[test]
+    fn uses_fx_hasher_by_default() {
+        let map: IndexMap<u8, u8> = IndexMap::new();
+
+        let _: &FxBuildHasher = map.indices.hasher();
+    }
 
     #[test]
     fn entry_or_default_inserts_if_missing() {
