@@ -106,6 +106,10 @@ pub(super) fn sizeof_reference(options: LangOptions) -> String {
     standard_reference(options, "6.5.3.4p1", "6.5.4.4p2", "sizeof operator")
 }
 
+pub(super) fn member_reference(options: LangOptions) -> String {
+    standard_reference(options, "6.5.2.3p2", "6.5.3.2p2", "structure members")
+}
+
 pub(super) fn object_type_reference(options: LangOptions) -> String {
     standard_reference(options, "6.2.5p19", "6.2.5p24", "void type")
 }

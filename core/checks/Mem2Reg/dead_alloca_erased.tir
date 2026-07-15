@@ -4,7 +4,7 @@
 
 module {
   func @dead() {
-    %0 = ptr.alloca : !ptr.p<!i32>
+    %0 = ptr.alloca {size = 4, align = 4} : !ptr.p<!i32>
     return
   }
   module_end

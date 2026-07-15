@@ -45,6 +45,115 @@ fn accepts(source: &str, options: LangOptions) -> bool {
 }
 
 #[test]
+fn computes_named_struct_layout() {
+    let typed = typed_for(
+        "struct Pair { char tag; int value; }; int main(void) { return 0; }",
+        "riscv64",
+    );
+    let pair = typed
+        .records()
+        .find(|record| record.name == "Pair")
+        .unwrap();
+
+    assert_eq!(pair.size, 8);
+    assert_eq!(pair.align, 4);
+    assert_eq!(pair.fields[0].offset, 0);
+    assert_eq!(pair.fields[1].offset, 4);
+}
+
+#[test]
+fn gives_anonymous_structs_distinct_compiler_names() {
+    let typed = typed_for(
+        "typedef struct { int value; } First; typedef struct { int value; } Second;",
+        "riscv64",
+    );
+    let names = typed
+        .records()
+        .map(|record| record.name.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(names.len(), 2);
+    assert_ne!(names[0], names[1]);
+    assert!(
+        names
+            .iter()
+            .all(|name| name.starts_with("__fcc_anon_struct."))
+    );
+}
+
+#[test]
+fn resolves_struct_member_type() {
+    let typed = typed_for(
+        "struct Pair { int value; }; int read(void) { struct Pair pair; return pair.value; }",
+        "riscv64",
+    );
+    let ast = typed.ast();
+    let member = ast
+        .postorder(ast.root().unwrap())
+        .find(|node| ast.get_node(*node).kind == fcc::ast::AstKind::Member)
+        .unwrap();
+    let semantics = ast.get_annotation(member).unwrap();
+
+    assert!(matches!(
+        typed.types().kind(semantics.ty.unwrap()),
+        fcc::sema::TypeKind::Integer(fcc::sema::IntegerKind::Int)
+    ));
+    assert_eq!(semantics.member_index, Some(0));
+}
+
+#[test]
+fn resolves_pointer_member_against_the_tag_identity() {
+    let typed = typed_for(
+        "struct Other { char byte; }; struct Pair { int value; }; int read(struct Pair *pair) { return pair->value; }",
+        "riscv64",
+    );
+    let ast = typed.ast();
+    let member = ast
+        .postorder(ast.root().unwrap())
+        .find(|node| ast.get_node(*node).kind == fcc::ast::AstKind::Member)
+        .unwrap();
+    let semantics = ast.get_annotation(member).unwrap();
+
+    assert!(matches!(
+        typed.types().kind(semantics.ty.unwrap()),
+        fcc::sema::TypeKind::Integer(fcc::sema::IntegerKind::Int)
+    ));
+}
+
+#[test]
+fn rejects_unknown_struct_member() {
+    let output = diagnostics(
+        "struct Pair { int value; }; int read(void) { struct Pair pair; return pair.missing; }",
+        "c23".parse().unwrap(),
+    );
+
+    assert!(output.contains("[E0402]"), "{output}");
+    assert!(output.contains("has no member named 'missing'"), "{output}");
+}
+
+#[test]
+fn rejects_duplicate_struct_member() {
+    let output = diagnostics(
+        "struct Pair { int value; char value; };",
+        "c23".parse().unwrap(),
+    );
+
+    assert!(output.contains("[E0201]"), "{output}");
+    assert!(output.contains("redefinition of 'value'"), "{output}");
+}
+
+#[test]
+fn rejects_object_with_incomplete_struct_type() {
+    let output = diagnostics(
+        "struct Pair; int read(void) { struct Pair pair; return 0; }",
+        "c23".parse().unwrap(),
+    );
+
+    assert!(output.contains("[E0409]"), "{output}");
+    assert!(output.contains("incomplete struct type"), "{output}");
+}
+
+#[test]
 fn rejects_redefinition_in_same_scope() {
     let output = diagnostics(
         "int main(void) { int value; int value; return 0; }",

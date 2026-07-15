@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::Region;
+use crate::attributes::AttributeValue;
 use crate::block::BlockId;
 use crate::parse::common::{Cursor, Span};
 use crate::value::ValueId;
@@ -92,6 +93,73 @@ impl<'src> Parser<'src> {
         self.position = (start + len + 1) as u32;
         self.skip_trivia();
         Some(&self.src[start..start + len])
+    }
+
+    pub fn parse_attribute_value(
+        &mut self,
+        context: &crate::Context,
+    ) -> Result<Option<AttributeValue>, (Span, crate::Error)> {
+        if let Some(value) = self.parse_string() {
+            return Ok(Some(AttributeValue::Str(value.to_string())));
+        }
+        if self.parse_token("[") {
+            let mut values = Vec::new();
+            if !self.parse_token("]") {
+                loop {
+                    let value = self
+                        .parse_attribute_value(context)?
+                        .ok_or_else(|| (self.span(), crate::Error::ExpectedToken("attribute")))?;
+                    values.push(value);
+                    if self.parse_token("]") {
+                        break;
+                    }
+                    if !self.parse_token(",") {
+                        return Err((self.span(), crate::Error::ExpectedToken(",")));
+                    }
+                }
+            }
+            return Ok(Some(AttributeValue::Array(values)));
+        }
+        if self.parse_token("{") {
+            let mut values = std::collections::BTreeMap::new();
+            if !self.parse_token("}") {
+                loop {
+                    let name = self
+                        .parse_ident()
+                        .ok_or_else(|| {
+                            (self.span(), crate::Error::ExpectedToken("attribute name"))
+                        })?
+                        .to_string();
+                    if !self.parse_token("=") {
+                        return Err((self.span(), crate::Error::ExpectedToken("=")));
+                    }
+                    let value = self
+                        .parse_attribute_value(context)?
+                        .ok_or_else(|| (self.span(), crate::Error::ExpectedToken("attribute")))?;
+                    values.insert(name, value);
+                    if self.parse_token("}") {
+                        break;
+                    }
+                    if !self.parse_token(",") {
+                        return Err((self.span(), crate::Error::ExpectedToken(",")));
+                    }
+                }
+            }
+            return Ok(Some(AttributeValue::Dict(values)));
+        }
+        if let Some(ty) = self.parse_type(context)? {
+            return Ok(Some(AttributeValue::Type(ty)));
+        }
+        if self.parse_token("true") {
+            return Ok(Some(AttributeValue::Bool(true)));
+        }
+        if self.parse_token("false") {
+            return Ok(Some(AttributeValue::Bool(false)));
+        }
+        if let Some(value) = self.parse_float() {
+            return Ok(Some(AttributeValue::F64(value)));
+        }
+        Ok(self.parse_number().map(AttributeValue::Int))
     }
 
     pub fn parse_number(&mut self) -> Option<i64> {
