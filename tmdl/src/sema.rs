@@ -11,6 +11,36 @@ use crate::{Span, Type, ast};
 
 type Diag = Rich<'static, String, Span>;
 
+fn isa_includes(
+    isa_name: &str,
+    required: &str,
+    item_cache: &HashMap<&str, &ast::Item>,
+    visiting: &mut HashSet<String>,
+) -> bool {
+    if isa_name == required {
+        return true;
+    }
+    if !visiting.insert(isa_name.to_string()) {
+        return false;
+    }
+    let includes = match item_cache.get(isa_name) {
+        Some(ast::Item::Isa(isa)) => match &isa.requires {
+            None => false,
+            Some(ast::IsaRequirement::Single(parent)) => {
+                isa_includes(parent, required, item_cache, visiting)
+            }
+            Some(ast::IsaRequirement::Any(parents)) | Some(ast::IsaRequirement::All(parents)) => {
+                parents
+                    .iter()
+                    .any(|parent| isa_includes(parent, required, item_cache, visiting))
+            }
+        },
+        _ => false,
+    };
+    visiting.remove(isa_name);
+    includes
+}
+
 // TODO path strings must be interned
 pub fn analyze(files: &[ast::File], text_only: bool) -> Vec<(String, Diag)> {
     let mut diags = vec![];
@@ -22,6 +52,7 @@ pub fn analyze(files: &[ast::File], text_only: bool) -> Vec<(String, Diag)> {
     diags.extend(check_templates(files, &cache));
     diags.extend(check_instructions(files, &cache, text_only));
     diags.extend(check_register_classes(files, &cache));
+    diags.extend(check_abis(files, &cache));
     diags.extend(check_performance_model(files, &cache));
     for file in files {
         for item in &file.items {
@@ -34,6 +65,355 @@ pub fn analyze(files: &[ast::File], text_only: bool) -> Vec<(String, Diag)> {
                     &cache,
                     &file.file_name,
                 ));
+            }
+        }
+    }
+
+    diags
+}
+
+fn check_abis(files: &[ast::File], item_cache: &HashMap<&str, &ast::Item>) -> Vec<(String, Diag)> {
+    let classes: HashMap<&str, &ast::RegisterClass> = files
+        .iter()
+        .flat_map(|file| file.register_classes())
+        .map(|class| (class.name.as_str(), class))
+        .collect();
+    let class_files: HashMap<String, &ast::RegisterClass> = classes
+        .values()
+        .map(|class| (class.name.clone(), *class))
+        .collect();
+    let mut diags = Vec::new();
+
+    for file in files {
+        for abi in file.abis() {
+            if let Some(classifier) = &abi.classifier
+                && !matches!(classifier.as_str(), "riscv" | "aapcs64" | "sysv")
+            {
+                diags.push((
+                    file.file_name.clone(),
+                    Rich::custom(
+                        abi.span,
+                        format!(
+                            "ABI '{}' has unknown classifier '{}'; expected riscv, aapcs64, or sysv",
+                            abi.name, classifier
+                        ),
+                    ),
+                ));
+            }
+            if !abi.roles.iter().any(|role| role.name == "sp") {
+                diags.push((
+                    file.file_name.clone(),
+                    Rich::custom(
+                        abi.span,
+                        format!("ABI '{}' does not declare the required 'sp' role", abi.name),
+                    ),
+                ));
+            }
+            let check_register = |register: &ast::AbiRegister, diags: &mut Vec<(String, Diag)>| {
+                let Some(class) = classes.get(register.class.as_str()) else {
+                    diags.push((
+                        file.file_name.clone(),
+                        Rich::custom(
+                            register.span,
+                            format!(
+                                "ABI '{}' references unknown register '{}::{}'",
+                                abi.name, register.class, register.name
+                            ),
+                        ),
+                    ));
+                    return;
+                };
+                let available = abi.for_isas.iter().any(|abi_isa| {
+                    class.for_isas.iter().any(|class_isa| {
+                        isa_includes(abi_isa, class_isa, item_cache, &mut HashSet::new())
+                    })
+                });
+                let exists = class
+                    .resolve_registers()
+                    .any(|candidate| candidate.name == register.name);
+                if !available || !exists {
+                    diags.push((
+                        file.file_name.clone(),
+                        Rich::custom(
+                            register.span,
+                            format!(
+                                "ABI '{}' references unknown register '{}::{}'",
+                                abi.name, register.class, register.name
+                            ),
+                        ),
+                    ));
+                }
+            };
+            let check_sequence =
+                |sequence: &ast::AbiRegisterSequence, diags: &mut Vec<(String, Diag)>| {
+                    check_register(&sequence.start, diags);
+                    if let Some(end) = &sequence.end {
+                        check_register(end, diags);
+                        if end.class != sequence.start.class {
+                            diags.push((
+                                file.file_name.clone(),
+                                Rich::custom(
+                                    sequence.span,
+                                    format!(
+                                        "ABI '{}' register range must stay within one class",
+                                        abi.name
+                                    ),
+                                ),
+                            ));
+                        }
+                    }
+                };
+            let expand_sequences = |sequences: &[ast::AbiRegisterSequence]| {
+                let mut registers = Vec::new();
+                for sequence in sequences {
+                    let Some(class) = classes.get(sequence.start.class.as_str()) else {
+                        continue;
+                    };
+                    let resolved: Vec<_> = class.resolve_registers().collect();
+                    let Some(start) = resolved
+                        .iter()
+                        .find(|candidate| candidate.name == sequence.start.name)
+                    else {
+                        continue;
+                    };
+                    let Some(start_index) = start.encoding_index() else {
+                        registers.push((
+                            format!("{}:{}", sequence.start.class, sequence.start.name),
+                            format!("{}::{}", sequence.start.class, sequence.start.name),
+                            sequence.span,
+                        ));
+                        continue;
+                    };
+                    let end_index = sequence
+                        .end
+                        .as_ref()
+                        .filter(|end| end.class == sequence.start.class)
+                        .and_then(|end| {
+                            resolved
+                                .iter()
+                                .find(|candidate| candidate.name == end.name)
+                                .and_then(|register| register.encoding_index())
+                        })
+                        .unwrap_or(start_index);
+                    let file_name = class.register_file(&class_files);
+                    for register in &resolved {
+                        let Some(index) = register.encoding_index() else {
+                            continue;
+                        };
+                        if (start_index..=end_index).contains(&index) {
+                            registers.push((
+                                format!("{file_name}:{index}"),
+                                format!("{}::{}", sequence.start.class, register.name),
+                                sequence.span,
+                            ));
+                        }
+                    }
+                }
+                registers
+            };
+            let kind_name = |kind| match kind {
+                ast::AbiValueKind::Int => "int",
+                ast::AbiValueKind::Float => "float",
+                ast::AbiValueKind::Vector => "vector",
+            };
+
+            for (passes, direction) in [(&abi.args, "argument"), (&abi.rets, "return")] {
+                let mut seen = HashSet::new();
+                for pass in passes {
+                    if !seen.insert(pass.kind) {
+                        diags.push((
+                            file.file_name.clone(),
+                            Rich::custom(
+                                pass.span,
+                                format!(
+                                    "ABI '{}' declares more than one {} {direction} sequence",
+                                    abi.name,
+                                    kind_name(pass.kind)
+                                ),
+                            ),
+                        ));
+                    }
+                }
+            }
+
+            for role in &abi.roles {
+                check_register(&role.register, &mut diags);
+            }
+            let mut role_registers: HashMap<String, &str> = HashMap::new();
+            for role in &abi.roles {
+                let Some(class) = classes.get(role.register.class.as_str()) else {
+                    continue;
+                };
+                let Some(register) = class
+                    .resolve_registers()
+                    .find(|candidate| candidate.name == role.register.name)
+                else {
+                    continue;
+                };
+                let identity = match register.encoding_index() {
+                    Some(index) => format!("{}:{index}", class.register_file(&class_files)),
+                    None => format!("{}:{}", role.register.class, role.register.name),
+                };
+                if let Some(previous) = role_registers.insert(identity, &role.name) {
+                    diags.push((
+                        file.file_name.clone(),
+                        Rich::custom(
+                            role.span,
+                            format!(
+                                "ABI '{}' assigns register '{}::{}' to both '{}' and '{}'",
+                                abi.name,
+                                role.register.class,
+                                role.register.name,
+                                previous,
+                                role.name
+                            ),
+                        ),
+                    ));
+                }
+            }
+            for (pass, direction) in abi
+                .args
+                .iter()
+                .map(|pass| (pass, "argument"))
+                .chain(abi.rets.iter().map(|pass| (pass, "return")))
+            {
+                for sequence in &pass.registers {
+                    check_sequence(sequence, &mut diags);
+                }
+                let mut seen = HashSet::new();
+                for (identity, display, span) in expand_sequences(&pass.registers) {
+                    if !seen.insert(identity) {
+                        diags.push((
+                            file.file_name.clone(),
+                            Rich::custom(
+                                span,
+                                format!(
+                                    "ABI '{}' {} {direction} sequence contains duplicate register '{}'",
+                                    abi.name,
+                                    kind_name(pass.kind),
+                                    display
+                                ),
+                            ),
+                        ));
+                    }
+                }
+            }
+            for sequence in abi
+                .callee_saved
+                .iter()
+                .flatten()
+                .chain(abi.reserved.iter().flatten())
+            {
+                check_sequence(sequence, &mut diags);
+            }
+
+            let reserved: HashMap<_, _> =
+                expand_sequences(abi.reserved.as_deref().unwrap_or_default())
+                    .into_iter()
+                    .map(|(identity, display, _)| (identity, display))
+                    .collect();
+            for pass in &abi.args {
+                for (identity, display, span) in expand_sequences(&pass.registers) {
+                    if reserved.contains_key(&identity) {
+                        diags.push((
+                            file.file_name.clone(),
+                            Rich::custom(
+                                span,
+                                format!(
+                                    "ABI '{}' uses reserved register '{}' for arguments",
+                                    abi.name, display
+                                ),
+                            ),
+                        ));
+                    }
+                }
+            }
+            for (identity, display, span) in
+                expand_sequences(abi.callee_saved.as_deref().unwrap_or_default())
+            {
+                if reserved.contains_key(&identity) {
+                    diags.push((
+                        file.file_name.clone(),
+                        Rich::custom(
+                            span,
+                            format!(
+                                "ABI '{}' lists register '{}' as both callee-saved and reserved",
+                                abi.name, display
+                            ),
+                        ),
+                    ));
+                }
+            }
+
+            let args_by_kind: HashMap<_, _> = abi
+                .args
+                .iter()
+                .map(|sequence| (sequence.kind, sequence))
+                .collect();
+            for sequence in &abi.args {
+                if let Some(ast::AbiOverflow::Kind(target)) = sequence.overflow
+                    && !args_by_kind.contains_key(&target)
+                {
+                    diags.push((
+                        file.file_name.clone(),
+                        Rich::custom(
+                            sequence.span,
+                            format!(
+                                "ABI '{}' {} argument overflow references undeclared {} sequence",
+                                abi.name,
+                                kind_name(sequence.kind),
+                                kind_name(target)
+                            ),
+                        ),
+                    ));
+                }
+            }
+            let mut reported_cycle_kinds = HashSet::new();
+            for sequence in &abi.args {
+                if reported_cycle_kinds.contains(&sequence.kind) {
+                    continue;
+                }
+                let mut path = Vec::new();
+                let mut positions = HashMap::new();
+                let mut kind = sequence.kind;
+                loop {
+                    if let Some(&position) = positions.get(&kind) {
+                        let mut cycle = path[position..].to_vec();
+                        cycle.push(kind);
+                        reported_cycle_kinds.extend(cycle.iter().copied());
+                        let display = cycle
+                            .iter()
+                            .map(|kind| kind_name(*kind))
+                            .collect::<Vec<_>>()
+                            .join(" -> ");
+                        diags.push((
+                            file.file_name.clone(),
+                            Rich::custom(
+                                sequence.span,
+                                format!(
+                                    "ABI '{}' argument overflow chain contains a cycle: {display}",
+                                    abi.name
+                                ),
+                            ),
+                        ));
+                        break;
+                    }
+                    positions.insert(kind, path.len());
+                    path.push(kind);
+                    let Some(next) = args_by_kind.get(&kind).and_then(|sequence| {
+                        if let Some(ast::AbiOverflow::Kind(next)) = sequence.overflow {
+                            Some(next)
+                        } else {
+                            None
+                        }
+                    }) else {
+                        break;
+                    };
+                    if !args_by_kind.contains_key(&next) {
+                        break;
+                    }
+                    kind = next;
+                }
             }
         }
     }

@@ -13,8 +13,8 @@ register_class GPR for [TestIsa32, TestIsa64] {
     param WIDTH: Integer = self.WIDTH;
     registers {
         x0("zero") => { traits = [hardwired_zero] },
-        x1("ra") => { traits = [return_address, caller_saved] },
-        x2..x31("r{}") => { traits = [callee_saved] },
+        x1("ra") => {                                         },
+        x2..x31("r{}") => {                         },
     }
 }
 

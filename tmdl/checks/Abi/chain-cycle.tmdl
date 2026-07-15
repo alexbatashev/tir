@@ -1,0 +1,22 @@
+// RUN: tmdlc --action=emit-ast-json --output=- %s | filecheck %s
+
+isa TestIsa {}
+
+register_class GPR for [TestIsa] {
+    registers {
+        x0..x2 => {  },
+    }
+}
+
+abi TestAbi("test") for [TestIsa] {
+    stack { align = 16; grows = down; red_zone = 0; slot_size = 8; }
+    sp = GPR::x2;
+    args int -> [GPR::x0], then float;
+    args float -> [GPR::x1], then int;
+    rets int -> [GPR::x0];
+     callee_saved = [];
+     reserved = [];
+    classifier = riscv;
+}
+
+// CHECK: ABI 'TestAbi' argument overflow chain contains a cycle: int -> float -> int

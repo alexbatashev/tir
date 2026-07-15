@@ -22,7 +22,7 @@ register_class GPR for [FlagIsa] {
     param WIDTH: Integer = self.XLEN;
 
     registers {
-        x0..x3 => { traits = [caller_saved] },
+        x0..x3 => {                         },
     }
 }
 

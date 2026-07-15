@@ -127,8 +127,6 @@ fn emit_register_parsers_and_printers(
 
 /// Emit a `register_info()` constructor returning the target-independent
 /// [`tir::backend::regalloc::RegisterInfo`] the allocator consumes: per class, the
-/// allocatable order plus the caller/callee-saved, argument, return-value, and
-/// reserved index sets, all derived from each register's TMDL traits.
 /// The `RegClassId` expression for a statically-known register class, referencing
 /// the generated per-dialect `RegClass` enum emitted alongside `register_info()`.
 fn reg_class_id(class_name: &str) -> proc_macro2::TokenStream {
@@ -137,32 +135,17 @@ fn reg_class_id(class_name: &str) -> proc_macro2::TokenStream {
 }
 
 fn emit_register_info(files: &[ast::File]) -> Result<proc_macro2::TokenStream, TMDLError> {
-    let slice = |indices: &[u16]| {
-        let lits = indices
-            .iter()
-            .map(|i| proc_macro2::Literal::u16_unsuffixed(*i));
-        quote! { &[#(#lits),*] }
-    };
-
     let classes: HashMap<String, &ast::RegisterClass> = files
         .iter()
         .flat_map(|f| f.register_classes())
         .map(|rc| (rc.name.clone(), rc))
         .collect();
-
     let mut class_entries = Vec::new();
     let mut class_variants = Vec::new();
     for rc in files.iter().flat_map(|f| f.register_classes()) {
         class_variants.push(format_ident!("{}", rc.name));
         let name_lit = proc_macro2::Literal::string(&rc.name);
         let file_lit = proc_macro2::Literal::string(rc.register_file(&classes));
-        let meta = rc.allocation_metadata();
-        let allocation_order = slice(&meta.allocation_order);
-        let caller_saved = slice(&meta.caller_saved);
-        let callee_saved = slice(&meta.callee_saved);
-        let arguments = slice(&meta.arguments);
-        let return_values = slice(&meta.return_values);
-        let reserved = slice(&meta.reserved);
         // A `GROUP_SIZE` class param declares how many consecutive file indices
         // one register covers (RVV LMUL>1 group classes); default 1.
         let group_width = match rc.parameters.get("GROUP_SIZE") {
@@ -175,12 +158,6 @@ fn emit_register_info(files: &[ast::File]) -> Result<proc_macro2::TokenStream, T
             tir::backend::regalloc::RegClassInfo {
                 name: #name_lit,
                 file: #file_lit,
-                allocation_order: #allocation_order,
-                caller_saved: #caller_saved,
-                callee_saved: #callee_saved,
-                arguments: #arguments,
-                return_values: #return_values,
-                reserved: #reserved,
                 group_width: #group_width,
             }
         });
@@ -267,7 +244,7 @@ fn emit_register_info(files: &[ast::File]) -> Result<proc_macro2::TokenStream, T
 
         impl RegClass {
             #[allow(dead_code)]
-            pub fn id(self) -> tir::backend::regalloc::RegClassId {
+            pub const fn id(self) -> tir::backend::regalloc::RegClassId {
                 tir::backend::regalloc::RegClassId::new(&REG_CLASSES[self as usize])
             }
         }

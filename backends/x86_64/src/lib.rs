@@ -282,126 +282,81 @@ mod isa {
         )
     }
 
-    /// The caller-saved registers a call clobbers, as a register-array attribute.
-    fn caller_saved_clobbers() -> AttributeValue {
-        let info = register_info();
-        let class = info.class("GPR").expect("x86-64 register info defines GPR");
-        AttributeValue::Array(
-            class
-                .caller_saved
-                .iter()
-                .map(|&index| phys(RegClass::GPR.id(), index))
-                .collect(),
-        )
-    }
+    struct X86CallEmitter;
 
-    /// Lower the builtin call ops to x86-64 virtual calls. Arguments are moved into
-    /// the System V argument registers and the result copied out of `rax`. The call
-    /// is bracketed with an 8-byte stack adjustment so `rsp` is 16-byte aligned at
-    /// the `call` (entry leaves `rsp` ≡ 8 mod 16, and the frame is 16-aligned), and
-    /// `eax` is zeroed to satisfy the variadic ABI's vector-count register.
-    fn lower_calls(
-        context: &tir::Context,
-        op: &tir::OperationRef,
-        rewriter: &mut tir::Rewriter,
-    ) -> Result<bool, tir::PassError> {
-        use tir::builtin::{CallOp, IndirectCallOp, UnitType};
-
-        let (callee_value, args, result) = if let Some(call) = op.as_op::<CallOp>() {
-            (None, call.args(), call.result())
-        } else if let Some(call) = op.as_op::<IndirectCallOp>() {
-            (Some(call.callee()), call.args(), call.result())
-        } else {
-            return Ok(false);
-        };
-
-        let info = register_info();
-        let class = info.class("GPR").expect("x86-64 register info defines GPR");
-        if args.len() > class.arguments.len() {
-            return Err(tir::PassError::InvalidRuleSet(
-                "stack-passed call arguments are not supported by codegen yet".to_string(),
-            ));
+    impl tir::backend::call_lowering::CallEmitter for X86CallEmitter {
+        fn copy(
+            &self,
+            context: &tir::Context,
+            dst: AttributeValue,
+            src: AttributeValue,
+        ) -> Box<dyn Operation> {
+            mv(context, dst, src)
         }
 
-        // Detach the callee and every argument into fresh virtual registers before
-        // any argument register is written: an operand may itself live in an
-        // argument register, so it must be read before the moves below clobber it.
-        let detach = |rewriter: &mut tir::Rewriter, value: tir::ValueId| {
-            let ty = context.get_value(value).ty();
-            let fresh = context.create_value(ty, None).id().number();
-            let copy = mv(
-                context,
-                virt(fresh, RegClass::GPR.id()),
-                virt(value.number(), RegClass::GPR.id()),
-            );
-            rewriter.insert_op_before(op, copy.as_ref()).map(|()| fresh)
-        };
-        let fresh_callee = callee_value
-            .map(|value| detach(rewriter, value))
-            .transpose()?;
-        let mut fresh_args = Vec::with_capacity(args.len());
-        for arg in &args {
-            fresh_args.push(detach(rewriter, *arg)?);
-        }
-
-        // Reserve 8 bytes to realign the stack for the call.
-        let realign = |rewriter: &mut tir::Rewriter, delta: i64| -> Result<(), tir::PassError> {
-            let adj = AddImmOpBuilder::new(context)
-                .attr("dst", phys(sp().0, sp().1))
-                .attr("imm", AttributeValue::Int(delta))
-                .build();
-            rewriter.insert_op_before(op, &adj)
-        };
-        realign(rewriter, -8)?;
-
-        for (&fresh, &reg) in fresh_args.iter().zip(class.arguments.iter()) {
-            let copy = mv(
-                context,
-                phys(RegClass::GPR.id(), reg),
-                virt(fresh, RegClass::GPR.id()),
-            );
-            rewriter.insert_op_before(op, copy.as_ref())?;
-        }
-
-        // Variadic ABI: `al` counts vector registers used; zero it (no float args).
-        let zero_eax = MovImm32OpBuilder::new(context)
-            .attr("dst", phys(RegClass::GPR32.id(), 0))
-            .attr("imm", AttributeValue::Int(0))
-            .build();
-        rewriter.insert_op_before(op, &zero_eax)?;
-
-        let virtual_call: Box<dyn Operation> = match fresh_callee {
-            None => {
-                let name = op.as_op::<CallOp>().expect("matched above").callee();
-                Box::new(
-                    VirtualCallOpBuilder::new(context)
-                        .attr("callee", AttributeValue::Str(name))
-                        .attr("clobbers", caller_saved_clobbers())
-                        .build(),
-                )
-            }
-            Some(fresh) => Box::new(
-                VirtualIndirectCallOpBuilder::new(context)
-                    .attr("callee_reg", virt(fresh, RegClass::GPR.id()))
-                    .attr("clobbers", caller_saved_clobbers())
+        fn vcall(
+            &self,
+            context: &tir::Context,
+            callee: String,
+            clobbers: AttributeValue,
+        ) -> Box<dyn Operation> {
+            Box::new(
+                VirtualCallOpBuilder::new(context)
+                    .attr("callee", AttributeValue::Str(callee))
+                    .attr("clobbers", clobbers)
                     .build(),
-            ),
-        };
-        rewriter.insert_op_before(op, virtual_call.as_ref())?;
-        realign(rewriter, 8)?;
-
-        let ret_reg = class.return_values[0];
-        if context.get_value(result).ty() == UnitType::new(context) {
-            rewriter.erase_op(op)?;
-        } else {
-            let copy = mv(
-                context,
-                virt(result.number(), RegClass::GPR.id()),
-                phys(RegClass::GPR.id(), ret_reg),
-            );
-            rewriter.replace_op(op, copy.as_ref())?;
+            )
         }
-        Ok(true)
+
+        fn vcall_indirect(
+            &self,
+            context: &tir::Context,
+            callee: AttributeValue,
+            clobbers: AttributeValue,
+        ) -> Box<dyn Operation> {
+            Box::new(
+                VirtualIndirectCallOpBuilder::new(context)
+                    .attr("callee_reg", callee)
+                    .attr("clobbers", clobbers)
+                    .build(),
+            )
+        }
+
+        fn call_prefix(
+            &self,
+            context: &tir::Context,
+            abi: &tir::backend::abi::AbiInfo,
+            _outgoing_size: u32,
+        ) -> Vec<Box<dyn Operation>> {
+            vec![
+                Box::new(
+                    AddImmOpBuilder::new(context)
+                        .attr("dst", phys(abi.sp.0, abi.sp.1))
+                        .attr("imm", AttributeValue::Int(-8))
+                        .build(),
+                ),
+                Box::new(
+                    MovImm32OpBuilder::new(context)
+                        .attr("dst", phys(RegClass::GPR32.id(), 0))
+                        .attr("imm", AttributeValue::Int(0))
+                        .build(),
+                ),
+            ]
+        }
+
+        fn call_suffix(
+            &self,
+            context: &tir::Context,
+            abi: &tir::backend::abi::AbiInfo,
+            _outgoing_size: u32,
+        ) -> Vec<Box<dyn Operation>> {
+            vec![Box::new(
+                AddImmOpBuilder::new(context)
+                    .attr("dst", phys(abi.sp.0, abi.sp.1))
+                    .attr("imm", AttributeValue::Int(8))
+                    .build(),
+            )]
+        }
     }
 
     /// Post-RA: a memory operand whose allocated base is rsp/r12 (ModR/M rm=100)
@@ -912,10 +867,6 @@ mod isa {
     }
 
     /// The x86-64 stack pointer (`rsp`, GPR index 4).
-    fn sp() -> tir::backend::liveness::PhysReg {
-        (RegClass::GPR.id(), 4)
-    }
-
     fn phys(class: tir::backend::regalloc::RegClassId, index: u16) -> AttributeValue {
         AttributeValue::Register(RegisterAttr::Physical { class, index })
     }
@@ -928,16 +879,6 @@ mod isa {
     impl tir::backend::regalloc::TargetRegAlloc for X86RegAlloc {
         fn register_info(&self) -> tir::backend::regalloc::RegisterInfo {
             register_info()
-        }
-
-        fn frame_register(&self) -> tir::backend::liveness::PhysReg {
-            sp()
-        }
-
-        // Keep the frame a multiple of 16 so `rsp` stays ≡ 8 mod 16 at call sites
-        // (entry value); `lower_calls` subtracts the final 8 to align each call.
-        fn frame_align(&self) -> u32 {
-            16
         }
 
         fn emit_spill_store(
@@ -1016,14 +957,10 @@ mod isa {
             }
         }
 
-        // Callee-saved registers are preserved with `push`/`pop`, not frame slots.
-        fn saves_on_frame(&self) -> bool {
-            false
-        }
-
         fn emit_prologue(
             &self,
             context: &tir::Context,
+            abi: &tir::backend::abi::AbiInfo,
             size: u32,
             saves: &[(tir::backend::liveness::PhysReg, i64)],
         ) -> Vec<Box<dyn Operation>> {
@@ -1041,7 +978,7 @@ mod isa {
             if total > 0 {
                 ops.push(Box::new(
                     AddImmOpBuilder::new(context)
-                        .attr("dst", phys(sp().0, sp().1))
+                        .attr("dst", phys(abi.sp.0, abi.sp.1))
                         .attr("imm", AttributeValue::Int(-total))
                         .build(),
                 ));
@@ -1052,6 +989,7 @@ mod isa {
         fn emit_epilogue(
             &self,
             context: &tir::Context,
+            abi: &tir::backend::abi::AbiInfo,
             size: u32,
             saves: &[(tir::backend::liveness::PhysReg, i64)],
         ) -> Vec<Box<dyn Operation>> {
@@ -1060,7 +998,7 @@ mod isa {
             if total > 0 {
                 ops.push(Box::new(
                     AddImmOpBuilder::new(context)
-                        .attr("dst", phys(sp().0, sp().1))
+                        .attr("dst", phys(abi.sp.0, abi.sp.1))
                         .attr("imm", AttributeValue::Int(total))
                         .build(),
                 ));
@@ -1077,6 +1015,7 @@ mod isa {
 
         fn incoming_stack_arg_offset(
             &self,
+            _abi: &tir::backend::abi::AbiInfo,
             frame_size: u32,
             saves: &[(tir::backend::liveness::PhysReg, i64)],
             stack_index: usize,
@@ -1207,7 +1146,9 @@ mod isa {
         }
     }
 
-    struct X86Target;
+    struct X86Target {
+        selected_abi: &'static tir::backend::abi::AbiInfo,
+    }
 
     impl tir::backend::TargetMachine for X86Target {
         fn name(&self) -> &'static str {
@@ -1228,11 +1169,14 @@ mod isa {
                     cond_nonzero: emit_branch_nonzero,
                 })
                 .with_op_lowering(lower_func_and_return_to_asm_symbol)
-                .with_op_lowering(lower_calls)
+                .with_call_lowering(self.abi(), Box::new(X86CallEmitter))
         }
 
         fn regalloc_pass(&self) -> tir::backend::regalloc::RegisterAllocationPass {
-            tir::backend::regalloc::RegisterAllocationPass::new(Box::new(X86RegAlloc))
+            tir::backend::regalloc::RegisterAllocationPass::with_abi(
+                Box::new(X86RegAlloc),
+                self.abi(),
+            )
         }
 
         fn pre_ra_lowerings(&self) -> Vec<tir::backend::isel::OpLowering> {
@@ -1245,6 +1189,14 @@ mod isa {
 
         fn register_info(&self) -> tir::backend::regalloc::RegisterInfo {
             register_info()
+        }
+
+        fn abis(&self) -> &'static [tir::backend::abi::AbiInfo] {
+            abis()
+        }
+
+        fn abi(&self) -> &'static tir::backend::abi::AbiInfo {
+            self.selected_abi
         }
 
         fn asm_parser(&self, _context: &tir::Context) -> tir::backend::AsmParser {
@@ -1302,9 +1254,25 @@ mod isa {
         march: &str,
         _mcpu: Option<&str>,
         _mattr: Option<&str>,
+        mabi: Option<&str>,
     ) -> Result<Option<Box<dyn tir::backend::TargetMachine>>, String> {
         match march.trim().to_ascii_lowercase().replace('-', "_").as_str() {
-            "x86_64" | "amd64" | "x64" => Ok(Some(Box::new(X86Target))),
+            "x86_64" | "amd64" | "x64" => {
+                let selected_abi = match mabi {
+                    Some(name) => abi_by_name(name).ok_or_else(|| {
+                        format!(
+                            "unknown ABI '{name}' for x86_64 (available: {})",
+                            abis()
+                                .iter()
+                                .map(|abi| abi.name)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    })?,
+                    None => default_abi(),
+                };
+                Ok(Some(Box::new(X86Target { selected_abi })))
+            }
             _ => Ok(None),
         }
     }
@@ -1476,6 +1444,78 @@ mod isa {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn generated_abi_matches_sysv_register_convention() {
+        let abi = crate::isa::default_abi();
+        let int_args = abi
+            .args
+            .iter()
+            .find(|sequence| sequence.kind == tir::backend::abi::ValueKind::Int)
+            .unwrap();
+        let int_rets = abi
+            .rets
+            .iter()
+            .find(|sequence| sequence.kind == tir::backend::abi::ValueKind::Int)
+            .unwrap();
+        let float_args = abi
+            .args
+            .iter()
+            .find(|sequence| sequence.kind == tir::backend::abi::ValueKind::Float)
+            .unwrap();
+        let float_rets = abi
+            .rets
+            .iter()
+            .find(|sequence| sequence.kind == tir::backend::abi::ValueKind::Float)
+            .unwrap();
+
+        assert_eq!(abi.name, "sysv");
+        assert_eq!(abi.sp, (int_args.regs[0].0, 4));
+        assert_eq!(abi.ra, None);
+        assert_eq!(abi.fp, Some((int_args.regs[0].0, 5)));
+        assert_eq!(abi.stack.align, 16);
+        assert_eq!(abi.stack.slot_size, 8);
+        assert_eq!(abi.stack.save_style, tir::backend::abi::SaveStyle::PushPop);
+        assert_eq!(
+            int_args
+                .regs
+                .iter()
+                .map(|register| register.1)
+                .collect::<Vec<_>>(),
+            vec![7, 6, 2, 1, 8, 9]
+        );
+        assert_eq!(
+            int_rets
+                .regs
+                .iter()
+                .map(|register| register.1)
+                .collect::<Vec<_>>(),
+            vec![0, 2]
+        );
+        assert_eq!(
+            float_args
+                .regs
+                .iter()
+                .map(|register| register.1)
+                .collect::<Vec<_>>(),
+            (0..=7).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            float_rets
+                .regs
+                .iter()
+                .map(|register| register.1)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert_eq!(
+            abi.callee_saved
+                .iter()
+                .map(|register| register.1)
+                .collect::<Vec<_>>(),
+            vec![3, 5, 12, 13, 14, 15]
+        );
+    }
+
     #[test]
     #[ignore = "run with `cargo xtask axioms`"]
     fn committed_isel_axioms_are_fresh() {

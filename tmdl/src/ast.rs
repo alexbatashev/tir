@@ -7,24 +7,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum RegisterTrait {
     HardwiredZero,
-    ReturnAddress,
-    CallerSaved,
-    CalleeSaved,
-    StackPointer,
     ProgramCounter,
-    GlobalPointer,
-    ThreadPointer,
-    /// Reserved by the platform ABI: never allocated (e.g. AArch64 x18, the
-    /// platform register). Like the pointer traits, it excludes the register from
-    /// the allocation order.
-    Reserved,
-    /// Carries an incoming argument under the calling convention. Argument order
-    /// follows the register index order within the class (a0 before a1, ...).
-    Argument,
-    /// Holds an outgoing return value under the calling convention.
-    ReturnValue,
-    Temporary,
-    Saved,
     /// A condition-code bit (x86 EFLAGS `zf`, AArch64 PSTATE `z`): written as a
     /// side effect by compare-style instructions and read by conditional-branch
     /// guards. Marks the class for flag-branch rule derivation.
@@ -45,11 +28,6 @@ pub struct Register {
     /// Explicit encoding index (`index = 0xC00`), for registers whose
     /// architectural number is not derivable from the name (e.g. CSRs).
     pub index: Option<u16>,
-    /// Explicit calling-convention argument position (`arg = 0`), for ABIs whose
-    /// argument order does not match register-index order (e.g. the x86-64 System V
-    /// order rdi, rsi, rdx, rcx, r8, r9). When any argument register in a class sets
-    /// this, the class's argument list is ordered by it instead of by index.
-    pub arg_order: Option<u16>,
     pub traits: Vec<RegisterTrait>,
     pub subregisters: Vec<Register>,
     #[serde(skip_serializing)]
@@ -113,17 +91,92 @@ pub struct RegisterNameTables {
     pub abi_names: Vec<(u16, String)>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct RegisterAllocationMetadata {
-    /// Allocatable register indices in preferred allocation order.
-    pub allocation_order: Vec<u16>,
-    pub caller_saved: Vec<u16>,
-    pub callee_saved: Vec<u16>,
-    /// Argument registers in calling-convention order.
-    pub arguments: Vec<u16>,
-    pub return_values: Vec<u16>,
-    /// Indices reserved by the ABI and never allocated.
-    pub reserved: Vec<u16>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+pub enum AbiValueKind {
+    Int,
+    Float,
+    Vector,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum AbiStackGrowth {
+    Down,
+    Up,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum AbiSaveStyle {
+    FrameSlots,
+    PushPop,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AbiRegister {
+    pub class: String,
+    pub name: String,
+    #[serde(skip_serializing)]
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AbiRegisterSequence {
+    pub start: AbiRegister,
+    pub end: Option<AbiRegister>,
+    #[serde(skip_serializing)]
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AbiRole {
+    pub name: String,
+    pub register: AbiRegister,
+    #[serde(skip_serializing)]
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum AbiOverflow {
+    Kind(AbiValueKind),
+    Stack,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AbiPassSequence {
+    pub kind: AbiValueKind,
+    pub registers: Vec<AbiRegisterSequence>,
+    pub overflow: Option<AbiOverflow>,
+    #[serde(skip_serializing)]
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AbiStack {
+    pub align: Option<Expr>,
+    pub grows: Option<AbiStackGrowth>,
+    pub red_zone: Option<Expr>,
+    pub slot_size: Option<Expr>,
+    pub save_style: Option<AbiSaveStyle>,
+    #[serde(skip_serializing)]
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Abi {
+    pub name: String,
+    pub alias: Option<String>,
+    pub for_isas: Vec<String>,
+    pub base: Option<String>,
+    #[serde(serialize_with = "serialize_params")]
+    pub parameters: StableHashMap<String, (Type, Option<Expr>)>,
+    pub stack: Option<AbiStack>,
+    pub roles: Vec<AbiRole>,
+    pub args: Vec<AbiPassSequence>,
+    pub rets: Vec<AbiPassSequence>,
+    pub callee_saved: Option<Vec<AbiRegisterSequence>>,
+    pub reserved: Option<Vec<AbiRegisterSequence>>,
+    pub classifier: Option<String>,
+    #[serde(skip_serializing)]
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -336,6 +389,7 @@ pub struct EncodingArm {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum Item {
     Isa(Isa),
+    Abi(Abi),
     RegisterClass(RegisterClass),
     Template(Template),
     Instruction(Instruction),
@@ -1618,6 +1672,7 @@ impl Item {
     pub fn name(&self) -> &str {
         match self {
             Item::Isa(isa) => &isa.name,
+            Item::Abi(abi) => &abi.name,
             Item::Instruction(inst) => &inst.name,
             Item::RegisterClass(rc) => &rc.name,
             Item::Template(tmpl) => &tmpl.name,
@@ -1797,85 +1852,6 @@ impl RegisterClass {
         regs
     }
 
-    /// Register allocation metadata derived from per-register traits: which
-    /// registers are allocatable (and in what preferred order), the caller/callee
-    /// saved partitions, the ordered argument registers, and the return-value
-    /// registers. Indices that are reserved by the ABI (zero, return address,
-    /// stack/global/thread pointer, program counter) never appear in the
-    /// allocation order.
-    pub fn allocation_metadata(&self) -> RegisterAllocationMetadata {
-        let regs = self.indexed_registers();
-        let is_reserved = |traits: &[RegisterTrait]| {
-            traits.iter().any(|t| {
-                matches!(
-                    t,
-                    RegisterTrait::HardwiredZero
-                        | RegisterTrait::ReturnAddress
-                        | RegisterTrait::StackPointer
-                        | RegisterTrait::ProgramCounter
-                        | RegisterTrait::GlobalPointer
-                        | RegisterTrait::ThreadPointer
-                        | RegisterTrait::Reserved
-                )
-            })
-        };
-        let has = |traits: &[RegisterTrait], want: &RegisterTrait| traits.contains(want);
-
-        let mut caller_saved = Vec::new();
-        let mut callee_saved = Vec::new();
-        let mut arguments = Vec::new();
-        let mut return_values = Vec::new();
-        let mut reserved = Vec::new();
-        for (idx, traits) in &regs {
-            if is_reserved(traits) {
-                reserved.push(*idx);
-            }
-            if has(traits, &RegisterTrait::CallerSaved) && !is_reserved(traits) {
-                caller_saved.push(*idx);
-            }
-            if has(traits, &RegisterTrait::CalleeSaved) && !is_reserved(traits) {
-                callee_saved.push(*idx);
-            }
-            if has(traits, &RegisterTrait::Argument) {
-                arguments.push(*idx);
-            }
-            if has(traits, &RegisterTrait::ReturnValue) {
-                return_values.push(*idx);
-            }
-        }
-
-        // Order argument registers by explicit `arg = N` positions when a class
-        // declares them (the x86-64 System V order differs from index order); fall
-        // back to index order otherwise.
-        let arg_orders: HashMap<u16, u16> = self
-            .resolve_registers()
-            .filter_map(|reg| match (reg.encoding_index(), reg.arg_order) {
-                (Some(idx), Some(order)) => Some((idx, order)),
-                _ => None,
-            })
-            .collect();
-        if !arg_orders.is_empty() {
-            arguments.sort_by_key(|idx| arg_orders.get(idx).copied().unwrap_or(u16::MAX));
-        }
-
-        // Allocate caller-saved (scratch) registers first so short-lived values
-        // avoid forcing a callee-saved register's save/restore.
-        let allocation_order = caller_saved
-            .iter()
-            .chain(callee_saved.iter())
-            .copied()
-            .collect();
-
-        RegisterAllocationMetadata {
-            allocation_order,
-            caller_saved,
-            callee_saved,
-            arguments,
-            return_values,
-            reserved,
-        }
-    }
-
     /// The name of the physical register file this class draws from: the root of
     /// its inheritance chain. Classes that share a file (e.g. AArch64 `GPR` and
     /// `GPRsp`) name the same physical register at a given encoding index, so the
@@ -1919,7 +1895,6 @@ impl RegisterClass {
                             name: format!("{prefix}{idx}"),
                             alias: range.alias_pattern.clone(),
                             index: None,
-                            arg_order: None,
                             traits: range.traits.clone(),
                             subregisters: Vec::new(),
                             span: range.span,
@@ -2010,6 +1985,98 @@ pub fn resolve_register_class_inheritance(files: &mut [File]) {
     }
 }
 
+/// Flatten ABI inheritance in place. Named role and pass-sequence entries are
+/// replaced by key; the stack and saved-register lists are replaced as whole
+/// declarations. Parameters are inherited and overridden by name.
+pub fn resolve_abi_inheritance(files: &mut [File]) {
+    let raw: HashMap<String, Abi> = files
+        .iter()
+        .flat_map(|file| file.abis())
+        .map(|abi| (abi.name.clone(), abi.clone()))
+        .collect();
+
+    fn replace_by_key<T, K: PartialEq>(base: &mut Vec<T>, own: Vec<T>, key: impl Fn(&T) -> K) {
+        base.retain(|existing| !own.iter().any(|value| key(existing) == key(value)));
+        base.extend(own);
+    }
+
+    fn merge(
+        name: &str,
+        raw: &HashMap<String, Abi>,
+        cache: &mut HashMap<String, Abi>,
+        visiting: &mut std::collections::HashSet<String>,
+    ) -> Abi {
+        if let Some(done) = cache.get(name) {
+            return done.clone();
+        }
+        let mut abi = raw
+            .get(name)
+            .cloned()
+            .expect("merge called with a known ABI name");
+        if !visiting.insert(name.to_string()) {
+            return abi;
+        }
+
+        if let Some(base_name) = abi.base.clone()
+            && raw.contains_key(&base_name)
+            && base_name != name
+        {
+            let base = merge(&base_name, raw, cache, visiting);
+
+            let mut parameters = base.parameters;
+            for (key, value) in abi.parameters.iter() {
+                parameters.insert(key.clone(), value.clone());
+            }
+            abi.parameters = parameters;
+            if abi.stack.is_none() {
+                abi.stack = base.stack;
+            }
+
+            let own_roles = std::mem::take(&mut abi.roles);
+            abi.roles = base.roles;
+            replace_by_key(&mut abi.roles, own_roles, |role| role.name.clone());
+
+            let own_args = std::mem::take(&mut abi.args);
+            abi.args = base.args;
+            replace_by_key(&mut abi.args, own_args, |sequence| sequence.kind);
+
+            let own_rets = std::mem::take(&mut abi.rets);
+            abi.rets = base.rets;
+            replace_by_key(&mut abi.rets, own_rets, |sequence| sequence.kind);
+
+            if abi.callee_saved.is_none() {
+                abi.callee_saved = base.callee_saved;
+            }
+            if abi.reserved.is_none() {
+                abi.reserved = base.reserved;
+            }
+            if abi.classifier.is_none() {
+                abi.classifier = base.classifier;
+            }
+        }
+
+        visiting.remove(name);
+        cache.insert(name.to_string(), abi.clone());
+        abi
+    }
+
+    let mut cache = HashMap::new();
+    let mut visiting = std::collections::HashSet::new();
+    for name in raw.keys() {
+        merge(name, &raw, &mut cache, &mut visiting);
+    }
+
+    for file in files {
+        for item in &mut file.items {
+            if let Item::Abi(abi) = item
+                && let Some(merged) = cache.get(&abi.name)
+            {
+                *abi = merged.clone();
+            }
+        }
+    }
+}
+
 fn parse_trailing_index(s: &str) -> Option<u16> {
     let mut i = s.len();
     while i > 0 && s.as_bytes()[i - 1].is_ascii_digit() {
@@ -2055,6 +2122,13 @@ impl File {
     pub fn register_classes(&self) -> impl Iterator<Item = &RegisterClass> {
         self.items.iter().filter_map(|f| match f {
             Item::RegisterClass(rc) => Some(rc),
+            _ => None,
+        })
+    }
+
+    pub fn abis(&self) -> impl Iterator<Item = &Abi> {
+        self.items.iter().filter_map(|f| match f {
+            Item::Abi(abi) => Some(abi),
             _ => None,
         })
     }

@@ -3,7 +3,6 @@ use std::error::Error;
 use tmdl::{Action, Compiler, OutputKind};
 
 fn main() -> Result<(), Box<dyn Error>> {
-    println!("cargo:rerun-if-changed=defs");
     let out_dir = std::env::var("OUT_DIR")?;
     let inputs = [
         "./defs/main.tmdl",
@@ -13,6 +12,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         "./defs/memory_ext.tmdl",
         "./defs/float.tmdl",
     ];
+    for input in &inputs {
+        println!("cargo:rerun-if-changed={input}");
+    }
     let compile = |action, output| {
         let mut builder = Compiler::builder()
             .output(OutputKind::File(format!("{out_dir}/{output}")))

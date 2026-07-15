@@ -57,10 +57,10 @@ register_class VR for [RVV] {
     // Vector arguments are passed in v8..v23 and results returned in v8..v9
     // (RISC-V psABI, vector register calling convention).
     registers {
-        v0..v7 => { traits = [caller_saved] },
-        v8..v9 => { traits = [argument, return_value, caller_saved] },
-        v10..v23 => { traits = [argument, caller_saved] },
-        v24..v31 => { traits = [caller_saved] },
+        v0..v7 => {},
+        v8..v9 => {},
+        v10..v23 => {},
+        v24..v31 => {},
     }
 }
 
@@ -83,22 +83,22 @@ register_class VRM2 for [RVV] {
     param WIDTH: Integer = VCSR::vlenb;
 
     registers {
-        v0m2 => { index = 0, traits = [caller_saved] },
-        v2m2 => { index = 2, traits = [caller_saved] },
-        v4m2 => { index = 4, traits = [caller_saved] },
-        v6m2 => { index = 6, traits = [caller_saved] },
-        v8m2 => { index = 8, traits = [argument, return_value, caller_saved] },
-        v10m2 => { index = 10, traits = [argument, caller_saved] },
-        v12m2 => { index = 12, traits = [argument, caller_saved] },
-        v14m2 => { index = 14, traits = [argument, caller_saved] },
-        v16m2 => { index = 16, traits = [argument, caller_saved] },
-        v18m2 => { index = 18, traits = [argument, caller_saved] },
-        v20m2 => { index = 20, traits = [argument, caller_saved] },
-        v22m2 => { index = 22, traits = [argument, caller_saved] },
-        v24m2 => { index = 24, traits = [caller_saved] },
-        v26m2 => { index = 26, traits = [caller_saved] },
-        v28m2 => { index = 28, traits = [caller_saved] },
-        v30m2 => { index = 30, traits = [caller_saved] },
+        v0m2 => { index = 0 },
+        v2m2 => { index = 2 },
+        v4m2 => { index = 4 },
+        v6m2 => { index = 6 },
+        v8m2 => { index = 8 },
+        v10m2 => { index = 10 },
+        v12m2 => { index = 12 },
+        v14m2 => { index = 14 },
+        v16m2 => { index = 16 },
+        v18m2 => { index = 18 },
+        v20m2 => { index = 20 },
+        v22m2 => { index = 22 },
+        v24m2 => { index = 24 },
+        v26m2 => { index = 26 },
+        v28m2 => { index = 28 },
+        v30m2 => { index = 30 },
     }
 }
 
@@ -109,14 +109,14 @@ register_class VRM4 for [RVV] {
     param WIDTH: Integer = VCSR::vlenb;
 
     registers {
-        v0m4 => { index = 0, traits = [caller_saved] },
-        v4m4 => { index = 4, traits = [caller_saved] },
-        v8m4 => { index = 8, traits = [argument, return_value, caller_saved] },
-        v12m4 => { index = 12, traits = [argument, caller_saved] },
-        v16m4 => { index = 16, traits = [argument, caller_saved] },
-        v20m4 => { index = 20, traits = [argument, caller_saved] },
-        v24m4 => { index = 24, traits = [caller_saved] },
-        v28m4 => { index = 28, traits = [caller_saved] },
+        v0m4 => { index = 0 },
+        v4m4 => { index = 4 },
+        v8m4 => { index = 8 },
+        v12m4 => { index = 12 },
+        v16m4 => { index = 16 },
+        v20m4 => { index = 20 },
+        v24m4 => { index = 24 },
+        v28m4 => { index = 28 },
     }
 }
 
@@ -127,10 +127,10 @@ register_class VRM8 for [RVV] {
     param WIDTH: Integer = VCSR::vlenb;
 
     registers {
-        v0m8 => { index = 0, traits = [caller_saved] },
-        v8m8 => { index = 8, traits = [argument, return_value, caller_saved] },
-        v16m8 => { index = 16, traits = [argument, caller_saved] },
-        v24m8 => { index = 24, traits = [caller_saved] },
+        v0m8 => { index = 0 },
+        v8m8 => { index = 8 },
+        v16m8 => { index = 16 },
+        v24m8 => { index = 24 },
     }
 }
 

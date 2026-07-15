@@ -22,35 +22,35 @@ isa PTX {
 register_class P for [PTX] {
     param ENCODING_LEN: Integer = 4;
     param WIDTH: Integer = 1;
-    registers { p0..p15 => { traits = [caller_saved] }, }
+    registers { p0..p15 => {}, }
 }
 register_class RS for [PTX] {
     param ENCODING_LEN: Integer = 4;
     param WIDTH: Integer = 16;
-    registers { rs0..rs15 => { traits = [caller_saved] }, }
+    registers { rs0..rs15 => {}, }
 }
 register_class R for [PTX] {
     param ENCODING_LEN: Integer = 4;
     param WIDTH: Integer = 32;
-    registers { r0..r15 => { traits = [caller_saved] }, }
+    registers { r0..r15 => {}, }
 }
 register_class RD for [PTX] {
     param ENCODING_LEN: Integer = 4;
     param WIDTH: Integer = 64;
     registers {
-        rd0..rd7 => { traits = [argument, return_value, caller_saved] },
-        rd8..rd15 => { traits = [caller_saved] },
+        rd0..rd7 => {},
+        rd8..rd15 => {},
     }
 }
 register_class F for [PTX] {
     param ENCODING_LEN: Integer = 4;
     param WIDTH: Integer = 32;
-    registers { f0..f15 => { traits = [float, caller_saved] }, }
+    registers { f0..f15 => { traits = [float] }, }
 }
 register_class FD for [PTX] {
     param ENCODING_LEN: Integer = 4;
     param WIDTH: Integer = 64;
-    registers { fd0..fd15 => { traits = [float, caller_saved] }, }
+    registers { fd0..fd15 => { traits = [float] }, }
 }
 
 // ---------------------------------------------------------------------------

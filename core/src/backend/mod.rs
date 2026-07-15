@@ -1,7 +1,9 @@
 use tir::helpers::dialect;
 
+pub mod abi;
 pub mod asm_syntax;
 pub mod binary;
+pub mod call_lowering;
 pub mod isel;
 mod lexer;
 pub mod liveness;
@@ -15,7 +17,9 @@ pub mod sched;
 pub mod target;
 
 pub use operations::*;
-pub use target::{TARGETS, TargetInfo, TargetMachine, select_target, supported_targets};
+pub use target::{
+    TARGETS, TargetInfo, TargetMachine, select_target, select_target_with_abi, supported_targets,
+};
 
 // Re-exported so the `register_target!` macro can reference linkme from the
 // backend crates without each of them depending on it directly.

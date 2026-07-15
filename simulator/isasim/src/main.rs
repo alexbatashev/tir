@@ -32,6 +32,9 @@ struct Cli {
     /// Target feature toggles (e.g. `+m,-zmmul`), applied on top of `--march`.
     #[arg(long)]
     mattr: Option<String>,
+    /// Target calling convention.
+    #[arg(long)]
+    mabi: Option<String>,
     #[arg(long, default_value_t = 65536)]
     mem_size: usize,
     #[arg(long, default_value_t = 0x80000000_u64)]
@@ -97,12 +100,16 @@ fn main() {
     let args = Cli::parse();
     let bytes = std::fs::read(&args.program).expect("failed to read program path");
 
-    let target =
-        tir::backend::select_target(&args.march, args.mcpu.as_deref(), args.mattr.as_deref())
-            .unwrap_or_else(|error| {
-                eprintln!("{error}");
-                std::process::exit(2);
-            });
+    let target = tir::backend::select_target_with_abi(
+        &args.march,
+        args.mcpu.as_deref(),
+        args.mattr.as_deref(),
+        args.mabi.as_deref(),
+    )
+    .unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(2);
+    });
 
     let context = tir::Context::with_default_dialects();
     target.register_dialects(&context);
@@ -254,7 +261,8 @@ fn report_timing(
             std::process::exit(2);
         });
     let config = TimingConfig::for_model(model);
-    let prf = Prf::for_target(register_info, model);
+    let abi = (!target.abis().is_empty()).then(|| target.abi());
+    let prf = Prf::for_target(register_info, model, abi);
     let printer = target.asm_printer(context);
     let disasm = |id: tir::OpId, pc: u64| {
         let op = context.get_op(id);
@@ -524,7 +532,14 @@ fn run_elf(
     executor.set_register_files(register_files);
     executor.set_hardwired_zero_registers(target.hardwired_zero_registers().iter().copied());
     executor.set_isa_params(target.isa_params());
-    executor.set_register_widths(target.register_widths());
+    let register_widths = target.register_widths();
+    let abi = target.abi();
+    let sp_width = register_widths
+        .iter()
+        .find(|(class, _)| *class == abi.sp.0.name())
+        .map(|(_, width)| *width)
+        .unwrap_or(64);
+    executor.set_register_widths(register_widths);
     executor.set_register_views(target.register_views());
     executor.set_counter_registers(target.counter_registers());
 
@@ -536,11 +551,14 @@ fn run_elf(
             .expect("ELF segment does not fit in guest memory");
     }
 
-    // Stack pointer at the top of the region, 16-byte aligned (AArch64 requires
-    // 16-byte SP alignment).
-    let sp = (base + mem_size as u64 - 16) & !0xF;
+    let align = u64::from(abi.stack.align);
+    let sp = (base + mem_size as u64 - align) & !(align - 1);
     executor
-        .write_register("GPRsp", 31, tir::utils::APInt::new(64, sp))
+        .write_register(
+            abi.sp.0.name(),
+            abi.sp.1,
+            tir::utils::APInt::new(sp_width, sp),
+        )
         .expect("failed to initialize stack pointer");
 
     executor.set_decoder(context.clone(), decoder);

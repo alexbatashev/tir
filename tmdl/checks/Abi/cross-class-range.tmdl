@@ -1,0 +1,23 @@
+// RUN: tmdlc --action=emit-ast-json --output=- %s | filecheck %s
+
+isa TestIsa {}
+
+register_class GPR for [TestIsa] {
+    registers { x0..x1 => {  }, }
+}
+
+register_class FPR for [TestIsa] {
+    registers { f0 => { traits = [float] }, }
+}
+
+abi TestAbi("test") for [TestIsa] {
+    stack { align = 16; grows = down; red_zone = 0; slot_size = 8; }
+    sp = GPR::x1;
+    args int -> [GPR::x0..FPR::f0], then stack;
+    rets int -> [GPR::x0];
+     callee_saved = [];
+     reserved = [];
+    classifier = riscv;
+}
+
+// CHECK: ABI 'TestAbi' register range must stay within one class

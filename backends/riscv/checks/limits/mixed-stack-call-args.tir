@@ -1,0 +1,16 @@
+// RUN: tir mc --march=rv64id --stage=isel %s | filecheck %s
+
+module {
+  declare @ext(!i64,!i64,!i64,!i64,!i64,!i64,!i64,!i64,!i64,!f64,!f64,!f64,!f64,!f64,!f64,!f64,!f64,!f64) -> !i64
+  func @caller(%i: !i64, %f: !f64) -> !i64 {
+    %r = call @ext(%i,%i,%i,%i,%i,%i,%i,%i,%i,%f,%f,%f,%f,%f,%f,%f,%f,%f : !i64,!i64,!i64,!i64,!i64,!i64,!i64,!i64,!i64,!f64,!f64,!f64,!f64,!f64,!f64,!f64,!f64,!f64) -> !i64
+    return %r
+  }
+  module_end
+}
+
+// CHECK: riscv.addi {rd = x2, rs1 = x2, imm = -16}
+// CHECK: riscv.sd {rs1 = x2, rs2 = {{.*}}, imm = 0}
+// CHECK: riscv.sd {rs1 = x2, rs2 = %virt{{[0-9]+}}:GPR, imm = 8}
+// CHECK: riscv.vcall {callee = "ext"
+// CHECK: riscv.addi {rd = x2, rs1 = x2, imm = 16}

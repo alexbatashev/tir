@@ -1,0 +1,42 @@
+// RUN: tmdlc --action=emit-ast-json --output=- %s | filecheck %s
+
+isa X86_64 {}
+
+register_class GPR for [X86_64] {
+    registers {
+        rax => { index = 0 },
+        rcx => { index = 1 },
+        rdx => { index = 2 },
+        rbx => { index = 3 },
+        rsp => { index = 4 },
+        rbp => { index = 5 },
+        rsi => { index = 6 },
+        rdi => { index = 7 },
+        r8..r15 => {  },
+    }
+}
+
+abi SysV("sysv") for [X86_64] {
+    stack {
+        align = 16;
+        grows = down;
+        red_zone = 128;
+        slot_size = 8;
+        save_style = push_pop;
+    }
+    sp = GPR::rsp;
+    fp = GPR::rbp;
+    args int -> [GPR::rdi, GPR::rsi, GPR::rdx, GPR::rcx, GPR::r8, GPR::r9],
+        then stack;
+    rets int -> [GPR::rax, GPR::rdx];
+     callee_saved = [GPR::rbx, GPR::rbp, GPR::r12..GPR::r15];
+     reserved = [];
+    classifier = sysv;
+}
+
+// CHECK: "Abi": {
+// CHECK: "name": "SysV",
+// CHECK: "alias": "sysv",
+// CHECK: "save_style": "PushPop"
+// CHECK: "overflow": "Stack"
+// CHECK: "classifier": "sysv"

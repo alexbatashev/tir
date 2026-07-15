@@ -1,9 +1,7 @@
-// RUN: not tir mc --march=rv64i --filetype=asm %s
+// RUN: tir mc --march=rv64i --stage=regalloc %s | filecheck %s
 
-// A call with more than eight integer arguments needs stack-passed arguments,
-// which codegen rejects cleanly ("stack-passed call arguments are not supported
-// by codegen yet"). Note the *function-definition* side of the same limit is
-// NOT rejected and instead miscompiles: see xfail-many-params-abi.tir.
+// Arguments nine and ten use the outgoing stack area while the first eight use
+// a0..a7. The area remains 16-byte aligned across the call.
 
 module {
   declare @ext(!i64,!i64,!i64,!i64,!i64,!i64,!i64,!i64,!i64,!i64) -> !i64
@@ -13,3 +11,9 @@ module {
   }
   module_end
 }
+
+// CHECK: riscv.addi {rd = x2, rs1 = x2, imm = -16}
+// CHECK: riscv.sd {rs1 = x2, rs2 = {{.*}}, imm = 0}
+// CHECK: riscv.sd {rs1 = x2, rs2 = {{.*}}, imm = 8}
+// CHECK: riscv.vcall {callee = "ext"
+// CHECK: riscv.addi {rd = x2, rs1 = x2, imm = 16}

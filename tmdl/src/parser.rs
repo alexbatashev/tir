@@ -27,6 +27,7 @@ where
     let fname = file_name.to_string();
     choice((
         isa_def().map(Item::Isa),
+        abi_def().map(Item::Abi),
         register_class_def().map(Item::RegisterClass),
         template_def().map(Item::Template),
         instruction_def().map(Item::Instruction),
@@ -40,6 +41,278 @@ where
         items,
         file_name: fname.clone(),
     })
+}
+
+enum AbiBody {
+    Param((String, (Type, Option<Expr>))),
+    Stack(AbiStack),
+    Role(AbiRole),
+    Args(AbiPassSequence),
+    Rets(AbiPassSequence),
+    CalleeSaved(Vec<AbiRegisterSequence>),
+    Reserved(Vec<AbiRegisterSequence>),
+    Classifier(String),
+}
+
+fn abi_def<'src, I>() -> impl Parser<'src, I, Abi, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    let ident = select! { Token::Identifier(ident) => ident.to_string() };
+    let alias = select! { Token::StringLit(alias) => alias.to_string() }
+        .delimited_by(just(Token::LParen), just(Token::RParen))
+        .or_not();
+    just(Token::KwAbi)
+        .ignore_then(ident)
+        .then(alias)
+        .then(for_isas())
+        .then(just(Token::Colon).ignore_then(ident).or_not())
+        .then(
+            choice((
+                parameter().map(AbiBody::Param),
+                abi_stack().map(AbiBody::Stack),
+                abi_role().map(AbiBody::Role),
+                abi_pass("args").map(AbiBody::Args),
+                abi_pass("rets").map(AbiBody::Rets),
+                abi_register_list("callee_saved").map(AbiBody::CalleeSaved),
+                abi_register_list("reserved").map(AbiBody::Reserved),
+                abi_classifier().map(AbiBody::Classifier),
+            ))
+            .repeated()
+            .collect::<Vec<_>>()
+            .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+        )
+        .map_with(|((((name, alias), for_isas), base), body), e| {
+            let mut parameters = crate::utils::StableHashMap::default();
+            let mut stack = None;
+            let mut roles = Vec::new();
+            let mut args = Vec::new();
+            let mut rets = Vec::new();
+            let mut callee_saved = None;
+            let mut reserved = None;
+            let mut classifier = None;
+            for item in body {
+                match item {
+                    AbiBody::Param((name, value)) => {
+                        parameters.insert(name, value);
+                    }
+                    AbiBody::Stack(value) => stack = Some(value),
+                    AbiBody::Role(value) => roles.push(value),
+                    AbiBody::Args(value) => args.push(value),
+                    AbiBody::Rets(value) => rets.push(value),
+                    AbiBody::CalleeSaved(value) => callee_saved = Some(value),
+                    AbiBody::Reserved(value) => reserved = Some(value),
+                    AbiBody::Classifier(value) => classifier = Some(value),
+                }
+            }
+            Abi {
+                name,
+                alias,
+                for_isas,
+                base,
+                parameters,
+                stack,
+                roles,
+                args,
+                rets,
+                callee_saved,
+                reserved,
+                classifier,
+                span: e.span(),
+            }
+        })
+        .labelled("ABI definition")
+}
+
+enum AbiStackField {
+    Align(Expr),
+    Grows(AbiStackGrowth),
+    RedZone(Expr),
+    SlotSize(Expr),
+    SaveStyle(AbiSaveStyle),
+}
+
+fn abi_stack<'src, I>() -> impl Parser<'src, I, AbiStack, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    let expr_field = |name| {
+        just(Token::Identifier(name))
+            .ignore_then(just(Token::Equals))
+            .ignore_then(inline_expr())
+            .then_ignore(just(Token::Semicolon))
+    };
+    let grows = just(Token::Identifier("grows"))
+        .ignore_then(just(Token::Equals))
+        .ignore_then(choice((
+            just(Token::Identifier("down")).to(AbiStackGrowth::Down),
+            just(Token::Identifier("up")).to(AbiStackGrowth::Up),
+        )))
+        .then_ignore(just(Token::Semicolon));
+    let save_style = just(Token::Identifier("save_style"))
+        .ignore_then(just(Token::Equals))
+        .ignore_then(choice((
+            just(Token::Identifier("frame_slots")).to(AbiSaveStyle::FrameSlots),
+            just(Token::Identifier("push_pop")).to(AbiSaveStyle::PushPop),
+        )))
+        .then_ignore(just(Token::Semicolon));
+    just(Token::Identifier("stack"))
+        .ignore_then(
+            choice((
+                expr_field("align").map(AbiStackField::Align),
+                grows.map(AbiStackField::Grows),
+                expr_field("red_zone").map(AbiStackField::RedZone),
+                expr_field("slot_size").map(AbiStackField::SlotSize),
+                save_style.map(AbiStackField::SaveStyle),
+            ))
+            .repeated()
+            .collect::<Vec<_>>()
+            .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+        )
+        .map_with(|fields, e| {
+            let mut stack = AbiStack {
+                align: None,
+                grows: None,
+                red_zone: None,
+                slot_size: None,
+                save_style: None,
+                span: e.span(),
+            };
+            for field in fields {
+                match field {
+                    AbiStackField::Align(value) => stack.align = Some(value),
+                    AbiStackField::Grows(value) => stack.grows = Some(value),
+                    AbiStackField::RedZone(value) => stack.red_zone = Some(value),
+                    AbiStackField::SlotSize(value) => stack.slot_size = Some(value),
+                    AbiStackField::SaveStyle(value) => stack.save_style = Some(value),
+                }
+            }
+            stack
+        })
+}
+
+fn abi_register<'src, I>()
+-> impl Parser<'src, I, AbiRegister, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    let ident = select! { Token::Identifier(ident) => ident.to_string() };
+    ident
+        .then_ignore(just(Token::Colon).then(just(Token::Colon)))
+        .then(ident)
+        .map_with(|(class, name), e| AbiRegister {
+            class,
+            name,
+            span: e.span(),
+        })
+}
+
+fn abi_register_sequence<'src, I>()
+-> impl Parser<'src, I, AbiRegisterSequence, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    abi_register()
+        .then(just(Token::Range).ignore_then(abi_register()).or_not())
+        .map_with(|(start, end), e| AbiRegisterSequence {
+            start,
+            end,
+            span: e.span(),
+        })
+}
+
+fn abi_register_sequence_list<'src, I>()
+-> impl Parser<'src, I, Vec<AbiRegisterSequence>, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    abi_register_sequence()
+        .separated_by(just(Token::Comma))
+        .allow_trailing()
+        .collect::<Vec<_>>()
+        .delimited_by(just(Token::LBracket), just(Token::RBracket))
+}
+
+fn abi_role<'src, I>() -> impl Parser<'src, I, AbiRole, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    choice((
+        just(Token::Identifier("sp")),
+        just(Token::Identifier("ra")),
+        just(Token::Identifier("fp")),
+    ))
+    .map(|token| token.as_ident().to_string())
+    .then_ignore(just(Token::Equals))
+    .then(abi_register())
+    .then_ignore(just(Token::Semicolon))
+    .map_with(|(name, register), e| AbiRole {
+        name,
+        register,
+        span: e.span(),
+    })
+}
+
+fn abi_value_kind<'src, I>()
+-> impl Parser<'src, I, AbiValueKind, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    choice((
+        just(Token::Identifier("int")).to(AbiValueKind::Int),
+        just(Token::Identifier("float")).to(AbiValueKind::Float),
+        just(Token::Identifier("vector")).to(AbiValueKind::Vector),
+    ))
+}
+
+fn abi_pass<'src, I>(
+    name: &'static str,
+) -> impl Parser<'src, I, AbiPassSequence, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    let overflow = just(Token::Comma)
+        .ignore_then(just(Token::Identifier("then")))
+        .ignore_then(choice((
+            just(Token::Identifier("stack")).to(AbiOverflow::Stack),
+            abi_value_kind().map(AbiOverflow::Kind),
+        )))
+        .or_not();
+    just(Token::Identifier(name))
+        .ignore_then(abi_value_kind())
+        .then_ignore(just(Token::Dash).then(just(Token::RAngle)))
+        .then(abi_register_sequence_list())
+        .then(overflow)
+        .then_ignore(just(Token::Semicolon))
+        .map_with(|((kind, registers), overflow), e| AbiPassSequence {
+            kind,
+            registers,
+            overflow,
+            span: e.span(),
+        })
+}
+
+fn abi_register_list<'src, I>(
+    name: &'static str,
+) -> impl Parser<'src, I, Vec<AbiRegisterSequence>, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    just(Token::Identifier(name))
+        .ignore_then(just(Token::Equals))
+        .ignore_then(abi_register_sequence_list())
+        .then_ignore(just(Token::Semicolon))
+}
+
+fn abi_classifier<'src, I>()
+-> impl Parser<'src, I, String, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    just(Token::Identifier("classifier"))
+        .ignore_then(just(Token::Equals))
+        .ignore_then(select! { Token::Identifier(ident) => ident.to_string() })
+        .then_ignore(just(Token::Semicolon))
 }
 
 /// Parse isa definition.
@@ -118,8 +391,8 @@ where
 ///   }
 ///   registers {
 ///     x0("zero") => { traits = [hardwired_zero] },
-///     x1("ra") => { traits = [return_address, caller_saved] },
-///     x2..x31("r{}") => { traits = [ callee_saved ] },
+///     x1("ra") => {},
+///     x2..x31("r{}") => {},
 ///   }
 /// }
 /// ```
@@ -1010,32 +1283,20 @@ where
         .then_ignore(just(Token::Comma).or_not())
         .or_not();
 
-    // Optional explicit calling-convention argument position: `arg = 0`, for ABIs
-    // whose argument order does not follow register-index order (x86-64 System V).
-    let reg_arg = just(Token::Identifier("arg"))
-        .then_ignore(just(Token::Equals))
-        .ignore_then(select! { Token::Number(n) => n.to_string() })
-        .then_ignore(just(Token::Comma).or_not())
-        .or_not();
-
     let single = ident
         .then(alias)
         .then_ignore(just(Token::FatArrow))
         .then_ignore(just(Token::LBrace))
         .then(reg_index)
-        .then(reg_arg)
         .then(reg_traits.or_not())
         .then_ignore(just(Token::RBrace))
-        .map_with(|((((name, alias), index), arg_order), traits), e| {
+        .map_with(|(((name, alias), index), traits), e| {
             let index = index
-                .map(|n| crate::utils::parse_literal_value(&ast::LitInt::new(n, e.span())) as u16);
-            let arg_order = arg_order
                 .map(|n| crate::utils::parse_literal_value(&ast::LitInt::new(n, e.span())) as u16);
             RegisterDef::Single(Register {
                 name,
                 alias,
                 index,
-                arg_order,
                 traits: traits.unwrap_or_default(),
                 subregisters: Vec::new(),
                 span: e.span(),
@@ -1073,18 +1334,16 @@ where
                 .into_iter()
                 .filter_map(|t| match t.as_str() {
                     "hardwired_zero" => Some(RegisterTrait::HardwiredZero),
-                    "return_address" => Some(RegisterTrait::ReturnAddress),
-                    "caller_saved" => Some(RegisterTrait::CallerSaved),
-                    "callee_saved" => Some(RegisterTrait::CalleeSaved),
-                    "stack_pointer" => Some(RegisterTrait::StackPointer),
+                    "return_address" | "caller_saved" | "callee_saved" | "stack_pointer"
+                    | "global_pointer" | "thread_pointer" | "reserved" | "argument"
+                    | "return_value" | "temporary" | "saved" => {
+                        emitter.emit(Rich::custom(
+                            e.span(),
+                            format!("register trait '{t}' moved to abi"),
+                        ));
+                        None
+                    }
                     "program_counter" => Some(RegisterTrait::ProgramCounter),
-                    "global_pointer" => Some(RegisterTrait::GlobalPointer),
-                    "thread_pointer" => Some(RegisterTrait::ThreadPointer),
-                    "reserved" => Some(RegisterTrait::Reserved),
-                    "argument" => Some(RegisterTrait::Argument),
-                    "return_value" => Some(RegisterTrait::ReturnValue),
-                    "temporary" => Some(RegisterTrait::Temporary),
-                    "saved" => Some(RegisterTrait::Saved),
                     "status_flag" => Some(RegisterTrait::StatusFlag),
                     "float" => Some(RegisterTrait::Float),
                     "polymorphic" => Some(RegisterTrait::Polymorphic),
@@ -1122,14 +1381,14 @@ where
         .then(alias_pattern)
         .then_ignore(just(Token::FatArrow))
         .then_ignore(just(Token::LBrace))
-        .then(reg_traits)
+        .then(reg_traits.or_not())
         .then_ignore(just(Token::RBrace))
         .map_with(|(((start, end), alias_pattern), traits), e| {
             RegisterDef::Range(RegisterRange {
                 start,
                 end,
                 alias_pattern,
-                traits,
+                traits: traits.unwrap_or_default(),
                 span: e.span(),
             })
         })
@@ -1586,7 +1845,7 @@ mod tests {
 
     #[test]
     fn register_class_parses_inheritance() {
-        let with_base = "register_class GPRsp for [Isa] : GPR { registers { x31(\"sp\") => { traits = [stack_pointer] }, } }";
+        let with_base = "register_class GPRsp for [Isa] : GPR { registers { x31(\"sp\") => {}, } }";
         let (tokens, _e) = lexer().parse(with_base).into_output_errors();
         let tokens = tokens.unwrap();
         let rc = register_class_def()
@@ -1621,7 +1880,7 @@ mod tests {
 
     #[test]
     fn register_class_parses_file_override() {
-        let src = "register_class GPR8H for [Isa] { file = GPR; param WIDTH: Integer = 8; registers { ah => { index = 0, traits = [caller_saved] }, } }";
+        let src = "register_class GPR8H for [Isa] { file = GPR; param WIDTH: Integer = 8; registers { ah => { index = 0 }, } }";
         let (tokens, _e) = lexer().parse(src).into_output_errors();
         let tokens = tokens.unwrap();
         let rc = register_class_def()
@@ -1651,13 +1910,13 @@ mod tests {
                 param ENCODING_LEN: Integer = 5;
                 param WIDTH: Integer = self.XLEN;
                 registers {
-                    x0..x30 => { traits = [caller_saved] },
+                    x0..x30 => {},
                     x31("xzr") => { traits = [hardwired_zero] },
                 }
             }
             register_class GPRsp for [Isa] : GPR {
                 registers {
-                    x31("sp") => { traits = [stack_pointer] },
+                    x31("sp") => {},
                 }
             }
         "#;
@@ -1679,7 +1938,6 @@ mod tests {
         assert_eq!(regs.len(), 32);
         let r31 = regs.iter().find(|r| r.name == "x31").unwrap();
         assert_eq!(r31.alias.as_deref(), Some("sp"));
-        assert!(r31.traits.contains(&RegisterTrait::StackPointer));
         // The base class is left untouched: slot 31 is still `xzr`.
         let gpr = files[0]
             .register_classes()

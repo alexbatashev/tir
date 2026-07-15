@@ -641,9 +641,6 @@ fn emit_branch_nonzero(
     )]
 }
 
-/// The RISC-V return-address register (`ra` = `x1`).
-const RA: u16 = 1;
-
 /// Build a register-register move (`addi rd, rs, 0`).
 fn mv(
     context: &tir::Context,
@@ -659,137 +656,12 @@ fn mv(
     )
 }
 
-/// Lower the builtin call ops to RISC-V virtual calls. Arguments are moved into
-/// the ABI argument registers and the result is copied out of the first return
-/// register, so the allocator never has to pin long live ranges. The call
-/// clobbers every caller-saved register — including `ra`, which also holds this
-/// function's own return address, so it is saved into a fresh virtual register
-/// across the call (the allocator gives it a callee-saved register or a spill
-/// slot).
-fn lower_calls(
-    context: &tir::Context,
-    op: &tir::OperationRef,
-    rewriter: &mut tir::Rewriter,
-) -> Result<bool, tir::PassError> {
-    use tir::attributes::AttributeValue;
-    use tir::builtin::{CallOp, IndirectCallOp, UnitType};
-
-    let (callee_value, args, result) = if let Some(call) = op.as_op::<CallOp>() {
-        (None, call.args(), call.result())
-    } else if let Some(call) = op.as_op::<IndirectCallOp>() {
-        (Some(call.callee()), call.args(), call.result())
-    } else {
-        return Ok(false);
-    };
-
-    let info = register_info();
-    let class = info
-        .class("GPR")
-        .expect("riscv register info must define GPR");
-    if args.len() > class.arguments.len() {
-        return Err(tir::PassError::InvalidRuleSet(
-            "stack-passed call arguments are not supported by codegen yet".to_string(),
-        ));
-    }
-
-    // Detach the callee and every argument into fresh virtual registers before
-    // any argument register is written: an operand may itself live in an
-    // argument register (e.g. this function's own incoming arguments), so it
-    // must be read before the moves below clobber them, whatever the argument
-    // permutation.
-    let detach = |rewriter: &mut tir::Rewriter, value: tir::ValueId| {
-        let ty = context.get_value(value).ty();
-        let fresh = context.create_value(ty, None).id().number();
-        let copy = mv(
-            context,
-            virt(fresh, RegClass::GPR.id()),
-            virt(value.number(), RegClass::GPR.id()),
-        );
-        rewriter.insert_op_before(op, copy.as_ref()).map(|()| fresh)
-    };
-    let fresh_callee = callee_value
-        .map(|value| detach(rewriter, value))
-        .transpose()?;
-    let mut fresh_args = Vec::with_capacity(args.len());
-    for arg in &args {
-        fresh_args.push(detach(rewriter, *arg)?);
-    }
-    for (&fresh, &reg) in fresh_args.iter().zip(class.arguments.iter()) {
-        let copy = mv(
-            context,
-            phys(&(RegClass::GPR.id(), reg)),
-            virt(fresh, RegClass::GPR.id()),
-        );
-        rewriter.insert_op_before(op, copy.as_ref())?;
-    }
-
-    let virtual_call: Box<dyn Operation> = match fresh_callee {
-        None => {
-            let name = op.as_op::<CallOp>().expect("matched above").callee();
-            Box::new(
-                VirtualCallOpBuilder::new(context)
-                    .attr("callee", AttributeValue::Str(name))
-                    .attr("clobbers", caller_saved_clobbers())
-                    .build(),
-            )
-        }
-        Some(fresh) => Box::new(
-            VirtualIndirectCallOpBuilder::new(context)
-                .attr("callee_reg", virt(fresh, RegClass::GPR.id()))
-                .attr("clobbers", caller_saved_clobbers())
-                .build(),
-        ),
-    };
-
-    let ra = (RegClass::GPR.id(), RA);
-    let saved_ra = context
-        .create_value(tir::builtin::IntegerType::new(context, 64), None)
-        .id();
-    let save = mv(
-        context,
-        virt(saved_ra.number(), RegClass::GPR.id()),
-        phys(&ra),
-    );
-    rewriter.insert_op_before(op, save.as_ref())?;
-    rewriter.insert_op_before(op, virtual_call.as_ref())?;
-    let restore = mv(
-        context,
-        phys(&ra),
-        virt(saved_ra.number(), RegClass::GPR.id()),
-    );
-
-    let ret_reg = class.return_values[0];
-    if context.get_value(result).ty() == UnitType::new(context) {
-        rewriter.replace_op(op, restore.as_ref())?;
-    } else {
-        rewriter.insert_op_before(op, restore.as_ref())?;
-        let copy = mv(
-            context,
-            virt(result.number(), RegClass::GPR.id()),
-            phys(&(RegClass::GPR.id(), ret_reg)),
-        );
-        rewriter.replace_op(op, copy.as_ref())?;
-    }
-    Ok(true)
-}
-
-/// The caller-saved registers a call clobbers, as a register-array attribute.
-fn caller_saved_clobbers() -> tir::attributes::AttributeValue {
-    let info = register_info();
-    let class = info
-        .class("GPR")
-        .expect("riscv register info must define GPR");
-    tir::attributes::AttributeValue::Array(
-        class
-            .caller_saved
-            .iter()
-            .map(|&index| phys(&(RegClass::GPR.id(), index)))
-            .collect(),
-    )
-}
-
 pub fn create_isel_pass(context: &tir::Context) -> tir::backend::isel::InstructionSelectPass {
-    create_isel_pass_for(context, Feature::ALL)
+    create_isel_pass_for(
+        context,
+        Feature::ALL,
+        abi_by_name("lp64d").expect("RISC-V must define lp64d"),
+    )
 }
 
 /// The C extension features. Compressed instructions never take part in
@@ -809,6 +681,7 @@ const COMPRESSED_FEATURES: &[Feature] = &[
 fn create_isel_pass_for(
     context: &tir::Context,
     features: &[Feature],
+    abi: &'static tir::backend::abi::AbiInfo,
 ) -> tir::backend::isel::InstructionSelectPass {
     let features: Vec<Feature> = features
         .iter()
@@ -822,13 +695,107 @@ fn create_isel_pass_for(
             cond_nonzero: emit_branch_nonzero,
         })
         .with_op_lowering(lower_func_and_return_to_asm_symbol)
-        .with_op_lowering(lower_calls)
+        .with_call_lowering(abi, Box::new(RiscvCallEmitter))
         .with_op_lowering(lower_vector_len)
 }
 
-/// The RISC-V stack pointer (`sp` = `x2`).
-fn sp() -> tir::backend::liveness::PhysReg {
-    (RegClass::GPR.id(), 2)
+struct RiscvCallEmitter;
+
+impl tir::backend::call_lowering::CallEmitter for RiscvCallEmitter {
+    fn copy(
+        &self,
+        context: &tir::Context,
+        dst: tir::attributes::AttributeValue,
+        src: tir::attributes::AttributeValue,
+    ) -> Box<dyn Operation> {
+        mv(context, dst, src)
+    }
+
+    fn vcall(
+        &self,
+        context: &tir::Context,
+        callee: String,
+        clobbers: tir::attributes::AttributeValue,
+    ) -> Box<dyn Operation> {
+        Box::new(
+            VirtualCallOpBuilder::new(context)
+                .attr("callee", tir::attributes::AttributeValue::Str(callee))
+                .attr("clobbers", clobbers)
+                .build(),
+        )
+    }
+
+    fn vcall_indirect(
+        &self,
+        context: &tir::Context,
+        callee: tir::attributes::AttributeValue,
+        clobbers: tir::attributes::AttributeValue,
+    ) -> Box<dyn Operation> {
+        Box::new(
+            VirtualIndirectCallOpBuilder::new(context)
+                .attr("callee_reg", callee)
+                .attr("clobbers", clobbers)
+                .build(),
+        )
+    }
+
+    fn stack_arg_store(
+        &self,
+        context: &tir::Context,
+        abi: &tir::backend::abi::AbiInfo,
+        value: tir::attributes::AttributeValue,
+        offset: i64,
+    ) -> Result<Box<dyn Operation>, tir::PassError> {
+        Ok(Box::new(
+            StoreDoubleWordOpBuilder::new(context)
+                .attr("rs1", phys(&abi.sp))
+                .attr("rs2", value)
+                .attr("imm", tir::attributes::AttributeValue::Int(offset))
+                .build(),
+        ))
+    }
+
+    fn call_prefix(
+        &self,
+        context: &tir::Context,
+        abi: &tir::backend::abi::AbiInfo,
+        outgoing_size: u32,
+    ) -> Vec<Box<dyn Operation>> {
+        if outgoing_size == 0 {
+            return Vec::new();
+        }
+        vec![Box::new(
+            AddImmOpBuilder::new(context)
+                .attr("rd", phys(&abi.sp))
+                .attr("rs1", phys(&abi.sp))
+                .attr(
+                    "imm",
+                    tir::attributes::AttributeValue::Int(-i64::from(outgoing_size)),
+                )
+                .build(),
+        )]
+    }
+
+    fn call_suffix(
+        &self,
+        context: &tir::Context,
+        abi: &tir::backend::abi::AbiInfo,
+        outgoing_size: u32,
+    ) -> Vec<Box<dyn Operation>> {
+        if outgoing_size == 0 {
+            return Vec::new();
+        }
+        vec![Box::new(
+            AddImmOpBuilder::new(context)
+                .attr("rd", phys(&abi.sp))
+                .attr("rs1", phys(&abi.sp))
+                .attr(
+                    "imm",
+                    tir::attributes::AttributeValue::Int(i64::from(outgoing_size)),
+                )
+                .build(),
+        )]
+    }
 }
 
 fn phys(reg: &tir::backend::liveness::PhysReg) -> tir::attributes::AttributeValue {
@@ -923,14 +890,6 @@ impl tir::backend::regalloc::TargetRegAlloc for RiscvRegAlloc {
         register_info()
     }
 
-    fn frame_align(&self) -> u32 {
-        16
-    }
-
-    fn frame_register(&self) -> tir::backend::liveness::PhysReg {
-        sp()
-    }
-
     fn emit_spill_store(
         &self,
         context: &tir::Context,
@@ -1021,10 +980,11 @@ impl tir::backend::regalloc::TargetRegAlloc for RiscvRegAlloc {
     fn emit_prologue(
         &self,
         context: &tir::Context,
+        abi: &tir::backend::abi::AbiInfo,
         size: u32,
         saves: &[(tir::backend::liveness::PhysReg, i64)],
     ) -> Vec<Box<dyn Operation>> {
-        let sp = sp();
+        let sp = abi.sp;
         let mut ops: Vec<Box<dyn Operation>> = vec![Box::new(
             AddImmOpBuilder::new(context)
                 .attr("rd", phys(&sp))
@@ -1041,10 +1001,11 @@ impl tir::backend::regalloc::TargetRegAlloc for RiscvRegAlloc {
     fn emit_epilogue(
         &self,
         context: &tir::Context,
+        abi: &tir::backend::abi::AbiInfo,
         size: u32,
         saves: &[(tir::backend::liveness::PhysReg, i64)],
     ) -> Vec<Box<dyn Operation>> {
-        let sp = sp();
+        let sp = abi.sp;
         let mut ops: Vec<Box<dyn Operation>> = Vec::new();
         for (reg, offset) in saves {
             ops.push(reg_reload(context, reg, &sp, *offset));
@@ -1105,12 +1066,19 @@ impl tir::backend::regalloc::TargetRegAlloc for RiscvRegAlloc {
 }
 
 pub fn create_regalloc_pass() -> tir::backend::regalloc::RegisterAllocationPass {
-    tir::backend::regalloc::RegisterAllocationPass::new(Box::new(RiscvRegAlloc))
+    create_regalloc_pass_for(abi_by_name("lp64d").expect("RISC-V must define lp64d"))
+}
+
+fn create_regalloc_pass_for(
+    abi: &'static tir::backend::abi::AbiInfo,
+) -> tir::backend::regalloc::RegisterAllocationPass {
+    tir::backend::regalloc::RegisterAllocationPass::with_abi(Box::new(RiscvRegAlloc), abi)
 }
 
 /// The RISC-V target, selected via `--march`/`--mcpu`.
 pub struct RiscvTarget {
     config: TargetConfig,
+    selected_abi: &'static tir::backend::abi::AbiInfo,
 }
 
 impl tir::backend::TargetMachine for RiscvTarget {
@@ -1125,16 +1093,24 @@ impl tir::backend::TargetMachine for RiscvTarget {
     }
 
     fn isel_pass(&self, context: &tir::Context) -> tir::backend::isel::InstructionSelectPass {
-        create_isel_pass_for(context, &self.config.features)
+        create_isel_pass_for(context, &self.config.features, self.abi())
     }
 
     fn regalloc_pass(&self) -> tir::backend::regalloc::RegisterAllocationPass {
-        create_regalloc_pass()
+        create_regalloc_pass_for(self.abi())
     }
 
     fn register_info(&self) -> tir::backend::regalloc::RegisterInfo {
         use tir::backend::regalloc::TargetRegAlloc;
         RiscvRegAlloc.register_info()
+    }
+
+    fn abis(&self) -> &'static [tir::backend::abi::AbiInfo] {
+        abis()
+    }
+
+    fn abi(&self) -> &'static tir::backend::abi::AbiInfo {
+        self.selected_abi
     }
 
     fn asm_parser(&self, _context: &tir::Context) -> tir::backend::AsmParser {
@@ -1253,6 +1229,7 @@ fn select_riscv(
     march: &str,
     mcpu: Option<&str>,
     mattr: Option<&str>,
+    mabi: Option<&str>,
 ) -> Result<Option<Box<dyn tir::backend::TargetMachine>>, String> {
     let owned = ["riscv", "rv32", "rv64"]
         .iter()
@@ -1261,7 +1238,26 @@ fn select_riscv(
         return Ok(None);
     }
     let config = TargetConfig::parse(march, mcpu, mattr)?;
-    Ok(Some(Box::new(RiscvTarget { config })))
+    let selected_abi = match mabi {
+        Some(name) => abi_by_name(name).ok_or_else(|| {
+            format!(
+                "unknown ABI '{name}' for riscv (available: {})",
+                abis()
+                    .iter()
+                    .map(|abi| abi.name)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })?,
+        None if config.features.contains(&Feature::D) => {
+            abi_by_name("lp64d").expect("RISC-V must define lp64d")
+        }
+        None => abi_by_name("lp64").expect("RISC-V must define lp64"),
+    };
+    Ok(Some(Box::new(RiscvTarget {
+        config,
+        selected_abi,
+    })))
 }
 
 tir::register_target!(select_riscv, ["riscv32", "riscv64"]);
@@ -1275,6 +1271,85 @@ mod tests {
     };
 
     use crate::{RegClass, RiscvDialect, create_isel_pass, create_regalloc_pass};
+
+    #[test]
+    fn generated_abi_matches_lp64d_register_convention() {
+        let abi = crate::abi_by_name("lp64d").unwrap();
+        let args = |kind| {
+            abi.args
+                .iter()
+                .find(|sequence| sequence.kind == kind)
+                .unwrap()
+        };
+        let rets = |kind| {
+            abi.rets
+                .iter()
+                .find(|sequence| sequence.kind == kind)
+                .unwrap()
+        };
+
+        assert_eq!(abi.name, "lp64d");
+        assert_eq!(abi.sp, (RegClass::GPR.id(), 2));
+        assert_eq!(abi.ra, Some((RegClass::GPR.id(), 1)));
+        assert_eq!(abi.fp, Some((RegClass::GPR.id(), 8)));
+        assert_eq!(abi.stack.align, 16);
+        assert_eq!(abi.stack.slot_size, 8);
+        assert_eq!(
+            args(tir::backend::abi::ValueKind::Int)
+                .regs
+                .iter()
+                .map(|register| register.1)
+                .collect::<Vec<_>>(),
+            (10..=17).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            args(tir::backend::abi::ValueKind::Float)
+                .regs
+                .iter()
+                .map(|register| register.1)
+                .collect::<Vec<_>>(),
+            (10..=17).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            rets(tir::backend::abi::ValueKind::Int)
+                .regs
+                .iter()
+                .map(|register| register.1)
+                .collect::<Vec<_>>(),
+            vec![10, 11]
+        );
+        assert_eq!(
+            rets(tir::backend::abi::ValueKind::Float)
+                .regs
+                .iter()
+                .map(|register| register.1)
+                .collect::<Vec<_>>(),
+            vec![10, 11]
+        );
+        assert!(abi.callee_saved.contains(&(RegClass::GPR.id(), 8)));
+        assert!(abi.callee_saved.contains(&(RegClass::FPR64.id(), 8)));
+    }
+
+    #[test]
+    fn target_selection_accepts_and_validates_mabi() {
+        let target =
+            tir::backend::select_target_with_abi("riscv64", None, None, Some("lp64d")).unwrap();
+        assert_eq!(target.abi().name, "lp64d");
+
+        let target = tir::backend::select_target("rv64i", None, None).unwrap();
+        assert_eq!(target.abi().name, "lp64");
+
+        let target = tir::backend::select_target("rv64id", None, None).unwrap();
+        assert_eq!(target.abi().name, "lp64d");
+
+        let error = tir::backend::select_target_with_abi("riscv64", None, None, Some("unknown"))
+            .err()
+            .unwrap();
+        assert_eq!(
+            error,
+            "unknown ABI 'unknown' for riscv (available: lp64, lp64d)"
+        );
+    }
 
     fn body_op_names(context: &Context, region_id: tir::RegionId) -> Vec<&'static str> {
         context
@@ -1479,6 +1554,7 @@ mod tests {
     fn target_for(march: &str) -> crate::RiscvTarget {
         crate::RiscvTarget {
             config: crate::TargetConfig::parse(march, None, None).expect("march should parse"),
+            selected_abi: crate::default_abi(),
         }
     }
 
@@ -2215,24 +2291,18 @@ mod tests {
     /// target.
     struct TinyRiscv(crate::RiscvRegAlloc);
 
+    fn abi_with_callers(
+        callers: Vec<tir::backend::liveness::PhysReg>,
+    ) -> &'static tir::backend::abi::AbiInfo {
+        let mut abi = *crate::default_abi();
+        abi.caller_saved = Box::leak(callers.into_boxed_slice());
+        abi.callee_saved = &[];
+        Box::leak(Box::new(abi))
+    }
+
     impl tir::backend::regalloc::TargetRegAlloc for TinyRiscv {
         fn register_info(&self) -> tir::backend::regalloc::RegisterInfo {
-            tir::backend::regalloc::RegisterInfo {
-                classes: &[tir::backend::regalloc::RegClassInfo {
-                    name: "GPR",
-                    file: "GPR",
-                    allocation_order: &[10, 11, 5, 6, 7],
-                    caller_saved: &[10, 11, 5, 6, 7],
-                    callee_saved: &[],
-                    arguments: &[10, 11],
-                    return_values: &[10],
-                    reserved: &[0, 1, 2, 3, 4],
-                    group_width: 1,
-                }],
-            }
-        }
-        fn frame_register(&self) -> tir::backend::liveness::PhysReg {
-            self.0.frame_register()
+            crate::register_info()
         }
         fn emit_spill_store(
             &self,
@@ -2257,18 +2327,20 @@ mod tests {
         fn emit_prologue(
             &self,
             c: &tir::Context,
+            a: &tir::backend::abi::AbiInfo,
             s: u32,
             saves: &[(tir::backend::liveness::PhysReg, i64)],
         ) -> Vec<Box<dyn Operation>> {
-            self.0.emit_prologue(c, s, saves)
+            self.0.emit_prologue(c, a, s, saves)
         }
         fn emit_epilogue(
             &self,
             c: &tir::Context,
+            a: &tir::backend::abi::AbiInfo,
             s: u32,
             saves: &[(tir::backend::liveness::PhysReg, i64)],
         ) -> Vec<Box<dyn Operation>> {
-            self.0.emit_epilogue(c, s, saves)
+            self.0.emit_epilogue(c, a, s, saves)
         }
     }
 
@@ -2346,8 +2418,14 @@ mod tests {
         mb.insert(ops::module_end(&context).build());
 
         let mut pm = PassManager::new();
-        pm.add_pass(tir::backend::regalloc::RegisterAllocationPass::new(
+        pm.add_pass(tir::backend::regalloc::RegisterAllocationPass::with_abi(
             Box::new(TinyRiscv(crate::RiscvRegAlloc)),
+            abi_with_callers(
+                vec![5, 6, 7, 10, 11]
+                    .into_iter()
+                    .map(|index| (RegClass::GPR.id(), index))
+                    .collect(),
+            ),
         ));
         pm.run(&context, context.get_op(module.id()))
             .expect("register allocation should converge with spilling");
@@ -2388,35 +2466,7 @@ mod tests {
 
     impl tir::backend::regalloc::TargetRegAlloc for TinyFprRiscv {
         fn register_info(&self) -> tir::backend::regalloc::RegisterInfo {
-            tir::backend::regalloc::RegisterInfo {
-                classes: &[
-                    tir::backend::regalloc::RegClassInfo {
-                        name: "GPR",
-                        file: "GPR",
-                        allocation_order: &[10, 11],
-                        caller_saved: &[10, 11],
-                        callee_saved: &[],
-                        arguments: &[10, 11],
-                        return_values: &[10],
-                        reserved: &[0, 1, 2, 3, 4],
-                        group_width: 1,
-                    },
-                    tir::backend::regalloc::RegClassInfo {
-                        name: "FPR32",
-                        file: "FPR32",
-                        allocation_order: &[10, 0, 1],
-                        caller_saved: &[10, 0, 1],
-                        callee_saved: &[],
-                        arguments: &[10],
-                        return_values: &[10],
-                        reserved: &[],
-                        group_width: 1,
-                    },
-                ],
-            }
-        }
-        fn frame_register(&self) -> tir::backend::liveness::PhysReg {
-            self.0.frame_register()
+            crate::register_info()
         }
         fn emit_spill_store(
             &self,
@@ -2441,18 +2491,20 @@ mod tests {
         fn emit_prologue(
             &self,
             c: &tir::Context,
+            a: &tir::backend::abi::AbiInfo,
             s: u32,
             saves: &[(tir::backend::liveness::PhysReg, i64)],
         ) -> Vec<Box<dyn Operation>> {
-            self.0.emit_prologue(c, s, saves)
+            self.0.emit_prologue(c, a, s, saves)
         }
         fn emit_epilogue(
             &self,
             c: &tir::Context,
+            a: &tir::backend::abi::AbiInfo,
             s: u32,
             saves: &[(tir::backend::liveness::PhysReg, i64)],
         ) -> Vec<Box<dyn Operation>> {
-            self.0.emit_epilogue(c, s, saves)
+            self.0.emit_epilogue(c, a, s, saves)
         }
     }
 
@@ -2525,8 +2577,15 @@ mod tests {
         mb.insert(ops::module_end(&context).build());
 
         let mut pm = PassManager::new();
-        pm.add_pass(tir::backend::regalloc::RegisterAllocationPass::new(
+        pm.add_pass(tir::backend::regalloc::RegisterAllocationPass::with_abi(
             Box::new(TinyFprRiscv(crate::RiscvRegAlloc)),
+            abi_with_callers(vec![
+                (RegClass::GPR.id(), 10),
+                (RegClass::GPR.id(), 11),
+                (RegClass::FPR32.id(), 10),
+                (RegClass::FPR32.id(), 0),
+                (RegClass::FPR32.id(), 1),
+            ]),
         ));
         pm.run(&context, context.get_op(module.id()))
             .expect("register allocation should converge with FP spilling");
@@ -2987,6 +3046,7 @@ mod target_parser_tests {
 
         let target = |march| crate::RiscvTarget {
             config: TargetConfig::parse(march, None, None).expect("march should parse"),
+            selected_abi: crate::default_abi(),
         };
         assert!(target("rv64i").counter_registers().is_empty());
         // RV64 reads the full 64-bit counters; RV32 adds the high-half CSRs.

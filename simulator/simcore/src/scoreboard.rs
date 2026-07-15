@@ -131,7 +131,11 @@ impl Prf {
     /// Map each register class to its physical file and give each file a
     /// capacity: the machine's declared `reg_file` count, or the architectural
     /// register count of that file as a fallback.
-    pub fn for_target(info: &RegisterInfo, model: &MachineModel) -> Self {
+    pub fn for_target(
+        info: &RegisterInfo,
+        model: &MachineModel,
+        abi: Option<&tir::backend::abi::AbiInfo>,
+    ) -> Self {
         let class_to_file = info
             .classes
             .iter()
@@ -141,18 +145,19 @@ impl Prf {
         // Architectural register count per file: the number of distinct
         // encoding indices the file's classes name.
         let mut indices: HashMap<&str, HashSet<u16>> = HashMap::new();
-        for c in info.classes {
-            let set = indices.entry(c.file).or_default();
-            for &i in c
-                .allocation_order
-                .iter()
-                .chain(c.reserved)
-                .chain(c.caller_saved)
-                .chain(c.callee_saved)
-                .chain(c.arguments)
-                .chain(c.return_values)
-            {
-                set.insert(i);
+        if let Some(abi) = abi {
+            let mut registers = Vec::new();
+            registers.extend(abi.caller_saved);
+            registers.extend(abi.callee_saved);
+            registers.extend(abi.reserved);
+            registers.push(abi.sp);
+            registers.extend(abi.ra);
+            registers.extend(abi.fp);
+            for sequence in abi.args.iter().chain(abi.rets) {
+                registers.extend(sequence.regs);
+            }
+            for (class, index) in registers {
+                indices.entry(class.file()).or_default().insert(index);
             }
         }
 

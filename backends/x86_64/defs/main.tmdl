@@ -41,45 +41,67 @@ register_class GPR for [X86_64] {
     param WIDTH: Integer = self.XLEN;
 
     registers {
-        rax => { index = 0, traits = [return_value, caller_saved] },
-        rcx => { index = 1, arg = 3, traits = [argument, caller_saved] },
-        rdx => { index = 2, arg = 2, traits = [argument, return_value, caller_saved] },
-        rbx => { index = 3, traits = [callee_saved] },
-        rsp => { index = 4, traits = [stack_pointer, callee_saved] },
-        rbp => { index = 5, traits = [callee_saved] },
-        rsi => { index = 6, arg = 1, traits = [argument, caller_saved] },
-        rdi => { index = 7, arg = 0, traits = [argument, caller_saved] },
-        r8 => { index = 8, arg = 4, traits = [argument, caller_saved] },
-        r9 => { index = 9, arg = 5, traits = [argument, caller_saved] },
-        r10 => { index = 10, traits = [caller_saved] },
-        r11 => { index = 11, traits = [caller_saved] },
-        r12 => { index = 12, traits = [callee_saved] },
-        r13 => { index = 13, traits = [callee_saved] },
-        r14 => { index = 14, traits = [callee_saved] },
-        r15 => { index = 15, traits = [callee_saved] },
+        rax => { index = 0 },
+        rcx => { index = 1 },
+        rdx => { index = 2 },
+        rbx => { index = 3 },
+        rsp => { index = 4 },
+        rbp => { index = 5 },
+        rsi => { index = 6 },
+        rdi => { index = 7 },
+        r8 => { index = 8 },
+        r9 => { index = 9 },
+        r10 => { index = 10 },
+        r11 => { index = 11 },
+        r12 => { index = 12 },
+        r13 => { index = 13 },
+        r14 => { index = 14 },
+        r15 => { index = 15 },
     }
+}
+
+abi SysV("sysv") for [X86_64] {
+    stack {
+        align = 16;
+        grows = down;
+        red_zone = 128;
+        slot_size = 8;
+        save_style = push_pop;
+    }
+    sp = GPR::rsp;
+    fp = GPR::rbp;
+    args int -> [GPR::rdi, GPR::rsi, GPR::rdx, GPR::rcx, GPR::r8, GPR::r9],
+        then stack;
+    args float -> [XMM::xmm0..XMM::xmm7], then stack;
+    args vector -> [XMM::xmm0..XMM::xmm7], then stack;
+    rets int -> [GPR::rax, GPR::rdx];
+    rets float -> [XMM::xmm0, XMM::xmm1];
+    rets vector -> [XMM::xmm0, XMM::xmm1];
+    callee_saved = [GPR::rbx, GPR::rbp, GPR::r12..GPR::r15];
+    reserved = [];
+    classifier = sysv;
 }
 
 register_class GPR32 for [X86] : GPR {
     param WIDTH: Integer = 32;
 
     registers {
-        eax => { index = 0, traits = [return_value, caller_saved] },
-        ecx => { index = 1, arg = 3, traits = [argument, caller_saved] },
-        edx => { index = 2, arg = 2, traits = [argument, return_value, caller_saved] },
-        ebx => { index = 3, traits = [callee_saved] },
-        esp => { index = 4, traits = [stack_pointer, callee_saved] },
-        ebp => { index = 5, traits = [callee_saved] },
-        esi => { index = 6, arg = 1, traits = [argument, caller_saved] },
-        edi => { index = 7, arg = 0, traits = [argument, caller_saved] },
-        r8d => { index = 8, arg = 4, traits = [argument, caller_saved] },
-        r9d => { index = 9, arg = 5, traits = [argument, caller_saved] },
-        r10d => { index = 10, traits = [caller_saved] },
-        r11d => { index = 11, traits = [caller_saved] },
-        r12d => { index = 12, traits = [callee_saved] },
-        r13d => { index = 13, traits = [callee_saved] },
-        r14d => { index = 14, traits = [callee_saved] },
-        r15d => { index = 15, traits = [callee_saved] },
+        eax => { index = 0 },
+        ecx => { index = 1 },
+        edx => { index = 2 },
+        ebx => { index = 3 },
+        esp => { index = 4 },
+        ebp => { index = 5 },
+        esi => { index = 6 },
+        edi => { index = 7 },
+        r8d => { index = 8 },
+        r9d => { index = 9 },
+        r10d => { index = 10 },
+        r11d => { index = 11 },
+        r12d => { index = 12 },
+        r13d => { index = 13 },
+        r14d => { index = 14 },
+        r15d => { index = 15 },
     }
 }
 
@@ -88,22 +110,22 @@ register_class GPR16 for [X86] : GPR {
     param WRITE_POLICY: String = "merge";
 
     registers {
-        ax => { index = 0, traits = [return_value, caller_saved] },
-        cx => { index = 1, arg = 3, traits = [argument, caller_saved] },
-        dx => { index = 2, arg = 2, traits = [argument, return_value, caller_saved] },
-        bx => { index = 3, traits = [callee_saved] },
-        sp => { index = 4, traits = [stack_pointer, callee_saved] },
-        bp => { index = 5, traits = [callee_saved] },
-        si => { index = 6, arg = 1, traits = [argument, caller_saved] },
-        di => { index = 7, arg = 0, traits = [argument, caller_saved] },
-        r8w => { index = 8, arg = 4, traits = [argument, caller_saved] },
-        r9w => { index = 9, arg = 5, traits = [argument, caller_saved] },
-        r10w => { index = 10, traits = [caller_saved] },
-        r11w => { index = 11, traits = [caller_saved] },
-        r12w => { index = 12, traits = [callee_saved] },
-        r13w => { index = 13, traits = [callee_saved] },
-        r14w => { index = 14, traits = [callee_saved] },
-        r15w => { index = 15, traits = [callee_saved] },
+        ax => { index = 0 },
+        cx => { index = 1 },
+        dx => { index = 2 },
+        bx => { index = 3 },
+        sp => { index = 4 },
+        bp => { index = 5 },
+        si => { index = 6 },
+        di => { index = 7 },
+        r8w => { index = 8 },
+        r9w => { index = 9 },
+        r10w => { index = 10 },
+        r11w => { index = 11 },
+        r12w => { index = 12 },
+        r13w => { index = 13 },
+        r14w => { index = 14 },
+        r15w => { index = 15 },
     }
 }
 
@@ -114,22 +136,22 @@ register_class GPR8 for [X86] : GPR {
     param WRITE_POLICY: String = "merge";
 
     registers {
-        al => { index = 0, traits = [return_value, caller_saved] },
-        cl => { index = 1, arg = 3, traits = [argument, caller_saved] },
-        dl => { index = 2, arg = 2, traits = [argument, return_value, caller_saved] },
-        bl => { index = 3, traits = [callee_saved] },
-        spl => { index = 4, traits = [stack_pointer, callee_saved] },
-        bpl => { index = 5, traits = [callee_saved] },
-        sil => { index = 6, arg = 1, traits = [argument, caller_saved] },
-        dil => { index = 7, arg = 0, traits = [argument, caller_saved] },
-        r8b => { index = 8, arg = 4, traits = [argument, caller_saved] },
-        r9b => { index = 9, arg = 5, traits = [argument, caller_saved] },
-        r10b => { index = 10, traits = [caller_saved] },
-        r11b => { index = 11, traits = [caller_saved] },
-        r12b => { index = 12, traits = [callee_saved] },
-        r13b => { index = 13, traits = [callee_saved] },
-        r14b => { index = 14, traits = [callee_saved] },
-        r15b => { index = 15, traits = [callee_saved] },
+        al => { index = 0 },
+        cl => { index = 1 },
+        dl => { index = 2 },
+        bl => { index = 3 },
+        spl => { index = 4 },
+        bpl => { index = 5 },
+        sil => { index = 6 },
+        dil => { index = 7 },
+        r8b => { index = 8 },
+        r9b => { index = 9 },
+        r10b => { index = 10 },
+        r11b => { index = 11 },
+        r12b => { index = 12 },
+        r13b => { index = 13 },
+        r14b => { index = 14 },
+        r15b => { index = 15 },
     }
 }
 
@@ -144,10 +166,10 @@ register_class GPR8H for [X86] {
     param BIT_OFFSET: Integer = 8;
 
     registers {
-        ah => { index = 0, traits = [caller_saved] },
-        ch => { index = 1, traits = [caller_saved] },
-        dh => { index = 2, traits = [caller_saved] },
-        bh => { index = 3, traits = [callee_saved] },
+        ah => { index = 0 },
+        ch => { index = 1 },
+        dh => { index = 2 },
+        bh => { index = 3 },
     }
 }
 
@@ -239,8 +261,8 @@ register_class GPRsib for [X86_64] {
     param WIDTH: Integer = self.XLEN;
 
     registers {
-        rsp => { index = 4, traits = [stack_pointer, callee_saved] },
-        r12 => { index = 12, traits = [callee_saved] },
+        rsp => { index = 4 },
+        r12 => { index = 12 },
     }
 }
 
@@ -252,8 +274,8 @@ register_class GPRrbp for [X86_64] {
     param WIDTH: Integer = self.XLEN;
 
     registers {
-        rbp => { index = 5, traits = [callee_saved] },
-        r13 => { index = 13, traits = [callee_saved] },
+        rbp => { index = 5 },
+        r13 => { index = 13 },
     }
 }
 

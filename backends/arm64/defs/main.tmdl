@@ -17,13 +17,13 @@ register_class GPR for [ARMv8A64] {
     param WIDTH: Integer = self.XLEN;
 
     registers {
-        x0 => { traits = [argument, return_value, caller_saved] },
-        x1..x7 => { traits = [argument, caller_saved] },
-        x8..x17 => { traits = [caller_saved] },
-        x18 => { traits = [reserved] },
-        x19..x28 => { traits = [callee_saved] },
-        x29("fp") => { traits = [callee_saved] },
-        x30("lr") => { traits = [return_address, caller_saved] },
+        x0 => {},
+        x1..x7 => {},
+        x8..x17 => {},
+        x18 => {},
+        x19..x28 => {},
+        x29("fp") => {},
+        x30("lr") => {},
         x31("xzr") => { traits = [hardwired_zero] },
     }
 }
@@ -35,7 +35,7 @@ register_class GPR for [ARMv8A64] {
 // overriding only slot 31. Operands that can reference `sp` use this class.
 register_class GPRsp for [ARMv8A64] : GPR {
     registers {
-        sp => { index = 31, traits = [stack_pointer] },
+        sp => { index = 31 },
     }
 }
 
@@ -60,7 +60,7 @@ register_class VPR for [ARMv8A64] {
     param WIDTH: Integer = 128;
 
     registers {
-        v0..v31 => { traits = [float, caller_saved] },
+        v0..v31 => { traits = [float] },
     }
 }
 
@@ -70,7 +70,7 @@ register_class FPR64 for [ARMv8A64] {
     param WIDTH: Integer = 64;
 
     registers {
-        d0..d31 => { traits = [float, caller_saved] },
+        d0..d31 => { traits = [float] },
     }
 }
 
@@ -80,8 +80,24 @@ register_class FPR32 for [ARMv8A64] {
     param WIDTH: Integer = 32;
 
     registers {
-        s0..s31 => { traits = [float, caller_saved] },
+        s0..s31 => { traits = [float] },
     }
+}
+
+abi AAPCS64("aapcs64") for [ARMv8A64] {
+    stack { align = 16; grows = down; red_zone = 0; slot_size = 8; }
+    sp = GPRsp::sp;
+    ra = GPR::x30;
+    fp = GPR::x29;
+    args int -> [GPR::x0..GPR::x7], then stack;
+    args float -> [FPR64::d0..FPR64::d7], then stack;
+    args vector -> [VPR::v0..VPR::v7], then stack;
+    rets int -> [GPR::x0, GPR::x1];
+    rets float -> [FPR64::d0..FPR64::d3];
+    rets vector -> [VPR::v0..VPR::v3];
+    callee_saved = [GPR::x19..GPR::x29, VPR::v8..VPR::v15];
+    reserved = [GPR::x18];
+    classifier = aapcs64;
 }
 
 // FP data-processing (2 source), double precision. OPCODE selects the operation

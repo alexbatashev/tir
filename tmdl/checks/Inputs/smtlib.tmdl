@@ -17,7 +17,7 @@ register_class GPR for [TestIsa] {
 
     registers {
         x0("zero") => { traits = [hardwired_zero] },
-        x1..x31("r{}") => { traits = [callee_saved] },
+        x1..x31("r{}") => {                         },
     }
 }
 

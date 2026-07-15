@@ -1,0 +1,35 @@
+// RUN: tmdlc --action=emit-ast-json --output=- %s | filecheck %s
+
+isa ARMv8A64 {}
+
+register_class GPR for [ARMv8A64] {
+    registers {
+        x0..x30 => {  },
+        x31("xzr") => { traits = [hardwired_zero] },
+    }
+}
+
+register_class GPRsp for [ARMv8A64] : GPR {
+    registers {
+        sp => { index = 31 },
+    }
+}
+
+abi AAPCS64("aapcs64") for [ARMv8A64] {
+    stack { align = 16; grows = down; red_zone = 0; slot_size = 8; }
+    sp = GPRsp::sp;
+    ra = GPR::x30;
+    fp = GPR::x29;
+    args int -> [GPR::x0..GPR::x7], then stack;
+    rets int -> [GPR::x0, GPR::x1];
+     callee_saved = [GPR::x19..GPR::x29];
+     reserved = [GPR::x18];
+    classifier = aapcs64;
+}
+
+// CHECK: "Abi": {
+// CHECK: "name": "AAPCS64",
+// CHECK: "alias": "aapcs64",
+// CHECK: "class": "GPRsp",
+// CHECK-NEXT: "name": "sp"
+// CHECK: "classifier": "aapcs64"
