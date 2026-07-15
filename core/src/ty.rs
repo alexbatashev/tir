@@ -48,11 +48,13 @@ pub trait TypeConstraint {
 pub struct Any;
 
 impl TypeConstraint for Any {
-    fn satisfies(_ty: &dyn Type) -> bool
+    fn satisfies(ty: &dyn Type) -> bool
     where
         Self: Sized + 'static,
     {
-        true
+        (ty as &dyn StdAny)
+            .downcast_ref::<crate::builtin::TokenType>()
+            .is_none()
     }
 }
 

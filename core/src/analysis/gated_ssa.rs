@@ -836,6 +836,13 @@ mod tests {
         let cond = context.create_value(i1, None);
 
         let (body, acc_id, latch_op) = counting_body(&context, i32);
+        let before = context.create_value(i32, None);
+        let condition_region = context.create_region();
+        let condition_block = context.create_block(vec![before.clone()]);
+        condition_region.add_block(condition_block.id());
+        IRBuilder::new(condition_block).insert(
+            crate::scf::ops::condition(&context, cond.id(), Operand::from(before.id())).build(),
+        );
 
         let init = ops::constant(&context, 0, i32).build();
         let init_val = init.result();
@@ -847,9 +854,9 @@ mod tests {
 
         let while_op = crate::scf::ops::r#while(
             &context,
-            cond.id(),
             Operand::from(init_val),
             Some(i32),
+            Some(condition_region.id()),
             Some(body),
         )
         .build();

@@ -150,6 +150,7 @@ pub fn verify_op_tree(context: &Context, op_id: OpId) -> Result<(), Error> {
     }
 
     let instance = context.get_op(op_id);
+    verify_token_region_arguments(context, &instance)?;
     instance.clone().as_dyn_op().verify(context)?;
 
     for region_id in instance.regions.clone() {
@@ -161,6 +162,51 @@ pub fn verify_op_tree(context: &Context, op_id: OpId) -> Result<(), Error> {
         }
     }
 
+    Ok(())
+}
+
+fn verify_token_region_arguments(
+    context: &Context,
+    instance: &Arc<OpInstance>,
+) -> Result<(), Error> {
+    let token = crate::builtin::TokenType::new(context);
+    let scope_regions = instance
+        .clone()
+        .as_interface::<dyn crate::TokenScope>()
+        .map(|scope| scope.token_scope_regions())
+        .unwrap_or_default();
+    for (region_index, region_id) in instance.regions.iter().enumerate() {
+        for (block_index, block) in context
+            .get_region(*region_id)
+            .iter(context.clone())
+            .enumerate()
+        {
+            for argument in block.arguments() {
+                if argument.ty() != token {
+                    continue;
+                }
+                if block_index != 0 || !scope_regions.contains(&instance.regions[region_index]) {
+                    return Err(Error::VerificationError(
+                        "token values are only allowed as loop body entry arguments".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+    if instance.dialect == "builtin"
+        && instance.name == "func"
+        && instance.attributes.iter().any(|attribute| {
+            attribute.name == "ret_type"
+                && matches!(
+                    attribute.value,
+                    crate::attributes::AttributeValue::Type(ty) if ty == token
+                )
+        })
+    {
+        return Err(Error::VerificationError(
+            "token values are not allowed in function signatures".to_string(),
+        ));
+    }
     Ok(())
 }
 

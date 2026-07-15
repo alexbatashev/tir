@@ -157,21 +157,20 @@ impl<'src> TextParser<'src> {
         }
 
         let len = state.region.iter(context.clone()).len();
-        if index as usize != len {
-            return Err((
-                self.span(),
-                Error::VerificationError(format!("block ^bb{index} is not defined in this region")),
-            ));
+        for missing in len..=index as usize {
+            let block_args = if missing == index as usize {
+                block_arg_types
+                    .iter()
+                    .map(|ty| context.create_value(*ty, None))
+                    .collect()
+            } else {
+                vec![]
+            };
+            let block = context.create_block(block_args);
+            state.region.add_block(block.id());
+            state.indices.insert(missing as u32, block.id());
         }
-
-        let block_args = block_arg_types
-            .iter()
-            .map(|ty| context.create_value(*ty, None))
-            .collect();
-        let block = context.create_block(block_args);
-        state.region.add_block(block.id());
-        state.indices.insert(index, block.id());
-        Ok(block.id())
+        Ok(state.indices[&index])
     }
 
     fn try_parse_block_label(&mut self, context: &Context) -> ParseResult<Option<BlockLabel>> {

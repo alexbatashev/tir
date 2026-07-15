@@ -108,6 +108,20 @@ pub trait Terminator {
     }
 }
 
+/// An operation whose selected region entry arguments define non-forwarding
+/// control tokens.
+pub trait TokenScope {
+    fn token_scope_regions(&self) -> Vec<RegionId>;
+
+    fn verify_interface(
+        &self,
+        _this: &dyn Operation,
+        _context: &Context,
+    ) -> Result<(), crate::Error> {
+        Ok(())
+    }
+}
+
 /// A terminator that transfers control to successor blocks within the same region,
 /// forwarding values to their block arguments. Lets a CFG analysis read the edge
 /// targets and the values flowing along each edge without knowing the concrete

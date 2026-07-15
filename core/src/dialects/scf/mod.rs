@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use crate::builtin::IntegerType;
+use crate::builtin::{IntegerType, TokenType};
 use crate::{
-    Context, Error, LoopLike, Operation, RegionGuard, Terminator, TypeId, ValueId, dialect,
-    operation,
+    Context, Error, LoopLike, Operation, RegionGuard, Terminator, TokenScope, TypeId, ValueId,
+    dialect, operation,
 };
 
 use crate as tir;
@@ -12,7 +12,10 @@ use crate::Value;
 use crate::parse::common::Cursor;
 
 pub mod ops {
-    pub use super::{ForOp, IfOp, WhileOp, YieldOp, r#for, r#if, r#while, r#yield};
+    pub use super::{
+        BreakOp, ConditionOp, ContinueOp, ForOp, IfOp, WhileOp, YieldOp, r#break, condition,
+        r#continue, r#for, r#if, r#while, r#yield,
+    };
 }
 
 dialect! {
@@ -22,6 +25,9 @@ dialect! {
             ForOp,
             WhileOp,
             IfOp,
+            ConditionOp,
+            BreakOp,
+            ContinueOp,
             YieldOp,
         ],
         types: [],
@@ -48,7 +54,7 @@ operation! {
                 single_block: true,
             }
         },
-        interfaces: [LoopLike],
+        interfaces: [LoopLike, TokenScope],
     }
 }
 
@@ -62,6 +68,9 @@ impl LoopOp for ForOp {
     fn body_block(&self) -> Arc<tir::Block> {
         self.body()
     }
+    fn iter_arg(&self) -> ValueId {
+        carried_argument(&self.loop_context(), &self.body_block()).id()
+    }
     fn loop_context(&self) -> Context {
         self.0.context.upgrade()
     }
@@ -72,10 +81,16 @@ impl tir::LoopLike for ForOp {
         self.init_operand().unwrap()
     }
     fn carried_arg(&self) -> ValueId {
-        self.body_block().arguments()[0].id()
+        carried_argument(&self.loop_context(), &self.body_block()).id()
     }
     fn latched(&self) -> ValueId {
         latched_value(self)
+    }
+}
+
+impl TokenScope for ForOp {
+    fn token_scope_regions(&self) -> Vec<tir::RegionId> {
+        vec![self.0.regions[0]]
     }
 }
 
@@ -96,6 +111,7 @@ impl ForOp {
             self.operands()[1].number(),
             self.operands()[2].number()
         ))?;
+        print_scope(fmt, &context, self.body_block())?;
         print_loop_tail(fmt, &context, self)?;
         tir::region_format::print_op_region(fmt, &context, self, 0)
     }
@@ -109,8 +125,10 @@ impl ForOp {
         let upper_bound = parse_value_id(parser)?;
         expect_token(parser, ",")?;
         let step = parse_value_id(parser)?;
+        let scope = parse_scope(parser, context)?;
         let carried = parse_iter_args(parser, context)?;
-        let body = parse_loop_body(parser, context, &carried)?;
+        let body_carried = carried.as_ref().map(|carried| carried.acc.clone());
+        let body = parse_loop_body(parser, context, scope, body_carried)?;
 
         let mut builder = ForOpBuilder::new(context)
             .lower_bound(lower_bound)
@@ -131,18 +149,20 @@ operation! {
         format: "custom",
         verifier: "true",
         operands: O {
-            condition: "crate::Integer<1>",
             init: "?AnyConstraint",
         },
         results: R {
             result: "?AnyConstraint",
         },
         regions: R {
+            condition_region: Region {
+                single_block: true,
+            },
             body: Region {
                 single_block: true,
             }
         },
-        interfaces: [LoopLike],
+        interfaces: [LoopLike, TokenScope],
     }
 }
 
@@ -151,10 +171,13 @@ impl LoopOp for WhileOp {
         self.0.results.first().copied()
     }
     fn init_operand(&self) -> Option<ValueId> {
-        self.operands().get(1).copied()
+        self.operands().first().copied()
     }
     fn body_block(&self) -> Arc<tir::Block> {
         self.body()
+    }
+    fn iter_arg(&self) -> ValueId {
+        self.condition_region().arguments()[0].id()
     }
     fn loop_context(&self) -> Context {
         self.0.context.upgrade()
@@ -166,49 +189,87 @@ impl tir::LoopLike for WhileOp {
         self.init_operand().unwrap()
     }
     fn carried_arg(&self) -> ValueId {
-        self.body_block().arguments()[0].id()
+        carried_argument(&self.loop_context(), &self.body_block()).id()
     }
     fn latched(&self) -> ValueId {
         latched_value(self)
     }
 }
 
+impl TokenScope for WhileOp {
+    fn token_scope_regions(&self) -> Vec<tir::RegionId> {
+        vec![self.0.regions[1]]
+    }
+}
+
 impl tir::Verifiable for WhileOp {
     fn verify_impl(&self, context: &Context) -> Result<(), Error> {
-        verify_i1_operand(context, self.condition(), "scf.while condition")?;
+        verify_single_block_region_has_terminator(
+            context,
+            self.condition_region(),
+            "scf.while condition",
+        )?;
         verify_single_block_region_has_terminator(context, self.body(), "scf.while body")?;
+        verify_while_condition(context, self)?;
         verify_loop_carried(context, self, "scf.while")
     }
 }
 
 impl WhileOp {
-    fn condition(&self) -> ValueId {
-        self.operands()[0]
-    }
-
     fn custom_print(&self, fmt: &mut tir::IRFormatter) -> Result<(), std::fmt::Error> {
         let context = self.0.context.upgrade();
         print_result_prefix(fmt, self)?;
-        fmt.write(format!("scf.while %{}", self.condition().number()))?;
+        fmt.write("scf.while")?;
         print_loop_tail(fmt, &context, self)?;
-        tir::region_format::print_op_region(fmt, &context, self, 0)
+        tir::region_format::print_op_region(fmt, &context, self, 0)?;
+        fmt.write(" do")?;
+        print_scope(fmt, &context, self.body_block())?;
+        if !self.0.results.is_empty() {
+            fmt.write(format!(
+                "(%{})",
+                carried_argument(&context, &self.body_block()).id().number()
+            ))?;
+        }
+        tir::region_format::print_op_region(fmt, &context, self, 1)
     }
 
     fn custom_parse(
         parser: &mut tir::parse::text::Parser,
         context: &Context,
     ) -> Result<Box<dyn Operation>, (tir::parse::Span, Error)> {
-        let condition = parse_value_id(parser)?;
         let carried = parse_iter_args(parser, context)?;
-        let body = parse_loop_body(parser, context, &carried)?;
+        let condition_args = carried.iter().map(|c| c.acc.clone()).collect();
+        let condition_region = parser
+            .parse_region_with_entry_args(context, condition_args)?
+            .id();
+        expect_token(parser, "do")?;
+        let scope = parse_scope(parser, context)?;
+        let body_carried = parse_body_carried(parser, context, &carried)?;
+        let body = parse_loop_body(parser, context, scope, body_carried)?;
 
-        let mut builder = WhileOpBuilder::new(context).condition(condition).body(body);
+        let mut builder = WhileOpBuilder::new(context)
+            .condition_region(condition_region)
+            .body(body);
         if let Some(carried) = &carried {
             builder = builder.init(carried.init).result_type(carried.ty);
         }
         Ok(Box::new(builder.build()))
     }
 }
+
+operation! {
+    ConditionOp {
+        name: "condition",
+        dialect: "scf",
+        operands: O {
+            condition: "crate::Integer<1>",
+            value: "?AnyConstraint",
+        },
+        interfaces: [Terminator],
+    }
+}
+
+impl Terminator for ConditionOp {}
 
 operation! {
     IfOp {
@@ -299,6 +360,32 @@ impl IfOp {
 }
 
 operation! {
+    BreakOp {
+        name: "break",
+        dialect: "scf",
+        operands: O {
+            scope: "crate::builtin::TokenType",
+        },
+        interfaces: [Terminator],
+    }
+}
+
+impl Terminator for BreakOp {}
+
+operation! {
+    ContinueOp {
+        name: "continue",
+        dialect: "scf",
+        operands: O {
+            scope: "crate::builtin::TokenType",
+        },
+        interfaces: [Terminator],
+    }
+}
+
+impl Terminator for ContinueOp {}
+
+operation! {
     YieldOp {
         name: "yield",
         dialect: "scf",
@@ -339,6 +426,7 @@ trait LoopOp: Operation {
     fn result(&self) -> Option<ValueId>;
     fn init_operand(&self) -> Option<ValueId>;
     fn body_block(&self) -> Arc<tir::Block>;
+    fn iter_arg(&self) -> ValueId;
     fn loop_context(&self) -> Context;
 }
 
@@ -377,7 +465,7 @@ fn print_loop_tail(
     let Some(result) = op.result() else {
         return Ok(());
     };
-    let acc = op.body_block().arguments()[0].id();
+    let acc = op.iter_arg();
     let init = op
         .init_operand()
         .expect("value-producing loop has an init operand");
@@ -387,6 +475,39 @@ fn print_loop_tail(
         init.number()
     ))?;
     context.print_type(context.get_value(result).ty(), fmt)
+}
+
+fn print_scope(
+    fmt: &mut tir::IRFormatter,
+    context: &Context,
+    body: Arc<tir::Block>,
+) -> Result<(), std::fmt::Error> {
+    if let Some(scope) = body
+        .arguments()
+        .iter()
+        .find(|argument| argument.ty() == TokenType::new(context))
+    {
+        fmt.write(format!(" scope(%{})", scope.id().number()))?;
+    }
+    Ok(())
+}
+
+fn parse_scope(
+    parser: &mut tir::parse::text::Parser,
+    context: &Context,
+) -> Result<Option<Value>, (tir::parse::Span, Error)> {
+    if !parser.parse_token("scope") {
+        return Ok(None);
+    }
+    expect_token(parser, "(")?;
+    let name = parser
+        .parse_value_ref()
+        .ok_or_else(|| (parser.span(), Error::ExpectedValueRef))?
+        .to_string();
+    expect_token(parser, ")")?;
+    let scope = context.create_value(TokenType::new(context), None);
+    parser.define_value(&name, scope.id());
+    Ok(Some(scope))
 }
 
 /// Parse an optional `iter_args(%acc = %init) -> <ty>` clause, creating the carried
@@ -417,24 +538,78 @@ fn parse_iter_args(
 fn parse_loop_body(
     parser: &mut tir::parse::text::Parser,
     context: &Context,
-    carried: &Option<Carried>,
+    scope: Option<Value>,
+    carried: Option<Value>,
 ) -> Result<tir::RegionId, (tir::parse::Span, Error)> {
-    let entry_args = carried.iter().map(|c| c.acc.clone()).collect();
+    let entry_args = scope.into_iter().chain(carried).collect();
     Ok(parser
         .parse_region_with_entry_args(context, entry_args)?
         .id())
+}
+
+fn parse_body_carried(
+    parser: &mut tir::parse::text::Parser,
+    context: &Context,
+    carried: &Option<Carried>,
+) -> Result<Option<Value>, (tir::parse::Span, Error)> {
+    let Some(carried) = carried else {
+        return Ok(None);
+    };
+    expect_token(parser, "(")?;
+    let name = parser
+        .parse_value_ref()
+        .ok_or_else(|| (parser.span(), Error::ExpectedValueRef))?
+        .to_string();
+    expect_token(parser, ")")?;
+    let value = context.create_value(carried.ty, None);
+    parser.define_value(&name, value.id());
+    Ok(Some(value))
+}
+
+fn carried_argument(context: &Context, body: &Arc<tir::Block>) -> Value {
+    body.arguments()
+        .iter()
+        .find(|argument| argument.ty() != TokenType::new(context))
+        .cloned()
+        .expect("value-producing loop has a carried argument")
 }
 
 /// Verify a loop's carried value: a result requires a matching init operand, a single
 /// carried body argument, and a matching yielded value; a resultless loop has none.
 fn verify_loop_carried(context: &Context, op: &impl LoopOp, label: &str) -> Result<(), Error> {
     let body = op.body_block();
-    let yielded = context
-        .get_op(*body.op_ids().last().unwrap())
-        .operands
-        .first()
-        .copied();
-    let body_args = body.arguments();
+    let terminator = context.get_op(*body.op_ids().last().unwrap());
+    let yielded = (terminator.dialect == "scf" && terminator.name == "yield")
+        .then(|| terminator.operands.first().copied())
+        .flatten();
+    let token = TokenType::new(context);
+    let scope_args = body
+        .arguments()
+        .iter()
+        .filter(|argument| argument.ty() == token)
+        .collect::<Vec<_>>();
+    let body_args = body
+        .arguments()
+        .iter()
+        .filter(|argument| argument.ty() != token)
+        .collect::<Vec<_>>();
+    if scope_args.len() > 1 {
+        return Err(Error::VerificationError(format!(
+            "{label} body must have at most one token scope"
+        )));
+    }
+    if terminator.dialect != "scf" || !matches!(terminator.name, "yield" | "break" | "continue") {
+        return Err(Error::VerificationError(format!(
+            "{label} body must end with scf.yield, scf.break, or scf.continue"
+        )));
+    }
+    if matches!(terminator.name, "break" | "continue")
+        && (scope_args.len() != 1 || terminator.operands != [scope_args[0].id()])
+    {
+        return Err(Error::VerificationError(format!(
+            "{label} exit must consume its body token scope"
+        )));
+    }
 
     match op.result() {
         Some(result) => {
@@ -452,7 +627,8 @@ fn verify_loop_carried(context: &Context, op: &impl LoopOp, label: &str) -> Resu
                     "{label} body must carry one argument of the result type"
                 )));
             }
-            if yielded.map(|v| context.get_value(v).ty()) != Some(ty) {
+            if terminator.name != "yield" || yielded.map(|v| context.get_value(v).ty()) != Some(ty)
+            {
                 return Err(Error::VerificationError(format!(
                     "{label} body must yield the carried value"
                 )));
@@ -463,6 +639,42 @@ fn verify_loop_carried(context: &Context, op: &impl LoopOp, label: &str) -> Resu
                 return Err(Error::VerificationError(format!(
                     "{label} without a result must not carry a value"
                 )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn verify_while_condition(context: &Context, op: &WhileOp) -> Result<(), Error> {
+    let block = op.condition_region();
+    let terminator = context.get_op(*block.op_ids().last().unwrap());
+    if terminator.dialect != "scf" || terminator.name != "condition" {
+        return Err(Error::VerificationError(
+            "scf.while condition must end with scf.condition".to_string(),
+        ));
+    }
+    let arguments = block.arguments();
+    match op.0.results.first().copied() {
+        Some(result) => {
+            let ty = context.get_value(result).ty();
+            if arguments.len() != 1 || arguments[0].ty() != ty {
+                return Err(Error::VerificationError(
+                    "scf.while condition must carry the result type".to_string(),
+                ));
+            }
+            if terminator.operands.len() != 2
+                || context.get_value(terminator.operands[1]).ty() != ty
+            {
+                return Err(Error::VerificationError(
+                    "scf.condition must forward the carried value".to_string(),
+                ));
+            }
+        }
+        None => {
+            if !arguments.is_empty() || terminator.operands.len() != 1 {
+                return Err(Error::VerificationError(
+                    "resultless scf.while must not carry a condition value".to_string(),
+                ));
             }
         }
     }

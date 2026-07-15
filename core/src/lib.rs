@@ -45,7 +45,7 @@ pub use error::Error;
 pub use interfaces::{
     BranchGuard, BranchTerminator, Commutative, ConstantFold, ConstantLike, IntegerArithmetic,
     LoopLike, MemoryRead, MemoryWrite, OpCost, PromotableAllocation, RegionGuard, SameOperandType,
-    Terminator,
+    Terminator, TokenScope,
 };
 pub use ir_formatter::IRFormatter;
 pub use operand::Operand;

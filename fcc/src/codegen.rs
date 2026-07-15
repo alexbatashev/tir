@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use tir::builtin::{IntegerType, ModuleOp, UnitType, ops as b};
+use tir::builtin::{IntegerType, ModuleOp, TokenType, UnitType, ops as b};
 use tir::graph::{Dag, NodeId};
 use tir::ptr::{PtrType, ops as p};
 use tir::{Context, IRBuilder, Operand, Operation, TypeId, ValueId};
@@ -32,6 +32,8 @@ struct FnCodegen<'a> {
     builder: IRBuilder,
     locals: HashMap<EntityId, Slot>,
     signatures: &'a HashMap<EntityId, Signature>,
+    loop_scopes: Vec<ValueId>,
+    terminated: bool,
     /// Scratch holding the lowered SSA value of each node in the expression
     /// subtree currently being lowered, indexed by `node.index() - base`. Reused
     /// across expressions to avoid reallocating.
@@ -202,6 +204,8 @@ fn lower_function(
         builder: IRBuilder::new(func_op.body()),
         locals: HashMap::new(),
         signatures,
+        loop_scopes: Vec::new(),
+        terminated: false,
         values: Vec::new(),
     };
     cg.lower_body(func, &param_ids)?;
@@ -274,6 +278,9 @@ impl FnCodegen<'_> {
 
         for stmt in ast.children(func).skip(idx) {
             self.lower_stmt(stmt)?;
+            if self.terminated {
+                break;
+            }
         }
 
         Ok(())
@@ -314,6 +321,7 @@ impl FnCodegen<'_> {
                 };
                 self.builder
                     .insert(b::r#return(self.context, operand).build());
+                self.terminated = true;
                 Ok(())
             }
             AstKind::ExprStmt => {
@@ -322,10 +330,258 @@ impl FnCodegen<'_> {
                 }
                 Ok(())
             }
-            // Control flow and expression statements are parsed but not yet
-            // lowered; codegen for them is stubbed out for now.
+            AstKind::Block => {
+                for child in ast.children(stmt) {
+                    self.lower_stmt(child)?;
+                    if self.terminated {
+                        break;
+                    }
+                }
+                Ok(())
+            }
+            AstKind::While => {
+                let mut children = ast.children(stmt);
+                let condition = children.next().unwrap();
+                let body = children.next().unwrap();
+                let scope = self
+                    .context
+                    .create_value(TokenType::new(self.context), None);
+
+                let condition_region = self.context.create_region();
+                let condition_block = self.context.create_block(vec![]);
+                condition_region.add_block(condition_block.id());
+                self.in_block(condition_block, |cg| {
+                    let value = cg.lower_condition(condition)?;
+                    cg.builder
+                        .insert(cir::ops::condition(cg.context, value).build());
+                    Ok(())
+                })?;
+
+                let body_region = self.context.create_region();
+                let body_block = self.context.create_block(vec![scope.clone()]);
+                body_region.add_block(body_block.id());
+                self.loop_scopes.push(scope.id());
+                self.in_block(body_block.clone(), |cg| {
+                    cg.lower_stmt(body)?;
+                    cg.ensure_cir_yield(body_block);
+                    Ok(())
+                })?;
+                self.loop_scopes.pop();
+
+                self.builder.insert(
+                    cir::ops::r#while(
+                        self.context,
+                        Some(condition_region.id()),
+                        Some(body_region.id()),
+                    )
+                    .build(),
+                );
+                Ok(())
+            }
+            AstKind::DoWhile => {
+                let mut children = ast.children(stmt);
+                let body = children.next().unwrap();
+                let condition = children.next().unwrap();
+
+                let scope = self
+                    .context
+                    .create_value(TokenType::new(self.context), None);
+                let body_region = self.context.create_region();
+                let body_block = self.context.create_block(vec![scope.clone()]);
+                body_region.add_block(body_block.id());
+                self.loop_scopes.push(scope.id());
+                self.in_block(body_block.clone(), |cg| {
+                    cg.lower_stmt(body)?;
+                    cg.ensure_cir_yield(body_block);
+                    Ok(())
+                })?;
+                self.loop_scopes.pop();
+
+                let condition_region = self.context.create_region();
+                let condition_block = self.context.create_block(vec![]);
+                condition_region.add_block(condition_block.id());
+                self.in_block(condition_block, |cg| {
+                    let value = cg.lower_condition(condition)?;
+                    cg.builder
+                        .insert(cir::ops::condition(cg.context, value).build());
+                    Ok(())
+                })?;
+
+                self.builder.insert(
+                    cir::ops::r#do(
+                        self.context,
+                        Some(body_region.id()),
+                        Some(condition_region.id()),
+                    )
+                    .build(),
+                );
+                Ok(())
+            }
+            AstKind::For => {
+                let children = ast.children(stmt).collect::<Vec<_>>();
+                let [init, condition, step, body] = children.as_slice() else {
+                    unreachable!("for statement has four children");
+                };
+                if ast.get_node(*init).kind != AstKind::Empty {
+                    self.lower_stmt(*init)?;
+                }
+                let scope = self
+                    .context
+                    .create_value(TokenType::new(self.context), None);
+
+                let condition_region = self.context.create_region();
+                let condition_block = self.context.create_block(vec![]);
+                condition_region.add_block(condition_block.id());
+                self.in_block(condition_block, |cg| {
+                    let value = if ast.get_node(*condition).kind == AstKind::Empty {
+                        cg.builder
+                            .insert(
+                                b::constant(cg.context, 1, IntegerType::new(cg.context, 1)).build(),
+                            )
+                            .result()
+                    } else {
+                        cg.lower_condition(*condition)?
+                    };
+                    cg.builder
+                        .insert(cir::ops::condition(cg.context, value).build());
+                    Ok(())
+                })?;
+
+                let body_region = self.context.create_region();
+                let body_block = self.context.create_block(vec![scope.clone()]);
+                body_region.add_block(body_block.id());
+                self.loop_scopes.push(scope.id());
+                self.in_block(body_block.clone(), |cg| {
+                    cg.lower_stmt(*body)?;
+                    cg.ensure_cir_yield(body_block);
+                    Ok(())
+                })?;
+                self.loop_scopes.pop();
+
+                let step_region = self.context.create_region();
+                let step_block = self.context.create_block(vec![]);
+                step_region.add_block(step_block.id());
+                self.in_block(step_block.clone(), |cg| {
+                    if ast.get_node(*step).kind != AstKind::Empty {
+                        cg.lower_stmt(*step)?;
+                    }
+                    cg.ensure_cir_yield(step_block);
+                    Ok(())
+                })?;
+
+                self.builder.insert(
+                    cir::ops::r#for(
+                        self.context,
+                        Some(condition_region.id()),
+                        Some(body_region.id()),
+                        Some(step_region.id()),
+                    )
+                    .build(),
+                );
+                Ok(())
+            }
+            AstKind::If => {
+                let mut children = ast.children(stmt);
+                let condition = children.next().unwrap();
+                let then_stmt = children.next().unwrap();
+                let else_stmt = children.next();
+                let condition = self.lower_condition(condition)?;
+
+                let then_region = self.context.create_region();
+                let then_block = self.context.create_block(vec![]);
+                then_region.add_block(then_block.id());
+                self.in_block(then_block.clone(), |cg| {
+                    cg.lower_stmt(then_stmt)?;
+                    cg.ensure_cir_yield(then_block);
+                    Ok(())
+                })?;
+
+                let else_region = self.context.create_region();
+                let else_block = self.context.create_block(vec![]);
+                else_region.add_block(else_block.id());
+                self.in_block(else_block.clone(), |cg| {
+                    if let Some(else_stmt) = else_stmt {
+                        cg.lower_stmt(else_stmt)?;
+                    }
+                    cg.ensure_cir_yield(else_block);
+                    Ok(())
+                })?;
+
+                self.builder.insert(
+                    cir::ops::r#if(
+                        self.context,
+                        condition,
+                        Some(then_region.id()),
+                        Some(else_region.id()),
+                    )
+                    .build(),
+                );
+                Ok(())
+            }
+            AstKind::Break => {
+                let scope = *self.loop_scopes.last().unwrap();
+                self.builder
+                    .insert(cir::ops::r#break(self.context, scope).build());
+                self.terminated = true;
+                Ok(())
+            }
+            AstKind::Continue => {
+                let scope = *self.loop_scopes.last().unwrap();
+                self.builder
+                    .insert(cir::ops::r#continue(self.context, scope).build());
+                self.terminated = true;
+                Ok(())
+            }
             kind => Err(unsupported(ast, stmt, format!("statement {kind:?}"))),
         }
+    }
+
+    fn in_block<T>(
+        &mut self,
+        block: std::sync::Arc<tir::Block>,
+        lower: impl FnOnce(&mut Self) -> Result<T, Diagnostic>,
+    ) -> Result<T, Diagnostic> {
+        let outer = std::mem::replace(&mut self.builder, IRBuilder::new(block));
+        let outer_terminated = std::mem::replace(&mut self.terminated, false);
+        let result = lower(self);
+        self.builder = outer;
+        self.terminated = outer_terminated;
+        result
+    }
+
+    fn ensure_cir_yield(&mut self, block: std::sync::Arc<tir::Block>) {
+        let terminated = block.op_ids().last().is_some_and(|op| {
+            self.context
+                .get_op(*op)
+                .as_interface::<dyn tir::Terminator>()
+                .is_some()
+        });
+        if !terminated {
+            self.builder.insert(cir::ops::r#yield(self.context).build());
+        }
+    }
+
+    fn lower_condition(&mut self, expression: NodeId) -> Result<ValueId, Diagnostic> {
+        let value = self.lower_expr(expression)?;
+        let ty = self.context.get_value(value).ty();
+        if ty == IntegerType::new(self.context, 1) {
+            return Ok(value);
+        }
+        let zero = self
+            .builder
+            .insert(b::constant(self.context, 0, ty).build())
+            .result();
+        Ok(self
+            .builder
+            .insert(
+                b::CmpIOpBuilder::new(self.context)
+                    .lhs(value)
+                    .rhs(zero)
+                    .predicate("ne")
+                    .result_type(IntegerType::new(self.context, 1))
+                    .build(),
+            )
+            .result())
     }
 
     /// Lower an expression subtree in one post-order pass: operands precede their
@@ -409,6 +665,45 @@ impl FnCodegen<'_> {
                             .insert(b::muli(self.context, l, r, ty).build())
                             .result(),
                     }
+                }
+                kind @ (AstKind::Lt
+                | AstKind::Gt
+                | AstKind::Le
+                | AstKind::Ge
+                | AstKind::Eq
+                | AstKind::Ne) => {
+                    let mut children = ast.children(node);
+                    let lhs_node = children.next().unwrap();
+                    let rhs_node = children.next().unwrap();
+                    let lhs = self.values[lhs_node.index() - base];
+                    let rhs = self.values[rhs_node.index() - base];
+                    let signed = self
+                        .typed
+                        .integer_is_signed(node_type(self.typed, lhs_node))
+                        .unwrap_or(true);
+                    let predicate = match (kind, signed) {
+                        (AstKind::Lt, true) => "slt",
+                        (AstKind::Lt, false) => "ult",
+                        (AstKind::Gt, true) => "sgt",
+                        (AstKind::Gt, false) => "ugt",
+                        (AstKind::Le, true) => "sle",
+                        (AstKind::Le, false) => "ule",
+                        (AstKind::Ge, true) => "sge",
+                        (AstKind::Ge, false) => "uge",
+                        (AstKind::Eq, _) => "eq",
+                        (AstKind::Ne, _) => "ne",
+                        _ => unreachable!(),
+                    };
+                    self.builder
+                        .insert(
+                            b::CmpIOpBuilder::new(self.context)
+                                .lhs(lhs)
+                                .rhs(rhs)
+                                .predicate(predicate)
+                                .result_type(IntegerType::new(self.context, 1))
+                                .build(),
+                        )
+                        .result()
                 }
                 // The richer operators (division, comparison, logical, unary,
                 // calls) are parsed but not yet lowered; stub them out for now.
