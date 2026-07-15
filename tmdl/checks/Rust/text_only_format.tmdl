@@ -9,7 +9,7 @@ register_class GPR for [TextIsa] {
     param WIDTH: Integer = self.XLEN;
 
     registers {
-        r0..r3 => { traits = [caller_saved] },
+        r0..r3 => {                         },
     }
 }
 

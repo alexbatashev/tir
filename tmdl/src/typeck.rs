@@ -747,7 +747,7 @@ mod tests {
         register_class VR for [RVV] {
             param ENCODING_LEN: Integer = 5;
             param WIDTH: Integer = self.VLEN;
-            registers { v0..v31 => { traits = [caller_saved] }, }
+            registers { v0..v31 => {}, }
         }
         template VArithVV for [RVV] {
             param MNEMONIC: String;

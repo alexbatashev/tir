@@ -186,6 +186,7 @@ impl Compiler {
         }
 
         crate::ast::resolve_register_class_inheritance(&mut parsed_files);
+        crate::ast::resolve_abi_inheritance(&mut parsed_files);
 
         let sema_diags = sema_analyze(&parsed_files, self.text_only);
         if !sema_diags.is_empty() {

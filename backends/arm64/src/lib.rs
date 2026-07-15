@@ -313,8 +313,7 @@ fn emit_branch_nonzero(
     ]
 }
 
-/// The AArch64 link register (`lr` = `x30`) and zero register (`xzr` = slot 31).
-const LR: u16 = 30;
+/// The AArch64 zero register (`xzr` = slot 31).
 const XZR: u16 = 31;
 
 /// Build a register-register move (`orr rd, xzr, rm`).
@@ -332,143 +331,14 @@ fn mv(
     )
 }
 
-/// Lower the builtin call ops to AArch64 virtual calls. Arguments are moved
-/// into the ABI argument registers and the result is copied out of the first
-/// return register, so the allocator never has to pin long live ranges. The
-/// call clobbers every caller-saved register — including `lr`, which also holds
-/// this function's own return address, so it is saved into a fresh virtual
-/// register across the call.
-fn lower_calls(
-    context: &tir::Context,
-    op: &tir::OperationRef,
-    rewriter: &mut tir::Rewriter,
-) -> Result<bool, tir::PassError> {
-    use tir::attributes::AttributeValue;
-    use tir::builtin::{CallOp, IndirectCallOp, UnitType};
-
-    let (callee_value, args, result) = if let Some(call) = op.as_op::<CallOp>() {
-        (None, call.args(), call.result())
-    } else if let Some(call) = op.as_op::<IndirectCallOp>() {
-        (Some(call.callee()), call.args(), call.result())
-    } else {
-        return Ok(false);
-    };
-
-    let info = register_info();
-    let class = info
-        .class("GPR")
-        .expect("arm64 register info must define GPR");
-    if args.len() > class.arguments.len() {
-        return Err(tir::PassError::InvalidRuleSet(
-            "stack-passed call arguments are not supported by codegen yet".to_string(),
-        ));
-    }
-
-    // Detach the callee and every argument into fresh virtual registers before
-    // any argument register is written: an operand may itself live in an
-    // argument register (e.g. this function's own incoming arguments), so it
-    // must be read before the moves below clobber them, whatever the argument
-    // permutation.
-    let detach = |rewriter: &mut tir::Rewriter, value: tir::ValueId| {
-        let ty = context.get_value(value).ty();
-        let fresh = context.create_value(ty, None).id().number();
-        let copy = mv(
-            context,
-            virt(fresh, RegClass::GPR.id()),
-            virt(value.number(), RegClass::GPR.id()),
-        );
-        rewriter.insert_op_before(op, copy.as_ref()).map(|()| fresh)
-    };
-    let fresh_callee = callee_value
-        .map(|value| detach(rewriter, value))
-        .transpose()?;
-    let mut fresh_args = Vec::with_capacity(args.len());
-    for arg in &args {
-        fresh_args.push(detach(rewriter, *arg)?);
-    }
-
-    let lr = (RegClass::GPR.id(), LR);
-    let saved_lr = context
-        .create_value(tir::builtin::IntegerType::new(context, 64), None)
-        .id();
-    let save = mv(
-        context,
-        virt(saved_lr.number(), RegClass::GPR.id()),
-        phys(&lr),
-    );
-    rewriter.insert_op_before(op, save.as_ref())?;
-
-    for (&fresh, &reg) in fresh_args.iter().zip(class.arguments.iter()) {
-        let copy = mv(
-            context,
-            phys(&(RegClass::GPR.id(), reg)),
-            virt(fresh, RegClass::GPR.id()),
-        );
-        rewriter.insert_op_before(op, copy.as_ref())?;
-    }
-
-    let virtual_call: Box<dyn Operation> = match fresh_callee {
-        None => {
-            let name = op.as_op::<CallOp>().expect("matched above").callee();
-            Box::new(
-                VirtualCallOpBuilder::new(context)
-                    .attr("callee", AttributeValue::Str(name))
-                    .attr("clobbers", caller_saved_clobbers())
-                    .build(),
-            )
-        }
-        Some(fresh) => Box::new(
-            VirtualIndirectCallOpBuilder::new(context)
-                .attr("callee_reg", virt(fresh, RegClass::GPR.id()))
-                .attr("clobbers", caller_saved_clobbers())
-                .build(),
-        ),
-    };
-
-    rewriter.insert_op_before(op, virtual_call.as_ref())?;
-    let restore = mv(
-        context,
-        phys(&lr),
-        virt(saved_lr.number(), RegClass::GPR.id()),
-    );
-
-    let ret_reg = class.return_values[0];
-    if context.get_value(result).ty() == UnitType::new(context) {
-        rewriter.replace_op(op, restore.as_ref())?;
-    } else {
-        rewriter.insert_op_before(op, restore.as_ref())?;
-        let copy = mv(
-            context,
-            virt(result.number(), RegClass::GPR.id()),
-            phys(&(RegClass::GPR.id(), ret_reg)),
-        );
-        rewriter.replace_op(op, copy.as_ref())?;
-    }
-    Ok(true)
-}
-
-/// The caller-saved registers a call clobbers, as a register-array attribute.
-fn caller_saved_clobbers() -> tir::attributes::AttributeValue {
-    let info = register_info();
-    let class = info
-        .class("GPR")
-        .expect("arm64 register info must define GPR");
-    tir::attributes::AttributeValue::Array(
-        class
-            .caller_saved
-            .iter()
-            .map(|&index| phys(&(RegClass::GPR.id(), index)))
-            .collect(),
-    )
-}
-
 pub fn create_isel_pass(context: &tir::Context) -> tir::backend::isel::InstructionSelectPass {
-    create_isel_pass_for(context, Feature::ALL)
+    create_isel_pass_for(context, Feature::ALL, default_abi())
 }
 
 fn create_isel_pass_for(
     context: &tir::Context,
     features: &[Feature],
+    abi: &'static tir::backend::abi::AbiInfo,
 ) -> tir::backend::isel::InstructionSelectPass {
     tir::backend::isel::InstructionSelectPass::new(get_isel_rules(context, features))
         .with_axioms(include_str!("isel.axioms"))
@@ -477,13 +347,106 @@ fn create_isel_pass_for(
             cond_nonzero: emit_branch_nonzero,
         })
         .with_op_lowering(lower_func_and_return_to_asm_symbol)
-        .with_op_lowering(lower_calls)
+        .with_call_lowering(abi, Box::new(Arm64CallEmitter))
 }
 
-/// The AArch64 stack pointer, reserved from allocation and used as the base for
-/// spill slots after the frame has been reserved.
-fn sp() -> tir::backend::liveness::PhysReg {
-    (RegClass::GPRsp.id(), 31)
+struct Arm64CallEmitter;
+
+impl tir::backend::call_lowering::CallEmitter for Arm64CallEmitter {
+    fn copy(
+        &self,
+        context: &tir::Context,
+        dst: tir::attributes::AttributeValue,
+        src: tir::attributes::AttributeValue,
+    ) -> Box<dyn Operation> {
+        mv(context, dst, src)
+    }
+
+    fn vcall(
+        &self,
+        context: &tir::Context,
+        callee: String,
+        clobbers: tir::attributes::AttributeValue,
+    ) -> Box<dyn Operation> {
+        Box::new(
+            VirtualCallOpBuilder::new(context)
+                .attr("callee", tir::attributes::AttributeValue::Str(callee))
+                .attr("clobbers", clobbers)
+                .build(),
+        )
+    }
+
+    fn vcall_indirect(
+        &self,
+        context: &tir::Context,
+        callee: tir::attributes::AttributeValue,
+        clobbers: tir::attributes::AttributeValue,
+    ) -> Box<dyn Operation> {
+        Box::new(
+            VirtualIndirectCallOpBuilder::new(context)
+                .attr("callee_reg", callee)
+                .attr("clobbers", clobbers)
+                .build(),
+        )
+    }
+
+    fn stack_arg_store(
+        &self,
+        context: &tir::Context,
+        abi: &tir::backend::abi::AbiInfo,
+        value: tir::attributes::AttributeValue,
+        offset: i64,
+    ) -> Result<Box<dyn Operation>, tir::PassError> {
+        Ok(Box::new(
+            StoreDoublewordOpBuilder::new(context)
+                .attr("rt", value)
+                .attr("rn", phys(&abi.sp))
+                .attr("imm", tir::attributes::AttributeValue::Int(offset))
+                .build(),
+        ))
+    }
+
+    fn call_prefix(
+        &self,
+        context: &tir::Context,
+        abi: &tir::backend::abi::AbiInfo,
+        outgoing_size: u32,
+    ) -> Vec<Box<dyn Operation>> {
+        if outgoing_size == 0 {
+            return Vec::new();
+        }
+        vec![Box::new(
+            SubImmediateOpBuilder::new(context)
+                .attr("rd", phys(&abi.sp))
+                .attr("rn", phys(&abi.sp))
+                .attr(
+                    "imm",
+                    tir::attributes::AttributeValue::Int(i64::from(outgoing_size)),
+                )
+                .build(),
+        )]
+    }
+
+    fn call_suffix(
+        &self,
+        context: &tir::Context,
+        abi: &tir::backend::abi::AbiInfo,
+        outgoing_size: u32,
+    ) -> Vec<Box<dyn Operation>> {
+        if outgoing_size == 0 {
+            return Vec::new();
+        }
+        vec![Box::new(
+            AddImmediateOpBuilder::new(context)
+                .attr("rd", phys(&abi.sp))
+                .attr("rn", phys(&abi.sp))
+                .attr(
+                    "imm",
+                    tir::attributes::AttributeValue::Int(i64::from(outgoing_size)),
+                )
+                .build(),
+        )]
+    }
 }
 
 fn phys(reg: &tir::backend::liveness::PhysReg) -> tir::attributes::AttributeValue {
@@ -507,14 +470,6 @@ pub struct Arm64RegAlloc;
 impl tir::backend::regalloc::TargetRegAlloc for Arm64RegAlloc {
     fn register_info(&self) -> tir::backend::regalloc::RegisterInfo {
         register_info()
-    }
-
-    fn frame_align(&self) -> u32 {
-        16
-    }
-
-    fn frame_register(&self) -> tir::backend::liveness::PhysReg {
-        sp()
     }
 
     fn emit_spill_store(
@@ -573,10 +528,11 @@ impl tir::backend::regalloc::TargetRegAlloc for Arm64RegAlloc {
     fn emit_prologue(
         &self,
         context: &tir::Context,
+        abi: &tir::backend::abi::AbiInfo,
         size: u32,
         saves: &[(tir::backend::liveness::PhysReg, i64)],
     ) -> Vec<Box<dyn Operation>> {
-        let sp = sp();
+        let sp = abi.sp;
         let mut ops: Vec<Box<dyn Operation>> = vec![Box::new(
             SubImmediateOpBuilder::new(context)
                 .attr("rd", phys(&sp))
@@ -599,10 +555,11 @@ impl tir::backend::regalloc::TargetRegAlloc for Arm64RegAlloc {
     fn emit_epilogue(
         &self,
         context: &tir::Context,
+        abi: &tir::backend::abi::AbiInfo,
         size: u32,
         saves: &[(tir::backend::liveness::PhysReg, i64)],
     ) -> Vec<Box<dyn Operation>> {
-        let sp = sp();
+        let sp = abi.sp;
         let mut ops: Vec<Box<dyn Operation>> = Vec::new();
         for (reg, offset) in saves {
             ops.push(Box::new(
@@ -669,12 +626,19 @@ impl tir::backend::regalloc::TargetRegAlloc for Arm64RegAlloc {
 }
 
 pub fn create_regalloc_pass() -> tir::backend::regalloc::RegisterAllocationPass {
-    tir::backend::regalloc::RegisterAllocationPass::new(Box::new(Arm64RegAlloc))
+    create_regalloc_pass_for(default_abi())
+}
+
+fn create_regalloc_pass_for(
+    abi: &'static tir::backend::abi::AbiInfo,
+) -> tir::backend::regalloc::RegisterAllocationPass {
+    tir::backend::regalloc::RegisterAllocationPass::with_abi(Box::new(Arm64RegAlloc), abi)
 }
 
 /// The AArch64 (ARMv8-A) target, selected via `--march`/`--mcpu`.
 pub struct Arm64Target {
     config: TargetConfig,
+    selected_abi: &'static tir::backend::abi::AbiInfo,
 }
 
 impl tir::backend::TargetMachine for Arm64Target {
@@ -689,16 +653,24 @@ impl tir::backend::TargetMachine for Arm64Target {
     }
 
     fn isel_pass(&self, context: &tir::Context) -> tir::backend::isel::InstructionSelectPass {
-        create_isel_pass_for(context, &self.config.features)
+        create_isel_pass_for(context, &self.config.features, self.abi())
     }
 
     fn regalloc_pass(&self) -> tir::backend::regalloc::RegisterAllocationPass {
-        create_regalloc_pass()
+        create_regalloc_pass_for(self.abi())
     }
 
     fn register_info(&self) -> tir::backend::regalloc::RegisterInfo {
         use tir::backend::regalloc::TargetRegAlloc;
         Arm64RegAlloc.register_info()
+    }
+
+    fn abis(&self) -> &'static [tir::backend::abi::AbiInfo] {
+        abis()
+    }
+
+    fn abi(&self) -> &'static tir::backend::abi::AbiInfo {
+        self.selected_abi
     }
 
     fn asm_parser(&self, _context: &tir::Context) -> tir::backend::AsmParser {
@@ -769,6 +741,7 @@ fn select_arm64(
     march: &str,
     mcpu: Option<&str>,
     mattr: Option<&str>,
+    mabi: Option<&str>,
 ) -> Result<Option<Box<dyn tir::backend::TargetMachine>>, String> {
     let owned = ["arm", "aarch64"]
         .iter()
@@ -777,7 +750,23 @@ fn select_arm64(
         return Ok(None);
     }
     let config = TargetConfig::parse(march, mcpu, mattr)?;
-    Ok(Some(Box::new(Arm64Target { config })))
+    let selected_abi = match mabi {
+        Some(name) => abi_by_name(name).ok_or_else(|| {
+            format!(
+                "unknown ABI '{name}' for arm64 (available: {})",
+                abis()
+                    .iter()
+                    .map(|abi| abi.name)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })?,
+        None => default_abi(),
+    };
+    Ok(Some(Box::new(Arm64Target {
+        config,
+        selected_abi,
+    })))
 }
 
 tir::register_target!(select_arm64, ["arm64"]);
@@ -791,6 +780,81 @@ mod tests {
     };
 
     use crate::{Arm64Dialect, RegClass, create_isel_pass, create_regalloc_pass};
+
+    #[test]
+    fn generated_abi_matches_aapcs64_register_convention() {
+        let abi = crate::default_abi();
+        let int_args = abi
+            .args
+            .iter()
+            .find(|sequence| sequence.kind == tir::backend::abi::ValueKind::Int)
+            .unwrap();
+        let int_rets = abi
+            .rets
+            .iter()
+            .find(|sequence| sequence.kind == tir::backend::abi::ValueKind::Int)
+            .unwrap();
+        let float_args = abi
+            .args
+            .iter()
+            .find(|sequence| sequence.kind == tir::backend::abi::ValueKind::Float)
+            .unwrap();
+        let vector_rets = abi
+            .rets
+            .iter()
+            .find(|sequence| sequence.kind == tir::backend::abi::ValueKind::Vector)
+            .unwrap();
+
+        assert_eq!(abi.name, "aapcs64");
+        assert_eq!(abi.sp, (RegClass::GPRsp.id(), 31));
+        assert_eq!(abi.ra, Some((RegClass::GPR.id(), 30)));
+        assert_eq!(abi.fp, Some((RegClass::GPR.id(), 29)));
+        assert_eq!(abi.stack.align, 16);
+        assert_eq!(abi.stack.slot_size, 8);
+        assert_eq!(
+            abi.stack.save_style,
+            tir::backend::abi::SaveStyle::FrameSlots
+        );
+        assert_eq!(
+            int_args
+                .regs
+                .iter()
+                .map(|register| register.1)
+                .collect::<Vec<_>>(),
+            (0..=7).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            int_rets
+                .regs
+                .iter()
+                .map(|register| register.1)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert_eq!(float_args.regs[0], (RegClass::FPR64.id(), 0));
+        assert_eq!(float_args.regs.last(), Some(&(RegClass::FPR64.id(), 7)));
+        assert_eq!(
+            vector_rets.regs,
+            &[
+                (RegClass::VPR.id(), 0),
+                (RegClass::VPR.id(), 1),
+                (RegClass::VPR.id(), 2),
+                (RegClass::VPR.id(), 3),
+            ]
+        );
+        assert_eq!(
+            &abi.callee_saved[..11],
+            &(19..=29)
+                .map(|index| (RegClass::GPR.id(), index))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            &abi.callee_saved[11..],
+            &(8..=15)
+                .map(|index| (RegClass::VPR.id(), index))
+                .collect::<Vec<_>>()
+        );
+    }
 
     #[test]
     #[ignore = "run with `cargo xtask axioms`"]
@@ -1147,22 +1211,7 @@ mod tests {
 
     impl tir::backend::regalloc::TargetRegAlloc for TinyArm64 {
         fn register_info(&self) -> tir::backend::regalloc::RegisterInfo {
-            tir::backend::regalloc::RegisterInfo {
-                classes: &[tir::backend::regalloc::RegClassInfo {
-                    name: "GPR",
-                    file: "GPR",
-                    allocation_order: &[0, 1, 2, 3, 4],
-                    caller_saved: &[0, 1, 2, 3, 4],
-                    callee_saved: &[],
-                    arguments: &[0, 1],
-                    return_values: &[0],
-                    reserved: &[29, 30, 31],
-                    group_width: 1,
-                }],
-            }
-        }
-        fn frame_register(&self) -> tir::backend::liveness::PhysReg {
-            self.0.frame_register()
+            crate::register_info()
         }
         fn emit_spill_store(
             &self,
@@ -1187,18 +1236,20 @@ mod tests {
         fn emit_prologue(
             &self,
             c: &tir::Context,
+            a: &tir::backend::abi::AbiInfo,
             s: u32,
             saves: &[(tir::backend::liveness::PhysReg, i64)],
         ) -> Vec<Box<dyn Operation>> {
-            self.0.emit_prologue(c, s, saves)
+            self.0.emit_prologue(c, a, s, saves)
         }
         fn emit_epilogue(
             &self,
             c: &tir::Context,
+            a: &tir::backend::abi::AbiInfo,
             s: u32,
             saves: &[(tir::backend::liveness::PhysReg, i64)],
         ) -> Vec<Box<dyn Operation>> {
-            self.0.emit_epilogue(c, s, saves)
+            self.0.emit_epilogue(c, a, s, saves)
         }
     }
 
@@ -1275,8 +1326,17 @@ mod tests {
         mb.insert(ops::module_end(&context).build());
 
         let mut pm = PassManager::new();
-        pm.add_pass(tir::backend::regalloc::RegisterAllocationPass::new(
+        let mut abi = *crate::default_abi();
+        abi.caller_saved = Box::leak(
+            (0..=4)
+                .map(|index| (RegClass::GPR.id(), index))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
+        abi.callee_saved = &[];
+        pm.add_pass(tir::backend::regalloc::RegisterAllocationPass::with_abi(
             Box::new(TinyArm64(crate::Arm64RegAlloc)),
+            Box::leak(Box::new(abi)),
         ));
         pm.run(&context, context.get_op(module.id()))
             .expect("register allocation should converge with spilling");
@@ -1858,6 +1918,7 @@ mod tests {
         let context = Context::with_default_dialects();
         let target = crate::Arm64Target {
             config: crate::TargetConfig::parse("arm64", None, None).expect("march should parse"),
+            selected_abi: crate::default_abi(),
         };
         target.register_dialects(&context);
 
@@ -1945,6 +2006,7 @@ mod tests {
         let context = Context::with_default_dialects();
         let target = crate::Arm64Target {
             config: crate::TargetConfig::parse("arm64", None, None).expect("march should parse"),
+            selected_abi: crate::default_abi(),
         };
         target.register_dialects(&context);
 

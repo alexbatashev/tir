@@ -25,14 +25,14 @@ register_class GPRC for [C] {
     param WIDTH: Integer = self.XLEN;
 
     registers {
-        x8("s0") => { traits = [saved, callee_saved] },
-        x9("s1") => { traits = [saved, callee_saved] },
-        x10("a0") => { traits = [argument, return_value, caller_saved] },
-        x11("a1") => { traits = [argument, return_value, caller_saved] },
-        x12("a2") => { traits = [argument, caller_saved] },
-        x13("a3") => { traits = [argument, caller_saved] },
-        x14("a4") => { traits = [argument, caller_saved] },
-        x15("a5") => { traits = [argument, caller_saved] },
+        x8("s0") => {},
+        x9("s1") => {},
+        x10("a0") => {},
+        x11("a1") => {},
+        x12("a2") => {},
+        x13("a3") => {},
+        x14("a4") => {},
+        x15("a5") => {},
     }
 }
 
@@ -44,14 +44,14 @@ register_class FPR64C for [Zcd] {
     param WIDTH: Integer = 64;
 
     registers {
-        f8("fs0") => { traits = [float, saved, callee_saved] },
-        f9("fs1") => { traits = [float, saved, callee_saved] },
-        f10("fa0") => { traits = [float, argument, return_value, caller_saved] },
-        f11("fa1") => { traits = [float, argument, return_value, caller_saved] },
-        f12("fa2") => { traits = [float, argument, caller_saved] },
-        f13("fa3") => { traits = [float, argument, caller_saved] },
-        f14("fa4") => { traits = [float, argument, caller_saved] },
-        f15("fa5") => { traits = [float, argument, caller_saved] },
+        f8("fs0") => { traits = [float] },
+        f9("fs1") => { traits = [float] },
+        f10("fa0") => { traits = [float] },
+        f11("fa1") => { traits = [float] },
+        f12("fa2") => { traits = [float] },
+        f13("fa3") => { traits = [float] },
+        f14("fa4") => { traits = [float] },
+        f15("fa5") => { traits = [float] },
     }
 }
 
@@ -62,14 +62,14 @@ register_class FPR32C for [Zcf] {
     param WIDTH: Integer = 32;
 
     registers {
-        f8("fs0") => { traits = [float, saved, callee_saved] },
-        f9("fs1") => { traits = [float, saved, callee_saved] },
-        f10("fa0") => { traits = [float, argument, return_value, caller_saved] },
-        f11("fa1") => { traits = [float, argument, return_value, caller_saved] },
-        f12("fa2") => { traits = [float, argument, caller_saved] },
-        f13("fa3") => { traits = [float, argument, caller_saved] },
-        f14("fa4") => { traits = [float, argument, caller_saved] },
-        f15("fa5") => { traits = [float, argument, caller_saved] },
+        f8("fs0") => { traits = [float] },
+        f9("fs1") => { traits = [float] },
+        f10("fa0") => { traits = [float] },
+        f11("fa1") => { traits = [float] },
+        f12("fa2") => { traits = [float] },
+        f13("fa3") => { traits = [float] },
+        f14("fa4") => { traits = [float] },
+        f15("fa5") => { traits = [float] },
     }
 }
 

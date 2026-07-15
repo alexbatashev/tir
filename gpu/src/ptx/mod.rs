@@ -32,7 +32,10 @@ impl tir::backend::TargetMachine for PtxTarget {
     }
 
     fn regalloc_pass(&self) -> tir::backend::regalloc::RegisterAllocationPass {
-        tir::backend::regalloc::RegisterAllocationPass::new(Box::new(PtxRegAlloc))
+        tir::backend::regalloc::RegisterAllocationPass::with_abi(
+            Box::new(PtxRegAlloc),
+            ptx_regalloc_abi(),
+        )
     }
 
     fn register_info(&self) -> tir::backend::regalloc::RegisterInfo {
@@ -85,6 +88,71 @@ impl tir::backend::TargetMachine for PtxTarget {
     }
 }
 
+fn ptx_regalloc_abi() -> &'static tir::backend::abi::AbiInfo {
+    use std::sync::OnceLock;
+    use tir::backend::abi::{
+        AbiInfo, ClassifierKind, Overflow, PassSeq, SaveStyle, StackLayout, ValueKind,
+    };
+
+    static ABI: OnceLock<AbiInfo> = OnceLock::new();
+    ABI.get_or_init(|| {
+        let int_args = Box::leak(
+            (0..8)
+                .map(|index| (RegClass::RD.id(), index))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
+        let caller_saved = Box::leak(
+            [
+                RegClass::P.id(),
+                RegClass::RS.id(),
+                RegClass::R.id(),
+                RegClass::RD.id(),
+                RegClass::F.id(),
+                RegClass::FD.id(),
+            ]
+            .into_iter()
+            .flat_map(|class| (0..16).map(move |index| (class, index)))
+            .filter(|register| *register != (RegClass::RD.id(), 15))
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
+        );
+        AbiInfo {
+            name: "ptx-internal",
+            stack: StackLayout {
+                align: 8,
+                slot_size: 8,
+                red_zone: 0,
+                grows_down: true,
+                save_style: SaveStyle::FrameSlots,
+            },
+            sp: (RegClass::RD.id(), 15),
+            ra: None,
+            fp: None,
+            args: Box::leak(
+                vec![PassSeq {
+                    kind: ValueKind::Int,
+                    regs: int_args,
+                    overflow: Overflow::Stack,
+                }]
+                .into_boxed_slice(),
+            ),
+            rets: Box::leak(
+                vec![PassSeq {
+                    kind: ValueKind::Int,
+                    regs: &int_args[..1],
+                    overflow: Overflow::Stack,
+                }]
+                .into_boxed_slice(),
+            ),
+            callee_saved: &[],
+            caller_saved,
+            reserved: &[],
+            classifier: ClassifierKind::Sysv,
+        }
+    })
+}
+
 /// PTX has no stack, so register spilling is unsupported; the round-trip and
 /// isel-demo paths never spill.
 struct PtxRegAlloc;
@@ -92,10 +160,6 @@ struct PtxRegAlloc;
 impl tir::backend::regalloc::TargetRegAlloc for PtxRegAlloc {
     fn register_info(&self) -> tir::backend::regalloc::RegisterInfo {
         register_info()
-    }
-
-    fn frame_register(&self) -> tir::backend::liveness::PhysReg {
-        (RegClass::RD.id(), 15)
     }
 
     fn emit_spill_store(
@@ -123,6 +187,7 @@ impl tir::backend::regalloc::TargetRegAlloc for PtxRegAlloc {
     fn emit_prologue(
         &self,
         _context: &tir::Context,
+        _abi: &tir::backend::abi::AbiInfo,
         _size: u32,
         _saves: &[(tir::backend::liveness::PhysReg, i64)],
     ) -> Vec<Box<dyn tir::Operation>> {
@@ -132,6 +197,7 @@ impl tir::backend::regalloc::TargetRegAlloc for PtxRegAlloc {
     fn emit_epilogue(
         &self,
         _context: &tir::Context,
+        _abi: &tir::backend::abi::AbiInfo,
         _size: u32,
         _saves: &[(tir::backend::liveness::PhysReg, i64)],
     ) -> Vec<Box<dyn tir::Operation>> {
@@ -143,6 +209,7 @@ fn select_ptx(
     march: &str,
     _mcpu: Option<&str>,
     _mattr: Option<&str>,
+    _mabi: Option<&str>,
 ) -> Result<Option<Box<dyn tir::backend::TargetMachine>>, String> {
     if !march.trim().eq_ignore_ascii_case("ptx") {
         return Ok(None);

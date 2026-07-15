@@ -29,8 +29,15 @@ struct TargetIntegerLegalizer {
 impl TargetIntegerLegalizer {
     fn new(target: &dyn TargetMachine) -> Self {
         let info = target.register_info();
-        let class = info
-            .default_integer_class()
+        let class = target
+            .abis()
+            .first()
+            .and_then(|abi| info.default_integer_class(abi))
+            .or_else(|| {
+                info.classes
+                    .first()
+                    .map(crate::backend::regalloc::RegClassId::new)
+            })
             .expect("target must define an integer register class");
         let max_width = target
             .register_widths()

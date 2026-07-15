@@ -1,0 +1,49 @@
+// RUN: tmdlc --action=emit-ast-json --output=- %s | filecheck %s
+
+isa RV64I {
+    param XLEN: Integer = 64;
+}
+
+isa RV64ID requires RV64I {}
+
+register_class GPR for [RV64I] {
+    registers {
+        x0..x31 => {  },
+    }
+}
+
+register_class FPR64 for [RV64ID] {
+    registers {
+        f0..f31 => {  },
+    }
+}
+
+abi LP64("lp64") for [RV64I] {
+    stack { align = 16; grows = down; red_zone = 0; slot_size = self.XLEN / 8; }
+    sp = GPR::x2;
+    ra = GPR::x1;
+    fp = GPR::x8;
+    args int -> [GPR::x10..GPR::x17], then stack;
+    rets int -> [GPR::x10, GPR::x11];
+     callee_saved = [GPR::x2, GPR::x8..GPR::x9, GPR::x18..GPR::x27];
+     reserved = [GPR::x0, GPR::x3, GPR::x4];
+    classifier = riscv;
+}
+
+abi LP64D("lp64d") for [RV64ID] : LP64 {
+    args float -> [FPR64::f10..FPR64::f17], then int;
+    rets float -> [FPR64::f10, FPR64::f11];
+     callee_saved = [GPR::x2, GPR::x8..GPR::x9, GPR::x18..GPR::x27,
+                    FPR64::f8..FPR64::f9, FPR64::f18..FPR64::f27];
+}
+
+// CHECK: "Abi": {
+// CHECK: "name": "LP64",
+// CHECK: "alias": "lp64",
+// CHECK: "classifier": "riscv"
+// CHECK: "Abi": {
+// CHECK: "name": "LP64D",
+// CHECK: "alias": "lp64d",
+// CHECK: "kind": "Int"
+// CHECK: "kind": "Float"
+// CHECK: "classifier": "riscv"

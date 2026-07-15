@@ -21,6 +21,9 @@ pub struct ToolArgs {
     /// Target feature toggles (e.g. `+m,-zmmul`), applied on top of `--march`.
     #[arg(long)]
     mattr: Option<String>,
+    /// Target calling convention.
+    #[arg(long)]
+    mabi: Option<String>,
     /// Optional stage after which pipeline is stopped
     #[arg(value_enum, long, conflicts_with = "filetype")]
     stage: Option<Stage>,
@@ -57,8 +60,12 @@ pub enum FileType {
 }
 
 pub fn run(args: ToolArgs) -> Result<(), Box<dyn Error>> {
-    let target =
-        tir::backend::select_target(&args.march, args.mcpu.as_deref(), args.mattr.as_deref())?;
+    let target = tir::backend::select_target_with_abi(
+        &args.march,
+        args.mcpu.as_deref(),
+        args.mattr.as_deref(),
+        args.mabi.as_deref(),
+    )?;
 
     let context = Context::with_default_dialects();
     target.register_dialects(&context);

@@ -10,7 +10,7 @@ register_class XMM for [X86_64] {
     param WIDTH: Integer = 64;
 
     registers {
-        xmm0..xmm15 => { traits = [float, caller_saved] },
+        xmm0..xmm15 => { traits = [float] },
     }
 }
 

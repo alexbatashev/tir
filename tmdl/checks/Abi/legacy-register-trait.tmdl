@@ -1,0 +1,11 @@
+// RUN: tmdlc --action=emit-ast-json --output=- %s | filecheck %s
+
+isa TestIsa {}
+
+register_class GPR for [TestIsa] {
+    registers {
+        x0 => { traits = [caller_saved] },
+    }
+}
+
+// CHECK: register trait 'caller_saved' moved to abi

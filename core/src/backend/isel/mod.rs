@@ -639,6 +639,7 @@ pub struct InstructionSelectPass {
     branch_emitters: Option<BranchEmitters>,
     cost_model: Box<dyn IselCostModel>,
     op_lowerings: Vec<OpLowering>,
+    call_lowering: Option<crate::backend::call_lowering::CallLowering>,
     /// The solved emission plan of every block (or the error explaining why it
     /// cannot be selected), populated up front when the pass visits each function.
     plans: HashMap<BlockId, Result<BlockPlan, String>>,
@@ -673,6 +674,7 @@ impl InstructionSelectPass {
             branch_emitters: None,
             cost_model: Box::new(DefaultIselCostModel),
             op_lowerings: vec![],
+            call_lowering: None,
             plans: HashMap::new(),
             emitted_blocks: HashSet::new(),
             solved: HashSet::new(),
@@ -719,6 +721,17 @@ impl InstructionSelectPass {
 
     pub fn with_op_lowering(mut self, lowering: OpLowering) -> Self {
         self.op_lowerings.push(lowering);
+        self
+    }
+
+    pub fn with_call_lowering(
+        mut self,
+        abi: &'static crate::backend::abi::AbiInfo,
+        emitter: Box<dyn crate::backend::call_lowering::CallEmitter>,
+    ) -> Self {
+        self.call_lowering = Some(crate::backend::call_lowering::CallLowering::new(
+            abi, emitter,
+        ));
         self
     }
 
@@ -1918,6 +1931,12 @@ impl Pass for InstructionSelectPass {
             if lowering(context, op, rewriter)? {
                 return Ok(PreservedAnalyses::none());
             }
+        }
+
+        if let Some(lowering) = &self.call_lowering
+            && lowering.lower(context, op, rewriter)?
+        {
+            return Ok(PreservedAnalyses::none());
         }
 
         // Result-less ops still participate: a store must trigger its block's

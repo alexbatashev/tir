@@ -73,6 +73,8 @@ pub enum Token<'a> {
 
     /// `isa`
     KwIsa,
+    /// `abi`
+    KwAbi,
     /// `requires`
     KwRequires,
     /// `register_class`
@@ -196,6 +198,7 @@ pub(crate) fn lexer<'src>()
 
     let ident = text::ascii::ident().map(|ident: &str| match ident {
         "isa" => Token::KwIsa,
+        "abi" => Token::KwAbi,
         "requires" => Token::KwRequires,
         "for" => Token::KwFor,
         "in" => Token::KwIn,
@@ -277,6 +280,7 @@ impl<'a> fmt::Display for Token<'a> {
             Token::RAngle => f.write_str(">"),
             Token::Pipe => f.write_str("|"),
             Token::KwIsa => f.write_str("isa"),
+            Token::KwAbi => f.write_str("abi"),
             Token::KwRequires => f.write_str("requires"),
             Token::KwRegClass => f.write_str("register_class"),
             Token::KwFor => f.write_str("for"),

@@ -18,5 +18,5 @@ module {
 // RV64: riscv.addiw
 // RV32: riscv.addi
 // CHECK: riscv.fmv.w.x {fd = {{f[0-9]+}}, rs1 = {{x[0-9]+}}}
-// CHECK: riscv.fmul.s {fd = f10,
+// CHECK: riscv.fmul.s {fd = {{f[0-9]+}}, fs1 = f10,
 // CHECK: riscv.vret

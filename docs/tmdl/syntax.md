@@ -80,12 +80,8 @@ register_class GPR for [RV32I, RV64I] {
 
   registers {
     x0("zero") => { traits = [hardwired_zero] },
-    x1("ra")   => { traits = [return_address, caller_saved] },
-    x2..x7("t{}") => { traits = [caller_saved] },
-    x8..x9("s{}")  => { traits = [callee_saved] },
-    x10..x17("a{}") => { traits = [caller_saved] },
-    x18..x27("s{}") => { traits = [callee_saved] },
-    x28..x31("t{}") => { traits = [caller_saved] },
+    x1("ra") => {},
+    x2..x31 => {},
   }
 }
 ```
@@ -98,7 +94,9 @@ register_class GPR for [RV32I, RV64I] {
   Without it, the index is the trailing number in the name (`x5` -> 5), or the
   declaration position for index-less registers. Both `index` and `traits` are
   optional inside the braces.
-- Known traits currently recognized by tools: `hardwired_zero`, `return_address`, `caller_saved`, `callee_saved`, `stack_pointer`, `status_flag`. Other identifiers parse but may be ignored by current tooling.
+- Known traits currently recognized by tools: `hardwired_zero`, `program_counter`,
+  `status_flag`, `float`, and `polymorphic`. Calling-convention traits such as
+  `argument`, `caller_saved`, and `stack_pointer` moved to top-level `abi` items.
 - `status_flag` marks condition-code bits (x86 EFLAGS `zf`, AArch64 PSTATE `z`):
   1-bit registers written as side effects by compare-style instructions
   (`EFLAGS::zf = ...` in a behavior) and read by conditional-branch guards
@@ -121,13 +119,36 @@ most operands but the stack pointer in addressing bases and add/sub-immediate:
 ```
 register_class GPRsp for [ARMv8A64] : GPR {
   registers {
-    x31("sp") => { traits = [stack_pointer] },   // overrides GPR's xzr at slot 31
+    x31("sp") => {},   // overrides GPR's xzr at slot 31
   }
 }
 ```
 
 Operands then bind to the precise class (`rn: GPRsp` vs `rn: GPR`), and assembly
 printing resolves each operand's register name through its own class.
+
+### ABI
+
+An `abi` describes stack layout, architectural roles, value-passing sequences,
+and saved/reserved registers independently of the register classes:
+
+```
+abi LP64("lp64") for [RV64I] {
+  stack { align = 16; grows = down; red_zone = 0; slot_size = 8; }
+  sp = GPR::x2;
+  ra = GPR::x1;
+  fp = GPR::x8;
+  args int -> [GPR::x10..GPR::x17], then stack;
+  rets int -> [GPR::x10..GPR::x11];
+  callee_saved = [GPR::x2, GPR::x8..GPR::x9, GPR::x18..GPR::x27];
+  reserved = [GPR::x0, GPR::x3, GPR::x4];
+  classifier = riscv;
+}
+```
+
+An ABI may inherit another with `: Base`; stack fields and omitted lists inherit,
+while argument/return sequences and roles declared by the child replace matching
+entries from the base.
 
 ### Instruction Template
 
@@ -274,7 +295,7 @@ register_class GPR for [RV32I, RV64I] {
   param WIDTH: Integer = self.XLEN;
   registers {
     x0("zero") => { traits = [hardwired_zero] },
-    x10..x17("a{}") => { traits = [caller_saved] },
+    x10..x17("a{}") => {},
   }
 }
 

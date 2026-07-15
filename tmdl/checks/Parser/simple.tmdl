@@ -125,7 +125,6 @@
 // CHECK-NEXT:                                 "zero",
 // CHECK-NEXT:                             ),
 // CHECK-NEXT:                             index: None,
-// CHECK-NEXT:                             arg_order: None,
 // CHECK-NEXT:                             traits: [
 // CHECK-NEXT:                                 HardwiredZero,
 // CHECK-NEXT:                             ],
@@ -140,11 +139,7 @@
 // CHECK-NEXT:                                 "ra",
 // CHECK-NEXT:                             ),
 // CHECK-NEXT:                             index: None,
-// CHECK-NEXT:                             arg_order: None,
-// CHECK-NEXT:                             traits: [
-// CHECK-NEXT:                                 ReturnAddress,
-// CHECK-NEXT:                                 CallerSaved,
-// CHECK-NEXT:                             ],
+// CHECK-NEXT:                             traits: [],
 // CHECK-NEXT:                             subregisters: [],
 // CHECK-NEXT:                             span: 367..422,
 // CHECK-NEXT:                         },
@@ -156,9 +151,7 @@
 // CHECK-NEXT:                             alias_pattern: Some(
 // CHECK-NEXT:                                 "r{}",
 // CHECK-NEXT:                             ),
-// CHECK-NEXT:                             traits: [
-// CHECK-NEXT:                                 CalleeSaved,
-// CHECK-NEXT:                             ],
+// CHECK-NEXT:                             traits: [],
 // CHECK-NEXT:                             span: 432..477,
 // CHECK-NEXT:                         },
 // CHECK-NEXT:                     ),

@@ -49,15 +49,15 @@ register_class GPR for [RV32I, RV64I] {
 
     registers {
         x0("zero") => { traits = [hardwired_zero] },
-        x1("ra") => { traits = [return_address, caller_saved] },
-        x2("sp") => { traits = [stack_pointer, callee_saved] },
-        x3("gp") => { traits = [global_pointer] },
-        x4("tp") => { traits = [thread_pointer] },
-        x5..x7("t{}") => { traits = [temporary, caller_saved] },
-        x8..x9("s{}") => { traits = [saved, callee_saved] },
-        x10..x17("a{}") => { traits = [argument, return_value, caller_saved] },
-        x18..x27("s{}") => { traits = [saved, callee_saved] },
-        x28..x31("t{}") => { traits = [temporary, caller_saved] },
+        x1("ra") => {},
+        x2("sp") => {},
+        x3("gp") => {},
+        x4("tp") => {},
+        x5..x7("t{}") => {},
+        x8..x9("s{}") => {},
+        x10..x17("a{}") => {},
+        x18..x27("s{}") => {},
+        x28..x31("t{}") => {},
     }
 }
 

@@ -313,12 +313,6 @@ mod tests {
     static R_CLASS: RegClassInfo = RegClassInfo {
         name: "R",
         file: "R",
-        allocation_order: &[0],
-        caller_saved: &[0],
-        callee_saved: &[],
-        arguments: &[],
-        return_values: &[],
-        reserved: &[],
         group_width: 1,
     };
 

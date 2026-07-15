@@ -12,6 +12,7 @@ module {
 // The call lowers to a virtual call carrying the callee symbol; the argument
 // and result travel through a0 via copies and ra is saved across the call.
 // ISEL: riscv.vcall {callee = "foo"
+// ISEL-SAME: FPR32[0]
 
 // The callee's address is unknown until link time: the jal immediate stays
 // zero and an R_RISCV_JAL relocation against the undefined symbol is emitted.

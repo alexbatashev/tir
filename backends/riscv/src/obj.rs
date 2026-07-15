@@ -354,7 +354,10 @@ pub(crate) fn finalize_virtual_ops(
     if let Some(call) = op.as_op::<VirtualCallOp>() {
         let callee = string_attr(&call, "callee")?;
         let jal = JumpAndLinkOpBuilder::new(context)
-            .attr("rd", phys(&(crate::RegClass::GPR.id(), crate::RA)))
+            .attr(
+                "rd",
+                phys(&crate::default_abi().ra.expect("RISC-V ABI must define ra")),
+            )
             .attr("imm", AttributeValue::Str(callee))
             .build();
         rewriter.replace_op(op, &jal)?;
@@ -366,7 +369,10 @@ pub(crate) fn finalize_virtual_ops(
     if let Some(call) = op.as_op::<VirtualIndirectCallOp>() {
         let target = register_attr(&call, "callee_reg")?;
         let jalr = JumpAndLinkRegOpBuilder::new(context)
-            .attr("rd", phys(&(crate::RegClass::GPR.id(), crate::RA)))
+            .attr(
+                "rd",
+                phys(&crate::default_abi().ra.expect("RISC-V ABI must define ra")),
+            )
             .attr("rs1", target)
             .attr("imm", AttributeValue::Int(0))
             .build();

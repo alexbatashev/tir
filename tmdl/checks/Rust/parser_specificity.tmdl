@@ -15,7 +15,7 @@ register_class GPR for [SortIsa] {
     param WIDTH: Integer = self.XLEN;
 
     registers {
-        x0..x3 => { traits = [caller_saved] },
+        x0..x3 => {                         },
     }
 }
 

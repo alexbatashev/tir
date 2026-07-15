@@ -9,9 +9,8 @@
 //! ([`tir::pbqp`]). The chosen physical registers are written back by rewriting
 //! every `Virtual` attribute to `Physical`.
 //!
-//! The set of physical registers, their caller/callee-saved partitions, and the
-//! calling convention are not hardcoded here: they come from [`RegisterInfo`],
-//! which the TMDL backend emits from each target's `register_class` declarations.
+//! Register files come from [`RegisterInfo`]; allocation order and calling
+//! convention policy come from the selected [`crate::backend::abi::AbiInfo`].
 
 use std::collections::{HashMap, HashSet};
 
@@ -24,8 +23,7 @@ use tir::{
 
 use crate::backend::liveness::{self, Liveness, PhysReg};
 
-/// Allocation metadata for one register class, emitted by the TMDL backend from a
-/// target's `register_class` traits.
+/// Architectural metadata for one register class.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegClassInfo {
     pub name: &'static str,
@@ -35,30 +33,10 @@ pub struct RegClassInfo {
     /// same physical register at a given index, so the allocator treats their
     /// indices as aliases. A standalone class is its own file.
     pub file: &'static str,
-    /// Allocatable register indices, in preferred allocation order. A class with
-    /// an empty order (e.g. the program-counter class) is never allocated.
-    pub allocation_order: &'static [u16],
-    pub caller_saved: &'static [u16],
-    pub callee_saved: &'static [u16],
-    /// Argument registers in calling-convention order.
-    pub arguments: &'static [u16],
-    pub return_values: &'static [u16],
-    /// Indices reserved by the ABI and never allocated.
-    pub reserved: &'static [u16],
     /// How many consecutive file indices one register of this class covers.
     /// 1 for ordinary classes; an RVV LMUL>1 group class covers 2/4/8 (e.g.
     /// `VRM2` index 8 is the architectural pair v8..v9).
     pub group_width: u16,
-}
-
-impl RegClassInfo {
-    pub fn is_callee_saved(&self, index: u16) -> bool {
-        self.callee_saved.contains(&index)
-    }
-
-    pub fn is_caller_saved(&self, index: u16) -> bool {
-        self.caller_saved.contains(&index)
-    }
 }
 
 /// A handle to a register class: a pointer to its `'static` [`RegClassInfo`].
@@ -68,8 +46,7 @@ impl RegClassInfo {
 /// table — so a class's identity is the identity of that pointer. Equality and
 /// hashing are by pointer; ordering is by name so codegen that sorts physical
 /// registers stays deterministic across builds. Derefs to [`RegClassInfo`], so a
-/// class's traits (`allocation_order`, `arguments`, `is_callee_saved`, …) read
-/// directly through the handle.
+/// its architectural properties read directly through the handle.
 #[derive(Clone, Copy)]
 pub struct RegClassId(&'static RegClassInfo);
 
@@ -182,15 +159,12 @@ impl RegisterInfo {
         a.0.overlaps(a.1, b.0, b.1)
     }
 
-    /// The class that owns the calling convention's argument registers — the
-    /// natural default for integer virtual registers whose class is otherwise
-    /// undetermined (e.g. function parameters with no register attribute yet).
-    pub fn default_integer_class(&self) -> Option<RegClassId> {
-        self.classes
+    pub fn default_integer_class(&self, abi: &crate::backend::abi::AbiInfo) -> Option<RegClassId> {
+        abi.args
             .iter()
-            .find(|c| !c.arguments.is_empty())
-            .or_else(|| self.classes.iter().find(|c| !c.allocation_order.is_empty()))
-            .map(RegClassId::new)
+            .find(|sequence| sequence.kind == crate::backend::abi::ValueKind::Int)
+            .and_then(|sequence| sequence.regs.first())
+            .map(|register| register.0)
     }
 }
 
@@ -228,6 +202,7 @@ const CALLEE_SAVED_COST: u64 = 1;
 /// Inputs that tune one allocation round.
 pub struct AllocConfig<'a> {
     pub info: &'a RegisterInfo,
+    pub abi: &'a crate::backend::abi::AbiInfo,
     pub liveness: &'a Liveness,
     /// Virtual registers pinned to a physical register (ABI args/return, fixed regs).
     pub precolor: &'a HashMap<u32, PhysReg>,
@@ -245,6 +220,7 @@ pub struct AllocConfig<'a> {
 pub fn allocate(config: &AllocConfig) -> Result<AllocResult, RegAllocError> {
     let AllocConfig {
         info,
+        abi,
         liveness,
         precolor,
         spill_cost,
@@ -254,21 +230,18 @@ pub fn allocate(config: &AllocConfig) -> Result<AllocResult, RegAllocError> {
     let vregs: Vec<u32> = liveness.vregs.iter().copied().collect();
     let node_of: HashMap<u32, usize> = vregs.iter().enumerate().map(|(i, &v)| (v, i)).collect();
 
-    let default_class = info.default_integer_class();
+    let default_class = info.default_integer_class(abi);
 
     // Per-node alternative lists, resolved to concrete physical registers.
     let mut alternatives: Vec<Vec<Alternative>> = Vec::with_capacity(vregs.len());
-    let mut node_classes: Vec<RegClassId> = Vec::with_capacity(vregs.len());
     for &vreg in &vregs {
         let class = resolve_class(liveness, precolor, default_class, vreg)?;
-        let mut alts: Vec<Alternative> = class
-            .allocation_order
-            .iter()
-            .map(|&idx| Alternative::Phys((class, idx)))
+        let mut alts: Vec<Alternative> = allocation_order(abi, class)
+            .into_iter()
+            .map(Alternative::Phys)
             .collect();
         alts.push(Alternative::Spill);
         alternatives.push(alts);
-        node_classes.push(class);
     }
 
     let mut problem = PbqpProblem::new();
@@ -276,10 +249,10 @@ pub fn allocate(config: &AllocConfig) -> Result<AllocResult, RegAllocError> {
         let costs = node_costs(
             info,
             &alternatives[i],
-            node_classes[i],
             vreg,
             liveness,
             precolor,
+            abi,
             spill_cost,
         );
         // A node with no finite alternative is unallocatable and unspillable.
@@ -345,10 +318,10 @@ fn resolve_class(
 fn node_costs(
     info: &RegisterInfo,
     alternatives: &[Alternative],
-    class: RegClassId,
     vreg: u32,
     liveness: &Liveness,
     precolor: &HashMap<u32, PhysReg>,
+    abi: &crate::backend::abi::AbiInfo,
     spill_cost: &dyn Fn(u32) -> u64,
 ) -> Vec<u64> {
     let pinned = precolor.get(&vreg);
@@ -378,7 +351,11 @@ fn node_costs(
                 if forbidden.is_some_and(|set| set.iter().any(|f| info.phys_overlap(f, p))) {
                     return INF_COST;
                 }
-                if class.is_callee_saved(p.1) {
+                if abi
+                    .callee_saved
+                    .iter()
+                    .any(|saved| info.phys_overlap(saved, p))
+                {
                     CALLEE_SAVED_COST
                 } else {
                     0
@@ -394,6 +371,24 @@ fn node_costs(
             }
         })
         .collect()
+}
+
+fn allocation_order(abi: &crate::backend::abi::AbiInfo, class: RegClassId) -> Vec<PhysReg> {
+    let mut result = Vec::new();
+    for register in abi.caller_saved.iter().chain(abi.callee_saved) {
+        if register.0.file() == class.file() && register.1 % class.group_width.max(1) == 0 {
+            let candidate = (class, register.1);
+            let is_role = std::iter::once(&abi.sp)
+                .chain(abi.ra.iter())
+                .chain(abi.fp.iter())
+                .chain(abi.reserved)
+                .any(|role| candidate.0.overlaps(candidate.1, role.0, role.1));
+            if !is_role && !result.contains(&candidate) {
+                result.push(candidate);
+            }
+        }
+    }
+    result
 }
 
 /// Build the interference matrix between two nodes, or `None` if their alternative
@@ -435,20 +430,6 @@ fn interference_matrix(
 pub trait TargetRegAlloc: Send + Sync {
     fn register_info(&self) -> RegisterInfo;
 
-    /// Bytes reserved for each spill slot.
-    fn slot_size(&self) -> u32 {
-        8
-    }
-
-    /// Stack frame alignment in bytes.
-    fn frame_align(&self) -> u32 {
-        self.slot_size()
-    }
-
-    /// The physical register spill loads/stores are addressed relative to (the
-    /// stack pointer, after the prologue has reserved the frame).
-    fn frame_register(&self) -> PhysReg;
-
     /// Build a store of virtual register `value` (of class `class`) to
     /// `[frame + offset]`.
     fn emit_spill_store(
@@ -484,15 +465,6 @@ pub trait TargetRegAlloc: Send + Sync {
         unimplemented!("this target has tied operands but no copy emitter")
     }
 
-    /// Whether callee-saved registers are preserved in the spill frame (each at its
-    /// `[frame + offset]` slot, so the generic code reserves a slot per saved
-    /// register). Targets that save via a dedicated mechanism (x86-64 `push`/`pop`)
-    /// return `false`: no frame slot is reserved and the `offset` field of each
-    /// save is unused.
-    fn saves_on_frame(&self) -> bool {
-        true
-    }
-
     /// Prologue instructions reserving a frame of `size` bytes (e.g. `addi sp, sp,
     /// -size`) and saving the callee-saved registers the allocation used, each at
     /// its reserved `[frame + offset]` slot. Inserted at the top of the entry block
@@ -500,6 +472,7 @@ pub trait TargetRegAlloc: Send + Sync {
     fn emit_prologue(
         &self,
         _context: &Context,
+        _abi: &crate::backend::abi::AbiInfo,
         _size: u32,
         _saves: &[(PhysReg, i64)],
     ) -> Vec<Box<dyn Operation>> {
@@ -511,6 +484,7 @@ pub trait TargetRegAlloc: Send + Sync {
     fn emit_epilogue(
         &self,
         _context: &Context,
+        _abi: &crate::backend::abi::AbiInfo,
         _size: u32,
         _saves: &[(PhysReg, i64)],
     ) -> Vec<Box<dyn Operation>> {
@@ -521,11 +495,12 @@ pub trait TargetRegAlloc: Send + Sync {
     /// incoming stack argument `stack_index` lives.
     fn incoming_stack_arg_offset(
         &self,
+        abi: &crate::backend::abi::AbiInfo,
         frame_size: u32,
         _saves: &[(PhysReg, i64)],
         stack_index: usize,
     ) -> i64 {
-        frame_size as i64 + (stack_index as i64 * self.slot_size() as i64)
+        frame_size as i64 + (stack_index as i64 * abi.stack.slot_size as i64)
     }
 
     /// Build a load from an incoming stack argument into an already allocated
@@ -566,14 +541,19 @@ pub trait TargetRegAlloc: Send + Sync {
 /// rewrites every virtual register operand to its assigned physical register.
 pub struct RegisterAllocationPass {
     target: Box<dyn TargetRegAlloc>,
+    abi: &'static crate::backend::abi::AbiInfo,
     /// Safety valve against a non-converging spill loop.
     max_rounds: usize,
 }
 
 impl RegisterAllocationPass {
-    pub fn new(target: Box<dyn TargetRegAlloc>) -> Self {
+    pub fn with_abi(
+        target: Box<dyn TargetRegAlloc>,
+        abi: &'static crate::backend::abi::AbiInfo,
+    ) -> Self {
         Self {
             target,
+            abi,
             max_rounds: 16,
         }
     }
@@ -604,9 +584,17 @@ impl Pass for RegisterAllocationPass {
         self.lower_tied_operands(context, rewriter, &blocks)?;
         self.lower_block_args(context, rewriter, &blocks)?;
 
-        let abi = abi_precolor(context, op, &info, self.target.as_ref(), rewriter, &blocks)?;
+        let abi = abi_precolor(
+            context,
+            op,
+            &info,
+            self.abi,
+            self.target.as_ref(),
+            rewriter,
+            &blocks,
+        )?;
 
-        let mut frame = FrameState::new(self.target.slot_size());
+        let mut frame = FrameState::new(self.abi.stack.slot_size);
         let stack_allocas = collect_stack_allocas(context, &blocks, &mut frame);
         let assignment = loop {
             // Recomputed each round: spills insert ops within blocks but never add
@@ -632,6 +620,7 @@ impl Pass for RegisterAllocationPass {
 
             let result = allocate(&AllocConfig {
                 info: &info,
+                abi: self.abi,
                 liveness: &liveness,
                 precolor: &abi.precolor,
                 spill_cost: &spill_cost,
@@ -657,9 +646,14 @@ impl Pass for RegisterAllocationPass {
         // Preserve the callee-saved registers the allocation used for this
         // function's caller. Frame-based targets reserve a slot per register;
         // push/pop targets handle framing themselves.
-        let saves = callee_saved_slots(&assignment, &mut frame, self.target.saves_on_frame());
+        let saves = callee_saved_slots(
+            &assignment,
+            &mut frame,
+            self.abi.callee_saved,
+            self.abi.stack.save_style == crate::backend::abi::SaveStyle::FrameSlots,
+        );
 
-        let frame_size = frame.size(self.target.frame_align());
+        let frame_size = frame.size(self.abi.stack.align);
         self.insert_stack_alloca_addresses(
             context,
             rewriter,
@@ -688,6 +682,10 @@ impl Pass for RegisterAllocationPass {
 }
 
 impl RegisterAllocationPass {
+    fn frame_register(&self) -> PhysReg {
+        self.abi.sp
+    }
+
     /// Lower tied (two-address) operands ahead of allocation. Instruction
     /// selection emits `op {dst = %r (ReadWrite), dst_tied = %x, ...}` for an
     /// instruction whose behavior reads its destination (e.g. the x86
@@ -765,7 +763,7 @@ impl RegisterAllocationPass {
         blocks: &[BlockId],
     ) -> Result<(), PassError> {
         let info = self.target.register_info();
-        let default_class = info.default_integer_class();
+        let default_class = info.default_integer_class(self.abi);
         for &block_id in blocks {
             for op_id in context.get_block(block_id).op_ids() {
                 let op = context.get_op(op_id);
@@ -839,8 +837,8 @@ impl RegisterAllocationPass {
         frame: &mut FrameState,
     ) -> Result<(), PassError> {
         let info = self.target.register_info();
-        let default_class = info.default_integer_class();
-        let frame_reg = self.target.frame_register();
+        let default_class = info.default_integer_class(self.abi);
+        let frame_reg = self.frame_register();
 
         for &vreg in vregs {
             let class = liveness
@@ -922,7 +920,7 @@ impl RegisterAllocationPass {
             let op_ids = context.get_block(entry).op_ids();
             if let Some(&first) = op_ids.first() {
                 let target = op_ref_in(context, entry, first);
-                for op in self.target.emit_prologue(context, size, saves) {
+                for op in self.target.emit_prologue(context, self.abi, size, saves) {
                     rewriter.insert_op_before(&target, op.as_ref())?;
                 }
             }
@@ -933,7 +931,7 @@ impl RegisterAllocationPass {
                     continue;
                 }
                 let target = op_ref_in(context, block_id, op_id);
-                for op in self.target.emit_epilogue(context, size, saves) {
+                for op in self.target.emit_epilogue(context, self.abi, size, saves) {
                     rewriter.insert_op_before(&target, op.as_ref())?;
                 }
             }
@@ -962,7 +960,7 @@ impl RegisterAllocationPass {
             return Ok(());
         };
         let target = op_ref_in(context, entry, first);
-        let frame = self.target.frame_register();
+        let frame = self.frame_register();
         for arg in args {
             let Some(dst) = assignment.get(&arg.vreg) else {
                 continue;
@@ -975,9 +973,12 @@ impl RegisterAllocationPass {
                     arg.class.name()
                 )));
             }
-            let offset =
-                self.target
-                    .incoming_stack_arg_offset(layout.size, layout.saves, arg.stack_index);
+            let offset = self.target.incoming_stack_arg_offset(
+                self.abi,
+                layout.size,
+                layout.saves,
+                arg.stack_index,
+            );
             let load = self
                 .target
                 .emit_incoming_stack_arg_load(context, dst, &frame, offset)?;
@@ -1005,7 +1006,7 @@ impl RegisterAllocationPass {
             return Ok(());
         };
         let target = op_ref_in(context, entry, first);
-        let frame = self.target.frame_register();
+        let frame = self.frame_register();
         for alloca in allocas {
             let Some(dst) = assignment.get(&alloca.vreg) else {
                 continue;
@@ -1193,11 +1194,16 @@ fn insert_after(
 fn callee_saved_slots(
     assignment: &HashMap<u32, PhysReg>,
     frame: &mut FrameState,
+    abi_callee_saved: &[PhysReg],
     on_frame: bool,
 ) -> Vec<(PhysReg, i64)> {
     let mut regs: Vec<PhysReg> = assignment
         .values()
-        .filter(|p| p.0.is_callee_saved(p.1))
+        .filter(|p| {
+            abi_callee_saved
+                .iter()
+                .any(|candidate| p.0.overlaps(p.1, candidate.0, candidate.1))
+        })
         .copied()
         .collect();
     regs.sort();
@@ -1263,10 +1269,72 @@ struct IncomingStackArg {
     stack_index: usize,
 }
 
+fn abi_value_kind(context: &Context, vreg: u32) -> crate::backend::abi::ValueKind {
+    let ty = context.get_value(ValueId::from_number(vreg)).ty();
+    let data = context.get_type_data(ty);
+    let data = data.as_ref() as &dyn std::any::Any;
+    if data.downcast_ref::<tir::builtin::FloatType>().is_some() {
+        crate::backend::abi::ValueKind::Float
+    } else if data.downcast_ref::<tir::vector::VectorType>().is_some() {
+        crate::backend::abi::ValueKind::Vector
+    } else {
+        crate::backend::abi::ValueKind::Int
+    }
+}
+
+fn next_abi_register(
+    abi: &crate::backend::abi::AbiInfo,
+    class: RegClassId,
+    mut kind: crate::backend::abi::ValueKind,
+    next_slot: &mut HashMap<crate::backend::abi::ValueKind, usize>,
+) -> Option<PhysReg> {
+    let mut visited = HashSet::new();
+    loop {
+        if !visited.insert(kind) {
+            return None;
+        }
+        let sequence = match abi.args.iter().find(|sequence| sequence.kind == kind) {
+            Some(sequence) => sequence,
+            None if kind != crate::backend::abi::ValueKind::Int => {
+                kind = crate::backend::abi::ValueKind::Int;
+                continue;
+            }
+            None => return None,
+        };
+        let slot = next_slot.entry(kind).or_insert(0);
+        let register = if class.group_width > 1
+            && sequence
+                .regs
+                .first()
+                .is_some_and(|register| register.0.file() == class.file())
+        {
+            let first = sequence.regs.first().unwrap();
+            let last = sequence.regs.last().unwrap();
+            let index = first.1 + (*slot as u16 * class.group_width);
+            (index <= last.1).then_some((class, index))
+        } else {
+            sequence.regs.get(*slot).copied()
+        };
+        if let Some(register) = register {
+            *slot += 1;
+            return Some(if register.0.file() == class.file() {
+                (class, register.1)
+            } else {
+                register
+            });
+        }
+        match sequence.overflow {
+            crate::backend::abi::Overflow::Chain(next) => kind = next,
+            crate::backend::abi::Overflow::Stack => return None,
+        }
+    }
+}
+
 fn abi_precolor(
     context: &Context,
     op: &OperationRef,
     info: &RegisterInfo,
+    abi: &crate::backend::abi::AbiInfo,
     target: &dyn TargetRegAlloc,
     rewriter: &mut Rewriter,
     blocks: &[BlockId],
@@ -1280,7 +1348,8 @@ fn abi_precolor(
     // argument takes the next calling-convention register of its class, with
     // the slot counter shared across classes of one register *file*: an f32 and
     // an f64 argument draw fa0 and fa1 from the same fa0..fa7 sequence.
-    let mut next_slot: HashMap<&str, usize> = HashMap::new();
+    let mut next_abi_slot: HashMap<crate::backend::abi::ValueKind, usize> = HashMap::new();
+    let mut next_stack_slot = 0;
     if let Some(AttributeValue::Array(args)) = op
         .op()
         .attributes
@@ -1292,12 +1361,12 @@ fn abi_precolor(
             let AttributeValue::Register(RegisterAttr::Virtual { id, class }) = attr else {
                 continue;
             };
-            let Some(rc) = class.or_else(|| info.default_integer_class()) else {
+            let Some(rc) = class.or_else(|| info.default_integer_class(abi)) else {
                 continue;
             };
-            let slot = next_slot.entry(rc.file).or_insert(0);
-            if let Some(&reg) = rc.arguments.get(*slot) {
-                let pin = (rc, reg);
+            let kind = abi_value_kind(context, *id);
+            let pin = next_abi_register(abi, rc, kind, &mut next_abi_slot);
+            if let Some(pin) = pin {
                 if let Some(prev) = precolor.insert(*id, pin)
                     && prev != pin
                 {
@@ -1309,10 +1378,10 @@ fn abi_precolor(
                 stack_args.push(IncomingStackArg {
                     vreg: *id,
                     class: rc,
-                    stack_index: *slot - rc.arguments.len(),
+                    stack_index: next_stack_slot,
                 });
+                next_stack_slot += 1;
             }
-            *slot += 1;
         }
     }
 
@@ -1329,13 +1398,21 @@ fn abi_precolor(
             };
             let vreg = value.number();
             let class = vreg_class_in(context, blocks, vreg);
-            let Some(rc) = class.or_else(|| info.default_integer_class()) else {
+            let Some(rc) = class.or_else(|| info.default_integer_class(abi)) else {
                 continue;
             };
-            let Some(&ret_reg) = rc.return_values.first() else {
+            let kind = abi_value_kind(context, vreg);
+            let Some(sequence) = abi.rets.iter().find(|sequence| sequence.kind == kind) else {
                 continue;
             };
-            let ret_pin = (rc, ret_reg);
+            let Some(&register) = sequence.regs.first() else {
+                continue;
+            };
+            let ret_pin = if register.0.file() == rc.file() {
+                (rc, register.1)
+            } else {
+                register
+            };
 
             match precolor.get(&vreg) {
                 // Already pinned to exactly the return register (or returned by
@@ -1492,15 +1569,86 @@ mod tests {
             classes: &[RegClassInfo {
                 name: "R",
                 file: "R",
-                allocation_order: &[0, 1, 2],
-                caller_saved: &[0, 1, 2],
-                callee_saved: &[],
-                arguments: &[0, 1],
-                return_values: &[0],
-                reserved: &[],
                 group_width: 1,
             }],
         }
+    }
+
+    fn test_abi(
+        info: &RegisterInfo,
+        register_indices: &[u16],
+    ) -> &'static crate::backend::abi::AbiInfo {
+        use crate::backend::abi::{
+            AbiInfo, ClassifierKind, Overflow, PassSeq, SaveStyle, StackLayout, ValueKind,
+        };
+
+        let caller_saved = Box::leak(
+            info.classes
+                .iter()
+                .flat_map(|class| {
+                    let class = RegClassId::new(class);
+                    register_indices
+                        .iter()
+                        .copied()
+                        .map(move |index| (class, index))
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
+        let int_regs = Box::leak(
+            caller_saved
+                .iter()
+                .copied()
+                .take(2)
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
+        Box::leak(Box::new(AbiInfo {
+            name: "test",
+            stack: StackLayout {
+                align: 8,
+                slot_size: 8,
+                red_zone: 0,
+                grows_down: true,
+                save_style: SaveStyle::FrameSlots,
+            },
+            sp: (caller_saved[0].0, 1000),
+            ra: None,
+            fp: None,
+            args: Box::leak(
+                vec![PassSeq {
+                    kind: ValueKind::Int,
+                    regs: int_regs,
+                    overflow: Overflow::Stack,
+                }]
+                .into_boxed_slice(),
+            ),
+            rets: Box::leak(
+                vec![PassSeq {
+                    kind: ValueKind::Int,
+                    regs: &int_regs[..1],
+                    overflow: Overflow::Stack,
+                }]
+                .into_boxed_slice(),
+            ),
+            callee_saved: &[],
+            caller_saved,
+            reserved: &[],
+            classifier: ClassifierKind::Sysv,
+        }))
+    }
+
+    #[test]
+    fn allocation_order_excludes_abi_roles() {
+        let info = three_reg_info();
+        let class = RegClassId::new(&info.classes[0]);
+        let mut abi = *test_abi(&info, &[0, 1, 2]);
+        abi.sp = (class, 0);
+        abi.fp = Some((class, 2));
+        abi.caller_saved = Box::leak(vec![(class, 1)].into_boxed_slice());
+        abi.callee_saved = Box::leak(vec![(class, 0), (class, 2)].into_boxed_slice());
+
+        assert_eq!(allocation_order(&abi, class), vec![(class, 1)]);
     }
 
     /// The `RegClassId` for class `name` in `info`. Register-class tables are
@@ -1574,6 +1722,7 @@ mod tests {
         let map = assigned(
             allocate(&AllocConfig {
                 info: &info,
+                abi: test_abi(&info, &[0, 1, 2]),
                 liveness: &liveness,
                 precolor: &precolor,
                 spill_cost: &|_| 100,
@@ -1644,6 +1793,7 @@ mod tests {
         let precolor = HashMap::new();
         let result = allocate(&AllocConfig {
             info: &info,
+            abi: test_abi(&info, &[0, 1, 2]),
             liveness: &liveness,
             precolor: &precolor,
             spill_cost: &|_| 100,
@@ -1670,6 +1820,7 @@ mod tests {
         let precolor = HashMap::new();
         let result = allocate(&AllocConfig {
             info: &info,
+            abi: test_abi(&info, &[0, 1, 2]),
             liveness: &liveness,
             precolor: &precolor,
             spill_cost: &|_| 100,
@@ -1693,6 +1844,7 @@ mod tests {
         // vreg 4 is far cheaper to spill than the rest.
         let result = allocate(&AllocConfig {
             info: &info,
+            abi: test_abi(&info, &[0, 1, 2]),
             liveness: &liveness,
             precolor: &precolor,
             spill_cost: &|v| if v == 4 { 1 } else { 1000 },
@@ -1710,6 +1862,7 @@ mod tests {
         precolor.insert(1u32, (r_id(), 0u16));
         let result = allocate(&AllocConfig {
             info: &info,
+            abi: test_abi(&info, &[0, 1, 2]),
             liveness: &liveness,
             precolor: &precolor,
             spill_cost: &|_| 100,
@@ -1739,6 +1892,7 @@ mod tests {
         let precolor = HashMap::new();
         let result = allocate(&AllocConfig {
             info: &info,
+            abi: test_abi(&info, &[0, 1, 2]),
             liveness: &liveness,
             precolor: &precolor,
             spill_cost: &|_| 100,
@@ -1762,6 +1916,7 @@ mod tests {
         let precolor = HashMap::new();
         let result = allocate(&AllocConfig {
             info: &info,
+            abi: test_abi(&info, &[0, 1, 2]),
             liveness: &liveness,
             precolor: &precolor,
             spill_cost: &|_| 100,
@@ -1782,23 +1937,11 @@ mod tests {
         RegClassInfo {
             name: "GPR",
             file: "GPR",
-            allocation_order: &[0],
-            caller_saved: &[0],
-            callee_saved: &[],
-            arguments: &[0],
-            return_values: &[],
-            reserved: &[],
             group_width: 1,
         },
         RegClassInfo {
             name: "GPRsp",
             file: "GPR",
-            allocation_order: &[0],
-            caller_saved: &[0],
-            callee_saved: &[],
-            arguments: &[],
-            return_values: &[],
-            reserved: &[],
             group_width: 1,
         },
     ];
@@ -1826,6 +1969,7 @@ mod tests {
         let precolor = HashMap::new();
         let result = allocate(&AllocConfig {
             info: &info,
+            abi: test_abi(&info, &[0]),
             liveness: &liveness,
             precolor: &precolor,
             spill_cost: &|_| 100,
@@ -1846,23 +1990,11 @@ mod tests {
             RegClassInfo {
                 name: "A",
                 file: "A",
-                allocation_order: &[0],
-                caller_saved: &[0],
-                callee_saved: &[],
-                arguments: &[],
-                return_values: &[],
-                reserved: &[],
                 group_width: 1,
             },
             RegClassInfo {
                 name: "B",
                 file: "B",
-                allocation_order: &[0],
-                caller_saved: &[0],
-                callee_saved: &[],
-                arguments: &[],
-                return_values: &[],
-                reserved: &[],
                 group_width: 1,
             },
         ];
@@ -1871,6 +2003,7 @@ mod tests {
         let precolor = HashMap::new();
         let result = allocate(&AllocConfig {
             info: &info,
+            abi: test_abi(&info, &[0]),
             liveness: &liveness,
             precolor: &precolor,
             spill_cost: &|_| 100,
@@ -1892,23 +2025,11 @@ mod tests {
             RegClassInfo {
                 name: "VR",
                 file: "VR",
-                allocation_order: &[0, 1, 2],
-                caller_saved: &[0, 1, 2],
-                callee_saved: &[],
-                arguments: &[],
-                return_values: &[],
-                reserved: &[],
                 group_width: 1,
             },
             RegClassInfo {
                 name: "VRM2",
                 file: "VR",
-                allocation_order: &[0],
-                caller_saved: &[0],
-                callee_saved: &[],
-                arguments: &[],
-                return_values: &[],
-                reserved: &[],
                 group_width: 2,
             },
         ];
@@ -1925,6 +2046,7 @@ mod tests {
         let precolor = HashMap::new();
         let result = allocate(&AllocConfig {
             info: &info,
+            abi: test_abi(&info, &[0, 1, 2]),
             liveness: &liveness,
             precolor: &precolor,
             spill_cost: &|_| 100,
@@ -1932,8 +2054,8 @@ mod tests {
         .unwrap();
 
         let map = assigned(result);
-        assert_eq!(map[&1], (vrm2, 0));
-        assert_eq!(map[&2], (vr, 2));
+        assert_eq!(map[&1].1 % 2, 0);
+        assert!(!info.phys_overlap(&map[&1], &map[&2]));
     }
 
     #[test]
@@ -1944,23 +2066,11 @@ mod tests {
             RegClassInfo {
                 name: "GPR",
                 file: "GPR",
-                allocation_order: &[0, 1],
-                caller_saved: &[0, 1],
-                callee_saved: &[],
-                arguments: &[],
-                return_values: &[],
-                reserved: &[],
                 group_width: 1,
             },
             RegClassInfo {
                 name: "GPRsp",
                 file: "GPR",
-                allocation_order: &[0, 1],
-                caller_saved: &[0, 1],
-                callee_saved: &[],
-                arguments: &[],
-                return_values: &[],
-                reserved: &[],
                 group_width: 1,
             },
         ];
@@ -1976,6 +2086,7 @@ mod tests {
         let precolor = HashMap::new();
         let result = allocate(&AllocConfig {
             info: &info,
+            abi: test_abi(&info, &[0, 1]),
             liveness: &liveness,
             precolor: &precolor,
             spill_cost: &|_| 100,

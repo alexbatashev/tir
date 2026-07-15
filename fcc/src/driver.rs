@@ -38,6 +38,9 @@ pub struct CompileArgs {
     /// Target CPU
     #[arg(long)]
     mcpu: Option<String>,
+    /// Target calling convention.
+    #[arg(long)]
+    mabi: Option<String>,
     #[arg(short = 'o', default_value = "-")]
     output: OsString,
     /// Predefine a macro, e.g. `-D NAME=VALUE` (or `-D NAME`).
@@ -274,11 +277,16 @@ fn emit_machine_code(args: &CompileArgs, name: &str, source: &str) -> Vec<u8> {
         eprintln!("fcc: --march is required for the asm and obj stages");
         std::process::exit(1);
     };
-    let target =
-        tir::backend::select_target(march, args.mcpu.as_deref(), None).unwrap_or_else(|e| {
-            eprintln!("fcc: {e}");
-            std::process::exit(1);
-        });
+    let target = tir::backend::select_target_with_abi(
+        march,
+        args.mcpu.as_deref(),
+        None,
+        args.mabi.as_deref(),
+    )
+    .unwrap_or_else(|e| {
+        eprintln!("fcc: {e}");
+        std::process::exit(1);
+    });
 
     let unit = parse_source(name, source, &args.defines, args.lang_options);
     let context = fcc_context();

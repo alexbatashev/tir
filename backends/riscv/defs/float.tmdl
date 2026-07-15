@@ -21,11 +21,11 @@ register_class FPR32 for [F] {
     param WIDTH: Integer = 32;
 
     registers {
-        f0..f7("ft{}") => { traits = [float, temporary, caller_saved] },
-        f8..f9("fs{}") => { traits = [float, saved, callee_saved] },
-        f10..f17("fa{}") => { traits = [float, argument, return_value, caller_saved] },
-        f18..f27("fs{}") => { traits = [float, saved, callee_saved] },
-        f28..f31("ft{}") => { traits = [float, temporary, caller_saved] },
+        f0..f7("ft{}") => { traits = [float] },
+        f8..f9("fs{}") => { traits = [float] },
+        f10..f17("fa{}") => { traits = [float] },
+        f18..f27("fs{}") => { traits = [float] },
+        f28..f31("ft{}") => { traits = [float] },
     }
 }
 
@@ -38,11 +38,11 @@ register_class FPR64 for [D] {
     param WIDTH: Integer = 64;
 
     registers {
-        f0..f7("ft{}") => { traits = [float, temporary, caller_saved] },
-        f8..f9("fs{}") => { traits = [float, saved, callee_saved] },
-        f10..f17("fa{}") => { traits = [float, argument, return_value, caller_saved] },
-        f18..f27("fs{}") => { traits = [float, saved, callee_saved] },
-        f28..f31("ft{}") => { traits = [float, temporary, caller_saved] },
+        f0..f7("ft{}") => { traits = [float] },
+        f8..f9("fs{}") => { traits = [float] },
+        f10..f17("fa{}") => { traits = [float] },
+        f18..f27("fs{}") => { traits = [float] },
+        f28..f31("ft{}") => { traits = [float] },
     }
 }
 
@@ -72,6 +72,27 @@ template FPArith32 for [F] {
     asm {
         "{self.MNEMONIC} {fd}, {fs1}, {fs2}"
     }
+}
+
+abi LP64("lp64") for [RV64I, RVV] {
+    stack { align = 16; grows = down; red_zone = 0; slot_size = 8; }
+    sp = GPR::x2;
+    ra = GPR::x1;
+    fp = GPR::x8;
+    args int -> [GPR::x10..GPR::x17], then stack;
+    args vector -> [VR::v8..VR::v23], then stack;
+    rets int -> [GPR::x10, GPR::x11];
+    rets vector -> [VR::v8, VR::v9];
+    callee_saved = [GPR::x2, GPR::x8..GPR::x9, GPR::x18..GPR::x27];
+    reserved = [GPR::x0, GPR::x3, GPR::x4];
+    classifier = riscv;
+}
+
+abi LP64D("lp64d") for [D, RVV] : LP64 {
+    args float -> [FPR64::f10..FPR64::f17], then int;
+    rets float -> [FPR64::f10, FPR64::f11];
+    callee_saved = [GPR::x2, GPR::x8..GPR::x9, GPR::x18..GPR::x27,
+                    FPR64::f8..FPR64::f9, FPR64::f18..FPR64::f27];
 }
 
 // R-type FP arithmetic, double precision.

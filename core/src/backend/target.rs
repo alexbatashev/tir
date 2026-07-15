@@ -45,6 +45,16 @@ pub trait TargetMachine {
     /// visible through the other.
     fn register_info(&self) -> RegisterInfo;
 
+    fn abis(&self) -> &'static [crate::backend::abi::AbiInfo] {
+        &[]
+    }
+
+    fn abi(&self) -> &'static crate::backend::abi::AbiInfo {
+        self.abis()
+            .first()
+            .unwrap_or_else(|| panic!("target declares no ABI"))
+    }
+
     /// An assembly parser for this target's textual `.s`/`.S` syntax.
     fn asm_parser(&self, context: &Context) -> AsmParser;
 
@@ -191,6 +201,7 @@ pub type SelectFn = fn(
     march: &str,
     mcpu: Option<&str>,
     mattr: Option<&str>,
+    mabi: Option<&str>,
 ) -> Result<Option<Box<dyn TargetMachine>>, String>;
 
 /// Link-time registry of every target reachable in the final binary.
@@ -203,8 +214,17 @@ pub fn select_target(
     mcpu: Option<&str>,
     mattr: Option<&str>,
 ) -> Result<Box<dyn TargetMachine>, String> {
+    select_target_with_abi(march, mcpu, mattr, None)
+}
+
+pub fn select_target_with_abi(
+    march: &str,
+    mcpu: Option<&str>,
+    mattr: Option<&str>,
+    mabi: Option<&str>,
+) -> Result<Box<dyn TargetMachine>, String> {
     for t in TARGETS.iter() {
-        if let Some(target) = (t.select)(march, mcpu, mattr)? {
+        if let Some(target) = (t.select)(march, mcpu, mattr, mabi)? {
             return Ok(target);
         }
     }

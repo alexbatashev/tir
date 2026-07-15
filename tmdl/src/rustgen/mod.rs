@@ -44,6 +44,7 @@ pub fn generate_rust_modules<'a>(
     let register_traits = emit_register_trait_helpers(files)?;
     let registers = emit_register_parsers_and_printers(files)?;
     let register_info = emit_register_info(files)?;
+    let abi_info = emit_abi_info(files, item_cache)?;
     let machine_models = emit_machine_models(files, item_cache)?;
     let instruction_cost = emit_instruction_cost(files, item_cache)?;
     let split_files: Vec<&ast::File> = split_inputs
@@ -154,6 +155,8 @@ pub fn generate_rust_modules<'a>(
         #registers
 
         #register_info
+
+        #abi_info
 
         #machine_models
 
@@ -290,6 +293,7 @@ pub fn generate_operation_list(
 include!("features.rs");
 include!("instructions.rs");
 include!("registers.rs");
+include!("abis.rs");
 include!("scheduling.rs");
 include!("register_traits.rs");
 include!("flag_analysis.rs");
