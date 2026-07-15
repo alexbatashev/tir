@@ -6,15 +6,16 @@
 //! `ptr.load` and writes become `ptr.store`. Arithmetic uses the `builtin`
 //! integer ops; C-only literals and variadic markers use the local `cir` dialect.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
+use tir::attributes::AttributeValue;
 use tir::builtin::{IntegerType, ModuleOp, TokenType, UnitType, ops as b};
 use tir::graph::{Dag, NodeId};
 use tir::ptr::{PtrType, ops as p};
 use tir::{Context, IRBuilder, Operand, Operation, TypeId, ValueId};
 
 use crate::ast::*;
-use crate::cir::{self, VarArgsType};
+use crate::cir::{self, StructType, VarArgsType};
 use crate::diagnostics::{Diagnostic, EmptyTranslationUnit, UnsupportedConstruct};
 use crate::sema::{EntityId, QualType, TypeKind, TypedAst};
 
@@ -23,6 +24,12 @@ use crate::sema::{EntityId, QualType, TypeKind, TypedAst};
 struct Slot {
     ptr: ValueId,
     elem: TypeId,
+}
+
+#[derive(Clone, Copy)]
+enum LoweredExpr {
+    Value(ValueId),
+    Address { ptr: ValueId, elem: TypeId },
 }
 
 struct FnCodegen<'a> {
@@ -37,7 +44,7 @@ struct FnCodegen<'a> {
     /// Scratch holding the lowered SSA value of each node in the expression
     /// subtree currently being lowered, indexed by `node.index() - base`. Reused
     /// across expressions to avoid reallocating.
-    values: Vec<ValueId>,
+    values: Vec<LoweredExpr>,
 }
 
 #[derive(Clone)]
@@ -67,6 +74,31 @@ pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnost
             | AstKind::Attribute => {}
             _ => return Err(unsupported(ast, item, "top-level item".to_string())),
         }
+    }
+
+    for record in typed.records() {
+        let fields = record
+            .fields
+            .iter()
+            .map(|field| {
+                AttributeValue::Dict(BTreeMap::from([
+                    ("name".to_string(), AttributeValue::Str(field.name.clone())),
+                    (
+                        "type".to_string(),
+                        AttributeValue::Type(lower_type(context, typed, field.ty)),
+                    ),
+                    ("offset".to_string(), AttributeValue::UInt(field.offset)),
+                ]))
+            })
+            .collect();
+        module_builder.insert(
+            cir::DefineStructOpBuilder::new(context)
+                .attr("sym_name", AttributeValue::Str(record.name.clone()))
+                .attr("fields", AttributeValue::Array(fields))
+                .attr("size", AttributeValue::UInt(record.size))
+                .attr("align", AttributeValue::UInt(record.align))
+                .build(),
+        );
     }
 
     for item in ast.children(root) {
@@ -104,7 +136,14 @@ fn lower_type(context: &Context, typed: &TypedAst, ty: QualType) -> TypeId {
     match typed.types().kind(ty) {
         TypeKind::Void => UnitType::new(context),
         TypeKind::Integer(_) => IntegerType::new(context, typed.integer_width(ty).unwrap()),
-        TypeKind::Pointer(pointee) | TypeKind::Array(pointee, _) => {
+        TypeKind::Pointer(pointee) => {
+            if matches!(typed.types().kind(*pointee), TypeKind::Record(_)) {
+                PtrType::opaque(context)
+            } else {
+                PtrType::typed(context, lower_type(context, typed, *pointee))
+            }
+        }
+        TypeKind::Array(pointee, _) => {
             PtrType::typed(context, lower_type(context, typed, *pointee))
         }
         TypeKind::Enum(_) => IntegerType::new(context, 32),
@@ -112,8 +151,34 @@ fn lower_type(context: &Context, typed: &TypedAst, ty: QualType) -> TypeId {
         | TypeKind::Float
         | TypeKind::Double
         | TypeKind::LongDouble
-        | TypeKind::Function { .. }
-        | TypeKind::Record(_, _) => IntegerType::new(context, 64),
+        | TypeKind::Function { .. } => IntegerType::new(context, 64),
+        TypeKind::Record(id) => StructType::new(context, &typed.record(*id).unwrap().name),
+    }
+}
+
+fn source_type_layout(typed: &TypedAst, ty: QualType) -> (u64, u64) {
+    match typed.types().kind(ty) {
+        TypeKind::Integer(_) => {
+            let size = u64::from(typed.integer_width(ty).unwrap() / 8);
+            (size, size)
+        }
+        TypeKind::Pointer(_) => {
+            let size = u64::from(typed.target().pointer_width() / 8);
+            (size, size)
+        }
+        TypeKind::Array(element, Some(length)) => {
+            let (size, align) = source_type_layout(typed, *element);
+            (size * length, align)
+        }
+        TypeKind::Record(id) => {
+            let record = typed.record(*id).unwrap();
+            (record.size, record.align)
+        }
+        TypeKind::Float => (4, 4),
+        TypeKind::Double => (8, 8),
+        TypeKind::LongDouble => (16, 16),
+        TypeKind::Enum(_) => (4, 4),
+        _ => (1, 1),
     }
 }
 
@@ -214,9 +279,11 @@ fn lower_function(
 }
 
 impl FnCodegen<'_> {
-    fn alloca(&mut self, elem: TypeId) -> Slot {
+    fn alloca(&mut self, elem: TypeId, size: u64, align: u64) -> Slot {
         let ptr_ty = PtrType::typed(self.context, elem);
-        let op = self.builder.insert(p::alloca(self.context, ptr_ty).build());
+        let op = self
+            .builder
+            .insert(p::alloca(self.context, size, align, ptr_ty).build());
         Slot {
             ptr: op.result(),
             elem,
@@ -268,8 +335,10 @@ impl FnCodegen<'_> {
             let AstLeaf::Param { .. } = ast.get_leaf_data(param).unwrap() else {
                 unreachable!("param node carries a param payload");
             };
-            let elem = lower_type(self.context, self.typed, node_type(self.typed, param));
-            let slot = self.alloca(elem);
+            let source_ty = node_type(self.typed, param);
+            let elem = lower_type(self.context, self.typed, source_ty);
+            let (size, align) = source_type_layout(self.typed, source_ty);
+            let slot = self.alloca(elem, size, align);
             self.builder
                 .insert(p::store(self.context, param_ids[idx], slot.ptr).build());
             idx += 1;
@@ -293,8 +362,10 @@ impl FnCodegen<'_> {
                 let AstLeaf::Decl { .. } = ast.get_leaf_data(stmt).unwrap() else {
                     unreachable!("decl node carries a decl payload");
                 };
-                let elem = lower_type(self.context, self.typed, node_type(self.typed, stmt));
-                let slot = self.alloca(elem);
+                let source_ty = node_type(self.typed, stmt);
+                let elem = lower_type(self.context, self.typed, source_ty);
+                let (size, align) = source_type_layout(self.typed, source_ty);
+                let slot = self.alloca(elem, size, align);
                 if let Some(init) = ast.children(stmt).next() {
                     let value = self.lower_expr(init)?;
                     self.builder
@@ -309,9 +380,29 @@ impl FnCodegen<'_> {
                 };
                 let slot = self.locals[&node_entity(self.typed, stmt)];
                 let value = ast.children(stmt).next().unwrap();
-                let v = self.lower_expr(value)?;
-                self.builder
-                    .insert(p::store(self.context, v, slot.ptr).build());
+                if let TypeKind::Record(id) = self.typed.types().kind(node_type(self.typed, stmt)) {
+                    let LoweredExpr::Address { ptr: source, .. } = self.lower_expr_value(value)?
+                    else {
+                        return Err(unsupported(
+                            ast,
+                            stmt,
+                            "non-addressable struct source".to_string(),
+                        ));
+                    };
+                    self.builder.insert(
+                        cir::ops::copy_struct(
+                            self.context,
+                            slot.ptr,
+                            source,
+                            self.typed.record(*id).unwrap().name.as_str(),
+                        )
+                        .build(),
+                    );
+                } else {
+                    let v = self.lower_expr(value)?;
+                    self.builder
+                        .insert(p::store(self.context, v, slot.ptr).build());
+                }
                 Ok(())
             }
             AstKind::Return => {
@@ -584,12 +675,22 @@ impl FnCodegen<'_> {
             .result())
     }
 
-    /// Lower an expression subtree in one post-order pass: operands precede their
-    /// operator, so each node's value is ready when its parent is reached. The
-    /// AST is a tree, so the subtree is a contiguous index range `[base, root]`;
-    /// values are pushed in index order, letting children be read by offset
-    /// without hashing.
+    fn materialize(&mut self, expression: LoweredExpr) -> ValueId {
+        match expression {
+            LoweredExpr::Value(value) => value,
+            LoweredExpr::Address { ptr, elem } => self
+                .builder
+                .insert(p::load(self.context, ptr, elem).build())
+                .result(),
+        }
+    }
+
     fn lower_expr(&mut self, root: NodeId) -> Result<ValueId, Diagnostic> {
+        let expression = self.lower_expr_value(root)?;
+        Ok(self.materialize(expression))
+    }
+
+    fn lower_expr_value(&mut self, root: NodeId) -> Result<LoweredExpr, Diagnostic> {
         let ast = self.ast;
         self.values.clear();
         let mut base = root.index();
@@ -604,15 +705,26 @@ impl FnCodegen<'_> {
                 "subtree not contiguous"
             );
 
-            let value = match ast.get_node(node).kind {
+            let expression = match ast.get_node(node).kind {
                 AstKind::Int => {
                     let AstLeaf::Int(n) = ast.get_leaf_data(node).unwrap() else {
                         unreachable!("int node carries an int payload");
                     };
                     let ty = lower_type(self.context, self.typed, node_type(self.typed, node));
-                    self.builder
-                        .insert(b::constant(self.context, n.value.to_i64(), ty).build())
-                        .result()
+                    LoweredExpr::Value(
+                        self.builder
+                            .insert(b::constant(self.context, n.value.to_i64(), ty).build())
+                            .result(),
+                    )
+                }
+                AstKind::SizeofType | AstKind::SizeofExpr => {
+                    let value = ast.get_annotation(node).unwrap().constant.unwrap();
+                    let ty = lower_type(self.context, self.typed, node_type(self.typed, node));
+                    LoweredExpr::Value(
+                        self.builder
+                            .insert(b::constant(self.context, value, ty).build())
+                            .result(),
+                    )
                 }
                 AstKind::String => {
                     let AstLeaf::String(value) = ast.get_leaf_data(node).unwrap() else {
@@ -620,38 +732,102 @@ impl FnCodegen<'_> {
                     };
                     let i8_ty = IntegerType::new(self.context, 8);
                     let ptr_ty = PtrType::typed(self.context, i8_ty);
-                    self.builder
-                        .insert(cir::string_op(self.context, value, ptr_ty))
-                        .result()
+                    LoweredExpr::Value(
+                        self.builder
+                            .insert(cir::string_op(self.context, value, ptr_ty))
+                            .result(),
+                    )
                 }
                 AstKind::Var => {
                     let AstLeaf::Var(_) = ast.get_leaf_data(node).unwrap() else {
                         unreachable!("var node carries a var payload");
                     };
                     let slot = self.locals[&node_entity(self.typed, node)];
-                    self.builder
-                        .insert(p::load(self.context, slot.ptr, slot.elem).build())
-                        .result()
+                    LoweredExpr::Address {
+                        ptr: slot.ptr,
+                        elem: slot.elem,
+                    }
+                }
+                AstKind::Member => {
+                    let AstLeaf::Member { indirect, .. } = ast.get_leaf_data(node).unwrap() else {
+                        unreachable!("member node carries a member payload");
+                    };
+                    let base_node = ast.children(node).next().unwrap();
+                    let base = self.values[base_node.index() - base];
+                    let base_ptr = if *indirect {
+                        self.materialize(base)
+                    } else if let LoweredExpr::Address { ptr, .. } = base {
+                        ptr
+                    } else {
+                        return Err(unsupported(
+                            ast,
+                            node,
+                            "non-addressable member base".to_string(),
+                        ));
+                    };
+                    let elem = lower_type(self.context, self.typed, node_type(self.typed, node));
+                    let ptr_ty = if matches!(
+                        self.typed.types().kind(node_type(self.typed, node)),
+                        TypeKind::Record(_)
+                    ) {
+                        PtrType::opaque(self.context)
+                    } else {
+                        PtrType::typed(self.context, elem)
+                    };
+                    let field = ast.get_annotation(node).unwrap().member_index.unwrap() as u64;
+                    let base_ty = node_type(self.typed, base_node);
+                    let record = match self.typed.types().kind(base_ty) {
+                        TypeKind::Record(id) => self.typed.record(*id).unwrap(),
+                        TypeKind::Pointer(pointee) => {
+                            let TypeKind::Record(id) = self.typed.types().kind(*pointee) else {
+                                unreachable!("member base has a record type")
+                            };
+                            self.typed.record(*id).unwrap()
+                        }
+                        _ => unreachable!("member base has a record type"),
+                    };
+                    let member = self.builder.insert(
+                        cir::ops::get_member(
+                            self.context,
+                            base_ptr,
+                            field,
+                            record.name.as_str(),
+                            ptr_ty,
+                        )
+                        .build(),
+                    );
+                    LoweredExpr::Address {
+                        ptr: member.result(),
+                        elem,
+                    }
                 }
                 AstKind::Call => {
                     let AstLeaf::Call(name) = ast.get_leaf_data(node).unwrap() else {
                         unreachable!("call node carries a call payload");
                     };
                     let sig = &self.signatures[&node_entity(self.typed, node)];
-                    let args = ast
+                    let arguments = ast
                         .children(node)
                         .map(|arg| self.values[arg.index() - base])
                         .collect::<Vec<_>>();
-                    self.builder
-                        .insert(b::call(self.context, args, name.as_str(), sig.ret).build())
-                        .result()
+                    let args = arguments
+                        .into_iter()
+                        .map(|argument| self.materialize(argument))
+                        .collect();
+                    LoweredExpr::Value(
+                        self.builder
+                            .insert(b::call(self.context, args, name.as_str(), sig.ret).build())
+                            .result(),
+                    )
                 }
                 kind @ (AstKind::Add | AstKind::Sub | AstKind::Mul) => {
                     let mut children = ast.children(node);
-                    let l = self.values[children.next().unwrap().index() - base];
-                    let r = self.values[children.next().unwrap().index() - base];
+                    let lhs = self.values[children.next().unwrap().index() - base];
+                    let rhs = self.values[children.next().unwrap().index() - base];
+                    let l = self.materialize(lhs);
+                    let r = self.materialize(rhs);
                     let ty = lower_type(self.context, self.typed, node_type(self.typed, node));
-                    match kind {
+                    let value = match kind {
                         AstKind::Add => self
                             .builder
                             .insert(b::addi(self.context, l, r, ty).build())
@@ -664,7 +840,8 @@ impl FnCodegen<'_> {
                             .builder
                             .insert(b::muli(self.context, l, r, ty).build())
                             .result(),
-                    }
+                    };
+                    LoweredExpr::Value(value)
                 }
                 kind @ (AstKind::Lt
                 | AstKind::Gt
@@ -675,8 +852,8 @@ impl FnCodegen<'_> {
                     let mut children = ast.children(node);
                     let lhs_node = children.next().unwrap();
                     let rhs_node = children.next().unwrap();
-                    let lhs = self.values[lhs_node.index() - base];
-                    let rhs = self.values[rhs_node.index() - base];
+                    let lhs = self.materialize(self.values[lhs_node.index() - base]);
+                    let rhs = self.materialize(self.values[rhs_node.index() - base]);
                     let signed = self
                         .typed
                         .integer_is_signed(node_type(self.typed, lhs_node))
@@ -694,16 +871,57 @@ impl FnCodegen<'_> {
                         (AstKind::Ne, _) => "ne",
                         _ => unreachable!(),
                     };
-                    self.builder
-                        .insert(
-                            b::CmpIOpBuilder::new(self.context)
-                                .lhs(lhs)
-                                .rhs(rhs)
-                                .predicate(predicate)
-                                .result_type(IntegerType::new(self.context, 1))
-                                .build(),
-                        )
-                        .result()
+                    LoweredExpr::Value(
+                        self.builder
+                            .insert(
+                                b::CmpIOpBuilder::new(self.context)
+                                    .lhs(lhs)
+                                    .rhs(rhs)
+                                    .predicate(predicate)
+                                    .result_type(IntegerType::new(self.context, 1))
+                                    .build(),
+                            )
+                            .result(),
+                    )
+                }
+                AstKind::AssignExpr => {
+                    let mut children = ast.children(node);
+                    let lhs_node = children.next().unwrap();
+                    let lhs = self.values[lhs_node.index() - base];
+                    let rhs = self.values[children.next().unwrap().index() - base];
+                    let LoweredExpr::Address { ptr, elem } = lhs else {
+                        return Err(unsupported(
+                            ast,
+                            node,
+                            "non-addressable assignment".to_string(),
+                        ));
+                    };
+                    if let TypeKind::Record(id) =
+                        self.typed.types().kind(node_type(self.typed, lhs_node))
+                    {
+                        let LoweredExpr::Address { ptr: source, .. } = rhs else {
+                            return Err(unsupported(
+                                ast,
+                                node,
+                                "non-addressable struct source".to_string(),
+                            ));
+                        };
+                        self.builder.insert(
+                            cir::ops::copy_struct(
+                                self.context,
+                                ptr,
+                                source,
+                                self.typed.record(*id).unwrap().name.as_str(),
+                            )
+                            .build(),
+                        );
+                        LoweredExpr::Address { ptr, elem }
+                    } else {
+                        let value = self.materialize(rhs);
+                        self.builder
+                            .insert(p::store(self.context, value, ptr).build());
+                        LoweredExpr::Value(value)
+                    }
                 }
                 // The richer operators (division, comparison, logical, unary,
                 // calls) are parsed but not yet lowered; stub them out for now.
@@ -711,8 +929,16 @@ impl FnCodegen<'_> {
                     return Err(unsupported(ast, node, format!("expression {kind:?}")));
                 }
             };
-            let value = self.apply_conversions(node, value);
-            self.values.push(value);
+            let expression = if ast
+                .get_annotation(node)
+                .is_some_and(|semantics| !semantics.conversions.is_empty())
+            {
+                let value = self.materialize(expression);
+                LoweredExpr::Value(self.apply_conversions(node, value))
+            } else {
+                expression
+            };
+            self.values.push(expression);
         }
 
         Ok(*self.values.last().unwrap())

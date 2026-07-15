@@ -22,6 +22,7 @@ use tir::{
 };
 
 use crate::backend::liveness::{self, Liveness, PhysReg};
+use crate::ptr::AllocaOp;
 
 /// Architectural metadata for one register class.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1050,8 +1051,14 @@ impl FrameState {
     }
 
     fn alloc_slot(&mut self) -> i64 {
+        self.alloc(self.slot_size, self.slot_size)
+    }
+
+    fn alloc(&mut self, size: u32, align: u32) -> i64 {
+        let align = i64::from(align.max(1));
+        self.next_offset = ((self.next_offset + align - 1) / align) * align;
         let offset = self.next_offset;
-        self.next_offset += self.slot_size as i64;
+        self.next_offset += i64::from(size);
         offset
     }
 
@@ -1081,9 +1088,9 @@ fn collect_stack_allocas(
     for &block in blocks {
         for op_id in context.get_block(block).op_ids() {
             let op = context.get_op(op_id);
-            if op.dialect != "ptr" || op.name != "alloca" {
+            let Some(allocation) = op.clone().as_op::<AllocaOp>() else {
                 continue;
-            }
+            };
             let Some(result) = op.results.first() else {
                 continue;
             };
@@ -1091,7 +1098,7 @@ fn collect_stack_allocas(
                 op_id,
                 block,
                 vreg: result.number(),
-                offset: frame.alloc_slot(),
+                offset: frame.alloc(allocation.size() as u32, allocation.align() as u32),
             });
         }
     }
@@ -1559,6 +1566,16 @@ fn role_of(op: &tir::OpInstance, name: &str) -> AttributeRole {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frame_allocations_respect_size_and_alignment() {
+        let mut frame = FrameState::new(8);
+
+        assert_eq!(frame.alloc(1, 1), 0);
+        assert_eq!(frame.alloc(8, 8), 8);
+        assert_eq!(frame.alloc(4, 4), 16);
+        assert_eq!(frame.size(16), 32);
+    }
     use std::collections::BTreeSet;
     use std::sync::Arc;
     use tir::builtin::{IntegerType, ops};

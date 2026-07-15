@@ -52,7 +52,7 @@ pub enum CType {
     LongDouble,
     Builtin(String),
     Named(String),
-    Record(RecordKind, Option<String>),
+    Record(RecordKind, RecordId, Option<String>),
     Enum(Option<String>),
     Const(Box<CType>),
     Volatile(Box<CType>),
@@ -66,6 +66,19 @@ pub enum CType {
         has_parameter_type_list: bool,
     },
     Attributed(Box<CType>, Vec<String>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RecordId(u32);
+
+impl RecordId {
+    pub(crate) fn new(id: u32) -> Self {
+        Self(id)
+    }
+
+    pub(crate) fn number(self) -> u32 {
+        self.0
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -173,6 +186,8 @@ pub enum AstKind {
     PostDec,
     /// Children: the argument expressions. Callee name lives in [`AstLeaf::Call`].
     Call,
+    /// Child: the base expression. Field name and access form live in [`AstLeaf::Member`].
+    Member,
     Var,
     String,
     Int,
@@ -185,6 +200,7 @@ pub enum AstKind {
 #[derive(Debug, Clone, PartialEq)]
 pub enum AstLeaf {
     Record {
+        id: RecordId,
         kind: RecordKind,
         name: Option<String>,
     },
@@ -217,6 +233,10 @@ pub enum AstLeaf {
     Assign(String),
     Label(String),
     Call(String),
+    Member {
+        name: String,
+        indirect: bool,
+    },
     Var(String),
     String(String),
     Int(IntegerLiteral),
@@ -245,7 +265,7 @@ fn render_ctype(ty: &CType) -> String {
         CType::LongDouble => "LongDouble".to_string(),
         CType::Builtin(name) => format!("Builtin({name})"),
         CType::Named(name) => format!("Named({name})"),
-        CType::Record(kind, name) => {
+        CType::Record(kind, _, name) => {
             let kind = match kind {
                 RecordKind::Struct => "struct",
                 RecordKind::Union => "union",
@@ -302,7 +322,7 @@ fn render_node(ast: &Ast, id: NodeId, depth: usize, out: &mut String) {
         AstKind::TranslationUnit => "TranslationUnit".to_string(),
         AstKind::DeclGroup => "DeclGroup".to_string(),
         AstKind::RecordDecl => match ast.get_leaf_data(id) {
-            Some(AstLeaf::Record { kind, name }) => {
+            Some(AstLeaf::Record { kind, name, .. }) => {
                 let kind = match kind {
                     RecordKind::Struct => "Struct",
                     RecordKind::Union => "Union",
@@ -438,6 +458,12 @@ fn render_node(ast: &Ast, id: NodeId, depth: usize, out: &mut String) {
         AstKind::PostDec => "PostDec".to_string(),
         AstKind::Call => match ast.get_leaf_data(id) {
             Some(AstLeaf::Call(name)) => format!("Call {name:?}"),
+            _ => unreachable!(),
+        },
+        AstKind::Member => match ast.get_leaf_data(id) {
+            Some(AstLeaf::Member { name, indirect }) => {
+                format!("Member {}{name}", if *indirect { "->" } else { "." })
+            }
             _ => unreachable!(),
         },
         AstKind::Var => match ast.get_leaf_data(id) {

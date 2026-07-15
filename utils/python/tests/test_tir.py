@@ -10,7 +10,7 @@ import tir
 MODULE = """
 module {
   func @f(%0: !i32, %1: !i32) -> !i32 {
-    %2 = ptr.alloca : !ptr.p<!i32>
+    %2 = ptr.alloca {size = 4, align = 4} : !ptr.p<!i32>
     ptr.store %0, %2
     %5 = ptr.load %2 : !i32
     %7 = muli %5, %1 : !i32
@@ -60,7 +60,7 @@ class TirTest(unittest.TestCase):
             self.assertEqual(addi.operands[1].id, b.id)
 
             # A different dialect via the same generated path.
-            alloca = tir.ptr.alloca(ctx, result_type=ptr_i32)
+            alloca = tir.ptr.alloca(ctx, size=4, align=4, result_type=ptr_i32)
             block.insert(0, alloca)
             self.assertEqual(alloca.dialect, "ptr")
             self.assertEqual(len(block.ops), 2)

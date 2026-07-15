@@ -265,7 +265,8 @@ mod tests {
         let func = b::func(&context, "fwd", i32_ty, Some(region.id())).build();
 
         let mut entry_b = IRBuilder::new(entry.clone());
-        let slot = entry_b.insert(p::alloca(&context, PtrType::typed(&context, i32_ty)).build());
+        let slot = entry_b
+            .insert(p::alloca(&context, 4u64, 4u64, PtrType::typed(&context, i32_ty)).build());
         let slot_ptr = slot.result();
         let alloca_id = slot.id();
         let store_id = entry_b
@@ -311,7 +312,8 @@ mod tests {
         let func = b::func(&context, "maybe", i32_ty, Some(region.id())).build();
 
         let mut entry_b = IRBuilder::new(entry.clone());
-        let slot = entry_b.insert(p::alloca(&context, PtrType::typed(&context, i32_ty)).build());
+        let slot = entry_b
+            .insert(p::alloca(&context, 4u64, 4u64, PtrType::typed(&context, i32_ty)).build());
         let slot_ptr = slot.result();
         let alloca_id = slot.id();
         entry_b.insert(b::cond_br(&context, cond_id, vec![], vec![], then.id(), join.id()).build());

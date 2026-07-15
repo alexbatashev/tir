@@ -8,7 +8,7 @@
 static const char *MODULE =
     "module {\n"
     "  func @f(%0: !i32, %1: !i32) -> !i32 {\n"
-    "    %2 = ptr.alloca : !ptr.p<!i32>\n"
+    "    %2 = ptr.alloca {size = 4, align = 4} : !ptr.p<!i32>\n"
     "    ptr.store %0, %2\n"
     "    %5 = ptr.load %2 : !i32\n"
     "    %7 = muli %5, %5 : !i32\n"

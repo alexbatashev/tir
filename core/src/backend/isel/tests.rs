@@ -1011,7 +1011,7 @@ fn memory_ops_select_via_interfaces() {
     let func = ops::func(&context, "demo", i32_ty, Some(region.id())).build();
     let mut fb = IRBuilder::new(func.body());
     let slot_ty = tir::ptr::PtrType::typed(&context, i32_ty);
-    let slot = fb.insert(tir::ptr::ops::alloca(&context, slot_ty).build());
+    let slot = fb.insert(tir::ptr::ops::alloca(&context, 4u64, 4u64, slot_ty).build());
     fb.insert(tir::ptr::ops::store(&context, param_id, slot.result()).build());
     let loaded = fb.insert(tir::ptr::ops::load(&context, slot.result(), i32_ty).build());
     fb.insert(ops::r#return(&context, loaded.result()).build());

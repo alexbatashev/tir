@@ -178,7 +178,12 @@ fn lower_inst(
         }
         Inst::Alloca { result, ty } => {
             let ptr_ty = PtrType::typed(context, lower_type(context, ty));
-            let o = pops::alloca(context, ptr_ty).build();
+            let bytes = match ty {
+                Type::Int(width) => u64::from(width.div_ceil(8)),
+                Type::Ptr(_) => 8,
+                _ => 8,
+            };
+            let o = pops::alloca(context, bytes, bytes, ptr_ty).build();
             values.insert(result.clone(), o.result());
             builder.insert(o);
         }

@@ -1,7 +1,7 @@
 //! The `ptr` dialect: pointers plus the loads and stores that read and write
 //! through them. It is deliberately tiny — just enough to express the
 //! memory-based (non-SSA) lowering a simple C frontend produces, where every
-//! local lives in a stack slot. There is no pointer arithmetic and loads/stores
+//! local lives in a stack slot. Pointer arithmetic is byte-based and loads/stores
 //! carry no offset.
 
 use std::any::Any;
@@ -10,14 +10,14 @@ use std::sync::Arc;
 use crate::ty::TypeConstraint;
 use crate::{
     Context, Error, IRFormatter, MemoryRead, MemoryWrite, Operation, PromotableAllocation, Type,
-    TypeId, dialect, operation, parse::Span,
+    TypeId, attributes::AttributeValue, dialect, operation, parse::Span,
 };
 
 use crate as tir;
 use crate::Any as AnyConstraint;
 
 pub mod ops {
-    pub use super::{AllocaOp, LoadOp, StoreOp, alloca, load, store};
+    pub use super::{AllocaOp, LoadOp, PtrAddOp, StoreOp, alloca, load, ptradd, store};
 }
 
 dialect! {
@@ -25,6 +25,7 @@ dialect! {
         name: "ptr",
         operations: [
             AllocaOp,
+            PtrAddOp,
             LoadOp,
             StoreOp,
         ],
@@ -139,10 +140,60 @@ operation! {
     AllocaOp {
         name: "alloca",
         dialect: "ptr",
+        attributes: A {
+            size: "UInt",
+            align: "UInt",
+        },
         results: R {
             result: "crate::ptr::PtrType",
         },
         interfaces: [PromotableAllocation],
+    }
+}
+
+impl AllocaOpBuilder {
+    pub fn size(self, size: u64) -> Self {
+        self.attr("size", AttributeValue::UInt(size))
+    }
+
+    pub fn align(self, align: u64) -> Self {
+        self.attr("align", AttributeValue::UInt(align))
+    }
+}
+
+impl AllocaOp {
+    pub fn size(&self) -> u64 {
+        uint_attribute(self, "size")
+    }
+
+    pub fn align(&self) -> u64 {
+        uint_attribute(self, "align")
+    }
+}
+
+fn uint_attribute(op: &impl Operation, name: &str) -> u64 {
+    op.attributes()
+        .iter()
+        .find(|attribute| attribute.name == name)
+        .and_then(|attribute| match attribute.value {
+            AttributeValue::UInt(value) => Some(value),
+            _ => None,
+        })
+        .unwrap()
+}
+
+operation! {
+    PtrAddOp {
+        name: "ptradd",
+        dialect: "ptr",
+        operands: O {
+            base: "crate::ptr::PtrType",
+            offset: "crate::builtin::IntegerType",
+        },
+        results: R {
+            result: "crate::ptr::PtrType",
+        },
+        sem: "(set result (add base offset))",
     }
 }
 
@@ -231,6 +282,21 @@ mod tests {
         // Typed and opaque pointers are distinct, identical ones are interned.
         assert_ne!(opaque, typed);
         assert_eq!(PtrType::typed(&context, i32_ty), typed);
+    }
+
+    #[test]
+    fn allocation_records_size_and_alignment() {
+        let context = Context::with_default_dialects();
+        let i32_ty = IntegerType::new(&context, 32);
+        let ptr_ty = PtrType::typed(&context, i32_ty);
+        let allocation = AllocaOpBuilder::new(&context)
+            .size(12)
+            .align(4)
+            .result_type(ptr_ty)
+            .build();
+
+        assert_eq!(allocation.size(), 12);
+        assert_eq!(allocation.align(), 4);
     }
 
     // The alloca/store/load roundtrip inside a function is covered by the

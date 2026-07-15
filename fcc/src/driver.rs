@@ -294,6 +294,7 @@ fn emit_machine_code(args: &CompileArgs, name: &str, source: &str) -> Vec<u8> {
     let module = lower_to_ir(&context, unit, args.lang_options, Some(march));
 
     let mut pm = tir::PassManager::new();
+    pm.add_pass(crate::passes::LowerCirStructsPass::new());
     let function_pipeline = pm.nest(tir::builtin::FuncOp::name());
     function_pipeline.add_pass(crate::passes::LowerCirControlFlowPass::new());
     function_pipeline.add_pass(tir::passes::Mem2RegPass::new());

@@ -41,6 +41,7 @@ mod tests {
         let (context, module) = lower(src);
         let module_op = context.get_op(tir::Operation::id(&module));
         let mut passes = tir::PassManager::new();
+        passes.add_pass(crate::passes::LowerCirStructsPass::new());
         let function_pipeline = passes.nest(tir::builtin::FuncOp::name());
         function_pipeline.add_pass(crate::passes::LowerCirControlFlowPass::new());
         function_pipeline.add_pass(tir::passes::Mem2RegPass::new());
@@ -53,6 +54,19 @@ mod tests {
         let mut out = String::new();
         let mut fmt = tir::IRFormatter::new(&mut out);
         tir::Operation::print(&module, &mut fmt).expect("print");
+        out
+    }
+
+    fn compile_structs_lowered(src: &str) -> String {
+        let (context, module) = lower(src);
+        let mut passes = tir::PassManager::new();
+        passes.add_pass(crate::passes::LowerCirStructsPass::new());
+        passes
+            .run(&context, context.get_op(tir::Operation::id(&module)))
+            .expect("lower CIR structs");
+        let mut out = String::new();
+        let mut formatter = tir::IRFormatter::new(&mut out);
+        tir::Operation::print(&module, &mut formatter).unwrap();
         out
     }
 
@@ -90,6 +104,82 @@ int main(void) { printf("hello"); return 0; }"#,
         let mut fmt = tir::IRFormatter::new(&mut buf);
         tir::Operation::print(&module, &mut fmt).expect("print");
         assert_eq!(ir, buf);
+    }
+
+    #[test]
+    fn emits_struct_definition_and_type() {
+        let ir = compile(
+            "struct Pair { char tag; int value; }; int main(void) { struct Pair pair; return 0; }",
+        );
+
+        assert!(ir.contains("cir.define_struct"), "{ir}");
+        assert!(ir.contains("!cir.struct<\"Pair\">"), "{ir}");
+    }
+
+    #[test]
+    fn struct_ir_roundtrips_through_parser() {
+        let ir = compile(
+            "struct Pair { char tag; int value; }; int main(void) { struct Pair source; struct Pair destination; source.value = 1; destination = source; return destination.value; }",
+        );
+        let context = fcc_context();
+        let module = tir::parse::ir::parse_ir::<tir::builtin::ModuleOp>(&context, &ir)
+            .expect("emitted struct CIR should parse");
+        let mut parsed = String::new();
+        let mut formatter = tir::IRFormatter::new(&mut parsed);
+        tir::Operation::print(&module, &mut formatter).unwrap();
+
+        assert_eq!(ir, parsed);
+    }
+
+    #[test]
+    fn emits_member_address_and_scalar_load() {
+        let ir = compile(
+            "struct Pair { char tag; int value; }; int read(void) { struct Pair pair; return pair.value; }",
+        );
+
+        assert!(ir.contains("cir.get_member"), "{ir}");
+        assert!(ir.contains("ptr.load"), "{ir}");
+    }
+
+    #[test]
+    fn emits_scalar_member_store() {
+        let ir = compile(
+            "struct Pair { int value; }; int write(void) { struct Pair pair; pair.value = 7; return pair.value; }",
+        );
+
+        assert!(ir.matches("cir.get_member").count() >= 2, "{ir}");
+        assert!(ir.contains("ptr.store"), "{ir}");
+    }
+
+    #[test]
+    fn emits_whole_struct_copy() {
+        let ir = compile(
+            "struct Pair { int value; }; int copy(void) { struct Pair source; struct Pair destination; destination = source; return 0; }",
+        );
+
+        assert!(ir.contains("cir.copy_struct"), "{ir}");
+    }
+
+    #[test]
+    fn lowers_member_access_to_pointer_addition() {
+        let ir = compile_structs_lowered(
+            "struct Pair { char tag; int value; }; int read(void) { struct Pair pair; return pair.value; }",
+        );
+
+        assert!(ir.contains("ptr.ptradd"), "{ir}");
+        assert!(!ir.contains("cir.get_member"), "{ir}");
+        assert!(!ir.contains("cir.define_struct"), "{ir}");
+    }
+
+    #[test]
+    fn lowers_struct_copy_to_scalar_memory_operations() {
+        let ir = compile_structs_lowered(
+            "struct Pair { char tag; int value; }; int copy(void) { struct Pair source; struct Pair destination; destination = source; return 0; }",
+        );
+
+        assert!(!ir.contains("cir.copy_struct"), "{ir}");
+        assert!(ir.matches("ptr.load").count() >= 2, "{ir}");
+        assert!(ir.matches("ptr.store").count() >= 2, "{ir}");
     }
 
     #[test]
@@ -207,5 +297,88 @@ int main(void) { printf("hello"); return 0; }"#,
         };
         assert_eq!(function(0), 4);
         assert_eq!(function(1), 7);
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn struct_fields_execute_through_host_jit() {
+        let ir = compile_cfg(
+            "struct Pair { char tag; int value; }; int read(void) { struct Pair pair; pair.value = 42; return pair.value; }",
+        );
+        let module = tir_jit::Jit::host().unwrap().compile(&ir).unwrap();
+        let function = unsafe { module.get::<extern "C" fn() -> i32>("read").unwrap() };
+
+        assert_eq!(function(), 42);
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn pointer_member_access_executes_through_host_jit() {
+        #[repr(C)]
+        struct Pair {
+            tag: i8,
+            value: i32,
+        }
+
+        let ir = compile_cfg(
+            "struct Pair { char tag; int value; }; int read(struct Pair *pair) { return pair->value; }",
+        );
+        let module = tir_jit::Jit::host().unwrap().compile(&ir).unwrap();
+        let function = unsafe {
+            module
+                .get::<extern "C" fn(*const Pair) -> i32>("read")
+                .unwrap()
+        };
+        let pair = Pair { tag: 1, value: 73 };
+
+        assert_eq!(function(&pair), 73);
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn whole_struct_copy_executes_through_host_jit() {
+        let ir = compile_cfg(
+            "struct Pair { char tag; int value; }; int copy(void) { struct Pair source; struct Pair destination; source.tag = 3; source.value = 91; destination = source; return destination.tag + destination.value; }",
+        );
+        let module = tir_jit::Jit::host().unwrap().compile(&ir).unwrap();
+        let function = unsafe { module.get::<extern "C" fn() -> i32>("copy").unwrap() };
+
+        assert_eq!(function(), 94);
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn compiler_named_anonymous_struct_executes_through_host_jit() {
+        let ir = compile_cfg(
+            "typedef struct { int value; } Pair; int read(void) { Pair pair; pair.value = 29; return pair.value; }",
+        );
+        let module = tir_jit::Jit::host().unwrap().compile(&ir).unwrap();
+        let function = unsafe { module.get::<extern "C" fn() -> i32>("read").unwrap() };
+
+        assert_eq!(function(), 29);
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn sizeof_struct_uses_its_padded_layout() {
+        let ir = compile_cfg(
+            "struct Pair { char tag; int value; }; int size(void) { return sizeof(struct Pair); }",
+        );
+        let module = tir_jit::Jit::host().unwrap().compile(&ir).unwrap();
+        let function = unsafe { module.get::<extern "C" fn() -> i32>("size").unwrap() };
+
+        assert_eq!(function(), 8);
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn nested_struct_member_executes_through_host_jit() {
+        let ir = compile_cfg(
+            "struct Inner { int value; }; struct Outer { char tag; struct Inner inner; }; int read(void) { struct Outer outer; outer.inner.value = 61; return outer.inner.value; }",
+        );
+        let module = tir_jit::Jit::host().unwrap().compile(&ir).unwrap();
+        let function = unsafe { module.get::<extern "C" fn() -> i32>("read").unwrap() };
+
+        assert_eq!(function(), 61);
     }
 }

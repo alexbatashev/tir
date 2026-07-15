@@ -5,7 +5,7 @@
 
 module {
   func @sum(%0: !i32) -> !i32 {
-    %p = ptr.alloca : !ptr.p<!i32>
+    %p = ptr.alloca {size = 4, align = 4} : !ptr.p<!i32>
     ptr.store %0, %p
     %v = ptr.load %p : !i32
     return %v

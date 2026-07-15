@@ -8,7 +8,7 @@
 
 module {
   func @forward(%0: !i1, %1: !i32) -> !i32 {
-    %2 = ptr.alloca : !ptr.p<!i32>
+    %2 = ptr.alloca {size = 4, align = 4} : !ptr.p<!i32>
     ptr.store %1, %2
     scf.if %0 {
       %3 = ptr.load %2 : !i32

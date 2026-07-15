@@ -88,7 +88,13 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
     let parser = if custom_format {
         make_custom_parser()
     } else {
-        make_parser(&builder_name, &regions, &operand_names, has_results)
+        make_parser(
+            &builder_name,
+            &regions,
+            &operand_names,
+            &attributes,
+            has_results,
+        )
     };
 
     let attribute_verifier = make_attribute_verifier(&attributes);
@@ -1580,8 +1586,17 @@ fn make_parser(
     builder_name: &Ident,
     regions: &[Region],
     operands: &[String],
+    attributes: &[AttrSpec],
     has_results: bool,
 ) -> proc_macro2::TokenStream {
+    let attr_spec_literals: Vec<_> = attributes
+        .iter()
+        .map(|attr| {
+            let name = proc_macro2::Literal::string(&attr.name);
+            let ty = proc_macro2::Literal::string(&attr.ty);
+            quote! { (#name, #ty) }
+        })
+        .collect();
     let (region_parsers, region_builders) = if regions.len() == 1 && regions[0].single_block {
         let region_name = format_ident!("{}", regions[0].name);
         (
@@ -1637,6 +1652,7 @@ fn make_parser(
            use tir::parse::common::Cursor;
 
            let mut parsed_attrs: Vec<tir::attributes::NamedAttribute> = vec![];
+           let attr_specs: &[(&str, &str)] = &[#(#attr_spec_literals),*];
 
            let mut builder = #builder_name::new(context);
 
@@ -1650,11 +1666,7 @@ fn make_parser(
                    loop {
                        if let Some(name) = parser.parse_ident() {
                            if !parser.parse_token("=") { ok = false; break; }
-                           let val = if let Some(s) = parser.parse_string() {
-                               tir::attributes::AttributeValue::Str(s.to_string())
-                           } else if let Some(ty) = parser.parse_type(context)? {
-                               tir::attributes::AttributeValue::Type(ty)
-                           } else if parser.parse_token("%virt") {
+                           let mut val = if parser.parse_token("%virt") {
                                if let Some(id) = parser.parse_number() {
                                    let mut class = None;
                                    if parser.parse_token(":") {
@@ -1662,13 +1674,20 @@ fn make_parser(
                                    }
                                    tir::attributes::AttributeValue::Register(tir::attributes::RegisterAttr::Virtual { id: id as u32, class: class })
                                } else { ok = false; break; }
-                           } else if let Some(f) = parser.parse_float() {
-                               tir::attributes::AttributeValue::F64(f)
-                           } else if let Some(n) = parser.parse_number() {
-                               tir::attributes::AttributeValue::Int(n)
+                           } else if let Some(value) = parser.parse_attribute_value(context)? {
+                               value
                            } else {
                                ok = false; break;
                            };
+                           if attr_specs.iter().any(|(attr_name, ty)| *attr_name == name && *ty == "UInt") {
+                               val = match val {
+                                   tir::attributes::AttributeValue::Int(value) if value >= 0 => {
+                                       tir::attributes::AttributeValue::UInt(value as u64)
+                                   }
+                                   tir::attributes::AttributeValue::Int(_) => { ok = false; break; }
+                                   other => other,
+                               };
+                           }
                            parsed_attrs.push(tir::attributes::NamedAttribute::new(name, val));
                            if parser.parse_token("}") { break; }
                            if !parser.parse_token(",") { ok = false; break; }

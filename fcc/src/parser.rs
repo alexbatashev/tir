@@ -13,7 +13,7 @@
 use chumsky::input::{MapExtra, ValueInput};
 use chumsky::inspector::SimpleState;
 use chumsky::prelude::*;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use tir::graph::{Dag, MutDag, NodeId};
 
@@ -35,12 +35,14 @@ struct ParseState {
     ast: Ast,
     spans: Vec<crate::diagnostics::Span>,
     name_scopes: Vec<NameScope>,
+    next_record: u32,
 }
 
 #[derive(Default)]
 struct NameScope {
     typedefs: HashSet<String>,
     ordinary: HashSet<String>,
+    tags: HashMap<String, (RecordKind, RecordId)>,
 }
 
 impl ParseState {
@@ -73,6 +75,31 @@ impl ParseState {
 
     fn declare_ordinary(&mut self, name: String) {
         self.name_scopes.last_mut().unwrap().ordinary.insert(name);
+    }
+
+    fn record_id(&mut self, kind: RecordKind, name: Option<&str>, defining: bool) -> RecordId {
+        if let Some(name) = name {
+            if let Some((_, id)) = self.name_scopes.last().unwrap().tags.get(name) {
+                return *id;
+            }
+            if !defining {
+                for scope in self.name_scopes.iter().rev().skip(1) {
+                    if let Some((_, id)) = scope.tags.get(name) {
+                        return *id;
+                    }
+                }
+            }
+        }
+        let id = RecordId::new(self.next_record);
+        self.next_record += 1;
+        if let Some(name) = name {
+            self.name_scopes
+                .last_mut()
+                .unwrap()
+                .tags
+                .insert(name.to_string(), (kind, id));
+        }
+        id
     }
 
     fn push_scope(&mut self) {
@@ -137,6 +164,7 @@ pub fn parse(
         ast: Ast::new(),
         spans: byte_spans.clone(),
         name_scopes: vec![NameScope::default()],
+        next_record: 0,
     });
     let (out, errors) = translation_unit()
         .parse_with_state(filtered.as_slice(), &mut state)
@@ -337,7 +365,16 @@ where
             }
         },
     );
-    let base = choice((builtin, named));
+    let record = just(Token::KwStruct).ignore_then(ident()).map_with(
+        |name, e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
+            let id = e
+                .state()
+                .0
+                .record_id(RecordKind::Struct, Some(&name), false);
+            CType::Record(RecordKind::Struct, id, Some(name))
+        },
+    );
+    let base = choice((builtin, record, named));
     let pointer = just(Token::Star).ignore_then(qualifier.clone().repeated().collect::<Vec<_>>());
 
     qualifier
@@ -445,8 +482,14 @@ where
             let postfix = primary
                 .then(
                     choice((
-                        just(Token::PlusPlus).to(AstKind::PostInc),
-                        just(Token::MinusMinus).to(AstKind::PostDec),
+                        just(Token::PlusPlus).to((Some(AstKind::PostInc), None)),
+                        just(Token::MinusMinus).to((Some(AstKind::PostDec), None)),
+                        just(Token::Dot)
+                            .ignore_then(ident())
+                            .map(|name| (None, Some((false, name)))),
+                        just(Token::Arrow)
+                            .ignore_then(ident())
+                            .map(|name| (None, Some((true, name)))),
                     ))
                     .repeated()
                     .collect::<Vec<_>>(),
@@ -455,8 +498,16 @@ where
                     |(operand, ops), e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
                         let tok = e.span().start;
                         let st = &mut e.state().0;
-                        ops.into_iter()
-                            .fold(operand, |child, op| unary(st, op, child, tok))
+                        ops.into_iter().fold(operand, |child, (op, member)| {
+                            if let Some(op) = op {
+                                return unary(st, op, child, tok);
+                            }
+                            let (indirect, name) = member.unwrap();
+                            let id = st.add(AstKind::Member, tok);
+                            st.ast.set_leaf_data(id, AstLeaf::Member { name, indirect });
+                            st.ast.add_edge(id, child);
+                            id
+                        })
                     },
                 );
             let unary_expr = recursive(|unary_expr| {
@@ -1245,6 +1296,8 @@ impl<'a> DeclParser<'a> {
             },
             _ => None,
         };
+        let defining = self.peek() == Some(&Token::LBrace);
+        let record_id = st.record_id(kind, name.as_deref(), defining);
         let mut record = None;
         if self.eat(&Token::LBrace) {
             let mut fields = Vec::new();
@@ -1258,6 +1311,7 @@ impl<'a> DeclParser<'a> {
             st.ast.set_leaf_data(
                 id,
                 AstLeaf::Record {
+                    id: record_id,
                     kind,
                     name: name.clone(),
                 },
@@ -1267,7 +1321,7 @@ impl<'a> DeclParser<'a> {
             }
             record = Some(id);
         }
-        Ok((CType::Record(kind, name), record))
+        Ok((CType::Record(kind, record_id, name), record))
     }
 
     fn parse_field_decl(&mut self, st: &mut ParseState, tok: usize) -> Result<Vec<NodeId>, String> {
@@ -1445,6 +1499,7 @@ impl<'a> DeclParser<'a> {
             ast: Ast::new(),
             spans: Vec::new(),
             name_scopes: vec![NameScope::default()],
+            next_record: 0,
         };
         self.parse_specs(&mut scratch, 0).map(|specs| specs.ty)
     }
@@ -1807,9 +1862,16 @@ fn parse_external_tokens(
         if nodes.len() == 1 {
             return Ok(nodes[0]);
         }
-        if let CType::Record(kind, name) = specs.ty {
+        if let CType::Record(kind, record_id, name) = specs.ty {
             let id = st.add(AstKind::RecordDecl, tok);
-            st.ast.set_leaf_data(id, AstLeaf::Record { kind, name });
+            st.ast.set_leaf_data(
+                id,
+                AstLeaf::Record {
+                    id: record_id,
+                    kind,
+                    name,
+                },
+            );
             return Ok(id);
         }
         return Err("record declaration has no declarator".to_string());
@@ -2059,6 +2121,28 @@ mod tests {
     #[test]
     fn accepts_a_well_formed_function() {
         assert!(parse(&lex("int main(void) { return 0; }"), Default::default()).is_ok());
+    }
+
+    #[test]
+    fn accepts_local_struct_object() {
+        assert!(
+            parse(
+                &lex("struct Pair { int value; }; int main(void) { struct Pair pair; return 0; }"),
+                Default::default(),
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn accepts_struct_member_access() {
+        assert!(
+            parse(
+                &lex("struct Pair { int value; }; int read(void) { struct Pair pair; return pair.value; }"),
+                Default::default(),
+            )
+            .is_ok()
+        );
     }
 
     fn errors(src: &str) -> Vec<Code> {

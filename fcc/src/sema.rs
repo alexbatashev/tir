@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use tir::graph::{Dag, MutDag, NodeId};
 
-use crate::ast::{Ast, AstKind, AstLeaf, CParam, CType, RecordKind};
+use crate::ast::{Ast, AstKind, AstLeaf, CParam, CType, RecordId, RecordKind};
 use crate::diagnostics::{
     ArgumentMismatch, CalledObjectNotFunction, CompleteObjectTypeRequired, ConflictingDeclaration,
     Diagnostic, DuplicateLabel, DuplicateSwitchLabel, IncompatibleConversion,
@@ -144,7 +144,7 @@ pub enum TypeKind {
         varargs: bool,
         prototype: bool,
     },
-    Record(RecordKind, Option<String>),
+    Record(RecordId),
     Enum(Option<String>),
 }
 
@@ -163,6 +163,7 @@ pub struct NodeSemantics {
     pub category: ValueCategory,
     pub conversions: Vec<QualType>,
     pub constant: Option<i64>,
+    pub member_index: Option<usize>,
 }
 
 #[derive(Default)]
@@ -196,6 +197,24 @@ pub struct TypedAst {
     ast: Ast,
     types: TypeInterner,
     target: TargetProfile,
+    records: Vec<RecordDefinition>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RecordField {
+    pub name: String,
+    pub ty: QualType,
+    pub offset: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct RecordDefinition {
+    pub id: RecordId,
+    pub kind: RecordKind,
+    pub name: String,
+    pub fields: Vec<RecordField>,
+    pub size: u64,
+    pub align: u64,
 }
 
 impl TypedAst {
@@ -209,6 +228,14 @@ impl TypedAst {
 
     pub fn target(&self) -> TargetProfile {
         self.target
+    }
+
+    pub fn records(&self) -> impl Iterator<Item = &RecordDefinition> {
+        self.records.iter()
+    }
+
+    pub fn record(&self, id: RecordId) -> Option<&RecordDefinition> {
+        self.records.iter().find(|record| record.id == id)
     }
 
     pub fn integer_width(&self, ty: QualType) -> Option<u32> {
@@ -248,7 +275,7 @@ pub fn analyze_with_target(
     options: LangOptions,
     target: TargetProfile,
 ) -> Result<TypedAst, Vec<Diagnostic>> {
-    let (types, diagnostics) = {
+    let (types, records, diagnostics) = {
         let mut analyzer = Analyzer {
             ast: &mut ast,
             options,
@@ -262,12 +289,19 @@ pub fn analyze_with_target(
             switches: Vec::new(),
             target,
             next_entity: 0,
+            records: Vec::new(),
+            record_indices: HashMap::new(),
         };
         analyzer.translation_unit();
-        (analyzer.types, analyzer.diagnostics)
+        (analyzer.types, analyzer.records, analyzer.diagnostics)
     };
     if diagnostics.is_empty() {
-        Ok(TypedAst { ast, types, target })
+        Ok(TypedAst {
+            ast,
+            types,
+            target,
+            records,
+        })
     } else {
         Err(diagnostics)
     }
@@ -286,6 +320,8 @@ struct Analyzer<'a> {
     switches: Vec<SwitchContext>,
     target: TargetProfile,
     next_entity: u32,
+    records: Vec<RecordDefinition>,
+    record_indices: HashMap<RecordId, usize>,
 }
 
 #[derive(Default)]
@@ -309,6 +345,7 @@ impl Analyzer<'_> {
         let items = self.ast.children(root).collect::<Vec<_>>();
         for item in items {
             match self.ast.get_node(item).kind {
+                AstKind::RecordDecl => self.record_declaration(item),
                 AstKind::Function => {
                     self.declare_file_item(item);
                     self.function(item);
@@ -319,13 +356,70 @@ impl Analyzer<'_> {
                 AstKind::DeclGroup => {
                     let declarations = self.ast.children(item).collect::<Vec<_>>();
                     for declaration in declarations {
-                        self.declare_file_item(declaration);
+                        if self.ast.get_node(declaration).kind == AstKind::RecordDecl {
+                            self.record_declaration(declaration);
+                        } else {
+                            self.declare_file_item(declaration);
+                        }
                     }
                 }
                 _ => {}
             }
         }
         self.scopes.pop();
+    }
+
+    fn record_declaration(&mut self, node: NodeId) {
+        let Some(AstLeaf::Record { id, kind, name }) = self.ast.get_leaf_data(node).cloned() else {
+            return;
+        };
+        let name = name.unwrap_or_else(|| format!("__fcc_anon_struct.{}", id.number()));
+        let index = if let Some(&index) = self.record_indices.get(&id) {
+            index
+        } else {
+            let index = self.records.len();
+            self.record_indices.insert(id, index);
+            self.records.push(RecordDefinition {
+                id,
+                kind,
+                name,
+                fields: Vec::new(),
+                size: 0,
+                align: 1,
+            });
+            index
+        };
+
+        let children = self.ast.children(node).collect::<Vec<_>>();
+        if children.is_empty() {
+            return;
+        }
+        let mut fields = Vec::with_capacity(children.len());
+        let mut field_spans = HashMap::new();
+        let mut offset = 0;
+        let mut record_align = 1;
+        for field in children {
+            let Some(AstLeaf::Field { name, ty }) = self.ast.get_leaf_data(field).cloned() else {
+                continue;
+            };
+            let span = self.ast.get_node(field).span;
+            if let Some(previous) = field_spans.insert(name.clone(), span) {
+                self.diagnostics.push(
+                    Redefinition::new(span, previous, name, redefinition_reference(self.options))
+                        .into(),
+                );
+                continue;
+            }
+            let ty = self.canonical_type(&ty);
+            let (size, align) = self.type_layout(ty).unwrap_or((0, 1));
+            offset = align_to(offset, align);
+            fields.push(RecordField { name, ty, offset });
+            offset += size;
+            record_align = record_align.max(align);
+        }
+        self.records[index].size = align_to(offset, record_align);
+        self.records[index].align = record_align;
+        self.records[index].fields = fields;
     }
 
     fn declare_file_item(&mut self, node: NodeId) {
@@ -739,15 +833,24 @@ impl Analyzer<'_> {
         let span = self.ast.get_node(node).span;
         self.validate_parsed_type(span, &parsed_ty);
         let ty = self.canonical_type(&parsed_ty);
-        if !typedef && matches!(self.types.kind(ty), TypeKind::Void) {
-            self.diagnostics.push(
-                CompleteObjectTypeRequired::new(
-                    span,
-                    format!("object '{name}' cannot have void type"),
-                    object_type_reference(self.options),
-                )
-                .into(),
-            );
+        if !typedef {
+            let message = match self.types.kind(ty) {
+                TypeKind::Void => Some(format!("object '{name}' cannot have void type")),
+                TypeKind::Record(_) if self.type_layout(ty).is_none() => {
+                    Some(format!("object '{name}' has incomplete struct type"))
+                }
+                _ => None,
+            };
+            if let Some(message) = message {
+                self.diagnostics.push(
+                    CompleteObjectTypeRequired::new(
+                        span,
+                        message,
+                        object_type_reference(self.options),
+                    )
+                    .into(),
+                );
+            }
         }
         if ty.qualifiers.is_restrict() && !matches!(self.types.kind(ty), TypeKind::Pointer(_)) {
             self.diagnostics.push(
@@ -877,6 +980,7 @@ impl Analyzer<'_> {
         let int = self.types.intern(TypeKind::Integer(IntegerKind::Int));
         let error = self.types.intern(TypeKind::Error);
         let mut entity = None;
+        let mut member_index = None;
         let (ty, category) = match kind {
             AstKind::Int => {
                 let Some(AstLeaf::Int(literal)) = self.ast.get_leaf_data(node).cloned() else {
@@ -911,6 +1015,68 @@ impl Analyzer<'_> {
                         (symbol.ty, category)
                     }
                     _ => (error, ValueCategory::Value),
+                }
+            }
+            AstKind::Member => {
+                let Some(AstLeaf::Member { name, indirect }) =
+                    self.ast.get_leaf_data(node).cloned()
+                else {
+                    return;
+                };
+                let base = self.ast.children(node).next().unwrap();
+                let base_ty = self
+                    .ast
+                    .get_annotation(base)
+                    .and_then(|info| info.ty)
+                    .unwrap_or(error);
+                let record = if indirect {
+                    match self.types.kind(base_ty) {
+                        TypeKind::Pointer(pointee) => match self.types.kind(*pointee) {
+                            TypeKind::Record(id) => Some(*id),
+                            _ => None,
+                        },
+                        _ => None,
+                    }
+                } else {
+                    match self.types.kind(base_ty) {
+                        TypeKind::Record(id) => Some(*id),
+                        _ => None,
+                    }
+                };
+                let field = record
+                    .and_then(|id| self.record_indices.get(&id).copied())
+                    .and_then(|index| {
+                        self.records[index]
+                            .fields
+                            .iter()
+                            .enumerate()
+                            .find(|(_, field)| field.name == name)
+                    });
+                if let Some((index, field)) = field {
+                    member_index = Some(index);
+                    (field.ty, ValueCategory::Lvalue)
+                } else {
+                    if let Some(id) = record {
+                        let record_name = self.records[self.record_indices[&id]].name.clone();
+                        self.diagnostics.push(
+                            InvalidOperands::new(
+                                self.ast.get_node(node).span,
+                                format!("struct '{record_name}' has no member named '{name}'"),
+                                member_reference(self.options),
+                            )
+                            .into(),
+                        );
+                    } else if !matches!(self.types.kind(base_ty), TypeKind::Error) {
+                        self.diagnostics.push(
+                            InvalidOperands::new(
+                                self.ast.get_node(node).span,
+                                "member access requires a struct operand".to_string(),
+                                member_reference(self.options),
+                            )
+                            .into(),
+                        );
+                    }
+                    (error, ValueCategory::Value)
                 }
             }
             AstKind::Call => {
@@ -1285,6 +1451,7 @@ impl Analyzer<'_> {
                         category: ValueCategory::Value,
                         constant: size.map(|value| value as i64),
                         conversions: Vec::new(),
+                        member_index: None,
                     },
                 );
                 return;
@@ -1418,6 +1585,7 @@ impl Analyzer<'_> {
                 category,
                 conversions: Vec::new(),
                 constant,
+                member_index,
             },
         );
     }
@@ -1539,7 +1707,7 @@ impl Analyzer<'_> {
             TypeKind::Pointer(_) => "pointer",
             TypeKind::Array(_, _) => "array",
             TypeKind::Function { .. } => "function",
-            TypeKind::Record(_, _) => "record",
+            TypeKind::Record(_) => "record",
             TypeKind::Enum(_) => "enumeration",
             TypeKind::Void => "void",
             TypeKind::Error => "invalid",
@@ -1547,15 +1715,32 @@ impl Analyzer<'_> {
     }
 
     fn type_size(&self, ty: QualType) -> Option<u64> {
+        self.type_layout(ty).map(|(size, _)| size)
+    }
+
+    fn type_layout(&self, ty: QualType) -> Option<(u64, u64)> {
         match self.types.kind(ty) {
-            TypeKind::Integer(kind) => Some((self.target.integer_width(*kind) / 8) as u64),
-            TypeKind::Float => Some(4),
-            TypeKind::Double => Some(8),
-            TypeKind::LongDouble => Some(16),
-            TypeKind::Pointer(_) => Some((self.target.pointer_width() / 8) as u64),
-            TypeKind::Array(element, Some(length)) => {
-                self.type_size(*element)?.checked_mul(*length)
+            TypeKind::Integer(kind) => {
+                let size = (self.target.integer_width(*kind) / 8) as u64;
+                Some((size, size))
             }
+            TypeKind::Float => Some((4, 4)),
+            TypeKind::Double => Some((8, 8)),
+            TypeKind::LongDouble => Some((16, 16)),
+            TypeKind::Pointer(_) => {
+                let size = (self.target.pointer_width() / 8) as u64;
+                Some((size, size))
+            }
+            TypeKind::Array(element, Some(length)) => {
+                let (size, align) = self.type_layout(*element)?;
+                Some((size.checked_mul(*length)?, align))
+            }
+            TypeKind::Record(id) => self
+                .record_indices
+                .get(id)
+                .map(|&index| &self.records[index])
+                .filter(|record| record.size != 0)
+                .map(|record| (record.size, record.align)),
             _ => None,
         }
     }
@@ -1758,7 +1943,7 @@ impl Analyzer<'_> {
                         || self.options.std_version == StdVersion::C23,
                 })
             }
-            CType::Record(kind, name) => self.types.intern(TypeKind::Record(*kind, name.clone())),
+            CType::Record(_, id, _) => self.types.intern(TypeKind::Record(*id)),
             CType::Enum(name) => self.types.intern(TypeKind::Enum(name.clone())),
             CType::Named(name) => self
                 .lookup(name)
@@ -1791,6 +1976,10 @@ impl Analyzer<'_> {
             .map(|param| self.canonical_type(&param.ty))
             .collect()
     }
+}
+
+fn align_to(value: u64, align: u64) -> u64 {
+    value.div_ceil(align) * align
 }
 
 fn operator_text(kind: AstKind) -> &'static str {

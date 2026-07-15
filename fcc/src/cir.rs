@@ -10,8 +10,9 @@ use tir::{
 
 pub mod ops {
     pub use super::{
-        BreakOp, ConditionOp, ContinueOp, DoOp, ForOp, IfOp, StringOp, VaArgOp, VaEndOp, VaStartOp,
-        WhileOp, YieldOp, r#break, condition, r#continue, r#do, r#for, r#if, string, va_arg,
+        BreakOp, ConditionOp, ContinueOp, CopyStructOp, DefineStructOp, DoOp, ForOp, GetMemberOp,
+        IfOp, StringOp, VaArgOp, VaEndOp, VaStartOp, WhileOp, YieldOp, r#break, condition,
+        r#continue, copy_struct, define_struct, r#do, r#for, get_member, r#if, string, va_arg,
         va_end, va_start, r#while, r#yield,
     };
 }
@@ -21,6 +22,9 @@ dialect! {
         name: "cir",
         operations: [
             StringOp,
+            DefineStructOp,
+            GetMemberOp,
+            CopyStructOp,
             VaStartOp,
             VaArgOp,
             VaEndOp,
@@ -33,7 +37,105 @@ dialect! {
             ContinueOp,
             YieldOp,
         ],
-        types: [VarArgsType, VaListType],
+        types: [StructType, VarArgsType, VaListType],
+    }
+}
+
+pub struct StructType {
+    name: String,
+}
+
+impl StructType {
+    #[allow(clippy::new_ret_no_self)]
+    pub fn new(context: &Context, name: impl Into<String>) -> TypeId {
+        context.get_type_id(Arc::new(Self { name: name.into() }))
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl TypeConstraint for StructType {}
+
+impl Type for StructType {
+    fn dialect(&self) -> &'static str {
+        "cir"
+    }
+
+    fn parse_key() -> &'static str {
+        "struct"
+    }
+
+    fn parse<'src>(
+        _mnemonic: &str,
+        parser: &mut tir::parse::text::Parser<'src>,
+        context: &Context,
+    ) -> Result<TypeId, (Span, Error)> {
+        if !parser.parse_token("<") {
+            return Err((parser.span(), Error::ExpectedToken("<")));
+        }
+        let name = parser
+            .parse_string()
+            .ok_or_else(|| (parser.span(), Error::ExpectedToken("struct name")))?;
+        if !parser.parse_token(">") {
+            return Err((parser.span(), Error::ExpectedToken(">")));
+        }
+        Ok(Self::new(context, name))
+    }
+
+    fn print(&self, fmt: &mut IRFormatter<'_>) -> Result<(), std::fmt::Error> {
+        fmt.write(format!("struct<\"{}\">", self.name))
+    }
+
+    fn eq(&self, other: &dyn Type) -> bool {
+        (other as &dyn Any)
+            .downcast_ref::<StructType>()
+            .is_some_and(|other| other.name == self.name)
+    }
+}
+
+operation! {
+    DefineStructOp {
+        name: "define_struct",
+        dialect: "cir",
+        attributes: A {
+            sym_name: "Str",
+            fields: "Array",
+            size: "UInt",
+            align: "UInt",
+        },
+    }
+}
+
+operation! {
+    GetMemberOp {
+        name: "get_member",
+        dialect: "cir",
+        operands: O {
+            base: "tir::ptr::PtrType",
+        },
+        attributes: A {
+            field: "UInt",
+            struct_name: "Str",
+        },
+        results: R {
+            result: "tir::ptr::PtrType",
+        },
+    }
+}
+
+operation! {
+    CopyStructOp {
+        name: "copy_struct",
+        dialect: "cir",
+        operands: O {
+            destination: "tir::ptr::PtrType",
+            source: "tir::ptr::PtrType",
+        },
+        attributes: A {
+            struct_name: "Str",
+        },
     }
 }
 
