@@ -31,8 +31,20 @@ pub enum AttributeRole {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum RegisterAttr {
-    Physical { class: RegClassId, index: u16 },
-    Virtual { id: u32, class: Option<RegClassId> },
+    Physical {
+        class: RegClassId,
+        index: u16,
+    },
+    Virtual {
+        id: u32,
+        class: Option<RegClassId>,
+    },
+    /// A virtual value read from one physical register at this operation.
+    FixedUse {
+        id: u32,
+        class: RegClassId,
+        index: u16,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -101,6 +113,9 @@ impl AttributeValue {
                     } else {
                         fmt.write(format!("%virt{}", id))
                     }
+                }
+                RegisterAttr::FixedUse { id, class, index } => {
+                    fmt.write(format!("%virt{}:{}@{}", id, class.name(), index))
                 }
             },
             AttributeValue::Type(ty) => context.print_type(*ty, fmt),

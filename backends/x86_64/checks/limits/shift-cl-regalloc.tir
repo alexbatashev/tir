@@ -1,11 +1,7 @@
 // RUN: tir mc --march=x86_64 --stage=regalloc %s | filecheck %s
-// XFAIL: *
 
-// FINDING F1 (miscompile): register-count shifts always encode `shl cl` but the
-// count operand ("rcx") is allocated to an arbitrary register and never moved
-// into rcx. Here the count %b lives in rsi. A correct allocator must copy it
-// into rcx before the shift. It currently does not, so this CHECK fails (XFAIL).
-// tir-jit confirms: shl(a=1, by b=1) yields 1<<CL (garbage), not 2.
+// Register-count shifts constrain the count at this program point to rcx. The
+// argument arrives in rsi, so register allocation inserts the required copy.
 
 module {
   func @shl(%a: !i64, %b: !i64, %c: !i64, %d: !i64) -> !i64 {

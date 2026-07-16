@@ -245,8 +245,12 @@ impl Context {
             let Some(attr) = instance.attributes.iter().find(|a| a.name == *attr_name) else {
                 continue;
             };
-            let AttributeValue::Register(RegisterAttr::Virtual { id, .. }) = &attr.value else {
+            let AttributeValue::Register(register) = &attr.value else {
                 continue;
+            };
+            let id = match register {
+                RegisterAttr::Virtual { id, .. } | RegisterAttr::FixedUse { id, .. } => id,
+                RegisterAttr::Physical { .. } => continue,
             };
             let value_id = ValueId::from_number(*id);
             let Some(value) = slab_get_mut(&mut inner.values, value_id.index()) else {
@@ -393,8 +397,13 @@ impl Context {
 
         let mut touched: Vec<ValueId> = op.operands.clone();
         for attr in &op.attributes {
-            if let AttributeValue::Register(RegisterAttr::Virtual { id, .. }) = &attr.value {
-                touched.push(ValueId::from_number(*id));
+            if let AttributeValue::Register(register) = &attr.value {
+                match register {
+                    RegisterAttr::Virtual { id, .. } | RegisterAttr::FixedUse { id, .. } => {
+                        touched.push(ValueId::from_number(*id));
+                    }
+                    RegisterAttr::Physical { .. } => {}
+                }
             }
         }
 

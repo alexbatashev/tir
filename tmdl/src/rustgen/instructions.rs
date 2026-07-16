@@ -263,10 +263,9 @@ fn emit_instructions<'a>(
         };
 
         // The registers the behavior reads by path, resolved to attribute names.
-        // Each becomes a demand attribute on the emitted op: the value the read
-        // bound to (an immediate or a virtual register), consumed later by a
-        // target machine pass that materializes the register's definer (e.g.
-        // RISC-V `vsetvli` insertion satisfying `vl` demands).
+        // Each becomes a demand attribute on the emitted op. Reads from a value
+        // register become fixed uses for register allocation; configuration reads
+        // remain demands materialized by a target pass (e.g. RISC-V `vsetvli`).
         let implicit_reads: Vec<(String, u32)> = {
             let mut reads: Vec<(String, u32)> = semantics
                 .as_ref()
@@ -530,29 +529,32 @@ fn emit_instructions<'a>(
             // this the count is stuffed into the reg as a dead attribute and the
             // encoder emits the by-`cl` form reading garbage. A config-register
             // demand (e.g. RISC-V `VCSR::vl`) is a different class and unaffected.
-            let value_reg_classes: std::collections::HashSet<&str> = ops
+            let value_reg_classes: Vec<&str> = ops
                 .iter()
                 .filter_map(|(_, ty)| match ty {
                     Type::Struct(class) => Some(class.as_str()),
                     _ => None,
                 })
                 .collect();
-            let value_reg_files: std::collections::HashSet<&str> = value_reg_classes
-                .iter()
-                .filter_map(|class| register_files.get(*class).map(String::as_str))
-                .collect();
+            let mut fixed_value_reads = HashMap::new();
             for ((class, index), symbol) in &semantics.register_symbols {
                 let is_implicit = register_name_map
                     .get(&(class.clone(), *index))
                     .map(|name| !ops.iter().any(|(op_name, _)| op_name == name))
                     .unwrap_or(false);
-                let is_value_register = register_files
-                    .get(class)
-                    .is_some_and(|file| value_reg_files.contains(file.as_str()));
-                if is_implicit && is_value_register {
+                let value_class = register_files.get(class).and_then(|fixed_file| {
+                    value_reg_classes.iter().find(|value_class| {
+                        register_files
+                            .get(**value_class)
+                            .is_some_and(|file| file == fixed_file)
+                    })
+                });
+                if is_implicit && let Some(value_class) = value_class {
                     let symbol_lit = proc_macro2::Literal::u32_unsuffixed(*symbol);
                     operand_constraint_entries
                         .push(quote! { (#symbol_lit, tir::graph::OperandConstraint::Register) });
+                    let index = u16::try_from(*index).expect("register indices fit u16");
+                    fixed_value_reads.insert(*symbol, ((*value_class).to_string(), index));
                 }
             }
 
@@ -722,14 +724,31 @@ fn emit_instructions<'a>(
             let base_cost_lit = proc_macro2::Literal::u32_unsuffixed(base_cost);
             let mnemonic_cost_lit = proc_macro2::Literal::string(mnemonic_name);
 
-            // The registers the behavior reads by path (e.g. `VCSR::vl`) are real
-            // dependencies not among the encoded operands. Each becomes a demand
-            // attribute on the emitted op — the immediate or virtual register the
-            // read bound to — satisfied later by a target machine pass that
-            // materializes the register's definer (e.g. `vsetvli` insertion).
+            // Registers read by path are dependencies outside the encoded operands.
+            // Value-register reads carry a fixed-use constraint; configuration
+            // reads remain demands for a target pass such as `vsetvli` insertion.
             for (name, sym) in &implicit_reads {
                 let name_lit = proc_macro2::Literal::string(name);
                 let sym_lit = proc_macro2::Literal::u32_unsuffixed(*sym);
+                if let Some((class, index)) = fixed_value_reads.get(sym) {
+                    let class_id = reg_class_id(class);
+                    let index_lit = proc_macro2::Literal::u16_unsuffixed(*index);
+                    emit_attr_steps.push(quote! {
+                        let src = m.value_binding(#sym_lit)
+                            .ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
+                        builder = builder.attr(
+                            #name_lit,
+                            tir::attributes::AttributeValue::Register(
+                                tir::attributes::RegisterAttr::FixedUse {
+                                    id: src.number(),
+                                    class: #class_id,
+                                    index: #index_lit,
+                                },
+                            ),
+                        );
+                    });
+                    continue;
+                }
                 emit_attr_steps.push(quote! {
                     if let Some(v) = m.int_binding(#sym_lit) {
                         builder = builder.attr(#name_lit, tir::attributes::AttributeValue::Int(v));

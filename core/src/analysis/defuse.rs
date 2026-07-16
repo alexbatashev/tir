@@ -92,6 +92,10 @@ pub fn op_regs(op: &OpInstance) -> OpRegs {
                     id: *id,
                     class: *class,
                 },
+                RegisterAttr::FixedUse { id, class, .. } => RegRef::Virtual {
+                    id: *id,
+                    class: Some(*class),
+                },
                 RegisterAttr::Physical { class, index } => RegRef::Physical {
                     class: *class,
                     index: *index,

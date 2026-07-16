@@ -146,6 +146,23 @@ int main(void) {
 }
 
 #[test]
+fn variable_shift_count_matches_host_compiler() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        r#"unsigned int shift(unsigned int value, unsigned int count) {
+    return value << count;
+}
+int main(void) {
+    if (shift(3, 4) == 48) return 0;
+    return 1;
+}
+"#,
+    );
+}
+
+#[test]
 fn loops_execute_through_driver() {
     if !cc_available() {
         return;
