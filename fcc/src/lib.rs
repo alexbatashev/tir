@@ -15,6 +15,7 @@ pub mod parser;
 pub mod passes;
 pub mod preprocessor;
 pub mod sema;
+mod toolchain;
 
 #[cfg(test)]
 mod codegen_tests;
