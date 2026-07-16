@@ -341,6 +341,112 @@ int main(void) {
 }
 
 #[test]
+fn switch_dispatch_fallthrough_and_break_match_host() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        r#"int classify(int value) {
+    int result = 0;
+    switch (value) {
+    case 0:
+        result = 1;
+        break;
+    case 1:
+        result = 2;
+    case 2:
+        result += 3;
+        break;
+    default:
+        result = 9;
+    }
+    return result;
+}
+int main(void) {
+    if (classify(0) != 1) return 1;
+    if (classify(1) != 5) return 2;
+    if (classify(2) != 3) return 3;
+    if (classify(3) != 9) return 4;
+    return 0;
+}
+"#,
+    );
+}
+
+#[test]
+fn switch_break_exits_nearest_scope() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        r#"int accumulate(void) {
+    int result = 0;
+    for (int i = 0; i < 3; i = i + 1) {
+        switch (i) {
+        case 0:
+            result += 1;
+            break;
+        default:
+            result += 2;
+        }
+        result += 4;
+    }
+    return result;
+}
+int main(void) { return accumulate() == 17 ? 0 : 1; }
+"#,
+    );
+}
+
+#[test]
+fn switch_default_can_fall_through_in_source_order() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        r#"int classify(int value) {
+    int result = 0;
+    switch (value) {
+    default:
+        result = 4;
+    case 2:
+        result += 3;
+        break;
+    case 5:
+        result = 9;
+    }
+    return result;
+}
+int main(void) {
+    if (classify(0) != 7) return 1;
+    if (classify(2) != 3) return 2;
+    if (classify(5) != 9) return 3;
+    return 0;
+}
+"#,
+    );
+}
+
+#[test]
+fn switch_without_matching_case_preserves_state() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        r#"int classify(int value) {
+    int result = 4;
+    switch (value) {
+    case 1:
+        result = 9;
+    }
+    return result;
+}
+int main(void) { return classify(2) == 4 ? 0 : 1; }
+"#,
+    );
+}
+
+#[test]
 fn unary_operators_match_host_compiler() {
     if !cc_available() {
         return;
