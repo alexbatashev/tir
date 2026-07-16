@@ -12,7 +12,7 @@ use tir::attributes::AttributeValue;
 use tir::builtin::{FloatType, IntegerType, ModuleOp, TokenType, UnitType, ops as b};
 use tir::graph::{Dag, NodeId};
 use tir::ptr::{PtrType, ops as p};
-use tir::{Context, IRBuilder, Operand, Operation, TypeId, ValueId};
+use tir::{Context, IRBuilder, Operand, Operation, RegionId, TypeId, ValueId};
 
 use crate::ast::*;
 use crate::cir::{self, StructType, VarArgsType};
@@ -49,6 +49,7 @@ struct FnCodegen<'a> {
     typed: &'a TypedAst,
     ast: &'a Ast,
     builder: IRBuilder,
+    region: RegionId,
     locals: HashMap<EntityId, Slot>,
     signatures: &'a HashMap<EntityId, Signature>,
     loop_scopes: Vec<ValueId>,
@@ -278,6 +279,7 @@ fn lower_function(
         typed,
         ast,
         builder: IRBuilder::new(func_op.body()),
+        region: region.id(),
         locals: HashMap::new(),
         signatures,
         loop_scopes: Vec::new(),
@@ -440,9 +442,6 @@ impl FnCodegen<'_> {
 
         for stmt in ast.children(func).skip(idx) {
             self.lower_stmt(stmt)?;
-            if self.terminated {
-                break;
-            }
         }
 
         Ok(())
@@ -450,6 +449,15 @@ impl FnCodegen<'_> {
 
     fn lower_stmt(&mut self, stmt: NodeId) -> Result<(), Diagnostic> {
         let ast = self.ast;
+        if self.terminated {
+            if !self.contains_label(stmt) {
+                return Ok(());
+            }
+            let block = self.context.create_block(vec![]);
+            self.context.get_region(self.region).add_block(block.id());
+            self.builder = IRBuilder::new(block);
+            self.terminated = false;
+        }
         match ast.get_node(stmt).kind {
             AstKind::Decl => {
                 let AstLeaf::Decl { .. } = ast.get_leaf_data(stmt).unwrap() else {
@@ -517,9 +525,6 @@ impl FnCodegen<'_> {
             AstKind::Block => {
                 for child in ast.children(stmt) {
                     self.lower_stmt(child)?;
-                    if self.terminated {
-                        break;
-                    }
                 }
                 Ok(())
             }
@@ -709,6 +714,28 @@ impl FnCodegen<'_> {
                 );
                 Ok(())
             }
+            AstKind::Goto => {
+                let AstLeaf::Label(label) = ast.get_leaf_data(stmt).unwrap() else {
+                    unreachable!("goto node carries a label payload");
+                };
+                self.builder.insert(
+                    cir::GotoOpBuilder::new(self.context)
+                        .attr("label", AttributeValue::Str(label.clone()))
+                        .build(),
+                );
+                Ok(())
+            }
+            AstKind::Label => {
+                let AstLeaf::Label(label) = ast.get_leaf_data(stmt).unwrap() else {
+                    unreachable!("label node carries a label payload");
+                };
+                self.builder.insert(
+                    cir::LabelOpBuilder::new(self.context)
+                        .attr("label", AttributeValue::Str(label.clone()))
+                        .build(),
+                );
+                self.lower_stmt(ast.children(stmt).next().unwrap())
+            }
             AstKind::Break => {
                 match *self.break_scopes.last().unwrap() {
                     BreakScope::Loop(scope) => {
@@ -736,6 +763,14 @@ impl FnCodegen<'_> {
             }
             kind => Err(unsupported(ast, stmt, format!("statement {kind:?}"))),
         }
+    }
+
+    fn contains_label(&self, statement: NodeId) -> bool {
+        self.ast.get_node(statement).kind == AstKind::Label
+            || self
+                .ast
+                .children(statement)
+                .any(|child| self.contains_label(child))
     }
 
     fn lower_switch(&mut self, stmt: NodeId) -> Result<(), Diagnostic> {
@@ -948,10 +983,13 @@ impl FnCodegen<'_> {
         block: std::sync::Arc<tir::Block>,
         lower: impl FnOnce(&mut Self) -> Result<T, Diagnostic>,
     ) -> Result<T, Diagnostic> {
+        let region = self.context.parent_region(block.id()).unwrap();
         let outer = std::mem::replace(&mut self.builder, IRBuilder::new(block));
+        let outer_region = std::mem::replace(&mut self.region, region);
         let outer_terminated = std::mem::replace(&mut self.terminated, false);
         let result = lower(self);
         self.builder = outer;
+        self.region = outer_region;
         self.terminated = outer_terminated;
         result
     }

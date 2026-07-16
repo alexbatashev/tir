@@ -48,6 +48,23 @@ impl Region {
         self.context.upgrade().set_block_parent(id, self.id);
     }
 
+    pub fn remove_block(&self, id: BlockId) -> bool {
+        let removed = {
+            let mut blocks = self.blocks.write();
+            match blocks.iter().position(|block_id| *block_id == id) {
+                Some(position) => {
+                    blocks.remove(position);
+                    true
+                }
+                None => false,
+            }
+        };
+        if removed {
+            self.context.upgrade().clear_block_parent(id);
+        }
+        removed
+    }
+
     pub fn iter(&self, context: Context) -> ContextIterator<BlockId> {
         ContextIterator::new(context, self.blocks.read().clone())
     }

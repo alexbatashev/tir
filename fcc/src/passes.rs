@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use tir::analysis::{AnalysisManager, PreservedAnalyses};
@@ -337,6 +337,131 @@ impl LowerCirControlFlowPass {
             .iter(context.clone())
             .next()
             .unwrap()
+    }
+
+    fn marker_label(operation: &impl Operation) -> String {
+        operation
+            .attributes()
+            .iter()
+            .find(|attribute| attribute.name == "label")
+            .and_then(|attribute| match &attribute.value {
+                AttributeValue::Str(label) => Some(label.clone()),
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    fn region_has_goto(context: &Context, region: RegionId) -> bool {
+        context
+            .get_region(region)
+            .iter(context.clone())
+            .any(|block| {
+                block.op_ids().into_iter().any(|op_id| {
+                    let op = context.get_op(op_id);
+                    op.clone().as_op::<cir::GotoOp>().is_some()
+                        || op.clone().as_op::<cir::LabelOp>().is_some()
+                        || op
+                            .regions
+                            .iter()
+                            .any(|region| Self::region_has_goto(context, *region))
+                })
+            })
+    }
+
+    fn resolve_gotos(
+        context: &Context,
+        rewriter: &mut Rewriter,
+        function_region: RegionId,
+    ) -> Result<bool, PassError> {
+        let region = context.get_region(function_region);
+        let labels = region
+            .iter(context.clone())
+            .flat_map(|block| block.op_ids())
+            .filter(|op_id| context.get_op(*op_id).as_op::<cir::LabelOp>().is_some())
+            .collect::<Vec<_>>();
+        let mut destinations = HashMap::new();
+        for label_id in labels {
+            let label = context.get_op(label_id);
+            let name = Self::marker_label(&label.clone().as_op::<cir::LabelOp>().unwrap());
+            let block = context.get_block(label.parent_block().unwrap());
+            let op_ids = block.op_ids();
+            let position = op_ids.iter().position(|id| *id == label_id).unwrap();
+            let destination = context.create_block(vec![]);
+            for op_id in op_ids.into_iter().skip(position + 1) {
+                block.remove_op(op_id);
+                destination.insert(destination.len(), op_id);
+            }
+            rewriter.erase_op(&OperationRef::new(label, Some(block.clone()), None))?;
+            region.add_block(destination.id());
+            let terminated = block.op_ids().last().is_some_and(|op_id| {
+                context
+                    .get_op(*op_id)
+                    .as_interface::<dyn tir::Terminator>()
+                    .is_some()
+            });
+            if !terminated {
+                IRBuilder::new(block).insert(b::br(context, vec![], destination.id()).build());
+            }
+            destinations.insert(name, destination.id());
+        }
+
+        let gotos = region
+            .iter(context.clone())
+            .flat_map(|block| block.op_ids())
+            .filter(|op_id| context.get_op(*op_id).as_op::<cir::GotoOp>().is_some())
+            .collect::<Vec<_>>();
+        let changed = !destinations.is_empty() || !gotos.is_empty();
+        for goto_id in gotos {
+            let goto = context.get_op(goto_id);
+            let destination =
+                destinations[&Self::marker_label(&goto.clone().as_op::<cir::GotoOp>().unwrap())];
+            let block = context.get_block(goto.parent_block().unwrap());
+            let op_ids = block.op_ids();
+            let position = op_ids.iter().position(|id| *id == goto_id).unwrap();
+            if position + 1 < op_ids.len() {
+                let continuation = context.create_block(vec![]);
+                for op_id in op_ids.into_iter().skip(position + 1) {
+                    block.remove_op(op_id);
+                    continuation.insert(continuation.len(), op_id);
+                }
+                region.add_block(continuation.id());
+            }
+            let branch = b::br(context, vec![], destination).build();
+            rewriter.replace_op(&OperationRef::new(goto, Some(block), None), &branch)?;
+        }
+        Ok(changed)
+    }
+
+    fn remove_unreachable_blocks(context: &Context, function_region: RegionId) -> bool {
+        let region = context.get_region(function_region);
+        let blocks = region.iter(context.clone()).collect::<Vec<_>>();
+        let Some(entry) = blocks.first() else {
+            return false;
+        };
+        let mut reachable = HashSet::new();
+        let mut pending = vec![entry.id()];
+        while let Some(block_id) = pending.pop() {
+            if !reachable.insert(block_id) {
+                continue;
+            }
+            let block = context.get_block(block_id);
+            let Some(terminator) = block.op_ids().last().map(|id| context.get_op(*id)) else {
+                continue;
+            };
+            if let Some(branch) = terminator.clone().as_op::<BranchOp>() {
+                pending.push(branch.dest());
+            } else if let Some(branch) = terminator.clone().as_op::<CondBranchOp>() {
+                pending.push(branch.true_dest());
+                pending.push(branch.false_dest());
+            }
+        }
+        let mut changed = false;
+        for block in blocks {
+            if !reachable.contains(&block.id()) {
+                changed |= region.remove_block(block.id());
+            }
+        }
+        changed
     }
 
     fn condition_operand(context: &Context, region: RegionId) -> Option<ValueId> {
@@ -936,6 +1061,7 @@ impl Pass for LowerCirControlFlowPass {
             return Ok(PreservedAnalyses::all());
         }
         let function_region = op.op().regions[0];
+        let has_goto = Self::region_has_goto(context, function_region);
         let mut loop_targets = HashMap::new();
         let mut changed = false;
         while let Some((block, control)) = Self::next_control_op_in_region(context, function_region)
@@ -951,9 +1077,10 @@ impl Pass for LowerCirControlFlowPass {
                     .all(|region| Self::body_is_structured(context, *region))
             } else {
                 false
-            } && !control.regions.iter().any(|region| {
-                Self::region_uses_direct_loop_target(context, *region, &loop_targets)
-            });
+            } && !has_goto
+                && !control.regions.iter().any(|region| {
+                    Self::region_uses_direct_loop_target(context, *region, &loop_targets)
+                });
             if structured {
                 Self::lower_structured(context, rewriter, block, control)?;
             } else {
@@ -967,6 +1094,10 @@ impl Pass for LowerCirControlFlowPass {
                 )?;
             }
             changed = true;
+        }
+        if has_goto {
+            changed |= Self::resolve_gotos(context, rewriter, function_region)?;
+            changed |= Self::remove_unreachable_blocks(context, function_region);
         }
         Ok(if changed {
             PreservedAnalyses::none()
