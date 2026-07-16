@@ -163,6 +163,28 @@ int main(void) {
 }
 
 #[test]
+fn unary_operators_match_host_compiler() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        r#"int negate(int value) { return -value; }
+unsigned int complement(unsigned int value) { return ~value; }
+int logical_not(int value) { return !value; }
+int positive(int value) { return +value; }
+int main(void) {
+    if (negate(7) + 7 != 0) return 1;
+    if (complement(0) + 1 != 0) return 2;
+    if (logical_not(0) != 1) return 3;
+    if (logical_not(9) != 0) return 4;
+    if (positive(9) != 9) return 5;
+    return 0;
+}
+"#,
+    );
+}
+
+#[test]
 fn loops_execute_through_driver() {
     if !cc_available() {
         return;

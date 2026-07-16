@@ -884,6 +884,57 @@ impl FnCodegen<'_> {
                     };
                     LoweredExpr::Value(value)
                 }
+                kind @ (AstKind::Neg | AstKind::Pos | AstKind::Not | AstKind::BitNot) => {
+                    let child = ast.children(node).next().unwrap();
+                    let operand = self.materialize(self.values[child.index() - base]);
+                    let result_ty =
+                        lower_type(self.context, self.typed, node_type(self.typed, node));
+                    let value = match kind {
+                        AstKind::Pos => operand,
+                        AstKind::Neg => {
+                            let zero = self
+                                .builder
+                                .insert(b::constant(self.context, 0, result_ty).build())
+                                .result();
+                            self.builder
+                                .insert(b::subi(self.context, zero, operand, result_ty).build())
+                                .result()
+                        }
+                        AstKind::BitNot => {
+                            let ones = self
+                                .builder
+                                .insert(b::constant(self.context, -1, result_ty).build())
+                                .result();
+                            self.builder
+                                .insert(b::xori(self.context, operand, ones, result_ty).build())
+                                .result()
+                        }
+                        AstKind::Not => {
+                            let operand_ty =
+                                lower_type(self.context, self.typed, node_type(self.typed, child));
+                            let zero = self
+                                .builder
+                                .insert(b::constant(self.context, 0, operand_ty).build())
+                                .result();
+                            let comparison = self
+                                .builder
+                                .insert(
+                                    b::CmpIOpBuilder::new(self.context)
+                                        .lhs(operand)
+                                        .rhs(zero)
+                                        .predicate("eq")
+                                        .result_type(IntegerType::new(self.context, 1))
+                                        .build(),
+                                )
+                                .result();
+                            self.builder
+                                .insert(b::extui(self.context, comparison, result_ty).build())
+                                .result()
+                        }
+                        _ => unreachable!(),
+                    };
+                    LoweredExpr::Value(value)
+                }
                 kind @ (AstKind::Lt
                 | AstKind::Gt
                 | AstKind::Le

@@ -282,7 +282,17 @@ impl<'a> SemDagBuilder<'a> {
     ) -> Id {
         match def.attributes.iter().find(|a| a.name == "value") {
             Some(attr) => match &attr.value {
-                AttributeValue::Int(v) => self.add_int(APInt::new_signed(64, *v), value_ty),
+                AttributeValue::Int(v) => {
+                    let width = value_ty
+                        .and_then(|ty| {
+                            let ty = self.context.get_type_data(ty);
+                            (ty.as_ref() as &dyn std::any::Any)
+                                .downcast_ref::<tir::builtin::IntegerType>()
+                                .map(tir::builtin::IntegerType::width)
+                        })
+                        .unwrap_or(64);
+                    self.add_int(APInt::new_signed(width, *v), value_ty)
+                }
                 _ => self.add_input_value(value, value_ty),
             },
             None => self.add_input_value(value, value_ty),
