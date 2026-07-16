@@ -12,13 +12,11 @@
 // A64: Symbol copy:
 
 // RVASM: read:
-// RVASM: addi {{.*}}, {{.*}}, 4
-// RVASM: lw
+// RVASM-NEXT: {{(c\.)?lw}} {{.*}}, 4({{.*}})
 // RVASM: copy:
 // RVASM: sw
 
 // A64ASM: read:
-// A64ASM: add {{.*}}, {{.*}}, 4
-// A64ASM: ldr
+// A64ASM-NEXT: ldr {{.*}}, [{{.*}}, 4]
 // A64ASM: copy:
 // A64ASM: str

@@ -280,6 +280,46 @@ fn escaped_character_constant_executes_through_driver() {
 }
 
 #[test]
+fn logical_and_short_circuits_rhs() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        r#"int logical_and(int lhs) {
+    int rhs = 0;
+    int result = lhs && ++rhs;
+    return result * 10 + rhs;
+}
+int main(void) {
+    if (logical_and(0) != 0) return 1;
+    if (logical_and(1) != 11) return 2;
+    return 0;
+}
+"#,
+    );
+}
+
+#[test]
+fn logical_or_short_circuits_rhs() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        r#"int logical_or(int lhs) {
+    int rhs = 0;
+    int result = lhs || ++rhs;
+    return result * 10 + rhs;
+}
+int main(void) {
+    if (logical_or(0) != 11) return 1;
+    if (logical_or(1) != 10) return 2;
+    return 0;
+}
+"#,
+    );
+}
+
+#[test]
 fn unary_operators_match_host_compiler() {
     if !cc_available() {
         return;
