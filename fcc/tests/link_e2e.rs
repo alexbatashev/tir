@@ -244,6 +244,32 @@ int main(void) {
 }
 
 #[test]
+fn compound_assignments_match_host_compiler() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        r#"int compound_assign(void) {
+    int value = 5;
+    value += 3;
+    value *= 2;
+    value -= 4;
+    value <<= 1;
+    value >>= 2;
+    value &= 7;
+    value ^= 3;
+    value |= 8;
+    return value;
+}
+int main(void) {
+    if (compound_assign() == 13) return 0;
+    return 1;
+}
+"#,
+    );
+}
+
+#[test]
 fn loops_execute_through_driver() {
     if !cc_available() {
         return;

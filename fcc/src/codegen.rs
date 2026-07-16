@@ -327,6 +327,58 @@ impl FnCodegen<'_> {
         }
     }
 
+    fn lower_integer_binary(
+        &mut self,
+        kind: AstKind,
+        lhs: ValueId,
+        rhs: ValueId,
+        source_ty: QualType,
+    ) -> ValueId {
+        let ty = lower_type(self.context, self.typed, source_ty);
+        match kind {
+            AstKind::Add | AstKind::AddAssign => self
+                .builder
+                .insert(b::addi(self.context, lhs, rhs, ty).build())
+                .result(),
+            AstKind::Sub | AstKind::SubAssign => self
+                .builder
+                .insert(b::subi(self.context, lhs, rhs, ty).build())
+                .result(),
+            AstKind::Mul | AstKind::MulAssign => self
+                .builder
+                .insert(b::muli(self.context, lhs, rhs, ty).build())
+                .result(),
+            AstKind::BitAnd | AstKind::AndAssign => self
+                .builder
+                .insert(b::andi(self.context, lhs, rhs, ty).build())
+                .result(),
+            AstKind::BitXor | AstKind::XorAssign => self
+                .builder
+                .insert(b::xori(self.context, lhs, rhs, ty).build())
+                .result(),
+            AstKind::BitOr | AstKind::OrAssign => self
+                .builder
+                .insert(b::ori(self.context, lhs, rhs, ty).build())
+                .result(),
+            AstKind::Shl | AstKind::ShlAssign => self
+                .builder
+                .insert(b::shli(self.context, lhs, rhs, ty).build())
+                .result(),
+            AstKind::Shr | AstKind::ShrAssign
+                if self.typed.integer_is_signed(source_ty).unwrap() =>
+            {
+                self.builder
+                    .insert(b::shrsi(self.context, lhs, rhs, ty).build())
+                    .result()
+            }
+            AstKind::Shr | AstKind::ShrAssign => self
+                .builder
+                .insert(b::shrui(self.context, lhs, rhs, ty).build())
+                .result(),
+            _ => unreachable!(),
+        }
+    }
+
     /// Lower a function: spill parameters into stack slots, then lower each body
     /// statement in source order (statement order is a side-effect ordering, so it
     /// stays top-down; only the expressions within use the post-order iterator).
@@ -832,22 +884,12 @@ impl FnCodegen<'_> {
                     let rhs = self.values[children.next().unwrap().index() - base];
                     let l = self.materialize(lhs);
                     let r = self.materialize(rhs);
-                    let ty = lower_type(self.context, self.typed, node_type(self.typed, node));
-                    let value = match kind {
-                        AstKind::Add => self
-                            .builder
-                            .insert(b::addi(self.context, l, r, ty).build())
-                            .result(),
-                        AstKind::Sub => self
-                            .builder
-                            .insert(b::subi(self.context, l, r, ty).build())
-                            .result(),
-                        _ => self
-                            .builder
-                            .insert(b::muli(self.context, l, r, ty).build())
-                            .result(),
-                    };
-                    LoweredExpr::Value(value)
+                    LoweredExpr::Value(self.lower_integer_binary(
+                        kind,
+                        l,
+                        r,
+                        node_type(self.typed, node),
+                    ))
                 }
                 kind @ (AstKind::BitAnd
                 | AstKind::BitXor
@@ -859,36 +901,12 @@ impl FnCodegen<'_> {
                     let rhs = self.values[children.next().unwrap().index() - base];
                     let lhs = self.materialize(lhs);
                     let rhs = self.materialize(rhs);
-                    let source_ty = node_type(self.typed, node);
-                    let ty = lower_type(self.context, self.typed, source_ty);
-                    let value = match kind {
-                        AstKind::BitAnd => self
-                            .builder
-                            .insert(b::andi(self.context, lhs, rhs, ty).build())
-                            .result(),
-                        AstKind::BitXor => self
-                            .builder
-                            .insert(b::xori(self.context, lhs, rhs, ty).build())
-                            .result(),
-                        AstKind::BitOr => self
-                            .builder
-                            .insert(b::ori(self.context, lhs, rhs, ty).build())
-                            .result(),
-                        AstKind::Shl => self
-                            .builder
-                            .insert(b::shli(self.context, lhs, rhs, ty).build())
-                            .result(),
-                        AstKind::Shr if self.typed.integer_is_signed(source_ty).unwrap() => self
-                            .builder
-                            .insert(b::shrsi(self.context, lhs, rhs, ty).build())
-                            .result(),
-                        AstKind::Shr => self
-                            .builder
-                            .insert(b::shrui(self.context, lhs, rhs, ty).build())
-                            .result(),
-                        _ => unreachable!(),
-                    };
-                    LoweredExpr::Value(value)
+                    LoweredExpr::Value(self.lower_integer_binary(
+                        kind,
+                        lhs,
+                        rhs,
+                        node_type(self.typed, node),
+                    ))
                 }
                 kind @ (AstKind::Neg | AstKind::Pos | AstKind::Not | AstKind::BitNot) => {
                     let child = ast.children(node).next().unwrap();
@@ -1030,6 +1048,36 @@ impl FnCodegen<'_> {
                         node_type(self.typed, child),
                         node_type(self.typed, node),
                     ))
+                }
+                kind @ (AstKind::AddAssign
+                | AstKind::SubAssign
+                | AstKind::MulAssign
+                | AstKind::ShlAssign
+                | AstKind::ShrAssign
+                | AstKind::AndAssign
+                | AstKind::XorAssign
+                | AstKind::OrAssign) => {
+                    let mut children = ast.children(node);
+                    let lhs_node = children.next().unwrap();
+                    let LoweredExpr::Address { ptr, elem } = self.values[lhs_node.index() - base]
+                    else {
+                        return Err(unsupported(
+                            ast,
+                            node,
+                            "non-addressable compound assignment".to_string(),
+                        ));
+                    };
+                    let rhs =
+                        self.materialize(self.values[children.next().unwrap().index() - base]);
+                    let lhs = self
+                        .builder
+                        .insert(p::load(self.context, ptr, elem).build())
+                        .result();
+                    let value =
+                        self.lower_integer_binary(kind, lhs, rhs, node_type(self.typed, lhs_node));
+                    self.builder
+                        .insert(p::store(self.context, value, ptr).build());
+                    LoweredExpr::Value(value)
                 }
                 AstKind::AssignExpr => {
                     let mut children = ast.children(node);
