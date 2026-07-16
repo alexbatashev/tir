@@ -185,6 +185,24 @@ int main(void) {
 }
 
 #[test]
+fn comma_operator_matches_host_compiler() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        r#"int comma_value(void) {
+    int value = 0;
+    return (value = 3, value + 4);
+}
+int main(void) {
+    if (comma_value() == 7) return 0;
+    return 1;
+}
+"#,
+    );
+}
+
+#[test]
 fn loops_execute_through_driver() {
     if !cc_available() {
         return;

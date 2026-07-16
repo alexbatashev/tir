@@ -976,6 +976,10 @@ impl FnCodegen<'_> {
                             .result(),
                     )
                 }
+                AstKind::Comma => {
+                    let rhs = ast.children(node).nth(1).unwrap();
+                    LoweredExpr::Value(self.materialize(self.values[rhs.index() - base]))
+                }
                 AstKind::AssignExpr => {
                     let mut children = ast.children(node);
                     let lhs_node = children.next().unwrap();
