@@ -75,6 +75,15 @@ fn compile_host_object(dir: &Path, source: &str, output: &str) {
     assert!(status.success(), "host cc failed");
 }
 
+fn assert_fcc_object_executes_with_host(source: &str, host: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("fcc.c"), source).unwrap();
+    run_fcc(dir.path(), &["cc", "-c", "fcc.c", "-o", "fcc.o"]);
+    compile_host_object(dir.path(), host, "host.o");
+    run_fcc(dir.path(), &["cc", "fcc.o", "host.o", "-o", "program"]);
+    assert_eq!(exit_code(&run_program(dir.path(), "program")), 0);
+}
+
 #[test]
 fn compile_and_link_in_one_step() {
     if !cc_available() {
@@ -159,6 +168,50 @@ int main(void) {
     return 1;
 }
 "#,
+    );
+}
+
+#[test]
+fn double_addition_executes_through_driver() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "double add(double lhs, double rhs) { return lhs + rhs; }\n",
+        "double add(double, double); int main(void) { return add(1.25, 2.5) == 3.75 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn double_subtraction_executes_through_driver() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "double subtract(double lhs, double rhs) { return lhs - rhs; }\n",
+        "double subtract(double, double); int main(void) { return subtract(4.5, 1.25) == 3.25 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn double_multiplication_executes_through_driver() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "double multiply(double lhs, double rhs) { return lhs * rhs; }\n",
+        "double multiply(double, double); int main(void) { return multiply(1.5, 2.5) == 3.75 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn double_division_executes_through_driver() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "double divide(double lhs, double rhs) { return lhs / rhs; }\n",
+        "double divide(double, double); int main(void) { return divide(7.5, 2.5) == 3.0 ? 0 : 1; }\n",
     );
 }
 

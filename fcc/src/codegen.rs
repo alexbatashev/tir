@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use tir::attributes::AttributeValue;
-use tir::builtin::{IntegerType, ModuleOp, TokenType, UnitType, ops as b};
+use tir::builtin::{FloatType, IntegerType, ModuleOp, TokenType, UnitType, ops as b};
 use tir::graph::{Dag, NodeId};
 use tir::ptr::{PtrType, ops as p};
 use tir::{Context, IRBuilder, Operand, Operation, TypeId, ValueId};
@@ -147,11 +147,10 @@ fn lower_type(context: &Context, typed: &TypedAst, ty: QualType) -> TypeId {
             PtrType::typed(context, lower_type(context, typed, *pointee))
         }
         TypeKind::Enum(_) => IntegerType::new(context, 32),
-        TypeKind::Error
-        | TypeKind::Float
-        | TypeKind::Double
-        | TypeKind::LongDouble
-        | TypeKind::Function { .. } => IntegerType::new(context, 64),
+        TypeKind::Double => FloatType::f64(context),
+        TypeKind::Error | TypeKind::Float | TypeKind::LongDouble | TypeKind::Function { .. } => {
+            IntegerType::new(context, 64)
+        }
         TypeKind::Record(id) => StructType::new(context, &typed.record(*id).unwrap().name),
     }
 }
@@ -374,6 +373,29 @@ impl FnCodegen<'_> {
             AstKind::Shr | AstKind::ShrAssign => self
                 .builder
                 .insert(b::shrui(self.context, lhs, rhs, ty).build())
+                .result(),
+            _ => unreachable!(),
+        }
+    }
+
+    fn lower_double_binary(&mut self, kind: AstKind, lhs: ValueId, rhs: ValueId) -> ValueId {
+        let ty = FloatType::f64(self.context);
+        match kind {
+            AstKind::Add => self
+                .builder
+                .insert(b::addf(self.context, lhs, rhs, ty).build())
+                .result(),
+            AstKind::Sub => self
+                .builder
+                .insert(b::subf(self.context, lhs, rhs, ty).build())
+                .result(),
+            AstKind::Mul => self
+                .builder
+                .insert(b::mulf(self.context, lhs, rhs, ty).build())
+                .result(),
+            AstKind::Div => self
+                .builder
+                .insert(b::divf(self.context, lhs, rhs, ty).build())
                 .result(),
             _ => unreachable!(),
         }
@@ -878,18 +900,21 @@ impl FnCodegen<'_> {
                             .result(),
                     )
                 }
-                kind @ (AstKind::Add | AstKind::Sub | AstKind::Mul) => {
+                kind @ (AstKind::Add | AstKind::Sub | AstKind::Mul | AstKind::Div) => {
                     let mut children = ast.children(node);
                     let lhs = self.values[children.next().unwrap().index() - base];
                     let rhs = self.values[children.next().unwrap().index() - base];
                     let l = self.materialize(lhs);
                     let r = self.materialize(rhs);
-                    LoweredExpr::Value(self.lower_integer_binary(
-                        kind,
-                        l,
-                        r,
-                        node_type(self.typed, node),
-                    ))
+                    let source_ty = node_type(self.typed, node);
+                    let value = match self.typed.types().kind(source_ty) {
+                        TypeKind::Double => self.lower_double_binary(kind, l, r),
+                        _ if kind == AstKind::Div => {
+                            return Err(unsupported(ast, node, "expression Div".to_string()));
+                        }
+                        _ => self.lower_integer_binary(kind, l, r, source_ty),
+                    };
+                    LoweredExpr::Value(value)
                 }
                 kind @ (AstKind::BitAnd
                 | AstKind::BitXor
