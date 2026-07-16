@@ -797,6 +797,24 @@ impl FnCodegen<'_> {
                             .result(),
                     )
                 }
+                AstKind::Character => {
+                    let AstLeaf::Character(spelling) = ast.get_leaf_data(node).unwrap() else {
+                        unreachable!("character node carries a character payload");
+                    };
+                    let Some(value) = decode_character_constant(spelling) else {
+                        return Err(unsupported(
+                            ast,
+                            node,
+                            "multi-character constant".to_string(),
+                        ));
+                    };
+                    let ty = lower_type(self.context, self.typed, node_type(self.typed, node));
+                    LoweredExpr::Value(
+                        self.builder
+                            .insert(b::constant(self.context, value, ty).build())
+                            .result(),
+                    )
+                }
                 AstKind::SizeofType | AstKind::SizeofExpr => {
                     let value = ast.get_annotation(node).unwrap().constant.unwrap();
                     let ty = lower_type(self.context, self.typed, node_type(self.typed, node));
@@ -1199,6 +1217,18 @@ fn decode_c_escapes(source: &str) -> String {
         }
     }
     out
+}
+
+fn decode_character_constant(source: &str) -> Option<i64> {
+    let first_quote = source.find('\'')?;
+    let body = source.get(first_quote + 1..source.len().checked_sub(1)?)?;
+    let decoded = decode_c_escapes(body);
+    let mut characters = decoded.chars();
+    let value = characters.next()?;
+    characters
+        .next()
+        .is_none()
+        .then_some(i64::from(value as u32))
 }
 
 /// Hoist every `cir.string` into a module-level `.rodata` section and rewrite

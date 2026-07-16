@@ -260,6 +260,26 @@ fn double_div_assignment_executes_through_driver() {
 }
 
 #[test]
+fn character_constant_executes_through_driver() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "int value(void) { return 'A'; } int main(void) { if (value() != 65) return 1; return 0; }\n",
+    );
+}
+
+#[test]
+fn escaped_character_constant_executes_through_driver() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "int value(void) { return '\\n'; } int main(void) { if (value() != 10) return 1; return 0; }\n",
+    );
+}
+
+#[test]
 fn unary_operators_match_host_compiler() {
     if !cc_available() {
         return;
