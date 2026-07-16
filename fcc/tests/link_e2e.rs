@@ -222,6 +222,28 @@ int main(void) {
 }
 
 #[test]
+fn increment_operators_match_host_compiler() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        r#"int increment_values(void) {
+    int value = 4;
+    int post = value++;
+    int pre = ++value;
+    int old = value--;
+    int now = --value;
+    return post + pre + old + now + value;
+}
+int main(void) {
+    if (increment_values() == 24) return 0;
+    return 1;
+}
+"#,
+    );
+}
+
+#[test]
 fn loops_execute_through_driver() {
     if !cc_available() {
         return;

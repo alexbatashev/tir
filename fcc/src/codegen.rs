@@ -941,6 +941,42 @@ impl FnCodegen<'_> {
                     };
                     LoweredExpr::Value(value)
                 }
+                kind
+                @ (AstKind::PreInc | AstKind::PreDec | AstKind::PostInc | AstKind::PostDec) => {
+                    let child = ast.children(node).next().unwrap();
+                    let LoweredExpr::Address { ptr, elem } = self.values[child.index() - base]
+                    else {
+                        return Err(unsupported(
+                            ast,
+                            node,
+                            "non-addressable increment operand".to_string(),
+                        ));
+                    };
+                    let old = self
+                        .builder
+                        .insert(p::load(self.context, ptr, elem).build())
+                        .result();
+                    let one = self
+                        .builder
+                        .insert(b::constant(self.context, 1, elem).build())
+                        .result();
+                    let new = if matches!(kind, AstKind::PreInc | AstKind::PostInc) {
+                        self.builder
+                            .insert(b::addi(self.context, old, one, elem).build())
+                            .result()
+                    } else {
+                        self.builder
+                            .insert(b::subi(self.context, old, one, elem).build())
+                            .result()
+                    };
+                    self.builder
+                        .insert(p::store(self.context, new, ptr).build());
+                    LoweredExpr::Value(if matches!(kind, AstKind::PostInc | AstKind::PostDec) {
+                        old
+                    } else {
+                        new
+                    })
+                }
                 kind @ (AstKind::Lt
                 | AstKind::Gt
                 | AstKind::Le
