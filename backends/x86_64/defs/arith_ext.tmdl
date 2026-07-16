@@ -202,6 +202,13 @@ instruction Test32 for [X86_64] : RegReg32 {
     }
 }
 
+instruction Test8 for [X86_64] : RegReg8 {
+    param OPNAME: String = "test8";
+    param MNEMONIC: String = "test";
+    param OPCODE: bits<8> = 0x84;
+    behavior { }
+}
+
 instruction CmpImm32 for [X86_64] : RegImm32 {
     param OPNAME: String = "cmp_imm32";
     param MNEMONIC: String = "cmp";

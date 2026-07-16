@@ -244,6 +244,9 @@ fn fold_class(context: &Context, eg: &EGraph<Node>, class: Id) -> Option<APInt> 
         else {
             return None;
         };
+        if !context.has_operation(*op) {
+            return None;
+        }
         let operands: Vec<Value> = args
             .iter()
             .map(|&c| const_value(eg, c).map(Value::Int))

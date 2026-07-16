@@ -203,6 +203,25 @@ int main(void) {
 }
 
 #[test]
+fn integer_casts_match_host_compiler() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        r#"int truncate(int value) { return (unsigned char)value; }
+long widen(int value) { return (long)value; }
+unsigned long widen_unsigned(unsigned int value) { return (unsigned long)value; }
+int main(void) {
+    if (truncate(257) != 1) return 1;
+    if ((int)(widen(-2) >> 32) != -1) return 2;
+    if ((int)(widen_unsigned(7U) >> 32) != 0) return 3;
+    return 0;
+}
+"#,
+    );
+}
+
+#[test]
 fn loops_execute_through_driver() {
     if !cc_available() {
         return;

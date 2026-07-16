@@ -256,6 +256,16 @@ mod isa {
                 _ => None,
             })
         }
+        fn reg_class(op: &dyn Operation, name: &str) -> Option<tir::backend::regalloc::RegClassId> {
+            op.attributes().iter().find_map(|a| match &a.value {
+                AttributeValue::Register(RegisterAttr::Physical { class, .. })
+                    if a.name == name =>
+                {
+                    Some(*class)
+                }
+                _ => None,
+            })
+        }
         // An immediate operand's integer value, or None for a symbol reference
         // (a relocation that cannot fold to the sign-extended imm8 form).
         fn imm_int(op: &dyn Operation, name: &str) -> Option<i64> {
@@ -377,6 +387,22 @@ mod isa {
         // behavior-free variant, so selection is unaffected.
         const LO: u16 = 8;
         const B: u16 = 4;
+
+        // A boolean materialized by setcc defines one byte. Preserve that width
+        // when a generic test consumes it, so stale upper register bits are ignored.
+        if let Some(inner) = op.as_op::<TestOp>()
+            && reg_class(&inner, "dst") == Some(RegClass::GPR8.id())
+        {
+            return replace(
+                rewriter,
+                Box::new(
+                    Test8OpBuilder::new(context)
+                        .attr("dst", attr(&inner, "dst"))
+                        .attr("src", attr(&inner, "src"))
+                        .build(),
+                ),
+            );
+        }
 
         // Register/register: `op → op_norex` when both operands are low.
         macro_rules! rr_norex {

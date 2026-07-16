@@ -294,31 +294,37 @@ impl FnCodegen<'_> {
         let semantics = self.ast.get_annotation(node).unwrap();
         let mut source = semantics.ty.unwrap();
         for &target in &semantics.conversions {
-            if let (Some(source_width), Some(target_width)) = (
-                self.typed.integer_width(source),
-                self.typed.integer_width(target),
-            ) {
-                let target_ty = lower_type(self.context, self.typed, target);
-                if source_width < target_width {
-                    value = if self.typed.integer_is_signed(source).unwrap() {
-                        self.builder
-                            .insert(b::extsi(self.context, value, target_ty).build())
-                            .result()
-                    } else {
-                        self.builder
-                            .insert(b::extui(self.context, value, target_ty).build())
-                            .result()
-                    };
-                } else if source_width > target_width {
-                    value = self
-                        .builder
-                        .insert(b::trunci(self.context, value, target_ty).build())
-                        .result();
-                }
-            }
+            value = self.convert_integer(value, source, target);
             source = target;
         }
         value
+    }
+
+    fn convert_integer(&mut self, value: ValueId, source: QualType, target: QualType) -> ValueId {
+        let (Some(source_width), Some(target_width)) = (
+            self.typed.integer_width(source),
+            self.typed.integer_width(target),
+        ) else {
+            return value;
+        };
+        let target_ty = lower_type(self.context, self.typed, target);
+        if source_width < target_width {
+            if self.typed.integer_is_signed(source).unwrap() {
+                self.builder
+                    .insert(b::extsi(self.context, value, target_ty).build())
+                    .result()
+            } else {
+                self.builder
+                    .insert(b::extui(self.context, value, target_ty).build())
+                    .result()
+            }
+        } else if source_width > target_width {
+            self.builder
+                .insert(b::trunci(self.context, value, target_ty).build())
+                .result()
+        } else {
+            value
+        }
     }
 
     /// Lower a function: spill parameters into stack slots, then lower each body
@@ -979,6 +985,15 @@ impl FnCodegen<'_> {
                 AstKind::Comma => {
                     let rhs = ast.children(node).nth(1).unwrap();
                     LoweredExpr::Value(self.materialize(self.values[rhs.index() - base]))
+                }
+                AstKind::Cast => {
+                    let child = ast.children(node).next().unwrap();
+                    let value = self.materialize(self.values[child.index() - base]);
+                    LoweredExpr::Value(self.convert_integer(
+                        value,
+                        node_type(self.typed, child),
+                        node_type(self.typed, node),
+                    ))
                 }
                 AstKind::AssignExpr => {
                     let mut children = ast.children(node);
