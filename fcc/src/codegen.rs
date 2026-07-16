@@ -381,19 +381,19 @@ impl FnCodegen<'_> {
     fn lower_double_binary(&mut self, kind: AstKind, lhs: ValueId, rhs: ValueId) -> ValueId {
         let ty = FloatType::f64(self.context);
         match kind {
-            AstKind::Add => self
+            AstKind::Add | AstKind::AddAssign => self
                 .builder
                 .insert(b::addf(self.context, lhs, rhs, ty).build())
                 .result(),
-            AstKind::Sub => self
+            AstKind::Sub | AstKind::SubAssign => self
                 .builder
                 .insert(b::subf(self.context, lhs, rhs, ty).build())
                 .result(),
-            AstKind::Mul => self
+            AstKind::Mul | AstKind::MulAssign => self
                 .builder
                 .insert(b::mulf(self.context, lhs, rhs, ty).build())
                 .result(),
-            AstKind::Div => self
+            AstKind::Div | AstKind::DivAssign => self
                 .builder
                 .insert(b::divf(self.context, lhs, rhs, ty).build())
                 .result(),
@@ -1077,6 +1077,7 @@ impl FnCodegen<'_> {
                 kind @ (AstKind::AddAssign
                 | AstKind::SubAssign
                 | AstKind::MulAssign
+                | AstKind::DivAssign
                 | AstKind::ShlAssign
                 | AstKind::ShrAssign
                 | AstKind::AndAssign
@@ -1098,8 +1099,14 @@ impl FnCodegen<'_> {
                         .builder
                         .insert(p::load(self.context, ptr, elem).build())
                         .result();
-                    let value =
-                        self.lower_integer_binary(kind, lhs, rhs, node_type(self.typed, lhs_node));
+                    let source_ty = node_type(self.typed, lhs_node);
+                    let value = if matches!(self.typed.types().kind(source_ty), TypeKind::Double) {
+                        self.lower_double_binary(kind, lhs, rhs)
+                    } else if kind == AstKind::DivAssign {
+                        return Err(unsupported(ast, node, "expression DivAssign".to_string()));
+                    } else {
+                        self.lower_integer_binary(kind, lhs, rhs, source_ty)
+                    };
                     self.builder
                         .insert(p::store(self.context, value, ptr).build());
                     LoweredExpr::Value(value)

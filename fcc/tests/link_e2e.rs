@@ -216,6 +216,50 @@ fn double_division_executes_through_driver() {
 }
 
 #[test]
+fn double_add_assignment_executes_through_driver() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "double update(double value, double amount) { value += amount; return value; }\n",
+        "double update(double, double); int main(void) { return update(1.25, 2.5) == 3.75 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn double_sub_assignment_executes_through_driver() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "double update(double value, double amount) { value -= amount; return value; }\n",
+        "double update(double, double); int main(void) { return update(4.5, 1.25) == 3.25 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn double_mul_assignment_executes_through_driver() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "double update(double value, double amount) { value *= amount; return value; }\n",
+        "double update(double, double); int main(void) { return update(1.5, 2.5) == 3.75 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn double_div_assignment_executes_through_driver() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "double update(double value, double amount) { value /= amount; return value; }\n",
+        "double update(double, double); int main(void) { return update(7.5, 2.5) == 3.0 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
 fn unary_operators_match_host_compiler() {
     if !cc_available() {
         return;
