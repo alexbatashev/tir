@@ -1,13 +1,24 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use logos::{Lexer, Logos};
 
 use crate::diagnostics::{
-    Diagnostic, FileId, PreprocError, PreprocWarning, Span, file_source, intern_file,
+    Diagnostic, FileId, MissingInclude, PreprocError, PreprocWarning, Span, file_source,
+    intern_file,
 };
 use crate::lexer::Token;
+
+/// Directories searched for `#include` files. `user` holds `-I` directories in
+/// command-line order; `system` holds the toolchain's default directories.
+/// Quoted includes search the including file's directory, then `user`, then
+/// `system`; angle includes search `user` then `system`.
+#[derive(Debug, Clone, Default)]
+pub struct IncludePaths {
+    pub user: Vec<PathBuf>,
+    pub system: Vec<PathBuf>,
+}
 
 // ---------------------------------------------------------------------------
 // Preprocessor-directive token type
@@ -451,6 +462,9 @@ struct Frame {
     source: Arc<str>,
     offset: usize,
     file: FileId,
+    /// Resolved path of this frame's file. Its parent directory is the search
+    /// base for quoted includes appearing in this file.
+    path: PathBuf,
 }
 
 pub struct TokenStream {
@@ -462,7 +476,7 @@ pub struct TokenStream {
     /// text" (e.g. `#define FLAG`).  Such macros participate in `#ifdef` /
     /// `#ifndef` but expand to nothing in code.
     defines: HashMap<String, Token>,
-    include_paths: Vec<PathBuf>,
+    include_paths: IncludePaths,
     cond_stack: Vec<CondState>,
     diagnostics: Vec<Diagnostic>,
 }
@@ -496,6 +510,30 @@ impl TokenStream {
     /// The currently active file, for spanning directives.
     fn current_file(&self) -> FileId {
         self.frames.last().unwrap().file
+    }
+
+    /// Resolve an `#include` to its `(path, contents)`, or `None` if not found.
+    /// Quoted includes search the including file's directory first; both forms
+    /// then search `user` (`-I` order) and `system` directories.
+    fn resolve_include(&self, path: &str, quoted: bool) -> Option<(PathBuf, String)> {
+        let includer_dir = if quoted {
+            self.frames
+                .last()
+                .and_then(|f| f.path.parent())
+                .map(Path::to_path_buf)
+        } else {
+            None
+        };
+        includer_dir
+            .iter()
+            .chain(&self.include_paths.user)
+            .chain(&self.include_paths.system)
+            .find_map(|dir| {
+                let candidate = dir.join(path);
+                std::fs::read_to_string(&candidate)
+                    .ok()
+                    .map(|content| (candidate, content))
+            })
     }
 
     fn process_directive(
@@ -539,32 +577,30 @@ impl TokenStream {
             }
 
             Some(Ok(PreprocToken::Include)) if !skipping => {
-                let path = match pp.next() {
-                    Some(Ok(PreprocToken::QuotedPath)) => {
-                        let s = pp.slice();
-                        s[1..s.len() - 1].to_string()
-                    }
-                    Some(Ok(PreprocToken::AnglePath)) => {
-                        let s = pp.slice();
-                        s[1..s.len() - 1].to_string()
-                    }
+                let (path, quoted) = match pp.next() {
+                    Some(Ok(PreprocToken::QuotedPath)) => (unquote(pp.slice()), true),
+                    Some(Ok(PreprocToken::AnglePath)) => (unquote(pp.slice()), false),
                     _ => {
                         self.skip_line(source.len(), pp.remainder());
                         return;
                     }
                 };
                 self.skip_line(source.len(), pp.remainder());
-                let content = self
-                    .include_paths
-                    .iter()
-                    .find_map(|dir| std::fs::read_to_string(dir.join(&path)).ok());
-                if let Some(content) = content {
-                    let file = intern_file(&path, &content);
-                    self.frames.push(Frame {
-                        source: file_source(file),
-                        offset: 0,
-                        file,
-                    });
+                match self.resolve_include(&path, quoted) {
+                    Some((resolved, content)) => {
+                        let file = intern_file(&resolved.to_string_lossy(), &content);
+                        self.frames.push(Frame {
+                            source: file_source(file),
+                            offset: 0,
+                            file,
+                            path: resolved,
+                        });
+                    }
+                    None => {
+                        let span = Span::new(self.current_file(), directive_start);
+                        self.diagnostics
+                            .push(MissingInclude::new(span, path).into());
+                    }
                 }
             }
 
@@ -800,6 +836,11 @@ impl TokenStream {
     }
 }
 
+/// Strip the surrounding `"..."` or `<...>` delimiters from an include path.
+fn unquote(spelling: &str) -> String {
+    spelling[1..spelling.len() - 1].to_string()
+}
+
 /// Build a lazy preprocessed token stream over a source file.
 ///
 /// * `name`          — file name shown in diagnostics (e.g. a path or `<stdin>`)
@@ -810,7 +851,7 @@ pub fn preprocessed(
     name: &str,
     source: &str,
     defines: HashMap<String, Token>,
-    include_paths: &[PathBuf],
+    include_paths: &IncludePaths,
 ) -> TokenStream {
     let file = intern_file(name, source);
     TokenStream {
@@ -818,9 +859,10 @@ pub fn preprocessed(
             source: file_source(file),
             offset: 0,
             file,
+            path: PathBuf::from(name),
         }],
         defines,
-        include_paths: include_paths.to_vec(),
+        include_paths: include_paths.clone(),
         cond_stack: Vec::new(),
         diagnostics: Vec::new(),
     }
@@ -828,14 +870,37 @@ pub fn preprocessed(
 
 #[cfg(test)]
 mod tests {
-    use super::preprocessed;
+    use super::{IncludePaths, preprocessed};
     use crate::diagnostics::Code;
     use std::collections::HashMap;
 
     fn diagnostics(source: &str) -> Vec<Code> {
-        let mut stream = preprocessed("<pp-test>", source, HashMap::new(), &[]);
+        let mut stream = preprocessed(
+            "<pp-test>",
+            source,
+            HashMap::new(),
+            &IncludePaths::default(),
+        );
         stream.collect_tokens();
         stream.diagnostics().iter().map(|d| d.code()).collect()
+    }
+
+    #[test]
+    fn missing_include_reports_the_path() {
+        let mut stream = preprocessed(
+            "<pp-test>",
+            "#include \"nope.h\"\n",
+            HashMap::new(),
+            &IncludePaths::default(),
+        );
+        stream.collect_tokens();
+        let diags = stream.diagnostics();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code(), Code::MissingInclude);
+        let mut buf = Vec::new();
+        diags[0].write(&mut buf, false).unwrap();
+        let rendered = String::from_utf8(buf).unwrap();
+        assert!(rendered.contains("'nope.h' file not found"), "{rendered}");
     }
 
     #[test]

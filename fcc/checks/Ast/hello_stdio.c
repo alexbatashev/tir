@@ -1,4 +1,4 @@
-// RUN: fcc compile --stage ast -o - %S/../Inputs/hello_stdio.c | filecheck %s
+// RUN: fcc compile --stage ast -I %S/../Inputs -o - %S/../Inputs/hello_stdio.c | filecheck %s
 
 // CHECK: Prototype "printf" ->
 // CHECK:     Param _: Attr(restrict; Ptr(Const(Char)))

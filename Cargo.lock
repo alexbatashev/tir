@@ -625,6 +625,7 @@ dependencies = [
  "clap",
  "criterion",
  "logos",
+ "tempfile",
  "tir",
  "tir-arm64",
  "tir-jit",

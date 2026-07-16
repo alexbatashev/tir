@@ -503,6 +503,23 @@ missing `-D` define or include path).",
             .label(d.span, "#error directive encountered"),
     }
 
+    /// `E0301`: an `#include` names a file that cannot be found.
+    MissingInclude = "E0301" {
+        title: "include file not found",
+        reference: Some("C17 6.10.2: the named source file is searched for in an implementation-defined manner"),
+        explain: "\
+An `#include` directive names a header that was not found in any searched
+directory. Quoted includes search the including file's directory first, then the
+`-I` directories and the system directories; angle includes skip the including
+file's directory.
+
+Check the spelling of the header and add the directory holding it with `-I`.",
+        fields: { span: Span, path: String },
+        build: |d| Diagnostic::of(Code::MissingInclude)
+            .message(format!("'{}' file not found", d.path))
+            .label(d.span, "file not found"),
+    }
+
     /// `W0300`: an active `#warning` directive.
     PreprocWarning = "W0300" {
         title: "#warning directive",

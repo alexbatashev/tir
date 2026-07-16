@@ -1,9 +1,9 @@
-// RUN: fcc compile --stage obj --march riscv64 -o - %S/../Inputs/hello_stdio.c | tir readobj - | filecheck %s
-// RUN: fcc compile --stage asm --march riscv64 -o - %S/../Inputs/hello_stdio.c | filecheck %s --check-prefix=ASM
-// RUN: fcc compile --stage obj --march arm64 -o - %S/../Inputs/hello_stdio.c | tir readobj - | filecheck %s --check-prefix=ARM
-// RUN: fcc compile --stage asm --march arm64 -o - %S/../Inputs/hello_stdio.c | filecheck %s --check-prefix=ARMASM
-// RUN: fcc compile --stage obj --march x86_64 -o - %S/../Inputs/hello_stdio.c | tir readobj - | filecheck %s --check-prefix=X86
-// RUN: fcc compile --stage asm --march x86_64 -o - %S/../Inputs/hello_stdio.c | filecheck %s --check-prefix=X86ASM
+// RUN: fcc compile --stage obj --march riscv64 -I %S/../Inputs -o - %S/../Inputs/hello_stdio.c | tir readobj - | filecheck %s
+// RUN: fcc compile --stage asm --march riscv64 -I %S/../Inputs -o - %S/../Inputs/hello_stdio.c | filecheck %s --check-prefix=ASM
+// RUN: fcc compile --stage obj --march arm64 -I %S/../Inputs -o - %S/../Inputs/hello_stdio.c | tir readobj - | filecheck %s --check-prefix=ARM
+// RUN: fcc compile --stage asm --march arm64 -I %S/../Inputs -o - %S/../Inputs/hello_stdio.c | filecheck %s --check-prefix=ARMASM
+// RUN: fcc compile --stage obj --march x86_64 -I %S/../Inputs -o - %S/../Inputs/hello_stdio.c | tir readobj - | filecheck %s --check-prefix=X86
+// RUN: fcc compile --stage asm --march x86_64 -I %S/../Inputs -o - %S/../Inputs/hello_stdio.c | filecheck %s --check-prefix=X86ASM
 
 // The string literal lands in .rodata as a local object symbol; its address
 // materializes as an absolute lui/addi pair relocated against the symbol, and

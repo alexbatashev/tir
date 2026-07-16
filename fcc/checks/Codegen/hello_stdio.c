@@ -1,4 +1,4 @@
-// RUN: fcc compile --stage ir -o - %S/../Inputs/hello_stdio.c | filecheck %s
+// RUN: fcc compile --stage ir -I %S/../Inputs -o - %S/../Inputs/hello_stdio.c | filecheck %s
 
 // CHECK: declare @printf(!ptr.p<!i8>, !cir.varargs) -> !i32
 // CHECK: func @main() -> !i32 {
