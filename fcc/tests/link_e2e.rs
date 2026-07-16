@@ -127,6 +127,25 @@ int main(void) { puts("same output"); return 17; }
 }
 
 #[test]
+fn bitwise_and_shifts_match_host_compiler() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        r#"unsigned int bits(unsigned int a, unsigned int b) {
+    return ((a & b) | (a ^ b)) << 2 >> 1;
+}
+int signed_shift(int value) { return value >> 3; }
+int main(void) {
+    if (bits(10, 12) != 28) return 1;
+    if (signed_shift(16) != 2) return 2;
+    return 0;
+}
+"#,
+    );
+}
+
+#[test]
 fn loops_execute_through_driver() {
     if !cc_available() {
         return;

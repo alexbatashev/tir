@@ -843,6 +843,47 @@ impl FnCodegen<'_> {
                     };
                     LoweredExpr::Value(value)
                 }
+                kind @ (AstKind::BitAnd
+                | AstKind::BitXor
+                | AstKind::BitOr
+                | AstKind::Shl
+                | AstKind::Shr) => {
+                    let mut children = ast.children(node);
+                    let lhs = self.values[children.next().unwrap().index() - base];
+                    let rhs = self.values[children.next().unwrap().index() - base];
+                    let lhs = self.materialize(lhs);
+                    let rhs = self.materialize(rhs);
+                    let source_ty = node_type(self.typed, node);
+                    let ty = lower_type(self.context, self.typed, source_ty);
+                    let value = match kind {
+                        AstKind::BitAnd => self
+                            .builder
+                            .insert(b::andi(self.context, lhs, rhs, ty).build())
+                            .result(),
+                        AstKind::BitXor => self
+                            .builder
+                            .insert(b::xori(self.context, lhs, rhs, ty).build())
+                            .result(),
+                        AstKind::BitOr => self
+                            .builder
+                            .insert(b::ori(self.context, lhs, rhs, ty).build())
+                            .result(),
+                        AstKind::Shl => self
+                            .builder
+                            .insert(b::shli(self.context, lhs, rhs, ty).build())
+                            .result(),
+                        AstKind::Shr if self.typed.integer_is_signed(source_ty).unwrap() => self
+                            .builder
+                            .insert(b::shrsi(self.context, lhs, rhs, ty).build())
+                            .result(),
+                        AstKind::Shr => self
+                            .builder
+                            .insert(b::shrui(self.context, lhs, rhs, ty).build())
+                            .result(),
+                        _ => unreachable!(),
+                    };
+                    LoweredExpr::Value(value)
+                }
                 kind @ (AstKind::Lt
                 | AstKind::Gt
                 | AstKind::Le
