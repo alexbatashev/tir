@@ -320,6 +320,27 @@ int main(void) {
 }
 
 #[test]
+fn conditional_operator_executes_only_selected_arm() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        r#"int conditional(int condition) {
+    int lhs = 0;
+    int rhs = 0;
+    int result = condition ? ++lhs : ++rhs;
+    return result * 100 + lhs * 10 + rhs;
+}
+int main(void) {
+    if (conditional(0) != 101) return 1;
+    if (conditional(1) != 110) return 2;
+    return 0;
+}
+"#,
+    );
+}
+
+#[test]
 fn unary_operators_match_host_compiler() {
     if !cc_available() {
         return;

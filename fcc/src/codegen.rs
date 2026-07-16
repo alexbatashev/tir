@@ -786,6 +786,9 @@ impl FnCodegen<'_> {
         if matches!(kind, AstKind::LogAnd | AstKind::LogOr) {
             return self.lower_logical(node, kind);
         }
+        if kind == AstKind::Conditional {
+            return self.lower_conditional(node);
+        }
 
         for child in ast.children(node) {
             self.lower_expr_node(child)?;
@@ -1269,6 +1272,65 @@ impl FnCodegen<'_> {
                 .insert(b::constant(self.context, constant, result_ty).build())
                 .result()
         };
+        self.builder
+            .insert(p::store(self.context, value, result.ptr).build());
+        self.ensure_cir_yield(block);
+        Ok(())
+    }
+
+    fn lower_conditional(&mut self, node: NodeId) -> Result<LoweredExpr, Diagnostic> {
+        let mut children = self.ast.children(node);
+        let condition_node = children.next().unwrap();
+        let then_node = children.next().unwrap();
+        let else_node = children.next().unwrap();
+        let condition = self.lower_expr_node(condition_node)?;
+        let condition = self.materialize(condition);
+        let condition = self.truth_value(condition);
+        let source_ty = node_type(self.typed, node);
+        let result_ty = lower_type(self.context, self.typed, source_ty);
+        let (size, align) = source_type_layout(self.typed, source_ty);
+        let result = self.alloca(result_ty, size, align);
+
+        let then_region = self.context.create_region();
+        let then_block = self.context.create_block(vec![]);
+        then_region.add_block(then_block.id());
+        self.in_block(then_block.clone(), |cg| {
+            cg.lower_conditional_arm(then_node, result, then_block)
+        })?;
+
+        let else_region = self.context.create_region();
+        let else_block = self.context.create_block(vec![]);
+        else_region.add_block(else_block.id());
+        self.in_block(else_block.clone(), |cg| {
+            cg.lower_conditional_arm(else_node, result, else_block)
+        })?;
+
+        self.builder.insert(
+            cir::ops::r#if(
+                self.context,
+                condition,
+                Some(then_region.id()),
+                Some(else_region.id()),
+            )
+            .build(),
+        );
+        let expression = LoweredExpr::Value(
+            self.builder
+                .insert(p::load(self.context, result.ptr, result.elem).build())
+                .result(),
+        );
+        self.values.insert(node, expression);
+        Ok(expression)
+    }
+
+    fn lower_conditional_arm(
+        &mut self,
+        node: NodeId,
+        result: Slot,
+        block: std::sync::Arc<tir::Block>,
+    ) -> Result<(), Diagnostic> {
+        let value = self.lower_expr_node(node)?;
+        let value = self.materialize(value);
         self.builder
             .insert(p::store(self.context, value, result.ptr).build());
         self.ensure_cir_yield(block);
