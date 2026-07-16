@@ -34,6 +34,14 @@ impl ENode for Math {
 
     // Buckets by operator only, so all `Num`s collide — exercises matches()+children disambiguation.
     fn hash_cons(&self) -> u64 {
+        let mut hash = self.op_key();
+        for child in self.children() {
+            hash = hash.rotate_left(5) ^ child.index() as u64;
+        }
+        hash
+    }
+
+    fn op_key(&self) -> u64 {
         match self {
             Math::Num(_) => 1,
             Math::Sym(_) => 2,

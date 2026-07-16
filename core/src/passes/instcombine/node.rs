@@ -119,7 +119,7 @@ impl ENode for Node {
     }
 
     fn hash_cons(&self) -> u64 {
-        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let mut h = tir_adt::FxHasher::default();
         match self {
             Node::Gate(gate, _) => {
                 0u8.hash(&mut h);
@@ -144,25 +144,35 @@ impl ENode for Node {
                 value.to_u64().hash(&mut h);
             }
         }
+        self.children().hash(&mut h);
         h.finish()
     }
 
     /// Search-index bucket: like [`hash_cons`](Self::hash_cons) but omits an `Op`'s result type, so a wildcard-typed ([`any_type`]) template buckets with the concrete ops it matches.
     fn op_key(&self) -> u64 {
-        let Node::Op {
-            dialect,
-            name,
-            attrs,
-            ..
-        } = self
-        else {
-            return self.hash_cons();
-        };
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        1u8.hash(&mut h);
-        dialect.hash(&mut h);
-        name.hash(&mut h);
-        hash_attrs(attrs, &mut h);
+        let mut h = tir_adt::FxHasher::default();
+        match self {
+            Node::Gate(gate, _) => {
+                0u8.hash(&mut h);
+                hash_gate(gate, &mut h);
+            }
+            Node::Op {
+                dialect,
+                name,
+                attrs,
+                ..
+            } => {
+                1u8.hash(&mut h);
+                dialect.hash(&mut h);
+                name.hash(&mut h);
+                hash_attrs(attrs, &mut h);
+            }
+            Node::Const { value, .. } => {
+                2u8.hash(&mut h);
+                value.width().hash(&mut h);
+                value.to_u64().hash(&mut h);
+            }
+        }
         h.finish()
     }
 

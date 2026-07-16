@@ -12,7 +12,7 @@ mod test_lang;
 
 use std::collections::HashMap;
 
-use tir_adt::ScopedDisjointSet;
+use tir_adt::{IndexMap, ScopedDisjointSet};
 
 pub use eclass::*;
 pub use enode::*;
@@ -41,23 +41,23 @@ pub struct EGraph<L: ENode> {
     unionfind: ScopedDisjointSet,
     /// Base hash-cons: [`ENode::hash_cons`] bucket -> `[(canonical node, class)]`.
     /// Collisions only share a bucket; identity is `matches` + equal children.
-    memo: HashMap<u64, Vec<(L, Id)>>,
+    memo: IndexMap<u64, Vec<(L, Id)>>,
     /// Canonical base class id -> e-class; absorbed ids removed on `union`. Scoped
     /// unions never touch it, so `pop_context` restores it for free.
     classes: HashMap<Id, EClass<L>>,
     /// [`ENode::op_key`] bucket -> class ids holding such a node, so
     /// [`Self::classes_with_op`] skips classes a concrete-rooted pattern can't match.
     /// Append-only, caller-dedup'd: over-approximates, never misses a live class.
-    classes_by_op: HashMap<u64, Vec<Id>>,
+    classes_by_op: IndexMap<u64, Vec<Id>>,
     /// Classes touched by a `union` since the last `rebuild`, awaiting repair.
     pending: Vec<Id>,
     /// Scope overlay, live only inside a scope. `scope_members`/`scope_classes` cache
     /// the scope partition (rebuilt by [`Self::aggregate_scope`]); `scope_memo` stacks
     /// one hash-cons per open context so a nested `pop_context` restores the enclosing
     /// table. Base `classes`/`memo` stay immutable underneath.
-    scope_members: HashMap<Id, Vec<Id>>,
+    scope_members: IndexMap<Id, Vec<Id>>,
     scope_classes: HashMap<Id, EClass<L>>,
-    scope_memo: Vec<HashMap<u64, Vec<(L, Id)>>>,
+    scope_memo: Vec<IndexMap<u64, Vec<(L, Id)>>>,
     /// Undo log of base insertions per open context: `make_class` still writes the
     /// new class into base `classes`/`classes_by_op`/children's `parents` while scoped
     /// (so the overlay, which reads base, sees it), but `pop_context` reverts exactly
@@ -85,11 +85,11 @@ impl<L: ENode> EGraph<L> {
     pub fn new() -> Self {
         Self {
             unionfind: ScopedDisjointSet::new(0),
-            memo: HashMap::new(),
+            memo: IndexMap::new(),
             classes: HashMap::new(),
-            classes_by_op: HashMap::new(),
+            classes_by_op: IndexMap::new(),
             pending: Vec::new(),
-            scope_members: HashMap::new(),
+            scope_members: IndexMap::new(),
             scope_classes: HashMap::new(),
             scope_memo: Vec::new(),
             scope_created: Vec::new(),
@@ -126,7 +126,7 @@ impl<L: ENode> EGraph<L> {
     /// base classes and hash-cons stay untouched.
     pub fn push_context(&mut self) {
         self.unionfind.push_context();
-        self.scope_memo.push(HashMap::new());
+        self.scope_memo.push(IndexMap::new());
         self.scope_created.push(Vec::new());
         self.aggregate_scope();
     }
@@ -393,8 +393,8 @@ impl<L: ENode> EGraph<L> {
     /// Rebuild the scope view: `scope_members` groups base reps under each scope rep,
     /// `scope_classes` aggregates their e-nodes for the read API.
     fn aggregate_scope(&mut self) {
-        let mut members: HashMap<Id, Vec<Id>> = HashMap::new();
-        let mut nodes: HashMap<Id, Vec<L>> = HashMap::new();
+        let mut members: IndexMap<Id, Vec<Id>> = IndexMap::new();
+        let mut nodes: IndexMap<Id, Vec<L>> = IndexMap::new();
         for class in self.classes.values() {
             let root = self.find(class.id);
             members.entry(root).or_default().push(class.id);
@@ -448,7 +448,7 @@ impl<L: ENode> EGraph<L> {
         Self::bucket_lookup(&self.memo, node).map(|id| self.find(id))
     }
 
-    fn bucket_lookup(memo: &HashMap<u64, Vec<(L, Id)>>, node: &L) -> Option<Id> {
+    fn bucket_lookup(memo: &IndexMap<u64, Vec<(L, Id)>>, node: &L) -> Option<Id> {
         memo.get(&node.hash_cons())?
             .iter()
             .find(|(stored, _)| is_congruent(stored, node))
@@ -586,6 +586,16 @@ mod tests {
         assert_eq!(g.nodes(e1).len(), 1);
         assert_eq!(g.total_size(), 3);
         assert_eq!(g.num_classes(), 3);
+    }
+
+    #[test]
+    fn hash_cons_includes_children() {
+        let a = Id::from_raw(1);
+        let b = Id::from_raw(2);
+        let c = Id::from_raw(3);
+
+        assert_eq!(Math::Add([a, b]).hash_cons(), Math::Add([a, b]).hash_cons());
+        assert_ne!(Math::Add([a, b]).hash_cons(), Math::Add([a, c]).hash_cons());
     }
 
     #[test]

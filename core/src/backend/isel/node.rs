@@ -2,7 +2,6 @@
 //! shared helpers that read types and operand bindings off e-classes.
 
 use std::collections::HashMap;
-use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 use tir::{
@@ -10,7 +9,7 @@ use tir::{
     builtin::{FloatType, IntegerType},
     sem::{FloatFormat, SemType, SymKind, SymPayload},
 };
-use tir_adt::APInt;
+use tir_adt::{APInt, FxHasher};
 use tir_symbolic::egraph::{EGraph, ENode, Id};
 
 /// The semantic e-graph instruction selection operates over: e-classes of
@@ -68,8 +67,9 @@ impl ENode for SemNode {
     }
 
     fn hash_cons(&self) -> u64 {
-        let mut h = DefaultHasher::new();
+        let mut h = FxHasher::default();
         hash_label(self, &mut h);
+        self.children.hash(&mut h);
         h.finish()
     }
 
@@ -77,7 +77,7 @@ impl ENode for SemNode {
     /// wildcard type/payload must find every class holding its kind (the
     /// [`ENode::op_key`] contract for [`ENode::matches_template`]).
     fn op_key(&self) -> u64 {
-        let mut h = DefaultHasher::new();
+        let mut h = FxHasher::default();
         self.kind.hash(&mut h);
         h.finish()
     }
