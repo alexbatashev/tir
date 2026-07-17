@@ -2229,6 +2229,7 @@ dependencies = [
 name = "tir-tools"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "clap",
  "tir",
  "tir-arm64",
@@ -2238,6 +2239,7 @@ dependencies = [
  "tir-riscv",
  "tir-sim",
  "tir-x86_64",
+ "tmdl",
 ]
 
 [[package]]
@@ -2280,6 +2282,7 @@ dependencies = [
  "tir",
  "tir-adt",
  "tir-lit",
+ "tir-symbolic",
  "typed-arena",
 ]
 
