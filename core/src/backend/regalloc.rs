@@ -2,12 +2,12 @@
 //!
 //! The allocator works on machine IR produced by instruction selection, where
 //! every register operand is carried in an op attribute as
-//! [`RegisterAttr::Virtual`] (its `id` is the SSA value number) or
-//! [`RegisterAttr::Physical`]. It reads the def/use role of each register operand
-//! from the op's generated `attribute_roles` table, computes liveness, builds an
-//! interference graph, and solves an optimal coloring with the shared PBQP solver
-//! ([`tir::pbqp`]). The chosen physical registers are written back by rewriting
-//! every `Virtual` attribute to `Physical`.
+//! [`RegisterAttr::Virtual`] (its `id` is the SSA value number),
+//! [`RegisterAttr::FixedUse`], or [`RegisterAttr::Physical`]. It reads the def/use
+//! role of each register operand from the op's generated `attribute_roles` table,
+//! computes liveness, builds an interference graph, and solves an optimal coloring
+//! with the shared PBQP solver ([`tir::pbqp`]). The chosen physical registers are
+//! written back by rewriting every `Virtual` attribute to `Physical`.
 //!
 //! Register files come from [`RegisterInfo`]; allocation order and calling
 //! convention policy come from the selected [`crate::backend::abi::AbiInfo`].
@@ -582,10 +582,11 @@ impl Pass for RegisterAllocationPass {
             return Ok(PreservedAnalyses::all());
         }
 
+        let fixed_precolor = self.lower_fixed_uses(context, rewriter, &blocks)?;
         self.lower_tied_operands(context, rewriter, &blocks)?;
         self.lower_block_args(context, rewriter, &blocks)?;
 
-        let abi = abi_precolor(
+        let mut abi = abi_precolor(
             context,
             op,
             &info,
@@ -594,6 +595,7 @@ impl Pass for RegisterAllocationPass {
             rewriter,
             &blocks,
         )?;
+        abi.precolor.extend(fixed_precolor);
 
         let mut frame = FrameState::new(self.abi.stack.slot_size);
         let stack_allocas = collect_stack_allocas(context, &blocks, &mut frame);
@@ -685,6 +687,51 @@ impl Pass for RegisterAllocationPass {
 impl RegisterAllocationPass {
     fn frame_register(&self) -> PhysReg {
         self.abi.sp
+    }
+
+    fn lower_fixed_uses(
+        &self,
+        context: &Context,
+        rewriter: &mut Rewriter,
+        blocks: &[BlockId],
+    ) -> Result<HashMap<u32, PhysReg>, PassError> {
+        let mut precolor = HashMap::new();
+        for &block_id in blocks {
+            for op_id in context.get_block(block_id).op_ids() {
+                let op = context.get_op(op_id);
+                let fixed_uses: Vec<_> = op
+                    .attributes
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(attr_index, attr)| match &attr.value {
+                        AttributeValue::Register(RegisterAttr::FixedUse { id, class, index }) => {
+                            Some((attr_index, *id, *class, *index))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                if fixed_uses.is_empty() {
+                    continue;
+                }
+
+                let op_ref = op_ref_in(context, block_id, op_id);
+                let mut attributes = op.attributes.clone();
+                for (attr_index, source, class, index) in fixed_uses {
+                    let ty = context.get_value(ValueId::from_number(source)).ty();
+                    let fixed = context.create_value(ty, None).id().number();
+                    let copy = self.target.emit_copy(context, class, fixed, source);
+                    rewriter.insert_op_before(&op_ref, copy.as_ref())?;
+                    attributes[attr_index].value =
+                        AttributeValue::Register(RegisterAttr::Virtual {
+                            id: fixed,
+                            class: Some(class),
+                        });
+                    precolor.insert(fixed, (class, index));
+                }
+                context.set_op_attributes(op_id, attributes);
+            }
+        }
+        Ok(precolor)
     }
 
     /// Lower tied (two-address) operands ahead of allocation. Instruction
