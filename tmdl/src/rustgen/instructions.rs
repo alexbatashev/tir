@@ -74,6 +74,15 @@ fn emit_instructions<'a>(
         .flat_map(|f| f.register_classes())
         .map(|rc| (rc.name.clone(), rc.resolve_registers().count()))
         .collect();
+    let classes: HashMap<String, &ast::RegisterClass> = files
+        .iter()
+        .flat_map(|f| f.register_classes())
+        .map(|rc| (rc.name.clone(), rc))
+        .collect();
+    let register_files: HashMap<String, String> = classes
+        .values()
+        .map(|rc| (rc.name.clone(), rc.register_file(&classes).to_string()))
+        .collect();
 
     // The inverse mapping, used to name a demand attribute after the register a
     // behavior reads implicitly (`VCSR::vl` -> attribute `vl`). Declaration names
@@ -528,12 +537,19 @@ fn emit_instructions<'a>(
                     _ => None,
                 })
                 .collect();
+            let value_reg_files: std::collections::HashSet<&str> = value_reg_classes
+                .iter()
+                .filter_map(|class| register_files.get(*class).map(String::as_str))
+                .collect();
             for ((class, index), symbol) in &semantics.register_symbols {
                 let is_implicit = register_name_map
                     .get(&(class.clone(), *index))
                     .map(|name| !ops.iter().any(|(op_name, _)| op_name == name))
                     .unwrap_or(false);
-                if is_implicit && value_reg_classes.contains(class.as_str()) {
+                let is_value_register = register_files
+                    .get(class)
+                    .is_some_and(|file| value_reg_files.contains(file.as_str()));
+                if is_implicit && is_value_register {
                     let symbol_lit = proc_macro2::Literal::u32_unsuffixed(*symbol);
                     operand_constraint_entries
                         .push(quote! { (#symbol_lit, tir::graph::OperandConstraint::Register) });

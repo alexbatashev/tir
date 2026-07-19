@@ -1,0 +1,13 @@
+// RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s
+
+module {
+  func @shl(%value: !i32) -> !i32 {
+    %count = constant {value = 2} : !i32
+    %result = shli %value, %count : !i32
+    return %result
+  }
+  module_end
+}
+
+// CHECK: x86_64.shl32 {{.*}}imm = 2
+// CHECK-NOT: x86_64.shl_cl
