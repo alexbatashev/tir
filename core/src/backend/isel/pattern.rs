@@ -59,6 +59,14 @@ impl PatternNodeMeta {
 }
 
 impl CompiledIselPattern {
+    pub(crate) fn capture_meta(&self, symbol: u32) -> Option<&PatternNodeMeta> {
+        (0..self.pattern.len()).find_map(|index| {
+            let node = Id::from_raw(index as u32);
+            matches!(self.pattern.node(node), PatternNode::Var(Var::Symbol(found)) if *found == symbol)
+                .then_some(&self.node_meta[index])
+        })
+    }
+
     fn match_types(
         &self,
         egraph: &SemEGraph,

@@ -69,14 +69,13 @@ impl<'a> SemDagBuilder<'a> {
         self.add_int(minimal_unsigned_apint(value), None)
     }
 
-    /// The synthetic `addr + 0` wrapper that makes a bare pointer match the
-    /// targets' base+offset addressing patterns (canonicalized to `Add(base, imm)`).
-    /// The `Add` is private to one memory op (see [`Self::add_op_unique`]), like
-    /// the memory effect it addresses: two memory ops are never interchangeable,
-    /// so neither is their addressing context.
+    /// Add the `addr + 0` form used by base+offset addressing patterns and record
+    /// its exact equality with the bare address used by direct-base patterns. The
+    /// node stays unique to this memory operation; only its value class is shared.
     fn zero_offset_address(&mut self, address: Id) -> Id {
         let zero = self.add_u64_const(0);
-        self.add_op_unique(SymKind::Add, vec![address, zero], None)
+        let with_zero = self.add_op_unique(SymKind::Add, vec![address, zero], None);
+        self.egraph.union(with_zero, address)
     }
 
     fn add_input_value(&mut self, value: ValueId, ty: Option<TypeId>) -> Id {
@@ -282,7 +281,17 @@ impl<'a> SemDagBuilder<'a> {
     ) -> Id {
         match def.attributes.iter().find(|a| a.name == "value") {
             Some(attr) => match &attr.value {
-                AttributeValue::Int(v) => self.add_int(APInt::new_signed(64, *v), value_ty),
+                AttributeValue::Int(v) => {
+                    let width = value_ty
+                        .and_then(|ty| {
+                            let ty = self.context.get_type_data(ty);
+                            (ty.as_ref() as &dyn std::any::Any)
+                                .downcast_ref::<tir::builtin::IntegerType>()
+                                .map(tir::builtin::IntegerType::width)
+                        })
+                        .unwrap_or(64);
+                    self.add_int(APInt::new_signed(width, *v), value_ty)
+                }
                 _ => self.add_input_value(value, value_ty),
             },
             None => self.add_input_value(value, value_ty),

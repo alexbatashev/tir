@@ -4,7 +4,7 @@
 // participate in instruction selection. They carry empty behaviors, so no isel
 // rule derives from them; only `canonicalize_encodings` may pick them post-RA.
 // SysV lands the pointer arg in rdi, so the load must select the generic form
-// with rm=rdi (ModR/M 0x87) — never the SIB escape (0x84 + 0x24) that would
+// with rm=rdi (ModR/M 0x07) — never the SIB escape (0x04 + 0x24) that would
 // pin the base to rsp/r12 and load from the wrong address.
 
 module {
@@ -16,6 +16,6 @@ module {
 }
 
 // CHECK: loadq:
-// mov rax, [rdi] (disp0, base=rdi): 48 8b 87 00000000
-// CHECK-NEXT: [0x48, 0x8B, 0x87, 0x00, 0x00, 0x00, 0x00]
+// mov rax, [rdi] (base=rdi): 48 8b 07
+// CHECK-NEXT: [0x48, 0x8B, 0x07]
 // CHECK-NEXT: [0xC3]

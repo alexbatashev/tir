@@ -377,6 +377,27 @@ fn canon_rebuild<V: Clone>(
     let kind = *graph.get_node(node);
     let children: Vec<NodeId> = graph.children(node).collect();
 
+    // Target behaviors spell width-specific literals as extended bitvectors;
+    // source IR carries the same literal directly at its use width.
+    if matches!(kind, SymKind::SExt | SymKind::ZExt)
+        && children.len() == 2
+        && let Some(SymPayload::Int(value)) = graph.get_leaf_data(children[0])
+        && let Some(width) =
+            const_u64(graph, children[1]).and_then(|width| u32::try_from(width).ok())
+        && width >= value.width()
+    {
+        let value = if kind == SymKind::SExt {
+            value.with_signed(true).sign_extend(width)
+        } else {
+            value.zero_extend(width)
+        }
+        .with_signed(true);
+        let constant = out.add_node(SymKind::Constant);
+        out.set_leaf_data(constant, SymPayload::Int(value));
+        memo.insert(node.index(), constant);
+        return constant;
+    }
+
     // Collapse `sext/zext(load/imm, XLEN)` to the bare load or immediate: source IR
     // types the load result and carries constants at use width, rather than wrapping.
     if matches!(kind, SymKind::SExt | SymKind::ZExt)

@@ -75,6 +75,15 @@ fn compile_host_object(dir: &Path, source: &str, output: &str) {
     assert!(status.success(), "host cc failed");
 }
 
+fn assert_fcc_object_executes_with_host(source: &str, host: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("fcc.c"), source).unwrap();
+    run_fcc(dir.path(), &["cc", "-c", "fcc.c", "-o", "fcc.o"]);
+    compile_host_object(dir.path(), host, "host.o");
+    run_fcc(dir.path(), &["cc", "fcc.o", "host.o", "-o", "program"]);
+    assert_eq!(exit_code(&run_program(dir.path(), "program")), 0);
+}
+
 #[test]
 fn compile_and_link_in_one_step() {
     if !cc_available() {
@@ -156,6 +165,282 @@ fn variable_shift_count_matches_host_compiler() {
 }
 int main(void) {
     if (shift(3, 4) == 48) return 0;
+    return 1;
+}
+"#,
+    );
+}
+
+#[test]
+fn double_addition_executes_through_driver() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "double add(double lhs, double rhs) { return lhs + rhs; }\n",
+        "double add(double, double); int main(void) { return add(1.25, 2.5) == 3.75 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn double_subtraction_executes_through_driver() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "double subtract(double lhs, double rhs) { return lhs - rhs; }\n",
+        "double subtract(double, double); int main(void) { return subtract(4.5, 1.25) == 3.25 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn double_multiplication_executes_through_driver() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "double multiply(double lhs, double rhs) { return lhs * rhs; }\n",
+        "double multiply(double, double); int main(void) { return multiply(1.5, 2.5) == 3.75 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn double_division_executes_through_driver() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "double divide(double lhs, double rhs) { return lhs / rhs; }\n",
+        "double divide(double, double); int main(void) { return divide(7.5, 2.5) == 3.0 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn double_add_assignment_executes_through_driver() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "double update(double value, double amount) { value += amount; return value; }\n",
+        "double update(double, double); int main(void) { return update(1.25, 2.5) == 3.75 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn double_sub_assignment_executes_through_driver() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "double update(double value, double amount) { value -= amount; return value; }\n",
+        "double update(double, double); int main(void) { return update(4.5, 1.25) == 3.25 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn double_mul_assignment_executes_through_driver() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "double update(double value, double amount) { value *= amount; return value; }\n",
+        "double update(double, double); int main(void) { return update(1.5, 2.5) == 3.75 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn double_div_assignment_executes_through_driver() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "double update(double value, double amount) { value /= amount; return value; }\n",
+        "double update(double, double); int main(void) { return update(7.5, 2.5) == 3.0 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn character_constant_executes_through_driver() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "int value(void) { return 'A'; } int main(void) { if (value() != 65) return 1; return 0; }\n",
+    );
+}
+
+#[test]
+fn escaped_character_constant_executes_through_driver() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "int value(void) { return '\\n'; } int main(void) { if (value() != 10) return 1; return 0; }\n",
+    );
+}
+
+#[test]
+fn logical_and_short_circuits_rhs() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        r#"int logical_and(int lhs) {
+    int rhs = 0;
+    int result = lhs && ++rhs;
+    return result * 10 + rhs;
+}
+int main(void) {
+    if (logical_and(0) != 0) return 1;
+    if (logical_and(1) != 11) return 2;
+    return 0;
+}
+"#,
+    );
+}
+
+#[test]
+fn logical_or_short_circuits_rhs() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        r#"int logical_or(int lhs) {
+    int rhs = 0;
+    int result = lhs || ++rhs;
+    return result * 10 + rhs;
+}
+int main(void) {
+    if (logical_or(0) != 11) return 1;
+    if (logical_or(1) != 10) return 2;
+    return 0;
+}
+"#,
+    );
+}
+
+#[test]
+fn conditional_operator_executes_only_selected_arm() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        r#"int conditional(int condition) {
+    int lhs = 0;
+    int rhs = 0;
+    int result = condition ? ++lhs : ++rhs;
+    return result * 100 + lhs * 10 + rhs;
+}
+int main(void) {
+    if (conditional(0) != 101) return 1;
+    if (conditional(1) != 110) return 2;
+    return 0;
+}
+"#,
+    );
+}
+
+#[test]
+fn unary_operators_match_host_compiler() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        r#"int negate(int value) { return -value; }
+unsigned int complement(unsigned int value) { return ~value; }
+int logical_not(int value) { return !value; }
+int positive(int value) { return +value; }
+int main(void) {
+    if (negate(7) + 7 != 0) return 1;
+    if (complement(0) + 1 != 0) return 2;
+    if (logical_not(0) != 1) return 3;
+    if (logical_not(9) != 0) return 4;
+    if (positive(9) != 9) return 5;
+    return 0;
+}
+"#,
+    );
+}
+
+#[test]
+fn comma_operator_matches_host_compiler() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        r#"int comma_value(void) {
+    int value = 0;
+    return (value = 3, value + 4);
+}
+int main(void) {
+    if (comma_value() == 7) return 0;
+    return 1;
+}
+"#,
+    );
+}
+
+#[test]
+fn integer_casts_match_host_compiler() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        r#"int truncate(int value) { return (unsigned char)value; }
+long widen(int value) { return (long)value; }
+unsigned long widen_unsigned(unsigned int value) { return (unsigned long)value; }
+int main(void) {
+    if (truncate(257) != 1) return 1;
+    if ((int)(widen(-2) >> 32) != -1) return 2;
+    if ((int)(widen_unsigned(7U) >> 32) != 0) return 3;
+    return 0;
+}
+"#,
+    );
+}
+
+#[test]
+fn increment_operators_match_host_compiler() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        r#"int increment_values(void) {
+    int value = 4;
+    int post = value++;
+    int pre = ++value;
+    int old = value--;
+    int now = --value;
+    return post + pre + old + now + value;
+}
+int main(void) {
+    if (increment_values() == 24) return 0;
+    return 1;
+}
+"#,
+    );
+}
+
+#[test]
+fn compound_assignments_match_host_compiler() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        r#"int compound_assign(void) {
+    int value = 5;
+    value += 3;
+    value *= 2;
+    value -= 4;
+    value <<= 1;
+    value >>= 2;
+    value &= 7;
+    value ^= 3;
+    value |= 8;
+    return value;
+}
+int main(void) {
+    if (compound_assign() == 13) return 0;
     return 1;
 }
 "#,

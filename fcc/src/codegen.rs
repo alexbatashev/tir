@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use tir::attributes::AttributeValue;
-use tir::builtin::{IntegerType, ModuleOp, TokenType, UnitType, ops as b};
+use tir::builtin::{FloatType, IntegerType, ModuleOp, TokenType, UnitType, ops as b};
 use tir::graph::{Dag, NodeId};
 use tir::ptr::{PtrType, ops as p};
 use tir::{Context, IRBuilder, Operand, Operation, TypeId, ValueId};
@@ -41,10 +41,9 @@ struct FnCodegen<'a> {
     signatures: &'a HashMap<EntityId, Signature>,
     loop_scopes: Vec<ValueId>,
     terminated: bool,
-    /// Scratch holding the lowered SSA value of each node in the expression
-    /// subtree currently being lowered, indexed by `node.index() - base`. Reused
-    /// across expressions to avoid reallocating.
-    values: Vec<LoweredExpr>,
+    /// Lowered values in the expression subtree currently being emitted. The AST
+    /// is a DAG, so shared children reuse their first lowering.
+    values: HashMap<NodeId, LoweredExpr>,
 }
 
 #[derive(Clone)]
@@ -147,11 +146,10 @@ fn lower_type(context: &Context, typed: &TypedAst, ty: QualType) -> TypeId {
             PtrType::typed(context, lower_type(context, typed, *pointee))
         }
         TypeKind::Enum(_) => IntegerType::new(context, 32),
-        TypeKind::Error
-        | TypeKind::Float
-        | TypeKind::Double
-        | TypeKind::LongDouble
-        | TypeKind::Function { .. } => IntegerType::new(context, 64),
+        TypeKind::Double => FloatType::f64(context),
+        TypeKind::Error | TypeKind::Float | TypeKind::LongDouble | TypeKind::Function { .. } => {
+            IntegerType::new(context, 64)
+        }
         TypeKind::Record(id) => StructType::new(context, &typed.record(*id).unwrap().name),
     }
 }
@@ -271,7 +269,7 @@ fn lower_function(
         signatures,
         loop_scopes: Vec::new(),
         terminated: false,
-        values: Vec::new(),
+        values: HashMap::new(),
     };
     cg.lower_body(func, &param_ids)?;
 
@@ -294,31 +292,112 @@ impl FnCodegen<'_> {
         let semantics = self.ast.get_annotation(node).unwrap();
         let mut source = semantics.ty.unwrap();
         for &target in &semantics.conversions {
-            if let (Some(source_width), Some(target_width)) = (
-                self.typed.integer_width(source),
-                self.typed.integer_width(target),
-            ) {
-                let target_ty = lower_type(self.context, self.typed, target);
-                if source_width < target_width {
-                    value = if self.typed.integer_is_signed(source).unwrap() {
-                        self.builder
-                            .insert(b::extsi(self.context, value, target_ty).build())
-                            .result()
-                    } else {
-                        self.builder
-                            .insert(b::extui(self.context, value, target_ty).build())
-                            .result()
-                    };
-                } else if source_width > target_width {
-                    value = self
-                        .builder
-                        .insert(b::trunci(self.context, value, target_ty).build())
-                        .result();
-                }
-            }
+            value = self.convert_integer(value, source, target);
             source = target;
         }
         value
+    }
+
+    fn convert_integer(&mut self, value: ValueId, source: QualType, target: QualType) -> ValueId {
+        let (Some(source_width), Some(target_width)) = (
+            self.typed.integer_width(source),
+            self.typed.integer_width(target),
+        ) else {
+            return value;
+        };
+        let target_ty = lower_type(self.context, self.typed, target);
+        if source_width < target_width {
+            if self.typed.integer_is_signed(source).unwrap() {
+                self.builder
+                    .insert(b::extsi(self.context, value, target_ty).build())
+                    .result()
+            } else {
+                self.builder
+                    .insert(b::extui(self.context, value, target_ty).build())
+                    .result()
+            }
+        } else if source_width > target_width {
+            self.builder
+                .insert(b::trunci(self.context, value, target_ty).build())
+                .result()
+        } else {
+            value
+        }
+    }
+
+    fn lower_integer_binary(
+        &mut self,
+        kind: AstKind,
+        lhs: ValueId,
+        rhs: ValueId,
+        source_ty: QualType,
+    ) -> ValueId {
+        let ty = lower_type(self.context, self.typed, source_ty);
+        match kind {
+            AstKind::Add | AstKind::AddAssign => self
+                .builder
+                .insert(b::addi(self.context, lhs, rhs, ty).build())
+                .result(),
+            AstKind::Sub | AstKind::SubAssign => self
+                .builder
+                .insert(b::subi(self.context, lhs, rhs, ty).build())
+                .result(),
+            AstKind::Mul | AstKind::MulAssign => self
+                .builder
+                .insert(b::muli(self.context, lhs, rhs, ty).build())
+                .result(),
+            AstKind::BitAnd | AstKind::AndAssign => self
+                .builder
+                .insert(b::andi(self.context, lhs, rhs, ty).build())
+                .result(),
+            AstKind::BitXor | AstKind::XorAssign => self
+                .builder
+                .insert(b::xori(self.context, lhs, rhs, ty).build())
+                .result(),
+            AstKind::BitOr | AstKind::OrAssign => self
+                .builder
+                .insert(b::ori(self.context, lhs, rhs, ty).build())
+                .result(),
+            AstKind::Shl | AstKind::ShlAssign => self
+                .builder
+                .insert(b::shli(self.context, lhs, rhs, ty).build())
+                .result(),
+            AstKind::Shr | AstKind::ShrAssign
+                if self.typed.integer_is_signed(source_ty).unwrap() =>
+            {
+                self.builder
+                    .insert(b::shrsi(self.context, lhs, rhs, ty).build())
+                    .result()
+            }
+            AstKind::Shr | AstKind::ShrAssign => self
+                .builder
+                .insert(b::shrui(self.context, lhs, rhs, ty).build())
+                .result(),
+            _ => unreachable!(),
+        }
+    }
+
+    fn lower_double_binary(&mut self, kind: AstKind, lhs: ValueId, rhs: ValueId) -> ValueId {
+        let ty = FloatType::f64(self.context);
+        match kind {
+            AstKind::Add | AstKind::AddAssign => self
+                .builder
+                .insert(b::addf(self.context, lhs, rhs, ty).build())
+                .result(),
+            AstKind::Sub | AstKind::SubAssign => self
+                .builder
+                .insert(b::subf(self.context, lhs, rhs, ty).build())
+                .result(),
+            AstKind::Mul | AstKind::MulAssign => self
+                .builder
+                .insert(b::mulf(self.context, lhs, rhs, ty).build())
+                .result(),
+            AstKind::Div | AstKind::DivAssign => self
+                .builder
+                .insert(b::divf(self.context, lhs, rhs, ty).build())
+                .result(),
+            _ => unreachable!(),
+        }
     }
 
     /// Lower a function: spill parameters into stack slots, then lower each body
@@ -654,16 +733,19 @@ impl FnCodegen<'_> {
 
     fn lower_condition(&mut self, expression: NodeId) -> Result<ValueId, Diagnostic> {
         let value = self.lower_expr(expression)?;
+        Ok(self.truth_value(value))
+    }
+
+    fn truth_value(&mut self, value: ValueId) -> ValueId {
         let ty = self.context.get_value(value).ty();
         if ty == IntegerType::new(self.context, 1) {
-            return Ok(value);
+            return value;
         }
         let zero = self
             .builder
             .insert(b::constant(self.context, 0, ty).build())
             .result();
-        Ok(self
-            .builder
+        self.builder
             .insert(
                 b::CmpIOpBuilder::new(self.context)
                     .lhs(value)
@@ -672,7 +754,7 @@ impl FnCodegen<'_> {
                     .result_type(IntegerType::new(self.context, 1))
                     .build(),
             )
-            .result())
+            .result()
     }
 
     fn materialize(&mut self, expression: LoweredExpr) -> ValueId {
@@ -691,20 +773,28 @@ impl FnCodegen<'_> {
     }
 
     fn lower_expr_value(&mut self, root: NodeId) -> Result<LoweredExpr, Diagnostic> {
-        let ast = self.ast;
         self.values.clear();
-        let mut base = root.index();
+        self.lower_expr_node(root)
+    }
 
-        for node in ast.postorder(root) {
-            if self.values.is_empty() {
-                base = node.index();
-            }
-            debug_assert_eq!(
-                node.index(),
-                base + self.values.len(),
-                "subtree not contiguous"
-            );
+    fn lower_expr_node(&mut self, node: NodeId) -> Result<LoweredExpr, Diagnostic> {
+        if let Some(expression) = self.values.get(&node) {
+            return Ok(*expression);
+        }
+        let ast = self.ast;
+        let kind = ast.get_node(node).kind;
+        if matches!(kind, AstKind::LogAnd | AstKind::LogOr) {
+            return self.lower_logical(node, kind);
+        }
+        if kind == AstKind::Conditional {
+            return self.lower_conditional(node);
+        }
 
+        for child in ast.children(node) {
+            self.lower_expr_node(child)?;
+        }
+
+        {
             let expression = match ast.get_node(node).kind {
                 AstKind::Int => {
                     let AstLeaf::Int(n) = ast.get_leaf_data(node).unwrap() else {
@@ -714,6 +804,24 @@ impl FnCodegen<'_> {
                     LoweredExpr::Value(
                         self.builder
                             .insert(b::constant(self.context, n.value.to_i64(), ty).build())
+                            .result(),
+                    )
+                }
+                AstKind::Character => {
+                    let AstLeaf::Character(spelling) = ast.get_leaf_data(node).unwrap() else {
+                        unreachable!("character node carries a character payload");
+                    };
+                    let Some(value) = decode_character_constant(spelling) else {
+                        return Err(unsupported(
+                            ast,
+                            node,
+                            "multi-character constant".to_string(),
+                        ));
+                    };
+                    let ty = lower_type(self.context, self.typed, node_type(self.typed, node));
+                    LoweredExpr::Value(
+                        self.builder
+                            .insert(b::constant(self.context, value, ty).build())
                             .result(),
                     )
                 }
@@ -753,10 +861,10 @@ impl FnCodegen<'_> {
                         unreachable!("member node carries a member payload");
                     };
                     let base_node = ast.children(node).next().unwrap();
-                    let base = self.values[base_node.index() - base];
+                    let base_value = self.values[&base_node];
                     let base_ptr = if *indirect {
-                        self.materialize(base)
-                    } else if let LoweredExpr::Address { ptr, .. } = base {
+                        self.materialize(base_value)
+                    } else if let LoweredExpr::Address { ptr, .. } = base_value {
                         ptr
                     } else {
                         return Err(unsupported(
@@ -808,7 +916,7 @@ impl FnCodegen<'_> {
                     let sig = &self.signatures[&node_entity(self.typed, node)];
                     let arguments = ast
                         .children(node)
-                        .map(|arg| self.values[arg.index() - base])
+                        .map(|arg| self.values[&arg])
                         .collect::<Vec<_>>();
                     let args = arguments
                         .into_iter()
@@ -820,26 +928,19 @@ impl FnCodegen<'_> {
                             .result(),
                     )
                 }
-                kind @ (AstKind::Add | AstKind::Sub | AstKind::Mul) => {
+                kind @ (AstKind::Add | AstKind::Sub | AstKind::Mul | AstKind::Div) => {
                     let mut children = ast.children(node);
-                    let lhs = self.values[children.next().unwrap().index() - base];
-                    let rhs = self.values[children.next().unwrap().index() - base];
+                    let lhs = self.values[&children.next().unwrap()];
+                    let rhs = self.values[&children.next().unwrap()];
                     let l = self.materialize(lhs);
                     let r = self.materialize(rhs);
-                    let ty = lower_type(self.context, self.typed, node_type(self.typed, node));
-                    let value = match kind {
-                        AstKind::Add => self
-                            .builder
-                            .insert(b::addi(self.context, l, r, ty).build())
-                            .result(),
-                        AstKind::Sub => self
-                            .builder
-                            .insert(b::subi(self.context, l, r, ty).build())
-                            .result(),
-                        _ => self
-                            .builder
-                            .insert(b::muli(self.context, l, r, ty).build())
-                            .result(),
+                    let source_ty = node_type(self.typed, node);
+                    let value = match self.typed.types().kind(source_ty) {
+                        TypeKind::Double => self.lower_double_binary(kind, l, r),
+                        _ if kind == AstKind::Div => {
+                            return Err(unsupported(ast, node, "expression Div".to_string()));
+                        }
+                        _ => self.lower_integer_binary(kind, l, r, source_ty),
                     };
                     LoweredExpr::Value(value)
                 }
@@ -849,40 +950,102 @@ impl FnCodegen<'_> {
                 | AstKind::Shl
                 | AstKind::Shr) => {
                     let mut children = ast.children(node);
-                    let lhs = self.values[children.next().unwrap().index() - base];
-                    let rhs = self.values[children.next().unwrap().index() - base];
+                    let lhs = self.values[&children.next().unwrap()];
+                    let rhs = self.values[&children.next().unwrap()];
                     let lhs = self.materialize(lhs);
                     let rhs = self.materialize(rhs);
-                    let source_ty = node_type(self.typed, node);
-                    let ty = lower_type(self.context, self.typed, source_ty);
+                    LoweredExpr::Value(self.lower_integer_binary(
+                        kind,
+                        lhs,
+                        rhs,
+                        node_type(self.typed, node),
+                    ))
+                }
+                kind @ (AstKind::Neg | AstKind::Pos | AstKind::Not | AstKind::BitNot) => {
+                    let child = ast.children(node).next().unwrap();
+                    let operand = self.materialize(self.values[&child]);
+                    let result_ty =
+                        lower_type(self.context, self.typed, node_type(self.typed, node));
                     let value = match kind {
-                        AstKind::BitAnd => self
-                            .builder
-                            .insert(b::andi(self.context, lhs, rhs, ty).build())
-                            .result(),
-                        AstKind::BitXor => self
-                            .builder
-                            .insert(b::xori(self.context, lhs, rhs, ty).build())
-                            .result(),
-                        AstKind::BitOr => self
-                            .builder
-                            .insert(b::ori(self.context, lhs, rhs, ty).build())
-                            .result(),
-                        AstKind::Shl => self
-                            .builder
-                            .insert(b::shli(self.context, lhs, rhs, ty).build())
-                            .result(),
-                        AstKind::Shr if self.typed.integer_is_signed(source_ty).unwrap() => self
-                            .builder
-                            .insert(b::shrsi(self.context, lhs, rhs, ty).build())
-                            .result(),
-                        AstKind::Shr => self
-                            .builder
-                            .insert(b::shrui(self.context, lhs, rhs, ty).build())
-                            .result(),
+                        AstKind::Pos => operand,
+                        AstKind::Neg => {
+                            let zero = self
+                                .builder
+                                .insert(b::constant(self.context, 0, result_ty).build())
+                                .result();
+                            self.builder
+                                .insert(b::subi(self.context, zero, operand, result_ty).build())
+                                .result()
+                        }
+                        AstKind::BitNot => {
+                            let ones = self
+                                .builder
+                                .insert(b::constant(self.context, -1, result_ty).build())
+                                .result();
+                            self.builder
+                                .insert(b::xori(self.context, operand, ones, result_ty).build())
+                                .result()
+                        }
+                        AstKind::Not => {
+                            let operand_ty =
+                                lower_type(self.context, self.typed, node_type(self.typed, child));
+                            let zero = self
+                                .builder
+                                .insert(b::constant(self.context, 0, operand_ty).build())
+                                .result();
+                            let comparison = self
+                                .builder
+                                .insert(
+                                    b::CmpIOpBuilder::new(self.context)
+                                        .lhs(operand)
+                                        .rhs(zero)
+                                        .predicate("eq")
+                                        .result_type(IntegerType::new(self.context, 1))
+                                        .build(),
+                                )
+                                .result();
+                            self.builder
+                                .insert(b::extui(self.context, comparison, result_ty).build())
+                                .result()
+                        }
                         _ => unreachable!(),
                     };
                     LoweredExpr::Value(value)
+                }
+                kind
+                @ (AstKind::PreInc | AstKind::PreDec | AstKind::PostInc | AstKind::PostDec) => {
+                    let child = ast.children(node).next().unwrap();
+                    let LoweredExpr::Address { ptr, elem } = self.values[&child] else {
+                        return Err(unsupported(
+                            ast,
+                            node,
+                            "non-addressable increment operand".to_string(),
+                        ));
+                    };
+                    let old = self
+                        .builder
+                        .insert(p::load(self.context, ptr, elem).build())
+                        .result();
+                    let one = self
+                        .builder
+                        .insert(b::constant(self.context, 1, elem).build())
+                        .result();
+                    let new = if matches!(kind, AstKind::PreInc | AstKind::PostInc) {
+                        self.builder
+                            .insert(b::addi(self.context, old, one, elem).build())
+                            .result()
+                    } else {
+                        self.builder
+                            .insert(b::subi(self.context, old, one, elem).build())
+                            .result()
+                    };
+                    self.builder
+                        .insert(p::store(self.context, new, ptr).build());
+                    LoweredExpr::Value(if matches!(kind, AstKind::PostInc | AstKind::PostDec) {
+                        old
+                    } else {
+                        new
+                    })
                 }
                 kind @ (AstKind::Lt
                 | AstKind::Gt
@@ -893,8 +1056,8 @@ impl FnCodegen<'_> {
                     let mut children = ast.children(node);
                     let lhs_node = children.next().unwrap();
                     let rhs_node = children.next().unwrap();
-                    let lhs = self.materialize(self.values[lhs_node.index() - base]);
-                    let rhs = self.materialize(self.values[rhs_node.index() - base]);
+                    let lhs = self.materialize(self.values[&lhs_node]);
+                    let rhs = self.materialize(self.values[&rhs_node]);
                     let signed = self
                         .typed
                         .integer_is_signed(node_type(self.typed, lhs_node))
@@ -925,11 +1088,59 @@ impl FnCodegen<'_> {
                             .result(),
                     )
                 }
+                AstKind::Comma => {
+                    let rhs = ast.children(node).nth(1).unwrap();
+                    LoweredExpr::Value(self.materialize(self.values[&rhs]))
+                }
+                AstKind::Cast => {
+                    let child = ast.children(node).next().unwrap();
+                    let value = self.materialize(self.values[&child]);
+                    LoweredExpr::Value(self.convert_integer(
+                        value,
+                        node_type(self.typed, child),
+                        node_type(self.typed, node),
+                    ))
+                }
+                kind @ (AstKind::AddAssign
+                | AstKind::SubAssign
+                | AstKind::MulAssign
+                | AstKind::DivAssign
+                | AstKind::ShlAssign
+                | AstKind::ShrAssign
+                | AstKind::AndAssign
+                | AstKind::XorAssign
+                | AstKind::OrAssign) => {
+                    let mut children = ast.children(node);
+                    let lhs_node = children.next().unwrap();
+                    let LoweredExpr::Address { ptr, elem } = self.values[&lhs_node] else {
+                        return Err(unsupported(
+                            ast,
+                            node,
+                            "non-addressable compound assignment".to_string(),
+                        ));
+                    };
+                    let rhs = self.materialize(self.values[&children.next().unwrap()]);
+                    let lhs = self
+                        .builder
+                        .insert(p::load(self.context, ptr, elem).build())
+                        .result();
+                    let source_ty = node_type(self.typed, lhs_node);
+                    let value = if matches!(self.typed.types().kind(source_ty), TypeKind::Double) {
+                        self.lower_double_binary(kind, lhs, rhs)
+                    } else if kind == AstKind::DivAssign {
+                        return Err(unsupported(ast, node, "expression DivAssign".to_string()));
+                    } else {
+                        self.lower_integer_binary(kind, lhs, rhs, source_ty)
+                    };
+                    self.builder
+                        .insert(p::store(self.context, value, ptr).build());
+                    LoweredExpr::Value(value)
+                }
                 AstKind::AssignExpr => {
                     let mut children = ast.children(node);
                     let lhs_node = children.next().unwrap();
-                    let lhs = self.values[lhs_node.index() - base];
-                    let rhs = self.values[children.next().unwrap().index() - base];
+                    let lhs = self.values[&lhs_node];
+                    let rhs = self.values[&children.next().unwrap()];
                     let LoweredExpr::Address { ptr, elem } = lhs else {
                         return Err(unsupported(
                             ast,
@@ -979,10 +1190,151 @@ impl FnCodegen<'_> {
             } else {
                 expression
             };
-            self.values.push(expression);
+            self.values.insert(node, expression);
+            Ok(expression)
         }
+    }
 
-        Ok(*self.values.last().unwrap())
+    fn lower_logical(&mut self, node: NodeId, kind: AstKind) -> Result<LoweredExpr, Diagnostic> {
+        let mut children = self.ast.children(node);
+        let lhs_node = children.next().unwrap();
+        let rhs_node = children.next().unwrap();
+        let lhs = self.lower_expr_node(lhs_node)?;
+        let lhs = self.materialize(lhs);
+        let condition = self.truth_value(lhs);
+        let result_ty = IntegerType::new(self.context, 32);
+        let result = self.alloca(result_ty, 4, 4);
+
+        let then_region = self.context.create_region();
+        let then_block = self.context.create_block(vec![]);
+        then_region.add_block(then_block.id());
+        self.in_block(then_block.clone(), |cg| {
+            cg.lower_logical_arm(
+                rhs_node,
+                result,
+                result_ty,
+                then_block,
+                kind == AstKind::LogAnd,
+                1,
+            )
+        })?;
+
+        let else_region = self.context.create_region();
+        let else_block = self.context.create_block(vec![]);
+        else_region.add_block(else_block.id());
+        self.in_block(else_block.clone(), |cg| {
+            cg.lower_logical_arm(
+                rhs_node,
+                result,
+                result_ty,
+                else_block,
+                kind == AstKind::LogOr,
+                0,
+            )
+        })?;
+
+        self.builder.insert(
+            cir::ops::r#if(
+                self.context,
+                condition,
+                Some(then_region.id()),
+                Some(else_region.id()),
+            )
+            .build(),
+        );
+        let expression = LoweredExpr::Value(
+            self.builder
+                .insert(p::load(self.context, result.ptr, result.elem).build())
+                .result(),
+        );
+        self.values.insert(node, expression);
+        Ok(expression)
+    }
+
+    fn lower_logical_arm(
+        &mut self,
+        rhs_node: NodeId,
+        result: Slot,
+        result_ty: TypeId,
+        block: std::sync::Arc<tir::Block>,
+        evaluate_rhs: bool,
+        constant: i64,
+    ) -> Result<(), Diagnostic> {
+        let value = if evaluate_rhs {
+            let rhs = self.lower_expr_node(rhs_node)?;
+            let rhs = self.materialize(rhs);
+            let rhs = self.truth_value(rhs);
+            self.builder
+                .insert(b::extui(self.context, rhs, result_ty).build())
+                .result()
+        } else {
+            self.builder
+                .insert(b::constant(self.context, constant, result_ty).build())
+                .result()
+        };
+        self.builder
+            .insert(p::store(self.context, value, result.ptr).build());
+        self.ensure_cir_yield(block);
+        Ok(())
+    }
+
+    fn lower_conditional(&mut self, node: NodeId) -> Result<LoweredExpr, Diagnostic> {
+        let mut children = self.ast.children(node);
+        let condition_node = children.next().unwrap();
+        let then_node = children.next().unwrap();
+        let else_node = children.next().unwrap();
+        let condition = self.lower_expr_node(condition_node)?;
+        let condition = self.materialize(condition);
+        let condition = self.truth_value(condition);
+        let source_ty = node_type(self.typed, node);
+        let result_ty = lower_type(self.context, self.typed, source_ty);
+        let (size, align) = source_type_layout(self.typed, source_ty);
+        let result = self.alloca(result_ty, size, align);
+
+        let then_region = self.context.create_region();
+        let then_block = self.context.create_block(vec![]);
+        then_region.add_block(then_block.id());
+        self.in_block(then_block.clone(), |cg| {
+            cg.lower_conditional_arm(then_node, result, then_block)
+        })?;
+
+        let else_region = self.context.create_region();
+        let else_block = self.context.create_block(vec![]);
+        else_region.add_block(else_block.id());
+        self.in_block(else_block.clone(), |cg| {
+            cg.lower_conditional_arm(else_node, result, else_block)
+        })?;
+
+        self.builder.insert(
+            cir::ops::r#if(
+                self.context,
+                condition,
+                Some(then_region.id()),
+                Some(else_region.id()),
+            )
+            .build(),
+        );
+        let expression = LoweredExpr::Value(
+            self.builder
+                .insert(p::load(self.context, result.ptr, result.elem).build())
+                .result(),
+        );
+        self.values.insert(node, expression);
+        Ok(expression)
+    }
+
+    fn lower_conditional_arm(
+        &mut self,
+        node: NodeId,
+        result: Slot,
+        block: std::sync::Arc<tir::Block>,
+    ) -> Result<(), Diagnostic> {
+        let value = self.lower_expr_node(node)?;
+        let value = self.materialize(value);
+        self.builder
+            .insert(p::store(self.context, value, result.ptr).build());
+        self.ensure_cir_yield(block);
+        Ok(())
     }
 }
 
@@ -1013,6 +1365,18 @@ fn decode_c_escapes(source: &str) -> String {
         }
     }
     out
+}
+
+fn decode_character_constant(source: &str) -> Option<i64> {
+    let first_quote = source.find('\'')?;
+    let body = source.get(first_quote + 1..source.len().checked_sub(1)?)?;
+    let decoded = decode_c_escapes(body);
+    let mut characters = decoded.chars();
+    let value = characters.next()?;
+    characters
+        .next()
+        .is_none()
+        .then_some(i64::from(value as u32))
 }
 
 /// Hoist every `cir.string` into a module-level `.rodata` section and rewrite

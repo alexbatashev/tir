@@ -86,7 +86,13 @@ impl RuleMatch {
         self.int_bindings
             .iter()
             .find(|(sym, _)| *sym == symbol)
-            .map(|(_, v)| v.to_u64() as i64)
+            .map(|(_, v)| {
+                if v.is_signed() {
+                    v.to_i64()
+                } else {
+                    v.to_u64() as i64
+                }
+            })
     }
 
     pub fn block_binding(&self, symbol: u32) -> Option<BlockId> {
@@ -647,23 +653,6 @@ impl FunctionSelection {
             current = dom.idom(block);
         }
         usize::MAX
-    }
-
-    /// Whether `class` resolves to an operand for `consumer` in `block`: an
-    /// immediate constant; a valueless class (a pure or rewrite-introduced
-    /// intermediate the cover materializes); or a class with a candidate value
-    /// legal under the dominance rule. A class whose only register candidates are
-    /// cross-block non-escaping values is unresolvable.
-    fn boundary_resolvable(
-        &self,
-        dom: &DominatorTree,
-        context: &Context,
-        class: Id,
-        block: BlockId,
-        consumer: OpId,
-    ) -> bool {
-        let binding = self.resolve_binding(dom, context, class, block, consumer);
-        binding.int.is_some() || binding.value.is_some() || !self.has_values(class)
     }
 }
 
@@ -1814,12 +1803,28 @@ impl InstructionSelectPass {
                     captures.bind(*symbol, fs.egraph.find(class));
                 }
 
-                // Discard the match if a boundary operand cannot be resolved to an
-                // operand at B (a cross-block register read of a non-escaping
-                // value). Only when there is a concrete consumer op in B.
+                // Discard a match whose boundary cannot satisfy its encoded
+                // operand kind at B. A register boundary needs a legal register
+                // value (or an explicitly materializable class); an immediate
+                // boundary needs a constant in range.
                 if let Some(consumer) = block_op
-                    && !captures.entries.iter().all(|(_, class)| {
-                        fs.boundary_resolvable(dom, context, *class, block, consumer)
+                    && !captures.entries.iter().all(|(symbol, class)| {
+                        let binding = fs.resolve_binding(dom, context, *class, block, consumer);
+                        match compiled.capture_meta(*symbol) {
+                            Some(meta) if meta.constraint == Some(OperandConstraint::Register) => {
+                                binding.value.is_some()
+                                    || meta.materialized_constant && binding.int.is_some()
+                                    || !fs.has_values(*class)
+                            }
+                            Some(meta) if meta.constraint == Some(OperandConstraint::Immediate) => {
+                                binding.int.is_some()
+                            }
+                            _ => {
+                                binding.int.is_some()
+                                    || binding.value.is_some()
+                                    || !fs.has_values(*class)
+                            }
+                        }
                     })
                 {
                     continue;

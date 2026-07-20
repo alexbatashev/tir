@@ -657,13 +657,7 @@ impl Pass for RegisterAllocationPass {
         );
 
         let frame_size = frame.size(self.abi.stack.align);
-        self.insert_stack_alloca_addresses(
-            context,
-            rewriter,
-            &blocks,
-            &assignment,
-            &stack_allocas,
-        )?;
+        self.insert_stack_alloca_addresses(context, rewriter, &assignment, &stack_allocas)?;
         erase_stack_allocas(context, rewriter, &stack_allocas)?;
         self.insert_incoming_stack_arg_loads(
             context,
@@ -1039,26 +1033,15 @@ impl RegisterAllocationPass {
         &self,
         context: &Context,
         rewriter: &mut Rewriter,
-        blocks: &[BlockId],
         assignment: &HashMap<u32, PhysReg>,
         allocas: &[StackAlloca],
     ) -> Result<(), PassError> {
-        if allocas.is_empty() {
-            return Ok(());
-        }
-        let Some(&entry) = blocks.first() else {
-            return Ok(());
-        };
-        let op_ids = context.get_block(entry).op_ids();
-        let Some(&first) = op_ids.first() else {
-            return Ok(());
-        };
-        let target = op_ref_in(context, entry, first);
         let frame = self.frame_register();
         for alloca in allocas {
             let Some(dst) = assignment.get(&alloca.vreg) else {
                 continue;
             };
+            let target = op_ref_in(context, alloca.block, alloca.op_id);
             for op in self
                 .target
                 .emit_frame_address(context, dst, &frame, alloca.offset)?
