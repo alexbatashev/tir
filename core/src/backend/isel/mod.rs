@@ -86,7 +86,13 @@ impl RuleMatch {
         self.int_bindings
             .iter()
             .find(|(sym, _)| *sym == symbol)
-            .map(|(_, v)| v.to_u64() as i64)
+            .map(|(_, v)| {
+                if v.is_signed() {
+                    v.to_i64()
+                } else {
+                    v.to_u64() as i64
+                }
+            })
     }
 
     pub fn block_binding(&self, symbol: u32) -> Option<BlockId> {
@@ -1808,7 +1814,7 @@ impl InstructionSelectPass {
                             Some(meta) if meta.constraint == Some(OperandConstraint::Register) => {
                                 binding.value.is_some()
                                     || meta.materialized_constant && binding.int.is_some()
-                                    || !fs.has_values(*class) && binding.int.is_none()
+                                    || !fs.has_values(*class)
                             }
                             Some(meta) if meta.constraint == Some(OperandConstraint::Immediate) => {
                                 binding.int.is_some()
