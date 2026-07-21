@@ -22,9 +22,11 @@ mod theory;
 use std::collections::{HashMap, HashSet};
 
 use tir::{
-    AnalysisManager, Block, BlockId, BranchGuard, BranchTerminator, Context, OpId, Operation,
-    OperationRef, Pass, PassError, PassTarget, PreservedAnalyses, Rewriter, TypeId, ValueId,
+    AnalysisManager, Block, BlockId, BranchGuard, BranchTerminator, Context, IRBuilder, OpId,
+    Operation, OperationRef, Pass, PassError, PassTarget, PreservedAnalyses, Rewriter, TypeId,
+    ValueId,
     analysis::{DominatingEdgeFacts, DominatorTree, EdgeFact},
+    builtin::{CondBranchOp, ops},
     graph::OperandConstraint,
     sem::{SemGraph, SymKind, SymPayload},
 };
@@ -744,6 +746,56 @@ impl InstructionSelectPass {
             emitted_blocks: HashSet::new(),
             solved: HashSet::new(),
         }
+    }
+
+    fn split_conditional_edge_args(
+        &self,
+        context: &Context,
+        function: &OperationRef,
+        rewriter: &mut Rewriter,
+    ) -> Result<(), PassError> {
+        for region_id in &function.op().regions {
+            let region = context.get_region(*region_id);
+            let blocks: Vec<_> = region.iter(context.clone()).collect();
+            for block in blocks {
+                for (position, op_id) in block.op_ids().into_iter().enumerate() {
+                    let op = context.get_op(op_id);
+                    let Some(branch) = op.clone().as_op::<CondBranchOp>() else {
+                        continue;
+                    };
+                    let true_args = branch.true_args();
+                    let false_args = branch.false_args();
+                    if true_args.is_empty() && false_args.is_empty() {
+                        continue;
+                    }
+
+                    let split_edge = |dest, args: Vec<ValueId>| {
+                        if args.is_empty() {
+                            return dest;
+                        }
+                        let edge = context.create_block(vec![]);
+                        let mut builder = IRBuilder::new(edge.clone());
+                        builder.insert(ops::br(context, args, dest).build());
+                        region.add_block(edge.id());
+                        edge.id()
+                    };
+                    let true_dest = split_edge(branch.true_dest(), true_args);
+                    let false_dest = split_edge(branch.false_dest(), false_args);
+                    let replacement = ops::cond_br(
+                        context,
+                        branch.condition(),
+                        vec![],
+                        vec![],
+                        true_dest,
+                        false_dest,
+                    )
+                    .build();
+                    let op_ref = OperationRef::new(op, Some(block.clone()), Some(position));
+                    rewriter.replace_op(&op_ref, &replacement)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Install the target's terminator emitters, enabling rule-driven selection
@@ -2180,6 +2232,7 @@ impl Pass for InstructionSelectPass {
         // reads the guard condition's *defining op*, which a dominator's commit
         // would otherwise have replaced by the time the dominated block solves.
         if !op.op().regions.is_empty() {
+            self.split_conditional_edge_args(context, op, rewriter)?;
             self.solve_function(context, op, analyses);
         }
 
