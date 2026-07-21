@@ -12,7 +12,7 @@ use tir::attributes::AttributeValue;
 use tir::builtin::{FloatType, IntegerType, ModuleOp, TokenType, UnitType, ops as b};
 use tir::graph::{Dag, NodeId};
 use tir::ptr::{PtrType, ops as p};
-use tir::{Context, IRBuilder, Operand, Operation, TypeId, ValueId};
+use tir::{Context, IRBuilder, Operand, Operation, RegionId, TypeId, ValueId};
 
 use crate::ast::*;
 use crate::cir::{self, StructType, VarArgsType};
@@ -27,6 +27,18 @@ struct Slot {
 }
 
 #[derive(Clone, Copy)]
+enum BreakScope {
+    Loop(ValueId),
+    Switch(Slot),
+}
+
+enum SwitchItem {
+    Case(i64),
+    Default,
+    Statement(NodeId),
+}
+
+#[derive(Clone, Copy)]
 enum LoweredExpr {
     Value(ValueId),
     Address { ptr: ValueId, elem: TypeId },
@@ -37,9 +49,11 @@ struct FnCodegen<'a> {
     typed: &'a TypedAst,
     ast: &'a Ast,
     builder: IRBuilder,
+    region: RegionId,
     locals: HashMap<EntityId, Slot>,
     signatures: &'a HashMap<EntityId, Signature>,
     loop_scopes: Vec<ValueId>,
+    break_scopes: Vec<BreakScope>,
     terminated: bool,
     /// Lowered values in the expression subtree currently being emitted. The AST
     /// is a DAG, so shared children reuse their first lowering.
@@ -265,9 +279,11 @@ fn lower_function(
         typed,
         ast,
         builder: IRBuilder::new(func_op.body()),
+        region: region.id(),
         locals: HashMap::new(),
         signatures,
         loop_scopes: Vec::new(),
+        break_scopes: Vec::new(),
         terminated: false,
         values: HashMap::new(),
     };
@@ -426,9 +442,6 @@ impl FnCodegen<'_> {
 
         for stmt in ast.children(func).skip(idx) {
             self.lower_stmt(stmt)?;
-            if self.terminated {
-                break;
-            }
         }
 
         Ok(())
@@ -436,6 +449,15 @@ impl FnCodegen<'_> {
 
     fn lower_stmt(&mut self, stmt: NodeId) -> Result<(), Diagnostic> {
         let ast = self.ast;
+        if self.terminated {
+            if !self.contains_label(stmt) {
+                return Ok(());
+            }
+            let block = self.context.create_block(vec![]);
+            self.context.get_region(self.region).add_block(block.id());
+            self.builder = IRBuilder::new(block);
+            self.terminated = false;
+        }
         match ast.get_node(stmt).kind {
             AstKind::Decl => {
                 let AstLeaf::Decl { .. } = ast.get_leaf_data(stmt).unwrap() else {
@@ -503,9 +525,6 @@ impl FnCodegen<'_> {
             AstKind::Block => {
                 for child in ast.children(stmt) {
                     self.lower_stmt(child)?;
-                    if self.terminated {
-                        break;
-                    }
                 }
                 Ok(())
             }
@@ -531,11 +550,13 @@ impl FnCodegen<'_> {
                 let body_block = self.context.create_block(vec![scope.clone()]);
                 body_region.add_block(body_block.id());
                 self.loop_scopes.push(scope.id());
+                self.break_scopes.push(BreakScope::Loop(scope.id()));
                 self.in_block(body_block.clone(), |cg| {
                     cg.lower_stmt(body)?;
                     cg.ensure_cir_yield(body_block);
                     Ok(())
                 })?;
+                self.break_scopes.pop();
                 self.loop_scopes.pop();
 
                 self.builder.insert(
@@ -560,11 +581,13 @@ impl FnCodegen<'_> {
                 let body_block = self.context.create_block(vec![scope.clone()]);
                 body_region.add_block(body_block.id());
                 self.loop_scopes.push(scope.id());
+                self.break_scopes.push(BreakScope::Loop(scope.id()));
                 self.in_block(body_block.clone(), |cg| {
                     cg.lower_stmt(body)?;
                     cg.ensure_cir_yield(body_block);
                     Ok(())
                 })?;
+                self.break_scopes.pop();
                 self.loop_scopes.pop();
 
                 let condition_region = self.context.create_region();
@@ -621,11 +644,13 @@ impl FnCodegen<'_> {
                 let body_block = self.context.create_block(vec![scope.clone()]);
                 body_region.add_block(body_block.id());
                 self.loop_scopes.push(scope.id());
+                self.break_scopes.push(BreakScope::Loop(scope.id()));
                 self.in_block(body_block.clone(), |cg| {
                     cg.lower_stmt(*body)?;
                     cg.ensure_cir_yield(body_block);
                     Ok(())
                 })?;
+                self.break_scopes.pop();
                 self.loop_scopes.pop();
 
                 let step_region = self.context.create_region();
@@ -650,6 +675,7 @@ impl FnCodegen<'_> {
                 );
                 Ok(())
             }
+            AstKind::Switch => self.lower_switch(stmt),
             AstKind::If => {
                 let mut children = ast.children(stmt);
                 let condition = children.next().unwrap();
@@ -688,10 +714,43 @@ impl FnCodegen<'_> {
                 );
                 Ok(())
             }
+            AstKind::Goto => {
+                let AstLeaf::Label(label) = ast.get_leaf_data(stmt).unwrap() else {
+                    unreachable!("goto node carries a label payload");
+                };
+                self.builder.insert(
+                    cir::GotoOpBuilder::new(self.context)
+                        .attr("label", AttributeValue::Str(label.clone()))
+                        .build(),
+                );
+                Ok(())
+            }
+            AstKind::Label => {
+                let AstLeaf::Label(label) = ast.get_leaf_data(stmt).unwrap() else {
+                    unreachable!("label node carries a label payload");
+                };
+                self.builder.insert(
+                    cir::LabelOpBuilder::new(self.context)
+                        .attr("label", AttributeValue::Str(label.clone()))
+                        .build(),
+                );
+                self.lower_stmt(ast.children(stmt).next().unwrap())
+            }
             AstKind::Break => {
-                let scope = *self.loop_scopes.last().unwrap();
-                self.builder
-                    .insert(cir::ops::r#break(self.context, scope).build());
+                match *self.break_scopes.last().unwrap() {
+                    BreakScope::Loop(scope) => {
+                        self.builder
+                            .insert(cir::ops::r#break(self.context, scope).build());
+                    }
+                    BreakScope::Switch(done) => {
+                        let one = self
+                            .builder
+                            .insert(b::constant(self.context, 1, done.elem).build())
+                            .result();
+                        self.builder
+                            .insert(p::store(self.context, one, done.ptr).build());
+                    }
+                }
                 self.terminated = true;
                 Ok(())
             }
@@ -706,15 +765,231 @@ impl FnCodegen<'_> {
         }
     }
 
+    fn contains_label(&self, statement: NodeId) -> bool {
+        self.ast.get_node(statement).kind == AstKind::Label
+            || self
+                .ast
+                .children(statement)
+                .any(|child| self.contains_label(child))
+    }
+
+    fn lower_switch(&mut self, stmt: NodeId) -> Result<(), Diagnostic> {
+        let mut children = self.ast.children(stmt);
+        let value = self.lower_expr(children.next().unwrap())?;
+        let body = children.next().unwrap();
+        let value_ty = self.context.get_value(value).ty();
+        let i32_ty = IntegerType::new(self.context, 32);
+        let active = self.alloca(i32_ty, 4, 4);
+        let done = self.alloca(i32_ty, 4, 4);
+        let zero = self
+            .builder
+            .insert(b::constant(self.context, 0, i32_ty).build())
+            .result();
+        self.builder
+            .insert(p::store(self.context, zero, active.ptr).build());
+        self.builder
+            .insert(p::store(self.context, zero, done.ptr).build());
+
+        let mut items = Vec::new();
+        self.flatten_switch_items(body, &mut items)?;
+        let mut case_conditions = HashMap::new();
+        let mut any_match = zero;
+        for (index, item) in items.iter().enumerate() {
+            let SwitchItem::Case(case_value) = item else {
+                continue;
+            };
+            let case_value = self
+                .builder
+                .insert(b::constant(self.context, *case_value, value_ty).build())
+                .result();
+            let condition = self
+                .builder
+                .insert(
+                    b::CmpIOpBuilder::new(self.context)
+                        .lhs(value)
+                        .rhs(case_value)
+                        .predicate("eq")
+                        .result_type(IntegerType::new(self.context, 1))
+                        .build(),
+                )
+                .result();
+            let condition_value = self
+                .builder
+                .insert(b::extui(self.context, condition, i32_ty).build())
+                .result();
+            any_match = self
+                .builder
+                .insert(b::ori(self.context, any_match, condition_value, i32_ty).build())
+                .result();
+            case_conditions.insert(index, condition);
+        }
+        let default_condition = self
+            .builder
+            .insert(
+                b::CmpIOpBuilder::new(self.context)
+                    .lhs(any_match)
+                    .rhs(zero)
+                    .predicate("eq")
+                    .result_type(IntegerType::new(self.context, 1))
+                    .build(),
+            )
+            .result();
+
+        self.break_scopes.push(BreakScope::Switch(done));
+        for (index, item) in items.into_iter().enumerate() {
+            let activation = match &item {
+                SwitchItem::Case(_) => Some(case_conditions[&index]),
+                SwitchItem::Default => Some(default_condition),
+                SwitchItem::Statement(_) => None,
+            };
+            let condition = self.switch_item_condition(active, done, activation, i32_ty);
+            let then_region = self.context.create_region();
+            let then_block = self.context.create_block(vec![]);
+            then_region.add_block(then_block.id());
+            self.in_block(then_block.clone(), |cg| {
+                match item {
+                    SwitchItem::Case(_) | SwitchItem::Default => {
+                        let one = cg
+                            .builder
+                            .insert(b::constant(cg.context, 1, i32_ty).build())
+                            .result();
+                        cg.builder
+                            .insert(p::store(cg.context, one, active.ptr).build());
+                    }
+                    SwitchItem::Statement(statement) => cg.lower_stmt(statement)?,
+                }
+                cg.ensure_cir_yield(then_block);
+                Ok(())
+            })?;
+
+            let else_region = self.context.create_region();
+            let else_block = self.context.create_block(vec![]);
+            else_region.add_block(else_block.id());
+            self.in_block(else_block.clone(), |cg| {
+                cg.ensure_cir_yield(else_block);
+                Ok(())
+            })?;
+            self.builder.insert(
+                cir::ops::r#if(
+                    self.context,
+                    condition,
+                    Some(then_region.id()),
+                    Some(else_region.id()),
+                )
+                .build(),
+            );
+        }
+        self.break_scopes.pop();
+        Ok(())
+    }
+
+    fn flatten_switch_items(
+        &self,
+        statement: NodeId,
+        items: &mut Vec<SwitchItem>,
+    ) -> Result<(), Diagnostic> {
+        match self.ast.get_node(statement).kind {
+            AstKind::Block => {
+                for child in self.ast.children(statement) {
+                    self.flatten_switch_items(child, items)?;
+                }
+            }
+            AstKind::Case => {
+                let mut children = self.ast.children(statement);
+                let value = children.next().unwrap();
+                let body = children.next().unwrap();
+                let case_value = self
+                    .ast
+                    .get_annotation(value)
+                    .and_then(|annotation| annotation.constant)
+                    .ok_or_else(|| unsupported(self.ast, value, "non-constant case".to_string()))?;
+                items.push(SwitchItem::Case(case_value));
+                self.flatten_switch_items(body, items)?;
+            }
+            AstKind::Default => {
+                items.push(SwitchItem::Default);
+                self.flatten_switch_items(self.ast.children(statement).next().unwrap(), items)?;
+            }
+            _ => items.push(SwitchItem::Statement(statement)),
+        }
+        Ok(())
+    }
+
+    fn switch_item_condition(
+        &mut self,
+        active: Slot,
+        done: Slot,
+        activation: Option<ValueId>,
+        i32_ty: TypeId,
+    ) -> ValueId {
+        let active = self
+            .builder
+            .insert(p::load(self.context, active.ptr, active.elem).build())
+            .result();
+        let active = self.truth_value(active);
+        let selected = if let Some(activation) = activation {
+            let active = self
+                .builder
+                .insert(b::extui(self.context, active, i32_ty).build())
+                .result();
+            let activation = self
+                .builder
+                .insert(b::extui(self.context, activation, i32_ty).build())
+                .result();
+            let selected = self
+                .builder
+                .insert(b::ori(self.context, active, activation, i32_ty).build())
+                .result();
+            self.truth_value(selected)
+        } else {
+            active
+        };
+        let done = self
+            .builder
+            .insert(p::load(self.context, done.ptr, done.elem).build())
+            .result();
+        let zero = self
+            .builder
+            .insert(b::constant(self.context, 0, i32_ty).build())
+            .result();
+        let not_done = self
+            .builder
+            .insert(
+                b::CmpIOpBuilder::new(self.context)
+                    .lhs(done)
+                    .rhs(zero)
+                    .predicate("eq")
+                    .result_type(IntegerType::new(self.context, 1))
+                    .build(),
+            )
+            .result();
+        let selected = self
+            .builder
+            .insert(b::extui(self.context, selected, i32_ty).build())
+            .result();
+        let not_done = self
+            .builder
+            .insert(b::extui(self.context, not_done, i32_ty).build())
+            .result();
+        let condition = self
+            .builder
+            .insert(b::andi(self.context, selected, not_done, i32_ty).build())
+            .result();
+        self.truth_value(condition)
+    }
+
     fn in_block<T>(
         &mut self,
         block: std::sync::Arc<tir::Block>,
         lower: impl FnOnce(&mut Self) -> Result<T, Diagnostic>,
     ) -> Result<T, Diagnostic> {
+        let region = self.context.parent_region(block.id()).unwrap();
         let outer = std::mem::replace(&mut self.builder, IRBuilder::new(block));
+        let outer_region = std::mem::replace(&mut self.region, region);
         let outer_terminated = std::mem::replace(&mut self.terminated, false);
         let result = lower(self);
         self.builder = outer;
+        self.region = outer_region;
         self.terminated = outer_terminated;
         result
     }

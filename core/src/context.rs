@@ -533,6 +533,13 @@ impl Context {
         slab_put(&mut self.0.write().block_parent, block.index(), region);
     }
 
+    pub(crate) fn clear_block_parent(&self, block: BlockId) {
+        let mut inner = self.0.write();
+        if let Some(slot) = inner.block_parent.get_mut(block.index()) {
+            *slot = None;
+        }
+    }
+
     pub fn get_block(&self, id: BlockId) -> Arc<Block> {
         let inner = self.0.read();
 
@@ -785,6 +792,19 @@ mod tests {
         // Removing clears it.
         assert!(block.remove_op(sub.id()));
         assert_eq!(context.parent_block(sub.id()), None);
+    }
+
+    #[test]
+    fn parent_region_tracks_membership() {
+        let context = Context::with_default_dialects();
+        let region = context.create_region();
+        let block = context.create_block(vec![]);
+
+        region.add_block(block.id());
+        assert_eq!(context.parent_region(block.id()), Some(region.id()));
+
+        assert!(region.remove_block(block.id()));
+        assert_eq!(context.parent_region(block.id()), None);
     }
 
     #[test]

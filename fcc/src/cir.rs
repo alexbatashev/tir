@@ -11,9 +11,9 @@ use tir::{
 pub mod ops {
     pub use super::{
         BreakOp, ConditionOp, ContinueOp, CopyStructOp, DefineStructOp, DoOp, ForOp, GetMemberOp,
-        IfOp, StringOp, VaArgOp, VaEndOp, VaStartOp, WhileOp, YieldOp, r#break, condition,
-        r#continue, copy_struct, define_struct, r#do, r#for, get_member, r#if, string, va_arg,
-        va_end, va_start, r#while, r#yield,
+        GotoOp, IfOp, LabelOp, StringOp, VaArgOp, VaEndOp, VaStartOp, WhileOp, YieldOp, r#break,
+        condition, r#continue, copy_struct, define_struct, r#do, r#for, get_member, r#goto, r#if,
+        label, string, va_arg, va_end, va_start, r#while, r#yield,
     };
 }
 
@@ -35,6 +35,8 @@ dialect! {
             ConditionOp,
             BreakOp,
             ContinueOp,
+            GotoOp,
+            LabelOp,
             YieldOp,
         ],
         types: [StructType, VarArgsType, VaListType],
@@ -380,6 +382,26 @@ operation! {
 }
 
 impl Terminator for ContinueOp {}
+
+operation! {
+    GotoOp {
+        name: "goto",
+        dialect: "cir",
+        attributes: A {
+            label: "Str",
+        },
+    }
+}
+
+operation! {
+    LabelOp {
+        name: "label",
+        dialect: "cir",
+        attributes: A {
+            label: "Str",
+        },
+    }
+}
 
 operation! {
     YieldOp {
