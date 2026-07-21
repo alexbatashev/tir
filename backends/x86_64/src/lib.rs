@@ -204,6 +204,42 @@ mod isa {
         Ok(false)
     }
 
+    fn lower_float_constant_pseudo(
+        context: &tir::Context,
+        op: &tir::OperationRef,
+        rewriter: &mut tir::Rewriter,
+    ) -> Result<bool, tir::PassError> {
+        if op.as_op::<SelectFloatConstant64Op>().is_none() {
+            return Ok(false);
+        }
+        let attr = |name| {
+            op.op()
+                .attributes
+                .iter()
+                .find(|attr| attr.name == name)
+                .map(|attr| attr.value.clone())
+                .ok_or_else(|| {
+                    tir::PassError::InvalidRuleSet(format!(
+                        "float constant pseudo is missing '{name}'"
+                    ))
+                })
+        };
+        let temp = context
+            .create_value(tir::builtin::IntegerType::new(context, 64), None)
+            .id();
+        let materialize = MovAbsOpBuilder::new(context)
+            .attr("dst", virt(temp.number(), RegClass::GPR.id()))
+            .attr("imm", attr("imm")?)
+            .build();
+        let move_bits = MovqXmmGprOpBuilder::new(context)
+            .attr("dst", attr("dst")?)
+            .attr("src", virt(temp.number(), RegClass::GPR.id()))
+            .build();
+        rewriter.insert_op_before(op, &materialize)?;
+        rewriter.replace_op(op, &move_bits)?;
+        Ok(true)
+    }
+
     /// Emit the branch-if-nonzero fallback for a condition no branch rule
     /// fused: `test cond, cond` + `jne dest`.
     fn emit_branch_nonzero(
@@ -1275,7 +1311,12 @@ mod isa {
         }
 
         fn pre_ra_lowerings(&self) -> Vec<tir::backend::isel::OpLowering> {
-            vec![lower_divrem_pseudo, lower_constant, lower_addr_of]
+            vec![
+                lower_divrem_pseudo,
+                lower_float_constant_pseudo,
+                lower_constant,
+                lower_addr_of,
+            ]
         }
 
         fn finalize_lowerings(&self) -> Vec<tir::backend::isel::OpLowering> {

@@ -216,6 +216,17 @@ fn double_division_executes_through_driver() {
 }
 
 #[test]
+fn double_literal_executes_through_driver() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "double literal(void) { return 1.5; }\n",
+        "double literal(void); int main(void) { return literal() == 1.5 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
 fn signed_integer_division_executes_through_driver() {
     if !cc_available() {
         return;

@@ -574,6 +574,41 @@ fn lower_divrem_pseudo(
     Ok(false)
 }
 
+fn lower_float_constant_pseudo(
+    context: &tir::Context,
+    op: &tir::OperationRef,
+    rewriter: &mut tir::Rewriter,
+) -> Result<bool, tir::PassError> {
+    if op.as_op::<SelectFloatConstant64Op>().is_none() {
+        return Ok(false);
+    }
+    let value = tir::backend::int_attr(&op.op().attributes, "imm").ok_or_else(|| {
+        tir::PassError::InvalidRuleSet("float constant pseudo is missing 'imm'".to_string())
+    })?;
+    let destination = op
+        .op()
+        .attributes
+        .iter()
+        .find(|attr| attr.name == "fd")
+        .map(|attr| attr.value.clone())
+        .ok_or_else(|| {
+            tir::PassError::InvalidRuleSet("float constant pseudo is missing 'fd'".to_string())
+        })?;
+    let temp = context
+        .create_value(tir::builtin::IntegerType::new(context, 64), None)
+        .id();
+    let integer = virt(temp.number(), RegClass::GPR.id());
+    for instruction in obj::materialize_integer(context, integer.clone(), value as u64) {
+        rewriter.insert_op_before(op, instruction.as_ref())?;
+    }
+    let move_bits = FMovGeneralToDoubleOpBuilder::new(context)
+        .attr("fd", destination)
+        .attr("rn", integer)
+        .build();
+    rewriter.replace_op(op, &move_bits)?;
+    Ok(true)
+}
+
 /// The AArch64 (ARMv8-A) target, selected via `--march`/`--mcpu`.
 pub struct Arm64Target {
     config: TargetConfig,
@@ -657,7 +692,12 @@ impl tir::backend::TargetMachine for Arm64Target {
     }
 
     fn pre_ra_lowerings(&self) -> Vec<tir::backend::isel::OpLowering> {
-        vec![lower_divrem_pseudo, obj::lower_constant, obj::lower_addr_of]
+        vec![
+            lower_divrem_pseudo,
+            lower_float_constant_pseudo,
+            obj::lower_constant,
+            obj::lower_addr_of,
+        ]
     }
 
     fn finalize_lowerings(&self) -> Vec<tir::backend::isel::OpLowering> {
@@ -1449,6 +1489,7 @@ mod tests {
             (0x1E600843, "fmul d3, d2, d0"),
             (0x1E601000, "fmov d0, #2.0"),
             (0x9E660064, "fmov x4, d3"),
+            (0x9E670064, "fmov d4, x3"),
             (0x4E080C00, "dup v0.2d, x0"),
             (0x4EE18402, "add v2.2d, v0.2d, v1.2d"),
             (0x4EA18403, "add v3.4s, v0.4s, v1.4s"),
