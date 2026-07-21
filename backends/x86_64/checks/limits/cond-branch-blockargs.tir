@@ -1,9 +1,8 @@
-// RUN: not tir mc --march=x86_64 --stage=isel %s
+// RUN: tir mc --march=x86_64 --stage=regalloc %s | filecheck %s
 
-// FINDING G7 (isel-gap): block arguments on conditional-branch edges are
-// unsupported: "block arguments on conditional branch edges are not supported
-// by codegen yet". Unconditional br with block args works; this blocks loops
-// whose loop-carried phi rides the back-edge cond_br.
+// The true edge carrying values is forwarded through a single trampoline block
+// the conditional branch targets; the false edge's values ride the fallthrough
+// branch directly. Register allocation then lowers each forwarded value to a copy.
 
 module {
   func @f(%0:!i64, %1:!i1) -> !i64 {
@@ -15,3 +14,11 @@ module {
   }
   module_end
 }
+
+// CHECK:      x86_64.test
+// CHECK-NEXT: x86_64.jne {imm = ^[[TRAMP:bb[0-9]+]]}
+// CHECK-NEXT: x86_64.mov {dst = rax, src = rdi}
+// CHECK-NEXT: asm.vbr ^bb2
+// CHECK:      ^[[TRAMP]]:
+// CHECK-NEXT: x86_64.mov {dst = rax, src = rdi}
+// CHECK-NEXT: asm.vbr ^bb1
