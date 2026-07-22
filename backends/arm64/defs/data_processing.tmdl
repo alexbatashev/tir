@@ -1101,7 +1101,7 @@ instruction FMovDoubleToGeneral for [ARMv8A64] {
     }
 
     behavior {
-        rd = extract(fa, 63, 0);
+        rd = bitcast(fa);
     }
 }
 
