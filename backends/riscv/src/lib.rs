@@ -2088,9 +2088,11 @@ mod tests {
                 "addi",
                 "addi",
                 "addi", // detach arg + move into a0 + save ra
-                "jal",  // the call
+                "addi",
+                "jal", // the call
                 "addi",
                 "addi", // restore ra + copy the result out of a0
+                "addi",
                 "ld",   // epilogue: reload the callee-saved register
                 "addi", // epilogue: release frame
                 "jalr", // return

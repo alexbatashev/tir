@@ -352,7 +352,7 @@ impl tir::backend::regalloc::TargetRegAlloc for Arm64RegAlloc {
         src: u32,
     ) -> Box<dyn Operation> {
         match class.name() {
-            "GPR" => mv(
+            "GPR" | "GPRsp" => mv(
                 context,
                 virt(dst, RegClass::GPR.id()),
                 virt(src, RegClass::GPR.id()),
@@ -2027,7 +2027,9 @@ mod tests {
                 "orr",
                 "orr",
                 "orr",
+                "orr",
                 "bl",
+                "orr",
                 "orr",
                 "orr",
                 "load_doubleword",

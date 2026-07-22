@@ -136,6 +136,14 @@ int main(void) { puts("same output"); return 17; }
 }
 
 #[test]
+fn scalar_fibonacci_matches_host_compiler() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(include_str!("scalar/fibonacci.c"));
+}
+
+#[test]
 fn bitwise_and_shifts_match_host_compiler() {
     if !cc_available() {
         return;

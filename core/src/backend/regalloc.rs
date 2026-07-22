@@ -22,6 +22,7 @@ use tir::{
 };
 
 use crate::backend::liveness::{self, Liveness, PhysReg};
+use crate::backend::{VirtualCallOp, VirtualIndirectCallOp};
 use crate::ptr::AllocaOp;
 
 /// Architectural metadata for one register class.
@@ -1298,17 +1299,13 @@ fn sequence_parallel_copies(
     result
 }
 
-/// Compute the calling-convention pre-coloring: each argument register pinned in
-/// order, and the returned value pinned to the first return register.
+/// Compute the calling-convention pre-coloring at function entry and returns.
 ///
-/// A physical-register constraint applies at a program point, not to a whole live
-/// range: an argument register pins the value at entry, a return register pins it
-/// at the `vret`. When the same vreg carries both constraints with *different*
-/// registers (e.g. an identity function whose argument register differs from the
-/// return register), pinning it twice would silently overwrite one constraint and
-/// miscompile. Such a return is broken with a copy (`fresh <- vreg`) inserted
-/// before the `vret`, so the argument keeps its entry pin while `fresh` takes the
-/// return pin. This mutates the IR, so it runs once, outside the spill loop.
+/// In functions containing calls, register arguments are copied from pinned entry
+/// temporaries into free body vregs, and each return is copied into a fresh vreg
+/// pinned at its `vret`. This lets values spanning calls move to callee-saved
+/// registers or spill. Leaf functions retain whole-range pins to avoid redundant
+/// boundary copies.
 struct AbiPrecolor {
     precolor: HashMap<u32, PhysReg>,
     stack_args: Vec<IncomingStackArg>,
@@ -1392,6 +1389,13 @@ fn abi_precolor(
 ) -> Result<AbiPrecolor, PassError> {
     let mut precolor: HashMap<u32, PhysReg> = HashMap::new();
     let mut stack_args = Vec::new();
+    let has_call = blocks.iter().any(|block| {
+        context.get_block(*block).op_ids().iter().any(|op_id| {
+            let op = context.get_op(*op_id);
+            op.clone().as_op::<VirtualCallOp>().is_some()
+                || op.as_op::<VirtualIndirectCallOp>().is_some()
+        })
+    });
 
     // Argument vregs: the symbol's `arg_regs` attribute carries each argument's
     // register class (assigned by the target's function lowering, e.g. vectors
@@ -1401,14 +1405,19 @@ fn abi_precolor(
     // an f64 argument draw fa0 and fa1 from the same fa0..fa7 sequence.
     let mut next_abi_slot: HashMap<crate::backend::abi::ValueKind, usize> = HashMap::new();
     let mut next_stack_slot = 0;
-    if let Some(AttributeValue::Array(args)) = op
+    if let Some((arg_attr_index, AttributeValue::Array(mut args))) = op
         .op()
         .attributes
         .iter()
-        .find(|a| a.name == "arg_regs")
-        .map(|a| &a.value)
+        .enumerate()
+        .find(|(_, attribute)| attribute.name == "arg_regs")
+        .map(|(index, attribute)| (index, attribute.value.clone()))
     {
-        for attr in args {
+        let entry = blocks
+            .first()
+            .and_then(|block| context.get_block(*block).op_ids().first().copied())
+            .map(|first| op_ref_in(context, blocks[0], first));
+        for attr in &mut args {
             let AttributeValue::Register(RegisterAttr::Virtual { id, class }) = attr else {
                 continue;
             };
@@ -1418,11 +1427,31 @@ fn abi_precolor(
             let kind = abi_value_kind(context, *id);
             let pin = next_abi_register(abi, rc, kind, &mut next_abi_slot);
             if let Some(pin) = pin {
-                if let Some(prev) = precolor.insert(*id, pin)
+                if !has_call {
+                    precolor.insert(*id, pin);
+                    continue;
+                }
+                let body = *id;
+                let ty = context.get_value(ValueId::from_number(body)).ty();
+                let incoming = context.create_value(ty, None).id().number();
+                *attr = AttributeValue::Register(RegisterAttr::Virtual {
+                    id: incoming,
+                    class: Some(pin.0),
+                });
+                let copy = target.emit_copy(context, pin.0, body, incoming);
+                rewriter.insert_op_before(
+                    entry.as_ref().ok_or_else(|| {
+                        PassError::InvalidRuleSet(
+                            "function with register arguments has no entry operation".to_string(),
+                        )
+                    })?,
+                    copy.as_ref(),
+                )?;
+                if let Some(prev) = precolor.insert(incoming, pin)
                     && prev != pin
                 {
                     return Err(PassError::InvalidRuleSet(format!(
-                        "argument vreg {id} pinned to conflicting registers {prev:?} and {pin:?}"
+                        "argument vreg {incoming} pinned to conflicting registers {prev:?} and {pin:?}"
                     )));
                 }
             } else {
@@ -1434,6 +1463,9 @@ fn abi_precolor(
                 next_stack_slot += 1;
             }
         }
+        let mut attributes = op.op().attributes.clone();
+        attributes[arg_attr_index].value = AttributeValue::Array(args);
+        context.set_op_attributes(op.op().id, attributes);
     }
 
     // Return value: the operand of the `vret` terminator, in the first return
@@ -1465,24 +1497,29 @@ fn abi_precolor(
                 register
             };
 
-            match precolor.get(&vreg) {
-                // Already pinned to exactly the return register (or returned by
-                // several `vret`s): nothing to do.
-                Some(existing) if *existing == ret_pin => {}
-                // Pinned elsewhere (an argument register): break the point
-                // conflict with a copy into a fresh vreg that takes the return
-                // pin, and retarget the `vret` at it.
-                Some(_) => {
-                    let ty = context.get_value(value).ty();
-                    let fresh = context.create_value(ty, None).id().number();
-                    let copy = target.emit_copy(context, rc, fresh, vreg);
-                    let op_ref = op_ref_in(context, block_id, op_id);
-                    rewriter.insert_op_before(&op_ref, copy.as_ref())?;
-                    context.set_op_operand(op_id, 0, ValueId::from_number(fresh));
-                    precolor.insert(fresh, ret_pin);
-                }
-                None => {
-                    precolor.insert(vreg, ret_pin);
+            if has_call {
+                let ty = context.get_value(value).ty();
+                let fresh = context.create_value(ty, None).id().number();
+                let copy = target.emit_copy(context, rc, fresh, vreg);
+                let op_ref = op_ref_in(context, block_id, op_id);
+                rewriter.insert_op_before(&op_ref, copy.as_ref())?;
+                context.set_op_operand(op_id, 0, ValueId::from_number(fresh));
+                precolor.insert(fresh, ret_pin);
+            } else {
+                match precolor.get(&vreg) {
+                    Some(existing) if *existing == ret_pin => {}
+                    Some(_) => {
+                        let ty = context.get_value(value).ty();
+                        let fresh = context.create_value(ty, None).id().number();
+                        let copy = target.emit_copy(context, rc, fresh, vreg);
+                        let op_ref = op_ref_in(context, block_id, op_id);
+                        rewriter.insert_op_before(&op_ref, copy.as_ref())?;
+                        context.set_op_operand(op_id, 0, ValueId::from_number(fresh));
+                        precolor.insert(fresh, ret_pin);
+                    }
+                    None => {
+                        precolor.insert(vreg, ret_pin);
+                    }
                 }
             }
         }

@@ -1,9 +1,8 @@
-// RUN: not tir mc --march=x86_64 --stage=regalloc %s
+// RUN: tir mc --march=x86_64 --stage=regalloc %s
 
-// FINDING F5 (crash): register allocation aborts with "Infeasible" when a raw
-// function argument is live across a call (used after it). A fresh computed
-// value in the same position allocates fine, so the failure is specific to
-// argument-valued live ranges spanning a call. Expected to fail today.
+// Incoming argument registers are point constraints. The body gets a detached
+// virtual copy, allowing an argument used after a call to move to a callee-saved
+// register or spill instead of remaining pinned to a caller-clobbered register.
 
 module {
   declare @g(!i64) -> !i64
