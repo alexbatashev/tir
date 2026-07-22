@@ -171,20 +171,7 @@ pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnost
                     }
                     continue;
                 };
-                if !matches!(
-                    typed.types().kind(source_ty),
-                    TypeKind::Integer(_) | TypeKind::Enum(_)
-                ) {
-                    return Err(unsupported(
-                        ast,
-                        initializer,
-                        "non-integer global initializer".to_string(),
-                    ));
-                }
-                let Some(value) = ast
-                    .get_annotation(initializer)
-                    .and_then(|semantics| semantics.constant)
-                else {
+                let Some(bytes) = constant_initializer_bytes(typed, source_ty, initializer) else {
                     return Err(unsupported(
                         ast,
                         initializer,
@@ -194,8 +181,15 @@ pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnost
                 module_builder.insert(
                     cir::GlobalOpBuilder::new(context)
                         .attr("sym_name", AttributeValue::Str(global.name.clone()))
-                        .attr("value", AttributeValue::Int(value))
-                        .attr("size", AttributeValue::UInt(size))
+                        .attr(
+                            "bytes",
+                            AttributeValue::Array(
+                                bytes
+                                    .into_iter()
+                                    .map(|byte| AttributeValue::UInt(u64::from(byte)))
+                                    .collect(),
+                            ),
+                        )
                         .attr("align", AttributeValue::UInt(align))
                         .build(),
                 );
@@ -259,6 +253,34 @@ fn source_type_layout(typed: &TypedAst, ty: QualType) -> (u64, u64) {
         TypeKind::LongDouble => (16, 16),
         TypeKind::Enum(_) => (4, 4),
         _ => (1, 1),
+    }
+}
+
+fn constant_initializer_bytes(
+    typed: &TypedAst,
+    target: QualType,
+    initializer: NodeId,
+) -> Option<Vec<u8>> {
+    let ast = typed.ast();
+    match typed.types().kind(target) {
+        TypeKind::Integer(_) | TypeKind::Enum(_) => {
+            let value = ast.get_annotation(initializer)?.constant?;
+            let size = source_type_layout(typed, target).0 as usize;
+            Some(value.to_le_bytes()[..size].to_vec())
+        }
+        TypeKind::Array(element, Some(length))
+            if ast.get_node(initializer).kind == AstKind::InitializerList =>
+        {
+            let element_size = source_type_layout(typed, *element).0 as usize;
+            let mut bytes = vec![0; element_size * *length as usize];
+            for (index, value) in ast.children(initializer).take(*length as usize).enumerate() {
+                let element_bytes = constant_initializer_bytes(typed, *element, value)?;
+                let offset = index * element_size;
+                bytes[offset..offset + element_size].copy_from_slice(&element_bytes);
+            }
+            Some(bytes)
+        }
+        _ => None,
     }
 }
 
@@ -2134,7 +2156,7 @@ pub fn lower_data(context: &Context, module: &ModuleOp) -> Result<(), tir::PassE
     for op_id in module_body.op_ids() {
         let op = context.get_op(op_id);
         if let Some(global) = op.clone().as_op::<cir::GlobalOp>() {
-            globals.push((global.sym_name(), global.value(), global.size()));
+            globals.push((global.sym_name(), global.bytes()));
             rewriter.erase_op(&tir::OperationRef::new(op, Some(module_body.clone()), None))?;
         } else if let Some(global) = op.clone().as_op::<cir::ZeroGlobalOp>() {
             zero_globals.push((global.sym_name(), global.size()));
@@ -2186,26 +2208,21 @@ pub fn lower_data(context: &Context, module: &ModuleOp) -> Result<(), tir::PassE
             .attr("name", AttributeValue::Str(".data".to_string()))
             .build();
         let mut section_builder = IRBuilder::new(section.body());
-        for (name, value, size) in globals {
-            let kind = match size {
-                1 => "byte",
-                2 => "half",
-                4 => "word",
-                8 => "dword",
-                _ => unreachable!("integer global has a supported scalar width"),
-            };
+        for (name, bytes) in globals {
             let symbol = SymbolOpBuilder::new(context)
                 .attr("name", AttributeValue::Str(name))
                 .attr("binding", AttributeValue::Str("global".to_string()))
                 .attr("kind", AttributeValue::Str("object".to_string()))
                 .build();
             let mut symbol_builder = IRBuilder::new(symbol.body());
-            symbol_builder.insert(
-                LiteralOpBuilder::new(context)
-                    .attr("kind", AttributeValue::Str(kind.to_string()))
-                    .attr("value", AttributeValue::Int(value))
-                    .build(),
-            );
+            for byte in bytes {
+                symbol_builder.insert(
+                    LiteralOpBuilder::new(context)
+                        .attr("kind", AttributeValue::Str("byte".to_string()))
+                        .attr("value", AttributeValue::Int(i64::from(byte)))
+                        .build(),
+                );
+            }
             symbol_builder.insert(SymbolEndOpBuilder::new(context).build());
             section_builder.insert(symbol);
         }

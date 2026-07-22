@@ -52,8 +52,7 @@ operation! {
         dialect: "cir",
         attributes: A {
             sym_name: "Str",
-            value: "Int",
-            size: "UInt",
+            bytes: "Array",
             align: "UInt",
         },
     }
@@ -64,12 +63,21 @@ impl GlobalOp {
         string_attribute(self, "sym_name")
     }
 
-    pub fn value(&self) -> i64 {
-        int_attribute(self, "value")
-    }
-
-    pub fn size(&self) -> u64 {
-        uint_attribute(self, "size")
+    pub fn bytes(&self) -> Vec<u8> {
+        self.attributes()
+            .iter()
+            .find(|attribute| attribute.name == "bytes")
+            .and_then(|attribute| match &attribute.value {
+                AttributeValue::Array(bytes) => bytes
+                    .iter()
+                    .map(|byte| match byte {
+                        AttributeValue::UInt(value) => u8::try_from(*value).ok(),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => None,
+            })
+            .unwrap()
     }
 
     pub fn align(&self) -> u64 {
@@ -110,18 +118,6 @@ fn string_attribute(operation: &impl Operation, name: &str) -> String {
         .find(|attribute| attribute.name == name)
         .and_then(|attribute| match &attribute.value {
             AttributeValue::Str(value) => Some(value.clone()),
-            _ => None,
-        })
-        .unwrap()
-}
-
-fn int_attribute(operation: &impl Operation, name: &str) -> i64 {
-    operation
-        .attributes()
-        .iter()
-        .find(|attribute| attribute.name == name)
-        .and_then(|attribute| match attribute.value {
-            AttributeValue::Int(value) => Some(value),
             _ => None,
         })
         .unwrap()

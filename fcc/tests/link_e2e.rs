@@ -1192,3 +1192,13 @@ fn tentative_scalar_global_is_zero_initialized() {
     }
     assert_fcc_matches_host("int counter; int main(void) { return counter; }\n");
 }
+
+#[test]
+fn initialized_global_array_uses_constant_data() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "int values[3] = {11, 22, 9}; int main(void) { return values[0] + values[1] + values[2] - 42; }\n",
+    );
+}
