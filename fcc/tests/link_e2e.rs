@@ -1084,6 +1084,28 @@ fn pointer_member_access_executes_through_driver() {
 }
 
 #[test]
+fn one_word_struct_argument_matches_host_abi() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "struct Box { int value; }; int read(struct Box box) { return box.value; }\n",
+        "struct Box { int value; }; int read(struct Box); int main(void) { struct Box box = {42}; return read(box) == 42 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn one_word_struct_call_matches_host_abi() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "struct Box { int value; }; int read(struct Box); int main(void) { struct Box box = {42}; return read(box) == 42 ? 0 : 1; }\n",
+        "struct Box { int value; }; int read(struct Box box) { return box.value; }\n",
+    );
+}
+
+#[test]
 fn whole_struct_copy_executes_through_driver() {
     if !cc_available() {
         return;

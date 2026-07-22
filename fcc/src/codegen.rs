@@ -82,7 +82,33 @@ struct FnCodegen<'a> {
 #[derive(Clone)]
 struct Signature {
     ret: TypeId,
-    args: Vec<TypeId>,
+    params: Vec<AbiParameter>,
+    varargs: bool,
+}
+
+#[derive(Clone)]
+struct AbiParameter {
+    pieces: Vec<AbiPiece>,
+}
+
+#[derive(Clone, Copy)]
+struct AbiPiece {
+    offset: u64,
+    ty: TypeId,
+}
+
+impl Signature {
+    fn argument_types(&self, context: &Context) -> Vec<TypeId> {
+        let mut args = self
+            .params
+            .iter()
+            .flat_map(|parameter| parameter.pieces.iter().map(|piece| piece.ty))
+            .collect::<Vec<_>>();
+        if self.varargs {
+            args.push(VarArgsType::new(context));
+        }
+        args
+    }
 }
 
 /// Lower a translation unit into a `builtin.module` in `context`.
@@ -158,7 +184,12 @@ pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnost
                 };
                 let entity = node_entity(typed, item);
                 let sig = signatures.get(&entity).unwrap();
-                module_builder.insert(b::declare_op(context, name, sig.ret, &sig.args));
+                module_builder.insert(b::declare_op(
+                    context,
+                    name,
+                    sig.ret,
+                    &sig.argument_types(context),
+                ));
             }
             AstKind::Function => {
                 let func_op = lower_function(context, typed, item, &signatures, &globals)?;
@@ -415,13 +446,18 @@ fn lower_signature(
     let AstLeaf::Function { .. } = ast.get_leaf_data(item).unwrap() else {
         unreachable!("function-like node carries a function payload");
     };
-    let mut args = Vec::new();
+    let mut params = Vec::new();
+    let mut varargs = false;
     for child in ast.children(item) {
         match ast.get_node(child).kind {
             AstKind::Param => {
-                args.push(lower_type(context, typed, node_type(typed, child)));
+                params.push(classify_abi_parameter(
+                    context,
+                    typed,
+                    node_type(typed, child),
+                ));
             }
-            AstKind::VarArgs => args.push(VarArgsType::new(context)),
+            AstKind::VarArgs => varargs = true,
             _ => break,
         }
     }
@@ -432,9 +468,27 @@ fn lower_signature(
                 TypeKind::Function { ret, .. } => lower_type(context, typed, *ret),
                 _ => unreachable!("function node has function semantic type"),
             },
-            args,
+            params,
+            varargs,
         },
     ))
+}
+
+fn classify_abi_parameter(context: &Context, typed: &TypedAst, ty: QualType) -> AbiParameter {
+    let (size, _) = source_type_layout(typed, ty);
+    let scalar_width = u64::from(typed.target().pointer_width() / 8);
+    let carrier = match typed.types().kind(ty) {
+        TypeKind::Record(_) if size <= scalar_width && size.is_power_of_two() => {
+            IntegerType::new(context, (size * 8) as u32)
+        }
+        _ => lower_type(context, typed, ty),
+    };
+    AbiParameter {
+        pieces: vec![AbiPiece {
+            offset: 0,
+            ty: carrier,
+        }],
+    }
 }
 
 fn lower_function(
@@ -452,17 +506,16 @@ fn lower_function(
         TypeKind::Function { ret, .. } => lower_type(context, typed, *ret),
         _ => unreachable!("function node has function semantic type"),
     };
+    let signature = &signatures[&node_entity(typed, func)];
 
     // Entry block arguments carry the incoming parameter values; parameters are
     // the function node's leading children.
-    let mut param_values = Vec::new();
-    for param in ast
-        .children(func)
-        .take_while(|&c| matches!(ast.get_node(c).kind, AstKind::Param))
-    {
-        param_values
-            .push(context.create_value(lower_type(context, typed, node_type(typed, param)), None));
-    }
+    let param_values = signature
+        .params
+        .iter()
+        .flat_map(|parameter| parameter.pieces.iter())
+        .map(|piece| context.create_value(piece.ty, None))
+        .collect::<Vec<_>>();
     let param_ids: Vec<ValueId> = param_values.iter().map(|v| v.id()).collect();
 
     let region = context.create_region();
@@ -485,7 +538,7 @@ fn lower_function(
         terminated: false,
         values: HashMap::new(),
     };
-    cg.lower_body(func, &param_ids)?;
+    cg.lower_body(func, &param_ids, &signature.params)?;
 
     Ok(func_op)
 }
@@ -768,12 +821,19 @@ impl FnCodegen<'_> {
     }
 
     fn offset_address(&mut self, base: ValueId, offset: u64, element: QualType) -> ValueId {
+        let element = lower_type(self.context, self.typed, element);
+        self.offset_address_ir(base, offset, element)
+    }
+
+    fn offset_address_ir(&mut self, base: ValueId, offset: u64, element: TypeId) -> ValueId {
+        if offset == 0 {
+            return base;
+        }
         let offset_ty = IntegerType::new(self.context, self.typed.target().pointer_width());
         let offset = self
             .builder
             .insert(b::constant(self.context, offset as i64, offset_ty).build())
             .result();
-        let element = lower_type(self.context, self.typed, element);
         self.builder
             .insert(
                 p::ptradd(
@@ -911,14 +971,20 @@ impl FnCodegen<'_> {
     /// Lower a function: spill parameters into stack slots, then lower each body
     /// statement in source order (statement order is a side-effect ordering, so it
     /// stays top-down; only the expressions within use the post-order iterator).
-    fn lower_body(&mut self, func: NodeId, param_ids: &[ValueId]) -> Result<(), Diagnostic> {
+    fn lower_body(
+        &mut self,
+        func: NodeId,
+        param_ids: &[ValueId],
+        abi_params: &[AbiParameter],
+    ) -> Result<(), Diagnostic> {
         let ast = self.ast;
 
-        let mut idx = 0;
-        for param in ast
+        let params = ast
             .children(func)
             .take_while(|&c| matches!(ast.get_node(c).kind, AstKind::Param))
-        {
+            .collect::<Vec<_>>();
+        let mut abi_value = 0;
+        for (&param, abi_param) in params.iter().zip(abi_params) {
             let AstLeaf::Param { .. } = ast.get_leaf_data(param).unwrap() else {
                 unreachable!("param node carries a param payload");
             };
@@ -926,13 +992,16 @@ impl FnCodegen<'_> {
             let elem = lower_type(self.context, self.typed, source_ty);
             let (size, align) = source_type_layout(self.typed, source_ty);
             let slot = self.alloca(elem, size, align);
-            self.builder
-                .insert(p::store(self.context, param_ids[idx], slot.ptr).build());
-            idx += 1;
+            for piece in &abi_param.pieces {
+                let address = self.offset_address_ir(slot.ptr, piece.offset, piece.ty);
+                self.builder
+                    .insert(p::store(self.context, param_ids[abi_value], address).build());
+                abi_value += 1;
+            }
             self.locals.insert(node_entity(self.typed, param), slot);
         }
 
-        for stmt in ast.children(func).skip(idx) {
+        for stmt in ast.children(func).skip(params.len()) {
             self.lower_stmt(stmt)?;
         }
 
@@ -1549,6 +1618,37 @@ impl FnCodegen<'_> {
         }
     }
 
+    fn lower_abi_argument(
+        &mut self,
+        node: NodeId,
+        expression: LoweredExpr,
+        parameter: &AbiParameter,
+    ) -> Result<Vec<ValueId>, Diagnostic> {
+        if matches!(
+            self.typed.types().kind(node_type(self.typed, node)),
+            TypeKind::Record(_)
+        ) {
+            let LoweredExpr::Address { ptr, .. } = expression else {
+                return Err(unsupported(
+                    self.ast,
+                    node,
+                    "non-addressable aggregate argument".to_string(),
+                ));
+            };
+            return Ok(parameter
+                .pieces
+                .iter()
+                .map(|piece| {
+                    let address = self.offset_address_ir(ptr, piece.offset, piece.ty);
+                    self.builder
+                        .insert(p::load(self.context, address, piece.ty).build())
+                        .result()
+                })
+                .collect());
+        }
+        Ok(vec![self.materialize(expression)])
+    }
+
     fn lower_expr(&mut self, root: NodeId) -> Result<ValueId, Diagnostic> {
         let expression = self.lower_expr_value(root)?;
         Ok(self.materialize(expression))
@@ -1720,15 +1820,16 @@ impl FnCodegen<'_> {
                     let AstLeaf::Call(name) = ast.get_leaf_data(node).unwrap() else {
                         unreachable!("call node carries a call payload");
                     };
-                    let sig = &self.signatures[&node_entity(self.typed, node)];
-                    let arguments = ast
-                        .children(node)
-                        .map(|arg| self.values[&arg])
-                        .collect::<Vec<_>>();
-                    let args = arguments
-                        .into_iter()
-                        .map(|argument| self.materialize(argument))
-                        .collect();
+                    let sig = self.signatures[&node_entity(self.typed, node)].clone();
+                    let mut args = Vec::new();
+                    for (index, argument) in ast.children(node).enumerate() {
+                        let expression = self.values[&argument];
+                        if let Some(parameter) = sig.params.get(index) {
+                            args.extend(self.lower_abi_argument(argument, expression, parameter)?);
+                        } else {
+                            args.push(self.materialize(expression));
+                        }
+                    }
                     LoweredExpr::Value(
                         self.builder
                             .insert(b::call(self.context, args, name.as_str(), sig.ret).build())
