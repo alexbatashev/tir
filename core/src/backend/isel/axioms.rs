@@ -39,13 +39,16 @@ use tir::sem::{EquivalenceOracle, SmtOracle, sym};
 use tir::{
     Context,
     graph::NodeId,
-    sem::{SemExpr, SemGraph, SymKind, SymPayload, Value, con, execute, op, op_kind, parse},
+    sem::{
+        SemExpr, SemGraph, SemType, SymKind, SymPayload, Value, con, execute, op, op_kind, parse,
+    },
 };
 use tir_adt::APInt;
 use tir_symbolic::egraph::{EMatch, Id, Pattern, Var};
 
 use super::node::{
-    SemEGraph, SemNode, class_int_binding, class_width, is_comparison, template_node,
+    SemEGraph, SemNode, class_int_binding, class_semantic_type, class_width, is_comparison,
+    template_node,
 };
 use super::rewrites::IselRewrite;
 
@@ -616,6 +619,14 @@ impl Axiom {
                     return;
                 };
                 if !self.guards.iter().all(|g| g.holds(&widths)) {
+                    return;
+                }
+                if self.vars.iter().any(|(name, _)| {
+                    !matches!(
+                        class_semantic_type(ctx, eg, m.binding(holes[name])),
+                        Some(SemType::Bits(_))
+                    )
+                }) {
                     return;
                 }
                 // Constant-operand vars fire only on the immediate form.

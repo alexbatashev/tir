@@ -158,6 +158,24 @@ pseudo instruction SelectFloatLessThan64 for [X86_64] {
     behavior { dst = lhs < rhs; }
 }
 
+pseudo instruction SelectFloatGreaterEqual64 for [X86_64] {
+    param OPNAME: String = "select_float_greater_equal64";
+    operands { dst: GPR8, lhs: XMM, rhs: XMM, }
+    behavior { dst = lhs >= rhs; }
+}
+
+pseudo instruction SelectFloatEqual64 for [X86_64] {
+    param OPNAME: String = "select_float_equal64";
+    operands { dst: GPR8, lhs: XMM, rhs: XMM, }
+    behavior { dst = lhs == rhs; }
+}
+
+pseudo instruction SelectFloatNotEqual64 for [X86_64] {
+    param OPNAME: String = "select_float_not_equal64";
+    operands { dst: GPR8, lhs: XMM, rhs: XMM, }
+    behavior { dst = lhs != rhs; }
+}
+
 instruction Ucomisd for [X86_64] {
     param MNEMONIC: String = "ucomisd";
     operands { lhs: XMM, rhs: XMM, }
@@ -175,7 +193,29 @@ instruction Ucomisd for [X86_64] {
         38..39 => 0b11,
     }
     asm { "{self.MNEMONIC} {lhs}, {rhs}" }
-    behavior { }
+    behavior {
+        EFLAGS::cf = if ((lhs != lhs) | (rhs != rhs)) == zext(0b1, 1) {
+            zext(0b1, 1)
+        } else if lhs < rhs {
+            zext(0b1, 1)
+        } else {
+            zext(0b0, 1)
+        };
+        EFLAGS::pf = if ((lhs != lhs) | (rhs != rhs)) == zext(0b1, 1) {
+            zext(0b1, 1)
+        } else {
+            zext(0b0, 1)
+        };
+        EFLAGS::zf = if ((lhs != lhs) | (rhs != rhs)) == zext(0b1, 1) {
+            zext(0b1, 1)
+        } else if lhs == rhs {
+            zext(0b1, 1)
+        } else {
+            zext(0b0, 1)
+        };
+        EFLAGS::sf = zext(0b0, 1);
+        EFLAGS::of = zext(0b0, 1);
+    }
 }
 
 // `movsd xmm_dst, xmm_src` (F2 0F 10 /r): register-to-register scalar-double

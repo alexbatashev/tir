@@ -324,12 +324,16 @@ mod isa {
         Ok(true)
     }
 
-    fn lower_float_less_than_pseudo(
+    fn lower_float_comparison_pseudo(
         context: &tir::Context,
         op: &tir::OperationRef,
         rewriter: &mut tir::Rewriter,
     ) -> Result<bool, tir::PassError> {
-        if op.as_op::<SelectFloatLessThan64Op>().is_none() {
+        let less = op.as_op::<SelectFloatLessThan64Op>().is_some();
+        let greater_equal = op.as_op::<SelectFloatGreaterEqual64Op>().is_some();
+        let equal = op.as_op::<SelectFloatEqual64Op>().is_some();
+        let not_equal = op.as_op::<SelectFloatNotEqual64Op>().is_some();
+        if !less && !greater_equal && !equal && !not_equal {
             return Ok(false);
         }
         let attr = |name| {
@@ -344,15 +348,83 @@ mod isa {
                     ))
                 })
         };
+        let (lhs, rhs) = if less {
+            (attr("rhs")?, attr("lhs")?)
+        } else {
+            (attr("lhs")?, attr("rhs")?)
+        };
         let compare = UcomisdOpBuilder::new(context)
-            .attr("lhs", attr("rhs")?)
-            .attr("rhs", attr("lhs")?)
-            .build();
-        let set = SetAboveOpBuilder::new(context)
-            .attr("dst", attr("dst")?)
+            .attr("lhs", lhs)
+            .attr("rhs", rhs)
             .build();
         rewriter.insert_op_before(op, &compare)?;
-        rewriter.replace_op(op, &set)?;
+        if equal || not_equal {
+            let comparison_value = context
+                .create_value(tir::builtin::IntegerType::new(context, 1), None)
+                .id();
+            let parity_value = context
+                .create_value(tir::builtin::IntegerType::new(context, 1), None)
+                .id();
+            let comparison_dst = virt(comparison_value.number(), RegClass::GPR8.id());
+            let parity_dst = virt(parity_value.number(), RegClass::GPR8.id());
+            if equal {
+                rewriter.insert_op_before(
+                    op,
+                    &SetEqOpBuilder::new(context)
+                        .attr("dst", comparison_dst.clone())
+                        .build(),
+                )?;
+                rewriter.insert_op_before(
+                    op,
+                    &SetNoParityOpBuilder::new(context)
+                        .attr("dst", parity_dst.clone())
+                        .build(),
+                )?;
+                rewriter.replace_op(
+                    op,
+                    &And8OpBuilder::new(context)
+                        .attr("dst", attr("dst")?)
+                        .attr("dst_tied", comparison_dst)
+                        .attr("src", parity_dst)
+                        .build(),
+                )?;
+            } else {
+                rewriter.insert_op_before(
+                    op,
+                    &SetNotEqOpBuilder::new(context)
+                        .attr("dst", comparison_dst.clone())
+                        .build(),
+                )?;
+                rewriter.insert_op_before(
+                    op,
+                    &SetParityOpBuilder::new(context)
+                        .attr("dst", parity_dst.clone())
+                        .build(),
+                )?;
+                rewriter.replace_op(
+                    op,
+                    &Or8OpBuilder::new(context)
+                        .attr("dst", attr("dst")?)
+                        .attr("dst_tied", comparison_dst)
+                        .attr("src", parity_dst)
+                        .build(),
+                )?;
+            }
+        } else if greater_equal {
+            rewriter.replace_op(
+                op,
+                &SetAboveEqOpBuilder::new(context)
+                    .attr("dst", attr("dst")?)
+                    .build(),
+            )?;
+        } else {
+            rewriter.replace_op(
+                op,
+                &SetAboveOpBuilder::new(context)
+                    .attr("dst", attr("dst")?)
+                    .build(),
+            )?;
+        }
         Ok(true)
     }
 
@@ -903,6 +975,8 @@ mod isa {
         ri_norex!(SarImm8Op, SarImm8NorexOpBuilder, B);
 
         reg1_norex!(SetEqOp, SetEqNorexOpBuilder, "dst", B);
+        reg1_norex!(SetParityOp, SetParityNorexOpBuilder, "dst", B);
+        reg1_norex!(SetNoParityOp, SetNoParityNorexOpBuilder, "dst", B);
         reg1_norex!(SetNotEqOp, SetNotEqNorexOpBuilder, "dst", B);
         reg1_norex!(SetLessOp, SetLessNorexOpBuilder, "dst", B);
         reg1_norex!(SetGreaterEqOp, SetGreaterEqNorexOpBuilder, "dst", B);
@@ -1432,7 +1506,7 @@ mod isa {
                 lower_float_constant_pseudo,
                 lower_unsigned_integer_to_double_pseudo,
                 lower_double_to_unsigned_integer_pseudo,
-                lower_float_less_than_pseudo,
+                lower_float_comparison_pseudo,
                 lower_constant,
                 lower_addr_of,
             ]
