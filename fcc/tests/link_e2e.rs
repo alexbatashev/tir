@@ -176,6 +176,14 @@ fn scalar_call_chain_matches_host_compiler() {
 }
 
 #[test]
+fn scalar_branch_mix_matches_host_compiler() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(include_str!("scalar/branch_mix.c"));
+}
+
+#[test]
 fn bitwise_and_shifts_match_host_compiler() {
     if !cc_available() {
         return;
