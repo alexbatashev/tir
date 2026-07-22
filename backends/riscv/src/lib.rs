@@ -490,6 +490,44 @@ fn lower_vector_len(
     Ok(true)
 }
 
+fn lower_float_not_equal_pseudo(
+    context: &tir::Context,
+    op: &tir::OperationRef,
+    rewriter: &mut tir::Rewriter,
+) -> Result<bool, tir::PassError> {
+    if op.as_op::<SelectFloatNotEqual64Op>().is_none() {
+        return Ok(false);
+    }
+    let attr = |name| {
+        op.op()
+            .attributes
+            .iter()
+            .find(|attribute| attribute.name == name)
+            .map(|attribute| attribute.value.clone())
+            .ok_or_else(|| {
+                tir::PassError::InvalidRuleSet(format!(
+                    "float comparison pseudo is missing '{name}'"
+                ))
+            })
+    };
+    let equal = context
+        .create_value(tir::builtin::IntegerType::new(context, 1), None)
+        .id();
+    let compare = FEqDOpBuilder::new(context)
+        .attr("rd", virt(equal.number(), RegClass::GPR.id()))
+        .attr("fs1", attr("fs1")?)
+        .attr("fs2", attr("fs2")?)
+        .build();
+    let invert = XorImmOpBuilder::new(context)
+        .attr("rd", attr("rd")?)
+        .attr("rs1", virt(equal.number(), RegClass::GPR.id()))
+        .attr("imm", tir::attributes::AttributeValue::Int(1))
+        .build();
+    rewriter.insert_op_before(op, &compare)?;
+    rewriter.replace_op(op, &invert)?;
+    Ok(true)
+}
+
 /// Emit the branch-if-nonzero fallback for a condition no branch rule fused:
 /// `bne cond, x0, dest`.
 fn emit_branch_nonzero(
@@ -1042,9 +1080,17 @@ impl tir::backend::TargetMachine for RiscvTarget {
 
     fn pre_ra_lowerings(&self) -> Vec<tir::backend::isel::OpLowering> {
         if self.config.xlen == 64 {
-            vec![obj::lower_constant_rv64, obj::lower_addr_of]
+            vec![
+                lower_float_not_equal_pseudo,
+                obj::lower_constant_rv64,
+                obj::lower_addr_of,
+            ]
         } else {
-            vec![obj::lower_constant_rv32, obj::lower_addr_of]
+            vec![
+                lower_float_not_equal_pseudo,
+                obj::lower_constant_rv32,
+                obj::lower_addr_of,
+            ]
         }
     }
 
