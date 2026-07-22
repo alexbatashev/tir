@@ -1168,6 +1168,16 @@ fn local_record_initializer_follows_field_order() {
 }
 
 #[test]
+fn local_union_initializer_uses_first_member() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "union Value { int integer; long wide; }; int main(void) { union Value value = {42}; return value.integer - 42; }\n",
+    );
+}
+
+#[test]
 fn nested_record_initializer_zero_fills_fields() {
     if !cc_available() {
         return;

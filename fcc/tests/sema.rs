@@ -210,6 +210,19 @@ fn rejects_excess_record_initializers() {
 }
 
 #[test]
+fn rejects_excess_union_initializers() {
+    let output = diagnostics(
+        "union Value { int integer; long wide; }; int main(void) { union Value value = {11, 22}; return 0; }",
+        "c23".parse().unwrap(),
+    );
+
+    assert!(
+        output.contains("too many initializers for union"),
+        "{output}"
+    );
+}
+
+#[test]
 fn rejects_redefinition_in_same_scope() {
     let output = diagnostics(
         "int main(void) { int value; int value; return 0; }",

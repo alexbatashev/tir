@@ -374,15 +374,15 @@ where
             }
         },
     );
-    let record = just(Token::KwStruct).ignore_then(ident()).map_with(
-        |name, e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
-            let id = e
-                .state()
-                .0
-                .record_id(RecordKind::Struct, Some(&name), false);
-            CType::Record(RecordKind::Struct, id, Some(name))
-        },
-    );
+    let record = choice((
+        just(Token::KwStruct).to(RecordKind::Struct),
+        just(Token::KwUnion).to(RecordKind::Union),
+    ))
+    .then(ident())
+    .map_with(|(kind, name), e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
+        let id = e.state().0.record_id(kind, Some(&name), false);
+        CType::Record(kind, id, Some(name))
+    });
     let base = choice((builtin, record, named));
     let pointer = just(Token::Star).ignore_then(qualifier.clone().repeated().collect::<Vec<_>>());
 

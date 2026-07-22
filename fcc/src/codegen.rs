@@ -788,15 +788,27 @@ impl FnCodegen<'_> {
         initializer: NodeId,
     ) -> Result<(), Diagnostic> {
         if let TypeKind::Record(id) = self.typed.types().kind(target) {
-            let fields = self
-                .typed
-                .record(*id)
-                .unwrap()
+            let record = self.typed.record(*id).unwrap();
+            let kind = record.kind;
+            let fields = record
                 .fields
                 .iter()
                 .map(|field| (field.ty, field.offset))
                 .collect::<Vec<_>>();
             let values = self.ast.children(initializer).collect::<Vec<_>>();
+            if kind == RecordKind::Union {
+                if let Some(&(storage_type, _)) = fields
+                    .iter()
+                    .max_by_key(|(field, _)| source_type_layout(self.typed, *field).0)
+                {
+                    self.zero_initialize(storage_type, address, initializer)?;
+                }
+                if let (Some(&(field, offset)), Some(&value)) = (fields.first(), values.first()) {
+                    let field_address = self.offset_address(address, offset, field);
+                    self.lower_initializer(field, field_address, value)?;
+                }
+                return Ok(());
+            }
             for (index, (field, offset)) in fields.into_iter().enumerate() {
                 let field_address = self.offset_address(address, offset, field);
                 if let Some(&value) = values.get(index) {
@@ -838,14 +850,20 @@ impl FnCodegen<'_> {
         initializer: NodeId,
     ) -> Result<(), Diagnostic> {
         if let TypeKind::Record(id) = self.typed.types().kind(target) {
-            let fields = self
-                .typed
-                .record(*id)
-                .unwrap()
+            let record = self.typed.record(*id).unwrap();
+            let kind = record.kind;
+            let mut fields = record
                 .fields
                 .iter()
                 .map(|field| (field.ty, field.offset))
                 .collect::<Vec<_>>();
+            if kind == RecordKind::Union {
+                fields = fields
+                    .into_iter()
+                    .max_by_key(|(field, _)| source_type_layout(self.typed, *field).0)
+                    .into_iter()
+                    .collect();
+            }
             for (field, offset) in fields {
                 let field_address = self.offset_address(address, offset, field);
                 self.zero_initialize(field, field_address, initializer)?;
