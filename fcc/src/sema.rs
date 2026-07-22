@@ -1323,6 +1323,58 @@ impl Analyzer<'_> {
                     (error, ValueCategory::Value)
                 }
             }
+            AstKind::AddressOf => {
+                let child = self.ast.children(node).next().unwrap();
+                let info = self.ast.get_annotation(child).cloned().unwrap_or_default();
+                let operand = info.ty.unwrap_or(error);
+                if matches!(
+                    info.category,
+                    ValueCategory::Lvalue | ValueCategory::Function
+                ) {
+                    (
+                        self.types.intern(TypeKind::Pointer(operand)),
+                        ValueCategory::Value,
+                    )
+                } else if self.types.kind(operand) == &TypeKind::Error {
+                    (error, ValueCategory::Value)
+                } else {
+                    self.diagnostics.push(
+                        InvalidOperands::new(
+                            self.ast.get_node(node).span,
+                            "operator '&' requires an lvalue or function operand",
+                            operand_reference(self.options, kind),
+                        )
+                        .into(),
+                    );
+                    (error, ValueCategory::Value)
+                }
+            }
+            AstKind::Deref => {
+                let operand = self.child_types(node).first().copied().unwrap_or(error);
+                match self.types.kind(operand).clone() {
+                    TypeKind::Pointer(pointee) => {
+                        let category =
+                            if matches!(self.types.kind(pointee), TypeKind::Function { .. }) {
+                                ValueCategory::Function
+                            } else {
+                                ValueCategory::Lvalue
+                            };
+                        (pointee, category)
+                    }
+                    TypeKind::Error => (error, ValueCategory::Value),
+                    _ => {
+                        self.diagnostics.push(
+                            InvalidOperands::new(
+                                self.ast.get_node(node).span,
+                                "operator '*' requires a pointer operand",
+                                operand_reference(self.options, kind),
+                            )
+                            .into(),
+                        );
+                        (error, ValueCategory::Value)
+                    }
+                }
+            }
             AstKind::Comma => {
                 let operands = self.child_types(node);
                 (
@@ -2007,6 +2059,8 @@ fn operator_text(kind: AstKind) -> &'static str {
         AstKind::Pos => "+",
         AstKind::BitNot => "~",
         AstKind::Not => "!",
+        AstKind::AddressOf => "&",
+        AstKind::Deref => "*",
         _ => unreachable!(),
     }
 }
