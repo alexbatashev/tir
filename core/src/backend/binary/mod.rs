@@ -154,6 +154,7 @@ mod tests {
             elf_class: class,
             elf_flags: 0,
             reloc_for: |_| None,
+            absolute_reloc: |_| None,
             pc_rel_scale: |_| 0,
             pc_rel_from_end: |_| false,
         }

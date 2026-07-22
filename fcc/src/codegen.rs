@@ -32,6 +32,18 @@ struct Global {
     elem: TypeId,
 }
 
+struct ConstantData {
+    bytes: Vec<u8>,
+    relocations: Vec<DataRelocation>,
+}
+
+struct DataRelocation {
+    offset: u64,
+    symbol: String,
+    addend: i64,
+    width: u64,
+}
+
 #[derive(Clone, Copy)]
 enum BreakScope {
     Loop(ValueId),
@@ -171,7 +183,8 @@ pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnost
                     }
                     continue;
                 };
-                let Some(bytes) = constant_initializer_bytes(typed, source_ty, initializer) else {
+                let Some(data) = constant_initializer_data(typed, &globals, source_ty, initializer)
+                else {
                     return Err(unsupported(
                         ast,
                         initializer,
@@ -184,9 +197,37 @@ pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnost
                         .attr(
                             "bytes",
                             AttributeValue::Array(
-                                bytes
+                                data.bytes
                                     .into_iter()
                                     .map(|byte| AttributeValue::UInt(u64::from(byte)))
+                                    .collect(),
+                            ),
+                        )
+                        .attr(
+                            "relocations",
+                            AttributeValue::Array(
+                                data.relocations
+                                    .into_iter()
+                                    .map(|relocation| {
+                                        AttributeValue::Dict(BTreeMap::from([
+                                            (
+                                                "offset".to_string(),
+                                                AttributeValue::UInt(relocation.offset),
+                                            ),
+                                            (
+                                                "symbol".to_string(),
+                                                AttributeValue::Str(relocation.symbol),
+                                            ),
+                                            (
+                                                "addend".to_string(),
+                                                AttributeValue::Int(relocation.addend),
+                                            ),
+                                            (
+                                                "width".to_string(),
+                                                AttributeValue::UInt(relocation.width),
+                                            ),
+                                        ]))
+                                    })
                                     .collect(),
                             ),
                         )
@@ -256,42 +297,78 @@ fn source_type_layout(typed: &TypedAst, ty: QualType) -> (u64, u64) {
     }
 }
 
-fn constant_initializer_bytes(
+fn constant_initializer_data(
     typed: &TypedAst,
+    globals: &HashMap<EntityId, Global>,
     target: QualType,
     initializer: NodeId,
-) -> Option<Vec<u8>> {
+) -> Option<ConstantData> {
     let ast = typed.ast();
     match typed.types().kind(target) {
         TypeKind::Integer(_) | TypeKind::Enum(_) => {
             let value = ast.get_annotation(initializer)?.constant?;
             let size = source_type_layout(typed, target).0 as usize;
-            Some(value.to_le_bytes()[..size].to_vec())
+            Some(ConstantData {
+                bytes: value.to_le_bytes()[..size].to_vec(),
+                relocations: Vec::new(),
+            })
+        }
+        TypeKind::Pointer(_) if ast.get_node(initializer).kind == AstKind::AddressOf => {
+            let referent = ast.children(initializer).next()?;
+            if ast.get_node(referent).kind != AstKind::Var {
+                return None;
+            }
+            let global = globals.get(&node_entity(typed, referent))?;
+            let width = source_type_layout(typed, target).0;
+            Some(ConstantData {
+                bytes: vec![0; width as usize],
+                relocations: vec![DataRelocation {
+                    offset: 0,
+                    symbol: global.name.clone(),
+                    addend: 0,
+                    width,
+                }],
+            })
         }
         TypeKind::Array(element, Some(length))
             if ast.get_node(initializer).kind == AstKind::InitializerList =>
         {
             let element_size = source_type_layout(typed, *element).0 as usize;
-            let mut bytes = vec![0; element_size * *length as usize];
+            let mut data = ConstantData {
+                bytes: vec![0; element_size * *length as usize],
+                relocations: Vec::new(),
+            };
             for (index, value) in ast.children(initializer).take(*length as usize).enumerate() {
-                let element_bytes = constant_initializer_bytes(typed, *element, value)?;
+                let mut element_data = constant_initializer_data(typed, globals, *element, value)?;
                 let offset = index * element_size;
-                bytes[offset..offset + element_size].copy_from_slice(&element_bytes);
+                data.bytes[offset..offset + element_size].copy_from_slice(&element_data.bytes);
+                for relocation in &mut element_data.relocations {
+                    relocation.offset += offset as u64;
+                }
+                data.relocations.extend(element_data.relocations);
             }
-            Some(bytes)
+            Some(data)
         }
         TypeKind::Record(id)
             if ast.get_node(initializer).kind == AstKind::InitializerList
                 && typed.record(*id)?.kind == RecordKind::Struct =>
         {
             let record = typed.record(*id)?;
-            let mut bytes = vec![0; record.size as usize];
+            let mut data = ConstantData {
+                bytes: vec![0; record.size as usize],
+                relocations: Vec::new(),
+            };
             for (field, value) in record.fields.iter().zip(ast.children(initializer)) {
-                let field_bytes = constant_initializer_bytes(typed, field.ty, value)?;
+                let mut field_data = constant_initializer_data(typed, globals, field.ty, value)?;
                 let offset = field.offset as usize;
-                bytes[offset..offset + field_bytes.len()].copy_from_slice(&field_bytes);
+                data.bytes[offset..offset + field_data.bytes.len()]
+                    .copy_from_slice(&field_data.bytes);
+                for relocation in &mut field_data.relocations {
+                    relocation.offset += field.offset;
+                }
+                data.relocations.extend(field_data.relocations);
             }
-            Some(bytes)
+            Some(data)
         }
         _ => None,
     }
@@ -2155,8 +2232,8 @@ fn decode_character_constant(source: &str) -> Option<i64> {
 pub fn lower_data(context: &Context, module: &ModuleOp) -> Result<(), tir::PassError> {
     use tir::attributes::AttributeValue;
     use tir::backend::{
-        LiteralOpBuilder, SectionEndOpBuilder, SectionOpBuilder, SymbolEndOpBuilder,
-        SymbolOpBuilder,
+        DataRelocOpBuilder, LiteralOpBuilder, SectionEndOpBuilder, SectionOpBuilder,
+        SymbolEndOpBuilder, SymbolOpBuilder,
     };
 
     let mut rewriter = tir::Rewriter::new(context.clone());
@@ -2169,7 +2246,12 @@ pub fn lower_data(context: &Context, module: &ModuleOp) -> Result<(), tir::PassE
     for op_id in module_body.op_ids() {
         let op = context.get_op(op_id);
         if let Some(global) = op.clone().as_op::<cir::GlobalOp>() {
-            globals.push((global.sym_name(), global.bytes(), global.align()));
+            globals.push((
+                global.sym_name(),
+                global.bytes(),
+                global.relocations(),
+                global.align(),
+            ));
             rewriter.erase_op(&tir::OperationRef::new(op, Some(module_body.clone()), None))?;
         } else if let Some(global) = op.clone().as_op::<cir::ZeroGlobalOp>() {
             zero_globals.push((global.sym_name(), global.size(), global.align()));
@@ -2221,7 +2303,7 @@ pub fn lower_data(context: &Context, module: &ModuleOp) -> Result<(), tir::PassE
             .attr("name", AttributeValue::Str(".data".to_string()))
             .build();
         let mut section_builder = IRBuilder::new(section.body());
-        for (name, bytes, align) in globals {
+        for (name, bytes, mut relocations, align) in globals {
             let symbol = SymbolOpBuilder::new(context)
                 .attr("name", AttributeValue::Str(name))
                 .attr("binding", AttributeValue::Str("global".to_string()))
@@ -2229,7 +2311,27 @@ pub fn lower_data(context: &Context, module: &ModuleOp) -> Result<(), tir::PassE
                 .attr("align", AttributeValue::UInt(align))
                 .build();
             let mut symbol_builder = IRBuilder::new(symbol.body());
-            for byte in bytes {
+            relocations.sort_by_key(|relocation| relocation.0);
+            let mut cursor = 0;
+            for (offset, target, addend, width) in relocations {
+                for &byte in &bytes[cursor..offset as usize] {
+                    symbol_builder.insert(
+                        LiteralOpBuilder::new(context)
+                            .attr("kind", AttributeValue::Str("byte".to_string()))
+                            .attr("value", AttributeValue::Int(i64::from(byte)))
+                            .build(),
+                    );
+                }
+                symbol_builder.insert(
+                    DataRelocOpBuilder::new(context)
+                        .attr("symbol", AttributeValue::Str(target))
+                        .attr("width", AttributeValue::UInt(width))
+                        .attr("addend", AttributeValue::Int(addend))
+                        .build(),
+                );
+                cursor = (offset + width) as usize;
+            }
+            for &byte in &bytes[cursor..] {
                 symbol_builder.insert(
                     LiteralOpBuilder::new(context)
                         .attr("kind", AttributeValue::Str("byte".to_string()))

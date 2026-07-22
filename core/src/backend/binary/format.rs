@@ -31,6 +31,8 @@ pub struct ObjectFormatInfo {
     /// Maps an op name to the relocation used for its symbol operand;
     /// `None` means the instruction cannot take a symbol operand.
     pub reloc_for: fn(&str) -> Option<RelocKind>,
+    /// Maps a byte width to an absolute relocation for a data field.
+    pub absolute_reloc: fn(u8) -> Option<u32>,
     /// log2 of the divisor applied to a pc-relative byte delta before it is
     /// scattered into the instruction (0 on RISC-V; 2 on AArch64, whose
     /// branch immediates are word offsets).

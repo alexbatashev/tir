@@ -1241,3 +1241,13 @@ fn global_objects_respect_source_alignment() {
     assert_eq!(value.value % 8, 0);
     assert!(data.addralign >= 8);
 }
+
+#[test]
+fn global_pointer_initializer_emits_a_relocation() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "int target = 42; int *pointer = &target; int main(void) { return *pointer - 42; }\n",
+    );
+}

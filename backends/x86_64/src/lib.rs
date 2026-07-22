@@ -698,6 +698,32 @@ mod isa {
         Ok(true)
     }
 
+    fn lower_pointer_load(
+        context: &tir::Context,
+        op: &tir::OperationRef,
+        rewriter: &mut tir::Rewriter,
+    ) -> Result<bool, tir::PassError> {
+        let Some(load) = op.as_op::<tir::ptr::LoadOp>() else {
+            return Ok(false);
+        };
+        let result_type = context.get_type_data(context.get_value(load.result()).ty());
+        if (result_type.as_ref() as &dyn std::any::Any)
+            .downcast_ref::<tir::ptr::PtrType>()
+            .is_none()
+        {
+            return Ok(false);
+        }
+        let mov = MovLoadOpBuilder::new(context)
+            .attr("dst", virt(load.result().number(), RegClass::GPR.id()))
+            .attr(
+                "base",
+                virt(load.operands()[0].number(), RegClass::GPR.id()),
+            )
+            .build();
+        rewriter.replace_op(op, &mov)?;
+        Ok(true)
+    }
+
     /// A register-to-register `mov dst, src`.
     fn mv(context: &tir::Context, dst: AttributeValue, src: AttributeValue) -> Box<dyn Operation> {
         Box::new(
@@ -1561,6 +1587,7 @@ mod isa {
     // start while the displacement is measured from the instruction's end.
     const R_X86_64_PC32: u32 = 2;
     const R_X86_64_PLT32: u32 = 4;
+    const R_X86_64_64: u32 = 1;
 
     fn object_format() -> tir::backend::binary::ObjectFormatInfo {
         use tir::backend::binary::{EM_X86_64, ElfClass, ObjectFormatInfo, RelocKind};
@@ -1568,6 +1595,7 @@ mod isa {
             elf_machine: EM_X86_64,
             elf_class: ElfClass::Elf64,
             elf_flags: 0,
+            absolute_reloc: |width| (width == 8).then_some(R_X86_64_64),
             reloc_for: |op| match op {
                 // `call rel32`: the disp32 follows the 1-byte opcode.
                 "call" => Some(RelocKind {
@@ -1705,6 +1733,7 @@ mod isa {
                 lower_double_to_unsigned_integer_pseudo,
                 lower_float_comparison_pseudo,
                 lower_constant,
+                lower_pointer_load,
                 lower_addr_of,
             ]
         }

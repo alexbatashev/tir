@@ -329,6 +329,7 @@ dialect! {
             SymbolOp,
             SymbolEndOp,
             LiteralOp,
+            DataRelocOp,
             BlockEndOp,
             VirtualReturnOp,
             VirtualBranchOp,

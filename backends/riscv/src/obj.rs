@@ -7,9 +7,14 @@ use tir::attributes::AttributeValue;
 use tir::backend::binary::{EM_RISCV, ElfClass, ObjectFormatInfo, RelocKind};
 use tir::backend::{VirtualBranchOp, VirtualCallOp, VirtualIndirectCallOp, VirtualReturnOp};
 
-use crate::{JumpAndLinkOpBuilder, JumpAndLinkRegOpBuilder, phys, virt};
+use crate::{
+    JumpAndLinkOpBuilder, JumpAndLinkRegOpBuilder, LoadDoubleWordOpBuilder, LoadWordOpBuilder,
+    phys, virt,
+};
 
 const R_RISCV_BRANCH: u32 = 16;
+const R_RISCV_32: u32 = 1;
+const R_RISCV_64: u32 = 2;
 const R_RISCV_JAL: u32 = 17;
 const R_RISCV_HI20: u32 = 26;
 const R_RISCV_LO12_I: u32 = 27;
@@ -37,6 +42,11 @@ pub(crate) fn object_format(xlen: u32, features: &[crate::Feature]) -> ObjectFor
             ElfClass::Elf32
         },
         elf_flags,
+        absolute_reloc: |width| match width {
+            4 => Some(R_RISCV_32),
+            8 => Some(R_RISCV_64),
+            _ => None,
+        },
         reloc_for: |op| match op {
             "jal" => Some(RelocKind {
                 r_type: R_RISCV_JAL,
@@ -158,6 +168,61 @@ pub(crate) fn lower_addr_of(
         .attr("imm", AttributeValue::Str(sym))
         .build();
     rewriter.replace_op(op, &addi)?;
+    Ok(true)
+}
+
+pub(crate) fn lower_pointer_load_rv32(
+    context: &tir::Context,
+    op: &tir::OperationRef,
+    rewriter: &mut tir::Rewriter,
+) -> Result<bool, tir::PassError> {
+    lower_pointer_load(context, op, rewriter, false)
+}
+
+pub(crate) fn lower_pointer_load_rv64(
+    context: &tir::Context,
+    op: &tir::OperationRef,
+    rewriter: &mut tir::Rewriter,
+) -> Result<bool, tir::PassError> {
+    lower_pointer_load(context, op, rewriter, true)
+}
+
+fn lower_pointer_load(
+    context: &tir::Context,
+    op: &tir::OperationRef,
+    rewriter: &mut tir::Rewriter,
+    is_rv64: bool,
+) -> Result<bool, tir::PassError> {
+    let Some(load) = op.as_op::<tir::ptr::LoadOp>() else {
+        return Ok(false);
+    };
+    let result_type = context.get_type_data(context.get_value(load.result()).ty());
+    if (result_type.as_ref() as &dyn std::any::Any)
+        .downcast_ref::<tir::ptr::PtrType>()
+        .is_none()
+    {
+        return Ok(false);
+    }
+    let dest = virt(load.result().number(), crate::RegClass::GPR.id());
+    let base = virt(load.operands()[0].number(), crate::RegClass::GPR.id());
+    let load: Box<dyn Operation> = if is_rv64 {
+        Box::new(
+            LoadDoubleWordOpBuilder::new(context)
+                .attr("rd", dest)
+                .attr("rs1", base)
+                .attr("imm", AttributeValue::Int(0))
+                .build(),
+        )
+    } else {
+        Box::new(
+            LoadWordOpBuilder::new(context)
+                .attr("rd", dest)
+                .attr("rs1", base)
+                .attr("imm", AttributeValue::Int(0))
+                .build(),
+        )
+    };
+    rewriter.replace_op(op, load.as_ref())?;
     Ok(true)
 }
 

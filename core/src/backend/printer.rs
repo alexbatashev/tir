@@ -8,8 +8,8 @@ use tir::builtin::{DeclareOp, ModuleEndOp, ModuleOp};
 use tir::{Context, OpInstance, Operation};
 
 use crate::backend::{
-    BlockEndOp, LiteralOp, MachineInstruction, SectionEndOp, SectionOp, SymbolEndOp, SymbolOp,
-    int_attr, uint_attr,
+    BlockEndOp, DataRelocOp, LiteralOp, MachineInstruction, SectionEndOp, SectionOp, SymbolEndOp,
+    SymbolOp, int_attr, uint_attr,
 };
 
 pub type AsmInstructionPrinter = fn(&Context, &OpInstance) -> Option<String>;
@@ -169,6 +169,38 @@ impl AsmPrinter {
                         out.push_str("\"\n");
                     }
                 }
+                continue;
+            }
+
+            if op.clone().as_op::<DataRelocOp>().is_some() {
+                let symbol = string_attr(&op, "symbol").ok_or(AsmPrintError::UnsupportedOp {
+                    op: DataRelocOp::name(),
+                })?;
+                let width =
+                    uint_attr(&op.attributes, "width").ok_or(AsmPrintError::UnsupportedOp {
+                        op: DataRelocOp::name(),
+                    })?;
+                let directive = match width {
+                    4 => "word",
+                    8 => "quad",
+                    _ => {
+                        return Err(AsmPrintError::UnsupportedOp {
+                            op: DataRelocOp::name(),
+                        });
+                    }
+                };
+                let addend = int_attr(&op.attributes, "addend").unwrap_or(0);
+                out.push_str("\t.");
+                out.push_str(directive);
+                out.push(' ');
+                out.push_str(symbol);
+                if addend > 0 {
+                    out.push('+');
+                    out.push_str(&addend.to_string());
+                } else if addend < 0 {
+                    out.push_str(&addend.to_string());
+                }
+                out.push('\n');
                 continue;
             }
 

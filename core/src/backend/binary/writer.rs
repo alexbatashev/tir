@@ -18,8 +18,8 @@ use super::{
     ObjectFile, SectionKind, SymBinding, SymKind,
 };
 use crate::backend::{
-    BlockEndOp, LiteralOp, MachineInstruction, SectionEndOp, SectionOp, SymbolEndOp, SymbolOp,
-    int_attr, uint_attr,
+    BlockEndOp, DataRelocOp, LiteralOp, MachineInstruction, SectionEndOp, SectionOp, SymbolEndOp,
+    SymbolOp, int_attr, uint_attr,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,7 +111,7 @@ impl BinaryWriter {
             fixups: Vec::new(),
         };
 
-        self.walk_block(context, module.body(), &mut state)?;
+        self.walk_block(context, module.body(), &mut state, fmt)?;
         self.resolve_fixups(&mut state, fmt)?;
         Ok(state.obj)
     }
@@ -121,6 +121,7 @@ impl BinaryWriter {
         context: &Context,
         block: Arc<tir::Block>,
         state: &mut WalkState,
+        fmt: &ObjectFormatInfo,
     ) -> Result<(), BinaryEmitError> {
         for op_id in block.op_ids() {
             let op = context.get_op(op_id);
@@ -139,18 +140,23 @@ impl BinaryWriter {
                 let name = string_attr(&op, "name").unwrap_or(".text");
                 let enclosing = state.current_section;
                 state.current_section = Some(ensure_section(&mut state.obj, name));
-                self.walk_block(context, section.body(), state)?;
+                self.walk_block(context, section.body(), state, fmt)?;
                 state.current_section = enclosing;
                 continue;
             }
 
             if op.clone().as_op::<SymbolOp>().is_some() {
-                self.walk_symbol(context, &op, state)?;
+                self.walk_symbol(context, &op, state, fmt)?;
                 continue;
             }
 
             if op.clone().as_op::<LiteralOp>().is_some() {
                 emit_literal(&op, state)?;
+                continue;
+            }
+
+            if op.clone().as_op::<DataRelocOp>().is_some() {
+                emit_data_reloc(&op, state, fmt)?;
                 continue;
             }
 
@@ -164,6 +170,7 @@ impl BinaryWriter {
         context: &Context,
         op: &Arc<tir::OpInstance>,
         state: &mut WalkState,
+        fmt: &ObjectFormatInfo,
     ) -> Result<(), BinaryEmitError> {
         let name = string_attr(op, "name")
             .ok_or(BinaryEmitError::MissingSymbolName)?
@@ -182,7 +189,7 @@ impl BinaryWriter {
         for block in region.iter(context.clone()) {
             let offset = state.obj.sections[section].data.len() as u64;
             state.block_starts.insert(block.id(), offset);
-            self.walk_block(context, block, state)?;
+            self.walk_block(context, block, state, fmt)?;
         }
         let end = state.obj.sections[section].data.len() as u64;
 
@@ -353,6 +360,38 @@ fn emit_literal(op: &Arc<tir::OpInstance>, state: &mut WalkState) -> Result<(), 
         .unwrap_or_else(|| ensure_section(&mut state.obj, ".text"));
     state.current_section = Some(section);
     state.obj.sections[section].data.extend_from_slice(&bytes);
+    Ok(())
+}
+
+fn emit_data_reloc(
+    op: &Arc<tir::OpInstance>,
+    state: &mut WalkState,
+    fmt: &ObjectFormatInfo,
+) -> Result<(), BinaryEmitError> {
+    let unsupported = || BinaryEmitError::UnsupportedOp {
+        op: DataRelocOp::name().to_string(),
+    };
+    let symbol = string_attr(op, "symbol")
+        .ok_or_else(unsupported)?
+        .to_string();
+    let width = uint_attr(&op.attributes, "width").ok_or_else(unsupported)?;
+    let r_type = (fmt.absolute_reloc)(u8::try_from(width).map_err(|_| unsupported())?)
+        .ok_or_else(unsupported)?;
+    let addend = int_attr(&op.attributes, "addend").ok_or_else(unsupported)?;
+    let section = state
+        .current_section
+        .unwrap_or_else(|| ensure_section(&mut state.obj, ".data"));
+    state.current_section = Some(section);
+    let offset = state.obj.sections[section].data.len() as u64;
+    state.obj.sections[section]
+        .data
+        .resize((offset + width) as usize, 0);
+    state.obj.sections[section].relocs.push(ObjReloc {
+        offset,
+        symbol,
+        r_type,
+        addend,
+    });
     Ok(())
 }
 

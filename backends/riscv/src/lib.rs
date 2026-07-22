@@ -1083,12 +1083,14 @@ impl tir::backend::TargetMachine for RiscvTarget {
             vec![
                 lower_float_not_equal_pseudo,
                 obj::lower_constant_rv64,
+                obj::lower_pointer_load_rv64,
                 obj::lower_addr_of,
             ]
         } else {
             vec![
                 lower_float_not_equal_pseudo,
                 obj::lower_constant_rv32,
+                obj::lower_pointer_load_rv32,
                 obj::lower_addr_of,
             ]
         }

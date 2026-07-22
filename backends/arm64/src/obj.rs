@@ -9,10 +9,13 @@ use tir::backend::{VirtualBranchOp, VirtualCallOp, VirtualIndirectCallOp, Virtua
 
 use crate::{
     AddressPCRelOpBuilder, BranchImmediateOpBuilder, BranchLinkOpBuilder, BranchLinkRegOpBuilder,
-    MoveWideKeepShiftedOpBuilder, MoveWideZeroOpBuilder, ReturnOpBuilder, phys, virt,
+    LoadDoublewordOpBuilder, MoveWideKeepShiftedOpBuilder, MoveWideZeroOpBuilder, ReturnOpBuilder,
+    phys, virt,
 };
 
 const R_AARCH64_ADR_PREL_LO21: u32 = 274;
+const R_AARCH64_ABS64: u32 = 257;
+const R_AARCH64_ABS32: u32 = 258;
 const R_AARCH64_TSTBR14: u32 = 279;
 const R_AARCH64_CONDBR19: u32 = 280;
 const R_AARCH64_JUMP26: u32 = 282;
@@ -23,6 +26,11 @@ pub(crate) fn object_format() -> ObjectFormatInfo {
         elf_machine: EM_AARCH64,
         elf_class: ElfClass::Elf64,
         elf_flags: 0,
+        absolute_reloc: |width| match width {
+            4 => Some(R_AARCH64_ABS32),
+            8 => Some(R_AARCH64_ABS64),
+            _ => None,
+        },
         reloc_for: |op| match op {
             "adr" => Some(RelocKind {
                 r_type: R_AARCH64_ADR_PREL_LO21,
@@ -130,6 +138,36 @@ pub(crate) fn lower_addr_of(
         .attr("imm", AttributeValue::Str(addr_of.sym_name()))
         .build();
     rewriter.replace_op(op, &adr)?;
+    Ok(true)
+}
+
+pub(crate) fn lower_pointer_load(
+    context: &tir::Context,
+    op: &tir::OperationRef,
+    rewriter: &mut tir::Rewriter,
+) -> Result<bool, tir::PassError> {
+    let Some(load) = op.as_op::<tir::ptr::LoadOp>() else {
+        return Ok(false);
+    };
+    let result_type = context.get_type_data(context.get_value(load.result()).ty());
+    if (result_type.as_ref() as &dyn std::any::Any)
+        .downcast_ref::<tir::ptr::PtrType>()
+        .is_none()
+    {
+        return Ok(false);
+    }
+    let ldr = LoadDoublewordOpBuilder::new(context)
+        .attr(
+            "rt",
+            virt(load.result().number(), crate::RegClass::GPR.id()),
+        )
+        .attr(
+            "rn",
+            virt(load.operands()[0].number(), crate::RegClass::GPRsp.id()),
+        )
+        .attr("imm", AttributeValue::Int(0))
+        .build();
+    rewriter.replace_op(op, &ldr)?;
     Ok(true)
 }
 

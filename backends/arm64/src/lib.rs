@@ -794,6 +794,7 @@ impl tir::backend::TargetMachine for Arm64Target {
             lower_float_constant_pseudo,
             lower_float_comparison_pseudo,
             obj::lower_constant,
+            obj::lower_pointer_load,
             obj::lower_addr_of,
         ]
     }

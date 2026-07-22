@@ -54,6 +54,18 @@ operation! {
 }
 
 operation! {
+    DataRelocOp {
+        name: "data_reloc",
+        dialect: "asm",
+        attributes: A {
+            symbol: "Str",
+            width: "UInt",
+            addend: "Int",
+        }
+    }
+}
+
+operation! {
     BlockEndOp {
         name: "block_end",
         dialect: "asm",
