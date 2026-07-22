@@ -56,8 +56,8 @@ impl Node {
             .as_interface::<dyn OpCost>()
             .map_or(1, |c| c.cost());
         Self::Op {
-            dialect: instance.dialect,
-            name: instance.name,
+            dialect: instance.dialect().as_str(),
+            name: instance.name().as_str(),
             ty,
             attrs: instance.attributes.clone(),
             commutative,
