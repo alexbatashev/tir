@@ -160,6 +160,14 @@ fn scalar_recursive_descent_matches_host_compiler() {
 }
 
 #[test]
+fn scalar_mixed_widths_matches_host_compiler() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(include_str!("scalar/mixed_widths.c"));
+}
+
+#[test]
 fn bitwise_and_shifts_match_host_compiler() {
     if !cc_available() {
         return;
