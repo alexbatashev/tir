@@ -349,16 +349,22 @@ fn constant_initializer_data(
             }
             Some(data)
         }
-        TypeKind::Record(id)
-            if ast.get_node(initializer).kind == AstKind::InitializerList
-                && typed.record(*id)?.kind == RecordKind::Struct =>
-        {
+        TypeKind::Record(id) if ast.get_node(initializer).kind == AstKind::InitializerList => {
             let record = typed.record(*id)?;
             let mut data = ConstantData {
                 bytes: vec![0; record.size as usize],
                 relocations: Vec::new(),
             };
-            for (field, value) in record.fields.iter().zip(ast.children(initializer)) {
+            let field_count = match record.kind {
+                RecordKind::Struct => record.fields.len(),
+                RecordKind::Union => usize::from(!record.fields.is_empty()),
+            };
+            for (field, value) in record
+                .fields
+                .iter()
+                .take(field_count)
+                .zip(ast.children(initializer))
+            {
                 let mut field_data = constant_initializer_data(typed, globals, field.ty, value)?;
                 let offset = field.offset as usize;
                 data.bytes[offset..offset + field_data.bytes.len()]

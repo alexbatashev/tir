@@ -1224,6 +1224,16 @@ fn initialized_global_struct_uses_field_layout() {
 }
 
 #[test]
+fn initialized_global_union_uses_first_member() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "union Value { int integer; long wide; } value = {42}; int main(void) { return value.integer - 42; }\n",
+    );
+}
+
+#[test]
 fn global_objects_respect_source_alignment() {
     if !cc_available() {
         return;
