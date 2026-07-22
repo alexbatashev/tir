@@ -271,6 +271,17 @@ fn double_to_unsigned_integer_conversion_executes_through_driver() {
 }
 
 #[test]
+fn double_less_than_executes_through_driver() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "int less(double left, double right) { return left < right; }\n",
+        "int less(double, double); int main(void) { return less(-1.25, 2.5) == 1 && less(3.0, 2.0) == 0 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
 fn signed_integer_division_executes_through_driver() {
     if !cc_available() {
         return;

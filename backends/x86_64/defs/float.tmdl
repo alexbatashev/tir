@@ -152,6 +152,32 @@ instruction Divsd for [X86_64] : FpArith {
     }
 }
 
+pseudo instruction SelectFloatLessThan64 for [X86_64] {
+    param OPNAME: String = "select_float_less_than64";
+    operands { dst: GPR8, lhs: XMM, rhs: XMM, }
+    behavior { dst = lhs < rhs; }
+}
+
+instruction Ucomisd for [X86_64] {
+    param MNEMONIC: String = "ucomisd";
+    operands { lhs: XMM, rhs: XMM, }
+    encoding {
+        0..7 => 0x66,
+        8 => rhs[3],
+        9 => 0b0,
+        10 => lhs[3],
+        11 => 0b0,
+        12..15 => 0b0100,
+        16..23 => 0x0F,
+        24..31 => 0x2E,
+        32..34 => rhs[0..2],
+        35..37 => lhs[0..2],
+        38..39 => 0b11,
+    }
+    asm { "{self.MNEMONIC} {lhs}, {rhs}" }
+    behavior { }
+}
+
 // `movsd xmm_dst, xmm_src` (F2 0F 10 /r): register-to-register scalar-double
 // move. Emitted by register allocation to copy a value before a two-address FP
 // op overwrites it; the reg/rm layout matches `FpArith`.

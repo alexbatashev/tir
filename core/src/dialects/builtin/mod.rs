@@ -55,6 +55,7 @@ dialect! {
             ShrUIOp,
             ShrSIOp,
             CmpIOp,
+            CmpFOp,
             ExtSIOp,
             ExtUIOp,
             TruncIOp,

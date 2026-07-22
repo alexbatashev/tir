@@ -324,6 +324,38 @@ mod isa {
         Ok(true)
     }
 
+    fn lower_float_less_than_pseudo(
+        context: &tir::Context,
+        op: &tir::OperationRef,
+        rewriter: &mut tir::Rewriter,
+    ) -> Result<bool, tir::PassError> {
+        if op.as_op::<SelectFloatLessThan64Op>().is_none() {
+            return Ok(false);
+        }
+        let attr = |name| {
+            op.op()
+                .attributes
+                .iter()
+                .find(|attribute| attribute.name == name)
+                .map(|attribute| attribute.value.clone())
+                .ok_or_else(|| {
+                    tir::PassError::InvalidRuleSet(format!(
+                        "float comparison pseudo is missing '{name}'"
+                    ))
+                })
+        };
+        let compare = UcomisdOpBuilder::new(context)
+            .attr("lhs", attr("rhs")?)
+            .attr("rhs", attr("lhs")?)
+            .build();
+        let set = SetAboveOpBuilder::new(context)
+            .attr("dst", attr("dst")?)
+            .build();
+        rewriter.insert_op_before(op, &compare)?;
+        rewriter.replace_op(op, &set)?;
+        Ok(true)
+    }
+
     /// Emit the branch-if-nonzero fallback for a condition no branch rule
     /// fused: `test cond, cond` + `jne dest`.
     fn emit_branch_nonzero(
@@ -1400,6 +1432,7 @@ mod isa {
                 lower_float_constant_pseudo,
                 lower_unsigned_integer_to_double_pseudo,
                 lower_double_to_unsigned_integer_pseudo,
+                lower_float_less_than_pseudo,
                 lower_constant,
                 lower_addr_of,
             ]
