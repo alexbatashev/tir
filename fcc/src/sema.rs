@@ -1182,7 +1182,22 @@ impl Analyzer<'_> {
                     None
                 };
                 if let Some(result) = pointer_result {
-                    (result, ValueCategory::Value)
+                    let TypeKind::Pointer(pointee) = self.types.kind(result) else {
+                        unreachable!("pointer arithmetic result has pointer type")
+                    };
+                    if self.type_size(*pointee).is_some() {
+                        (result, ValueCategory::Value)
+                    } else {
+                        self.diagnostics.push(
+                            InvalidOperands::new(
+                                self.ast.get_node(node).span,
+                                "pointer arithmetic requires a pointer to a complete object type",
+                                operand_reference(self.options, kind),
+                            )
+                            .into(),
+                        );
+                        (error, ValueCategory::Value)
+                    }
                 } else if operands.len() == 2 && operands.iter().all(|&ty| self.is_arithmetic(ty)) {
                     let result = self.common_arithmetic_type(operands[0], operands[1]);
                     self.record_operand_conversions(node, &operands, result);

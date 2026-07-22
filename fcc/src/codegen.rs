@@ -466,6 +466,70 @@ impl FnCodegen<'_> {
         }
     }
 
+    fn lower_pointer_offset(
+        &mut self,
+        base: ValueId,
+        index: ValueId,
+        index_ty: QualType,
+        pointer_ty: QualType,
+        subtract: bool,
+    ) -> ValueId {
+        let TypeKind::Pointer(pointee) = self.typed.types().kind(pointer_ty) else {
+            unreachable!("pointer arithmetic result has pointer type")
+        };
+        let pointer_width = self.typed.target().pointer_width();
+        let offset_ty = IntegerType::new(self.context, pointer_width);
+        let index_width = self.typed.integer_width(index_ty).unwrap();
+        let index = if index_width < pointer_width {
+            if self.typed.integer_is_signed(index_ty).unwrap() {
+                self.builder
+                    .insert(b::extsi(self.context, index, offset_ty).build())
+                    .result()
+            } else {
+                self.builder
+                    .insert(b::extui(self.context, index, offset_ty).build())
+                    .result()
+            }
+        } else if index_width > pointer_width {
+            self.builder
+                .insert(b::trunci(self.context, index, offset_ty).build())
+                .result()
+        } else {
+            index
+        };
+        let size = source_type_layout(self.typed, *pointee).0;
+        let scale = self
+            .builder
+            .insert(b::constant(self.context, size as i64, offset_ty).build())
+            .result();
+        let offset = self
+            .builder
+            .insert(b::muli(self.context, index, scale, offset_ty).build())
+            .result();
+        let offset = if subtract {
+            let zero = self
+                .builder
+                .insert(b::constant(self.context, 0, offset_ty).build())
+                .result();
+            self.builder
+                .insert(b::subi(self.context, zero, offset, offset_ty).build())
+                .result()
+        } else {
+            offset
+        };
+        self.builder
+            .insert(
+                p::ptradd(
+                    self.context,
+                    base,
+                    offset,
+                    lower_type(self.context, self.typed, pointer_ty),
+                )
+                .build(),
+            )
+            .result()
+    }
+
     /// Lower a function: spill parameters into stack slots, then lower each body
     /// statement in source order (statement order is a side-effect ordering, so it
     /// stays top-down; only the expressions within use the post-order iterator).
@@ -1276,13 +1340,31 @@ impl FnCodegen<'_> {
                 | AstKind::Div
                 | AstKind::Mod) => {
                     let mut children = ast.children(node);
-                    let lhs = self.values[&children.next().unwrap()];
-                    let rhs = self.values[&children.next().unwrap()];
+                    let lhs_node = children.next().unwrap();
+                    let rhs_node = children.next().unwrap();
+                    let lhs = self.values[&lhs_node];
+                    let rhs = self.values[&rhs_node];
                     let l = self.materialize(lhs);
                     let r = self.materialize(rhs);
                     let source_ty = node_type(self.typed, node);
-                    let value = match self.typed.types().kind(source_ty) {
-                        TypeKind::Double => self.lower_double_binary(kind, l, r),
+                    let lhs_ty = node_type(self.typed, lhs_node);
+                    let rhs_ty = node_type(self.typed, rhs_node);
+                    let value = match (
+                        kind,
+                        self.typed.types().kind(lhs_ty),
+                        self.typed.types().kind(rhs_ty),
+                    ) {
+                        (
+                            AstKind::Add | AstKind::Sub,
+                            TypeKind::Pointer(_),
+                            TypeKind::Integer(_),
+                        ) => self.lower_pointer_offset(l, r, rhs_ty, lhs_ty, kind == AstKind::Sub),
+                        (AstKind::Add, TypeKind::Integer(_), TypeKind::Pointer(_)) => {
+                            self.lower_pointer_offset(r, l, lhs_ty, rhs_ty, false)
+                        }
+                        _ if matches!(self.typed.types().kind(source_ty), TypeKind::Double) => {
+                            self.lower_double_binary(kind, l, r)
+                        }
                         _ => self.lower_integer_binary(kind, l, r, source_ty),
                     };
                     LoweredExpr::Value(value)

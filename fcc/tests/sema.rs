@@ -195,6 +195,19 @@ fn rejects_arithmetic_with_void_operand() {
 }
 
 #[test]
+fn pointer_arithmetic_requires_complete_object_pointee() {
+    let output = diagnostics(
+        "int offset(void *pointer) { return pointer + 1 != pointer; }",
+        "c23".parse().unwrap(),
+    );
+
+    assert!(
+        output.contains("pointer arithmetic requires a pointer to a complete object type"),
+        "{output}"
+    );
+}
+
+#[test]
 fn assignment_requires_modifiable_lvalue() {
     let output = diagnostics(
         "int main(void) { 1 = 2; return 0; }",
