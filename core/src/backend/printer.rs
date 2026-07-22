@@ -9,7 +9,7 @@ use tir::{Context, OpInstance, Operation};
 
 use crate::backend::{
     BlockEndOp, LiteralOp, MachineInstruction, SectionEndOp, SectionOp, SymbolEndOp, SymbolOp,
-    int_attr,
+    int_attr, uint_attr,
 };
 
 pub type AsmInstructionPrinter = fn(&Context, &OpInstance) -> Option<String>;
@@ -112,6 +112,13 @@ impl AsmPrinter {
                 if string_attr(&op, "binding") != Some("local") {
                     out.push_str(".global ");
                     out.push_str(name);
+                    out.push('\n');
+                }
+                if let Some(align) = uint_attr(&op.attributes, "align")
+                    && align > 1
+                {
+                    out.push_str("\t.balign ");
+                    out.push_str(&align.to_string());
                     out.push('\n');
                 }
                 out.push_str(name);

@@ -2169,10 +2169,10 @@ pub fn lower_data(context: &Context, module: &ModuleOp) -> Result<(), tir::PassE
     for op_id in module_body.op_ids() {
         let op = context.get_op(op_id);
         if let Some(global) = op.clone().as_op::<cir::GlobalOp>() {
-            globals.push((global.sym_name(), global.bytes()));
+            globals.push((global.sym_name(), global.bytes(), global.align()));
             rewriter.erase_op(&tir::OperationRef::new(op, Some(module_body.clone()), None))?;
         } else if let Some(global) = op.clone().as_op::<cir::ZeroGlobalOp>() {
-            zero_globals.push((global.sym_name(), global.size()));
+            zero_globals.push((global.sym_name(), global.size(), global.align()));
             rewriter.erase_op(&tir::OperationRef::new(op, Some(module_body.clone()), None))?;
         }
     }
@@ -2221,11 +2221,12 @@ pub fn lower_data(context: &Context, module: &ModuleOp) -> Result<(), tir::PassE
             .attr("name", AttributeValue::Str(".data".to_string()))
             .build();
         let mut section_builder = IRBuilder::new(section.body());
-        for (name, bytes) in globals {
+        for (name, bytes, align) in globals {
             let symbol = SymbolOpBuilder::new(context)
                 .attr("name", AttributeValue::Str(name))
                 .attr("binding", AttributeValue::Str("global".to_string()))
                 .attr("kind", AttributeValue::Str("object".to_string()))
+                .attr("align", AttributeValue::UInt(align))
                 .build();
             let mut symbol_builder = IRBuilder::new(symbol.body());
             for byte in bytes {
@@ -2249,11 +2250,12 @@ pub fn lower_data(context: &Context, module: &ModuleOp) -> Result<(), tir::PassE
             .attr("name", AttributeValue::Str(".bss".to_string()))
             .build();
         let mut section_builder = IRBuilder::new(section.body());
-        for (name, size) in zero_globals {
+        for (name, size, align) in zero_globals {
             let symbol = SymbolOpBuilder::new(context)
                 .attr("name", AttributeValue::Str(name))
                 .attr("binding", AttributeValue::Str("global".to_string()))
                 .attr("kind", AttributeValue::Str("object".to_string()))
+                .attr("align", AttributeValue::UInt(align))
                 .build();
             let mut symbol_builder = IRBuilder::new(symbol.body());
             symbol_builder.insert(

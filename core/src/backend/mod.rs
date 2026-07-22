@@ -304,6 +304,18 @@ pub fn int_attr(attrs: &[tir::attributes::NamedAttribute], name: &str) -> Option
     })
 }
 
+pub fn uint_attr(attrs: &[tir::attributes::NamedAttribute], name: &str) -> Option<u64> {
+    attrs.iter().find_map(|attribute| {
+        if attribute.name != name {
+            return None;
+        }
+        match attribute.value {
+            tir::attributes::AttributeValue::UInt(value) => Some(value),
+            _ => None,
+        }
+    })
+}
+
 pub mod ops {
     pub use crate::backend::operations::*;
 }

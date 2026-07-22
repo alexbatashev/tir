@@ -19,7 +19,7 @@ use super::{
 };
 use crate::backend::{
     BlockEndOp, LiteralOp, MachineInstruction, SectionEndOp, SectionOp, SymbolEndOp, SymbolOp,
-    int_attr,
+    int_attr, uint_attr,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -173,6 +173,10 @@ impl BinaryWriter {
             .unwrap_or_else(|| ensure_section(&mut state.obj, ".text"));
         state.current_section = Some(section);
 
+        let align = uint_attr(&op.attributes, "align").unwrap_or(1).max(1);
+        let aligned = (state.obj.sections[section].data.len() as u64).div_ceil(align) * align;
+        state.obj.sections[section].data.resize(aligned as usize, 0);
+        state.obj.sections[section].align = state.obj.sections[section].align.max(align);
         let start = state.obj.sections[section].data.len() as u64;
         let region = context.get_region(op.regions[0]);
         for block in region.iter(context.clone()) {
