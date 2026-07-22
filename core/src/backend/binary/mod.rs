@@ -219,6 +219,33 @@ mod tests {
     }
 
     #[test]
+    fn bss_is_encoded_as_writable_nobits() {
+        let object = ObjectFile {
+            sections: vec![ObjSection {
+                name: ".bss".to_string(),
+                kind: SectionKind::Data,
+                align: 4,
+                data: vec![0; 4],
+                relocs: Vec::new(),
+                insn_spans: Vec::new(),
+            }],
+            symbols: Vec::new(),
+        };
+        let bytes = write_elf(&object, &format_info(ElfClass::Elf64));
+        let elf = parse_elf(&bytes).expect("emitted ELF parses back");
+        let bss = elf
+            .sections
+            .iter()
+            .find(|section| section.name == ".bss")
+            .unwrap();
+
+        assert_eq!(bss.sh_type, 8, "SHT_NOBITS");
+        assert_eq!(bss.flags, 0x3, "SHF_WRITE | SHF_ALLOC");
+        assert_eq!(bss.size, 4);
+        assert!(bss.data.is_empty());
+    }
+
+    #[test]
     fn ascii_rendering_is_stable() {
         let rendered = render_ascii(&sample_object());
         assert_eq!(
