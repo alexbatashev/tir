@@ -1106,6 +1106,28 @@ fn one_word_struct_call_matches_host_abi() {
 }
 
 #[test]
+fn two_word_struct_argument_matches_host_abi() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "struct Pair { long left; long right; }; long sum(struct Pair pair) { return pair.left + pair.right; }\n",
+        "struct Pair { long left; long right; }; long sum(struct Pair); int main(void) { struct Pair pair = {11, 31}; return sum(pair) == 42 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn two_word_struct_call_matches_host_abi() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "struct Pair { long left; long right; }; long sum(struct Pair); int main(void) { struct Pair pair = {11, 31}; return sum(pair) == 42 ? 0 : 1; }\n",
+        "struct Pair { long left; long right; }; long sum(struct Pair pair) { return pair.left + pair.right; }\n",
+    );
+}
+
+#[test]
 fn whole_struct_copy_executes_through_driver() {
     if !cc_available() {
         return;

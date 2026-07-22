@@ -477,17 +477,50 @@ fn lower_signature(
 fn classify_abi_parameter(context: &Context, typed: &TypedAst, ty: QualType) -> AbiParameter {
     let (size, _) = source_type_layout(typed, ty);
     let scalar_width = u64::from(typed.target().pointer_width() / 8);
-    let carrier = match typed.types().kind(ty) {
-        TypeKind::Record(_) if size <= scalar_width && size.is_power_of_two() => {
-            IntegerType::new(context, (size * 8) as u32)
+    if matches!(typed.types().kind(ty), TypeKind::Record(_)) && is_integer_aggregate(typed, ty) {
+        if size <= scalar_width && size.is_power_of_two() {
+            return AbiParameter {
+                pieces: vec![AbiPiece {
+                    offset: 0,
+                    ty: IntegerType::new(context, (size * 8) as u32),
+                }],
+            };
         }
-        _ => lower_type(context, typed, ty),
-    };
+        if size == scalar_width * 2 {
+            let carrier = IntegerType::new(context, typed.target().pointer_width());
+            return AbiParameter {
+                pieces: vec![
+                    AbiPiece {
+                        offset: 0,
+                        ty: carrier,
+                    },
+                    AbiPiece {
+                        offset: scalar_width,
+                        ty: carrier,
+                    },
+                ],
+            };
+        }
+    }
     AbiParameter {
         pieces: vec![AbiPiece {
             offset: 0,
-            ty: carrier,
+            ty: lower_type(context, typed, ty),
         }],
+    }
+}
+
+fn is_integer_aggregate(typed: &TypedAst, ty: QualType) -> bool {
+    match typed.types().kind(ty) {
+        TypeKind::Integer(_) | TypeKind::Enum(_) | TypeKind::Pointer(_) => true,
+        TypeKind::Array(element, _) => is_integer_aggregate(typed, *element),
+        TypeKind::Record(id) => typed.record(*id).is_some_and(|record| {
+            record
+                .fields
+                .iter()
+                .all(|field| is_integer_aggregate(typed, field.ty))
+        }),
+        _ => false,
     }
 }
 
