@@ -289,6 +289,8 @@ pub(super) enum BuiltinFunction {
     SIToFP,
     #[serde(rename = "uitofp")]
     UIToFP,
+    #[serde(rename = "fptosi")]
+    FPToSI,
     Todo,
 }
 
@@ -321,6 +323,7 @@ impl From<ast::BuiltinFunction> for BuiltinFunction {
             ast::BuiltinFunction::FDiv => Self::FDiv,
             ast::BuiltinFunction::SIToFP => Self::SIToFP,
             ast::BuiltinFunction::UIToFP => Self::UIToFP,
+            ast::BuiltinFunction::FPToSI => Self::FPToSI,
             ast::BuiltinFunction::Todo => Self::Todo,
         }
     }
