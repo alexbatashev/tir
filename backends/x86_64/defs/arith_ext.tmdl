@@ -238,6 +238,12 @@ pseudo instruction SelectSignedDivide32 for [X86_64] {
     behavior { quotient = lhs / divisor; }
 }
 
+pseudo instruction SelectSignedDivideConstant64 for [X86_64] {
+    param OPNAME: String = "select_signed_divide_constant64";
+    operands { quotient: GPR, lhs: GPR, divisor: bits<64>, }
+    behavior { quotient = lhs / divisor; }
+}
+
 pseudo instruction SelectUnsignedDivide64 for [X86_64] {
     param OPNAME: String = "select_unsigned_divide64";
     operands { quotient: GPR, lhs: GPR, divisor: GPR, }

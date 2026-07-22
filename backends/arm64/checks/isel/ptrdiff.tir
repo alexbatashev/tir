@@ -1,0 +1,17 @@
+// RUN: tir mc --march=arm64 --stage=isel %s | filecheck %s --check-prefix=ISEL
+// RUN: tir mc --march=arm64 --stage=regalloc %s | filecheck %s --check-prefix=REGALLOC
+
+module {
+  func @distance(%0: !ptr.p<!i32>, %1: !ptr.p<!i32>) -> !i64 {
+    %2 = ptr.ptrdiff %1, %0 : !i64
+    %3 = constant {value = 4} : !i64
+    %4 = divsi %2, %3 : !i64
+    return %4
+  }
+  module_end
+}
+
+// ISEL: arm64.sub
+// ISEL: arm64.select_sdiv_constant
+// REGALLOC: arm64.movz
+// REGALLOC: arm64.sdiv

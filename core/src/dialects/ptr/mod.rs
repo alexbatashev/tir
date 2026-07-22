@@ -17,7 +17,9 @@ use crate as tir;
 use crate::Any as AnyConstraint;
 
 pub mod ops {
-    pub use super::{AllocaOp, LoadOp, PtrAddOp, StoreOp, alloca, load, ptradd, store};
+    pub use super::{
+        AllocaOp, LoadOp, PtrAddOp, PtrDiffOp, StoreOp, alloca, load, ptradd, ptrdiff, store,
+    };
 }
 
 dialect! {
@@ -26,6 +28,7 @@ dialect! {
         operations: [
             AllocaOp,
             PtrAddOp,
+            PtrDiffOp,
             LoadOp,
             StoreOp,
         ],
@@ -194,6 +197,21 @@ operation! {
             result: "crate::ptr::PtrType",
         },
         sem: "(set result (add base offset))",
+    }
+}
+
+operation! {
+    PtrDiffOp {
+        name: "ptrdiff",
+        dialect: "ptr",
+        operands: O {
+            lhs: "crate::ptr::PtrType",
+            rhs: "crate::ptr::PtrType",
+        },
+        results: R {
+            result: "crate::builtin::IntegerType",
+        },
+        sem: "(set result (sub lhs rhs))",
     }
 }
 

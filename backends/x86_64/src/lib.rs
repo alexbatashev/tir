@@ -197,6 +197,35 @@ mod isa {
             };
         }
 
+        macro_rules! lower_divide_imm64 {
+            ($Pseudo:ty, $Prelude:ident, $Divide:ident) => {
+                if op.as_op::<$Pseudo>().is_some() {
+                    let quotient = value("quotient")?;
+                    let lhs = value("lhs")?;
+                    let ty = context.get_value(quotient).ty();
+                    let divisor = context.create_value(ty, None).id();
+                    let materialize = MovImmOpBuilder::new(context)
+                        .attr("dst", virt(divisor.number(), RegClass::GPR.id()))
+                        .attr("imm", attr("divisor")?)
+                        .build();
+                    let prelude = $Prelude::new(context)
+                        .attr("high", phys(RegClass::GPR.id(), 2))
+                        .attr("low", fixed_def(quotient, RegClass::GPR, 0))
+                        .attr("low_tied", virt(lhs.number(), RegClass::GPR.id()))
+                        .build();
+                    let divide = $Divide::new(context)
+                        .attr("quotient", fixed_def(quotient, RegClass::GPR, 0))
+                        .attr("remainder", phys(RegClass::GPR.id(), 2))
+                        .attr("divisor", virt(divisor.number(), RegClass::GPR.id()))
+                        .build();
+                    rewriter.insert_op_before(op, &materialize)?;
+                    rewriter.insert_op_before(op, &prelude)?;
+                    rewriter.replace_op(op, &divide)?;
+                    return Ok(true);
+                }
+            };
+        }
+
         lower!(
             SelectSignedDivide32Op,
             SignExtendDividend32OpBuilder,
@@ -208,6 +237,11 @@ mod isa {
             SignExtendDividend64OpBuilder,
             SignedDivide64OpBuilder,
             RegClass::GPR
+        );
+        lower_divide_imm64!(
+            SelectSignedDivideConstant64Op,
+            SignExtendDividend64OpBuilder,
+            SignedDivide64OpBuilder
         );
         lower!(
             SelectUnsignedDivide32Op,

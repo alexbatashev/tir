@@ -1262,7 +1262,44 @@ impl Analyzer<'_> {
                 } else {
                     None
                 };
-                if let Some(result) = pointer_result {
+                let pointer_difference = if operands.len() == 2 && kind == AstKind::Sub {
+                    match (self.types.kind(operands[0]), self.types.kind(operands[1])) {
+                        (TypeKind::Pointer(left), TypeKind::Pointer(right))
+                            if self.types.kind(*left) == self.types.kind(*right)
+                                && self.type_size(*left).is_some() =>
+                        {
+                            Some(match self.target.model {
+                                DataModel::Ilp32 => {
+                                    self.types.intern(TypeKind::Integer(IntegerKind::Int))
+                                }
+                                DataModel::Lp64 => {
+                                    self.types.intern(TypeKind::Integer(IntegerKind::Long))
+                                }
+                            })
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                let subtracts_pointers = operands.len() == 2
+                    && kind == AstKind::Sub
+                    && operands
+                        .iter()
+                        .all(|ty| matches!(self.types.kind(*ty), TypeKind::Pointer(_)));
+                if let Some(result) = pointer_difference {
+                    (result, ValueCategory::Value)
+                } else if subtracts_pointers {
+                    self.diagnostics.push(
+                        InvalidOperands::new(
+                            self.ast.get_node(node).span,
+                            "pointer subtraction requires pointers to compatible complete object types",
+                            operand_reference(self.options, kind),
+                        )
+                        .into(),
+                    );
+                    (error, ValueCategory::Value)
+                } else if let Some(result) = pointer_result {
                     let TypeKind::Pointer(pointee) = self.types.kind(result) else {
                         unreachable!("pointer arithmetic result has pointer type")
                     };

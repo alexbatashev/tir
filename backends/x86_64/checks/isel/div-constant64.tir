@@ -1,0 +1,16 @@
+// RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s --check-prefix=ISEL
+// RUN: tir mc --march=x86_64 --stage=regalloc %s | filecheck %s --check-prefix=REGALLOC
+
+module {
+  func @divide_by_four(%0: !i64) -> !i64 {
+    %1 = constant {value = 4} : !i64
+    %2 = divsi %0, %1 : !i64
+    return %2
+  }
+  module_end
+}
+
+// ISEL: x86_64.select_signed_divide_constant64
+// REGALLOC: x86_64.mov_imm
+// REGALLOC: x86_64.sign_extend_dividend64
+// REGALLOC: x86_64.signed_divide64

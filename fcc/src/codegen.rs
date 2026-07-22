@@ -551,6 +551,34 @@ impl FnCodegen<'_> {
             .result()
     }
 
+    fn lower_pointer_difference(
+        &mut self,
+        lhs: ValueId,
+        rhs: ValueId,
+        pointer_ty: QualType,
+        result_ty: QualType,
+    ) -> ValueId {
+        let TypeKind::Pointer(pointee) = self.typed.types().kind(pointer_ty) else {
+            unreachable!("pointer difference operand has pointer type")
+        };
+        let result_ty = lower_type(self.context, self.typed, result_ty);
+        let bytes = self
+            .builder
+            .insert(p::ptrdiff(self.context, lhs, rhs, result_ty).build())
+            .result();
+        let size = source_type_layout(self.typed, *pointee).0;
+        if size == 1 {
+            return bytes;
+        }
+        let divisor = self
+            .builder
+            .insert(b::constant(self.context, size as i64, result_ty).build())
+            .result();
+        self.builder
+            .insert(b::divsi(self.context, bytes, divisor, result_ty).build())
+            .result()
+    }
+
     /// Lower a function: spill parameters into stack slots, then lower each body
     /// statement in source order (statement order is a side-effect ordering, so it
     /// stays top-down; only the expressions within use the post-order iterator).
@@ -1438,6 +1466,9 @@ impl FnCodegen<'_> {
                         self.typed.types().kind(lhs_ty),
                         self.typed.types().kind(rhs_ty),
                     ) {
+                        (AstKind::Sub, TypeKind::Pointer(_), TypeKind::Pointer(_)) => {
+                            self.lower_pointer_difference(l, r, lhs_ty, source_ty)
+                        }
                         (
                             AstKind::Add | AstKind::Sub,
                             TypeKind::Pointer(_),

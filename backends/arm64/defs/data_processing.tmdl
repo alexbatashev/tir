@@ -585,6 +585,12 @@ pseudo instruction SelectSignedDivideWord for [ARMv8A64] {
     }
 }
 
+pseudo instruction SelectSignedDivideConstant for [ARMv8A64] {
+    param OPNAME: String = "select_sdiv_constant";
+    operands { rd: GPR, rn: GPR, divisor: bits<16>, }
+    behavior { rd = rn / zext(divisor, self.XLEN); }
+}
+
 pseudo instruction SelectUnsignedDivide for [ARMv8A64] {
     param OPNAME: String = "select_udiv";
     operands { rd: GPR, rn: GPR, rm: GPR, }

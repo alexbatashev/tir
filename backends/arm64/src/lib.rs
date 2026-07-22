@@ -514,6 +514,36 @@ fn lower_divrem_pseudo(
     lower!(SelectUnsignedDivideOp, UnsignedDivideOpBuilder);
     lower!(SelectUnsignedDivideWordOp, UnsignedDivideWordOpBuilder);
 
+    if op.as_op::<SelectSignedDivideConstantOp>().is_some() {
+        let rd = attr("rd")?;
+        let result = match &rd {
+            tir::attributes::AttributeValue::Register(tir::attributes::RegisterAttr::Virtual {
+                id,
+                ..
+            }) => tir::ValueId::from_number(*id),
+            _ => {
+                return Err(tir::PassError::InvalidRuleSet(
+                    "constant division pseudo result is not virtual".to_string(),
+                ));
+            }
+        };
+        let divisor = context
+            .create_value(context.get_value(result).ty(), None)
+            .id();
+        let materialize = MoveWideZeroOpBuilder::new(context)
+            .attr("rd", virt(divisor.number(), RegClass::GPR.id()))
+            .attr("imm", attr("divisor")?)
+            .build();
+        let divide = SignedDivideOpBuilder::new(context)
+            .attr("rd", rd)
+            .attr("rn", attr("rn")?)
+            .attr("rm", virt(divisor.number(), RegClass::GPR.id()))
+            .build();
+        rewriter.insert_op_before(op, &materialize)?;
+        rewriter.replace_op(op, &divide)?;
+        return Ok(true);
+    }
+
     macro_rules! lower_remainder {
         ($Pseudo:ty, $Divide:ident, $MultiplySub:ident) => {
             if op.as_op::<$Pseudo>().is_some() {
