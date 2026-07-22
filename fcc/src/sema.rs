@@ -959,8 +959,8 @@ impl Analyzer<'_> {
                 return;
             }
         };
-        let elements = self.ast.children(initializer).collect::<Vec<_>>();
-        if elements.len() as u64 > length {
+        let values = self.ast.children(initializer).collect::<Vec<_>>();
+        if values.len() as u64 > length {
             self.diagnostics.push(
                 InvalidOperands::new(
                     self.ast.get_node(initializer).span,
@@ -970,29 +970,37 @@ impl Analyzer<'_> {
                 .into(),
             );
         }
-        for value in elements.into_iter().take(length as usize) {
-            let source = self
-                .ast
-                .get_annotation(value)
-                .and_then(|info| info.ty)
-                .unwrap_or(element);
-            if !self.assignment_compatible(element, source, value) {
-                self.diagnostics.push(
-                    IncompatibleConversion::new(
-                        self.ast.get_node(value).span,
-                        None,
-                        format!(
-                            "cannot initialize array element of {} type with {} value",
-                            self.type_category(element),
-                            self.type_category(source)
-                        ),
-                        initializer_reference(self.options),
-                    )
-                    .into(),
-                );
-            } else {
-                self.record_conversion(value, element);
-            }
+        for value in values.into_iter().take(length as usize) {
+            self.validate_initializer_value(element, value);
+        }
+    }
+
+    fn validate_initializer_value(&mut self, target: QualType, value: NodeId) {
+        if self.ast.get_node(value).kind == AstKind::InitializerList {
+            self.validate_initializer_list(target, value);
+            return;
+        }
+        let source = self
+            .ast
+            .get_annotation(value)
+            .and_then(|info| info.ty)
+            .unwrap_or(target);
+        if !self.assignment_compatible(target, source, value) {
+            self.diagnostics.push(
+                IncompatibleConversion::new(
+                    self.ast.get_node(value).span,
+                    None,
+                    format!(
+                        "cannot initialize array element of {} type with {} value",
+                        self.type_category(target),
+                        self.type_category(source)
+                    ),
+                    initializer_reference(self.options),
+                )
+                .into(),
+            );
+        } else {
+            self.record_conversion(value, target);
         }
     }
 

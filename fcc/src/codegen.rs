@@ -579,6 +579,94 @@ impl FnCodegen<'_> {
             .result()
     }
 
+    fn offset_address(&mut self, base: ValueId, offset: u64, element: QualType) -> ValueId {
+        let offset_ty = IntegerType::new(self.context, self.typed.target().pointer_width());
+        let offset = self
+            .builder
+            .insert(b::constant(self.context, offset as i64, offset_ty).build())
+            .result();
+        let element = lower_type(self.context, self.typed, element);
+        self.builder
+            .insert(
+                p::ptradd(
+                    self.context,
+                    base,
+                    offset,
+                    PtrType::typed(self.context, element),
+                )
+                .build(),
+            )
+            .result()
+    }
+
+    fn lower_initializer(
+        &mut self,
+        target: QualType,
+        address: ValueId,
+        initializer: NodeId,
+    ) -> Result<(), Diagnostic> {
+        if let TypeKind::Array(element, Some(length)) = self.typed.types().kind(target) {
+            let (element, length) = (*element, *length);
+            let values = self.ast.children(initializer).collect::<Vec<_>>();
+            let element_size = source_type_layout(self.typed, element).0;
+            for index in 0..length {
+                let element_address = self.offset_address(address, index * element_size, element);
+                if let Some(&value) = values.get(index as usize) {
+                    self.lower_initializer(element, element_address, value)?;
+                } else {
+                    self.zero_initialize(element, element_address, initializer)?;
+                }
+            }
+            return Ok(());
+        }
+        if self.ast.get_node(initializer).kind == AstKind::InitializerList {
+            let value = self.ast.children(initializer).next().unwrap();
+            return self.lower_initializer(target, address, value);
+        }
+        let value = self.lower_expr(initializer)?;
+        self.builder
+            .insert(p::store(self.context, value, address).build());
+        Ok(())
+    }
+
+    fn zero_initialize(
+        &mut self,
+        target: QualType,
+        address: ValueId,
+        initializer: NodeId,
+    ) -> Result<(), Diagnostic> {
+        if let TypeKind::Array(element, Some(length)) = self.typed.types().kind(target) {
+            let (element, length) = (*element, *length);
+            let element_size = source_type_layout(self.typed, element).0;
+            for index in 0..length {
+                let element_address = self.offset_address(address, index * element_size, element);
+                self.zero_initialize(element, element_address, initializer)?;
+            }
+            return Ok(());
+        }
+        let ir_type = lower_type(self.context, self.typed, target);
+        let value = match self.typed.types().kind(target) {
+            TypeKind::Double => self
+                .builder
+                .insert(b::constantf(self.context, 0.0, ir_type).build())
+                .result(),
+            TypeKind::Integer(_) | TypeKind::Enum(_) => self
+                .builder
+                .insert(b::constant(self.context, 0, ir_type).build())
+                .result(),
+            _ => {
+                return Err(unsupported(
+                    self.ast,
+                    initializer,
+                    "zero initialization of aggregate array element".to_string(),
+                ));
+            }
+        };
+        self.builder
+            .insert(p::store(self.context, value, address).build());
+        Ok(())
+    }
+
     /// Lower a function: spill parameters into stack slots, then lower each body
     /// statement in source order (statement order is a side-effect ordering, so it
     /// stays top-down; only the expressions within use the post-order iterator).
@@ -638,60 +726,8 @@ impl FnCodegen<'_> {
                 let (size, align) = source_type_layout(self.typed, source_ty);
                 let slot = self.alloca(elem, size, align);
                 if let Some(init) = ast.children(stmt).next() {
-                    if let Some((element, length)) = array {
-                        let values = ast.children(init).collect::<Vec<_>>();
-                        let element_size = source_type_layout(self.typed, element).0;
-                        let offset_ty =
-                            IntegerType::new(self.context, self.typed.target().pointer_width());
-                        for index in 0..length {
-                            let offset = self
-                                .builder
-                                .insert(
-                                    b::constant(
-                                        self.context,
-                                        (index * element_size) as i64,
-                                        offset_ty,
-                                    )
-                                    .build(),
-                                )
-                                .result();
-                            let address = self
-                                .builder
-                                .insert(
-                                    p::ptradd(
-                                        self.context,
-                                        slot.ptr,
-                                        offset,
-                                        PtrType::typed(self.context, elem),
-                                    )
-                                    .build(),
-                                )
-                                .result();
-                            let value = if let Some(&value) = values.get(index as usize) {
-                                self.lower_expr(value)?
-                            } else {
-                                match self.typed.types().kind(element) {
-                                    TypeKind::Double => self
-                                        .builder
-                                        .insert(b::constantf(self.context, 0.0, elem).build())
-                                        .result(),
-                                    TypeKind::Integer(_) | TypeKind::Enum(_) => self
-                                        .builder
-                                        .insert(b::constant(self.context, 0, elem).build())
-                                        .result(),
-                                    _ => {
-                                        return Err(unsupported(
-                                            ast,
-                                            init,
-                                            "zero initialization of aggregate array element"
-                                                .to_string(),
-                                        ));
-                                    }
-                                }
-                            };
-                            self.builder
-                                .insert(p::store(self.context, value, address).build());
-                        }
+                    if array.is_some() {
+                        self.lower_initializer(source_ty, slot.ptr, init)?;
                     } else {
                         let value = self.lower_expr(init)?;
                         self.builder

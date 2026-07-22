@@ -287,6 +287,26 @@ fn local_array_initializer_infers_omitted_bound() {
 }
 
 #[test]
+fn nested_array_initializer_uses_row_major_storage() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "int main(void) { int values[2][3] = {{11, 22, 33}, {44, 55}}; return sizeof(values) == 24 && values[1][0] == 44 && values[1][2] == 0 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn nested_array_initializer_infers_outer_bound() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "int main(void) { int values[][2] = {{11, 22}, {33, 44}}; return sizeof(values) == 16 && values[1][1] == 44 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
 fn bitwise_and_shifts_match_host_compiler() {
     if !cc_available() {
         return;
