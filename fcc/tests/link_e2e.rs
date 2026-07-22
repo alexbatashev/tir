@@ -225,6 +225,17 @@ fn integer_plus_pointer_scales_by_pointee_size() {
 }
 
 #[test]
+fn pointer_subscript_scales_by_pointee_size() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "int third(int *values) { return values[2]; }\n",
+        "int third(int *); int main(void) { int values[3] = {11, 22, 37}; return third(values) == 37 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
 fn bitwise_and_shifts_match_host_compiler() {
     if !cc_available() {
         return;
