@@ -439,6 +439,7 @@ fn scalar_root_kind(kind: &tir::sem::SymKind) -> bool {
             | K::SIToFP
             | K::UIToFP
             | K::FPToSI
+            | K::FPToUI
     )
 }
 

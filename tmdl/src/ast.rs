@@ -592,6 +592,8 @@ pub enum BuiltinFunction {
     UIToFP,
     /// IEEE 754 binary floating point to signed integer, rounding toward zero.
     FPToSI,
+    /// IEEE 754 binary floating point to unsigned integer, rounding toward zero.
+    FPToUI,
     /// `todo()`: the instruction's semantics are not modeled. It suppresses
     /// instruction-selection rule generation (the op still exists, prints, and
     /// parses) and its `execute()` traps. For behaviors the TMDL expression
@@ -1684,6 +1686,12 @@ impl Call {
                 let input = self.arguments[0].lower_with_ctx(ctx);
                 let width = self.arguments[1].lower_with_ctx(ctx);
                 ctx.add_node(tir::sem::SymKind::FPToSI, &[input, width])
+            }
+            BuiltinFunction::FPToUI => {
+                assert!(self.arguments.len() == 2, "fptoui requires 2 arguments");
+                let input = self.arguments[0].lower_with_ctx(ctx);
+                let width = self.arguments[1].lower_with_ctx(ctx);
+                ctx.add_node(tir::sem::SymKind::FPToUI, &[input, width])
             }
             // `todo()` marks unmodeled semantics; rustgen suppresses selection-rule
             // and `execute()` lowering for such behaviors, so this is never reached.

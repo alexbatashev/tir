@@ -44,7 +44,7 @@ pub fn infer_types<V>(
                     _ => inference.fresh_float(),
                 }
             }
-            SymKind::FPToSI => {
+            SymKind::FPToSI | SymKind::FPToUI => {
                 let operand = inference.fresh_float();
                 inference.unify(&child(0), &operand)?;
                 let width = inference.fresh_bits();
@@ -239,7 +239,7 @@ pub fn infer_widths<V>(
                     _ => None,
                 },
 
-                SymKind::FPToSI => children
+                SymKind::FPToSI | SymKind::FPToUI => children
                     .get(1)
                     .and_then(|&c| const_u64(graph, c))
                     .map(|width| width as u32),
@@ -450,7 +450,12 @@ fn canon_rebuild<V: Clone>(
         && children.len() == 2
         && matches!(
             graph.get_node(children[0]),
-            SymKind::Div | SymKind::UDiv | SymKind::SRem | SymKind::URem | SymKind::FPToSI
+            SymKind::Div
+                | SymKind::UDiv
+                | SymKind::SRem
+                | SymKind::URem
+                | SymKind::FPToSI
+                | SymKind::FPToUI
         )
         && let Some(width) = infer_widths(graph, |_| None)[children[0].index()]
     {
