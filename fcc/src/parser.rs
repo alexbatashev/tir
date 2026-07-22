@@ -735,14 +735,20 @@ fn decl_body<'src, I>() -> impl Parser<'src, I, NodeId, Extra<'src>> + Clone
 where
     I: ValueInput<'src, Token = Token, Span = Span>,
 {
+    let array_length = select! { Token::IntegerLiteral(value) => value.spelling }
+        .or_not()
+        .delimited_by(just(Token::LBracket), just(Token::RBracket));
     ctype()
-        .then(ident())
+        .then(ident().then(array_length.repeated().collect::<Vec<Option<String>>>()))
         .then(just(Token::Assign).ignore_then(expr()).or_not())
         .map_with(
-            |((ty, name), init), e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
+            |((ty, (name, dimensions)), init), e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
                 let tok = e.span().start;
                 let st = &mut e.state().0;
                 st.declare_ordinary(name.clone());
+                let ty = dimensions.into_iter().rev().fold(ty, |element, length| {
+                    CType::Array(Box::new(element), length)
+                });
                 let id = st.add(AstKind::Decl, tok);
                 st.ast.set_leaf_data(id, AstLeaf::Decl { name, ty });
                 if let Some(init) = init {

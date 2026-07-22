@@ -154,6 +154,19 @@ fn rejects_object_with_incomplete_struct_type() {
 }
 
 #[test]
+fn rejects_local_array_with_incomplete_type() {
+    let output = diagnostics(
+        "int main(void) { int values[]; return 0; }",
+        "c23".parse().unwrap(),
+    );
+
+    assert!(
+        output.contains("object 'values' has incomplete array type"),
+        "{output}"
+    );
+}
+
+#[test]
 fn rejects_redefinition_in_same_scope() {
     let output = diagnostics(
         "int main(void) { int value; int value; return 0; }",

@@ -236,6 +236,26 @@ fn pointer_subscript_scales_by_pointee_size() {
 }
 
 #[test]
+fn local_array_storage_is_contiguous() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "int main(void) { int values[3]; values[0] = 11; values[1] = 22; values[2] = 37; return values[0] + values[1] + values[2] - 70; }\n",
+    );
+}
+
+#[test]
+fn local_array_decays_when_passed_to_function() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "int sum(int *values) { return values[0] + values[1] + values[2]; } int main(void) { int values[3]; values[0] = 11; values[1] = 22; values[2] = 37; return sum(values) - 70; }\n",
+    );
+}
+
+#[test]
 fn bitwise_and_shifts_match_host_compiler() {
     if !cc_available() {
         return;
