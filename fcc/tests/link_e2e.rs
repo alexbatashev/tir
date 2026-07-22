@@ -256,6 +256,26 @@ fn local_array_decays_when_passed_to_function() {
 }
 
 #[test]
+fn local_array_initializer_zero_fills_remainder() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "int main(void) { int values[3] = {11, 22}; return values[0] + values[1] + values[2] - 33; }\n",
+    );
+}
+
+#[test]
+fn local_array_initializer_infers_omitted_bound() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "int main(void) { int values[] = {11, 22, 37}; return sizeof(values) == 12 && values[2] == 37 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
 fn bitwise_and_shifts_match_host_compiler() {
     if !cc_available() {
         return;

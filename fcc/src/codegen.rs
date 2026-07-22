@@ -599,18 +599,76 @@ impl FnCodegen<'_> {
                     unreachable!("decl node carries a decl payload");
                 };
                 let source_ty = node_type(self.typed, stmt);
-                let elem = match self.typed.types().kind(source_ty) {
-                    TypeKind::Array(element, Some(_)) => {
-                        lower_type(self.context, self.typed, *element)
-                    }
+                let array = match self.typed.types().kind(source_ty) {
+                    TypeKind::Array(element, Some(length)) => Some((*element, *length)),
+                    _ => None,
+                };
+                let elem = match array {
+                    Some((element, _)) => lower_type(self.context, self.typed, element),
                     _ => lower_type(self.context, self.typed, source_ty),
                 };
                 let (size, align) = source_type_layout(self.typed, source_ty);
                 let slot = self.alloca(elem, size, align);
                 if let Some(init) = ast.children(stmt).next() {
-                    let value = self.lower_expr(init)?;
-                    self.builder
-                        .insert(p::store(self.context, value, slot.ptr).build());
+                    if let Some((element, length)) = array {
+                        let values = ast.children(init).collect::<Vec<_>>();
+                        let element_size = source_type_layout(self.typed, element).0;
+                        let offset_ty =
+                            IntegerType::new(self.context, self.typed.target().pointer_width());
+                        for index in 0..length {
+                            let offset = self
+                                .builder
+                                .insert(
+                                    b::constant(
+                                        self.context,
+                                        (index * element_size) as i64,
+                                        offset_ty,
+                                    )
+                                    .build(),
+                                )
+                                .result();
+                            let address = self
+                                .builder
+                                .insert(
+                                    p::ptradd(
+                                        self.context,
+                                        slot.ptr,
+                                        offset,
+                                        PtrType::typed(self.context, elem),
+                                    )
+                                    .build(),
+                                )
+                                .result();
+                            let value = if let Some(&value) = values.get(index as usize) {
+                                self.lower_expr(value)?
+                            } else {
+                                match self.typed.types().kind(element) {
+                                    TypeKind::Double => self
+                                        .builder
+                                        .insert(b::constantf(self.context, 0.0, elem).build())
+                                        .result(),
+                                    TypeKind::Integer(_) | TypeKind::Enum(_) => self
+                                        .builder
+                                        .insert(b::constant(self.context, 0, elem).build())
+                                        .result(),
+                                    _ => {
+                                        return Err(unsupported(
+                                            ast,
+                                            init,
+                                            "zero initialization of aggregate array element"
+                                                .to_string(),
+                                        ));
+                                    }
+                                }
+                            };
+                            self.builder
+                                .insert(p::store(self.context, value, address).build());
+                        }
+                    } else {
+                        let value = self.lower_expr(init)?;
+                        self.builder
+                            .insert(p::store(self.context, value, slot.ptr).build());
+                    }
                 }
                 self.locals.insert(node_entity(self.typed, stmt), slot);
                 Ok(())
