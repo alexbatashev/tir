@@ -71,6 +71,7 @@ struct FnCodegen<'a> {
     locals: HashMap<EntityId, Slot>,
     globals: &'a HashMap<EntityId, Global>,
     signatures: &'a HashMap<EntityId, Signature>,
+    return_abi: &'a AbiReturn,
     loop_scopes: Vec<ValueId>,
     break_scopes: Vec<BreakScope>,
     terminated: bool,
@@ -81,7 +82,7 @@ struct FnCodegen<'a> {
 
 #[derive(Clone)]
 struct Signature {
-    ret: TypeId,
+    ret: AbiReturn,
     params: Vec<AbiParameter>,
     varargs: bool,
 }
@@ -95,6 +96,12 @@ struct AbiParameter {
 struct AbiPiece {
     offset: u64,
     ty: TypeId,
+}
+
+#[derive(Clone)]
+struct AbiReturn {
+    ty: TypeId,
+    aggregate: Option<AbiPiece>,
 }
 
 impl Signature {
@@ -187,7 +194,7 @@ pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnost
                 module_builder.insert(b::declare_op(
                     context,
                     name,
-                    sig.ret,
+                    sig.ret.ty,
                     &sig.argument_types(context),
                 ));
             }
@@ -465,13 +472,33 @@ fn lower_signature(
         node_entity(typed, item),
         Signature {
             ret: match typed.types().kind(node_type(typed, item)) {
-                TypeKind::Function { ret, .. } => lower_type(context, typed, *ret),
+                TypeKind::Function { ret, .. } => classify_abi_return(context, typed, *ret),
                 _ => unreachable!("function node has function semantic type"),
             },
             params,
             varargs,
         },
     ))
+}
+
+fn classify_abi_return(context: &Context, typed: &TypedAst, ty: QualType) -> AbiReturn {
+    if matches!(typed.types().kind(ty), TypeKind::Record(_)) {
+        let parameter = classify_abi_parameter(context, typed, ty);
+        if let [piece] = parameter.pieces.as_slice()
+            && (context.get_type_data(piece.ty).as_ref() as &dyn std::any::Any)
+                .downcast_ref::<StructType>()
+                .is_none()
+        {
+            return AbiReturn {
+                ty: piece.ty,
+                aggregate: Some(*piece),
+            };
+        }
+    }
+    AbiReturn {
+        ty: lower_type(context, typed, ty),
+        aggregate: None,
+    }
 }
 
 fn classify_abi_parameter(context: &Context, typed: &TypedAst, ty: QualType) -> AbiParameter {
@@ -535,10 +562,6 @@ fn lower_function(
     let AstLeaf::Function { name, .. } = ast.get_leaf_data(func).unwrap() else {
         unreachable!("function node carries a function payload");
     };
-    let ret_ty = match typed.types().kind(node_type(typed, func)) {
-        TypeKind::Function { ret, .. } => lower_type(context, typed, *ret),
-        _ => unreachable!("function node has function semantic type"),
-    };
     let signature = &signatures[&node_entity(typed, func)];
 
     // Entry block arguments carry the incoming parameter values; parameters are
@@ -555,7 +578,7 @@ fn lower_function(
     let block = context.create_block(param_values);
     region.add_block(block.id());
 
-    let func_op = b::func(context, name.as_str(), ret_ty, Some(region.id())).build();
+    let func_op = b::func(context, name.as_str(), signature.ret.ty, Some(region.id())).build();
 
     let mut cg = FnCodegen {
         context,
@@ -566,6 +589,7 @@ fn lower_function(
         locals: HashMap::new(),
         globals,
         signatures,
+        return_abi: &signature.ret,
         loop_scopes: Vec::new(),
         break_scopes: Vec::new(),
         terminated: false,
@@ -1113,7 +1137,7 @@ impl FnCodegen<'_> {
             }
             AstKind::Return => {
                 let operand = match ast.children(stmt).next() {
-                    Some(e) => Operand::from(self.lower_expr(e)?),
+                    Some(e) => Operand::from(self.lower_return_value(e)?),
                     None => Operand::none(),
                 };
                 self.builder
@@ -1682,6 +1706,25 @@ impl FnCodegen<'_> {
         Ok(vec![self.materialize(expression)])
     }
 
+    fn lower_return_value(&mut self, node: NodeId) -> Result<ValueId, Diagnostic> {
+        let expression = self.lower_expr_value(node)?;
+        let Some(piece) = self.return_abi.aggregate else {
+            return Ok(self.materialize(expression));
+        };
+        let LoweredExpr::Address { ptr, .. } = expression else {
+            return Err(unsupported(
+                self.ast,
+                node,
+                "non-addressable aggregate return value".to_string(),
+            ));
+        };
+        let address = self.offset_address_ir(ptr, piece.offset, piece.ty);
+        Ok(self
+            .builder
+            .insert(p::load(self.context, address, piece.ty).build())
+            .result())
+    }
+
     fn lower_expr(&mut self, root: NodeId) -> Result<ValueId, Diagnostic> {
         let expression = self.lower_expr_value(root)?;
         Ok(self.materialize(expression))
@@ -1863,11 +1906,25 @@ impl FnCodegen<'_> {
                             args.push(self.materialize(expression));
                         }
                     }
-                    LoweredExpr::Value(
+                    let result = self
+                        .builder
+                        .insert(b::call(self.context, args, name.as_str(), sig.ret.ty).build())
+                        .result();
+                    if let Some(piece) = sig.ret.aggregate {
+                        let source_ty = node_type(self.typed, node);
+                        let elem = lower_type(self.context, self.typed, source_ty);
+                        let (size, align) = source_type_layout(self.typed, source_ty);
+                        let slot = self.alloca(elem, size, align);
+                        let address = self.offset_address_ir(slot.ptr, piece.offset, piece.ty);
                         self.builder
-                            .insert(b::call(self.context, args, name.as_str(), sig.ret).build())
-                            .result(),
-                    )
+                            .insert(p::store(self.context, result, address).build());
+                        LoweredExpr::Address {
+                            ptr: slot.ptr,
+                            elem,
+                        }
+                    } else {
+                        LoweredExpr::Value(result)
+                    }
                 }
                 kind @ (AstKind::Add
                 | AstKind::Sub

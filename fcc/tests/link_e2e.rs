@@ -1128,6 +1128,28 @@ fn two_word_struct_call_matches_host_abi() {
 }
 
 #[test]
+fn one_word_struct_return_matches_host_abi() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "struct Box { int value; }; struct Box make(int value) { struct Box box = {value}; return box; }\n",
+        "struct Box { int value; }; struct Box make(int); int main(void) { return make(42).value == 42 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn one_word_struct_return_call_matches_host_abi() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "struct Box { int value; }; struct Box make(int); int main(void) { return make(42).value == 42 ? 0 : 1; }\n",
+        "struct Box { int value; }; struct Box make(int value) { struct Box box = {value}; return box; }\n",
+    );
+}
+
+#[test]
 fn whole_struct_copy_executes_through_driver() {
     if !cc_available() {
         return;
