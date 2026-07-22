@@ -729,6 +729,39 @@ fn unary(st: &mut ParseState, op: AstKind, operand: NodeId, tok: usize) -> NodeI
     id
 }
 
+fn collect_initializer_elements(ast: &Ast, node: NodeId, elements: &mut Vec<NodeId>) {
+    if ast.get_node(node).kind == AstKind::Comma {
+        for child in ast.children(node) {
+            collect_initializer_elements(ast, child, elements);
+        }
+    } else {
+        elements.push(node);
+    }
+}
+
+fn initializer<'src, I>() -> impl Parser<'src, I, NodeId, Extra<'src>> + Clone
+where
+    I: ValueInput<'src, Token = Token, Span = Span>,
+{
+    expr()
+        .or_not()
+        .delimited_by(just(Token::LBrace), just(Token::RBrace))
+        .map_with(|value, e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
+            let tok = e.span().start;
+            let st = &mut e.state().0;
+            let id = st.add(AstKind::InitializerList, tok);
+            if let Some(value) = value {
+                let mut elements = Vec::new();
+                collect_initializer_elements(&st.ast, value, &mut elements);
+                for element in elements {
+                    st.ast.add_edge(id, element);
+                }
+            }
+            id
+        })
+        .or(expr())
+}
+
 /// Build an `int x = init` declaration node (without the trailing `;`, so the
 /// same body serves both a declaration statement and a `for` init clause).
 fn decl_body<'src, I>() -> impl Parser<'src, I, NodeId, Extra<'src>> + Clone
@@ -740,7 +773,7 @@ where
         .delimited_by(just(Token::LBracket), just(Token::RBracket));
     ctype()
         .then(ident().then(array_length.repeated().collect::<Vec<Option<String>>>()))
-        .then(just(Token::Assign).ignore_then(expr()).or_not())
+        .then(just(Token::Assign).ignore_then(initializer()).or_not())
         .map_with(
             |((ty, (name, dimensions)), init), e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
                 let tok = e.span().start;

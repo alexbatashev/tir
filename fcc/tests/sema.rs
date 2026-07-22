@@ -167,6 +167,19 @@ fn rejects_local_array_with_incomplete_type() {
 }
 
 #[test]
+fn rejects_excess_array_initializers() {
+    let output = diagnostics(
+        "int main(void) { int values[1] = {11, 22}; return 0; }",
+        "c23".parse().unwrap(),
+    );
+
+    assert!(
+        output.contains("too many initializers for array"),
+        "{output}"
+    );
+}
+
+#[test]
 fn rejects_redefinition_in_same_scope() {
     let output = diagnostics(
         "int main(void) { int value; int value; return 0; }",

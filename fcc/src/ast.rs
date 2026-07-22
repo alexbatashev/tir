@@ -115,6 +115,8 @@ pub enum AstKind {
     VarArgs,
     /// Child: the optional initializer expression.
     Decl,
+    /// Children: initializer expressions in source order.
+    InitializerList,
     /// Child: the assigned value expression.
     Assign,
     AssignExpr,
@@ -387,6 +389,7 @@ fn render_node(ast: &Ast, id: NodeId, depth: usize, out: &mut String) {
             Some(AstLeaf::Decl { name, ty }) => format!("Decl {name:?}: {}", render_ctype(ty)),
             _ => unreachable!(),
         },
+        AstKind::InitializerList => "InitializerList".to_string(),
         AstKind::Assign => match ast.get_leaf_data(id) {
             Some(AstLeaf::Assign(name)) => format!("Assign {name:?}"),
             _ => unreachable!(),

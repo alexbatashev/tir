@@ -832,7 +832,17 @@ impl Analyzer<'_> {
         }
         let span = self.ast.get_node(node).span;
         self.validate_parsed_type(span, &parsed_ty);
-        let ty = self.canonical_type(&parsed_ty);
+        let children = self.ast.children(node).collect::<Vec<_>>();
+        let mut ty = self.canonical_type(&parsed_ty);
+        if self.ast.get_node(node).kind == AstKind::Decl
+            && let Some(&initializer) = children.first()
+            && self.ast.get_node(initializer).kind == AstKind::InitializerList
+            && let TypeKind::Array(element, None) = self.types.kind(ty)
+        {
+            let element = *element;
+            let length = self.ast.children(initializer).count() as u64;
+            ty = self.types.intern(TypeKind::Array(element, Some(length)));
+        }
         if !typedef {
             let message = match self.types.kind(ty) {
                 TypeKind::Void => Some(format!("object '{name}' cannot have void type")),
@@ -898,13 +908,16 @@ impl Analyzer<'_> {
                 },
             );
         }
-        let children = self.ast.children(node).collect::<Vec<_>>();
         for &child in &children {
             self.node(child);
         }
         if self.ast.get_node(node).kind == AstKind::Decl
             && let Some(&initializer) = children.first()
         {
+            if self.ast.get_node(initializer).kind == AstKind::InitializerList {
+                self.validate_initializer_list(ty, initializer);
+                return;
+            }
             let source = self
                 .ast
                 .get_annotation(initializer)
@@ -926,6 +939,59 @@ impl Analyzer<'_> {
                 );
             } else {
                 self.record_conversion(initializer, ty);
+            }
+        }
+    }
+
+    fn validate_initializer_list(&mut self, target: QualType, initializer: NodeId) {
+        let (element, length) = match self.types.kind(target) {
+            TypeKind::Array(element, Some(length)) => (*element, *length),
+            _ => {
+                self.diagnostics.push(
+                    IncompatibleConversion::new(
+                        self.ast.get_node(initializer).span,
+                        None,
+                        "brace initializer requires an array object",
+                        initializer_reference(self.options),
+                    )
+                    .into(),
+                );
+                return;
+            }
+        };
+        let elements = self.ast.children(initializer).collect::<Vec<_>>();
+        if elements.len() as u64 > length {
+            self.diagnostics.push(
+                InvalidOperands::new(
+                    self.ast.get_node(initializer).span,
+                    "too many initializers for array",
+                    initializer_reference(self.options),
+                )
+                .into(),
+            );
+        }
+        for value in elements.into_iter().take(length as usize) {
+            let source = self
+                .ast
+                .get_annotation(value)
+                .and_then(|info| info.ty)
+                .unwrap_or(element);
+            if !self.assignment_compatible(element, source, value) {
+                self.diagnostics.push(
+                    IncompatibleConversion::new(
+                        self.ast.get_node(value).span,
+                        None,
+                        format!(
+                            "cannot initialize array element of {} type with {} value",
+                            self.type_category(element),
+                            self.type_category(source)
+                        ),
+                        initializer_reference(self.options),
+                    )
+                    .into(),
+                );
+            } else {
+                self.record_conversion(value, element);
             }
         }
     }
