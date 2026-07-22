@@ -707,8 +707,12 @@ impl FnCodegen<'_> {
                 let step_block = self.context.create_block(vec![]);
                 step_region.add_block(step_block.id());
                 self.in_block(step_block.clone(), |cg| {
-                    if ast.get_node(*step).kind != AstKind::Empty {
-                        cg.lower_stmt(*step)?;
+                    match ast.get_node(*step).kind {
+                        AstKind::Empty => {}
+                        AstKind::Assign => cg.lower_stmt(*step)?,
+                        _ => {
+                            cg.lower_expr(*step)?;
+                        }
                     }
                     cg.ensure_cir_yield(step_block);
                     Ok(())
