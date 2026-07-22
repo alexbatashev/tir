@@ -605,6 +605,26 @@ impl FnCodegen<'_> {
         address: ValueId,
         initializer: NodeId,
     ) -> Result<(), Diagnostic> {
+        if let TypeKind::Record(id) = self.typed.types().kind(target) {
+            let fields = self
+                .typed
+                .record(*id)
+                .unwrap()
+                .fields
+                .iter()
+                .map(|field| (field.ty, field.offset))
+                .collect::<Vec<_>>();
+            let values = self.ast.children(initializer).collect::<Vec<_>>();
+            for (index, (field, offset)) in fields.into_iter().enumerate() {
+                let field_address = self.offset_address(address, offset, field);
+                if let Some(&value) = values.get(index) {
+                    self.lower_initializer(field, field_address, value)?;
+                } else {
+                    self.zero_initialize(field, field_address, initializer)?;
+                }
+            }
+            return Ok(());
+        }
         if let TypeKind::Array(element, Some(length)) = self.typed.types().kind(target) {
             let (element, length) = (*element, *length);
             let values = self.ast.children(initializer).collect::<Vec<_>>();
@@ -635,6 +655,21 @@ impl FnCodegen<'_> {
         address: ValueId,
         initializer: NodeId,
     ) -> Result<(), Diagnostic> {
+        if let TypeKind::Record(id) = self.typed.types().kind(target) {
+            let fields = self
+                .typed
+                .record(*id)
+                .unwrap()
+                .fields
+                .iter()
+                .map(|field| (field.ty, field.offset))
+                .collect::<Vec<_>>();
+            for (field, offset) in fields {
+                let field_address = self.offset_address(address, offset, field);
+                self.zero_initialize(field, field_address, initializer)?;
+            }
+            return Ok(());
+        }
         if let TypeKind::Array(element, Some(length)) = self.typed.types().kind(target) {
             let (element, length) = (*element, *length);
             let element_size = source_type_layout(self.typed, element).0;
@@ -726,7 +761,7 @@ impl FnCodegen<'_> {
                 let (size, align) = source_type_layout(self.typed, source_ty);
                 let slot = self.alloca(elem, size, align);
                 if let Some(init) = ast.children(stmt).next() {
-                    if array.is_some() {
+                    if ast.get_node(init).kind == AstKind::InitializerList {
                         self.lower_initializer(source_ty, slot.ptr, init)?;
                     } else {
                         let value = self.lower_expr(init)?;

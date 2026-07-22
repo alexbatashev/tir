@@ -944,6 +944,28 @@ impl Analyzer<'_> {
     }
 
     fn validate_initializer_list(&mut self, target: QualType, initializer: NodeId) {
+        if let TypeKind::Record(id) = self.types.kind(target) {
+            let fields = self.records[self.record_indices[id]]
+                .fields
+                .iter()
+                .map(|field| field.ty)
+                .collect::<Vec<_>>();
+            let values = self.ast.children(initializer).collect::<Vec<_>>();
+            if values.len() > fields.len() {
+                self.diagnostics.push(
+                    InvalidOperands::new(
+                        self.ast.get_node(initializer).span,
+                        "too many initializers for record",
+                        initializer_reference(self.options),
+                    )
+                    .into(),
+                );
+            }
+            for (value, field) in values.into_iter().zip(fields) {
+                self.validate_initializer_value(field, value);
+            }
+            return;
+        }
         let (element, length) = match self.types.kind(target) {
             TypeKind::Array(element, Some(length)) => (*element, *length),
             _ => {

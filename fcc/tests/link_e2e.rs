@@ -1156,3 +1156,23 @@ int main(void) { if (read() == 61) return 0; return 1; }
     compile_fcc(dir.path(), source, "nested-struct");
     assert_eq!(exit_code(&run_program(dir.path(), "nested-struct")), 0);
 }
+
+#[test]
+fn local_record_initializer_follows_field_order() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "struct Pair { int left; int right; }; int main(void) { struct Pair pair = {11, 22}; return pair.left + pair.right - 33; }\n",
+    );
+}
+
+#[test]
+fn nested_record_initializer_zero_fills_fields() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "struct Inner { int left; int right; }; struct Outer { int tag; struct Inner inner; }; int main(void) { struct Outer value = {7, {11}}; return value.tag == 7 && value.inner.left == 11 && value.inner.right == 0 ? 0 : 1; }\n",
+    );
+}
