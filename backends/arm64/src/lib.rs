@@ -609,6 +609,73 @@ fn lower_float_constant_pseudo(
     Ok(true)
 }
 
+fn lower_float_comparison_pseudo(
+    context: &tir::Context,
+    op: &tir::OperationRef,
+    rewriter: &mut tir::Rewriter,
+) -> Result<bool, tir::PassError> {
+    let less = op.as_op::<SelectFloatLessThan64Op>().is_some();
+    let greater_equal = op.as_op::<SelectFloatGreaterEqual64Op>().is_some();
+    let equal = op.as_op::<SelectFloatEqual64Op>().is_some();
+    let not_equal = op.as_op::<SelectFloatNotEqual64Op>().is_some();
+    if !less && !greater_equal && !equal && !not_equal {
+        return Ok(false);
+    }
+    let attr = |name| {
+        op.op()
+            .attributes
+            .iter()
+            .find(|attribute| attribute.name == name)
+            .map(|attribute| attribute.value.clone())
+            .ok_or_else(|| {
+                tir::PassError::InvalidRuleSet(format!(
+                    "float comparison pseudo is missing '{name}'"
+                ))
+            })
+    };
+    let (fa, fb) = if less {
+        (attr("fb")?, attr("fa")?)
+    } else {
+        (attr("fa")?, attr("fb")?)
+    };
+    let compare = FCmpDoubleOpBuilder::new(context)
+        .attr("fa", fa)
+        .attr("fb", fb)
+        .build();
+    rewriter.insert_op_before(op, &compare)?;
+    let rd = attr("rd")?;
+    if less {
+        rewriter.replace_op(
+            op,
+            &ConditionalSetGtOpBuilder::new(context)
+                .attr("rd", rd)
+                .build(),
+        )?;
+    } else if greater_equal {
+        rewriter.replace_op(
+            op,
+            &ConditionalSetGeOpBuilder::new(context)
+                .attr("rd", rd)
+                .build(),
+        )?;
+    } else if equal {
+        rewriter.replace_op(
+            op,
+            &ConditionalSetEqOpBuilder::new(context)
+                .attr("rd", rd)
+                .build(),
+        )?;
+    } else {
+        rewriter.replace_op(
+            op,
+            &ConditionalSetNeOpBuilder::new(context)
+                .attr("rd", rd)
+                .build(),
+        )?;
+    }
+    Ok(true)
+}
+
 /// The AArch64 (ARMv8-A) target, selected via `--march`/`--mcpu`.
 pub struct Arm64Target {
     config: TargetConfig,
@@ -695,6 +762,7 @@ impl tir::backend::TargetMachine for Arm64Target {
         vec![
             lower_divrem_pseudo,
             lower_float_constant_pseudo,
+            lower_float_comparison_pseudo,
             obj::lower_constant,
             obj::lower_addr_of,
         ]

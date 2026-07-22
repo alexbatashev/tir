@@ -876,6 +876,67 @@ instruction FDivDouble for [ARMv8A64] : FPArith64 {
     }
 }
 
+pseudo instruction SelectFloatLessThan64 for [ARMv8A64] {
+    param OPNAME: String = "select_float_less_than64";
+    operands { rd: GPR, fa: FPR64, fb: FPR64, }
+    behavior { rd = fa < fb; }
+}
+
+pseudo instruction SelectFloatGreaterEqual64 for [ARMv8A64] {
+    param OPNAME: String = "select_float_greater_equal64";
+    operands { rd: GPR, fa: FPR64, fb: FPR64, }
+    behavior { rd = fa >= fb; }
+}
+
+pseudo instruction SelectFloatEqual64 for [ARMv8A64] {
+    param OPNAME: String = "select_float_equal64";
+    operands { rd: GPR, fa: FPR64, fb: FPR64, }
+    behavior { rd = fa == fb; }
+}
+
+pseudo instruction SelectFloatNotEqual64 for [ARMv8A64] {
+    param OPNAME: String = "select_float_not_equal64";
+    operands { rd: GPR, fa: FPR64, fb: FPR64, }
+    behavior { rd = fa != fb; }
+}
+
+instruction FCmpDouble for [ARMv8A64] {
+    param MNEMONIC: String = "fcmp";
+    operands { fa: FPR64, fb: FPR64, }
+    encoding {
+        0..4 => 0b00000,
+        5..9 => fa,
+        10..15 => 0b001000,
+        16..20 => fb,
+        21..31 => 0b00011110011,
+    }
+    asm { "{self.MNEMONIC} {fa}, {fb}" }
+    behavior {
+        PSTATE::n = if fa < fb {
+            zext(0b1, 1)
+        } else {
+            zext(0b0, 1)
+        };
+        PSTATE::z = if fa == fb {
+            zext(0b1, 1)
+        } else {
+            zext(0b0, 1)
+        };
+        PSTATE::c = if ((fa != fa) | (fb != fb)) == zext(0b1, 1) {
+            zext(0b1, 1)
+        } else if fa < fb {
+            zext(0b0, 1)
+        } else {
+            zext(0b1, 1)
+        };
+        PSTATE::v = if ((fa != fa) | (fb != fb)) == zext(0b1, 1) {
+            zext(0b1, 1)
+        } else {
+            zext(0b0, 1)
+        };
+    }
+}
+
 // Convert the low signed 32-bit integer in a general register to binary64.
 instruction SCvtfDoubleWord for [ARMv8A64] {
     param MNEMONIC: String = "scvtf";
