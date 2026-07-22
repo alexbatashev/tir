@@ -1869,8 +1869,8 @@ impl InstructionSelectPass {
                         match compiled.capture_meta(*symbol) {
                             Some(meta) if meta.constraint == Some(OperandConstraint::Register) => {
                                 binding.value.is_some()
-                                    || (binding.int.is_some() && fs.has_values(*class))
-                                    || (binding.int.is_none() && !fs.has_values(*class))
+                                    || meta.materialized_constant && binding.int.is_some()
+                                    || !fs.has_values(*class)
                             }
                             Some(meta) if meta.constraint == Some(OperandConstraint::Immediate) => {
                                 binding.int.is_some()

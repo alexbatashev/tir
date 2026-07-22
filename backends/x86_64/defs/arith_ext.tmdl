@@ -278,6 +278,14 @@ pseudo instruction SelectUnsignedRemainder32 for [X86_64] {
     }
 }
 
+pseudo instruction SelectShiftLeftConstant64 for [X86_64] {
+    param OPNAME: String = "select_shift_left_constant64";
+    operands { dst: GPR, imm: bits<32>, }
+    behavior {
+        dst = sext(imm, self.XLEN) << extract(GPR::rcx, 5, 0);
+    }
+}
+
 // Rotates share the 0xC1 shift-immediate layout. Both shifts of the rotate pair
 // are computed with the count masked to the operand width, so a zero count
 // degenerates to `dst | dst`.

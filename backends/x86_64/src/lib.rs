@@ -204,6 +204,56 @@ mod isa {
         Ok(false)
     }
 
+    fn lower_constant_shift_pseudo(
+        context: &tir::Context,
+        op: &tir::OperationRef,
+        rewriter: &mut tir::Rewriter,
+    ) -> Result<bool, tir::PassError> {
+        if op.as_op::<SelectShiftLeftConstant64Op>().is_none() {
+            return Ok(false);
+        }
+        let attr = |name| {
+            op.op()
+                .attributes
+                .iter()
+                .find(|attr| attr.name == name)
+                .map(|attr| attr.value.clone())
+                .ok_or_else(|| {
+                    tir::PassError::InvalidRuleSet(format!(
+                        "constant shift pseudo is missing '{name}'"
+                    ))
+                })
+        };
+        let dst = op
+            .op()
+            .attributes
+            .iter()
+            .find_map(|attr| match (&attr.value, attr.name.as_str()) {
+                (AttributeValue::Register(RegisterAttr::Virtual { id, .. }), "dst") => {
+                    Some(tir::ValueId::from_number(*id))
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                tir::PassError::InvalidRuleSet(
+                    "constant shift pseudo is missing virtual 'dst'".to_string(),
+                )
+            })?;
+        let temp = context.create_value(context.get_value(dst).ty(), None).id();
+        let materialize = MovImmOpBuilder::new(context)
+            .attr("dst", virt(temp.number(), RegClass::GPR.id()))
+            .attr("imm", attr("imm")?)
+            .build();
+        let shift = ShlClOpBuilder::new(context)
+            .attr("dst", virt(dst.number(), RegClass::GPR.id()))
+            .attr("dst_tied", virt(temp.number(), RegClass::GPR.id()))
+            .attr("rcx", attr("rcx")?)
+            .build();
+        rewriter.insert_op_before(op, &materialize)?;
+        rewriter.replace_op(op, &shift)?;
+        Ok(true)
+    }
+
     fn lower_float_constant_pseudo(
         context: &tir::Context,
         op: &tir::OperationRef,
@@ -1503,6 +1553,7 @@ mod isa {
         fn pre_ra_lowerings(&self) -> Vec<tir::backend::isel::OpLowering> {
             vec![
                 lower_divrem_pseudo,
+                lower_constant_shift_pseudo,
                 lower_float_constant_pseudo,
                 lower_unsigned_integer_to_double_pseudo,
                 lower_double_to_unsigned_integer_pseudo,
