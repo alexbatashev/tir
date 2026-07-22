@@ -280,6 +280,19 @@ fn constant_initializer_bytes(
             }
             Some(bytes)
         }
+        TypeKind::Record(id)
+            if ast.get_node(initializer).kind == AstKind::InitializerList
+                && typed.record(*id)?.kind == RecordKind::Struct =>
+        {
+            let record = typed.record(*id)?;
+            let mut bytes = vec![0; record.size as usize];
+            for (field, value) in record.fields.iter().zip(ast.children(initializer)) {
+                let field_bytes = constant_initializer_bytes(typed, field.ty, value)?;
+                let offset = field.offset as usize;
+                bytes[offset..offset + field_bytes.len()].copy_from_slice(&field_bytes);
+            }
+            Some(bytes)
+        }
         _ => None,
     }
 }

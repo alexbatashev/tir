@@ -1202,3 +1202,13 @@ fn initialized_global_array_uses_constant_data() {
         "int values[3] = {11, 22, 9}; int main(void) { return values[0] + values[1] + values[2] - 42; }\n",
     );
 }
+
+#[test]
+fn initialized_global_struct_uses_field_layout() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "struct Pair { char tag; int value; } pair = {3, 39}; int main(void) { return pair.tag + pair.value - 42; }\n",
+    );
+}
