@@ -34,6 +34,7 @@ type Extra<'src> = extra::Full<Rich<'src, Token, Span>, SimpleState<ParseState>,
 struct ParseState {
     ast: Ast,
     spans: Vec<crate::diagnostics::Span>,
+    token_offset: usize,
     name_scopes: Vec<NameScope>,
     next_record: u32,
 }
@@ -58,7 +59,7 @@ impl ParseState {
     fn add(&mut self, kind: AstKind, tok: usize) -> NodeId {
         let span = self
             .spans
-            .get(tok)
+            .get(tok + self.token_offset)
             .copied()
             .unwrap_or(crate::diagnostics::Span::new(FileId::default(), 0));
         self.ast.add_node(AstNode::new(kind, span))
@@ -170,6 +171,7 @@ pub fn parse(
     let mut state = SimpleState(ParseState {
         ast: Ast::new(),
         spans: byte_spans.clone(),
+        token_offset: 0,
         name_scopes: vec![NameScope::default()],
         next_record: 0,
     });
@@ -1264,6 +1266,21 @@ impl<'a> DeclParser<'a> {
         self.pos >= self.tokens.len()
     }
 
+    fn take_initializer(&mut self) -> &'a [Token] {
+        let start = self.pos;
+        let mut depth = 0;
+        while let Some(token) = self.tokens.get(self.pos) {
+            match token {
+                Token::LBrace | Token::LParen | Token::LBracket => depth += 1,
+                Token::RBrace | Token::RParen | Token::RBracket => depth -= 1,
+                Token::Comma if depth == 0 => break,
+                _ => {}
+            }
+            self.pos += 1;
+        }
+        &self.tokens[start..self.pos]
+    }
+
     fn parse_specs(&mut self, st: &mut ParseState, tok: usize) -> Result<DeclSpecs, String> {
         let mut storage = Vec::new();
         let mut qualifiers = Vec::new();
@@ -1574,6 +1591,7 @@ impl<'a> DeclParser<'a> {
         let mut scratch = ParseState {
             ast: Ast::new(),
             spans: Vec::new(),
+            token_offset: 0,
             name_scopes: vec![NameScope::default()],
             next_record: 0,
         };
@@ -1915,20 +1933,16 @@ where
 }
 
 fn parse_external_tokens(
-    st: &mut ParseState,
+    state: &mut SimpleState<ParseState>,
     tok: usize,
     tokens: &[Token],
 ) -> Result<NodeId, String> {
     let mut parser = DeclParser::new(tokens);
-    let specs = parser.parse_specs(st, tok)?;
+    let specs = parser.parse_specs(&mut state.0, tok)?;
     let is_typedef = specs
         .storage
         .iter()
         .any(|tok| matches!(tok, Token::KwTypedef));
-    let is_extern = specs
-        .storage
-        .iter()
-        .any(|tok| matches!(tok, Token::KwExtern));
     let mut nodes = Vec::new();
     if let Some(record) = specs.record {
         nodes.push(record);
@@ -1939,8 +1953,8 @@ fn parse_external_tokens(
             return Ok(nodes[0]);
         }
         if let CType::Record(kind, record_id, name) = specs.ty {
-            let id = st.add(AstKind::RecordDecl, tok);
-            st.ast.set_leaf_data(
+            let id = state.0.add(AstKind::RecordDecl, tok);
+            state.0.ast.set_leaf_data(
                 id,
                 AstLeaf::Record {
                     id: record_id,
@@ -1965,11 +1979,11 @@ fn parse_external_tokens(
         {
             let params = params
                 .into_iter()
-                .map(|param| add_param_node(st, tok, param))
+                .map(|param| add_param_node(&mut state.0, tok, param))
                 .collect::<Vec<_>>();
-            let varargs = varargs.then(|| add_varargs_node(st, tok));
-            let id = st.add(AstKind::Prototype, tok);
-            st.ast.set_leaf_data(
+            let varargs = varargs.then(|| add_varargs_node(&mut state.0, tok));
+            let id = state.0.add(AstKind::Prototype, tok);
+            state.0.ast.set_leaf_data(
                 id,
                 AstLeaf::Function {
                     name: decl.name,
@@ -1978,18 +1992,18 @@ fn parse_external_tokens(
                 },
             );
             for param in params {
-                st.ast.add_edge(id, param);
+                state.0.ast.add_edge(id, param);
             }
             if let Some(varargs) = varargs {
-                st.ast.add_edge(id, varargs);
+                state.0.ast.add_edge(id, varargs);
             }
             nodes.push(id);
         } else {
             match ty {
                 ty if is_typedef => {
-                    st.declare_typedef(decl.name.clone());
-                    let id = st.add(AstKind::Typedef, tok);
-                    st.ast.set_leaf_data(
+                    state.0.declare_typedef(decl.name.clone());
+                    let id = state.0.add(AstKind::Typedef, tok);
+                    state.0.ast.set_leaf_data(
                         id,
                         AstLeaf::Typedef {
                             name: decl.name,
@@ -1998,18 +2012,32 @@ fn parse_external_tokens(
                     );
                     nodes.push(id);
                 }
-                ty if is_extern => {
-                    let id = st.add(AstKind::Global, tok);
-                    st.ast.set_leaf_data(
+                ty => {
+                    state.0.declare_ordinary(decl.name.clone());
+                    let initializer = if parser.eat(&Token::Assign) {
+                        let initializer_tok = tok + parser.pos;
+                        let initializer_tokens = parser.take_initializer();
+                        Some(parse_external_initializer(
+                            state,
+                            initializer_tok,
+                            initializer_tokens,
+                        )?)
+                    } else {
+                        None
+                    };
+                    let id = state.0.add(AstKind::Global, tok);
+                    state.0.ast.set_leaf_data(
                         id,
                         AstLeaf::Global {
                             name: decl.name,
                             ty,
                         },
                     );
+                    if let Some(initializer) = initializer {
+                        state.0.ast.add_edge(id, initializer);
+                    }
                     nodes.push(id);
                 }
-                _ => return Err("unsupported top-level declaration".to_string()),
             }
         }
 
@@ -2028,12 +2056,33 @@ fn parse_external_tokens(
     if nodes.len() == 1 {
         Ok(nodes[0])
     } else {
-        let group = st.add(AstKind::DeclGroup, tok);
+        let group = state.0.add(AstKind::DeclGroup, tok);
         for node in nodes {
-            st.ast.add_edge(group, node);
+            state.0.ast.add_edge(group, node);
         }
         Ok(group)
     }
+}
+
+fn parse_external_initializer(
+    state: &mut SimpleState<ParseState>,
+    token_offset: usize,
+    tokens: &[Token],
+) -> Result<NodeId, String> {
+    if tokens.is_empty() {
+        return Err("expected initializer".to_string());
+    }
+    let previous_offset = state.0.token_offset;
+    state.0.token_offset = token_offset;
+    let (initializer, errors) = initializer()
+        .then_ignore(end())
+        .parse_with_state(tokens, state)
+        .into_output_errors();
+    state.0.token_offset = previous_offset;
+    if let Some(error) = errors.first() {
+        return Err(error.to_string());
+    }
+    initializer.ok_or_else(|| "expected initializer".to_string())
 }
 
 fn external_decl<'src, I>() -> impl Parser<'src, I, NodeId, Extra<'src>> + Clone
@@ -2145,8 +2194,8 @@ where
     .try_map_with(|parts, e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
         let tok = e.span().start;
         let tokens = parts.into_iter().flatten().collect::<Vec<_>>();
-        let st = &mut e.state().0;
-        parse_external_tokens(st, tok, &tokens).map_err(|msg| Rich::custom(e.span(), msg))
+        let span = e.span();
+        parse_external_tokens(e.state(), tok, &tokens).map_err(|msg| Rich::custom(span, msg))
     })
 }
 
