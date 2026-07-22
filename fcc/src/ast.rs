@@ -216,6 +216,7 @@ pub enum AstLeaf {
     Global {
         name: String,
         ty: CType,
+        is_extern: bool,
     },
     Field {
         name: String,
@@ -347,8 +348,12 @@ fn render_node(ast: &Ast, id: NodeId, depth: usize, out: &mut String) {
             _ => unreachable!(),
         },
         AstKind::Global => match ast.get_leaf_data(id) {
-            Some(AstLeaf::Global { name, ty }) => {
-                format!("Global {name:?}: {}", render_ctype(ty))
+            Some(AstLeaf::Global {
+                name,
+                ty,
+                is_extern,
+            }) => {
+                format!("Global {name:?} extern={is_extern}: {}", render_ctype(ty))
             }
             _ => unreachable!(),
         },

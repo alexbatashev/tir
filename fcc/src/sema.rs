@@ -441,7 +441,7 @@ impl Analyzer<'_> {
                 self.function_type(node, ret, has_parameter_type_list),
                 false,
             ),
-            Some(AstLeaf::Global { name, ty }) => (name, self.canonical_type(&ty), false),
+            Some(AstLeaf::Global { name, ty, .. }) => (name, self.canonical_type(&ty), false),
             Some(AstLeaf::Typedef { name, ty }) => (name, self.canonical_type(&ty), true),
             _ => return,
         };

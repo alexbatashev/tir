@@ -12,8 +12,9 @@ pub mod ops {
     pub use super::{
         BreakOp, ConditionOp, ContinueOp, CopyStructOp, DefineStructOp, DoOp, ForOp, GetMemberOp,
         GlobalOp, GotoOp, IfOp, LabelOp, StringOp, VaArgOp, VaEndOp, VaStartOp, WhileOp, YieldOp,
-        r#break, condition, r#continue, copy_struct, define_struct, r#do, r#for, get_member,
-        global, r#goto, r#if, label, string, va_arg, va_end, va_start, r#while, r#yield,
+        ZeroGlobalOp, r#break, condition, r#continue, copy_struct, define_struct, r#do, r#for,
+        get_member, global, r#goto, r#if, label, string, va_arg, va_end, va_start, r#while,
+        r#yield, zero_global,
     };
 }
 
@@ -23,6 +24,7 @@ dialect! {
         operations: [
             StringOp,
             GlobalOp,
+            ZeroGlobalOp,
             DefineStructOp,
             GetMemberOp,
             CopyStructOp,
@@ -59,50 +61,82 @@ operation! {
 
 impl GlobalOp {
     pub fn sym_name(&self) -> String {
-        self.string_attribute("sym_name")
+        string_attribute(self, "sym_name")
     }
 
     pub fn value(&self) -> i64 {
-        self.attributes()
-            .iter()
-            .find_map(|attribute| match (&*attribute.name, &attribute.value) {
-                ("value", AttributeValue::Int(value)) => Some(*value),
-                _ => None,
-            })
-            .expect("cir.global must carry an integer value")
+        int_attribute(self, "value")
     }
 
     pub fn size(&self) -> u64 {
-        self.unsigned_attribute("size")
+        uint_attribute(self, "size")
     }
 
     pub fn align(&self) -> u64 {
-        self.unsigned_attribute("align")
+        uint_attribute(self, "align")
+    }
+}
+
+operation! {
+    ZeroGlobalOp {
+        name: "zero_global",
+        dialect: "cir",
+        attributes: A {
+            sym_name: "Str",
+            size: "UInt",
+            align: "UInt",
+        },
+    }
+}
+
+impl ZeroGlobalOp {
+    pub fn sym_name(&self) -> String {
+        string_attribute(self, "sym_name")
     }
 
-    fn string_attribute(&self, name: &str) -> String {
-        self.attributes()
-            .iter()
-            .find_map(|attribute| match (&*attribute.name, &attribute.value) {
-                (attribute_name, AttributeValue::Str(value)) if attribute_name == name => {
-                    Some(value.clone())
-                }
-                _ => None,
-            })
-            .expect("cir.global string attribute")
+    pub fn size(&self) -> u64 {
+        uint_attribute(self, "size")
     }
 
-    fn unsigned_attribute(&self, name: &str) -> u64 {
-        self.attributes()
-            .iter()
-            .find_map(|attribute| match (&*attribute.name, &attribute.value) {
-                (attribute_name, AttributeValue::UInt(value)) if attribute_name == name => {
-                    Some(*value)
-                }
-                _ => None,
-            })
-            .expect("cir.global unsigned attribute")
+    pub fn align(&self) -> u64 {
+        uint_attribute(self, "align")
     }
+}
+
+fn string_attribute(operation: &impl Operation, name: &str) -> String {
+    operation
+        .attributes()
+        .iter()
+        .find(|attribute| attribute.name == name)
+        .and_then(|attribute| match &attribute.value {
+            AttributeValue::Str(value) => Some(value.clone()),
+            _ => None,
+        })
+        .unwrap()
+}
+
+fn int_attribute(operation: &impl Operation, name: &str) -> i64 {
+    operation
+        .attributes()
+        .iter()
+        .find(|attribute| attribute.name == name)
+        .and_then(|attribute| match attribute.value {
+            AttributeValue::Int(value) => Some(value),
+            _ => None,
+        })
+        .unwrap()
+}
+
+fn uint_attribute(operation: &impl Operation, name: &str) -> u64 {
+    operation
+        .attributes()
+        .iter()
+        .find(|attribute| attribute.name == name)
+        .and_then(|attribute| match attribute.value {
+            AttributeValue::UInt(value) => Some(value),
+            _ => None,
+        })
+        .unwrap()
 }
 
 pub struct StructType {
