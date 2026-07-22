@@ -92,6 +92,18 @@ mod isa {
                     ))
                 })
         };
+        let attr = |name| {
+            op.op()
+                .attributes
+                .iter()
+                .find(|attr| attr.name == name)
+                .map(|attr| attr.value.clone())
+                .ok_or_else(|| {
+                    tir::PassError::InvalidRuleSet(format!(
+                        "division/remainder pseudo is missing '{name}'"
+                    ))
+                })
+        };
 
         macro_rules! lower {
             ($Pseudo:ty, $Prelude:ident, $Divide:ident, $class:expr) => {
@@ -141,6 +153,42 @@ mod isa {
                         .attr("dst", virt(remainder.number(), class.id()))
                         .attr("src", virt(high.number(), class.id()))
                         .build();
+                    rewriter.insert_op_before(op, &prelude)?;
+                    rewriter.insert_op_before(op, &divide)?;
+                    rewriter.replace_op(op, &copy)?;
+                    return Ok(true);
+                }
+            };
+        }
+
+        macro_rules! lower_remainder_imm {
+            ($Pseudo:ty, $Prelude:ident, $Divide:ident) => {
+                if op.as_op::<$Pseudo>().is_some() {
+                    let remainder = value("remainder")?;
+                    let lhs = value("lhs")?;
+                    let ty = context.get_value(remainder).ty();
+                    let divisor = context.create_value(ty, None).id();
+                    let quotient = context.create_value(ty, None).id();
+                    let high = context.create_value(ty, None).id();
+                    let materialize = MovImm32OpBuilder::new(context)
+                        .attr("dst", virt(divisor.number(), RegClass::GPR32.id()))
+                        .attr("imm", attr("divisor")?)
+                        .build();
+                    let prelude = $Prelude::new(context)
+                        .attr("high", fixed_def(high, RegClass::GPR32, 2))
+                        .attr("low", fixed_def(quotient, RegClass::GPR32, 0))
+                        .attr("low_tied", virt(lhs.number(), RegClass::GPR32.id()))
+                        .build();
+                    let divide = $Divide::new(context)
+                        .attr("quotient", fixed_def(quotient, RegClass::GPR32, 0))
+                        .attr("remainder", fixed_def(high, RegClass::GPR32, 2))
+                        .attr("divisor", virt(divisor.number(), RegClass::GPR32.id()))
+                        .build();
+                    let copy = Mov32OpBuilder::new(context)
+                        .attr("dst", virt(remainder.number(), RegClass::GPR32.id()))
+                        .attr("src", virt(high.number(), RegClass::GPR32.id()))
+                        .build();
+                    rewriter.insert_op_before(op, &materialize)?;
                     rewriter.insert_op_before(op, &prelude)?;
                     rewriter.insert_op_before(op, &divide)?;
                     rewriter.replace_op(op, &copy)?;
@@ -201,7 +249,70 @@ mod isa {
             MovOpBuilder,
             RegClass::GPR
         );
+        lower_remainder_imm!(
+            SelectSignedRemainderConstant32Op,
+            SignExtendDividend32OpBuilder,
+            SignedDivide32OpBuilder
+        );
+        lower_remainder_imm!(
+            SelectUnsignedRemainderConstant32Op,
+            ZeroExtendDividend32OpBuilder,
+            UnsignedDivide32OpBuilder
+        );
         Ok(false)
+    }
+
+    fn lower_constant_subtract_pseudo(
+        context: &tir::Context,
+        op: &tir::OperationRef,
+        rewriter: &mut tir::Rewriter,
+    ) -> Result<bool, tir::PassError> {
+        if op.as_op::<SelectSubtractConstantLeft32Op>().is_none() {
+            return Ok(false);
+        }
+        let attr = |name| {
+            op.op()
+                .attributes
+                .iter()
+                .find(|attr| attr.name == name)
+                .map(|attr| attr.value.clone())
+                .ok_or_else(|| {
+                    tir::PassError::InvalidRuleSet(format!(
+                        "constant subtraction pseudo is missing '{name}'"
+                    ))
+                })
+        };
+        let value = |name| {
+            op.op()
+                .attributes
+                .iter()
+                .find_map(|attr| match (&attr.value, attr.name == name) {
+                    (AttributeValue::Register(RegisterAttr::Virtual { id, .. }), true) => {
+                        Some(tir::ValueId::from_number(*id))
+                    }
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    tir::PassError::InvalidRuleSet(format!(
+                        "constant subtraction pseudo is missing virtual '{name}'"
+                    ))
+                })
+        };
+        let dst = value("dst")?;
+        let rhs = value("rhs")?;
+        let temp = context.create_value(context.get_value(dst).ty(), None).id();
+        let materialize = MovImm32OpBuilder::new(context)
+            .attr("dst", virt(temp.number(), RegClass::GPR32.id()))
+            .attr("imm", attr("lhs")?)
+            .build();
+        let subtract = Sub32OpBuilder::new(context)
+            .attr("dst", virt(dst.number(), RegClass::GPR32.id()))
+            .attr("dst_tied", virt(temp.number(), RegClass::GPR32.id()))
+            .attr("src", virt(rhs.number(), RegClass::GPR32.id()))
+            .build();
+        rewriter.insert_op_before(op, &materialize)?;
+        rewriter.replace_op(op, &subtract)?;
+        Ok(true)
     }
 
     fn lower_constant_shift_pseudo(
@@ -1553,6 +1664,7 @@ mod isa {
         fn pre_ra_lowerings(&self) -> Vec<tir::backend::isel::OpLowering> {
             vec![
                 lower_divrem_pseudo,
+                lower_constant_subtract_pseudo,
                 lower_constant_shift_pseudo,
                 lower_float_constant_pseudo,
                 lower_unsigned_integer_to_double_pseudo,

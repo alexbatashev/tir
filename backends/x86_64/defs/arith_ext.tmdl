@@ -278,6 +278,22 @@ pseudo instruction SelectUnsignedRemainder32 for [X86_64] {
     }
 }
 
+pseudo instruction SelectSignedRemainderConstant32 for [X86_64] {
+    param OPNAME: String = "select_signed_remainder_constant32";
+    operands { remainder: GPR32, lhs: GPR32, divisor: bits<32>, }
+    behavior {
+        remainder = sext(extract(lhs, 31, 0) % divisor, self.XLEN);
+    }
+}
+
+pseudo instruction SelectUnsignedRemainderConstant32 for [X86_64] {
+    param OPNAME: String = "select_unsigned_remainder_constant32";
+    operands { remainder: GPR32, lhs: GPR32, divisor: bits<32>, }
+    behavior {
+        remainder = zext(extract(lhs, 31, 0) ~% divisor, self.XLEN);
+    }
+}
+
 pseudo instruction SelectShiftLeftConstant64 for [X86_64] {
     param OPNAME: String = "select_shift_left_constant64";
     operands { dst: GPR, imm: bits<32>, }
@@ -443,6 +459,12 @@ instruction Neg32 for [X86_64] : RegUnary32 {
     behavior {
         dst = zext(0b0, 32) - dst;
     }
+}
+
+pseudo instruction SelectSubtractConstantLeft32 for [X86_64] {
+    param OPNAME: String = "select_subtract_constant_left32";
+    operands { dst: GPR32, lhs: bits<32>, rhs: GPR32, }
+    behavior { dst = lhs - rhs; }
 }
 
 instruction Not32 for [X86_64] : RegUnary32 {
