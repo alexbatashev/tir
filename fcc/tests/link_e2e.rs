@@ -1176,3 +1176,11 @@ fn nested_record_initializer_zero_fills_fields() {
         "struct Inner { int left; int right; }; struct Outer { int tag; struct Inner inner; }; int main(void) { struct Outer value = {7, {11}}; return value.tag == 7 && value.inner.left == 11 && value.inner.right == 0 ? 0 : 1; }\n",
     );
 }
+
+#[test]
+fn initialized_scalar_global_is_read_by_main() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host("int answer = 42; int main(void) { return answer - 42; }\n");
+}

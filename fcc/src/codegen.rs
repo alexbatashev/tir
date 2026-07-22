@@ -26,6 +26,12 @@ struct Slot {
     elem: TypeId,
 }
 
+#[derive(Clone)]
+struct Global {
+    name: String,
+    elem: TypeId,
+}
+
 #[derive(Clone, Copy)]
 enum BreakScope {
     Loop(ValueId),
@@ -51,6 +57,7 @@ struct FnCodegen<'a> {
     builder: IRBuilder,
     region: RegionId,
     locals: HashMap<EntityId, Slot>,
+    globals: &'a HashMap<EntityId, Global>,
     signatures: &'a HashMap<EntityId, Signature>,
     loop_scopes: Vec<ValueId>,
     break_scopes: Vec<BreakScope>,
@@ -73,18 +80,35 @@ pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnost
     let mut module_builder = IRBuilder::new(module.body());
 
     let root = ast.root().ok_or_else(EmptyTranslationUnit::new)?;
-    let mut signatures = HashMap::new();
+    let mut items = Vec::new();
     for item in ast.children(root) {
+        if ast.get_node(item).kind == AstKind::DeclGroup {
+            items.extend(ast.children(item));
+        } else {
+            items.push(item);
+        }
+    }
+    let mut signatures = HashMap::new();
+    let mut globals = HashMap::new();
+    for &item in &items {
         match ast.get_node(item).kind {
             AstKind::Prototype | AstKind::Function => {
                 let (entity, sig) = lower_signature(context, typed, item)?;
                 signatures.insert(entity, sig);
             }
-            AstKind::DeclGroup
-            | AstKind::RecordDecl
-            | AstKind::Typedef
-            | AstKind::Global
-            | AstKind::Attribute => {}
+            AstKind::Global => {
+                let AstLeaf::Global { name, .. } = ast.get_leaf_data(item).unwrap() else {
+                    unreachable!("global node carries a global payload");
+                };
+                globals.insert(
+                    node_entity(typed, item),
+                    Global {
+                        name: name.clone(),
+                        elem: lower_type(context, typed, node_type(typed, item)),
+                    },
+                );
+            }
+            AstKind::RecordDecl | AstKind::Typedef | AstKind::Attribute => {}
             _ => return Err(unsupported(ast, item, "top-level item".to_string())),
         }
     }
@@ -114,7 +138,7 @@ pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnost
         );
     }
 
-    for item in ast.children(root) {
+    for item in items {
         match ast.get_node(item).kind {
             AstKind::Prototype => {
                 let AstLeaf::Function { name, .. } = ast.get_leaf_data(item).unwrap() else {
@@ -125,14 +149,46 @@ pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnost
                 module_builder.insert(b::declare_op(context, name, sig.ret, &sig.args));
             }
             AstKind::Function => {
-                let func_op = lower_function(context, typed, item, &signatures)?;
+                let func_op = lower_function(context, typed, item, &signatures, &globals)?;
                 module_builder.insert(func_op);
             }
-            AstKind::DeclGroup
-            | AstKind::RecordDecl
-            | AstKind::Typedef
-            | AstKind::Global
-            | AstKind::Attribute => {}
+            AstKind::Global => {
+                let Some(initializer) = ast.children(item).next() else {
+                    continue;
+                };
+                let source_ty = node_type(typed, item);
+                if !matches!(
+                    typed.types().kind(source_ty),
+                    TypeKind::Integer(_) | TypeKind::Enum(_)
+                ) {
+                    return Err(unsupported(
+                        ast,
+                        initializer,
+                        "non-integer global initializer".to_string(),
+                    ));
+                }
+                let Some(value) = ast
+                    .get_annotation(initializer)
+                    .and_then(|semantics| semantics.constant)
+                else {
+                    return Err(unsupported(
+                        ast,
+                        initializer,
+                        "non-constant global initializer".to_string(),
+                    ));
+                };
+                let (size, align) = source_type_layout(typed, source_ty);
+                let global = &globals[&node_entity(typed, item)];
+                module_builder.insert(
+                    cir::GlobalOpBuilder::new(context)
+                        .attr("sym_name", AttributeValue::Str(global.name.clone()))
+                        .attr("value", AttributeValue::Int(value))
+                        .attr("size", AttributeValue::UInt(size))
+                        .attr("align", AttributeValue::UInt(align))
+                        .build(),
+                );
+            }
+            AstKind::RecordDecl | AstKind::Typedef | AstKind::Attribute => {}
             _ => unreachable!("top-level item was checked before emission"),
         }
     }
@@ -256,6 +312,7 @@ fn lower_function(
     typed: &TypedAst,
     func: NodeId,
     signatures: &HashMap<EntityId, Signature>,
+    globals: &HashMap<EntityId, Global>,
 ) -> Result<impl Operation, Diagnostic> {
     let ast = typed.ast();
     let AstLeaf::Function { name, .. } = ast.get_leaf_data(func).unwrap() else {
@@ -291,6 +348,7 @@ fn lower_function(
         builder: IRBuilder::new(func_op.body()),
         region: region.id(),
         locals: HashMap::new(),
+        globals,
         signatures,
         loop_scopes: Vec::new(),
         break_scopes: Vec::new(),
@@ -1439,10 +1497,22 @@ impl FnCodegen<'_> {
                     let AstLeaf::Var(_) = ast.get_leaf_data(node).unwrap() else {
                         unreachable!("var node carries a var payload");
                     };
-                    let slot = self.locals[&node_entity(self.typed, node)];
-                    LoweredExpr::Address {
-                        ptr: slot.ptr,
-                        elem: slot.elem,
+                    let entity = node_entity(self.typed, node);
+                    if let Some(slot) = self.locals.get(&entity).copied() {
+                        LoweredExpr::Address {
+                            ptr: slot.ptr,
+                            elem: slot.elem,
+                        }
+                    } else {
+                        let global = &self.globals[&entity];
+                        let ptr_ty = PtrType::typed(self.context, global.elem);
+                        LoweredExpr::Address {
+                            ptr: self
+                                .builder
+                                .insert(b::addr_of_op(self.context, &global.name, ptr_ty))
+                                .result(),
+                            elem: global.elem,
+                        }
                     }
                 }
                 AstKind::Member => {
@@ -2032,11 +2102,10 @@ fn decode_character_constant(source: &str) -> Option<i64> {
         .then_some(i64::from(value as u32))
 }
 
-/// Hoist every `cir.string` into a module-level `.rodata` section and rewrite
-/// its use into a `builtin.addr_of` of the string's local symbol; identical
-/// literals share one symbol. Runs only ahead of the machine backend — the
-/// asm-dialect data ops it creates mean nothing to earlier stages.
-pub fn hoist_strings(context: &Context, module: &ModuleOp) -> Result<(), tir::PassError> {
+/// Lower frontend data definitions immediately ahead of the machine backend.
+/// String uses become addresses into `.rodata`; scalar globals become symbols
+/// in `.data`.
+pub fn lower_data(context: &Context, module: &ModuleOp) -> Result<(), tir::PassError> {
     use tir::attributes::AttributeValue;
     use tir::backend::{
         LiteralOpBuilder, SectionEndOpBuilder, SectionOpBuilder, SymbolEndOpBuilder,
@@ -2046,6 +2115,17 @@ pub fn hoist_strings(context: &Context, module: &ModuleOp) -> Result<(), tir::Pa
     let mut rewriter = tir::Rewriter::new(context.clone());
     let mut strings: Vec<(String, String)> = Vec::new();
     let mut labels: HashMap<String, String> = HashMap::new();
+    let mut globals = Vec::new();
+
+    let module_body = module.body();
+    for op_id in module_body.op_ids() {
+        let op = context.get_op(op_id);
+        let Some(global) = op.clone().as_op::<cir::GlobalOp>() else {
+            continue;
+        };
+        globals.push((global.sym_name(), global.value(), global.size()));
+        rewriter.erase_op(&tir::OperationRef::new(op, Some(module_body.clone()), None))?;
+    }
 
     for op_id in module.body().op_ids() {
         let op = context.get_op(op_id);
@@ -2086,6 +2166,39 @@ pub fn hoist_strings(context: &Context, module: &ModuleOp) -> Result<(), tir::Pa
         }
     }
 
+    if !globals.is_empty() {
+        let section = SectionOpBuilder::new(context)
+            .attr("name", AttributeValue::Str(".data".to_string()))
+            .build();
+        let mut section_builder = IRBuilder::new(section.body());
+        for (name, value, size) in globals {
+            let kind = match size {
+                1 => "byte",
+                2 => "half",
+                4 => "word",
+                8 => "dword",
+                _ => unreachable!("integer global has a supported scalar width"),
+            };
+            let symbol = SymbolOpBuilder::new(context)
+                .attr("name", AttributeValue::Str(name))
+                .attr("binding", AttributeValue::Str("global".to_string()))
+                .attr("kind", AttributeValue::Str("object".to_string()))
+                .build();
+            let mut symbol_builder = IRBuilder::new(symbol.body());
+            symbol_builder.insert(
+                LiteralOpBuilder::new(context)
+                    .attr("kind", AttributeValue::Str(kind.to_string()))
+                    .attr("value", AttributeValue::Int(value))
+                    .build(),
+            );
+            symbol_builder.insert(SymbolEndOpBuilder::new(context).build());
+            section_builder.insert(symbol);
+        }
+        section_builder.insert(SectionEndOpBuilder::new(context).build());
+        let end = module_body.op_ids().len().saturating_sub(1);
+        module_body.insert(end, section.id());
+    }
+
     if strings.is_empty() {
         return Ok(());
     }
@@ -2113,8 +2226,7 @@ pub fn hoist_strings(context: &Context, module: &ModuleOp) -> Result<(), tir::Pa
     section_builder.insert(SectionEndOpBuilder::new(context).build());
 
     // Splice the section in ahead of the module terminator.
-    let body = module.body();
-    let end = body.op_ids().len().saturating_sub(1);
-    body.insert(end, section.id());
+    let end = module_body.op_ids().len().saturating_sub(1);
+    module_body.insert(end, section.id());
     Ok(())
 }

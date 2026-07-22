@@ -350,7 +350,11 @@ impl Analyzer<'_> {
                     self.declare_file_item(item);
                     self.function(item);
                 }
-                AstKind::Prototype | AstKind::Global | AstKind::Typedef => {
+                AstKind::Global => {
+                    self.declare_file_item(item);
+                    self.global_initializer(item);
+                }
+                AstKind::Prototype | AstKind::Typedef => {
                     self.declare_file_item(item);
                 }
                 AstKind::DeclGroup => {
@@ -360,6 +364,9 @@ impl Analyzer<'_> {
                             self.record_declaration(declaration);
                         } else {
                             self.declare_file_item(declaration);
+                            if self.ast.get_node(declaration).kind == AstKind::Global {
+                                self.global_initializer(declaration);
+                            }
                         }
                     }
                 }
@@ -451,7 +458,9 @@ impl Analyzer<'_> {
                 .into(),
             );
         }
-        let defined = self.ast.get_node(node).kind == AstKind::Function;
+        let defined = self.ast.get_node(node).kind == AstKind::Function
+            || (self.ast.get_node(node).kind == AstKind::Global
+                && self.ast.children(node).next().is_some());
         let previous = self.scopes[0].get(&name).cloned();
         let entity = previous
             .as_ref()
@@ -537,6 +546,19 @@ impl Analyzer<'_> {
             varargs,
             prototype: has_parameter_type_list || self.options.std_version == StdVersion::C23,
         })
+    }
+
+    fn global_initializer(&mut self, node: NodeId) {
+        let Some(initializer) = self.ast.children(node).next() else {
+            return;
+        };
+        self.node(initializer);
+        let target = self
+            .ast
+            .get_annotation(node)
+            .and_then(|info| info.ty)
+            .unwrap();
+        self.validate_initializer(target, initializer);
     }
 
     fn function(&mut self, function: NodeId) {
@@ -914,32 +936,36 @@ impl Analyzer<'_> {
         if self.ast.get_node(node).kind == AstKind::Decl
             && let Some(&initializer) = children.first()
         {
-            if self.ast.get_node(initializer).kind == AstKind::InitializerList {
-                self.validate_initializer_list(ty, initializer);
-                return;
-            }
-            let source = self
-                .ast
-                .get_annotation(initializer)
-                .and_then(|info| info.ty)
-                .unwrap_or(ty);
-            if !self.assignment_compatible(ty, source, initializer) {
-                self.diagnostics.push(
-                    IncompatibleConversion::new(
-                        self.ast.get_node(initializer).span,
-                        None,
-                        format!(
-                            "cannot initialize {} with {} value",
-                            self.type_category(ty),
-                            self.type_category(source)
-                        ),
-                        initializer_reference(self.options),
-                    )
-                    .into(),
-                );
-            } else {
-                self.record_conversion(initializer, ty);
-            }
+            self.validate_initializer(ty, initializer);
+        }
+    }
+
+    fn validate_initializer(&mut self, target: QualType, initializer: NodeId) {
+        if self.ast.get_node(initializer).kind == AstKind::InitializerList {
+            self.validate_initializer_list(target, initializer);
+            return;
+        }
+        let source = self
+            .ast
+            .get_annotation(initializer)
+            .and_then(|info| info.ty)
+            .unwrap_or(target);
+        if !self.assignment_compatible(target, source, initializer) {
+            self.diagnostics.push(
+                IncompatibleConversion::new(
+                    self.ast.get_node(initializer).span,
+                    None,
+                    format!(
+                        "cannot initialize {} with {} value",
+                        self.type_category(target),
+                        self.type_category(source)
+                    ),
+                    initializer_reference(self.options),
+                )
+                .into(),
+            );
+        } else {
+            self.record_conversion(initializer, target);
         }
     }
 

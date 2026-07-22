@@ -131,8 +131,8 @@ pub(super) fn emit_machine_code(
         std::process::exit(1);
     });
 
-    crate::codegen::hoist_strings(&context, &module).unwrap_or_else(|e| {
-        eprintln!("fcc: error: string lowering failed: {e}");
+    crate::codegen::lower_data(&context, &module).unwrap_or_else(|e| {
+        eprintln!("fcc: error: data lowering failed: {e}");
         std::process::exit(1);
     });
 
