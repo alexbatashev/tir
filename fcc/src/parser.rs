@@ -743,23 +743,27 @@ fn initializer<'src, I>() -> impl Parser<'src, I, NodeId, Extra<'src>> + Clone
 where
     I: ValueInput<'src, Token = Token, Span = Span>,
 {
-    expr()
-        .or_not()
-        .delimited_by(just(Token::LBrace), just(Token::RBrace))
-        .map_with(|value, e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
-            let tok = e.span().start;
-            let st = &mut e.state().0;
-            let id = st.add(AstKind::InitializerList, tok);
-            if let Some(value) = value {
-                let mut elements = Vec::new();
-                collect_initializer_elements(&st.ast, value, &mut elements);
-                for element in elements {
-                    st.ast.add_edge(id, element);
+    recursive(|initializer| {
+        initializer
+            .separated_by(just(Token::Comma))
+            .allow_trailing()
+            .collect::<Vec<_>>()
+            .delimited_by(just(Token::LBrace), just(Token::RBrace))
+            .map_with(|values, e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
+                let tok = e.span().start;
+                let st = &mut e.state().0;
+                let id = st.add(AstKind::InitializerList, tok);
+                for value in values {
+                    let mut elements = Vec::new();
+                    collect_initializer_elements(&st.ast, value, &mut elements);
+                    for element in elements {
+                        st.ast.add_edge(id, element);
+                    }
                 }
-            }
-            id
-        })
-        .or(expr())
+                id
+            })
+            .or(expr())
+    })
 }
 
 /// Build an `int x = init` declaration node (without the trailing `;`, so the
