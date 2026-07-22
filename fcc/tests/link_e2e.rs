@@ -168,6 +168,14 @@ fn scalar_mixed_widths_matches_host_compiler() {
 }
 
 #[test]
+fn scalar_call_chain_matches_host_compiler() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(include_str!("scalar/call_chain.c"));
+}
+
+#[test]
 fn bitwise_and_shifts_match_host_compiler() {
     if !cc_available() {
         return;
