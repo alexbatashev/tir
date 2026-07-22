@@ -1943,6 +1943,10 @@ fn parse_external_tokens(
         .storage
         .iter()
         .any(|tok| matches!(tok, Token::KwTypedef));
+    let is_extern = specs
+        .storage
+        .iter()
+        .any(|tok| matches!(tok, Token::KwExtern));
     let mut nodes = Vec::new();
     if let Some(record) = specs.record {
         nodes.push(record);
@@ -2031,6 +2035,7 @@ fn parse_external_tokens(
                         AstLeaf::Global {
                             name: decl.name,
                             ty,
+                            is_extern,
                         },
                     );
                     if let Some(initializer) = initializer {

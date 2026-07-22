@@ -153,10 +153,24 @@ pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnost
                 module_builder.insert(func_op);
             }
             AstKind::Global => {
-                let Some(initializer) = ast.children(item).next() else {
-                    continue;
+                let AstLeaf::Global { is_extern, .. } = ast.get_leaf_data(item).unwrap() else {
+                    unreachable!("global node carries a global payload");
                 };
                 let source_ty = node_type(typed, item);
+                let (size, align) = source_type_layout(typed, source_ty);
+                let global = &globals[&node_entity(typed, item)];
+                let Some(initializer) = ast.children(item).next() else {
+                    if !is_extern {
+                        module_builder.insert(
+                            cir::ZeroGlobalOpBuilder::new(context)
+                                .attr("sym_name", AttributeValue::Str(global.name.clone()))
+                                .attr("size", AttributeValue::UInt(size))
+                                .attr("align", AttributeValue::UInt(align))
+                                .build(),
+                        );
+                    }
+                    continue;
+                };
                 if !matches!(
                     typed.types().kind(source_ty),
                     TypeKind::Integer(_) | TypeKind::Enum(_)
@@ -177,8 +191,6 @@ pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnost
                         "non-constant global initializer".to_string(),
                     ));
                 };
-                let (size, align) = source_type_layout(typed, source_ty);
-                let global = &globals[&node_entity(typed, item)];
                 module_builder.insert(
                     cir::GlobalOpBuilder::new(context)
                         .attr("sym_name", AttributeValue::Str(global.name.clone()))
@@ -2116,15 +2128,18 @@ pub fn lower_data(context: &Context, module: &ModuleOp) -> Result<(), tir::PassE
     let mut strings: Vec<(String, String)> = Vec::new();
     let mut labels: HashMap<String, String> = HashMap::new();
     let mut globals = Vec::new();
+    let mut zero_globals = Vec::new();
 
     let module_body = module.body();
     for op_id in module_body.op_ids() {
         let op = context.get_op(op_id);
-        let Some(global) = op.clone().as_op::<cir::GlobalOp>() else {
-            continue;
-        };
-        globals.push((global.sym_name(), global.value(), global.size()));
-        rewriter.erase_op(&tir::OperationRef::new(op, Some(module_body.clone()), None))?;
+        if let Some(global) = op.clone().as_op::<cir::GlobalOp>() {
+            globals.push((global.sym_name(), global.value(), global.size()));
+            rewriter.erase_op(&tir::OperationRef::new(op, Some(module_body.clone()), None))?;
+        } else if let Some(global) = op.clone().as_op::<cir::ZeroGlobalOp>() {
+            zero_globals.push((global.sym_name(), global.size()));
+            rewriter.erase_op(&tir::OperationRef::new(op, Some(module_body.clone()), None))?;
+        }
     }
 
     for op_id in module.body().op_ids() {
@@ -2189,6 +2204,32 @@ pub fn lower_data(context: &Context, module: &ModuleOp) -> Result<(), tir::PassE
                 LiteralOpBuilder::new(context)
                     .attr("kind", AttributeValue::Str(kind.to_string()))
                     .attr("value", AttributeValue::Int(value))
+                    .build(),
+            );
+            symbol_builder.insert(SymbolEndOpBuilder::new(context).build());
+            section_builder.insert(symbol);
+        }
+        section_builder.insert(SectionEndOpBuilder::new(context).build());
+        let end = module_body.op_ids().len().saturating_sub(1);
+        module_body.insert(end, section.id());
+    }
+
+    if !zero_globals.is_empty() {
+        let section = SectionOpBuilder::new(context)
+            .attr("name", AttributeValue::Str(".bss".to_string()))
+            .build();
+        let mut section_builder = IRBuilder::new(section.body());
+        for (name, size) in zero_globals {
+            let symbol = SymbolOpBuilder::new(context)
+                .attr("name", AttributeValue::Str(name))
+                .attr("binding", AttributeValue::Str("global".to_string()))
+                .attr("kind", AttributeValue::Str("object".to_string()))
+                .build();
+            let mut symbol_builder = IRBuilder::new(symbol.body());
+            symbol_builder.insert(
+                LiteralOpBuilder::new(context)
+                    .attr("kind", AttributeValue::Str("space".to_string()))
+                    .attr("value", AttributeValue::Int(size as i64))
                     .build(),
             );
             symbol_builder.insert(SymbolEndOpBuilder::new(context).build());

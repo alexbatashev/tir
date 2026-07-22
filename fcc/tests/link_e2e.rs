@@ -1184,3 +1184,11 @@ fn initialized_scalar_global_is_read_by_main() {
     }
     assert_fcc_matches_host("int answer = 42; int main(void) { return answer - 42; }\n");
 }
+
+#[test]
+fn tentative_scalar_global_is_zero_initialized() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host("int counter; int main(void) { return counter; }\n");
+}
