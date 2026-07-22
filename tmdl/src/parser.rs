@@ -1468,6 +1468,7 @@ where
                 "fmul" => Some(BuiltinFunction::FMul),
                 "fdiv" => Some(BuiltinFunction::FDiv),
                 "sitofp" => Some(BuiltinFunction::SIToFP),
+                "uitofp" => Some(BuiltinFunction::UIToFP),
                 "todo" => Some(BuiltinFunction::Todo),
                 _ => None,
             }

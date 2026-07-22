@@ -240,6 +240,48 @@ mod isa {
         Ok(true)
     }
 
+    fn lower_unsigned_integer_to_double_pseudo(
+        context: &tir::Context,
+        op: &tir::OperationRef,
+        rewriter: &mut tir::Rewriter,
+    ) -> Result<bool, tir::PassError> {
+        if op.as_op::<SelectUnsignedIntegerToDouble32Op>().is_none() {
+            return Ok(false);
+        }
+        let value = |name| {
+            op.op()
+                .attributes
+                .iter()
+                .find_map(|attr| match (&attr.value, attr.name == name) {
+                    (AttributeValue::Register(RegisterAttr::Virtual { id, .. }), true) => {
+                        Some(tir::ValueId::from_number(*id))
+                    }
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    tir::PassError::InvalidRuleSet(format!(
+                        "unsigned integer conversion pseudo is missing virtual '{name}'"
+                    ))
+                })
+        };
+        let dst = value("dst")?;
+        let src = value("src")?;
+        let temp = context
+            .create_value(tir::builtin::IntegerType::new(context, 64), None)
+            .id();
+        let zero_extend = Mov32OpBuilder::new(context)
+            .attr("dst", virt(temp.number(), RegClass::GPR32.id()))
+            .attr("src", virt(src.number(), RegClass::GPR32.id()))
+            .build();
+        let convert = Cvtsi2sd64OpBuilder::new(context)
+            .attr("dst", virt(dst.number(), RegClass::XMM.id()))
+            .attr("src", virt(temp.number(), RegClass::GPR.id()))
+            .build();
+        rewriter.insert_op_before(op, &zero_extend)?;
+        rewriter.replace_op(op, &convert)?;
+        Ok(true)
+    }
+
     /// Emit the branch-if-nonzero fallback for a condition no branch rule
     /// fused: `test cond, cond` + `jne dest`.
     fn emit_branch_nonzero(
@@ -1314,6 +1356,7 @@ mod isa {
             vec![
                 lower_divrem_pseudo,
                 lower_float_constant_pseudo,
+                lower_unsigned_integer_to_double_pseudo,
                 lower_constant,
                 lower_addr_of,
             ]
