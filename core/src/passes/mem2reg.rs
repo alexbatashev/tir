@@ -168,21 +168,33 @@ fn collect_slots(context: &Context, layout: &OpLayout) -> BTreeMap<ValueId, Slot
             continue;
         }
 
-        if let Some(read) = instance.clone().as_interface::<dyn MemoryRead>()
-            && let Some(slot) = slots.get_mut(&read.read_location())
+        let read_location = instance
+            .clone()
+            .as_interface::<dyn MemoryRead>()
+            .map(|read| read.read_location());
+        if let Some(location) = read_location
+            && let Some(slot) = slots.get_mut(&location)
         {
             slot.loads.push(op_id);
-            continue;
         }
 
-        if let Some(write) = instance.clone().as_interface::<dyn MemoryWrite>()
-            && let Some(slot) = slots.get_mut(&write.write_location())
+        let write = instance.clone().as_interface::<dyn MemoryWrite>();
+        let write_location = write.as_ref().map(|write| write.write_location());
+        if let Some(location) = write_location
+            && let Some(slot) = slots.get_mut(&location)
         {
             slot.stores.push(op_id);
-            continue;
+        }
+        if let Some(value) = write.map(|write| write.written_value())
+            && let Some(slot) = slots.get_mut(&value)
+        {
+            slot.escapes = true;
         }
 
         for operand in &instance.operands {
+            if Some(*operand) == read_location || Some(*operand) == write_location {
+                continue;
+            }
             if let Some(slot) = slots.get_mut(operand) {
                 slot.escapes = true;
             }

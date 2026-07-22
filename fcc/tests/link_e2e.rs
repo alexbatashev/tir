@@ -184,6 +184,14 @@ fn scalar_branch_mix_matches_host_compiler() {
 }
 
 #[test]
+fn local_pointer_matches_host_compiler() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(include_str!("memory/local_pointer.c"));
+}
+
+#[test]
 fn bitwise_and_shifts_match_host_compiler() {
     if !cc_available() {
         return;

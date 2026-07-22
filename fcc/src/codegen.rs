@@ -1355,6 +1355,23 @@ impl FnCodegen<'_> {
                     };
                     LoweredExpr::Value(value)
                 }
+                AstKind::AddressOf => {
+                    let child = ast.children(node).next().unwrap();
+                    let LoweredExpr::Address { ptr, .. } = self.values[&child] else {
+                        return Err(unsupported(
+                            ast,
+                            node,
+                            "non-addressable address-of operand".to_string(),
+                        ));
+                    };
+                    LoweredExpr::Value(ptr)
+                }
+                AstKind::Deref => {
+                    let child = ast.children(node).next().unwrap();
+                    let ptr = self.materialize(self.values[&child]);
+                    let elem = lower_type(self.context, self.typed, node_type(self.typed, node));
+                    LoweredExpr::Address { ptr, elem }
+                }
                 kind
                 @ (AstKind::PreInc | AstKind::PreDec | AstKind::PostInc | AstKind::PostDec) => {
                     let child = ast.children(node).next().unwrap();

@@ -1,0 +1,22 @@
+// RUN: tir opt --pass mem2reg %s | filecheck %s
+
+module {
+  func @stored_pointer(%initial: !i32, %replacement: !i32) -> !i32 {
+    %value = ptr.alloca {size = 4, align = 4} : !ptr.p<!i32>
+    ptr.store %initial, %value
+    %holder = ptr.alloca {size = 8, align = 8} : !ptr.p<!ptr.p<!i32>>
+    ptr.store %value, %holder
+    %alias = ptr.load %holder : !ptr.p<!i32>
+    ptr.store %replacement, %alias
+    %result = ptr.load %value : !i32
+    return %result
+  }
+  module_end
+}
+
+// CHECK-LABEL: func @stored_pointer
+// CHECK: %[[VALUE:[0-9]+]] = ptr.alloca
+// CHECK: ptr.store %0, %[[VALUE]]
+// CHECK: ptr.store %1, %[[VALUE]]
+// CHECK: %[[RESULT:[0-9]+]] = ptr.load %[[VALUE]]
+// CHECK: return %[[RESULT]]

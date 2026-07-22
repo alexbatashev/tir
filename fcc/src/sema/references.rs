@@ -14,6 +14,7 @@ pub(super) fn operand_reference(options: LangOptions, kind: AstKind) -> String {
         AstKind::LogAnd => ("6.5.13p2", "6.5.14p2"),
         AstKind::LogOr => ("6.5.14p2", "6.5.15p2"),
         AstKind::Neg | AstKind::Pos | AstKind::BitNot | AstKind::Not => ("6.5.3.3p1", "6.5.4.3p1"),
+        AstKind::AddressOf | AstKind::Deref => ("6.5.3.2p1", "6.5.4.2p1"),
         _ => unreachable!(),
     };
     standard_reference(options, old_clause, new_clause, "operator constraints")

@@ -553,6 +553,8 @@ where
                     just(Token::Plus).to(AstKind::Pos),
                     just(Token::Bang).to(AstKind::Not),
                     just(Token::Tilde).to(AstKind::BitNot),
+                    just(Token::Amp).to(AstKind::AddressOf),
+                    just(Token::Star).to(AstKind::Deref),
                     just(Token::PlusPlus).to(AstKind::PreInc),
                     just(Token::MinusMinus).to(AstKind::PreDec),
                 ))
