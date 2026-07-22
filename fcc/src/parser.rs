@@ -38,6 +38,13 @@ struct ParseState {
     next_record: u32,
 }
 
+#[derive(Clone)]
+enum PostfixOp {
+    Unary(AstKind),
+    Member { indirect: bool, name: String },
+    Subscript(NodeId),
+}
+
 #[derive(Default)]
 struct NameScope {
     typedefs: HashSet<String>,
@@ -492,14 +499,23 @@ where
             let postfix = primary
                 .then(
                     choice((
-                        just(Token::PlusPlus).to((Some(AstKind::PostInc), None)),
-                        just(Token::MinusMinus).to((Some(AstKind::PostDec), None)),
+                        just(Token::PlusPlus).to(PostfixOp::Unary(AstKind::PostInc)),
+                        just(Token::MinusMinus).to(PostfixOp::Unary(AstKind::PostDec)),
                         just(Token::Dot)
                             .ignore_then(ident())
-                            .map(|name| (None, Some((false, name)))),
+                            .map(|name| PostfixOp::Member {
+                                indirect: false,
+                                name,
+                            }),
                         just(Token::Arrow)
                             .ignore_then(ident())
-                            .map(|name| (None, Some((true, name)))),
+                            .map(|name| PostfixOp::Member {
+                                indirect: true,
+                                name,
+                            }),
+                        expr.clone()
+                            .delimited_by(just(Token::LBracket), just(Token::RBracket))
+                            .map(PostfixOp::Subscript),
                     ))
                     .repeated()
                     .collect::<Vec<_>>(),
@@ -508,15 +524,20 @@ where
                     |(operand, ops), e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
                         let tok = e.span().start;
                         let st = &mut e.state().0;
-                        ops.into_iter().fold(operand, |child, (op, member)| {
-                            if let Some(op) = op {
-                                return unary(st, op, child, tok);
+                        ops.into_iter().fold(operand, |child, op| match op {
+                            PostfixOp::Unary(kind) => unary(st, kind, child, tok),
+                            PostfixOp::Member { indirect, name } => {
+                                let id = st.add(AstKind::Member, tok);
+                                st.ast.set_leaf_data(id, AstLeaf::Member { name, indirect });
+                                st.ast.add_edge(id, child);
+                                id
                             }
-                            let (indirect, name) = member.unwrap();
-                            let id = st.add(AstKind::Member, tok);
-                            st.ast.set_leaf_data(id, AstLeaf::Member { name, indirect });
-                            st.ast.add_edge(id, child);
-                            id
+                            PostfixOp::Subscript(index) => {
+                                let add = st.add(AstKind::Add, tok);
+                                st.ast.add_edge(add, child);
+                                st.ast.add_edge(add, index);
+                                unary(st, AstKind::Deref, add, tok)
+                            }
                         })
                     },
                 );
