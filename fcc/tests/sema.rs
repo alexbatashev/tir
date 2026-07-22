@@ -62,6 +62,23 @@ fn computes_named_struct_layout() {
 }
 
 #[test]
+fn computes_named_union_layout() {
+    let typed = typed_for(
+        "union Value { int integer; long wide; }; int main(void) { return 0; }",
+        "riscv64",
+    );
+    let value = typed
+        .records()
+        .find(|record| record.name == "Value")
+        .unwrap();
+
+    assert_eq!(value.size, 8);
+    assert_eq!(value.align, 8);
+    assert_eq!(value.fields[0].offset, 0);
+    assert_eq!(value.fields[1].offset, 0);
+}
+
+#[test]
 fn gives_anonymous_structs_distinct_compiler_names() {
     let typed = typed_for(
         "typedef struct { int value; } First; typedef struct { int value; } Second;",

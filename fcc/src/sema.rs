@@ -419,9 +419,19 @@ impl Analyzer<'_> {
             }
             let ty = self.canonical_type(&ty);
             let (size, align) = self.type_layout(ty).unwrap_or((0, 1));
-            offset = align_to(offset, align);
-            fields.push(RecordField { name, ty, offset });
-            offset += size;
+            let field_offset = match kind {
+                RecordKind::Struct => align_to(offset, align),
+                RecordKind::Union => 0,
+            };
+            fields.push(RecordField {
+                name,
+                ty,
+                offset: field_offset,
+            });
+            offset = match kind {
+                RecordKind::Struct => field_offset + size,
+                RecordKind::Union => offset.max(size),
+            };
             record_align = record_align.max(align);
         }
         self.records[index].size = align_to(offset, record_align);
