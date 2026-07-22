@@ -202,6 +202,16 @@ fn node_type(typed: &TypedAst, node: NodeId) -> QualType {
         .expect("semantic analysis annotates codegen nodes")
 }
 
+fn converted_node_type(typed: &TypedAst, node: NodeId) -> QualType {
+    let semantics = typed.ast().get_annotation(node).unwrap();
+    semantics
+        .conversions
+        .last()
+        .copied()
+        .or(semantics.ty)
+        .expect("semantic analysis annotates codegen nodes")
+}
+
 fn node_entity(typed: &TypedAst, node: NodeId) -> EntityId {
     typed
         .ast()
@@ -304,14 +314,25 @@ impl FnCodegen<'_> {
         }
     }
 
-    fn apply_conversions(&mut self, node: NodeId, mut value: ValueId) -> ValueId {
+    fn apply_conversions(&mut self, node: NodeId, mut expression: LoweredExpr) -> LoweredExpr {
         let semantics = self.ast.get_annotation(node).unwrap();
         let mut source = semantics.ty.unwrap();
         for &target in &semantics.conversions {
-            value = self.convert_scalar(value, source, target);
+            expression = if matches!(self.typed.types().kind(source), TypeKind::Array(_, _))
+                && matches!(self.typed.types().kind(target), TypeKind::Pointer(_))
+            {
+                match expression {
+                    LoweredExpr::Value(ptr) | LoweredExpr::Address { ptr, .. } => {
+                        LoweredExpr::Value(ptr)
+                    }
+                }
+            } else {
+                let value = self.materialize(expression);
+                LoweredExpr::Value(self.convert_scalar(value, source, target))
+            };
             source = target;
         }
-        value
+        expression
     }
 
     fn convert_scalar(&mut self, value: ValueId, source: QualType, target: QualType) -> ValueId {
@@ -578,7 +599,12 @@ impl FnCodegen<'_> {
                     unreachable!("decl node carries a decl payload");
                 };
                 let source_ty = node_type(self.typed, stmt);
-                let elem = lower_type(self.context, self.typed, source_ty);
+                let elem = match self.typed.types().kind(source_ty) {
+                    TypeKind::Array(element, Some(_)) => {
+                        lower_type(self.context, self.typed, *element)
+                    }
+                    _ => lower_type(self.context, self.typed, source_ty),
+                };
                 let (size, align) = source_type_layout(self.typed, source_ty);
                 let slot = self.alloca(elem, size, align);
                 if let Some(init) = ast.children(stmt).next() {
@@ -1347,8 +1373,8 @@ impl FnCodegen<'_> {
                     let l = self.materialize(lhs);
                     let r = self.materialize(rhs);
                     let source_ty = node_type(self.typed, node);
-                    let lhs_ty = node_type(self.typed, lhs_node);
-                    let rhs_ty = node_type(self.typed, rhs_node);
+                    let lhs_ty = converted_node_type(self.typed, lhs_node);
+                    let rhs_ty = converted_node_type(self.typed, rhs_node);
                     let value = match (
                         kind,
                         self.typed.types().kind(lhs_ty),
@@ -1653,8 +1679,7 @@ impl FnCodegen<'_> {
                 .get_annotation(node)
                 .is_some_and(|semantics| !semantics.conversions.is_empty())
             {
-                let value = self.materialize(expression);
-                LoweredExpr::Value(self.apply_conversions(node, value))
+                self.apply_conversions(node, expression)
             } else {
                 expression
             };

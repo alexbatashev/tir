@@ -839,6 +839,9 @@ impl Analyzer<'_> {
                 TypeKind::Record(_) if self.type_layout(ty).is_none() => {
                     Some(format!("object '{name}' has incomplete struct type"))
                 }
+                TypeKind::Array(_, _) if self.type_layout(ty).is_none() => {
+                    Some(format!("object '{name}' has incomplete array type"))
+                }
                 _ => None,
             };
             if let Some(message) = message {
@@ -1161,7 +1164,19 @@ impl Analyzer<'_> {
                 }
             }
             AstKind::Add | AstKind::Sub | AstKind::Mul | AstKind::Div => {
-                let operands = self.child_types(node);
+                let children = self.ast.children(node).collect::<Vec<_>>();
+                let mut operands = self.child_types(node);
+                for (&child, operand) in children.iter().zip(&mut operands) {
+                    let element = match self.types.kind(*operand) {
+                        TypeKind::Array(element, _) => Some(*element),
+                        _ => None,
+                    };
+                    if let Some(element) = element {
+                        let pointer = self.types.intern(TypeKind::Pointer(element));
+                        self.record_conversion(child, pointer);
+                        *operand = pointer;
+                    }
+                }
                 let pointer_result = if operands.len() == 2 {
                     match (
                         self.types.kind(operands[0]),
