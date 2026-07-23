@@ -524,19 +524,50 @@ fn classify_riscv_fp_aggregate(
         return None;
     };
     let record = typed.record(*id)?;
-    if record.kind != RecordKind::Struct || !(1..=2).contains(&record.fields.len()) {
+    if record.kind != RecordKind::Struct {
         return None;
     }
-    record
-        .fields
-        .iter()
-        .map(|field| {
-            matches!(typed.types().kind(field.ty), TypeKind::Double).then(|| AbiPiece {
-                offset: field.offset,
+    let mut pieces = vec![];
+    if !flatten_riscv_fp_fields(context, typed, ty, 0, &mut pieces)
+        || !(1..=2).contains(&pieces.len())
+    {
+        return None;
+    }
+    Some(pieces)
+}
+
+fn flatten_riscv_fp_fields(
+    context: &Context,
+    typed: &TypedAst,
+    ty: QualType,
+    offset: u64,
+    pieces: &mut Vec<AbiPiece>,
+) -> bool {
+    match typed.types().kind(ty) {
+        TypeKind::Double => {
+            pieces.push(AbiPiece {
+                offset,
                 ty: FloatType::f64(context),
+            });
+            true
+        }
+        TypeKind::Record(id) => {
+            let Some(record) = typed.record(*id) else {
+                return false;
+            };
+            record.kind == RecordKind::Struct
+                && record.fields.iter().all(|field| {
+                    flatten_riscv_fp_fields(context, typed, field.ty, offset + field.offset, pieces)
+                })
+        }
+        TypeKind::Array(element, Some(length)) => {
+            let stride = source_type_layout(typed, *element).0;
+            (0..*length).all(|index| {
+                flatten_riscv_fp_fields(context, typed, *element, offset + index * stride, pieces)
             })
-        })
-        .collect()
+        }
+        _ => false,
+    }
 }
 
 fn classify_integer_aggregate(
