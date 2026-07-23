@@ -1234,6 +1234,24 @@ fn emit_store_marker(
     ))
 }
 
+fn memory_rules() -> Vec<Rule> {
+    vec![
+        Rule::new("load", load_pattern(), 1, emit_load_marker).with_operand_constraints(vec![
+            (0, OperandConstraint::Register),
+            (1, OperandConstraint::Immediate),
+            (3, OperandConstraint::Immediate),
+            (4, OperandConstraint::Immediate),
+        ]),
+        Rule::new("store", store_pattern(), 1, emit_store_marker).with_operand_constraints(vec![
+            (0, OperandConstraint::Register),
+            (1, OperandConstraint::Immediate),
+            (3, OperandConstraint::Immediate),
+            (4, OperandConstraint::Register),
+            (5, OperandConstraint::Immediate),
+        ]),
+    ]
+}
+
 /// Memory lowering is driven purely by the `MemoryRead`/`MemoryWrite` interfaces:
 /// a `ptr.store` and a `ptr.load` of the same slot must lower to the target's
 /// store/load patterns with the base pointer and stored value bound as operands.
@@ -1264,10 +1282,7 @@ fn memory_ops_select_via_interfaces() {
     mb.insert(func);
     mb.insert(ops::module_end(&context).build());
 
-    let rules = vec![
-        Rule::new("load", load_pattern(), 1, emit_load_marker),
-        Rule::new("store", store_pattern(), 1, emit_store_marker),
-    ];
+    let rules = memory_rules();
 
     let mut pm = PassManager::new();
     pm.nest(FuncOp::name())
@@ -1312,10 +1327,7 @@ fn pointer_memory_ops_select_via_target_width() {
     mb.insert(func);
     mb.insert(ops::module_end(&context).build());
 
-    let rules = vec![
-        Rule::new("load", load_pattern(), 1, emit_load_marker),
-        Rule::new("store", store_pattern(), 1, emit_store_marker),
-    ];
+    let rules = memory_rules();
 
     let mut pm = PassManager::new();
     pm.nest(FuncOp::name())

@@ -307,6 +307,7 @@ pub fn canonicalize_for_selection<V: Clone>(
     let new_root = canon_rebuild(
         graph,
         root,
+        root,
         immediate_symbols,
         &mut out,
         &mut memo,
@@ -398,11 +399,26 @@ fn is_immediate_leaf<V>(
 fn canon_rebuild<V: Clone>(
     graph: &impl Dag<Node = SymKind, Leaf = SymPayload<V>>,
     node: NodeId,
+    selection_root: NodeId,
     immediate_symbols: &HashSet<u32>,
     out: &mut GenericDag<SymKind, SymPayload<V>>,
     memo: &mut HashMap<usize, NodeId>,
     forced: &mut HashMap<usize, u32>,
 ) -> NodeId {
+    macro_rules! rebuild {
+        ($child:expr) => {
+            canon_rebuild(
+                graph,
+                $child,
+                selection_root,
+                immediate_symbols,
+                out,
+                memo,
+                forced,
+            )
+        };
+    }
+
     if let Some(&existing) = memo.get(&node.index()) {
         return existing;
     }
@@ -438,7 +454,7 @@ fn canon_rebuild<V: Clone>(
         && (*graph.get_node(children[0]) == SymKind::LoadMemory
             || is_immediate_leaf(graph, children[0], immediate_symbols))
     {
-        let inner = canon_rebuild(graph, children[0], immediate_symbols, out, memo, forced);
+        let inner = rebuild!(children[0]);
         memo.insert(node.index(), inner);
         return inner;
     }
@@ -456,18 +472,39 @@ fn canon_rebuild<V: Clone>(
         )
         && let Some(width) = infer_widths(graph, |_| None)[children[0].index()]
     {
-        let inner = canon_rebuild(graph, children[0], immediate_symbols, out, memo, forced);
+        let inner = rebuild!(children[0]);
         forced.insert(inner.index(), width);
         memo.insert(node.index(), inner);
         return inner;
     }
 
-    // SExt(Extract(inner, hi, 0), _) -> inner forced to width hi+1.
+    // A sign-extension instruction reads a narrow view of a register and
+    // extends it into the full destination. Preserve that operation when the
+    // extracted source is the instruction's register operand, while dropping
+    // the explicit low-bit view that source IR represents through its type.
+    if kind == SymKind::SExt
+        && node == selection_root
+        && children.len() == 2
+        && let Some((source, hi)) = extract_from_zero_hi(graph, children[0])
+        && *graph.get_node(source) == SymKind::Symbol
+    {
+        let value = rebuild!(source);
+        forced.insert(value.index(), (hi + 1) as u32);
+        let width = rebuild!(children[1]);
+        let extension = out.add_node(SymKind::SExt);
+        out.add_edge(extension, value);
+        out.add_edge(extension, width);
+        memo.insert(node.index(), extension);
+        return extension;
+    }
+
+    // SExt(Extract(inner, hi, 0), _) -> inner forced to width hi+1 for word
+    // arithmetic whose instruction already sign-extends its narrow result.
     if kind == SymKind::SExt
         && children.len() == 2
         && let Some((source, hi)) = extract_from_zero_hi(graph, children[0])
     {
-        let inner = canon_rebuild(graph, source, immediate_symbols, out, memo, forced);
+        let inner = rebuild!(source);
         forced.insert(inner.index(), (hi + 1) as u32);
         memo.insert(node.index(), inner);
         return inner;
@@ -490,16 +527,9 @@ fn canon_rebuild<V: Clone>(
         if sc.len() == 2
             && let Some((value_src, hi)) = extract_from_zero_hi(graph, sc[0])
         {
-            let value = canon_rebuild(graph, value_src, immediate_symbols, out, memo, forced);
+            let value = rebuild!(value_src);
             forced.insert(value.index(), (hi + 1) as u32);
-            let amount = canon_rebuild(
-                graph,
-                shift_amount_src(graph, sc[1]),
-                immediate_symbols,
-                out,
-                memo,
-                forced,
-            );
+            let amount = rebuild!(shift_amount_src(graph, sc[1]));
             let new_node = out.add_node(*graph.get_node(shift));
             out.add_edge(new_node, value);
             out.add_edge(new_node, amount);
@@ -525,7 +555,7 @@ fn canon_rebuild<V: Clone>(
         let mut ch = graph.children(node);
         let source = ch.next().expect("extract has a value operand");
         let hi = const_u64(graph, ch.next().expect("extract has a hi operand"));
-        let inner = canon_rebuild(graph, source, immediate_symbols, out, memo, forced);
+        let inner = rebuild!(source);
         if let Some(hi) = hi {
             forced.insert(inner.index(), (hi + 1) as u32);
         }
@@ -536,15 +566,8 @@ fn canon_rebuild<V: Clone>(
     // Shift-amount mask strip (mask is implicit in the encoding):
     //   Shift(v, Extract(amt, k, 0)) / Shift(v, Clamp(amt, _, _)) -> Shift(v, amt)
     if is_shift(kind) && children.len() == 2 {
-        let value = canon_rebuild(graph, children[0], immediate_symbols, out, memo, forced);
-        let amount = canon_rebuild(
-            graph,
-            shift_amount_src(graph, children[1]),
-            immediate_symbols,
-            out,
-            memo,
-            forced,
-        );
+        let value = rebuild!(children[0]);
+        let amount = rebuild!(shift_amount_src(graph, children[1]));
         let new_node = out.add_node(kind);
         out.add_edge(new_node, value);
         out.add_edge(new_node, amount);
@@ -555,8 +578,8 @@ fn canon_rebuild<V: Clone>(
     // Normalize the load's metadata child to 0 so source IR loads match both signed
     // and unsigned target forms; signedness lives in the surrounding SExt/ZExt.
     if kind == SymKind::LoadMemory && children.len() == 3 {
-        let address = canon_rebuild(graph, children[0], immediate_symbols, out, memo, forced);
-        let bytes = canon_rebuild(graph, children[1], immediate_symbols, out, memo, forced);
+        let address = rebuild!(children[0]);
+        let bytes = rebuild!(children[1]);
         let zero = out.add_node(SymKind::Constant);
         out.set_leaf_data(zero, SymPayload::Int(APInt::new(1, 0)));
         let new_node = out.add_node(kind);
@@ -570,17 +593,17 @@ fn canon_rebuild<V: Clone>(
     // Collapse the explicit store truncation `extract(rs, 31, 0)` to the inner value,
     // forcing its width; source IR already carries the stored value's width.
     if kind == SymKind::StoreMemory && children.len() == 4 {
-        let address = canon_rebuild(graph, children[0], immediate_symbols, out, memo, forced);
-        let bytes = canon_rebuild(graph, children[1], immediate_symbols, out, memo, forced);
+        let address = rebuild!(children[0]);
+        let bytes = rebuild!(children[1]);
         let value_src = children[2];
         let value = if let Some((source, hi)) = extract_from_zero_hi(graph, value_src) {
-            let inner = canon_rebuild(graph, source, immediate_symbols, out, memo, forced);
+            let inner = rebuild!(source);
             forced.insert(inner.index(), (hi + 1) as u32);
             inner
         } else {
-            canon_rebuild(graph, value_src, immediate_symbols, out, memo, forced)
+            rebuild!(value_src)
         };
-        let address_space = canon_rebuild(graph, children[3], immediate_symbols, out, memo, forced);
+        let address_space = rebuild!(children[3]);
         let new_node = out.add_node(kind);
         out.add_edge(new_node, address);
         out.add_edge(new_node, bytes);
@@ -598,10 +621,7 @@ fn canon_rebuild<V: Clone>(
         }
         new_node
     } else {
-        let new_children: Vec<NodeId> = children
-            .iter()
-            .map(|&child| canon_rebuild(graph, child, immediate_symbols, out, memo, forced))
-            .collect();
+        let new_children: Vec<NodeId> = children.iter().map(|&child| rebuild!(child)).collect();
         let new_node = out.add_node(kind);
         for child in new_children {
             out.add_edge(new_node, child);

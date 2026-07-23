@@ -550,23 +550,28 @@ impl FunctionSelection {
         })
     }
 
-    /// Whether External satisfies a boundary's register requirement for `class`:
-    /// a value that outlives selection backs the class. Without materializer
-    /// rules (`no_materializer_rules`), a bare constant also qualifies: the
-    /// target's pre-RA hook still lowers surviving constants. With them, every
-    /// constant needing a register must root a materializer match.
+    #[allow(clippy::too_many_arguments)]
+    /// A free External alternative can satisfy a register boundary only when
+    /// emission resolves the same concrete value at that match's consumer.
     fn externally_bindable(
         &self,
         context: &Context,
         dom: &DominatorTree,
         class: Id,
         block: BlockId,
+        consumer: Option<OpId>,
         no_materializer_rules: bool,
     ) -> bool {
-        self.has_surviving_value(context, class)
-            || self.has_materialized_constant_value(dom, class, block)
-            || (no_materializer_rules
-                && (self.has_values(class) || class_int_binding(&self.egraph, class).is_some()))
+        consumer.is_some_and(|consumer| {
+            let binding = self.resolve_binding(dom, context, class, block, consumer);
+            if no_materializer_rules {
+                binding.value.is_some()
+            } else {
+                binding.value.is_some()
+                    && (self.has_surviving_value(context, class)
+                        || self.has_materialized_constant_value(dom, class, block))
+            }
+        })
     }
 
     /// Resolve `class` to operands for consumer op `consumer` in `block`: the
@@ -1566,15 +1571,28 @@ impl InstructionSelectPass {
             &covered,
             &cover::ClassPolicies {
                 must_materialize: &|class| fs.requires_materialization(class, &mm_overlay),
-                force_materialize: &|class| fs.forces_constant_materialization(class, block_id),
-                externally_bindable: &|class| {
+                force_materialize: &|class| {
+                    fs.forces_constant_materialization(class, block_id)
+                        || (block_roots.contains(&fs.egraph.find(class))
+                            && fs.requires_materialization(class, &mm_overlay)
+                            && class_int_binding(&fs.egraph, class).is_some())
+                },
+                externally_bindable: &|class, consumer| {
                     fs.externally_bindable(
                         context,
                         dom,
                         class,
                         block_id,
+                        consumer,
                         self.constant_materializer_ranges.is_empty(),
                     )
+                },
+                root_bindable: &|class, consumer| {
+                    consumer.is_some_and(|consumer| {
+                        fs.resolve_binding(dom, context, class, block_id, consumer)
+                            .value
+                            .is_some()
+                    })
                 },
             },
             &dead_allowed,
@@ -1979,10 +1997,49 @@ impl InstructionSelectPass {
                     pattern_root,
                     bindings,
                     cost,
+                    consumer: block_op,
+                    introduced,
                 });
             }
         }
         prune_dominated_matches(&self.compiled_patterns, &mut matches);
+        let mut consumer_by_class = block_op_by_root.clone();
+        loop {
+            let mut changed = false;
+            for matched in &matches {
+                let root = fs.egraph.find(matched.root);
+                let Some(&consumer) = consumer_by_class.get(&root) else {
+                    continue;
+                };
+                for (_, class) in &matched.bindings.captures.entries {
+                    let class = fs.egraph.find(*class);
+                    if class == root {
+                        continue;
+                    }
+                    match consumer_by_class.get_mut(&class) {
+                        Some(existing) if fs.op_position[&consumer] < fs.op_position[existing] => {
+                            *existing = consumer;
+                            changed = true;
+                        }
+                        None => {
+                            consumer_by_class.insert(class, consumer);
+                            changed = true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        for matched in &mut matches {
+            if matched.consumer.is_none() {
+                matched.consumer = consumer_by_class
+                    .get(&fs.egraph.find(matched.root))
+                    .copied();
+            }
+        }
         matches
     }
 }
@@ -2000,7 +2057,13 @@ fn value_match_allowed(
     pattern_node: Id,
     class: Id,
 ) -> bool {
-    if !compiled.boundary_ok(&fs.egraph, context, pattern_node, class) {
+    if !compiled.boundary_ok(
+        &fs.egraph,
+        context,
+        pattern_node,
+        class,
+        fs.has_values(class),
+    ) {
         return false;
     }
     if pattern_node == pattern_root || compiled.node_meta[pattern_node.index()].duplicable {

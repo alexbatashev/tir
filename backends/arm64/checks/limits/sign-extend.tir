@@ -1,16 +1,20 @@
 // RUN: tir mc --march=arm64 --stage=isel %s | filecheck %s
-// XFAIL: *
-
-// ISEL GAP: `extsi` (and `extui`) cannot be lowered. isel aborts with
-//   "pass pipeline failed: failed to rewrite op OpId(0)".
-// The TMDL defines sxtb/sxth/sxtw/ubfm but no rule binds the widen semantics.
 
 module {
   func @f(%0: !i32) -> !i64 {
     %1 = extsi %0 : !i64
     return %1
   }
+  func @g() -> !i64 {
+    %0 = constant {value = 16} : !i32
+    %1 = extsi %0 : !i64
+    return %1
+  }
   module_end
 }
 
+// CHECK-LABEL: asm.symbol {name = "f"
 // CHECK: arm64.sxtw
+// CHECK-LABEL: asm.symbol {name = "g"
+// CHECK: arm64.sxtw
+// CHECK-NOT: extsi

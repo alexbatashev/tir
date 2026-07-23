@@ -119,8 +119,9 @@ impl CompiledIselPattern {
         ctx: &Context,
         pattern_node: Id,
         class: Id,
+        value_backed: bool,
     ) -> bool {
-        self.boundary_ok_impl(egraph, ctx, pattern_node, class, false)
+        self.boundary_ok_impl(egraph, ctx, pattern_node, class, false, value_backed)
     }
 
     fn boundary_ok_impl(
@@ -130,6 +131,7 @@ impl CompiledIselPattern {
         pattern_node: Id,
         class: Id,
         bool_binds_wide: bool,
+        value_backed: bool,
     ) -> bool {
         let meta = &self.node_meta[pattern_node.index()];
         if let Some(required) = meta.register
@@ -150,6 +152,7 @@ impl CompiledIselPattern {
         match meta.constraint {
             Some(OperandConstraint::Register) => {
                 meta.materialized_constant
+                    || value_backed
                     || egraph
                         .nodes(class)
                         .iter()
@@ -175,7 +178,7 @@ impl CompiledIselPattern {
         ctx: &Context,
     ) -> Vec<tir_symbolic::egraph::EMatch<u32>> {
         self.search_with_legality(egraph, ctx, &|node, class| {
-            self.boundary_ok_impl(egraph, ctx, node, class, true)
+            self.boundary_ok_impl(egraph, ctx, node, class, true, false)
         })
     }
 

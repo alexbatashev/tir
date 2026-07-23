@@ -210,10 +210,10 @@ fn value_zero_form_operands(
 fn width_sensitive_symbols(
     dag: &impl tir::graph::Dag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
     node_widths: &[Option<u32>],
-) -> HashSet<u32> {
+) -> HashMap<u32, Option<u32>> {
     use tir::sem::SymKind as K;
 
-    let mut out = HashSet::new();
+    let mut out = HashMap::new();
     for index in 0..dag.len() {
         let node = tir::graph::NodeId::from_index(index);
         let untyped = node_widths.get(index).copied().flatten().is_none();
@@ -221,6 +221,7 @@ fn width_sensitive_symbols(
             K::Eq | K::Ne | K::Lt | K::Le | K::Gt | K::Ge | K::ULt | K::ULe | K::UGt | K::UGe => {
                 &[0, 1]
             }
+            K::SExt | K::ZExt => &[0],
             K::Div | K::UDiv | K::SRem | K::URem if untyped => &[0, 1],
             K::ShiftRightLogic | K::ShiftRightArithmetic if untyped => &[0],
             _ => &[],
@@ -230,7 +231,7 @@ fn width_sensitive_symbols(
             if let Some(child) = children.get(slot)
                 && let Some(tir::sem::SymPayload::SymbolId(symbol)) = dag.get_leaf_data(*child)
             {
-                out.insert(*symbol);
+                out.insert(*symbol, node_widths.get(child.index()).copied().flatten());
             }
         }
     }
@@ -242,7 +243,7 @@ fn width_sensitive_symbols(
 fn emit_operand_register_call(
     ops: &[(String, Type)],
     variable_symbols: &HashMap<String, u32>,
-    sensitive_symbols: &HashSet<u32>,
+    sensitive_symbols: &HashMap<u32, Option<u32>>,
     float_classes: &HashSet<String>,
     polymorphic_classes: &HashSet<String>,
 ) -> proc_macro2::TokenStream {
@@ -255,14 +256,26 @@ fn emit_operand_register_call(
             let &symbol = variable_symbols.get(op_name)?;
             let class_lit = proc_macro2::Literal::string(class_name);
             let symbol_lit = proc_macro2::Literal::u32_unsuffixed(symbol);
+            let capability_width = sensitive_symbols
+                .get(&symbol)
+                .copied()
+                .flatten()
+                .map(|width| {
+                    let required_width = proc_macro2::Literal::u32_unsuffixed(width);
+                    quote! {{
+                        let _ = width;
+                        #required_width
+                    }}
+                })
+                .unwrap_or_else(|| quote! { *width });
             let capability = if polymorphic_classes.contains(class_name) {
-                quote! { tir::backend::isel::RegisterCapability::any(*width) }
+                quote! { tir::backend::isel::RegisterCapability::any(#capability_width) }
             } else if float_classes.contains(class_name) {
-                quote! { tir::backend::isel::RegisterCapability::float(*width) }
+                quote! { tir::backend::isel::RegisterCapability::float(#capability_width) }
             } else {
-                quote! { tir::backend::isel::RegisterCapability::integer(*width) }
+                quote! { tir::backend::isel::RegisterCapability::integer(#capability_width) }
             };
-            let requirement = if sensitive_symbols.contains(&symbol) {
+            let requirement = if sensitive_symbols.contains_key(&symbol) {
                 quote! { tir::backend::isel::RegisterRequirement::whole(#capability) }
             } else {
                 quote! { tir::backend::isel::RegisterRequirement::low_bits(#capability) }

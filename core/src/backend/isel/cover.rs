@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 
 use tir::{
-    ValueId,
+    OpId, ValueId,
     pbqp::{self, INF_COST, PbqpAlternative, PbqpMatrix, PbqpProblem},
     sem::SymKind,
 };
@@ -111,6 +111,10 @@ pub(crate) struct PbqpIselMatch {
     pub(crate) pattern_root: Id,
     pub(crate) bindings: FullMatchBindings,
     pub(crate) cost: u64,
+    /// The original op before which every register boundary must be available.
+    pub(crate) consumer: Option<OpId>,
+    /// A root without an original op is emitted before its consuming instruction.
+    pub(crate) introduced: bool,
 }
 /// A solved cover: the chosen alternative for every PBQP node and the e-class
 /// each PBQP node stands for (same index).
@@ -130,13 +134,14 @@ pub(crate) struct ClassCover {
 /// Per-class predicates the cover consults (all derived from the function-wide
 /// side tables): `must_materialize` bars consuming alternatives,
 /// `force_materialize` drops the free External alternative when a materializer
-/// match roots the class, and `externally_bindable` says whether External
-/// satisfies a boundary's register requirement (the class carries an IR value
-/// or folds to an immediate).
+/// match roots the class, `externally_bindable` says whether External carries a
+/// register value at the match's consumer, and `root_bindable` says whether a
+/// separately rooted original op can supply one there.
 pub(crate) struct ClassPolicies<'a> {
     pub(crate) must_materialize: &'a dyn Fn(Id) -> bool,
     pub(crate) force_materialize: &'a dyn Fn(Id) -> bool,
-    pub(crate) externally_bindable: &'a dyn Fn(Id) -> bool,
+    pub(crate) externally_bindable: &'a dyn Fn(Id, Option<OpId>) -> bool,
+    pub(crate) root_bindable: &'a dyn Fn(Id, Option<OpId>) -> bool,
 }
 
 pub(crate) fn build_eclass_cover(
@@ -287,6 +292,7 @@ pub(crate) fn build_eclass_cover(
                     child_alt,
                     matches,
                     policies.externally_bindable,
+                    policies.root_bindable,
                 ) {
                     matrix.set(parent_alt_idx, child_alt_idx, INF_COST);
                 }
@@ -452,7 +458,8 @@ pub(crate) fn alternatives_compatible(
     parent_alt: &PbqpIselAlternative,
     child_alt: &PbqpIselAlternative,
     matches: &[PbqpIselMatch],
-    externally_bindable: &dyn Fn(Id) -> bool,
+    externally_bindable: &dyn Fn(Id, Option<OpId>) -> bool,
+    root_bindable: &dyn Fn(Id, Option<OpId>) -> bool,
 ) -> bool {
     match child_requirement(egraph, child, parent_alt, matches) {
         // A boundary requirement is satisfied by the class rooting its own
@@ -461,11 +468,22 @@ pub(crate) fn alternatives_compatible(
         // immediate — a valueless synthetic class (the injected `zext(0b0, W)`
         // zero shape) can only satisfy it by rooting a match; for an immediate,
         // any constant class (the value is folded into the encoding).
-        Some(req @ (ChildRequirement::Materialized | ChildRequirement::Immediate)) => {
+        Some(req @ (ChildRequirement::Materialized { .. } | ChildRequirement::Immediate)) => {
             match child_alt {
-                PbqpIselAlternative::Root { .. } => true,
+                PbqpIselAlternative::Root { match_id } => match req {
+                    ChildRequirement::Materialized {
+                        match_id: parent_match,
+                    } => {
+                        matches[*match_id].introduced
+                            || root_bindable(child, matches[parent_match].consumer)
+                    }
+                    ChildRequirement::Immediate => true,
+                    ChildRequirement::SameMatch { .. } => unreachable!(),
+                },
                 PbqpIselAlternative::External => match req {
-                    ChildRequirement::Materialized => externally_bindable(child),
+                    ChildRequirement::Materialized { match_id } => {
+                        externally_bindable(child, matches[match_id].consumer)
+                    }
                     _ => class_int_binding(egraph, child).is_some(),
                 },
                 PbqpIselAlternative::Internal { .. } | PbqpIselAlternative::Dead => false,
@@ -524,7 +542,7 @@ pub(crate) fn child_requirement(
     }
 
     if register_boundary {
-        return Some(ChildRequirement::Materialized);
+        return Some(ChildRequirement::Materialized { match_id });
     }
     if immediate_boundary {
         return Some(ChildRequirement::Immediate);
@@ -540,7 +558,7 @@ pub(crate) fn child_requirement(
 }
 
 pub(crate) enum ChildRequirement {
-    Materialized,
+    Materialized { match_id: usize },
     Immediate,
     SameMatch { match_id: usize, pattern_node: Id },
 }
