@@ -76,6 +76,8 @@ dialect! {
             CondBranchOp,
             CallOp,
             IndirectCallOp,
+            CallIndirectResultOp,
+            IndirectResultOp,
             MakeTupleOp,
             TupleGetOp,
             DeclareOp,

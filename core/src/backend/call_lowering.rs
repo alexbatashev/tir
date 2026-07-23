@@ -1,7 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
 use tir::attributes::{AttributeValue, RegisterAttr};
-use tir::builtin::{CallOp, IndirectCallOp, MakeTupleOp, TupleGetOp, TupleType, UnitType};
+use tir::builtin::{
+    CallIndirectResultOp, CallOp, IndirectCallOp, IndirectResultOp, MakeTupleOp, TupleGetOp,
+    TupleType, UnitType,
+};
 use tir::{Context, OpId, Operation, OperationRef, PassError, Rewriter, ValueId};
 
 use crate::backend::abi::{AbiInfo, Overflow, ValueKind, exhaust_argument_registers, value_kind};
@@ -62,10 +65,40 @@ impl CallLowering {
         op: &OperationRef,
         rewriter: &mut Rewriter,
     ) -> Result<bool, PassError> {
-        let (callee, args, result) = if let Some(call) = op.as_op::<CallOp>() {
-            (Callee::Direct(call.callee()), call.args(), call.result())
+        if let Some(result) = op.as_op::<IndirectResultOp>() {
+            let register = self.abi.indirect_result.ok_or_else(|| {
+                PassError::InvalidRuleSet("ABI has no indirect result register".to_string())
+            })?;
+            let copy = self.emitter.copy(
+                context,
+                virtual_reg(result.result().number(), register.0),
+                physical_reg(register),
+            );
+            rewriter.replace_op(op, copy.as_ref())?;
+            return Ok(true);
+        }
+
+        let (callee, args, result, indirect_result) = if let Some(call) = op.as_op::<CallOp>() {
+            (
+                Callee::Direct(call.callee()),
+                call.args(),
+                call.result(),
+                None,
+            )
         } else if let Some(call) = op.as_op::<IndirectCallOp>() {
-            (Callee::Indirect(call.callee()), call.args(), call.result())
+            (
+                Callee::Indirect(call.callee()),
+                call.args(),
+                call.result(),
+                None,
+            )
+        } else if let Some(call) = op.as_op::<CallIndirectResultOp>() {
+            (
+                Callee::Direct(call.callee()),
+                call.args(),
+                call.result(),
+                Some(call.destination()),
+            )
         } else {
             return Ok(false);
         };
@@ -168,6 +201,14 @@ impl CallLowering {
             Callee::Direct(_) => None,
             Callee::Indirect(value) => Some(detach(rewriter, value, indirect_class)?),
         };
+        let fresh_indirect_result = indirect_result
+            .map(|value| {
+                let register = self.abi.indirect_result.ok_or_else(|| {
+                    PassError::InvalidRuleSet("ABI has no indirect result register".to_string())
+                })?;
+                detach(rewriter, value, register.0).map(|fresh| (fresh, register))
+            })
+            .transpose()?;
         let mut fresh_args = Vec::with_capacity(argument_values.len());
         for (&arg, location) in argument_values.iter().zip(&argument_locations) {
             fresh_args.push(detach(rewriter, arg, location.class())?);
@@ -196,6 +237,14 @@ impl CallLowering {
                     rewriter.insert_op_before(op, store.as_ref())?;
                 }
             }
+        }
+        if let Some((fresh, register)) = fresh_indirect_result {
+            let copy = self.emitter.copy(
+                context,
+                physical_reg(register),
+                virtual_reg(fresh, register.0),
+            );
+            rewriter.insert_op_before(op, copy.as_ref())?;
         }
 
         let saved_ra = if let Some(ra) = self.abi.ra {

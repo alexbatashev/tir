@@ -116,6 +116,79 @@ impl IndirectCallOp {
     }
 }
 
+operation! {
+    CallIndirectResultOp {
+        name: "call_indirect_result",
+        dialect: "builtin",
+        format: "custom",
+        operands: O {
+            destination: "crate::ptr::PtrType",
+            args: "*Any",
+        },
+        attributes: A {
+            callee: "Str",
+        },
+        results: R {
+            result: "crate::builtin::UnitType",
+        },
+    }
+}
+
+impl CallIndirectResultOp {
+    pub fn callee(&self) -> String {
+        callee_attr(self)
+    }
+
+    pub fn destination(&self) -> ValueId {
+        self.operands()[0]
+    }
+
+    pub fn args(&self) -> Vec<ValueId> {
+        self.operands()[1..].to_vec()
+    }
+
+    fn custom_print(&self, fmt: &mut tir::IRFormatter) -> Result<(), std::fmt::Error> {
+        let context = self.0.context.upgrade();
+        let header = format!("call_indirect_result @{}", self.callee());
+        print_call(&context, fmt, &header, self.result(), self.operands())
+    }
+
+    fn custom_parse(
+        parser: &mut tir::parse::text::Parser,
+        context: &Context,
+    ) -> Result<Box<dyn Operation>, (tir::parse::Span, Error)> {
+        use tir::parse::common::Cursor;
+        let callee = parser
+            .parse_symbol_name()
+            .ok_or_else(|| (parser.span(), Error::ExpectedSymbolName))?
+            .to_string();
+        let operands = parse_arg_list(parser, context)?;
+        let Some((&destination, args)) = operands.split_first() else {
+            return Err((parser.span(), Error::ExpectedValueRef));
+        };
+        let ret_type = parse_ret_type(parser, context)?;
+
+        Ok(Box::new(
+            CallIndirectResultOpBuilder::new(context)
+                .destination(destination)
+                .args(args.to_vec())
+                .attr("callee", AttributeValue::Str(callee))
+                .result_type(ret_type)
+                .build(),
+        ))
+    }
+}
+
+operation! {
+    IndirectResultOp {
+        name: "indirect_result",
+        dialect: "builtin",
+        results: R {
+            result: "crate::ptr::PtrType",
+        },
+    }
+}
+
 /// Print a call as `%r = <header>(%a, %b : t1, t2) -> ret`, omitting the result
 /// binding and arrow for unit-returning calls.
 fn print_call(

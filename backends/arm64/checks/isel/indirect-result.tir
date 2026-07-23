@@ -1,0 +1,21 @@
+// RUN: tir mc --march=arm64 --stage=isel %s | filecheck %s
+
+module {
+  func @make_large(%0: !i64) {
+    %1 = indirect_result : !ptr.p
+    ptr.store %0, %1
+    return
+  }
+  func @caller(%0: !ptr.p, %1: !i64) {
+    call_indirect_result @make_large(%0, %1 : !ptr.p, !i64)
+    return
+  }
+  module_end
+}
+
+// CHECK-LABEL: asm.symbol {name = "make_large"
+// CHECK: arm64.orr {rd = %virt{{[0-9]+}}:GPR, rn = x31, rm = x8}
+// CHECK-LABEL: asm.symbol {name = "caller"
+// CHECK: arm64.orr {rd = x8, rn = x31, rm = %virt{{[0-9]+}}:GPR}
+// CHECK: asm.vcall {callee = "make_large"
+// CHECK-NOT: call_indirect_result
