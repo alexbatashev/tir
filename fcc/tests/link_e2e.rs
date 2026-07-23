@@ -718,6 +718,16 @@ fn enum_constants_accept_character_constants() {
 }
 
 #[test]
+fn enum_constants_accept_sizeof_and_integer_casts() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "enum Value { IntSize = sizeof(int), LongSize = sizeof(long), Narrow = (unsigned char)258, Signed = (signed char)255, Truth = (_Bool)42 }; int main(void) { return IntSize == 4 && LongSize == 8 && Narrow == 2 && Signed == -1 && Truth == 1 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
 fn escaped_character_constant_executes_through_driver() {
     if !cc_available() {
         return;

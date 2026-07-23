@@ -2180,7 +2180,7 @@ impl Analyzer<'_> {
             }
             _ => return,
         };
-        let constant = named_constant.or_else(|| self.constant_value(node, kind));
+        let constant = named_constant.or_else(|| self.constant_value(node, kind, ty));
         self.ast.set_annotation(
             node,
             NodeSemantics {
@@ -2194,7 +2194,7 @@ impl Analyzer<'_> {
         );
     }
 
-    fn constant_value(&self, node: NodeId, kind: AstKind) -> Option<i64> {
+    fn constant_value(&self, node: NodeId, kind: AstKind, result_ty: QualType) -> Option<i64> {
         match kind {
             AstKind::Int => {
                 let AstLeaf::Int(value) = self.ast.get_leaf_data(node)? else {
@@ -2274,11 +2274,33 @@ impl Analyzer<'_> {
             (AstKind::Ge, [left, right]) => Some(i64::from(left >= right)),
             (AstKind::Eq, [left, right]) => Some(i64::from(left == right)),
             (AstKind::Ne, [left, right]) => Some(i64::from(left != right)),
+            (AstKind::Cast, [value]) => match self.types.kind(result_ty) {
+                TypeKind::Integer(kind) => Some(self.cast_integer_constant(*value, *kind)),
+                _ => None,
+            },
             (AstKind::Neg, [value]) => value.checked_neg(),
             (AstKind::Pos, [value]) => Some(*value),
             (AstKind::Not, [value]) => Some(i64::from(*value == 0)),
             (AstKind::BitNot, [value]) => Some(!value),
             _ => None,
+        }
+    }
+
+    fn cast_integer_constant(&self, value: i64, kind: IntegerKind) -> i64 {
+        if kind == IntegerKind::Bool {
+            return i64::from(value != 0);
+        }
+        let width = self.target.integer_width(kind);
+        if width == 64 {
+            return value;
+        }
+        let mask = (1_u64 << width) - 1;
+        let bits = (value as u64) & mask;
+        if is_signed_integer(kind, self.target) {
+            let shift = 64 - width;
+            ((bits << shift) as i64) >> shift
+        } else {
+            bits as i64
         }
     }
 
