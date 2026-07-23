@@ -91,6 +91,7 @@ abi AAPCS64("aapcs64") for [ARMv8A64] {
     sp = GPRsp::sp;
     ra = GPR::x30;
     fp = GPR::x29;
+    indirect_result = GPR::x8;
     args int -> [GPR::x0..GPR::x7], then stack;
     args float -> [FPR64::d0..FPR64::d7], then stack;
     args vector -> [VPR::v0..VPR::v7], then stack;

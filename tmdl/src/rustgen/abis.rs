@@ -149,6 +149,7 @@ fn emit_abi_info(
         })?;
         let ra = role("ra")?;
         let fp = role("fp")?;
+        let indirect_result = role("indirect_result")?;
 
         let pass_entries = |passes: &[ast::AbiPassSequence]| -> Result<Vec<_>, TMDLError> {
             passes
@@ -217,6 +218,10 @@ fn emit_abi_info(
             Some((register, _, _)) => quote! { Some(#register) },
             None => quote! { None },
         };
+        let indirect_result = match indirect_result {
+            Some((register, _, _)) => quote! { Some(#register) },
+            None => quote! { None },
+        };
         let classifier = match abi.classifier.as_deref() {
             Some("riscv") => quote! { tir::backend::abi::ClassifierKind::Riscv },
             Some("aapcs64") => quote! { tir::backend::abi::ClassifierKind::Aapcs64 },
@@ -242,6 +247,7 @@ fn emit_abi_info(
                 sp: #sp,
                 ra: #ra,
                 fp: #fp,
+                indirect_result: #indirect_result,
                 args: &[#(#args),*],
                 rets: &[#(#rets),*],
                 callee_saved: &[#(#callee_saved),*],

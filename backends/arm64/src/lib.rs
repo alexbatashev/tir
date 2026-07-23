@@ -938,6 +938,7 @@ mod tests {
         assert_eq!(abi.sp, (RegClass::GPRsp.id(), 31));
         assert_eq!(abi.ra, Some((RegClass::GPR.id(), 30)));
         assert_eq!(abi.fp, Some((RegClass::GPR.id(), 29)));
+        assert_eq!(abi.indirect_result, Some((RegClass::GPR.id(), 8)));
         assert_eq!(abi.stack.align, 16);
         assert_eq!(abi.stack.slot_size, 8);
         assert_eq!(

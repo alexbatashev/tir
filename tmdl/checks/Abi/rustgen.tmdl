@@ -20,6 +20,7 @@ abi TestAbi("test") for [TestIsa] {
         save_style = frame_slots;
     }
     sp = GPR::x2;
+    indirect_result = GPR::x3;
     args int -> [GPR::x1], then stack;
     rets int -> [GPR::x1];
      callee_saved = [GPR::x2, GPR::x3];
@@ -33,6 +34,7 @@ abi TestAbi("test") for [TestIsa] {
 // CHECK: static ABIS: [tir::backend::abi::AbiInfo; 1usize]
 // CHECK: name: "test",
 // CHECK: sp: (RegClass::GPR.id(), 2u16),
+// CHECK: indirect_result: Some((RegClass::GPR.id(), 3u16)),
 // CHECK: kind: tir::backend::abi::ValueKind::Int,
 // CHECK: regs: &[(RegClass::GPR.id(), 1u16)],
 // CHECK: overflow: tir::backend::abi::Overflow::Stack,

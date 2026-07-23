@@ -1808,6 +1808,7 @@ mod tests {
             sp: (caller_saved[0].0, 1000),
             ra: None,
             fp: None,
+            indirect_result: None,
             args: Box::leak(
                 vec![PassSeq {
                     kind: ValueKind::Int,

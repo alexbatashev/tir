@@ -68,6 +68,7 @@ pub struct AbiInfo {
     pub sp: PhysReg,
     pub ra: Option<PhysReg>,
     pub fp: Option<PhysReg>,
+    pub indirect_result: Option<PhysReg>,
     pub args: &'static [PassSeq],
     pub rets: &'static [PassSeq],
     pub callee_saved: &'static [PhysReg],

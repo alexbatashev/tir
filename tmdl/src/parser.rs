@@ -273,6 +273,7 @@ where
         just(Token::Identifier("sp")),
         just(Token::Identifier("ra")),
         just(Token::Identifier("fp")),
+        just(Token::Identifier("indirect_result")),
     ))
     .map(|token| token.as_ident().to_string())
     .then_ignore(just(Token::Equals))
