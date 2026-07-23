@@ -210,6 +210,32 @@ fn rejects_excess_record_initializers() {
 }
 
 #[test]
+fn rejects_excess_record_initializer_after_designator() {
+    let output = diagnostics(
+        "struct Pair { int left; int right; }; int main(void) { struct Pair pair = {.right = 22, 11}; return 0; }",
+        "c23".parse().unwrap(),
+    );
+
+    assert!(
+        output.contains("too many initializers for record"),
+        "{output}"
+    );
+}
+
+#[test]
+fn rejects_excess_array_initializer_after_designator() {
+    let output = diagnostics(
+        "int main(void) { int values[2] = {[1] = 12, 30}; return 0; }",
+        "c23".parse().unwrap(),
+    );
+
+    assert!(
+        output.contains("too many initializers for array"),
+        "{output}"
+    );
+}
+
+#[test]
 fn rejects_excess_union_initializers() {
     let output = diagnostics(
         "union Value { int integer; long wide; }; int main(void) { union Value value = {11, 22}; return 0; }",

@@ -1113,26 +1113,16 @@ impl Analyzer<'_> {
                 .map(|field| (field.name.clone(), field.ty))
                 .collect::<Vec<_>>();
             let values = self.ast.children(initializer).collect::<Vec<_>>();
-            let initializer_count = if kind == RecordKind::Union {
-                1
+            let aggregate = if kind == RecordKind::Union {
+                "union"
+            } else {
+                "record"
+            };
+            let positional_limit = if kind == RecordKind::Union {
+                usize::from(!fields.is_empty())
             } else {
                 fields.len()
             };
-            if values.len() > initializer_count {
-                let aggregate = if kind == RecordKind::Union {
-                    "union"
-                } else {
-                    "record"
-                };
-                self.diagnostics.push(
-                    InvalidOperands::new(
-                        self.ast.get_node(initializer).span,
-                        format!("too many initializers for {aggregate}"),
-                        initializer_reference(self.options),
-                    )
-                    .into(),
-                );
-            }
             let mut next_field = 0;
             for value in values {
                 if let Some(AstLeaf::DesignatedInitializer(InitializerDesignator::Field(name))) =
@@ -1172,9 +1162,18 @@ impl Analyzer<'_> {
                         )
                         .into(),
                     );
-                } else if let Some((_, field)) = fields.get(next_field) {
-                    self.validate_initializer_value(*field, value);
+                } else if next_field < positional_limit {
+                    self.validate_initializer_value(fields[next_field].1, value);
                     next_field += 1;
+                } else {
+                    self.diagnostics.push(
+                        InvalidOperands::new(
+                            self.ast.get_node(initializer).span,
+                            format!("too many initializers for {aggregate}"),
+                            initializer_reference(self.options),
+                        )
+                        .into(),
+                    );
                 }
             }
             return;
@@ -1195,16 +1194,6 @@ impl Analyzer<'_> {
             }
         };
         let values = self.ast.children(initializer).collect::<Vec<_>>();
-        if values.len() as u64 > length {
-            self.diagnostics.push(
-                InvalidOperands::new(
-                    self.ast.get_node(initializer).span,
-                    "too many initializers for array",
-                    initializer_reference(self.options),
-                )
-                .into(),
-            );
-        }
         let mut next_element = 0;
         for value in values {
             if let Some(AstLeaf::DesignatedInitializer(InitializerDesignator::Index)) =
@@ -1263,6 +1252,15 @@ impl Analyzer<'_> {
             } else if next_element < length as usize {
                 self.validate_initializer_value(element, value);
                 next_element += 1;
+            } else {
+                self.diagnostics.push(
+                    InvalidOperands::new(
+                        self.ast.get_node(initializer).span,
+                        "too many initializers for array",
+                        initializer_reference(self.options),
+                    )
+                    .into(),
+                );
             }
         }
     }
