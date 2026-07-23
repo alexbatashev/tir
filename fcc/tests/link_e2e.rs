@@ -658,6 +658,16 @@ fn character_constant_executes_through_driver() {
 }
 
 #[test]
+fn enum_constants_use_implicit_and_explicit_values() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "enum Color { Red, Green = 5, Blue }; int main(void) { return Red == 0 && Green == 5 && Blue == 6 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
 fn escaped_character_constant_executes_through_driver() {
     if !cc_available() {
         return;

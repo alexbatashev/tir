@@ -103,6 +103,9 @@ pub enum AstKind {
     DeclGroup,
     /// Children: field declarations.
     RecordDecl,
+    /// Children: enumerators in declaration order.
+    EnumDecl,
+    Enumerator,
     Typedef,
     Global,
     Field,
@@ -210,6 +213,13 @@ pub enum AstLeaf {
         id: RecordId,
         kind: RecordKind,
         name: Option<String>,
+    },
+    Enum {
+        name: Option<String>,
+    },
+    Enumerator {
+        name: String,
+        value: Option<i64>,
     },
     Typedef {
         name: String,
@@ -347,6 +357,16 @@ fn render_node(ast: &Ast, id: NodeId, depth: usize, out: &mut String) {
                     Some(name) => format!("{kind} {name:?}"),
                     None => kind.to_string(),
                 }
+            }
+            _ => unreachable!(),
+        },
+        AstKind::EnumDecl => match ast.get_leaf_data(id) {
+            Some(AstLeaf::Enum { name }) => format!("EnumDecl {name:?}"),
+            _ => unreachable!(),
+        },
+        AstKind::Enumerator => match ast.get_leaf_data(id) {
+            Some(AstLeaf::Enumerator { name, value }) => {
+                format!("Enumerator {name:?} = {value:?}")
             }
             _ => unreachable!(),
         },

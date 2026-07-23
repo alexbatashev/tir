@@ -236,7 +236,7 @@ pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnost
                     },
                 );
             }
-            AstKind::RecordDecl | AstKind::Typedef | AstKind::Attribute => {}
+            AstKind::RecordDecl | AstKind::EnumDecl | AstKind::Typedef | AstKind::Attribute => {}
             _ => return Err(unsupported(ast, item, "top-level item".to_string())),
         }
     }
@@ -356,7 +356,7 @@ pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnost
                         .build(),
                 );
             }
-            AstKind::RecordDecl | AstKind::Typedef | AstKind::Attribute => {}
+            AstKind::RecordDecl | AstKind::EnumDecl | AstKind::Typedef | AstKind::Attribute => {}
             _ => unreachable!("top-level item was checked before emission"),
         }
     }
@@ -2627,21 +2627,30 @@ impl FnCodegen<'_> {
                     let AstLeaf::Var(_) = ast.get_leaf_data(node).unwrap() else {
                         unreachable!("var node carries a var payload");
                     };
-                    let entity = node_entity(self.typed, node);
-                    if let Some(slot) = self.locals.get(&entity).copied() {
-                        LoweredExpr::Address {
-                            ptr: slot.ptr,
-                            elem: slot.elem,
-                        }
-                    } else {
-                        let global = &self.globals[&entity];
-                        let ptr_ty = PtrType::typed(self.context, global.elem);
-                        LoweredExpr::Address {
-                            ptr: self
-                                .builder
-                                .insert(b::addr_of_op(self.context, &global.name, ptr_ty))
+                    if let Some(value) = ast.get_annotation(node).and_then(|info| info.constant) {
+                        let ty = lower_type(self.context, self.typed, node_type(self.typed, node));
+                        LoweredExpr::Value(
+                            self.builder
+                                .insert(b::constant(self.context, value, ty).build())
                                 .result(),
-                            elem: global.elem,
+                        )
+                    } else {
+                        let entity = node_entity(self.typed, node);
+                        if let Some(slot) = self.locals.get(&entity).copied() {
+                            LoweredExpr::Address {
+                                ptr: slot.ptr,
+                                elem: slot.elem,
+                            }
+                        } else {
+                            let global = &self.globals[&entity];
+                            let ptr_ty = PtrType::typed(self.context, global.elem);
+                            LoweredExpr::Address {
+                                ptr: self
+                                    .builder
+                                    .insert(b::addr_of_op(self.context, &global.name, ptr_ty))
+                                    .result(),
+                                elem: global.elem,
+                            }
                         }
                     }
                 }
