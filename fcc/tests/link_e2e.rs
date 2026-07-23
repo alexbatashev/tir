@@ -208,6 +208,56 @@ fn memory_hash_table_matches_host_compiler() {
 }
 
 #[test]
+fn function_pointer_call_matches_host_compiler() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "int add_five(int value) { return value + 5; } int main(void) { int (*function)(int) = add_five; return function(37) == 42 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn function_pointer_parameter_matches_host_compiler() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "typedef int (*Unary)(int); int add_five(int value) { return value + 5; } int apply(Unary function, int value) { return function(value); } int main(void) { return apply(add_five, 37) == 42 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn global_function_pointer_matches_host_compiler() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "int add_five(int value) { return value + 5; } int (*function)(int) = add_five; int main(void) { return function(37) == 42 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn dereferenced_function_pointer_call_matches_host_compiler() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "int add_five(int value) { return value + 5; } int main(void) { int (*function)(int) = add_five; return (*function)(37) == 42 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn returned_function_pointer_call_matches_host_compiler() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "typedef int (*Unary)(int); int add_five(int value) { return value + 5; } Unary choose(void) { return add_five; } int main(void) { return choose()(37) == 42 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
 fn pointer_addition_scales_by_pointee_size() {
     if !cc_available() {
         return;

@@ -244,6 +244,7 @@ pub struct NodeSemantics {
     pub conversions: Vec<QualType>,
     pub constant: Option<i64>,
     pub member_index: Option<usize>,
+    pub call_designator_ty: Option<QualType>,
 }
 
 #[derive(Default)]
@@ -1455,6 +1456,7 @@ impl Analyzer<'_> {
         let error = self.types.intern(TypeKind::Error);
         let mut entity = None;
         let mut member_index = None;
+        let mut call_designator_ty = None;
         let mut named_constant = None;
         let (ty, category) = match kind {
             AstKind::Int => {
@@ -1562,79 +1564,32 @@ impl Analyzer<'_> {
                     return;
                 };
                 match self.require_name(node, &name) {
-                    Some(symbol) => match self.types.kind(symbol.ty).clone() {
-                        TypeKind::Function {
-                            ret,
-                            params,
-                            varargs,
-                            prototype,
-                        } => {
-                            entity = Some(symbol.entity);
-                            let actual = self.ast.children(node).count();
-                            let valid = if !prototype {
-                                true
-                            } else if varargs {
-                                actual >= params.len()
-                            } else {
-                                actual == params.len()
-                            };
-                            if !valid {
-                                self.diagnostics.push(
-                                    ArgumentMismatch::new(
-                                        self.ast.get_node(node).span,
-                                        symbol.span,
-                                        format!(
-                                            "function '{name}' expects {} arguments but {actual} was provided",
-                                            params.len()
-                                        ),
-                                        call_reference(self.options),
-                                    )
-                                    .into(),
-                                );
-                            }
-                            let arguments = self.ast.children(node).collect::<Vec<_>>();
-                            for (index, (&argument, &parameter)) in
-                                arguments.iter().zip(&params).enumerate()
+                    Some(symbol) => {
+                        let function_ty = match self.types.kind(symbol.ty) {
+                            TypeKind::Function { .. } => Some(symbol.ty),
+                            TypeKind::Pointer(pointee)
+                                if matches!(
+                                    self.types.kind(*pointee),
+                                    TypeKind::Function { .. }
+                                ) =>
                             {
-                                let source = self
-                                    .ast
-                                    .get_annotation(argument)
-                                    .and_then(|info| info.ty)
-                                    .unwrap_or(error);
-                                if !self.assignment_compatible(parameter, source, argument) {
-                                    self.diagnostics.push(
-                                        IncompatibleConversion::new(
-                                            self.ast.get_node(argument).span,
-                                            Some(symbol.span),
-                                            format!(
-                                                "argument {} to '{name}' has incompatible {} type",
-                                                index + 1,
-                                                self.type_category(source)
-                                            ),
-                                            call_reference(self.options),
-                                        )
-                                        .into(),
-                                    );
-                                } else {
-                                    self.record_conversion(argument, parameter);
-                                }
+                                Some(*pointee)
                             }
-                            if varargs {
-                                for &argument in arguments.iter().skip(params.len()) {
-                                    let source = self
-                                        .ast
-                                        .get_annotation(argument)
-                                        .and_then(|info| info.ty)
-                                        .unwrap_or(error);
-                                    if self.is_integer(source) {
-                                        let promoted = self.integer_promotion(source);
-                                        self.record_conversion(argument, promoted);
-                                    }
-                                }
-                            }
-                            (ret, ValueCategory::Value)
-                        }
-                        _ => {
+                            _ => None,
+                        };
+                        if let Some(function_ty) = function_ty {
+                            call_designator_ty = Some(symbol.ty);
+                            entity = Some(symbol.entity);
+                            let arguments = self.ast.children(node).collect::<Vec<_>>();
+                            self.check_call(
+                                node,
+                                &name,
+                                symbol.span,
+                                function_ty,
+                                &arguments,
+                                error,
+                            )
+                        } else {
                             self.diagnostics.push(
                                 CalledObjectNotFunction::new(
                                     self.ast.get_node(node).span,
@@ -1646,8 +1601,45 @@ impl Analyzer<'_> {
                             );
                             (error, ValueCategory::Value)
                         }
-                    },
+                    }
                     None => (error, ValueCategory::Value),
+                }
+            }
+            AstKind::CallExpr => {
+                let children = self.ast.children(node).collect::<Vec<_>>();
+                let callee = children[0];
+                let callee_info = self.ast.get_annotation(callee).cloned().unwrap_or_default();
+                let designator_ty = callee_info.ty.unwrap_or(error);
+                let function_ty = match self.types.kind(designator_ty) {
+                    TypeKind::Function { .. } => Some(designator_ty),
+                    TypeKind::Pointer(pointee)
+                        if matches!(self.types.kind(*pointee), TypeKind::Function { .. }) =>
+                    {
+                        Some(*pointee)
+                    }
+                    _ => None,
+                };
+                if let Some(function_ty) = function_ty {
+                    call_designator_ty = Some(designator_ty);
+                    self.check_call(
+                        node,
+                        "called expression",
+                        self.ast.get_node(callee).span,
+                        function_ty,
+                        &children[1..],
+                        error,
+                    )
+                } else {
+                    self.diagnostics.push(
+                        CalledObjectNotFunction::new(
+                            self.ast.get_node(node).span,
+                            self.ast.get_node(callee).span,
+                            "expression".to_string(),
+                            call_designator_reference(self.options),
+                        )
+                        .into(),
+                    );
+                    (error, ValueCategory::Value)
                 }
             }
             AstKind::Add | AstKind::Sub | AstKind::Mul | AstKind::Div => {
@@ -2059,6 +2051,7 @@ impl Analyzer<'_> {
                         constant: size.map(|value| value as i64),
                         conversions: Vec::new(),
                         member_index: None,
+                        call_designator_ty: None,
                     },
                 );
                 return;
@@ -2231,8 +2224,89 @@ impl Analyzer<'_> {
                 conversions: Vec::new(),
                 constant,
                 member_index,
+                call_designator_ty,
             },
         );
+    }
+
+    fn check_call(
+        &mut self,
+        node: NodeId,
+        callee: &str,
+        declaration_span: Span,
+        function_ty: QualType,
+        arguments: &[NodeId],
+        error: QualType,
+    ) -> (QualType, ValueCategory) {
+        let TypeKind::Function {
+            ret,
+            params,
+            varargs,
+            prototype,
+        } = self.types.kind(function_ty).clone()
+        else {
+            unreachable!("call checker receives a function type")
+        };
+        let actual = arguments.len();
+        let valid = if !prototype {
+            true
+        } else if varargs {
+            actual >= params.len()
+        } else {
+            actual == params.len()
+        };
+        if !valid {
+            self.diagnostics.push(
+                ArgumentMismatch::new(
+                    self.ast.get_node(node).span,
+                    declaration_span,
+                    format!(
+                        "function '{callee}' expects {} arguments but {actual} was provided",
+                        params.len()
+                    ),
+                    call_reference(self.options),
+                )
+                .into(),
+            );
+        }
+        for (index, (&argument, &parameter)) in arguments.iter().zip(&params).enumerate() {
+            let source = self
+                .ast
+                .get_annotation(argument)
+                .and_then(|info| info.ty)
+                .unwrap_or(error);
+            if !self.assignment_compatible(parameter, source, argument) {
+                self.diagnostics.push(
+                    IncompatibleConversion::new(
+                        self.ast.get_node(argument).span,
+                        Some(declaration_span),
+                        format!(
+                            "argument {} to '{callee}' has incompatible {} type",
+                            index + 1,
+                            self.type_category(source)
+                        ),
+                        call_reference(self.options),
+                    )
+                    .into(),
+                );
+            } else {
+                self.record_conversion(argument, parameter);
+            }
+        }
+        if varargs {
+            for &argument in arguments.iter().skip(params.len()) {
+                let source = self
+                    .ast
+                    .get_annotation(argument)
+                    .and_then(|info| info.ty)
+                    .unwrap_or(error);
+                if self.is_integer(source) {
+                    let promoted = self.integer_promotion(source);
+                    self.record_conversion(argument, promoted);
+                }
+            }
+        }
+        (ret, ValueCategory::Value)
     }
 
     fn constant_value(&self, node: NodeId, kind: AstKind, result_ty: QualType) -> Option<i64> {

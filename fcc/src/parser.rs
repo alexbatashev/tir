@@ -44,6 +44,7 @@ enum PostfixOp {
     Unary(AstKind),
     Member { indirect: bool, name: String },
     Subscript(NodeId),
+    Call(Vec<NodeId>),
 }
 
 #[derive(Default)]
@@ -521,6 +522,12 @@ where
                         expr.clone()
                             .delimited_by(just(Token::LBracket), just(Token::RBracket))
                             .map(PostfixOp::Subscript),
+                        assignment
+                            .clone()
+                            .separated_by(just(Token::Comma))
+                            .collect::<Vec<NodeId>>()
+                            .delimited_by(just(Token::LParen), just(Token::RParen))
+                            .map(PostfixOp::Call),
                     ))
                     .repeated()
                     .collect::<Vec<_>>(),
@@ -542,6 +549,14 @@ where
                                 st.ast.add_edge(add, child);
                                 st.ast.add_edge(add, index);
                                 unary(st, AstKind::Deref, add, tok)
+                            }
+                            PostfixOp::Call(arguments) => {
+                                let call = st.add(AstKind::CallExpr, tok);
+                                st.ast.add_edge(call, child);
+                                for argument in arguments {
+                                    st.ast.add_edge(call, argument);
+                                }
+                                call
                             }
                         })
                     },
@@ -987,7 +1002,6 @@ where
                 id
             });
 
-        let decl = decl_body().then_ignore(semi.clone());
         let assign = assign_body().then_ignore(semi.clone());
 
         let cond = expr().delimited_by(just(Token::LParen), just(Token::RParen));
@@ -1167,8 +1181,7 @@ where
         choice((
             block,
             typedef_decl,
-            local_enum_decl(),
-            decl,
+            local_decl(),
             ret,
             if_stmt,
             while_stmt,
@@ -1661,9 +1674,17 @@ impl<'a> DeclParser<'a> {
 
         loop {
             if self.eat(&Token::LBracket) {
-                let len = self.collect_until_matching(Token::LBracket, Token::RBracket)?;
-                let len = (!len.is_empty()).then_some(tokens_text(&len));
-                decl.ty = CType::Array(Box::new(decl.ty), len);
+                let mut dimensions = Vec::new();
+                loop {
+                    let len = self.collect_until_matching(Token::LBracket, Token::RBracket)?;
+                    dimensions.push((!len.is_empty()).then_some(tokens_text(&len)));
+                    if !self.eat(&Token::LBracket) {
+                        break;
+                    }
+                }
+                for length in dimensions.into_iter().rev() {
+                    decl.ty = CType::Array(Box::new(decl.ty), length);
+                }
             } else if self.eat(&Token::LParen) {
                 let (params, varargs, has_parameter_type_list) =
                     self.parse_param_list(state, tok)?;
@@ -2228,7 +2249,7 @@ fn parse_external_tokens(
     }
 }
 
-fn parse_local_enum_tokens(
+fn parse_local_decl_tokens(
     state: &mut SimpleState<ParseState>,
     tok: usize,
     tokens: &[Token],
@@ -2447,17 +2468,17 @@ where
     .map(|parts| parts.into_iter().flatten().collect())
 }
 
-fn local_enum_decl<'src, I>() -> impl Parser<'src, I, NodeId, Extra<'src>> + Clone
+fn local_decl<'src, I>() -> impl Parser<'src, I, NodeId, Extra<'src>> + Clone
 where
     I: ValueInput<'src, Token = Token, Span = Span>,
 {
-    just(Token::KwEnum)
+    ctype()
         .rewind()
         .ignore_then(declaration_tokens())
         .try_map_with(|tokens, e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
             let tok = e.span().start;
             let span = e.span();
-            parse_local_enum_tokens(e.state(), tok, &tokens)
+            parse_local_decl_tokens(e.state(), tok, &tokens)
                 .map_err(|message| Rich::custom(span, message))
         })
 }
