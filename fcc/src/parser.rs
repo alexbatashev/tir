@@ -1167,6 +1167,7 @@ where
         choice((
             block,
             typedef_decl,
+            local_enum_decl(),
             decl,
             ret,
             if_stmt,
@@ -2219,6 +2220,74 @@ fn parse_external_tokens(
     }
 }
 
+fn parse_local_enum_tokens(
+    state: &mut SimpleState<ParseState>,
+    tok: usize,
+    tokens: &[Token],
+) -> Result<NodeId, String> {
+    let mut parser = DeclParser::new(tokens);
+    let specs = parser.parse_specs(state, tok)?;
+    let mut nodes = specs.type_decl.into_iter().collect::<Vec<_>>();
+
+    if parser.is_done() {
+        return nodes
+            .pop()
+            .ok_or_else(|| "enum declaration has no declarator".to_string());
+    }
+
+    loop {
+        parser.consume_attrs()?;
+        let mut declarator = parser.parse_declarator(specs.ty.clone())?;
+        parser.consume_attrs()?;
+        declarator.ty = parser.take_attrs(declarator.ty);
+        state.0.declare_ordinary(declarator.name.clone());
+        let initializer = if parser.eat(&Token::Assign) {
+            let initializer_tok = tok + parser.pos;
+            let initializer_tokens = parser.take_initializer();
+            Some(parse_external_initializer(
+                state,
+                initializer_tok,
+                initializer_tokens,
+            )?)
+        } else {
+            None
+        };
+        let declaration = state.0.add(AstKind::Decl, tok);
+        state.0.ast.set_leaf_data(
+            declaration,
+            AstLeaf::Decl {
+                name: declarator.name,
+                ty: declarator.ty,
+            },
+        );
+        if let Some(initializer) = initializer {
+            state.0.ast.add_edge(declaration, initializer);
+        }
+        nodes.push(declaration);
+
+        if parser.eat(&Token::Comma) {
+            continue;
+        }
+        if parser.is_done() {
+            break;
+        }
+        return Err(format!(
+            "unexpected token in declaration: {}",
+            parser.peek().unwrap()
+        ));
+    }
+
+    if nodes.len() == 1 {
+        Ok(nodes[0])
+    } else {
+        let group = state.0.add(AstKind::DeclGroup, tok);
+        for node in nodes {
+            state.0.ast.add_edge(group, node);
+        }
+        Ok(group)
+    }
+}
+
 fn parse_external_initializer(
     state: &mut SimpleState<ParseState>,
     token_offset: usize,
@@ -2261,7 +2330,7 @@ fn parse_external_expression(
     expression.ok_or_else(|| "expected enumerator value".to_string())
 }
 
-fn external_decl<'src, I>() -> impl Parser<'src, I, NodeId, Extra<'src>> + Clone
+fn declaration_tokens<'src, I>() -> impl Parser<'src, I, Vec<Token>, Extra<'src>> + Clone
 where
     I: ValueInput<'src, Token = Token, Span = Span>,
 {
@@ -2367,11 +2436,32 @@ where
     .repeated()
     .collect::<Vec<Vec<Token>>>()
     .then_ignore(just(Token::Semicolon))
-    .try_map_with(|parts, e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
+    .map(|parts| parts.into_iter().flatten().collect())
+}
+
+fn local_enum_decl<'src, I>() -> impl Parser<'src, I, NodeId, Extra<'src>> + Clone
+where
+    I: ValueInput<'src, Token = Token, Span = Span>,
+{
+    just(Token::KwEnum)
+        .rewind()
+        .ignore_then(declaration_tokens())
+        .try_map_with(|tokens, e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
+            let tok = e.span().start;
+            let span = e.span();
+            parse_local_enum_tokens(e.state(), tok, &tokens)
+                .map_err(|message| Rich::custom(span, message))
+        })
+}
+
+fn external_decl<'src, I>() -> impl Parser<'src, I, NodeId, Extra<'src>> + Clone
+where
+    I: ValueInput<'src, Token = Token, Span = Span>,
+{
+    declaration_tokens().try_map_with(|parts, e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
         let tok = e.span().start;
-        let tokens = parts.into_iter().flatten().collect::<Vec<_>>();
         let span = e.span();
-        parse_external_tokens(e.state(), tok, &tokens).map_err(|msg| Rich::custom(span, msg))
+        parse_external_tokens(e.state(), tok, &parts).map_err(|msg| Rich::custom(span, msg))
     })
 }
 

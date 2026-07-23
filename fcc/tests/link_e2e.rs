@@ -748,6 +748,26 @@ fn tagged_enum_objects_execute_through_driver() {
 }
 
 #[test]
+fn local_enum_declarations_execute_through_driver() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "int main(void) { enum Local { Base = 2, Value = Base + 3 }; return Value == 5 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn local_enum_definition_can_declare_an_object() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "int main(void) { enum Local { Value = 5 } value = Value; return value == 5 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
 fn escaped_character_constant_executes_through_driver() {
     if !cc_available() {
         return;

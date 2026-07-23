@@ -1688,6 +1688,14 @@ impl FnCodegen<'_> {
             self.terminated = false;
         }
         match ast.get_node(stmt).kind {
+            AstKind::DeclGroup => {
+                let declarations = ast.children(stmt).collect::<Vec<_>>();
+                for declaration in declarations {
+                    self.lower_stmt(declaration)?;
+                }
+                Ok(())
+            }
+            AstKind::EnumDecl => Ok(()),
             AstKind::Decl => {
                 let AstLeaf::Decl { .. } = ast.get_leaf_data(stmt).unwrap() else {
                     unreachable!("decl node carries a decl payload");

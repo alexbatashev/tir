@@ -429,6 +429,17 @@ fn for_initializer_declaration_has_loop_scope() {
 }
 
 #[test]
+fn local_enum_constants_have_block_scope() {
+    let output = diagnostics(
+        "int main(void) { { enum Local { Value = 5 }; } return Value; }",
+        "c23".parse().unwrap(),
+    );
+
+    assert!(output.contains("[E0200]"), "{output}");
+    assert!(output.contains("undeclared identifier 'Value'"), "{output}");
+}
+
+#[test]
 fn rejects_invalid_type_specifier_combination() {
     let output = diagnostics(
         "int main(void) { unsigned float value; return 0; }",
