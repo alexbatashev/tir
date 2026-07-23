@@ -287,6 +287,16 @@ fn local_array_designated_initializer_selects_elements() {
 }
 
 #[test]
+fn array_initializer_continues_after_designator() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "int main(void) { int values[4] = {[1] = 12, 30}; return values[0] == 0 && values[1] == 12 && values[2] == 30 && values[3] == 0 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
 fn local_array_initializer_infers_omitted_bound() {
     if !cc_available() {
         return;
@@ -1403,6 +1413,16 @@ fn local_record_designated_initializer_selects_fields() {
     }
     assert_fcc_matches_host(
         "struct Pair { int left; int right; }; int main(void) { struct Pair pair = {.right = 22, .left = 11}; return pair.left + pair.right - 33; }\n",
+    );
+}
+
+#[test]
+fn record_initializer_continues_after_designator() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "struct Pair { int left; int right; }; int main(void) { struct Pair pair = {.left = 11, 22}; return pair.left + pair.right - 33; }\n",
     );
 }
 

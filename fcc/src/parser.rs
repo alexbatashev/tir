@@ -791,13 +791,36 @@ where
             .map_with(|values, e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
                 let tok = e.span().start;
                 let st = &mut e.state().0;
-                let id = st.add(AstKind::InitializerList, tok);
+                let mut entries = Vec::new();
                 for value in values {
+                    if st.ast.get_node(value).kind == AstKind::DesignatedInitializer {
+                        let children = st.ast.children(value).collect::<Vec<_>>();
+                        let selected = *children.last().unwrap();
+                        if st.ast.get_node(selected).kind == AstKind::Comma {
+                            let mut elements = Vec::new();
+                            collect_initializer_elements(&st.ast, selected, &mut elements);
+                            let first = elements.remove(0);
+                            let replacement = st.add(AstKind::DesignatedInitializer, tok);
+                            st.ast.set_leaf_data(
+                                replacement,
+                                st.ast.get_leaf_data(value).unwrap().clone(),
+                            );
+                            for &child in &children[..children.len() - 1] {
+                                st.ast.add_edge(replacement, child);
+                            }
+                            st.ast.add_edge(replacement, first);
+                            entries.push(replacement);
+                            entries.extend(elements);
+                            continue;
+                        }
+                    }
                     let mut elements = Vec::new();
                     collect_initializer_elements(&st.ast, value, &mut elements);
-                    for element in elements {
-                        st.ast.add_edge(id, element);
-                    }
+                    entries.extend(elements);
+                }
+                let id = st.add(AstKind::InitializerList, tok);
+                for entry in entries {
+                    st.ast.add_edge(id, entry);
                 }
                 id
             })
