@@ -1,0 +1,15 @@
+// RUN: tir mc --march=armv8 --stage=isel %s | filecheck %s
+
+module {
+  func @roundtrip(%0: !f64) -> !f64 {
+    %1 = ptr.alloca {size = 8, align = 8} : !ptr.p<!f64>
+    ptr.store %0, %1
+    %2 = ptr.load %1 : !f64
+    return %2
+  }
+  module_end
+}
+
+// CHECK: arm64.store_float_double {ft = %virt0:FPR64, rn = %virt1:GPRsp, imm = 0}
+// CHECK: arm64.load_float_double {ft = %virt2:FPR64, rn = %virt1:GPRsp, imm = 0}
+// CHECK: asm.vret

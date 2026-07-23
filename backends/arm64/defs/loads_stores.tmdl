@@ -40,6 +40,16 @@ instruction LoadDoubleword for [ARMv8A64] : LoadStoreImmUnsignedD {
     }
 }
 
+instruction LoadFloatDouble for [ARMv8A64] : LoadStoreFloatImmUnsignedD {
+    param MNEMONIC: String = "ldr";
+    param OPNAME: String = "load_float_double";
+    param OPC: bits<2> = 0b01;
+
+    behavior {
+        ft = load(rn + zext(imm, self.XLEN), 8, 0b0);
+    }
+}
+
 instruction LoadWordUnsigned for [ARMv8A64] : LoadStoreImmUnsignedW {
     param MNEMONIC: String = "ldr";
     param OPNAME: String = "load_word_unsigned";
@@ -115,6 +125,18 @@ instruction StoreDoubleword for [ARMv8A64] : LoadStoreImmUnsignedD {
 
     behavior {
         store(rn + zext(imm, self.XLEN), 8, rt);
+    }
+
+    schedule { units = [WriteStore]; }
+}
+
+instruction StoreFloatDouble for [ARMv8A64] : LoadStoreFloatImmUnsignedD {
+    param MNEMONIC: String = "str";
+    param OPNAME: String = "store_float_double";
+    param OPC: bits<2> = 0b00;
+
+    behavior {
+        store(rn + zext(imm, self.XLEN), 8, ft);
     }
 
     schedule { units = [WriteStore]; }
