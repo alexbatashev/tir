@@ -482,22 +482,15 @@ fn lower_signature(
 }
 
 fn classify_abi_return(context: &Context, typed: &TypedAst, ty: QualType) -> AbiReturn {
-    if matches!(typed.types().kind(ty), TypeKind::Record(_)) {
-        let parameter = classify_abi_parameter(context, typed, ty);
-        if parameter.pieces.iter().all(|piece| {
-            (context.get_type_data(piece.ty).as_ref() as &dyn std::any::Any)
-                .downcast_ref::<StructType>()
-                .is_none()
-        }) {
-            let ty = match parameter.pieces.as_slice() {
-                [piece] => piece.ty,
-                pieces => TupleType::new(context, pieces.iter().map(|piece| piece.ty).collect()),
-            };
-            return AbiReturn {
-                ty,
-                aggregate: Some(parameter.pieces),
-            };
-        }
+    if let Some(pieces) = classify_integer_aggregate(context, typed, ty) {
+        let ty = match pieces.as_slice() {
+            [piece] => piece.ty,
+            pieces => TupleType::new(context, pieces.iter().map(|piece| piece.ty).collect()),
+        };
+        return AbiReturn {
+            ty,
+            aggregate: Some(pieces),
+        };
     }
     AbiReturn {
         ty: lower_type(context, typed, ty),
@@ -506,39 +499,73 @@ fn classify_abi_return(context: &Context, typed: &TypedAst, ty: QualType) -> Abi
 }
 
 fn classify_abi_parameter(context: &Context, typed: &TypedAst, ty: QualType) -> AbiParameter {
+    let pieces = classify_riscv_fp_aggregate(context, typed, ty)
+        .or_else(|| classify_integer_aggregate(context, typed, ty))
+        .unwrap_or_else(|| {
+            vec![AbiPiece {
+                offset: 0,
+                ty: lower_type(context, typed, ty),
+            }]
+        });
+    AbiParameter { pieces }
+}
+
+fn classify_riscv_fp_aggregate(
+    context: &Context,
+    typed: &TypedAst,
+    ty: QualType,
+) -> Option<Vec<AbiPiece>> {
+    if !typed.target().uses_riscv_hard_float_abi() {
+        return None;
+    }
+    let TypeKind::Record(id) = typed.types().kind(ty) else {
+        return None;
+    };
+    let record = typed.record(*id)?;
+    if record.kind != RecordKind::Struct || !(1..=2).contains(&record.fields.len()) {
+        return None;
+    }
+    record
+        .fields
+        .iter()
+        .map(|field| {
+            matches!(typed.types().kind(field.ty), TypeKind::Double).then(|| AbiPiece {
+                offset: field.offset,
+                ty: FloatType::f64(context),
+            })
+        })
+        .collect()
+}
+
+fn classify_integer_aggregate(
+    context: &Context,
+    typed: &TypedAst,
+    ty: QualType,
+) -> Option<Vec<AbiPiece>> {
     let (size, _) = source_type_layout(typed, ty);
     let scalar_width = u64::from(typed.target().pointer_width() / 8);
     if matches!(typed.types().kind(ty), TypeKind::Record(_)) && is_integer_aggregate(typed, ty) {
         if size <= scalar_width && size.is_power_of_two() {
-            return AbiParameter {
-                pieces: vec![AbiPiece {
-                    offset: 0,
-                    ty: IntegerType::new(context, (size * 8) as u32),
-                }],
-            };
+            return Some(vec![AbiPiece {
+                offset: 0,
+                ty: IntegerType::new(context, (size * 8) as u32),
+            }]);
         }
         if size == scalar_width * 2 {
             let carrier = IntegerType::new(context, typed.target().pointer_width());
-            return AbiParameter {
-                pieces: vec![
-                    AbiPiece {
-                        offset: 0,
-                        ty: carrier,
-                    },
-                    AbiPiece {
-                        offset: scalar_width,
-                        ty: carrier,
-                    },
-                ],
-            };
+            return Some(vec![
+                AbiPiece {
+                    offset: 0,
+                    ty: carrier,
+                },
+                AbiPiece {
+                    offset: scalar_width,
+                    ty: carrier,
+                },
+            ]);
         }
     }
-    AbiParameter {
-        pieces: vec![AbiPiece {
-            offset: 0,
-            ty: lower_type(context, typed, ty),
-        }],
-    }
+    None
 }
 
 fn is_integer_aggregate(typed: &TypedAst, ty: QualType) -> bool {

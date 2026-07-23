@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use tir::backend::abi::{AbiInfo, ClassifierKind, ValueKind};
 use tir::graph::{Dag, MutDag, NodeId};
 
 use crate::ast::{Ast, AstKind, AstLeaf, CParam, CType, RecordId, RecordKind};
@@ -75,6 +76,8 @@ enum DataModel {
 pub struct TargetProfile {
     model: DataModel,
     plain_char_signed: bool,
+    abi_classifier: ClassifierKind,
+    hard_float_abi: bool,
 }
 
 impl TargetProfile {
@@ -84,6 +87,8 @@ impl TargetProfile {
             Ok(Self {
                 model: DataModel::Ilp32,
                 plain_char_signed: true,
+                abi_classifier: ClassifierKind::Riscv,
+                hard_float_abi: false,
             })
         } else if normalized.starts_with("riscv64")
             || normalized.starts_with("rv64")
@@ -92,15 +97,33 @@ impl TargetProfile {
             Ok(Self {
                 model: DataModel::Lp64,
                 plain_char_signed: true,
+                abi_classifier: if normalized == "x86_64" {
+                    ClassifierKind::Sysv
+                } else {
+                    ClassifierKind::Riscv
+                },
+                hard_float_abi: normalized == "x86_64",
             })
         } else if normalized.starts_with("arm64") || normalized.starts_with("aarch64") {
             Ok(Self {
                 model: DataModel::Lp64,
                 plain_char_signed: false,
+                abi_classifier: ClassifierKind::Aapcs64,
+                hard_float_abi: true,
             })
         } else {
             Err(format!("no C data model for target '{march}'"))
         }
+    }
+
+    pub(crate) fn for_abi(march: &str, abi: &AbiInfo) -> Result<Self, String> {
+        let mut profile = Self::for_march(march)?;
+        profile.abi_classifier = abi.classifier;
+        profile.hard_float_abi = abi
+            .args
+            .iter()
+            .any(|sequence| sequence.kind == ValueKind::Float);
+        Ok(profile)
     }
 
     pub fn host() -> Result<Self, String> {
@@ -125,6 +148,10 @@ impl TargetProfile {
             IntegerKind::Long | IntegerKind::UnsignedLong => self.pointer_width(),
             IntegerKind::LongLong | IntegerKind::UnsignedLongLong => 64,
         }
+    }
+
+    pub(crate) fn uses_riscv_hard_float_abi(self) -> bool {
+        self.abi_classifier == ClassifierKind::Riscv && self.hard_float_abi
     }
 }
 
@@ -266,6 +293,8 @@ pub fn analyze(ast: Ast, options: LangOptions) -> Result<TypedAst, Vec<Diagnosti
     let target = TargetProfile::host().unwrap_or(TargetProfile {
         model: DataModel::Lp64,
         plain_char_signed: true,
+        abi_classifier: ClassifierKind::Sysv,
+        hard_float_abi: true,
     });
     analyze_with_target(ast, options, target)
 }
