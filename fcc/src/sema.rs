@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use tir::backend::abi::{AbiInfo, ClassifierKind, ValueKind};
+use tir::backend::abi::{AbiInfo, ClassifierKind, Overflow, ValueKind};
 use tir::graph::{Dag, MutDag, NodeId};
 
 use crate::ast::{Ast, AstKind, AstLeaf, CParam, CType, RecordId, RecordKind};
@@ -77,18 +77,27 @@ pub struct TargetProfile {
     model: DataModel,
     plain_char_signed: bool,
     abi_classifier: ClassifierKind,
-    hard_float_abi: bool,
+    integer_argument_registers: usize,
+    float_argument_registers: usize,
+    float_argument_overflow: Overflow,
 }
 
 impl TargetProfile {
     pub fn for_march(march: &str) -> Result<Self, String> {
+        let target = tir::backend::select_target(march, None, None)?;
+        Self::for_abi(march, target.abi())
+    }
+
+    fn for_data_model(march: &str) -> Result<Self, String> {
         let normalized = march.to_ascii_lowercase();
         if normalized.starts_with("riscv32") || normalized.starts_with("rv32") {
             Ok(Self {
                 model: DataModel::Ilp32,
                 plain_char_signed: true,
                 abi_classifier: ClassifierKind::Riscv,
-                hard_float_abi: false,
+                integer_argument_registers: 0,
+                float_argument_registers: 0,
+                float_argument_overflow: Overflow::Stack,
             })
         } else if normalized.starts_with("riscv64")
             || normalized.starts_with("rv64")
@@ -102,14 +111,18 @@ impl TargetProfile {
                 } else {
                     ClassifierKind::Riscv
                 },
-                hard_float_abi: normalized == "x86_64",
+                integer_argument_registers: 0,
+                float_argument_registers: 0,
+                float_argument_overflow: Overflow::Stack,
             })
         } else if normalized.starts_with("arm64") || normalized.starts_with("aarch64") {
             Ok(Self {
                 model: DataModel::Lp64,
                 plain_char_signed: false,
                 abi_classifier: ClassifierKind::Aapcs64,
-                hard_float_abi: true,
+                integer_argument_registers: 0,
+                float_argument_registers: 0,
+                float_argument_overflow: Overflow::Stack,
             })
         } else {
             Err(format!("no C data model for target '{march}'"))
@@ -117,12 +130,25 @@ impl TargetProfile {
     }
 
     pub(crate) fn for_abi(march: &str, abi: &AbiInfo) -> Result<Self, String> {
-        let mut profile = Self::for_march(march)?;
+        let mut profile = Self::for_data_model(march)?;
         profile.abi_classifier = abi.classifier;
-        profile.hard_float_abi = abi
+        profile.integer_argument_registers = abi
             .args
             .iter()
-            .any(|sequence| sequence.kind == ValueKind::Float);
+            .find(|sequence| sequence.kind == ValueKind::Int)
+            .map_or(0, |sequence| sequence.regs.len());
+        profile.float_argument_registers = abi
+            .args
+            .iter()
+            .find(|sequence| sequence.kind == ValueKind::Float)
+            .map_or(0, |sequence| sequence.regs.len());
+        profile.float_argument_overflow = abi
+            .args
+            .iter()
+            .find(|sequence| sequence.kind == ValueKind::Float)
+            .map_or(Overflow::Chain(ValueKind::Int), |sequence| {
+                sequence.overflow
+            });
         Ok(profile)
     }
 
@@ -151,7 +177,19 @@ impl TargetProfile {
     }
 
     pub(crate) fn uses_riscv_hard_float_abi(self) -> bool {
-        self.abi_classifier == ClassifierKind::Riscv && self.hard_float_abi
+        self.abi_classifier == ClassifierKind::Riscv && self.float_argument_registers > 0
+    }
+
+    pub(crate) fn argument_registers(self, kind: ValueKind) -> usize {
+        match kind {
+            ValueKind::Int => self.integer_argument_registers,
+            ValueKind::Float => self.float_argument_registers,
+            ValueKind::Vector => 0,
+        }
+    }
+
+    pub(crate) fn float_argument_overflow(self) -> Overflow {
+        self.float_argument_overflow
     }
 }
 
@@ -294,7 +332,9 @@ pub fn analyze(ast: Ast, options: LangOptions) -> Result<TypedAst, Vec<Diagnosti
         model: DataModel::Lp64,
         plain_char_signed: true,
         abi_classifier: ClassifierKind::Sysv,
-        hard_float_abi: true,
+        integer_argument_registers: 0,
+        float_argument_registers: 0,
+        float_argument_overflow: Overflow::Stack,
     });
     analyze_with_target(ast, options, target)
 }

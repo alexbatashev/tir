@@ -9,6 +9,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use tir::attributes::AttributeValue;
+use tir::backend::abi::{Overflow, ValueKind, type_kind};
 use tir::builtin::{FloatType, IntegerType, ModuleOp, TokenType, TupleType, UnitType, ops as b};
 use tir::graph::{Dag, NodeId};
 use tir::ptr::{PtrType, ops as p};
@@ -17,7 +18,7 @@ use tir::{Context, IRBuilder, Operand, Operation, RegionId, TypeId, ValueId};
 use crate::ast::*;
 use crate::cir::{self, StructType, VarArgsType};
 use crate::diagnostics::{Diagnostic, EmptyTranslationUnit, UnsupportedConstruct};
-use crate::sema::{EntityId, QualType, TypeKind, TypedAst};
+use crate::sema::{EntityId, QualType, TargetProfile, TypeKind, TypedAst};
 
 /// A local variable: the pointer to its stack slot and the slot's element type.
 #[derive(Clone, Copy)]
@@ -102,6 +103,55 @@ struct AbiPiece {
 struct AbiReturn {
     ty: TypeId,
     aggregate: Option<Vec<AbiPiece>>,
+}
+
+#[derive(Default)]
+struct AbiRegisterUsage {
+    integers: usize,
+    floats: usize,
+}
+
+impl AbiRegisterUsage {
+    fn has_direct_registers(
+        &self,
+        context: &Context,
+        target: TargetProfile,
+        pieces: &[AbiPiece],
+    ) -> bool {
+        let mut integers = 0;
+        let mut floats = 0;
+        for piece in pieces {
+            match type_kind(context, piece.ty) {
+                ValueKind::Int => integers += 1,
+                ValueKind::Float => floats += 1,
+                ValueKind::Vector => return false,
+            }
+        }
+        self.integers + integers <= target.argument_registers(ValueKind::Int)
+            && self.floats + floats <= target.argument_registers(ValueKind::Float)
+    }
+
+    fn consume(&mut self, context: &Context, target: TargetProfile, pieces: &[AbiPiece]) {
+        let integer_limit = target.argument_registers(ValueKind::Int);
+        let float_limit = target.argument_registers(ValueKind::Float);
+        for piece in pieces {
+            match type_kind(context, piece.ty) {
+                ValueKind::Float if self.floats < float_limit => {
+                    self.floats += 1;
+                }
+                ValueKind::Float
+                    if target.float_argument_overflow() == Overflow::Chain(ValueKind::Int)
+                        && self.integers < integer_limit =>
+                {
+                    self.integers += 1;
+                }
+                ValueKind::Int if self.integers < integer_limit => {
+                    self.integers += 1;
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 impl Signature {
@@ -454,6 +504,7 @@ fn lower_signature(
         unreachable!("function-like node carries a function payload");
     };
     let mut params = Vec::new();
+    let mut register_usage = AbiRegisterUsage::default();
     let mut varargs = false;
     for child in ast.children(item) {
         match ast.get_node(child).kind {
@@ -462,6 +513,7 @@ fn lower_signature(
                     context,
                     typed,
                     node_type(typed, child),
+                    &mut register_usage,
                 ));
             }
             AstKind::VarArgs => varargs = true,
@@ -500,15 +552,27 @@ fn classify_abi_return(context: &Context, typed: &TypedAst, ty: QualType) -> Abi
     }
 }
 
-fn classify_abi_parameter(context: &Context, typed: &TypedAst, ty: QualType) -> AbiParameter {
-    let pieces = classify_riscv_fp_aggregate(context, typed, ty)
-        .or_else(|| classify_integer_aggregate(context, typed, ty))
-        .unwrap_or_else(|| {
-            vec![AbiPiece {
-                offset: 0,
-                ty: lower_type(context, typed, ty),
-            }]
-        });
+fn classify_abi_parameter(
+    context: &Context,
+    typed: &TypedAst,
+    ty: QualType,
+    register_usage: &mut AbiRegisterUsage,
+) -> AbiParameter {
+    let fp_pieces = classify_riscv_fp_aggregate(context, typed, ty);
+    let pieces = match fp_pieces {
+        Some(pieces) if register_usage.has_direct_registers(context, typed.target(), &pieces) => {
+            Some(pieces)
+        }
+        Some(_) => classify_integer_carriers(context, typed, ty),
+        None => classify_integer_aggregate(context, typed, ty),
+    }
+    .unwrap_or_else(|| {
+        vec![AbiPiece {
+            offset: 0,
+            ty: lower_type(context, typed, ty),
+        }]
+    });
+    register_usage.consume(context, typed.target(), &pieces);
     AbiParameter { pieces }
 }
 
@@ -533,9 +597,9 @@ fn classify_riscv_fp_aggregate(
     }
     let kinds = pieces
         .iter()
-        .map(|piece| tir::backend::abi::type_kind(context, piece.ty))
+        .map(|piece| type_kind(context, piece.ty))
         .collect::<Vec<_>>();
-    use tir::backend::abi::ValueKind::{Float, Int};
+    use ValueKind::{Float, Int};
     if !matches!(
         kinds.as_slice(),
         [Float] | [Float, Float] | [Float, Int] | [Int, Float]
@@ -604,28 +668,40 @@ fn classify_integer_aggregate(
     typed: &TypedAst,
     ty: QualType,
 ) -> Option<Vec<AbiPiece>> {
+    if !matches!(typed.types().kind(ty), TypeKind::Record(_)) || !is_integer_aggregate(typed, ty) {
+        return None;
+    }
+    classify_integer_carriers(context, typed, ty)
+}
+
+fn classify_integer_carriers(
+    context: &Context,
+    typed: &TypedAst,
+    ty: QualType,
+) -> Option<Vec<AbiPiece>> {
+    if !matches!(typed.types().kind(ty), TypeKind::Record(_)) {
+        return None;
+    }
     let (size, _) = source_type_layout(typed, ty);
     let scalar_width = u64::from(typed.target().pointer_width() / 8);
-    if matches!(typed.types().kind(ty), TypeKind::Record(_)) && is_integer_aggregate(typed, ty) {
-        if size <= scalar_width && size.is_power_of_two() {
-            return Some(vec![AbiPiece {
+    if size <= scalar_width && size.is_power_of_two() {
+        return Some(vec![AbiPiece {
+            offset: 0,
+            ty: IntegerType::new(context, (size * 8) as u32),
+        }]);
+    }
+    if size == scalar_width * 2 {
+        let carrier = IntegerType::new(context, typed.target().pointer_width());
+        return Some(vec![
+            AbiPiece {
                 offset: 0,
-                ty: IntegerType::new(context, (size * 8) as u32),
-            }]);
-        }
-        if size == scalar_width * 2 {
-            let carrier = IntegerType::new(context, typed.target().pointer_width());
-            return Some(vec![
-                AbiPiece {
-                    offset: 0,
-                    ty: carrier,
-                },
-                AbiPiece {
-                    offset: scalar_width,
-                    ty: carrier,
-                },
-            ]);
-        }
+                ty: carrier,
+            },
+            AbiPiece {
+                offset: scalar_width,
+                ty: carrier,
+            },
+        ]);
     }
     None
 }
