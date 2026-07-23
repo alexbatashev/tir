@@ -67,6 +67,10 @@ impl tir::backend::TargetMachine for PtxTarget {
         crate::ptx::register_widths(Feature::ALL)
     }
 
+    fn pointer_width(&self) -> u32 {
+        64
+    }
+
     fn register_name(&self, class: &str, index: u16, prefer_abi: bool) -> Option<String> {
         crate::ptx::register_name(class, index, prefer_abi)
     }

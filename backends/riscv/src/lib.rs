@@ -1075,6 +1075,10 @@ impl tir::backend::TargetMachine for RiscvTarget {
         crate::register_widths(&self.config.features)
     }
 
+    fn pointer_width(&self) -> u32 {
+        self.config.xlen
+    }
+
     fn register_name(&self, class: &str, index: u16, prefer_abi: bool) -> Option<String> {
         crate::register_name(class, index, prefer_abi)
     }

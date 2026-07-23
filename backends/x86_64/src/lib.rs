@@ -1782,6 +1782,10 @@ mod isa {
             register_widths(self.config.features())
         }
 
+        fn pointer_width(&self) -> u32 {
+            64
+        }
+
         fn register_views(&self) -> Vec<(&'static str, tir::backend::regalloc::RegisterView)> {
             register_views(self.config.features())
         }

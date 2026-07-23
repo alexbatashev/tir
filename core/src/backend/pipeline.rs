@@ -100,7 +100,11 @@ pub fn build_pipeline(
     let mut pm = PassManager::new();
     pm.add_pass(LowerMemoryIntrinsicsPass::new());
     pm.add_pass(TargetIntegerLegalizer::new(target));
-    pm.nest(FuncOp::name()).add_pass(target.isel_pass(context));
+    pm.nest(FuncOp::name()).add_pass(
+        target
+            .isel_pass(context)
+            .with_pointer_width(target.pointer_width()),
+    );
     // Remove pure instructions left dead by selection (e.g. a value recomputed in
     // a consumer's block by cross-block fusion). Runs while results are still
     // virtual registers, so it must precede register allocation.

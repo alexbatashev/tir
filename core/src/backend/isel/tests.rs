@@ -1288,6 +1288,53 @@ fn memory_ops_select_via_interfaces() {
     assert_eq!(body_ops, vec!["alloca", "muli", "shli", "return"]);
 }
 
+#[test]
+fn pointer_memory_ops_select_via_target_width() {
+    let context = Context::with_default_dialects();
+    let module = ops::module(&context, None).build();
+
+    let pointer = tir::ptr::PtrType::opaque(&context);
+    let param = context.create_value(pointer, None);
+    let param_id = param.id();
+    let region = context.create_region();
+    let block = context.create_block(vec![param]);
+    region.add_block(block.id());
+
+    let func = ops::func(&context, "demo", pointer, Some(region.id())).build();
+    let mut fb = IRBuilder::new(func.body());
+    let slot_ty = tir::ptr::PtrType::typed(&context, pointer);
+    let slot = fb.insert(tir::ptr::ops::alloca(&context, 8u64, 8u64, slot_ty).build());
+    fb.insert(tir::ptr::ops::store(&context, param_id, slot.result()).build());
+    let loaded = fb.insert(tir::ptr::ops::load(&context, slot.result(), pointer).build());
+    fb.insert(ops::r#return(&context, loaded.result()).build());
+
+    let mut mb = IRBuilder::new(module.body());
+    mb.insert(func);
+    mb.insert(ops::module_end(&context).build());
+
+    let rules = vec![
+        Rule::new("load", load_pattern(), 1, emit_load_marker),
+        Rule::new("store", store_pattern(), 1, emit_store_marker),
+    ];
+
+    let mut pm = PassManager::new();
+    pm.nest(FuncOp::name())
+        .add_pass(InstructionSelectPass::new(rules).with_pointer_width(64));
+    pm.run(&context, context.get_op(module.id()))
+        .expect("pointer memory ops should use the target pointer width");
+
+    let body_ops: Vec<_> = context
+        .get_region(region.id())
+        .iter(context.clone())
+        .next()
+        .unwrap()
+        .op_ids()
+        .into_iter()
+        .map(|op_id| context.get_op(op_id).name)
+        .collect();
+    assert_eq!(body_ops, vec!["alloca", "muli", "shli", "return"]);
+}
+
 /// When a rewrite proves two op results equal (their e-classes merge), operand
 /// resolution must deterministically pick the earliest definition, and every
 /// merged op must still receive a selection decision.

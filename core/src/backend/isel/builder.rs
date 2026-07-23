@@ -29,6 +29,7 @@ pub(crate) struct SemDagBuilder<'a> {
     pub(crate) value_to_class: HashMap<ValueId, Id>,
     /// Serial of the next opaque leaf; each un-lowerable node gets its own.
     opaque_serial: u32,
+    pointer_width: Option<u32>,
 }
 
 impl<'a> SemDagBuilder<'a> {
@@ -43,7 +44,23 @@ impl<'a> SemDagBuilder<'a> {
             egraph,
             value_to_class: HashMap::new(),
             opaque_serial: 0,
+            pointer_width: None,
         }
+    }
+
+    pub(crate) fn with_pointer_width(mut self, pointer_width: Option<u32>) -> Self {
+        self.pointer_width = pointer_width;
+        self
+    }
+
+    fn type_width(&self, ty: TypeId) -> Option<u32> {
+        type_width(self.context, ty).or_else(|| {
+            let ty = self.context.get_type_data(ty);
+            ((ty.as_ref() as &dyn std::any::Any)
+                .downcast_ref::<tir::ptr::PtrType>()
+                .is_some())
+            .then_some(self.pointer_width?)
+        })
     }
 
     fn add_leaf(
@@ -168,7 +185,7 @@ impl<'a> SemDagBuilder<'a> {
 
         if let Some((location, result)) = read_parts {
             let result_ty = self.context.get_value(result).ty();
-            let bytes = type_width(self.context, result_ty)? / 8;
+            let bytes = self.type_width(result_ty)? / 8;
             let address = self.build_from_value(location);
             let address = self.zero_offset_address(address);
             let bytes = self.add_u64_const(u64::from(bytes));
@@ -187,7 +204,7 @@ impl<'a> SemDagBuilder<'a> {
 
         if let Some((location, value)) = write_parts {
             let value_ty = self.context.get_value(value).ty();
-            let bytes = type_width(self.context, value_ty)? / 8;
+            let bytes = self.type_width(value_ty)? / 8;
             let address = self.build_from_value(location);
             let address = self.zero_offset_address(address);
             let bytes = self.add_u64_const(u64::from(bytes));
@@ -282,14 +299,7 @@ impl<'a> SemDagBuilder<'a> {
         match def.attributes.iter().find(|a| a.name == "value") {
             Some(attr) => match &attr.value {
                 AttributeValue::Int(v) => {
-                    let width = value_ty
-                        .and_then(|ty| {
-                            let ty = self.context.get_type_data(ty);
-                            (ty.as_ref() as &dyn std::any::Any)
-                                .downcast_ref::<tir::builtin::IntegerType>()
-                                .map(tir::builtin::IntegerType::width)
-                        })
-                        .unwrap_or(64);
+                    let width = value_ty.and_then(|ty| self.type_width(ty)).unwrap_or(64);
                     self.add_int(APInt::new_signed(width, *v), value_ty)
                 }
                 _ => self.add_input_value(value, value_ty),

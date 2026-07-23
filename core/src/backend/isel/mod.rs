@@ -704,6 +704,7 @@ pub struct InstructionSelectPass {
     cost_model: Box<dyn IselCostModel>,
     op_lowerings: Vec<OpLowering>,
     call_lowering: Option<crate::backend::call_lowering::CallLowering>,
+    pointer_width: Option<u32>,
     /// The solved emission plan of every block (or the error explaining why it
     /// cannot be selected), populated up front when the pass visits each function.
     plans: HashMap<BlockId, Result<BlockPlan, String>>,
@@ -742,10 +743,16 @@ impl InstructionSelectPass {
             cost_model: Box::new(DefaultIselCostModel),
             op_lowerings: vec![],
             call_lowering: None,
+            pointer_width: None,
             plans: HashMap::new(),
             emitted_blocks: HashSet::new(),
             solved: HashSet::new(),
         }
+    }
+
+    pub fn with_pointer_width(mut self, pointer_width: u32) -> Self {
+        self.pointer_width = Some(pointer_width);
+        self
     }
 
     fn split_conditional_edge_args(
@@ -941,7 +948,8 @@ impl InstructionSelectPass {
         let mut prepared: HashMap<ValueId, ConditionExpr> = HashMap::new();
         let mut constant_candidates: Vec<(OpId, Id)> = Vec::new();
         let value_to_class = {
-            let mut builder = SemDagBuilder::new(context, &value_to_def, &mut egraph);
+            let mut builder = SemDagBuilder::new(context, &value_to_def, &mut egraph)
+                .with_pointer_width(self.pointer_width);
             for &block_id in &block_ids {
                 for op_id in context.get_block(block_id).op_ids() {
                     let op = context.get_op(op_id);

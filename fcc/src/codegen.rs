@@ -1182,7 +1182,17 @@ impl FnCodegen<'_> {
         let semantics = self.ast.get_annotation(node).unwrap();
         let mut source = semantics.ty.unwrap();
         for &target in &semantics.conversions {
-            expression = if matches!(self.typed.types().kind(source), TypeKind::Array(_, _))
+            expression = if self.typed.integer_width(source).is_some()
+                && matches!(self.typed.types().kind(target), TypeKind::Pointer(_))
+                && semantics.constant == Some(0)
+            {
+                let target = lower_type(self.context, self.typed, target);
+                LoweredExpr::Value(
+                    self.builder
+                        .insert(b::constant(self.context, 0, target).build())
+                        .result(),
+                )
+            } else if matches!(self.typed.types().kind(source), TypeKind::Array(_, _))
                 && matches!(self.typed.types().kind(target), TypeKind::Pointer(_))
             {
                 match expression {
@@ -1671,6 +1681,17 @@ impl FnCodegen<'_> {
 
         for stmt in ast.children(func).skip(params.len()) {
             self.lower_stmt(stmt)?;
+        }
+        let returns_void = match self.typed.types().kind(node_type(self.typed, func)) {
+            TypeKind::Function { ret, .. } => {
+                matches!(self.typed.types().kind(*ret), TypeKind::Void)
+            }
+            _ => false,
+        };
+        if returns_void && !self.terminated {
+            self.builder
+                .insert(b::r#return(self.context, Operand::none()).build());
+            self.terminated = true;
         }
 
         Ok(())

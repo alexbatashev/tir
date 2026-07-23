@@ -100,6 +100,9 @@ pub trait TargetMachine {
     /// features (e.g. RISC-V `GPR` is 32 bits wide on rv32, 64 on rv64).
     fn register_widths(&self) -> Vec<(&'static str, u32)>;
 
+    /// Width in bits of a pointer value for this target configuration.
+    fn pointer_width(&self) -> u32;
+
     /// Sub-register views departing from the default (bit offset 0, zero-extending
     /// writes): x86 8/16-bit classes merge into their storage and the high-byte
     /// classes sit at bit 8. Simulators install these so narrow writes preserve
