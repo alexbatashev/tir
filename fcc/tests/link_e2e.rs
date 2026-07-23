@@ -1260,6 +1260,39 @@ fn mixed_struct_return_call_matches_sysv_host_abi() {
 }
 
 #[test]
+fn large_struct_return_matches_sysv_host_abi() {
+    if !cc_available() || !cfg!(target_arch = "x86_64") {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "struct Large { long values[3]; }; struct Large make(long a, long b, long c) { struct Large value = {{a, b, c}}; return value; }\n",
+        "struct Large { long values[3]; }; struct Large make(long, long, long); int main(void) { struct Large value = make(5, 7, 30); return value.values[0] + value.values[1] + value.values[2] == 42 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn large_struct_return_call_matches_sysv_host_abi() {
+    if !cc_available() || !cfg!(target_arch = "x86_64") {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "struct Large { long values[3]; }; struct Large make(long, long, long); int main(void) { struct Large value = make(5, 7, 30); return (int)(value.values[0] + value.values[1] + value.values[2] - 42); }\n",
+        "struct Large { long values[3]; }; struct Large make(long a, long b, long c) { struct Large value = {{a, b, c}}; return value; }\n",
+    );
+}
+
+#[test]
+fn nested_large_struct_return_matches_sysv_host_abi() {
+    if !cc_available() || !cfg!(target_arch = "x86_64") {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "struct Large { long values[3]; }; struct Large make(long a, long b, long c) { struct Large value = {{a, b, c}}; return value; } struct Large forward(long a, long b, long c) { return make(a, b, c); }\n",
+        "struct Large { long values[3]; }; struct Large forward(long, long, long); int main(void) { struct Large value = forward(5, 7, 30); return value.values[0] + value.values[1] + value.values[2] == 42 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
 fn whole_struct_copy_executes_through_driver() {
     if !cc_available() {
         return;

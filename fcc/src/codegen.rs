@@ -588,6 +588,14 @@ fn classify_abi_return(context: &Context, typed: &TypedAst, ty: QualType) -> Abi
             argument_padding: 0,
         };
     }
+    if typed.target().uses_sysv_abi() && matches!(typed.types().kind(ty), TypeKind::Record(_)) {
+        return AbiReturn {
+            ty: PtrType::opaque(context),
+            aggregate: None,
+            indirect: true,
+            argument_padding: 1,
+        };
+    }
     if (typed.target().uses_aapcs64_abi() || typed.target().uses_riscv_abi())
         && matches!(typed.types().kind(ty), TypeKind::Record(_))
         && source_type_layout(typed, ty).0 > 16
@@ -1690,7 +1698,11 @@ impl FnCodegen<'_> {
                 let operand = match ast.children(stmt).next() {
                     Some(e) if self.return_abi.indirect => {
                         self.lower_indirect_return(e)?;
-                        Operand::none()
+                        if self.return_abi.ty == UnitType::new(self.context) {
+                            Operand::none()
+                        } else {
+                            Operand::from(self.indirect_return.unwrap())
+                        }
                     }
                     Some(e) => Operand::from(self.lower_return_value(e)?),
                     None => Operand::none(),
@@ -2243,6 +2255,23 @@ impl FnCodegen<'_> {
                 "non-addressable struct source".to_string(),
             ));
         };
+        if self.ast.get_node(node).kind == AstKind::Call {
+            let (size, _) = source_type_layout(self.typed, node_type(self.typed, node));
+            let size = self
+                .builder
+                .insert(
+                    b::constant(
+                        self.context,
+                        size as i64,
+                        IntegerType::new(self.context, 64),
+                    )
+                    .build(),
+                )
+                .result();
+            self.builder
+                .insert(p::memcpy(self.context, destination, source, size).build());
+            return Ok(());
+        }
         self.builder
             .insert(cir::ops::copy_struct(self.context, destination, source, record).build());
         Ok(())
@@ -2667,7 +2696,7 @@ impl FnCodegen<'_> {
                                 .destination(slot.ptr)
                                 .args(args)
                                 .attr("callee", AttributeValue::Str(name.clone()))
-                                .result_type(UnitType::new(self.context))
+                                .result_type(sig.ret.ty)
                                 .build(),
                         );
                         LoweredExpr::Address {
