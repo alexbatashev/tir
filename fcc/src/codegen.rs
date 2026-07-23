@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use tir::attributes::AttributeValue;
-use tir::builtin::{FloatType, IntegerType, ModuleOp, TokenType, UnitType, ops as b};
+use tir::builtin::{FloatType, IntegerType, ModuleOp, TokenType, TupleType, UnitType, ops as b};
 use tir::graph::{Dag, NodeId};
 use tir::ptr::{PtrType, ops as p};
 use tir::{Context, IRBuilder, Operand, Operation, RegionId, TypeId, ValueId};
@@ -101,7 +101,7 @@ struct AbiPiece {
 #[derive(Clone)]
 struct AbiReturn {
     ty: TypeId,
-    aggregate: Option<AbiPiece>,
+    aggregate: Option<Vec<AbiPiece>>,
 }
 
 impl Signature {
@@ -484,14 +484,18 @@ fn lower_signature(
 fn classify_abi_return(context: &Context, typed: &TypedAst, ty: QualType) -> AbiReturn {
     if matches!(typed.types().kind(ty), TypeKind::Record(_)) {
         let parameter = classify_abi_parameter(context, typed, ty);
-        if let [piece] = parameter.pieces.as_slice()
-            && (context.get_type_data(piece.ty).as_ref() as &dyn std::any::Any)
+        if parameter.pieces.iter().all(|piece| {
+            (context.get_type_data(piece.ty).as_ref() as &dyn std::any::Any)
                 .downcast_ref::<StructType>()
                 .is_none()
-        {
+        }) {
+            let ty = match parameter.pieces.as_slice() {
+                [piece] => piece.ty,
+                pieces => TupleType::new(context, pieces.iter().map(|piece| piece.ty).collect()),
+            };
             return AbiReturn {
-                ty: piece.ty,
-                aggregate: Some(*piece),
+                ty,
+                aggregate: Some(parameter.pieces),
             };
         }
     }
@@ -1095,6 +1099,9 @@ impl FnCodegen<'_> {
                 if let Some(init) = ast.children(stmt).next() {
                     if ast.get_node(init).kind == AstKind::InitializerList {
                         self.lower_initializer(source_ty, slot.ptr, init)?;
+                    } else if let TypeKind::Record(id) = self.typed.types().kind(source_ty) {
+                        let record = self.typed.record(*id).unwrap().name.clone();
+                        self.lower_record_copy(init, slot.ptr, record.as_str())?;
                     } else {
                         let value = self.lower_expr(init)?;
                         self.builder
@@ -1111,23 +1118,8 @@ impl FnCodegen<'_> {
                 let slot = self.locals[&node_entity(self.typed, stmt)];
                 let value = ast.children(stmt).next().unwrap();
                 if let TypeKind::Record(id) = self.typed.types().kind(node_type(self.typed, stmt)) {
-                    let LoweredExpr::Address { ptr: source, .. } = self.lower_expr_value(value)?
-                    else {
-                        return Err(unsupported(
-                            ast,
-                            stmt,
-                            "non-addressable struct source".to_string(),
-                        ));
-                    };
-                    self.builder.insert(
-                        cir::ops::copy_struct(
-                            self.context,
-                            slot.ptr,
-                            source,
-                            self.typed.record(*id).unwrap().name.as_str(),
-                        )
-                        .build(),
-                    );
+                    let record = self.typed.record(*id).unwrap().name.clone();
+                    self.lower_record_copy(value, slot.ptr, record.as_str())?;
                 } else {
                     let v = self.lower_expr(value)?;
                     self.builder
@@ -1675,6 +1667,24 @@ impl FnCodegen<'_> {
         }
     }
 
+    fn lower_record_copy(
+        &mut self,
+        node: NodeId,
+        destination: ValueId,
+        record: &str,
+    ) -> Result<(), Diagnostic> {
+        let LoweredExpr::Address { ptr: source, .. } = self.lower_expr_value(node)? else {
+            return Err(unsupported(
+                self.ast,
+                node,
+                "non-addressable struct source".to_string(),
+            ));
+        };
+        self.builder
+            .insert(cir::ops::copy_struct(self.context, destination, source, record).build());
+        Ok(())
+    }
+
     fn lower_abi_argument(
         &mut self,
         node: NodeId,
@@ -1708,7 +1718,7 @@ impl FnCodegen<'_> {
 
     fn lower_return_value(&mut self, node: NodeId) -> Result<ValueId, Diagnostic> {
         let expression = self.lower_expr_value(node)?;
-        let Some(piece) = self.return_abi.aggregate else {
+        let Some(pieces) = self.return_abi.aggregate.as_deref() else {
             return Ok(self.materialize(expression));
         };
         let LoweredExpr::Address { ptr, .. } = expression else {
@@ -1718,10 +1728,26 @@ impl FnCodegen<'_> {
                 "non-addressable aggregate return value".to_string(),
             ));
         };
-        let address = self.offset_address_ir(ptr, piece.offset, piece.ty);
+        let values = pieces
+            .iter()
+            .map(|piece| {
+                let address = self.offset_address_ir(ptr, piece.offset, piece.ty);
+                self.builder
+                    .insert(p::load(self.context, address, piece.ty).build())
+                    .result()
+            })
+            .collect::<Vec<_>>();
+        if let [value] = values.as_slice() {
+            return Ok(*value);
+        }
         Ok(self
             .builder
-            .insert(p::load(self.context, address, piece.ty).build())
+            .insert(
+                b::MakeTupleOpBuilder::new(self.context)
+                    .elements(values)
+                    .result_type(self.return_abi.ty)
+                    .build(),
+            )
             .result())
     }
 
@@ -1910,14 +1936,29 @@ impl FnCodegen<'_> {
                         .builder
                         .insert(b::call(self.context, args, name.as_str(), sig.ret.ty).build())
                         .result();
-                    if let Some(piece) = sig.ret.aggregate {
+                    if let Some(pieces) = sig.ret.aggregate.as_deref() {
                         let source_ty = node_type(self.typed, node);
                         let elem = lower_type(self.context, self.typed, source_ty);
                         let (size, align) = source_type_layout(self.typed, source_ty);
                         let slot = self.alloca(elem, size, align);
-                        let address = self.offset_address_ir(slot.ptr, piece.offset, piece.ty);
-                        self.builder
-                            .insert(p::store(self.context, result, address).build());
+                        for (index, piece) in pieces.iter().enumerate() {
+                            let value = if pieces.len() == 1 {
+                                result
+                            } else {
+                                self.builder
+                                    .insert(
+                                        b::TupleGetOpBuilder::new(self.context)
+                                            .tuple(result)
+                                            .attr("index", AttributeValue::UInt(index as u64))
+                                            .result_type(piece.ty)
+                                            .build(),
+                                    )
+                                    .result()
+                            };
+                            let address = self.offset_address_ir(slot.ptr, piece.offset, piece.ty);
+                            self.builder
+                                .insert(p::store(self.context, value, address).build());
+                        }
                         LoweredExpr::Address {
                             ptr: slot.ptr,
                             elem,
