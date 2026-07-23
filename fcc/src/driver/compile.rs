@@ -52,9 +52,11 @@ pub(super) fn lower_to_ir(
     unit: crate::ast::Ast,
     options: LangOptions,
     march: Option<&str>,
+    mabi: Option<&str>,
 ) -> tir::builtin::ModuleOp {
     let target = match march {
-        Some(march) => crate::sema::TargetProfile::for_march(march),
+        Some(march) => tir::backend::select_target_with_abi(march, None, None, mabi)
+            .and_then(|target| crate::sema::TargetProfile::for_abi(march, target.abi())),
         None => crate::sema::TargetProfile::host(),
     }
     .unwrap_or_else(|error| {
@@ -116,7 +118,13 @@ pub(super) fn emit_machine_code(
     );
     let context = fcc_context();
     target.register_dialects(&context);
-    let module = lower_to_ir(&context, unit, opts.lang_options, Some(march));
+    let module = lower_to_ir(
+        &context,
+        unit,
+        opts.lang_options,
+        Some(march),
+        opts.mabi.as_deref(),
+    );
 
     let mut pm = tir::PassManager::new();
     pm.add_pass(crate::passes::LowerCirStructsPass::new());

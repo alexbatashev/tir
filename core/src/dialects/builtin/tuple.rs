@@ -96,6 +96,13 @@ impl Type for TupleType {
                 .zip(&other.elements)
                 .all(|(left, right)| left.eq(right.as_ref()))
     }
+
+    fn hash(&self, state: &mut dyn std::hash::Hasher) {
+        for element in &self.elements {
+            state.write_usize(Arc::as_ptr(element) as *const () as usize);
+        }
+        state.write_usize(self.elements.len());
+    }
 }
 
 operation! {
