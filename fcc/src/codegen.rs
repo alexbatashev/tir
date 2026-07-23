@@ -1491,7 +1491,7 @@ impl FnCodegen<'_> {
                 {
                     self.zero_initialize(storage_type, address, initializer)?;
                 }
-                if let Some(&(index, value)) = values.first() {
+                if let Some(&(index, value)) = values.last() {
                     let (field, offset) = fields[index];
                     let field_address = self.offset_address(address, offset, field);
                     self.lower_initializer(field, field_address, value)?;

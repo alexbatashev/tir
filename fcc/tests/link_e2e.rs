@@ -1447,6 +1447,16 @@ fn local_union_designator_selects_member() {
 }
 
 #[test]
+fn later_union_designator_overrides_earlier_member() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "union Value { int integer; long wide; }; int main(void) { union Value value = {.integer = 11, .wide = 42}; return value.wide - 42; }\n",
+    );
+}
+
+#[test]
 fn nested_record_initializer_zero_fills_fields() {
     if !cc_available() {
         return;
