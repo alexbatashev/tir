@@ -1373,6 +1373,19 @@ impl Analyzer<'_> {
                                     self.record_conversion(argument, parameter);
                                 }
                             }
+                            if varargs {
+                                for &argument in arguments.iter().skip(params.len()) {
+                                    let source = self
+                                        .ast
+                                        .get_annotation(argument)
+                                        .and_then(|info| info.ty)
+                                        .unwrap_or(error);
+                                    if self.is_integer(source) {
+                                        let promoted = self.integer_promotion(source);
+                                        self.record_conversion(argument, promoted);
+                                    }
+                                }
+                            }
                             (ret, ValueCategory::Value)
                         }
                         _ => {
