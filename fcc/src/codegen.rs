@@ -94,6 +94,7 @@ struct AbiParameter {
     pieces: Vec<AbiPiece>,
     grouped: bool,
     indirect: bool,
+    padding: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -161,7 +162,17 @@ impl AbiRegisterUsage {
         if self.has_direct_registers(context, target, pieces) {
             self.consume(context, target, pieces);
         } else {
-            self.floats = target.argument_registers(ValueKind::Float);
+            for piece in pieces {
+                match type_kind(context, piece.ty) {
+                    ValueKind::Int => {
+                        self.integers = target.argument_registers(ValueKind::Int);
+                    }
+                    ValueKind::Float => {
+                        self.floats = target.argument_registers(ValueKind::Float);
+                    }
+                    ValueKind::Vector => {}
+                }
+            }
         }
     }
 }
@@ -170,6 +181,7 @@ impl Signature {
     fn argument_types(&self, context: &Context) -> Vec<TypeId> {
         let mut args = Vec::new();
         for parameter in &self.params {
+            args.extend((0..parameter.padding).map(|_| IntegerType::new(context, 64)));
             if parameter.grouped {
                 args.push(TupleType::new(
                     context,
@@ -606,12 +618,15 @@ fn classify_abi_parameter(
             pieces,
             grouped: false,
             indirect: true,
+            padding: 0,
         };
     }
     let composite_pieces = hfa_pieces
         .is_none()
         .then(|| classify_aapcs64_composite(context, typed, ty))
         .flatten();
+    let align_integer_registers =
+        composite_pieces.is_some() && source_type_layout(typed, ty).1 >= 16;
     let (pieces, grouped) = match riscv_pieces {
         Some(pieces) if register_usage.has_direct_registers(context, typed.target(), &pieces) => {
             (Some(pieces), false)
@@ -637,6 +652,12 @@ fn classify_abi_parameter(
             ty: lower_type(context, typed, ty),
         }]
     });
+    let padding = usize::from(
+        align_integer_registers
+            && register_usage.integers < typed.target().argument_registers(ValueKind::Int)
+            && !register_usage.integers.is_multiple_of(2),
+    );
+    register_usage.integers += padding;
     if grouped {
         register_usage.consume_group(context, typed.target(), &pieces);
     } else {
@@ -646,6 +667,7 @@ fn classify_abi_parameter(
         pieces,
         grouped,
         indirect: false,
+        padding,
     }
 }
 
@@ -885,6 +907,10 @@ fn lower_function(
     // the function node's leading children.
     let mut param_values = Vec::new();
     for parameter in &signature.params {
+        param_values.extend(
+            (0..parameter.padding)
+                .map(|_| context.create_value(IntegerType::new(context, 64), None)),
+        );
         if parameter.grouped {
             let ty = TupleType::new(
                 context,
@@ -1387,6 +1413,7 @@ impl FnCodegen<'_> {
             let source_ty = node_type(self.typed, param);
             let elem = lower_type(self.context, self.typed, source_ty);
             let (size, align) = source_type_layout(self.typed, source_ty);
+            abi_value += abi_param.padding;
             if abi_param.indirect {
                 self.locals.insert(
                     node_entity(self.typed, param),
@@ -2128,6 +2155,15 @@ impl FnCodegen<'_> {
         expression: LoweredExpr,
         parameter: &AbiParameter,
     ) -> Result<Vec<ValueId>, Diagnostic> {
+        let mut lowered = (0..parameter.padding)
+            .map(|_| {
+                self.builder
+                    .insert(
+                        b::constant(self.context, 0, IntegerType::new(self.context, 64)).build(),
+                    )
+                    .result()
+            })
+            .collect::<Vec<_>>();
         if parameter.indirect {
             let LoweredExpr::Address { ptr: source, .. } = expression else {
                 return Err(unsupported(
@@ -2155,7 +2191,8 @@ impl FnCodegen<'_> {
                 .result();
             self.builder
                 .insert(p::memcpy(self.context, destination, source, size).build());
-            return Ok(vec![destination]);
+            lowered.push(destination);
+            return Ok(lowered);
         }
         if matches!(
             self.typed.types().kind(node_type(self.typed, node)),
@@ -2188,7 +2225,7 @@ impl FnCodegen<'_> {
                     self.context,
                     parameter.pieces.iter().map(|piece| piece.ty).collect(),
                 );
-                return Ok(vec![
+                lowered.push(
                     self.builder
                         .insert(
                             b::MakeTupleOpBuilder::new(self.context)
@@ -2197,11 +2234,14 @@ impl FnCodegen<'_> {
                                 .build(),
                         )
                         .result(),
-                ]);
+                );
+                return Ok(lowered);
             }
-            return Ok(values);
+            lowered.extend(values);
+            return Ok(lowered);
         }
-        Ok(vec![self.materialize(expression)])
+        lowered.push(self.materialize(expression));
+        Ok(lowered)
     }
 
     fn lower_return_value(&mut self, node: NodeId) -> Result<ValueId, Diagnostic> {
