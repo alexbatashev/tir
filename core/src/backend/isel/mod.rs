@@ -550,28 +550,22 @@ impl FunctionSelection {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
     /// A free External alternative can satisfy a register boundary only when
-    /// emission resolves the same concrete value at that match's consumer.
+    /// the class carries a value that survives selection. Targets without
+    /// selector materializers may leave a value-backed constant to their
+    /// pre-register-allocation hook, but never a synthetic constant with no SSA
+    /// value to bind.
     fn externally_bindable(
         &self,
         context: &Context,
         dom: &DominatorTree,
         class: Id,
         block: BlockId,
-        consumer: Option<OpId>,
         no_materializer_rules: bool,
     ) -> bool {
-        consumer.is_some_and(|consumer| {
-            let binding = self.resolve_binding(dom, context, class, block, consumer);
-            if no_materializer_rules {
-                binding.value.is_some()
-            } else {
-                binding.value.is_some()
-                    && (self.has_surviving_value(context, class)
-                        || self.has_materialized_constant_value(dom, class, block))
-            }
-        })
+        self.has_surviving_value(context, class)
+            || self.has_materialized_constant_value(dom, class, block)
+            || (no_materializer_rules && self.has_values(class))
     }
 
     /// Resolve `class` to operands for consumer op `consumer` in `block`: the
@@ -1577,13 +1571,12 @@ impl InstructionSelectPass {
                             && fs.requires_materialization(class, &mm_overlay)
                             && class_int_binding(&fs.egraph, class).is_some())
                 },
-                externally_bindable: &|class, consumer| {
+                externally_bindable: &|class| {
                     fs.externally_bindable(
                         context,
                         dom,
                         class,
                         block_id,
-                        consumer,
                         self.constant_materializer_ranges.is_empty(),
                     )
                 },
@@ -2011,8 +2004,8 @@ impl InstructionSelectPass {
                 let Some(&consumer) = consumer_by_class.get(&root) else {
                     continue;
                 };
-                for (_, class) in &matched.bindings.captures.entries {
-                    let class = fs.egraph.find(*class);
+                for binding in &matched.bindings.pattern_nodes {
+                    let class = fs.egraph.find(binding.class);
                     if class == root {
                         continue;
                     }
@@ -2040,6 +2033,43 @@ impl InstructionSelectPass {
                     .copied();
             }
         }
+        let introduced_roots: HashSet<Id> = matches
+            .iter()
+            .filter(|matched| matched.introduced)
+            .map(|matched| fs.egraph.find(matched.root))
+            .collect();
+        matches.retain(|matched| {
+            let Some(consumer) = matched.consumer else {
+                return true;
+            };
+            matched
+                .bindings
+                .captures
+                .entries
+                .iter()
+                .all(|(symbol, class)| {
+                    let class = fs.egraph.find(*class);
+                    let binding = fs.resolve_binding(dom, context, class, block, consumer);
+                    let can_introduce =
+                        class != fs.egraph.find(matched.root) && introduced_roots.contains(&class);
+                    match self.compiled_patterns[matched.pattern_index].capture_meta(*symbol) {
+                        Some(meta) if meta.constraint == Some(OperandConstraint::Register) => {
+                            binding.value.is_some()
+                                || meta.materialized_constant && binding.int.is_some()
+                                || can_introduce
+                        }
+                        Some(meta) if meta.constraint == Some(OperandConstraint::Immediate) => {
+                            binding.int.is_some()
+                        }
+                        _ => {
+                            binding.int.is_some()
+                                || binding.value.is_some()
+                                || can_introduce
+                                || !fs.has_values(class)
+                        }
+                    }
+                })
+        });
         matches
     }
 }

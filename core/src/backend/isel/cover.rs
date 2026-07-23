@@ -140,7 +140,7 @@ pub(crate) struct ClassCover {
 pub(crate) struct ClassPolicies<'a> {
     pub(crate) must_materialize: &'a dyn Fn(Id) -> bool,
     pub(crate) force_materialize: &'a dyn Fn(Id) -> bool,
-    pub(crate) externally_bindable: &'a dyn Fn(Id, Option<OpId>) -> bool,
+    pub(crate) externally_bindable: &'a dyn Fn(Id) -> bool,
     pub(crate) root_bindable: &'a dyn Fn(Id, Option<OpId>) -> bool,
 }
 
@@ -458,7 +458,7 @@ pub(crate) fn alternatives_compatible(
     parent_alt: &PbqpIselAlternative,
     child_alt: &PbqpIselAlternative,
     matches: &[PbqpIselMatch],
-    externally_bindable: &dyn Fn(Id, Option<OpId>) -> bool,
+    externally_bindable: &dyn Fn(Id) -> bool,
     root_bindable: &dyn Fn(Id, Option<OpId>) -> bool,
 ) -> bool {
     match child_requirement(egraph, child, parent_alt, matches) {
@@ -481,9 +481,7 @@ pub(crate) fn alternatives_compatible(
                     ChildRequirement::SameMatch { .. } => unreachable!(),
                 },
                 PbqpIselAlternative::External => match req {
-                    ChildRequirement::Materialized { match_id } => {
-                        externally_bindable(child, matches[match_id].consumer)
-                    }
+                    ChildRequirement::Materialized { .. } => externally_bindable(child),
                     _ => class_int_binding(egraph, child).is_some(),
                 },
                 PbqpIselAlternative::Internal { .. } | PbqpIselAlternative::Dead => false,
