@@ -509,6 +509,33 @@ template LoadStoreImmUnsignedD for [ARMv8A64] {
     }
 }
 
+template LoadStoreFloatImmUnsignedD for [ARMv8A64] {
+    schedule { units = [WriteLoad]; }
+    param MNEMONIC: String;
+    param OPC: bits<2>;
+
+    operands {
+        ft: FPR64,
+        rn: GPRsp,
+        imm: bits<15>,
+    }
+
+    encoding {
+        0..4 => ft,
+        5..9 => rn,
+        10..21 => imm[3..14],
+        22..23 => OPC,
+        24..25 => 0b01,
+        26 => 0b1,
+        27..29 => 0b111,
+        30..31 => 0b11,
+    }
+
+    asm {
+        "{self.MNEMONIC} {ft}, [{rn}, {imm}]"
+    }
+}
+
 template BranchImm for [ARMv8A64] {
     schedule { units = [WriteIALU]; }
     param MNEMONIC: String;
