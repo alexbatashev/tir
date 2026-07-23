@@ -49,17 +49,6 @@ pub trait CallEmitter: Send + Sync {
     ) -> Vec<Box<dyn Operation>> {
         Vec::new()
     }
-
-    fn variadic_float_count(
-        &self,
-        _context: &Context,
-        _register: PhysReg,
-        _count: usize,
-    ) -> Result<Box<dyn Operation>, PassError> {
-        Err(PassError::InvalidRuleSet(
-            "variadic float counts are not supported by this target".to_string(),
-        ))
-    }
 }
 
 pub struct CallLowering {
@@ -91,34 +80,30 @@ impl CallLowering {
             return Ok(true);
         }
 
-        let (callee, args, result, indirect_result, variadic) =
-            if let Some(call) = op.as_op::<CallOp>() {
-                (
-                    Callee::Direct(call.callee()),
-                    call.args(),
-                    call.result(),
-                    None,
-                    call.fixed_args().is_some(),
-                )
-            } else if let Some(call) = op.as_op::<IndirectCallOp>() {
-                (
-                    Callee::Indirect(call.callee()),
-                    call.args(),
-                    call.result(),
-                    None,
-                    false,
-                )
-            } else if let Some(call) = op.as_op::<CallIndirectResultOp>() {
-                (
-                    Callee::Direct(call.callee()),
-                    call.args(),
-                    call.result(),
-                    Some(call.destination()),
-                    false,
-                )
-            } else {
-                return Ok(false);
-            };
+        let (callee, args, result, indirect_result) = if let Some(call) = op.as_op::<CallOp>() {
+            (
+                Callee::Direct(call.callee()),
+                call.args(),
+                call.result(),
+                None,
+            )
+        } else if let Some(call) = op.as_op::<IndirectCallOp>() {
+            (
+                Callee::Indirect(call.callee()),
+                call.args(),
+                call.result(),
+                None,
+            )
+        } else if let Some(call) = op.as_op::<CallIndirectResultOp>() {
+            (
+                Callee::Direct(call.callee()),
+                call.args(),
+                call.result(),
+                Some(call.destination()),
+            )
+        } else {
+            return Ok(false);
+        };
 
         let mut tuple_arguments = Vec::new();
         let mut lowered_arguments = Vec::with_capacity(args.len());
@@ -266,23 +251,6 @@ impl CallLowering {
                     rewriter.insert_op_before(op, store.as_ref())?;
                 }
             }
-        }
-        if variadic && let Some(register) = self.abi.variadic_float_count {
-            let float_count = argument_values
-                .iter()
-                .zip(&argument_locations)
-                .filter(|(value, location)| {
-                    matches!(location, ArgumentLocation::Register(_))
-                        && matches!(
-                            value_kind(context, **value),
-                            ValueKind::Float | ValueKind::Vector
-                        )
-                })
-                .count();
-            let count = self
-                .emitter
-                .variadic_float_count(context, register, float_count)?;
-            rewriter.insert_op_before(op, count.as_ref())?;
         }
         if let Some((fresh, register)) = fresh_indirect_result {
             let copy = self.emitter.copy(

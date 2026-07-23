@@ -1,9 +1,0 @@
-// RUN: not tir opt --verify %s
-
-module {
-  func @caller(%0: !i32) -> !i32 {
-    %1 = call @consume variadic 2(%0 : !i32) -> !i32
-    return %1
-  }
-  module_end
-}

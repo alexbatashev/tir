@@ -19,7 +19,6 @@ operation! {
         results: R {
             result: "Any",
         },
-        verifier: "true",
     }
 }
 
@@ -32,22 +31,9 @@ impl CallOp {
         self.operands().to_vec()
     }
 
-    pub fn fixed_args(&self) -> Option<usize> {
-        self.attributes()
-            .iter()
-            .find_map(|attribute| (attribute.name == "fixed_args").then_some(&attribute.value))
-            .and_then(|value| match value {
-                AttributeValue::UInt(count) => Some(*count as usize),
-                _ => None,
-            })
-    }
-
     fn custom_print(&self, fmt: &mut tir::IRFormatter) -> Result<(), std::fmt::Error> {
         let context = self.0.context.upgrade();
-        let header = match self.fixed_args() {
-            Some(count) => format!("call @{} variadic {count}", self.callee()),
-            None => format!("call @{}", self.callee()),
-        };
+        let header = format!("call @{}", self.callee());
         print_call(&context, fmt, &header, self.result(), &self.args())
     }
 
@@ -60,49 +46,16 @@ impl CallOp {
             .parse_symbol_name()
             .ok_or_else(|| (parser.span(), Error::ExpectedSymbolName))?
             .to_string();
-        let fixed_args = if parser.parse_token("variadic") {
-            let count = parser
-                .parse_number()
-                .filter(|count| *count >= 0)
-                .ok_or_else(|| (parser.span(), Error::ExpectedToken("argument count")))?;
-            Some(count as usize)
-        } else {
-            None
-        };
         let args = parse_arg_list(parser, context)?;
         let ret_type = parse_ret_type(parser, context)?;
 
-        let mut builder = CallOpBuilder::new(context)
-            .args(args)
-            .attr("callee", AttributeValue::Str(callee))
-            .result_type(ret_type);
-        if let Some(count) = fixed_args {
-            builder = builder.variadic(count);
-        }
-        Ok(Box::new(builder.build()))
-    }
-}
-
-impl CallOpBuilder {
-    pub fn variadic(self, fixed_args: usize) -> Self {
-        self.attr(
-            "fixed_args",
-            AttributeValue::UInt(fixed_args.try_into().unwrap()),
-        )
-    }
-}
-
-impl tir::Verifiable for CallOp {
-    fn verify_impl(&self, _context: &Context) -> Result<(), Error> {
-        if self
-            .fixed_args()
-            .is_some_and(|fixed_args| fixed_args > self.args().len())
-        {
-            return Err(Error::VerificationError(
-                "variadic call has more fixed arguments than operands".to_string(),
-            ));
-        }
-        Ok(())
+        Ok(Box::new(
+            CallOpBuilder::new(context)
+                .args(args)
+                .attr("callee", AttributeValue::Str(callee))
+                .result_type(ret_type)
+                .build(),
+        ))
     }
 }
 

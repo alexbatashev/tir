@@ -1,10 +1,10 @@
 // RUN: tir mc --march=x86_64 --filetype=obj-ascii %s | filecheck %s
 
-// An indirect call whose target lands in a low register (rax) is materialized
+// An indirect call whose target lands in a low register (rcx) is materialized
 // REX-free by `finalize_virtual_ops` (the call op is created after the
 // canonicalization pass, so the decision is made at creation). The surrounding
-// stack adjustment folds to the imm8 form. Bytes match GNU as:
-// call rax -> ff d0.
+// stack adjustment folds to the imm8 form and `mov eax, 0` drops its REX. Bytes
+// match GNU as: call rcx -> ff d1.
 
 module {
   func @f(%fp: !i64) -> !i64 {
@@ -15,13 +15,16 @@ module {
 }
 
 // CHECK: f:
-// detach the entry value, then allocate the callee to rax
+// detach the entry value, then move the callee to rcx
 // CHECK-NEXT: [0x48, 0x89, 0xF8]
-// CHECK-NEXT: [0x48, 0x89, 0xC0]
+// CHECK-NEXT: [0x48, 0x89, 0xC1]
 // add rsp, -8 (imm8): 48 83 c4 f8
 // CHECK-NEXT: [0x48, 0x83, 0xC4, 0xF8]
-// call rax (REX-free): ff d0
-// CHECK-NEXT: [0xFF, 0xD0]
+// mov eax, 0 (norex): c7 c0 ... (GNU as would use the shorter B8+rd form
+// b8 00 00 00 00; both valid, TIR's is one byte longer).
+// CHECK-NEXT: [0xC7, 0xC0, 0x00, 0x00, 0x00, 0x00]
+// call rcx (REX-free): ff d1
+// CHECK-NEXT: [0xFF, 0xD1]
 // CHECK-NEXT: [0x48, 0x83, 0xC4, 0x08]
 // CHECK-NEXT: [0x48, 0x89, 0xC0]
 // CHECK-NEXT: [0x48, 0x89, 0xC0]
