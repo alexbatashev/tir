@@ -746,7 +746,23 @@ where
     I: ValueInput<'src, Token = Token, Span = Span>,
 {
     recursive(|initializer| {
-        initializer
+        let designated = just(Token::Dot)
+            .ignore_then(ident())
+            .then_ignore(just(Token::Assign))
+            .then(initializer.clone())
+            .map_with(
+                |(name, value), e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
+                    let tok = e.span().start;
+                    let st = &mut e.state().0;
+                    let id = st.add(AstKind::DesignatedInitializer, tok);
+                    st.ast
+                        .set_leaf_data(id, AstLeaf::DesignatedInitializer(name));
+                    st.ast.add_edge(id, value);
+                    id
+                },
+            );
+        designated
+            .or(initializer.clone())
             .separated_by(just(Token::Comma))
             .allow_trailing()
             .collect::<Vec<_>>()

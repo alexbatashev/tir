@@ -501,6 +501,23 @@ fn constant_initializer_data(
     }
 }
 
+fn record_initializer_values(ast: &Ast, initializer: NodeId) -> Vec<(usize, NodeId)> {
+    let mut next_field = 0;
+    ast.children(initializer)
+        .filter_map(|value| {
+            if ast.get_node(value).kind == AstKind::DesignatedInitializer {
+                let index = ast.get_annotation(value)?.member_index?;
+                next_field = index + 1;
+                Some((index, ast.children(value).next().unwrap()))
+            } else {
+                let index = next_field;
+                next_field += 1;
+                Some((index, value))
+            }
+        })
+        .collect()
+}
+
 fn node_type(typed: &TypedAst, node: NodeId) -> QualType {
     typed
         .ast()
@@ -1448,7 +1465,7 @@ impl FnCodegen<'_> {
                 .iter()
                 .map(|field| (field.ty, field.offset))
                 .collect::<Vec<_>>();
-            let values = self.ast.children(initializer).collect::<Vec<_>>();
+            let values = record_initializer_values(self.ast, initializer);
             if kind == RecordKind::Union {
                 if let Some(&(storage_type, _)) = fields
                     .iter()
@@ -1456,15 +1473,17 @@ impl FnCodegen<'_> {
                 {
                     self.zero_initialize(storage_type, address, initializer)?;
                 }
-                if let (Some(&(field, offset)), Some(&value)) = (fields.first(), values.first()) {
+                if let Some(&(index, value)) = values.first() {
+                    let (field, offset) = fields[index];
                     let field_address = self.offset_address(address, offset, field);
                     self.lower_initializer(field, field_address, value)?;
                 }
                 return Ok(());
             }
+            let values = values.into_iter().collect::<HashMap<_, _>>();
             for (index, (field, offset)) in fields.into_iter().enumerate() {
                 let field_address = self.offset_address(address, offset, field);
-                if let Some(&value) = values.get(index) {
+                if let Some(&value) = values.get(&index) {
                     self.lower_initializer(field, field_address, value)?;
                 } else {
                     self.zero_initialize(field, field_address, initializer)?;

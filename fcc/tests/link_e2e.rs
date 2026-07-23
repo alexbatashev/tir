@@ -1377,6 +1377,16 @@ fn local_record_initializer_follows_field_order() {
 }
 
 #[test]
+fn local_record_designated_initializer_selects_fields() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "struct Pair { int left; int right; }; int main(void) { struct Pair pair = {.right = 22, .left = 11}; return pair.left + pair.right - 33; }\n",
+    );
+}
+
+#[test]
 fn local_union_initializer_uses_first_member() {
     if !cc_available() {
         return;

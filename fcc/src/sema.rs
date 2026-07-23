@@ -1067,7 +1067,7 @@ impl Analyzer<'_> {
             let fields = record
                 .fields
                 .iter()
-                .map(|field| field.ty)
+                .map(|field| (field.name.clone(), field.ty))
                 .collect::<Vec<_>>();
             let values = self.ast.children(initializer).collect::<Vec<_>>();
             let initializer_count = if kind == RecordKind::Union {
@@ -1090,11 +1090,40 @@ impl Analyzer<'_> {
                     .into(),
                 );
             }
-            for (value, field) in values
-                .into_iter()
-                .zip(fields.into_iter().take(initializer_count))
-            {
-                self.validate_initializer_value(field, value);
+            let mut next_field = 0;
+            for value in values {
+                if let Some(AstLeaf::DesignatedInitializer(name)) =
+                    self.ast.get_leaf_data(value).cloned()
+                {
+                    let Some((index, (_, field))) = fields
+                        .iter()
+                        .enumerate()
+                        .find(|(_, (field_name, _))| field_name == &name)
+                    else {
+                        self.diagnostics.push(
+                            InvalidOperands::new(
+                                self.ast.get_node(value).span,
+                                format!("record has no member named '{name}'"),
+                                initializer_reference(self.options),
+                            )
+                            .into(),
+                        );
+                        continue;
+                    };
+                    self.ast.set_annotation(
+                        value,
+                        NodeSemantics {
+                            member_index: Some(index),
+                            ..NodeSemantics::default()
+                        },
+                    );
+                    let selected = self.ast.children(value).next().unwrap();
+                    self.validate_initializer_value(*field, selected);
+                    next_field = index + 1;
+                } else if let Some((_, field)) = fields.get(next_field) {
+                    self.validate_initializer_value(*field, value);
+                    next_field += 1;
+                }
             }
             return;
         }
