@@ -1588,7 +1588,7 @@ impl<'a> DeclParser<'a> {
         let mut fields = Vec::new();
         loop {
             self.consume_attrs()?;
-            let mut decl = self.parse_declarator(specs.ty.clone())?;
+            let mut decl = self.parse_declarator(state, tok, specs.ty.clone())?;
             self.consume_attrs()?;
             decl.ty = self.take_attrs(decl.ty);
             self.consume_bitfield()?;
@@ -1610,7 +1610,12 @@ impl<'a> DeclParser<'a> {
         Ok(fields)
     }
 
-    fn parse_declarator(&mut self, mut base: CType) -> Result<Declarator, String> {
+    fn parse_declarator(
+        &mut self,
+        state: &mut SimpleState<ParseState>,
+        tok: usize,
+        mut base: CType,
+    ) -> Result<Declarator, String> {
         while self.eat(&Token::Star) {
             let attrs = self.consume_pointer_attrs()?;
             base = CType::Pointer(Box::new(base));
@@ -1625,7 +1630,8 @@ impl<'a> DeclParser<'a> {
                 let name = self.parse_name()?;
                 self.expect(&Token::RParen)?;
                 let ty = if self.eat(&Token::LParen) {
-                    let (params, varargs, has_parameter_type_list) = self.parse_param_list()?;
+                    let (params, varargs, has_parameter_type_list) =
+                        self.parse_param_list(state, tok)?;
                     CType::Pointer(Box::new(CType::Function {
                         ret: Box::new(base),
                         params,
@@ -1642,7 +1648,7 @@ impl<'a> DeclParser<'a> {
                 };
                 Declarator { name, ty }
             } else {
-                let decl = self.parse_declarator(base)?;
+                let decl = self.parse_declarator(state, tok, base)?;
                 self.expect(&Token::RParen)?;
                 decl
             }
@@ -1659,7 +1665,8 @@ impl<'a> DeclParser<'a> {
                 let len = (!len.is_empty()).then_some(tokens_text(&len));
                 decl.ty = CType::Array(Box::new(decl.ty), len);
             } else if self.eat(&Token::LParen) {
-                let (params, varargs, has_parameter_type_list) = self.parse_param_list()?;
+                let (params, varargs, has_parameter_type_list) =
+                    self.parse_param_list(state, tok)?;
                 decl.ty = CType::Function {
                     ret: Box::new(decl.ty),
                     params,
@@ -1683,7 +1690,11 @@ impl<'a> DeclParser<'a> {
         }
     }
 
-    fn parse_param_list(&mut self) -> Result<(Vec<CParam>, bool, bool), String> {
+    fn parse_param_list(
+        &mut self,
+        state: &mut SimpleState<ParseState>,
+        tok: usize,
+    ) -> Result<(Vec<CParam>, bool, bool), String> {
         let mut params = Vec::new();
         let mut varargs = false;
         if self.eat(&Token::RParen) {
@@ -1693,7 +1704,7 @@ impl<'a> DeclParser<'a> {
             if self.eat(&Token::Ellipsis) {
                 varargs = true;
             } else {
-                let specs = self.parse_specs_for_param()?;
+                let specs = self.parse_specs_for_param(state, tok)?;
                 let param = if matches!(self.peek(), Some(Token::Comma | Token::RParen)) {
                     CParam {
                         name: String::new(),
@@ -1702,7 +1713,7 @@ impl<'a> DeclParser<'a> {
                 } else {
                     let pos = self.pos;
                     let attrs = self.attrs.clone();
-                    let decl = match self.parse_declarator(specs.clone()) {
+                    let decl = match self.parse_declarator(state, tok, specs.clone()) {
                         Ok(decl) => decl,
                         Err(_) => {
                             self.pos = pos;
@@ -1753,15 +1764,12 @@ impl<'a> DeclParser<'a> {
         })
     }
 
-    fn parse_specs_for_param(&mut self) -> Result<CType, String> {
-        let mut scratch = SimpleState(ParseState {
-            ast: Ast::new(),
-            spans: Vec::new(),
-            token_offset: 0,
-            name_scopes: vec![NameScope::default()],
-            next_record: 0,
-        });
-        self.parse_specs(&mut scratch, 0).map(|specs| specs.ty)
+    fn parse_specs_for_param(
+        &mut self,
+        state: &mut SimpleState<ParseState>,
+        tok: usize,
+    ) -> Result<CType, String> {
+        self.parse_specs(state, tok).map(|specs| specs.ty)
     }
 
     fn consume_bitfield(&mut self) -> Result<(), String> {
@@ -2124,7 +2132,7 @@ fn parse_external_tokens(
 
     loop {
         parser.consume_attrs()?;
-        let mut decl = parser.parse_declarator(specs.ty.clone())?;
+        let mut decl = parser.parse_declarator(state, tok, specs.ty.clone())?;
         parser.consume_attrs()?;
         decl.ty = parser.take_attrs(decl.ty);
         let ty = decl.ty;
@@ -2237,7 +2245,7 @@ fn parse_local_enum_tokens(
 
     loop {
         parser.consume_attrs()?;
-        let mut declarator = parser.parse_declarator(specs.ty.clone())?;
+        let mut declarator = parser.parse_declarator(state, tok, specs.ty.clone())?;
         parser.consume_attrs()?;
         declarator.ty = parser.take_attrs(declarator.ty);
         state.0.declare_ordinary(declarator.name.clone());

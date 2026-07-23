@@ -138,6 +138,26 @@ fn resolves_pointer_member_against_the_tag_identity() {
 }
 
 #[test]
+fn calls_accept_each_of_multiple_tagged_record_types() {
+    let options: LangOptions = "c23".parse().unwrap();
+
+    assert!(accepts(
+        "struct IntegerPair { long left; long right; }; \
+         struct MixedPair { double fp; long integer; }; \
+         long check_integer(struct IntegerPair value); \
+         long check_mixed(struct MixedPair value); \
+         int main(void) { \
+             struct IntegerPair integers; \
+             struct MixedPair mixed; \
+             check_integer(integers); \
+             check_mixed(mixed); \
+             return 0; \
+         }",
+        options,
+    ));
+}
+
+#[test]
 fn rejects_unknown_struct_member() {
     let output = diagnostics(
         "struct Pair { int value; }; int read(void) { struct Pair pair; return pair.missing; }",
