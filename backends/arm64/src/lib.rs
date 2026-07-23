@@ -218,6 +218,20 @@ fn create_isel_pass_for(
 
 struct Arm64CallEmitter;
 
+fn register_attr_class(
+    attribute: &tir::attributes::AttributeValue,
+) -> Option<tir::backend::regalloc::RegClassId> {
+    let tir::attributes::AttributeValue::Register(register) = attribute else {
+        return None;
+    };
+    match register {
+        tir::attributes::RegisterAttr::Physical { class, .. } => Some(*class),
+        tir::attributes::RegisterAttr::Virtual { class, .. } => *class,
+        tir::attributes::RegisterAttr::FixedUse { class, .. }
+        | tir::attributes::RegisterAttr::FixedDef { class, .. } => Some(*class),
+    }
+}
+
 impl tir::backend::call_lowering::CallEmitter for Arm64CallEmitter {
     fn copy(
         &self,
@@ -225,7 +239,16 @@ impl tir::backend::call_lowering::CallEmitter for Arm64CallEmitter {
         dst: tir::attributes::AttributeValue,
         src: tir::attributes::AttributeValue,
     ) -> Box<dyn Operation> {
-        mv(context, dst, src)
+        if register_attr_class(&dst) == Some(RegClass::FPR64.id()) {
+            Box::new(
+                FMoveRegisterDoubleOpBuilder::new(context)
+                    .attr("fd", dst)
+                    .attr("fa", src)
+                    .build(),
+            )
+        } else {
+            mv(context, dst, src)
+        }
     }
 
     fn stack_arg_store(
