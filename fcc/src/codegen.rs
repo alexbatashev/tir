@@ -92,6 +92,7 @@ struct Signature {
 struct AbiParameter {
     pieces: Vec<AbiPiece>,
     grouped: bool,
+    indirect: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -577,6 +578,22 @@ fn classify_abi_parameter(
 ) -> AbiParameter {
     let riscv_pieces = classify_riscv_fp_aggregate(context, typed, ty);
     let hfa_pieces = classify_aapcs64_hfa(context, typed, ty);
+    if hfa_pieces.is_none()
+        && typed.target().uses_aapcs64_abi()
+        && matches!(typed.types().kind(ty), TypeKind::Record(_))
+        && source_type_layout(typed, ty).0 > 16
+    {
+        let pieces = vec![AbiPiece {
+            offset: 0,
+            ty: PtrType::opaque(context),
+        }];
+        register_usage.consume(context, typed.target(), &pieces);
+        return AbiParameter {
+            pieces,
+            grouped: false,
+            indirect: true,
+        };
+    }
     let composite_pieces = hfa_pieces
         .is_none()
         .then(|| classify_aapcs64_composite(context, typed, ty))
@@ -611,7 +628,11 @@ fn classify_abi_parameter(
     } else {
         register_usage.consume(context, typed.target(), &pieces);
     }
-    AbiParameter { pieces, grouped }
+    AbiParameter {
+        pieces,
+        grouped,
+        indirect: false,
+    }
 }
 
 fn classify_riscv_fp_aggregate(
@@ -1313,6 +1334,17 @@ impl FnCodegen<'_> {
             let source_ty = node_type(self.typed, param);
             let elem = lower_type(self.context, self.typed, source_ty);
             let (size, align) = source_type_layout(self.typed, source_ty);
+            if abi_param.indirect {
+                self.locals.insert(
+                    node_entity(self.typed, param),
+                    Slot {
+                        ptr: param_ids[abi_value],
+                        elem,
+                    },
+                );
+                abi_value += 1;
+                continue;
+            }
             let slot = self.alloca(elem, size, align);
             let values = if abi_param.grouped {
                 let tuple = param_ids[abi_value];
@@ -1975,6 +2007,35 @@ impl FnCodegen<'_> {
         expression: LoweredExpr,
         parameter: &AbiParameter,
     ) -> Result<Vec<ValueId>, Diagnostic> {
+        if parameter.indirect {
+            let LoweredExpr::Address { ptr: source, .. } = expression else {
+                return Err(unsupported(
+                    self.ast,
+                    node,
+                    "non-addressable aggregate argument".to_string(),
+                ));
+            };
+            let source_ty = node_type(self.typed, node);
+            let (size, align) = source_type_layout(self.typed, source_ty);
+            let destination = self
+                .builder
+                .insert(p::alloca(self.context, size, align, PtrType::opaque(self.context)).build())
+                .result();
+            let size = self
+                .builder
+                .insert(
+                    b::constant(
+                        self.context,
+                        size as i64,
+                        IntegerType::new(self.context, 64),
+                    )
+                    .build(),
+                )
+                .result();
+            self.builder
+                .insert(p::memcpy(self.context, destination, source, size).build());
+            return Ok(vec![destination]);
+        }
         if matches!(
             self.typed.types().kind(node_type(self.typed, node)),
             TypeKind::Record(_)
