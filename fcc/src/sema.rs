@@ -2211,6 +2211,15 @@ impl Analyzer<'_> {
             (AstKind::Mul, [left, right]) => left.checked_mul(*right),
             (AstKind::Div, [_, 0]) => None,
             (AstKind::Div, [left, right]) => left.checked_div(*right),
+            (AstKind::Shl, [left, right]) => u32::try_from(*right)
+                .ok()
+                .and_then(|shift| left.checked_shl(shift)),
+            (AstKind::Shr, [left, right]) => u32::try_from(*right)
+                .ok()
+                .and_then(|shift| left.checked_shr(shift)),
+            (AstKind::BitAnd, [left, right]) => Some(left & right),
+            (AstKind::BitXor, [left, right]) => Some(left ^ right),
+            (AstKind::BitOr, [left, right]) => Some(left | right),
             (AstKind::Neg, [value]) => value.checked_neg(),
             (AstKind::Pos, [value]) => Some(*value),
             _ => None,

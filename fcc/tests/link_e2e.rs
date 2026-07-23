@@ -678,6 +678,16 @@ fn enum_constants_evaluate_integer_constant_expressions() {
 }
 
 #[test]
+fn enum_constants_evaluate_shift_and_bitwise_expressions() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "enum Flags { Read = 1 << 0, Write = 1 << 1, Both = Read | Write, Masked = (Both ^ Read) & 3, High = 8 >> 1 }; int main(void) { return Both == 3 && Masked == 2 && High == 4 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
 fn escaped_character_constant_executes_through_driver() {
     if !cc_available() {
         return;
