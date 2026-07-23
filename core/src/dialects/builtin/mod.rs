@@ -5,6 +5,7 @@ mod declare;
 mod float;
 mod func;
 mod module;
+mod tuple;
 
 use std::any::Any;
 use std::sync::Arc;
@@ -21,6 +22,7 @@ pub use declare::*;
 pub use float::*;
 pub use func::*;
 pub use module::*;
+pub use tuple::*;
 
 pub mod ops {
     pub use super::arith::*;
@@ -30,6 +32,7 @@ pub mod ops {
     pub use super::float::*;
     pub use super::func::*;
     pub use super::module::*;
+    pub use super::tuple::*;
 }
 
 dialect! {
@@ -73,10 +76,12 @@ dialect! {
             CondBranchOp,
             CallOp,
             IndirectCallOp,
+            MakeTupleOp,
+            TupleGetOp,
             DeclareOp,
             AddressOfOp,
         ],
-        types: [IntegerType, FloatType, IndexType, UnitType, TokenType],
+        types: [IntegerType, FloatType, IndexType, UnitType, TokenType, TupleType],
     }
 }
 
@@ -411,5 +416,23 @@ mod tests {
         let token = context.get_type_data(TokenType::new(&context));
 
         assert!(!crate::Any::satisfies(token.as_ref()));
+    }
+
+    #[test]
+    fn tuple_type_roundtrip() {
+        let context = Context::with_default_dialects();
+        let i32_ty = IntegerType::new(&context, 32);
+        let i64_ty = IntegerType::new(&context, 64);
+
+        let tuple = TupleType::new(&context, vec![i32_ty, i64_ty]);
+
+        assert_eq!(context.type_to_string(tuple), "!tuple<!i32, !i64>");
+        let mut parser = crate::parse::text::Parser::new("!tuple<!i32, !i64>");
+        assert_eq!(parser.parse_type(&context).unwrap().unwrap(), tuple);
+        let tuple = context.get_type_data(tuple);
+        let tuple = (tuple.as_ref() as &dyn Any)
+            .downcast_ref::<TupleType>()
+            .unwrap();
+        assert_eq!(tuple.elements(&context), vec![i32_ty, i64_ty]);
     }
 }
