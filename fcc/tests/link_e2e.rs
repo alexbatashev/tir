@@ -1417,6 +1417,16 @@ fn local_union_initializer_uses_first_member() {
 }
 
 #[test]
+fn local_union_designator_selects_member() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "union Value { int integer; long wide; }; int main(void) { union Value value = {.wide = 42}; return value.wide - 42; }\n",
+    );
+}
+
+#[test]
 fn nested_record_initializer_zero_fills_fields() {
     if !cc_available() {
         return;
@@ -1499,6 +1509,16 @@ fn initialized_global_union_uses_first_member() {
     }
     assert_fcc_matches_host(
         "union Value { int integer; long wide; } value = {42}; int main(void) { return value.integer - 42; }\n",
+    );
+}
+
+#[test]
+fn initialized_global_union_designator_selects_member() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "union Value { int integer; long wide; } value = {.wide = 42}; int main(void) { return value.wide - 42; }\n",
     );
 }
 
