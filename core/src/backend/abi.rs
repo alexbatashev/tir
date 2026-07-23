@@ -8,7 +8,8 @@ pub enum ValueKind {
     Vector,
 }
 
-pub(crate) fn type_kind(context: &Context, ty: TypeId) -> ValueKind {
+/// Classifies an IR type for ABI register assignment.
+pub fn type_kind(context: &Context, ty: TypeId) -> ValueKind {
     let data = context.get_type_data(ty);
     let data = data.as_ref() as &dyn std::any::Any;
     if data.downcast_ref::<crate::builtin::FloatType>().is_some() {

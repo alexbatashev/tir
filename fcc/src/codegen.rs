@@ -528,15 +528,24 @@ fn classify_riscv_fp_aggregate(
         return None;
     }
     let mut pieces = vec![];
-    if !flatten_riscv_fp_fields(context, typed, ty, 0, &mut pieces)
-        || !(1..=2).contains(&pieces.len())
-    {
+    if !flatten_riscv_fields(context, typed, ty, 0, &mut pieces) {
+        return None;
+    }
+    let kinds = pieces
+        .iter()
+        .map(|piece| tir::backend::abi::type_kind(context, piece.ty))
+        .collect::<Vec<_>>();
+    use tir::backend::abi::ValueKind::{Float, Int};
+    if !matches!(
+        kinds.as_slice(),
+        [Float] | [Float, Float] | [Float, Int] | [Int, Float]
+    ) {
         return None;
     }
     Some(pieces)
 }
 
-fn flatten_riscv_fp_fields(
+fn flatten_riscv_fields(
     context: &Context,
     typed: &TypedAst,
     ty: QualType,
@@ -551,19 +560,39 @@ fn flatten_riscv_fp_fields(
             });
             true
         }
+        TypeKind::Integer(_) => {
+            let Some(width) = typed.integer_width(ty) else {
+                return false;
+            };
+            if width > typed.target().pointer_width() {
+                return false;
+            }
+            pieces.push(AbiPiece {
+                offset,
+                ty: lower_type(context, typed, ty),
+            });
+            true
+        }
+        TypeKind::Enum(_) => {
+            pieces.push(AbiPiece {
+                offset,
+                ty: IntegerType::new(context, 32),
+            });
+            true
+        }
         TypeKind::Record(id) => {
             let Some(record) = typed.record(*id) else {
                 return false;
             };
             record.kind == RecordKind::Struct
                 && record.fields.iter().all(|field| {
-                    flatten_riscv_fp_fields(context, typed, field.ty, offset + field.offset, pieces)
+                    flatten_riscv_fields(context, typed, field.ty, offset + field.offset, pieces)
                 })
         }
         TypeKind::Array(element, Some(length)) => {
             let stride = source_type_layout(typed, *element).0;
             (0..*length).all(|index| {
-                flatten_riscv_fp_fields(context, typed, *element, offset + index * stride, pieces)
+                flatten_riscv_fields(context, typed, *element, offset + index * stride, pieces)
             })
         }
         _ => false,
