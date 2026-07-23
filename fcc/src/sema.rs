@@ -949,14 +949,62 @@ impl Analyzer<'_> {
         self.validate_parsed_type(span, &parsed_ty);
         let children = self.ast.children(node).collect::<Vec<_>>();
         let mut ty = self.canonical_type(&parsed_ty);
+        let previous = self.scopes.last().unwrap().get(&name).cloned();
+        let redefined = previous.is_some();
+        let entity = self.new_entity();
+        self.ast.set_annotation(
+            node,
+            NodeSemantics {
+                ty: Some(ty),
+                entity: Some(entity),
+                category: ValueCategory::Lvalue,
+                ..NodeSemantics::default()
+            },
+        );
+        if let Some(previous) = previous {
+            self.diagnostics.push(
+                Redefinition::new(
+                    span,
+                    previous.span,
+                    name.clone(),
+                    redefinition_reference(self.options),
+                )
+                .into(),
+            );
+        } else {
+            self.scopes.last_mut().unwrap().insert(
+                name.clone(),
+                Symbol {
+                    span,
+                    ty,
+                    entity,
+                    typedef,
+                    defined: true,
+                },
+            );
+        }
+        for &child in &children {
+            self.node(child);
+        }
         if self.ast.get_node(node).kind == AstKind::Decl
             && let Some(&initializer) = children.first()
             && self.ast.get_node(initializer).kind == AstKind::InitializerList
             && let TypeKind::Array(element, None) = self.types.kind(ty)
+            && let Some(length) = self.inferred_array_length(initializer)
         {
-            let element = *element;
-            let length = self.ast.children(initializer).count() as u64;
-            ty = self.types.intern(TypeKind::Array(element, Some(length)));
+            ty = self.types.intern(TypeKind::Array(*element, Some(length)));
+            self.ast.set_annotation(
+                node,
+                NodeSemantics {
+                    ty: Some(ty),
+                    entity: Some(entity),
+                    category: ValueCategory::Lvalue,
+                    ..NodeSemantics::default()
+                },
+            );
+            if !redefined {
+                self.scopes.last_mut().unwrap().get_mut(&name).unwrap().ty = ty;
+            }
         }
         if !typedef {
             let message = match self.types.kind(ty) {
@@ -990,47 +1038,27 @@ impl Analyzer<'_> {
                 .into(),
             );
         }
-        let previous = self.scopes.last().unwrap().get(&name).cloned();
-        let entity = self.new_entity();
-        self.ast.set_annotation(
-            node,
-            NodeSemantics {
-                ty: Some(ty),
-                entity: Some(entity),
-                category: ValueCategory::Lvalue,
-                ..NodeSemantics::default()
-            },
-        );
-        if let Some(previous) = previous {
-            self.diagnostics.push(
-                Redefinition::new(
-                    span,
-                    previous.span,
-                    name.clone(),
-                    redefinition_reference(self.options),
-                )
-                .into(),
-            );
-        } else {
-            self.scopes.last_mut().unwrap().insert(
-                name,
-                Symbol {
-                    span,
-                    ty,
-                    entity,
-                    typedef,
-                    defined: true,
-                },
-            );
-        }
-        for &child in &children {
-            self.node(child);
-        }
         if self.ast.get_node(node).kind == AstKind::Decl
             && let Some(&initializer) = children.first()
         {
             self.validate_initializer(ty, initializer);
         }
+    }
+
+    fn inferred_array_length(&self, initializer: NodeId) -> Option<u64> {
+        let mut next = 0_u64;
+        let mut length = 0_u64;
+        for value in self.ast.children(initializer) {
+            if let Some(AstLeaf::DesignatedInitializer(InitializerDesignator::Index)) =
+                self.ast.get_leaf_data(value)
+            {
+                let index = self.ast.children(value).next().unwrap();
+                next = self.ast.get_annotation(index)?.constant?.try_into().ok()?;
+            }
+            next = next.checked_add(1)?;
+            length = length.max(next);
+        }
+        Some(length)
     }
 
     fn validate_initializer(&mut self, target: QualType, initializer: NodeId) {

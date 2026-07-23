@@ -297,6 +297,16 @@ fn local_array_initializer_infers_omitted_bound() {
 }
 
 #[test]
+fn local_array_designator_infers_omitted_bound() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "int main(void) { int values[] = {[4] = 42}; return sizeof(values) == 20 && values[4] == 42 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
 fn nested_array_initializer_uses_row_major_storage() {
     if !cc_available() {
         return;
