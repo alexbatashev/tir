@@ -85,6 +85,13 @@ pub struct AbiInfo {
     pub classifier: ClassifierKind,
 }
 
+impl AbiInfo {
+    pub(crate) fn argument_group_fits_register_limit(&self, members: usize) -> bool {
+        self.argument_group_register_limit
+            .is_none_or(|limit| members <= limit)
+    }
+}
+
 pub(crate) fn exhaust_argument_registers(
     abi: &AbiInfo,
     mut kind: ValueKind,

@@ -7,7 +7,9 @@ use tir::builtin::{
 };
 use tir::{Context, OpId, Operation, OperationRef, PassError, Rewriter, ValueId};
 
-use crate::backend::abi::{AbiInfo, Overflow, ValueKind, exhaust_argument_registers, value_kind};
+use crate::backend::abi::{
+    AbiInfo, GroupRollback, Overflow, ValueKind, exhaust_argument_registers, value_kind,
+};
 use crate::backend::liveness::PhysReg;
 
 pub trait CallEmitter: Send + Sync {
@@ -144,10 +146,16 @@ impl CallLowering {
         let mut stack_args = 0u32;
         for values in lowered_arguments {
             let mut trial_slots = next_slot.clone();
-            let direct = values
-                .iter()
-                .map(|&value| next_register(self.abi, value_kind(context, value), &mut trial_slots))
-                .collect::<Option<Vec<_>>>();
+            let direct = if self.abi.argument_group_fits_register_limit(values.len()) {
+                values
+                    .iter()
+                    .map(|&value| {
+                        next_register(self.abi, value_kind(context, value), &mut trial_slots)
+                    })
+                    .collect::<Option<Vec<_>>>()
+            } else {
+                None
+            };
             if let Some(registers) = direct {
                 next_slot = trial_slots;
                 argument_values.extend(values);
@@ -156,7 +164,13 @@ impl CallLowering {
             }
 
             for &value in &values {
-                exhaust_argument_registers(self.abi, value_kind(context, value), &mut next_slot);
+                if self.abi.argument_group_rollback == GroupRollback::Exhaust {
+                    exhaust_argument_registers(
+                        self.abi,
+                        value_kind(context, value),
+                        &mut next_slot,
+                    );
+                }
                 let class = stack_class(self.abi, value_kind(context, value)).ok_or_else(|| {
                     PassError::InvalidRuleSet("ABI has no argument sequence".to_string())
                 })?;

@@ -72,6 +72,10 @@ abi SysV("sysv") for [X86_64] {
     }
     sp = GPR::rsp;
     fp = GPR::rbp;
+    argument_groups {
+        register_limit = 2;
+        rollback = preserve;
+    }
     args int -> [GPR::rdi, GPR::rsi, GPR::rdx, GPR::rcx, GPR::r8, GPR::r9],
         then stack;
     args float -> [XMM::xmm0..XMM::xmm7], then stack;

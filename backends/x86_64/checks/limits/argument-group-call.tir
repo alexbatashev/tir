@@ -1,0 +1,18 @@
+// RUN: tir mc --march=x86_64 --stage=regalloc %s | filecheck %s
+
+// Outgoing SysV aggregate groups larger than two eightbytes go entirely to
+// memory without consuming the register used by the following scalar.
+
+module {
+  declare @consume(!tuple<!i64, !i64, !i64>, !i64) -> !i64
+  func @forward(%0: !i64, %1: !i64, %2: !i64, %3: !i64) -> !i64 {
+    %4 = make_tuple %0, %1, %2 : !tuple<!i64, !i64, !i64>
+    %5 = call @consume(%4, %3 : !tuple<!i64, !i64, !i64>, !i64) -> !i64
+    return %5
+  }
+  module_end
+}
+
+// CHECK-COUNT-3: x86_64.mov_store_disp
+// CHECK:         x86_64.mov {dst = rdi, src = {{.*}}}
+// CHECK-NEXT:    asm.vcall {callee = "consume"

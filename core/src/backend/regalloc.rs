@@ -1485,10 +1485,16 @@ fn abi_precolor(
                     })
                     .collect::<Result<Vec<_>, PassError>>()?;
                 let mut trial_slots = next_abi_slot.clone();
-                let pins = members
-                    .iter()
-                    .map(|&(_, class, kind)| next_abi_register(abi, class, kind, &mut trial_slots))
-                    .collect::<Option<Vec<_>>>();
+                let pins = if abi.argument_group_fits_register_limit(members.len()) {
+                    members
+                        .iter()
+                        .map(|&(_, class, kind)| {
+                            next_abi_register(abi, class, kind, &mut trial_slots)
+                        })
+                        .collect::<Option<Vec<_>>>()
+                } else {
+                    None
+                };
                 if let Some(pins) = pins {
                     next_abi_slot = trial_slots;
                     for ((body, _, _), (member, pin)) in
@@ -1498,11 +1504,15 @@ fn abi_precolor(
                     }
                 } else {
                     for (body, class, kind) in members {
-                        crate::backend::abi::exhaust_argument_registers(
-                            abi,
-                            kind,
-                            &mut next_abi_slot,
-                        );
+                        if abi.argument_group_rollback
+                            == crate::backend::abi::GroupRollback::Exhaust
+                        {
+                            crate::backend::abi::exhaust_argument_registers(
+                                abi,
+                                kind,
+                                &mut next_abi_slot,
+                            );
+                        }
                         stack_args.push(IncomingStackArg {
                             vreg: body,
                             class,
