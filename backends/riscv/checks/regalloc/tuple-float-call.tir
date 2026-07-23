@@ -1,0 +1,16 @@
+// RUN: tir mc --march=rv64id --stage=regalloc %s | filecheck %s
+
+module {
+  declare @make_pair() -> !tuple<!f64, !f64>
+  func @right() -> !f64 {
+    %0 = call @make_pair() -> !tuple<!f64, !f64>
+    %1 = tuple_get %0 {index = 1} : !f64
+    return %1
+  }
+  module_end
+}
+
+// CHECK: asm.vcall {callee = "make_pair"
+// CHECK: riscv.fsgnj.d {fd = f0, fs = f11}
+// CHECK: riscv.fsgnj.d {fd = f10, fs = f0}
+// CHECK: asm.vret

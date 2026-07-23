@@ -224,12 +224,7 @@ fn register_attr_class(
     let tir::attributes::AttributeValue::Register(register) = attribute else {
         return None;
     };
-    match register {
-        tir::attributes::RegisterAttr::Physical { class, .. } => Some(*class),
-        tir::attributes::RegisterAttr::Virtual { class, .. } => *class,
-        tir::attributes::RegisterAttr::FixedUse { class, .. }
-        | tir::attributes::RegisterAttr::FixedDef { class, .. } => Some(*class),
-    }
+    register.class()
 }
 
 impl tir::backend::call_lowering::CallEmitter for Arm64CallEmitter {

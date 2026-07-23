@@ -604,6 +604,15 @@ fn create_isel_pass_for(
 
 struct RiscvCallEmitter;
 
+fn register_attr_class(
+    attribute: &tir::attributes::AttributeValue,
+) -> Option<tir::backend::regalloc::RegClassId> {
+    let tir::attributes::AttributeValue::Register(register) = attribute else {
+        return None;
+    };
+    register.class()
+}
+
 impl tir::backend::call_lowering::CallEmitter for RiscvCallEmitter {
     fn copy(
         &self,
@@ -611,7 +620,21 @@ impl tir::backend::call_lowering::CallEmitter for RiscvCallEmitter {
         dst: tir::attributes::AttributeValue,
         src: tir::attributes::AttributeValue,
     ) -> Box<dyn Operation> {
-        mv(context, dst, src)
+        match register_attr_class(&dst) {
+            Some(class) if class == RegClass::FPR32.id() => Box::new(
+                FMoveSOpBuilder::new(context)
+                    .attr("fd", dst)
+                    .attr("fs", src)
+                    .build(),
+            ),
+            Some(class) if class == RegClass::FPR64.id() => Box::new(
+                FMoveDOpBuilder::new(context)
+                    .attr("fd", dst)
+                    .attr("fs", src)
+                    .build(),
+            ),
+            _ => mv(context, dst, src),
+        }
     }
 
     fn stack_arg_store(
