@@ -642,8 +642,10 @@ impl tir::backend::call_lowering::CallEmitter for RiscvCallEmitter {
         context: &tir::Context,
         abi: &tir::backend::abi::AbiInfo,
         value: tir::attributes::AttributeValue,
+        outgoing_size: u32,
         offset: i64,
     ) -> Result<Box<dyn Operation>, tir::PassError> {
+        let offset = offset - i64::from(outgoing_size);
         if register_attr_class(&value) == Some(RegClass::FPR64.id()) {
             Ok(Box::new(
                 FStoreDoubleOpBuilder::new(context)

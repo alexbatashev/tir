@@ -1,0 +1,19 @@
+// RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s
+
+// The ninth SysV f64 argument is stored to the outgoing stack area from its
+// XMM value.
+
+module {
+  declare @consume(!f64, !f64, !f64, !f64, !f64, !f64, !f64, !f64, !f64) -> !f64
+  func @forward(%0: !f64) -> !f64 {
+    %1 = call @consume(%0, %0, %0, %0, %0, %0, %0, %0, %0 : !f64, !f64, !f64, !f64, !f64, !f64, !f64, !f64, !f64) -> !f64
+    return %1
+  }
+  module_end
+}
+
+// CHECK: x86_64.movsd {dst = %virt{{[0-9]+}}:XMM, src = %virt0:XMM}
+// CHECK: x86_64.movsd_store_disp {base = rsp, imm = -24, src = %virt{{[0-9]+}}:XMM}
+// CHECK: x86_64.add_imm {dst = rsp, imm = -24}
+// CHECK: asm.vcall {callee = "consume"
+// CHECK: x86_64.add_imm {dst = rsp, imm = 24}

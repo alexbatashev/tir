@@ -9,7 +9,7 @@ module {
   module_end
 }
 
+// CHECK: arm64.store_float_double {ft = %virt{{[0-9]+}}:FPR64, rn = sp, imm = -16}
 // CHECK: arm64.sub_imm {rd = sp, rn = sp, imm = 16}
-// CHECK: arm64.store_float_double {ft = %virt{{[0-9]+}}:FPR64, rn = sp, imm = 0}
 // CHECK: asm.vcall {callee = "ext"
 // CHECK: arm64.add_imm {rd = sp, rn = sp, imm = 16}

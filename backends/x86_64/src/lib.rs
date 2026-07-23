@@ -734,6 +734,26 @@ mod isa {
         )
     }
 
+    fn abi_copy(
+        context: &tir::Context,
+        dst: AttributeValue,
+        src: AttributeValue,
+    ) -> Box<dyn Operation> {
+        let AttributeValue::Register(register) = &dst else {
+            unreachable!("ABI copies target a register")
+        };
+        match register.class().unwrap().name() {
+            "GPR" => mv(context, dst, src),
+            "XMM" => Box::new(
+                MovsdOpBuilder::new(context)
+                    .attr("dst", dst)
+                    .attr("src", src)
+                    .build(),
+            ),
+            other => unreachable!("unknown x86-64 ABI register class {other}"),
+        }
+    }
+
     struct X86CallEmitter;
 
     impl tir::backend::call_lowering::CallEmitter for X86CallEmitter {
@@ -743,7 +763,7 @@ mod isa {
             dst: AttributeValue,
             src: AttributeValue,
         ) -> Box<dyn Operation> {
-            mv(context, dst, src)
+            abi_copy(context, dst, src)
         }
 
         fn stack_arg_store(
@@ -751,15 +771,36 @@ mod isa {
             context: &tir::Context,
             abi: &tir::backend::abi::AbiInfo,
             value: AttributeValue,
+            outgoing_size: u32,
             offset: i64,
         ) -> Result<Box<dyn Operation>, tir::PassError> {
-            Ok(Box::new(
-                MovStoreDispOpBuilder::new(context)
-                    .attr("base", phys(abi.sp.0, abi.sp.1))
-                    .attr("imm", AttributeValue::Int(offset))
-                    .attr("src", value)
-                    .build(),
-            ))
+            let AttributeValue::Register(RegisterAttr::Virtual {
+                class: Some(class), ..
+            }) = &value
+            else {
+                unreachable!("call lowering stores a typed virtual register")
+            };
+            let base = phys(abi.sp.0, abi.sp.1);
+            let offset = AttributeValue::Int(offset - i64::from(outgoing_size) - 8);
+            match class.name() {
+                "GPR" => Ok(Box::new(
+                    MovStoreDispOpBuilder::new(context)
+                        .attr("base", base)
+                        .attr("imm", offset)
+                        .attr("src", value)
+                        .build(),
+                )),
+                "XMM" => Ok(Box::new(
+                    MovsdStoreDispOpBuilder::new(context)
+                        .attr("base", base)
+                        .attr("imm", offset)
+                        .attr("src", value)
+                        .build(),
+                )),
+                other => Err(tir::PassError::InvalidRuleSet(format!(
+                    "x86-64 stack arguments for register class {other} are not supported"
+                ))),
+            }
         }
 
         fn call_prefix(
@@ -1535,6 +1576,15 @@ mod isa {
             frame: &tir::backend::liveness::PhysReg,
             offset: i64,
         ) -> Result<Box<dyn Operation>, tir::PassError> {
+            if dst.0.name() == "XMM" {
+                return Ok(Box::new(
+                    MovsdLoadDispOpBuilder::new(context)
+                        .attr("dst", phys(dst.0, dst.1))
+                        .attr("base", phys(frame.0, frame.1))
+                        .attr("imm", AttributeValue::Int(offset))
+                        .build(),
+                ));
+            }
             if dst.0.name() != "GPR" {
                 return Err(tir::PassError::InvalidRuleSet(format!(
                     "x86-64 stack arguments for register class {} are not supported",

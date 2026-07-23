@@ -15,4 +15,5 @@ module {
 
 // CHECK-COUNT-3: x86_64.mov_store_disp
 // CHECK:         x86_64.mov {dst = rdi, src = {{.*}}}
-// CHECK-NEXT:    asm.vcall {callee = "consume"
+// CHECK:         x86_64.add_imm {dst = rsp, imm = -40}
+// CHECK:         asm.vcall {callee = "consume"

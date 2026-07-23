@@ -25,6 +25,7 @@ pub trait CallEmitter: Send + Sync {
         _context: &Context,
         _abi: &AbiInfo,
         _value: AttributeValue,
+        _outgoing_size: u32,
         _offset: i64,
     ) -> Result<Box<dyn Operation>, PassError> {
         Err(PassError::InvalidRuleSet(
@@ -228,9 +229,6 @@ impl CallLowering {
             fresh_args.push(detach(rewriter, arg, location.class())?);
         }
 
-        for prefix in self.emitter.call_prefix(context, self.abi, outgoing_size) {
-            rewriter.insert_op_before(op, prefix.as_ref())?;
-        }
         for (&fresh, location) in fresh_args.iter().zip(&argument_locations) {
             match *location {
                 ArgumentLocation::Register(register) => {
@@ -246,6 +244,7 @@ impl CallLowering {
                         context,
                         self.abi,
                         virtual_reg(fresh, class),
+                        outgoing_size,
                         offset,
                     )?;
                     rewriter.insert_op_before(op, store.as_ref())?;
@@ -272,6 +271,10 @@ impl CallLowering {
         } else {
             None
         };
+
+        for prefix in self.emitter.call_prefix(context, self.abi, outgoing_size) {
+            rewriter.insert_op_before(op, prefix.as_ref())?;
+        }
 
         let clobbers = AttributeValue::Array(
             self.abi
