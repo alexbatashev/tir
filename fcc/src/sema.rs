@@ -646,11 +646,24 @@ impl Analyzer<'_> {
             return;
         };
         self.node(initializer);
-        let target = self
+        let mut target = self
             .ast
             .get_annotation(node)
             .and_then(|info| info.ty)
             .unwrap();
+        if self.ast.get_node(initializer).kind == AstKind::InitializerList
+            && let TypeKind::Array(element, None) = self.types.kind(target)
+            && let Some(length) = self.inferred_array_length(initializer)
+        {
+            target = self.types.intern(TypeKind::Array(*element, Some(length)));
+            let mut semantics = self.ast.get_annotation(node).cloned().unwrap();
+            semantics.ty = Some(target);
+            self.ast.set_annotation(node, semantics);
+            let Some(AstLeaf::Global { name, .. }) = self.ast.get_leaf_data(node) else {
+                unreachable!();
+            };
+            self.scopes[0].get_mut(name).unwrap().ty = target;
+        }
         self.validate_initializer(target, initializer);
     }
 

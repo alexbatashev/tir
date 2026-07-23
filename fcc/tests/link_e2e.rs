@@ -1463,6 +1463,16 @@ fn initialized_global_array_designators_select_elements() {
 }
 
 #[test]
+fn initialized_global_array_designator_infers_omitted_bound() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "int values[] = {[4] = 42}; int main(void) { return sizeof(values) == 20 && values[4] == 42 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
 fn initialized_global_struct_uses_field_layout() {
     if !cc_available() {
         return;
