@@ -1150,6 +1150,50 @@ fn mixed_struct_call_matches_sysv_host_abi() {
 }
 
 #[test]
+fn large_struct_argument_matches_sysv_host_abi() {
+    if !cc_available() || !cfg!(target_arch = "x86_64") {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "struct Large { long values[3]; }; long sum(struct Large value, long tail) { return value.values[0] + value.values[1] + value.values[2] + tail; }\n",
+        "struct Large { long values[3]; }; long sum(struct Large, long); int main(void) { struct Large value = {{5, 7, 11}}; return sum(value, 19) == 42 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn large_struct_call_matches_sysv_host_abi() {
+    if !cc_available() || !cfg!(target_arch = "x86_64") {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "struct Large { long values[3]; }; long sum(struct Large, long); int main(void) { struct Large value = {{5, 7, 11}}; return sum(value, 19) == 42 ? 0 : 1; }\n",
+        "struct Large { long values[3]; }; long sum(struct Large value, long tail) { return value.values[0] + value.values[1] + value.values[2] + tail; }\n",
+    );
+}
+
+#[test]
+fn pressured_struct_argument_rolls_back_sysv_registers() {
+    if !cc_available() || !cfg!(target_arch = "x86_64") {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "struct Pair { long left; long right; }; long check(long a, long b, long c, long d, long e, struct Pair pair, long tail) { return a + b + c + d + e + pair.left + pair.right + tail; }\n",
+        "struct Pair { long left; long right; }; long check(long, long, long, long, long, struct Pair, long); int main(void) { struct Pair pair = {6, 7}; return check(1, 2, 3, 4, 5, pair, 14) == 42 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn pressured_struct_call_rolls_back_sysv_registers() {
+    if !cc_available() || !cfg!(target_arch = "x86_64") {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "struct Pair { long left; long right; }; long check(long, long, long, long, long, struct Pair, long); int main(void) { struct Pair pair = {6, 7}; return check(1, 2, 3, 4, 5, pair, 14) == 42 ? 0 : 1; }\n",
+        "struct Pair { long left; long right; }; long check(long a, long b, long c, long d, long e, struct Pair pair, long tail) { return a + b + c + d + e + pair.left + pair.right + tail; }\n",
+    );
+}
+
+#[test]
 fn one_word_struct_return_matches_host_abi() {
     if !cc_available() {
         return;

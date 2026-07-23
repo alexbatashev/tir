@@ -616,6 +616,17 @@ fn classify_abi_parameter(
     let sysv_pieces = classify_sysv_eightbytes(context, typed, ty);
     let riscv_pieces = classify_riscv_fp_aggregate(context, typed, ty);
     let hfa_pieces = classify_aapcs64_hfa(context, typed, ty);
+    if sysv_pieces.is_none()
+        && let Some(pieces) = classify_sysv_memory_carriers(context, typed, ty)
+    {
+        register_usage.consume_group(context, typed.target(), &pieces);
+        return AbiParameter {
+            pieces,
+            grouped: true,
+            indirect: false,
+            padding: 0,
+        };
+    }
     if riscv_pieces.is_none()
         && hfa_pieces.is_none()
         && (typed.target().uses_aapcs64_abi() || typed.target().uses_riscv_abi())
@@ -739,6 +750,29 @@ fn classify_sysv_eightbytes(
                     offset: index as u64 * 8,
                     ty,
                 })
+            })
+            .collect(),
+    )
+}
+
+fn classify_sysv_memory_carriers(
+    context: &Context,
+    typed: &TypedAst,
+    ty: QualType,
+) -> Option<Vec<AbiPiece>> {
+    if !typed.target().uses_sysv_abi() || !matches!(typed.types().kind(ty), TypeKind::Record(_)) {
+        return None;
+    }
+    let (size, _) = source_type_layout(typed, ty);
+    if size == 0 {
+        return None;
+    }
+    let carrier = IntegerType::new(context, 64);
+    Some(
+        (0..size.div_ceil(8))
+            .map(|index| AbiPiece {
+                offset: index * 8,
+                ty: carrier,
             })
             .collect(),
     )
