@@ -716,11 +716,20 @@ fn classify_aapcs64_composite(
 ) -> Option<Vec<AbiPiece>> {
     if !typed.target().uses_aapcs64_abi()
         || !matches!(typed.types().kind(ty), TypeKind::Record(_))
-        || !matches!(source_type_layout(typed, ty).0, 8 | 16)
+        || !(1..=16).contains(&source_type_layout(typed, ty).0)
     {
         return None;
     }
-    classify_integer_carriers(context, typed, ty)
+    let size = source_type_layout(typed, ty).0;
+    let carrier = IntegerType::new(context, 64);
+    Some(
+        (0..size.div_ceil(8))
+            .map(|index| AbiPiece {
+                offset: index * 8,
+                ty: carrier,
+            })
+            .collect(),
+    )
 }
 
 fn flatten_aggregate_fields(
@@ -824,6 +833,25 @@ fn classify_integer_carriers(
         ]);
     }
     None
+}
+
+fn abi_piece_size(context: &Context, ty: TypeId) -> Option<u64> {
+    let ty = context.get_type_data(ty);
+    let ty = ty.as_ref() as &dyn std::any::Any;
+    if let Some(integer) = ty.downcast_ref::<IntegerType>() {
+        return Some(u64::from(integer.width().div_ceil(8)));
+    }
+    if let Some(float) = ty.downcast_ref::<FloatType>() {
+        return Some(u64::from(float.bit_width() / 8));
+    }
+    None
+}
+
+fn abi_storage_layout(context: &Context, pieces: &[AbiPiece]) -> Option<(u64, u64)> {
+    pieces.iter().try_fold((0, 1), |(size, align), piece| {
+        let piece_size = abi_piece_size(context, piece.ty)?;
+        Some((size.max(piece.offset + piece_size), align.max(piece_size)))
+    })
 }
 
 fn is_integer_aggregate(typed: &TypedAst, ty: QualType) -> bool {
@@ -1370,7 +1398,13 @@ impl FnCodegen<'_> {
                 abi_value += 1;
                 continue;
             }
-            let slot = self.alloca(elem, size, align);
+            let (abi_size, abi_align) =
+                if matches!(self.typed.types().kind(source_ty), TypeKind::Record(_)) {
+                    abi_storage_layout(self.context, &abi_param.pieces).unwrap_or((size, align))
+                } else {
+                    (size, align)
+                };
+            let slot = self.alloca(elem, size.max(abi_size), align.max(abi_align));
             let values = if abi_param.grouped {
                 let tuple = param_ids[abi_value];
                 abi_value += 1;
@@ -2030,6 +2064,64 @@ impl FnCodegen<'_> {
         Ok(())
     }
 
+    fn prepare_abi_source(
+        &mut self,
+        source: ValueId,
+        source_ty: QualType,
+        pieces: &[AbiPiece],
+    ) -> ValueId {
+        let (size, align) = source_type_layout(self.typed, source_ty);
+        let Some((abi_size, abi_align)) = abi_storage_layout(self.context, pieces) else {
+            return source;
+        };
+        if abi_size <= size {
+            return source;
+        }
+
+        let destination = self
+            .builder
+            .insert(
+                p::alloca(
+                    self.context,
+                    abi_size,
+                    align.max(abi_align),
+                    PtrType::opaque(self.context),
+                )
+                .build(),
+            )
+            .result();
+        for piece in pieces {
+            let zero = match type_kind(self.context, piece.ty) {
+                ValueKind::Float => self
+                    .builder
+                    .insert(b::constantf(self.context, 0.0, piece.ty).build())
+                    .result(),
+                ValueKind::Int => self
+                    .builder
+                    .insert(b::constant(self.context, 0, piece.ty).build())
+                    .result(),
+                ValueKind::Vector => unreachable!("ABI padding uses scalar carriers"),
+            };
+            let address = self.offset_address_ir(destination, piece.offset, piece.ty);
+            self.builder
+                .insert(p::store(self.context, zero, address).build());
+        }
+        let size = self
+            .builder
+            .insert(
+                b::constant(
+                    self.context,
+                    size as i64,
+                    IntegerType::new(self.context, 64),
+                )
+                .build(),
+            )
+            .result();
+        self.builder
+            .insert(p::memcpy(self.context, destination, source, size).build());
+        destination
+    }
+
     fn lower_abi_argument(
         &mut self,
         node: NodeId,
@@ -2076,6 +2168,11 @@ impl FnCodegen<'_> {
                     "non-addressable aggregate argument".to_string(),
                 ));
             };
+            let ptr = self.prepare_abi_source(
+                ptr,
+                node_type(self.typed, node),
+                parameter.pieces.as_slice(),
+            );
             let values = parameter
                 .pieces
                 .iter()
@@ -2119,6 +2216,7 @@ impl FnCodegen<'_> {
                 "non-addressable aggregate return value".to_string(),
             ));
         };
+        let ptr = self.prepare_abi_source(ptr, node_type(self.typed, node), pieces);
         let values = pieces
             .iter()
             .map(|piece| {
@@ -2373,7 +2471,9 @@ impl FnCodegen<'_> {
                             .result();
                         if let Some(pieces) = sig.ret.aggregate.as_deref() {
                             let (size, align) = source_type_layout(self.typed, source_ty);
-                            let slot = self.alloca(elem, size, align);
+                            let (abi_size, abi_align) = abi_storage_layout(self.context, pieces)
+                                .expect("classified aggregate returns use scalar ABI pieces");
+                            let slot = self.alloca(elem, size.max(abi_size), align.max(abi_align));
                             for (index, piece) in pieces.iter().enumerate() {
                                 let value = if pieces.len() == 1 {
                                     result
