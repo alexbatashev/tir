@@ -1150,6 +1150,18 @@ fn one_word_struct_return_call_matches_host_abi() {
 }
 
 #[test]
+#[ignore = "requires multi-value ABI return lowering"]
+fn two_word_struct_return_matches_host_abi() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "struct Pair { long left; long right; }; struct Pair make(long left, long right) { struct Pair pair = {left, right}; return pair; }\n",
+        "struct Pair { long left; long right; }; struct Pair make(long, long); int main(void) { struct Pair pair = make(11, 31); return pair.left + pair.right == 42 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
 fn whole_struct_copy_executes_through_driver() {
     if !cc_available() {
         return;
