@@ -124,6 +124,28 @@ const FLOAT_PAIR_FIELDS: &[Field] = &[
         value: "2.5",
     },
 ];
+const FLOAT_QUAD_FIELDS: &[Field] = &[
+    Field {
+        name: "first",
+        kind: FieldKind::Double,
+        value: "4.25",
+    },
+    Field {
+        name: "second",
+        kind: FieldKind::Double,
+        value: "5.5",
+    },
+    Field {
+        name: "third",
+        kind: FieldKind::Double,
+        value: "6.75",
+    },
+    Field {
+        name: "fourth",
+        kind: FieldKind::Double,
+        value: "7.125",
+    },
+];
 const LARGE_RECORD_FIELDS: &[Field] = &[
     Field {
         name: "first",
@@ -162,6 +184,13 @@ const CASES: &[AggregateCase] = &[
         fields: FLOAT_PAIR_FIELDS,
         integer_pressure: 0,
         float_pressure: 7,
+    },
+    AggregateCase {
+        name: "float_quad",
+        tag: "FloatQuad",
+        fields: FLOAT_QUAD_FIELDS,
+        integer_pressure: 0,
+        float_pressure: 6,
     },
     AggregateCase {
         name: "large_record",
@@ -493,10 +522,12 @@ fn generated_suite_covers_each_aggregate_abi_shape() {
     assert!(suite.caller.contains("check_integer_pair"));
     assert!(suite.caller.contains("check_mixed_pair"));
     assert!(suite.caller.contains("check_float_pair"));
+    assert!(suite.caller.contains("check_float_quad"));
     assert!(suite.caller.contains("check_large_record"));
     assert!(suite.caller.contains("make_integer_pair"));
     assert!(suite.caller.contains("make_mixed_pair"));
     assert!(suite.caller.contains("make_float_pair"));
+    assert!(suite.caller.contains("make_float_quad"));
     assert!(suite.caller.contains("make_large_record"));
     assert!(suite.caller.contains("long i6"));
     assert!(suite.caller.contains("double d6"));
