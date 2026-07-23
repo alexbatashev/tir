@@ -746,7 +746,7 @@ where
     I: ValueInput<'src, Token = Token, Span = Span>,
 {
     recursive(|initializer| {
-        let designated = just(Token::Dot)
+        let field_designator = just(Token::Dot)
             .ignore_then(ident())
             .then_ignore(just(Token::Assign))
             .then(initializer.clone())
@@ -755,13 +755,34 @@ where
                     let tok = e.span().start;
                     let st = &mut e.state().0;
                     let id = st.add(AstKind::DesignatedInitializer, tok);
-                    st.ast
-                        .set_leaf_data(id, AstLeaf::DesignatedInitializer(name));
+                    st.ast.set_leaf_data(
+                        id,
+                        AstLeaf::DesignatedInitializer(InitializerDesignator::Field(name)),
+                    );
                     st.ast.add_edge(id, value);
                     id
                 },
             );
-        designated
+        let index_designator = expr()
+            .delimited_by(just(Token::LBracket), just(Token::RBracket))
+            .then_ignore(just(Token::Assign))
+            .then(initializer.clone())
+            .map_with(
+                |(index, value), e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
+                    let tok = e.span().start;
+                    let st = &mut e.state().0;
+                    let id = st.add(AstKind::DesignatedInitializer, tok);
+                    st.ast.set_leaf_data(
+                        id,
+                        AstLeaf::DesignatedInitializer(InitializerDesignator::Index),
+                    );
+                    st.ast.add_edge(id, index);
+                    st.ast.add_edge(id, value);
+                    id
+                },
+            );
+        field_designator
+            .or(index_designator)
             .or(initializer.clone())
             .separated_by(just(Token::Comma))
             .allow_trailing()

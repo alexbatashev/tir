@@ -238,7 +238,7 @@ pub enum AstLeaf {
         name: String,
         ty: CType,
     },
-    DesignatedInitializer(String),
+    DesignatedInitializer(InitializerDesignator),
     Assign(String),
     Label(String),
     Call(String),
@@ -252,6 +252,12 @@ pub enum AstLeaf {
     Float(FloatingLiteral),
     Character(String),
     Type(CType),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InitializerDesignator {
+    Field(String),
+    Index,
 }
 
 fn render_ctype(ty: &CType) -> String {
@@ -399,8 +405,11 @@ fn render_node(ast: &Ast, id: NodeId, depth: usize, out: &mut String) {
         },
         AstKind::InitializerList => "InitializerList".to_string(),
         AstKind::DesignatedInitializer => match ast.get_leaf_data(id) {
-            Some(AstLeaf::DesignatedInitializer(name)) => {
-                format!("DesignatedInitializer {name:?}")
+            Some(AstLeaf::DesignatedInitializer(InitializerDesignator::Field(name))) => {
+                format!("FieldDesignator {name:?}")
+            }
+            Some(AstLeaf::DesignatedInitializer(InitializerDesignator::Index)) => {
+                "IndexDesignator".to_string()
             }
             _ => unreachable!(),
         },

@@ -476,7 +476,7 @@ fn constant_initializer_data(
                 bytes: vec![0; record.size as usize],
                 relocations: Vec::new(),
             };
-            for (index, value) in record_initializer_values(ast, initializer) {
+            for (index, value) in aggregate_initializer_values(ast, initializer) {
                 let field = record.fields.get(index)?;
                 let mut field_data = constant_initializer_data(typed, globals, field.ty, value)?;
                 let offset = field.offset as usize;
@@ -493,14 +493,23 @@ fn constant_initializer_data(
     }
 }
 
-fn record_initializer_values(ast: &Ast, initializer: NodeId) -> Vec<(usize, NodeId)> {
+fn aggregate_initializer_values(ast: &Ast, initializer: NodeId) -> Vec<(usize, NodeId)> {
     let mut next_field = 0;
     ast.children(initializer)
         .filter_map(|value| {
             if ast.get_node(value).kind == AstKind::DesignatedInitializer {
                 let index = ast.get_annotation(value)?.member_index?;
                 next_field = index + 1;
-                Some((index, ast.children(value).next().unwrap()))
+                let selected = match ast.get_leaf_data(value)? {
+                    AstLeaf::DesignatedInitializer(InitializerDesignator::Field(_)) => {
+                        ast.children(value).next().unwrap()
+                    }
+                    AstLeaf::DesignatedInitializer(InitializerDesignator::Index) => {
+                        ast.children(value).nth(1).unwrap()
+                    }
+                    _ => unreachable!(),
+                };
+                Some((index, selected))
             } else {
                 let index = next_field;
                 next_field += 1;
@@ -1457,7 +1466,7 @@ impl FnCodegen<'_> {
                 .iter()
                 .map(|field| (field.ty, field.offset))
                 .collect::<Vec<_>>();
-            let values = record_initializer_values(self.ast, initializer);
+            let values = aggregate_initializer_values(self.ast, initializer);
             if kind == RecordKind::Union {
                 if let Some(&(storage_type, _)) = fields
                     .iter()
@@ -1485,11 +1494,13 @@ impl FnCodegen<'_> {
         }
         if let TypeKind::Array(element, Some(length)) = self.typed.types().kind(target) {
             let (element, length) = (*element, *length);
-            let values = self.ast.children(initializer).collect::<Vec<_>>();
+            let values = aggregate_initializer_values(self.ast, initializer)
+                .into_iter()
+                .collect::<HashMap<_, _>>();
             let element_size = source_type_layout(self.typed, element).0;
             for index in 0..length {
                 let element_address = self.offset_address(address, index * element_size, element);
-                if let Some(&value) = values.get(index as usize) {
+                if let Some(&value) = values.get(&(index as usize)) {
                     self.lower_initializer(element, element_address, value)?;
                 } else {
                     self.zero_initialize(element, element_address, initializer)?;

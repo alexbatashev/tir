@@ -277,6 +277,16 @@ fn local_array_initializer_zero_fills_remainder() {
 }
 
 #[test]
+fn local_array_designated_initializer_selects_elements() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "int main(void) { int values[5] = {[3] = 30, [1] = 12}; return values[0] == 0 && values[1] == 12 && values[2] == 0 && values[3] == 30 && values[4] == 0 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
 fn local_array_initializer_infers_omitted_bound() {
     if !cc_available() {
         return;
