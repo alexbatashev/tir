@@ -476,16 +476,8 @@ fn constant_initializer_data(
                 bytes: vec![0; record.size as usize],
                 relocations: Vec::new(),
             };
-            let field_count = match record.kind {
-                RecordKind::Struct => record.fields.len(),
-                RecordKind::Union => usize::from(!record.fields.is_empty()),
-            };
-            for (field, value) in record
-                .fields
-                .iter()
-                .take(field_count)
-                .zip(ast.children(initializer))
-            {
+            for (index, value) in record_initializer_values(ast, initializer) {
+                let field = record.fields.get(index)?;
                 let mut field_data = constant_initializer_data(typed, globals, field.ty, value)?;
                 let offset = field.offset as usize;
                 data.bytes[offset..offset + field_data.bytes.len()]

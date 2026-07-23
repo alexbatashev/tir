@@ -1443,6 +1443,16 @@ fn initialized_global_struct_uses_field_layout() {
 }
 
 #[test]
+fn initialized_global_struct_designators_select_fields() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "struct Pair { char tag; int value; } pair = {.value = 39, .tag = 3}; int main(void) { return pair.tag + pair.value - 42; }\n",
+    );
+}
+
+#[test]
 fn initialized_global_union_uses_first_member() {
     if !cc_available() {
         return;
