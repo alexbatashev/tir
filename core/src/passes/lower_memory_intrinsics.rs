@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::analysis::{AnalysisManager, PreservedAnalyses};
 use crate::attributes::AttributeValue;
 use crate::builtin::{DeclareOp, IntegerType, ModuleOp, ops as b};
-use crate::ptr::{MemcpyOp, PtrType};
+use crate::ptr::{MemcpyOp, MemsetOp, PtrType};
 use crate::{Context, OpInstance, Operation, OperationRef, Pass, PassError, PassTarget, Rewriter};
 
 pub struct LowerMemoryIntrinsicsPass;
@@ -63,24 +63,37 @@ impl Pass for LowerMemoryIntrinsicsPass {
         let Some(module) = operation.as_op::<ModuleOp>() else {
             return Ok(PreservedAnalyses::all());
         };
-        let copies: Vec<_> = Self::descendants(context, operation.op())
-            .into_iter()
+        let descendants = Self::descendants(context, operation.op());
+        let copies: Vec<_> = descendants
+            .iter()
             .filter(|operation| operation.as_op::<MemcpyOp>().is_some())
+            .cloned()
             .collect();
-        if copies.is_empty() {
+        let sets: Vec<_> = descendants
+            .into_iter()
+            .filter(|operation| operation.as_op::<MemsetOp>().is_some())
+            .collect();
+        if copies.is_empty() && sets.is_empty() {
             return Ok(PreservedAnalyses::all());
         }
 
         let pointer = PtrType::opaque(context);
         let size = IntegerType::new(context, 64);
-        let declaration = module.body().op_ids().into_iter().any(|operation| {
-            context
-                .get_op(operation)
-                .as_op::<DeclareOp>()
-                .is_some_and(|declaration| declaration.sym_name() == "memcpy")
-        });
-        if !declaration {
+        let has_declaration = |name: &str| {
+            module.body().op_ids().into_iter().any(|operation| {
+                context
+                    .get_op(operation)
+                    .as_op::<DeclareOp>()
+                    .is_some_and(|declaration| declaration.sym_name() == name)
+            })
+        };
+        if !copies.is_empty() && !has_declaration("memcpy") {
             let declaration = b::declare_op(context, "memcpy", pointer, &[pointer, pointer, size]);
+            module.body().insert(0, declaration.id());
+        }
+        let value = IntegerType::new(context, 32);
+        if !sets.is_empty() && !has_declaration("memset") {
+            let declaration = b::declare_op(context, "memset", pointer, &[pointer, value, size]);
             module.body().insert(0, declaration.id());
         }
 
@@ -89,6 +102,22 @@ impl Pass for LowerMemoryIntrinsicsPass {
             let call = b::CallOpBuilder::new(context)
                 .args(copy.operands().to_vec())
                 .attr("callee", AttributeValue::Str("memcpy".to_string()))
+                .result_type(pointer)
+                .build();
+            rewriter.replace_op(&operation, &call)?;
+        }
+
+        for operation in sets {
+            let set = operation.as_op::<MemsetOp>().unwrap();
+            let extended = b::extui(context, set.operands()[1], value).build();
+            rewriter.insert_op_before(&operation, &extended)?;
+            let call = b::CallOpBuilder::new(context)
+                .args(vec![
+                    set.operands()[0],
+                    extended.result(),
+                    set.operands()[2],
+                ])
+                .attr("callee", AttributeValue::Str("memset".to_string()))
                 .result_type(pointer)
                 .build();
             rewriter.replace_op(&operation, &call)?;
