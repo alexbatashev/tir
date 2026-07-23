@@ -803,6 +803,33 @@ fn assignment_like_contexts_record_the_destination_conversion() {
 }
 
 #[test]
+fn member_assignment_records_the_destination_conversion() {
+    let typed = typed_for(
+        "struct Node { struct Node *next; }; void clear(struct Node *node) { node->next = 0; }",
+        "riscv64",
+    );
+    let root = typed.ast().root().unwrap();
+    let assignment = typed
+        .ast()
+        .postorder(root)
+        .find(|&node| typed.ast().get_node(node).kind == fcc::ast::AstKind::AssignExpr)
+        .unwrap();
+    let mut children = typed.ast().children(assignment);
+    let destination = typed
+        .ast()
+        .get_annotation(children.next().unwrap())
+        .unwrap()
+        .ty
+        .unwrap();
+    let value = children.next().unwrap();
+
+    assert_eq!(
+        typed.ast().get_annotation(value).unwrap().conversions,
+        vec![destination]
+    );
+}
+
+#[test]
 fn object_declaration_requires_an_object_type() {
     let output = diagnostics(
         "int main(void) { void value; return 0; }",

@@ -2110,8 +2110,46 @@ impl Analyzer<'_> {
                     (symbol.ty, ValueCategory::Value)
                 }
             }
-            AstKind::AssignExpr
-            | AstKind::AddAssign
+            AstKind::AssignExpr => {
+                let children = self.ast.children(node).collect::<Vec<_>>();
+                let lhs = children[0];
+                let rhs = children[1];
+                let lhs_info = self.ast.get_annotation(lhs).cloned().unwrap_or_default();
+                let lhs_ty = lhs_info.ty.unwrap_or(error);
+                if lhs_info.category != ValueCategory::Lvalue || lhs_ty.qualifiers.is_const() {
+                    self.diagnostics.push(
+                        ModifiableLvalueRequired::new(
+                            self.ast.get_node(node).span,
+                            "left operand is not a modifiable lvalue",
+                            assignment_reference(self.options),
+                        )
+                        .into(),
+                    );
+                    (error, ValueCategory::Value)
+                } else {
+                    let source = self
+                        .ast
+                        .get_annotation(rhs)
+                        .and_then(|info| info.ty)
+                        .unwrap_or(error);
+                    if !self.assignment_compatible(lhs_ty, source, rhs) {
+                        self.diagnostics.push(
+                            IncompatibleConversion::new(
+                                self.ast.get_node(node).span,
+                                None,
+                                self.conversion_message(lhs_ty, source),
+                                simple_assignment_reference(self.options),
+                            )
+                            .into(),
+                        );
+                        (error, ValueCategory::Value)
+                    } else {
+                        self.record_conversion(rhs, lhs_ty);
+                        (lhs_ty, ValueCategory::Value)
+                    }
+                }
+            }
+            AstKind::AddAssign
             | AstKind::SubAssign
             | AstKind::MulAssign
             | AstKind::DivAssign
