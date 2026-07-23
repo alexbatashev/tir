@@ -535,6 +535,7 @@ fn lower_signature(
 
 fn classify_abi_return(context: &Context, typed: &TypedAst, ty: QualType) -> AbiReturn {
     if let Some(pieces) = classify_riscv_fp_aggregate(context, typed, ty)
+        .or_else(|| classify_aapcs64_hfa(context, typed, ty))
         .or_else(|| classify_integer_aggregate(context, typed, ty))
     {
         let ty = match pieces.as_slice() {
@@ -558,13 +559,22 @@ fn classify_abi_parameter(
     ty: QualType,
     register_usage: &mut AbiRegisterUsage,
 ) -> AbiParameter {
-    let fp_pieces = classify_riscv_fp_aggregate(context, typed, ty);
-    let pieces = match fp_pieces {
+    let riscv_pieces = classify_riscv_fp_aggregate(context, typed, ty);
+    let hfa_pieces = classify_aapcs64_hfa(context, typed, ty);
+    let pieces = match riscv_pieces {
         Some(pieces) if register_usage.has_direct_registers(context, typed.target(), &pieces) => {
             Some(pieces)
         }
         Some(_) => classify_integer_carriers(context, typed, ty),
-        None => classify_integer_aggregate(context, typed, ty),
+        None => match hfa_pieces {
+            Some(pieces)
+                if register_usage.has_direct_registers(context, typed.target(), &pieces) =>
+            {
+                Some(pieces)
+            }
+            Some(_) => None,
+            None => classify_integer_aggregate(context, typed, ty),
+        },
     }
     .unwrap_or_else(|| {
         vec![AbiPiece {
@@ -592,7 +602,7 @@ fn classify_riscv_fp_aggregate(
         return None;
     }
     let mut pieces = vec![];
-    if !flatten_riscv_fields(context, typed, ty, 0, &mut pieces) {
+    if !flatten_aggregate_fields(context, typed, ty, 0, &mut pieces) {
         return None;
     }
     let kinds = pieces
@@ -609,7 +619,34 @@ fn classify_riscv_fp_aggregate(
     Some(pieces)
 }
 
-fn flatten_riscv_fields(
+fn classify_aapcs64_hfa(
+    context: &Context,
+    typed: &TypedAst,
+    ty: QualType,
+) -> Option<Vec<AbiPiece>> {
+    if !typed.target().uses_aapcs64_abi() {
+        return None;
+    }
+    let TypeKind::Record(id) = typed.types().kind(ty) else {
+        return None;
+    };
+    if typed.record(*id)?.kind != RecordKind::Struct {
+        return None;
+    }
+    let mut pieces = vec![];
+    if !flatten_aggregate_fields(context, typed, ty, 0, &mut pieces)
+        || !(1..=4).contains(&pieces.len())
+        || pieces
+            .iter()
+            .any(|piece| type_kind(context, piece.ty) != ValueKind::Float)
+        || source_type_layout(typed, ty).0 != pieces.len() as u64 * 8
+    {
+        return None;
+    }
+    Some(pieces)
+}
+
+fn flatten_aggregate_fields(
     context: &Context,
     typed: &TypedAst,
     ty: QualType,
@@ -650,13 +687,19 @@ fn flatten_riscv_fields(
             };
             record.kind == RecordKind::Struct
                 && record.fields.iter().all(|field| {
-                    flatten_riscv_fields(context, typed, field.ty, offset + field.offset, pieces)
+                    flatten_aggregate_fields(
+                        context,
+                        typed,
+                        field.ty,
+                        offset + field.offset,
+                        pieces,
+                    )
                 })
         }
         TypeKind::Array(element, Some(length)) => {
             let stride = source_type_layout(typed, *element).0;
             (0..*length).all(|index| {
-                flatten_riscv_fields(context, typed, *element, offset + index * stride, pieces)
+                flatten_aggregate_fields(context, typed, *element, offset + index * stride, pieces)
             })
         }
         _ => false,

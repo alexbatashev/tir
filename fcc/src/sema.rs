@@ -180,6 +180,10 @@ impl TargetProfile {
         self.abi_classifier == ClassifierKind::Riscv && self.float_argument_registers > 0
     }
 
+    pub(crate) fn uses_aapcs64_abi(self) -> bool {
+        self.abi_classifier == ClassifierKind::Aapcs64
+    }
+
     pub(crate) fn argument_registers(self, kind: ValueKind) -> usize {
         match kind {
             ValueKind::Int => self.integer_argument_registers,
