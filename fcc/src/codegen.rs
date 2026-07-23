@@ -108,6 +108,7 @@ struct AbiReturn {
     ty: TypeId,
     aggregate: Option<Vec<AbiPiece>>,
     indirect: bool,
+    argument_padding: usize,
 }
 
 #[derive(Default)]
@@ -179,7 +180,9 @@ impl AbiRegisterUsage {
 
 impl Signature {
     fn argument_types(&self, context: &Context) -> Vec<TypeId> {
-        let mut args = Vec::new();
+        let mut args = (0..self.ret.argument_padding)
+            .map(|_| IntegerType::new(context, 64))
+            .collect::<Vec<_>>();
         for parameter in &self.params {
             args.extend((0..parameter.padding).map(|_| IntegerType::new(context, 64)));
             if parameter.grouped {
@@ -533,8 +536,15 @@ fn lower_signature(
     let AstLeaf::Function { .. } = ast.get_leaf_data(item).unwrap() else {
         unreachable!("function-like node carries a function payload");
     };
+    let ret = match typed.types().kind(node_type(typed, item)) {
+        TypeKind::Function { ret, .. } => classify_abi_return(context, typed, *ret),
+        _ => unreachable!("function node has function semantic type"),
+    };
     let mut params = Vec::new();
-    let mut register_usage = AbiRegisterUsage::default();
+    let mut register_usage = AbiRegisterUsage {
+        integers: ret.argument_padding,
+        ..AbiRegisterUsage::default()
+    };
     let mut varargs = false;
     for child in ast.children(item) {
         match ast.get_node(child).kind {
@@ -553,10 +563,7 @@ fn lower_signature(
     Ok((
         node_entity(typed, item),
         Signature {
-            ret: match typed.types().kind(node_type(typed, item)) {
-                TypeKind::Function { ret, .. } => classify_abi_return(context, typed, *ret),
-                _ => unreachable!("function node has function semantic type"),
-            },
+            ret,
             params,
             varargs,
         },
@@ -577,9 +584,10 @@ fn classify_abi_return(context: &Context, typed: &TypedAst, ty: QualType) -> Abi
             ty,
             aggregate: Some(pieces),
             indirect: false,
+            argument_padding: 0,
         };
     }
-    if typed.target().uses_aapcs64_abi()
+    if (typed.target().uses_aapcs64_abi() || typed.target().uses_riscv_abi())
         && matches!(typed.types().kind(ty), TypeKind::Record(_))
         && source_type_layout(typed, ty).0 > 16
     {
@@ -587,12 +595,14 @@ fn classify_abi_return(context: &Context, typed: &TypedAst, ty: QualType) -> Abi
             ty: UnitType::new(context),
             aggregate: None,
             indirect: true,
+            argument_padding: usize::from(typed.target().uses_riscv_abi()),
         };
     }
     AbiReturn {
         ty: lower_type(context, typed, ty),
         aggregate: None,
         indirect: false,
+        argument_padding: 0,
     }
 }
 
@@ -906,7 +916,9 @@ fn lower_function(
 
     // Entry block arguments carry the incoming parameter values; parameters are
     // the function node's leading children.
-    let mut param_values = Vec::new();
+    let mut param_values = (0..signature.ret.argument_padding)
+        .map(|_| context.create_value(IntegerType::new(context, 64), None))
+        .collect::<Vec<_>>();
     for parameter in &signature.params {
         param_values.extend(
             (0..parameter.padding)
@@ -1406,7 +1418,7 @@ impl FnCodegen<'_> {
             .children(func)
             .take_while(|&c| matches!(ast.get_node(c).kind, AstKind::Param))
             .collect::<Vec<_>>();
-        let mut abi_value = 0;
+        let mut abi_value = self.return_abi.argument_padding;
         for (&param, abi_param) in params.iter().zip(abi_params) {
             let AstLeaf::Param { .. } = ast.get_leaf_data(param).unwrap() else {
                 unreachable!("param node carries a param payload");
@@ -2479,7 +2491,20 @@ impl FnCodegen<'_> {
                         unreachable!("call node carries a call payload");
                     };
                     let sig = self.signatures[&node_entity(self.typed, node)].clone();
-                    let mut args = Vec::new();
+                    let mut args = (0..sig.ret.argument_padding)
+                        .map(|_| {
+                            self.builder
+                                .insert(
+                                    b::constant(
+                                        self.context,
+                                        0,
+                                        IntegerType::new(self.context, 64),
+                                    )
+                                    .build(),
+                                )
+                                .result()
+                        })
+                        .collect::<Vec<_>>();
                     for (index, argument) in ast.children(node).enumerate() {
                         let expression = self.values[&argument];
                         if let Some(parameter) = sig.params.get(index) {
