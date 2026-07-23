@@ -26,6 +26,27 @@
     "files"
   ],
   "$defs": {
+    "AbiArgumentGroups": {
+      "description": "Atomic ABI argument-group allocation policy.",
+      "type": "object",
+      "properties": {
+        "register_limit": {
+          "$ref": "#/$defs/Expr"
+        },
+        "rollback": {
+          "$ref": "#/$defs/AbiGroupRollback"
+        }
+      },
+      "additionalProperties": false
+    },
+    "AbiGroupRollback": {
+      "description": "Register state retained after an atomic argument group moves to the stack.",
+      "type": "string",
+      "enum": [
+        "exhaust",
+        "preserve"
+      ]
+    },
     "AbiOverflow": {
       "description": "Destination used after a pass sequence exhausts its registers.",
       "type": "string",
@@ -796,6 +817,9 @@
           "properties": {
             "alias": {
               "type": "string"
+            },
+            "argument_groups": {
+              "$ref": "#/$defs/AbiArgumentGroups"
             },
             "arguments": {
               "type": "array",

@@ -150,6 +150,19 @@ pub struct AbiStack {
     pub span: Span,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AbiGroupRollback {
+    Exhaust,
+    Preserve,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AbiArgumentGroups {
+    pub register_limit: Option<Expr>,
+    pub rollback: Option<AbiGroupRollback>,
+    pub span: Span,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Abi {
     pub doc: Option<String>,
@@ -159,6 +172,7 @@ pub struct Abi {
     pub base: Option<String>,
     pub parameters: StableHashMap<String, (Type, Option<Expr>)>,
     pub stack: Option<AbiStack>,
+    pub argument_groups: Option<Box<AbiArgumentGroups>>,
     pub roles: Vec<AbiRole>,
     pub args: Vec<AbiPassSequence>,
     pub rets: Vec<AbiPassSequence>,
@@ -2033,6 +2047,9 @@ pub fn resolve_abi_inheritance(files: &mut [File]) {
             abi.parameters = parameters;
             if abi.stack.is_none() {
                 abi.stack = base.stack;
+            }
+            if abi.argument_groups.is_none() {
+                abi.argument_groups = base.argument_groups;
             }
 
             let own_roles = std::mem::take(&mut abi.roles);

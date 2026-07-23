@@ -77,6 +77,7 @@ where
 enum AbiBody {
     Param((String, (Type, Option<Expr>))),
     Stack(AbiStack),
+    ArgumentGroups(AbiArgumentGroups),
     Role(AbiRole),
     Args(AbiPassSequence),
     Rets(AbiPassSequence),
@@ -102,6 +103,7 @@ where
             choice((
                 parameter().map(AbiBody::Param),
                 abi_stack().map(AbiBody::Stack),
+                abi_argument_groups().map(AbiBody::ArgumentGroups),
                 abi_role().map(AbiBody::Role),
                 abi_pass("args").map(AbiBody::Args),
                 abi_pass("rets").map(AbiBody::Rets),
@@ -116,6 +118,7 @@ where
         .map_with(|((((name, alias), for_isas), base), body), e| {
             let mut parameters = crate::utils::StableHashMap::default();
             let mut stack = None;
+            let mut argument_groups = None;
             let mut roles = Vec::new();
             let mut args = Vec::new();
             let mut rets = Vec::new();
@@ -128,6 +131,7 @@ where
                         parameters.insert(name, value);
                     }
                     AbiBody::Stack(value) => stack = Some(value),
+                    AbiBody::ArgumentGroups(value) => argument_groups = Some(Box::new(value)),
                     AbiBody::Role(value) => roles.push(value),
                     AbiBody::Args(value) => args.push(value),
                     AbiBody::Rets(value) => rets.push(value),
@@ -144,6 +148,7 @@ where
                 base,
                 parameters,
                 stack,
+                argument_groups,
                 roles,
                 args,
                 rets,
@@ -154,6 +159,54 @@ where
             }
         })
         .labelled("ABI definition")
+}
+
+enum AbiArgumentGroupField {
+    RegisterLimit(Expr),
+    Rollback(AbiGroupRollback),
+}
+
+fn abi_argument_groups<'src, I>()
+-> impl Parser<'src, I, AbiArgumentGroups, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    let register_limit = just(Token::Identifier("register_limit"))
+        .ignore_then(just(Token::Equals))
+        .ignore_then(inline_expr())
+        .then_ignore(just(Token::Semicolon))
+        .map(AbiArgumentGroupField::RegisterLimit);
+    let rollback = just(Token::Identifier("rollback"))
+        .ignore_then(just(Token::Equals))
+        .ignore_then(choice((
+            just(Token::Identifier("exhaust")).to(AbiGroupRollback::Exhaust),
+            just(Token::Identifier("preserve")).to(AbiGroupRollback::Preserve),
+        )))
+        .then_ignore(just(Token::Semicolon))
+        .map(AbiArgumentGroupField::Rollback);
+    just(Token::Identifier("argument_groups"))
+        .ignore_then(
+            choice((register_limit, rollback))
+                .repeated()
+                .collect::<Vec<_>>()
+                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+        )
+        .map_with(|fields, e| {
+            let mut groups = AbiArgumentGroups {
+                register_limit: None,
+                rollback: None,
+                span: e.span(),
+            };
+            for field in fields {
+                match field {
+                    AbiArgumentGroupField::RegisterLimit(value) => {
+                        groups.register_limit = Some(value);
+                    }
+                    AbiArgumentGroupField::Rollback(value) => groups.rollback = Some(value),
+                }
+            }
+            groups
+        })
 }
 
 enum AbiStackField {

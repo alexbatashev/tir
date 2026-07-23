@@ -1772,7 +1772,8 @@ mod tests {
         register_indices: &[u16],
     ) -> &'static crate::backend::abi::AbiInfo {
         use crate::backend::abi::{
-            AbiInfo, ClassifierKind, Overflow, PassSeq, SaveStyle, StackLayout, ValueKind,
+            AbiInfo, ClassifierKind, GroupRollback, Overflow, PassSeq, SaveStyle, StackLayout,
+            ValueKind,
         };
 
         let caller_saved = Box::leak(
@@ -1809,6 +1810,8 @@ mod tests {
             ra: None,
             fp: None,
             indirect_result: None,
+            argument_group_register_limit: None,
+            argument_group_rollback: GroupRollback::Exhaust,
             args: Box::leak(
                 vec![PassSeq {
                     kind: ValueKind::Int,

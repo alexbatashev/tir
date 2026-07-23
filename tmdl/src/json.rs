@@ -8,7 +8,7 @@ use crate::{Type as AstType, ast};
 mod abi;
 mod expr;
 
-use abi::{AbiPassSequence, AbiRegisterSequence, AbiRole, AbiStack};
+use abi::{AbiArgumentGroups, AbiPassSequence, AbiRegisterSequence, AbiRole, AbiStack};
 use expr::Expr;
 
 const VERSION: u8 = 1;
@@ -97,6 +97,9 @@ enum Item {
         #[serde(skip_serializing_if = "Option::is_none")]
         #[schemars(with = "AbiStack")]
         stack: Option<AbiStack>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[schemars(with = "AbiArgumentGroups")]
+        argument_groups: Option<AbiArgumentGroups>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         roles: Vec<AbiRole>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -225,6 +228,7 @@ impl From<&ast::Item> for Item {
                 base: abi.base.clone(),
                 parameters: parameters(&abi.parameters),
                 stack: abi.stack.as_ref().map(AbiStack::from),
+                argument_groups: abi.argument_groups.as_deref().map(AbiArgumentGroups::from),
                 roles: abi.roles.iter().map(AbiRole::from).collect(),
                 arguments: abi.args.iter().map(AbiPassSequence::from).collect(),
                 returns: abi.rets.iter().map(AbiPassSequence::from).collect(),

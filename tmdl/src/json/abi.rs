@@ -40,6 +40,45 @@ impl From<&ast::AbiStack> for AbiStack {
 
 #[derive(Serialize, JsonSchema)]
 #[schemars(deny_unknown_fields)]
+/// Atomic ABI argument-group allocation policy.
+pub(super) struct AbiArgumentGroups {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Expr")]
+    register_limit: Option<Expr>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "AbiGroupRollback")]
+    rollback: Option<AbiGroupRollback>,
+}
+
+impl From<&ast::AbiArgumentGroups> for AbiArgumentGroups {
+    fn from(groups: &ast::AbiArgumentGroups) -> Self {
+        Self {
+            register_limit: groups.register_limit.as_ref().map(Expr::from),
+            rollback: groups.rollback.map(AbiGroupRollback::from),
+        }
+    }
+}
+
+#[derive(Serialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
+/// Register state retained after an atomic argument group moves to the stack.
+enum AbiGroupRollback {
+    Exhaust,
+    Preserve,
+}
+
+impl From<ast::AbiGroupRollback> for AbiGroupRollback {
+    fn from(rollback: ast::AbiGroupRollback) -> Self {
+        match rollback {
+            ast::AbiGroupRollback::Exhaust => Self::Exhaust,
+            ast::AbiGroupRollback::Preserve => Self::Preserve,
+        }
+    }
+}
+
+#[derive(Serialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
 /// Named ABI role such as the stack pointer or return address.
 pub(super) struct AbiRole {
     name: String,

@@ -91,7 +91,8 @@ impl tir::backend::TargetMachine for PtxTarget {
 fn ptx_regalloc_abi() -> &'static tir::backend::abi::AbiInfo {
     use std::sync::OnceLock;
     use tir::backend::abi::{
-        AbiInfo, ClassifierKind, Overflow, PassSeq, SaveStyle, StackLayout, ValueKind,
+        AbiInfo, ClassifierKind, GroupRollback, Overflow, PassSeq, SaveStyle, StackLayout,
+        ValueKind,
     };
 
     static ABI: OnceLock<AbiInfo> = OnceLock::new();
@@ -130,6 +131,8 @@ fn ptx_regalloc_abi() -> &'static tir::backend::abi::AbiInfo {
             ra: None,
             fp: None,
             indirect_result: None,
+            argument_group_register_limit: None,
+            argument_group_rollback: GroupRollback::Exhaust,
             args: Box::leak(
                 vec![PassSeq {
                     kind: ValueKind::Int,

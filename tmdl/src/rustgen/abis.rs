@@ -150,6 +150,29 @@ fn emit_abi_info(
         let ra = role("ra")?;
         let fp = role("fp")?;
         let indirect_result = role("indirect_result")?;
+        let argument_group_register_limit = abi
+            .argument_groups
+            .as_ref()
+            .and_then(|groups| groups.register_limit.as_ref())
+            .map(|limit| abi_expr_value(limit, abi, item_cache).map(|value| value as usize))
+            .transpose()?;
+        let argument_group_register_limit = match argument_group_register_limit {
+            Some(limit) => quote! { Some(#limit) },
+            None => quote! { None },
+        };
+        let argument_group_rollback = match abi
+            .argument_groups
+            .as_ref()
+            .and_then(|groups| groups.rollback)
+            .unwrap_or(ast::AbiGroupRollback::Exhaust)
+        {
+            ast::AbiGroupRollback::Exhaust => {
+                quote! { tir::backend::abi::GroupRollback::Exhaust }
+            }
+            ast::AbiGroupRollback::Preserve => {
+                quote! { tir::backend::abi::GroupRollback::Preserve }
+            }
+        };
 
         let pass_entries = |passes: &[ast::AbiPassSequence]| -> Result<Vec<_>, TMDLError> {
             passes
@@ -248,6 +271,8 @@ fn emit_abi_info(
                 ra: #ra,
                 fp: #fp,
                 indirect_result: #indirect_result,
+                argument_group_register_limit: #argument_group_register_limit,
+                argument_group_rollback: #argument_group_rollback,
                 args: &[#(#args),*],
                 rets: &[#(#rets),*],
                 callee_saved: &[#(#callee_saved),*],
