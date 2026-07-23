@@ -614,12 +614,29 @@ impl Analyzer<'_> {
         let int = self.types.intern(TypeKind::Integer(IntegerKind::Int));
         let mut previous = -1_i64;
         for enumerator in self.ast.children(node).collect::<Vec<_>>() {
-            let Some(AstLeaf::Enumerator { name, value }) =
-                self.ast.get_leaf_data(enumerator).cloned()
+            let Some(AstLeaf::Enumerator { name }) = self.ast.get_leaf_data(enumerator).cloned()
             else {
                 continue;
             };
-            let value = value.unwrap_or_else(|| previous.saturating_add(1));
+            let explicit = self.ast.children(enumerator).next();
+            if let Some(expression) = explicit {
+                self.node(expression);
+            }
+            let value = explicit
+                .and_then(|expression| self.ast.get_annotation(expression))
+                .and_then(|info| info.constant)
+                .or_else(|| explicit.is_none().then(|| previous.saturating_add(1)));
+            let Some(value) = value else {
+                self.diagnostics.push(
+                    IntegerConstantRequired::new(
+                        self.ast.get_node(enumerator).span,
+                        "enumerator value is not an integer constant expression",
+                        initializer_reference(self.options),
+                    )
+                    .into(),
+                );
+                continue;
+            };
             previous = value;
             let span = self.ast.get_node(enumerator).span;
             let entity = self.new_entity();
@@ -928,6 +945,7 @@ impl Analyzer<'_> {
             self.diagnostics.push(
                 IntegerConstantRequired::new(
                     self.ast.get_node(expression).span,
+                    "case label is not an integer constant expression",
                     switch_case_reference(self.options),
                 )
                 .into(),
@@ -2193,6 +2211,8 @@ impl Analyzer<'_> {
             (AstKind::Mul, [left, right]) => left.checked_mul(*right),
             (AstKind::Div, [_, 0]) => None,
             (AstKind::Div, [left, right]) => left.checked_div(*right),
+            (AstKind::Neg, [value]) => value.checked_neg(),
+            (AstKind::Pos, [value]) => Some(*value),
             _ => None,
         }
     }

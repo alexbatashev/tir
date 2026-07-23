@@ -219,7 +219,6 @@ pub enum AstLeaf {
     },
     Enumerator {
         name: String,
-        value: Option<i64>,
     },
     Typedef {
         name: String,
@@ -365,9 +364,7 @@ fn render_node(ast: &Ast, id: NodeId, depth: usize, out: &mut String) {
             _ => unreachable!(),
         },
         AstKind::Enumerator => match ast.get_leaf_data(id) {
-            Some(AstLeaf::Enumerator { name, value }) => {
-                format!("Enumerator {name:?} = {value:?}")
-            }
+            Some(AstLeaf::Enumerator { name }) => format!("Enumerator {name:?}"),
             _ => unreachable!(),
         },
         AstKind::Typedef => match ast.get_leaf_data(id) {

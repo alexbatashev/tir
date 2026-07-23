@@ -668,6 +668,16 @@ fn enum_constants_use_implicit_and_explicit_values() {
 }
 
 #[test]
+fn enum_constants_evaluate_integer_constant_expressions() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "enum Value { Base = 3, Scaled = Base * 4 + 2, Negative = -1 }; int main(void) { return Scaled == 14 && Negative == -1 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
 fn escaped_character_constant_executes_through_driver() {
     if !cc_available() {
         return;
