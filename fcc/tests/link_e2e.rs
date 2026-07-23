@@ -738,6 +738,16 @@ fn enum_constants_accept_immediately_cast_floating_constants() {
 }
 
 #[test]
+fn tagged_enum_objects_execute_through_driver() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "enum Color { Red = 3 }; int main(void) { enum Color value = Red; return value == 3 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
 fn escaped_character_constant_executes_through_driver() {
     if !cc_available() {
         return;

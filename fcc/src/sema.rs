@@ -2364,7 +2364,11 @@ impl Analyzer<'_> {
     fn is_arithmetic(&self, ty: QualType) -> bool {
         matches!(
             self.types.kind(ty),
-            TypeKind::Integer(_) | TypeKind::Float | TypeKind::Double | TypeKind::LongDouble
+            TypeKind::Integer(_)
+                | TypeKind::Enum(_)
+                | TypeKind::Float
+                | TypeKind::Double
+                | TypeKind::LongDouble
         )
     }
 
@@ -2388,12 +2392,20 @@ impl Analyzer<'_> {
         match (self.types.kind(target), self.types.kind(source)) {
             (TypeKind::Error, _) | (_, TypeKind::Error) => true,
             (
-                TypeKind::Integer(_),
-                TypeKind::Integer(_) | TypeKind::Float | TypeKind::Double | TypeKind::LongDouble,
+                TypeKind::Integer(_) | TypeKind::Enum(_),
+                TypeKind::Integer(_)
+                | TypeKind::Enum(_)
+                | TypeKind::Float
+                | TypeKind::Double
+                | TypeKind::LongDouble,
             ) => true,
             (
                 TypeKind::Float | TypeKind::Double | TypeKind::LongDouble,
-                TypeKind::Integer(_) | TypeKind::Float | TypeKind::Double | TypeKind::LongDouble,
+                TypeKind::Integer(_)
+                | TypeKind::Enum(_)
+                | TypeKind::Float
+                | TypeKind::Double
+                | TypeKind::LongDouble,
             ) => true,
             (TypeKind::Pointer(_), TypeKind::Pointer(_)) => true,
             (TypeKind::Pointer(target), TypeKind::Array(source, _)) => {
@@ -2442,6 +2454,7 @@ impl Analyzer<'_> {
                 let size = (self.target.integer_width(*kind) / 8) as u64;
                 Some((size, size))
             }
+            TypeKind::Enum(_) => Some((4, 4)),
             TypeKind::Float => Some((4, 4)),
             TypeKind::Double => Some((8, 8)),
             TypeKind::LongDouble => Some((16, 16)),
