@@ -188,6 +188,10 @@ impl TargetProfile {
         self.abi_classifier == ClassifierKind::Aapcs64
     }
 
+    pub(crate) fn uses_sysv_abi(self) -> bool {
+        self.abi_classifier == ClassifierKind::Sysv
+    }
+
     pub(crate) fn argument_registers(self, kind: ValueKind) -> usize {
         match kind {
             ValueKind::Int => self.integer_argument_registers,

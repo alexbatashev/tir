@@ -571,7 +571,8 @@ fn lower_signature(
 }
 
 fn classify_abi_return(context: &Context, typed: &TypedAst, ty: QualType) -> AbiReturn {
-    if let Some(pieces) = classify_riscv_fp_aggregate(context, typed, ty)
+    if let Some(pieces) = classify_sysv_eightbytes(context, typed, ty)
+        .or_else(|| classify_riscv_fp_aggregate(context, typed, ty))
         .or_else(|| classify_aapcs64_hfa(context, typed, ty))
         .or_else(|| classify_aapcs64_composite(context, typed, ty))
         .or_else(|| classify_integer_aggregate(context, typed, ty))
@@ -612,6 +613,7 @@ fn classify_abi_parameter(
     ty: QualType,
     register_usage: &mut AbiRegisterUsage,
 ) -> AbiParameter {
+    let sysv_pieces = classify_sysv_eightbytes(context, typed, ty);
     let riscv_pieces = classify_riscv_fp_aggregate(context, typed, ty);
     let hfa_pieces = classify_aapcs64_hfa(context, typed, ty);
     if riscv_pieces.is_none()
@@ -638,22 +640,30 @@ fn classify_abi_parameter(
         .flatten();
     let align_integer_registers =
         composite_pieces.is_some() && source_type_layout(typed, ty).1 >= 16;
-    let (pieces, grouped) = match riscv_pieces {
-        Some(pieces) if register_usage.has_direct_registers(context, typed.target(), &pieces) => {
-            (Some(pieces), false)
+    let (pieces, grouped) = match sysv_pieces {
+        Some(pieces) => {
+            let grouped = pieces.len() > 1;
+            (Some(pieces), grouped)
         }
-        Some(_) => (classify_integer_carriers(context, typed, ty), false),
-        None => match hfa_pieces {
-            Some(pieces) => {
-                let grouped = pieces.len() > 1;
-                (Some(pieces), grouped)
+        None => match riscv_pieces {
+            Some(pieces)
+                if register_usage.has_direct_registers(context, typed.target(), &pieces) =>
+            {
+                (Some(pieces), false)
             }
-            None => match composite_pieces {
+            Some(_) => (classify_integer_carriers(context, typed, ty), false),
+            None => match hfa_pieces {
                 Some(pieces) => {
                     let grouped = pieces.len() > 1;
                     (Some(pieces), grouped)
                 }
-                None => (classify_integer_aggregate(context, typed, ty), false),
+                None => match composite_pieces {
+                    Some(pieces) => {
+                        let grouped = pieces.len() > 1;
+                        (Some(pieces), grouped)
+                    }
+                    None => (classify_integer_aggregate(context, typed, ty), false),
+                },
             },
         },
     };
@@ -679,6 +689,106 @@ fn classify_abi_parameter(
         grouped,
         indirect: false,
         padding,
+    }
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum SysvClass {
+    #[default]
+    None,
+    Integer,
+    Sse,
+}
+
+impl SysvClass {
+    fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (class, other) if class == other => class,
+            (Self::None, class) | (class, Self::None) => class,
+            (Self::Integer, _) | (_, Self::Integer) => Self::Integer,
+            _ => Self::Sse,
+        }
+    }
+}
+
+fn classify_sysv_eightbytes(
+    context: &Context,
+    typed: &TypedAst,
+    ty: QualType,
+) -> Option<Vec<AbiPiece>> {
+    if !typed.target().uses_sysv_abi() || !matches!(typed.types().kind(ty), TypeKind::Record(_)) {
+        return None;
+    }
+    let (size, _) = source_type_layout(typed, ty);
+    if !(1..=16).contains(&size) {
+        return None;
+    }
+    let mut classes = vec![SysvClass::None; size.div_ceil(8) as usize];
+    classify_sysv_fields(typed, ty, 0, &mut classes)?;
+    Some(
+        classes
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, class)| {
+                let ty = match class {
+                    SysvClass::None => return None,
+                    SysvClass::Integer => IntegerType::new(context, 64),
+                    SysvClass::Sse => FloatType::f64(context),
+                };
+                Some(AbiPiece {
+                    offset: index as u64 * 8,
+                    ty,
+                })
+            })
+            .collect(),
+    )
+}
+
+fn classify_sysv_fields(
+    typed: &TypedAst,
+    ty: QualType,
+    offset: u64,
+    classes: &mut [SysvClass],
+) -> Option<()> {
+    let scalar_class = match typed.types().kind(ty) {
+        TypeKind::Integer(_) | TypeKind::Enum(_) | TypeKind::Pointer(_) => Some(SysvClass::Integer),
+        TypeKind::Double => Some(SysvClass::Sse),
+        _ => None,
+    };
+    if let Some(class) = scalar_class {
+        let (size, align) = source_type_layout(typed, ty);
+        if !offset.is_multiple_of(align) {
+            return None;
+        }
+        let first = usize::try_from(offset / 8).ok()?;
+        let last = usize::try_from((offset + size - 1) / 8).ok()?;
+        for slot in classes.get_mut(first..=last)? {
+            *slot = slot.merge(class);
+        }
+        return Some(());
+    }
+
+    match typed.types().kind(ty) {
+        TypeKind::Record(id) => {
+            let record = typed.record(*id)?;
+            for field in &record.fields {
+                let (_, align) = source_type_layout(typed, field.ty);
+                let field_offset = offset + field.offset;
+                if !field_offset.is_multiple_of(align) {
+                    return None;
+                }
+                classify_sysv_fields(typed, field.ty, field_offset, classes)?;
+            }
+            Some(())
+        }
+        TypeKind::Array(element, Some(length)) => {
+            let stride = source_type_layout(typed, *element).0;
+            for index in 0..*length {
+                classify_sysv_fields(typed, *element, offset + index * stride, classes)?;
+            }
+            Some(())
+        }
+        _ => None,
     }
 }
 

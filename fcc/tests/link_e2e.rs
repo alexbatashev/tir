@@ -1128,6 +1128,28 @@ fn two_word_struct_call_matches_host_abi() {
 }
 
 #[test]
+fn mixed_struct_argument_matches_sysv_host_abi() {
+    if !cc_available() || !cfg!(target_arch = "x86_64") {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "struct Mixed { double fp; long integer; }; long read(struct Mixed value) { return value.fp == 10.0 ? value.integer : 0; }\n",
+        "struct Mixed { double fp; long integer; }; long read(struct Mixed); int main(void) { struct Mixed value = {10.0, 32}; return read(value) == 32 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn mixed_struct_call_matches_sysv_host_abi() {
+    if !cc_available() || !cfg!(target_arch = "x86_64") {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "struct Mixed { double fp; long integer; }; long read(struct Mixed); int main(void) { struct Mixed value = {10.0, 32}; return read(value) == 32 ? 0 : 1; }\n",
+        "struct Mixed { double fp; long integer; }; long read(struct Mixed value) { return value.fp == 10.0 ? value.integer : 0; }\n",
+    );
+}
+
+#[test]
 fn one_word_struct_return_matches_host_abi() {
     if !cc_available() {
         return;
@@ -1168,6 +1190,28 @@ fn two_word_struct_return_call_matches_host_abi() {
     assert_fcc_object_executes_with_host(
         "struct Pair { long left; long right; }; struct Pair make(long, long); int main(void) { struct Pair pair = make(11, 31); return pair.left + pair.right == 42 ? 0 : 1; }\n",
         "struct Pair { long left; long right; }; struct Pair make(long left, long right) { struct Pair pair = {left, right}; return pair; }\n",
+    );
+}
+
+#[test]
+fn mixed_struct_return_matches_sysv_host_abi() {
+    if !cc_available() || !cfg!(target_arch = "x86_64") {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "struct Mixed { double fp; long integer; }; struct Mixed make(double fp, long integer) { struct Mixed value = {fp, integer}; return value; }\n",
+        "struct Mixed { double fp; long integer; }; struct Mixed make(double, long); int main(void) { struct Mixed value = make(10.0, 32); return value.fp == 10.0 && value.integer == 32 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn mixed_struct_return_call_matches_sysv_host_abi() {
+    if !cc_available() || !cfg!(target_arch = "x86_64") {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "struct Mixed { double fp; long integer; }; struct Mixed make(double, long); int main(void) { struct Mixed value = make(10.0, 32); return value.fp == 10.0 && value.integer == 32 ? 0 : 1; }\n",
+        "struct Mixed { double fp; long integer; }; struct Mixed make(double fp, long integer) { struct Mixed value = {fp, integer}; return value; }\n",
     );
 }
 
