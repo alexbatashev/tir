@@ -129,7 +129,7 @@ operation! {
             callee: "Str",
         },
         results: R {
-            result: "crate::builtin::UnitType",
+            result: "Any",
         },
     }
 }

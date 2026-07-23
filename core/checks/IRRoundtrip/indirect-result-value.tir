@@ -1,0 +1,15 @@
+// RUN: tir opt %s | filecheck %s
+
+module {
+  declare @make_large(!i64) -> !ptr.p
+  func @caller(%0: !ptr.p, %1: !i64) -> !ptr.p {
+    %2 = call_indirect_result @make_large(%0, %1 : !ptr.p, !i64) -> !ptr.p
+    return %2
+  }
+  module_end
+}
+
+// CHECK: declare @make_large(!i64) -> !ptr.p
+// CHECK: func @caller(%{{[0-9]+}}: !ptr.p, %{{[0-9]+}}: !i64) -> !ptr.p {
+// CHECK-NEXT: %{{[0-9]+}} = call_indirect_result @make_large(%{{[0-9]+}}, %{{[0-9]+}} : !ptr.p, !i64) -> !ptr.p
+// CHECK-NEXT: return %{{[0-9]+}}
