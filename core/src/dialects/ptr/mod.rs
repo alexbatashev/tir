@@ -18,7 +18,8 @@ use crate::Any as AnyConstraint;
 
 pub mod ops {
     pub use super::{
-        AllocaOp, LoadOp, PtrAddOp, PtrDiffOp, StoreOp, alloca, load, ptradd, ptrdiff, store,
+        AllocaOp, LoadOp, MemcpyOp, PtrAddOp, PtrDiffOp, StoreOp, alloca, load, memcpy, ptradd,
+        ptrdiff, store,
     };
 }
 
@@ -31,6 +32,7 @@ dialect! {
             PtrDiffOp,
             LoadOp,
             StoreOp,
+            MemcpyOp,
         ],
         types: [PtrType],
     }
@@ -241,6 +243,35 @@ operation! {
     }
 }
 
+operation! {
+    MemcpyOp {
+        name: "memcpy",
+        dialect: "ptr",
+        verifier: "true",
+        operands: O {
+            destination: "crate::ptr::PtrType",
+            source: "crate::ptr::PtrType",
+            size: "crate::builtin::IntegerType",
+        },
+        interfaces: [MemoryWrite],
+    }
+}
+
+impl tir::Verifiable for MemcpyOp {
+    fn verify_impl(&self, context: &Context) -> Result<(), Error> {
+        let size_type = context.get_type_data(context.get_value(self.operands()[2]).ty());
+        let size_type = (size_type.as_ref() as &dyn Any)
+            .downcast_ref::<crate::builtin::IntegerType>()
+            .unwrap();
+        if size_type.width() != 64 {
+            return Err(Error::VerificationError(
+                "ptr.memcpy size must have type i64".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl PromotableAllocation for AllocaOp {
     fn promoted_location(&self) -> tir::ValueId {
         self.result()
@@ -264,6 +295,16 @@ impl MemoryWrite for StoreOp {
 
     fn written_value(&self) -> tir::ValueId {
         self.operands()[0]
+    }
+}
+
+impl MemoryWrite for MemcpyOp {
+    fn write_location(&self) -> tir::ValueId {
+        self.operands()[0]
+    }
+
+    fn written_value(&self) -> tir::ValueId {
+        self.operands()[1]
     }
 }
 

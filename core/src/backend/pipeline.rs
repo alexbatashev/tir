@@ -13,7 +13,7 @@ use tir::{
 
 use crate::backend::TargetMachine;
 use crate::backend::lower::OpLoweringPass;
-use crate::passes::DeadCodeEliminationPass;
+use crate::passes::{DeadCodeEliminationPass, LowerMemoryIntrinsicsPass};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopAfter {
@@ -98,6 +98,7 @@ pub fn build_pipeline(
     stop: StopAfter,
 ) -> PassManager {
     let mut pm = PassManager::new();
+    pm.add_pass(LowerMemoryIntrinsicsPass::new());
     pm.add_pass(TargetIntegerLegalizer::new(target));
     pm.nest(FuncOp::name()).add_pass(target.isel_pass(context));
     // Remove pure instructions left dead by selection (e.g. a value recomputed in

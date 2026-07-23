@@ -1,0 +1,12 @@
+// RUN: tir mc --march=arm64 --stage=isel %s | filecheck %s
+
+module {
+  func @copy(%0: !ptr.p, %1: !ptr.p, %2: !i64) {
+    ptr.memcpy %0, %1, %2
+    return
+  }
+  module_end
+}
+
+// CHECK: asm.vcall {callee = "memcpy"
+// CHECK-NOT: ptr.memcpy
