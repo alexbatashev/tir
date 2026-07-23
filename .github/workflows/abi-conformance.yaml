@@ -1,0 +1,31 @@
+name: FCC cross ABI conformance
+
+on:
+  merge_group:
+  pull_request:
+    branches: ["master"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  cross-target:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cross toolchains and emulators
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-riscv64-linux-gnu gcc-aarch64-linux-gnu qemu-user
+      - name: Execute generated ABI pairs
+        env:
+          TIR_REQUIRE_CROSS_ABI: "1"
+        run: >-
+          cargo test --locked -p fcc --test abi_conformance
+          generated_suite_roundtrips_with_cross_compilers_in_both_directions
+          -- --nocapture

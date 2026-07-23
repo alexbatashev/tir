@@ -1023,7 +1023,7 @@ impl RegisterAllocationPass {
             let Some(dst) = assignment.get(&arg.vreg) else {
                 continue;
             };
-            if dst.0 != arg.class {
+            if dst.0.file() != arg.class.file() || dst.0.group_width != arg.class.group_width {
                 return Err(PassError::InvalidRuleSet(format!(
                     "stack argument vreg {} assigned to {:?}, expected class {}",
                     arg.vreg,
@@ -1031,6 +1031,7 @@ impl RegisterAllocationPass {
                     arg.class.name()
                 )));
             }
+            let dst = (arg.class, dst.1);
             let offset = self.target.incoming_stack_arg_offset(
                 self.abi,
                 layout.size,
@@ -1039,7 +1040,7 @@ impl RegisterAllocationPass {
             );
             let load = self
                 .target
-                .emit_incoming_stack_arg_load(context, dst, &frame, offset)?;
+                .emit_incoming_stack_arg_load(context, &dst, &frame, offset)?;
             rewriter.insert_op_before(&target, load.as_ref())?;
         }
         Ok(())

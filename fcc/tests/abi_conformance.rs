@@ -5,9 +5,47 @@ use std::process::{Command, Output};
 
 const FCC: &str = env!("CARGO_BIN_EXE_fcc");
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum Target {
     Riscv64,
+    Arm64,
+}
+
+impl Target {
+    fn fcc_march(self) -> &'static str {
+        match self {
+            Self::Riscv64 => "riscv64",
+            Self::Arm64 => "arm64",
+        }
+    }
+
+    fn fcc_abi(self) -> &'static str {
+        match self {
+            Self::Riscv64 => "lp64d",
+            Self::Arm64 => "aapcs64",
+        }
+    }
+
+    fn cross_cc(self) -> &'static str {
+        match self {
+            Self::Riscv64 => "riscv64-linux-gnu-gcc",
+            Self::Arm64 => "aarch64-linux-gnu-gcc",
+        }
+    }
+
+    fn emulator(self) -> &'static str {
+        match self {
+            Self::Riscv64 => "qemu-riscv64",
+            Self::Arm64 => "qemu-aarch64",
+        }
+    }
+
+    fn cross_cc_flags(self) -> &'static [&'static str] {
+        match self {
+            Self::Riscv64 => &["-march=rv64gc", "-mabi=lp64d"],
+            Self::Arm64 => &[],
+        }
+    }
 }
 
 struct GeneratedSuite {
@@ -325,6 +363,105 @@ fn run_host_pair(suite: &GeneratedSuite, direction: CompilerDirection) {
     );
 }
 
+fn run_cross_target(target: Target) {
+    if !tool_available(target.cross_cc()) {
+        require_or_skip(target.cross_cc(), target);
+        return;
+    }
+
+    let suite = generate_suite(target);
+    for direction in [CompilerDirection::FccCaller, CompilerDirection::FccCallee] {
+        run_cross_pair(&suite, target, direction);
+    }
+}
+
+fn run_cross_pair(suite: &GeneratedSuite, target: Target, direction: CompilerDirection) {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(directory.path().join("caller.c"), &suite.caller).unwrap();
+    fs::write(directory.path().join("callee.c"), &suite.callee).unwrap();
+
+    compile_cross_object(
+        directory.path(),
+        target,
+        matches!(direction, CompilerDirection::FccCaller),
+        "caller.c",
+        "caller.o",
+    );
+    compile_cross_object(
+        directory.path(),
+        target,
+        matches!(direction, CompilerDirection::FccCallee),
+        "callee.c",
+        "callee.o",
+    );
+
+    let mut linker = Command::new(target.cross_cc());
+    linker.args(target.cross_cc_flags());
+    assert_success(
+        linker
+            .args(["-static", "caller.o", "callee.o", "-o", "abi-conformance"])
+            .current_dir(directory.path())
+            .output()
+            .expect("spawn cross linker"),
+        &format!("link generated {target:?} ABI suite"),
+    );
+
+    if !tool_available(target.emulator()) {
+        require_or_skip(target.emulator(), target);
+        return;
+    }
+    assert_success(
+        Command::new(target.emulator())
+            .arg(directory.path().join("abi-conformance"))
+            .output()
+            .expect("run generated cross ABI suite"),
+        &format!("run generated {target:?} ABI suite with {direction:?}"),
+    );
+}
+
+fn compile_cross_object(
+    directory: &Path,
+    target: Target,
+    with_fcc: bool,
+    input: &str,
+    output: &str,
+) {
+    let mut command = if with_fcc {
+        let mut command = Command::new(FCC);
+        command.args([
+            "cc",
+            "-c",
+            &format!("-march={}", target.fcc_march()),
+            &format!("-mabi={}", target.fcc_abi()),
+        ]);
+        command
+    } else {
+        let mut command = Command::new(target.cross_cc());
+        command.args(target.cross_cc_flags());
+        command.arg("-c");
+        command
+    };
+    assert_success(
+        command
+            .args([input, "-o", output])
+            .current_dir(directory)
+            .output()
+            .expect("spawn cross compiler"),
+        &format!(
+            "compile {input} for {target:?} with {}",
+            if with_fcc { "fcc" } else { target.cross_cc() },
+        ),
+    );
+}
+
+fn require_or_skip(tool: &str, target: Target) {
+    assert!(
+        std::env::var_os("TIR_REQUIRE_CROSS_ABI").is_none(),
+        "{tool} is required for the {target:?} ABI conformance test",
+    );
+    eprintln!("skipping {target:?} ABI execution: {tool} is unavailable");
+}
+
 fn compile_host_object(directory: &Path, compiler: &str, input: &str, output: &str) {
     let mut command = Command::new(compiler);
     if compiler == FCC {
@@ -375,4 +512,11 @@ fn generated_suite_roundtrips_with_host_compiler_in_both_directions() {
     let suite = generate_suite(Target::Riscv64);
     run_host_pair(&suite, CompilerDirection::FccCaller);
     run_host_pair(&suite, CompilerDirection::FccCallee);
+}
+
+#[test]
+fn generated_suite_roundtrips_with_cross_compilers_in_both_directions() {
+    for target in [Target::Riscv64, Target::Arm64] {
+        run_cross_target(target);
+    }
 }
