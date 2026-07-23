@@ -4,6 +4,8 @@
 //! earlier stages (wide constants before register allocation; `vret`/`vbr`
 //! after).
 
+use std::collections::HashMap;
+
 use tir::{
     AnalysisManager, Context, OperationRef, Pass, PassError, PassTarget, PreservedAnalyses,
     Rewriter, TypeId,
@@ -20,7 +22,7 @@ pub fn lower_function_and_return(
 ) -> Result<bool, PassError> {
     use tir::Operation;
     use tir::attributes::{AttributeValue, RegisterAttr};
-    use tir::builtin::{FuncOp, ReturnOp};
+    use tir::builtin::{FuncOp, MakeTupleOp, ReturnOp, TupleType};
 
     if let Some(func) = op.as_op::<FuncOp>() {
         let body = func.body();
@@ -60,6 +62,56 @@ pub fn lower_function_and_return(
     }
 
     if let Some(ret) = op.as_op::<ReturnOp>() {
+        if let Some(value) = ret.operands().first().copied() {
+            let ty = context.get_type_data(context.get_value(value).ty());
+            if (ty.as_ref() as &dyn std::any::Any)
+                .downcast_ref::<TupleType>()
+                .is_some()
+            {
+                let defining_op = context.get_value(value).defining_op().ok_or_else(|| {
+                    PassError::InvalidRuleSet(
+                        "returned tuple must be produced by make_tuple".to_string(),
+                    )
+                })?;
+                let tuple_instance = context.get_op(defining_op);
+                let tuple = tuple_instance
+                    .clone()
+                    .as_op::<MakeTupleOp>()
+                    .ok_or_else(|| {
+                        PassError::InvalidRuleSet(
+                            "returned tuple must be produced by make_tuple".to_string(),
+                        )
+                    })?;
+                let uses = context.value_uses(value);
+                if uses.len() != 1 || uses[0].op() != ret.id() {
+                    return Err(PassError::InvalidRuleSet(
+                        "returned tuple must only be consumed by return".to_string(),
+                    ));
+                }
+
+                let mut next_slot = HashMap::new();
+                for &element in tuple.operands() {
+                    let kind = crate::backend::abi::value_kind(context, element);
+                    let slot = next_slot.entry(kind).or_insert(0usize);
+                    let marker = super::VirtualReturnValueOpBuilder::new(context)
+                        .value(element)
+                        .attr("slot", AttributeValue::UInt(*slot as u64))
+                        .build();
+                    *slot += 1;
+                    rewriter.insert_op_before(op, &marker)?;
+                }
+
+                rewriter.replace_op(op, &super::VirtualReturnOpBuilder::new(context).build())?;
+                let tuple_block = context.parent_block(defining_op).ok_or_else(|| {
+                    PassError::InvalidRuleSet("make_tuple has no parent block".to_string())
+                })?;
+                let tuple_ref =
+                    OperationRef::new(tuple_instance, Some(context.get_block(tuple_block)), None);
+                rewriter.erase_op(&tuple_ref)?;
+                return Ok(true);
+            }
+        }
+
         let mut builder = super::VirtualReturnOpBuilder::new(context);
         if let Some(value) = ret.operands().first().copied() {
             builder = builder.value(value);

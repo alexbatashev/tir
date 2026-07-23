@@ -332,6 +332,7 @@ dialect! {
             DataRelocOp,
             BlockEndOp,
             VirtualReturnOp,
+            VirtualReturnValueOp,
             VirtualBranchOp,
             VirtualCallOp,
             VirtualIndirectCallOp,

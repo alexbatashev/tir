@@ -1,10 +1,27 @@
 use crate::backend::liveness::PhysReg;
+use crate::{Context, TypeId, ValueId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ValueKind {
     Int,
     Float,
     Vector,
+}
+
+pub fn type_kind(context: &Context, ty: TypeId) -> ValueKind {
+    let data = context.get_type_data(ty);
+    let data = data.as_ref() as &dyn std::any::Any;
+    if data.downcast_ref::<crate::builtin::FloatType>().is_some() {
+        ValueKind::Float
+    } else if data.downcast_ref::<crate::vector::VectorType>().is_some() {
+        ValueKind::Vector
+    } else {
+        ValueKind::Int
+    }
+}
+
+pub fn value_kind(context: &Context, value: ValueId) -> ValueKind {
+    type_kind(context, context.get_value(value).ty())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

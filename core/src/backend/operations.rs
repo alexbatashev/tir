@@ -87,6 +87,35 @@ operation! {
 impl Terminator for VirtualReturnOp {}
 
 operation! {
+    VirtualReturnValueOp {
+        name: "vret_value",
+        dialect: "asm",
+        operands: [value],
+        attributes: A {
+            slot: "UInt",
+        },
+    }
+}
+
+impl VirtualReturnValueOp {
+    pub fn value(&self) -> tir::ValueId {
+        self.operands()[0]
+    }
+
+    pub fn slot(&self) -> usize {
+        self.attributes()
+            .iter()
+            .find_map(|attribute| match attribute.value {
+                tir::attributes::AttributeValue::UInt(slot) if attribute.name == "slot" => {
+                    Some(slot as usize)
+                }
+                _ => None,
+            })
+            .expect("vret_value must carry a slot")
+    }
+}
+
+operation! {
     VirtualBranchOp {
         name: "vbr",
         dialect: "asm",

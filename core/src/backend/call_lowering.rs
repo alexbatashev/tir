@@ -1,10 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
 use tir::attributes::{AttributeValue, RegisterAttr};
-use tir::builtin::{CallOp, IndirectCallOp, UnitType};
+use tir::builtin::{CallOp, IndirectCallOp, TupleGetOp, TupleType, UnitType};
 use tir::{Context, Operation, OperationRef, PassError, Rewriter, ValueId};
 
-use crate::backend::abi::{AbiInfo, Overflow, ValueKind};
+use crate::backend::abi::{AbiInfo, Overflow, ValueKind, value_kind};
 use crate::backend::liveness::PhysReg;
 
 pub trait CallEmitter: Send + Sync {
@@ -204,6 +204,84 @@ impl CallLowering {
             rewriter.insert_op_before(op, restore.as_ref())?;
         }
 
+        let result_type = context.get_type_data(context.get_value(result).ty());
+        if let Some(tuple) =
+            (result_type.as_ref() as &dyn std::any::Any).downcast_ref::<TupleType>()
+        {
+            let element_types = tuple.elements(context);
+            let mut next_slot = HashMap::new();
+            let mut registers = Vec::with_capacity(element_types.len());
+            for element_type in element_types {
+                let kind = crate::backend::abi::type_kind(context, element_type);
+                let slot = next_slot.entry(kind).or_insert(0usize);
+                let register = self
+                    .abi
+                    .rets
+                    .iter()
+                    .find(|sequence| sequence.kind == kind)
+                    .and_then(|sequence| sequence.regs.get(*slot))
+                    .copied()
+                    .ok_or_else(|| {
+                        PassError::InvalidRuleSet(format!(
+                            "ABI has no return register for tuple element {}",
+                            registers.len()
+                        ))
+                    })?;
+                *slot += 1;
+                registers.push(register);
+            }
+
+            let mut extracts = vec![];
+            for usage in context.value_uses(result) {
+                if usage.operand_index() != Some(0) {
+                    return Err(PassError::InvalidRuleSet(
+                        "tuple call result must only be consumed by tuple_get".to_string(),
+                    ));
+                }
+                let extract_instance = context.get_op(usage.op());
+                let extract = extract_instance
+                    .clone()
+                    .as_op::<TupleGetOp>()
+                    .ok_or_else(|| {
+                        PassError::InvalidRuleSet(
+                            "tuple call result must only be consumed by tuple_get".to_string(),
+                        )
+                    })?;
+                let register = registers.get(extract.index()).copied().ok_or_else(|| {
+                    PassError::InvalidRuleSet("tuple_get index is out of bounds".to_string())
+                })?;
+                let block = context.parent_block(usage.op()).ok_or_else(|| {
+                    PassError::InvalidRuleSet("tuple_get has no parent block".to_string())
+                })?;
+                extracts.push((
+                    extract.index(),
+                    extract.result(),
+                    register,
+                    usage.op(),
+                    block,
+                ));
+            }
+            extracts.sort_by_key(|(index, result, ..)| (*index, result.number()));
+
+            for &(_, extracted, register, _, _) in &extracts {
+                let copy = self.emitter.copy(
+                    context,
+                    virtual_reg(extracted.number(), register.0),
+                    physical_reg(register),
+                );
+                rewriter.insert_op_before(op, copy.as_ref())?;
+            }
+            for &(_, _, _, extract, block) in &extracts {
+                rewriter.erase_op(&OperationRef::new(
+                    context.get_op(extract),
+                    Some(context.get_block(block)),
+                    None,
+                ))?;
+            }
+            rewriter.erase_op(op)?;
+            return Ok(true);
+        }
+
         if context.get_value(result).ty() == UnitType::new(context) {
             rewriter.erase_op(op)?;
             return Ok(true);
@@ -256,19 +334,6 @@ impl ArgumentLocation {
             ArgumentLocation::Register(register) => register.0,
             ArgumentLocation::Stack { class, .. } => class,
         }
-    }
-}
-
-fn value_kind(context: &Context, value: ValueId) -> ValueKind {
-    let ty = context.get_value(value).ty();
-    let data = context.get_type_data(ty);
-    let data = data.as_ref() as &dyn std::any::Any;
-    if data.downcast_ref::<tir::builtin::FloatType>().is_some() {
-        ValueKind::Float
-    } else if data.downcast_ref::<tir::vector::VectorType>().is_some() {
-        ValueKind::Vector
-    } else {
-        ValueKind::Int
     }
 }
 

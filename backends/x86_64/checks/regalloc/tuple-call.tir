@@ -1,0 +1,19 @@
+// RUN: tir mc --march=x86_64 --stage=regalloc %s | filecheck %s
+
+module {
+  declare @make_pair() -> !tuple<!i64, !i64>
+  func @sum_pair() -> !i64 {
+    %0 = call @make_pair() -> !tuple<!i64, !i64>
+    %1 = tuple_get %0 {index = 0} : !i64
+    %2 = tuple_get %0 {index = 1} : !i64
+    %3 = addi %1, %2 : !i64
+    return %3
+  }
+  module_end
+}
+
+// CHECK:      asm.vcall {callee = "make_pair"
+// CHECK:      x86_64.mov {dst = [[LEFT:[a-z0-9]+]], src = rax}
+// CHECK-NEXT: x86_64.mov {dst = [[RIGHT:[a-z0-9]+]], src = rdx}
+// CHECK:      x86_64.add {dst = rax, src = [[RIGHT]]}
+// CHECK:      asm.vret

@@ -22,7 +22,7 @@ use tir::{
 };
 
 use crate::backend::liveness::{self, Liveness, PhysReg};
-use crate::backend::{VirtualCallOp, VirtualIndirectCallOp};
+use crate::backend::{VirtualCallOp, VirtualIndirectCallOp, VirtualReturnOp, VirtualReturnValueOp};
 use crate::ptr::AllocaOp;
 
 /// Architectural metadata for one register class.
@@ -646,6 +646,7 @@ impl Pass for RegisterAllocationPass {
         };
 
         rewrite_registers(context, &blocks, &assignment);
+        erase_virtual_return_values(context, rewriter, &blocks)?;
 
         // Preserve the callee-saved registers the allocation used for this
         // function's caller. Frame-based targets reserve a slot per register;
@@ -984,7 +985,7 @@ impl RegisterAllocationPass {
         }
         for &block_id in blocks {
             for op_id in context.get_block(block_id).op_ids() {
-                if context.get_op(op_id).name != "vret" {
+                if context.get_op(op_id).as_op::<VirtualReturnOp>().is_none() {
                     continue;
                 }
                 let target = op_ref_in(context, block_id, op_id);
@@ -1318,16 +1319,7 @@ struct IncomingStackArg {
 }
 
 fn abi_value_kind(context: &Context, vreg: u32) -> crate::backend::abi::ValueKind {
-    let ty = context.get_value(ValueId::from_number(vreg)).ty();
-    let data = context.get_type_data(ty);
-    let data = data.as_ref() as &dyn std::any::Any;
-    if data.downcast_ref::<tir::builtin::FloatType>().is_some() {
-        crate::backend::abi::ValueKind::Float
-    } else if data.downcast_ref::<tir::vector::VectorType>().is_some() {
-        crate::backend::abi::ValueKind::Vector
-    } else {
-        crate::backend::abi::ValueKind::Int
-    }
+    crate::backend::abi::value_kind(context, ValueId::from_number(vreg))
 }
 
 fn next_abi_register(
@@ -1468,15 +1460,20 @@ fn abi_precolor(
         context.set_op_attributes(op.op().id, attributes);
     }
 
-    // Return value: the operand of the `vret` terminator, in the first return
-    // register of the value's class.
+    // Scalar returns use slot zero. Tuple returns are decomposed ahead of
+    // allocation into one typed marker per scalar ABI carrier.
     for &block_id in blocks {
         for op_id in context.get_block(block_id).op_ids() {
             let body_op = context.get_op(op_id);
-            if body_op.name != "vret" {
-                continue;
-            }
-            let Some(value) = body_op.operands.first().copied() else {
+            let return_value = if let Some(marker) = body_op.clone().as_op::<VirtualReturnValueOp>()
+            {
+                Some((marker.value(), marker.slot()))
+            } else if let Some(ret) = body_op.as_op::<VirtualReturnOp>() {
+                ret.operands().first().copied().map(|value| (value, 0))
+            } else {
+                None
+            };
+            let Some((value, slot)) = return_value else {
                 continue;
             };
             let vreg = value.number();
@@ -1488,7 +1485,7 @@ fn abi_precolor(
             let Some(sequence) = abi.rets.iter().find(|sequence| sequence.kind == kind) else {
                 continue;
             };
-            let Some(&register) = sequence.regs.first() else {
+            let Some(&register) = sequence.regs.get(slot) else {
                 continue;
             };
             let ret_pin = if register.0.file() == rc.file() {
@@ -1634,6 +1631,26 @@ fn rewrite_registers(context: &Context, blocks: &[BlockId], assignment: &HashMap
             }
         }
     }
+}
+
+fn erase_virtual_return_values(
+    context: &Context,
+    rewriter: &mut Rewriter,
+    blocks: &[BlockId],
+) -> Result<(), PassError> {
+    for &block_id in blocks {
+        for op_id in context.get_block(block_id).op_ids() {
+            if context
+                .get_op(op_id)
+                .clone()
+                .as_op::<VirtualReturnValueOp>()
+                .is_some()
+            {
+                rewriter.erase_op(&op_ref_in(context, block_id, op_id))?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn role_of(op: &tir::OpInstance, name: &str) -> AttributeRole {
