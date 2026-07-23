@@ -2122,10 +2122,8 @@ fn assumption_scope_is_popped_after_solving() {
     assert_eq!(block_op_list(&r.context, r.body).len(), 1);
 }
 
-/// Block arguments on conditional edges are still rejected (codegen cannot
-/// place them yet), now at selection time.
 #[test]
-fn guard_edge_arguments_are_rejected() {
+fn guard_edge_arguments_are_split() {
     let context = Context::with_default_dialects();
     let module = ops::module(&context, None).build();
 
@@ -2152,10 +2150,11 @@ fn guard_edge_arguments_are_rejected() {
     pm.nest::<FuncOp>().add_pass(
         InstructionSelectPass::new(vec![branch_rule()]).with_branch_emitters(branch_emitters()),
     );
-    let err = pm
-        .run(&context, context.get_op(module.id()))
-        .expect_err("edge arguments should be rejected");
-    assert!(err.to_string().contains("block arguments"));
+    let before = region.iter(context.clone()).count();
+    pm.run(&context, context.get_op(module.id())).unwrap();
+    // The true edge's argument is forwarded through exactly one trampoline block.
+    let after = region.iter(context.clone()).count();
+    assert_eq!(after, before + 1);
 }
 
 /// At *equal* cost, the type-constrained rule must win the tie via dominance

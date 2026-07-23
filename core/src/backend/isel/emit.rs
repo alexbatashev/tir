@@ -42,11 +42,15 @@ pub(crate) struct BlockPlan {
 pub(crate) enum TerminatorPlan {
     /// A guarded two-way terminator: insert the conditional branch to the true
     /// successor ahead of `op`, then replace `op` with an unconditional branch
-    /// to `false_dest`.
+    /// to `false_dest` (forwarding `false_args`). A non-empty `true_args` is
+    /// forwarded through a trampoline block the conditional branch targets.
     Guard {
         op: OpId,
         branch: GuardBranch,
+        true_dest: BlockId,
+        true_args: Vec<ValueId>,
         false_dest: BlockId,
+        false_args: Vec<ValueId>,
     },
     /// An unconditional branch, lowered through the target's `uncond` emitter.
     Jump {
@@ -62,7 +66,7 @@ pub(crate) enum TerminatorPlan {
 #[derive(Clone, Debug)]
 pub(crate) enum GuardBranch {
     Fused { rule_index: usize, m: RuleMatch },
-    Nonzero { condition: ValueId, dest: BlockId },
+    Nonzero { condition: ValueId },
 }
 
 /// An instruction to materialize for an introduced e-class: emitted with a fresh

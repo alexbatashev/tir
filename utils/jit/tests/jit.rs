@@ -208,6 +208,36 @@ fn block_argument_diamond() {
     assert_eq!(sel(-9, 0, 100, 200), 100);
 }
 
+#[test]
+fn conditional_edge_arguments() {
+    // The arms' forwarded values ride the conditional branch's own edges. The
+    // true edge is split into a trampoline block during selection; the false
+    // edge's value rides the fallthrough branch. Register allocation lowers each
+    // to a copy into the merge parameter's register.
+    let ir = r#"
+        module {
+          func @sel(%c: !i64, %d: !i64, %a: !i64, %b: !i64) -> !i64 {
+            %cond = cmpi %c, %d {predicate = "slt"} : !i1
+            cond_br %cond, ^bb1(%a : !i64), ^bb2(%b : !i64)
+          ^bb1(%x: !i64):
+            return %x
+          ^bb2(%y: !i64):
+            return %y
+          }
+          module_end
+        }
+    "#;
+
+    let jit = Jit::host().expect("host target");
+    let module = jit.compile(ir).expect("compile");
+    let sel: extern "C" fn(i64, i64, i64, i64) -> i64 =
+        unsafe { module.get("sel") }.expect("sel symbol");
+    // sel(c, d, a, b) = if c < d { a } else { b }
+    assert_eq!(sel(1, 2, 42, 7), 42);
+    assert_eq!(sel(5, 2, 42, 7), 7);
+    assert_eq!(sel(-9, 0, 100, 200), 100);
+}
+
 extern "C" fn host_triple(x: i64) -> i64 {
     x * 3
 }

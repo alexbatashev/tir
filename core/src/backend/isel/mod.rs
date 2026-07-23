@@ -75,6 +75,14 @@ impl RuleMatch {
         self
     }
 
+    pub(crate) fn rebind_block(&mut self, symbol: u32, block: BlockId) {
+        for (sym, dest) in &mut self.block_bindings {
+            if *sym == symbol {
+                *dest = block;
+            }
+        }
+    }
+
     pub fn value_binding(&self, symbol: u32) -> Option<ValueId> {
         self.value_bindings
             .iter()
@@ -672,8 +680,9 @@ struct BlockGuard {
     class: Id,
     true_dest: BlockId,
     false_dest: BlockId,
-    /// Whether any edge forwards block arguments (unsupported by codegen).
-    has_edge_args: bool,
+    /// Values forwarded to each successor's block arguments.
+    true_args: Vec<ValueId>,
+    false_args: Vec<ValueId>,
 }
 
 /// An unconditional branch terminator and its forwarded block arguments.
@@ -921,20 +930,25 @@ impl InstructionSelectPass {
                             if a_cond != b_cond {
                                 continue;
                             }
-                            let has_edge_args = op
-                                .clone()
-                                .as_interface::<dyn BranchTerminator>()
-                                .is_some_and(|branch| {
-                                    branch
-                                        .successor_operands()
-                                        .iter()
-                                        .any(|(_, args)| !args.is_empty())
-                                });
                             let (true_dest, false_dest) = if *a_taken {
                                 (*a_dest, *b_dest)
                             } else {
                                 (*b_dest, *a_dest)
                             };
+                            let operands = op
+                                .clone()
+                                .as_interface::<dyn BranchTerminator>()
+                                .map(|branch| branch.successor_operands())
+                                .unwrap_or_default();
+                            let edge_args = |dest| {
+                                operands
+                                    .iter()
+                                    .find(|(succ, _)| *succ == dest)
+                                    .map(|(_, args)| args.clone())
+                                    .unwrap_or_default()
+                            };
+                            let true_args = edge_args(true_dest);
+                            let false_args = edge_args(false_dest);
                             let class = builder.build_from_value(*a_cond);
                             guards.entry(block_id).or_default().push(BlockGuard {
                                 op: op_id,
@@ -942,7 +956,8 @@ impl InstructionSelectPass {
                                 class,
                                 true_dest,
                                 false_dest,
-                                has_edge_args,
+                                true_args,
+                                false_args,
                             });
                         } else if let Some(branch) =
                             op.clone().as_interface::<dyn BranchTerminator>()
@@ -1177,6 +1192,28 @@ impl InstructionSelectPass {
         plan
     }
 
+    /// Create a trampoline block forwarding `args` to `dest` through the target's
+    /// unconditional-branch emitter, appended to the branching block's region.
+    /// Returns the trampoline's id, which a conditional branch targets in place
+    /// of `dest`. The solver has already run over the (unchanged) block set, so
+    /// the new block is never visited for selection.
+    fn emit_edge_trampoline(
+        &self,
+        context: &Context,
+        source: BlockId,
+        dest: BlockId,
+        args: &[ValueId],
+        emitters: &BranchEmitters,
+    ) -> BlockId {
+        let trampoline = context.create_block(vec![]);
+        let vbr = (emitters.uncond)(context, dest, args);
+        trampoline.insert(trampoline.len(), vbr.id());
+        if let Some(region) = context.parent_region(source) {
+            context.get_region(region).add_block(trampoline.id());
+        }
+        trampoline.id()
+    }
+
     fn commit_block_solution(
         &mut self,
         context: &Context,
@@ -1225,10 +1262,27 @@ impl InstructionSelectPass {
                     TerminatorPlan::Guard {
                         op,
                         branch,
+                        true_dest,
+                        true_args,
                         false_dest,
+                        false_args,
                     } => {
                         let op_ref =
                             OperationRef::new(context.get_op(*op), Some(block_arc.clone()), None);
+                        // A true edge carrying arguments cannot ride the
+                        // conditional branch, so it forwards them through a
+                        // trampoline block the branch targets instead.
+                        let true_target = if true_args.is_empty() {
+                            *true_dest
+                        } else {
+                            self.emit_edge_trampoline(
+                                context,
+                                block.id(),
+                                *true_dest,
+                                true_args,
+                                emitters,
+                            )
+                        };
                         let branch_ops: Vec<Box<dyn Operation>> = match branch {
                             GuardBranch::Fused { rule_index, m } => {
                                 let request = EmitRequest {
@@ -1237,24 +1291,29 @@ impl InstructionSelectPass {
                                     result_ty: None,
                                 };
                                 let rule = &self.rules[*rule_index];
+                                let RuleKind::CondBranch { target_symbol } = rule.kind else {
+                                    unreachable!("fused guard rule is a conditional branch")
+                                };
+                                let mut m = m.clone();
+                                m.rebind_block(target_symbol, true_target);
                                 // A flag-mediated branch rule emits its
                                 // flag-setting definer right before the branch
                                 // instruction that reads the flags.
                                 let mut ops = Vec::new();
                                 if let Some(prelude) = rule.prelude_emit {
-                                    ops.push(prelude(context, &request, m)?);
+                                    ops.push(prelude(context, &request, &m)?);
                                 }
-                                ops.push((rule.emit_fn)(context, &request, m)?);
+                                ops.push((rule.emit_fn)(context, &request, &m)?);
                                 ops
                             }
-                            GuardBranch::Nonzero { condition, dest } => {
-                                (emitters.cond_nonzero)(context, *condition, *dest)
+                            GuardBranch::Nonzero { condition } => {
+                                (emitters.cond_nonzero)(context, *condition, true_target)
                             }
                         };
                         for branch_op in &branch_ops {
                             rewriter.insert_op_before(&op_ref, branch_op.as_ref())?;
                         }
-                        let fallthrough = (emitters.uncond)(context, *false_dest, &[]);
+                        let fallthrough = (emitters.uncond)(context, *false_dest, false_args);
                         rewriter.replace_op(&op_ref, fallthrough.as_ref())?;
                     }
                     TerminatorPlan::Jump { op, dest, args } => {
@@ -1398,25 +1457,19 @@ impl InstructionSelectPass {
         let mut fused_conditions = HashSet::new();
         let mut terminators = Vec::new();
         for guard in guards {
-            if guard.has_edge_args {
-                return Err(
-                    "block arguments on conditional branch edges are not supported by codegen yet"
-                        .to_string(),
-                );
-            }
             let class = fs.egraph.find(guard.class);
             // A condition proven constant (a dominating-edge assumption) folds
             // the guard to an unconditional branch to the known successor.
             if let Some(known) = class_int_binding(&fs.egraph, class) {
-                let dest = if known.to_u64() != 0 {
-                    guard.true_dest
+                let (dest, args) = if known.to_u64() != 0 {
+                    (guard.true_dest, guard.true_args.clone())
                 } else {
-                    guard.false_dest
+                    (guard.false_dest, guard.false_args.clone())
                 };
                 terminators.push(TerminatorPlan::Jump {
                     op: guard.op,
                     dest,
-                    args: Vec::new(),
+                    args,
                 });
                 continue;
             }
@@ -1433,7 +1486,10 @@ impl InstructionSelectPass {
                     terminators.push(TerminatorPlan::Guard {
                         op: guard.op,
                         branch: GuardBranch::Fused { rule_index, m },
+                        true_dest: guard.true_dest,
+                        true_args: guard.true_args.clone(),
                         false_dest: guard.false_dest,
+                        false_args: guard.false_args.clone(),
                     });
                 }
                 None => {
@@ -1442,9 +1498,11 @@ impl InstructionSelectPass {
                         op: guard.op,
                         branch: GuardBranch::Nonzero {
                             condition: guard.condition,
-                            dest: guard.true_dest,
                         },
+                        true_dest: guard.true_dest,
+                        true_args: guard.true_args.clone(),
                         false_dest: guard.false_dest,
+                        false_args: guard.false_args.clone(),
                     });
                 }
             }
