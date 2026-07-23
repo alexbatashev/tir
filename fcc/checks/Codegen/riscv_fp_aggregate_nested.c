@@ -1,0 +1,22 @@
+// RUN: fcc compile --march riscv64 --mabi lp64d --stage ir -o - %s | filecheck %s
+// RUN: fcc compile --march riscv64 --mabi lp64d --stage asm -o - %s | filecheck %s --check-prefix=ASM
+
+struct Element {
+    double value;
+};
+
+struct Nested {
+    struct Element values[2];
+};
+
+double consume_nested(struct Nested value) {
+    return 0.0;
+}
+struct Nested produce_nested(void);
+
+// CHECK: func @consume_nested(%{{[0-9]+}}: !f64, %{{[0-9]+}}: !f64) -> !f64 {
+// CHECK: declare @produce_nested() -> !tuple<!f64, !f64>
+
+// ASM-LABEL: consume_nested:
+// ASM: fsd f10, 0({{.*}})
+// ASM: fsd f11, 8({{.*}})
