@@ -1477,6 +1477,16 @@ fn chained_field_and_index_designators_select_nested_member() {
 }
 
 #[test]
+fn nested_initializer_continues_after_chained_designator() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "struct Inner { int left; int right; }; struct Outer { int tag; struct Inner inner; int tail; }; int main(void) { struct Outer value = {.inner.left = 11, 22}; return value.tag == 0 && value.inner.left == 11 && value.inner.right == 22 && value.tail == 0 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
 fn initialized_scalar_global_is_read_by_main() {
     if !cc_available() {
         return;
@@ -1539,6 +1549,16 @@ fn initialized_global_struct_designators_select_fields() {
     }
     assert_fcc_matches_host(
         "struct Pair { char tag; int value; } pair = {.value = 39, .tag = 3}; int main(void) { return pair.tag + pair.value - 42; }\n",
+    );
+}
+
+#[test]
+fn initialized_global_chained_designators_select_nested_member() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "struct Row { int left; int right; }; struct Table { struct Row rows[2]; } value = {.rows[1].right = 42}; int main(void) { return value.rows[0].right == 0 && value.rows[1].left == 0 && value.rows[1].right == 42 ? 0 : 1; }\n",
     );
 }
 

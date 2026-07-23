@@ -741,6 +741,57 @@ fn collect_initializer_elements(ast: &Ast, node: NodeId, elements: &mut Vec<Node
     }
 }
 
+fn normalize_designated_initializer(
+    st: &mut ParseState,
+    value: NodeId,
+    tok: usize,
+) -> (NodeId, Vec<NodeId>) {
+    let mut chain = Vec::new();
+    let mut selected = value;
+    while st.ast.get_node(selected).kind == AstKind::DesignatedInitializer {
+        let children = st.ast.children(selected).collect::<Vec<_>>();
+        chain.push((
+            st.ast.get_leaf_data(selected).unwrap().clone(),
+            children[..children.len() - 1].to_vec(),
+        ));
+        selected = *children.last().unwrap();
+    }
+    if chain.is_empty() || st.ast.get_node(selected).kind != AstKind::Comma {
+        return (value, Vec::new());
+    }
+
+    let mut elements = Vec::new();
+    collect_initializer_elements(&st.ast, selected, &mut elements);
+    let first = elements.remove(0);
+    let (leaf, prefix) = chain.pop().unwrap();
+    let mut normalized = st.add(AstKind::DesignatedInitializer, tok);
+    st.ast.set_leaf_data(normalized, leaf);
+    for child in prefix {
+        st.ast.add_edge(normalized, child);
+    }
+    st.ast.add_edge(normalized, first);
+    if chain.is_empty() {
+        return (normalized, elements);
+    }
+
+    let list = st.add(AstKind::InitializerList, tok);
+    st.ast.add_edge(list, normalized);
+    for element in elements {
+        st.ast.add_edge(list, element);
+    }
+    normalized = list;
+    for (leaf, prefix) in chain.into_iter().rev() {
+        let parent = st.add(AstKind::DesignatedInitializer, tok);
+        st.ast.set_leaf_data(parent, leaf);
+        for child in prefix {
+            st.ast.add_edge(parent, child);
+        }
+        st.ast.add_edge(parent, normalized);
+        normalized = parent;
+    }
+    (normalized, Vec::new())
+}
+
 fn initializer<'src, I>() -> impl Parser<'src, I, NodeId, Extra<'src>> + Clone
 where
     I: ValueInput<'src, Token = Token, Span = Span>,
@@ -790,25 +841,11 @@ where
                 let mut entries = Vec::new();
                 for value in values {
                     if st.ast.get_node(value).kind == AstKind::DesignatedInitializer {
-                        let children = st.ast.children(value).collect::<Vec<_>>();
-                        let selected = *children.last().unwrap();
-                        if st.ast.get_node(selected).kind == AstKind::Comma {
-                            let mut elements = Vec::new();
-                            collect_initializer_elements(&st.ast, selected, &mut elements);
-                            let first = elements.remove(0);
-                            let replacement = st.add(AstKind::DesignatedInitializer, tok);
-                            st.ast.set_leaf_data(
-                                replacement,
-                                st.ast.get_leaf_data(value).unwrap().clone(),
-                            );
-                            for &child in &children[..children.len() - 1] {
-                                st.ast.add_edge(replacement, child);
-                            }
-                            st.ast.add_edge(replacement, first);
-                            entries.push(replacement);
-                            entries.extend(elements);
-                            continue;
-                        }
+                        let (value, continuation) =
+                            normalize_designated_initializer(st, value, tok);
+                        entries.push(value);
+                        entries.extend(continuation);
+                        continue;
                     }
                     let mut elements = Vec::new();
                     collect_initializer_elements(&st.ast, value, &mut elements);

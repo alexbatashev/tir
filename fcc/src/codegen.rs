@@ -452,7 +452,10 @@ fn constant_initializer_data(
             })
         }
         TypeKind::Array(element, Some(length))
-            if ast.get_node(initializer).kind == AstKind::InitializerList =>
+            if matches!(
+                ast.get_node(initializer).kind,
+                AstKind::InitializerList | AstKind::DesignatedInitializer
+            ) =>
         {
             let element_size = source_type_layout(typed, *element).0 as usize;
             let mut data = ConstantData {
@@ -473,7 +476,12 @@ fn constant_initializer_data(
             }
             Some(data)
         }
-        TypeKind::Record(id) if ast.get_node(initializer).kind == AstKind::InitializerList => {
+        TypeKind::Record(id)
+            if matches!(
+                ast.get_node(initializer).kind,
+                AstKind::InitializerList | AstKind::DesignatedInitializer
+            ) =>
+        {
             let record = typed.record(*id)?;
             let mut data = ConstantData {
                 bytes: vec![0; record.size as usize],
