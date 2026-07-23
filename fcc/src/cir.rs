@@ -42,7 +42,7 @@ dialect! {
             LabelOp,
             YieldOp,
         ],
-        types: [StructType, VarArgsType, VaListType],
+        types: [StructType, VaListType],
     }
 }
 
@@ -580,45 +580,6 @@ fn parse_scope_token(
     let scope = context.create_value(tir::builtin::TokenType::new(context), None);
     parser.define_value(&name, scope.id());
     Ok(scope)
-}
-
-#[derive(TirType)]
-#[tir_type(dialect = "cir", name = "varargs")]
-pub struct VarArgsType;
-
-impl VarArgsType {
-    #[allow(clippy::new_ret_no_self)]
-    pub fn new(context: &Context) -> TypeId {
-        context.get_type_id(Arc::new(Self))
-    }
-}
-
-impl TypeConstraint for VarArgsType {}
-
-impl Type for VarArgsType {
-    fn dialect(&self) -> &'static str {
-        "cir"
-    }
-
-    fn parse_key() -> &'static str {
-        "varargs"
-    }
-
-    fn parse<'src>(
-        _mnemonic: &str,
-        _parser: &mut tir::parse::text::Parser<'src>,
-        context: &Context,
-    ) -> Result<TypeId, (Span, Error)> {
-        Ok(Self::new(context))
-    }
-
-    fn print(&self, fmt: &mut IRFormatter<'_>) -> Result<(), std::fmt::Error> {
-        fmt.write("varargs")
-    }
-
-    fn eq(&self, other: &dyn Type) -> bool {
-        (other as &dyn Any).downcast_ref::<VarArgsType>().is_some()
-    }
 }
 
 #[derive(TirType)]

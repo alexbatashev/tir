@@ -4,7 +4,7 @@
 //! SSA" shape a C frontend emits before any mem2reg pass): every parameter and
 //! local lives in a stack slot produced by `ptr.alloca`, reads become
 //! `ptr.load` and writes become `ptr.store`. Arithmetic uses the `builtin`
-//! integer ops; C-only literals and variadic markers use the local `cir` dialect.
+//! integer ops; C-only literals use the local `cir` dialect.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -16,7 +16,7 @@ use tir::ptr::{PtrType, ops as p};
 use tir::{Context, IRBuilder, Operand, Operation, RegionId, TypeId, ValueId};
 
 use crate::ast::*;
-use crate::cir::{self, StructType, VarArgsType};
+use crate::cir::{self, StructType};
 use crate::diagnostics::{Diagnostic, EmptyTranslationUnit, UnsupportedConstruct};
 use crate::lexer::{decode_c_escapes, decode_character_constant};
 use crate::sema::{EntityId, QualType, TargetProfile, TypeKind, TypedAst};
@@ -87,7 +87,6 @@ struct FnCodegen<'a> {
 struct Signature {
     ret: AbiReturn,
     params: Vec<AbiParameter>,
-    varargs: bool,
 }
 
 #[derive(Clone)]
@@ -194,9 +193,6 @@ impl Signature {
             } else {
                 args.extend(parameter.pieces.iter().map(|piece| piece.ty));
             }
-        }
-        if self.varargs {
-            args.push(VarArgsType::new(context));
         }
         args
     }
@@ -581,7 +577,6 @@ fn lower_signature(
         integers: ret.argument_padding,
         ..AbiRegisterUsage::default()
     };
-    let mut varargs = false;
     for child in ast.children(item) {
         match ast.get_node(child).kind {
             AstKind::Param => {
@@ -592,18 +587,11 @@ fn lower_signature(
                     &mut register_usage,
                 ));
             }
-            AstKind::VarArgs => varargs = true,
+            AstKind::VarArgs => {}
             _ => break,
         }
     }
-    Ok((
-        node_entity(typed, item),
-        Signature {
-            ret,
-            params,
-            varargs,
-        },
-    ))
+    Ok((node_entity(typed, item), Signature { ret, params }))
 }
 
 fn classify_abi_return(context: &Context, typed: &TypedAst, ty: QualType) -> AbiReturn {

@@ -1,6 +1,6 @@
 // RUN: fcc compile --stage ir -o - %s | filecheck %s
 
-// CHECK: declare @consume(!i32, !cir.varargs) -> !i32
+// CHECK: declare @consume(!i32) -> !i32
 // CHECK: func @main() -> !i32 {
 // CHECK: %[[VALUE:[0-9]+]] = ptr.load %{{[0-9]+}} : !i8
 // CHECK: %[[PROMOTED:[0-9]+]] = extsi %[[VALUE]] : !i32
