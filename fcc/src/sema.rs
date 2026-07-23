@@ -2200,10 +2200,46 @@ impl Analyzer<'_> {
             };
             return Some(value.value.to_i64());
         }
+        let children = self.ast.children(node).collect::<Vec<_>>();
+        let child_constant = |child| {
+            self.ast
+                .get_annotation(child)
+                .and_then(|info| info.constant)
+        };
+        match (kind, children.as_slice()) {
+            (AstKind::LogAnd, [left, right]) => {
+                return child_constant(*left).and_then(|left| {
+                    if left == 0 {
+                        Some(0)
+                    } else {
+                        child_constant(*right).map(|right| i64::from(right != 0))
+                    }
+                });
+            }
+            (AstKind::LogOr, [left, right]) => {
+                return child_constant(*left).and_then(|left| {
+                    if left != 0 {
+                        Some(1)
+                    } else {
+                        child_constant(*right).map(|right| i64::from(right != 0))
+                    }
+                });
+            }
+            (AstKind::Conditional, [condition, when_true, when_false]) => {
+                return child_constant(*condition).and_then(|condition| {
+                    child_constant(if condition != 0 {
+                        *when_true
+                    } else {
+                        *when_false
+                    })
+                });
+            }
+            _ => {}
+        }
         let values = self
             .ast
             .children(node)
-            .map(|child| self.ast.get_annotation(child)?.constant)
+            .map(child_constant)
             .collect::<Option<Vec<_>>>()?;
         match (kind, values.as_slice()) {
             (AstKind::Add, [left, right]) => left.checked_add(*right),
@@ -2222,6 +2258,12 @@ impl Analyzer<'_> {
             (AstKind::BitAnd, [left, right]) => Some(left & right),
             (AstKind::BitXor, [left, right]) => Some(left ^ right),
             (AstKind::BitOr, [left, right]) => Some(left | right),
+            (AstKind::Lt, [left, right]) => Some(i64::from(left < right)),
+            (AstKind::Gt, [left, right]) => Some(i64::from(left > right)),
+            (AstKind::Le, [left, right]) => Some(i64::from(left <= right)),
+            (AstKind::Ge, [left, right]) => Some(i64::from(left >= right)),
+            (AstKind::Eq, [left, right]) => Some(i64::from(left == right)),
+            (AstKind::Ne, [left, right]) => Some(i64::from(left != right)),
             (AstKind::Neg, [value]) => value.checked_neg(),
             (AstKind::Pos, [value]) => Some(*value),
             (AstKind::Not, [value]) => Some(i64::from(*value == 0)),

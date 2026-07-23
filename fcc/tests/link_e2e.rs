@@ -698,6 +698,16 @@ fn enum_constants_evaluate_remainder_and_unary_expressions() {
 }
 
 #[test]
+fn enum_constants_evaluate_comparison_logical_and_conditional_expressions() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "enum Decision { Lt = 2 < 3, Le = 3 <= 3, Gt = 4 > 3, Ge = 4 >= 4, Eq = 5 == 5, Ne = 5 != 6, Both = Lt && Eq, Either = 0 || Both, Pick = Either ? 9 : 1 / 0 }; int main(void) { return Lt && Le && Gt && Ge && Eq && Ne && Both && Either && Pick == 9 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
 fn escaped_character_constant_executes_through_driver() {
     if !cc_available() {
         return;
