@@ -604,8 +604,9 @@ fn classify_abi_parameter(
 ) -> AbiParameter {
     let riscv_pieces = classify_riscv_fp_aggregate(context, typed, ty);
     let hfa_pieces = classify_aapcs64_hfa(context, typed, ty);
-    if hfa_pieces.is_none()
-        && typed.target().uses_aapcs64_abi()
+    if riscv_pieces.is_none()
+        && hfa_pieces.is_none()
+        && (typed.target().uses_aapcs64_abi() || typed.target().uses_riscv_abi())
         && matches!(typed.types().kind(ty), TypeKind::Record(_))
         && source_type_layout(typed, ty).0 > 16
     {
