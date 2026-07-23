@@ -15,6 +15,7 @@ use crate::diagnostics::{
     UnknownLabel,
 };
 use crate::lang_options::{LangOptions, StdVersion};
+use crate::lexer::decode_character_constant;
 
 mod references;
 use references::*;
@@ -2194,11 +2195,20 @@ impl Analyzer<'_> {
     }
 
     fn constant_value(&self, node: NodeId, kind: AstKind) -> Option<i64> {
-        if kind == AstKind::Int {
-            let AstLeaf::Int(value) = self.ast.get_leaf_data(node)? else {
-                return None;
-            };
-            return Some(value.value.to_i64());
+        match kind {
+            AstKind::Int => {
+                let AstLeaf::Int(value) = self.ast.get_leaf_data(node)? else {
+                    return None;
+                };
+                return Some(value.value.to_i64());
+            }
+            AstKind::Character => {
+                let AstLeaf::Character(value) = self.ast.get_leaf_data(node)? else {
+                    return None;
+                };
+                return decode_character_constant(value);
+            }
+            _ => {}
         }
         let children = self.ast.children(node).collect::<Vec<_>>();
         let child_constant = |child| {

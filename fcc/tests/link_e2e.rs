@@ -708,6 +708,16 @@ fn enum_constants_evaluate_comparison_logical_and_conditional_expressions() {
 }
 
 #[test]
+fn enum_constants_accept_character_constants() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "enum Character { Letter = 'A', Newline = '\\n' }; int main(void) { return Letter == 65 && Newline == 10 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
 fn escaped_character_constant_executes_through_driver() {
     if !cc_available() {
         return;
