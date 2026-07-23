@@ -30,8 +30,9 @@ double call_pressured(double a, double b, double c, double d, double e, double f
 // ASM: ldr {{d[0-9]+}}, [sp, 48]
 // ASM: ldr {{d[0-9]+}}, [sp, 56]
 // ASM-LABEL: call_pressured:
-// ASM: str {{d[0-9]+}}, [sp, 0]
-// ASM: str {{d[0-9]+}}, [sp, 8]
-// ASM: str {{d[0-9]+}}, [sp, 16]
-// ASM: str {{d[0-9]+}}, [sp, 24]
+// ASM: str {{d[0-9]+}}, [sp, -32]
+// ASM: str {{d[0-9]+}}, [sp, -24]
+// ASM: str {{d[0-9]+}}, [sp, -16]
+// ASM: str {{d[0-9]+}}, [sp, -8]
+// ASM: sub sp, sp, 32
 // ASM: bl pressured

@@ -27,6 +27,7 @@ long call_pressured(long a, long b, long c, long d, long e, long f, long g,
 // ASM: ldr {{x[0-9]+}}, [sp, 16]
 // ASM: ldr {{x[0-9]+}}, [sp, 24]
 // ASM-LABEL: call_pressured:
-// ASM: str {{x[0-9]+}}, [sp, 0]
-// ASM: str {{x[0-9]+}}, [sp, 8]
+// ASM: str {{x[0-9]+}}, [sp, -16]
+// ASM: str {{x[0-9]+}}, [sp, -8]
+// ASM: sub sp, sp, 16
 // ASM: bl pressured

@@ -27,9 +27,9 @@ long forward_large(struct Large value, long tail) {
 // ASM-DAG: mov {{.*}}, [rsp + 56]
 // ASM: add {{.*}}, rdi
 // ASM-LABEL: forward_large:
-// ASM: add rsp, -40
-// ASM: mov [rsp + 0], {{.*}}
-// ASM: mov [rsp + 8], {{.*}}
-// ASM: mov [rsp + 16], {{.*}}
+// ASM: mov [rsp + -40], {{.*}}
+// ASM: mov [rsp + -32], {{.*}}
+// ASM: mov [rsp + -24], {{.*}}
 // ASM: mov rdi, {{.*}}
+// ASM: add rsp, -40
 // ASM: call consume_large
