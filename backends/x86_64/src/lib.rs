@@ -769,20 +769,12 @@ mod isa {
             outgoing_size: u32,
         ) -> Vec<Box<dyn Operation>> {
             let reserved = i64::from(outgoing_size) + 8;
-            vec![
-                Box::new(
-                    AddImmOpBuilder::new(context)
-                        .attr("dst", phys(abi.sp.0, abi.sp.1))
-                        .attr("imm", AttributeValue::Int(-reserved))
-                        .build(),
-                ),
-                Box::new(
-                    MovImm32OpBuilder::new(context)
-                        .attr("dst", phys(RegClass::GPR32.id(), 0))
-                        .attr("imm", AttributeValue::Int(0))
-                        .build(),
-                ),
-            ]
+            vec![Box::new(
+                AddImmOpBuilder::new(context)
+                    .attr("dst", phys(abi.sp.0, abi.sp.1))
+                    .attr("imm", AttributeValue::Int(-reserved))
+                    .build(),
+            )]
         }
 
         fn call_suffix(
@@ -798,6 +790,20 @@ mod isa {
                     .attr("imm", AttributeValue::Int(reserved))
                     .build(),
             )]
+        }
+
+        fn variadic_float_count(
+            &self,
+            context: &tir::Context,
+            register: tir::backend::liveness::PhysReg,
+            count: usize,
+        ) -> Result<Box<dyn Operation>, tir::PassError> {
+            Ok(Box::new(
+                MovImm32OpBuilder::new(context)
+                    .attr("dst", phys(RegClass::GPR32.id(), register.1))
+                    .attr("imm", AttributeValue::Int(count as i64))
+                    .build(),
+            ))
         }
     }
 

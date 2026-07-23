@@ -1,0 +1,11 @@
+// RUN: tir opt %s | filecheck %s
+
+module {
+  func @caller(%0: !f64) -> !i32 {
+    %1 = call @consume variadic 1(%0 : !f64) -> !i32
+    return %1
+  }
+  module_end
+}
+
+// CHECK: %{{[0-9]+}} = call @consume variadic 1(%{{[0-9]+}} : !f64) -> !i32

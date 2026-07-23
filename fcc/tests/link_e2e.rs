@@ -123,6 +123,19 @@ int main(void) { puts("fcc output"); return 0; }
     assert_eq!(output.stdout, b"fcc output\n");
 }
 
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn sysv_variadic_double_call_matches_host_compiler() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        r#"int printf(const char *format, ...);
+int main(void) { printf("%.1f\n", 3.5); return 0; }
+"#,
+    );
+}
+
 #[test]
 fn compares_program_with_host_compiler() {
     if !cc_available() {

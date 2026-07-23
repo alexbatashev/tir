@@ -2704,10 +2704,13 @@ impl FnCodegen<'_> {
                             elem,
                         }
                     } else {
-                        let result = self
-                            .builder
-                            .insert(b::call(self.context, args, name.as_str(), sig.ret.ty).build())
-                            .result();
+                        let call = b::call(self.context, args, name.as_str(), sig.ret.ty);
+                        let call = if sig.varargs {
+                            call.variadic(sig.params.len())
+                        } else {
+                            call
+                        };
+                        let result = self.builder.insert(call.build()).result();
                         if let Some(pieces) = sig.ret.aggregate.as_deref() {
                             let (size, align) = source_type_layout(self.typed, source_ty);
                             let (abi_size, abi_align) = abi_storage_layout(self.context, pieces)
