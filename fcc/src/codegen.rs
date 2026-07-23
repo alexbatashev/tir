@@ -498,7 +498,13 @@ fn constant_initializer_data(
 
 fn aggregate_initializer_values(ast: &Ast, initializer: NodeId) -> Vec<(usize, NodeId)> {
     let mut next_field = 0;
-    ast.children(initializer)
+    let values = if ast.get_node(initializer).kind == AstKind::DesignatedInitializer {
+        vec![initializer]
+    } else {
+        ast.children(initializer).collect()
+    };
+    values
+        .into_iter()
         .filter_map(|value| {
             if ast.get_node(value).kind == AstKind::DesignatedInitializer {
                 let index = ast.get_annotation(value)?.member_index?;

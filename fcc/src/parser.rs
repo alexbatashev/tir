@@ -748,41 +748,37 @@ where
     recursive(|initializer| {
         let field_designator = just(Token::Dot)
             .ignore_then(ident())
-            .then_ignore(just(Token::Assign))
-            .then(initializer.clone())
-            .map_with(
-                |(name, value), e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
-                    let tok = e.span().start;
-                    let st = &mut e.state().0;
-                    let id = st.add(AstKind::DesignatedInitializer, tok);
-                    st.ast.set_leaf_data(
-                        id,
-                        AstLeaf::DesignatedInitializer(InitializerDesignator::Field(name)),
-                    );
-                    st.ast.add_edge(id, value);
-                    id
-                },
-            );
+            .map(|name| (InitializerDesignator::Field(name), None));
         let index_designator = expr()
             .delimited_by(just(Token::LBracket), just(Token::RBracket))
+            .map(|index| (InitializerDesignator::Index, Some(index)));
+        let designated = field_designator
+            .or(index_designator)
+            .repeated()
+            .at_least(1)
+            .collect::<Vec<_>>()
             .then_ignore(just(Token::Assign))
             .then(initializer.clone())
             .map_with(
-                |(index, value), e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
+                |(designators, value), e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
                     let tok = e.span().start;
                     let st = &mut e.state().0;
-                    let id = st.add(AstKind::DesignatedInitializer, tok);
-                    st.ast.set_leaf_data(
-                        id,
-                        AstLeaf::DesignatedInitializer(InitializerDesignator::Index),
-                    );
-                    st.ast.add_edge(id, index);
-                    st.ast.add_edge(id, value);
-                    id
+                    designators
+                        .into_iter()
+                        .rev()
+                        .fold(value, |selected, (designator, index)| {
+                            let id = st.add(AstKind::DesignatedInitializer, tok);
+                            st.ast
+                                .set_leaf_data(id, AstLeaf::DesignatedInitializer(designator));
+                            if let Some(index) = index {
+                                st.ast.add_edge(id, index);
+                            }
+                            st.ast.add_edge(id, selected);
+                            id
+                        })
                 },
             );
-        field_designator
-            .or(index_designator)
+        designated
             .or(initializer.clone())
             .separated_by(just(Token::Comma))
             .allow_trailing()

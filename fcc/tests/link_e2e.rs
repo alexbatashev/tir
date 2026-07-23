@@ -1457,6 +1457,26 @@ fn nested_record_initializer_zero_fills_fields() {
 }
 
 #[test]
+fn chained_field_designator_selects_nested_member() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "struct Inner { int left; int right; }; struct Outer { int tag; struct Inner inner; }; int main(void) { struct Outer value = {.inner.right = 42}; return value.tag == 0 && value.inner.left == 0 && value.inner.right == 42 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn chained_field_and_index_designators_select_nested_member() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "struct Row { int left; int right; }; struct Table { struct Row rows[2]; }; int main(void) { struct Table value = {.rows[1].right = 42}; return value.rows[0].right == 0 && value.rows[1].left == 0 && value.rows[1].right == 42 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
 fn initialized_scalar_global_is_read_by_main() {
     if !cc_available() {
         return;
