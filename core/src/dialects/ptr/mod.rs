@@ -18,8 +18,8 @@ use crate::Any as AnyConstraint;
 
 pub mod ops {
     pub use super::{
-        AllocaOp, LoadOp, MemcpyOp, PtrAddOp, PtrDiffOp, StoreOp, alloca, load, memcpy, ptradd,
-        ptrdiff, store,
+        AllocaOp, LoadOp, MemcpyOp, MemsetOp, PtrAddOp, PtrDiffOp, StoreOp, alloca, load, memcpy,
+        memset, ptradd, ptrdiff, store,
     };
 }
 
@@ -33,6 +33,7 @@ dialect! {
             LoadOp,
             StoreOp,
             MemcpyOp,
+            MemsetOp,
         ],
         types: [PtrType],
     }
@@ -272,6 +273,44 @@ impl tir::Verifiable for MemcpyOp {
     }
 }
 
+operation! {
+    MemsetOp {
+        name: "memset",
+        dialect: "ptr",
+        verifier: "true",
+        operands: O {
+            destination: "crate::ptr::PtrType",
+            value: "crate::builtin::IntegerType",
+            size: "crate::builtin::IntegerType",
+        },
+        interfaces: [MemoryWrite],
+    }
+}
+
+impl tir::Verifiable for MemsetOp {
+    fn verify_impl(&self, context: &Context) -> Result<(), Error> {
+        let value_type = context.get_type_data(context.get_value(self.operands()[1]).ty());
+        let value_type = (value_type.as_ref() as &dyn Any)
+            .downcast_ref::<crate::builtin::IntegerType>()
+            .unwrap();
+        if value_type.width() != 8 {
+            return Err(Error::VerificationError(
+                "ptr.memset value must have type i8".to_string(),
+            ));
+        }
+        let size_type = context.get_type_data(context.get_value(self.operands()[2]).ty());
+        let size_type = (size_type.as_ref() as &dyn Any)
+            .downcast_ref::<crate::builtin::IntegerType>()
+            .unwrap();
+        if size_type.width() != 64 {
+            return Err(Error::VerificationError(
+                "ptr.memset size must have type i64".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl PromotableAllocation for AllocaOp {
     fn promoted_location(&self) -> tir::ValueId {
         self.result()
@@ -299,6 +338,16 @@ impl MemoryWrite for StoreOp {
 }
 
 impl MemoryWrite for MemcpyOp {
+    fn write_location(&self) -> tir::ValueId {
+        self.operands()[0]
+    }
+
+    fn written_value(&self) -> tir::ValueId {
+        self.operands()[1]
+    }
+}
+
+impl MemoryWrite for MemsetOp {
     fn write_location(&self) -> tir::ValueId {
         self.operands()[0]
     }
