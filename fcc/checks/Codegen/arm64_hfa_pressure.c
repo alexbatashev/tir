@@ -1,0 +1,37 @@
+// RUN: fcc compile --march arm64 --mabi aapcs64 --stage ir -o - %s | filecheck %s
+// RUN: fcc compile --march arm64 --mabi aapcs64 --stage asm -o - %s | filecheck %s --check-prefix=ASM
+
+struct Quad {
+    double values[4];
+};
+
+double pressured(double a, double b, double c, double d, double e, double f,
+                 struct Quad quad) {
+    return a + quad.values[0];
+}
+
+double call_pressured(double a, double b, double c, double d, double e, double f,
+                      struct Quad quad) {
+    return pressured(a, b, c, d, e, f, quad);
+}
+
+// CHECK: func @pressured(
+// CHECK-SAME: !f64, %{{[0-9]+}}: !f64, %{{[0-9]+}}: !f64,
+// CHECK-SAME: !f64, %{{[0-9]+}}: !f64, %{{[0-9]+}}: !f64,
+// CHECK-SAME: !tuple<!f64, !f64, !f64, !f64>) -> !f64 {
+// CHECK: func @call_pressured(
+// CHECK-SAME: !tuple<!f64, !f64, !f64, !f64>) -> !f64 {
+// CHECK: make_tuple {{.*}} : !tuple<!f64, !f64, !f64, !f64>
+// CHECK: call @pressured({{.*}} : !f64, !f64, !f64, !f64, !f64, !f64, !tuple<!f64, !f64, !f64, !f64>) -> !f64
+
+// ASM-LABEL: pressured:
+// ASM: ldr {{d[0-9]+}}, [sp, 32]
+// ASM: ldr {{d[0-9]+}}, [sp, 40]
+// ASM: ldr {{d[0-9]+}}, [sp, 48]
+// ASM: ldr {{d[0-9]+}}, [sp, 56]
+// ASM-LABEL: call_pressured:
+// ASM: str {{d[0-9]+}}, [sp, 0]
+// ASM: str {{d[0-9]+}}, [sp, 8]
+// ASM: str {{d[0-9]+}}, [sp, 16]
+// ASM: str {{d[0-9]+}}, [sp, 24]
+// ASM: bl pressured

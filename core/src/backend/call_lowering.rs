@@ -1,10 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
 use tir::attributes::{AttributeValue, RegisterAttr};
-use tir::builtin::{CallOp, IndirectCallOp, TupleGetOp, TupleType, UnitType};
-use tir::{Context, Operation, OperationRef, PassError, Rewriter, ValueId};
+use tir::builtin::{CallOp, IndirectCallOp, MakeTupleOp, TupleGetOp, TupleType, UnitType};
+use tir::{Context, OpId, Operation, OperationRef, PassError, Rewriter, ValueId};
 
-use crate::backend::abi::{AbiInfo, Overflow, ValueKind, value_kind};
+use crate::backend::abi::{AbiInfo, Overflow, ValueKind, exhaust_argument_registers, value_kind};
 use crate::backend::liveness::PhysReg;
 
 pub trait CallEmitter: Send + Sync {
@@ -70,17 +70,64 @@ impl CallLowering {
             return Ok(false);
         };
 
+        let mut tuple_arguments = Vec::new();
+        let mut lowered_arguments = Vec::with_capacity(args.len());
+        for arg in args {
+            let ty = context.get_type_data(context.get_value(arg).ty());
+            if (ty.as_ref() as &dyn std::any::Any)
+                .downcast_ref::<TupleType>()
+                .is_none()
+            {
+                lowered_arguments.push(vec![arg]);
+                continue;
+            }
+            let defining_op = context.get_value(arg).defining_op().ok_or_else(|| {
+                PassError::InvalidRuleSet(
+                    "tuple call argument must be produced by make_tuple".to_string(),
+                )
+            })?;
+            let tuple_instance = context.get_op(defining_op);
+            let tuple = tuple_instance
+                .clone()
+                .as_op::<MakeTupleOp>()
+                .ok_or_else(|| {
+                    PassError::InvalidRuleSet(
+                        "tuple call argument must be produced by make_tuple".to_string(),
+                    )
+                })?;
+            let uses = context.value_uses(arg);
+            if uses.len() != 1 || uses[0].op() != op.op().id {
+                return Err(PassError::InvalidRuleSet(
+                    "tuple call argument must only be consumed by its call".to_string(),
+                ));
+            }
+            lowered_arguments.push(tuple.operands().to_vec());
+            tuple_arguments.push(defining_op);
+        }
+
         let mut next_slot = HashMap::new();
-        let mut argument_locations = Vec::with_capacity(args.len());
+        let mut argument_values = Vec::new();
+        let mut argument_locations = Vec::new();
         let mut stack_args = 0u32;
-        for &arg in &args {
-            let kind = value_kind(context, arg);
-            if let Some(register) = next_register(self.abi, kind, &mut next_slot) {
-                argument_locations.push(ArgumentLocation::Register(register));
-            } else {
-                let class = stack_class(self.abi, kind).ok_or_else(|| {
+        for values in lowered_arguments {
+            let mut trial_slots = next_slot.clone();
+            let direct = values
+                .iter()
+                .map(|&value| next_register(self.abi, value_kind(context, value), &mut trial_slots))
+                .collect::<Option<Vec<_>>>();
+            if let Some(registers) = direct {
+                next_slot = trial_slots;
+                argument_values.extend(values);
+                argument_locations.extend(registers.into_iter().map(ArgumentLocation::Register));
+                continue;
+            }
+
+            for &value in &values {
+                exhaust_argument_registers(self.abi, value_kind(context, value), &mut next_slot);
+                let class = stack_class(self.abi, value_kind(context, value)).ok_or_else(|| {
                     PassError::InvalidRuleSet("ABI has no argument sequence".to_string())
                 })?;
+                argument_values.push(value);
                 argument_locations.push(ArgumentLocation::Stack {
                     class,
                     offset: i64::from(stack_args * self.abi.stack.slot_size),
@@ -121,8 +168,8 @@ impl CallLowering {
             Callee::Direct(_) => None,
             Callee::Indirect(value) => Some(detach(rewriter, value, indirect_class)?),
         };
-        let mut fresh_args = Vec::with_capacity(args.len());
-        for (&arg, location) in args.iter().zip(&argument_locations) {
+        let mut fresh_args = Vec::with_capacity(argument_values.len());
+        for (&arg, location) in argument_values.iter().zip(&argument_locations) {
             fresh_args.push(detach(rewriter, arg, location.class())?);
         }
 
@@ -279,11 +326,13 @@ impl CallLowering {
                 ))?;
             }
             rewriter.erase_op(op)?;
+            erase_tuple_arguments(context, rewriter, &tuple_arguments)?;
             return Ok(true);
         }
 
         if context.get_value(result).ty() == UnitType::new(context) {
             rewriter.erase_op(op)?;
+            erase_tuple_arguments(context, rewriter, &tuple_arguments)?;
             return Ok(true);
         }
 
@@ -310,8 +359,27 @@ impl CallLowering {
             physical_reg(return_reg),
         );
         rewriter.replace_op(op, copy.as_ref())?;
+        erase_tuple_arguments(context, rewriter, &tuple_arguments)?;
         Ok(true)
     }
+}
+
+fn erase_tuple_arguments(
+    context: &Context,
+    rewriter: &mut Rewriter,
+    tuple_arguments: &[OpId],
+) -> Result<(), PassError> {
+    for &tuple in tuple_arguments {
+        let block = context.parent_block(tuple).ok_or_else(|| {
+            PassError::InvalidRuleSet("make_tuple has no parent block".to_string())
+        })?;
+        rewriter.erase_op(&OperationRef::new(
+            context.get_op(tuple),
+            Some(context.get_block(block)),
+            None,
+        ))?;
+    }
+    Ok(())
 }
 
 enum Callee {

@@ -138,12 +138,18 @@ fn lower_func_and_return_to_asm_symbol(
     op: &tir::OperationRef,
     rewriter: &mut tir::Rewriter,
 ) -> Result<bool, tir::PassError> {
-    tir::backend::lower::lower_function_and_return(
-        context,
-        op,
-        rewriter,
-        |_| Ok(RegClass::GPR.id()),
-    )
+    tir::backend::lower::lower_function_and_return(context, op, rewriter, |ty| {
+        let data = context.get_type_data(ty);
+        let data = data.as_ref() as &dyn std::any::Any;
+        if data
+            .downcast_ref::<tir::builtin::FloatType>()
+            .is_some_and(|float| float.bit_width() == 64)
+        {
+            Ok(RegClass::FPR64.id())
+        } else {
+            Ok(RegClass::GPR.id())
+        }
+    })
 }
 
 impl Arm64Dialect {
@@ -457,7 +463,16 @@ impl tir::backend::regalloc::TargetRegAlloc for Arm64RegAlloc {
         frame: &tir::backend::liveness::PhysReg,
         offset: i64,
     ) -> Result<Box<dyn Operation>, tir::PassError> {
-        if dst.0.name() != "GPR" {
+        if dst.0 == RegClass::FPR64.id() {
+            return Ok(Box::new(
+                LoadFloatDoubleOpBuilder::new(context)
+                    .attr("ft", phys(dst))
+                    .attr("rn", phys(frame))
+                    .attr("imm", tir::attributes::AttributeValue::Int(offset))
+                    .build(),
+            ));
+        }
+        if dst.0 != RegClass::GPR.id() {
             return Err(tir::PassError::InvalidRuleSet(format!(
                 "arm64 stack arguments for register class {} are not supported",
                 dst.0.name()

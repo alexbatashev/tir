@@ -91,6 +91,7 @@ struct Signature {
 #[derive(Clone)]
 struct AbiParameter {
     pieces: Vec<AbiPiece>,
+    grouped: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -152,15 +153,29 @@ impl AbiRegisterUsage {
             }
         }
     }
+
+    fn consume_group(&mut self, context: &Context, target: TargetProfile, pieces: &[AbiPiece]) {
+        if self.has_direct_registers(context, target, pieces) {
+            self.consume(context, target, pieces);
+        } else {
+            self.floats = target.argument_registers(ValueKind::Float);
+        }
+    }
 }
 
 impl Signature {
     fn argument_types(&self, context: &Context) -> Vec<TypeId> {
-        let mut args = self
-            .params
-            .iter()
-            .flat_map(|parameter| parameter.pieces.iter().map(|piece| piece.ty))
-            .collect::<Vec<_>>();
+        let mut args = Vec::new();
+        for parameter in &self.params {
+            if parameter.grouped {
+                args.push(TupleType::new(
+                    context,
+                    parameter.pieces.iter().map(|piece| piece.ty).collect(),
+                ));
+            } else {
+                args.extend(parameter.pieces.iter().map(|piece| piece.ty));
+            }
+        }
         if self.varargs {
             args.push(VarArgsType::new(context));
         }
@@ -561,29 +576,31 @@ fn classify_abi_parameter(
 ) -> AbiParameter {
     let riscv_pieces = classify_riscv_fp_aggregate(context, typed, ty);
     let hfa_pieces = classify_aapcs64_hfa(context, typed, ty);
-    let pieces = match riscv_pieces {
+    let (pieces, grouped) = match riscv_pieces {
         Some(pieces) if register_usage.has_direct_registers(context, typed.target(), &pieces) => {
-            Some(pieces)
+            (Some(pieces), false)
         }
-        Some(_) => classify_integer_carriers(context, typed, ty),
+        Some(_) => (classify_integer_carriers(context, typed, ty), false),
         None => match hfa_pieces {
-            Some(pieces)
-                if register_usage.has_direct_registers(context, typed.target(), &pieces) =>
-            {
-                Some(pieces)
+            Some(pieces) => {
+                let grouped = pieces.len() > 1;
+                (Some(pieces), grouped)
             }
-            Some(_) => None,
-            None => classify_integer_aggregate(context, typed, ty),
+            None => (classify_integer_aggregate(context, typed, ty), false),
         },
-    }
-    .unwrap_or_else(|| {
+    };
+    let pieces = pieces.unwrap_or_else(|| {
         vec![AbiPiece {
             offset: 0,
             ty: lower_type(context, typed, ty),
         }]
     });
-    register_usage.consume(context, typed.target(), &pieces);
-    AbiParameter { pieces }
+    if grouped {
+        register_usage.consume_group(context, typed.target(), &pieces);
+    } else {
+        register_usage.consume(context, typed.target(), &pieces);
+    }
+    AbiParameter { pieces, grouped }
 }
 
 fn classify_riscv_fp_aggregate(
@@ -778,12 +795,23 @@ fn lower_function(
 
     // Entry block arguments carry the incoming parameter values; parameters are
     // the function node's leading children.
-    let param_values = signature
-        .params
-        .iter()
-        .flat_map(|parameter| parameter.pieces.iter())
-        .map(|piece| context.create_value(piece.ty, None))
-        .collect::<Vec<_>>();
+    let mut param_values = Vec::new();
+    for parameter in &signature.params {
+        if parameter.grouped {
+            let ty = TupleType::new(
+                context,
+                parameter.pieces.iter().map(|piece| piece.ty).collect(),
+            );
+            param_values.push(context.create_value(ty, None));
+        } else {
+            param_values.extend(
+                parameter
+                    .pieces
+                    .iter()
+                    .map(|piece| context.create_value(piece.ty, None)),
+            );
+        }
+    }
     let param_ids: Vec<ValueId> = param_values.iter().map(|v| v.id()).collect();
 
     let region = context.create_region();
@@ -1261,11 +1289,34 @@ impl FnCodegen<'_> {
             let elem = lower_type(self.context, self.typed, source_ty);
             let (size, align) = source_type_layout(self.typed, source_ty);
             let slot = self.alloca(elem, size, align);
-            for piece in &abi_param.pieces {
+            let values = if abi_param.grouped {
+                let tuple = param_ids[abi_value];
+                abi_value += 1;
+                abi_param
+                    .pieces
+                    .iter()
+                    .enumerate()
+                    .map(|(index, piece)| {
+                        self.builder
+                            .insert(
+                                b::TupleGetOpBuilder::new(self.context)
+                                    .tuple(tuple)
+                                    .attr("index", AttributeValue::UInt(index as u64))
+                                    .result_type(piece.ty)
+                                    .build(),
+                            )
+                            .result()
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                let values = param_ids[abi_value..abi_value + abi_param.pieces.len()].to_vec();
+                abi_value += abi_param.pieces.len();
+                values
+            };
+            for (piece, value) in abi_param.pieces.iter().zip(values) {
                 let address = self.offset_address_ir(slot.ptr, piece.offset, piece.ty);
                 self.builder
-                    .insert(p::store(self.context, param_ids[abi_value], address).build());
-                abi_value += 1;
+                    .insert(p::store(self.context, value, address).build());
             }
             self.locals.insert(node_entity(self.typed, param), slot);
         }
@@ -1910,7 +1961,7 @@ impl FnCodegen<'_> {
                     "non-addressable aggregate argument".to_string(),
                 ));
             };
-            return Ok(parameter
+            let values = parameter
                 .pieces
                 .iter()
                 .map(|piece| {
@@ -1919,7 +1970,24 @@ impl FnCodegen<'_> {
                         .insert(p::load(self.context, address, piece.ty).build())
                         .result()
                 })
-                .collect());
+                .collect::<Vec<_>>();
+            if parameter.grouped {
+                let ty = TupleType::new(
+                    self.context,
+                    parameter.pieces.iter().map(|piece| piece.ty).collect(),
+                );
+                return Ok(vec![
+                    self.builder
+                        .insert(
+                            b::MakeTupleOpBuilder::new(self.context)
+                                .elements(values)
+                                .result_type(ty)
+                                .build(),
+                        )
+                        .result(),
+                ]);
+            }
+            return Ok(values);
         }
         Ok(vec![self.materialize(expression)])
     }

@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use crate::backend::liveness::PhysReg;
 use crate::{Context, TypeId, ValueId};
 
@@ -72,4 +74,27 @@ pub struct AbiInfo {
     pub caller_saved: &'static [PhysReg],
     pub reserved: &'static [PhysReg],
     pub classifier: ClassifierKind,
+}
+
+pub(crate) fn exhaust_argument_registers(
+    abi: &AbiInfo,
+    mut kind: ValueKind,
+    next_slot: &mut HashMap<ValueKind, usize>,
+) {
+    let mut visited = HashSet::new();
+    while visited.insert(kind) {
+        let sequence = match abi.args.iter().find(|sequence| sequence.kind == kind) {
+            Some(sequence) => sequence,
+            None if kind != ValueKind::Int => {
+                kind = ValueKind::Int;
+                continue;
+            }
+            None => return,
+        };
+        next_slot.insert(kind, sequence.regs.len());
+        match sequence.overflow {
+            Overflow::Chain(next) => kind = next,
+            Overflow::Stack => return,
+        }
+    }
 }

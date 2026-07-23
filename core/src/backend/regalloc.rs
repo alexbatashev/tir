@@ -1370,6 +1370,52 @@ fn next_abi_register(
     }
 }
 
+struct IncomingRegisterPrecolor<'a> {
+    context: &'a Context,
+    target: &'a dyn TargetRegAlloc,
+    rewriter: &'a mut Rewriter,
+    entry: Option<&'a OperationRef>,
+    precolor: &'a mut HashMap<u32, PhysReg>,
+    has_call: bool,
+}
+
+impl IncomingRegisterPrecolor<'_> {
+    fn apply(
+        &mut self,
+        attribute: &mut AttributeValue,
+        body: u32,
+        pin: PhysReg,
+    ) -> Result<(), PassError> {
+        if !self.has_call {
+            self.precolor.insert(body, pin);
+            return Ok(());
+        }
+        let ty = self.context.get_value(ValueId::from_number(body)).ty();
+        let incoming = self.context.create_value(ty, None).id().number();
+        *attribute = AttributeValue::Register(RegisterAttr::Virtual {
+            id: incoming,
+            class: Some(pin.0),
+        });
+        let copy = self.target.emit_copy(self.context, pin.0, body, incoming);
+        self.rewriter.insert_op_before(
+            self.entry.ok_or_else(|| {
+                PassError::InvalidRuleSet(
+                    "function with register arguments has no entry operation".to_string(),
+                )
+            })?,
+            copy.as_ref(),
+        )?;
+        if let Some(previous) = self.precolor.insert(incoming, pin)
+            && previous != pin
+        {
+            return Err(PassError::InvalidRuleSet(format!(
+                "argument vreg {incoming} pinned to conflicting registers {previous:?} and {pin:?}"
+            )));
+        }
+        Ok(())
+    }
+}
+
 fn abi_precolor(
     context: &Context,
     op: &OperationRef,
@@ -1409,47 +1455,79 @@ fn abi_precolor(
             .first()
             .and_then(|block| context.get_block(*block).op_ids().first().copied())
             .map(|first| op_ref_in(context, blocks[0], first));
-        for attr in &mut args {
-            let AttributeValue::Register(RegisterAttr::Virtual { id, class }) = attr else {
+        let mut register_precolor = IncomingRegisterPrecolor {
+            context,
+            target,
+            rewriter,
+            entry: entry.as_ref(),
+            precolor: &mut precolor,
+            has_call,
+        };
+        for attribute in &mut args {
+            if let AttributeValue::Array(group) = attribute {
+                let members = group
+                    .iter()
+                    .map(|member| {
+                        let AttributeValue::Register(RegisterAttr::Virtual { id, class }) = member
+                        else {
+                            return Err(PassError::InvalidRuleSet(
+                                "ABI argument group contains a non-register".to_string(),
+                            ));
+                        };
+                        let class = class
+                            .or_else(|| info.default_integer_class(abi))
+                            .ok_or_else(|| {
+                                PassError::InvalidRuleSet(
+                                    "ABI argument group has no register class".to_string(),
+                                )
+                            })?;
+                        Ok((*id, class, abi_value_kind(context, *id)))
+                    })
+                    .collect::<Result<Vec<_>, PassError>>()?;
+                let mut trial_slots = next_abi_slot.clone();
+                let pins = members
+                    .iter()
+                    .map(|&(_, class, kind)| next_abi_register(abi, class, kind, &mut trial_slots))
+                    .collect::<Option<Vec<_>>>();
+                if let Some(pins) = pins {
+                    next_abi_slot = trial_slots;
+                    for ((body, _, _), (member, pin)) in
+                        members.into_iter().zip(group.iter_mut().zip(pins))
+                    {
+                        register_precolor.apply(member, body, pin)?;
+                    }
+                } else {
+                    for (body, class, kind) in members {
+                        crate::backend::abi::exhaust_argument_registers(
+                            abi,
+                            kind,
+                            &mut next_abi_slot,
+                        );
+                        stack_args.push(IncomingStackArg {
+                            vreg: body,
+                            class,
+                            stack_index: next_stack_slot,
+                        });
+                        next_stack_slot += 1;
+                    }
+                }
+                continue;
+            }
+
+            let (body, class) = match attribute {
+                AttributeValue::Register(RegisterAttr::Virtual { id, class }) => (*id, *class),
+                _ => continue,
+            };
+            let Some(class) = class.or_else(|| info.default_integer_class(abi)) else {
                 continue;
             };
-            let Some(rc) = class.or_else(|| info.default_integer_class(abi)) else {
-                continue;
-            };
-            let kind = abi_value_kind(context, *id);
-            let pin = next_abi_register(abi, rc, kind, &mut next_abi_slot);
-            if let Some(pin) = pin {
-                if !has_call {
-                    precolor.insert(*id, pin);
-                    continue;
-                }
-                let body = *id;
-                let ty = context.get_value(ValueId::from_number(body)).ty();
-                let incoming = context.create_value(ty, None).id().number();
-                *attr = AttributeValue::Register(RegisterAttr::Virtual {
-                    id: incoming,
-                    class: Some(pin.0),
-                });
-                let copy = target.emit_copy(context, pin.0, body, incoming);
-                rewriter.insert_op_before(
-                    entry.as_ref().ok_or_else(|| {
-                        PassError::InvalidRuleSet(
-                            "function with register arguments has no entry operation".to_string(),
-                        )
-                    })?,
-                    copy.as_ref(),
-                )?;
-                if let Some(prev) = precolor.insert(incoming, pin)
-                    && prev != pin
-                {
-                    return Err(PassError::InvalidRuleSet(format!(
-                        "argument vreg {incoming} pinned to conflicting registers {prev:?} and {pin:?}"
-                    )));
-                }
+            let kind = abi_value_kind(context, body);
+            if let Some(pin) = next_abi_register(abi, class, kind, &mut next_abi_slot) {
+                register_precolor.apply(attribute, body, pin)?;
             } else {
                 stack_args.push(IncomingStackArg {
-                    vreg: *id,
-                    class: rc,
+                    vreg: body,
+                    class,
                     stack_index: next_stack_slot,
                 });
                 next_stack_slot += 1;

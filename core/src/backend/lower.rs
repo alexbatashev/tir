@@ -22,7 +22,7 @@ pub fn lower_function_and_return(
 ) -> Result<bool, PassError> {
     use tir::Operation;
     use tir::attributes::{AttributeValue, RegisterAttr};
-    use tir::builtin::{FuncOp, MakeTupleOp, ReturnOp, TupleType};
+    use tir::builtin::{FuncOp, MakeTupleOp, ReturnOp, TupleGetOp, TupleType};
 
     if let Some(func) = op.as_op::<FuncOp>() {
         let body = func.body();
@@ -41,23 +41,83 @@ pub fn lower_function_and_return(
                 _ => None,
             })
             .unwrap_or_else(|| "unknown".to_string());
-        let arguments = func
-            .body()
-            .arguments()
-            .iter()
-            .map(|argument| {
-                Ok(AttributeValue::Register(RegisterAttr::Virtual {
+        let mut tuple_extracts = Vec::new();
+        let mut arguments = Vec::new();
+        for argument in func.body().arguments() {
+            let ty = context.get_type_data(argument.ty());
+            let Some(tuple) = (ty.as_ref() as &dyn std::any::Any).downcast_ref::<TupleType>()
+            else {
+                arguments.push(AttributeValue::Register(RegisterAttr::Virtual {
                     id: argument.id().number(),
                     class: Some(argument_class(argument.ty())?),
-                }))
-            })
-            .collect::<Result<Vec<_>, PassError>>()?;
+                }));
+                continue;
+            };
+
+            let element_types = tuple.elements(context);
+            let mut elements = vec![None; element_types.len()];
+            for usage in context.value_uses(argument.id()) {
+                if usage.operand_index() != Some(0) {
+                    return Err(PassError::InvalidRuleSet(
+                        "tuple function argument must only be consumed by tuple_get".to_string(),
+                    ));
+                }
+                let extract_instance = context.get_op(usage.op());
+                let extract = extract_instance
+                    .clone()
+                    .as_op::<TupleGetOp>()
+                    .ok_or_else(|| {
+                        PassError::InvalidRuleSet(
+                            "tuple function argument must only be consumed by tuple_get"
+                                .to_string(),
+                        )
+                    })?;
+                let Some(element) = elements.get_mut(extract.index()) else {
+                    return Err(PassError::InvalidRuleSet(
+                        "tuple_get index is out of bounds".to_string(),
+                    ));
+                };
+                if element.replace(extract.result()).is_some() {
+                    return Err(PassError::InvalidRuleSet(
+                        "tuple function argument element must be extracted once".to_string(),
+                    ));
+                }
+                let block = context.parent_block(usage.op()).ok_or_else(|| {
+                    PassError::InvalidRuleSet("tuple_get has no parent block".to_string())
+                })?;
+                tuple_extracts.push((usage.op(), block));
+            }
+
+            let group = element_types
+                .into_iter()
+                .zip(elements)
+                .map(|(ty, value)| {
+                    let value = value.ok_or_else(|| {
+                        PassError::InvalidRuleSet(
+                            "tuple function argument element must be extracted once".to_string(),
+                        )
+                    })?;
+                    Ok(AttributeValue::Register(RegisterAttr::Virtual {
+                        id: value.number(),
+                        class: Some(argument_class(ty)?),
+                    }))
+                })
+                .collect::<Result<Vec<_>, PassError>>()?;
+            arguments.push(AttributeValue::Array(group));
+        }
         let symbol = super::SymbolOpBuilder::new(context)
             .body(op.op().regions[0])
             .attr("name", AttributeValue::Str(name))
             .attr("arg_regs", AttributeValue::Array(arguments))
             .build();
         rewriter.replace_op(op, &symbol)?;
+        for (extract, block) in tuple_extracts {
+            rewriter.erase_op(&OperationRef::new(
+                context.get_op(extract),
+                Some(context.get_block(block)),
+                None,
+            ))?;
+        }
         return Ok(true);
     }
 
