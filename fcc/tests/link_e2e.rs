@@ -728,6 +728,16 @@ fn enum_constants_accept_sizeof_and_integer_casts() {
 }
 
 #[test]
+fn enum_constants_accept_immediately_cast_floating_constants() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "enum Value { Truncated = (int)3.75 }; int main(void) { return Truncated == 3 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
 fn escaped_character_constant_executes_through_driver() {
     if !cc_available() {
         return;

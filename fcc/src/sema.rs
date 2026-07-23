@@ -2216,6 +2216,12 @@ impl Analyzer<'_> {
                 .get_annotation(child)
                 .and_then(|info| info.constant)
         };
+        if let (AstKind::Cast, [child], TypeKind::Integer(integer)) =
+            (kind, children.as_slice(), self.types.kind(result_ty))
+            && let Some(AstLeaf::Float(value)) = self.ast.get_leaf_data(*child)
+        {
+            return self.cast_float_constant(value.value, *integer);
+        }
         match (kind, children.as_slice()) {
             (AstKind::LogAnd, [left, right]) => {
                 return child_constant(*left).and_then(|left| {
@@ -2301,6 +2307,26 @@ impl Analyzer<'_> {
             ((bits << shift) as i64) >> shift
         } else {
             bits as i64
+        }
+    }
+
+    fn cast_float_constant(&self, value: f64, kind: IntegerKind) -> Option<i64> {
+        if kind == IntegerKind::Bool {
+            return Some(i64::from(value != 0.0));
+        }
+        let value = value.trunc();
+        if !value.is_finite() {
+            return None;
+        }
+        let width = self.target.integer_width(kind);
+        if is_signed_integer(kind, self.target) {
+            let limit = 2_f64.powi((width - 1) as i32);
+            (-limit..limit).contains(&value).then_some(value as i64)
+        } else {
+            let limit = 2_f64.powi(width as i32);
+            (0.0..limit)
+                .contains(&value)
+                .then_some((value as u64) as i64)
         }
     }
 
