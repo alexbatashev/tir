@@ -551,6 +551,7 @@ fn lower_signature(
 fn classify_abi_return(context: &Context, typed: &TypedAst, ty: QualType) -> AbiReturn {
     if let Some(pieces) = classify_riscv_fp_aggregate(context, typed, ty)
         .or_else(|| classify_aapcs64_hfa(context, typed, ty))
+        .or_else(|| classify_aapcs64_composite(context, typed, ty))
         .or_else(|| classify_integer_aggregate(context, typed, ty))
     {
         let ty = match pieces.as_slice() {
@@ -576,6 +577,10 @@ fn classify_abi_parameter(
 ) -> AbiParameter {
     let riscv_pieces = classify_riscv_fp_aggregate(context, typed, ty);
     let hfa_pieces = classify_aapcs64_hfa(context, typed, ty);
+    let composite_pieces = hfa_pieces
+        .is_none()
+        .then(|| classify_aapcs64_composite(context, typed, ty))
+        .flatten();
     let (pieces, grouped) = match riscv_pieces {
         Some(pieces) if register_usage.has_direct_registers(context, typed.target(), &pieces) => {
             (Some(pieces), false)
@@ -586,7 +591,13 @@ fn classify_abi_parameter(
                 let grouped = pieces.len() > 1;
                 (Some(pieces), grouped)
             }
-            None => (classify_integer_aggregate(context, typed, ty), false),
+            None => match composite_pieces {
+                Some(pieces) => {
+                    let grouped = pieces.len() > 1;
+                    (Some(pieces), grouped)
+                }
+                None => (classify_integer_aggregate(context, typed, ty), false),
+            },
         },
     };
     let pieces = pieces.unwrap_or_else(|| {
@@ -661,6 +672,20 @@ fn classify_aapcs64_hfa(
         return None;
     }
     Some(pieces)
+}
+
+fn classify_aapcs64_composite(
+    context: &Context,
+    typed: &TypedAst,
+    ty: QualType,
+) -> Option<Vec<AbiPiece>> {
+    if !typed.target().uses_aapcs64_abi()
+        || !matches!(typed.types().kind(ty), TypeKind::Record(_))
+        || !matches!(source_type_layout(typed, ty).0, 8 | 16)
+    {
+        return None;
+    }
+    classify_integer_carriers(context, typed, ty)
 }
 
 fn flatten_aggregate_fields(
