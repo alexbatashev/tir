@@ -482,7 +482,9 @@ fn lower_signature(
 }
 
 fn classify_abi_return(context: &Context, typed: &TypedAst, ty: QualType) -> AbiReturn {
-    if let Some(pieces) = classify_integer_aggregate(context, typed, ty) {
+    if let Some(pieces) = classify_riscv_fp_aggregate(context, typed, ty)
+        .or_else(|| classify_integer_aggregate(context, typed, ty))
+    {
         let ty = match pieces.as_slice() {
             [piece] => piece.ty,
             pieces => TupleType::new(context, pieces.iter().map(|piece| piece.ty).collect()),
