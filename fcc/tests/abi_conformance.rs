@@ -80,12 +80,37 @@ struct Field {
     value: &'static str,
 }
 
+#[derive(Clone, Copy)]
+enum AggregateKind {
+    Struct,
+    Union,
+}
+
+impl AggregateKind {
+    fn keyword(self) -> &'static str {
+        match self {
+            Self::Struct => "struct",
+            Self::Union => "union",
+        }
+    }
+}
+
 struct AggregateCase {
     name: &'static str,
     tag: &'static str,
+    kind: AggregateKind,
     fields: &'static [Field],
     integer_pressure: usize,
     float_pressure: usize,
+}
+
+impl AggregateCase {
+    fn initialized_fields(&self) -> &[Field] {
+        match self.kind {
+            AggregateKind::Struct => self.fields,
+            AggregateKind::Union => &self.fields[..1],
+        }
+    }
 }
 
 const INTEGER_PAIR_FIELDS: &[Field] = &[
@@ -146,6 +171,18 @@ const FLOAT_QUAD_FIELDS: &[Field] = &[
         value: "7.125",
     },
 ];
+const WORD_UNION_FIELDS: &[Field] = &[
+    Field {
+        name: "integer",
+        kind: FieldKind::Long,
+        value: "808",
+    },
+    Field {
+        name: "fp",
+        kind: FieldKind::Double,
+        value: "9.5",
+    },
+];
 const LARGE_RECORD_FIELDS: &[Field] = &[
     Field {
         name: "first",
@@ -167,6 +204,7 @@ const CASES: &[AggregateCase] = &[
     AggregateCase {
         name: "integer_pair",
         tag: "IntegerPair",
+        kind: AggregateKind::Struct,
         fields: INTEGER_PAIR_FIELDS,
         integer_pressure: 7,
         float_pressure: 0,
@@ -174,6 +212,7 @@ const CASES: &[AggregateCase] = &[
     AggregateCase {
         name: "mixed_pair",
         tag: "MixedPair",
+        kind: AggregateKind::Struct,
         fields: MIXED_PAIR_FIELDS,
         integer_pressure: 7,
         float_pressure: 7,
@@ -181,6 +220,7 @@ const CASES: &[AggregateCase] = &[
     AggregateCase {
         name: "float_pair",
         tag: "FloatPair",
+        kind: AggregateKind::Struct,
         fields: FLOAT_PAIR_FIELDS,
         integer_pressure: 0,
         float_pressure: 7,
@@ -188,13 +228,23 @@ const CASES: &[AggregateCase] = &[
     AggregateCase {
         name: "float_quad",
         tag: "FloatQuad",
+        kind: AggregateKind::Struct,
         fields: FLOAT_QUAD_FIELDS,
         integer_pressure: 0,
         float_pressure: 6,
     },
     AggregateCase {
+        name: "word_union",
+        tag: "WordUnion",
+        kind: AggregateKind::Union,
+        fields: WORD_UNION_FIELDS,
+        integer_pressure: 7,
+        float_pressure: 7,
+    },
+    AggregateCase {
         name: "large_record",
         tag: "LargeRecord",
+        kind: AggregateKind::Struct,
         fields: LARGE_RECORD_FIELDS,
         integer_pressure: 8,
         float_pressure: 0,
@@ -204,7 +254,7 @@ const CASES: &[AggregateCase] = &[
 fn generate_suite(target: Target) -> GeneratedSuite {
     let mut common = String::new();
     for case in CASES {
-        write!(&mut common, "struct {} {{", case.tag).unwrap();
+        write!(&mut common, "{} {} {{", case.kind.keyword(), case.tag).unwrap();
         for field in case.fields {
             write!(&mut common, " {} {};", field.kind.c_type(), field.name).unwrap();
         }
@@ -213,9 +263,10 @@ fn generate_suite(target: Target) -> GeneratedSuite {
     for case in CASES {
         write!(
             &mut common,
-            "long check_{}({});\nstruct {} make_{}(void);\n",
+            "long check_{}({});\n{} {} make_{}(void);\n",
             case.name,
             parameter_declarations(target, case),
+            case.kind.keyword(),
             case.tag,
             case.name,
         )
@@ -227,7 +278,8 @@ fn generate_suite(target: Target) -> GeneratedSuite {
     for (index, case) in CASES.iter().enumerate() {
         writeln!(
             &mut caller,
-            "  struct {} value_{} = {{{}}};",
+            "  {} {} value_{} = {{{}}};",
+            case.kind.keyword(),
             case.tag,
             case.name,
             field_values(case),
@@ -246,11 +298,14 @@ fn generate_suite(target: Target) -> GeneratedSuite {
         .unwrap();
         writeln!(
             &mut caller,
-            "  struct {} result_{} = make_{}();",
-            case.tag, case.name, case.name,
+            "  {} {} result_{} = make_{}();",
+            case.kind.keyword(),
+            case.tag,
+            case.name,
+            case.name,
         )
         .unwrap();
-        for field in case.fields {
+        for field in case.initialized_fields() {
             writeln!(
                 &mut caller,
                 "  if (result_{}.{} != {}) return {};",
@@ -291,7 +346,7 @@ fn generate_suite(target: Target) -> GeneratedSuite {
             )
             .unwrap();
         }
-        for (index, field) in case.fields.iter().enumerate() {
+        for (index, field) in case.initialized_fields().iter().enumerate() {
             writeln!(
                 &mut callee,
                 "  if (value.{} != {}) return {};",
@@ -304,9 +359,11 @@ fn generate_suite(target: Target) -> GeneratedSuite {
         callee.push_str("  return 0;\n}\n");
         write!(
             &mut callee,
-            "struct {} make_{}(void) {{\n  struct {} result = {{{}}};\n  return result;\n}}\n",
+            "{} {} make_{}(void) {{\n  {} {} result = {{{}}};\n  return result;\n}}\n",
+            case.kind.keyword(),
             case.tag,
             case.name,
+            case.kind.keyword(),
             case.tag,
             field_values(case),
         )
@@ -324,7 +381,7 @@ fn parameter_declarations(_target: Target, case: &AggregateCase) -> String {
     for index in 0..case.float_pressure {
         parameters.push(format!("double d{index}"));
     }
-    parameters.push(format!("struct {} value", case.tag));
+    parameters.push(format!("{} {} value", case.kind.keyword(), case.tag));
     parameters.join(", ")
 }
 
@@ -343,7 +400,7 @@ fn call_arguments(_target: Target, case: &AggregateCase, value: Option<&str>) ->
 }
 
 fn field_values(case: &AggregateCase) -> String {
-    case.fields
+    case.initialized_fields()
         .iter()
         .map(|field| field.value)
         .collect::<Vec<_>>()
@@ -523,11 +580,13 @@ fn generated_suite_covers_each_aggregate_abi_shape() {
     assert!(suite.caller.contains("check_mixed_pair"));
     assert!(suite.caller.contains("check_float_pair"));
     assert!(suite.caller.contains("check_float_quad"));
+    assert!(suite.caller.contains("check_word_union"));
     assert!(suite.caller.contains("check_large_record"));
     assert!(suite.caller.contains("make_integer_pair"));
     assert!(suite.caller.contains("make_mixed_pair"));
     assert!(suite.caller.contains("make_float_pair"));
     assert!(suite.caller.contains("make_float_quad"));
+    assert!(suite.caller.contains("make_word_union"));
     assert!(suite.caller.contains("make_large_record"));
     assert!(suite.caller.contains("long i6"));
     assert!(suite.caller.contains("double d6"));
