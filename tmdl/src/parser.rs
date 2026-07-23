@@ -327,7 +327,6 @@ where
         just(Token::Identifier("ra")),
         just(Token::Identifier("fp")),
         just(Token::Identifier("indirect_result")),
-        just(Token::Identifier("variadic_float_count")),
     ))
     .map(|token| token.as_ident().to_string())
     .then_ignore(just(Token::Equals))

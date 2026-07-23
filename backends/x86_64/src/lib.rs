@@ -2041,7 +2041,6 @@ mod tests {
         assert_eq!(abi.sp, (int_args.regs[0].0, 4));
         assert_eq!(abi.ra, None);
         assert_eq!(abi.fp, Some((int_args.regs[0].0, 5)));
-        assert_eq!(abi.variadic_float_count, Some((int_args.regs[0].0, 0)));
         assert_eq!(abi.stack.align, 16);
         assert_eq!(abi.stack.slot_size, 8);
         assert_eq!(abi.stack.save_style, tir::backend::abi::SaveStyle::PushPop);

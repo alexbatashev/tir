@@ -73,7 +73,6 @@ abi SysV("sysv") for [X86_64] {
     sp = GPR::rsp;
     fp = GPR::rbp;
     indirect_result = GPR::rdi;
-    variadic_float_count = GPR::rax;
     argument_groups {
         register_limit = 2;
         rollback = preserve;

@@ -75,7 +75,6 @@ pub struct AbiInfo {
     pub ra: Option<PhysReg>,
     pub fp: Option<PhysReg>,
     pub indirect_result: Option<PhysReg>,
-    pub variadic_float_count: Option<PhysReg>,
     pub argument_group_register_limit: Option<usize>,
     pub argument_group_rollback: GroupRollback,
     pub args: &'static [PassSeq],
