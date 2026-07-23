@@ -131,6 +131,7 @@ fn ptx_regalloc_abi() -> &'static tir::backend::abi::AbiInfo {
             ra: None,
             fp: None,
             indirect_result: None,
+            variadic_float_count: None,
             argument_group_register_limit: None,
             argument_group_rollback: GroupRollback::Exhaust,
             args: Box::leak(

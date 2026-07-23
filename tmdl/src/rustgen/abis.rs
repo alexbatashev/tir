@@ -150,6 +150,7 @@ fn emit_abi_info(
         let ra = role("ra")?;
         let fp = role("fp")?;
         let indirect_result = role("indirect_result")?;
+        let variadic_float_count = role("variadic_float_count")?;
         let argument_group_register_limit = abi
             .argument_groups
             .as_ref()
@@ -245,6 +246,10 @@ fn emit_abi_info(
             Some((register, _, _)) => quote! { Some(#register) },
             None => quote! { None },
         };
+        let variadic_float_count = match variadic_float_count {
+            Some((register, _, _)) => quote! { Some(#register) },
+            None => quote! { None },
+        };
         let classifier = match abi.classifier.as_deref() {
             Some("riscv") => quote! { tir::backend::abi::ClassifierKind::Riscv },
             Some("aapcs64") => quote! { tir::backend::abi::ClassifierKind::Aapcs64 },
@@ -271,6 +276,7 @@ fn emit_abi_info(
                 ra: #ra,
                 fp: #fp,
                 indirect_result: #indirect_result,
+                variadic_float_count: #variadic_float_count,
                 argument_group_register_limit: #argument_group_register_limit,
                 argument_group_rollback: #argument_group_rollback,
                 args: &[#(#args),*],

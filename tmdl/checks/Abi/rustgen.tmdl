@@ -22,6 +22,7 @@ abi TestAbi("test") for [TestIsa] {
     }
     sp = GPR::x2;
     indirect_result = GPR::x3;
+    variadic_float_count = GPR::x1;
     argument_groups {
         register_limit = 2;
         rollback = preserve;
@@ -40,6 +41,7 @@ abi TestAbi("test") for [TestIsa] {
 // CHECK: name: "test",
 // CHECK: sp: (RegClass::GPR.id(), 2u16),
 // CHECK: indirect_result: Some((RegClass::GPR.id(), 3u16)),
+// CHECK: variadic_float_count: Some((RegClass::GPR.id(), 1u16)),
 // CHECK: argument_group_register_limit: Some(2usize),
 // CHECK: argument_group_rollback: tir::backend::abi::GroupRollback::Preserve,
 // CHECK: kind: tir::backend::abi::ValueKind::Int,
