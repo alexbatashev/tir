@@ -1443,6 +1443,16 @@ fn initialized_global_array_uses_constant_data() {
 }
 
 #[test]
+fn initialized_global_array_designators_select_elements() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "int values[5] = {[3] = 30, [1] = 12}; int main(void) { return values[0] == 0 && values[1] == 12 && values[2] == 0 && values[3] == 30 && values[4] == 0 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
 fn initialized_global_struct_uses_field_layout() {
     if !cc_available() {
         return;
