@@ -688,6 +688,16 @@ fn enum_constants_evaluate_shift_and_bitwise_expressions() {
 }
 
 #[test]
+fn enum_constants_evaluate_remainder_and_unary_expressions() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "enum Value { Remainder = 17 % 5, Inverted = ~0, False = !1, True = !0 }; int main(void) { return Remainder == 2 && Inverted == -1 && False == 0 && True == 1 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
 fn escaped_character_constant_executes_through_driver() {
     if !cc_available() {
         return;
