@@ -81,6 +81,7 @@ abi LP64("lp64") for [RV64I, RVV] {
     sp = GPR::x2;
     ra = GPR::x1;
     fp = GPR::x8;
+    indirect_result = GPR::x10;
     args int -> [GPR::x10..GPR::x17], then stack;
     args vector -> [VR::v8..VR::v23], then stack;
     rets int -> [GPR::x10, GPR::x11];
