@@ -583,11 +583,11 @@ impl Pass for RegisterAllocationPass {
             return Ok(PreservedAnalyses::all());
         }
 
-        let fixed_precolor = self.lower_fixed_uses(context, rewriter, &blocks)?;
+        let fixed_precolor = self.lower_fixed_registers(context, rewriter, &blocks)?;
         self.lower_tied_operands(context, rewriter, &blocks)?;
         self.lower_block_args(context, rewriter, &blocks)?;
 
-        let mut abi = abi_precolor(
+        let abi = abi_precolor(
             context,
             op,
             &info,
@@ -595,8 +595,8 @@ impl Pass for RegisterAllocationPass {
             self.target.as_ref(),
             rewriter,
             &blocks,
+            fixed_precolor,
         )?;
-        abi.precolor.extend(fixed_precolor);
 
         let mut frame = FrameState::new(self.abi.stack.slot_size);
         let stack_allocas = collect_stack_allocas(context, &blocks, &mut frame);
@@ -684,7 +684,7 @@ impl RegisterAllocationPass {
         self.abi.sp
     }
 
-    fn lower_fixed_uses(
+    fn lower_fixed_registers(
         &self,
         context: &Context,
         rewriter: &mut Rewriter,
@@ -694,34 +694,48 @@ impl RegisterAllocationPass {
         for &block_id in blocks {
             for op_id in context.get_block(block_id).op_ids() {
                 let op = context.get_op(op_id);
-                let fixed_uses: Vec<_> = op
+                let fixed_registers: Vec<_> = op
                     .attributes
                     .iter()
                     .enumerate()
                     .filter_map(|(attr_index, attr)| match &attr.value {
                         AttributeValue::Register(RegisterAttr::FixedUse { id, class, index }) => {
-                            Some((attr_index, *id, *class, *index))
+                            Some((attr_index, *id, *class, *index, true))
+                        }
+                        AttributeValue::Register(RegisterAttr::FixedDef { id, class, index }) => {
+                            Some((attr_index, *id, *class, *index, false))
                         }
                         _ => None,
                     })
                     .collect();
-                if fixed_uses.is_empty() {
+                if fixed_registers.is_empty() {
                     continue;
                 }
 
                 let op_ref = op_ref_in(context, block_id, op_id);
                 let mut attributes = op.attributes.clone();
-                for (attr_index, source, class, index) in fixed_uses {
-                    let ty = context.get_value(ValueId::from_number(source)).ty();
-                    let fixed = context.create_value(ty, None).id().number();
-                    let copy = self.target.emit_copy(context, class, fixed, source);
-                    rewriter.insert_op_before(&op_ref, copy.as_ref())?;
+                for (attr_index, value, class, index, is_use) in fixed_registers {
+                    let fixed = if is_use {
+                        let ty = context.get_value(ValueId::from_number(value)).ty();
+                        let fixed = context.create_value(ty, None).id().number();
+                        let copy = self.target.emit_copy(context, class, fixed, value);
+                        rewriter.insert_op_before(&op_ref, copy.as_ref())?;
+                        fixed
+                    } else {
+                        value
+                    };
                     attributes[attr_index].value =
                         AttributeValue::Register(RegisterAttr::Virtual {
                             id: fixed,
                             class: Some(class),
                         });
-                    precolor.insert(fixed, (class, index));
+                    if let Some(previous) = precolor.insert(fixed, (class, index))
+                        && previous != (class, index)
+                    {
+                        return Err(PassError::InvalidRuleSet(format!(
+                            "virtual register {fixed} is pinned to conflicting physical registers"
+                        )));
+                    }
                 }
                 context.set_op_attributes(op_id, attributes);
             }
@@ -1368,6 +1382,7 @@ fn next_abi_register(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn abi_precolor(
     context: &Context,
     op: &OperationRef,
@@ -1376,8 +1391,12 @@ fn abi_precolor(
     target: &dyn TargetRegAlloc,
     rewriter: &mut Rewriter,
     blocks: &[BlockId],
+    // Fixed-register precolors (e.g. a `FixedDef` result pinned to `rdx`), seeded
+    // so the return handler sees a value already pinned elsewhere and breaks the
+    // point conflict with a copy into the return register instead of double-pinning.
+    fixed_precolor: HashMap<u32, PhysReg>,
 ) -> Result<AbiPrecolor, PassError> {
-    let mut precolor: HashMap<u32, PhysReg> = HashMap::new();
+    let mut precolor: HashMap<u32, PhysReg> = fixed_precolor;
     let mut stack_args = Vec::new();
 
     // Argument vregs: the symbol's `arg_regs` attribute carries each argument's

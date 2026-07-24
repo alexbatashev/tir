@@ -462,6 +462,17 @@ instruction MultiplySub for [ARMv8A64] : DataProc3Src {
     }
 }
 
+instruction MultiplySubWord for [ARMv8A64] : DataProc3Src {
+    param OPNAME: String = "msub_word";
+    param MNEMONIC: String = "msub";
+    param SF: bits<1> = 0b0;
+    param O0: bits<1> = 0b1;
+
+    behavior {
+        rd = zext(extract(ra, 31, 0) - extract(rn * rm, 31, 0), self.XLEN);
+    }
+}
+
 // MUL is MADD with ra = xzr.
 instruction Multiply for [ARMv8A64] : DataProc3SrcZr {
     param MNEMONIC: String = "mul";
@@ -495,21 +506,33 @@ instruction SignedMultiplyHigh for [ARMv8A64] : DataProc3SrcZr {
 }
 
 // A64 division: division by zero yields 0 (no trap); INT_MIN / -1 wraps.
-// Both arms of an if-expression are evaluated, so the divisor is patched to 1
-// in the zero case (`~(rm | -rm) >> 63` is 1 exactly when rm == 0); the
-// select then discards that dummy quotient.
 instruction SignedDivide for [ARMv8A64] : ShiftReg {
     param MNEMONIC: String = "sdiv";
     param OPCODE: bits<6> = 0b000011;
     schedule { units = [WriteIDiv]; }
 
     behavior {
-        rd = if rm == zext(0b0, self.XLEN) {
-            zext(0b0, self.XLEN)
+        if rm == zext(0b0, self.XLEN) {
+            rd = zext(0b0, self.XLEN);
         } else {
-            rn / (rm | zext(extract(~(rm | (zext(0b0, self.XLEN) - rm)),
-                self.XLEN - 1, self.XLEN - 1), self.XLEN))
-        };
+            rd = rn / rm;
+        }
+    }
+}
+
+instruction SignedDivideWord for [ARMv8A64] : ShiftReg {
+    param OPNAME: String = "sdiv_word";
+    param MNEMONIC: String = "sdiv";
+    param SF: bits<1> = 0b0;
+    param OPCODE: bits<6> = 0b000011;
+    schedule { units = [WriteIDiv]; }
+
+    behavior {
+        if extract(rm, 31, 0) == zext(0b0, 32) {
+            rd = zext(0b0, self.XLEN);
+        } else {
+            rd = zext(extract(rn, 31, 0) / extract(rm, 31, 0), self.XLEN);
+        }
     }
 }
 
@@ -519,12 +542,27 @@ instruction UnsignedDivide for [ARMv8A64] : ShiftReg {
     schedule { units = [WriteIDiv]; }
 
     behavior {
-        rd = if rm == zext(0b0, self.XLEN) {
-            zext(0b0, self.XLEN)
+        if rm == zext(0b0, self.XLEN) {
+            rd = zext(0b0, self.XLEN);
         } else {
-            rn ~/ (rm | zext(extract(~(rm | (zext(0b0, self.XLEN) - rm)),
-                self.XLEN - 1, self.XLEN - 1), self.XLEN))
-        };
+            rd = rn ~/ rm;
+        }
+    }
+}
+
+instruction UnsignedDivideWord for [ARMv8A64] : ShiftReg {
+    param OPNAME: String = "udiv_word";
+    param MNEMONIC: String = "udiv";
+    param SF: bits<1> = 0b0;
+    param OPCODE: bits<6> = 0b000010;
+    schedule { units = [WriteIDiv]; }
+
+    behavior {
+        if extract(rm, 31, 0) == zext(0b0, 32) {
+            rd = zext(0b0, self.XLEN);
+        } else {
+            rd = zext(extract(rn, 31, 0) ~/ extract(rm, 31, 0), self.XLEN);
+        }
     }
 }
 

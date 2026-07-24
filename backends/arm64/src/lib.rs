@@ -1436,6 +1436,20 @@ mod tests {
             .build();
         assert_eq!(word(udiv.id()), 0x9AC20820, "udiv x0, x1, x2");
 
+        let sdiv_word = crate::SignedDivideWordOpBuilder::new(&context)
+            .attr("rd", gpr(0))
+            .attr("rn", gpr(1))
+            .attr("rm", gpr(2))
+            .build();
+        assert_eq!(word(sdiv_word.id()), 0x1AC20C20, "sdiv w0, w1, w2");
+
+        let udiv_word = crate::UnsignedDivideWordOpBuilder::new(&context)
+            .attr("rd", gpr(0))
+            .attr("rn", gpr(1))
+            .attr("rm", gpr(2))
+            .build();
+        assert_eq!(word(udiv_word.id()), 0x1AC20820, "udiv w0, w1, w2");
+
         let cmn = crate::CompareNegativeOpBuilder::new(&context)
             .attr("rn", gpr(1))
             .attr("rm", gpr(2))
@@ -1487,6 +1501,14 @@ mod tests {
             .attr("ra", gpr(3))
             .build();
         assert_eq!(word(msub.id()), 0x9B028C20, "msub x0, x1, x2, x3");
+
+        let msub_word = crate::MultiplySubWordOpBuilder::new(&context)
+            .attr("rd", gpr(0))
+            .attr("rn", gpr(1))
+            .attr("rm", gpr(2))
+            .attr("ra", gpr(3))
+            .build();
+        assert_eq!(word(msub_word.id()), 0x1B028C20, "msub w0, w1, w2, w3");
 
         let mul = crate::MultiplyOpBuilder::new(&context)
             .attr("rd", gpr(0))

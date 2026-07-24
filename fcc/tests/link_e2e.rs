@@ -216,6 +216,72 @@ fn double_division_executes_through_driver() {
 }
 
 #[test]
+fn signed_integer_division_executes_through_driver() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "int divide(int lhs, int rhs) { return lhs / rhs; }\n",
+        "int divide(int, int); int main(void) { return divide(-17, 5) == -3 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn unsigned_integer_division_executes_through_driver() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "unsigned int divide(unsigned int lhs, unsigned int rhs) { return lhs / rhs; }\n",
+        "unsigned int divide(unsigned int, unsigned int); int main(void) { return divide(4294967295U, 2U) == 2147483647U ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn signed_integer_remainder_executes_through_driver() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "int mod_signed(int lhs, int rhs) { return lhs % rhs; }\n",
+        "int mod_signed(int, int); int main(void) { return mod_signed(-17, 5) == -2 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn signed_integer_remainder_assignment_executes_through_driver() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "int mod_assign(int lhs, int rhs) { lhs %= rhs; return lhs; }\n",
+        "int mod_assign(int, int); int main(void) { return mod_assign(-17, 5) == -2 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn unsigned_integer_remainder_executes_through_driver() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "unsigned int mod_unsigned(unsigned int lhs, unsigned int rhs) { return lhs % rhs; }\n",
+        "unsigned int mod_unsigned(unsigned int, unsigned int); int main(void) { return mod_unsigned(4294967295U, 2U) == 1U ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn unsigned_integer_remainder_assignment_executes_through_driver() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "unsigned int mod_assign(unsigned int lhs, unsigned int rhs) { lhs %= rhs; return lhs; }\n",
+        "unsigned int mod_assign(unsigned int, unsigned int); int main(void) { return mod_assign(4294967295U, 2U) == 1U ? 0 : 1; }\n",
+    );
+}
+
+#[test]
 fn double_add_assignment_executes_through_driver() {
     if !cc_available() {
         return;

@@ -111,6 +111,88 @@ impl crate::OpCost for MulIOp {
 }
 
 operation! {
+    DivSIOp {
+        name: "divsi",
+        dialect: "builtin",
+        operands: O {
+            lhs: "crate::builtin::IntegerType",
+            rhs: "crate::builtin::IntegerType",
+        },
+        results: R {
+            result: "crate::builtin::IntegerType",
+        },
+        interfaces: [SameOperandType, IntegerArithmetic],
+        sem: "(set result (div lhs rhs))",
+    }
+}
+
+impl SameOperandType for DivSIOp {}
+impl IntegerArithmetic for DivSIOp {}
+
+operation! {
+    DivUIOp {
+        name: "divui",
+        dialect: "builtin",
+        operands: O {
+            lhs: "crate::builtin::IntegerType",
+            rhs: "crate::builtin::IntegerType",
+        },
+        results: R {
+            result: "crate::builtin::IntegerType",
+        },
+        interfaces: [SameOperandType, IntegerArithmetic],
+        sem: "(set result (udiv lhs rhs))",
+    }
+}
+
+impl SameOperandType for DivUIOp {}
+impl IntegerArithmetic for DivUIOp {}
+
+operation! {
+    // Remainder is defined by the Euclidean identity rather than a primitive
+    // srem/urem, so the semantic form matches the canonical sub-mul-div target
+    // that TMDL rem/remu behaviors reduce to and selects through the e-graph
+    // without an unprovable rewrite. This total form equals bvsrem/bvurem
+    // everywhere, including rhs=0 (a - x*0 = a) and MIN/-1 (0). IR-level
+    // partiality (C's UB at rhs=0) is unchanged.
+    RemSIOp {
+        name: "remsi",
+        dialect: "builtin",
+        operands: O {
+            lhs: "crate::builtin::IntegerType",
+            rhs: "crate::builtin::IntegerType",
+        },
+        results: R {
+            result: "crate::builtin::IntegerType",
+        },
+        interfaces: [SameOperandType, IntegerArithmetic],
+        sem: "(set result (sub lhs (mul (div lhs rhs) rhs)))",
+    }
+}
+
+impl SameOperandType for RemSIOp {}
+impl IntegerArithmetic for RemSIOp {}
+
+operation! {
+    RemUIOp {
+        name: "remui",
+        dialect: "builtin",
+        operands: O {
+            lhs: "crate::builtin::IntegerType",
+            rhs: "crate::builtin::IntegerType",
+        },
+        results: R {
+            result: "crate::builtin::IntegerType",
+        },
+        interfaces: [SameOperandType, IntegerArithmetic],
+        sem: "(set result (sub lhs (mul (udiv lhs rhs) rhs)))",
+    }
+}
+
+impl SameOperandType for RemUIOp {}
+impl IntegerArithmetic for RemUIOp {}
+
+operation! {
     AndIOp {
         name: "andi",
         dialect: "builtin",
