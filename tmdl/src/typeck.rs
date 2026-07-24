@@ -441,6 +441,22 @@ fn infer<'a>(
                 }
                 lhs_ty.apply(subst)
             }
+            ast::Expr::BuiltinFunction(
+                ast::BuiltinFunction::SIToFP | ast::BuiltinFunction::UIToFP,
+            ) => {
+                for arg in &call.arguments {
+                    infer(arg, env, tvg, subst, cache, diags, file_name);
+                }
+                Type::Var(tvg.fresh())
+            }
+            ast::Expr::BuiltinFunction(
+                ast::BuiltinFunction::FPToSI | ast::BuiltinFunction::FPToUI,
+            ) => {
+                for arg in &call.arguments {
+                    infer(arg, env, tvg, subst, cache, diags, file_name);
+                }
+                Type::Var(tvg.fresh())
+            }
             ast::Expr::BuiltinFunction(ast::BuiltinFunction::Store)
             | ast::Expr::BuiltinFunction(ast::BuiltinFunction::Trap) => {
                 for arg in &call.arguments {

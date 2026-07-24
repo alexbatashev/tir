@@ -81,6 +81,18 @@ pub enum SymKind {
     FSub,
     FMul,
     FDiv,
+    /// Convert a signed integer to an IEEE 754 binary format. Arguments are
+    /// the integer, exponent width, and mantissa width.
+    SIToFP,
+    /// Convert an unsigned integer to an IEEE 754 binary format. Arguments are
+    /// the integer, exponent width, and mantissa width.
+    UIToFP,
+    /// Convert an IEEE 754 binary value to a signed integer. Arguments are the
+    /// float and destination integer width; rounding is toward zero.
+    FPToSI,
+    /// Convert an IEEE 754 binary value to an unsigned integer. Arguments are
+    /// the float and destination integer width; rounding is toward zero.
+    FPToUI,
     /// `[iter, body]`: map `body` over each lane, element bound via `Arg(0)` (or
     /// `Arg(0)`/`Arg(1)` for a `Zip` pair); value is the iterator of results.
     // #[arity = 2]
@@ -167,7 +179,9 @@ impl SymKind {
             | SymKind::LoadMemory
             | SymKind::LoadReserved
             | SymKind::Fence
-            | SymKind::Fma => 3,
+            | SymKind::Fma
+            | SymKind::SIToFP
+            | SymKind::UIToFP => 3,
             SymKind::StoreMemory | SymKind::StoreConditional => 4,
             SymKind::AtomicRmw => 5,
             _ => 2,

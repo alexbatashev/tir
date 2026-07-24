@@ -15,6 +15,10 @@ const OP_VOCABULARY: &[(&str, SymKind)] = &[
     ("fsub", SymKind::FSub),
     ("fmul", SymKind::FMul),
     ("fdiv", SymKind::FDiv),
+    ("sitofp", SymKind::SIToFP),
+    ("uitofp", SymKind::UIToFP),
+    ("fptosi", SymKind::FPToSI),
+    ("fptoui", SymKind::FPToUI),
     ("zip", SymKind::Zip),
     ("split", SymKind::Split),
     ("sext", SymKind::SExt),
@@ -276,6 +280,8 @@ where
             "sext" => Some(Some(SymKind::SExt)),
             "zext" => Some(Some(SymKind::ZExt)),
             "trunc" => Some(None),
+            "fptosi" => Some(Some(SymKind::FPToSI)),
+            "fptoui" => Some(Some(SymKind::FPToUI)),
             _ => None,
         }
     {
@@ -283,7 +289,16 @@ where
         let width = hooks.result_width().ok_or(BuildError::MissingWidth)?;
         return Ok(match kind {
             Some(kind) => {
-                let w = leaf(g, SymKind::Constant, SymPayload::Int(APInt::new(16, width)));
+                let width_bits = if matches!(kind, SymKind::FPToSI | SymKind::FPToUI) {
+                    (u64::BITS - width.leading_zeros()).max(1)
+                } else {
+                    16
+                };
+                let w = leaf(
+                    g,
+                    SymKind::Constant,
+                    SymPayload::Int(APInt::new(width_bits, width)),
+                );
                 node(g, kind, &[inner, w])
             }
             None => {

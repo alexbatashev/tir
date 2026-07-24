@@ -186,6 +186,204 @@ instruction Movsd for [X86_64] {
     }
 }
 
+// `movq xmm, r64` copies an integer bit pattern into the low binary64 lane.
+instruction MovqXmmGpr for [X86_64] {
+    param OPNAME: String = "movq_xmm_gpr";
+    param MNEMONIC: String = "movq";
+
+    operands {
+        dst: XMM,
+        src: GPR,
+    }
+
+    encoding {
+        0..7 => 0x66,
+        8 => src[3],
+        9 => 0b0,
+        10 => dst[3],
+        11 => 0b1,
+        12..15 => 0b0100,
+        16..23 => 0x0F,
+        24..31 => 0x6E,
+        32..34 => src[0..2],
+        35..37 => dst[0..2],
+        38..39 => 0b11,
+    }
+
+    asm {
+        "{self.MNEMONIC} {dst}, {src}"
+    }
+
+    behavior {
+        dst = bitcast(src);
+    }
+}
+
+// `movq r64, xmm` copies the low binary64 lane into an integer register.
+instruction MovqGprXmm for [X86_64] {
+    param OPNAME: String = "movq_gpr_xmm";
+    param MNEMONIC: String = "movq";
+
+    operands {
+        dst: GPR,
+        src: XMM,
+    }
+
+    encoding {
+        0..7 => 0x66,
+        8 => dst[3],
+        9 => 0b0,
+        10 => src[3],
+        11 => 0b1,
+        12..15 => 0b0100,
+        16..23 => 0x0F,
+        24..31 => 0x7E,
+        32..34 => dst[0..2],
+        35..37 => src[0..2],
+        38..39 => 0b11,
+    }
+
+    asm {
+        "{self.MNEMONIC} {dst}, {src}"
+    }
+
+    behavior {
+        dst = bitcast(src);
+    }
+}
+
+// Convert a signed 32-bit integer to scalar binary64 (`cvtsi2sd xmm, r32`).
+instruction Cvtsi2sd32 for [X86_64] {
+    param OPNAME: String = "cvtsi2sd32";
+    param MNEMONIC: String = "cvtsi2sd";
+
+    operands {
+        dst: XMM,
+        src: GPR32,
+    }
+
+    encoding {
+        0..7 => 0xF2,
+        8 => src[3],
+        9 => 0b0,
+        10 => dst[3],
+        11 => 0b0,
+        12..15 => 0b0100,
+        16..23 => 0x0F,
+        24..31 => 0x2A,
+        32..34 => src[0..2],
+        35..37 => dst[0..2],
+        38..39 => 0b11,
+    }
+
+    asm {
+        "{self.MNEMONIC} {dst}, {src}"
+    }
+
+    behavior {
+        dst = sitofp(src, 11, 52);
+    }
+}
+
+// Convert a signed 64-bit integer to scalar binary64 (`cvtsi2sd xmm, r64`).
+instruction Cvtsi2sd64 for [X86_64] {
+    param OPNAME: String = "cvtsi2sd64";
+    param MNEMONIC: String = "cvtsi2sd";
+
+    operands {
+        dst: XMM,
+        src: GPR,
+    }
+
+    encoding {
+        0..7 => 0xF2,
+        8 => src[3],
+        9 => 0b0,
+        10 => dst[3],
+        11 => 0b1,
+        12..15 => 0b0100,
+        16..23 => 0x0F,
+        24..31 => 0x2A,
+        32..34 => src[0..2],
+        35..37 => dst[0..2],
+        38..39 => 0b11,
+    }
+
+    asm {
+        "{self.MNEMONIC} {dst}, {src}"
+    }
+
+    behavior {
+        dst = sitofp(src, 11, 52);
+    }
+}
+
+// Convert scalar binary64 to a signed 32-bit integer, truncating toward zero.
+instruction Cvttsd2si32 for [X86_64] {
+    param OPNAME: String = "cvttsd2si32";
+    param MNEMONIC: String = "cvttsd2si";
+
+    operands {
+        dst: GPR32,
+        src: XMM,
+    }
+
+    encoding {
+        0..7 => 0xF2,
+        8 => src[3],
+        9 => 0b0,
+        10 => dst[3],
+        11 => 0b0,
+        12..15 => 0b0100,
+        16..23 => 0x0F,
+        24..31 => 0x2C,
+        32..34 => src[0..2],
+        35..37 => dst[0..2],
+        38..39 => 0b11,
+    }
+
+    asm {
+        "{self.MNEMONIC} {dst}, {src}"
+    }
+
+    behavior {
+        dst = fptosi(src, 32);
+    }
+}
+
+// Convert scalar binary64 to a signed 64-bit integer, truncating toward zero.
+instruction Cvttsd2si64 for [X86_64] {
+    param OPNAME: String = "cvttsd2si64";
+    param MNEMONIC: String = "cvttsd2si";
+
+    operands {
+        dst: GPR,
+        src: XMM,
+    }
+
+    encoding {
+        0..7 => 0xF2,
+        8 => src[3],
+        9 => 0b0,
+        10 => dst[3],
+        11 => 0b1,
+        12..15 => 0b0100,
+        16..23 => 0x0F,
+        24..31 => 0x2C,
+        32..34 => src[0..2],
+        35..37 => dst[0..2],
+        38..39 => 0b11,
+    }
+
+    asm {
+        "{self.MNEMONIC} {dst}, {src}"
+    }
+
+    behavior {
+        dst = fptosi(src, 64);
+    }
+}
+
 instruction MovsdLoadDisp for [X86_64] {
     param OPNAME: String = "movsd_load_disp";
     param MNEMONIC: String = "movsd";

@@ -281,6 +281,14 @@ pub(super) enum BuiltinFunction {
     FMul,
     #[serde(rename = "fdiv")]
     FDiv,
+    #[serde(rename = "sitofp")]
+    SIToFP,
+    #[serde(rename = "uitofp")]
+    UIToFP,
+    #[serde(rename = "fptosi")]
+    FPToSI,
+    #[serde(rename = "fptoui")]
+    FPToUI,
     Todo,
 }
 
@@ -311,6 +319,10 @@ impl From<ast::BuiltinFunction> for BuiltinFunction {
             ast::BuiltinFunction::FSub => Self::FSub,
             ast::BuiltinFunction::FMul => Self::FMul,
             ast::BuiltinFunction::FDiv => Self::FDiv,
+            ast::BuiltinFunction::SIToFP => Self::SIToFP,
+            ast::BuiltinFunction::UIToFP => Self::UIToFP,
+            ast::BuiltinFunction::FPToSI => Self::FPToSI,
+            ast::BuiltinFunction::FPToUI => Self::FPToUI,
             ast::BuiltinFunction::Todo => Self::Todo,
         }
     }

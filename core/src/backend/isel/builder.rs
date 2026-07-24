@@ -6,7 +6,7 @@ use tir::{
     Context, MemoryRead, MemoryWrite, OpId, OpInstance, TypeId, ValueId,
     attributes::AttributeValue,
     builtin::{FloatType, IntegerType},
-    graph::{Dag, NodeId},
+    graph::{Dag, MetaDag, NodeId},
     sem::{SemGraph, SemType, SymKind, SymPayload, infer_types},
 };
 use tir_adt::APInt;
@@ -135,8 +135,11 @@ impl<'a> SemDagBuilder<'a> {
     }
 
     pub(crate) fn build_for_op(&mut self, op: &std::sync::Arc<OpInstance>) -> Option<Id> {
+        // A standalone `constantf` is left for the target's pre-RA hook, like a
+        // bare integer `constant`; only as an operand (see `build_from_value`)
+        // does it fold into a consumer via `float_constant_class`.
         if op.is::<crate::builtin::ConstantFOp>() {
-            return self.float_constant_class(op);
+            return None;
         }
         if let Some(class) = self.build_memory_effect(op) {
             return Some(class);
@@ -322,12 +325,17 @@ impl<'a> SemDagBuilder<'a> {
     }
 
     fn infer_local_types(&self, graph: &SemGraph, operands: &[Id]) -> Option<Vec<SemType>> {
-        infer_types(graph, |node| match graph.get_leaf_data(node) {
-            Some(SymPayload::SymbolId(id)) => operands
-                .get(*id as usize)
-                .and_then(|&class| self.class_ty(class))
-                .and_then(|ty| semantic_type(self.context, ty)),
-            _ => None,
+        infer_types(graph, |node| {
+            graph
+                .get_actual_type(node)
+                .and_then(|ty| semantic_type(self.context, ty))
+                .or_else(|| match graph.get_leaf_data(node) {
+                    Some(SymPayload::SymbolId(id)) => operands
+                        .get(*id as usize)
+                        .and_then(|&class| self.class_ty(class))
+                        .and_then(|ty| semantic_type(self.context, ty)),
+                    _ => None,
+                })
         })
         .ok()
     }
@@ -344,7 +352,9 @@ impl<'a> SemDagBuilder<'a> {
         operands: &[Id],
         types: Option<&[SemType]>,
     ) -> Id {
-        let node_ty = types.and_then(|types| ir_type(self.context, &types[node.index()]));
+        let node_ty = graph
+            .get_actual_type(node)
+            .or_else(|| types.and_then(|types| ir_type(self.context, &types[node.index()])));
         match graph.get_node(node) {
             SymKind::Symbol => match graph.get_leaf_data(node) {
                 Some(SymPayload::SymbolId(id)) => operands

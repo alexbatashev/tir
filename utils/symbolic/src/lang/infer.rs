@@ -30,6 +30,29 @@ pub fn infer_types<V>(
                 inference.unify(&child(1), &ty)?;
                 ty
             }
+            SymKind::SIToFP | SymKind::UIToFP => {
+                let operand = inference.fresh_bits();
+                inference.unify(&child(0), &operand)?;
+                for slot in 1..3 {
+                    let width = inference.fresh_bits();
+                    inference.unify(&child(slot), &width)?;
+                }
+                match (const_u64(graph, children[1]), const_u64(graph, children[2])) {
+                    (Some(exponent), Some(mantissa)) => SemType::Float(
+                        crate::lang::FloatFormat::new(exponent as u32, mantissa as u32),
+                    ),
+                    _ => inference.fresh_float(),
+                }
+            }
+            SymKind::FPToSI | SymKind::FPToUI => {
+                let operand = inference.fresh_float();
+                inference.unify(&child(0), &operand)?;
+                let width = inference.fresh_bits();
+                inference.unify(&child(1), &width)?;
+                const_u64(graph, children[1])
+                    .map(|width| SemType::bits(width as u32))
+                    .unwrap_or_else(|| inference.fresh_bits())
+            }
             SymKind::Eq
             | SymKind::Ne
             | SymKind::Lt
@@ -207,6 +230,19 @@ pub fn infer_widths<V>(
                 | SymKind::FSub
                 | SymKind::FMul
                 | SymKind::FDiv => child_width(0),
+
+                SymKind::SIToFP | SymKind::UIToFP => match (
+                    children.get(1).and_then(|&c| const_u64(graph, c)),
+                    children.get(2).and_then(|&c| const_u64(graph, c)),
+                ) {
+                    (Some(exponent), Some(mantissa)) => Some(1 + exponent as u32 + mantissa as u32),
+                    _ => None,
+                },
+
+                SymKind::FPToSI | SymKind::FPToUI => children
+                    .get(1)
+                    .and_then(|&c| const_u64(graph, c))
+                    .map(|width| width as u32),
 
                 // As wide as its arms (the then-branch).
                 SymKind::If => child_width(1),
@@ -441,6 +477,8 @@ fn canon_rebuild<V: Clone>(
                 | SymKind::ShiftLeft
                 | SymKind::ShiftRightLogic
                 | SymKind::ShiftRightArithmetic
+                | SymKind::FPToSI
+                | SymKind::FPToUI
         )
         && let Some(width) = infer_widths(graph, |_| None)[children[0].index()]
     {

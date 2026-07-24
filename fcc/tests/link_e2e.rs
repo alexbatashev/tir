@@ -216,6 +216,61 @@ fn double_division_executes_through_driver() {
 }
 
 #[test]
+fn double_literal_executes_through_driver() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "double literal(void) { return 1.5; }\n",
+        "double literal(void); int main(void) { return literal() == 1.5 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn signed_integer_to_double_conversion_executes_through_driver() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "double convert(int value) { return value; }\n",
+        "double convert(int); int main(void) { return convert(-17) == -17.0 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn unsigned_integer_to_double_conversion_executes_through_driver() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "double convert(unsigned int value) { return value; }\n",
+        "double convert(unsigned int); int main(void) { return convert(4000000000u) == 4000000000.0 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn double_to_signed_integer_conversion_executes_through_driver() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "int convert(double value) { return value; }\n",
+        "int convert(double); int main(void) { return convert(-17.75) == -17 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn double_to_unsigned_integer_conversion_executes_through_driver() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "unsigned int convert(double value) { return value; }\n",
+        "unsigned int convert(double); int main(void) { return convert(4000000000.75) == 4000000000u ? 0 : 1; }\n",
+    );
+}
+
+#[test]
 fn signed_integer_division_executes_through_driver() {
     if !cc_available() {
         return;

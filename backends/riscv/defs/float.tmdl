@@ -196,6 +196,120 @@ instruction FDivD for [D] : FPArith64 {
     }
 }
 
+// Convert the low signed 32-bit integer in an integer register to binary64.
+instruction FCvtDW for [D] {
+    param MNEMONIC: String = "fcvt.d.w";
+    param RM: bits<3> = 0b111;
+    param OPCODE: bits<7> = 0b1010011;
+
+    operands {
+        fd: FPR64,
+        rs1: GPR,
+    }
+
+    encoding {
+        0..6 => OPCODE,
+        7..11 => fd,
+        12..14 => RM,
+        15..19 => rs1,
+        20..24 => 0b00000,
+        25..31 => 0b1101001,
+    }
+
+    asm {
+        "{self.MNEMONIC} {fd}, {rs1}"
+    }
+
+    behavior {
+        fd = sitofp(sext(extract(rs1, 31, 0), self.XLEN), 11, 52);
+    }
+}
+
+// Convert the low unsigned 32-bit integer in an integer register to binary64.
+instruction FCvtDWU for [D] {
+    param MNEMONIC: String = "fcvt.d.wu";
+    param RM: bits<3> = 0b111;
+    param OPCODE: bits<7> = 0b1010011;
+
+    operands {
+        fd: FPR64,
+        rs1: GPR,
+    }
+
+    encoding {
+        0..6 => OPCODE,
+        7..11 => fd,
+        12..14 => RM,
+        15..19 => rs1,
+        20..24 => 0b00001,
+        25..31 => 0b1101001,
+    }
+
+    asm {
+        "{self.MNEMONIC} {fd}, {rs1}"
+    }
+
+    behavior {
+        fd = uitofp(extract(rs1, 31, 0), 11, 52);
+    }
+}
+
+// Convert binary64 to a signed 32-bit integer, truncating toward zero.
+instruction FCvtWD for [D] {
+    param MNEMONIC: String = "fcvt.w.d";
+    param OPCODE: bits<7> = 0b1010011;
+
+    operands {
+        rd: GPR,
+        fs1: FPR64,
+    }
+
+    encoding {
+        0..6 => OPCODE,
+        7..11 => rd,
+        12..14 => 0b001,
+        15..19 => fs1,
+        20..24 => 0b00000,
+        25..31 => 0b1100001,
+    }
+
+    asm {
+        "{self.MNEMONIC} {rd}, {fs1}"
+    }
+
+    behavior {
+        rd = sext(fptosi(fs1, 32), self.XLEN);
+    }
+}
+
+// Convert binary64 to an unsigned 32-bit integer, truncating toward zero.
+instruction FCvtWUD for [D] {
+    param MNEMONIC: String = "fcvt.wu.d";
+    param OPCODE: bits<7> = 0b1010011;
+
+    operands {
+        rd: GPR,
+        fs1: FPR64,
+    }
+
+    encoding {
+        0..6 => OPCODE,
+        7..11 => rd,
+        12..14 => 0b001,
+        15..19 => fs1,
+        20..24 => 0b00001,
+        25..31 => 0b1100001,
+    }
+
+    asm {
+        "{self.MNEMONIC} {rd}, {fs1}"
+    }
+
+    behavior {
+        rd = sext(fptoui(fs1, 32), self.XLEN);
+    }
+}
+
 // Register copies use FSGNJ with both sources equal, preserving every bit.
 instruction FMoveS for [F] {
     param MNEMONIC: String = "fsgnj.s";
@@ -304,6 +418,33 @@ instruction FMvDX for [D64] {
 
     behavior {
         fd = bitcast(rs1);
+    }
+}
+
+instruction FMvXD for [D64] {
+    param MNEMONIC: String = "fmv.x.d";
+    param OPCODE: bits<7> = 0b1010011;
+
+    operands {
+        rd: GPR,
+        fs1: FPR64,
+    }
+
+    encoding {
+        0..6 => OPCODE,
+        7..11 => rd,
+        12..14 => 0b000,
+        15..19 => fs1,
+        20..24 => 0b00000,
+        25..31 => 0b1110001,
+    }
+
+    asm {
+        "{self.MNEMONIC} {rd}, {fs1}"
+    }
+
+    behavior {
+        rd = bitcast(fs1);
     }
 }
 
