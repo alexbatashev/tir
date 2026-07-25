@@ -5,6 +5,7 @@ mod declare;
 mod float;
 mod func;
 mod module;
+mod tuple;
 
 use std::any::Any;
 use std::sync::Arc;
@@ -21,6 +22,7 @@ pub use declare::*;
 pub use float::*;
 pub use func::*;
 pub use module::*;
+pub use tuple::*;
 
 pub mod ops {
     pub use super::arith::*;
@@ -30,6 +32,7 @@ pub mod ops {
     pub use super::float::*;
     pub use super::func::*;
     pub use super::module::*;
+    pub use super::tuple::*;
 }
 
 dialect! {
@@ -73,10 +76,12 @@ dialect! {
             CondBranchOp,
             CallOp,
             IndirectCallOp,
+            MakeTupleOp,
+            TupleGetOp,
             DeclareOp,
             AddressOfOp,
         ],
-        types: [IntegerType, FloatType, IndexType, UnitType, TokenType],
+        types: [IntegerType, FloatType, IndexType, UnitType, TokenType, TupleType],
     }
 }
 
