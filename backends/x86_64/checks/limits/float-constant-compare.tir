@@ -1,0 +1,16 @@
+// RUN: tir mc --march=x86_64 --stage=regalloc %s | filecheck %s
+
+module {
+  func @equal_literal(%0: !f64) -> !i1 {
+    %1 = constantf {value = 10.0} : !f64
+    %2 = cmpf %0, %1 {predicate = "oeq"} : !i1
+    return %2
+  }
+  module_end
+}
+
+// CHECK-LABEL: asm.symbol {name = "equal_literal"
+// CHECK: x86_64.movabs
+// CHECK: x86_64.movq_xmm_gpr
+// CHECK: x86_64.ucomisd
+// CHECK: asm.vret

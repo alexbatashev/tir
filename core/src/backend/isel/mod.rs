@@ -335,6 +335,9 @@ pub struct Rule {
     pub operand_registers: Vec<(u32, RegisterRequirement)>,
     /// Storage capability of the register receiving this rule's result.
     pub result_register: Option<RegisterRequirement>,
+    /// Width of a floating-point value this target instruction can materialize
+    /// from its integer bit pattern.
+    pub float_constant_width: Option<u32>,
     /// Per-operand-symbol immediate encoding range. A constant outside the field's
     /// representable range must not bind (its encoding would truncate). Symbols
     /// absent here accept any constant.
@@ -360,6 +363,7 @@ impl Rule {
             operand_constraints: Vec::new(),
             operand_registers: Vec::new(),
             result_register: None,
+            float_constant_width: None,
             operand_imm_ranges: Vec::new(),
             guarded_semantics: None,
             emit_fn,
@@ -387,6 +391,13 @@ impl Rule {
 
     pub fn with_optional_result_register(mut self, register: Option<RegisterRequirement>) -> Self {
         self.result_register = register;
+        self
+    }
+
+    /// Record that this target instruction bridges integer bits into a scalar
+    /// floating-point register, so floating constants can be rooted by selection.
+    pub fn with_float_constant_materializer(mut self, width: u32) -> Self {
+        self.float_constant_width = Some(width);
         self
     }
 
@@ -472,6 +483,10 @@ struct FunctionSelection {
     /// a call): the defining block's cover must root a materializer match for them
     /// instead of leaving the constant to the pre-RA hook.
     force_constant_values: HashSet<ValueId>,
+    /// Terminal integer bit patterns synthesized beneath rooted floating constants.
+    /// Target immediate instructions may introduce these despite their having no
+    /// source IR op of their own.
+    introduced_constants: HashSet<Id>,
     /// Control-flow edges retained when gate values are reified.
     control: HashMap<BlockId, Vec<ControlReification>>,
     /// Canonical classes seeded from reducible γ/μ gates. An algebraic `If`
@@ -759,8 +774,8 @@ pub struct InstructionSelectPass {
     /// Ranges whose materializer specifically uses an add from a hardwired zero
     /// register; only these need the structural `zero + immediate` bridge.
     zero_form_constant_materializer_ranges: Vec<ImmRange>,
-    /// Whether target patterns can materialize a bit-pattern into a float register.
-    has_float_constant_materializer: bool,
+    /// Floating-point widths target instructions can materialize from integer bits.
+    float_constant_materializer_widths: HashSet<u32>,
     /// Address width inferred from the target's natural integer load rules.
     pointer_width: Option<u32>,
     /// Semantic invariants the program e-graph is saturated with before covering.
@@ -1003,6 +1018,10 @@ impl InstructionSelectPass {
     }
 
     fn build(rules: Vec<Rule>) -> Self {
+        let declared_float_constant_materializer_widths: HashSet<_> = rules
+            .iter()
+            .filter_map(|rule| rule.float_constant_width)
+            .collect();
         let compiled_patterns: Vec<_> = rules
             .iter()
             .enumerate()
@@ -1023,8 +1042,15 @@ impl InstructionSelectPass {
             pattern::constant_materializer_ranges(&compiled_patterns);
         let zero_form_constant_materializer_ranges =
             pattern::zero_form_constant_materializer_ranges(&compiled_patterns);
-        let has_float_constant_materializer = !zero_form_constant_materializer_ranges.is_empty()
-            && pattern::has_float_constant_materializer(&compiled_patterns);
+        let float_constant_materializer_widths = declared_float_constant_materializer_widths
+            .into_iter()
+            .filter(|width| {
+                !zero_form_constant_materializer_ranges.is_empty()
+                    || constant_materializer_ranges
+                        .iter()
+                        .any(|range| range.width >= *width)
+            })
+            .collect();
         let pointer_width = pattern::natural_pointer_width(&compiled_patterns);
 
         Self {
@@ -1032,7 +1058,7 @@ impl InstructionSelectPass {
             compiled_patterns,
             constant_materializer_ranges,
             zero_form_constant_materializer_ranges,
-            has_float_constant_materializer,
+            float_constant_materializer_widths,
             pointer_width,
             rewrites,
             branch_emitters: None,
@@ -1198,8 +1224,17 @@ impl InstructionSelectPass {
                         roots_by_op.insert(op_id, root);
                     } else if ((!self.constant_materializer_ranges.is_empty()
                         && op.is::<crate::builtin::ConstantOp>())
-                        || (self.has_float_constant_materializer
-                            && op.is::<crate::builtin::ConstantFOp>()))
+                        || (op.is::<crate::builtin::ConstantFOp>()
+                            && op.results.first().is_some_and(|result| {
+                                let ty = context.get_value(*result).ty();
+                                let data = context.get_type_data(ty);
+                                (data.as_ref() as &dyn std::any::Any)
+                                    .downcast_ref::<tir::builtin::FloatType>()
+                                    .is_some_and(|ty| {
+                                        self.float_constant_materializer_widths
+                                            .contains(&ty.bit_width())
+                                    })
+                            })))
                         && let Some(&result) = op.results.first()
                     {
                         constant_candidates.push((op_id, builder.build_from_value(result)));
@@ -1453,6 +1488,20 @@ impl InstructionSelectPass {
                     .then(|| egraph.find(class))
             })
             .collect();
+        let mut introduced_constants = HashSet::new();
+        for &(op_id, class) in &constant_candidates {
+            if !context.get_op(op_id).is::<crate::builtin::ConstantFOp>() {
+                continue;
+            }
+            let class = egraph.find(class);
+            for node in egraph.nodes(class) {
+                if node.kind == SymKind::Bitcast
+                    && let [bits] = node.children.as_slice()
+                {
+                    introduced_constants.insert(egraph.find(*bits));
+                }
+            }
+        }
 
         FunctionSelection {
             egraph,
@@ -1466,6 +1515,7 @@ impl InstructionSelectPass {
             shared_classes,
             must_materialize,
             force_constant_values,
+            introduced_constants,
             control,
             reifiable_gates,
             prepared,
@@ -2166,14 +2216,16 @@ impl InstructionSelectPass {
                 let block_op = block_op_by_root.get(&root).copied();
                 let is_guard_class = guard_classes.contains(&root);
                 // A match roots an instruction only if it produces a value B
-                // computes: an op of B, a guard condition of B, or a
-                // rewrite-introduced intermediate (a computed class with no op).
+                // computes: an op of B, a guard condition of B, a
+                // rewrite-introduced intermediate, or the terminal integer bits
+                // synthesized beneath a rooted floating constant.
                 let is_computed = fs
                     .egraph
                     .nodes(root)
                     .iter()
                     .any(|n| !n.children().is_empty());
-                let introduced = is_computed && !fs.is_op_root(root);
+                let introduced = !fs.is_op_root(root)
+                    && (is_computed || fs.introduced_constants.contains(&root));
                 if block_op.is_none() && !is_guard_class && !introduced {
                     continue;
                 }

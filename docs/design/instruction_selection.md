@@ -322,9 +322,9 @@ struct PbqpIselMatch {
 }
 ```
 
-A match rooted at a pure operand (leaf/constant) is discarded — instructions root
-at *computed* values only. A pure class may sit interior to any number of
-matches (each fused instruction recomputes it); a shared *memory effect* (§1)
+A match rooted at a pure operand is discarded unless it is a constant matched by
+a target materializer instruction. A pure class may sit interior to any number
+of matches (each fused instruction recomputes it); a shared *memory effect* (§1)
 is allowed as a match root or boundary, but never as an interior node a larger
 match would erase.
 
@@ -386,11 +386,14 @@ as a materializer; only that form receives the structural
 `Add(ZExt(0), immediate)` e-graph bridge. No target lowering hook participates
 in either selection.
 
-A standalone `constantf` is rooted for covering only when the compiled target
-patterns contain both a float-register bitcast materializer and a zero-form
-integer materializer. Its integer bit pattern then uses the same target-derived
-integer materializer chain before the final bitcast instruction, including when
-the value crosses a call boundary.
+TMDL marks a value rule that bitcasts into a scalar floating-point register with
+the destination format's width. A `constantf` of that width becomes an op root
+only when this target-instruction capability is present and the target rules can
+construct every integer bit pattern of that width: either a whole-width
+bare-immediate instruction such as x86 `movabs`, or a zero-register materializer
+that participates in the proved wide-constant decomposition. The integer bits
+select that target-derived chain before the final bitcast instruction, including
+when the value is consumed by another selected instruction.
 
 ### Narrow register-width forms
 
