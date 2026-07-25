@@ -41,6 +41,19 @@ impl FuncOpBuilder {
             tir::attributes::AttributeValue::Bool(true),
         )
     }
+
+    pub fn argument_alignments(self, alignments: &[u64]) -> Self {
+        self.attr(
+            "argument_alignments",
+            tir::attributes::AttributeValue::Array(
+                alignments
+                    .iter()
+                    .copied()
+                    .map(tir::attributes::AttributeValue::UInt)
+                    .collect(),
+            ),
+        )
+    }
 }
 
 impl FuncOp {
@@ -61,6 +74,10 @@ impl FuncOp {
                 _ => None,
             })
             .expect("func must carry ret_type")
+    }
+
+    pub fn argument_alignments(&self) -> Vec<u64> {
+        super::argument_alignments(self)
     }
 
     fn custom_print(&self, fmt: &mut tir::IRFormatter) -> Result<(), std::fmt::Error> {
@@ -107,6 +124,7 @@ impl FuncOp {
         if self.has_result_address() {
             fmt.write(" result_address")?;
         }
+        super::print_argument_alignments(fmt, &self.argument_alignments())?;
 
         tir::region_format::print_op_region(fmt, &context, self, 0)?;
 
@@ -170,6 +188,7 @@ impl FuncOp {
             UnitType::new(context)
         };
         let result_address = parser.parse_token("result_address");
+        let argument_alignments = super::parse_argument_alignments(parser, context)?;
 
         // Parse body region { ... }
         let body_region = parser.parse_region_with_entry_args(context, block_args)?;
@@ -181,6 +200,9 @@ impl FuncOp {
         if result_address {
             builder = builder.result_address();
         }
+        if let Some(argument_alignments) = argument_alignments {
+            builder = builder.attr("argument_alignments", argument_alignments);
+        }
 
         Ok(Box::new(builder.build()))
     }
@@ -188,6 +210,7 @@ impl FuncOp {
 
 impl tir::Verifiable for FuncOp {
     fn verify_impl(&self, context: &Context) -> Result<(), Error> {
+        super::verify_argument_alignments(self, self.body().arguments().len(), "function")?;
         if !self.has_result_address() {
             return Ok(());
         }

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use tir::backend::abi::{AbiInfo, ClassifierKind, Overflow, ValueKind};
+use tir::backend::abi::{AbiInfo, ArgumentGroupAlignment, ClassifierKind, Overflow, ValueKind};
 use tir::graph::{Dag, MutDag, NodeId};
 
 use crate::ast::{Ast, AstKind, AstLeaf, CParam, CType, RecordId, RecordKind};
@@ -80,6 +80,7 @@ pub struct TargetProfile {
     integer_argument_registers: usize,
     float_argument_registers: usize,
     float_argument_overflow: Overflow,
+    argument_group_alignment: Option<ArgumentGroupAlignment>,
 }
 
 impl TargetProfile {
@@ -98,6 +99,7 @@ impl TargetProfile {
                 integer_argument_registers: 0,
                 float_argument_registers: 0,
                 float_argument_overflow: Overflow::Stack,
+                argument_group_alignment: None,
             })
         } else if normalized.starts_with("riscv64")
             || normalized.starts_with("rv64")
@@ -114,6 +116,7 @@ impl TargetProfile {
                 integer_argument_registers: 0,
                 float_argument_registers: 0,
                 float_argument_overflow: Overflow::Stack,
+                argument_group_alignment: None,
             })
         } else if normalized.starts_with("arm64") || normalized.starts_with("aarch64") {
             Ok(Self {
@@ -123,6 +126,7 @@ impl TargetProfile {
                 integer_argument_registers: 0,
                 float_argument_registers: 0,
                 float_argument_overflow: Overflow::Stack,
+                argument_group_alignment: None,
             })
         } else {
             Err(format!("no C data model for target '{march}'"))
@@ -149,6 +153,7 @@ impl TargetProfile {
             .map_or(Overflow::Chain(ValueKind::Int), |sequence| {
                 sequence.overflow
             });
+        profile.argument_group_alignment = abi.argument_group_alignment;
         Ok(profile)
     }
 
@@ -194,6 +199,17 @@ impl TargetProfile {
 
     pub(crate) fn float_argument_overflow(self) -> Overflow {
         self.float_argument_overflow
+    }
+
+    pub(crate) fn align_argument_slot(
+        self,
+        kind: ValueKind,
+        source_alignment: u64,
+        slot: usize,
+    ) -> usize {
+        self.argument_group_alignment.map_or(slot, |alignment| {
+            alignment.align_slot(kind, source_alignment, slot)
+        })
     }
 }
 
@@ -339,6 +355,7 @@ pub fn analyze(ast: Ast, options: LangOptions) -> Result<TypedAst, Vec<Diagnosti
         integer_argument_registers: 0,
         float_argument_registers: 0,
         float_argument_overflow: Overflow::Stack,
+        argument_group_alignment: None,
     });
     analyze_with_target(ast, options, target)
 }

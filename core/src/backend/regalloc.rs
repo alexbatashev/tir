@@ -21,7 +21,7 @@ use tir::{
     PreservedAnalyses, Rewriter, ValueId,
 };
 
-use crate::backend::abi::value_kind;
+use crate::backend::abi::{align_argument_group, value_kind};
 use crate::backend::liveness::{self, Liveness, PhysReg};
 use crate::backend::{SymbolOp, VirtualBranchOp, VirtualReturnOp};
 use crate::ptr::AllocaOp;
@@ -1507,7 +1507,33 @@ fn abi_precolor(
         }
 
         for attribute in args {
-            if let AttributeValue::Array(group) = attribute {
+            let group = match attribute {
+                AttributeValue::Array(group) => Some((group, 1)),
+                AttributeValue::Dict(group) => {
+                    let members = match group.get("members") {
+                        Some(AttributeValue::Array(members)) => members,
+                        _ => {
+                            return Err(PassError::InvalidRuleSet(
+                                "ABI argument group has no members".to_string(),
+                            ));
+                        }
+                    };
+                    let alignment = match group.get("alignment") {
+                        Some(AttributeValue::UInt(alignment)) => *alignment,
+                        Some(AttributeValue::Int(alignment)) if *alignment >= 0 => {
+                            *alignment as u64
+                        }
+                        _ => {
+                            return Err(PassError::InvalidRuleSet(
+                                "ABI argument group has invalid alignment".to_string(),
+                            ));
+                        }
+                    };
+                    Some((members, alignment))
+                }
+                _ => None,
+            };
+            if let Some((group, alignment)) = group {
                 let members = group
                     .iter()
                     .map(|member| {
@@ -1528,6 +1554,12 @@ fn abi_precolor(
                     })
                     .collect::<Result<Vec<_>, PassError>>()?;
                 let mut trial_slots = next_abi_slot.clone();
+                align_argument_group(
+                    abi,
+                    alignment,
+                    members.iter().map(|&(_, _, kind)| kind),
+                    &mut trial_slots,
+                );
                 let pins = members
                     .iter()
                     .map(|&(_, class, kind)| next_abi_register(abi, class, kind, &mut trial_slots))
@@ -1813,6 +1845,7 @@ mod tests {
             ra: None,
             fp: None,
             indirect_result: None,
+            argument_group_alignment: None,
             args: Box::leak(
                 vec![PassSeq {
                     kind: ValueKind::Int,

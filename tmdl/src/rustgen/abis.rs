@@ -243,6 +243,7 @@ fn emit_abi_info(
                 ra: #ra,
                 fp: #fp,
                 indirect_result: None,
+                argument_group_alignment: None,
                 args: &[#(#args),*],
                 rets: &[#(#rets),*],
                 callee_saved: &[#(#callee_saved),*],

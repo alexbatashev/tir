@@ -704,6 +704,11 @@ fn arm64_abis() -> &'static [tir::backend::abi::AbiInfo] {
             .iter()
             .map(|abi| tir::backend::abi::AbiInfo {
                 indirect_result: Some((RegClass::GPR.id(), 8)),
+                argument_group_alignment: Some(tir::backend::abi::ArgumentGroupAlignment {
+                    kind: tir::backend::abi::ValueKind::Int,
+                    minimum_source_alignment: 16,
+                    register_multiple: 2,
+                }),
                 ..*abi
             })
             .collect()

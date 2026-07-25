@@ -42,13 +42,23 @@ pub fn lower_function_and_return(
         let mut tuple_extracts = Vec::new();
         let mut arguments = Vec::new();
         let function_arguments = func.body().arguments().to_vec();
+        let mut argument_alignments = func.argument_alignments();
+        if argument_alignments.is_empty() {
+            argument_alignments.resize(function_arguments.len(), 1);
+        } else if argument_alignments.len() != function_arguments.len() {
+            return Err(PassError::InvalidRuleSet(
+                "function argument alignment count does not match its arguments".to_string(),
+            ));
+        }
         let mut function_arguments = function_arguments.into_iter();
+        let mut argument_alignments = argument_alignments.into_iter();
         let result_address = if func.has_result_address() {
             let argument = function_arguments.next().ok_or_else(|| {
                 PassError::InvalidRuleSet(
                     "result-address function has no destination argument".to_string(),
                 )
             })?;
+            argument_alignments.next();
             Some(AttributeValue::Register(RegisterAttr::Virtual {
                 id: argument.id().number(),
                 class: Some(argument_class(argument.ty())?),
@@ -56,7 +66,7 @@ pub fn lower_function_and_return(
         } else {
             None
         };
-        for argument in function_arguments {
+        for (argument, alignment) in function_arguments.zip(argument_alignments) {
             let ty = context.get_type_data(argument.ty());
             let Some(tuple) = (ty.as_ref() as &dyn std::any::Any).downcast_ref::<TupleType>()
             else {
@@ -105,7 +115,14 @@ pub fn lower_function_and_return(
                     }))
                 })
                 .collect::<Result<Vec<_>, PassError>>()?;
-            arguments.push(AttributeValue::Array(group));
+            if alignment == 1 {
+                arguments.push(AttributeValue::Array(group));
+            } else {
+                arguments.push(AttributeValue::Dict(std::collections::BTreeMap::from([
+                    ("alignment".to_string(), AttributeValue::UInt(alignment)),
+                    ("members".to_string(), AttributeValue::Array(group)),
+                ])));
+            }
         }
         let mut symbol = super::SymbolOpBuilder::new(context)
             .body(op.op().regions[0])

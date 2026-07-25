@@ -8,7 +8,8 @@ use tir::builtin::{
 use tir::{Context, OpId, Operand, Operation, OperationRef, PassError, Rewriter, ValueId};
 
 use crate::backend::abi::{
-    AbiInfo, Overflow, ValueKind, exhaust_argument_registers, type_kind, value_kind,
+    AbiInfo, Overflow, ValueKind, align_argument_group, exhaust_argument_registers, type_kind,
+    value_kind,
 };
 use crate::backend::liveness::PhysReg;
 
@@ -170,13 +171,14 @@ impl CallLowering {
         op: &OperationRef,
         rewriter: &mut Rewriter,
     ) -> Result<bool, PassError> {
-        let (callee, mut args, result, has_result_address) =
+        let (callee, mut args, result, has_result_address, mut argument_alignments) =
             if let Some(call) = op.as_op::<CallOp>() {
                 (
                     Callee::Direct(call.callee()),
                     call.args(),
                     call.result(),
                     call.has_result_address(),
+                    call.argument_alignments(),
                 )
             } else if let Some(call) = op.as_op::<IndirectCallOp>() {
                 (
@@ -184,16 +186,25 @@ impl CallLowering {
                     call.args(),
                     call.result(),
                     false,
+                    Vec::new(),
                 )
             } else {
                 return Ok(false);
             };
+        if argument_alignments.is_empty() {
+            argument_alignments.resize(args.len(), 1);
+        } else if argument_alignments.len() != args.len() {
+            return Err(PassError::InvalidRuleSet(
+                "call argument alignment count does not match its arguments".to_string(),
+            ));
+        }
         let result_address = if has_result_address {
             if args.is_empty() {
                 return Err(PassError::InvalidRuleSet(
                     "result-address call has no destination argument".to_string(),
                 ));
             }
+            argument_alignments.remove(0);
             Some(args.remove(0))
         } else {
             None
@@ -202,20 +213,22 @@ impl CallLowering {
 
         let mut tuple_arguments = Vec::new();
         let mut lowered_arguments = Vec::with_capacity(args.len());
-        for (argument_index, arg) in args.into_iter().enumerate() {
+        for (argument_index, (arg, alignment)) in
+            args.into_iter().zip(argument_alignments).enumerate()
+        {
             let ty = context.get_type_data(context.get_value(arg).ty());
             if (ty.as_ref() as &dyn std::any::Any)
                 .downcast_ref::<TupleType>()
                 .is_none()
             {
-                lowered_arguments.push(vec![arg]);
+                lowered_arguments.push((vec![arg], alignment));
                 continue;
             }
             if let Some(elements) = self
                 .tuple_argument_elements
                 .get(&(op.op().id, argument_index + argument_offset))
             {
-                lowered_arguments.push(elements.clone());
+                lowered_arguments.push((elements.clone(), alignment));
                 continue;
             }
             let defining_op = context.get_value(arg).defining_op().ok_or_else(|| {
@@ -230,7 +243,7 @@ impl CallLowering {
                         "tuple call argument has no scalar elements".to_string(),
                     )
                 })?;
-            lowered_arguments.push(tuple.operands().to_vec());
+            lowered_arguments.push((tuple.operands().to_vec(), alignment));
             tuple_arguments.push((defining_op, arg));
         }
 
@@ -238,8 +251,14 @@ impl CallLowering {
         let mut argument_values = Vec::new();
         let mut argument_locations = Vec::new();
         let mut stack_args = 0u32;
-        for values in lowered_arguments {
+        for (values, alignment) in lowered_arguments {
             let mut trial_slots = next_slot.clone();
+            align_argument_group(
+                self.abi,
+                alignment,
+                values.iter().map(|&value| value_kind(context, value)),
+                &mut trial_slots,
+            );
             let direct = values
                 .iter()
                 .map(|&value| next_register(self.abi, value_kind(context, value), &mut trial_slots))
