@@ -11,7 +11,7 @@ use std::fmt::{self, Display, Formatter};
 
 use tir_graph::{Dag, GenericDag, NodeId};
 
-use crate::lang::{SymKind, SymPayload};
+use crate::lang::{SemType, SymKind, SymPayload};
 use crate::sat::{Lit, SatResult, Solver};
 
 #[derive(Clone, Copy)]
@@ -105,7 +105,17 @@ pub fn blast<V>(
     graph: &GenericDag<SymKind, SymPayload<V>>,
     widths: &[Option<u32>],
 ) -> Result<Blasted, BitblastError> {
-    let mut b = Blaster::new(graph, widths);
+    blast_with_types(graph, widths, &[])
+}
+
+/// Bit-blast a graph with semantic types for overloaded scalar operations. An
+/// empty `types` leaves every node in the bit-vector domain.
+pub fn blast_with_types<V>(
+    graph: &GenericDag<SymKind, SymPayload<V>>,
+    widths: &[Option<u32>],
+    types: &[SemType],
+) -> Result<Blasted, BitblastError> {
+    let mut b = Blaster::new(graph, widths, types);
     for i in 0..graph.len() {
         let id = NodeId::from_index(i);
         let bits = b.encode(id)?;
@@ -133,10 +143,15 @@ pub(crate) struct Blaster<'g, V> {
     sym_bits: HashMap<u32, Vec<Lit>>,
     graph: &'g GenericDag<SymKind, SymPayload<V>>,
     widths: &'g [Option<u32>],
+    types: &'g [SemType],
 }
 
 impl<'g, V> Blaster<'g, V> {
-    fn new(graph: &'g GenericDag<SymKind, SymPayload<V>>, widths: &'g [Option<u32>]) -> Self {
+    fn new(
+        graph: &'g GenericDag<SymKind, SymPayload<V>>,
+        widths: &'g [Option<u32>],
+        types: &'g [SemType],
+    ) -> Self {
         let mut solver = Solver::new();
         let one = Lit::positive(solver.new_var());
         solver.add_clause(&[one]);
@@ -148,6 +163,7 @@ impl<'g, V> Blaster<'g, V> {
             sym_bits: HashMap::new(),
             graph,
             widths,
+            types,
         }
     }
 
@@ -218,6 +234,9 @@ impl<'g, V> Blaster<'g, V> {
             ShiftLeft => self.shift(id, Shift::Left),
             ShiftRightLogic => self.shift(id, Shift::Logical),
             ShiftRightArithmetic => self.shift(id, Shift::Arithmetic),
+            Eq | Ne | Lt | Le | Gt | Ge if self.is_float_comparison(id) => {
+                self.encode_float_compare(id, kind)
+            }
             Eq => {
                 let (a, b) = self.binop_bits(id);
                 Ok(vec![self.eq_bits(&a, &b)])
@@ -265,6 +284,13 @@ impl<'g, V> Blaster<'g, V> {
             }
             _ => Ok(defined),
         }
+    }
+
+    fn is_float_comparison(&self, id: NodeId) -> bool {
+        self.graph
+            .children(id)
+            .next()
+            .is_some_and(|child| matches!(self.types.get(child.index()), Some(SemType::Float(_))))
     }
 
     fn encode_symbol(&mut self, id: NodeId) -> Result<Vec<Lit>, BitblastError> {

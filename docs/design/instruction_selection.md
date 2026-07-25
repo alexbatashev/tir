@@ -611,6 +611,24 @@ ahead of the terminator. Everything else (the `Dead` alternative consuming the
 compare, boundary-forced materialization, dominating-edge assumptions) is the
 same machinery as the fused single-instruction path.
 
+Comparison proof is semantic-type aware. Integer flag definers use the ordinary
+bit-vector oracle. A definer whose operands belong to a TMDL `float` register
+class seeds the same comparison graph with its binary floating-point type, so
+`eq`/`ne` and ordered inequalities use IEEE NaN and signed-zero semantics during
+bit-blasting. The resulting pattern remains the target-independent comparison
+kind and is kept in the floating domain by its register requirements.
+
+Ordered floating equality is represented as `(a >= b) & (b >= a)`: both
+comparisons are false for unordered operands, while signed zero still compares
+equal. Ordered inequality is that one-bit result XOR `1`. This lets the e-graph
+cover equality using whichever proved ordered comparisons a target provides,
+and keeps the materialized boolean canonical without a target-specific rule.
+The one-bit `and` and `xor` materialization bridges also make instructions whose
+formal behavior returns either expression directly available as a single cover.
+Floating flag-reader composition proves equality and inequality against these
+same compound graphs, so a real compare plus condition-set pair can cover them
+without introducing an atomic float `eq`/`ne` rule.
+
 A guard matching no canonical comparison (e.g. a branch on overflow alone)
 derives no rule; the instruction still assembles, encodes, and simulates.
 

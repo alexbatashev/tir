@@ -1,14 +1,88 @@
-//! Integer-to-float conversion circuits (`SIToFP`/`UIToFP`) as combinational
-//! bit-vector logic, so the QF_BV oracle can prove float-conversion identities.
-//! All vectors little-endian (bit 0 = LSB). Round-to-nearest, ties-to-even; the
-//! input range (≤64 bits) never overflows the exponent, so no infinity/NaN path.
+//! Float comparison and integer/float conversion circuits (`SIToFP`/`UIToFP`)
+//! as combinational bit-vector logic, so the QF_BV oracle can prove
+//! floating-point identities. All vectors little-endian (bit 0 = LSB).
+//! Conversions round to nearest, ties-to-even; the input range (≤64 bits) never
+//! overflows the exponent, so no infinity/NaN path.
 
 use tir_graph::{Dag, NodeId};
 
 use super::{BitblastError, Blaster};
+use crate::lang::SymKind;
 use crate::sat::Lit;
 
 impl<V> Blaster<'_, V> {
+    pub(super) fn encode_float_compare(
+        &mut self,
+        id: NodeId,
+        kind: SymKind,
+    ) -> Result<Vec<Lit>, BitblastError> {
+        let lhs = self.child_bits(id, 0);
+        let rhs = self.child_bits(id, 1);
+        let (exp_width, mant_width) =
+            float_format(lhs.len()).ok_or(BitblastError::UnknownWidth(id.index()))?;
+        if rhs.len() != lhs.len() {
+            return Err(BitblastError::UnknownWidth(id.index()));
+        }
+
+        let lhs_fraction = &lhs[..mant_width];
+        let lhs_exponent = &lhs[mant_width..mant_width + exp_width];
+        let lhs_sign = lhs[mant_width + exp_width];
+        let rhs_fraction = &rhs[..mant_width];
+        let rhs_exponent = &rhs[mant_width..mant_width + exp_width];
+        let rhs_sign = rhs[mant_width + exp_width];
+
+        let lhs_nan = self.float_is_nan(lhs_fraction, lhs_exponent);
+        let rhs_nan = self.float_is_nan(rhs_fraction, rhs_exponent);
+        let unordered = self.gate_or(lhs_nan, rhs_nan);
+        let ordered = unordered.negate();
+
+        let lhs_zero = self.float_is_zero(lhs_fraction, lhs_exponent);
+        let rhs_zero = self.float_is_zero(rhs_fraction, rhs_exponent);
+        let both_zero = self.gate_and(lhs_zero, rhs_zero);
+        let bit_equal = self.eq_bits(&lhs, &rhs);
+        let equal_value = self.gate_or(bit_equal, both_zero);
+        let ordered_equal = self.gate_and(ordered, equal_value);
+
+        let signs_differ = self.gate_xor(lhs_sign, rhs_sign);
+        let negative_before_positive = self.gate_and(lhs_sign, signs_differ);
+        let lhs_magnitude = &lhs[..lhs.len() - 1];
+        let rhs_magnitude = &rhs[..rhs.len() - 1];
+        let positive_less = self.uge(lhs_magnitude, rhs_magnitude).negate();
+        let negative_less = self.uge(rhs_magnitude, lhs_magnitude).negate();
+        let same_sign_less = self.gate_mux(lhs_sign, negative_less, positive_less);
+        let numeric_less = self.gate_mux(signs_differ, negative_before_positive, same_sign_less);
+        let nonzero_less = self.gate_and(both_zero.negate(), numeric_less);
+        let ordered_less = self.gate_and(ordered, nonzero_less);
+
+        let neither_less_nor_equal = self.gate_and(ordered_less.negate(), ordered_equal.negate());
+        let ordered_greater = self.gate_and(ordered, neither_less_nor_equal);
+        let result = match kind {
+            SymKind::Eq => ordered_equal,
+            SymKind::Ne => ordered_equal.negate(),
+            SymKind::Lt => ordered_less,
+            SymKind::Le => self.gate_and(ordered, ordered_greater.negate()),
+            SymKind::Gt => ordered_greater,
+            SymKind::Ge => self.gate_and(ordered, ordered_less.negate()),
+            _ => unreachable!(),
+        };
+        Ok(vec![result])
+    }
+
+    fn float_is_nan(&mut self, fraction: &[Lit], exponent: &[Lit]) -> Lit {
+        let exponent_all_ones = exponent
+            .iter()
+            .copied()
+            .fold(self.one, |all, bit| self.gate_and(all, bit));
+        let fraction_nonzero = self.or_reduce(fraction);
+        self.gate_and(exponent_all_ones, fraction_nonzero)
+    }
+
+    fn float_is_zero(&mut self, fraction: &[Lit], exponent: &[Lit]) -> Lit {
+        let fraction_zero = self.nor(fraction);
+        let exponent_zero = self.nor(exponent);
+        self.gate_and(fraction_zero, exponent_zero)
+    }
+
     /// `SIToFP`/`UIToFP`: children are `[value, exponent_width, mantissa_width]`.
     pub(super) fn encode_int_to_float(
         &mut self,

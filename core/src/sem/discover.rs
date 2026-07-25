@@ -12,8 +12,8 @@
 use std::collections::HashMap;
 
 use tir_adt::APInt;
-use tir_symbolic::bitblast::{SolveOutcome, blast};
-use tir_symbolic::lang::infer_widths;
+use tir_symbolic::bitblast::{SolveOutcome, blast, blast_with_types};
+use tir_symbolic::lang::{SemType, Width, infer_types, infer_widths};
 
 use crate::ValueId;
 use crate::graph::{Dag, GenericDag, MutDag, NodeId};
@@ -91,6 +91,31 @@ impl EquivalenceOracle for SmtOracle {
 }
 
 impl SmtOracle {
+    /// Prove equivalence while preserving the semantic domains of shared symbols.
+    pub fn equivalent_typed(
+        &self,
+        lhs: &SemGraph,
+        rhs: &SemGraph,
+        symbol_types: &[SemType],
+    ) -> bool {
+        let Some((g, l, r)) = disequality(lhs, rhs) else {
+            return false;
+        };
+        let symbol_type = |id: NodeId| match g.get_leaf_data(id) {
+            Some(SymPayload::SymbolId(id)) => symbol_types.get(*id as usize).cloned(),
+            _ => None,
+        };
+        let Ok(types) = infer_types(&g, symbol_type) else {
+            return false;
+        };
+        let widths = infer_widths(&g, |id| symbol_type(id).and_then(semantic_width));
+        same_root_widths(&widths, l, r)
+            && matches!(
+                blast_with_types(&g, &widths, &types).map(|blasted| blasted.solve()),
+                Ok(SolveOutcome::Unsat)
+            )
+    }
+
     fn prove(
         &self,
         lhs: &SemGraph,
@@ -98,24 +123,15 @@ impl SmtOracle {
         symbol_widths: &[u32],
         defined_refinement: bool,
     ) -> bool {
-        let (Some(lhs_root), Some(rhs_root)) = (lhs.root(), rhs.root()) else {
+        let Some((g, l, r)) = disequality(lhs, rhs) else {
             return false;
         };
-        let mut g = OracleGraph::new();
-        let mut symbols = HashMap::new();
-        let l = copy_reachable(lhs, lhs_root, &mut g, &mut symbols, &mut HashMap::new());
-        let r = copy_reachable(rhs, rhs_root, &mut g, &mut symbols, &mut HashMap::new());
-        let ne = g.add_node(SymKind::Ne);
-        g.add_edge(ne, l);
-        g.add_edge(ne, r);
-
         let widths = infer_widths(&g, |id| match g.get_leaf_data(id) {
             Some(SymPayload::SymbolId(id)) => symbol_widths.get(*id as usize).copied(),
             _ => None,
         });
-        match (widths[l.index()], widths[r.index()]) {
-            (Some(lw), Some(rw)) if lw == rw => {}
-            _ => return false,
+        if !same_root_widths(&widths, l, r) {
+            return false;
         }
         match blast(&g, &widths) {
             Ok(b) if defined_refinement => {
@@ -124,6 +140,35 @@ impl SmtOracle {
             Ok(b) => matches!(b.solve(), SolveOutcome::Unsat),
             Err(_) => false,
         }
+    }
+}
+
+/// The `lhs != rhs` graph both sides share, with the copied roots. `None` if
+/// either side is empty.
+fn disequality(lhs: &SemGraph, rhs: &SemGraph) -> Option<(OracleGraph, NodeId, NodeId)> {
+    let (lhs_root, rhs_root) = (lhs.root()?, rhs.root()?);
+    let mut g = OracleGraph::new();
+    let mut symbols = HashMap::new();
+    let l = copy_reachable(lhs, lhs_root, &mut g, &mut symbols, &mut HashMap::new());
+    let r = copy_reachable(rhs, rhs_root, &mut g, &mut symbols, &mut HashMap::new());
+    let ne = g.add_node(SymKind::Ne);
+    g.add_edge(ne, l);
+    g.add_edge(ne, r);
+    Some((g, l, r))
+}
+
+fn same_root_widths(widths: &[Option<u32>], l: NodeId, r: NodeId) -> bool {
+    matches!((widths[l.index()], widths[r.index()]), (Some(l), Some(r)) if l == r)
+}
+
+fn semantic_width(ty: SemType) -> Option<u32> {
+    match ty {
+        SemType::Bits(Width::Const(width)) | SemType::RawBits(Width::Const(width)) => Some(width),
+        SemType::Float(format) => match (format.exponent, format.mantissa) {
+            (Width::Const(exponent), Width::Const(mantissa)) => Some(1 + exponent + mantissa),
+            _ => None,
+        },
+        _ => None,
     }
 }
 

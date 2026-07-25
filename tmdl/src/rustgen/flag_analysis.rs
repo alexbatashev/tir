@@ -737,19 +737,28 @@ fn comparison_candidate(
     (g, root)
 }
 
+/// The `cmpf` graph for an equality predicate: floating equality is compound,
+/// so it has no single-kind candidate.
+fn floating_equality_candidate(predicate: &str) -> (tir::sem::SemGraph, tir::graph::NodeId) {
+    let mut g = tir::sem::SemGraph::new();
+    let root = tir::builtin::cmpf_semantics(&mut g, predicate)
+        .expect("the builtin floating comparison predicate must be valid");
+    (g, root)
+}
+
 /// The comparison the composed flag condition is provably equivalent to, if
-/// any: the six canonical predicates `cmpi` lowers to, in both operand orders.
-/// A fuzz filter picks the candidate cheaply; the SMT oracle then proves it
-/// (bit-blasted equivalence at the operands' architectural widths), so a wrong
-/// flag formula derives no rule instead of a miscompiling one.
+/// any: the canonical predicates `cmpi` lowers to, in both operand orders.
+/// Integer candidates pass a fuzz filter before the SMT proof. Float candidates
+/// go directly through the type-aware SMT proof so IEEE comparison semantics are
+/// retained, and use the compound `cmpf` graphs for equality. A wrong flag
+/// formula derives no rule instead of a miscompiling one.
 fn find_equivalent_comparison(
     composed: &tir::sem::SemGraph,
-    symbol_widths: &[u32],
+    symbols: &ComparisonSymbols,
 ) -> Option<(tir::sem::SemGraph, tir::graph::NodeId)> {
     use tir::sem::{EquivalenceOracle, FuzzOracle, SmtOracle, SymKind};
-    const CANDIDATES: &[(SymKind, bool)] = &[
-        (SymKind::Eq, false),
-        (SymKind::Ne, false),
+    const EQUALITY: &[(SymKind, bool)] = &[(SymKind::Eq, false), (SymKind::Ne, false)];
+    const ORDERED: &[(SymKind, bool)] = &[
         (SymKind::Lt, false),
         (SymKind::Lt, true),
         (SymKind::Ge, false),
@@ -759,16 +768,23 @@ fn find_equivalent_comparison(
         (SymKind::UGe, false),
         (SymKind::UGe, true),
     ];
-    let fuzz = FuzzOracle::default();
-    for (kind, swap) in CANDIDATES {
-        let (candidate, root) = comparison_candidate(*kind, *swap);
-        if fuzz.equivalent(composed, &candidate, symbol_widths)
-            && SmtOracle.equivalent(composed, &candidate, symbol_widths)
-        {
-            return Some((candidate, root));
-        }
+
+    if symbols.floating() {
+        return ORDERED
+            .iter()
+            .map(|(kind, swap)| comparison_candidate(*kind, *swap))
+            .chain(["oeq", "une"].map(floating_equality_candidate))
+            .find(|(candidate, _)| SmtOracle.equivalent_typed(composed, candidate, &symbols.types));
     }
-    None
+    let fuzz = FuzzOracle::default();
+    EQUALITY
+        .iter()
+        .chain(ORDERED)
+        .map(|(kind, swap)| comparison_candidate(*kind, *swap))
+        .find(|(candidate, _)| {
+            fuzz.equivalent(composed, candidate, &symbols.widths)
+                && SmtOracle.equivalent(composed, candidate, &symbols.widths)
+        })
 }
 
 /// A register class's architectural width: a literal `WIDTH`, or `WIDTH =
@@ -795,19 +811,49 @@ fn register_class_width_with_isa(
     }
 }
 
-/// The architectural bit-width of each of a definer's comparison-operand
-/// symbols. A register operand's width comes from its class; the immediate
-/// operand shares it — comparison operands are the same architectural width, so
-/// the composed condition proves against a canonical comparison over full-width
-/// symbols. `None` if a register width is unresolved or a symbol is untyped.
-fn definer_symbol_widths(
+/// The semantic type and architectural width of each comparison operand.
+/// An immediate shares the register operand's type. `None` if a register width
+/// is unresolved, a float format is unsupported, or a symbol is untyped.
+struct ComparisonSymbols {
+    widths: Vec<u32>,
+    types: Vec<tir::sem::SemType>,
+}
+
+impl ComparisonSymbols {
+    fn floating(&self) -> bool {
+        self.types
+            .iter()
+            .any(|ty| matches!(ty, tir::sem::SemType::Float(_)))
+    }
+}
+
+/// The IEEE binary format of a float register class of `width` bits, or the
+/// plain bit-vector type for an integer class.
+fn operand_type(files: &[ast::File], class_name: &str, width: u32) -> Option<tir::sem::SemType> {
+    let class = files
+        .iter()
+        .flat_map(|file| file.register_classes())
+        .find(|class| class.name == class_name)?;
+    if !class.has_float_registers() {
+        return Some(tir::sem::SemType::bits(width));
+    }
+    match width {
+        32 => Some(tir::sem::SemType::Float(tir::sem::FloatFormat::new(8, 23))),
+        64 => Some(tir::sem::SemType::Float(tir::sem::FloatFormat::new(11, 52))),
+        _ => None,
+    }
+}
+
+fn definer_comparison_symbols(
     files: &[ast::File],
     d: &FlagInst<'_>,
     d_sem: &FlagDefinerSemantics,
-) -> Option<Vec<u32>> {
+) -> Option<ComparisonSymbols> {
     let mut widths = vec![0u32; d_sem.variable_symbols.len()];
+    let mut types = vec![tir::sem::SemType::bits(1); d_sem.variable_symbols.len()];
     let mut imm_symbol: Option<u32> = None;
     let mut register_width: Option<u32> = None;
+    let mut register_type: Option<tir::sem::SemType> = None;
     for (op_name, op_ty) in &d.ops {
         let Some(&symbol) = d_sem.variable_symbols.get(op_name) else {
             continue;
@@ -815,8 +861,11 @@ fn definer_symbol_widths(
         match op_ty {
             Type::Struct(class_name) => {
                 let width = register_class_width_with_isa(files, class_name, &d.isa_param_values)?;
+                let ty = operand_type(files, class_name, width)?;
                 widths[symbol as usize] = width;
+                types[symbol as usize] = ty.clone();
                 register_width = Some(width);
+                register_type = Some(ty);
             }
             Type::Bits(_) | Type::Integer => imm_symbol = Some(symbol),
             _ => {}
@@ -824,11 +873,12 @@ fn definer_symbol_widths(
     }
     if let Some(symbol) = imm_symbol {
         widths[symbol as usize] = register_width?;
+        types[symbol as usize] = register_type?;
     }
     if widths.contains(&0) {
         return None;
     }
-    Some(widths)
+    Some(ComparisonSymbols { widths, types })
 }
 
 /// The pattern symbols bound to a definer's immediate operands (there is at most
