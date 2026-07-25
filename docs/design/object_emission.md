@@ -27,7 +27,7 @@ Targets opt in through `TargetMachine`: `object_format()`,
 `binary_writer()`, plus `pre_ra_lowerings()` (e.g. constant
 materialization — before register allocation because the allocator must
 color the operands) and `finalize_lowerings()` (`vret`/`vbr` → real
-instructions — after it because the allocator matches `vret` by name).
+instructions — after it because the allocator consumes their typed operands).
 
 ## Emitting and linking an object
 

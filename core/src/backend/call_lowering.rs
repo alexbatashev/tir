@@ -1,10 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
 use tir::attributes::{AttributeValue, RegisterAttr};
-use tir::builtin::{CallOp, IndirectCallOp, UnitType};
+use tir::builtin::{CallOp, IndirectCallOp, TupleGetOp, TupleType, UnitType};
 use tir::{Context, Operation, OperationRef, PassError, Rewriter, ValueId};
 
-use crate::backend::abi::{AbiInfo, Overflow, ValueKind};
+use crate::backend::abi::{AbiInfo, Overflow, ValueKind, type_kind, value_kind};
 use crate::backend::liveness::PhysReg;
 
 pub trait CallEmitter: Send + Sync {
@@ -209,6 +209,54 @@ impl CallLowering {
             return Ok(true);
         }
 
+        let result_type = context.get_type_data(context.get_value(result).ty());
+        if let Some(tuple) =
+            (result_type.as_ref() as &dyn std::any::Any).downcast_ref::<TupleType>()
+        {
+            let registers = tuple_return_registers(context, self.abi, tuple)?;
+            let mut extracts = Vec::new();
+            for usage in context.value_uses(result) {
+                if usage.operand_index() != Some(0) {
+                    return Err(PassError::InvalidRuleSet(
+                        "tuple call result has a non-extraction use".to_string(),
+                    ));
+                }
+                let instance = context.get_op(usage.op());
+                let extract = instance.clone().as_op::<TupleGetOp>().ok_or_else(|| {
+                    PassError::InvalidRuleSet(
+                        "tuple call result has a non-extraction use".to_string(),
+                    )
+                })?;
+                let register = registers.get(extract.index()).copied().ok_or_else(|| {
+                    PassError::InvalidRuleSet("tuple extraction index is out of bounds".to_string())
+                })?;
+                let block = context.parent_block(usage.op()).ok_or_else(|| {
+                    PassError::InvalidRuleSet("tuple extraction has no parent block".to_string())
+                })?;
+                extracts.push((
+                    extract.index(),
+                    extract.result(),
+                    register,
+                    OperationRef::new(instance, Some(context.get_block(block)), None),
+                ));
+            }
+            extracts.sort_by_key(|(index, result, ..)| (*index, result.number()));
+
+            for &(_, extracted, register, _) in &extracts {
+                let copy = self.emitter.copy(
+                    context,
+                    virtual_reg(extracted.number(), register.0),
+                    physical_reg(register),
+                );
+                rewriter.insert_op_before(op, copy.as_ref())?;
+            }
+            for (_, _, _, extract) in extracts {
+                rewriter.erase_op(&extract)?;
+            }
+            rewriter.erase_op(op)?;
+            return Ok(true);
+        }
+
         let kind = value_kind(context, result);
         let return_reg = self
             .abi
@@ -236,6 +284,45 @@ impl CallLowering {
     }
 }
 
+fn tuple_return_registers(
+    context: &Context,
+    abi: &AbiInfo,
+    tuple: &TupleType,
+) -> Result<Vec<PhysReg>, PassError> {
+    let mut next_slot = HashMap::new();
+    tuple
+        .elements(context)
+        .into_iter()
+        .enumerate()
+        .map(|(index, ty)| {
+            let kind = type_kind(context, ty);
+            let slot = next_slot.entry(kind).or_insert(0usize);
+            let register = abi
+                .rets
+                .iter()
+                .find(|sequence| sequence.kind == kind)
+                .or_else(|| {
+                    (kind != ValueKind::Int)
+                        .then(|| {
+                            abi.rets
+                                .iter()
+                                .find(|sequence| sequence.kind == ValueKind::Int)
+                        })
+                        .flatten()
+                })
+                .and_then(|sequence| sequence.regs.get(*slot))
+                .copied()
+                .ok_or_else(|| {
+                    PassError::InvalidRuleSet(format!(
+                        "ABI has no return register for tuple element {index}"
+                    ))
+                })?;
+            *slot += 1;
+            Ok(register)
+        })
+        .collect()
+}
+
 enum Callee {
     Direct(String),
     Indirect(ValueId),
@@ -256,19 +343,6 @@ impl ArgumentLocation {
             ArgumentLocation::Register(register) => register.0,
             ArgumentLocation::Stack { class, .. } => class,
         }
-    }
-}
-
-fn value_kind(context: &Context, value: ValueId) -> ValueKind {
-    let ty = context.get_value(value).ty();
-    let data = context.get_type_data(ty);
-    let data = data.as_ref() as &dyn std::any::Any;
-    if data.downcast_ref::<tir::builtin::FloatType>().is_some() {
-        ValueKind::Float
-    } else if data.downcast_ref::<tir::vector::VectorType>().is_some() {
-        ValueKind::Vector
-    } else {
-        ValueKind::Int
     }
 }
 

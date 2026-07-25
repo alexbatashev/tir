@@ -3,7 +3,7 @@
 //! Ordering matters: `vcond_br` is lowered to a real conditional branch plus
 //! `vbr` *before* register allocation because its condition is an SSA value
 //! the allocator must color, while `vret`/`vbr` are finalized *after* it
-//! because the allocator identifies `vret` to precolor return values.
+//! because the allocator consumes their typed operands.
 
 use tir::{
     AnalysisManager, Context, IntegerArithmetic, OperationRef, Pass, PassError, PassManager,

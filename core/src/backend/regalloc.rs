@@ -21,6 +21,7 @@ use tir::{
     PreservedAnalyses, Rewriter, ValueId,
 };
 
+use crate::backend::abi::value_kind;
 use crate::backend::liveness::{self, Liveness, PhysReg};
 use crate::backend::{SymbolOp, VirtualBranchOp, VirtualReturnOp};
 use crate::ptr::AllocaOp;
@@ -1372,19 +1373,6 @@ struct IncomingStackArg {
     stack_index: usize,
 }
 
-fn abi_value_kind(context: &Context, vreg: u32) -> crate::backend::abi::ValueKind {
-    let ty = context.get_value(ValueId::from_number(vreg)).ty();
-    let data = context.get_type_data(ty);
-    let data = data.as_ref() as &dyn std::any::Any;
-    if data.downcast_ref::<tir::builtin::FloatType>().is_some() {
-        crate::backend::abi::ValueKind::Float
-    } else if data.downcast_ref::<tir::vector::VectorType>().is_some() {
-        crate::backend::abi::ValueKind::Vector
-    } else {
-        crate::backend::abi::ValueKind::Int
-    }
-}
-
 fn next_abi_register(
     abi: &crate::backend::abi::AbiInfo,
     class: RegClassId,
@@ -1477,7 +1465,7 @@ fn abi_precolor(
             let Some(rc) = class.or_else(|| info.default_integer_class(abi)) else {
                 continue;
             };
-            let kind = abi_value_kind(context, *id);
+            let kind = value_kind(context, ValueId::from_number(*id));
             let pin = next_abi_register(abi, rc, kind, &mut next_abi_slot);
             if let Some(pin) = pin {
                 let incoming = *id;
@@ -1524,49 +1512,50 @@ fn abi_precolor(
         }
     }
 
-    // Return value: the operand of the `vret` terminator, in the first return
-    // register of the value's class.
+    // Return operands take consecutive registers within each ABI value class.
     for &block_id in blocks {
         for op_id in context.get_block(block_id).op_ids() {
             let body_op = context.get_op(op_id);
             if !body_op.is::<VirtualReturnOp>() {
                 continue;
             }
-            let Some(value) = body_op.operands.first().copied() else {
-                continue;
-            };
-            let vreg = value.number();
-            let class = vreg_class_in(context, blocks, vreg);
-            let Some(rc) = class.or_else(|| info.default_integer_class(abi)) else {
-                continue;
-            };
-            let kind = abi_value_kind(context, vreg);
-            let Some(sequence) = abi.rets.iter().find(|sequence| sequence.kind == kind) else {
-                continue;
-            };
-            let Some(&register) = sequence.regs.first() else {
-                continue;
-            };
-            let ret_pin = if register.0.file() == rc.file() {
-                (rc, register.1)
-            } else {
-                register
-            };
+            let mut next_slot = HashMap::new();
+            for (operand_index, value) in body_op.operands.iter().copied().enumerate() {
+                let vreg = value.number();
+                let class = vreg_class_in(context, blocks, vreg);
+                let Some(rc) = class.or_else(|| info.default_integer_class(abi)) else {
+                    continue;
+                };
+                let kind = value_kind(context, value);
+                let slot = next_slot.entry(kind).or_insert(0usize);
+                let Some(sequence) = abi.rets.iter().find(|sequence| sequence.kind == kind) else {
+                    continue;
+                };
+                let Some(&register) = sequence.regs.get(*slot) else {
+                    continue;
+                };
+                *slot += 1;
+                let ret_pin = if register.0.file() == rc.file() {
+                    (rc, register.1)
+                } else {
+                    register
+                };
 
-            let ty = context.get_value(value).ty();
-            let outgoing = context.create_value(ty, None).id().number();
-            let copy = target.emit_copy(context, rc, outgoing, vreg);
-            let copy_id = copy.id();
-            let op_ref = op_ref_in(context, block_id, op_id);
-            rewriter.insert_op_before(&op_ref, copy.as_ref())?;
-            context.set_op_operand(op_id, 0, ValueId::from_number(outgoing));
-            precolor.insert(outgoing, ret_pin);
-            copies.push(AbiCopy {
-                block: block_id,
-                op: copy_id,
-                src: vreg,
-                dst: outgoing,
-            });
+                let ty = context.get_value(value).ty();
+                let outgoing = context.create_value(ty, None).id().number();
+                let copy = target.emit_copy(context, rc, outgoing, vreg);
+                let copy_id = copy.id();
+                let op_ref = op_ref_in(context, block_id, op_id);
+                rewriter.insert_op_before(&op_ref, copy.as_ref())?;
+                context.set_op_operand(op_id, operand_index, ValueId::from_number(outgoing));
+                precolor.insert(outgoing, ret_pin);
+                copies.push(AbiCopy {
+                    block: block_id,
+                    op: copy_id,
+                    src: vreg,
+                    dst: outgoing,
+                });
+            }
         }
     }
 

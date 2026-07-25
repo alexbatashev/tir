@@ -20,7 +20,7 @@ pub fn lower_function_and_return(
 ) -> Result<bool, PassError> {
     use tir::Operation;
     use tir::attributes::{AttributeValue, RegisterAttr};
-    use tir::builtin::{FuncOp, ReturnOp};
+    use tir::builtin::{FuncOp, MakeTupleOp, ReturnOp, TupleType};
 
     if let Some(func) = op.as_op::<FuncOp>() {
         let body = func.body();
@@ -60,11 +60,54 @@ pub fn lower_function_and_return(
     }
 
     if let Some(ret) = op.as_op::<ReturnOp>() {
-        let mut builder = super::VirtualReturnOpBuilder::new(context);
-        if let Some(value) = ret.operands().first().copied() {
-            builder = builder.value(value);
+        let mut tuple_source = None;
+        let values = match ret.operands().first().copied() {
+            None => Vec::new(),
+            Some(value) => {
+                let ty = context.get_type_data(context.get_value(value).ty());
+                if (ty.as_ref() as &dyn std::any::Any)
+                    .downcast_ref::<TupleType>()
+                    .is_none()
+                {
+                    vec![value]
+                } else {
+                    let defining_op = context.get_value(value).defining_op().ok_or_else(|| {
+                        PassError::InvalidRuleSet(
+                            "returned tuple has no defining operation".to_string(),
+                        )
+                    })?;
+                    let tuple = context
+                        .get_op(defining_op)
+                        .clone()
+                        .as_op::<MakeTupleOp>()
+                        .ok_or_else(|| {
+                            PassError::InvalidRuleSet(
+                                "returned tuple must be assembled from scalar values".to_string(),
+                            )
+                        })?;
+                    tuple_source = Some((value, defining_op));
+                    tuple.operands().to_vec()
+                }
+            }
+        };
+        rewriter.replace_op(
+            op,
+            &super::VirtualReturnOpBuilder::new(context)
+                .values(values)
+                .build(),
+        )?;
+        if let Some((value, defining_op)) = tuple_source
+            && context.value_uses(value).is_empty()
+        {
+            let block = context.parent_block(defining_op).ok_or_else(|| {
+                PassError::InvalidRuleSet("tuple construction has no parent block".to_string())
+            })?;
+            rewriter.erase_op(&OperationRef::new(
+                context.get_op(defining_op),
+                Some(context.get_block(block)),
+                None,
+            ))?;
         }
-        rewriter.replace_op(op, &builder.build())?;
         return Ok(true);
     }
 

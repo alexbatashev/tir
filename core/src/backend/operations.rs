@@ -79,8 +79,30 @@ operation! {
     VirtualReturnOp {
         name: "vret",
         dialect: "asm",
-        operands: [value],
+        format: "custom",
+        operands: O {
+            values: "*Any",
+        },
         interfaces: [Terminator],
+    }
+}
+
+impl VirtualReturnOp {
+    fn custom_print(&self, fmt: &mut tir::IRFormatter) -> Result<(), std::fmt::Error> {
+        super::print_branch(fmt, self)
+    }
+
+    fn custom_parse(
+        parser: &mut tir::parse::text::Parser,
+        _context: &tir::Context,
+    ) -> Result<Box<dyn Operation>, (tir::parse::Span, tir::Error)> {
+        Err((tir::parse::Span(parser.pos()), tir::Error::ExpectedOpName))
+    }
+}
+
+impl VirtualReturnOpBuilder {
+    pub fn value(self, value: tir::ValueId) -> Self {
+        self.values(vec![value])
     }
 }
 
