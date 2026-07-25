@@ -2655,6 +2655,9 @@ impl Pass for InstructionSelectPass {
         // reads the guard condition's *defining op*, which a dominator's commit
         // would otherwise have replaced by the time the dominated block solves.
         if !op.op().regions.is_empty() {
+            if let Some(lowering) = &mut self.call_lowering {
+                lowering.prepare_function(context, op, rewriter)?;
+            }
             self.solve_function(context, op, analyses);
         }
 
@@ -2664,7 +2667,7 @@ impl Pass for InstructionSelectPass {
             }
         }
 
-        if let Some(lowering) = &self.call_lowering
+        if let Some(lowering) = &mut self.call_lowering
             && lowering.lower(context, op, rewriter)?
         {
             return Ok(PreservedAnalyses::none());

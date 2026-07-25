@@ -1,0 +1,18 @@
+// RUN: tir mc --march=arm64 --stage=regalloc %s | filecheck %s
+
+module {
+  declare @make_pair() -> !tuple<!f64, !f64>
+  declare @consume(!tuple<!f64, !f64>) -> !f64
+  func @forward() -> !f64 {
+    %0 = call @make_pair() -> !tuple<!f64, !f64>
+    %1 = call @consume(%0 : !tuple<!f64, !f64>) -> !f64
+    return %1
+  }
+  module_end
+}
+
+// CHECK: asm.vcall {callee = "make_pair"
+// CHECK: arm64.fmov_reg64
+// CHECK: arm64.fmov_reg64
+// CHECK: asm.vcall {callee = "consume"
+// CHECK: asm.vret

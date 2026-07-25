@@ -1,0 +1,18 @@
+// RUN: tir mc --march=arm64 --stage=isel %s | filecheck %s
+
+module {
+  declare @ext(!f64,!f64,!f64,!f64,!f64,!f64,!tuple<!f64, !f64, !f64, !f64>) -> !f64
+  func @caller(%0: !f64) -> !f64 {
+    %1 = make_tuple %0, %0, %0, %0 : !tuple<!f64, !f64, !f64, !f64>
+    %2 = call @ext(%0,%0,%0,%0,%0,%0,%1 : !f64,!f64,!f64,!f64,!f64,!f64,!tuple<!f64, !f64, !f64, !f64>) -> !f64
+    return %2
+  }
+  module_end
+}
+
+// CHECK: arm64.sub_imm {rd = sp, rn = sp, imm = 32}
+// CHECK: arm64.store_float_double {ft = %virt{{[0-9]+}}:FPR64, rn = sp, imm = 0}
+// CHECK: arm64.store_float_double {ft = %virt{{[0-9]+}}:FPR64, rn = sp, imm = 8}
+// CHECK: arm64.store_float_double {ft = %virt{{[0-9]+}}:FPR64, rn = sp, imm = 16}
+// CHECK: arm64.store_float_double {ft = %virt{{[0-9]+}}:FPR64, rn = sp, imm = 24}
+// CHECK: asm.vcall {callee = "ext"

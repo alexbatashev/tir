@@ -1,10 +1,15 @@
 use std::collections::{HashMap, HashSet};
 
 use tir::attributes::{AttributeValue, RegisterAttr};
-use tir::builtin::{CallOp, IndirectCallOp, TupleGetOp, TupleType, UnitType};
-use tir::{Context, Operation, OperationRef, PassError, Rewriter, ValueId};
+use tir::builtin::{
+    CallOp, IndirectCallOp, MakeTupleOp, MakeTupleOpBuilder, ReturnOp, TupleGetOp,
+    TupleGetOpBuilder, TupleType, UnitType,
+};
+use tir::{Context, OpId, Operand, Operation, OperationRef, PassError, Rewriter, ValueId};
 
-use crate::backend::abi::{AbiInfo, Overflow, ValueKind, type_kind, value_kind};
+use crate::backend::abi::{
+    AbiInfo, Overflow, ValueKind, exhaust_argument_registers, type_kind, value_kind,
+};
 use crate::backend::liveness::PhysReg;
 
 pub trait CallEmitter: Send + Sync {
@@ -49,15 +54,118 @@ pub trait CallEmitter: Send + Sync {
 pub struct CallLowering {
     abi: &'static AbiInfo,
     emitter: Box<dyn CallEmitter>,
+    prepared_functions: HashSet<OpId>,
+    tuple_argument_elements: HashMap<(OpId, usize), Vec<ValueId>>,
 }
 
 impl CallLowering {
     pub fn new(abi: &'static AbiInfo, emitter: Box<dyn CallEmitter>) -> Self {
-        Self { abi, emitter }
+        Self {
+            abi,
+            emitter,
+            prepared_functions: HashSet::new(),
+            tuple_argument_elements: HashMap::new(),
+        }
+    }
+
+    pub fn prepare_function(
+        &mut self,
+        context: &Context,
+        function: &OperationRef,
+        rewriter: &mut Rewriter,
+    ) -> Result<(), PassError> {
+        if !self.prepared_functions.insert(function.op().id) {
+            return Ok(());
+        }
+        for &region_id in &function.op().regions {
+            let region = context.get_region(region_id);
+            for block in region.iter(context.clone()) {
+                for op_id in block.op_ids() {
+                    let instance = context.get_op(op_id);
+                    if let Some(ret) = instance.clone().as_op::<ReturnOp>()
+                        && let Some(value) = ret.operands().first().copied()
+                    {
+                        let ty = context.get_value(value).ty();
+                        let data = context.get_type_data(ty);
+                        if let Some(tuple) =
+                            (data.as_ref() as &dyn std::any::Any).downcast_ref::<TupleType>()
+                        {
+                            let assembled =
+                                context
+                                    .get_value(value)
+                                    .defining_op()
+                                    .is_some_and(|definition| {
+                                        context.get_op(definition).is::<MakeTupleOp>()
+                                    });
+                            if !assembled {
+                                let return_ref = OperationRef::new(
+                                    instance.clone(),
+                                    Some(context.get_block(block.id())),
+                                    None,
+                                );
+                                let elements = insert_tuple_extractions(
+                                    context,
+                                    rewriter,
+                                    &return_ref,
+                                    value,
+                                    tuple,
+                                )?;
+                                let make_tuple = MakeTupleOpBuilder::new(context)
+                                    .elements(elements)
+                                    .result_type(ty)
+                                    .build();
+                                let tuple_value = make_tuple.result();
+                                rewriter.insert_op_before(&return_ref, &make_tuple)?;
+                                let replacement = tir::builtin::ops::r#return(
+                                    context,
+                                    Operand::from(tuple_value),
+                                )
+                                .build();
+                                rewriter.replace_op(&return_ref, &replacement)?;
+                            }
+                        }
+                        continue;
+                    }
+                    let args = if let Some(call) = instance.clone().as_op::<CallOp>() {
+                        call.args()
+                    } else if let Some(call) = instance.clone().as_op::<IndirectCallOp>() {
+                        call.args()
+                    } else {
+                        continue;
+                    };
+                    let call_ref =
+                        OperationRef::new(instance, Some(context.get_block(block.id())), None);
+                    for (argument_index, argument) in args.into_iter().enumerate() {
+                        let ty = context.get_type_data(context.get_value(argument).ty());
+                        let Some(tuple) =
+                            (ty.as_ref() as &dyn std::any::Any).downcast_ref::<TupleType>()
+                        else {
+                            continue;
+                        };
+                        let assembled =
+                            context
+                                .get_value(argument)
+                                .defining_op()
+                                .is_some_and(|definition| {
+                                    context.get_op(definition).is::<MakeTupleOp>()
+                                });
+                        if assembled {
+                            continue;
+                        }
+                        let elements = insert_tuple_extractions(
+                            context, rewriter, &call_ref, argument, tuple,
+                        )?;
+                        self.tuple_argument_elements
+                            .insert((op_id, argument_index), elements);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn lower(
-        &self,
+        &mut self,
         context: &Context,
         op: &OperationRef,
         rewriter: &mut Rewriter,
@@ -70,17 +178,63 @@ impl CallLowering {
             return Ok(false);
         };
 
+        let mut tuple_arguments = Vec::new();
+        let mut lowered_arguments = Vec::with_capacity(args.len());
+        for (argument_index, arg) in args.into_iter().enumerate() {
+            let ty = context.get_type_data(context.get_value(arg).ty());
+            if (ty.as_ref() as &dyn std::any::Any)
+                .downcast_ref::<TupleType>()
+                .is_none()
+            {
+                lowered_arguments.push(vec![arg]);
+                continue;
+            }
+            if let Some(elements) = self
+                .tuple_argument_elements
+                .get(&(op.op().id, argument_index))
+            {
+                lowered_arguments.push(elements.clone());
+                continue;
+            }
+            let defining_op = context.get_value(arg).defining_op().ok_or_else(|| {
+                PassError::InvalidRuleSet("tuple call argument has no scalar elements".to_string())
+            })?;
+            let tuple = context
+                .get_op(defining_op)
+                .clone()
+                .as_op::<MakeTupleOp>()
+                .ok_or_else(|| {
+                    PassError::InvalidRuleSet(
+                        "tuple call argument has no scalar elements".to_string(),
+                    )
+                })?;
+            lowered_arguments.push(tuple.operands().to_vec());
+            tuple_arguments.push((defining_op, arg));
+        }
+
         let mut next_slot = HashMap::new();
-        let mut argument_locations = Vec::with_capacity(args.len());
+        let mut argument_values = Vec::new();
+        let mut argument_locations = Vec::new();
         let mut stack_args = 0u32;
-        for &arg in &args {
-            let kind = value_kind(context, arg);
-            if let Some(register) = next_register(self.abi, kind, &mut next_slot) {
-                argument_locations.push(ArgumentLocation::Register(register));
-            } else {
-                let class = stack_class(self.abi, kind).ok_or_else(|| {
+        for values in lowered_arguments {
+            let mut trial_slots = next_slot.clone();
+            let direct = values
+                .iter()
+                .map(|&value| next_register(self.abi, value_kind(context, value), &mut trial_slots))
+                .collect::<Option<Vec<_>>>();
+            if let Some(registers) = direct {
+                next_slot = trial_slots;
+                argument_values.extend(values);
+                argument_locations.extend(registers.into_iter().map(ArgumentLocation::Register));
+                continue;
+            }
+
+            for &value in &values {
+                exhaust_argument_registers(self.abi, value_kind(context, value), &mut next_slot);
+                let class = stack_class(self.abi, value_kind(context, value)).ok_or_else(|| {
                     PassError::InvalidRuleSet("ABI has no argument sequence".to_string())
                 })?;
+                argument_values.push(value);
                 argument_locations.push(ArgumentLocation::Stack {
                     class,
                     offset: i64::from(stack_args * self.abi.stack.slot_size),
@@ -121,8 +275,8 @@ impl CallLowering {
             Callee::Direct(_) => None,
             Callee::Indirect(value) => Some(detach(rewriter, value, indirect_class)?),
         };
-        let mut fresh_args = Vec::with_capacity(args.len());
-        for (&arg, location) in args.iter().zip(&argument_locations) {
+        let mut fresh_args = Vec::with_capacity(argument_values.len());
+        for (&arg, location) in argument_values.iter().zip(&argument_locations) {
             fresh_args.push(detach(rewriter, arg, location.class())?);
         }
 
@@ -206,6 +360,7 @@ impl CallLowering {
 
         if context.get_value(result).ty() == UnitType::new(context) {
             rewriter.erase_op(op)?;
+            erase_dead_tuple_arguments(context, rewriter, &tuple_arguments)?;
             return Ok(true);
         }
 
@@ -216,6 +371,13 @@ impl CallLowering {
             let registers = tuple_return_registers(context, self.abi, tuple)?;
             let mut extracts = Vec::new();
             for usage in context.value_uses(result) {
+                if self
+                    .tuple_argument_elements
+                    .keys()
+                    .any(|(call, _)| *call == usage.op())
+                {
+                    continue;
+                }
                 if usage.operand_index() != Some(0) {
                     return Err(PassError::InvalidRuleSet(
                         "tuple call result has a non-extraction use".to_string(),
@@ -254,6 +416,7 @@ impl CallLowering {
                 rewriter.erase_op(&extract)?;
             }
             rewriter.erase_op(op)?;
+            erase_dead_tuple_arguments(context, rewriter, &tuple_arguments)?;
             return Ok(true);
         }
 
@@ -280,8 +443,50 @@ impl CallLowering {
             physical_reg(return_reg),
         );
         rewriter.replace_op(op, copy.as_ref())?;
+        erase_dead_tuple_arguments(context, rewriter, &tuple_arguments)?;
         Ok(true)
     }
+}
+
+fn insert_tuple_extractions(
+    context: &Context,
+    rewriter: &mut Rewriter,
+    before: &OperationRef,
+    tuple_value: ValueId,
+    tuple: &TupleType,
+) -> Result<Vec<ValueId>, PassError> {
+    let mut elements = Vec::new();
+    for (index, element_ty) in tuple.elements(context).into_iter().enumerate() {
+        let extract = TupleGetOpBuilder::new(context)
+            .tuple(tuple_value)
+            .attr("index", AttributeValue::UInt(index as u64))
+            .result_type(element_ty)
+            .build();
+        elements.push(extract.result());
+        rewriter.insert_op_before(before, &extract)?;
+    }
+    Ok(elements)
+}
+
+fn erase_dead_tuple_arguments(
+    context: &Context,
+    rewriter: &mut Rewriter,
+    tuple_arguments: &[(OpId, ValueId)],
+) -> Result<(), PassError> {
+    for &(tuple, value) in tuple_arguments {
+        if context.is_value_used(value) {
+            continue;
+        }
+        let block = context.parent_block(tuple).ok_or_else(|| {
+            PassError::InvalidRuleSet("tuple construction has no parent block".to_string())
+        })?;
+        rewriter.erase_op(&OperationRef::new(
+            context.get_op(tuple),
+            Some(context.get_block(block)),
+            None,
+        ))?;
+    }
+    Ok(())
 }
 
 fn tuple_return_registers(

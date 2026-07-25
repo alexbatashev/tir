@@ -140,6 +140,16 @@ treats the atomic and synchronization kinds
 (`LoadReserved`, `StoreConditional`, `AtomicRmw`, `Fence`) as impure, so like
 plain loads and stores their classes never merge or duplicate.
 
+### Tuple ABI preparation
+
+Before the function-wide graph is built, call lowering makes scalar extractions
+explicit for tuple values forwarded directly between calls or returned without
+an intervening `make_tuple`. Selection therefore sees ordinary scalar values;
+no tuple machine operation or target-specific lowering rule is introduced.
+Grouped function arguments retain an ordered array of scalar virtual registers
+in `asm.symbol.arg_regs`, which lets register allocation assign the whole ABI
+group transactionally or place every member on the stack.
+
 ### Side tables produced by the build
 
 The tables are function-wide and **multi-valued**: a class may root ops in several
