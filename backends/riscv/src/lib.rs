@@ -525,7 +525,7 @@ pub fn create_isel_pass(context: &tir::Context) -> tir::backend::isel::Instructi
     create_isel_pass_for(
         context,
         Feature::ALL,
-        abi_by_name("lp64d").expect("RISC-V must define lp64d"),
+        riscv_abi_by_name("lp64d").expect("RISC-V must define lp64d"),
     )
 }
 
@@ -969,7 +969,7 @@ impl tir::backend::regalloc::TargetRegAlloc for RiscvRegAlloc {
 }
 
 pub fn create_regalloc_pass() -> tir::backend::regalloc::RegisterAllocationPass {
-    create_regalloc_pass_for(abi_by_name("lp64d").expect("RISC-V must define lp64d"))
+    create_regalloc_pass_for(riscv_abi_by_name("lp64d").expect("RISC-V must define lp64d"))
 }
 
 fn create_regalloc_pass_for(
@@ -1021,7 +1021,7 @@ impl tir::backend::TargetMachine for RiscvTarget {
     }
 
     fn abis(&self) -> &'static [tir::backend::abi::AbiInfo] {
-        abis()
+        riscv_abis()
     }
 
     fn abi(&self) -> &'static tir::backend::abi::AbiInfo {
@@ -1146,10 +1146,10 @@ fn select_riscv(
     }
     let config = TargetConfig::parse(march, mcpu, mattr)?;
     let selected_abi = match mabi {
-        Some(name) => abi_by_name(name).ok_or_else(|| {
+        Some(name) => riscv_abi_by_name(name).ok_or_else(|| {
             format!(
                 "unknown ABI '{name}' for riscv (available: {})",
-                abis()
+                riscv_abis()
                     .iter()
                     .map(|abi| abi.name)
                     .collect::<Vec<_>>()
@@ -1157,9 +1157,9 @@ fn select_riscv(
             )
         })?,
         None if config.features.contains(&Feature::D) => {
-            abi_by_name("lp64d").expect("RISC-V must define lp64d")
+            riscv_abi_by_name("lp64d").expect("RISC-V must define lp64d")
         }
-        None => abi_by_name("lp64").expect("RISC-V must define lp64"),
+        None => riscv_abi_by_name("lp64").expect("RISC-V must define lp64"),
     };
     Ok(Some(Box::new(RiscvTarget {
         config,
@@ -1168,6 +1168,30 @@ fn select_riscv(
 }
 
 tir::register_target!(select_riscv, ["riscv32", "riscv64"]);
+
+fn riscv_abis() -> &'static [tir::backend::abi::AbiInfo] {
+    static ABIS: std::sync::OnceLock<Vec<tir::backend::abi::AbiInfo>> = std::sync::OnceLock::new();
+    ABIS.get_or_init(|| {
+        abis()
+            .iter()
+            .map(|abi| tir::backend::abi::AbiInfo {
+                indirect_result: Some((RegClass::GPR.id(), 10)),
+                ..*abi
+            })
+            .collect()
+    })
+}
+
+#[cfg(test)]
+fn riscv_default_abi() -> &'static tir::backend::abi::AbiInfo {
+    &riscv_abis()[0]
+}
+
+fn riscv_abi_by_name(name: &str) -> Option<&'static tir::backend::abi::AbiInfo> {
+    riscv_abis()
+        .iter()
+        .find(|abi| abi.name.eq_ignore_ascii_case(name))
+}
 
 #[cfg(test)]
 mod tests {
@@ -1180,8 +1204,8 @@ mod tests {
     use crate::{RegClass, RiscvDialect, create_isel_pass, create_regalloc_pass};
 
     #[test]
-    fn generated_abi_matches_lp64d_register_convention() {
-        let abi = crate::abi_by_name("lp64d").unwrap();
+    fn target_abi_matches_lp64d_register_convention() {
+        let abi = crate::riscv_abi_by_name("lp64d").unwrap();
         let args = |kind| {
             abi.args
                 .iter()
@@ -1199,6 +1223,7 @@ mod tests {
         assert_eq!(abi.sp, (RegClass::GPR.id(), 2));
         assert_eq!(abi.ra, Some((RegClass::GPR.id(), 1)));
         assert_eq!(abi.fp, Some((RegClass::GPR.id(), 8)));
+        assert_eq!(abi.indirect_result, Some((RegClass::GPR.id(), 10)));
         assert_eq!(abi.stack.align, 16);
         assert_eq!(abi.stack.slot_size, 8);
         assert_eq!(
@@ -1461,7 +1486,7 @@ mod tests {
     fn target_for(march: &str) -> crate::RiscvTarget {
         crate::RiscvTarget {
             config: crate::TargetConfig::parse(march, None, None).expect("march should parse"),
-            selected_abi: crate::default_abi(),
+            selected_abi: crate::riscv_default_abi(),
         }
     }
 
@@ -2200,7 +2225,7 @@ mod tests {
     fn abi_with_callers(
         callers: Vec<tir::backend::liveness::PhysReg>,
     ) -> &'static tir::backend::abi::AbiInfo {
-        let mut abi = *crate::default_abi();
+        let mut abi = *crate::riscv_default_abi();
         abi.caller_saved = Box::leak(callers.into_boxed_slice());
         abi.callee_saved = &[];
         Box::leak(Box::new(abi))
@@ -2972,7 +2997,7 @@ mod target_parser_tests {
 
         let target = |march| crate::RiscvTarget {
             config: TargetConfig::parse(march, None, None).expect("march should parse"),
-            selected_abi: crate::default_abi(),
+            selected_abi: crate::riscv_default_abi(),
         };
         assert!(target("rv64i").counter_registers().is_empty());
         // RV64 reads the full 64-bit counters; RV32 adds the high-half CSRs.

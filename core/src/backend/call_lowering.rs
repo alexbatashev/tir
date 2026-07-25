@@ -8,8 +8,8 @@ use tir::builtin::{
 use tir::{Context, OpId, Operand, Operation, OperationRef, PassError, Rewriter, ValueId};
 
 use crate::backend::abi::{
-    AbiInfo, Overflow, ValueKind, align_argument_group, exhaust_argument_registers, type_kind,
-    value_kind,
+    AbiInfo, Overflow, ValueKind, align_argument_group, exhaust_argument_registers,
+    reserve_indirect_result_argument, type_kind, value_kind,
 };
 use crate::backend::liveness::PhysReg;
 
@@ -248,6 +248,9 @@ impl CallLowering {
         }
 
         let mut next_slot = HashMap::new();
+        if result_address.is_some() {
+            reserve_indirect_result_argument(self.abi, &mut next_slot);
+        }
         let mut argument_values = Vec::new();
         let mut argument_locations = Vec::new();
         let mut stack_args = 0u32;

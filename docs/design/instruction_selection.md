@@ -160,7 +160,9 @@ A result-address function or call carries its destination as the first ordinary
 pointer argument. Function lowering records that value separately from
 `arg_regs`; call lowering likewise removes it from the normal argument sequence.
 Register allocation and call emission then use the ABI's target-described
-result-address register. No result-address operation enters the semantic graph.
+result-address register. If that physical register is also in an ordinary
+argument sequence, its slot is consumed before assigning the remaining
+arguments. No result-address operation enters the semantic graph.
 
 ### Side tables produced by the build
 
