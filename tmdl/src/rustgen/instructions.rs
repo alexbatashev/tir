@@ -732,20 +732,25 @@ fn emit_instructions<'a>(
                 }
                 None => (quote! {}, quote! {}),
             };
-            if *tir::graph::Dag::get_node(&canon_pattern, canon_root)
-                == tir::sem::SymKind::Bitcast
-                && let Some(dst_class) = dst_class
-                && float_classes.contains(dst_class)
-                && let Some(width) = literal_register_class_width(files, dst_class)
-            {
-                let result_ty = match width {
-                    32 => quote! { tir::builtin::FloatType::f32(_context) },
-                    64 => quote! { tir::builtin::FloatType::f64(_context) },
-                    _ => unreachable!("unsupported scalar float register width {width}"),
+            let float_constant_materializer_call =
+                if *tir::graph::Dag::get_node(&canon_pattern, canon_root)
+                    == tir::sem::SymKind::Bitcast
+                    && let Some(dst_class) = dst_class
+                    && float_classes.contains(dst_class)
+                    && let Some(width) = literal_register_class_width(files, dst_class)
+                {
+                    let result_ty = match width {
+                        32 => quote! { tir::builtin::FloatType::f32(_context) },
+                        64 => quote! { tir::builtin::FloatType::f64(_context) },
+                        _ => unreachable!("unsupported scalar float register width {width}"),
+                    };
+                    pattern_stmts.insert(0, quote! { use tir::graph::MetaMutDag as _; });
+                    pattern_stmts.push(quote! { g.set_actual_type(#root_var, #result_ty); });
+                    let width = proc_macro2::Literal::u32_unsuffixed(width);
+                    quote! { .with_float_constant_materializer(#width) }
+                } else {
+                    quote! {}
                 };
-                pattern_stmts.insert(0, quote! { use tir::graph::MetaMutDag as _; });
-                pattern_stmts.push(quote! { g.set_actual_type(#root_var, #result_ty); });
-            }
             let operand_register_call = emit_operand_register_call(
                 &ops,
                 &semantics.variable_symbols,
@@ -841,6 +846,7 @@ fn emit_instructions<'a>(
                         .with_operand_constraints(vec![#(#operand_constraint_entries),*])
                         #operand_register_call
                         #result_register_call
+                        #float_constant_materializer_call
                         #operand_imm_range_call
                         #guarded_semantics_call
                         ,
