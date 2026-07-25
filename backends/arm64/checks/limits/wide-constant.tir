@@ -1,4 +1,5 @@
 // RUN: tir mc --march=arm64 --filetype=asm %s | filecheck %s
+// RUN: tir mc --march=arm64 --stage=isel %s | filecheck %s --check-prefix=ISEL
 
 // Values wider than 16 bits start from MOVZ and fill the remaining halfwords
 // with MOVK.
@@ -8,8 +9,40 @@ module {
     %0 = constant {value = 65536} : !i64
     return %0
   }
+
+  func @lane32() -> !i64 {
+    %0 = constant {value = 4294967296} : !i64
+    return %0
+  }
+
+  func @lane48() -> !i64 {
+    %0 = constant {value = 281474976710656} : !i64
+    return %0
+  }
+
+  func @negative() -> !i64 {
+    %0 = constant {value = -1} : !i64
+    return %0
+  }
   module_end
 }
 
 // CHECK: movz {{.*}}, 0
 // CHECK: movk {{.*}}, 1, 1
+// ISEL: arm64.movz
+// ISEL: arm64.movk_lsl16
+// ISEL-NOT: constant
+// ISEL-LABEL: asm.symbol {name = "lane32"
+// ISEL: arm64.movz
+// ISEL: arm64.movk_lsl32
+// ISEL-NOT: constant
+// ISEL-LABEL: asm.symbol {name = "lane48"
+// ISEL: arm64.movz
+// ISEL: arm64.movk_lsl48
+// ISEL-NOT: constant
+// ISEL-LABEL: asm.symbol {name = "negative"
+// ISEL: arm64.movz
+// ISEL: arm64.movk_lsl16
+// ISEL: arm64.movk_lsl32
+// ISEL: arm64.movk_lsl48
+// ISEL-NOT: constant

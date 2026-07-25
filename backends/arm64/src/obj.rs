@@ -9,7 +9,7 @@ use tir::backend::{VirtualBranchOp, VirtualCallOp, VirtualIndirectCallOp, Virtua
 
 use crate::{
     AddressPCRelOpBuilder, BranchImmediateOpBuilder, BranchLinkOpBuilder, BranchLinkRegOpBuilder,
-    MoveWideKeepShiftedOpBuilder, MoveWideZeroOpBuilder, ReturnOpBuilder, phys, virt,
+    ReturnOpBuilder, phys, virt,
 };
 
 const R_AARCH64_ADR_PREL_LO21: u32 = 274;
@@ -63,58 +63,6 @@ pub(crate) fn object_format() -> ObjectFormatInfo {
         pc_rel_scale: |op| if op == "adr" { 0 } else { 2 },
         pc_rel_from_end: |_| false,
     }
-}
-
-/// Pre-RA: materialize a `constant` that survived instruction selection with
-/// `movz` followed by one `movk` for each non-zero upper halfword.
-pub(crate) fn lower_constant(
-    context: &tir::Context,
-    op: &tir::OperationRef,
-    rewriter: &mut tir::Rewriter,
-) -> Result<bool, tir::PassError> {
-    use tir::builtin::ConstantOp;
-
-    let Some(constant) = op.as_op::<ConstantOp>() else {
-        return Ok(false);
-    };
-    let value = tir::backend::int_attr(constant.attributes(), "value").ok_or_else(|| {
-        tir::PassError::InvalidRuleSet("constant op without an integer value".to_string())
-    })?;
-    let dest = virt(constant.result().number(), crate::RegClass::GPR.id());
-    let mut instructions = materialize_integer(context, dest, value as u64);
-    let last = instructions.pop().unwrap();
-    for instruction in instructions {
-        rewriter.insert_op_before(op, instruction.as_ref())?;
-    }
-    rewriter.replace_op(op, last.as_ref())?;
-    Ok(true)
-}
-
-pub(crate) fn materialize_integer(
-    context: &tir::Context,
-    dest: AttributeValue,
-    bits: u64,
-) -> Vec<Box<dyn Operation>> {
-    let mut instructions: Vec<Box<dyn Operation>> = vec![Box::new(
-        MoveWideZeroOpBuilder::new(context)
-            .attr("rd", dest.clone())
-            .attr("imm", AttributeValue::Int((bits & 0xffff) as i64))
-            .build(),
-    )];
-    for halfword in 1..4 {
-        let part = ((bits >> (halfword * 16)) & 0xffff) as i64;
-        if part == 0 {
-            continue;
-        }
-        instructions.push(Box::new(
-            MoveWideKeepShiftedOpBuilder::new(context)
-                .attr("rd", dest.clone())
-                .attr("imm", AttributeValue::Int(part))
-                .attr("hw", AttributeValue::Int(halfword))
-                .build(),
-        ));
-    }
-    instructions
 }
 
 /// Pre-RA: materialize an `addr_of` symbol address as `adr rd, sym`. The

@@ -64,6 +64,17 @@ impl CompiledIselPattern {
         self.copy
     }
 
+    pub(crate) fn constant_materializer_range(&self) -> Option<ImmRange> {
+        let root = self.pattern.root();
+        if let PatternNode::Var(Var::Symbol(_)) = self.pattern.node(root) {
+            let meta = &self.node_meta[root.index()];
+            return (meta.constraint == Some(OperandConstraint::Immediate))
+                .then_some(meta.imm_range)
+                .flatten();
+        }
+        zero_form_materializer_range(self)
+    }
+
     pub(crate) fn capture_meta(&self, symbol: u32) -> Option<&PatternNodeMeta> {
         (0..self.pattern.len()).find_map(|index| {
             let node = Id::from_raw(index as u32);
@@ -387,16 +398,7 @@ fn compile_isel_pattern_node(
 pub(crate) fn constant_materializer_ranges(patterns: &[CompiledIselPattern]) -> Vec<ImmRange> {
     patterns
         .iter()
-        .filter_map(|compiled| {
-            let root = compiled.pattern.root();
-            if let PatternNode::Var(Var::Symbol(_)) = compiled.pattern.node(root) {
-                let meta = &compiled.node_meta[root.index()];
-                return (meta.constraint == Some(OperandConstraint::Immediate))
-                    .then_some(meta.imm_range)
-                    .flatten();
-            }
-            zero_form_materializer_range(compiled)
-        })
+        .filter_map(CompiledIselPattern::constant_materializer_range)
         .collect()
 }
 

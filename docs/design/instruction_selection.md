@@ -387,16 +387,27 @@ ops coverable by that target instruction directly (`movz` on ARM64, `mov imm`
 on x86). A zero-register add such as RISC-V `addi rd, x0, imm` is also derived
 as a materializer; only that form receives the structural
 `Add(ZExt(0), immediate)` e-graph bridge. No target lowering hook participates
-in either selection.
+in either selection. A terminal constant introduced by a proved decomposition
+may root such a rule when another matched target instruction computing the
+constant requires it in a register and the compiled target pattern identifies
+the terminal rule as a materializer. Introducibility does not depend on a
+synthetic e-graph shape.
+
+Target axiom files may partition the remaining values and reconstruct them with
+formal target instruction behaviors. ARM64 clears one nonzero 16-bit lane at a
+time, recursively materializes the smaller value with `movz`, and restores the
+lane with the corresponding fixed-shift `movk`. RISC-V recursively splits off a
+signed 12-bit low part and reconstructs it with `slli`/`addi`. The generic cover
+selects these real instructions and their tied operands.
 
 TMDL marks a value rule that bitcasts into a scalar floating-point register with
 the destination format's width. A `constantf` of that width becomes an op root
 only when this target-instruction capability is present and the target rules can
 construct every integer bit pattern of that width: either a whole-width
-bare-immediate instruction such as x86 `movabs`, or a zero-register materializer
-that participates in the proved wide-constant decomposition. The integer bits
-select that target-derived chain before the final bitcast instruction, including
-when the value is consumed by another selected instruction.
+bare-immediate instruction such as x86 `movabs`, or a base materializer that
+participates in a target's proved wide-constant axioms. The integer bits select
+that target-derived chain before the final bitcast instruction, including when
+the value is consumed by another selected instruction.
 
 ### Narrow register-width forms
 

@@ -483,10 +483,6 @@ struct FunctionSelection {
     /// a call): the defining block's cover must root a materializer match for them
     /// instead of leaving the constant to the pre-RA hook.
     force_constant_values: HashSet<ValueId>,
-    /// Terminal integer bit patterns synthesized beneath rooted floating constants.
-    /// Target immediate instructions may introduce these despite their having no
-    /// source IR op of their own.
-    introduced_constants: HashSet<Id>,
     /// Control-flow edges retained when gate values are reified.
     control: HashMap<BlockId, Vec<ControlReification>>,
     /// Canonical classes seeded from reducible γ/μ gates. An algebraic `If`
@@ -528,6 +524,16 @@ impl FunctionSelection {
     fn is_op_root(&self, class: Id) -> bool {
         self.base_members(class)
             .any(|m| self.ops_by_root.contains_key(&m))
+    }
+
+    fn is_constant_root(&self, context: &Context, class: Id) -> bool {
+        class_int_binding(&self.egraph, class).is_some()
+            || self.base_members(class).any(|member| {
+                self.ops_by_root.get(&member).is_some_and(|ops| {
+                    ops.iter()
+                        .any(|op| context.get_op(*op).is::<crate::builtin::ConstantFOp>())
+                })
+            })
     }
 
     /// Whether any base member of `class` is used as an operand by more than one
@@ -1086,10 +1092,19 @@ impl InstructionSelectPass {
 
     /// Install additional semantic invariants.
     pub fn with_axioms(mut self, file: &str) -> Self {
+        let mut materializes_constants = false;
         for form in axioms::axiom_forms(file) {
             let axiom = axioms::parse_axiom(&form)
                 .unwrap_or_else(|e| panic!("invalid axiom `{form}`: {e}"));
+            materializes_constants |= axiom.materializes_constants();
             self.rewrites.push(axiom.compile());
+        }
+        if materializes_constants && !self.constant_materializer_ranges.is_empty() {
+            self.float_constant_materializer_widths.extend(
+                self.rules
+                    .iter()
+                    .filter_map(|rule| rule.float_constant_width),
+            );
         }
         self
     }
@@ -1488,21 +1503,6 @@ impl InstructionSelectPass {
                     .then(|| egraph.find(class))
             })
             .collect();
-        let mut introduced_constants = HashSet::new();
-        for &(op_id, class) in &constant_candidates {
-            if !context.get_op(op_id).is::<crate::builtin::ConstantFOp>() {
-                continue;
-            }
-            let class = egraph.find(class);
-            for node in egraph.nodes(class) {
-                if node.kind == SymKind::Bitcast
-                    && let [bits] = node.children.as_slice()
-                {
-                    introduced_constants.insert(egraph.find(*bits));
-                }
-            }
-        }
-
         FunctionSelection {
             egraph,
             ops_by_root,
@@ -1515,7 +1515,6 @@ impl InstructionSelectPass {
             shared_classes,
             must_materialize,
             force_constant_values,
-            introduced_constants,
             control,
             reifiable_gates,
             prepared,
@@ -2182,6 +2181,8 @@ impl InstructionSelectPass {
         base_matches: Option<&[Vec<EMatch<u32>>]>,
     ) -> Vec<PbqpIselMatch> {
         let mut matches = Vec::new();
+        let constant_register_dependencies =
+            self.constant_register_dependencies(context, fs, base_matches);
         for (pattern_index, compiled) in self.compiled_patterns.iter().enumerate() {
             let rule = &self.rules[compiled.rule_index];
             // Branch rules select terminators, not values (see `best_guard_branch`).
@@ -2202,7 +2203,6 @@ impl InstructionSelectPass {
                 });
                 &fresh
             };
-
             for m in raw {
                 let root = fs.egraph.find(m.root);
                 if compiled.is_copy() && fs.has_values(m.binding(pattern_root)) {
@@ -2217,15 +2217,17 @@ impl InstructionSelectPass {
                 let is_guard_class = guard_classes.contains(&root);
                 // A match roots an instruction only if it produces a value B
                 // computes: an op of B, a guard condition of B, a
-                // rewrite-introduced intermediate, or the terminal integer bits
-                // synthesized beneath a rooted floating constant.
+                // rewrite-introduced intermediate, or a terminal constant covered
+                // by a real target materializer instruction.
                 let is_computed = fs
                     .egraph
                     .nodes(root)
                     .iter()
                     .any(|n| !n.children().is_empty());
                 let introduced = !fs.is_op_root(root)
-                    && (is_computed || fs.introduced_constants.contains(&root));
+                    && (is_computed
+                        || (constant_register_dependencies.contains(&root)
+                            && compiled.constant_materializer_range().is_some()));
                 if block_op.is_none() && !is_guard_class && !introduced {
                     continue;
                 }
@@ -2417,6 +2419,45 @@ impl InstructionSelectPass {
                 })
         });
         matches
+    }
+
+    fn constant_register_dependencies(
+        &self,
+        context: &Context,
+        fs: &FunctionSelection,
+        base_matches: Option<&[Vec<EMatch<u32>>]>,
+    ) -> HashSet<Id> {
+        let mut dependencies = HashSet::new();
+        for (pattern_index, compiled) in self.compiled_patterns.iter().enumerate() {
+            if compiled.is_copy() || compiled.constant_materializer_range().is_some() {
+                continue;
+            }
+            let fresh;
+            let matches = if let Some(cache) = base_matches {
+                &cache[pattern_index]
+            } else {
+                fresh = compiled.search_with_legality(&fs.egraph, context, &|node, class| {
+                    value_match_allowed(fs, context, compiled, compiled.pattern.root(), node, class)
+                });
+                &fresh
+            };
+            for matched in matches {
+                if !fs.is_constant_root(context, fs.egraph.find(matched.root)) {
+                    continue;
+                }
+                for index in 0..compiled.pattern.len() {
+                    let node = Id::from_raw(index as u32);
+                    let meta = &compiled.node_meta[index];
+                    if meta.is_boundary && meta.demands_register() {
+                        let class = fs.egraph.find(matched.binding(node));
+                        if class_int_binding(&fs.egraph, class).is_some() {
+                            dependencies.insert(class);
+                        }
+                    }
+                }
+            }
+        }
+        dependencies
     }
 }
 

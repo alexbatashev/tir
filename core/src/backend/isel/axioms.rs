@@ -131,6 +131,7 @@ impl Guard {
 struct ValueGuard {
     var: usize,
     bits: u32,
+    unsigned: bool,
     negated: bool,
 }
 
@@ -146,6 +147,10 @@ fn fits_signed(v: &APInt, bits: u32) -> bool {
     let signed = sign_extend(v.to_u64(), v.width());
     let bound = 1i128 << (bits - 1);
     (-bound..bound).contains(&i128::from(signed))
+}
+
+fn fits_unsigned(v: &APInt, bits: u32) -> bool {
+    bits == 64 || v.to_u64() < (1u64 << bits)
 }
 
 /// The width a template constant materializes at.
@@ -339,10 +344,10 @@ pub(crate) fn parse_axiom(text: &str) -> Result<Axiom, String> {
             "where" => {
                 for g in rest {
                     let SemExpr::List(parts) = g else {
-                        return Err("guards must be (< <a> <b>) or (fits <var> <bits>)".into());
+                        return Err("guards must be (< <a> <b>) or ([u]fits <var> <bits>)".into());
                     };
-                    // `(not ...)` unwraps to its inner guard; only `fits` may be
-                    // negated, which the match below enforces.
+                    // `(not ...)` unwraps to its inner guard; only `[u]fits` may
+                    // be negated, which the match below enforces.
                     let (parts, negated) = match parts.as_slice() {
                         [SemExpr::Atom(kw), SemExpr::List(inner)] if kw == "not" => {
                             (inner.as_slice(), true)
@@ -351,9 +356,15 @@ pub(crate) fn parse_axiom(text: &str) -> Result<Axiom, String> {
                     };
                     match parts {
                         [SemExpr::Atom(kw), SemExpr::Atom(var), SemExpr::Atom(bits)]
-                            if kw == "fits" =>
+                            if kw == "fits" || kw == "ufits" =>
                         {
-                            value_guards.push(parse_value_guard(var, bits, negated, &vars)?);
+                            value_guards.push(parse_value_guard(
+                                var,
+                                bits,
+                                kw == "ufits",
+                                negated,
+                                &vars,
+                            )?);
                         }
                         [SemExpr::Atom(cmp), a, b] if !negated => {
                             let a = parse_width_expr(a, &width_names)?;
@@ -365,8 +376,8 @@ pub(crate) fn parse_axiom(text: &str) -> Result<Axiom, String> {
                             });
                         }
                         _ => {
-                            return Err("guards must be (< <a> <b>), (fits <var> <bits>), \
-                                 or (not (fits <var> <bits>))"
+                            return Err("guards must be (< <a> <b>), ([u]fits <var> <bits>), \
+                                 or (not ([u]fits <var> <bits>))"
                                 .into());
                         }
                     }
@@ -491,6 +502,7 @@ fn is_theta_invariant_collapse(lhs: &AxNode, rhs: &AxNode) -> bool {
 fn parse_value_guard(
     var: &str,
     bits: &str,
+    unsigned: bool,
     negated: bool,
     vars: &[(String, WidthBinding)],
 ) -> Result<ValueGuard, String> {
@@ -504,7 +516,12 @@ fn parse_value_guard(
     if !(1..=64).contains(&bits) {
         return Err("fits bit count must be in 1..=64".to_string());
     }
-    Ok(ValueGuard { var, bits, negated })
+    Ok(ValueGuard {
+        var,
+        bits,
+        unsigned,
+        negated,
+    })
 }
 
 fn intern(names: &mut Vec<String>, name: &str) -> usize {
@@ -651,6 +668,10 @@ fn holes_of(node: &AxNode, out: &mut Vec<(String, Option<usize>)>) {
 }
 
 impl Axiom {
+    pub(crate) fn materializes_constants(&self) -> bool {
+        self.materialize
+    }
+
     /// Compile into an [`IselRewrite`]. Debug builds prove each width
     /// instantiation before asserting the invariant.
     pub(crate) fn compile(self) -> IselRewrite {
@@ -695,7 +716,12 @@ impl Axiom {
                 }
                 for vg in &self.value_guards {
                     match class_int_binding(eg, m.binding(holes[&self.vars[vg.var].0])) {
-                        Some(v) if fits_signed(&v, vg.bits) == !vg.negated => {}
+                        Some(v)
+                            if (if vg.unsigned {
+                                fits_unsigned(&v, vg.bits)
+                            } else {
+                                fits_signed(&v, vg.bits)
+                            }) == !vg.negated => {}
                         _ => return,
                     }
                 }
@@ -1798,18 +1824,22 @@ mod tests {
 
     #[test]
     fn fits_guard_rejects_invalid_bit_counts_and_supports_64_bits() {
-        let axiom = |bits| {
+        let axiom = |guard, bits| {
             parse_axiom(&format!(
                 "(axiom fits-{bits}
-                   (consts (v w)) (root w) (where (fits v {bits}))
+                   (consts (v w)) (root w) (where ({guard} v {bits}))
                    (lhs v) (rhs v))"
             ))
         };
 
-        assert!(axiom(0).is_err());
-        assert!(axiom(65).is_err());
-        assert!(axiom(64).is_ok());
+        assert!(axiom("fits", 0).is_err());
+        assert!(axiom("ufits", 65).is_err());
+        assert!(axiom("fits", 64).is_ok());
+        assert!(axiom("ufits", 64).is_ok());
         assert!(fits_signed(&APInt::new_signed(64, i64::MIN), 64));
         assert!(fits_signed(&APInt::new_signed(64, i64::MAX), 64));
+        assert!(fits_unsigned(&APInt::new(64, u32::MAX as u64), 32));
+        assert!(!fits_unsigned(&APInt::new(64, 1u64 << 32), 32));
+        assert!(fits_unsigned(&APInt::new(64, u64::MAX), 64));
     }
 }
