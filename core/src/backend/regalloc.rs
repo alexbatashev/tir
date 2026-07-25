@@ -21,7 +21,7 @@ use tir::{
     PreservedAnalyses, Rewriter, ValueId,
 };
 
-use crate::backend::abi::{align_argument_group, value_kind};
+use crate::backend::abi::{align_argument_group, reserve_indirect_result_argument, value_kind};
 use crate::backend::liveness::{self, Liveness, PhysReg};
 use crate::backend::{SymbolOp, VirtualBranchOp, VirtualReturnOp};
 use crate::ptr::AllocaOp;
@@ -1504,6 +1504,7 @@ fn abi_precolor(
                 PassError::InvalidRuleSet("ABI has no result-address register".to_string())
             })?;
             precolor_register(*id, register)?;
+            reserve_indirect_result_argument(abi, &mut next_abi_slot);
         }
 
         for attribute in args {
