@@ -234,6 +234,20 @@ fn pointer_arithmetic_requires_complete_object_pointee() {
 }
 
 #[test]
+fn pointer_difference_requires_compatible_pointee_types() {
+    let output = diagnostics(
+        "long distance(int *left, char *right) { return left - right; }",
+        "c23".parse().unwrap(),
+    );
+
+    assert!(
+        output
+            .contains("pointer subtraction requires pointers to compatible complete object types"),
+        "{output}"
+    );
+}
+
+#[test]
 fn assignment_requires_modifiable_lvalue() {
     let output = diagnostics(
         "int main(void) { 1 = 2; return 0; }",

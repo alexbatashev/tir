@@ -214,6 +214,17 @@ fn pointer_subtraction_scales_by_pointee_size() {
 }
 
 #[test]
+fn pointer_difference_counts_elements() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "long distance(int *begin, int *end) { return end - begin; }\n",
+        "long distance(int *, int *); int main(void) { int values[4]; return distance(values, values + 3) == 3 && distance(values + 3, values) == -3 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
 fn integer_plus_pointer_scales_by_pointee_size() {
     if !cc_available() {
         return;
