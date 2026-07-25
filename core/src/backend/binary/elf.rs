@@ -14,6 +14,8 @@ pub(crate) const SHT_PROGBITS: u32 = 1;
 pub(crate) const SHT_SYMTAB: u32 = 2;
 pub(crate) const SHT_STRTAB: u32 = 3;
 pub(crate) const SHT_RELA: u32 = 4;
+pub(crate) const SHT_NOBITS: u32 = 8;
+pub(crate) const SHF_WRITE: u64 = 0x1;
 pub(crate) const SHF_ALLOC: u64 = 0x2;
 pub(crate) const SHF_EXECINSTR: u64 = 0x4;
 pub(crate) const STB_LOCAL: u8 = 0;
@@ -202,13 +204,16 @@ pub fn write_elf(obj: &ObjectFile, fmt: &ObjectFormatInfo) -> Vec<u8> {
 
     let mut sections: Vec<Section> = Vec::new();
     for (idx, section) in obj.sections.iter().enumerate() {
+        let (sh_type, sh_flags) = match section.kind {
+            super::SectionKind::Text => (SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR),
+            super::SectionKind::ReadOnlyData => (SHT_PROGBITS, SHF_ALLOC),
+            super::SectionKind::Data => (SHT_PROGBITS, SHF_WRITE | SHF_ALLOC),
+            super::SectionKind::UninitializedData => (SHT_NOBITS, SHF_WRITE | SHF_ALLOC),
+        };
         sections.push(Section {
             name: section.name.clone(),
-            sh_type: SHT_PROGBITS,
-            sh_flags: match section.kind {
-                super::SectionKind::Text => SHF_ALLOC | SHF_EXECINSTR,
-                super::SectionKind::Data => SHF_ALLOC,
-            },
+            sh_type,
+            sh_flags,
             sh_link: 0,
             sh_info: 0,
             sh_addralign: section.align,
@@ -301,7 +306,9 @@ pub fn write_elf(obj: &ObjectFile, fmt: &ObjectFormatInfo) -> Vec<u8> {
         let align = section.sh_addralign.max(1);
         pos = pos.div_ceil(align) * align;
         offsets.push(pos);
-        pos += section.data.len() as u64;
+        if section.sh_type != SHT_NOBITS {
+            pos += section.data.len() as u64;
+        }
     }
     let shoff = pos.div_ceil(8) * 8;
     let shnum = sections.len() as u16 + 1; // + NULL section
@@ -336,7 +343,9 @@ pub fn write_elf(obj: &ObjectFile, fmt: &ObjectFormatInfo) -> Vec<u8> {
     }
     for (section, offset) in sections.iter().zip(&offsets) {
         out.resize(*offset as usize, 0);
-        out.extend_from_slice(&section.data);
+        if section.sh_type != SHT_NOBITS {
+            out.extend_from_slice(&section.data);
+        }
     }
     out.resize(shoff as usize, 0);
     {

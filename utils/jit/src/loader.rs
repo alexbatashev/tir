@@ -85,7 +85,9 @@ pub fn load(
         cursor += tramp_size;
     }
 
+    place(SectionKind::ReadOnlyData, &mut cursor, &mut placed);
     place(SectionKind::Data, &mut cursor, &mut placed);
+    place(SectionKind::UninitializedData, &mut cursor, &mut placed);
 
     let total = cursor.max(1);
     let map = ExecMap::new(total)?;

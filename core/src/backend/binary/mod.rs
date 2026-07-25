@@ -64,8 +64,9 @@ pub struct ObjectFile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SectionKind {
     Text,
-    /// Non-executable data (`.rodata` string constants).
+    ReadOnlyData,
     Data,
+    UninitializedData,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,6 +166,27 @@ mod tests {
         parse_elf(&bytes).expect("emitted ELF parses back")
     }
 
+    fn roundtrip_section(name: &str, kind: SectionKind, data: Vec<u8>) -> ElfSection {
+        let object = ObjectFile {
+            sections: vec![ObjSection {
+                name: name.to_string(),
+                kind,
+                align: 4,
+                data,
+                relocs: Vec::new(),
+                insn_spans: Vec::new(),
+            }],
+            symbols: Vec::new(),
+        };
+        let bytes = write_elf(&object, &format_info(ElfClass::Elf64));
+        parse_elf(&bytes)
+            .expect("emitted ELF parses back")
+            .sections
+            .into_iter()
+            .find(|section| section.name == name)
+            .unwrap()
+    }
+
     fn check_roundtrip(class: ElfClass) {
         let elf = roundtrip(class);
         assert_eq!(elf.class, class);
@@ -216,6 +238,34 @@ mod tests {
     #[test]
     fn elf32_roundtrip() {
         check_roundtrip(ElfClass::Elf32);
+    }
+
+    #[test]
+    fn bss_is_encoded_as_writable_nobits() {
+        let bss = roundtrip_section(".bss", SectionKind::UninitializedData, vec![0; 4]);
+
+        assert_eq!(bss.sh_type, 8, "SHT_NOBITS");
+        assert_eq!(bss.flags, 0x3, "SHF_WRITE | SHF_ALLOC");
+        assert_eq!(bss.size, 4);
+        assert!(bss.data.is_empty());
+    }
+
+    #[test]
+    fn initialized_data_is_writable() {
+        let data = roundtrip_section(".data", SectionKind::Data, vec![1, 2, 3, 4]);
+
+        assert_eq!(data.sh_type, 1, "SHT_PROGBITS");
+        assert_eq!(data.flags, 0x3, "SHF_WRITE | SHF_ALLOC");
+        assert_eq!(data.data, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn read_only_data_is_not_writable() {
+        let rodata = roundtrip_section(".rodata", SectionKind::ReadOnlyData, vec![1, 2, 3, 4]);
+
+        assert_eq!(rodata.sh_type, 1, "SHT_PROGBITS");
+        assert_eq!(rodata.flags, 0x2, "SHF_ALLOC");
+        assert_eq!(rodata.data, vec![1, 2, 3, 4]);
     }
 
     #[test]

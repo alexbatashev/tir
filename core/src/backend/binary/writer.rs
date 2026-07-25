@@ -356,17 +356,20 @@ fn ensure_section(obj: &mut ObjectFile, name: &str) -> usize {
     if let Some(idx) = obj.sections.iter().position(|s| s.name == name) {
         return idx;
     }
-    // Only .text holds code; everything else (.rodata, .data) is data with
-    // byte alignment until a directive says otherwise.
-    let is_text = name == ".text" || name.starts_with(".text.");
+    // Sections start byte-aligned until a directive says otherwise.
+    let kind = if name == ".text" || name.starts_with(".text.") {
+        SectionKind::Text
+    } else if name == ".bss" || name.starts_with(".bss.") {
+        SectionKind::UninitializedData
+    } else if name == ".rodata" || name.starts_with(".rodata.") {
+        SectionKind::ReadOnlyData
+    } else {
+        SectionKind::Data
+    };
     obj.sections.push(ObjSection {
         name: name.to_string(),
-        kind: if is_text {
-            SectionKind::Text
-        } else {
-            SectionKind::Data
-        },
-        align: if is_text { 4 } else { 1 },
+        kind,
+        align: if kind == SectionKind::Text { 4 } else { 1 },
         data: Vec::new(),
         relocs: Vec::new(),
         insn_spans: Vec::new(),
