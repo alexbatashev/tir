@@ -33,6 +33,7 @@ abi TestAbi("test") for [TestIsa] {
 // CHECK: static ABIS: [tir::backend::abi::AbiInfo; 1usize]
 // CHECK: name: "test",
 // CHECK: sp: (RegClass::GPR.id(), 2u16),
+// CHECK: indirect_result: None,
 // CHECK: kind: tir::backend::abi::ValueKind::Int,
 // CHECK: regs: &[(RegClass::GPR.id(), 1u16)],
 // CHECK: overflow: tir::backend::abi::Overflow::Stack,
