@@ -607,6 +607,13 @@ fn classify_abi_return(context: &Context, typed: &TypedAst, ty: QualType) -> Abi
     if let Some(pieces) = classify_riscv_fp_aggregate(context, typed, ty)
         .or_else(|| classify_aapcs64_hfa(context, typed, ty))
         .or_else(|| classify_aapcs64_composite(context, typed, ty))
+        .or_else(|| {
+            typed
+                .target()
+                .uses_riscv_abi()
+                .then(|| classify_integer_carriers(context, typed, ty))
+                .flatten()
+        })
         .or_else(|| classify_integer_aggregate(context, typed, ty))
     {
         let ty = match pieces.as_slice() {
@@ -644,8 +651,9 @@ fn classify_abi_parameter(
 ) -> AbiParameter {
     let riscv_pieces = classify_riscv_fp_aggregate(context, typed, ty);
     let hfa_pieces = classify_aapcs64_hfa(context, typed, ty);
-    if hfa_pieces.is_none()
-        && typed.target().uses_aapcs64_abi()
+    if riscv_pieces.is_none()
+        && hfa_pieces.is_none()
+        && (typed.target().uses_aapcs64_abi() || typed.target().uses_riscv_abi())
         && matches!(typed.types().kind(ty), TypeKind::Record(_))
         && source_type_layout(typed, ty).0 > 16
     {
@@ -679,6 +687,9 @@ fn classify_abi_parameter(
                 Some(pieces) => {
                     let grouped = pieces.len() > 1;
                     (Some(pieces), grouped)
+                }
+                None if typed.target().uses_riscv_abi() => {
+                    (classify_integer_carriers(context, typed, ty), false)
                 }
                 None => (classify_integer_aggregate(context, typed, ty), false),
             },
