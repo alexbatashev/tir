@@ -362,6 +362,12 @@ as a materializer; only that form receives the structural
 `Add(ZExt(0), immediate)` e-graph bridge. No target lowering hook participates
 in either selection.
 
+A standalone `constantf` is rooted for covering only when the compiled target
+patterns contain both a float-register bitcast materializer and a zero-form
+integer materializer. Its integer bit pattern then uses the same target-derived
+integer materializer chain before the final bitcast instruction, including when
+the value crosses a call boundary.
+
 ### Narrow register-width forms
 
 An instruction whose destination register class is statically narrower than

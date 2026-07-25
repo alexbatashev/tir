@@ -409,6 +409,21 @@ pub(crate) fn zero_form_constant_materializer_ranges(
         .collect()
 }
 
+pub(crate) fn has_float_constant_materializer(patterns: &[CompiledIselPattern]) -> bool {
+    patterns.iter().any(|compiled| {
+        let Some(result) = compiled.result_register else {
+            return false;
+        };
+        if !result.capability.float {
+            return false;
+        }
+        matches!(
+            compiled.pattern.node(compiled.pattern.root()),
+            PatternNode::Node(root) if root.kind == SymKind::Bitcast
+        )
+    })
+}
+
 pub(crate) fn natural_pointer_width(patterns: &[CompiledIselPattern]) -> Option<u32> {
     patterns
         .iter()

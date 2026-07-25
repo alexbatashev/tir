@@ -759,6 +759,8 @@ pub struct InstructionSelectPass {
     /// Ranges whose materializer specifically uses an add from a hardwired zero
     /// register; only these need the structural `zero + immediate` bridge.
     zero_form_constant_materializer_ranges: Vec<ImmRange>,
+    /// Whether target patterns can materialize a bit-pattern into a float register.
+    has_float_constant_materializer: bool,
     /// Address width inferred from the target's natural integer load rules.
     pointer_width: Option<u32>,
     /// Semantic invariants the program e-graph is saturated with before covering.
@@ -1021,6 +1023,8 @@ impl InstructionSelectPass {
             pattern::constant_materializer_ranges(&compiled_patterns);
         let zero_form_constant_materializer_ranges =
             pattern::zero_form_constant_materializer_ranges(&compiled_patterns);
+        let has_float_constant_materializer = !zero_form_constant_materializer_ranges.is_empty()
+            && pattern::has_float_constant_materializer(&compiled_patterns);
         let pointer_width = pattern::natural_pointer_width(&compiled_patterns);
 
         Self {
@@ -1028,6 +1032,7 @@ impl InstructionSelectPass {
             compiled_patterns,
             constant_materializer_ranges,
             zero_form_constant_materializer_ranges,
+            has_float_constant_materializer,
             pointer_width,
             rewrites,
             branch_emitters: None,
@@ -1191,8 +1196,10 @@ impl InstructionSelectPass {
                     let op = context.get_op(op_id);
                     if let Some(root) = builder.build_for_op(&op) {
                         roots_by_op.insert(op_id, root);
-                    } else if !self.constant_materializer_ranges.is_empty()
-                        && op.is::<crate::builtin::ConstantOp>()
+                    } else if ((!self.constant_materializer_ranges.is_empty()
+                        && op.is::<crate::builtin::ConstantOp>())
+                        || (self.has_float_constant_materializer
+                            && op.is::<crate::builtin::ConstantFOp>()))
                         && let Some(&result) = op.results.first()
                     {
                         constant_candidates.push((op_id, builder.build_from_value(result)));
@@ -1284,11 +1291,13 @@ impl InstructionSelectPass {
             builder.value_to_class
         };
 
-        // A `constant` op has no semantic expression, so it never roots the
-        // e-graph on its own. With formal materializer rules in the rule set,
-        // each integer constant's class becomes the op's root, so the cover can
-        // select a real materializing instruction for it.
-        constant_candidates.retain(|(_, class)| class_int_binding(&egraph, *class).is_some());
+        // Standalone constants have no semantic root. When the target patterns
+        // describe a matching materializer, their operand-built class becomes
+        // the op root so the cover can select the materializing instructions.
+        constant_candidates.retain(|(op, class)| {
+            context.get_op(*op).is::<crate::builtin::ConstantFOp>()
+                || class_int_binding(&egraph, *class).is_some()
+        });
         for &(op_id, class) in &constant_candidates {
             roots_by_op.entry(op_id).or_insert(class);
         }
