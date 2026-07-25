@@ -428,8 +428,6 @@ fn emit_one_division_rule(
     isel_rule_emitters: &mut Vec<proc_macro2::TokenStream>,
     isel_rule_inits: &mut Vec<proc_macro2::TokenStream>,
 ) {
-    use tir::graph::Dag;
-
     let sibling_reg = &definer.written;
     let (dividend_class, dividend_index) = dividend_reg.clone();
     let result_is_dividend = result_reg == dividend_reg;
@@ -559,8 +557,6 @@ fn emit_one_division_rule(
         "{}+{} {}",
         definer.mnemonic, reader.mnemonic, kind
     ));
-    let base_cost = canon_pattern.len() as u32 + 1;
-    let base_cost_lit = proc_macro2::Literal::u32_unsuffixed(base_cost);
     let reader_mnemonic_lit = proc_macro2::Literal::string(&reader.mnemonic);
     let definer_mnemonic_lit = proc_macro2::Literal::string(&definer.mnemonic);
 
@@ -676,10 +672,8 @@ fn emit_one_division_rule(
                 tir::backend::isel::Rule::new(
                     #rule_name_lit,
                     #pattern_fn_ident(context),
-                    (#base_cost_lit).max(
-                        instruction_cost(#definer_mnemonic_lit)
-                            + instruction_cost(#reader_mnemonic_lit),
-                    ),
+                    instruction_cost(#definer_mnemonic_lit)
+                        + instruction_cost(#reader_mnemonic_lit),
                     #emit_fn_ident,
                 )
                 .with_prelude_emitter(#prelude_fn_ident)

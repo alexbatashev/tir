@@ -262,9 +262,9 @@ pub(crate) fn compile_isel_pattern(
     pattern.set_root(pattern_root);
 
     // A bare register-to-register copy cannot root on its own operand class
-    // without becoming self-referential. It instead materializes a low-bit
-    // Extract view, binding the copy source to the Extract's wider operand.
-    let copy = pattern.len() == 1 && node_meta[0].is_boundary;
+    // without becoming self-referential. A bare immediate rule is different:
+    // it encodes the captured constant and therefore materializes that class.
+    let copy = pattern.len() == 1 && node_meta[0].demands_register();
 
     let specificity = (0..pattern.len())
         .map(|index| Id::from_raw(index as u32))
@@ -379,53 +379,71 @@ fn compile_isel_pattern_node(
     memo.insert(node, compiled);
     Some(compiled)
 }
-/// The immediate ranges of the rule set's zero-form constant materializers:
-/// rules whose pattern is `Add(ZExt(0b0, W), imm)` with an immediate-constrained,
-/// range-annotated `imm` (the TMDL-derived `addi rd, zero_reg, imm` li form).
-/// Program constants fitting one of these ranges can be covered by a real
-/// instruction, so the constant bridge injects the matching shape for them.
+/// The immediate ranges of the rule set's constant materializers: bare
+/// immediate rules such as `movz`/`mov imm`, plus zero-form rules whose pattern
+/// is `Add(ZExt(0b0, W), imm)` (the TMDL-derived `addi rd, zero_reg, imm` form).
+/// Program constants fitting one of these ranges can be rooted by a real
+/// instruction rather than surviving to a target lowering hook.
 pub(crate) fn constant_materializer_ranges(patterns: &[CompiledIselPattern]) -> Vec<ImmRange> {
     patterns
         .iter()
         .filter_map(|compiled| {
             let root = compiled.pattern.root();
-            let PatternNode::Node(root_node) = compiled.pattern.node(root) else {
-                return None;
-            };
-            if root_node.kind != SymKind::Add || root_node.children.len() != 2 {
-                return None;
+            if let PatternNode::Var(Var::Symbol(_)) = compiled.pattern.node(root) {
+                let meta = &compiled.node_meta[root.index()];
+                return (meta.constraint == Some(OperandConstraint::Immediate))
+                    .then_some(meta.imm_range)
+                    .flatten();
             }
-            let mut has_zero_zext = false;
-            let mut imm_range = None;
-            for &child in &root_node.children {
-                match compiled.pattern.node(child) {
-                    PatternNode::Node(node)
-                        if node.kind == SymKind::ZExt && node.children.len() == 2 =>
-                    {
-                        let zero_value = matches!(
-                            compiled.pattern.node(node.children[0]),
-                            PatternNode::Node(zero)
-                                if zero.kind == SymKind::Constant
-                                    && matches!(
-                                        &zero.payload,
-                                        Some(super::SemPayload::Expr(SymPayload::Int(v)))
-                                            if v.to_u64() == 0
-                                    )
-                        );
-                        let wildcard_width =
-                            matches!(compiled.pattern.node(node.children[1]), PatternNode::Var(_));
-                        has_zero_zext = zero_value && wildcard_width;
-                    }
-                    PatternNode::Var(Var::Symbol(_)) => {
-                        let meta = &compiled.node_meta[child.index()];
-                        if meta.constraint == Some(OperandConstraint::Immediate) {
-                            imm_range = meta.imm_range;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            has_zero_zext.then_some(imm_range).flatten()
+            zero_form_materializer_range(compiled)
         })
         .collect()
+}
+
+pub(crate) fn zero_form_constant_materializer_ranges(
+    patterns: &[CompiledIselPattern],
+) -> Vec<ImmRange> {
+    patterns
+        .iter()
+        .filter_map(zero_form_materializer_range)
+        .collect()
+}
+
+fn zero_form_materializer_range(compiled: &CompiledIselPattern) -> Option<ImmRange> {
+    let root = compiled.pattern.root();
+    let PatternNode::Node(root_node) = compiled.pattern.node(root) else {
+        return None;
+    };
+    if root_node.kind != SymKind::Add || root_node.children.len() != 2 {
+        return None;
+    }
+    let mut has_zero_zext = false;
+    let mut imm_range = None;
+    for &child in &root_node.children {
+        match compiled.pattern.node(child) {
+            PatternNode::Node(node) if node.kind == SymKind::ZExt && node.children.len() == 2 => {
+                let zero_value = matches!(
+                    compiled.pattern.node(node.children[0]),
+                    PatternNode::Node(zero)
+                        if zero.kind == SymKind::Constant
+                            && matches!(
+                                &zero.payload,
+                                Some(super::SemPayload::Expr(SymPayload::Int(v)))
+                                    if v.to_u64() == 0
+                            )
+                );
+                let wildcard_width =
+                    matches!(compiled.pattern.node(node.children[1]), PatternNode::Var(_));
+                has_zero_zext = zero_value && wildcard_width;
+            }
+            PatternNode::Var(Var::Symbol(_)) => {
+                let meta = &compiled.node_meta[child.index()];
+                if meta.constraint == Some(OperandConstraint::Immediate) {
+                    imm_range = meta.imm_range;
+                }
+            }
+            _ => {}
+        }
+    }
+    has_zero_zext.then_some(imm_range).flatten()
 }

@@ -760,12 +760,6 @@ fn emit_instructions<'a>(
                 &ops,
                 &semantics.variable_symbols,
             ));
-            // Cost reflects the canonical pattern's size (one machine instruction).
-            let base_cost = {
-                use tir::graph::Dag;
-                (canon_pattern.len() as u32 + implicit_reads.len() as u32).max(1)
-            };
-            let base_cost_lit = proc_macro2::Literal::u32_unsuffixed(base_cost);
             let mnemonic_cost_lit = proc_macro2::Literal::string(mnemonic_name);
 
             // Registers read by path are dependencies outside the encoded operands.
@@ -841,10 +835,7 @@ fn emit_instructions<'a>(
                         tir::backend::isel::Rule::new(
                             #rule_name_lit,
                             #pattern_fn_ident(context),
-                            // base_cost is the larger of the canonical pattern size and the
-                            // TMDL-modeled instruction cost, so a genuinely expensive
-                            // instruction (high `unit` latency) outweighs the structural proxy.
-                            (#base_cost_lit).max(instruction_cost(#mnemonic_cost_lit)),
+                            instruction_cost(#mnemonic_cost_lit),
                             #emit_fn_ident,
                         )
                         .with_operand_constraints(vec![#(#operand_constraint_entries),*])
@@ -1006,7 +997,7 @@ fn emit_instructions<'a>(
                             tir::backend::isel::Rule::new(
                                 #zero_rule_name_lit,
                                 #zero_pattern_fn_ident(context),
-                                (5).max(instruction_cost(#mnemonic_cost_lit)),
+                                instruction_cost(#mnemonic_cost_lit),
                                 #zero_emit_fn_ident,
                             )
                             .with_operand_constraints(vec![(

@@ -586,11 +586,6 @@ fn emit_cond_branch_rule(
     );
     let operand_imm_range_call =
         emit_operand_imm_range_call(&immediate_operand_ranges(pattern, ops, variable_symbols));
-    let base_cost = {
-        use tir::graph::Dag;
-        (canon_pattern.len() as u32).max(1)
-    };
-    let base_cost_lit = proc_macro2::Literal::u32_unsuffixed(base_cost);
     let mnemonic_cost_lit = proc_macro2::Literal::string(mnemonic_name);
 
     let emitter = quote! {
@@ -619,7 +614,7 @@ fn emit_cond_branch_rule(
                 tir::backend::isel::Rule::new(
                     #rule_name_lit,
                     #pattern_fn_ident(context),
-                    (#base_cost_lit).max(instruction_cost(#mnemonic_cost_lit)),
+                    instruction_cost(#mnemonic_cost_lit),
                     #emit_fn_ident,
                 )
                 .with_kind(tir::backend::isel::RuleKind::CondBranch {

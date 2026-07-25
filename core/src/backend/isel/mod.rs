@@ -752,10 +752,13 @@ pub type OpLowering = fn(&Context, &OperationRef, &mut Rewriter) -> Result<bool,
 pub struct InstructionSelectPass {
     rules: Vec<Rule>,
     compiled_patterns: Vec<CompiledIselPattern>,
-    /// Immediate ranges of the rule set's zero-form constant materializers
+    /// Immediate ranges of every formal constant materializer
     /// (see [`pattern::constant_materializer_ranges`]). Empty means bare
     /// constants stay with the target's pre-RA materialization hook.
     constant_materializer_ranges: Vec<ImmRange>,
+    /// Ranges whose materializer specifically uses an add from a hardwired zero
+    /// register; only these need the structural `zero + immediate` bridge.
+    zero_form_constant_materializer_ranges: Vec<ImmRange>,
     /// Semantic invariants the program e-graph is saturated with before covering.
     rewrites: Vec<IselRewrite>,
     /// Instructions that define a register implicitly; selection introduces one
@@ -1014,11 +1017,14 @@ impl InstructionSelectPass {
         let rewrites = discover_rewrites();
         let constant_materializer_ranges =
             pattern::constant_materializer_ranges(&compiled_patterns);
+        let zero_form_constant_materializer_ranges =
+            pattern::zero_form_constant_materializer_ranges(&compiled_patterns);
 
         Self {
             rules,
             compiled_patterns,
             constant_materializer_ranges,
+            zero_form_constant_materializer_ranges,
             rewrites,
             branch_emitters: None,
             cost_model: Box::new(DefaultIselCostModel),
@@ -1274,7 +1280,7 @@ impl InstructionSelectPass {
         };
 
         // A `constant` op has no semantic expression, so it never roots the
-        // e-graph on its own. With zero-form materializer rules in the rule set,
+        // e-graph on its own. With formal materializer rules in the rule set,
         // each integer constant's class becomes the op's root, so the cover can
         // select a real materializing instruction for it.
         constant_candidates.retain(|(_, class)| class_int_binding(&egraph, *class).is_some());
@@ -1286,7 +1292,7 @@ impl InstructionSelectPass {
 
         seed_bare_condition_terms(context, &mut egraph, &control);
 
-        bridge_constant_materializers(&mut egraph, &self.constant_materializer_ranges);
+        bridge_constant_materializers(&mut egraph, &self.zero_form_constant_materializer_ranges);
 
         // Canonicalize the side tables through `find`: saturation may merge classes,
         // so every id recorded against the pre-saturation graph is re-resolved here.

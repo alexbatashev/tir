@@ -567,7 +567,10 @@ impl Solver {
                             self.problem.node_costs[neighbor][neighbor_alt] < INF_COST
                         })
                         .map(|neighbor_alt| {
-                            self.edge_cost(node, alternative, neighbor, neighbor_alt)
+                            add_cost(
+                                self.problem.node_costs[neighbor][neighbor_alt],
+                                self.edge_cost(node, alternative, neighbor, neighbor_alt),
+                            )
                         })
                         .min()
                         .unwrap_or(INF_COST);
@@ -757,6 +760,24 @@ mod tests {
         let solution = solve(&problem).expect("PBQP should be solvable");
         assert_eq!(solution.choices, vec![0, 0, 0]);
         assert_eq!(solution.total_cost, 1);
+    }
+
+    #[test]
+    fn rn_accounts_for_neighbor_instruction_costs() {
+        let mut problem = PbqpProblem::new();
+        let root = problem.add_node(vec![1, 2]);
+        for _ in 0..3 {
+            let operand = problem.add_node(vec![0, 10]);
+            problem.add_edge(
+                root,
+                operand,
+                PbqpMatrix::new(2, 2, vec![INF_COST, 0, 0, INF_COST]),
+            );
+        }
+
+        let solution = solve(&problem).expect("PBQP should be solvable");
+        assert_eq!(solution.choices[0], 1);
+        assert_eq!(solution.total_cost, 2);
     }
 
     #[test]

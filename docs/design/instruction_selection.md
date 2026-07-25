@@ -349,6 +349,16 @@ outside the range must not bind — its encoding would silently truncate — so
 `addi x, 2047` folds while `addi x, 2048` refuses the immediate rule (and,
 with no wide-constant materializer in the rule set, fails selection loudly).
 
+### Constant materializers
+
+A TMDL value rule whose canonical pattern is a bare immediate is a constant
+materializer, not a register copy. Its encoding range makes fitting `constant`
+ops coverable by that target instruction directly (`movz` on ARM64, `mov imm`
+on x86). A zero-register add such as RISC-V `addi rd, x0, imm` is also derived
+as a materializer; only that form receives the structural
+`Add(ZExt(0), immediate)` e-graph bridge. No target lowering hook participates
+in either selection.
+
 ### Narrow register-width forms
 
 An instruction whose destination register class is statically narrower than
@@ -414,10 +424,14 @@ nodes. The compatibility matrix sets `INF_COST` for incoherent pairs and asks
                                               recomputes the value (duplication)
 ```
 
-`pbqp::solve` returns the min-cost assignment as a `ClassCover` (one chosen
-alternative per class). If every assignment violates a boundary or coherence
-requirement, selection reports an infeasible cover; it never falls back to an
-empty plan that leaves the original operations unselected.
+`pbqp::solve` reduces degree-zero, degree-one, and degree-two nodes exactly.
+For a higher-degree node its Rₙ heuristic chooses the alternative with the
+lowest target-instruction cost plus the cheapest compatible alternative at
+each neighbor; compatibility alone is insufficient because it would ignore
+introduced materializer instructions. Reconstruction produces a `ClassCover`
+(one chosen alternative per class). If every assignment violates a boundary
+or coherence requirement, selection reports an infeasible cover; it never
+falls back to an empty plan that leaves the original operations unselected.
 
 An `If`-rooted value rule is offered only when both its structural pattern and
 the matched γ arm classes are speculatable. Division, remainder, memory,
@@ -773,10 +787,12 @@ is simply left standalone.
 
 A target may install an `IselCostModel` (`with_cost_model`); its single hook,
 `node_cost(context, op, rule, match)`, prices the Root alternative of an
-op-backed match. The default is the rule's TMDL-derived `base_cost`, which is
-also what a rewrite-introduced match (no backing op) always costs. Costs enter
-PBQP unmodified; equal-cost ties between interchangeable matches are resolved
-by dominance pruning (§3), not by cost tweaks.
+op-backed match. The default is the rule's TMDL-derived `base_cost`: the sum of
+the modeled costs of the target instructions the rule emits. A rule's symbolic
+graph size never contributes to instruction cost. The same base cost prices a
+rewrite-introduced match (which has no backing op). Costs enter PBQP unmodified;
+equal-cost ties between interchangeable matches are resolved by dominance
+pruning (§3), not by cost tweaks.
 
 ## Emitters
 

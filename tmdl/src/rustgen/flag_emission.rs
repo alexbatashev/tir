@@ -233,15 +233,6 @@ fn emit_flag_branch_rules(
             let (prelude_fn_ident, operand_constraint_entries) =
                 emit_flag_definer_prelude(d, d_sem, emitted_preludes, isel_rule_emitters);
 
-            let base_cost = {
-                use tir::graph::Dag;
-                // The condition pattern plus the two emitted instructions (the
-                // definer and the branch): a fused compare-and-branch is never
-                // cheaper than a single-instruction direct branch (e.g. arm64
-                // `cbz`) that covers the same guard.
-                canon_pattern.len() as u32 + 2
-            };
-            let base_cost_lit = proc_macro2::Literal::u32_unsuffixed(base_cost);
             let d_mnemonic_lit = proc_macro2::Literal::string(&d.mnemonic);
             let b_mnemonic_lit = proc_macro2::Literal::string(&b.mnemonic);
 
@@ -277,12 +268,8 @@ fn emit_flag_branch_rules(
                         tir::backend::isel::Rule::new(
                             #rule_name_lit,
                             #pattern_fn_ident(context),
-                            // Structural proxy or the TMDL-modeled cost of the
-                            // two emitted instructions, whichever is larger.
-                            (#base_cost_lit).max(
-                                instruction_cost(#d_mnemonic_lit)
-                                    + instruction_cost(#b_mnemonic_lit),
-                            ),
+                            instruction_cost(#d_mnemonic_lit)
+                                + instruction_cost(#b_mnemonic_lit),
                             #emit_fn_ident,
                         )
                         .with_kind(tir::backend::isel::RuleKind::CondBranch {
@@ -410,7 +397,6 @@ fn emit_aliased_zero_branch_rules(
     isel_rule_emitters: &mut Vec<proc_macro2::TokenStream>,
     isel_rule_inits: &mut Vec<proc_macro2::TokenStream>,
 ) {
-    use tir::graph::Dag;
     let mut emitted_preludes: HashSet<String> = HashSet::new();
     for (b, b_sem) in branches {
         for (d, d_sem) in definers {
@@ -559,8 +545,6 @@ fn emit_aliased_zero_branch_rules(
             let emit_fn_ident = format_ident!("emit_isel_{}_via_{}_selfzero", b_lower, d_lower);
             let rule_name_lit =
                 proc_macro2::Literal::string(&format!("{}+{}(self-zero)", d.mnemonic, b.mnemonic));
-            let base_cost = canon_pattern.len() as u32 + 2;
-            let base_cost_lit = proc_macro2::Literal::u32_unsuffixed(base_cost);
             let d_mnemonic_lit = proc_macro2::Literal::string(&d.mnemonic);
             let b_mnemonic_lit = proc_macro2::Literal::string(&b.mnemonic);
             let pair_features = feature_slice(&shared_isas);
@@ -596,10 +580,8 @@ fn emit_aliased_zero_branch_rules(
                         tir::backend::isel::Rule::new(
                             #rule_name_lit,
                             #pattern_fn_ident(context),
-                            (#base_cost_lit).max(
-                                instruction_cost(#d_mnemonic_lit)
-                                    + instruction_cost(#b_mnemonic_lit),
-                            ),
+                            instruction_cost(#d_mnemonic_lit)
+                                + instruction_cost(#b_mnemonic_lit),
                             #emit_fn_ident,
                         )
                         .with_kind(tir::backend::isel::RuleKind::CondBranch {
@@ -702,7 +684,7 @@ fn emit_flag_reader_rules(
         .filter(|class| class.has_polymorphic_registers())
         .map(|class| class.name.clone())
         .collect();
-    use tir::graph::{Dag, MutDag};
+    use tir::graph::MutDag;
     let isa_closure = isa_requires_closure(files);
     for (r, r_sem) in readers {
         for (d, d_sem) in definers {
@@ -931,15 +913,6 @@ fn emit_flag_reader_rules(
                 emit_flag_definer_prelude(d, d_sem, emitted_preludes, isel_rule_emitters);
             operand_constraint_entries.extend(reader_constraint_entries);
 
-            let base_cost = if r_sem.variable_symbols.is_empty() {
-                // Boolean materializers retain the historical structural proxy
-                // used to rank their alternative comparison shapes.
-                canon_pattern.len() as u32 + 1
-            } else {
-                // A select emits exactly the flag definer and reader.
-                2
-            };
-            let base_cost_lit = proc_macro2::Literal::u32_unsuffixed(base_cost);
             let d_mnemonic_lit = proc_macro2::Literal::string(&d.mnemonic);
             let r_mnemonic_lit = proc_macro2::Literal::string(&r.mnemonic);
 
@@ -984,12 +957,8 @@ fn emit_flag_reader_rules(
                         tir::backend::isel::Rule::new(
                             #rule_name_lit,
                             #pattern_fn_ident(context),
-                            // The derived structural/emission proxy or the
-                            // TMDL-modeled cost, whichever is larger.
-                            (#base_cost_lit).max(
-                                instruction_cost(#d_mnemonic_lit)
-                                    + instruction_cost(#r_mnemonic_lit),
-                            ),
+                            instruction_cost(#d_mnemonic_lit)
+                                + instruction_cost(#r_mnemonic_lit),
                             #emit_fn_ident,
                         )
                         .with_prelude_emitter(#prelude_fn_ident)
