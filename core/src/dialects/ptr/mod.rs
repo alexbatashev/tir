@@ -18,7 +18,8 @@ use crate::Any as AnyConstraint;
 
 pub mod ops {
     pub use super::{
-        AllocaOp, LoadOp, PtrAddOp, PtrDiffOp, StoreOp, alloca, load, ptradd, ptrdiff, store,
+        AllocaOp, LoadOp, MemcpyOp, PtrAddOp, PtrDiffOp, StoreOp, alloca, load, memcpy, ptradd,
+        ptrdiff, store,
     };
 }
 
@@ -31,6 +32,7 @@ dialect! {
             PtrDiffOp,
             LoadOp,
             StoreOp,
+            MemcpyOp,
         ],
         types: [PtrType],
     }
@@ -246,6 +248,38 @@ operation! {
             ptr: "crate::ptr::PtrType",
         },
         interfaces: [MemoryWrite],
+    }
+}
+
+operation! {
+    MemcpyOp {
+        name: "memcpy",
+        dialect: "ptr",
+        verifier: "true",
+        operands: O {
+            destination: "crate::ptr::PtrType",
+            source: "crate::ptr::PtrType",
+            size: "crate::builtin::IntegerType",
+        },
+    }
+}
+
+impl tir::Verifiable for MemcpyOp {
+    fn verify_impl(&self, context: &Context) -> Result<(), Error> {
+        let size_type = context.get_type_data(context.get_value(self.operands()[2]).ty());
+        let Some(size_type) =
+            (size_type.as_ref() as &dyn Any).downcast_ref::<crate::builtin::IntegerType>()
+        else {
+            return Err(Error::VerificationError(
+                "ptr.memcpy size must have integer type".to_string(),
+            ));
+        };
+        if size_type.width() != 64 {
+            return Err(Error::VerificationError(
+                "ptr.memcpy size must have type i64".to_string(),
+            ));
+        }
+        Ok(())
     }
 }
 

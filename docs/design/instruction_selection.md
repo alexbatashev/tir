@@ -28,6 +28,9 @@ does the rest.
 
 ## Pipeline
 
+The shared backend pipeline lowers target-independent memory intrinsics such as
+`ptr.memcpy` to ordinary calls before constructing any target semantic graph.
+
 ```mermaid
 flowchart TB
     subgraph per_function["per function (FunctionSelection), up front"]
