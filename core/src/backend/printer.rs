@@ -116,6 +116,13 @@ impl AsmPrinter {
                     out.push_str(name);
                     out.push('\n');
                 }
+                if let Some(align) = int_attr(&op.attributes, "align")
+                    && align > 1
+                {
+                    out.push_str("\t.balign ");
+                    out.push_str(&align.to_string());
+                    out.push('\n');
+                }
                 out.push_str(name);
                 out.push_str(":\n");
                 // The symbol label above names the entry block, so only non-entry

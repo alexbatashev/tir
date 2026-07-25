@@ -1217,3 +1217,46 @@ fn initialized_global_struct_uses_field_layout() {
         "struct Pair { char tag; int value; } pair = {3, 39}; int main(void) { return pair.tag + pair.value - 42; }\n",
     );
 }
+
+#[test]
+fn global_objects_respect_source_alignment() {
+    if !cc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("globals.c"),
+        "char prefix = 1; long value = 42; int main(void) { return prefix + value - 43; }\n",
+    )
+    .unwrap();
+    run_fcc(dir.path(), &["cc", "-c", "globals.c", "-o", "globals.o"]);
+    let object = fs::read(dir.path().join("globals.o")).unwrap();
+    let elf = tir::backend::binary::parse_elf(&object).unwrap();
+    let value = elf
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == "value")
+        .unwrap();
+    let data = elf
+        .sections
+        .iter()
+        .find(|section| section.name == ".data")
+        .unwrap();
+
+    assert_eq!(value.value % 8, 0);
+    assert!(data.addralign >= 8);
+}
+
+#[test]
+fn global_object_assembly_emits_alignment() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("globals.c"),
+        "char prefix = 1; long value = 42;\n",
+    )
+    .unwrap();
+    run_fcc(dir.path(), &["cc", "-S", "globals.c", "-o", "globals.s"]);
+    let assembly = fs::read_to_string(dir.path().join("globals.s")).unwrap();
+
+    assert!(assembly.contains("\t.balign 8\nvalue:\n"));
+}
