@@ -154,7 +154,10 @@ in `asm.symbol.arg_regs`, which lets register allocation assign the whole ABI
 group transactionally or place every member on the stack. The source alignment
 of a group is preserved with that array. A target ABI may use it to align the
 next register slot before assigning the group; alignment never creates an IR
-argument or a machine value.
+argument or a machine value. An ABI may also cap the registers used by one group
+and choose whether a failed group exhausts or preserves the register counters.
+The same policy drives incoming precoloring and outgoing call lowering, so a
+stacked group cannot make caller and callee disagree about later arguments.
 
 A result-address function or call carries its destination as the first ordinary
 pointer argument. Function lowering records that value separately from

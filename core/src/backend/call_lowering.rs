@@ -8,7 +8,7 @@ use tir::builtin::{
 use tir::{Context, OpId, Operand, Operation, OperationRef, PassError, Rewriter, ValueId};
 
 use crate::backend::abi::{
-    AbiInfo, Overflow, ValueKind, align_argument_group, exhaust_argument_registers,
+    AbiInfo, GroupRollback, Overflow, ValueKind, align_argument_group, exhaust_argument_registers,
     reserve_indirect_result_argument, type_kind, value_kind,
 };
 use crate::backend::liveness::PhysReg;
@@ -262,10 +262,16 @@ impl CallLowering {
                 values.iter().map(|&value| value_kind(context, value)),
                 &mut trial_slots,
             );
-            let direct = values
-                .iter()
-                .map(|&value| next_register(self.abi, value_kind(context, value), &mut trial_slots))
-                .collect::<Option<Vec<_>>>();
+            let direct = if self.abi.argument_group_fits_register_limit(values.len()) {
+                values
+                    .iter()
+                    .map(|&value| {
+                        next_register(self.abi, value_kind(context, value), &mut trial_slots)
+                    })
+                    .collect::<Option<Vec<_>>>()
+            } else {
+                None
+            };
             if let Some(registers) = direct {
                 next_slot = trial_slots;
                 argument_values.extend(values);
@@ -274,7 +280,13 @@ impl CallLowering {
             }
 
             for &value in &values {
-                exhaust_argument_registers(self.abi, value_kind(context, value), &mut next_slot);
+                if self.abi.argument_group_rollback() == GroupRollback::Exhaust {
+                    exhaust_argument_registers(
+                        self.abi,
+                        value_kind(context, value),
+                        &mut next_slot,
+                    );
+                }
                 let class = stack_class(self.abi, value_kind(context, value)).ok_or_else(|| {
                     PassError::InvalidRuleSet("ABI has no argument sequence".to_string())
                 })?;
