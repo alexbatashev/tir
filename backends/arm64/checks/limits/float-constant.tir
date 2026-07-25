@@ -1,4 +1,5 @@
 // RUN: tir mc --march=arm64 --stage=regalloc %s | filecheck %s
+// RUN: tir mc --march=arm64 --stage=isel %s | filecheck %s --check-prefix=ISEL
 
 module {
   func @f() -> !f64 {
@@ -9,6 +10,10 @@ module {
 }
 
 // CHECK: arm64.movz
-// CHECK: arm64.movk_shifted
+// CHECK: arm64.movk_lsl48
 // CHECK: arm64.fmov_d_x
 // CHECK-NOT: constantf
+// ISEL: arm64.movz
+// ISEL: arm64.movk_lsl48
+// ISEL: arm64.fmov_d_x
+// ISEL-NOT: constantf

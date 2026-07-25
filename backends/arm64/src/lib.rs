@@ -214,6 +214,7 @@ fn create_isel_pass_for(
     abi: &'static tir::backend::abi::AbiInfo,
 ) -> tir::backend::isel::InstructionSelectPass {
     tir::backend::isel::InstructionSelectPass::new(get_isel_rules(context, features))
+        .with_axioms(include_str!("isel-materialize.axioms"))
         .with_branch_emitters(tir::backend::isel::BranchEmitters {
             uncond: tir::backend::emit_uncond_branch,
             cond_nonzero: emit_branch_nonzero,
@@ -519,36 +520,6 @@ fn create_regalloc_pass_for(
     tir::backend::regalloc::RegisterAllocationPass::with_abi(Box::new(Arm64RegAlloc), abi)
 }
 
-/// Pre-RA: materialize a `constantf` that survived instruction selection into
-/// an integer sequence plus `fmov d, x`.
-fn lower_float_constant(
-    context: &tir::Context,
-    op: &tir::OperationRef,
-    rewriter: &mut tir::Rewriter,
-) -> Result<bool, tir::PassError> {
-    use tir::builtin::ConstantFOp;
-
-    let Some(constant) = op.as_op::<ConstantFOp>() else {
-        return Ok(false);
-    };
-    let Some(bits) = tir::backend::f64_constant_bits(context, &constant) else {
-        return Ok(false);
-    };
-    let temp = context
-        .create_value(tir::builtin::IntegerType::new(context, 64), None)
-        .id();
-    let integer = virt(temp.number(), RegClass::GPR.id());
-    for instruction in obj::materialize_integer(context, integer.clone(), bits as u64) {
-        rewriter.insert_op_before(op, instruction.as_ref())?;
-    }
-    let move_bits = FMovGeneralToDoubleOpBuilder::new(context)
-        .attr("fd", virt(constant.result().number(), RegClass::FPR64.id()))
-        .attr("rn", integer)
-        .build();
-    rewriter.replace_op(op, &move_bits)?;
-    Ok(true)
-}
-
 /// The AArch64 (ARMv8-A) target, selected via `--march`/`--mcpu`.
 pub struct Arm64Target {
     config: TargetConfig,
@@ -632,11 +603,7 @@ impl tir::backend::TargetMachine for Arm64Target {
     }
 
     fn pre_ra_lowerings(&self) -> Vec<tir::backend::isel::OpLowering> {
-        vec![
-            lower_float_constant,
-            obj::lower_constant,
-            obj::lower_addr_of,
-        ]
+        vec![obj::lower_addr_of]
     }
 
     fn finalize_lowerings(&self) -> Vec<tir::backend::isel::OpLowering> {
