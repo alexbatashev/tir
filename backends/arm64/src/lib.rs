@@ -205,7 +205,7 @@ fn mv(
 }
 
 pub fn create_isel_pass(context: &tir::Context) -> tir::backend::isel::InstructionSelectPass {
-    create_isel_pass_for(context, Feature::ALL, default_abi())
+    create_isel_pass_for(context, Feature::ALL, arm64_default_abi())
 }
 
 fn create_isel_pass_for(
@@ -510,7 +510,7 @@ impl tir::backend::regalloc::TargetRegAlloc for Arm64RegAlloc {
 }
 
 pub fn create_regalloc_pass() -> tir::backend::regalloc::RegisterAllocationPass {
-    create_regalloc_pass_for(default_abi())
+    create_regalloc_pass_for(arm64_default_abi())
 }
 
 fn create_regalloc_pass_for(
@@ -588,7 +588,7 @@ impl tir::backend::TargetMachine for Arm64Target {
     }
 
     fn abis(&self) -> &'static [tir::backend::abi::AbiInfo] {
-        abis()
+        arm64_abis()
     }
 
     fn abi(&self) -> &'static tir::backend::abi::AbiInfo {
@@ -677,17 +677,17 @@ fn select_arm64(
     }
     let config = TargetConfig::parse(march, mcpu, mattr)?;
     let selected_abi = match mabi {
-        Some(name) => abi_by_name(name).ok_or_else(|| {
+        Some(name) => arm64_abi_by_name(name).ok_or_else(|| {
             format!(
                 "unknown ABI '{name}' for arm64 (available: {})",
-                abis()
+                arm64_abis()
                     .iter()
                     .map(|abi| abi.name)
                     .collect::<Vec<_>>()
                     .join(", ")
             )
         })?,
-        None => default_abi(),
+        None => arm64_default_abi(),
     };
     Ok(Some(Box::new(Arm64Target {
         config,
@@ -696,6 +696,27 @@ fn select_arm64(
 }
 
 tir::register_target!(select_arm64, ["arm64"]);
+
+fn arm64_abis() -> &'static [tir::backend::abi::AbiInfo] {
+    static ABIS: std::sync::OnceLock<Vec<tir::backend::abi::AbiInfo>> = std::sync::OnceLock::new();
+    ABIS.get_or_init(|| {
+        abis()
+            .iter()
+            .map(|abi| tir::backend::abi::AbiInfo {
+                indirect_result: Some((RegClass::GPR.id(), 8)),
+                ..*abi
+            })
+            .collect()
+    })
+}
+
+fn arm64_default_abi() -> &'static tir::backend::abi::AbiInfo {
+    &arm64_abis()[0]
+}
+
+fn arm64_abi_by_name(name: &str) -> Option<&'static tir::backend::abi::AbiInfo> {
+    arm64_abis().iter().find(|abi| abi.name == name)
+}
 
 #[cfg(test)]
 mod tests {
