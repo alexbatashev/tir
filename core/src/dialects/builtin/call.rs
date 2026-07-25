@@ -10,6 +10,7 @@ operation! {
         name: "call",
         dialect: "builtin",
         format: "custom",
+        verifier: "true",
         operands: O {
             args: "*Any",
         },
@@ -31,10 +32,21 @@ impl CallOp {
         self.operands().to_vec()
     }
 
+    pub fn has_result_address(&self) -> bool {
+        has_result_address(self)
+    }
+
     fn custom_print(&self, fmt: &mut tir::IRFormatter) -> Result<(), std::fmt::Error> {
         let context = self.0.context.upgrade();
         let header = format!("call @{}", self.callee());
-        print_call(&context, fmt, &header, self.result(), &self.args())
+        print_call(
+            &context,
+            fmt,
+            &header,
+            self.result(),
+            &self.args(),
+            self.has_result_address(),
+        )
     }
 
     fn custom_parse(
@@ -48,14 +60,50 @@ impl CallOp {
             .to_string();
         let args = parse_arg_list(parser, context)?;
         let ret_type = parse_ret_type(parser, context)?;
+        let result_address = parser.parse_token("result_address");
 
-        Ok(Box::new(
-            CallOpBuilder::new(context)
-                .args(args)
-                .attr("callee", AttributeValue::Str(callee))
-                .result_type(ret_type)
-                .build(),
-        ))
+        let mut builder = CallOpBuilder::new(context)
+            .args(args)
+            .attr("callee", AttributeValue::Str(callee))
+            .result_type(ret_type);
+        if result_address {
+            builder = builder.result_address();
+        }
+        Ok(Box::new(builder.build()))
+    }
+}
+
+impl CallOpBuilder {
+    pub fn result_address(self) -> Self {
+        self.attr("result_address", AttributeValue::Bool(true))
+    }
+}
+
+impl tir::Verifiable for CallOp {
+    fn verify_impl(&self, context: &Context) -> Result<(), Error> {
+        if !self.has_result_address() {
+            return Ok(());
+        }
+        if context.get_value(self.result()).ty() != UnitType::new(context) {
+            return Err(Error::VerificationError(
+                "result-address call must return unit".to_string(),
+            ));
+        }
+        let Some(destination) = self.args().first().copied() else {
+            return Err(Error::VerificationError(
+                "result-address call requires a destination argument".to_string(),
+            ));
+        };
+        let ty = context.get_type_data(context.get_value(destination).ty());
+        if (ty.as_ref() as &dyn std::any::Any)
+            .downcast_ref::<crate::ptr::PtrType>()
+            .is_none()
+        {
+            return Err(Error::VerificationError(
+                "result-address call destination must have pointer type".to_string(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -86,7 +134,7 @@ impl IndirectCallOp {
     fn custom_print(&self, fmt: &mut tir::IRFormatter) -> Result<(), std::fmt::Error> {
         let context = self.0.context.upgrade();
         let header = format!("indirect_call %{}", self.callee().number());
-        print_call(&context, fmt, &header, self.result(), &self.args())
+        print_call(&context, fmt, &header, self.result(), &self.args(), false)
     }
 
     fn custom_parse(
@@ -124,6 +172,7 @@ fn print_call(
     header: &str,
     result: ValueId,
     args: &[ValueId],
+    result_address: bool,
 ) -> Result<(), std::fmt::Error> {
     let ret_type = context.get_value(result).ty();
     let is_unit = ret_type == UnitType::new(context);
@@ -154,6 +203,9 @@ fn print_call(
     if !is_unit {
         fmt.write(" -> ")?;
         context.print_type(ret_type, fmt)?;
+    }
+    if result_address {
+        fmt.write(" result_address")?;
     }
     fmt.write("\n")
 }
@@ -223,6 +275,12 @@ fn callee_attr(op: &impl Operation) -> String {
             _ => None,
         })
         .expect("call must carry a 'callee' symbol name")
+}
+
+fn has_result_address(op: &impl Operation) -> bool {
+    op.attributes().iter().any(|attribute| {
+        attribute.name == "result_address" && attribute.value == AttributeValue::Bool(true)
+    })
 }
 
 #[cfg(test)]

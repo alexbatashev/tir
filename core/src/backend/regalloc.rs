@@ -1493,6 +1493,19 @@ fn abi_precolor(
             Ok(())
         };
 
+        if let Some(AttributeValue::Register(RegisterAttr::Virtual { id, .. })) = op
+            .op()
+            .attributes
+            .iter()
+            .find(|attribute| attribute.name == "result_address")
+            .map(|attribute| &attribute.value)
+        {
+            let register = abi.indirect_result.ok_or_else(|| {
+                PassError::InvalidRuleSet("ABI has no result-address register".to_string())
+            })?;
+            precolor_register(*id, register)?;
+        }
+
         for attribute in args {
             if let AttributeValue::Array(group) = attribute {
                 let members = group
