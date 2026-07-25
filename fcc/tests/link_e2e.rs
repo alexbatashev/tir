@@ -1260,3 +1260,27 @@ fn global_object_assembly_emits_alignment() {
 
     assert!(assembly.contains("\t.balign 8\nvalue:\n"));
 }
+
+#[test]
+fn global_pointer_initializer_emits_a_relocation() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "int target = 42; int *pointer = &target; int main(void) { return *pointer - 42; }\n",
+    );
+}
+
+#[test]
+fn global_pointer_assembly_uses_a_symbolic_directive() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("globals.c"),
+        "int target = 42; int *pointer = &target;\n",
+    )
+    .unwrap();
+    run_fcc(dir.path(), &["cc", "-S", "globals.c", "-o", "globals.s"]);
+    let assembly = fs::read_to_string(dir.path().join("globals.s")).unwrap();
+
+    assert!(assembly.contains("pointer:\n\t.quad target\n"));
+}

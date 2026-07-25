@@ -409,6 +409,32 @@ pub(crate) fn zero_form_constant_materializer_ranges(
         .collect()
 }
 
+pub(crate) fn natural_pointer_width(patterns: &[CompiledIselPattern]) -> Option<u32> {
+    patterns
+        .iter()
+        .filter_map(|compiled| {
+            let result = compiled.result_register?;
+            if !result.capability.integer {
+                return None;
+            }
+            let PatternNode::Node(root) = compiled.pattern.node(compiled.pattern.root()) else {
+                return None;
+            };
+            if root.kind != SymKind::LoadMemory || root.children.len() != 3 {
+                return None;
+            }
+            let PatternNode::Node(bytes) = compiled.pattern.node(root.children[1]) else {
+                return None;
+            };
+            let Some(super::SemPayload::Expr(SymPayload::Int(bytes))) = &bytes.payload else {
+                return None;
+            };
+            let width = u32::try_from(bytes.to_u64().checked_mul(8)?).ok()?;
+            (width == result.capability.width).then_some(width)
+        })
+        .max()
+}
+
 fn zero_form_materializer_range(compiled: &CompiledIselPattern) -> Option<ImmRange> {
     let root = compiled.pattern.root();
     let PatternNode::Node(root_node) = compiled.pattern.node(root) else {

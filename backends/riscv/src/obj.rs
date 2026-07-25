@@ -10,6 +10,8 @@ use tir::backend::{VirtualBranchOp, VirtualCallOp, VirtualIndirectCallOp, Virtua
 use crate::{JumpAndLinkOpBuilder, JumpAndLinkRegOpBuilder, phys, virt};
 
 const R_RISCV_BRANCH: u32 = 16;
+const R_RISCV_32: u32 = 1;
+const R_RISCV_64: u32 = 2;
 const R_RISCV_JAL: u32 = 17;
 const R_RISCV_HI20: u32 = 26;
 const R_RISCV_LO12_I: u32 = 27;
@@ -37,6 +39,11 @@ pub(crate) fn object_format(xlen: u32, features: &[crate::Feature]) -> ObjectFor
             ElfClass::Elf32
         },
         elf_flags,
+        absolute_reloc: |width| match width {
+            4 => Some(R_RISCV_32),
+            8 => Some(R_RISCV_64),
+            _ => None,
+        },
         reloc_for: |op| match op {
             "jal" => Some(RelocKind {
                 r_type: R_RISCV_JAL,

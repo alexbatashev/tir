@@ -27,6 +27,7 @@ pub(crate) struct SemDagBuilder<'a> {
     value_to_def: &'a HashMap<ValueId, OpId>,
     gsa: &'a GSA,
     egraph: &'a mut SemEGraph,
+    pointer_width: Option<u32>,
     /// The e-class built for each already-lowered IR value (operand sharing / CSE).
     pub(crate) value_to_class: HashMap<ValueId, Id>,
     /// Serial of the next opaque leaf; each un-lowerable node gets its own.
@@ -39,12 +40,14 @@ impl<'a> SemDagBuilder<'a> {
         value_to_def: &'a HashMap<ValueId, OpId>,
         gsa: &'a GSA,
         egraph: &'a mut SemEGraph,
+        pointer_width: Option<u32>,
     ) -> Self {
         Self {
             context,
             value_to_def,
             gsa,
             egraph,
+            pointer_width,
             value_to_class: HashMap::new(),
             opaque_serial: 0,
         }
@@ -175,7 +178,7 @@ impl<'a> SemDagBuilder<'a> {
 
         if let Some((location, result)) = read_parts {
             let result_ty = self.context.get_value(result).ty();
-            let bytes = type_width(self.context, result_ty)? / 8;
+            let bytes = self.type_width(result_ty)? / 8;
             let address = self.build_from_value(location);
             let address = self.zero_offset_address(address);
             let bytes = self.add_u64_const(u64::from(bytes));
@@ -194,7 +197,7 @@ impl<'a> SemDagBuilder<'a> {
 
         if let Some((location, value)) = write_parts {
             let value_ty = self.context.get_value(value).ty();
-            let bytes = type_width(self.context, value_ty)? / 8;
+            let bytes = self.type_width(value_ty)? / 8;
             let address = self.build_from_value(location);
             let address = self.zero_offset_address(address);
             let bytes = self.add_u64_const(u64::from(bytes));
@@ -208,6 +211,15 @@ impl<'a> SemDagBuilder<'a> {
         }
 
         None
+    }
+
+    fn type_width(&self, ty: TypeId) -> Option<u32> {
+        type_width(self.context, ty).or_else(|| {
+            let data = self.context.get_type_data(ty);
+            (data.as_ref() as &dyn std::any::Any)
+                .downcast_ref::<tir::ptr::PtrType>()
+                .and(self.pointer_width)
+        })
     }
 
     /// The canonical comparison the (possibly cross-block) definer of `value`

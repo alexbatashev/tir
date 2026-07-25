@@ -1032,6 +1032,7 @@ mod isa {
     // start while the displacement is measured from the instruction's end.
     const R_X86_64_PC32: u32 = 2;
     const R_X86_64_PLT32: u32 = 4;
+    const R_X86_64_64: u32 = 1;
 
     fn object_format() -> tir::backend::binary::ObjectFormatInfo {
         use tir::backend::binary::{EM_X86_64, ElfClass, ObjectFormatInfo, RelocKind};
@@ -1039,6 +1040,7 @@ mod isa {
             elf_machine: EM_X86_64,
             elf_class: ElfClass::Elf64,
             elf_flags: 0,
+            absolute_reloc: |width| (width == 8).then_some(R_X86_64_64),
             reloc_for: |op| match op {
                 // `call rel32`: the disp32 follows the 1-byte opcode.
                 "call" => Some(RelocKind {

@@ -759,6 +759,8 @@ pub struct InstructionSelectPass {
     /// Ranges whose materializer specifically uses an add from a hardwired zero
     /// register; only these need the structural `zero + immediate` bridge.
     zero_form_constant_materializer_ranges: Vec<ImmRange>,
+    /// Address width inferred from the target's natural integer load rules.
+    pointer_width: Option<u32>,
     /// Semantic invariants the program e-graph is saturated with before covering.
     rewrites: Vec<IselRewrite>,
     /// Instructions that define a register implicitly; selection introduces one
@@ -1019,12 +1021,14 @@ impl InstructionSelectPass {
             pattern::constant_materializer_ranges(&compiled_patterns);
         let zero_form_constant_materializer_ranges =
             pattern::zero_form_constant_materializer_ranges(&compiled_patterns);
+        let pointer_width = pattern::natural_pointer_width(&compiled_patterns);
 
         Self {
             rules,
             compiled_patterns,
             constant_materializer_ranges,
             zero_form_constant_materializer_ranges,
+            pointer_width,
             rewrites,
             branch_emitters: None,
             cost_model: Box::new(DefaultIselCostModel),
@@ -1180,7 +1184,8 @@ impl InstructionSelectPass {
         let mut prepared: HashMap<ValueId, ConditionExpr> = HashMap::new();
         let mut constant_candidates: Vec<(OpId, Id)> = Vec::new();
         let value_to_class = {
-            let mut builder = SemDagBuilder::new(context, &value_to_def, gsa, &mut egraph);
+            let mut builder =
+                SemDagBuilder::new(context, &value_to_def, gsa, &mut egraph, self.pointer_width);
             for &block_id in &block_ids {
                 for op_id in context.get_block(block_id).op_ids() {
                     let op = context.get_op(op_id);

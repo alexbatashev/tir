@@ -53,6 +53,7 @@ operation! {
         attributes: A {
             sym_name: "Str",
             bytes: "Array",
+            relocations: "Array",
             align: "UInt",
         },
     }
@@ -82,6 +83,39 @@ impl GlobalOp {
 
     pub fn align(&self) -> u64 {
         uint_attribute(self, "align")
+    }
+
+    pub fn relocations(&self) -> Vec<(u64, String, i64, u64)> {
+        self.attributes()
+            .iter()
+            .find(|attribute| attribute.name == "relocations")
+            .and_then(|attribute| match &attribute.value {
+                AttributeValue::Array(relocations) => Some(
+                    relocations
+                        .iter()
+                        .map(|relocation| {
+                            let AttributeValue::Dict(fields) = relocation else {
+                                unreachable!("cir.global relocation is a dictionary")
+                            };
+                            let AttributeValue::UInt(offset) = fields.get("offset").unwrap() else {
+                                unreachable!("cir.global relocation has an offset")
+                            };
+                            let AttributeValue::Str(symbol) = fields.get("symbol").unwrap() else {
+                                unreachable!("cir.global relocation has a symbol")
+                            };
+                            let AttributeValue::Int(addend) = fields.get("addend").unwrap() else {
+                                unreachable!("cir.global relocation has an addend")
+                            };
+                            let AttributeValue::UInt(width) = fields.get("width").unwrap() else {
+                                unreachable!("cir.global relocation has a width")
+                            };
+                            (*offset, symbol.clone(), *addend, *width)
+                        })
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .unwrap()
     }
 }
 

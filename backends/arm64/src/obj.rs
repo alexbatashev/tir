@@ -13,6 +13,8 @@ use crate::{
 };
 
 const R_AARCH64_ADR_PREL_LO21: u32 = 274;
+const R_AARCH64_ABS64: u32 = 257;
+const R_AARCH64_ABS32: u32 = 258;
 const R_AARCH64_TSTBR14: u32 = 279;
 const R_AARCH64_CONDBR19: u32 = 280;
 const R_AARCH64_JUMP26: u32 = 282;
@@ -23,6 +25,11 @@ pub(crate) fn object_format() -> ObjectFormatInfo {
         elf_machine: EM_AARCH64,
         elf_class: ElfClass::Elf64,
         elf_flags: 0,
+        absolute_reloc: |width| match width {
+            4 => Some(R_AARCH64_ABS32),
+            8 => Some(R_AARCH64_ABS64),
+            _ => None,
+        },
         reloc_for: |op| match op {
             "adr" => Some(RelocKind {
                 r_type: R_AARCH64_ADR_PREL_LO21,

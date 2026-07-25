@@ -133,7 +133,10 @@ Ops implementing `MemoryRead` / `MemoryWrite` are lowered by
 `build_memory_effect` into `LoadMemory` / `StoreMemory` nodes whose address is
 wrapped as `addr + 0` so the targets' base+offset addressing patterns
 match a bare pointer. The interfaces are the only trigger; there is no op-name
-matching. `class_is_pure` also treats the atomic and synchronization kinds
+matching. Pointer-valued memory effects use the address width inferred from the
+target's natural integer load patterns, so their byte width remains target-defined
+without embedding an ISA or ABI choice in the core builder. `class_is_pure` also
+treats the atomic and synchronization kinds
 (`LoadReserved`, `StoreConditional`, `AtomicRmw`, `Fence`) as impure, so like
 plain loads and stores their classes never merge or duplicate.
 

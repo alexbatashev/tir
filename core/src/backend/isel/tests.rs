@@ -1168,7 +1168,7 @@ fn opaque_leaves_are_distinct() {
     let gsa = GSA::new(&context, func.id());
     let value_to_def = HashMap::new();
     let mut egraph = SemEGraph::new();
-    let mut builder = SemDagBuilder::new(&context, &value_to_def, &gsa, &mut egraph);
+    let mut builder = SemDagBuilder::new(&context, &value_to_def, &gsa, &mut egraph, None);
     let a = builder.add_opaque();
     let b = builder.add_opaque();
     assert_ne!(egraph.find(a), egraph.find(b));
@@ -1218,7 +1218,7 @@ fn builder_seeds_gamma_block_argument_as_if() {
     let gsa = GSA::new(&context, func.id());
     let value_to_def = HashMap::new();
     let mut egraph = SemEGraph::new();
-    let mut builder = SemDagBuilder::new(&context, &value_to_def, &gsa, &mut egraph);
+    let mut builder = SemDagBuilder::new(&context, &value_to_def, &gsa, &mut egraph, None);
     let class = builder.build_from_value(merged_id);
     let cond_class = builder.build_from_value(cond_id);
     let x_class = builder.build_from_value(x_id);
@@ -1286,7 +1286,7 @@ fn builder_seeds_mu_block_argument_as_recursive_theta() {
     ]);
     let mut egraph = SemEGraph::new();
     let class = {
-        let mut builder = SemDagBuilder::new(&context, &value_to_def, &gsa, &mut egraph);
+        let mut builder = SemDagBuilder::new(&context, &value_to_def, &gsa, &mut egraph, None);
         builder.build_from_value(carried_id)
     };
     egraph.rebuild();

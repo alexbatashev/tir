@@ -1,0 +1,15 @@
+// RUN: tir mc --march=rv64i --stage=isel %s | filecheck %s
+// RUN: tir mc --march=rv32i --stage=isel %s | filecheck %s --check-prefix=RV32
+
+module {
+  func @load_pointer(%0: !ptr.p<!ptr.p<!i32>>) -> !ptr.p<!i32> {
+    %1 = ptr.load %0 : !ptr.p<!i32>
+    return %1
+  }
+  module_end
+}
+
+// CHECK: riscv.ld
+// CHECK-NOT: ptr.load
+// RV32: riscv.lw
+// RV32-NOT: ptr.load
