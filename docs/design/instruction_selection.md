@@ -301,6 +301,16 @@ matches (each fused instruction recomputes it); a shared *memory effect* (§1)
 is allowed as a match root or boundary, but never as an interior node a larger
 match would erase.
 
+An explicit register boundary may e-match a constant. After matching, consumer
+positions propagate from each original op root through the formal dependency
+graph, giving rewrite-introduced matches the real op before which their operands
+must exist. A match survives only when each register capture either resolves to
+an SSA value at that consumer or has an introduced producer. The PBQP cover then
+requires the producer Root: an introduced materializer is emitted before the
+consumer, while an op-backed Root is accepted only when its value already
+resolves before that consumer. This applies to every register operand rather
+than special-casing stores.
+
 The function-wide legality (boundary constraints, pure-or-op-root interiors) does
 not depend on the assumption scope, so a **fact-free** block sees exactly the base
 graph: its patterns are searched once for the whole function
@@ -737,7 +747,9 @@ rule**. One resolver (`resolve_binding`) backs boundary filtering (§3), guard
 selection, and emission (§5), so a match accepted at collect time always resolves
 at emit time. For a class:
 
-1. an integer constant in the class → an **immediate** (unchanged from before);
+1. an integer constant in the class → an **immediate**; when the selected
+   instruction demands a register, the cover additionally selects a constant
+   materializer and emission binds the materialized value;
 2. otherwise a register value `V` from the class's candidates, choosing the first
    legal under, in preference order:
    - a same-block def **preceding** `C` (`is_before`), earliest first, then

@@ -1875,6 +1875,13 @@ impl InstructionSelectPass {
                         self.constant_materializer_ranges.is_empty(),
                     )
                 },
+                root_bindable: &|class, consumer| {
+                    consumer.is_some_and(|consumer| {
+                        fs.resolve_binding(dom, context, class, block_id, consumer)
+                            .value
+                            .is_some()
+                    })
+                },
                 reifiable_gate: &|class| fs.is_reifiable_gate(class),
             },
             &dead_allowed,
@@ -2173,33 +2180,6 @@ impl InstructionSelectPass {
                     captures.bind(*symbol, fs.egraph.find(class));
                 }
 
-                // Discard a match whose boundary cannot satisfy its encoded
-                // operand kind at B. A register boundary needs a legal register
-                // value (or an explicitly materializable class); an immediate
-                // boundary needs a constant in range.
-                if let Some(consumer) = block_op
-                    && !captures.entries.iter().all(|(symbol, class)| {
-                        let binding = fs.resolve_binding(dom, context, *class, block, consumer);
-                        match compiled.capture_meta(*symbol) {
-                            Some(meta) if meta.constraint == Some(OperandConstraint::Register) => {
-                                binding.value.is_some()
-                                    || meta.materialized_constant && binding.int.is_some()
-                                    || !fs.has_values(*class)
-                            }
-                            Some(meta) if meta.constraint == Some(OperandConstraint::Immediate) => {
-                                binding.int.is_some()
-                            }
-                            _ => {
-                                binding.int.is_some()
-                                    || binding.value.is_some()
-                                    || !fs.has_values(*class)
-                            }
-                        }
-                    })
-                {
-                    continue;
-                }
-
                 let mut structural_boundaries = HashSet::new();
                 let mut value_boundaries = HashSet::new();
                 for index in 0..compiled.pattern.len() {
@@ -2285,10 +2265,85 @@ impl InstructionSelectPass {
                     pattern_root,
                     bindings,
                     cost,
+                    consumer: block_op,
+                    introduced,
                 });
             }
         }
         prune_dominated_matches(&self.compiled_patterns, &mut matches);
+        let mut consumer_by_class = block_op_by_root.clone();
+        loop {
+            let mut changed = false;
+            for matched in &matches {
+                let root = fs.egraph.find(matched.root);
+                let Some(&consumer) = consumer_by_class.get(&root) else {
+                    continue;
+                };
+                for binding in &matched.bindings.pattern_nodes {
+                    let class = fs.egraph.find(binding.class);
+                    if class == root {
+                        continue;
+                    }
+                    match consumer_by_class.get_mut(&class) {
+                        Some(existing) if fs.op_position[&consumer] < fs.op_position[existing] => {
+                            *existing = consumer;
+                            changed = true;
+                        }
+                        None => {
+                            consumer_by_class.insert(class, consumer);
+                            changed = true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        for matched in &mut matches {
+            if matched.consumer.is_none() {
+                matched.consumer = consumer_by_class
+                    .get(&fs.egraph.find(matched.root))
+                    .copied();
+            }
+        }
+
+        let introduced_roots: HashSet<Id> = matches
+            .iter()
+            .filter(|matched| matched.introduced)
+            .map(|matched| fs.egraph.find(matched.root))
+            .collect();
+        matches.retain(|matched| {
+            let Some(consumer) = matched.consumer else {
+                return true;
+            };
+            matched
+                .bindings
+                .captures
+                .entries
+                .iter()
+                .all(|(symbol, class)| {
+                    let class = fs.egraph.find(*class);
+                    let binding = fs.resolve_binding(dom, context, class, block, consumer);
+                    let can_introduce =
+                        class != fs.egraph.find(matched.root) && introduced_roots.contains(&class);
+                    match self.compiled_patterns[matched.pattern_index].capture_meta(*symbol) {
+                        Some(meta) if meta.constraint == Some(OperandConstraint::Register) => {
+                            binding.value.is_some() || can_introduce
+                        }
+                        Some(meta) if meta.constraint == Some(OperandConstraint::Immediate) => {
+                            binding.int.is_some()
+                        }
+                        _ => {
+                            binding.int.is_some()
+                                || binding.value.is_some()
+                                || can_introduce
+                                || !fs.has_values(class)
+                        }
+                    }
+                })
+        });
         matches
     }
 }

@@ -45,9 +45,6 @@ pub(crate) struct PatternNodeMeta {
     pub(crate) constraint: Option<OperandConstraint>,
     /// Storage capability and bit demand of a physical register operand.
     pub(crate) register: Option<RegisterRequirement>,
-    /// A store's source register may be produced by a separate constant
-    /// materializer; other register operands keep preferring immediate forms.
-    pub(crate) materialized_constant: bool,
     /// Encoding range of an immediate operand (see `Rule::operand_imm_ranges`).
     pub(crate) imm_range: Option<ImmRange>,
     /// The symbolic value type inferred from the semantic operator signatures.
@@ -119,8 +116,9 @@ impl CompiledIselPattern {
     /// at (a rewrite-introduced class of unknown width is produced at register
     /// width, so it still matches), an immediate range rejects a constant the
     /// encoding field cannot represent, and an immediate constraint requires a
-    /// constant member. A store source register may bind a constant because the
-    /// cover must then choose a materializing instruction for that class.
+    /// constant member. Register constraints are checked by the cover: a constant
+    /// may bind here only if a selected materializer makes it available in a
+    /// register.
     pub(crate) fn boundary_ok(
         &self,
         egraph: &SemEGraph,
@@ -156,13 +154,7 @@ impl CompiledIselPattern {
             return false;
         }
         match meta.constraint {
-            Some(OperandConstraint::Register) => {
-                meta.materialized_constant
-                    || egraph
-                        .nodes(class)
-                        .iter()
-                        .any(|n| n.kind != SymKind::Constant)
-            }
+            Some(OperandConstraint::Register) => true,
             Some(OperandConstraint::Immediate) => egraph
                 .nodes(class)
                 .iter()
@@ -268,13 +260,6 @@ pub(crate) fn compile_isel_pattern(
         operand_imm_ranges,
     )?;
     pattern.set_root(pattern_root);
-
-    if *expr.get_node(root) == SymKind::StoreMemory
-        && let Some(value) = expr.children(root).nth(2)
-        && let Some(pattern_value) = memo.get(&value)
-    {
-        node_meta[pattern_value.index()].materialized_constant = true;
-    }
 
     // A bare register-to-register copy cannot root on its own operand class
     // without becoming self-referential. It instead materializes a low-bit
