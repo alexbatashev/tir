@@ -127,7 +127,12 @@ impl Type for PointerType {
         let Some(other) = (other as &dyn Any).downcast_ref::<Self>() else {
             return false;
         };
-        self.storage_class == other.storage_class && self.pointee.eq(other.pointee.as_ref())
+        self.storage_class == other.storage_class && Arc::ptr_eq(&self.pointee, &other.pointee)
+    }
+
+    fn hash(&self, state: &mut dyn std::hash::Hasher) {
+        state.write_usize(Arc::as_ptr(&self.pointee) as *const () as usize);
+        state.write_u32(self.storage_class as u32);
     }
 }
 
@@ -198,7 +203,12 @@ impl Type for RuntimeArrayType {
         let Some(other) = (other as &dyn Any).downcast_ref::<Self>() else {
             return false;
         };
-        self.stride == other.stride && self.element.eq(other.element.as_ref())
+        self.stride == other.stride && Arc::ptr_eq(&self.element, &other.element)
+    }
+
+    fn hash(&self, state: &mut dyn std::hash::Hasher) {
+        state.write_usize(Arc::as_ptr(&self.element) as *const () as usize);
+        state.write_u32(self.stride);
     }
 }
 

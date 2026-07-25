@@ -1,4 +1,5 @@
 use std::any::Any as StdAny;
+use std::hash::Hasher;
 
 use crate::{
     Context, Error, IRFormatter,
@@ -33,7 +34,16 @@ pub trait Type: StdAny + Sync + Send + TypeConstraint {
     where
         Self: Sized;
     fn print(&self, fmt: &mut IRFormatter<'_>) -> Result<(), std::fmt::Error>;
+    /// Structural equality. A type built from another type holds the context's
+    /// interned `Arc` for it (see [`Context::get_type_data`]), so nested types
+    /// compare by address rather than by walking the nesting — otherwise
+    /// interning a deep chain costs time and stack proportional to its depth.
     fn eq(&self, other: &dyn Type) -> bool;
+    /// Hash of everything [`Type::eq`] compares, so the context can bucket
+    /// candidate types instead of scanning every interned type. Parameterless
+    /// types contribute nothing; the context settles collisions with
+    /// [`Type::eq`].
+    fn hash(&self, state: &mut dyn Hasher);
 }
 
 pub trait TypeConstraint {

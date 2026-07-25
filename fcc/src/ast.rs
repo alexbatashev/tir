@@ -68,6 +68,23 @@ pub enum CType {
     Attributed(Box<CType>, Vec<String>),
 }
 
+impl CType {
+    /// The operand of a type built from another type, or `None` for a leaf.
+    /// Walking this chain iteratively keeps deeply nested declarators (`int
+    /// **...*x` with thousands of `*`) off the stack.
+    pub(crate) fn derived_inner(&self) -> Option<&CType> {
+        match self {
+            CType::Const(inner)
+            | CType::Volatile(inner)
+            | CType::Restrict(inner)
+            | CType::Pointer(inner)
+            | CType::Array(inner, _)
+            | CType::Attributed(inner, _) => Some(inner),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RecordId(u32);
 
@@ -252,6 +269,37 @@ pub enum AstLeaf {
 }
 
 fn render_ctype(ty: &CType) -> String {
+    let mut out = String::new();
+    let mut lengths = Vec::new();
+    let mut leaf = ty;
+    while let Some(inner) = leaf.derived_inner() {
+        match leaf {
+            CType::Const(_) => out.push_str("Const("),
+            CType::Volatile(_) => out.push_str("Volatile("),
+            CType::Restrict(_) => out.push_str("Restrict("),
+            CType::Pointer(_) => out.push_str("Ptr("),
+            CType::Array(..) => out.push_str("Array("),
+            CType::Attributed(_, attrs) => out.push_str(&format!("Attr({}; ", attrs.join(", "))),
+            _ => unreachable!("derived type"),
+        }
+        lengths.push(match leaf {
+            CType::Array(_, length) => length.as_ref(),
+            _ => None,
+        });
+        leaf = inner;
+    }
+
+    out.push_str(&render_leaf_ctype(leaf));
+    while let Some(length) = lengths.pop() {
+        if let Some(length) = length {
+            out.push_str(&format!(", {length}"));
+        }
+        out.push(')');
+    }
+    out
+}
+
+fn render_leaf_ctype(ty: &CType) -> String {
     match ty {
         CType::Invalid(spelling) => format!("Invalid({spelling})"),
         CType::Int => "Int".to_string(),
@@ -286,12 +334,6 @@ fn render_ctype(ty: &CType) -> String {
             Some(name) => format!("Enum({name})"),
             None => "Enum".to_string(),
         },
-        CType::Const(inner) => format!("Const({})", render_ctype(inner)),
-        CType::Volatile(inner) => format!("Volatile({})", render_ctype(inner)),
-        CType::Restrict(inner) => format!("Restrict({})", render_ctype(inner)),
-        CType::Pointer(inner) => format!("Ptr({})", render_ctype(inner)),
-        CType::Array(inner, Some(len)) => format!("Array({}, {len})", render_ctype(inner)),
-        CType::Array(inner, None) => format!("Array({})", render_ctype(inner)),
         CType::Function {
             ret,
             params,
@@ -307,9 +349,12 @@ fn render_ctype(ty: &CType) -> String {
             }
             format!("Fn({}) -> {}", parts.join(", "), render_ctype(ret))
         }
-        CType::Attributed(inner, attrs) => {
-            format!("Attr({}; {})", attrs.join(", "), render_ctype(inner))
-        }
+        CType::Const(_)
+        | CType::Volatile(_)
+        | CType::Restrict(_)
+        | CType::Pointer(_)
+        | CType::Array(..)
+        | CType::Attributed(..) => unreachable!("derived type is not a leaf"),
     }
 }
 

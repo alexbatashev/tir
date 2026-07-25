@@ -116,7 +116,12 @@ impl Type for VectorType {
         let Some(other) = (other as &dyn Any).downcast_ref::<VectorType>() else {
             return false;
         };
-        self.length == other.length && self.element.eq(other.element.as_ref())
+        self.length == other.length && Arc::ptr_eq(&self.element, &other.element)
+    }
+
+    fn hash(&self, state: &mut dyn std::hash::Hasher) {
+        state.write_usize(Arc::as_ptr(&self.element) as *const () as usize);
+        state.write_u32(self.length.unwrap_or(0));
     }
 }
 

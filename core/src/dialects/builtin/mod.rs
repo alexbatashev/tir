@@ -130,6 +130,10 @@ impl Type for IntegerType {
         let int = (other as &dyn Any).downcast_ref::<IntegerType>();
         int.map(|item| item.width == self.width).unwrap_or(false)
     }
+
+    fn hash(&self, state: &mut dyn std::hash::Hasher) {
+        state.write_u32(self.width);
+    }
 }
 
 /// A binary floating-point type described by its exponent and mantissa widths
@@ -244,6 +248,11 @@ impl Type for FloatType {
             .map(|f| f.exp_width == self.exp_width && f.mant_width == self.mant_width)
             .unwrap_or(false)
     }
+
+    fn hash(&self, state: &mut dyn std::hash::Hasher) {
+        state.write_u32(self.exp_width);
+        state.write_u32(self.mant_width);
+    }
 }
 
 #[derive(TirType)]
@@ -283,6 +292,8 @@ impl Type for IndexType {
     fn eq(&self, other: &dyn Type) -> bool {
         (other as &dyn Any).downcast_ref::<IndexType>().is_some()
     }
+
+    fn hash(&self, _state: &mut dyn std::hash::Hasher) {}
 }
 
 #[derive(TirType)]
@@ -322,6 +333,8 @@ impl Type for UnitType {
     fn eq(&self, other: &dyn Type) -> bool {
         (other as &dyn Any).downcast_ref::<UnitType>().is_some()
     }
+
+    fn hash(&self, _state: &mut dyn std::hash::Hasher) {}
 }
 
 /// Opaque, parameterless type with no runtime representation.
@@ -368,6 +381,8 @@ impl Type for TokenType {
     fn eq(&self, other: &dyn Type) -> bool {
         (other as &dyn Any).downcast_ref::<TokenType>().is_some()
     }
+
+    fn hash(&self, _state: &mut dyn std::hash::Hasher) {}
 }
 
 pub struct Integer<const N: usize>;

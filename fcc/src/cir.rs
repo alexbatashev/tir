@@ -221,6 +221,10 @@ impl Type for StructType {
             .downcast_ref::<StructType>()
             .is_some_and(|other| other.name == self.name)
     }
+
+    fn hash(&self, state: &mut dyn std::hash::Hasher) {
+        state.write(self.name.as_bytes());
+    }
 }
 
 operation! {
@@ -619,6 +623,8 @@ impl Type for VarArgsType {
     fn eq(&self, other: &dyn Type) -> bool {
         (other as &dyn Any).downcast_ref::<VarArgsType>().is_some()
     }
+
+    fn hash(&self, _state: &mut dyn std::hash::Hasher) {}
 }
 
 #[derive(TirType)]
@@ -658,6 +664,8 @@ impl Type for VaListType {
     fn eq(&self, other: &dyn Type) -> bool {
         (other as &dyn Any).downcast_ref::<VaListType>().is_some()
     }
+
+    fn hash(&self, _state: &mut dyn std::hash::Hasher) {}
 }
 
 operation! {

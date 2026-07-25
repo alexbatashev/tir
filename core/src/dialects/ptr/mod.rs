@@ -133,10 +133,18 @@ impl Type for PtrType {
         };
         match (&self.pointee, &other.pointee) {
             (None, None) => true,
-            (Some(a), Some(b)) => a.eq(b.as_ref()),
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
             _ => false,
         }
     }
+
+    fn hash(&self, state: &mut dyn std::hash::Hasher) {
+        state.write_usize(pointee_key(self.pointee.as_ref()));
+    }
+}
+
+fn pointee_key(pointee: Option<&Arc<dyn Type>>) -> usize {
+    pointee.map_or(0, |p| Arc::as_ptr(p) as *const () as usize)
 }
 
 operation! {
@@ -300,6 +308,20 @@ mod tests {
         // Typed and opaque pointers are distinct, identical ones are interned.
         assert_ne!(opaque, typed);
         assert_eq!(PtrType::typed(&context, i32_ty), typed);
+    }
+
+    #[test]
+    fn deeply_nested_pointers_are_interned() {
+        let context = Context::with_default_dialects();
+        let build = |depth| {
+            let mut ty = IntegerType::new(&context, 32);
+            for _ in 0..depth {
+                ty = PtrType::typed(&context, ty);
+            }
+            ty
+        };
+
+        assert_eq!(build(10_000), build(10_000));
     }
 
     #[test]

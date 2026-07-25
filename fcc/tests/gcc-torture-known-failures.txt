@@ -539,7 +539,6 @@ compile/limits-externdecl.c
 compile/limits-fndefn.c
 compile/limits-idexternal.c
 compile/limits-idinternal.c
-compile/limits-pointer.c
 compile/limits-stringlit.c
 compile/limits-structmem.c
 compile/limits-structnest.c

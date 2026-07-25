@@ -2129,7 +2129,40 @@ impl Analyzer<'_> {
         }
     }
 
+    /// Declarators nest as deeply as the source spells them, so the
+    /// pointer/array/qualifier spine is unwound iteratively; recursing once per
+    /// level overflows the stack on inputs with thousands of `*`.
     fn canonical_type(&mut self, parsed: &CType) -> QualType {
+        let mut spine = Vec::new();
+        let mut leaf = parsed;
+        while let Some(inner) = leaf.derived_inner() {
+            spine.push(leaf);
+            leaf = inner;
+        }
+
+        let mut ty = self.canonical_leaf_type(leaf);
+        while let Some(derived) = spine.pop() {
+            ty = self.derive_canonical_type(derived, ty);
+        }
+        ty
+    }
+
+    fn derive_canonical_type(&mut self, derived: &CType, inner: QualType) -> QualType {
+        match derived {
+            CType::Pointer(_) => self.types.intern(TypeKind::Pointer(inner)),
+            CType::Array(_, length) => {
+                let length = length.as_deref().and_then(|value| value.parse().ok());
+                self.types.intern(TypeKind::Array(inner, length))
+            }
+            CType::Const(_) => with_qualifier(inner, Qualifiers::CONST),
+            CType::Volatile(_) => with_qualifier(inner, Qualifiers::VOLATILE),
+            CType::Restrict(_) => with_qualifier(inner, Qualifiers::RESTRICT),
+            CType::Attributed(_, _) => inner,
+            _ => unreachable!("not a derived type"),
+        }
+    }
+
+    fn canonical_leaf_type(&mut self, parsed: &CType) -> QualType {
         match parsed {
             CType::Invalid(_) => self.types.intern(TypeKind::Error),
             CType::Void => self.types.intern(TypeKind::Void),
@@ -2160,15 +2193,6 @@ impl Analyzer<'_> {
             CType::Float => self.types.intern(TypeKind::Float),
             CType::Double => self.types.intern(TypeKind::Double),
             CType::LongDouble => self.types.intern(TypeKind::LongDouble),
-            CType::Pointer(inner) => {
-                let inner = self.canonical_type(inner);
-                self.types.intern(TypeKind::Pointer(inner))
-            }
-            CType::Array(inner, length) => {
-                let inner = self.canonical_type(inner);
-                let length = length.as_deref().and_then(|value| value.parse().ok());
-                self.types.intern(TypeKind::Array(inner, length))
-            }
             CType::Function {
                 ret,
                 params,
@@ -2192,23 +2216,13 @@ impl Analyzer<'_> {
                 .filter(|symbol| symbol.typedef)
                 .map(|symbol| symbol.ty)
                 .unwrap_or_else(|| self.types.intern(TypeKind::Error)),
-            CType::Const(inner) => {
-                let mut ty = self.canonical_type(inner);
-                ty.qualifiers = ty.qualifiers.with(Qualifiers::CONST);
-                ty
-            }
-            CType::Volatile(inner) => {
-                let mut ty = self.canonical_type(inner);
-                ty.qualifiers = ty.qualifiers.with(Qualifiers::VOLATILE);
-                ty
-            }
-            CType::Restrict(inner) => {
-                let mut ty = self.canonical_type(inner);
-                ty.qualifiers = ty.qualifiers.with(Qualifiers::RESTRICT);
-                ty
-            }
-            CType::Attributed(inner, _) => self.canonical_type(inner),
             CType::Builtin(_) => self.types.intern(TypeKind::Error),
+            CType::Pointer(_)
+            | CType::Array(..)
+            | CType::Const(_)
+            | CType::Volatile(_)
+            | CType::Restrict(_)
+            | CType::Attributed(..) => unreachable!("derived type is not a leaf"),
         }
     }
 
@@ -2218,6 +2232,11 @@ impl Analyzer<'_> {
             .map(|param| self.canonical_type(&param.ty))
             .collect()
     }
+}
+
+fn with_qualifier(mut ty: QualType, qualifier: u8) -> QualType {
+    ty.qualifiers = ty.qualifiers.with(qualifier);
+    ty
 }
 
 fn align_to(value: u64, align: u64) -> u64 {

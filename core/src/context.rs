@@ -1,6 +1,7 @@
 use std::{
     any::Any,
     collections::HashMap,
+    hash::{DefaultHasher, Hasher},
     sync::{Arc, Weak, atomic::AtomicU32},
 };
 
@@ -123,6 +124,16 @@ struct ContextInstance {
     op_interface_converters:
         HashMap<(&'static str, &'static str, std::any::TypeId), OpInterfaceConverter>,
     type_cache: Vec<Arc<dyn Type>>,
+    /// Interned type ids bucketed by [`Type::hash`], so [`Context::get_type_id`]
+    /// only runs [`Type::eq`] against colliding candidates.
+    type_lookup: HashMap<u64, Vec<TypeId>>,
+}
+
+fn type_hash(ty: &dyn Type) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    hasher.write(ty.dialect().as_bytes());
+    ty.hash(&mut hasher);
+    hasher.finish()
 }
 
 impl Context {
@@ -144,6 +155,7 @@ impl Context {
             reg_classes: HashMap::new(),
             op_interface_converters: HashMap::new(),
             type_cache: vec![],
+            type_lookup: HashMap::new(),
         })))
     }
 
@@ -665,23 +677,22 @@ impl Context {
     }
 
     pub fn get_type_id(&self, ty: Arc<dyn Type>) -> TypeId {
+        let hash = type_hash(&*ty);
         let mut inner = self.0.upgradable_read();
-        let id = inner
-            .type_cache
-            .iter()
-            .enumerate()
-            .find_map(|(id, item)| if item.eq(&*ty) { Some(id) } else { None });
-
-        if let Some(id) = id {
-            (id as u32).into()
-        } else {
-            let id = inner.with_upgraded(|inner| {
-                let id = inner.type_cache.len() as u32;
-                inner.type_cache.push(ty);
-                id
-            });
-            id.into()
+        if let Some(candidates) = inner.type_lookup.get(&hash) {
+            for &id in candidates {
+                if inner.type_cache[id.as_index()].eq(&*ty) {
+                    return id;
+                }
+            }
         }
+
+        inner.with_upgraded(|inner| {
+            let id = TypeId::from_number(inner.type_cache.len() as u32);
+            inner.type_cache.push(ty);
+            inner.type_lookup.entry(hash).or_default().push(id);
+            id
+        })
     }
 
     pub fn get_type_data(&self, ty: TypeId) -> Arc<dyn Type> {
