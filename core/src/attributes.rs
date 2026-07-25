@@ -53,6 +53,17 @@ pub enum RegisterAttr {
     },
 }
 
+impl RegisterAttr {
+    pub fn class(&self) -> Option<RegClassId> {
+        match self {
+            Self::Physical { class, .. }
+            | Self::FixedUse { class, .. }
+            | Self::FixedDef { class, .. } => Some(*class),
+            Self::Virtual { class, .. } => *class,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct NamedAttribute {
     pub name: String,

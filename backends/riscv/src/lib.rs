@@ -573,7 +573,25 @@ impl tir::backend::call_lowering::CallEmitter for RiscvCallEmitter {
         dst: tir::attributes::AttributeValue,
         src: tir::attributes::AttributeValue,
     ) -> Box<dyn Operation> {
-        mv(context, dst, src)
+        let class = match &dst {
+            tir::attributes::AttributeValue::Register(register) => register.class(),
+            _ => None,
+        };
+        match class {
+            Some(class) if class == RegClass::FPR32.id() => Box::new(
+                FMoveSOpBuilder::new(context)
+                    .attr("fd", dst)
+                    .attr("fs", src)
+                    .build(),
+            ),
+            Some(class) if class == RegClass::FPR64.id() => Box::new(
+                FMoveDOpBuilder::new(context)
+                    .attr("fd", dst)
+                    .attr("fs", src)
+                    .build(),
+            ),
+            _ => mv(context, dst, src),
+        }
     }
 
     fn stack_arg_store(
