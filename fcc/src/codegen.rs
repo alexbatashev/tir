@@ -73,6 +73,7 @@ struct FnCodegen<'a> {
     globals: &'a HashMap<EntityId, Global>,
     signatures: &'a HashMap<EntityId, Signature>,
     return_abi: &'a AbiReturn,
+    indirect_return: Option<ValueId>,
     loop_scopes: Vec<ValueId>,
     break_scopes: Vec<BreakScope>,
     terminated: bool,
@@ -105,6 +106,7 @@ struct AbiPiece {
 struct AbiReturn {
     ty: TypeId,
     aggregate: Option<Vec<AbiPiece>>,
+    indirect: bool,
 }
 
 #[derive(Default)]
@@ -167,6 +169,9 @@ impl AbiRegisterUsage {
 impl Signature {
     fn argument_types(&self, context: &Context) -> Vec<TypeId> {
         let mut args = Vec::new();
+        if self.ret.indirect {
+            args.push(PtrType::opaque(context));
+        }
         for parameter in &self.params {
             if parameter.grouped {
                 args.push(TupleType::new(
@@ -562,11 +567,23 @@ fn classify_abi_return(context: &Context, typed: &TypedAst, ty: QualType) -> Abi
         return AbiReturn {
             ty,
             aggregate: Some(pieces),
+            indirect: false,
+        };
+    }
+    if typed.target().uses_aapcs64_abi()
+        && matches!(typed.types().kind(ty), TypeKind::Record(_))
+        && source_type_layout(typed, ty).0 > 16
+    {
+        return AbiReturn {
+            ty: UnitType::new(context),
+            aggregate: None,
+            indirect: true,
         };
     }
     AbiReturn {
         ty: lower_type(context, typed, ty),
         aggregate: None,
+        indirect: false,
     }
 }
 
@@ -819,6 +836,9 @@ fn lower_function(
     // Entry block arguments carry the incoming parameter values; parameters are
     // the function node's leading children.
     let mut param_values = Vec::new();
+    if signature.ret.indirect {
+        param_values.push(context.create_value(PtrType::opaque(context), None));
+    }
     for parameter in &signature.params {
         if parameter.grouped {
             let ty = TupleType::new(
@@ -841,7 +861,13 @@ fn lower_function(
     let block = context.create_block(param_values);
     region.add_block(block.id());
 
-    let func_op = b::func(context, name.as_str(), signature.ret.ty, Some(region.id())).build();
+    let mut func_builder = b::func(context, name.as_str(), signature.ret.ty, Some(region.id()));
+    if signature.ret.indirect {
+        func_builder = func_builder.result_address();
+    }
+    let func_op = func_builder.build();
+    let indirect_return = signature.ret.indirect.then(|| param_ids[0]);
+    let parameter_start = usize::from(signature.ret.indirect);
 
     let mut cg = FnCodegen {
         context,
@@ -853,12 +879,13 @@ fn lower_function(
         globals,
         signatures,
         return_abi: &signature.ret,
+        indirect_return,
         loop_scopes: Vec::new(),
         break_scopes: Vec::new(),
         terminated: false,
         values: HashMap::new(),
     };
-    cg.lower_body(func, &param_ids, &signature.params)?;
+    cg.lower_body(func, &param_ids[parameter_start..], &signature.params)?;
 
     Ok(func_op)
 }
@@ -1479,6 +1506,10 @@ impl FnCodegen<'_> {
             }
             AstKind::Return => {
                 let operand = match ast.children(stmt).next() {
+                    Some(e) if self.return_abi.indirect => {
+                        self.lower_indirect_return(e)?;
+                        Operand::none()
+                    }
                     Some(e) => Operand::from(self.lower_return_value(e)?),
                     None => Operand::none(),
                 };
@@ -2147,6 +2178,36 @@ impl FnCodegen<'_> {
             .result())
     }
 
+    fn lower_indirect_return(&mut self, node: NodeId) -> Result<(), Diagnostic> {
+        let expression = self.lower_expr_value(node)?;
+        let LoweredExpr::Address { ptr: source, .. } = expression else {
+            unreachable!("aggregate return expressions lower to addresses");
+        };
+        let (size, _) = source_type_layout(self.typed, node_type(self.typed, node));
+        let size = self
+            .builder
+            .insert(
+                b::constant(
+                    self.context,
+                    size as i64,
+                    IntegerType::new(self.context, 64),
+                )
+                .build(),
+            )
+            .result();
+        self.builder.insert(
+            p::memcpy(
+                self.context,
+                self.indirect_return
+                    .expect("indirect return has a destination argument"),
+                source,
+                size,
+            )
+            .build(),
+        );
+        Ok(())
+    }
+
     fn lower_expr(&mut self, root: NodeId) -> Result<ValueId, Diagnostic> {
         let expression = self.lower_expr_value(root)?;
         Ok(self.materialize(expression))
@@ -2328,39 +2389,58 @@ impl FnCodegen<'_> {
                             args.push(self.materialize(expression));
                         }
                     }
-                    let result = self
-                        .builder
-                        .insert(b::call(self.context, args, name.as_str(), sig.ret.ty).build())
-                        .result();
-                    if let Some(pieces) = sig.ret.aggregate.as_deref() {
-                        let source_ty = node_type(self.typed, node);
-                        let elem = lower_type(self.context, self.typed, source_ty);
+                    let source_ty = node_type(self.typed, node);
+                    let elem = lower_type(self.context, self.typed, source_ty);
+                    if sig.ret.indirect {
                         let (size, align) = source_type_layout(self.typed, source_ty);
                         let slot = self.alloca(elem, size, align);
-                        for (index, piece) in pieces.iter().enumerate() {
-                            let value = if pieces.len() == 1 {
-                                result
-                            } else {
-                                self.builder
-                                    .insert(
-                                        b::TupleGetOpBuilder::new(self.context)
-                                            .tuple(result)
-                                            .attr("index", AttributeValue::UInt(index as u64))
-                                            .result_type(piece.ty)
-                                            .build(),
-                                    )
-                                    .result()
-                            };
-                            let address = self.offset_address_ir(slot.ptr, piece.offset, piece.ty);
-                            self.builder
-                                .insert(p::store(self.context, value, address).build());
-                        }
+                        args.insert(0, slot.ptr);
+                        self.builder.insert(
+                            b::CallOpBuilder::new(self.context)
+                                .args(args)
+                                .attr("callee", AttributeValue::Str(name.clone()))
+                                .result_address()
+                                .result_type(UnitType::new(self.context))
+                                .build(),
+                        );
                         LoweredExpr::Address {
                             ptr: slot.ptr,
                             elem,
                         }
                     } else {
-                        LoweredExpr::Value(result)
+                        let result = self
+                            .builder
+                            .insert(b::call(self.context, args, name.as_str(), sig.ret.ty).build())
+                            .result();
+                        if let Some(pieces) = sig.ret.aggregate.as_deref() {
+                            let (size, align) = source_type_layout(self.typed, source_ty);
+                            let slot = self.alloca(elem, size, align);
+                            for (index, piece) in pieces.iter().enumerate() {
+                                let value = if pieces.len() == 1 {
+                                    result
+                                } else {
+                                    self.builder
+                                        .insert(
+                                            b::TupleGetOpBuilder::new(self.context)
+                                                .tuple(result)
+                                                .attr("index", AttributeValue::UInt(index as u64))
+                                                .result_type(piece.ty)
+                                                .build(),
+                                        )
+                                        .result()
+                                };
+                                let address =
+                                    self.offset_address_ir(slot.ptr, piece.offset, piece.ty);
+                                self.builder
+                                    .insert(p::store(self.context, value, address).build());
+                            }
+                            LoweredExpr::Address {
+                                ptr: slot.ptr,
+                                elem,
+                            }
+                        } else {
+                            LoweredExpr::Value(result)
+                        }
                     }
                 }
                 kind @ (AstKind::Add
