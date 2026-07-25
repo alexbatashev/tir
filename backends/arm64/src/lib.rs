@@ -248,13 +248,27 @@ impl tir::backend::call_lowering::CallEmitter for Arm64CallEmitter {
         value: tir::attributes::AttributeValue,
         offset: i64,
     ) -> Result<Box<dyn Operation>, tir::PassError> {
-        Ok(Box::new(
-            StoreDoublewordOpBuilder::new(context)
-                .attr("rt", value)
-                .attr("rn", phys(&abi.sp))
-                .attr("imm", tir::attributes::AttributeValue::Int(offset))
-                .build(),
-        ))
+        let class = match &value {
+            tir::attributes::AttributeValue::Register(register) => register.class(),
+            _ => None,
+        };
+        if class == Some(RegClass::FPR64.id()) {
+            Ok(Box::new(
+                StoreFloatDoubleOpBuilder::new(context)
+                    .attr("ft", value)
+                    .attr("rn", phys(&abi.sp))
+                    .attr("imm", tir::attributes::AttributeValue::Int(offset))
+                    .build(),
+            ))
+        } else {
+            Ok(Box::new(
+                StoreDoublewordOpBuilder::new(context)
+                    .attr("rt", value)
+                    .attr("rn", phys(&abi.sp))
+                    .attr("imm", tir::attributes::AttributeValue::Int(offset))
+                    .build(),
+            ))
+        }
     }
 
     fn call_prefix(

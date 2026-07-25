@@ -601,13 +601,27 @@ impl tir::backend::call_lowering::CallEmitter for RiscvCallEmitter {
         value: tir::attributes::AttributeValue,
         offset: i64,
     ) -> Result<Box<dyn Operation>, tir::PassError> {
-        Ok(Box::new(
-            StoreDoubleWordOpBuilder::new(context)
-                .attr("rs1", phys(&abi.sp))
-                .attr("rs2", value)
-                .attr("imm", tir::attributes::AttributeValue::Int(offset))
-                .build(),
-        ))
+        let class = match &value {
+            tir::attributes::AttributeValue::Register(register) => register.class(),
+            _ => None,
+        };
+        if class == Some(RegClass::FPR64.id()) {
+            Ok(Box::new(
+                FStoreDoubleOpBuilder::new(context)
+                    .attr("rs1", phys(&abi.sp))
+                    .attr("fs2", value)
+                    .attr("imm", tir::attributes::AttributeValue::Int(offset))
+                    .build(),
+            ))
+        } else {
+            Ok(Box::new(
+                StoreDoubleWordOpBuilder::new(context)
+                    .attr("rs1", phys(&abi.sp))
+                    .attr("rs2", value)
+                    .attr("imm", tir::attributes::AttributeValue::Int(offset))
+                    .build(),
+            ))
+        }
     }
 
     fn call_prefix(

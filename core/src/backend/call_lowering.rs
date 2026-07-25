@@ -378,6 +378,7 @@ fn next_register(
 
 fn stack_class(abi: &AbiInfo, mut kind: ValueKind) -> Option<crate::backend::regalloc::RegClassId> {
     let mut visited = HashSet::new();
+    let mut value_class = None;
     loop {
         if !visited.insert(kind) {
             return None;
@@ -390,9 +391,10 @@ fn stack_class(abi: &AbiInfo, mut kind: ValueKind) -> Option<crate::backend::reg
             }
             None => return None,
         };
+        value_class.get_or_insert(sequence.regs.first()?.0);
         match sequence.overflow {
             Overflow::Chain(next) => kind = next,
-            Overflow::Stack => return sequence.regs.first().map(|register| register.0),
+            Overflow::Stack => return value_class,
         }
     }
 }
