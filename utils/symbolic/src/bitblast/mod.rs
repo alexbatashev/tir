@@ -43,18 +43,32 @@ impl Display for BitblastError {
 impl std::error::Error for BitblastError {}
 
 /// CNF encoding: solver, one-bit root literal, per-symbol bits keyed by
-/// `SymbolId`, and per-node bits indexed by node id (to read any sub-term back).
+/// `SymbolId`, and per-node values and definedness indexed by node id.
 pub struct Blasted {
     pub solver: Solver,
     pub root_bit: Lit,
     pub sym_bits: HashMap<u32, Vec<Lit>>,
     pub node_bits: Vec<Vec<Lit>>,
+    pub node_defined: Vec<Lit>,
 }
 
 impl Blasted {
     /// Assert the root and solve, decoding each symbol's little-endian bits on `Sat`.
     pub fn solve(mut self) -> SolveOutcome {
         self.solver.add_clause(&[self.root_bit]);
+        self.finish_solve()
+    }
+
+    /// Check whether `rhs` is defined and equal to `lhs` whenever `lhs` is
+    /// defined. The graph root must be the one-bit disequality of the two nodes.
+    pub fn solve_defined_equivalence(mut self, lhs: NodeId, rhs: NodeId) -> SolveOutcome {
+        self.solver.add_clause(&[self.node_defined[lhs.index()]]);
+        self.solver
+            .add_clause(&[self.node_defined[rhs.index()].negate(), self.root_bit]);
+        self.finish_solve()
+    }
+
+    fn finish_solve(mut self) -> SolveOutcome {
         match self.solver.solve() {
             SatResult::Sat(_) => {
                 let model = self
@@ -96,6 +110,8 @@ pub fn blast<V>(
         let id = NodeId::from_index(i);
         let bits = b.encode(id)?;
         b.bits.push(bits);
+        let defined = b.encode_defined(id)?;
+        b.defined.push(defined);
     }
     let root = graph.root().expect("non-empty formula graph");
     let root_bit = b.bits[root.index()][0];
@@ -104,6 +120,7 @@ pub fn blast<V>(
         root_bit,
         sym_bits: b.sym_bits,
         node_bits: b.bits,
+        node_defined: b.defined,
     })
 }
 
@@ -112,6 +129,7 @@ pub(crate) struct Blaster<'g, V> {
     /// A literal fixed to true; its negation is the constant false.
     one: Lit,
     bits: Vec<Vec<Lit>>,
+    defined: Vec<Lit>,
     sym_bits: HashMap<u32, Vec<Lit>>,
     graph: &'g GenericDag<SymKind, SymPayload<V>>,
     widths: &'g [Option<u32>],
@@ -126,6 +144,7 @@ impl<'g, V> Blaster<'g, V> {
             solver,
             one,
             bits: Vec::with_capacity(graph.len()),
+            defined: Vec::with_capacity(graph.len()),
             sym_bits: HashMap::new(),
             graph,
             widths,
@@ -222,7 +241,29 @@ impl<'g, V> Blaster<'g, V> {
             If => self.encode_ite(id),
             SIToFP => self.encode_int_to_float(id, true),
             UIToFP => self.encode_int_to_float(id, false),
+            FPToSI => self.encode_float_to_int(id, true),
+            FPToUI => self.encode_float_to_int(id, false),
             other => Err(BitblastError::Unsupported(other)),
+        }
+    }
+
+    fn encode_defined(&mut self, id: NodeId) -> Result<Lit, BitblastError> {
+        let mut defined = self.one;
+        let children: Vec<NodeId> = self.graph.children(id).collect();
+        for child in children {
+            defined = self.gate_and(defined, self.defined[child.index()]);
+        }
+
+        match self.graph.get_kind(id) {
+            SymKind::FPToSI => {
+                let in_range = self.float_to_int_defined(id, true)?;
+                Ok(self.gate_and(defined, in_range))
+            }
+            SymKind::FPToUI => {
+                let in_range = self.float_to_int_defined(id, false)?;
+                Ok(self.gate_and(defined, in_range))
+            }
+            _ => Ok(defined),
         }
     }
 

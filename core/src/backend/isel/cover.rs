@@ -16,6 +16,11 @@ use super::node::{
 };
 use super::pattern::CompiledIselPattern;
 
+/// The cost charged for keeping a gate as control flow. A conservative fixed
+/// estimate of the edge assignments the existing terminators already perform,
+/// tuned so a cheaper `If`-rooted value rule wins where the target has one.
+const REIFY_COST: u64 = 3;
+
 #[derive(Clone, Debug)]
 pub(crate) struct CaptureBindings {
     pub(crate) entries: Vec<(u32, Id)>,
@@ -88,7 +93,14 @@ pub(crate) struct FullMatchBindings {
 
 #[derive(Clone, Debug)]
 pub(crate) enum PbqpIselAlternative {
+    /// A terminal value already available outside this cover, or an unselected
+    /// rewrite-introduced class. Boundary compatibility accepts the latter only
+    /// when it really has an externally bindable value.
     External,
+    /// Preserve a gated SSA value as control-flow edge assignments. Terminator
+    /// emission already performs those assignments; this alternative accounts
+    /// for their cost against an `If`/`Theta`-rooted value rule.
+    Reify,
     Root {
         match_id: usize,
     },
@@ -119,26 +131,28 @@ pub(crate) struct ClassCover {
     pub(crate) classes: Vec<Id>,
 }
 
-/// Build and solve the PBQP cover over the supplied `classes` (B's op-root and
-/// guard classes closed under the matches' bindings): one PBQP node per class,
-/// alternatives drawn from the instruction-pattern `matches`, and root -> bound
-/// class compatibility derived from each match's bindings. `op_roots` are B's
-/// op-root classes (a class that is neither terminal nor a B op-root falls back
-/// to External). `must_materialize` lists classes whose value some consumer can
-/// never internalize, so they are never offered a consuming alternative. Returns
-/// `None` if the instance is infeasible (a class with no valid alternative).
 /// Per-class predicates the cover consults (all derived from the function-wide
 /// side tables): `must_materialize` bars consuming alternatives,
 /// `force_materialize` drops the free External alternative when a materializer
-/// match roots the class, and `externally_bindable` says whether External
-/// satisfies a boundary's register requirement (the class carries an IR value
-/// or folds to an immediate).
+/// match roots the class, `externally_bindable` says whether External satisfies
+/// a boundary's register requirement (the class carries an IR value or folds to
+/// an immediate), and `reifiable_gate` marks the classes seeded from GSA gates,
+/// the only ones offered Reify.
 pub(crate) struct ClassPolicies<'a> {
     pub(crate) must_materialize: &'a dyn Fn(Id) -> bool,
     pub(crate) force_materialize: &'a dyn Fn(Id) -> bool,
     pub(crate) externally_bindable: &'a dyn Fn(Id) -> bool,
+    pub(crate) reifiable_gate: &'a dyn Fn(Id) -> bool,
 }
 
+/// Build and solve the PBQP cover over the supplied `classes` (B's op-root and
+/// guard classes closed under the matches' bindings): one PBQP node per class,
+/// alternatives drawn from the instruction-pattern `matches`, and root -> bound
+/// class compatibility derived from each match's bindings. `op_roots` are B's
+/// op-root classes. A class that is neither terminal nor a B op-root receives an
+/// External opt-out so alternatives reachable only through an unchosen match do
+/// not make the whole cover infeasible. Returns `None` if the instance is
+/// infeasible (a class with no valid alternative).
 pub(crate) fn build_eclass_cover(
     egraph: &SemEGraph,
     op_roots: &HashSet<Id>,
@@ -162,7 +176,11 @@ pub(crate) fn build_eclass_cover(
 
     let mut alternatives_by_node = vec![Vec::<PbqpIselAlternative>::new(); classes.len()];
     for (i, &c) in classes.iter().enumerate() {
-        if is_terminal(c) && !((policies.force_materialize)(c) && rooted.contains(&c)) {
+        if (policies.reifiable_gate)(c) {
+            alternatives_by_node[i].push(PbqpIselAlternative::Reify);
+        } else if (is_terminal(c) || !op_roots.contains(&c))
+            && !((policies.force_materialize)(c) && rooted.contains(&c))
+        {
             alternatives_by_node[i].push(PbqpIselAlternative::External);
         }
     }
@@ -173,8 +191,12 @@ pub(crate) fn build_eclass_cover(
         };
         alternatives_by_node[root_index].push(PbqpIselAlternative::Root { match_id });
         for binding in &m.bindings.pattern_nodes {
+            // Saturation may collapse an interior into the match's root class.
+            // Root already covers it; a second Internal alternative on the same
+            // PBQP node would make the match's coherence set contradictory.
             if binding.is_boundary
                 || binding.pattern_node == m.pattern_root
+                || egraph.find(binding.class) == egraph.find(m.root)
                 || (policies.must_materialize)(egraph.find(binding.class))
             {
                 continue;
@@ -213,6 +235,7 @@ pub(crate) fn build_eclass_cover(
             .iter()
             .map(|alternative| match alternative {
                 PbqpIselAlternative::Root { match_id } => matches[*match_id].cost,
+                PbqpIselAlternative::Reify => REIFY_COST,
                 PbqpIselAlternative::External
                 | PbqpIselAlternative::Internal { .. }
                 | PbqpIselAlternative::Dead => 0,
@@ -238,7 +261,9 @@ pub(crate) fn build_eclass_cover(
                         match_id: alt_match,
                         ..
                     } => *alt_match == match_id && !class_is_pure(egraph, classes[node]),
-                    PbqpIselAlternative::External | PbqpIselAlternative::Dead => false,
+                    PbqpIselAlternative::External
+                    | PbqpIselAlternative::Reify
+                    | PbqpIselAlternative::Dead => false,
                 };
                 if belongs_to_match {
                     coherent.push(PbqpAlternative {
@@ -463,7 +488,7 @@ pub(crate) fn alternatives_compatible(
         // any constant class (the value is folded into the encoding).
         Some(req @ (ChildRequirement::Materialized | ChildRequirement::Immediate)) => {
             match child_alt {
-                PbqpIselAlternative::Root { .. } => true,
+                PbqpIselAlternative::Root { .. } | PbqpIselAlternative::Reify => true,
                 PbqpIselAlternative::External => match req {
                     ChildRequirement::Materialized => externally_bindable(child),
                     _ => class_int_binding(egraph, child).is_some(),
@@ -501,7 +526,9 @@ pub(crate) fn child_requirement(
         PbqpIselAlternative::Root { match_id } | PbqpIselAlternative::Internal { match_id, .. } => {
             *match_id
         }
-        PbqpIselAlternative::External | PbqpIselAlternative::Dead => return None,
+        PbqpIselAlternative::External | PbqpIselAlternative::Reify | PbqpIselAlternative::Dead => {
+            return None;
+        }
     };
 
     let m = &matches[match_id];
@@ -509,7 +536,12 @@ pub(crate) fn child_requirement(
     let mut register_boundary = false;
     let mut immediate_boundary = false;
     for binding in &m.bindings.pattern_nodes {
-        if binding.class != child || binding.pattern_node == m.pattern_root {
+        // A copy pattern's bare-symbol root binds the wider source while the
+        // match root is its low Extract view, so that root node is still a real
+        // boundary dependency.
+        if binding.class != child
+            || (binding.pattern_node == m.pattern_root && binding.class == m.root)
+        {
             continue;
         }
         if binding.is_boundary {

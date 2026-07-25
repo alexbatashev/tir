@@ -137,6 +137,33 @@ instruction BranchOverflow for [FlagIsa] {
     }
 }
 
+instruction SelectEq for [FlagIsa] {
+    param MNEMONIC: String = "selecteq";
+
+    operands {
+        dst: GPR,
+        src: GPR,
+    }
+
+    encoding {
+        0..4 => dst,
+        5..9 => src,
+        10..31 => 0,
+    }
+
+    asm {
+        "{self.MNEMONIC} {dst}, {src}"
+    }
+
+    behavior {
+        dst = if FLAGS::zf == zext(0b1, 1) {
+            src
+        } else {
+            dst
+        };
+    }
+}
+
 // The shared flag-definer emitter binds the compare's register operands.
 // CHECK: fn emit_isel_flag_definer_cmp(
 // CHECK: let src = m.value_binding(0)
@@ -152,6 +179,14 @@ instruction BranchOverflow for [FlagIsa] {
 // CHECK: fn isel_pattern_branchlt_via_cmp(
 // CHECK: tir::sem::SymKind::Lt
 // CHECK-NOT: branchoverflow_via_cmp
+
+// A flag-reading select derives the same proved comparison, retaining both
+// value arms and the destination tie in its value rule.
+// CHECK: fn isel_pattern_selecteq_via_cmp(
+// CHECK: tir::sem::SymKind::If
+// CHECK: fn emit_isel_selecteq_via_cmp(
+// CHECK: "dst_tied",
+// CHECK: "src",
 
 // Both rules are conditional branches emitting the definer first.
 // CHECK: RuleKind::CondBranch

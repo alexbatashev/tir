@@ -64,7 +64,7 @@ impl<V> Blaster<'_, V> {
     }
 
     /// `a >= b` for equal-width unsigned vectors: the carry-out of `a - b`.
-    fn uge(&mut self, a: &[Lit], b: &[Lit]) -> Lit {
+    pub(super) fn uge(&mut self, a: &[Lit], b: &[Lit]) -> Lit {
         self.sub_carry(a, b).1
     }
 

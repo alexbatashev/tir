@@ -185,6 +185,16 @@ enum Side {
     Rhs,
 }
 
+enum ProofObligation {
+    /// Discharged by the [`SmtOracle`] over the realized LHS and RHS.
+    Equivalence,
+    /// `theta(x, x) = x`: a loop-carried value whose initial and next values are
+    /// the same term. Base case and preservation step are both that term, so the
+    /// invariant holds by induction — there is no finite expression for the
+    /// oracle to bit-blast.
+    ThetaInvariant,
+}
+
 pub(crate) struct Axiom {
     name: String,
     /// Width names in declaration order; a resolved `Vec<u64>` in this order is
@@ -207,6 +217,10 @@ pub(crate) struct Axiom {
     /// The RHS references the matched root itself (excludes var references).
     #[cfg(debug_assertions)]
     uses_root: bool,
+    obligation: ProofObligation,
+    /// Declared `(phase post-saturation)`: applied once after the iterative
+    /// fixpoint instead of participating in it.
+    post_saturation: bool,
     /// A materialize axiom: its LHS root is a bare `consts` var, so it matches
     /// every constant class, and its RHS structure is unioned *with* the folded
     /// constant instead of collapsing to it (keeps the shift/add tiling live).
@@ -282,6 +296,7 @@ pub(crate) fn parse_axiom(text: &str) -> Result<Axiom, String> {
     let mut value_guards = Vec::new();
     let mut lhs_expr = None;
     let mut rhs_expr = None;
+    let mut post_saturation = false;
 
     for section in sections {
         let SemExpr::List(parts) = section else {
@@ -311,6 +326,15 @@ pub(crate) fn parse_axiom(text: &str) -> Result<Axiom, String> {
                     return Err("root section must be (root <width>)".into());
                 };
                 root_width = Some(binding(w, &mut width_names));
+            }
+            "phase" => {
+                let [SemExpr::Atom(phase)] = rest else {
+                    return Err("phase section must be (phase post-saturation)".into());
+                };
+                if phase != "post-saturation" {
+                    return Err(format!("unknown phase `{phase}`"));
+                }
+                post_saturation = true;
             }
             "where" => {
                 for g in rest {
@@ -405,6 +429,15 @@ pub(crate) fn parse_axiom(text: &str) -> Result<Axiom, String> {
             }
         }
     }
+    let obligation = if is_theta_invariant_collapse(&lhs, &rhs) {
+        ProofObligation::ThetaInvariant
+    } else if contains_kind(&lhs, SymKind::Theta) {
+        return Err("theta-unrolling axioms are prohibited".into());
+    } else if contains_kind(&rhs, SymKind::Theta) {
+        return Err("theta axioms require a supported induction obligation".into());
+    } else {
+        ProofObligation::Equivalence
+    };
 
     Ok(Axiom {
         name,
@@ -418,8 +451,41 @@ pub(crate) fn parse_axiom(text: &str) -> Result<Axiom, String> {
         rhs,
         #[cfg(debug_assertions)]
         uses_root,
+        obligation,
+        post_saturation,
         materialize,
     })
+}
+
+fn contains_kind(node: &AxNode, expected: SymKind) -> bool {
+    match node {
+        AxNode::Node(kind, children) => {
+            *kind == expected || children.iter().any(|child| contains_kind(child, expected))
+        }
+        AxNode::Keep(inner) => contains_kind(inner, expected),
+        _ => false,
+    }
+}
+
+fn same_node(lhs: &AxNode, rhs: &AxNode) -> bool {
+    match (lhs, rhs) {
+        (AxNode::Hole(a, av), AxNode::Hole(b, bv)) => a == b && av == bv,
+        (AxNode::Root, AxNode::Root) => true,
+        (AxNode::Node(a, ac), AxNode::Node(b, bc)) => {
+            a == b && ac.len() == bc.len() && ac.iter().zip(bc).all(|(a, b)| same_node(a, b))
+        }
+        _ => false,
+    }
+}
+
+fn is_theta_invariant_collapse(lhs: &AxNode, rhs: &AxNode) -> bool {
+    matches!(
+        lhs,
+        AxNode::Node(SymKind::Theta, children)
+            if children.len() == 2
+                && same_node(&children[0], &children[1])
+                && same_node(&children[0], rhs)
+    )
 }
 
 fn parse_value_guard(
@@ -606,11 +672,13 @@ impl Axiom {
             .collect();
 
         let name = format!("axiom-{}", self.name);
+        let post_saturation = self.post_saturation;
         #[cfg(debug_assertions)]
         let proofs: Mutex<HashMap<Vec<u64>, bool>> = Mutex::default();
         IselRewrite {
             name,
             searcher,
+            post_saturation,
             apply: Box::new(move |ctx: &Context, eg: &mut SemEGraph, m: &EMatch<u32>| {
                 let Some(widths) = self.resolve_widths(ctx, eg, m, &holes) else {
                     return;
@@ -692,6 +760,9 @@ impl Axiom {
     /// the width names' declaration order (`vars` first, then `root`).
     #[cfg(debug_assertions)]
     pub(crate) fn prove(&self, widths: &[u64]) -> bool {
+        if matches!(self.obligation, ProofObligation::ThetaInvariant) {
+            return true;
+        }
         let register_width = self.register_width(widths);
         let mut lhs = SemGraph::new();
         let mut rhs = SemGraph::new();
@@ -726,7 +797,7 @@ impl Axiom {
             return false;
         }
         let symbol_widths = vec![register_width; symbol_count];
-        SmtOracle.equivalent(&lhs, &rhs, &symbol_widths)
+        SmtOracle.refines(&lhs, &rhs, &symbol_widths)
     }
 
     fn register_width(&self, widths: &[u64]) -> u32 {
@@ -778,7 +849,7 @@ impl Axiom {
                 };
                 Some(con(g, e.eval(widths)?, width))
             }
-            AxNode::ConstMatch(e) => Some(con(g, e.eval(widths)?, 16)),
+            AxNode::ConstMatch(e) => Some(con(g, e.eval(widths)?, register_width)),
             AxNode::Node(kind, children) => {
                 let children = children
                     .iter()
@@ -1229,6 +1300,226 @@ mod tests {
             .unwrap();
         apply_all(&ctx, &mut eg, &axiom.compile());
         assert!(class_kinds(&eg, root).contains(&SymKind::If));
+    }
+
+    #[test]
+    fn comparison_zero_gains_extended_zero_shape() {
+        let ctx = Context::with_default_dialects();
+        let i1 = IntegerType::new(&ctx, 1);
+        let i64 = IntegerType::new(&ctx, 64);
+        let mut eg = SemEGraph::new();
+        let value = eg.add(template_node(
+            SymKind::Symbol,
+            Some(SymPayload::SymbolId(0)),
+            Some(i64),
+        ));
+        let zero = eg.add(template_node(
+            SymKind::Constant,
+            Some(SymPayload::Int(APInt::new(64, 0))),
+            Some(i64),
+        ));
+        let mut comparison = template_node(SymKind::Eq, None, Some(i1));
+        comparison.children = vec![value, zero];
+        let root = eg.add(comparison);
+        let axiom = super::super::theory::axioms()
+            .into_iter()
+            .find(|axiom| axiom.name == "eq-zero")
+            .expect("core theory must declare eq-zero");
+
+        apply_all(&ctx, &mut eg, &axiom.compile());
+
+        assert!(eg.nodes(root).iter().any(|node| {
+            node.kind == SymKind::Eq
+                && node.children.iter().any(|child| {
+                    eg.nodes(*child)
+                        .iter()
+                        .any(|child| child.kind == SymKind::ZExt)
+                })
+        }));
+    }
+
+    #[test]
+    fn comparison_zero_shape_matches_zero_register_rule() {
+        let ctx = Context::with_default_dialects();
+        let i1 = IntegerType::new(&ctx, 1);
+        let i64 = IntegerType::new(&ctx, 64);
+        let mut eg = SemEGraph::new();
+        let value = eg.add(template_node(
+            SymKind::Symbol,
+            Some(SymPayload::SymbolId(0)),
+            Some(i64),
+        ));
+        let zero = eg.add(template_node(
+            SymKind::Constant,
+            Some(SymPayload::Int(APInt::new(64, 0))),
+            Some(i64),
+        ));
+        let mut comparison = template_node(SymKind::Eq, None, Some(i1));
+        comparison.children = vec![value, zero];
+        let root = eg.add(comparison);
+        let axiom = super::super::theory::axioms()
+            .into_iter()
+            .find(|axiom| axiom.name == "eq-zero")
+            .unwrap();
+        apply_all(&ctx, &mut eg, &axiom.compile());
+
+        let mut pattern = SemGraph::new();
+        let value = sym(&mut pattern, 0);
+        let zero = con(&mut pattern, 0, 1);
+        let width = sym(&mut pattern, 1);
+        let zext = op(&mut pattern, SymKind::ZExt, &[zero, width]);
+        op(&mut pattern, SymKind::Eq, &[value, zext]);
+        let compiled =
+            super::super::pattern::compile_isel_pattern(0, &pattern, &[], &[], &[], None).unwrap();
+
+        assert!(!compiled.search(&eg, &ctx).is_empty());
+        assert!(
+            compiled
+                .search(&eg, &ctx)
+                .iter()
+                .any(|m| eg.find(m.root) == eg.find(root))
+        );
+    }
+
+    #[test]
+    fn gamma_with_identical_arms_collapses() {
+        let ctx = Context::with_default_dialects();
+        let i1 = IntegerType::new(&ctx, 1);
+        let i32 = IntegerType::new(&ctx, 32);
+        let mut eg = SemEGraph::new();
+        let condition = eg.add(template_node(
+            SymKind::Symbol,
+            Some(SymPayload::SymbolId(0)),
+            Some(i1),
+        ));
+        let value = eg.add(template_node(
+            SymKind::Symbol,
+            Some(SymPayload::SymbolId(1)),
+            Some(i32),
+        ));
+        let mut gate = template_node(SymKind::If, None, Some(i32));
+        gate.children = vec![condition, value, value];
+        let root = eg.add(gate);
+        let axiom = super::super::theory::axioms()
+            .into_iter()
+            .find(|axiom| axiom.name == "if-same")
+            .expect("core theory must declare if-same");
+
+        apply_all(&ctx, &mut eg, &axiom.compile());
+
+        assert_eq!(eg.find(root), eg.find(value));
+    }
+
+    #[test]
+    fn gamma_arm_condition_is_strengthened() {
+        let ctx = Context::with_default_dialects();
+        let i1 = IntegerType::new(&ctx, 1);
+        let mut eg = SemEGraph::new();
+        let condition = eg.add(template_node(
+            SymKind::Symbol,
+            Some(SymPayload::SymbolId(0)),
+            Some(i1),
+        ));
+        let other = eg.add(template_node(
+            SymKind::Symbol,
+            Some(SymPayload::SymbolId(1)),
+            Some(i1),
+        ));
+        let mut gate = template_node(SymKind::If, None, Some(i1));
+        gate.children = vec![condition, condition, other];
+        let root = eg.add(gate);
+        let axiom = super::super::theory::axioms()
+            .into_iter()
+            .find(|axiom| axiom.name == "if-then-condition")
+            .expect("core theory must strengthen the taken gamma arm");
+
+        apply_all(&ctx, &mut eg, &axiom.compile());
+
+        assert!(eg.nodes(root).iter().any(|node| {
+            node.kind == SymKind::If
+                && class_int_binding(&eg, node.children[1]).is_some_and(|value| value.to_u64() == 1)
+        }));
+    }
+
+    #[test]
+    fn theta_with_invariant_next_collapses() {
+        let ctx = Context::with_default_dialects();
+        let i32 = IntegerType::new(&ctx, 32);
+        let mut eg = SemEGraph::new();
+        let value = eg.add(template_node(
+            SymKind::Symbol,
+            Some(SymPayload::SymbolId(0)),
+            Some(i32),
+        ));
+        let mut gate = template_node(SymKind::Theta, None, Some(i32));
+        gate.children = vec![value, value];
+        let root = eg.add(gate);
+        let axiom = super::super::theory::axioms()
+            .into_iter()
+            .find(|axiom| axiom.name == "theta-same")
+            .expect("core theory must declare theta-same");
+
+        apply_all(&ctx, &mut eg, &axiom.compile());
+
+        assert_eq!(eg.find(root), eg.find(value));
+    }
+
+    #[test]
+    fn theta_unrolling_axiom_is_rejected() {
+        let error = parse_axiom(
+            "(axiom theta-unroll
+               (vars (init w) (next w)) (root w)
+               (lhs (theta init next))
+               (rhs next))",
+        )
+        .err()
+        .expect("theta unrolling must be rejected");
+
+        assert!(error.contains("theta-unrolling"), "{error}");
+    }
+
+    #[test]
+    fn phase_section_defers_the_rewrite_past_saturation() {
+        let axiom = parse_axiom(
+            "(axiom eq-zero (vars (x w)) (root 1) (phase post-saturation)
+               (lhs (eq x 0))
+               (rhs (eq x (zext (const 0 1) w))))",
+        )
+        .expect("phase section must parse");
+
+        assert!(axiom.compile().post_saturation);
+    }
+
+    #[test]
+    fn axiom_without_a_phase_section_saturates() {
+        let axiom =
+            parse_axiom("(axiom neg-sub (vars (x w)) (root w) (lhs (neg x)) (rhs (sub 0 x)))")
+                .expect("axiom must parse");
+
+        assert!(!axiom.compile().post_saturation);
+    }
+
+    #[test]
+    fn unknown_phase_is_rejected() {
+        let error = parse_axiom(
+            "(axiom eq-zero (vars (x w)) (root 1) (phase eventually)
+               (lhs (eq x 0))
+               (rhs (eq x (zext (const 0 1) w))))",
+        )
+        .err()
+        .expect("an unknown phase must be rejected");
+
+        assert!(error.contains("unknown phase"), "{error}");
+    }
+
+    #[test]
+    fn the_theory_defers_every_zero_comparison_shape() {
+        let deferred = super::super::theory::axioms()
+            .into_iter()
+            .filter(|axiom| axiom.post_saturation)
+            .count();
+
+        assert_eq!(deferred, 18);
     }
 
     /// `extract(symbol : i32, hi, lo)` with the width-16 constant convention;

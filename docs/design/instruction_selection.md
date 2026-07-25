@@ -66,8 +66,19 @@ builder instance lowers every block, so its per-value memoization
 
 A cross-block operand needs no special handling: the builder's `value_to_def` is
 function-wide, so an operand defined in another block expands to its defining
-expression like any local one. A value with no defining op — a block argument or
-entry input — stays an opaque `Input` leaf (always available in a register).
+expression like any local one. Entry inputs and irreducible block arguments stay
+opaque `Input` leaves (always available in a register). Reducible block arguments
+use the function's gated-SSA analysis:
+
+- a γ merge becomes `If(condition, true_value, false_value)`;
+- a μ loop-carried value becomes `Theta(init, latch)`. The builder first
+  memoizes an opaque placeholder, builds the latch through that placeholder, and
+  unions it with the `Theta` class to form the recursive e-graph cycle;
+- an irreducible `Phi` retains the opaque-leaf behavior.
+
+`Theta` is a value-sequence gate, distinct from effect-side `StateIf`. It has no
+finite-expression evaluator; selection may preserve it as CFG edge assignments,
+and the theory may only use the inductive invariant `theta(x, x) = x`.
 
 ### What a node is
 
@@ -144,7 +155,8 @@ saturation (which may merge classes). All live on `FunctionSelection`.
 | `externally_bound: Set<ValueId>` | a value with at least one original use **outside its def block** — guaranteed materialized in a register, so a dominated block may bind it |
 | `shared_classes: Set<Id>` | a value used as an operand by **>1 consumer** (counted function-wide); a memory effect here can never be internalized into a larger match (a pure value still can — duplication) |
 | `must_materialize: Set<Id>` | an op-root class whose value some consumer can never internalize: **(a)** a use in a different block (exactly `externally_bound`), or **(b)** a same-block use no match reaches that is not a guarded terminator; it is never offered a consuming alternative |
-| `guards` / `jumps: BlockId → Vec<…>` | each block's guarded two-way terminators (with the condition's class) and plain unconditional branches |
+| `control: BlockId → Vec<ControlReification>` | the guarded and unconditional CFG edges that preserve unselected γ/θ values, including forwarded block arguments |
+| `reifiable_gates: Set<Id>` | canonical classes seeded from GSA γ/μ nodes; these may preserve the existing control-flow edge assignments instead of selecting a value instruction |
 | `prepared: ValueId → ConditionExpr` | each dominating-edge condition prepared against the base graph (its class, and its defining comparison when there is one), so a block's scope can assert it |
 
 Because scoped assumptions merge classes, a per-block query through the *scoped*
@@ -172,6 +184,18 @@ The checked `core/defs/isel.sexp` theory is installed for every target. Target
 support is considered later: instruction patterns match whichever members of
 an equivalence class they can implement.
 
+Most axioms participate in iterative saturation. An axiom declaring
+`(phase post-saturation)` is applied once after that fixpoint instead. The
+zero-comparison shape axioms use it: their `zext(const(0, 1), W)` form exists
+for zero-register branch matching without feeding back through the boolean
+`*-via-if` identities and multiplying equivalent comparison forms.
+
+`if(c, x, x) = x` is verified as an ordinary equivalence.
+`theta(x, x) = x` uses the theory loader's `ThetaInvariant` obligation: the
+identical initial and next values establish the base and preservation steps.
+Other axioms containing `Theta` are rejected so saturation cannot introduce a
+θ-unrolling cycle.
+
 ### `isel.sexp` syntax
 
 The file contains one `theory` form with any number of axioms:
@@ -192,6 +216,7 @@ theory when it is loaded.
   (vars (value width) ...)
   (consts (value width) ...)
   (root width-or-literal)
+  (phase post-saturation)
   (where (< width-expr width-expr) (= width-expr width-expr) ...)
   (lhs pattern)
   (rhs template))
@@ -202,6 +227,8 @@ theory when it is loaded.
 - `consts` is optional and works like `vars`, but the matched e-class must
   contain a constant.
 - `root` binds or checks the matched root width.
+- `phase` is optional; `post-saturation` applies the axiom once after the
+  saturation fixpoint instead of inside it.
 - `where` is optional and accepts `<` and `=` guards over width expressions.
 - `lhs` is the e-matched semantic pattern. Declared variables are captures;
   undeclared atoms are anonymous wildcards. Integer and width-expression
@@ -217,9 +244,11 @@ op semantic-expression DSL.
 The compiled applier resolves the axiom's width names from the matched classes
 (`n` from `x`'s class, `w` from the root) and checks the guards. Debug builds
 also prove each concrete width instantiation with the `SmtOracle` before
-unioning. The proof models each operand as the low `n` bits of a full-width
-register the RHS reads whole, covering the undefined upper register bits the
-emitted instructions actually see. Release builds trust the checked-in theory.
+unioning. This is a refinement proof: whenever the LHS is defined, the RHS must
+also be defined and equal. The proof models each operand as the low `n` bits of
+a full-width register the RHS reads whole, covering the undefined upper register
+bits the emitted instructions actually see. Release builds trust the checked-in
+theory.
 The extension axiom asserts:
 
 ```
@@ -339,6 +368,7 @@ that closure**, each offering a set of **alternatives**:
 ```
    PbqpIselAlternative
    ├─ External                       leaf, or a value materialized in a register
+   ├─ Reify                          preserve a γ/θ as existing CFG edge assignments
    ├─ Root { match_id }              this class is the instruction's result   ← cost lives here
    ├─ Internal { match_id, p_node }  this class is an interior node of that match (cost 0)
    └─ Dead                           value not needed in a register: its only consumer is a
@@ -347,7 +377,14 @@ that closure**, each offering a set of **alternatives**:
 ```
 
 Only the **Root** alternative carries the match's cost; interior nodes are free
-(the paper's convention). A match's root and its *memory-effect* internals are
+(the paper's convention). **Reify** carries a conservative fixed cost so a
+cheaper `If`-rooted value rule may win. It is offered only to classes seeded
+from actual GSA gates, never to algebraic `If` nodes introduced by saturation.
+A rewrite-introduced class also retains an inactive **External** alternative;
+if a selected match needs it as a register boundary, compatibility rejects that
+alternative and forces its **Root**, while classes reachable only through
+unchosen matches remain inactive.
+A match's root and its *memory-effect* internals are
 held together by a **coherence set**; pure internals are exempt — the
 instruction recomputes them (duplication), so the match stays selectable even
 when the class is claimed by another match or materialized in its own right.
@@ -368,7 +405,16 @@ nodes. The compatibility matrix sets `INF_COST` for incoherent pairs and asks
 ```
 
 `pbqp::solve` returns the min-cost assignment as a `ClassCover` (one chosen
-alternative per class).
+alternative per class). If every assignment violates a boundary or coherence
+requirement, selection reports an infeasible cover; it never falls back to an
+empty plan that leaves the original operations unselected.
+
+An `If`-rooted value rule is offered only when both its structural pattern and
+the matched γ arm classes are speculatable. Division, remainder, memory,
+atomics, fences, state effects, and nested `Theta` make it ineligible. Choosing
+`Reify` requires no additional value instruction: the existing terminator
+emission performs the edge assignments. Choosing a value rule emits the
+selected instruction at the gate's use site.
 
 ### Worked example: `square` lowering
 
@@ -407,7 +453,12 @@ struct BlockPlan {
 - A class chosen **Root** and backed by an op → `Emit` that op with the rule.
 - A class chosen **Internal** and backed by an op → `Consume` (erased; folded into
   its parent instruction).
+- A class chosen **Reify** → preserve the existing branch-edge assignment; emit
+  no value instruction for the gate itself.
 - A **Root** class with no backing op → an `IntroducedEmit` (the saturation `slli`).
+- A low-bit `Extract` of an existing value → `ForwardOperand`. If its source is
+  rewrite-introduced, a width-matched identity-copy rule roots the view and
+  forces the introduced producer into the cover.
 
 `EmissionBuilder::resolve_match` turns a chosen match into a concrete
 `RuleMatch` — the symbol→operand bindings the emitter reads. Each capture resolves
@@ -474,9 +525,9 @@ at its condition class whose operands all resolve at B (tie → most specific):
   `Dead`, so a multi-use compare is still materialized (`slt`) *and* fused.
 - **Fallback**: no branch rule matches — the condition is forced materialized
   and `cond_nonzero` emits the branch. A bare i1 condition (block/function
-  argument, no comparison) no longer reaches here: the bridge below hands it a
-  derived zero-compare branch, so the fallback is reserved for conditions no
-  derived rule covers.
+  argument, no comparison) normally does not reach here: the guard seed below
+  hands it a derived zero-compare branch, so the fallback is reserved for
+  conditions no derived rule covers.
 
 Either way the terminator is replaced by the branch (inserted ahead of it)
 plus `uncond` to the false successor; a plain `br` lowers through `uncond`
@@ -498,19 +549,17 @@ Two idioms branch on whether a value is zero without materializing the zero: a
 bare i1 condition and a `cmpi x, 0` guard. Both are served by *derived* rules,
 so `cond_nonzero` is now a fallback of last resort.
 
-`bridge_zero_branch_guards` (`isel/mod.rs`) runs after saturation, over
-guard-condition classes only, and injects the shape the derived rules match:
+Target-independent, SMT-checked axioms rewrite every integer comparison with a
+literal-zero operand to the `Cmp(a, zext(0b0, W))` shape the derived rules
+match. The symmetric non-commutative forms are explicit axioms. They run once
+after ordinary saturation, so this matching form cannot expand the boolean
+theory's fixpoint.
 
-- a bare 1-bit class with no comparison to fuse gains `Ne(c, zext(0b0, 1))`
-  (trivially true for a 1-bit value) — a lone `Symbol` leaf otherwise roots no
-  `CondBranch` pattern;
-- a comparison against a proven-zero constant `Cmp(a, 0)` gains `Cmp(a,
-  zext(0b0, W))`, the zero operand replaced so the surviving operand binds from
-  the match while the zero wires to a zero register.
-
-Restricting the injection to guard classes keeps unrelated width-1 classes from
-gaining a spurious comparison member; a target with no matching rule leaves the
-extra member unmatched.
+A lone i1 leaf has no comparison term for an axiom to match. For guard classes
+only, `seed_bare_condition_terms` adds the true identity
+`c = Ne(c, zext(0b0, 1))` after saturation. Keeping this narrowly structural
+seed avoids a self-referential global boolean rewrite while comparison guards
+remain entirely axiom-driven.
 
 TMDL derives the rules these unify with. On a register class carrying a
 **hardwired-zero** register (the `hardwired_zero` trait — RISC-V `x0`), every
@@ -565,8 +614,8 @@ same machinery as the fused single-instruction path.
 A guard matching no canonical comparison (e.g. a branch on overflow alone)
 derives no rule; the instruction still assembles, encodes, and simulates.
 
-The same composition also materializes a flag *reader* (`cset`, `setcc`) — an
-instruction that computes a value from the condition-code bits. Such an
+The same composition also handles a flag *reader* (`cset`, `setcc`, `csel`,
+`cmov`) — an instruction that computes a value from condition-code bits. Such an
 instruction derives **no plain value rule** (`behavior_reads_flag_register`
 gates it in `rustgen.rs`): lifting its flag reads into free operands yields a
 pattern structurally identical to a comparison (`If(Eq(s0, s1), 1, 0)`), and —
@@ -576,13 +625,14 @@ matched integer `Eq` and dropped its operands). Instead `emit_flag_reader_rules`
 composes each definer with each reader — the definer's per-flag semantics
 substitute into the reader's condition, and when the composite SMT-proves equal
 to one canonical comparison the pair registers an `If`-rooted **value** rule
-whose prelude emits the definer (`cmp`) ahead of the reader (`cset.<cc>`). The
+whose prelude emits the definer (`cmp`) ahead of the reader. Boolean readers
+reuse their constant arms; select readers retain their encoded register arms
+and two-address destination tie, so a GSA γ can match `cmp` + `cmov`/`csel`. The
 value-commit path honours `prelude_emit` for value rules (`isel/mod.rs`),
-inserting the definer before the materializer. The reader's arms are reused
-verbatim, so the pattern is the width-polymorphic `slt`-style `If` the
-bool-materialize bridge already matches — the flag-arch analog of a compare
-materializing with no hand-written rule. A two-register `cmpi` as a value now
-emits `cmp` + `cset.<cc>`.
+inserting the definer before the reader. For boolean readers, the pattern is the
+width-polymorphic `slt`-style `If` the bool-materialize bridge already matches —
+the flag-arch analog of a compare materializing with no hand-written rule. A
+two-register `cmpi` as a value emits `cmp` + `cset.<cc>`.
 
 **Immediate definers.** `analyze_flag_definer_semantics` accepts one `Bits`/
 `Integer` operand alongside the register operands, so `cmp r, imm` composes into

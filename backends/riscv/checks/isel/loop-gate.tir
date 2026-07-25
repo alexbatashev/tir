@@ -1,0 +1,30 @@
+// RUN: tir mc --march=rv64i --stage=isel %s | filecheck %s
+
+// The loop-header parameter is seeded as a recursive theta gate. Selection
+// preserves it through the back-edge assignment while selecting the latch
+// computation and loop condition normally.
+
+module {
+  func @count(%limit: !i64) -> !i64 {
+    %zero = constant {value = 0} : !i64
+    br ^bb1(%zero : !i64)
+  ^bb1(%iv: !i64):
+    %keep_going = cmpi %iv, %limit {predicate = "slt"} : !i1
+    cond_br %keep_going, ^bb2, ^bb3
+  ^bb2:
+    %one = constant {value = 1} : !i64
+    %next = addi %iv, %one : !i64
+    br ^bb1(%next : !i64)
+  ^bb3:
+    return %iv
+  }
+  module_end
+}
+
+// CHECK:      asm.symbol {name = "count"
+// CHECK:      asm.vbr %{{[0-9]+}} ^bb1
+// CHECK:      ^bb1(%{{[0-9]+}}: !i64):
+// CHECK:      riscv.blt
+// CHECK:      ^bb2:
+// CHECK:      riscv.addi
+// CHECK-NEXT: asm.vbr %{{[0-9]+}} ^bb1

@@ -24,7 +24,7 @@ use std::collections::{HashMap, HashSet};
 use tir::{
     AnalysisManager, Block, BlockId, BranchGuard, BranchTerminator, Context, OpId, Operation,
     OperationRef, Pass, PassError, PassTarget, PreservedAnalyses, Rewriter, TypeId, ValueId,
-    analysis::{DominatingEdgeFacts, DominatorTree, EdgeFact},
+    analysis::{DominatingEdgeFacts, DominatorTree, EdgeFact, GSA, GateNode},
     graph::{Dag, MutDag, NodeId, OperandConstraint},
     sem::{
         EquivalenceOracle, SemGraph, SmtOracle, SymKind, SymPayload, canonicalize_for_selection,
@@ -45,8 +45,8 @@ use cover::{
 };
 use emit::{BlockDecision, BlockPlan, EmissionBuilder, GuardBranch, TerminatorPlan};
 use node::{
-    class_int_binding, class_width, is_comparison, is_low_extract_view, low_extract_source,
-    template_node,
+    class_int_binding, class_width, is_comparison, is_low_extract_view, kind_is_pure,
+    low_extract_source, template_node,
 };
 use pattern::{CompiledIselPattern, compile_isel_pattern};
 use rewrites::discover_rewrites;
@@ -98,7 +98,11 @@ impl RuleMatch {
             .iter()
             .find(|(sym, _)| *sym == symbol)
             .map(|(_, v)| {
-                if v.is_signed() {
+                // Boolean values occupy registers and immediates as 0/1; reading
+                // signed i1 through APInt would turn true into -1.
+                if v.width() == 1 {
+                    v.to_u64() as i64
+                } else if v.is_signed() {
                     v.to_i64()
                 } else {
                     v.to_u64() as i64
@@ -220,6 +224,15 @@ impl RegisterRequirement {
 
     fn accepts_low_bits(&self, ty: &tir::sem::SemType) -> bool {
         self.capability.accepts(ty)
+    }
+
+    fn accepts_low_view_source(&self, ty: &tir::sem::SemType) -> bool {
+        use tir::sem::{SemType, Width};
+        matches!(
+            ty,
+            SemType::Bits(Width::Const(width)) | SemType::RawBits(Width::Const(width))
+                if self.capability.integer && *width >= self.capability.width
+        )
     }
 }
 
@@ -459,10 +472,11 @@ struct FunctionSelection {
     /// a call): the defining block's cover must root a materializer match for them
     /// instead of leaving the constant to the pre-RA hook.
     force_constant_values: HashSet<ValueId>,
-    /// The guarded terminators of each block, each with its condition's e-class.
-    guards: HashMap<BlockId, Vec<BlockGuard>>,
-    /// Plain unconditional branch terminators per block.
-    jumps: HashMap<BlockId, Vec<BlockJump>>,
+    /// Control-flow edges retained when gate values are reified.
+    control: HashMap<BlockId, Vec<ControlReification>>,
+    /// Canonical classes seeded from reducible γ/μ gates. An algebraic `If`
+    /// introduced by an axiom is not control flow and must not gain reification.
+    reifiable_gates: HashSet<Id>,
     /// Each dominating-edge condition prepared against the base graph: the
     /// condition's class and, when its definer is a comparison, the comparison
     /// class with its kind and operand classes. Keyed by the condition value; the
@@ -508,6 +522,11 @@ impl FunctionSelection {
             .any(|m| self.shared_classes.contains(&m))
     }
 
+    fn is_reifiable_gate(&self, class: Id) -> bool {
+        self.base_members(class)
+            .any(|member| self.reifiable_gates.contains(&member))
+    }
+
     /// Whether `class` must keep a materializing alternative: a function-wide
     /// requirement (any base member) or the block-local `overlay` (fused-branch
     /// boundaries and materialized guard conditions, keyed by scoped rep).
@@ -535,14 +554,15 @@ impl FunctionSelection {
     }
 
     /// Whether the class carries an IR value that still exists after selection:
-    /// a block input, or the result of any op but a bare `constant` (which is
-    /// erased once selection or the dead-constant sweep is done with it). Only
-    /// such a value satisfies a register operand externally.
+    /// a block input, or the result of any op but a bare `constant`/`constantf`
+    /// (which is erased once selection or the target's pre-RA hook is done with
+    /// it). Only such a value satisfies a register operand externally.
     fn has_surviving_value(&self, context: &Context, class: Id) -> bool {
         self.any_class_value(class, |v| {
-            self.value_to_def
-                .get(v)
-                .is_none_or(|op| !context.get_op(*op).is::<crate::builtin::ConstantOp>())
+            self.value_to_def.get(v).is_none_or(|op| {
+                let op = context.get_op(*op);
+                !op.is::<crate::builtin::ConstantOp>() && !op.is::<crate::builtin::ConstantFOp>()
+            })
         })
     }
 
@@ -709,6 +729,22 @@ struct BlockJump {
     op: OpId,
     dest: BlockId,
     args: Vec<ValueId>,
+}
+
+/// Existing CFG edges that implement an unselected γ/θ gate. Both guarded and
+/// unconditional edges use the same forwarded-value representation.
+enum ControlReification {
+    Guarded(BlockGuard),
+    Unconditional(BlockJump),
+}
+
+impl ControlReification {
+    fn guard(&self) -> Option<&BlockGuard> {
+        match self {
+            ControlReification::Guarded(guard) => Some(guard),
+            ControlReification::Unconditional(_) => None,
+        }
+    }
 }
 
 pub type OpLowering = fn(&Context, &OperationRef, &mut Rewriter) -> Result<bool, PassError>;
@@ -1049,8 +1085,9 @@ impl InstructionSelectPass {
         }
         let dom = analyses.get::<DominatorTree>(context, root);
         let facts = analyses.get::<DominatingEdgeFacts>(context, root);
+        let gsa = analyses.get::<GSA>(context, root);
 
-        let mut fs = self.build_function_selection(context, op, &facts);
+        let mut fs = self.build_function_selection(context, op, &facts, &gsa);
         // A fact-free block sees exactly the base graph, so every value pattern's
         // e-match is block-independent: search once here and reuse for all such
         // blocks (fact-bearing blocks re-search under their scope).
@@ -1105,6 +1142,7 @@ impl InstructionSelectPass {
         context: &Context,
         op: &OperationRef,
         facts: &DominatingEdgeFacts,
+        gsa: &GSA,
     ) -> FunctionSelection {
         // Function-wide value/op layout: with a single `value_to_def` a cross-block
         // operand expands to its defining expression naturally (no remat special
@@ -1132,12 +1170,11 @@ impl InstructionSelectPass {
         // are resolved through `find` afterwards because saturation may merge them.
         let mut egraph = SemEGraph::new();
         let mut roots_by_op: HashMap<OpId, Id> = HashMap::new();
-        let mut guards: HashMap<BlockId, Vec<BlockGuard>> = HashMap::new();
-        let mut jumps: HashMap<BlockId, Vec<BlockJump>> = HashMap::new();
+        let mut control: HashMap<BlockId, Vec<ControlReification>> = HashMap::new();
         let mut prepared: HashMap<ValueId, ConditionExpr> = HashMap::new();
         let mut constant_candidates: Vec<(OpId, Id)> = Vec::new();
         let value_to_class = {
-            let mut builder = SemDagBuilder::new(context, &value_to_def, &mut egraph);
+            let mut builder = SemDagBuilder::new(context, &value_to_def, gsa, &mut egraph);
             for &block_id in &block_ids {
                 for op_id in context.get_block(block_id).op_ids() {
                     let op = context.get_op(op_id);
@@ -1189,15 +1226,18 @@ impl InstructionSelectPass {
                             let true_args = edge_args(true_dest);
                             let false_args = edge_args(false_dest);
                             let class = builder.build_from_value(*a_cond);
-                            guards.entry(block_id).or_default().push(BlockGuard {
-                                op: op_id,
-                                condition: *a_cond,
-                                class,
-                                true_dest,
-                                false_dest,
-                                true_args,
-                                false_args,
-                            });
+                            control
+                                .entry(block_id)
+                                .or_default()
+                                .push(ControlReification::Guarded(BlockGuard {
+                                    op: op_id,
+                                    condition: *a_cond,
+                                    class,
+                                    true_dest,
+                                    false_dest,
+                                    true_args,
+                                    false_args,
+                                }));
                         } else if let Some(branch) =
                             op.clone().as_interface::<dyn BranchTerminator>()
                         {
@@ -1205,11 +1245,13 @@ impl InstructionSelectPass {
                             let [(dest, args)] = successors.as_slice() else {
                                 continue;
                             };
-                            jumps.entry(block_id).or_default().push(BlockJump {
-                                op: op_id,
-                                dest: *dest,
-                                args: args.clone(),
-                            });
+                            control.entry(block_id).or_default().push(
+                                ControlReification::Unconditional(BlockJump {
+                                    op: op_id,
+                                    dest: *dest,
+                                    args: args.clone(),
+                                }),
+                            );
                         }
                     }
                 }
@@ -1242,7 +1284,7 @@ impl InstructionSelectPass {
 
         rewrites::saturate(context, &mut egraph, &self.rewrites, Default::default());
 
-        bridge_zero_branch_guards(context, &mut egraph, &guards);
+        seed_bare_condition_terms(context, &mut egraph, &control);
 
         bridge_constant_materializers(&mut egraph, &self.constant_materializer_ranges);
 
@@ -1327,10 +1369,14 @@ impl InstructionSelectPass {
         // instruction, so its class must keep a materializing alternative. A use by
         // a guarded terminator is exempt (branch selection recomputes the condition
         // inside the branch, or re-adds the materialization requirement itself).
-        let guard_ops: HashSet<OpId> = guards.values().flatten().map(|g| g.op).collect();
-        let guard_condition_ops: HashSet<OpId> = guards
-            .values()
-            .flatten()
+        let guards = || {
+            control
+                .values()
+                .flatten()
+                .filter_map(ControlReification::guard)
+        };
+        let guard_ops: HashSet<OpId> = guards().map(|guard| guard.op).collect();
+        let guard_condition_ops: HashSet<OpId> = guards()
             .filter_map(|guard| value_to_def.get(&guard.condition).copied())
             .collect();
         let mut must_materialize = HashSet::new();
@@ -1374,9 +1420,19 @@ impl InstructionSelectPass {
                 }
             }
         }
-        for guard in guards.values_mut().flatten() {
-            guard.class = egraph.find(guard.class);
+        for edge in control.values_mut().flatten() {
+            if let ControlReification::Guarded(guard) = edge {
+                guard.class = egraph.find(guard.class);
+            }
         }
+        let reifiable_gates = value_to_class
+            .iter()
+            .filter_map(|(&value, &class)| {
+                let node = gsa.node_of(value)?;
+                matches!(gsa.gate(node), GateNode::Gamma { .. } | GateNode::Mu { .. })
+                    .then(|| egraph.find(class))
+            })
+            .collect();
 
         FunctionSelection {
             egraph,
@@ -1390,8 +1446,8 @@ impl InstructionSelectPass {
             shared_classes,
             must_materialize,
             force_constant_values,
-            guards,
-            jumps,
+            control,
+            reifiable_gates,
             prepared,
         }
     }
@@ -1667,9 +1723,12 @@ impl InstructionSelectPass {
         }
         let block_roots: HashSet<Id> = block_op_by_root.keys().copied().collect();
 
-        let guards = fs.guards.get(&block_id).map(Vec::as_slice).unwrap_or(&[]);
-        let jumps = fs.jumps.get(&block_id).map(Vec::as_slice).unwrap_or(&[]);
-        let guard_classes: HashSet<Id> = guards.iter().map(|g| fs.egraph.find(g.class)).collect();
+        let control = fs.control.get(&block_id).map(Vec::as_slice).unwrap_or(&[]);
+        let guard_classes: HashSet<Id> = control
+            .iter()
+            .filter_map(ControlReification::guard)
+            .map(|guard| fs.egraph.find(guard.class))
+            .collect();
 
         let matches = self.collect_block_matches(
             context,
@@ -1684,7 +1743,11 @@ impl InstructionSelectPass {
 
         // Search the branch rules once for the whole block, indexed by condition
         // class, so each guard just looks up its hits.
-        let guard_branch_hits = self.guard_branch_hits(context, fs, guards);
+        let guard_branch_hits = if guard_classes.is_empty() {
+            HashMap::new()
+        } else {
+            self.guard_branch_hits(context, fs)
+        };
 
         // Resolve each guarded terminator: fuse its condition into a branch-rule
         // instruction when one matches, else fall back to the target's
@@ -1695,7 +1758,18 @@ impl InstructionSelectPass {
         let mut mm_overlay: HashSet<Id> = HashSet::new();
         let mut fused_conditions = HashSet::new();
         let mut terminators = Vec::new();
-        for guard in guards {
+        for edge in control {
+            let guard = match edge {
+                ControlReification::Unconditional(jump) => {
+                    terminators.push(TerminatorPlan::Jump {
+                        op: jump.op,
+                        dest: jump.dest,
+                        args: jump.args.clone(),
+                    });
+                    continue;
+                }
+                ControlReification::Guarded(guard) => guard,
+            };
             let class = fs.egraph.find(guard.class);
             // A condition proven constant (a dominating-edge assumption) folds
             // the guard to an unconditional branch to the known successor.
@@ -1716,41 +1790,29 @@ impl InstructionSelectPass {
                 .get(&class)
                 .map(Vec::as_slice)
                 .unwrap_or(&[]);
-            match self.best_guard_branch(context, fs, dom, block_id, guard, candidates) {
+            let branch = match self.best_guard_branch(context, fs, dom, block_id, guard, candidates)
+            {
                 Some((rule_index, m, boundary_classes)) => {
                     for boundary in boundary_classes {
                         mm_overlay.insert(fs.egraph.find(boundary));
                     }
                     fused_conditions.insert(class);
-                    terminators.push(TerminatorPlan::Guard {
-                        op: guard.op,
-                        branch: GuardBranch::Fused { rule_index, m },
-                        true_dest: guard.true_dest,
-                        true_args: guard.true_args.clone(),
-                        false_dest: guard.false_dest,
-                        false_args: guard.false_args.clone(),
-                    });
+                    GuardBranch::Fused { rule_index, m }
                 }
                 None => {
                     mm_overlay.insert(class);
-                    terminators.push(TerminatorPlan::Guard {
-                        op: guard.op,
-                        branch: GuardBranch::Nonzero {
-                            condition: guard.condition,
-                        },
-                        true_dest: guard.true_dest,
-                        true_args: guard.true_args.clone(),
-                        false_dest: guard.false_dest,
-                        false_args: guard.false_args.clone(),
-                    });
+                    GuardBranch::Nonzero {
+                        condition: guard.condition,
+                    }
                 }
-            }
-        }
-        for jump in jumps {
-            terminators.push(TerminatorPlan::Jump {
-                op: jump.op,
-                dest: jump.dest,
-                args: jump.args.clone(),
+            };
+            terminators.push(TerminatorPlan::Guard {
+                op: guard.op,
+                branch,
+                true_dest: guard.true_dest,
+                true_args: guard.true_args.clone(),
+                false_dest: guard.false_dest,
+                false_args: guard.false_args.clone(),
             });
         }
 
@@ -1797,7 +1859,7 @@ impl InstructionSelectPass {
         // intermediates reached from B are covered, but nothing from other blocks).
         let covered = closure_classes(&fs.egraph, &block_roots, &guard_classes, &matches);
 
-        let Some(cover) = build_eclass_cover(
+        let cover = build_eclass_cover(
             &fs.egraph,
             &block_roots,
             &covered,
@@ -1813,12 +1875,19 @@ impl InstructionSelectPass {
                         self.constant_materializer_ranges.is_empty(),
                     )
                 },
+                reifiable_gate: &|class| fs.is_reifiable_gate(class),
             },
             &dead_allowed,
             &matches,
-        ) else {
-            return Ok(BlockPlan::default());
-        };
+        )
+        .ok_or_else(|| {
+            let ops = op_ids
+                .iter()
+                .map(|op| context.get_op(*op).name().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("no feasible instruction cover for {block_id:?}: {ops}")
+        })?;
 
         // The match chosen as Root for each e-class, and the classes consumed as an
         // interior node of some selected match.
@@ -1834,7 +1903,7 @@ impl InstructionSelectPass {
                 PbqpIselAlternative::Internal { .. } | PbqpIselAlternative::Dead => {
                     internal_classes.insert(cover.classes[node]);
                 }
-                PbqpIselAlternative::External => {}
+                PbqpIselAlternative::External | PbqpIselAlternative::Reify => {}
             }
         }
 
@@ -1897,23 +1966,15 @@ impl InstructionSelectPass {
         })
     }
 
-    /// The best conditional-branch rule match rooted at a guard's condition
-    /// class: the rule, the operand bindings (with the taken target bound as a
-    /// block), and the boundary classes the branch reads as registers. `None`
-    /// when no branch rule matches or an operand is unresolvable at `block`.
     /// Every conditional-branch rule match over the block's (scoped) graph,
     /// indexed by condition class, so each guard resolves against its own hits
-    /// without re-searching per guard. Empty when the block has no guards.
+    /// without re-searching per guard.
     fn guard_branch_hits(
         &self,
         context: &Context,
         fs: &FunctionSelection,
-        guards: &[BlockGuard],
     ) -> HashMap<Id, Vec<(usize, EMatch<u32>)>> {
         let mut hits: HashMap<Id, Vec<(usize, EMatch<u32>)>> = HashMap::new();
-        if guards.is_empty() {
-            return hits;
-        }
         for (pattern_index, compiled) in self.compiled_patterns.iter().enumerate() {
             if !matches!(
                 self.rules[compiled.rule_index].kind,
@@ -2067,6 +2128,14 @@ impl InstructionSelectPass {
 
             for m in raw {
                 let root = fs.egraph.find(m.root);
+                if compiled.is_copy() && fs.has_values(m.binding(pattern_root)) {
+                    continue;
+                }
+                if fs.is_reifiable_gate(root)
+                    && !gate_match_is_speculatable(compiled, m, &fs.egraph)
+                {
+                    continue;
+                }
                 let block_op = block_op_by_root.get(&root).copied();
                 let is_guard_class = guard_classes.contains(&root);
                 // A match roots an instruction only if it produces a value B
@@ -2224,6 +2293,79 @@ impl InstructionSelectPass {
     }
 }
 
+/// Whether selecting `matched` as a value instruction is sound for a gate class:
+/// the instruction computes both arms unconditionally, so every node it covers —
+/// in the pattern and in the classes its arms bind — must be speculatable. A
+/// pattern not rooted at an `If` selects no gate arm, so it is unconstrained.
+fn gate_match_is_speculatable(
+    pattern: &CompiledIselPattern,
+    matched: &EMatch<u32>,
+    egraph: &SemEGraph,
+) -> bool {
+    let PatternNode::Node(root) = pattern.pattern.node(pattern.pattern.root()) else {
+        return true;
+    };
+    if root.kind != SymKind::If {
+        return true;
+    }
+    root.children
+        .iter()
+        .all(|&child| gate_pattern_is_speculatable(pattern, child))
+        && root.children[1..].iter().all(|&arm| {
+            gate_class_is_speculatable(egraph, matched.binding(arm), &mut HashSet::new())
+        })
+}
+
+fn gate_pattern_is_speculatable(pattern: &CompiledIselPattern, node: Id) -> bool {
+    match pattern.pattern.node(node) {
+        PatternNode::Var(_) => true,
+        PatternNode::Node(node) => {
+            gate_kind_is_speculatable(node.kind)
+                && node
+                    .children
+                    .iter()
+                    .all(|&child| gate_pattern_is_speculatable(pattern, child))
+        }
+    }
+}
+
+fn gate_class_is_speculatable(egraph: &SemEGraph, class: Id, visited: &mut HashSet<Id>) -> bool {
+    let class = egraph.find(class);
+    if !visited.insert(class) {
+        return true;
+    }
+    egraph.nodes(class).iter().all(|node| {
+        gate_kind_is_speculatable(node.kind)
+            && node
+                .children
+                .iter()
+                .all(|&child| gate_class_is_speculatable(egraph, child, visited))
+    })
+}
+
+/// Whether the kind may be evaluated on a path that does not need its value.
+fn gate_kind_is_speculatable(kind: SymKind) -> bool {
+    kind_is_pure(kind)
+        && !matches!(
+            kind,
+            // Division may trap, and a Theta has no value outside its loop.
+            SymKind::Div
+                | SymKind::UDiv
+                | SymKind::SRem
+                | SymKind::URem
+                | SymKind::Theta
+                | SymKind::StateAssign
+                | SymKind::StateStore
+                | SymKind::StateStoreConditional
+                | SymKind::StateFence
+                | SymKind::StateTrap
+                | SymKind::StateBlock
+                | SymKind::StateIf
+                | SymKind::StateTry
+                | SymKind::StateHandler
+        )
+}
+
 /// Whether `class` may bind under `pattern_node` in a value match, before the
 /// per-block narrowing: boundary constraints (register / immediate / width), and
 /// interior nodes restricted to pure or function-wide op-root, non-shared classes
@@ -2280,89 +2422,50 @@ fn assert_fact(context: &Context, egraph: &mut SemEGraph, expr: &ConditionExpr, 
     }
 }
 
-/// Bridge each guard condition class to the `zext(0b0, W)` zero shape the
-/// TMDL-derived zero-compare branch rules match — arm64 `cbz`/`cbnz` and the
-/// RISC-V `beq/bne … x0` zero-forms — so a branch fuses without materializing the
-/// zero:
-///
-/// * a bare 1-bit condition `c` (no comparison to fuse) gains `Ne(c, zext(0b0,
-///   1))`, trivially true for a 1-bit value; a bare leaf never matches the rules'
-///   `Ne(x, ZExt(0, W))` root;
-/// * a comparison against a proven-zero constant `Cmp(a, 0)` gains `Cmp(a,
-///   zext(0b0, W))`, the zero operand replaced so the surviving operand binds
-///   from the match while the zero wires to the hardwired-zero register.
-///
-/// Injected after saturation and only into guard-condition classes, so no
-/// unrelated class gains a spurious member; a target with no matching zero-form
-/// rule leaves the extra member unmatched and falls back as before.
-///
-/// CF-structural — kept, not an axiom (plan §2, no-escape-hatch/plan.md §1.5).
-/// Both shapes are true value equivalences, but the trigger is *structural
-/// position* ("this class is a branch guard"), which an e-matcher cannot key
-/// on: the bare-condition case would have to match every 1-bit class in the
-/// function, and the zero-compare case would inject the synthetic `zext(0)`
-/// into every `Cmp(a, 0)` rather than only guards — global e-graph bloat whose
-/// only purpose is `cbz`/`beq-x0` fusion at branches. It belongs here as a
-/// targeted post-saturation injection, not a saturation axiom.
-fn bridge_zero_branch_guards(
+/// Give a bare one-bit guard the same nonzero comparison term used by target
+/// zero-register branch rules. Comparison guards gain their zero-register forms
+/// from the target-independent axioms; only a leaf condition needs this seed
+/// because a self-referential global axiom interacts pathologically with the
+/// boolean `*-via-if` saturation rules.
+fn seed_bare_condition_terms(
     context: &Context,
     egraph: &mut SemEGraph,
-    guards: &HashMap<BlockId, Vec<BlockGuard>>,
+    control: &HashMap<BlockId, Vec<ControlReification>>,
 ) {
     let i1 = tir::builtin::IntegerType::new(context, 1);
-    // A fresh `zext(0b0, _)`: the width operand is a wildcard in the matching
-    // rules, so any constant serves as its placeholder.
-    let zext_zero = |egraph: &mut SemEGraph| {
+    for guard in control
+        .values()
+        .flatten()
+        .filter_map(ControlReification::guard)
+    {
+        let class = egraph.find(guard.class);
+        if class_width(context, egraph, class) != Some(1)
+            || egraph
+                .nodes(class)
+                .iter()
+                .any(|node| is_comparison(node.kind))
+        {
+            continue;
+        }
         let zero = egraph.add(template_node(
             SymKind::Constant,
             Some(SymPayload::Int(APInt::new(1, 0))),
             None,
         ));
-        let one = egraph.add(template_node(
+        // The zext width operand is a wildcard in the matching rules, so any
+        // constant serves as its placeholder.
+        let width = egraph.add(template_node(
             SymKind::Constant,
             Some(SymPayload::Int(APInt::new(1, 1))),
             None,
         ));
         let mut zext = template_node(SymKind::ZExt, None, None);
-        zext.children = vec![zero, one];
-        egraph.add(zext)
-    };
-    for guard in guards.values().flatten() {
-        let class = egraph.find(guard.class);
-        let comparisons: Vec<(SymKind, Option<TypeId>, Vec<Id>)> = egraph
-            .nodes(class)
-            .iter()
-            .filter(|n| is_comparison(n.kind))
-            .map(|n| (n.kind, n.ty, n.children.clone()))
-            .collect();
-
-        // Case 1: a bare 1-bit condition with no comparison to fuse.
-        if comparisons.is_empty() && class_width(context, egraph, class) == Some(1) {
-            let zext = zext_zero(egraph);
-            let mut ne = template_node(SymKind::Ne, None, Some(i1));
-            ne.children = vec![class, zext];
-            let ne = egraph.add(ne);
-            egraph.union(class, ne);
-        }
-
-        // Case 2: a comparison against a proven-zero constant operand.
-        for (kind, ty, children) in comparisons {
-            if children.len() != 2 {
-                continue;
-            }
-            for slot in 0..2 {
-                let operand = egraph.find(children[slot]);
-                if !matches!(class_int_binding(egraph, operand), Some(v) if v.to_u64() == 0) {
-                    continue;
-                }
-                let zext = zext_zero(egraph);
-                let mut replaced = template_node(kind, None, ty);
-                replaced.children = children.iter().map(|&c| egraph.find(c)).collect();
-                replaced.children[slot] = zext;
-                let replaced = egraph.add(replaced);
-                egraph.union(class, replaced);
-            }
-        }
+        zext.children = vec![zero, width];
+        let zext = egraph.add(zext);
+        let mut ne = template_node(SymKind::Ne, None, Some(i1));
+        ne.children = vec![class, zext];
+        let ne = egraph.add(ne);
+        egraph.union(class, ne);
     }
     egraph.rebuild();
 }
@@ -2375,7 +2478,7 @@ fn bridge_zero_branch_guards(
 ///
 /// * the injected `add` is a true value equivalence (`0 + C == C` at any
 ///   width), and the `zext(0b0, W)` zero is the same shape the branch
-///   zero-guard bridge and the derived zero-form rules already share;
+///   zero-comparison axioms and the derived zero-form rules already share;
 /// * only classes whose constant lands in a materializer's `ImmRange` gain the
 ///   member, so a wide constant keeps its bare class and selects through the
 ///   materialize decomposition axioms into a shift/add chain instead.
@@ -2383,11 +2486,11 @@ fn bridge_zero_branch_guards(
 /// Runs over every constant class, not just program-`constant` roots: the
 /// materialize axioms decompose a wide constant into narrower ones, and each
 /// narrowed constant that finally fits the immediate must gain the li form to
-/// be covered. Structural, not an axiom (same standard as
-/// [`bridge_zero_branch_guards`]): the equivalence is universally true, but the
-/// trigger is target immediate-range membership, decided from the rule set — a
-/// saturation axiom would need the range as a value guard yet compute nothing
-/// new. It belongs here as a targeted post-saturation injection.
+/// be covered. Structural, not an axiom (same standard as the zero-comparison
+/// guard seed): the equivalence is universally true, but the trigger is target
+/// immediate-range membership, decided from the rule set — a saturation axiom
+/// would need the range as a value guard yet compute nothing new. It belongs
+/// here as a targeted post-saturation injection.
 fn bridge_constant_materializers(egraph: &mut SemEGraph, ranges: &[ImmRange]) {
     if ranges.is_empty() {
         return;

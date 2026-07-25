@@ -209,6 +209,35 @@ fn block_argument_diamond() {
 }
 
 #[test]
+fn loop_carried_block_argument() {
+    let ir = r#"
+        module {
+          func @count(%limit: !i64) -> !i64 {
+            %zero = constant {value = 0} : !i64
+            br ^bb1(%zero : !i64)
+          ^bb1(%iv: !i64):
+            %keep_going = cmpi %iv, %limit {predicate = "slt"} : !i1
+            cond_br %keep_going, ^bb2, ^bb3
+          ^bb2:
+            %one = constant {value = 1} : !i64
+            %next = addi %iv, %one : !i64
+            br ^bb1(%next : !i64)
+          ^bb3:
+            return %iv
+          }
+          module_end
+        }
+    "#;
+
+    let jit = Jit::host().expect("host target");
+    let module = jit.compile(ir).expect("compile");
+    let count: extern "C" fn(i64) -> i64 = unsafe { module.get("count") }.expect("count symbol");
+    assert_eq!(count(0), 0);
+    assert_eq!(count(5), 5);
+    assert_eq!(count(23), 23);
+}
+
+#[test]
 fn conditional_edge_arguments() {
     // The arms' forwarded values ride the conditional branch's own edges. The
     // true edge is split into a trampoline block during selection; the false

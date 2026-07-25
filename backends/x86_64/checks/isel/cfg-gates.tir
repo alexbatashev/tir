@@ -1,0 +1,41 @@
+// RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s
+
+// A pure gamma may select through cmov when its two-instruction cmp+cmov rule
+// is cheaper than preserving the edge assignments. A trapping arm must retain
+// the CFG path and cannot gain a cmov value rule.
+
+module {
+  func @pure(%c: !i64, %d: !i64, %a: !i64, %b: !i64, %z: !i64) -> !i64 {
+    %cond = cmpi %c, %d {predicate = "slt"} : !i1
+    cond_br %cond, ^bb1, ^bb2
+  ^bb1:
+    br ^bb3(%a : !i64)
+  ^bb2:
+    br ^bb3(%b : !i64)
+  ^bb3(%selected: !i64):
+    %result = addi %selected, %z : !i64
+    return %result
+  }
+
+  func @trapping(%c: !i64, %d: !i64, %a: !i64, %b: !i64, %z: !i64) -> !i64 {
+    %cond = cmpi %c, %d {predicate = "slt"} : !i1
+    cond_br %cond, ^bb1, ^bb2
+  ^bb1:
+    br ^bb3(%a : !i64)
+  ^bb2:
+    %quotient = divsi %b, %z : !i64
+    br ^bb3(%quotient : !i64)
+  ^bb3(%selected: !i64):
+    %result = addi %selected, %z : !i64
+    return %result
+  }
+  module_end
+}
+
+// CHECK:      asm.symbol {name = "pure"
+// CHECK:      ^bb3(
+// CHECK:      x86_64.cmovl
+
+// CHECK:      asm.symbol {name = "trapping"
+// CHECK-NOT:  x86_64.cmov
+// CHECK:      x86_64.signed_divide

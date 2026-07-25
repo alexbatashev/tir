@@ -347,6 +347,7 @@ fn emit(graph: &ExprPostGraph, node: NodeId, r: &Resolver<'_>, b: &mut Btor2) ->
             Some(b.ite(below, min, hi, input.signed))
         }
         ExprKind::LoadMemory
+        | ExprKind::Theta
         | ExprKind::StoreMemory
         | ExprKind::Sqrt
         | ExprKind::Fma

@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use tir::{
     Context, MemoryRead, MemoryWrite, OpId, OpInstance, TypeId, ValueId,
+    analysis::{GSA, GateNode},
     attributes::AttributeValue,
     builtin::{FloatType, IntegerType},
     graph::{Dag, MetaDag, NodeId},
@@ -24,6 +25,7 @@ use super::node::{
 pub(crate) struct SemDagBuilder<'a> {
     context: &'a Context,
     value_to_def: &'a HashMap<ValueId, OpId>,
+    gsa: &'a GSA,
     egraph: &'a mut SemEGraph,
     /// The e-class built for each already-lowered IR value (operand sharing / CSE).
     pub(crate) value_to_class: HashMap<ValueId, Id>,
@@ -35,11 +37,13 @@ impl<'a> SemDagBuilder<'a> {
     pub(crate) fn new(
         context: &'a Context,
         value_to_def: &'a HashMap<ValueId, OpId>,
+        gsa: &'a GSA,
         egraph: &'a mut SemEGraph,
     ) -> Self {
         Self {
             context,
             value_to_def,
+            gsa,
             egraph,
             value_to_class: HashMap::new(),
             opaque_serial: 0,
@@ -250,7 +254,26 @@ impl<'a> SemDagBuilder<'a> {
         }
 
         let value_ty = Some(self.context.get_value(value).ty());
-        let class = if let Some(def_op_id) = self.value_to_def.get(&value).copied() {
+        let gsa = self.gsa;
+        let gate = gsa
+            .node_of(value)
+            .and_then(|node| Some((*gsa.gate(node), gsa.inputs_of(value)?)));
+        let class = if let Some((GateNode::Gamma { .. }, inputs)) = gate {
+            let children = inputs
+                .iter()
+                .map(|&input| self.build_from_value(input))
+                .collect();
+            self.add_op(SymKind::If, children, value_ty)
+        } else if let Some((GateNode::Mu { .. }, inputs)) = gate {
+            let placeholder = self.add_input_value(value, value_ty);
+            self.value_to_class.insert(value, placeholder);
+            let children = inputs
+                .iter()
+                .map(|&input| self.build_from_value(input))
+                .collect();
+            let theta = self.add_op(SymKind::Theta, children, value_ty);
+            self.egraph.union(placeholder, theta)
+        } else if let Some(def_op_id) = self.value_to_def.get(&value).copied() {
             let def = self.context.get_op(def_op_id);
             if def.is::<crate::builtin::ConstantOp>() {
                 self.constant_class(&def, value, value_ty)

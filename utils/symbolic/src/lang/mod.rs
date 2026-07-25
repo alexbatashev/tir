@@ -53,6 +53,10 @@ pub enum SymKind {
     /// Arguments are condition, then branch, else branch
     // #[arity = 3]
     If,
+    /// Loop-carried value: `[init, next]`, where `next` may reference this
+    /// node's e-class recursively.
+    // #[arity = 2]
+    Theta,
     // #[arity = 3]
     Clamp,
     /// Args: address, bytes read, metadata. Metadata is nonsemantic; `SExt`/`ZExt` model signedness.

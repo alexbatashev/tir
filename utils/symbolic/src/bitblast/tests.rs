@@ -517,6 +517,54 @@ mod fp {
         assert!(bridge_holds(64), "uitofp(x) == sitofp(zext(x, 64))");
     }
 
+    fn converts_from(kind: SymKind, value: f64, width: u32, expected: u64) -> bool {
+        let mut g = G::new();
+        let input = con(&mut g, value.to_bits(), 64);
+        let width_node = con(&mut g, width as u64, 7);
+        let converted = op(&mut g, kind, &[input, width_node]);
+        let want = con(&mut g, expected, width);
+        op(&mut g, SymKind::Ne, &[converted, want]);
+        let widths = infer_widths(&g, |_| None);
+        matches!(blast(&g, &widths).unwrap().solve(), SolveOutcome::Unsat)
+    }
+
+    #[test]
+    fn float_to_integer_truncates_defined_values() {
+        assert!(converts_from(SymKind::FPToUI, 0.5, 32, 0));
+        assert!(converts_from(
+            SymKind::FPToUI,
+            4_294_967_295.0,
+            32,
+            u32::MAX as u64
+        ));
+        assert!(converts_from(SymKind::FPToSI, -42.75, 64, (-42i64) as u64));
+        assert!(converts_from(SymKind::FPToSI, 42.75, 32, 42));
+    }
+
+    #[test]
+    fn unsigned_32_bridges_to_signed_64_over_its_defined_domain() {
+        let mut g = G::new();
+        let input = sym(&mut g, 0);
+        let width_32 = con(&mut g, 32, 7);
+        let unsigned = op(&mut g, SymKind::FPToUI, &[input, width_32]);
+        let width_64 = con(&mut g, 64, 7);
+        let signed = op(&mut g, SymKind::FPToSI, &[input, width_64]);
+        let hi = con(&mut g, 31, 6);
+        let lo = con(&mut g, 0, 1);
+        let low_signed = op(&mut g, SymKind::Extract, &[signed, hi, lo]);
+        op(&mut g, SymKind::Ne, &[unsigned, low_signed]);
+        let widths = infer_widths(&g, |id| match g.get_leaf_data(id) {
+            Some(SymPayload::SymbolId(_)) => Some(64),
+            _ => None,
+        });
+        let blasted = blast(&g, &widths).unwrap();
+
+        assert!(matches!(
+            blasted.solve_defined_equivalence(unsigned, low_signed),
+            SolveOutcome::Unsat
+        ));
+    }
+
     #[test]
     fn no_extend_is_unsound_for_high_bit_inputs() {
         // Extending to 32 (a no-op) leaves the sign bit interpreted, so the
