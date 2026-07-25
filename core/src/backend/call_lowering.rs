@@ -170,13 +170,35 @@ impl CallLowering {
         op: &OperationRef,
         rewriter: &mut Rewriter,
     ) -> Result<bool, PassError> {
-        let (callee, args, result) = if let Some(call) = op.as_op::<CallOp>() {
-            (Callee::Direct(call.callee()), call.args(), call.result())
-        } else if let Some(call) = op.as_op::<IndirectCallOp>() {
-            (Callee::Indirect(call.callee()), call.args(), call.result())
+        let (callee, mut args, result, has_result_address) =
+            if let Some(call) = op.as_op::<CallOp>() {
+                (
+                    Callee::Direct(call.callee()),
+                    call.args(),
+                    call.result(),
+                    call.has_result_address(),
+                )
+            } else if let Some(call) = op.as_op::<IndirectCallOp>() {
+                (
+                    Callee::Indirect(call.callee()),
+                    call.args(),
+                    call.result(),
+                    false,
+                )
+            } else {
+                return Ok(false);
+            };
+        let result_address = if has_result_address {
+            if args.is_empty() {
+                return Err(PassError::InvalidRuleSet(
+                    "result-address call has no destination argument".to_string(),
+                ));
+            }
+            Some(args.remove(0))
         } else {
-            return Ok(false);
+            None
         };
+        let argument_offset = usize::from(result_address.is_some());
 
         let mut tuple_arguments = Vec::new();
         let mut lowered_arguments = Vec::with_capacity(args.len());
@@ -191,7 +213,7 @@ impl CallLowering {
             }
             if let Some(elements) = self
                 .tuple_argument_elements
-                .get(&(op.op().id, argument_index))
+                .get(&(op.op().id, argument_index + argument_offset))
             {
                 lowered_arguments.push(elements.clone());
                 continue;
@@ -275,6 +297,14 @@ impl CallLowering {
             Callee::Direct(_) => None,
             Callee::Indirect(value) => Some(detach(rewriter, value, indirect_class)?),
         };
+        let fresh_result_address = result_address
+            .map(|value| {
+                let register = self.abi.indirect_result.ok_or_else(|| {
+                    PassError::InvalidRuleSet("ABI has no result-address register".to_string())
+                })?;
+                detach(rewriter, value, register.0).map(|fresh| (fresh, register))
+            })
+            .transpose()?;
         let mut fresh_args = Vec::with_capacity(argument_values.len());
         for (&arg, location) in argument_values.iter().zip(&argument_locations) {
             fresh_args.push(detach(rewriter, arg, location.class())?);
@@ -303,6 +333,14 @@ impl CallLowering {
                     rewriter.insert_op_before(op, store.as_ref())?;
                 }
             }
+        }
+        if let Some((fresh, register)) = fresh_result_address {
+            let copy = self.emitter.copy(
+                context,
+                physical_reg(register),
+                virtual_reg(fresh, register.0),
+            );
+            rewriter.insert_op_before(op, copy.as_ref())?;
         }
 
         let saved_ra = if let Some(ra) = self.abi.ra {

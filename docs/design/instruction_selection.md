@@ -153,6 +153,12 @@ Grouped function arguments retain an ordered array of scalar virtual registers
 in `asm.symbol.arg_regs`, which lets register allocation assign the whole ABI
 group transactionally or place every member on the stack.
 
+A result-address function or call carries its destination as the first ordinary
+pointer argument. Function lowering records that value separately from
+`arg_regs`; call lowering likewise removes it from the normal argument sequence.
+Register allocation and call emission then use the ABI's target-described
+result-address register. No result-address operation enters the semantic graph.
+
 ### Side tables produced by the build
 
 The tables are function-wide and **multi-valued**: a class may root ops in several

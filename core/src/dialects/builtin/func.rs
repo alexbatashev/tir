@@ -3,13 +3,14 @@ use crate::builtin::UnitType;
 use crate::operation;
 
 use crate as tir;
-use crate::Terminator;
+use crate::{Context, Error, Operation, Terminator};
 
 operation! {
     FuncOp {
         name: "func",
         dialect: "builtin",
         format: "custom",
+        verifier: "true",
         attributes: A {
             sym_name: "Str",
             ret_type: "Type",
@@ -33,9 +34,35 @@ impl FuncOpBuilder {
     pub fn ret_type(self, ty: tir::TypeId) -> Self {
         self.attr("ret_type", tir::attributes::AttributeValue::Type(ty))
     }
+
+    pub fn result_address(self) -> Self {
+        self.attr(
+            "result_address",
+            tir::attributes::AttributeValue::Bool(true),
+        )
+    }
 }
 
 impl FuncOp {
+    pub fn has_result_address(&self) -> bool {
+        self.attributes().iter().any(|attribute| {
+            attribute.name == "result_address"
+                && attribute.value == tir::attributes::AttributeValue::Bool(true)
+        })
+    }
+
+    pub fn ret_type(&self) -> tir::TypeId {
+        self.attributes()
+            .iter()
+            .find_map(|attribute| match attribute.value {
+                tir::attributes::AttributeValue::Type(ty) if attribute.name == "ret_type" => {
+                    Some(ty)
+                }
+                _ => None,
+            })
+            .expect("func must carry ret_type")
+    }
+
     fn custom_print(&self, fmt: &mut tir::IRFormatter) -> Result<(), std::fmt::Error> {
         use tir::Operation;
 
@@ -71,19 +98,14 @@ impl FuncOp {
         fmt.write(")")?;
 
         // Print return type
-        let ret_type = self
-            .attributes()
-            .iter()
-            .find(|a| a.name == "ret_type")
-            .map(|a| match &a.value {
-                tir::attributes::AttributeValue::Type(ty) => *ty,
-                _ => panic!("ret_type must be a type"),
-            })
-            .unwrap_or_else(|| UnitType::new(&context));
+        let ret_type = self.ret_type();
 
         if ret_type != UnitType::new(&context) {
             fmt.write(" -> ")?;
             context.print_type(ret_type, fmt)?;
+        }
+        if self.has_result_address() {
+            fmt.write(" result_address")?;
         }
 
         tir::region_format::print_op_region(fmt, &context, self, 0)?;
@@ -147,16 +169,48 @@ impl FuncOp {
         } else {
             UnitType::new(context)
         };
+        let result_address = parser.parse_token("result_address");
 
         // Parse body region { ... }
         let body_region = parser.parse_region_with_entry_args(context, block_args)?;
 
-        let builder = FuncOpBuilder::new(context)
+        let mut builder = FuncOpBuilder::new(context)
             .sym_name(&sym_name)
             .ret_type(ret_type)
             .body(body_region.id());
+        if result_address {
+            builder = builder.result_address();
+        }
 
         Ok(Box::new(builder.build()))
+    }
+}
+
+impl tir::Verifiable for FuncOp {
+    fn verify_impl(&self, context: &Context) -> Result<(), Error> {
+        if !self.has_result_address() {
+            return Ok(());
+        }
+        if self.ret_type() != UnitType::new(context) {
+            return Err(Error::VerificationError(
+                "result-address function must return unit".to_string(),
+            ));
+        }
+        let Some(argument) = self.body().arguments().first().cloned() else {
+            return Err(Error::VerificationError(
+                "result-address function requires a destination argument".to_string(),
+            ));
+        };
+        let ty = context.get_type_data(argument.ty());
+        if (ty.as_ref() as &dyn std::any::Any)
+            .downcast_ref::<crate::ptr::PtrType>()
+            .is_none()
+        {
+            return Err(Error::VerificationError(
+                "result-address function destination must have pointer type".to_string(),
+            ));
+        }
+        Ok(())
     }
 }
 

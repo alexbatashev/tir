@@ -41,7 +41,22 @@ pub fn lower_function_and_return(
             .unwrap_or_else(|| "unknown".to_string());
         let mut tuple_extracts = Vec::new();
         let mut arguments = Vec::new();
-        for argument in func.body().arguments() {
+        let function_arguments = func.body().arguments().to_vec();
+        let mut function_arguments = function_arguments.into_iter();
+        let result_address = if func.has_result_address() {
+            let argument = function_arguments.next().ok_or_else(|| {
+                PassError::InvalidRuleSet(
+                    "result-address function has no destination argument".to_string(),
+                )
+            })?;
+            Some(AttributeValue::Register(RegisterAttr::Virtual {
+                id: argument.id().number(),
+                class: Some(argument_class(argument.ty())?),
+            }))
+        } else {
+            None
+        };
+        for argument in function_arguments {
             let ty = context.get_type_data(argument.ty());
             let Some(tuple) = (ty.as_ref() as &dyn std::any::Any).downcast_ref::<TupleType>()
             else {
@@ -92,11 +107,14 @@ pub fn lower_function_and_return(
                 .collect::<Result<Vec<_>, PassError>>()?;
             arguments.push(AttributeValue::Array(group));
         }
-        let symbol = super::SymbolOpBuilder::new(context)
+        let mut symbol = super::SymbolOpBuilder::new(context)
             .body(op.op().regions[0])
             .attr("name", AttributeValue::Str(name))
-            .attr("arg_regs", AttributeValue::Array(arguments))
-            .build();
+            .attr("arg_regs", AttributeValue::Array(arguments));
+        if let Some(result_address) = result_address {
+            symbol = symbol.attr("result_address", result_address);
+        }
+        let symbol = symbol.build();
         rewriter.replace_op(op, &symbol)?;
         for (extract, block) in tuple_extracts {
             rewriter.erase_op(&OperationRef::new(
