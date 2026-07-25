@@ -117,6 +117,17 @@ struct AbiRegisterUsage {
 }
 
 impl AbiRegisterUsage {
+    fn reserve_indirect_result(&mut self, target: TargetProfile) {
+        let Some((kind, slot)) = target.indirect_result_argument_slots() else {
+            return;
+        };
+        match kind {
+            ValueKind::Int => self.integers = self.integers.max(slot),
+            ValueKind::Float => self.floats = self.floats.max(slot),
+            ValueKind::Vector => {}
+        }
+    }
+
     fn align_group(
         &mut self,
         context: &Context,
@@ -573,8 +584,15 @@ fn lower_signature(
     let AstLeaf::Function { .. } = ast.get_leaf_data(item).unwrap() else {
         unreachable!("function-like node carries a function payload");
     };
+    let ret = match typed.types().kind(node_type(typed, item)) {
+        TypeKind::Function { ret, .. } => classify_abi_return(context, typed, *ret),
+        _ => unreachable!("function node has function semantic type"),
+    };
     let mut params = Vec::new();
     let mut register_usage = AbiRegisterUsage::default();
+    if ret.indirect {
+        register_usage.reserve_indirect_result(typed.target());
+    }
     let mut varargs = false;
     for child in ast.children(item) {
         match ast.get_node(child).kind {
@@ -593,10 +611,7 @@ fn lower_signature(
     Ok((
         node_entity(typed, item),
         Signature {
-            ret: match typed.types().kind(node_type(typed, item)) {
-                TypeKind::Function { ret, .. } => classify_abi_return(context, typed, *ret),
-                _ => unreachable!("function node has function semantic type"),
-            },
+            ret,
             params,
             varargs,
         },
@@ -626,7 +641,7 @@ fn classify_abi_return(context: &Context, typed: &TypedAst, ty: QualType) -> Abi
             indirect: false,
         };
     }
-    if typed.target().uses_aapcs64_abi()
+    if (typed.target().uses_aapcs64_abi() || typed.target().uses_riscv_abi())
         && matches!(typed.types().kind(ty), TypeKind::Record(_))
         && source_type_layout(typed, ty).0 > 16
     {

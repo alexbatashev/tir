@@ -95,6 +95,19 @@ pub struct AbiInfo {
     pub classifier: ClassifierKind,
 }
 
+impl AbiInfo {
+    pub fn indirect_result_argument_slots(&self) -> Option<(ValueKind, usize)> {
+        let register = self.indirect_result?;
+        self.args.iter().find_map(|sequence| {
+            sequence
+                .regs
+                .iter()
+                .position(|candidate| *candidate == register)
+                .map(|slot| (sequence.kind, slot + 1))
+        })
+    }
+}
+
 pub(crate) fn align_argument_group(
     abi: &AbiInfo,
     source_alignment: u64,
@@ -115,20 +128,11 @@ pub(crate) fn reserve_indirect_result_argument(
     abi: &AbiInfo,
     next_slot: &mut HashMap<ValueKind, usize>,
 ) {
-    let Some(register) = abi.indirect_result else {
+    let Some((kind, slot)) = abi.indirect_result_argument_slots() else {
         return;
     };
-    let Some((sequence, slot)) = abi.args.iter().find_map(|sequence| {
-        sequence
-            .regs
-            .iter()
-            .position(|candidate| *candidate == register)
-            .map(|slot| (sequence, slot))
-    }) else {
-        return;
-    };
-    let next = next_slot.entry(sequence.kind).or_default();
-    *next = (*next).max(slot + 1);
+    let next = next_slot.entry(kind).or_default();
+    *next = (*next).max(slot);
 }
 
 pub(crate) fn exhaust_argument_registers(

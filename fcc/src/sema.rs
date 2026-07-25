@@ -81,6 +81,7 @@ pub struct TargetProfile {
     float_argument_registers: usize,
     float_argument_overflow: Overflow,
     argument_group_alignment: Option<ArgumentGroupAlignment>,
+    indirect_result_argument_slots: Option<(ValueKind, usize)>,
 }
 
 impl TargetProfile {
@@ -100,6 +101,7 @@ impl TargetProfile {
                 float_argument_registers: 0,
                 float_argument_overflow: Overflow::Stack,
                 argument_group_alignment: None,
+                indirect_result_argument_slots: None,
             })
         } else if normalized.starts_with("riscv64")
             || normalized.starts_with("rv64")
@@ -117,6 +119,7 @@ impl TargetProfile {
                 float_argument_registers: 0,
                 float_argument_overflow: Overflow::Stack,
                 argument_group_alignment: None,
+                indirect_result_argument_slots: None,
             })
         } else if normalized.starts_with("arm64") || normalized.starts_with("aarch64") {
             Ok(Self {
@@ -127,6 +130,7 @@ impl TargetProfile {
                 float_argument_registers: 0,
                 float_argument_overflow: Overflow::Stack,
                 argument_group_alignment: None,
+                indirect_result_argument_slots: None,
             })
         } else {
             Err(format!("no C data model for target '{march}'"))
@@ -154,6 +158,7 @@ impl TargetProfile {
                 sequence.overflow
             });
         profile.argument_group_alignment = abi.argument_group_alignment;
+        profile.indirect_result_argument_slots = abi.indirect_result_argument_slots();
         Ok(profile)
     }
 
@@ -214,6 +219,10 @@ impl TargetProfile {
         self.argument_group_alignment.map_or(slot, |alignment| {
             alignment.align_slot(kind, source_alignment, slot)
         })
+    }
+
+    pub(crate) fn indirect_result_argument_slots(self) -> Option<(ValueKind, usize)> {
+        self.indirect_result_argument_slots
     }
 }
 
@@ -360,6 +369,7 @@ pub fn analyze(ast: Ast, options: LangOptions) -> Result<TypedAst, Vec<Diagnosti
         float_argument_registers: 0,
         float_argument_overflow: Overflow::Stack,
         argument_group_alignment: None,
+        indirect_result_argument_slots: None,
     });
     analyze_with_target(ast, options, target)
 }
