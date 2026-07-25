@@ -63,6 +63,22 @@ pub struct PassSeq {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArgumentGroupAlignment {
+    pub kind: ValueKind,
+    pub minimum_source_alignment: u64,
+    pub register_multiple: usize,
+}
+
+impl ArgumentGroupAlignment {
+    pub fn align_slot(self, kind: ValueKind, source_alignment: u64, slot: usize) -> usize {
+        if kind != self.kind || source_alignment < self.minimum_source_alignment {
+            return slot;
+        }
+        slot.div_ceil(self.register_multiple) * self.register_multiple
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AbiInfo {
     pub name: &'static str,
     pub stack: StackLayout,
@@ -70,12 +86,29 @@ pub struct AbiInfo {
     pub ra: Option<PhysReg>,
     pub fp: Option<PhysReg>,
     pub indirect_result: Option<PhysReg>,
+    pub argument_group_alignment: Option<ArgumentGroupAlignment>,
     pub args: &'static [PassSeq],
     pub rets: &'static [PassSeq],
     pub callee_saved: &'static [PhysReg],
     pub caller_saved: &'static [PhysReg],
     pub reserved: &'static [PhysReg],
     pub classifier: ClassifierKind,
+}
+
+pub(crate) fn align_argument_group(
+    abi: &AbiInfo,
+    source_alignment: u64,
+    kinds: impl IntoIterator<Item = ValueKind>,
+    next_slot: &mut HashMap<ValueKind, usize>,
+) {
+    let Some(alignment) = abi.argument_group_alignment else {
+        return;
+    };
+    if !kinds.into_iter().any(|kind| kind == alignment.kind) {
+        return;
+    }
+    let slot = next_slot.entry(alignment.kind).or_default();
+    *slot = alignment.align_slot(alignment.kind, source_alignment, *slot);
 }
 
 pub(crate) fn exhaust_argument_registers(

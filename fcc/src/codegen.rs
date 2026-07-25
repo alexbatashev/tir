@@ -94,6 +94,7 @@ struct AbiParameter {
     pieces: Vec<AbiPiece>,
     grouped: bool,
     indirect: bool,
+    alignment: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -116,6 +117,29 @@ struct AbiRegisterUsage {
 }
 
 impl AbiRegisterUsage {
+    fn align_group(
+        &mut self,
+        context: &Context,
+        target: TargetProfile,
+        source_alignment: u64,
+        pieces: &[AbiPiece],
+    ) {
+        for kind in [ValueKind::Int, ValueKind::Float] {
+            if !pieces
+                .iter()
+                .any(|piece| type_kind(context, piece.ty) == kind)
+            {
+                continue;
+            }
+            let slot = match kind {
+                ValueKind::Int => &mut self.integers,
+                ValueKind::Float => &mut self.floats,
+                ValueKind::Vector => unreachable!(),
+            };
+            *slot = target.align_argument_slot(kind, source_alignment, *slot);
+        }
+    }
+
     fn has_direct_registers(
         &self,
         context: &Context,
@@ -161,7 +185,17 @@ impl AbiRegisterUsage {
         if self.has_direct_registers(context, target, pieces) {
             self.consume(context, target, pieces);
         } else {
-            self.floats = target.argument_registers(ValueKind::Float);
+            for piece in pieces {
+                match type_kind(context, piece.ty) {
+                    ValueKind::Int => {
+                        self.integers = target.argument_registers(ValueKind::Int);
+                    }
+                    ValueKind::Float => {
+                        self.floats = target.argument_registers(ValueKind::Float);
+                    }
+                    ValueKind::Vector => {}
+                }
+            }
         }
     }
 }
@@ -186,6 +220,21 @@ impl Signature {
             args.push(VarArgsType::new(context));
         }
         args
+    }
+
+    fn argument_alignments(&self) -> Vec<u64> {
+        let mut alignments = Vec::new();
+        if self.ret.indirect {
+            alignments.push(1);
+        }
+        for parameter in &self.params {
+            if parameter.grouped {
+                alignments.push(parameter.alignment);
+            } else {
+                alignments.extend(std::iter::repeat_n(1, parameter.pieces.len()));
+            }
+        }
+        alignments
     }
 }
 
@@ -609,6 +658,7 @@ fn classify_abi_parameter(
             pieces,
             grouped: false,
             indirect: true,
+            alignment: 1,
         };
     }
     let composite_pieces = hfa_pieces
@@ -640,7 +690,21 @@ fn classify_abi_parameter(
             ty: lower_type(context, typed, ty),
         }]
     });
+    let source_alignment = source_type_layout(typed, ty).1;
+    let alignment = if grouped
+        && pieces.iter().any(|piece| {
+            let kind = type_kind(context, piece.ty);
+            typed
+                .target()
+                .align_argument_slot(kind, source_alignment, 1)
+                != 1
+        }) {
+        source_alignment
+    } else {
+        1
+    };
     if grouped {
+        register_usage.align_group(context, typed.target(), alignment, &pieces);
         register_usage.consume_group(context, typed.target(), &pieces);
     } else {
         register_usage.consume(context, typed.target(), &pieces);
@@ -649,6 +713,7 @@ fn classify_abi_parameter(
         pieces,
         grouped,
         indirect: false,
+        alignment,
     }
 }
 
@@ -915,6 +980,10 @@ fn lower_function(
     let mut func_builder = b::func(context, name.as_str(), signature.ret.ty, Some(region.id()));
     if signature.ret.indirect {
         func_builder = func_builder.result_address();
+    }
+    let argument_alignments = signature.argument_alignments();
+    if argument_alignments.iter().any(|&alignment| alignment > 1) {
+        func_builder = func_builder.argument_alignments(&argument_alignments);
     }
     let func_op = func_builder.build();
     let indirect_return = signature.ret.indirect.then(|| param_ids[0]);
@@ -2502,12 +2571,20 @@ impl FnCodegen<'_> {
                     };
                     let sig = self.signatures[&node_entity(self.typed, node)].clone();
                     let mut args = Vec::new();
+                    let mut argument_alignments = Vec::new();
                     for (index, argument) in ast.children(node).enumerate() {
                         let expression = self.values[&argument];
                         if let Some(parameter) = sig.params.get(index) {
                             args.extend(self.lower_abi_argument(argument, expression, parameter)?);
+                            if parameter.grouped {
+                                argument_alignments.push(parameter.alignment);
+                            } else {
+                                argument_alignments
+                                    .extend(std::iter::repeat_n(1, parameter.pieces.len()));
+                            }
                         } else {
                             args.push(self.materialize(expression));
+                            argument_alignments.push(1);
                         }
                     }
                     let source_ty = node_type(self.typed, node);
@@ -2516,23 +2593,29 @@ impl FnCodegen<'_> {
                         let (size, align) = source_type_layout(self.typed, source_ty);
                         let slot = self.alloca(elem, size, align);
                         args.insert(0, slot.ptr);
-                        self.builder.insert(
-                            b::CallOpBuilder::new(self.context)
-                                .args(args)
-                                .attr("callee", AttributeValue::Str(name.clone()))
-                                .result_address()
-                                .result_type(UnitType::new(self.context))
-                                .build(),
-                        );
+                        argument_alignments.insert(0, 1);
+                        let mut call = b::CallOpBuilder::new(self.context)
+                            .args(args)
+                            .attr("callee", AttributeValue::Str(name.clone()))
+                            .result_address()
+                            .result_type(UnitType::new(self.context));
+                        if argument_alignments.iter().any(|&alignment| alignment > 1) {
+                            call = call.argument_alignments(&argument_alignments);
+                        }
+                        self.builder.insert(call.build());
                         LoweredExpr::Address {
                             ptr: slot.ptr,
                             elem,
                         }
                     } else {
-                        let result = self
-                            .builder
-                            .insert(b::call(self.context, args, name.as_str(), sig.ret.ty).build())
-                            .result();
+                        let mut call = b::CallOpBuilder::new(self.context)
+                            .args(args)
+                            .attr("callee", AttributeValue::Str(name.clone()))
+                            .result_type(sig.ret.ty);
+                        if argument_alignments.iter().any(|&alignment| alignment > 1) {
+                            call = call.argument_alignments(&argument_alignments);
+                        }
+                        let result = self.builder.insert(call.build()).result();
                         if let Some(pieces) = sig.ret.aggregate.as_deref() {
                             let (size, align) = source_type_layout(self.typed, source_ty);
                             let (abi_size, abi_align) = abi_storage_layout(self.context, pieces)

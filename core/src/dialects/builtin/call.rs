@@ -36,6 +36,10 @@ impl CallOp {
         has_result_address(self)
     }
 
+    pub fn argument_alignments(&self) -> Vec<u64> {
+        super::argument_alignments(self)
+    }
+
     fn custom_print(&self, fmt: &mut tir::IRFormatter) -> Result<(), std::fmt::Error> {
         let context = self.0.context.upgrade();
         let header = format!("call @{}", self.callee());
@@ -46,6 +50,7 @@ impl CallOp {
             self.result(),
             &self.args(),
             self.has_result_address(),
+            &self.argument_alignments(),
         )
     }
 
@@ -61,6 +66,7 @@ impl CallOp {
         let args = parse_arg_list(parser, context)?;
         let ret_type = parse_ret_type(parser, context)?;
         let result_address = parser.parse_token("result_address");
+        let argument_alignments = super::parse_argument_alignments(parser, context)?;
 
         let mut builder = CallOpBuilder::new(context)
             .args(args)
@@ -68,6 +74,9 @@ impl CallOp {
             .result_type(ret_type);
         if result_address {
             builder = builder.result_address();
+        }
+        if let Some(argument_alignments) = argument_alignments {
+            builder = builder.attr("argument_alignments", argument_alignments);
         }
         Ok(Box::new(builder.build()))
     }
@@ -77,10 +86,24 @@ impl CallOpBuilder {
     pub fn result_address(self) -> Self {
         self.attr("result_address", AttributeValue::Bool(true))
     }
+
+    pub fn argument_alignments(self, alignments: &[u64]) -> Self {
+        self.attr(
+            "argument_alignments",
+            AttributeValue::Array(
+                alignments
+                    .iter()
+                    .copied()
+                    .map(AttributeValue::UInt)
+                    .collect(),
+            ),
+        )
+    }
 }
 
 impl tir::Verifiable for CallOp {
     fn verify_impl(&self, context: &Context) -> Result<(), Error> {
+        super::verify_argument_alignments(self, self.args().len(), "call")?;
         if !self.has_result_address() {
             return Ok(());
         }
@@ -134,7 +157,15 @@ impl IndirectCallOp {
     fn custom_print(&self, fmt: &mut tir::IRFormatter) -> Result<(), std::fmt::Error> {
         let context = self.0.context.upgrade();
         let header = format!("indirect_call %{}", self.callee().number());
-        print_call(&context, fmt, &header, self.result(), &self.args(), false)
+        print_call(
+            &context,
+            fmt,
+            &header,
+            self.result(),
+            &self.args(),
+            false,
+            &[],
+        )
     }
 
     fn custom_parse(
@@ -173,6 +204,7 @@ fn print_call(
     result: ValueId,
     args: &[ValueId],
     result_address: bool,
+    argument_alignments: &[u64],
 ) -> Result<(), std::fmt::Error> {
     let ret_type = context.get_value(result).ty();
     let is_unit = ret_type == UnitType::new(context);
@@ -207,6 +239,7 @@ fn print_call(
     if result_address {
         fmt.write(" result_address")?;
     }
+    super::print_argument_alignments(fmt, argument_alignments)?;
     fmt.write("\n")
 }
 

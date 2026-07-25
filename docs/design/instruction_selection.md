@@ -151,7 +151,10 @@ an intervening `make_tuple`. Selection therefore sees ordinary scalar values;
 no tuple machine operation or target-specific lowering rule is introduced.
 Grouped function arguments retain an ordered array of scalar virtual registers
 in `asm.symbol.arg_regs`, which lets register allocation assign the whole ABI
-group transactionally or place every member on the stack.
+group transactionally or place every member on the stack. The source alignment
+of a group is preserved with that array. A target ABI may use it to align the
+next register slot before assigning the group; alignment never creates an IR
+argument or a machine value.
 
 A result-address function or call carries its destination as the first ordinary
 pointer argument. Function lowering records that value separately from

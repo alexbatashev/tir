@@ -141,6 +141,7 @@ fn ptx_regalloc_abi() -> &'static tir::backend::abi::AbiInfo {
             ra: None,
             fp: None,
             indirect_result: None,
+            argument_group_alignment: None,
             args: Box::leak(
                 vec![PassSeq {
                     kind: ValueKind::Int,
