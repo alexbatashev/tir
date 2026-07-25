@@ -2,8 +2,8 @@
 
 // LMUL legalization: a vec<8xi32> is 256 bits, two registers at the guaranteed
 // minimum VLEN of 128, so its values live in the VRM2 group class. Arguments
-// take aligned group registers (v8m2, v10m2 -- the psABI vector convention),
-// the result returns in v8m2, and vtypei packs e32/m2/ta/ma = 209. Group
+// take aligned group registers (v8, v10 -- the psABI vector convention),
+// the result returns in v8, and vtypei packs e32/m2/ta/ma = 209. Group
 // operands still print as their base register (the architecturally encoded
 // number).
 

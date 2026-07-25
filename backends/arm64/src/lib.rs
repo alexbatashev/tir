@@ -352,7 +352,7 @@ impl tir::backend::regalloc::TargetRegAlloc for Arm64RegAlloc {
         src: u32,
     ) -> Box<dyn Operation> {
         match class.name() {
-            "GPR" => mv(
+            "GPR" | "GPRsp" => mv(
                 context,
                 virt(dst, RegClass::GPR.id()),
                 virt(src, RegClass::GPR.id()),
@@ -1103,6 +1103,15 @@ mod tests {
             o: i64,
         ) -> Box<dyn Operation> {
             self.0.emit_spill_reload(c, v, class, f, o)
+        }
+        fn emit_copy(
+            &self,
+            c: &tir::Context,
+            class: tir::backend::regalloc::RegClassId,
+            dst: u32,
+            src: u32,
+        ) -> Box<dyn Operation> {
+            self.0.emit_copy(c, class, dst, src)
         }
         fn emit_prologue(
             &self,

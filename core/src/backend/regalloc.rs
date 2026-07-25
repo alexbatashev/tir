@@ -220,6 +220,13 @@ pub struct AllocConfig<'a> {
 /// assignment is read back from the PBQP solution. If the optimum spills any vreg,
 /// the spilled set is returned so the caller can lower it and retry.
 pub fn allocate(config: &AllocConfig) -> Result<AllocResult, RegAllocError> {
+    allocate_with_affinities(config, &[])
+}
+
+fn allocate_with_affinities(
+    config: &AllocConfig,
+    affinities: &[(u32, u32)],
+) -> Result<AllocResult, RegAllocError> {
     let AllocConfig {
         info,
         abi,
@@ -278,6 +285,20 @@ pub fn allocate(config: &AllocConfig) -> Result<AllocResult, RegAllocError> {
         }
     }
 
+    for &(u, v) in affinities {
+        let (Some(&iu), Some(&iv)) = (node_of.get(&u), node_of.get(&v)) else {
+            continue;
+        };
+        if iu == iv {
+            continue;
+        }
+        problem.add_edge(
+            PbqpNodeId::from_index(iu),
+            PbqpNodeId::from_index(iv),
+            affinity_matrix(&alternatives[iu], &alternatives[iv]),
+        );
+    }
+
     let solution = pbqp::solve(&problem).map_err(|e| RegAllocError::Solver(format!("{e:?}")))?;
 
     let mut assignment = HashMap::new();
@@ -296,6 +317,20 @@ pub fn allocate(config: &AllocConfig) -> Result<AllocResult, RegAllocError> {
     } else {
         Ok(AllocResult::Spill(spilled))
     }
+}
+
+fn affinity_matrix(left: &[Alternative], right: &[Alternative]) -> PbqpMatrix {
+    let mut matrix = PbqpMatrix::zero(left.len(), right.len());
+    for (i, l) in left.iter().enumerate() {
+        for (j, r) in right.iter().enumerate() {
+            if let (Alternative::Phys(lp), Alternative::Phys(rp)) = (l, r)
+                && lp.0.span(lp.1) != rp.0.span(rp.1)
+            {
+                matrix.set(i, j, 1);
+            }
+        }
+    }
+    matrix
 }
 
 /// Determine the register class a virtual register must be allocated from: its
@@ -597,6 +632,7 @@ impl Pass for RegisterAllocationPass {
             &blocks,
             fixed_precolor,
         )?;
+        let affinities: Vec<_> = abi.copies.iter().map(|copy| (copy.src, copy.dst)).collect();
 
         let mut frame = FrameState::new(self.abi.stack.slot_size);
         let stack_allocas = collect_stack_allocas(context, &blocks, &mut frame);
@@ -622,13 +658,16 @@ impl Pass for RegisterAllocationPass {
                 }
             };
 
-            let result = allocate(&AllocConfig {
-                info: &info,
-                abi: self.abi,
-                liveness: &liveness,
-                precolor: &abi.precolor,
-                spill_cost: &spill_cost,
-            })
+            let result = allocate_with_affinities(
+                &AllocConfig {
+                    info: &info,
+                    abi: self.abi,
+                    liveness: &liveness,
+                    precolor: &abi.precolor,
+                    spill_cost: &spill_cost,
+                },
+                &affinities,
+            )
             .map_err(|e| PassError::InvalidRuleSet(format!("register allocation failed: {e:?}")))?;
 
             match result {
@@ -645,6 +684,15 @@ impl Pass for RegisterAllocationPass {
             }
         };
 
+        for copy in &abi.copies {
+            let (Some(src), Some(dst)) = (assignment.get(&copy.src), assignment.get(&copy.dst))
+            else {
+                continue;
+            };
+            if src.0.span(src.1) == dst.0.span(dst.1) && context.has_operation(copy.op) {
+                rewriter.erase_op(&op_ref_in(context, copy.block, copy.op))?;
+            }
+        }
         rewrite_registers(context, &blocks, &assignment);
 
         // Preserve the callee-saved registers the allocation used for this
@@ -1299,20 +1347,23 @@ fn sequence_parallel_copies(
     result
 }
 
-/// Compute the calling-convention pre-coloring: each argument register pinned in
-/// order, and the returned value pinned to the first return register.
+/// Compute calling-convention pre-coloring at function entry and returns.
 ///
-/// A physical-register constraint applies at a program point, not to a whole live
-/// range: an argument register pins the value at entry, a return register pins it
-/// at the `vret`. When the same vreg carries both constraints with *different*
-/// registers (e.g. an identity function whose argument register differs from the
-/// return register), pinning it twice would silently overwrite one constraint and
-/// miscompile. Such a return is broken with a copy (`fresh <- vreg`) inserted
-/// before the `vret`, so the argument keeps its entry pin while `fresh` takes the
-/// return pin. This mutates the IR, so it runs once, outside the spill loop.
+/// Register arguments are copied from pinned entry temporaries into free body
+/// vregs. Each return is copied into a fresh vreg pinned at its `vret`. ABI
+/// registers are point constraints, so they must not pin an entire SSA live
+/// range across calls. This mutates the IR and runs once outside the spill loop.
 struct AbiPrecolor {
     precolor: HashMap<u32, PhysReg>,
     stack_args: Vec<IncomingStackArg>,
+    copies: Vec<AbiCopy>,
+}
+
+struct AbiCopy {
+    block: BlockId,
+    op: OpId,
+    src: u32,
+    dst: u32,
 }
 
 struct IncomingStackArg {
@@ -1398,6 +1449,7 @@ fn abi_precolor(
 ) -> Result<AbiPrecolor, PassError> {
     let mut precolor: HashMap<u32, PhysReg> = fixed_precolor;
     let mut stack_args = Vec::new();
+    let mut copies = Vec::new();
 
     // Argument vregs: the symbol's `arg_regs` attribute carries each argument's
     // register class (assigned by the target's function lowering, e.g. vectors
@@ -1411,9 +1463,13 @@ fn abi_precolor(
         .op()
         .attributes
         .iter()
-        .find(|a| a.name == "arg_regs")
-        .map(|a| &a.value)
+        .find(|attribute| attribute.name == "arg_regs")
+        .map(|attribute| &attribute.value)
     {
+        let entry = blocks
+            .first()
+            .and_then(|block| context.get_block(*block).op_ids().first().copied())
+            .map(|first| op_ref_in(context, blocks[0], first));
         for attr in args {
             let AttributeValue::Register(RegisterAttr::Virtual { id, class }) = attr else {
                 continue;
@@ -1424,11 +1480,37 @@ fn abi_precolor(
             let kind = abi_value_kind(context, *id);
             let pin = next_abi_register(abi, rc, kind, &mut next_abi_slot);
             if let Some(pin) = pin {
-                if let Some(prev) = precolor.insert(*id, pin)
+                let incoming = *id;
+                let ty = context.get_value(ValueId::from_number(incoming)).ty();
+                let body = context.create_value(ty, None).id().number();
+                for &block_id in blocks {
+                    for op_id in context.get_block(block_id).op_ids() {
+                        rename_attr(context, op_id, incoming, body, RoleClass::Read);
+                    }
+                }
+                context
+                    .replace_value_uses(ValueId::from_number(incoming), ValueId::from_number(body));
+                let copy = target.emit_copy(context, pin.0, body, incoming);
+                let copy_id = copy.id();
+                rewriter.insert_op_before(
+                    entry.as_ref().ok_or_else(|| {
+                        PassError::InvalidRuleSet(
+                            "function with register arguments has no entry operation".to_string(),
+                        )
+                    })?,
+                    copy.as_ref(),
+                )?;
+                copies.push(AbiCopy {
+                    block: blocks[0],
+                    op: copy_id,
+                    src: incoming,
+                    dst: body,
+                });
+                if let Some(prev) = precolor.insert(incoming, pin)
                     && prev != pin
                 {
                     return Err(PassError::InvalidRuleSet(format!(
-                        "argument vreg {id} pinned to conflicting registers {prev:?} and {pin:?}"
+                        "argument vreg {incoming} pinned to conflicting registers {prev:?} and {pin:?}"
                     )));
                 }
             } else {
@@ -1471,32 +1553,27 @@ fn abi_precolor(
                 register
             };
 
-            match precolor.get(&vreg) {
-                // Already pinned to exactly the return register (or returned by
-                // several `vret`s): nothing to do.
-                Some(existing) if *existing == ret_pin => {}
-                // Pinned elsewhere (an argument register): break the point
-                // conflict with a copy into a fresh vreg that takes the return
-                // pin, and retarget the `vret` at it.
-                Some(_) => {
-                    let ty = context.get_value(value).ty();
-                    let fresh = context.create_value(ty, None).id().number();
-                    let copy = target.emit_copy(context, rc, fresh, vreg);
-                    let op_ref = op_ref_in(context, block_id, op_id);
-                    rewriter.insert_op_before(&op_ref, copy.as_ref())?;
-                    context.set_op_operand(op_id, 0, ValueId::from_number(fresh));
-                    precolor.insert(fresh, ret_pin);
-                }
-                None => {
-                    precolor.insert(vreg, ret_pin);
-                }
-            }
+            let ty = context.get_value(value).ty();
+            let outgoing = context.create_value(ty, None).id().number();
+            let copy = target.emit_copy(context, rc, outgoing, vreg);
+            let copy_id = copy.id();
+            let op_ref = op_ref_in(context, block_id, op_id);
+            rewriter.insert_op_before(&op_ref, copy.as_ref())?;
+            context.set_op_operand(op_id, 0, ValueId::from_number(outgoing));
+            precolor.insert(outgoing, ret_pin);
+            copies.push(AbiCopy {
+                block: block_id,
+                op: copy_id,
+                src: vreg,
+                dst: outgoing,
+            });
         }
     }
 
     Ok(AbiPrecolor {
         precolor,
         stack_args,
+        copies,
     })
 }
 

@@ -820,6 +820,30 @@ impl tir::backend::regalloc::TargetRegAlloc for RiscvRegAlloc {
                     .attr("fs", virt(src, RegClass::FPR64.id()))
                     .build(),
             ),
+            "VR" => Box::new(
+                VMove1ROpBuilder::new(context)
+                    .attr("vd", virt(dst, class))
+                    .attr("vs", virt(src, class))
+                    .build(),
+            ),
+            "VRM2" => Box::new(
+                VMove2ROpBuilder::new(context)
+                    .attr("vd", virt(dst, class))
+                    .attr("vs", virt(src, class))
+                    .build(),
+            ),
+            "VRM4" => Box::new(
+                VMove4ROpBuilder::new(context)
+                    .attr("vd", virt(dst, class))
+                    .attr("vs", virt(src, class))
+                    .build(),
+            ),
+            "VRM8" => Box::new(
+                VMove8ROpBuilder::new(context)
+                    .attr("vd", virt(dst, class))
+                    .attr("vs", virt(src, class))
+                    .build(),
+            ),
             other => unimplemented!("riscv register copy for class {other} is not implemented"),
         }
     }
@@ -2174,6 +2198,15 @@ mod tests {
         ) -> Box<dyn Operation> {
             self.0.emit_spill_reload(c, v, class, f, o)
         }
+        fn emit_copy(
+            &self,
+            c: &tir::Context,
+            class: tir::backend::regalloc::RegClassId,
+            dst: u32,
+            src: u32,
+        ) -> Box<dyn Operation> {
+            self.0.emit_copy(c, class, dst, src)
+        }
         fn emit_prologue(
             &self,
             c: &tir::Context,
@@ -2338,6 +2371,15 @@ mod tests {
             o: i64,
         ) -> Box<dyn Operation> {
             self.0.emit_spill_reload(c, v, class, f, o)
+        }
+        fn emit_copy(
+            &self,
+            c: &tir::Context,
+            class: tir::backend::regalloc::RegClassId,
+            dst: u32,
+            src: u32,
+        ) -> Box<dyn Operation> {
+            self.0.emit_copy(c, class, dst, src)
         }
         fn emit_prologue(
             &self,

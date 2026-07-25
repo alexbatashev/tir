@@ -85,22 +85,22 @@ register_class VRM2 for [RVV] {
     param WIDTH: Integer = VCSR::vlenb;
 
     registers {
-        v0m2 => { index = 0 },
-        v2m2 => { index = 2 },
-        v4m2 => { index = 4 },
-        v6m2 => { index = 6 },
-        v8m2 => { index = 8 },
-        v10m2 => { index = 10 },
-        v12m2 => { index = 12 },
-        v14m2 => { index = 14 },
-        v16m2 => { index = 16 },
-        v18m2 => { index = 18 },
-        v20m2 => { index = 20 },
-        v22m2 => { index = 22 },
-        v24m2 => { index = 24 },
-        v26m2 => { index = 26 },
-        v28m2 => { index = 28 },
-        v30m2 => { index = 30 },
+        v0 => { index = 0 },
+        v2 => { index = 2 },
+        v4 => { index = 4 },
+        v6 => { index = 6 },
+        v8 => { index = 8 },
+        v10 => { index = 10 },
+        v12 => { index = 12 },
+        v14 => { index = 14 },
+        v16 => { index = 16 },
+        v18 => { index = 18 },
+        v20 => { index = 20 },
+        v22 => { index = 22 },
+        v24 => { index = 24 },
+        v26 => { index = 26 },
+        v28 => { index = 28 },
+        v30 => { index = 30 },
     }
 }
 
@@ -111,14 +111,14 @@ register_class VRM4 for [RVV] {
     param WIDTH: Integer = VCSR::vlenb;
 
     registers {
-        v0m4 => { index = 0 },
-        v4m4 => { index = 4 },
-        v8m4 => { index = 8 },
-        v12m4 => { index = 12 },
-        v16m4 => { index = 16 },
-        v20m4 => { index = 20 },
-        v24m4 => { index = 24 },
-        v28m4 => { index = 28 },
+        v0 => { index = 0 },
+        v4 => { index = 4 },
+        v8 => { index = 8 },
+        v12 => { index = 12 },
+        v16 => { index = 16 },
+        v20 => { index = 20 },
+        v24 => { index = 24 },
+        v28 => { index = 28 },
     }
 }
 
@@ -129,10 +129,10 @@ register_class VRM8 for [RVV] {
     param WIDTH: Integer = VCSR::vlenb;
 
     registers {
-        v0m8 => { index = 0 },
-        v8m8 => { index = 8 },
-        v16m8 => { index = 16 },
-        v24m8 => { index = 24 },
+        v0 => { index = 0 },
+        v8 => { index = 8 },
+        v16 => { index = 16 },
+        v24 => { index = 24 },
     }
 }
 
@@ -220,6 +220,50 @@ instruction VSetIVli for [RVV] {
 
     schedule { units = [WriteIALU]; }
 }
+
+macro whole_register_moves {
+    ( $( ( $name:ident, $mnemonic:literal, $class:ident, $nfields:literal ) ),* ) => {
+        $( instruction $name for [RVV] {
+            param MNEMONIC: String = $mnemonic;
+            param OPCODE: bits<7> = 0b1010111;
+            param FUNCT3: bits<3> = 0b011;
+            param NFIELDS: bits<5> = $nfields;
+            param FUNCT6: bits<6> = 0b100111;
+
+            operands {
+                vd: $class,
+                vs: $class,
+            }
+
+            encoding {
+                0..6 => OPCODE,
+                7..11 => vd,
+                12..14 => FUNCT3,
+                15..19 => NFIELDS,
+                20..24 => vs,
+                25 => 0b1,
+                26..31 => FUNCT6,
+            }
+
+            asm {
+                "{self.MNEMONIC} {vd}, {vs}"
+            }
+
+            behavior {
+                vd = vs;
+            }
+
+            schedule { units = [WriteIALU]; }
+        } )*
+    };
+}
+
+whole_register_moves!(
+    (VMove1R, "vmv1r.v", VR, 0),
+    (VMove2R, "vmv2r.v", VRM2, 1),
+    (VMove4R, "vmv4r.v", VRM4, 3),
+    (VMove8R, "vmv8r.v", VRM8, 7)
+)
 
 // OP-V, vector-vector (OPIVV) form: `op.vv vd, vs2, vs1`.
 template VArithVV for [RVV] {
