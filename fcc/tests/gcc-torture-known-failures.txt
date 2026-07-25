@@ -32,12 +32,10 @@ compile/20010226-1.c
 compile/20010313-1.c
 compile/20010326-1.c
 compile/20010328-1.c
-compile/20010329-1.c
 compile/20010408-1.c
 compile/20010423-1.c
 compile/20010518-1.c
 compile/20010605-1.c
-compile/20010605-2.c
 compile/20010610-1.c
 compile/20010611-1.c
 compile/20010903-1.c
@@ -121,7 +119,6 @@ compile/20040323-1.c
 compile/20040611-1.c
 compile/20040614-1.c
 compile/20040621-1.c
-compile/20040709-1.c
 compile/20040907-1.c
 compile/20040909-1.c
 compile/20041005-1.c
@@ -146,7 +143,6 @@ compile/20060109-1.c
 compile/20060202-1.c
 compile/20060208-1.c
 compile/20060217-1.c
-compile/20060419-1.c
 compile/20060421-1.c
 compile/20060609-1.c
 compile/20060625-1.c
@@ -178,8 +174,6 @@ compile/20081119-1.c
 compile/20090107-1.c
 compile/20090303-1.c
 compile/20090303-2.c
-compile/20090328-1.c
-compile/20090721-1.c
 compile/20090907-1.c
 compile/20090917-1.c
 compile/20091215-1.c
@@ -196,7 +190,6 @@ compile/20121107-1.c
 compile/20121220-1.c
 compile/20161123-1.c
 compile/20190827-1.c
-compile/20200313-1.c
 compile/386.c
 compile/86.c
 compile/900116-1.c
@@ -207,7 +200,6 @@ compile/900516-1.c
 compile/920301-1.c
 compile/920409-2.c
 compile/920410-1.c
-compile/920413-1.c
 compile/920415-1.c
 compile/920428-1.c
 compile/920428-2.c
@@ -300,7 +292,6 @@ compile/930527-1.c
 compile/930529-1.c
 compile/930530-1.c
 compile/930602-1.c
-compile/930603-1.c
 compile/930607-1.c
 compile/930611-1.c
 compile/930618-1.c
@@ -468,7 +459,6 @@ compile/calls-void.c
 compile/calls.c
 compile/cc.c
 compile/cmb.c
-compile/cmp.c
 compile/cmpsi386.c
 compile/cmul.c
 compile/comb.c
@@ -542,7 +532,6 @@ compile/limits-idinternal.c
 compile/limits-stringlit.c
 compile/limits-structmem.c
 compile/limits-structnest.c
-compile/llbug.c
 compile/lll.c
 compile/load8.c
 compile/loadhicc.c
@@ -613,7 +602,6 @@ compile/pr110266.c
 compile/pr110271.c
 compile/pr110334.c
 compile/pr110386-2.c
-compile/pr110705-1.c
 compile/pr110874-a.c
 compile/pr111059-10.c
 compile/pr111059-11.c
@@ -768,11 +756,8 @@ compile/pr40080.c
 compile/pr40252.c
 compile/pr40321.c
 compile/pr40351.c
-compile/pr40432.c
-compile/pr40582.c
 compile/pr40797.c
 compile/pr41181.c
-compile/pr41282.c
 compile/pr41469.c
 compile/pr41634.c
 compile/pr41728.c
@@ -791,7 +776,6 @@ compile/pr42632.c
 compile/pr42703.c
 compile/pr42716.c
 compile/pr42717.c
-compile/pr42730.c
 compile/pr42956.c
 compile/pr43066.c
 compile/pr43164.c
@@ -813,7 +797,6 @@ compile/pr44686.c
 compile/pr44707.c
 compile/pr44784.c
 compile/pr45109.c
-compile/pr45728.c
 compile/pr46107.c
 compile/pr46360.c
 compile/pr46534.c
@@ -926,7 +909,6 @@ compile/pr84195.c
 compile/pr84960.c
 compile/pr85401.c
 compile/pr85704.c
-compile/pr85945.c
 compile/pr86122.c
 compile/pr86123.c
 compile/pr86637-2.c
@@ -1061,7 +1043,6 @@ execute/20000402-1.c
 execute/20000412-1.c
 execute/20000412-5.c
 execute/20000519-1.c
-execute/20000603-1.c
 execute/20000605-1.c
 execute/20000605-2.c
 execute/20000703-1.c
@@ -1270,7 +1251,6 @@ execute/20170401-2.c
 execute/20171008-1.c
 execute/20180131-1.c
 execute/20180921-1.c
-execute/20181120-1.c
 execute/20190820-1.c
 execute/20190901-1.c
 execute/20191023-1.c
@@ -1457,7 +1437,6 @@ execute/990531-1.c
 execute/990628-1.c
 execute/990804-1.c
 execute/990826-0.c
-execute/991014-1.c
 execute/991112-1.c
 execute/991201-1.c
 execute/991202-2.c
@@ -1481,8 +1460,6 @@ execute/builtin-bitops-1.c
 execute/builtin-prefetch-1.c
 execute/builtin-prefetch-2.c
 execute/builtin-types-compatible-p.c
-execute/builtins/20010124-1-lib.c
-execute/builtins/20010124-1.c
 execute/builtins/abs-2-lib.c
 execute/builtins/abs-3-lib.c
 execute/builtins/complex-1-lib.c
@@ -1743,7 +1720,6 @@ execute/pr125291.c
 execute/pr15262-1.c
 execute/pr15262.c
 execute/pr15296.c
-execute/pr19687.c
 execute/pr20601-1.c
 execute/pr22061-1.c
 execute/pr22061-2.c
@@ -1830,7 +1806,6 @@ execute/pr42154.c
 execute/pr42231.c
 execute/pr42248.c
 execute/pr42269-2.c
-execute/pr42691.c
 execute/pr42833.c
 execute/pr43008.c
 execute/pr43220.c
@@ -1957,7 +1932,6 @@ execute/pr84524.c
 execute/pr84748.c
 execute/pr85156.c
 execute/pr85169.c
-execute/pr86492.c
 execute/pr86528.c
 execute/pr86659-1.c
 execute/pr86659-2.c
@@ -2075,5 +2049,4 @@ execute/widechar-2.c
 execute/widechar-3.c
 execute/zero-struct-1.c
 execute/zero-struct-2.c
-execute/zerolen-1.c
 execute/zerolen-2.c
