@@ -162,6 +162,7 @@ pub fn solve(problem: &PbqpProblem) -> Result<PbqpSolution, PbqpSolveError> {
     Solver::new(problem.clone()).solve(problem)
 }
 
+#[derive(Clone)]
 struct Solver {
     problem: PbqpProblem,
     active: Vec<bool>,
@@ -204,7 +205,7 @@ impl Solver {
                 0 => self.reduce_fixed(node)?,
                 1 => self.reduce_r1(node)?,
                 2 => self.reduce_r2(node)?,
-                _ => self.reduce_rn(node)?,
+                _ => return self.solve_rn(node, original),
             }
             // The reductions read edge costs directly via `edge_cost`, so a global
             // re-normalization pass per step is redundant; only feasibility needs
@@ -526,8 +527,26 @@ impl Solver {
         Ok(())
     }
 
-    fn reduce_rn(&mut self, node: usize) -> Result<(), PbqpSolveError> {
-        let alternative = self.locally_cheapest_alternative(node)?;
+    fn solve_rn(
+        &self,
+        node: usize,
+        original: &PbqpProblem,
+    ) -> Result<PbqpSolution, PbqpSolveError> {
+        for alternative in self.locally_ordered_alternatives(node)? {
+            let mut branch = self.clone();
+            branch.reduce_rn(node, alternative);
+            match branch.solve(original) {
+                Ok(solution) => return Ok(solution),
+                Err(PbqpSolveError::Infeasible { .. }) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Err(PbqpSolveError::Infeasible {
+            node: PbqpNodeId::from_index(node),
+        })
+    }
+
+    fn reduce_rn(&mut self, node: usize, alternative: usize) {
         for neighbor in self.neighbors(node) {
             for neighbor_alt in 0..self.problem.node_costs[neighbor].len() {
                 let cost = self.edge_cost(node, alternative, neighbor, neighbor_alt);
@@ -539,7 +558,6 @@ impl Solver {
         self.remove_incident_edges(node);
         self.active[node] = false;
         self.reductions.push(Reduction::Fixed { node, alternative });
-        Ok(())
     }
 
     fn cheapest_alternative(&self, node: usize) -> Result<usize, PbqpSolveError> {
@@ -554,9 +572,9 @@ impl Solver {
             })
     }
 
-    fn locally_cheapest_alternative(&self, node: usize) -> Result<usize, PbqpSolveError> {
+    fn locally_ordered_alternatives(&self, node: usize) -> Result<Vec<usize>, PbqpSolveError> {
         let neighbors = self.neighbors(node);
-        self.problem.node_costs[node]
+        let mut alternatives: Vec<(usize, u64)> = self.problem.node_costs[node]
             .iter()
             .enumerate()
             .filter(|(_, cost)| **cost < INF_COST)
@@ -578,11 +596,17 @@ impl Solver {
                 });
                 (alternative, add_cost(base, edge_costs))
             })
-            .min_by_key(|(alternative, cost)| (*cost, *alternative))
-            .map(|(alternative, _)| alternative)
-            .ok_or(PbqpSolveError::Infeasible {
+            .collect();
+        if alternatives.is_empty() {
+            return Err(PbqpSolveError::Infeasible {
                 node: PbqpNodeId::from_index(node),
-            })
+            });
+        }
+        alternatives.sort_by_key(|(alternative, cost)| (*cost, *alternative));
+        Ok(alternatives
+            .into_iter()
+            .map(|(alternative, _)| alternative)
+            .collect())
     }
 
     fn edge_cost(&self, lhs: usize, lhs_alt: usize, rhs: usize, rhs_alt: usize) -> u64 {
@@ -814,6 +838,24 @@ mod tests {
         problem.add_edge(center, c, prefer_alt_one);
 
         let solution = solve(&problem).expect("PBQP should be solvable");
+        assert_eq!(solution.choices[center.index()], 1);
+        assert_eq!(solution.total_cost, 1);
+    }
+
+    #[test]
+    fn rn_backtracks_when_local_choice_is_globally_infeasible() {
+        let mut problem = PbqpProblem::new();
+        let center = problem.add_node(vec![0, 1]);
+        let left = problem.add_node(vec![0, 0]);
+        let right = problem.add_node(vec![0, 0]);
+        let third = problem.add_node(vec![0, 0]);
+        let same_choice = PbqpMatrix::new(2, 2, vec![0, INF_COST, INF_COST, 0]);
+        problem.add_edge(center, left, same_choice.clone());
+        problem.add_edge(center, right, same_choice.clone());
+        problem.add_edge(center, third, same_choice);
+        problem.add_edge(left, right, PbqpMatrix::new(2, 2, vec![INF_COST, 0, 0, 0]));
+
+        let solution = solve(&problem).expect("PBQP should try the feasible Rn alternative");
         assert_eq!(solution.choices[center.index()], 1);
         assert_eq!(solution.total_cost, 1);
     }

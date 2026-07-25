@@ -428,10 +428,12 @@ nodes. The compatibility matrix sets `INF_COST` for incoherent pairs and asks
 For a higher-degree node its Rₙ heuristic chooses the alternative with the
 lowest target-instruction cost plus the cheapest compatible alternative at
 each neighbor; compatibility alone is insufficient because it would ignore
-introduced materializer instructions. Reconstruction produces a `ClassCover`
-(one chosen alternative per class). If every assignment violates a boundary
-or coherence requirement, selection reports an infeasible cover; it never
-falls back to an empty plan that leaves the original operations unselected.
+introduced materializer instructions. If that locally preferred branch makes
+the remaining problem infeasible, the solver tries the other alternatives in
+the same cost order. Reconstruction produces a `ClassCover` (one chosen
+alternative per class). If every assignment violates a boundary or coherence
+requirement, selection reports an infeasible cover; it never falls back to an
+empty plan that leaves the original operations unselected.
 
 An `If`-rooted value rule is offered only when both its structural pattern and
 the matched γ arm classes are speculatable. Division, remainder, memory,
