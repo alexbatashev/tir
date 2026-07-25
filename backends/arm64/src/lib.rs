@@ -225,7 +225,20 @@ impl tir::backend::call_lowering::CallEmitter for Arm64CallEmitter {
         dst: tir::attributes::AttributeValue,
         src: tir::attributes::AttributeValue,
     ) -> Box<dyn Operation> {
-        mv(context, dst, src)
+        let class = match &dst {
+            tir::attributes::AttributeValue::Register(register) => register.class(),
+            _ => None,
+        };
+        if class == Some(RegClass::FPR64.id()) {
+            Box::new(
+                FMoveRegisterDoubleOpBuilder::new(context)
+                    .attr("fd", dst)
+                    .attr("fa", src)
+                    .build(),
+            )
+        } else {
+            mv(context, dst, src)
+        }
     }
 
     fn stack_arg_store(
