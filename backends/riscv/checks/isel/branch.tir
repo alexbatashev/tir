@@ -85,7 +85,7 @@ module {
     %2 = constant {value = 0} : !i64
     return %2
   }
-  // A bare i1 condition has no comparison to fuse: the bridge rewrites it to
+  // A bare i1 condition has no comparison to fuse: the guard seed rewrites it to
   // `%0 != 0`, which the derived `bne … x0` zero-form selects against the
   // hardwired zero register.
   // CHECK: asm.symbol {name = "fallback"

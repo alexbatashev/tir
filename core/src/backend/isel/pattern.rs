@@ -7,9 +7,12 @@ use tir::{
     graph::{Dag, MetaDag, NodeId, OperandConstraint},
     sem::{SemGraph, SemType, SymKind, SymPayload, TypeUnifier, infer_types},
 };
-use tir_symbolic::egraph::{Id, Pattern, PatternNode, Var};
+use tir_symbolic::egraph::{EMatch, Id, Pattern, PatternNode, Substitution, Var};
 
-use super::node::{SemEGraph, SemNode, class_int_binding, class_semantic_type};
+use super::node::{
+    SemEGraph, SemNode, class_int_binding, class_semantic_type, low_extract_source,
+    low_extract_width,
+};
 use super::{ImmRange, RegisterRequirement};
 
 /// A rule's pattern compiled for e-matching: the [`Pattern`] itself plus the
@@ -25,6 +28,7 @@ pub(crate) struct CompiledIselPattern {
     /// untyped `add`/`and` still match every other width.
     pub(crate) specificity: usize,
     result_register: Option<RegisterRequirement>,
+    copy: bool,
 }
 
 /// Per-pattern-node matching metadata.
@@ -59,6 +63,10 @@ impl PatternNodeMeta {
 }
 
 impl CompiledIselPattern {
+    pub(crate) fn is_copy(&self) -> bool {
+        self.copy
+    }
+
     pub(crate) fn capture_meta(&self, symbol: u32) -> Option<&PatternNodeMeta> {
         (0..self.pattern.len()).find_map(|index| {
             let node = Id::from_raw(index as u32);
@@ -185,10 +193,52 @@ impl CompiledIselPattern {
         ctx: &Context,
         allowed: &dyn Fn(Id, Id) -> bool,
     ) -> Vec<tir_symbolic::egraph::EMatch<u32>> {
+        if self.copy {
+            return self.search_low_bit_copies(egraph, ctx);
+        }
         self.pattern
             .search_with_legality(egraph, allowed)
             .into_iter()
             .filter(|matched| self.match_types(egraph, ctx, matched))
+            .collect()
+    }
+
+    /// A copy rule roots on the low-bit `Extract` view of a wider class, binding
+    /// its bare symbol to the view's source — rooting on the source class itself
+    /// would make the copy self-referential.
+    fn search_low_bit_copies(&self, egraph: &SemEGraph, ctx: &Context) -> Vec<EMatch<u32>> {
+        let root_node = self.pattern.root();
+        let PatternNode::Var(var @ Var::Symbol(_)) = self.pattern.node(root_node) else {
+            unreachable!("copy pattern is a bare symbol")
+        };
+        let meta = &self.node_meta[root_node.index()];
+        if meta.constraint == Some(OperandConstraint::Immediate) {
+            return Vec::new();
+        }
+        egraph
+            .classes()
+            .filter_map(|class| {
+                let root = egraph.find(class.id());
+                let source = low_extract_source(egraph, root)?;
+                let width = low_extract_width(egraph, root)?;
+                let source_ty = class_semantic_type(ctx, egraph, source)?;
+                let writes_the_view = self.result_register.is_some_and(|register| {
+                    register.capability.integer && register.capability.width == width
+                });
+                let reads_the_source = meta
+                    .register
+                    .is_none_or(|register| register.accepts_low_view_source(&source_ty));
+                if !writes_the_view || !reads_the_source {
+                    return None;
+                }
+                let mut subst = Substitution::new();
+                subst.insert(var.clone(), source);
+                Some(EMatch {
+                    root,
+                    subst,
+                    bindings: vec![Some(source)],
+                })
+            })
             .collect()
     }
 }
@@ -226,12 +276,10 @@ pub(crate) fn compile_isel_pattern(
         node_meta[pattern_value.index()].materialized_constant = true;
     }
 
-    // A pattern that is a bare operand symbol — a register-to-register copy like
-    // x86 `mov dst, src` — selects nothing: it would match every e-class as
-    // "compute x by copying x", rooting a self-referential instruction.
-    if pattern.len() == 1 && node_meta[0].is_boundary {
-        return None;
-    }
+    // A bare register-to-register copy cannot root on its own operand class
+    // without becoming self-referential. It instead materializes a low-bit
+    // Extract view, binding the copy source to the Extract's wider operand.
+    let copy = pattern.len() == 1 && node_meta[0].is_boundary;
 
     let specificity = (0..pattern.len())
         .map(|index| Id::from_raw(index as u32))
@@ -244,6 +292,7 @@ pub(crate) fn compile_isel_pattern(
         node_meta,
         specificity,
         result_register,
+        copy,
     })
 }
 

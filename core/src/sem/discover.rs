@@ -23,6 +23,12 @@ use crate::sem::{SemGraph, SymKind, SymPayload, Value, execute};
 /// compute the same value for every input of the given symbol widths.
 pub trait EquivalenceOracle {
     fn equivalent(&self, lhs: &SemGraph, rhs: &SemGraph, symbol_widths: &[u32]) -> bool;
+
+    /// Decides whether `rhs` is defined and equal to `lhs` whenever `lhs` is
+    /// defined. Total operations reduce this obligation to equivalence.
+    fn refines(&self, lhs: &SemGraph, rhs: &SemGraph, symbol_widths: &[u32]) -> bool {
+        self.equivalent(lhs, rhs, symbol_widths)
+    }
 }
 
 /// Property-testing oracle: evaluates both graphs on boundary values plus a
@@ -76,6 +82,22 @@ type OracleGraph = GenericDag<SymKind, SymPayload<ValueId>>;
 
 impl EquivalenceOracle for SmtOracle {
     fn equivalent(&self, lhs: &SemGraph, rhs: &SemGraph, symbol_widths: &[u32]) -> bool {
+        self.prove(lhs, rhs, symbol_widths, false)
+    }
+
+    fn refines(&self, lhs: &SemGraph, rhs: &SemGraph, symbol_widths: &[u32]) -> bool {
+        self.prove(lhs, rhs, symbol_widths, true)
+    }
+}
+
+impl SmtOracle {
+    fn prove(
+        &self,
+        lhs: &SemGraph,
+        rhs: &SemGraph,
+        symbol_widths: &[u32],
+        defined_refinement: bool,
+    ) -> bool {
         let (Some(lhs_root), Some(rhs_root)) = (lhs.root(), rhs.root()) else {
             return false;
         };
@@ -96,6 +118,9 @@ impl EquivalenceOracle for SmtOracle {
             _ => return false,
         }
         match blast(&g, &widths) {
+            Ok(b) if defined_refinement => {
+                matches!(b.solve_defined_equivalence(l, r), SolveOutcome::Unsat)
+            }
             Ok(b) => matches!(b.solve(), SolveOutcome::Unsat),
             Err(_) => false,
         }

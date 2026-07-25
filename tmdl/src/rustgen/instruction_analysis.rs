@@ -333,13 +333,36 @@ fn emit_operand_register_call(
     float_classes: &HashSet<String>,
     polymorphic_classes: &HashSet<String>,
 ) -> proc_macro2::TokenStream {
-    let register_steps: Vec<proc_macro2::TokenStream> = ops
+    let operands: Vec<(u32, String)> = ops
         .iter()
         .filter_map(|(op_name, op_ty)| {
             let Type::Struct(class_name) = op_ty else {
                 return None;
             };
-            let &symbol = variable_symbols.get(op_name)?;
+            Some((*variable_symbols.get(op_name)?, class_name.clone()))
+        })
+        .collect();
+    emit_operand_registers(
+        &operands,
+        sensitive_symbols,
+        float_classes,
+        polymorphic_classes,
+    )
+}
+
+/// The `with_operand_registers` call for already-resolved `(symbol, register
+/// class)` pairs, so a composed rule may draw operands from several
+/// instructions.
+fn emit_operand_registers(
+    operands: &[(u32, String)],
+    sensitive_symbols: &HashSet<u32>,
+    float_classes: &HashSet<String>,
+    polymorphic_classes: &HashSet<String>,
+) -> proc_macro2::TokenStream {
+    let register_steps: Vec<proc_macro2::TokenStream> = operands
+        .iter()
+        .map(|(symbol, class_name)| {
+            let symbol = *symbol;
             let class_lit = proc_macro2::Literal::string(class_name);
             let symbol_lit = proc_macro2::Literal::u32_unsuffixed(symbol);
             let capability = if polymorphic_classes.contains(class_name) {
@@ -354,13 +377,13 @@ fn emit_operand_register_call(
             } else {
                 quote! { tir::backend::isel::RegisterRequirement::low_bits(#capability) }
             };
-            Some(quote! {
+            quote! {
                 if let Some((_, width)) =
                     __register_widths.iter().find(|(class, _)| *class == #class_lit)
                 {
                     __operand_registers.push((#symbol_lit, #requirement));
                 }
-            })
+            }
         })
         .collect();
 

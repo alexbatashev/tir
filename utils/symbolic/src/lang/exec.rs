@@ -584,6 +584,7 @@ fn eval_node<V, M: Memory>(
             };
             if cond_zero { c(2) } else { c(1) }
         }
+        SymKind::Theta => panic!("theta requires loop-sequence semantics"),
         SymKind::Clamp => {
             let input = as_int!(c(0), "clamp");
             let min = as_int!(c(1), "clamp");

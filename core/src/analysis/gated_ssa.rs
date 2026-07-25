@@ -33,6 +33,7 @@ pub enum GateNode {
 pub struct GSA {
     inner: GenericDag<GateNode, ()>,
     nodes: HashMap<ValueId, NodeId>,
+    gate_inputs: HashMap<ValueId, Vec<ValueId>>,
 }
 
 impl GSA {
@@ -62,6 +63,7 @@ impl GSA {
             loop_result,
             inner: GenericDag::new(),
             nodes: HashMap::new(),
+            gate_inputs: HashMap::new(),
         };
 
         // Materialize a node for every value defined in the region; recursion pulls
@@ -81,6 +83,7 @@ impl GSA {
         Self {
             inner: builder.inner,
             nodes: builder.nodes,
+            gate_inputs: builder.gate_inputs,
         }
     }
 
@@ -112,6 +115,17 @@ impl GSA {
             GateNode::Op(op) => Some(*op),
             _ => None,
         }
+    }
+
+    /// IR values feeding `value`'s gated-SSA node, in edge order. A structured
+    /// loop result shares its carried value's μ node, so it reads that value's
+    /// inputs.
+    pub fn inputs_of(&self, value: ValueId) -> Option<&[ValueId]> {
+        if let Some(inputs) = self.gate_inputs.get(&value) {
+            return Some(inputs);
+        }
+        let gate_value = self.value_of(self.node_of(value)?)?;
+        self.gate_inputs.get(&gate_value).map(Vec::as_slice)
     }
 }
 
@@ -190,6 +204,7 @@ struct Builder<'a> {
     loop_result: HashMap<ValueId, ValueId>,
     inner: GenericDag<GateNode, ()>,
     nodes: HashMap<ValueId, NodeId>,
+    gate_inputs: HashMap<ValueId, Vec<ValueId>>,
 }
 
 impl Builder<'_> {
@@ -204,6 +219,7 @@ impl Builder<'_> {
         if let Some((gate, inputs)) = self.gate_plan(value) {
             let node = self.inner.add_node(gate);
             self.nodes.insert(value, node);
+            self.gate_inputs.insert(value, inputs.clone());
             for input in inputs {
                 let child = self.node_for_value(input);
                 self.inner.add_edge(node, child);
@@ -578,6 +594,10 @@ mod tests {
                 cond: cond_id,
             }
         );
+        assert_eq!(
+            gs.inputs_of(merge_arg_id),
+            Some([cond_id, true_val, false_val].as_slice())
+        );
 
         let kids = children(&gs, node);
         assert_eq!(kids.len(), 3);
@@ -636,6 +656,7 @@ mod tests {
 
         let node = gs.node_of(iv_id).unwrap();
         assert_eq!(*gs.gate(node), GateNode::Mu { value: iv_id });
+        assert_eq!(gs.inputs_of(iv_id), Some([init_val, next_val].as_slice()));
 
         let kids = children(&gs, node);
         assert_eq!(kids.len(), 2);

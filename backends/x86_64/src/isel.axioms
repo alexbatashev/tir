@@ -13,6 +13,9 @@
   (lhs (uitofp x 11 52))
   (rhs (sitofp (and x (zext (const 4294967295 32) 64)) (const 11 4) (const 52 6))))
 
-(axiom fptoui-via-fptosi (vars (x)) (root 32)
-  (lhs (fptoui x))
+; FPToUI is defined only where truncation fits the unsigned destination. In
+; that domain, every u32 value fits an i64, so x86 can convert to i64 and keep
+; the low 32 bits.
+(axiom fptoui-via-fptosi (vars (x 64)) (root 32)
+  (lhs (fptoui x 32))
   (rhs (extract (fptosi x (const 64 7)) (const 31 6) (const 0 1))))

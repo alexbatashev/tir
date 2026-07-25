@@ -1,6 +1,6 @@
 /// Derive the flag-mediated selection rules for an ISA (x86 EFLAGS, AArch64
 /// PSTATE): flag definers compose with flag-guarded branches into conditional
-/// branch rules and with flag-reading materializers into boolean value rules.
+/// branch rules and with flag-reading instructions into `If`-rooted value rules.
 fn emit_flag_rules<'a>(
     files: &'a [ast::File],
     item_cache: &HashMap<&'a str, &'a ast::Item>,
@@ -616,12 +616,11 @@ fn emit_aliased_zero_branch_rules(
     }
 }
 
-/// Compose each flag definer with each flag-reading materializer into a boolean
-/// value rule: the definer's per-flag semantics substitute into the reader's
-/// condition, and when the composition is provably one canonical comparison the
-/// pair registers an `If`-rooted value rule whose prelude emits the definer and
-/// whose emitter is the reader (`cset`/`setcc`), materializing the comparison in
-/// a destination register — the value analog of the flag-branch rules.
+/// Compose each flag definer with each flag-reading value instruction: the
+/// definer's per-flag semantics substitute into the reader's condition, and when
+/// the composition is provably one canonical comparison the pair registers an
+/// `If`-rooted rule whose prelude emits the definer and whose emitter is the
+/// reader (`cset`/`setcc` or `csel`/`cmov`).
 /// Each ISA's transitive `requires` set. An instruction tagged with ISA `a`
 /// where `requires[a]` contains `b` can co-occur with an instruction tagged
 /// `b`, even when the two instructions have no shared tag.
@@ -752,11 +751,9 @@ fn emit_flag_reader_rules(
                 continue;
             };
 
-            // The value pattern is `if <canonical comparison> { <then> } else {
-            // <else> }`, reusing the reader's arms so it is structurally the
-            // `slt`-style materializer the bool-materialize bridge knows. The
-            // arms' symbols (the `XLEN` width var) renumber above the two
-            // comparison-operand symbols they now sit beside.
+            // The value pattern is `if <canonical comparison> { <then> } else
+            // { <else> }`, reusing the reader's value arms. Their symbols
+            // renumber above the two comparison-operand symbols.
             let mut pattern = tir::sem::SemGraph::new();
             let cmp = copy_subgraph(
                 &mut pattern,
@@ -780,12 +777,27 @@ fn emit_flag_reader_rules(
                 &mut arm_remap,
                 &mut next_symbol,
             );
+            let reader_symbols: HashMap<String, u32> = r_sem
+                .variable_symbols
+                .iter()
+                .filter_map(|(name, symbol)| {
+                    arm_remap
+                        .get(symbol)
+                        .copied()
+                        .map(|remapped| (name.clone(), remapped))
+                })
+                .collect();
             let if_root = pattern.add_node(tir::sem::SymKind::If);
             pattern.add_edge(if_root, cmp);
             pattern.add_edge(if_root, then_);
             pattern.add_edge(if_root, else_);
 
-            let immediate_symbols = definer_immediate_symbols(d, d_sem);
+            let mut immediate_symbols = definer_immediate_symbols(d, d_sem);
+            immediate_symbols.extend(r.ops.iter().filter_map(|(name, ty)| {
+                matches!(ty, Type::Bits(_) | Type::Integer)
+                    .then(|| reader_symbols.get(name).copied())
+                    .flatten()
+            }));
             let (canon_pattern, canon_root, forced_widths) =
                 tir::sem::canonicalize_for_selection(&pattern, if_root, &immediate_symbols);
             let mut pattern_widths = tir::sem::infer_widths(&canon_pattern, |_| None);
@@ -796,18 +808,46 @@ fn emit_flag_reader_rules(
             }
             let (pattern_stmts, _root_var) =
                 emit_dag_as_code(&canon_pattern, canon_root, &pattern_widths);
-            let operand_register_call = emit_operand_register_call(
-                &d.ops,
-                &d_sem.variable_symbols,
-                &width_sensitive_symbols(&canon_pattern, &pattern_widths),
+            let sensitive_symbols = width_sensitive_symbols(&canon_pattern, &pattern_widths);
+            // The rule reads registers from both composed instructions: the
+            // definer's operands and the reader's arm operands.
+            let register_class = |(name, ty): &(String, Type), symbols: &HashMap<String, u32>| {
+                let Type::Struct(class) = ty else {
+                    return None;
+                };
+                symbols.get(name).map(|symbol| (*symbol, class.clone()))
+            };
+            let mut register_operands: Vec<(u32, String)> = d
+                .ops
+                .iter()
+                .filter_map(|op| register_class(op, &d_sem.variable_symbols))
+                .chain(
+                    r.ops
+                        .iter()
+                        .filter_map(|op| register_class(op, &reader_symbols)),
+                )
+                .collect();
+            register_operands.sort();
+            register_operands.dedup();
+            let operand_register_call = emit_operand_registers(
+                &register_operands,
+                &sensitive_symbols,
                 &float_classes,
                 &polymorphic_classes,
             );
-            let operand_imm_range_call = emit_operand_imm_range_call(&immediate_operand_ranges(
-                &d_sem.graph,
-                &d.ops,
-                &d_sem.variable_symbols,
-            ));
+            let mut immediate_ranges =
+                immediate_operand_ranges(&d_sem.graph, &d.ops, &d_sem.variable_symbols);
+            immediate_ranges.extend(
+                immediate_operand_ranges(&r_sem.graph, &r.ops, &r_sem.variable_symbols)
+                    .into_iter()
+                    .filter_map(|(symbol, width, signed)| {
+                        arm_remap
+                            .get(&symbol)
+                            .copied()
+                            .map(|symbol| (symbol, width, signed))
+                    }),
+            );
+            let operand_imm_range_call = emit_operand_imm_range_call(&immediate_ranges);
 
             let Some((_, dest_class)) = r
                 .ops
@@ -822,6 +862,62 @@ fn emit_flag_reader_rules(
             };
             let dest_class_id = reg_class_id(&dest_class);
             let dest_name_lit = proc_macro2::Literal::string(&r_sem.dest_operand);
+            let result_register_call = emit_result_register_call(
+                Some(&dest_class),
+                &float_classes,
+                &polymorphic_classes,
+            );
+            let mut reader_constraint_entries = Vec::new();
+            let mut reader_attr_steps = Vec::new();
+            for (name, ty) in &r.ops {
+                let Some(&symbol) = reader_symbols.get(name) else {
+                    continue;
+                };
+                let symbol_lit = proc_macro2::Literal::u32_unsuffixed(symbol);
+                let name_lit = proc_macro2::Literal::string(name);
+                match ty {
+                    Type::Struct(class) => {
+                        reader_constraint_entries.push(quote! {
+                            (#symbol_lit, tir::graph::OperandConstraint::Register)
+                        });
+                        let class_id = reg_class_id(class);
+                        // A two-address reader reads its own destination; that
+                        // operand becomes the tie attribute rather than a source.
+                        let attr_name = if name == &r_sem.dest_operand {
+                            proc_macro2::Literal::string(&format!("{name}_tied"))
+                        } else {
+                            name_lit
+                        };
+                        reader_attr_steps.push(quote! {
+                            let source = m.value_binding(#symbol_lit)
+                                .ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
+                            builder = builder.attr(
+                                #attr_name,
+                                tir::attributes::AttributeValue::Register(
+                                    tir::attributes::RegisterAttr::Virtual {
+                                        id: source.number(),
+                                        class: Some(#class_id),
+                                    },
+                                ),
+                            );
+                        });
+                    }
+                    Type::Bits(_) | Type::Integer => {
+                        reader_constraint_entries.push(quote! {
+                            (#symbol_lit, tir::graph::OperandConstraint::Immediate)
+                        });
+                        reader_attr_steps.push(quote! {
+                            let value = m.int_binding(#symbol_lit)
+                                .ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
+                            builder = builder.attr(
+                                #name_lit,
+                                tir::attributes::AttributeValue::Int(value),
+                            );
+                        });
+                    }
+                    _ => {}
+                }
+            }
 
             let r_lower = r.inst.name.to_lowercase();
             let d_lower = d.inst.name.to_lowercase();
@@ -831,12 +927,17 @@ fn emit_flag_reader_rules(
                 proc_macro2::Literal::string(&format!("{}+{}", d.mnemonic, r.mnemonic));
             let r_builder_ident = format_ident!("{}OpBuilder", &r.inst.name);
 
-            let (prelude_fn_ident, operand_constraint_entries) =
+            let (prelude_fn_ident, mut operand_constraint_entries) =
                 emit_flag_definer_prelude(d, d_sem, emitted_preludes, isel_rule_emitters);
+            operand_constraint_entries.extend(reader_constraint_entries);
 
-            let base_cost = {
-                // The comparison pattern plus the definer instruction.
+            let base_cost = if r_sem.variable_symbols.is_empty() {
+                // Boolean materializers retain the historical structural proxy
+                // used to rank their alternative comparison shapes.
                 canon_pattern.len() as u32 + 1
+            } else {
+                // A select emits exactly the flag definer and reader.
+                2
             };
             let base_cost_lit = proc_macro2::Literal::u32_unsuffixed(base_cost);
             let d_mnemonic_lit = proc_macro2::Literal::string(&d.mnemonic);
@@ -871,6 +972,7 @@ fn emit_flag_reader_rules(
                             },
                         ),
                     );
+                    #(#reader_attr_steps)*
                     Ok(Box::new(builder.build()))
                 }
             });
@@ -882,8 +984,8 @@ fn emit_flag_reader_rules(
                         tir::backend::isel::Rule::new(
                             #rule_name_lit,
                             #pattern_fn_ident(context),
-                            // Structural proxy or the TMDL-modeled cost of the
-                            // two emitted instructions, whichever is larger.
+                            // The derived structural/emission proxy or the
+                            // TMDL-modeled cost, whichever is larger.
                             (#base_cost_lit).max(
                                 instruction_cost(#d_mnemonic_lit)
                                     + instruction_cost(#r_mnemonic_lit),
@@ -893,6 +995,7 @@ fn emit_flag_reader_rules(
                         .with_prelude_emitter(#prelude_fn_ident)
                         .with_operand_constraints(vec![#(#operand_constraint_entries),*])
                         #operand_register_call
+                        #result_register_call
                         #operand_imm_range_call,
                     );
                 }

@@ -153,10 +153,10 @@ struct FlagBranchSemantics {
     target_operand: String,
 }
 
-/// A flag-reading value materializer (`cset`, `setcc`): defines one register as
-/// `if <flags> { c1 } else { c0 }` over one class's status flags, with constant
-/// arms. Composed with a flag definer it yields a boolean materializer value
-/// rule (see `emit_flag_reader_rules`).
+/// A flag-reading value instruction (`cset`, `setcc`, `csel`, `cmov`): defines
+/// one register as `if <flags> { then } else { else }` over one class's status
+/// flags. Composed with a flag definer it yields an `If`-rooted value rule (see
+/// `emit_flag_reader_rules`).
 struct FlagReaderSemantics {
     class: String,
     graph: tir::sem::SemGraph,
@@ -166,6 +166,8 @@ struct FlagReaderSemantics {
     else_root: tir::graph::NodeId,
     /// Condition symbol id -> the flag register index it reads.
     flag_symbols: HashMap<u32, u32>,
+    /// Encoded value operand name -> symbol id used by either arm.
+    variable_symbols: HashMap<String, u32>,
     dest_operand: String,
 }
 
@@ -341,11 +343,9 @@ fn analyze_flag_branch_semantics(
     })
 }
 
-/// Recognize a flag-reading value materializer: one register defined as `if
-/// <cond> { c1 } else { c0 }` whose condition reads only status-flag registers
-/// of one class and whose arms are functions of those flags alone. Selects
-/// (`csel`, arms reading encoded operands) are rejected by the operand-read
-/// check.
+/// Recognize a flag-reading value instruction: one register defined as `if
+/// <cond> { then } else { else }` whose condition reads only status-flag
+/// registers of one class. The arms may read encoded value operands.
 ///
 /// The value is lowered exactly as a plain value rule would be — `self.XLEN`
 /// kept as a width symbol rather than const-folded — so the emitted arms are
@@ -400,14 +400,9 @@ fn analyze_flag_reader_semantics(
         isa_param_values,
         register_index_map,
     )?;
-    // No encoded operand feeds the value (that would be a select, not a boolean
-    // materializer); `self.XLEN` is an ISA param, not an operand, so it may still
-    // appear as a width symbol. It must actually read a flag.
-    if operands
-        .iter()
-        .any(|(name, _)| lowering.variable_symbols.contains_key(name))
-        || lowering.register_symbols.is_empty()
-    {
+    // It must actually read a flag. Encoded operands may feed the arms, but the
+    // condition itself was already restricted to status registers above.
+    if lowering.register_symbols.is_empty() {
         return None;
     }
 
@@ -419,6 +414,15 @@ fn analyze_flag_reader_semantics(
     let [cond_root, then_root, else_root] = children.as_slice() else {
         return None;
     };
+    let encoded_symbols: HashSet<u32> = lowering.variable_symbols.values().copied().collect();
+    if graph.preorder(*cond_root).any(|node| {
+        matches!(
+            graph.get_leaf_data(node),
+            Some(tir::sem::SymPayload::SymbolId(symbol)) if encoded_symbols.contains(symbol)
+        )
+    }) {
+        return None;
+    }
 
     let mut class: Option<String> = None;
     let mut flag_symbols = HashMap::new();
@@ -441,6 +445,7 @@ fn analyze_flag_reader_semantics(
         then_root: *then_root,
         else_root: *else_root,
         flag_symbols,
+        variable_symbols: lowering.variable_symbols,
         dest_operand: dest.clone(),
     })
 }
@@ -515,7 +520,7 @@ fn copy_subgraph_remap_symbols(
     copied
 }
 
-/// Copy a boolean value materializer's arm (`zext(0/1, W)`), replacing the
+/// Copy a flag reader's arm. For a boolean materializer (`zext(0/1, W)`), replace the
 /// widen-to width with a fresh capture symbol so the pattern matches the boolean
 /// regardless of the destination register width. Without this an 8-bit `setcc`
 /// arm (`zext(1, 8)`) fails to match the width-1 boolean the bridge produces,
@@ -920,4 +925,3 @@ fn emit_flag_definer_prelude(
 
     (prelude_fn_ident, operand_constraint_entries)
 }
-

@@ -18,6 +18,8 @@ pub struct IselRewrite {
     pub name: String,
     pub searcher: Pattern<SemNode, u32>,
     pub apply: Box<IselApplier>,
+    /// Apply once after iterative saturation reaches a fixpoint.
+    pub post_saturation: bool,
 }
 
 /// Saturation budget: a cap on iterations and on e-class count.
@@ -49,6 +51,9 @@ pub fn saturate(
     for _ in 0..limits.max_iterations {
         let mut matches = Vec::new();
         for (index, rw) in rewrites.iter().enumerate() {
+            if rw.post_saturation {
+                continue;
+            }
             for m in rw.searcher.search(eg) {
                 matches.push((index, m));
             }
@@ -66,6 +71,23 @@ pub fn saturate(
         if (eg.num_classes(), eg.total_size()) == before || eg.num_classes() >= limits.max_classes {
             break;
         }
+    }
+    eg.rebuild();
+
+    let matches: Vec<_> = rewrites
+        .iter()
+        .enumerate()
+        .filter(|(_, rewrite)| rewrite.post_saturation)
+        .flat_map(|(index, rewrite)| {
+            rewrite
+                .searcher
+                .search(eg)
+                .into_iter()
+                .map(move |matched| (index, matched))
+        })
+        .collect();
+    for (index, matched) in &matches {
+        (rewrites[*index].apply)(ctx, eg, matched);
     }
     eg.rebuild();
 }

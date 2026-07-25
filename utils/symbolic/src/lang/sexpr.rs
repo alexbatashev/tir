@@ -26,6 +26,7 @@ const OP_VOCABULARY: &[(&str, SymKind)] = &[
     ("extract", SymKind::Extract),
     ("bitcast", SymKind::Bitcast),
     ("if", SymKind::If),
+    ("theta", SymKind::Theta),
 ];
 
 /// The [`SymKind`] an operator atom names, if any.
@@ -515,6 +516,13 @@ mod tests {
             assert_eq!(op_kind(name), Some(kind));
             assert_eq!(op_name(kind), Some(name));
         }
+    }
+
+    #[test]
+    fn theta_is_a_binary_operator() {
+        assert_eq!(op_kind("theta"), Some(SymKind::Theta));
+        assert_eq!(op_name(SymKind::Theta), Some("theta"));
+        assert_eq!(SymKind::Theta.arity(), 2);
     }
 
     #[test]

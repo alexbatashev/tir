@@ -22,6 +22,106 @@ impl<V> Blaster<'_, V> {
         Ok(self.int_to_float(&value, signed, exp, mant))
     }
 
+    /// `FPToSI`/`FPToUI`: children are `[value, destination_width]`.
+    fn float_to_int_operand(&mut self, id: NodeId) -> Result<FloatToInt, BitblastError> {
+        let bits = self.child_bits(id, 0);
+        let children: Vec<NodeId> = self.graph.children(id).collect();
+        let width = self.const_u64(children[1])? as usize;
+        let (exp_width, mant_width) =
+            float_format(bits.len()).ok_or(BitblastError::UnknownWidth(children[0].index()))?;
+        Ok(FloatToInt {
+            bits,
+            width,
+            exp_width,
+            mant_width,
+        })
+    }
+
+    /// The conversion's value bits: the significand shifted by the unbiased
+    /// exponent, negated for a signed destination when the sign bit is set.
+    pub(super) fn encode_float_to_int(
+        &mut self,
+        id: NodeId,
+        signed: bool,
+    ) -> Result<Vec<Lit>, BitblastError> {
+        let operand = self.float_to_int_operand(id)?;
+        let exponent_is_zero = self.nor(operand.exponent());
+        let implicit = exponent_is_zero.negate();
+
+        let mut significand = operand.fraction().to_vec();
+        significand.push(implicit);
+        let work_width = operand.width.max(significand.len());
+        significand.resize(work_width, self.zero());
+
+        let one = self.const_bits(1, operand.exp_width);
+        let mut effective_exponent = self.mux_bits(exponent_is_zero, &one, operand.exponent());
+        effective_exponent.push(self.zero());
+
+        let base = self.const_bits(
+            (operand.bias() + operand.mant_width) as u64,
+            operand.exp_width + 1,
+        );
+        let shift_left = self.uge(&effective_exponent, &base);
+        let left_amount = self.subtract(&effective_exponent, &base);
+        let right_amount = self.subtract(&base, &effective_exponent);
+        let left = self.shift_by_bits(&significand, &left_amount, true);
+        let right = self.shift_by_bits(&significand, &right_amount, false);
+        let mut magnitude = self.mux_bits(shift_left, &left, &right);
+        magnitude.truncate(operand.width);
+
+        if !signed {
+            return Ok(magnitude);
+        }
+        let negative = self.negate(&magnitude);
+        Ok(self.mux_bits(operand.sign(), &negative, &magnitude))
+    }
+
+    /// The conversion is defined on finite values whose truncation fits the
+    /// destination: the exponent stays below the destination's magnitude limit,
+    /// with the signed minimum admitted exactly at the boundary exponent.
+    pub(super) fn float_to_int_defined(
+        &mut self,
+        id: NodeId,
+        signed: bool,
+    ) -> Result<Lit, BitblastError> {
+        let operand = self.float_to_int_operand(id)?;
+        let all_ones = self.const_bits((1u64 << operand.exp_width) - 1, operand.exp_width);
+        let finite = self.eq_bits(operand.exponent(), &all_ones).negate();
+
+        let less_than_exponent = |this: &mut Self, limit: usize| {
+            let bound = this.const_bits(limit as u64, operand.exp_width);
+            this.uge(operand.exponent(), &bound).negate()
+        };
+
+        let (negative_ok, positive_ok) = if signed {
+            let threshold = operand.bias() + operand.width - 1;
+            let below = less_than_exponent(self, threshold);
+            let at_threshold = {
+                let threshold = self.const_bits(threshold as u64, operand.exp_width);
+                self.eq_bits(operand.exponent(), &threshold)
+            };
+            let boundary_fraction_ok = if operand.mant_width >= operand.width - 1 {
+                let limit = 1u64 << (operand.mant_width - (operand.width - 1));
+                let limit = self.const_bits(limit, operand.mant_width);
+                self.uge(operand.fraction(), &limit).negate()
+            } else {
+                self.nor(operand.fraction())
+            };
+            let boundary_ok = self.gate_and(at_threshold, boundary_fraction_ok);
+            (self.gate_or(below, boundary_ok), below)
+        } else {
+            (
+                less_than_exponent(self, operand.bias()),
+                less_than_exponent(self, operand.bias() + operand.width),
+            )
+        };
+
+        let negative = self.gate_and(operand.sign(), negative_ok);
+        let positive = self.gate_and(operand.sign().negate(), positive_ok);
+        let in_range = self.gate_or(negative, positive);
+        Ok(self.gate_and(finite, in_range))
+    }
+
     /// Convert the integer `value` to the IEEE binary format with `e` exponent
     /// and `m` mantissa bits. The leading one is barrel-normalized to the top of
     /// a power-of-two working register; the mantissa is the `m` bits below it,
@@ -115,6 +215,69 @@ impl<V> Blaster<'_, V> {
         (0..w)
             .map(|i| if (value >> i) & 1 == 1 { one } else { zero })
             .collect()
+    }
+
+    fn shift_by_bits(&mut self, bits: &[Lit], amount: &[Lit], left: bool) -> Vec<Lit> {
+        let width = bits.len();
+        let mut stages = 0usize;
+        while (1usize << stages) < width {
+            stages += 1;
+        }
+
+        let mut current = bits.to_vec();
+        for (stage, &enabled) in amount.iter().enumerate().take(stages) {
+            let by = 1usize << stage;
+            let shifted = (0..width)
+                .map(|index| {
+                    let source = if left {
+                        index.checked_sub(by)
+                    } else {
+                        index.checked_add(by).filter(|&source| source < width)
+                    };
+                    source.map_or_else(|| self.zero(), |source| current[source])
+                })
+                .collect::<Vec<_>>();
+            current = self.mux_bits(enabled, &shifted, &current);
+        }
+
+        let overflow = self.or_reduce(&amount[stages.min(amount.len())..]);
+        let zeros = vec![self.zero(); width];
+        self.mux_bits(overflow, &zeros, &current)
+    }
+}
+
+/// A float-to-int conversion's operand: the value's IEEE fields and the
+/// destination integer width.
+struct FloatToInt {
+    bits: Vec<Lit>,
+    width: usize,
+    exp_width: usize,
+    mant_width: usize,
+}
+
+impl FloatToInt {
+    fn fraction(&self) -> &[Lit] {
+        &self.bits[..self.mant_width]
+    }
+
+    fn exponent(&self) -> &[Lit] {
+        &self.bits[self.mant_width..self.mant_width + self.exp_width]
+    }
+
+    fn sign(&self) -> Lit {
+        self.bits[self.mant_width + self.exp_width]
+    }
+
+    fn bias(&self) -> usize {
+        (1usize << (self.exp_width - 1)) - 1
+    }
+}
+
+fn float_format(width: usize) -> Option<(usize, usize)> {
+    match width {
+        32 => Some((8, 23)),
+        64 => Some((11, 52)),
+        _ => None,
     }
 }
 

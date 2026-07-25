@@ -1,10 +1,9 @@
 // RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s
 
-// A constant shift count (32) in the extension shift pair uses the immediate
-// form (`shl dst, 32`), not the by-`cl` form: a register the behavior reads by
-// path (`GPR::rcx`) reads that register's value, so it must bind a register,
-// leaving a constant count to the immediate form. Previously the count was
-// stuffed into the CL form as a dead `rcx = 32` attribute, emitting `shl cl`.
+// Signed extension uses the direct instruction. The zero-extension shift pair's
+// constant count uses the immediate form, not the by-`cl` form: a register the
+// behavior reads by path (`GPR::rcx`) reads that register's value, leaving a
+// constant count to the immediate form.
 
 module {
   func @se(%0: !i32) -> !i64 {
@@ -19,5 +18,6 @@ module {
 }
 
 // CHECK-NOT: rcx = 32
+// CHECK: x86_64.movsxd
 // CHECK: x86_64.shl {{.*}}imm = 32
-// CHECK: x86_64.sar {{.*}}imm = 32
+// CHECK: x86_64.shr {{.*}}imm = 32

@@ -165,6 +165,17 @@ pub(crate) fn is_low_extract_view(egraph: &SemEGraph, class: Id) -> bool {
     low_extract_source(egraph, class).is_some()
 }
 
+pub(crate) fn low_extract_width(egraph: &SemEGraph, class: Id) -> Option<u32> {
+    egraph.nodes(class).iter().find_map(|node| {
+        if node.kind != SymKind::Extract || node.children().len() != 3 {
+            return None;
+        }
+        let hi = class_int_binding(egraph, egraph.find(node.children()[1]))?.to_u64();
+        let lo = class_int_binding(egraph, egraph.find(node.children()[2]))?.to_u64();
+        (lo == 0).then(|| u32::try_from(hi + 1).ok()).flatten()
+    })
+}
+
 /// The constant a class is proven to hold, if any member is an integer literal.
 pub(crate) fn class_int_binding(egraph: &SemEGraph, class: Id) -> Option<APInt> {
     egraph.nodes(class).iter().find_map(|n| match &n.payload {
@@ -285,17 +296,20 @@ pub(crate) fn template_node(
 /// instruction. Memory effects are excluded — two reads of the same address are
 /// not interchangeable across an intervening write.
 pub(crate) fn class_is_pure(egraph: &SemEGraph, class: Id) -> bool {
-    egraph.nodes(class).iter().all(|n| {
-        !matches!(
-            n.kind,
-            SymKind::LoadMemory
-                | SymKind::StoreMemory
-                | SymKind::LoadReserved
-                | SymKind::StoreConditional
-                | SymKind::AtomicRmw
-                | SymKind::Fence
-        )
-    })
+    egraph.nodes(class).iter().all(|n| kind_is_pure(n.kind))
+}
+
+/// Whether the kind is a pure value expression (see [`class_is_pure`]).
+pub(crate) fn kind_is_pure(kind: SymKind) -> bool {
+    !matches!(
+        kind,
+        SymKind::LoadMemory
+            | SymKind::StoreMemory
+            | SymKind::LoadReserved
+            | SymKind::StoreConditional
+            | SymKind::AtomicRmw
+            | SymKind::Fence
+    )
 }
 
 /// The integer width of an e-class, taken from whichever member carries a known

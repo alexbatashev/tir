@@ -115,6 +115,12 @@ pub fn infer_types<V>(
                 inference.unify(&child(2), &result)?;
                 result
             }
+            SymKind::Theta => {
+                let result = inference.fresh_type();
+                inference.unify(&child(0), &result)?;
+                inference.unify(&child(1), &result)?;
+                result
+            }
             SymKind::SExt | SymKind::ZExt => {
                 let value = inference.fresh_bits();
                 let width = inference.fresh_bits();
@@ -246,6 +252,7 @@ pub fn infer_widths<V>(
 
                 // As wide as its arms (the then-branch).
                 SymKind::If => child_width(1),
+                SymKind::Theta => child_width(0),
 
                 SymKind::Extract => {
                     match (
