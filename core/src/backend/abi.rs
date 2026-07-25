@@ -78,6 +78,26 @@ impl ArgumentGroupAlignment {
     }
 }
 
+/// Register-state handling when an atomic argument group cannot use registers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupRollback {
+    Exhaust,
+    Preserve,
+}
+
+/// Allocation constraints shared by every member of one atomic argument group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArgumentGroupPolicy {
+    pub register_limit: Option<usize>,
+    pub rollback: GroupRollback,
+}
+
+impl ArgumentGroupPolicy {
+    pub fn fits_register_limit(self, members: usize) -> bool {
+        self.register_limit.is_none_or(|limit| members <= limit)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AbiInfo {
     pub name: &'static str,
@@ -87,6 +107,7 @@ pub struct AbiInfo {
     pub fp: Option<PhysReg>,
     pub indirect_result: Option<PhysReg>,
     pub argument_group_alignment: Option<ArgumentGroupAlignment>,
+    pub argument_group_policy: Option<ArgumentGroupPolicy>,
     pub args: &'static [PassSeq],
     pub rets: &'static [PassSeq],
     pub callee_saved: &'static [PhysReg],
@@ -155,5 +176,31 @@ pub(crate) fn exhaust_argument_registers(
             Overflow::Chain(next) => kind = next,
             Overflow::Stack => return,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ArgumentGroupPolicy, GroupRollback};
+
+    #[test]
+    fn argument_group_policy_enforces_its_register_limit() {
+        let policy = ArgumentGroupPolicy {
+            register_limit: Some(2),
+            rollback: GroupRollback::Preserve,
+        };
+
+        assert!(policy.fits_register_limit(2));
+        assert!(!policy.fits_register_limit(3));
+    }
+
+    #[test]
+    fn argument_group_policy_can_leave_the_register_count_unbounded() {
+        let policy = ArgumentGroupPolicy {
+            register_limit: None,
+            rollback: GroupRollback::Exhaust,
+        };
+
+        assert!(policy.fits_register_limit(usize::MAX));
     }
 }

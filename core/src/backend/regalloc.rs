@@ -1847,6 +1847,7 @@ mod tests {
             fp: None,
             indirect_result: None,
             argument_group_alignment: None,
+            argument_group_policy: None,
             args: Box::leak(
                 vec![PassSeq {
                     kind: ValueKind::Int,
