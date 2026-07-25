@@ -117,6 +117,16 @@ pub struct AbiInfo {
 }
 
 impl AbiInfo {
+    pub(crate) fn argument_group_fits_register_limit(&self, members: usize) -> bool {
+        self.argument_group_policy
+            .is_none_or(|policy| policy.fits_register_limit(members))
+    }
+
+    pub(crate) fn argument_group_rollback(&self) -> GroupRollback {
+        self.argument_group_policy
+            .map_or(GroupRollback::Exhaust, |policy| policy.rollback)
+    }
+
     pub fn indirect_result_argument_slots(&self) -> Option<(ValueKind, usize)> {
         let register = self.indirect_result?;
         self.args.iter().find_map(|sequence| {

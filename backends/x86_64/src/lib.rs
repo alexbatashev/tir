@@ -1182,7 +1182,7 @@ mod isa {
         }
 
         fn abis(&self) -> &'static [tir::backend::abi::AbiInfo] {
-            abis()
+            x86_64_abis()
         }
 
         fn abi(&self) -> &'static tir::backend::abi::AbiInfo {
@@ -1250,17 +1250,17 @@ mod isa {
             "x86_64" | "amd64" | "x64" => {
                 let config = TargetConfig::parse(march, mcpu, mattr)?;
                 let selected_abi = match mabi {
-                    Some(name) => abi_by_name(name).ok_or_else(|| {
+                    Some(name) => x86_64_abi_by_name(name).ok_or_else(|| {
                         format!(
                             "unknown ABI '{name}' for x86_64 (available: {})",
-                            abis()
+                            x86_64_abis()
                                 .iter()
                                 .map(|abi| abi.name)
                                 .collect::<Vec<_>>()
                                 .join(", ")
                         )
                     })?,
-                    None => default_abi(),
+                    None => x86_64_default_abi(),
                 };
                 Ok(Some(Box::new(X86Target {
                     config,
@@ -1272,6 +1272,31 @@ mod isa {
     }
 
     tir::register_target!(select_x86_64, ["x86_64"]);
+
+    fn x86_64_abis() -> &'static [tir::backend::abi::AbiInfo] {
+        static ABIS: std::sync::OnceLock<Vec<tir::backend::abi::AbiInfo>> =
+            std::sync::OnceLock::new();
+        ABIS.get_or_init(|| {
+            abis()
+                .iter()
+                .map(|abi| tir::backend::abi::AbiInfo {
+                    argument_group_policy: Some(tir::backend::abi::ArgumentGroupPolicy {
+                        register_limit: Some(2),
+                        rollback: tir::backend::abi::GroupRollback::Preserve,
+                    }),
+                    ..*abi
+                })
+                .collect()
+        })
+    }
+
+    fn x86_64_default_abi() -> &'static tir::backend::abi::AbiInfo {
+        &x86_64_abis()[0]
+    }
+
+    fn x86_64_abi_by_name(name: &str) -> Option<&'static tir::backend::abi::AbiInfo> {
+        x86_64_abis().iter().find(|abi| abi.name == name)
+    }
 
     #[cfg(test)]
     mod canonicalize_tests {

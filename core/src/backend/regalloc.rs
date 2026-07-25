@@ -21,7 +21,9 @@ use tir::{
     PreservedAnalyses, Rewriter, ValueId,
 };
 
-use crate::backend::abi::{align_argument_group, reserve_indirect_result_argument, value_kind};
+use crate::backend::abi::{
+    GroupRollback, align_argument_group, reserve_indirect_result_argument, value_kind,
+};
 use crate::backend::liveness::{self, Liveness, PhysReg};
 use crate::backend::{SymbolOp, VirtualBranchOp, VirtualReturnOp};
 use crate::ptr::AllocaOp;
@@ -1561,10 +1563,16 @@ fn abi_precolor(
                     members.iter().map(|&(_, _, kind)| kind),
                     &mut trial_slots,
                 );
-                let pins = members
-                    .iter()
-                    .map(|&(_, class, kind)| next_abi_register(abi, class, kind, &mut trial_slots))
-                    .collect::<Option<Vec<_>>>();
+                let pins = if abi.argument_group_fits_register_limit(members.len()) {
+                    members
+                        .iter()
+                        .map(|&(_, class, kind)| {
+                            next_abi_register(abi, class, kind, &mut trial_slots)
+                        })
+                        .collect::<Option<Vec<_>>>()
+                } else {
+                    None
+                };
                 if let Some(pins) = pins {
                     next_abi_slot = trial_slots;
                     for ((incoming, _, _), pin) in members.into_iter().zip(pins) {
@@ -1572,11 +1580,13 @@ fn abi_precolor(
                     }
                 } else {
                     for (incoming, class, kind) in members {
-                        crate::backend::abi::exhaust_argument_registers(
-                            abi,
-                            kind,
-                            &mut next_abi_slot,
-                        );
+                        if abi.argument_group_rollback() == GroupRollback::Exhaust {
+                            crate::backend::abi::exhaust_argument_registers(
+                                abi,
+                                kind,
+                                &mut next_abi_slot,
+                            );
+                        }
                         stack_args.push(IncomingStackArg {
                             vreg: incoming,
                             class,
