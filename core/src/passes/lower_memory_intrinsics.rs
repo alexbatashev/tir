@@ -1,14 +1,53 @@
+use std::sync::Arc;
+
 use crate::analysis::{AnalysisManager, PreservedAnalyses};
 use crate::attributes::AttributeValue;
 use crate::builtin::{DeclareOp, IntegerType, ModuleOp, ops as b};
-use crate::ptr::{MemcpyOp, PtrType};
-use crate::{Context, OpId, Operation, OperationRef, Pass, PassError, PassTarget, Rewriter};
+use crate::ptr::{MemcpyOp, MemsetOp, PtrType};
+use crate::{
+    Context, OpInstance, Operation, OperationRef, Pass, PassError, PassTarget, Rewriter, TypeId,
+};
 
 pub struct LowerMemoryIntrinsicsPass;
 
 impl LowerMemoryIntrinsicsPass {
     pub fn new() -> Self {
         Self
+    }
+
+    fn intrinsics(
+        context: &Context,
+        root: &Arc<OpInstance>,
+    ) -> (Vec<OperationRef>, Vec<OperationRef>) {
+        fn visit(
+            context: &Context,
+            operation: &Arc<OpInstance>,
+            copies: &mut Vec<OperationRef>,
+            sets: &mut Vec<OperationRef>,
+        ) {
+            for region in &operation.regions {
+                for block in context.get_region(*region).iter(context.clone()) {
+                    for operation in block.op_ids() {
+                        let operation = context.get_op(operation);
+                        if operation.is::<ModuleOp>() {
+                            continue;
+                        }
+                        let operation = OperationRef::new(operation, Some(block.clone()), None);
+                        if operation.is::<MemcpyOp>() {
+                            copies.push(operation.clone());
+                        } else if operation.is::<MemsetOp>() {
+                            sets.push(operation.clone());
+                        }
+                        visit(context, operation.op(), copies, sets);
+                    }
+                }
+            }
+        }
+
+        let mut copies = Vec::new();
+        let mut sets = Vec::new();
+        visit(context, root, &mut copies, &mut sets);
+        (copies, sets)
     }
 }
 
@@ -26,7 +65,7 @@ impl Pass for LowerMemoryIntrinsicsPass {
     }
 
     fn target(&self) -> PassTarget {
-        PassTarget::operation::<MemcpyOp>()
+        PassTarget::operation::<ModuleOp>()
     }
 
     fn run(
@@ -36,50 +75,84 @@ impl Pass for LowerMemoryIntrinsicsPass {
         rewriter: &mut Rewriter,
         _analyses: &AnalysisManager,
     ) -> Result<PreservedAnalyses, PassError> {
-        let copy = operation
-            .as_op::<MemcpyOp>()
-            .expect("pass target guarantees ptr.memcpy");
-        let module = enclosing_module(context, operation.op().id).ok_or_else(|| {
-            PassError::InvalidRuleSet("ptr.memcpy must be nested in a module".to_string())
-        })?;
+        let module = operation
+            .as_op::<ModuleOp>()
+            .expect("pass target guarantees builtin.module");
+        let (copies, sets) = Self::intrinsics(context, operation.op());
+        if copies.is_empty() && sets.is_empty() {
+            return Ok(PreservedAnalyses::all());
+        }
 
         let pointer = PtrType::opaque(context);
         let size = IntegerType::new(context, 64);
-        let signature = [pointer, pointer, size];
-        let declaration = module.body().op_ids().into_iter().find_map(|operation| {
-            context
-                .get_op(operation)
-                .as_op::<DeclareOp>()
-                .filter(|declaration| declaration.sym_name() == "memcpy")
-        });
-        if let Some(declaration) = declaration {
-            if declaration.ret_type() != pointer || declaration.arg_types() != signature {
-                return Err(PassError::InvalidRuleSet(
-                    "existing memcpy declaration has an incompatible type".to_string(),
-                ));
-            }
-        } else {
-            let declaration = b::declare_op(context, "memcpy", pointer, &signature);
-            module.body().insert(0, declaration.id());
+        if !copies.is_empty() {
+            ensure_declaration(
+                context,
+                &module,
+                "memcpy",
+                pointer,
+                &[pointer, pointer, size],
+            )?;
+        }
+        let value = IntegerType::new(context, 32);
+        if !sets.is_empty() {
+            ensure_declaration(context, &module, "memset", pointer, &[pointer, value, size])?;
         }
 
-        let call = b::CallOpBuilder::new(context)
-            .args(copy.operands().to_vec())
-            .attr("callee", AttributeValue::Str("memcpy".to_string()))
-            .result_type(pointer)
-            .build();
-        rewriter.replace_op(operation, &call)?;
+        for operation in copies {
+            let copy = operation
+                .as_op::<MemcpyOp>()
+                .expect("operation was collected as ptr.memcpy");
+            let call = b::CallOpBuilder::new(context)
+                .args(copy.operands().to_vec())
+                .attr("callee", AttributeValue::Str("memcpy".to_string()))
+                .result_type(pointer)
+                .build();
+            rewriter.replace_op(&operation, &call)?;
+        }
+        for operation in sets {
+            let set = operation
+                .as_op::<MemsetOp>()
+                .expect("operation was collected as ptr.memset");
+            let extended = b::extui(context, set.operands()[1], value).build();
+            rewriter.insert_op_before(&operation, &extended)?;
+            let call = b::CallOpBuilder::new(context)
+                .args(vec![
+                    set.operands()[0],
+                    extended.result(),
+                    set.operands()[2],
+                ])
+                .attr("callee", AttributeValue::Str("memset".to_string()))
+                .result_type(pointer)
+                .build();
+            rewriter.replace_op(&operation, &call)?;
+        }
         Ok(PreservedAnalyses::none())
     }
 }
 
-fn enclosing_module(context: &Context, mut operation: OpId) -> Option<ModuleOp> {
-    loop {
-        let block = context.parent_block(operation)?;
-        let region = context.parent_region(block)?;
-        operation = context.get_region(region).parent_op()?;
-        if let Some(module) = context.get_op(operation).as_op::<ModuleOp>() {
-            return Some(module);
+fn ensure_declaration(
+    context: &Context,
+    module: &ModuleOp,
+    name: &str,
+    return_type: TypeId,
+    argument_types: &[TypeId],
+) -> Result<(), PassError> {
+    let declaration = module.body().op_ids().into_iter().find_map(|operation| {
+        context
+            .get_op(operation)
+            .as_op::<DeclareOp>()
+            .filter(|declaration| declaration.sym_name() == name)
+    });
+    if let Some(declaration) = declaration {
+        if declaration.ret_type() != return_type || declaration.arg_types() != argument_types {
+            return Err(PassError::InvalidRuleSet(format!(
+                "existing {name} declaration has an incompatible type"
+            )));
         }
+    } else {
+        let declaration = b::declare_op(context, name, return_type, argument_types);
+        module.body().insert(0, declaration.id());
     }
+    Ok(())
 }
