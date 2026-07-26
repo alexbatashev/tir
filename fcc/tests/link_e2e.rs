@@ -192,6 +192,14 @@ fn local_pointer_matches_host_compiler() {
 }
 
 #[test]
+fn memory_linked_list_matches_host_compiler() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(include_str!("memory/linked_list.c"));
+}
+
+#[test]
 fn pointer_addition_scales_by_pointee_size() {
     if !cc_available() {
         return;

@@ -7,3 +7,5 @@
 // CHECK: extsi
 // CHECK: func @widen_unsigned
 // CHECK: extui
+// CHECK-LABEL: func @null_pointer
+// CHECK: constant {value = 0} : !ptr.p
