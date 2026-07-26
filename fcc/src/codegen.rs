@@ -499,78 +499,94 @@ fn constant_initializer_data(
                 }],
             })
         }
-        TypeKind::Array(element, Some(length))
+        TypeKind::Array(_, Some(_)) | TypeKind::Record(_)
             if ast.get_node(initializer).kind == AstKind::InitializerList =>
         {
-            let element_size = source_type_layout(typed, *element).0 as usize;
-            let mut data = ConstantData {
-                bytes: vec![0; element_size * *length as usize],
-                relocations: Vec::new(),
-            };
-            for (index, value) in aggregate_initializer_values(ast, initializer) {
-                let mut element_data = constant_initializer_data(typed, globals, *element, value)?;
-                let offset = index * element_size;
-                data.bytes[offset..offset + element_size].copy_from_slice(&element_data.bytes);
-                for relocation in &mut element_data.relocations {
-                    relocation.offset += offset as u64;
-                }
-                data.relocations.extend(element_data.relocations);
-            }
-            Some(data)
-        }
-        TypeKind::Record(id) if ast.get_node(initializer).kind == AstKind::InitializerList => {
-            let record = typed.record(*id)?;
-            let mut data = ConstantData {
-                bytes: vec![0; record.size as usize],
-                relocations: Vec::new(),
-            };
-            for (index, value) in aggregate_initializer_values(ast, initializer) {
-                let field = record.fields.get(index)?;
-                let mut field_data = constant_initializer_data(typed, globals, field.ty, value)?;
-                let offset = field.offset as usize;
-                data.bytes[offset..offset + field_data.bytes.len()]
-                    .copy_from_slice(&field_data.bytes);
-                for relocation in &mut field_data.relocations {
-                    relocation.offset += field.offset;
-                }
-                data.relocations.extend(field_data.relocations);
-            }
-            Some(data)
+            constant_aggregate_initializer_data(typed, globals, target, initializer)
         }
         _ => None,
     }
 }
 
-fn aggregate_initializer_values(ast: &Ast, initializer: NodeId) -> Vec<(usize, NodeId)> {
-    let mut next_index = 0;
-    let values = if ast.get_node(initializer).kind == AstKind::DesignatedInitializer {
-        vec![initializer]
-    } else {
-        ast.children(initializer).collect()
+fn constant_aggregate_initializer_data(
+    typed: &TypedAst,
+    globals: &HashMap<EntityId, Global>,
+    target: QualType,
+    initializer: NodeId,
+) -> Option<ConstantData> {
+    let mut data = ConstantData {
+        bytes: vec![0; source_type_layout(typed, target).0 as usize],
+        relocations: Vec::new(),
     };
-    values
-        .into_iter()
-        .filter_map(|value| {
-            if ast.get_node(value).kind == AstKind::DesignatedInitializer {
-                let index = ast.get_annotation(value)?.member_index?;
-                next_index = index + 1;
-                let selected = match ast.get_leaf_data(value)? {
-                    AstLeaf::DesignatedInitializer(InitializerDesignator::Field(_)) => {
-                        ast.children(value).next().unwrap()
-                    }
-                    AstLeaf::DesignatedInitializer(InitializerDesignator::Index) => {
-                        ast.children(value).nth(1).unwrap()
-                    }
-                    _ => unreachable!(),
-                };
-                Some((index, selected))
-            } else {
-                let index = next_index;
-                next_index += 1;
-                Some((index, value))
-            }
+    for (path, value) in initializer_entries(typed.ast(), initializer)? {
+        let (selected_type, offset) = initializer_subobject(typed, target, &path)?;
+        let value = constant_initializer_data(typed, globals, selected_type, value)?;
+        write_constant_data(&mut data, offset as usize, value);
+    }
+    Some(data)
+}
+
+fn write_constant_data(target: &mut ConstantData, offset: usize, mut value: ConstantData) {
+    let end = offset + value.bytes.len();
+    target.relocations.retain(|relocation| {
+        let relocation_start = relocation.offset as usize;
+        let relocation_end = relocation_start + relocation.width as usize;
+        relocation_end <= offset || relocation_start >= end
+    });
+    target.bytes[offset..end].copy_from_slice(&value.bytes);
+    for relocation in &mut value.relocations {
+        relocation.offset += offset as u64;
+    }
+    target.relocations.extend(value.relocations);
+}
+
+fn initializer_entries(ast: &Ast, initializer: NodeId) -> Option<Vec<(Vec<usize>, NodeId)>> {
+    ast.children(initializer)
+        .map(|value| {
+            let path = ast.get_annotation(value)?.initializer_path.clone()?;
+            Some((path, designated_initializer_value(ast, value)))
         })
         .collect()
+}
+
+fn designated_initializer_value(ast: &Ast, mut initializer: NodeId) -> NodeId {
+    while ast.get_node(initializer).kind == AstKind::DesignatedInitializer {
+        initializer = match ast.get_leaf_data(initializer).unwrap() {
+            AstLeaf::DesignatedInitializer(InitializerDesignator::Field(_)) => {
+                ast.children(initializer).next().unwrap()
+            }
+            AstLeaf::DesignatedInitializer(InitializerDesignator::Index) => {
+                ast.children(initializer).nth(1).unwrap()
+            }
+            _ => unreachable!(),
+        };
+    }
+    initializer
+}
+
+fn initializer_subobject(
+    typed: &TypedAst,
+    target: QualType,
+    path: &[usize],
+) -> Option<(QualType, u64)> {
+    let mut selected = target;
+    let mut offset = 0;
+    for &index in path {
+        match typed.types().kind(selected) {
+            TypeKind::Record(id) => {
+                let field = typed.record(*id)?.fields.get(index)?;
+                selected = field.ty;
+                offset += field.offset;
+            }
+            TypeKind::Array(element, Some(length)) if index < *length as usize => {
+                let element_size = source_type_layout(typed, *element).0;
+                selected = *element;
+                offset += index as u64 * element_size;
+            }
+            _ => return None,
+        }
+    }
+    Some((selected, offset))
 }
 
 fn node_type(typed: &TypedAst, node: NodeId) -> QualType {
@@ -1579,55 +1595,12 @@ impl FnCodegen<'_> {
         address: ValueId,
         initializer: NodeId,
     ) -> Result<(), Diagnostic> {
-        if let TypeKind::Record(id) = self.typed.types().kind(target) {
-            let record = self.typed.record(*id).unwrap();
-            let kind = record.kind;
-            let fields = record
-                .fields
-                .iter()
-                .map(|field| (field.ty, field.offset))
-                .collect::<Vec<_>>();
-            let values = aggregate_initializer_values(self.ast, initializer);
-            if kind == RecordKind::Union {
-                if let Some(&(storage_type, _)) = fields
-                    .iter()
-                    .max_by_key(|(field, _)| source_type_layout(self.typed, *field).0)
-                {
-                    self.zero_initialize(storage_type, address, initializer)?;
-                }
-                if let Some(&(index, value)) = values.first() {
-                    let (field, offset) = fields[index];
-                    let field_address = self.offset_address(address, offset, field);
-                    self.lower_initializer(field, field_address, value)?;
-                }
-                return Ok(());
-            }
-            let values = values.into_iter().collect::<HashMap<_, _>>();
-            for (index, (field, offset)) in fields.into_iter().enumerate() {
-                let field_address = self.offset_address(address, offset, field);
-                if let Some(&value) = values.get(&index) {
-                    self.lower_initializer(field, field_address, value)?;
-                } else {
-                    self.zero_initialize(field, field_address, initializer)?;
-                }
-            }
-            return Ok(());
-        }
-        if let TypeKind::Array(element, Some(length)) = self.typed.types().kind(target) {
-            let (element, length) = (*element, *length);
-            let values = aggregate_initializer_values(self.ast, initializer)
-                .into_iter()
-                .collect::<HashMap<_, _>>();
-            let element_size = source_type_layout(self.typed, element).0;
-            for index in 0..length {
-                let element_address = self.offset_address(address, index * element_size, element);
-                if let Some(&value) = values.get(&(index as usize)) {
-                    self.lower_initializer(element, element_address, value)?;
-                } else {
-                    self.zero_initialize(element, element_address, initializer)?;
-                }
-            }
-            return Ok(());
+        let aggregate = matches!(
+            self.typed.types().kind(target),
+            TypeKind::Record(_) | TypeKind::Array(_, Some(_))
+        );
+        if aggregate && self.ast.get_node(initializer).kind == AstKind::InitializerList {
+            return self.lower_aggregate_initializer(target, address, initializer);
         }
         if self.ast.get_node(initializer).kind == AstKind::InitializerList {
             let value = self.ast.children(initializer).next().unwrap();
@@ -1637,6 +1610,85 @@ impl FnCodegen<'_> {
         self.builder
             .insert(p::store(self.context, value, address).build());
         Ok(())
+    }
+
+    fn lower_aggregate_initializer(
+        &mut self,
+        target: QualType,
+        address: ValueId,
+        initializer: NodeId,
+    ) -> Result<(), Diagnostic> {
+        let entries = initializer_entries(self.ast, initializer)
+            .expect("semantic analysis resolves aggregate initializer paths");
+        let (kind, members) = match self.typed.types().kind(target) {
+            TypeKind::Record(id) => {
+                let record = self.typed.record(*id).unwrap();
+                (
+                    Some(record.kind),
+                    record
+                        .fields
+                        .iter()
+                        .map(|field| (field.ty, field.offset))
+                        .collect::<Vec<_>>(),
+                )
+            }
+            TypeKind::Array(element, Some(length)) => {
+                let element_size = source_type_layout(self.typed, *element).0;
+                (
+                    None,
+                    (0..*length)
+                        .map(|index| (*element, index * element_size))
+                        .collect(),
+                )
+            }
+            _ => unreachable!(),
+        };
+        if kind == Some(RecordKind::Union) {
+            if let Some(&(storage_type, _)) = members
+                .iter()
+                .max_by_key(|(member, _)| source_type_layout(self.typed, *member).0)
+            {
+                self.zero_initialize(storage_type, address, initializer)?;
+            }
+            for (path, value) in entries {
+                self.lower_initializer_path(target, address, &path, value)?;
+            }
+            return Ok(());
+        }
+        for (index, (member, offset)) in members.into_iter().enumerate() {
+            let member_entries = entries
+                .iter()
+                .filter(|(path, _)| path.first() == Some(&index))
+                .collect::<Vec<_>>();
+            let member_address = self.offset_address(address, offset, member);
+            if member_entries.is_empty() {
+                self.zero_initialize(member, member_address, initializer)?;
+                continue;
+            }
+            if member_entries[0].0.len() > 1 {
+                self.zero_initialize(member, member_address, initializer)?;
+            }
+            for (path, value) in member_entries {
+                if path.len() == 1 {
+                    self.lower_initializer(member, member_address, *value)?;
+                } else {
+                    self.lower_initializer_path(member, member_address, &path[1..], *value)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn lower_initializer_path(
+        &mut self,
+        target: QualType,
+        address: ValueId,
+        path: &[usize],
+        initializer: NodeId,
+    ) -> Result<(), Diagnostic> {
+        let (selected_type, offset) = initializer_subobject(self.typed, target, path).unwrap();
+        let selected_address = self.offset_address(address, offset, selected_type);
+        self.lower_initializer(selected_type, selected_address, initializer)
     }
 
     fn zero_initialize(
