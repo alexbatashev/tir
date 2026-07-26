@@ -383,7 +383,10 @@ where
         let id = e.state().0.record_id(kind, Some(&name), false);
         CType::Record(kind, id, Some(name))
     });
-    let base = choice((builtin, record, named));
+    let enumeration = just(Token::KwEnum)
+        .ignore_then(ident())
+        .map(|name| CType::Enum(Some(name)));
+    let base = choice((builtin, record, enumeration, named));
     let pointer = just(Token::Star).ignore_then(qualifier.clone().repeated().collect::<Vec<_>>());
 
     qualifier
