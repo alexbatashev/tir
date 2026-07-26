@@ -4,6 +4,44 @@ use logos::Logos;
 
 use tir::utils::APInt;
 
+pub(crate) fn decode_c_escapes(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut chars = source.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            Some('0') => out.push('\0'),
+            Some('\\') => out.push('\\'),
+            Some('"') => out.push('"'),
+            Some('\'') => out.push('\''),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
+pub(crate) fn decode_character_constant(source: &str) -> Option<i64> {
+    let first_quote = source.find('\'')?;
+    let body = source.get(first_quote + 1..source.len().checked_sub(1)?)?;
+    let decoded = decode_c_escapes(body);
+    let mut characters = decoded.chars();
+    let value = characters.next()?;
+    characters
+        .next()
+        .is_none()
+        .then_some(i64::from(value as u32))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IntegerLiteral {
     pub value: APInt,
