@@ -9,3 +9,5 @@
 // CHECK: extui
 // CHECK-LABEL: func @null_pointer
 // CHECK: constant {value = 0} : !ptr.p
+// CHECK-LABEL: func @clear
+// CHECK: constant {value = 0} : !ptr.p

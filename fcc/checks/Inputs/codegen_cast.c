@@ -13,3 +13,11 @@ unsigned long widen_unsigned(unsigned int value) {
 void *null_pointer(void) {
     return 0;
 }
+
+struct Node {
+    struct Node *next;
+};
+
+void clear(struct Node *node) {
+    node->next = 0;
+}

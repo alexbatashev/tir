@@ -200,6 +200,14 @@ fn memory_linked_list_matches_host_compiler() {
 }
 
 #[test]
+fn memory_hash_table_matches_host_compiler() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(include_str!("memory/hash_table.c"));
+}
+
+#[test]
 fn pointer_addition_scales_by_pointee_size() {
     if !cc_available() {
         return;
