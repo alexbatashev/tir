@@ -1462,6 +1462,26 @@ fn local_union_designator_selects_member() {
 }
 
 #[test]
+fn later_union_designator_overrides_earlier_member() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "union Value { int integer; long wide; }; int main(void) { union Value value = {.integer = 11, .wide = 42}; return value.wide - 42; }\n",
+    );
+}
+
+#[test]
+fn reselected_union_member_discards_overwritten_initializers() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "struct Pair { int left; int right; }; union Value { struct Pair pair; long wide; }; int main(void) { union Value value = {.pair.left = 11, .wide = -1, .pair.right = 42}; return value.pair.left == 0 && value.pair.right == 42 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
 fn nested_record_initializer_zero_fills_fields() {
     if !cc_available() {
         return;
@@ -1594,6 +1614,16 @@ fn initialized_global_union_designator_selects_member() {
     }
     assert_fcc_matches_host(
         "union Value { int integer; long wide; } value = {.wide = 42}; int main(void) { return value.wide - 42; }\n",
+    );
+}
+
+#[test]
+fn global_reselected_union_member_discards_overwritten_initializers() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "struct Pair { int left; int right; }; union Value { struct Pair pair; long wide; } value = {.pair.left = 11, .wide = -1, .pair.right = 42}; int main(void) { return value.pair.left == 0 && value.pair.right == 42 ? 0 : 1; }\n",
     );
 }
 
