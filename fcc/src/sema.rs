@@ -2266,6 +2266,8 @@ impl Analyzer<'_> {
             (AstKind::Mul, [left, right]) => left.checked_mul(*right),
             (AstKind::Div, [_, 0]) => None,
             (AstKind::Div, [left, right]) => left.checked_div(*right),
+            (AstKind::Mod, [_, 0]) => None,
+            (AstKind::Mod, [left, right]) => left.checked_rem(*right),
             (AstKind::Shl, [left, right]) => u32::try_from(*right)
                 .ok()
                 .and_then(|shift| left.checked_shl(shift)),
@@ -2277,6 +2279,8 @@ impl Analyzer<'_> {
             (AstKind::BitOr, [left, right]) => Some(left | right),
             (AstKind::Neg, [value]) => value.checked_neg(),
             (AstKind::Pos, [value]) => Some(*value),
+            (AstKind::Not, [value]) => Some(i64::from(*value == 0)),
+            (AstKind::BitNot, [value]) => Some(!value),
             _ => None,
         }
     }
