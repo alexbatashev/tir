@@ -1355,6 +1355,39 @@ fn pressured_struct_call_rolls_back_sysv_registers() {
 }
 
 #[test]
+fn float_stack_call_matches_sysv_host_abi() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "double ninth(double, double, double, double, double, double, double, double, double); int main(void) { return ninth(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0) == 9.0 ? 0 : 1; }\n",
+        "double ninth(double a0, double a1, double a2, double a3, double a4, double a5, double a6, double a7, double a8) { return a8; }\n",
+    );
+}
+
+#[test]
+fn float_stack_parameter_matches_sysv_host_abi() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "double ninth(double a0, double a1, double a2, double a3, double a4, double a5, double a6, double a7, double a8) { return a8; }\n",
+        "double ninth(double, double, double, double, double, double, double, double, double); int main(void) { return ninth(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0) == 9.0 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn integer_stack_call_survives_register_pressure() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "long sum20(long, long, long, long, long, long, long, long, long, long, long, long, long, long, long, long, long, long, long, long); int main(void) { return sum20(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20) == 210 ? 0 : 1; }\n",
+        "long sum20(long a1, long a2, long a3, long a4, long a5, long a6, long a7, long a8, long a9, long a10, long a11, long a12, long a13, long a14, long a15, long a16, long a17, long a18, long a19, long a20) { return a1+a2+a3+a4+a5+a6+a7+a8+a9+a10+a11+a12+a13+a14+a15+a16+a17+a18+a19+a20; }\n",
+    );
+}
+
+#[test]
 fn one_word_struct_return_matches_host_abi() {
     if !cc_available() {
         return;

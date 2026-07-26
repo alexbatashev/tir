@@ -148,6 +148,7 @@ operation! {
         dialect: "asm",
         attributes: A {
             callee: "Str",
+            outgoing_stack_size: "UInt",
         },
         roles: R {
             clobbers: Clobber,
@@ -161,10 +162,52 @@ operation! {
         dialect: "asm",
         attributes: A {
             callee_reg: "Register",
+            outgoing_stack_size: "UInt",
         },
         roles: R {
             callee_reg: Use,
             clobbers: Clobber,
         },
     }
+}
+
+impl VirtualCallOpBuilder {
+    pub fn outgoing_stack_size(self, size: u64) -> Self {
+        self.attr(
+            "outgoing_stack_size",
+            tir::attributes::AttributeValue::UInt(size),
+        )
+    }
+}
+
+impl VirtualIndirectCallOpBuilder {
+    pub fn outgoing_stack_size(self, size: u64) -> Self {
+        self.attr(
+            "outgoing_stack_size",
+            tir::attributes::AttributeValue::UInt(size),
+        )
+    }
+}
+
+impl VirtualCallOp {
+    pub fn outgoing_stack_size(&self) -> u64 {
+        outgoing_stack_size(self)
+    }
+}
+
+impl VirtualIndirectCallOp {
+    pub fn outgoing_stack_size(&self) -> u64 {
+        outgoing_stack_size(self)
+    }
+}
+
+fn outgoing_stack_size(op: &impl Operation) -> u64 {
+    op.attributes()
+        .iter()
+        .find(|attribute| attribute.name == "outgoing_stack_size")
+        .and_then(|attribute| match attribute.value {
+            tir::attributes::AttributeValue::UInt(value) => Some(value),
+            _ => None,
+        })
+        .expect("verified virtual calls have an outgoing stack size")
 }
