@@ -2713,6 +2713,21 @@ impl FnCodegen<'_> {
         }
         let ast = self.ast;
         let kind = ast.get_node(node).kind;
+        if let Some(value) = ast.get_annotation(node).and_then(|info| info.constant)
+            && matches!(
+                self.typed.types().kind(node_type(self.typed, node)),
+                TypeKind::Integer(_) | TypeKind::Enum(_)
+            )
+        {
+            let ty = lower_type(self.context, self.typed, node_type(self.typed, node));
+            let expression = LoweredExpr::Value(
+                self.builder
+                    .insert(b::constant(self.context, value, ty).build())
+                    .result(),
+            );
+            self.values.insert(node, expression);
+            return Ok(expression);
+        }
         if matches!(kind, AstKind::LogAnd | AstKind::LogOr) {
             return self.lower_logical(node, kind);
         }
