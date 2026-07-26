@@ -1612,9 +1612,9 @@ impl InstructionSelectPass {
 
         let block_arc = context.get_block(block.id());
 
-        // Insert the rewrite-introduced instructions first, in operand-first order,
+        // Insert pre-consumer materializations first, in operand-first order,
         // each ahead of its anchor op. The request carries only the fresh
-        // destination value: there is no backing IR op.
+        // destination value because the backing IR op, if any, is consumed.
         for intro in &plan.introduced {
             let request = EmitRequest {
                 op: None,
@@ -2016,6 +2016,10 @@ impl InstructionSelectPass {
                 continue;
             };
             if let Some(&match_id) = root_match.get(&class) {
+                if matches[match_id].introduced {
+                    op_decisions.insert(op_id, BlockDecision::Consume);
+                    continue;
+                }
                 let result_ty = context
                     .get_op(op_id)
                     .results
@@ -2392,10 +2396,25 @@ impl InstructionSelectPass {
             }
         }
         for matched in &mut matches {
+            let root = fs.egraph.find(matched.root);
+            let propagated_consumer = consumer_by_class.get(&root).copied();
             if matched.consumer.is_none() {
-                matched.consumer = consumer_by_class
-                    .get(&fs.egraph.find(matched.root))
-                    .copied();
+                matched.consumer = propagated_consumer;
+            }
+            if !matched.introduced
+                && self.compiled_patterns[matched.pattern_index]
+                    .constant_materializer_range()
+                    .is_some()
+                && !fs.requires_materialization(root, &HashSet::new())
+                && !fs.forces_constant_materialization(root, block)
+                && propagated_consumer.is_some_and(|consumer| {
+                    block_op_by_root.get(&root).is_some_and(|producer| {
+                        fs.op_position[&consumer] < fs.op_position[producer]
+                    })
+                })
+            {
+                matched.introduced = true;
+                matched.consumer = propagated_consumer;
             }
         }
 

@@ -401,6 +401,12 @@ pure operation rather than a literal `constant`. The cover selects the cheapest
 target instruction for the folded result type; it does not preserve the original
 operation chain merely to reproduce its intermediate register widths.
 
+When a constant e-class is also backed by a later IR `constant`, an earlier
+target instruction may still require that value in a register. The cover emits
+the target's constant materializer before the earlier consumer and consumes the
+later redundant IR definition. It does not make the earlier instruction read a
+register that is defined later in block order.
+
 Target axiom files may partition the remaining values and reconstruct them with
 formal target instruction behaviors. ARM64 clears one nonzero 16-bit lane at a
 time, recursively materializes the smaller value with `movz`, and restores the
@@ -540,6 +546,8 @@ struct BlockPlan {
 - A class chosen **Reify** → preserve the existing branch-edge assignment; emit
   no value instruction for the gate itself.
 - A **Root** class with no backing op → an `IntroducedEmit` (the saturation `slli`).
+- A constant class backed only by a later op, but required by an earlier consumer,
+  also becomes an `IntroducedEmit`; the later op is consumed.
 - A low-bit `Extract` of an existing value → `ForwardOperand`. If its source is
   rewrite-introduced, a width-matched identity-copy rule roots the view and
   forces the introduced producer into the cover.
