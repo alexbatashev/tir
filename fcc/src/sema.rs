@@ -3,7 +3,9 @@ use std::collections::HashMap;
 use tir::backend::abi::{AbiInfo, ArgumentGroupAlignment, ClassifierKind, Overflow, ValueKind};
 use tir::graph::{Dag, MutDag, NodeId};
 
-use crate::ast::{Ast, AstKind, AstLeaf, CParam, CType, RecordId, RecordKind};
+use crate::ast::{
+    Ast, AstKind, AstLeaf, CParam, CType, InitializerDesignator, RecordId, RecordKind,
+};
 use crate::diagnostics::{
     ArgumentMismatch, CalledObjectNotFunction, CompleteObjectTypeRequired, ConflictingDeclaration,
     Diagnostic, DuplicateLabel, DuplicateSwitchLabel, IncompatibleConversion,
@@ -1109,7 +1111,7 @@ impl Analyzer<'_> {
             };
             let mut next_field = 0;
             for value in values {
-                if let Some(AstLeaf::DesignatedInitializer(name)) =
+                if let Some(AstLeaf::DesignatedInitializer(InitializerDesignator::Field(name))) =
                     self.ast.get_leaf_data(value).cloned()
                 {
                     let Some((index, (_, field))) = fields
@@ -1137,6 +1139,15 @@ impl Analyzer<'_> {
                     let selected = self.ast.children(value).next().unwrap();
                     self.validate_initializer_value(*field, selected);
                     next_field = index + 1;
+                } else if self.ast.get_node(value).kind == AstKind::DesignatedInitializer {
+                    self.diagnostics.push(
+                        InvalidOperands::new(
+                            self.ast.get_node(value).span,
+                            "array designator cannot initialize a record",
+                            initializer_reference(self.options),
+                        )
+                        .into(),
+                    );
                 } else if next_field < positional_field_count {
                     self.validate_initializer_value(fields[next_field].1, value);
                     next_field += 1;
@@ -1169,18 +1180,74 @@ impl Analyzer<'_> {
             }
         };
         let values = self.ast.children(initializer).collect::<Vec<_>>();
-        if values.len() as u64 > length {
-            self.diagnostics.push(
-                InvalidOperands::new(
-                    self.ast.get_node(initializer).span,
-                    "too many initializers for array",
-                    initializer_reference(self.options),
-                )
-                .into(),
-            );
-        }
-        for value in values.into_iter().take(length as usize) {
-            self.validate_initializer_value(element, value);
+        let mut next_element = 0;
+        for value in values {
+            if let Some(AstLeaf::DesignatedInitializer(InitializerDesignator::Index)) =
+                self.ast.get_leaf_data(value)
+            {
+                let (index, selected) = {
+                    let mut children = self.ast.children(value);
+                    (children.next().unwrap(), children.next().unwrap())
+                };
+                let Some(index) = self
+                    .ast
+                    .get_annotation(index)
+                    .and_then(|info| info.constant)
+                    .filter(|index| *index >= 0)
+                    .map(|index| index as usize)
+                else {
+                    self.diagnostics.push(
+                        InvalidOperands::new(
+                            self.ast.get_node(value).span,
+                            "array designator requires a nonnegative integer constant",
+                            initializer_reference(self.options),
+                        )
+                        .into(),
+                    );
+                    continue;
+                };
+                if index >= length as usize {
+                    self.diagnostics.push(
+                        InvalidOperands::new(
+                            self.ast.get_node(value).span,
+                            "array designator index exceeds array bounds",
+                            initializer_reference(self.options),
+                        )
+                        .into(),
+                    );
+                    continue;
+                }
+                self.ast.set_annotation(
+                    value,
+                    NodeSemantics {
+                        member_index: Some(index),
+                        ..NodeSemantics::default()
+                    },
+                );
+                self.validate_initializer_value(element, selected);
+                next_element = index + 1;
+            } else if self.ast.get_node(value).kind == AstKind::DesignatedInitializer {
+                self.diagnostics.push(
+                    InvalidOperands::new(
+                        self.ast.get_node(value).span,
+                        "field designator cannot initialize an array",
+                        initializer_reference(self.options),
+                    )
+                    .into(),
+                );
+            } else if next_element < length as usize {
+                self.validate_initializer_value(element, value);
+                next_element += 1;
+            } else {
+                self.diagnostics.push(
+                    InvalidOperands::new(
+                        self.ast.get_node(value).span,
+                        "too many initializers for array",
+                        initializer_reference(self.options),
+                    )
+                    .into(),
+                );
+            }
         }
     }
 
