@@ -23,11 +23,11 @@ _start:
   lsr x12, x7, 8
   asr x13, x6, 8
   add x14, x0, 128
-  sxtb x15, x14
+  sxtb x15, w14
   movz x16, 32768
-  sxth x17, x16
+  sxth x17, w16
   lslv x18, x16, x8
-  sxtw x19, x18
+  sxtw x19, w18
   cmp x1, x2
   cset x20, gt
   cset x21, le
