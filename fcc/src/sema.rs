@@ -1152,43 +1152,10 @@ impl Analyzer<'_> {
             };
             let mut next_field = 0;
             for value in values {
-                if let Some(AstLeaf::DesignatedInitializer(InitializerDesignator::Field(name))) =
-                    self.ast.get_leaf_data(value).cloned()
-                {
-                    let Some((index, (_, field))) = fields
-                        .iter()
-                        .enumerate()
-                        .find(|(_, (field_name, _))| field_name == &name)
-                    else {
-                        self.diagnostics.push(
-                            InvalidOperands::new(
-                                self.ast.get_node(value).span,
-                                format!("record has no member named '{name}'"),
-                                initializer_reference(self.options),
-                            )
-                            .into(),
-                        );
-                        continue;
-                    };
-                    self.ast.set_annotation(
-                        value,
-                        NodeSemantics {
-                            member_index: Some(index),
-                            ..NodeSemantics::default()
-                        },
-                    );
-                    let selected = self.ast.children(value).next().unwrap();
-                    self.validate_initializer_value(*field, selected);
-                    next_field = index + 1;
-                } else if self.ast.get_node(value).kind == AstKind::DesignatedInitializer {
-                    self.diagnostics.push(
-                        InvalidOperands::new(
-                            self.ast.get_node(value).span,
-                            "array designator cannot initialize a record",
-                            initializer_reference(self.options),
-                        )
-                        .into(),
-                    );
+                if self.ast.get_node(value).kind == AstKind::DesignatedInitializer {
+                    if let Some(index) = self.validate_designated_initializer(target, value) {
+                        next_field = index + 1;
+                    }
                 } else if next_field < positional_field_count {
                     self.validate_initializer_value(fields[next_field].1, value);
                     next_field += 1;
@@ -1223,59 +1190,10 @@ impl Analyzer<'_> {
         let values = self.ast.children(initializer).collect::<Vec<_>>();
         let mut next_element = 0;
         for value in values {
-            if let Some(AstLeaf::DesignatedInitializer(InitializerDesignator::Index)) =
-                self.ast.get_leaf_data(value)
-            {
-                let (index, selected) = {
-                    let mut children = self.ast.children(value);
-                    (children.next().unwrap(), children.next().unwrap())
-                };
-                let Some(index) = self
-                    .ast
-                    .get_annotation(index)
-                    .and_then(|info| info.constant)
-                    .filter(|index| *index >= 0)
-                    .map(|index| index as usize)
-                else {
-                    self.diagnostics.push(
-                        InvalidOperands::new(
-                            self.ast.get_node(value).span,
-                            "array designator requires a nonnegative integer constant",
-                            initializer_reference(self.options),
-                        )
-                        .into(),
-                    );
-                    continue;
-                };
-                if index >= length as usize {
-                    self.diagnostics.push(
-                        InvalidOperands::new(
-                            self.ast.get_node(value).span,
-                            "array designator index exceeds array bounds",
-                            initializer_reference(self.options),
-                        )
-                        .into(),
-                    );
-                    continue;
+            if self.ast.get_node(value).kind == AstKind::DesignatedInitializer {
+                if let Some(index) = self.validate_designated_initializer(target, value) {
+                    next_element = index + 1;
                 }
-                self.ast.set_annotation(
-                    value,
-                    NodeSemantics {
-                        member_index: Some(index),
-                        ..NodeSemantics::default()
-                    },
-                );
-                self.validate_initializer_value(element, selected);
-                next_element = index + 1;
-            } else if self.ast.get_node(value).kind == AstKind::DesignatedInitializer {
-                self.diagnostics.push(
-                    InvalidOperands::new(
-                        self.ast.get_node(value).span,
-                        "field designator cannot initialize an array",
-                        initializer_reference(self.options),
-                    )
-                    .into(),
-                );
             } else if next_element < length as usize {
                 self.validate_initializer_value(element, value);
                 next_element += 1;
@@ -1292,7 +1210,107 @@ impl Analyzer<'_> {
         }
     }
 
+    fn validate_designated_initializer(
+        &mut self,
+        target: QualType,
+        initializer: NodeId,
+    ) -> Option<usize> {
+        let (index, selected, selected_type) = match self.ast.get_leaf_data(initializer).cloned()? {
+            AstLeaf::DesignatedInitializer(InitializerDesignator::Field(name)) => {
+                let TypeKind::Record(id) = self.types.kind(target) else {
+                    self.diagnostics.push(
+                        InvalidOperands::new(
+                            self.ast.get_node(initializer).span,
+                            "field designator requires a record",
+                            initializer_reference(self.options),
+                        )
+                        .into(),
+                    );
+                    return None;
+                };
+                let Some((index, field)) = self.records[self.record_indices[id]]
+                    .fields
+                    .iter()
+                    .enumerate()
+                    .find(|(_, field)| field.name == name)
+                    .map(|(index, field)| (index, field.ty))
+                else {
+                    self.diagnostics.push(
+                        InvalidOperands::new(
+                            self.ast.get_node(initializer).span,
+                            format!("record has no member named '{name}'"),
+                            initializer_reference(self.options),
+                        )
+                        .into(),
+                    );
+                    return None;
+                };
+                (index, self.ast.children(initializer).next().unwrap(), field)
+            }
+            AstLeaf::DesignatedInitializer(InitializerDesignator::Index) => {
+                let TypeKind::Array(element, Some(length)) = self.types.kind(target) else {
+                    self.diagnostics.push(
+                        InvalidOperands::new(
+                            self.ast.get_node(initializer).span,
+                            "array designator requires an array",
+                            initializer_reference(self.options),
+                        )
+                        .into(),
+                    );
+                    return None;
+                };
+                let (element, length) = (*element, *length);
+                let mut children = self.ast.children(initializer);
+                let index_expression = children.next().unwrap();
+                let selected = children.next().unwrap();
+                let Some(index) = self
+                    .ast
+                    .get_annotation(index_expression)
+                    .and_then(|info| info.constant)
+                    .filter(|index| *index >= 0)
+                    .map(|index| index as usize)
+                else {
+                    self.diagnostics.push(
+                        InvalidOperands::new(
+                            self.ast.get_node(initializer).span,
+                            "array designator requires a nonnegative integer constant",
+                            initializer_reference(self.options),
+                        )
+                        .into(),
+                    );
+                    return None;
+                };
+                if index >= length as usize {
+                    self.diagnostics.push(
+                        InvalidOperands::new(
+                            self.ast.get_node(initializer).span,
+                            "array designator index exceeds array bounds",
+                            initializer_reference(self.options),
+                        )
+                        .into(),
+                    );
+                    return None;
+                }
+                (index, selected, element)
+            }
+            _ => unreachable!(),
+        };
+        self.ast.set_annotation(
+            initializer,
+            NodeSemantics {
+                member_index: Some(index),
+                ..NodeSemantics::default()
+            },
+        );
+        self.validate_initializer_value(selected_type, selected);
+        Some(index)
+    }
+
     fn validate_initializer_value(&mut self, target: QualType, value: NodeId) {
+        if self.ast.get_node(value).kind == AstKind::DesignatedInitializer {
+            self.validate_designated_initializer(target, value);
+            return;
+        }
         if self.ast.get_node(value).kind == AstKind::InitializerList {
             self.validate_initializer_list(target, value);
             return;
