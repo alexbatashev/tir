@@ -4,12 +4,16 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use xshell::{cmd, Shell};
 
 const GCC_REPOSITORY: &str = "https://github.com/gcc-mirror/gcc.git";
 const GCC_REVISION: &str = "9aab80ddc5b2fa0eef80008e718067ab45f42c50";
 const TORTURE_PATH: &str = "gcc/testsuite/gcc.c-torture";
+const COMPILE_TIMEOUT: Duration = Duration::from_secs(60);
+const RUN_TIMEOUT: Duration = Duration::from_secs(10);
+const POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 pub fn run(sh: &Shell, root: &Path, bless: bool) -> anyhow::Result<()> {
     let checkout = root.join("target/test-suites/gcc");
@@ -18,46 +22,73 @@ pub fn run(sh: &Shell, root: &Path, bless: bool) -> anyhow::Result<()> {
     cmd!(sh, "cargo build -p fcc --bin fcc").run()?;
     let fcc = root.join("target/debug/fcc");
     let corpus = checkout.join(TORTURE_PATH);
-    let mut files = Vec::new();
+    let mut execute_files = Vec::new();
+    collect_c_files(&corpus.join("execute"), &mut execute_files)?;
+    execute_files.sort();
+
+    let mut files = execute_files.clone();
     collect_c_files(&corpus.join("compile"), &mut files)?;
-    collect_c_files(&corpus.join("execute"), &mut files)?;
     files.sort();
 
-    let results = run_parser(&fcc, &corpus, files)?;
-    let allowlist_path = root.join("fcc/tests/gcc-torture-known-failures.txt");
+    let parser = check_phase(
+        "parser",
+        &root.join("fcc/tests/gcc-torture-known-failures.txt"),
+        run_parser(&fcc, &corpus, files)?,
+        bless,
+    )?;
+    let workspace = root.join("target/test-suites/gcc-torture-execute");
+    let execute = check_phase(
+        "execute",
+        &root.join("fcc/tests/gcc-torture-execute-known-failures.txt"),
+        run_execute(&fcc, &corpus, &workspace, execute_files)?,
+        bless,
+    )?;
+    if !parser || !execute {
+        anyhow::bail!("GCC torture baseline changed");
+    }
+    Ok(())
+}
+
+/// Compares one phase against its allowlist, or rewrites the allowlist when
+/// blessing. Returns whether the baseline still holds.
+fn check_phase(
+    label: &str,
+    allowlist_path: &Path,
+    results: Vec<(String, bool)>,
+    bless: bool,
+) -> anyhow::Result<bool> {
+    let failures = results
+        .iter()
+        .filter_map(|(path, passed)| (!passed).then_some(path.as_str()))
+        .collect::<Vec<_>>();
     if bless {
-        let failures = results
-            .iter()
-            .filter_map(|(path, passed)| (!passed).then_some(path.as_str()))
-            .collect::<Vec<_>>();
         let contents = if failures.is_empty() {
             String::new()
         } else {
             format!("{}\n", failures.join("\n"))
         };
-        fs::write(&allowlist_path, contents)?;
-        println!("recorded {} known GCC torture failures", failures.len());
-        return Ok(());
+        fs::write(allowlist_path, contents)?;
+        println!(
+            "recorded {} known GCC torture {label} failures",
+            failures.len()
+        );
+        return Ok(true);
     }
 
-    let expected = parse_allowlist(&fs::read_to_string(&allowlist_path)?)?;
+    let expected = parse_allowlist(&fs::read_to_string(allowlist_path)?)?;
     let classification = classify_results(&expected, &results);
-    let passed = results.iter().filter(|(_, passed)| *passed).count();
     println!(
-        "GCC torture parser: {passed}/{} passed, {} expected failures",
+        "GCC torture {label}: {}/{} passed, {} expected failures",
+        results.len() - failures.len(),
         results.len(),
         expected.len()
     );
     print_paths("unexpected failures", &classification.unexpected_failures);
     print_paths("stale failures", &classification.stale_failures);
     print_paths("missing allowlist entries", &classification.missing_entries);
-    if !classification.unexpected_failures.is_empty()
-        || !classification.stale_failures.is_empty()
-        || !classification.missing_entries.is_empty()
-    {
-        anyhow::bail!("GCC torture parser baseline changed");
-    }
-    Ok(())
+    Ok(classification.unexpected_failures.is_empty()
+        && classification.stale_failures.is_empty()
+        && classification.missing_entries.is_empty())
 }
 
 fn fetch_gcc(sh: &Shell, checkout: &Path) -> anyhow::Result<()> {
@@ -93,39 +124,127 @@ fn run_parser(
     corpus: &Path,
     files: Vec<PathBuf>,
 ) -> anyhow::Result<Vec<(String, bool)>> {
-    let files = Arc::new(files);
+    Ok(run_parallel(files, |file| {
+        let passed = Command::new(fcc)
+            .args(["compile", "-std=gnu17", "--stage", "ast", "-o", "-"])
+            .arg(file)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        (relative_path(corpus, file), passed)
+    }))
+}
+
+/// Compiles and links each execute test with `cc`, then runs it: the GCC
+/// torture execute tests report failure by aborting, so a zero exit status is
+/// the whole verdict.
+fn run_execute(
+    fcc: &Path,
+    corpus: &Path,
+    workspace: &Path,
+    files: Vec<PathBuf>,
+) -> anyhow::Result<Vec<(String, bool)>> {
+    fs::create_dir_all(workspace)?;
+    let cases = pair_libraries(&files);
+    Ok(run_parallel(cases, |(test, library)| {
+        let path = relative_path(corpus, test);
+        let program = workspace.join(path.replace('/', "_"));
+        let mut command = Command::new(fcc);
+        command.args(["cc", "-std=gnu17"]).arg(test);
+        if let Some(library) = library {
+            command.arg(library);
+        }
+        command
+            .arg("-o")
+            .arg(&program)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let _ = fs::remove_file(&program);
+        let passed = run_with_timeout(&mut command, COMPILE_TIMEOUT)
+            && run_with_timeout(
+                Command::new(&program)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null()),
+                RUN_TIMEOUT,
+            );
+        let _ = fs::remove_file(&program);
+        (path, passed)
+    }))
+}
+
+/// Pairs each test with its `-lib.c` companion, which GCC links in separately
+/// for the `builtins` tests.
+fn pair_libraries(files: &[PathBuf]) -> Vec<(PathBuf, Option<PathBuf>)> {
+    let known = files.iter().collect::<BTreeSet<_>>();
+    files
+        .iter()
+        .filter(|file| !file.to_string_lossy().ends_with("-lib.c"))
+        .map(|file| {
+            let library = file.with_file_name(format!(
+                "{}-lib.c",
+                file.file_stem().unwrap().to_string_lossy()
+            ));
+            let library = known.contains(&library).then_some(library);
+            (file.clone(), library)
+        })
+        .collect()
+}
+
+fn run_with_timeout(command: &mut Command, timeout: Duration) -> bool {
+    let Ok(mut child) = command.spawn() else {
+        return false;
+    };
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) => {}
+            Err(_) => return false,
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return false;
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
+fn relative_path(corpus: &Path, file: &Path) -> String {
+    file.strip_prefix(corpus)
+        .unwrap()
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+fn run_parallel<T: Send + Sync>(
+    items: Vec<T>,
+    task: impl Fn(&T) -> (String, bool) + Sync,
+) -> Vec<(String, bool)> {
+    let items = Arc::new(items);
     let next = Arc::new(AtomicUsize::new(0));
-    let results = Arc::new(Mutex::new(Vec::with_capacity(files.len())));
+    let results = Arc::new(Mutex::new(Vec::with_capacity(items.len())));
     let workers = std::thread::available_parallelism().map_or(1, usize::from);
+    let task = &task;
     std::thread::scope(|scope| {
         for _ in 0..workers {
-            let files = Arc::clone(&files);
+            let items = Arc::clone(&items);
             let next = Arc::clone(&next);
             let results = Arc::clone(&results);
             scope.spawn(move || loop {
                 let index = next.fetch_add(1, Ordering::Relaxed);
-                let Some(file) = files.get(index) else {
+                let Some(item) = items.get(index) else {
                     break;
                 };
-                let passed = Command::new(fcc)
-                    .args(["compile", "-std=gnu17", "--stage", "ast", "-o", "-"])
-                    .arg(file)
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-                    .is_ok_and(|status| status.success());
-                let path = file
-                    .strip_prefix(corpus)
-                    .unwrap()
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                results.lock().unwrap().push((path, passed));
+                let result = task(item);
+                results.lock().unwrap().push(result);
             });
         }
     });
     let mut results = Arc::into_inner(results).unwrap().into_inner().unwrap();
     results.sort_by(|left, right| left.0.cmp(&right.0));
-    Ok(results)
+    results
 }
 
 fn print_paths(label: &str, paths: &[String]) {
@@ -186,8 +305,33 @@ fn parse_allowlist(contents: &str) -> anyhow::Result<BTreeSet<String>> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::path::PathBuf;
 
-    use super::{classify_results, parse_allowlist};
+    use super::{classify_results, pair_libraries, parse_allowlist};
+
+    #[test]
+    fn library_companion_is_linked_with_its_test() {
+        let files = vec![
+            PathBuf::from("execute/builtins/abs-1-lib.c"),
+            PathBuf::from("execute/builtins/abs-1.c"),
+        ];
+        assert_eq!(
+            pair_libraries(&files),
+            [(
+                PathBuf::from("execute/builtins/abs-1.c"),
+                Some(PathBuf::from("execute/builtins/abs-1-lib.c"))
+            )]
+        );
+    }
+
+    #[test]
+    fn test_without_companion_is_compiled_alone() {
+        let files = vec![PathBuf::from("execute/20000112-1.c")];
+        assert_eq!(
+            pair_libraries(&files),
+            [(PathBuf::from("execute/20000112-1.c"), None)]
+        );
+    }
 
     #[test]
     fn unlisted_failure_is_a_regression() {
