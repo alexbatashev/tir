@@ -365,6 +365,7 @@ struct Symbol {
     entity: EntityId,
     typedef: bool,
     defined: bool,
+    constant: Option<i64>,
 }
 
 pub fn analyze(ast: Ast, options: LangOptions) -> Result<TypedAst, Vec<Diagnostic>> {
@@ -457,6 +458,7 @@ impl Analyzer<'_> {
         for item in items {
             match self.ast.get_node(item).kind {
                 AstKind::RecordDecl => self.record_declaration(item),
+                AstKind::EnumDecl => self.enum_declaration(item),
                 AstKind::Function => {
                     self.declare_file_item(item);
                     self.function(item);
@@ -473,6 +475,8 @@ impl Analyzer<'_> {
                     for declaration in declarations {
                         if self.ast.get_node(declaration).kind == AstKind::RecordDecl {
                             self.record_declaration(declaration);
+                        } else if self.ast.get_node(declaration).kind == AstKind::EnumDecl {
+                            self.enum_declaration(declaration);
                         } else {
                             self.declare_file_item(declaration);
                             if self.ast.get_node(declaration).kind == AstKind::Global {
@@ -628,8 +632,80 @@ impl Analyzer<'_> {
                     entity,
                     typedef,
                     defined,
+                    constant: None,
                 },
             );
+        }
+    }
+
+    fn enum_declaration(&mut self, node: NodeId) {
+        let int = self.types.intern(TypeKind::Integer(IntegerKind::Int));
+        let mut previous = -1_i64;
+        for enumerator in self.ast.children(node).collect::<Vec<_>>() {
+            let Some(AstLeaf::Enumerator { name }) = self.ast.get_leaf_data(enumerator).cloned()
+            else {
+                continue;
+            };
+            let explicit = self.ast.children(enumerator).next();
+            if let Some(expression) = explicit {
+                self.node(expression);
+            }
+            let value = explicit
+                .and_then(|expression| self.ast.get_annotation(expression))
+                .and_then(|info| info.constant)
+                .or_else(|| {
+                    explicit
+                        .is_none()
+                        .then(|| previous.checked_add(1))
+                        .flatten()
+                });
+            let Some(value) = value else {
+                self.diagnostics.push(
+                    InvalidOperands::new(
+                        self.ast.get_node(enumerator).span,
+                        "enumerator value cannot be represented",
+                        initializer_reference(self.options),
+                    )
+                    .into(),
+                );
+                continue;
+            };
+            previous = value;
+            let span = self.ast.get_node(enumerator).span;
+            let entity = self.new_entity();
+            self.ast.set_annotation(
+                enumerator,
+                NodeSemantics {
+                    ty: Some(int),
+                    entity: Some(entity),
+                    category: ValueCategory::Value,
+                    constant: Some(value),
+                    ..NodeSemantics::default()
+                },
+            );
+            if let Some(existing) = self.scopes[0].get(&name) {
+                self.diagnostics.push(
+                    Redefinition::new(
+                        span,
+                        existing.span,
+                        name,
+                        redefinition_reference(self.options),
+                    )
+                    .into(),
+                );
+            } else {
+                self.scopes[0].insert(
+                    name,
+                    Symbol {
+                        span,
+                        ty: int,
+                        entity,
+                        typedef: false,
+                        defined: true,
+                        constant: Some(value),
+                    },
+                );
+            }
         }
     }
 
@@ -1021,6 +1097,7 @@ impl Analyzer<'_> {
                     entity,
                     typedef,
                     defined: true,
+                    constant: None,
                 },
             );
         }
@@ -1426,6 +1503,7 @@ impl Analyzer<'_> {
         let error = self.types.intern(TypeKind::Error);
         let mut entity = None;
         let mut member_index = None;
+        let mut named_constant = None;
         let (ty, category) = match kind {
             AstKind::Int => {
                 let Some(AstLeaf::Int(literal)) = self.ast.get_leaf_data(node).cloned() else {
@@ -1452,12 +1530,14 @@ impl Analyzer<'_> {
                 match self.require_name(node, &name) {
                     Some(symbol) if !symbol.typedef => {
                         entity = Some(symbol.entity);
-                        let category =
-                            if matches!(self.types.kind(symbol.ty), TypeKind::Function { .. }) {
-                                ValueCategory::Function
-                            } else {
-                                ValueCategory::Lvalue
-                            };
+                        named_constant = symbol.constant;
+                        let category = if symbol.constant.is_some() {
+                            ValueCategory::Value
+                        } else if matches!(self.types.kind(symbol.ty), TypeKind::Function { .. }) {
+                            ValueCategory::Function
+                        } else {
+                            ValueCategory::Lvalue
+                        };
                         (symbol.ty, category)
                     }
                     _ => (error, ValueCategory::Value),
@@ -2152,7 +2232,7 @@ impl Analyzer<'_> {
             }
             _ => return,
         };
-        let constant = self.constant_value(node, kind);
+        let constant = named_constant.or_else(|| self.constant_value(node, kind));
         self.ast.set_annotation(
             node,
             NodeSemantics {

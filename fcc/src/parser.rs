@@ -1258,7 +1258,7 @@ struct DeclParser<'a> {
 struct DeclSpecs {
     ty: CType,
     storage: Vec<Token>,
-    record: Option<NodeId>,
+    type_decl: Option<NodeId>,
 }
 
 struct Declarator {
@@ -1325,7 +1325,7 @@ impl<'a> DeclParser<'a> {
         let mut storage = Vec::new();
         let mut qualifiers = Vec::new();
         let mut spec_tokens = Vec::new();
-        let mut record = None;
+        let mut type_decl = None;
         let mut ty = None;
 
         loop {
@@ -1341,14 +1341,14 @@ impl<'a> DeclParser<'a> {
                     let (record_ty, record_node) =
                         self.parse_record(st, tok, RecordKind::Struct)?;
                     ty = Some(record_ty);
-                    record = record_node;
+                    type_decl = record_node;
                     break;
                 }
                 Some(Token::KwUnion) => {
                     self.next();
                     let (record_ty, record_node) = self.parse_record(st, tok, RecordKind::Union)?;
                     ty = Some(record_ty);
-                    record = record_node;
+                    type_decl = record_node;
                     break;
                 }
                 Some(Token::KwEnum) => {
@@ -1361,7 +1361,53 @@ impl<'a> DeclParser<'a> {
                         _ => None,
                     };
                     if self.eat(&Token::LBrace) {
-                        self.skip_balanced(Token::LBrace, Token::RBrace)?;
+                        let mut enumerators = Vec::new();
+                        while !self.eat(&Token::RBrace) {
+                            let enumerator_tok = tok + self.pos;
+                            let enumerator_name = match self.next() {
+                                Some(Token::Identifier(name)) => name,
+                                Some(token) => {
+                                    return Err(format!("expected enumerator name, found {token}"));
+                                }
+                                None => return Err("unterminated enum declaration".to_string()),
+                            };
+                            let value = if self.eat(&Token::Assign) {
+                                let value_tok = tok + self.pos;
+                                let Some(Token::IntegerLiteral(value)) = self.next() else {
+                                    return Err(
+                                        "expected integer literal enumerator value".to_string()
+                                    );
+                                };
+                                let value_node = st.add(AstKind::Int, value_tok);
+                                st.ast.set_leaf_data(value_node, AstLeaf::Int(value));
+                                Some(value_node)
+                            } else {
+                                None
+                            };
+                            st.declare_ordinary(enumerator_name.clone());
+                            let enumerator = st.add(AstKind::Enumerator, enumerator_tok);
+                            st.ast.set_leaf_data(
+                                enumerator,
+                                AstLeaf::Enumerator {
+                                    name: enumerator_name,
+                                },
+                            );
+                            if let Some(value) = value {
+                                st.ast.add_edge(enumerator, value);
+                            }
+                            enumerators.push(enumerator);
+                            if !self.eat(&Token::Comma) {
+                                self.expect(&Token::RBrace)?;
+                                break;
+                            }
+                        }
+                        let declaration = st.add(AstKind::EnumDecl, tok);
+                        st.ast
+                            .set_leaf_data(declaration, AstLeaf::Enum { name: name.clone() });
+                        for enumerator in enumerators {
+                            st.ast.add_edge(declaration, enumerator);
+                        }
+                        type_decl = Some(declaration);
                     }
                     ty = Some(CType::Enum(name));
                     break;
@@ -1412,7 +1458,7 @@ impl<'a> DeclParser<'a> {
         Ok(DeclSpecs {
             ty,
             storage,
-            record,
+            type_decl,
         })
     }
 
@@ -1696,21 +1742,6 @@ impl<'a> DeclParser<'a> {
         }
     }
 
-    fn skip_balanced(&mut self, open: Token, close: Token) -> Result<(), String> {
-        let mut depth = 1usize;
-        while let Some(tok) = self.next() {
-            if tok == open {
-                depth += 1;
-            } else if tok == close {
-                depth -= 1;
-                if depth == 0 {
-                    return Ok(());
-                }
-            }
-        }
-        Err(format!("expected {close}"))
-    }
-
     fn collect_until_matching(&mut self, open: Token, close: Token) -> Result<Vec<Token>, String> {
         let mut depth = 1usize;
         let mut out = Vec::new();
@@ -1988,8 +2019,8 @@ fn parse_external_tokens(
         .iter()
         .any(|tok| matches!(tok, Token::KwExtern));
     let mut nodes = Vec::new();
-    if let Some(record) = specs.record {
-        nodes.push(record);
+    if let Some(type_decl) = specs.type_decl {
+        nodes.push(type_decl);
     }
 
     if parser.is_done() {
