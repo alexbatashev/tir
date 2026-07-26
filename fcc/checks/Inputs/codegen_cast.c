@@ -9,3 +9,7 @@ long widen(int value) {
 unsigned long widen_unsigned(unsigned int value) {
     return (unsigned long)value;
 }
+
+void *null_pointer(void) {
+    return 0;
+}

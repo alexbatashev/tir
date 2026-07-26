@@ -6,3 +6,7 @@
 // CHECK-NEXT: return
 // CHECK-NEXT: }
 // CHECK-NOT: ptr.alloca
+
+// CHECK: func @implicit() {
+// CHECK-NEXT: return
+// CHECK-NEXT: }
