@@ -507,7 +507,7 @@ fn constant_initializer_data(
                 bytes: vec![0; element_size * *length as usize],
                 relocations: Vec::new(),
             };
-            for (index, value) in ast.children(initializer).take(*length as usize).enumerate() {
+            for (index, value) in aggregate_initializer_values(ast, initializer) {
                 let mut element_data = constant_initializer_data(typed, globals, *element, value)?;
                 let offset = index * element_size;
                 data.bytes[offset..offset + element_size].copy_from_slice(&element_data.bytes);
