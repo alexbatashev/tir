@@ -518,9 +518,18 @@ fn constant_aggregate_initializer_data(
         bytes: vec![0; source_type_layout(typed, target).0 as usize],
         relocations: Vec::new(),
     };
-    for (path, value) in initializer_entries(typed.ast(), initializer)? {
-        let (selected_type, offset) = initializer_subobject(typed, target, &path)?;
-        let value = constant_initializer_data(typed, globals, selected_type, value)?;
+    let entries = initializer_entries(typed.ast(), initializer)?;
+    let entries = if matches!(
+        typed.types().kind(target),
+        TypeKind::Record(id) if typed.record(*id)?.kind == RecordKind::Union
+    ) {
+        active_union_entries(&entries)
+    } else {
+        &entries
+    };
+    for (path, value) in entries {
+        let (selected_type, offset) = initializer_subobject(typed, target, path)?;
+        let value = constant_initializer_data(typed, globals, selected_type, *value)?;
         write_constant_data(&mut data, offset as usize, value);
     }
     Some(data)
@@ -547,6 +556,17 @@ fn initializer_entries(ast: &Ast, initializer: NodeId) -> Option<Vec<(Vec<usize>
             Some((path, designated_initializer_value(ast, value)))
         })
         .collect()
+}
+
+fn active_union_entries(entries: &[(Vec<usize>, NodeId)]) -> &[(Vec<usize>, NodeId)] {
+    let Some(active_member) = entries.last().and_then(|(path, _)| path.first()) else {
+        return entries;
+    };
+    let start = entries
+        .iter()
+        .rposition(|(path, _)| path.first() != Some(active_member))
+        .map_or(0, |index| index + 1);
+    &entries[start..]
 }
 
 fn designated_initializer_value(ast: &Ast, mut initializer: NodeId) -> NodeId {
@@ -1650,8 +1670,8 @@ impl FnCodegen<'_> {
             {
                 self.zero_initialize(storage_type, address, initializer)?;
             }
-            for (path, value) in entries {
-                self.lower_initializer_path(target, address, &path, value)?;
+            for (path, value) in active_union_entries(&entries) {
+                self.lower_initializer_path(target, address, path, *value)?;
             }
             return Ok(());
         }
