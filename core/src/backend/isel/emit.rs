@@ -1,5 +1,5 @@
-//! Emission planning: turning a solved cover into per-op decisions and the
-//! instructions materialized for rewrite-introduced e-classes.
+//! Emission planning: turning a solved cover into per-op decisions and target
+//! instructions that must be materialized before their consumers.
 
 use std::collections::HashMap;
 
@@ -25,9 +25,8 @@ pub(crate) enum BlockDecision {
     /// already-remapped value regardless of block commit order.
     ForwardOperand,
 }
-/// The emission plan for a block: how each original op is rewritten, plus the extra
-/// instructions to insert for rewrite-introduced e-classes that have no original op
-/// (the `slli` of a `slli`/`srai` sign-extension expansion).
+/// The emission plan for a block: how each original op is rewritten, plus extra
+/// instructions inserted before their consumers.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct BlockPlan {
     pub(crate) op_decisions: HashMap<OpId, BlockDecision>,
@@ -69,9 +68,9 @@ pub(crate) enum GuardBranch {
     Nonzero { condition: ValueId },
 }
 
-/// An instruction to materialize for an introduced e-class: emitted with a fresh
-/// destination value and inserted just before `anchor` (the source op whose
-/// expansion produced it). Operands precede consumers in `BlockPlan::introduced`.
+/// An instruction to materialize before its first consumer: emitted with a fresh
+/// destination value and inserted just before `anchor`. Operands precede consumers
+/// in `BlockPlan::introduced`.
 #[derive(Clone, Debug)]
 pub(crate) struct IntroducedEmit {
     pub(crate) rule_index: usize,
@@ -81,8 +80,8 @@ pub(crate) struct IntroducedEmit {
     pub(crate) anchor: OpId,
 }
 /// Turns a solved cover into concrete per-instruction `RuleMatch`es, materializing
-/// rewrite-introduced e-classes (those covered by a Root match but with no original
-/// IR op) as fresh-valued instructions threaded into their consumers' operands.
+/// classes that need an instruction before their existing IR definition as
+/// fresh-valued instructions threaded into their consumers' operands.
 pub(crate) struct EmissionBuilder<'a> {
     pub(crate) fs: &'a FunctionSelection,
     pub(crate) dom: &'a DominatorTree,
@@ -97,11 +96,11 @@ pub(crate) struct EmissionBuilder<'a> {
 }
 
 impl EmissionBuilder<'_> {
-    /// A Root-covered class with no original op is one the rewrites introduced.
-    /// The op-root test aggregates over the scoped class's base members, so a
-    /// fact-merged op class is not mistaken for an introduced one.
+    /// Whether the selected root match must be emitted before its consumer.
     fn is_introduced(&self, class: Id) -> bool {
-        self.root_match.contains_key(&class) && !self.fs.is_op_root(class)
+        self.root_match
+            .get(&class)
+            .is_some_and(|match_id| self.matches[*match_id].introduced)
     }
 
     /// Build the operand bindings for a match, first materializing any introduced
