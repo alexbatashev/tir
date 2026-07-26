@@ -185,8 +185,8 @@ impl CallLowering {
                     Callee::Indirect(call.callee()),
                     call.args(),
                     call.result(),
-                    false,
-                    Vec::new(),
+                    call.has_result_address(),
+                    call.argument_alignments(),
                 )
             } else {
                 return Ok(false);

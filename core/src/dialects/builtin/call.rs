@@ -103,25 +103,7 @@ impl CallOpBuilder {
 
 impl tir::Verifiable for CallOp {
     fn verify_impl(&self, context: &Context) -> Result<(), Error> {
-        super::verify_argument_alignments(self, self.args().len(), "call")?;
-        if !self.has_result_address() {
-            return Ok(());
-        }
-        let Some(destination) = self.args().first().copied() else {
-            return Err(Error::VerificationError(
-                "result-address call requires a destination argument".to_string(),
-            ));
-        };
-        let ty = context.get_type_data(context.get_value(destination).ty());
-        if (ty.as_ref() as &dyn std::any::Any)
-            .downcast_ref::<crate::ptr::PtrType>()
-            .is_none()
-        {
-            return Err(Error::VerificationError(
-                "result-address call destination must have pointer type".to_string(),
-            ));
-        }
-        Ok(())
+        verify_call_metadata(self, context, &self.args(), "call")
     }
 }
 
@@ -130,6 +112,7 @@ operation! {
         name: "indirect_call",
         dialect: "builtin",
         format: "custom",
+        verifier: "true",
         operands: O {
             callee: "Any",
             args: "*Any",
@@ -149,6 +132,14 @@ impl IndirectCallOp {
         self.operands()[1..].to_vec()
     }
 
+    pub fn has_result_address(&self) -> bool {
+        has_result_address(self)
+    }
+
+    pub fn argument_alignments(&self) -> Vec<u64> {
+        super::argument_alignments(self)
+    }
+
     fn custom_print(&self, fmt: &mut tir::IRFormatter) -> Result<(), std::fmt::Error> {
         let context = self.0.context.upgrade();
         let header = format!("indirect_call %{}", self.callee().number());
@@ -158,8 +149,8 @@ impl IndirectCallOp {
             &header,
             self.result(),
             &self.args(),
-            false,
-            &[],
+            self.has_result_address(),
+            &self.argument_alignments(),
         )
     }
 
@@ -179,15 +170,73 @@ impl IndirectCallOp {
         })?;
         let args = parse_arg_list(parser, context)?;
         let ret_type = parse_ret_type(parser, context)?;
+        let result_address = parser.parse_token("result_address");
+        let argument_alignments = super::parse_argument_alignments(parser, context)?;
 
-        Ok(Box::new(
-            IndirectCallOpBuilder::new(context)
-                .callee(callee)
-                .args(args)
-                .result_type(ret_type)
-                .build(),
-        ))
+        let mut builder = IndirectCallOpBuilder::new(context)
+            .callee(callee)
+            .args(args)
+            .result_type(ret_type);
+        if result_address {
+            builder = builder.result_address();
+        }
+        if let Some(argument_alignments) = argument_alignments {
+            builder = builder.attr("argument_alignments", argument_alignments);
+        }
+        Ok(Box::new(builder.build()))
     }
+}
+
+impl IndirectCallOpBuilder {
+    pub fn result_address(self) -> Self {
+        self.attr("result_address", AttributeValue::Bool(true))
+    }
+
+    pub fn argument_alignments(self, alignments: &[u64]) -> Self {
+        self.attr(
+            "argument_alignments",
+            AttributeValue::Array(
+                alignments
+                    .iter()
+                    .copied()
+                    .map(AttributeValue::UInt)
+                    .collect(),
+            ),
+        )
+    }
+}
+
+impl tir::Verifiable for IndirectCallOp {
+    fn verify_impl(&self, context: &Context) -> Result<(), Error> {
+        verify_call_metadata(self, context, &self.args(), "indirect_call")
+    }
+}
+
+fn verify_call_metadata(
+    op: &impl Operation,
+    context: &Context,
+    args: &[ValueId],
+    name: &str,
+) -> Result<(), Error> {
+    super::verify_argument_alignments(op, args.len(), name)?;
+    if !has_result_address(op) {
+        return Ok(());
+    }
+    let Some(destination) = args.first().copied() else {
+        return Err(Error::VerificationError(format!(
+            "result-address {name} requires a destination argument"
+        )));
+    };
+    let ty = context.get_type_data(context.get_value(destination).ty());
+    if (ty.as_ref() as &dyn std::any::Any)
+        .downcast_ref::<crate::ptr::PtrType>()
+        .is_none()
+    {
+        return Err(Error::VerificationError(format!(
+            "result-address {name} destination must have pointer type"
+        )));
+    }
+    Ok(())
 }
 
 /// Print a call as `%r = <header>(%a, %b : t1, t2) -> ret`, omitting the result
