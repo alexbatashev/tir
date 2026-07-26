@@ -381,10 +381,10 @@ designated by a modifiable lvalue.",
         title: "integer constant expression required",
         reference: None,
         explain: "This context requires a value computable as an integer during translation.",
-        fields: { span: Span, reference: String },
+        fields: { span: Span, message: String, reference: String },
         build: |d| Diagnostic::of(Code::IntegerConstantRequired)
-            .message("case label is not an integer constant expression")
-            .label(d.span, "not an integer constant expression")
+            .message(d.message.clone())
+            .label(d.span, d.message)
             .reference(d.reference),
     }
 

@@ -661,9 +661,9 @@ impl Analyzer<'_> {
                 });
             let Some(value) = value else {
                 self.diagnostics.push(
-                    InvalidOperands::new(
+                    IntegerConstantRequired::new(
                         self.ast.get_node(enumerator).span,
-                        "enumerator value cannot be represented",
+                        "enumerator value is not an integer constant expression",
                         initializer_reference(self.options),
                     )
                     .into(),
@@ -978,6 +978,7 @@ impl Analyzer<'_> {
             self.diagnostics.push(
                 IntegerConstantRequired::new(
                     self.ast.get_node(expression).span,
+                    "case label is not an integer constant expression",
                     switch_case_reference(self.options),
                 )
                 .into(),
@@ -2265,6 +2266,8 @@ impl Analyzer<'_> {
             (AstKind::Mul, [left, right]) => left.checked_mul(*right),
             (AstKind::Div, [_, 0]) => None,
             (AstKind::Div, [left, right]) => left.checked_div(*right),
+            (AstKind::Neg, [value]) => value.checked_neg(),
+            (AstKind::Pos, [value]) => Some(*value),
             _ => None,
         }
     }
