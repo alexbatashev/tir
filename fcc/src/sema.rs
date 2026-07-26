@@ -684,7 +684,8 @@ impl Analyzer<'_> {
                     ..NodeSemantics::default()
                 },
             );
-            if let Some(existing) = self.scopes[0].get(&name) {
+            let scope = self.scopes.last_mut().unwrap();
+            if let Some(existing) = scope.get(&name) {
                 self.diagnostics.push(
                     Redefinition::new(
                         span,
@@ -695,7 +696,7 @@ impl Analyzer<'_> {
                     .into(),
                 );
             } else {
-                self.scopes[0].insert(
+                scope.insert(
                     name,
                     Symbol {
                         span,
@@ -786,6 +787,7 @@ impl Analyzer<'_> {
         for child in children {
             match self.ast.get_node(child).kind {
                 AstKind::Param | AstKind::Decl | AstKind::Typedef => self.declaration(child),
+                AstKind::EnumDecl => self.enum_declaration(child),
                 _ => self.node(child),
             }
         }
@@ -831,6 +833,7 @@ impl Analyzer<'_> {
         for child in children {
             match self.ast.get_node(child).kind {
                 AstKind::Decl | AstKind::Typedef => self.declaration(child),
+                AstKind::EnumDecl => self.enum_declaration(child),
                 _ => self.node(child),
             }
         }
