@@ -1280,6 +1280,7 @@ mod isa {
             abis()
                 .iter()
                 .map(|abi| tir::backend::abi::AbiInfo {
+                    indirect_result: Some((RegClass::GPR.id(), 7)),
                     argument_group_policy: Some(tir::backend::abi::ArgumentGroupPolicy {
                         register_limit: Some(2),
                         rollback: tir::backend::abi::GroupRollback::Preserve,
