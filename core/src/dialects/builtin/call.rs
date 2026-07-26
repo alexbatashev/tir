@@ -107,11 +107,6 @@ impl tir::Verifiable for CallOp {
         if !self.has_result_address() {
             return Ok(());
         }
-        if context.get_value(self.result()).ty() != UnitType::new(context) {
-            return Err(Error::VerificationError(
-                "result-address call must return unit".to_string(),
-            ));
-        }
         let Some(destination) = self.args().first().copied() else {
             return Err(Error::VerificationError(
                 "result-address call requires a destination argument".to_string(),

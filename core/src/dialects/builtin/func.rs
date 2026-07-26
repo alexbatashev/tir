@@ -214,11 +214,6 @@ impl tir::Verifiable for FuncOp {
         if !self.has_result_address() {
             return Ok(());
         }
-        if self.ret_type() != UnitType::new(context) {
-            return Err(Error::VerificationError(
-                "result-address function must return unit".to_string(),
-            ));
-        }
         let Some(argument) = self.body().arguments().first().cloned() else {
             return Err(Error::VerificationError(
                 "result-address function requires a destination argument".to_string(),

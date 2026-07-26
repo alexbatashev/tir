@@ -165,7 +165,9 @@ pointer argument. Function lowering records that value separately from
 Register allocation and call emission then use the ABI's target-described
 result-address register. If that physical register is also in an ordinary
 argument sequence, its slot is consumed before assigning the remaining
-arguments. No result-address operation enters the semantic graph.
+arguments. The function or call may also return an ordinary typed value when
+the ABI requires one in addition to the memory result. No result-address
+operation enters the semantic graph.
 
 ### Side tables produced by the build
 
