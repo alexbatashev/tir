@@ -1464,28 +1464,44 @@ impl InstructionSelectPass {
             }
         }
 
-        // A constant consumed by an op that selection cannot rewrite (a return, a
-        // call) must reach that consumer in a register. Forcing the cover to
-        // root a materializer match there moves the `li` into selection; a
-        // wide cross-block constant is forced at its dominating definition;
+        // A proven constant consumed by an op that selection cannot rewrite (a
+        // return, a call) must reach that consumer in a register. Forcing the
+        // cover to root a materializer match there moves the `li` into selection;
+        // a wide cross-block constant is forced at its dominating definition;
         // constants whose consumers all fold them as immediates keep their
         // zero-cost External alternative.
         let mut force_constant_values: HashSet<ValueId> = HashSet::new();
-        for &(op_id, class) in &constant_candidates {
-            for &result in &context.get_op(op_id).results {
-                let unselected_use = context.get_value(result).uses().iter().any(|u| {
-                    !roots_by_op.contains_key(&u.op())
-                        && !guard_ops.contains(&u.op())
-                        && !guard_condition_ops.contains(&u.op())
+        let needs_forced_materialization = |result: ValueId, class: Id| {
+            let unselected_use = context.get_value(result).uses().iter().any(|u| {
+                !roots_by_op.contains_key(&u.op())
+                    && !guard_ops.contains(&u.op())
+                    && !guard_condition_ops.contains(&u.op())
+            });
+            let wide_cross_block = externally_bound.contains(&result)
+                && class_int_binding(&egraph, class).is_some_and(|value| {
+                    !self
+                        .constant_materializer_ranges
+                        .iter()
+                        .any(|range| range.contains(&value))
                 });
-                let wide_cross_block = externally_bound.contains(&result)
-                    && class_int_binding(&egraph, class).is_some_and(|value| {
-                        !self
-                            .constant_materializer_ranges
-                            .iter()
-                            .any(|range| range.contains(&value))
-                    });
-                if unselected_use || wide_cross_block {
+            unselected_use || wide_cross_block
+        };
+        for (&op_id, &class) in &roots_by_op {
+            if class_int_binding(&egraph, class).is_none() {
+                continue;
+            }
+            for &result in &context.get_op(op_id).results {
+                if needs_forced_materialization(result, class) {
+                    force_constant_values.insert(result);
+                }
+            }
+        }
+        for &(op_id, class) in &constant_candidates {
+            if !context.get_op(op_id).is::<crate::builtin::ConstantFOp>() {
+                continue;
+            }
+            for &result in &context.get_op(op_id).results {
+                if needs_forced_materialization(result, class) {
                     force_constant_values.insert(result);
                 }
             }

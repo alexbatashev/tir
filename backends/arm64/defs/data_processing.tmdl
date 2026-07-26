@@ -742,7 +742,7 @@ instruction MoveWideZero32 for [ARMv8A64] {
     schedule { units = [WriteIALU]; }
 
     operands {
-        rd: GPR,
+        rd: GPR32,
         imm: bits<16>,
     }
 
@@ -760,7 +760,7 @@ instruction MoveWideZero32 for [ARMv8A64] {
     }
 
     behavior {
-        rd = zext(imm, self.XLEN);
+        rd = zext(imm, 32);
     }
 }
 
