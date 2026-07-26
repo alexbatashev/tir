@@ -213,6 +213,8 @@ pub enum AstKind {
     PostDec,
     /// Children: the argument expressions. Callee name lives in [`AstLeaf::Call`].
     Call,
+    /// Children: the callee expression followed by the argument expressions.
+    CallExpr,
     /// Child: the base expression. Field name and access form live in [`AstLeaf::Member`].
     Member,
     Var,
@@ -555,6 +557,7 @@ fn render_node(ast: &Ast, id: NodeId, depth: usize, out: &mut String) {
             Some(AstLeaf::Call(name)) => format!("Call {name:?}"),
             _ => unreachable!(),
         },
+        AstKind::CallExpr => "CallExpr".to_string(),
         AstKind::Member => match ast.get_leaf_data(id) {
             Some(AstLeaf::Member { name, indirect }) => {
                 format!("Member {}{name}", if *indirect { "->" } else { "." })

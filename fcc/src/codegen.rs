@@ -19,7 +19,7 @@ use crate::ast::*;
 use crate::cir::{self, StructType, VarArgsType};
 use crate::diagnostics::{Diagnostic, EmptyTranslationUnit, UnsupportedConstruct};
 use crate::lexer::{decode_c_escapes, decode_character_constant};
-use crate::sema::{EntityId, QualType, TargetProfile, TypeKind, TypedAst};
+use crate::sema::{EntityId, QualType, TargetProfile, TypeKind, TypedAst, ValueCategory};
 
 /// A local variable: the pointer to its stack slot and the slot's element type.
 #[derive(Clone, Copy)]
@@ -483,18 +483,35 @@ fn constant_initializer_data(
                 relocations: Vec::new(),
             })
         }
-        TypeKind::Pointer(_) if ast.get_node(initializer).kind == AstKind::AddressOf => {
-            let referent = ast.children(initializer).next()?;
-            if ast.get_node(referent).kind != AstKind::Var {
-                return None;
-            }
-            let global = globals.get(&node_entity(typed, referent))?;
+        TypeKind::Pointer(_) => {
+            let referent = match ast.get_node(initializer).kind {
+                AstKind::AddressOf => ast.children(initializer).next()?,
+                AstKind::Var
+                    if ast
+                        .get_annotation(initializer)
+                        .is_some_and(|info| info.category == ValueCategory::Function) =>
+                {
+                    initializer
+                }
+                _ => return None,
+            };
+            let symbol = if ast
+                .get_annotation(referent)
+                .is_some_and(|info| info.category == ValueCategory::Function)
+            {
+                let AstLeaf::Var(name) = ast.get_leaf_data(referent)? else {
+                    return None;
+                };
+                name.clone()
+            } else {
+                globals.get(&node_entity(typed, referent))?.name.clone()
+            };
             let width = source_type_layout(typed, target).0;
             Some(ConstantData {
                 bytes: vec![0; width as usize],
                 relocations: vec![DataRelocation {
                     offset: 0,
-                    symbol: global.name.clone(),
+                    symbol,
                     addend: 0,
                     width,
                 }],
@@ -645,38 +662,36 @@ fn lower_signature(
     let AstLeaf::Function { .. } = ast.get_leaf_data(item).unwrap() else {
         unreachable!("function-like node carries a function payload");
     };
-    let ret = match typed.types().kind(node_type(typed, item)) {
-        TypeKind::Function { ret, .. } => classify_abi_return(context, typed, *ret),
-        _ => unreachable!("function node has function semantic type"),
+    Ok((
+        node_entity(typed, item),
+        classify_function_type(context, typed, node_type(typed, item)),
+    ))
+}
+
+fn classify_function_type(context: &Context, typed: &TypedAst, ty: QualType) -> Signature {
+    let TypeKind::Function {
+        ret,
+        params: source_params,
+        varargs,
+        ..
+    } = typed.types().kind(ty)
+    else {
+        unreachable!("function signature has function semantic type")
     };
-    let mut params = Vec::new();
+    let ret = classify_abi_return(context, typed, *ret);
     let mut register_usage = AbiRegisterUsage::default();
     if ret.indirect {
         register_usage.reserve_indirect_result(typed.target());
     }
-    let mut varargs = false;
-    for child in ast.children(item) {
-        match ast.get_node(child).kind {
-            AstKind::Param => {
-                params.push(classify_abi_parameter(
-                    context,
-                    typed,
-                    node_type(typed, child),
-                    &mut register_usage,
-                ));
-            }
-            AstKind::VarArgs => varargs = true,
-            _ => break,
-        }
+    let params = source_params
+        .iter()
+        .map(|&param| classify_abi_parameter(context, typed, param, &mut register_usage))
+        .collect();
+    Signature {
+        ret,
+        params,
+        varargs: *varargs,
     }
-    Ok((
-        node_entity(typed, item),
-        Signature {
-            ret,
-            params,
-            varargs,
-        },
-    ))
 }
 
 fn classify_abi_return(context: &Context, typed: &TypedAst, ty: QualType) -> AbiReturn {
@@ -2836,7 +2851,7 @@ impl FnCodegen<'_> {
                     )
                 }
                 AstKind::Var => {
-                    let AstLeaf::Var(_) = ast.get_leaf_data(node).unwrap() else {
+                    let AstLeaf::Var(name) = ast.get_leaf_data(node).unwrap() else {
                         unreachable!("var node carries a var payload");
                     };
                     if let Some(value) = ast.get_annotation(node).and_then(|info| info.constant) {
@@ -2844,6 +2859,20 @@ impl FnCodegen<'_> {
                         LoweredExpr::Value(
                             self.builder
                                 .insert(b::constant(self.context, value, ty).build())
+                                .result(),
+                        )
+                    } else if ast
+                        .get_annotation(node)
+                        .is_some_and(|info| info.category == ValueCategory::Function)
+                    {
+                        let ptr_ty = lower_type(
+                            self.context,
+                            self.typed,
+                            converted_node_type(self.typed, node),
+                        );
+                        LoweredExpr::Value(
+                            self.builder
+                                .insert(b::addr_of_op(self.context, name, ptr_ty))
                                 .result(),
                         )
                     } else {
@@ -2919,14 +2948,68 @@ impl FnCodegen<'_> {
                         elem,
                     }
                 }
-                AstKind::Call => {
-                    let AstLeaf::Call(name) = ast.get_leaf_data(node).unwrap() else {
-                        unreachable!("call node carries a call payload");
+                kind @ (AstKind::Call | AstKind::CallExpr) => {
+                    let designator_ty = ast
+                        .get_annotation(node)
+                        .and_then(|semantics| semantics.call_designator_ty)
+                        .expect("semantic analysis records the call designator type");
+                    let (name, sig, callee, arguments) = if kind == AstKind::Call {
+                        let AstLeaf::Call(name) = ast.get_leaf_data(node).unwrap() else {
+                            unreachable!("call node carries a call payload");
+                        };
+                        let entity = node_entity(self.typed, node);
+                        let (sig, callee) = match self.typed.types().kind(designator_ty) {
+                            TypeKind::Function { .. } => (self.signatures[&entity].clone(), None),
+                            TypeKind::Pointer(pointee) => {
+                                let sig =
+                                    classify_function_type(self.context, self.typed, *pointee);
+                                let callee = if let Some(slot) = self.locals.get(&entity).copied() {
+                                    self.materialize(LoweredExpr::Address {
+                                        ptr: slot.ptr,
+                                        elem: slot.elem,
+                                    })
+                                } else {
+                                    let global = &self.globals[&entity];
+                                    let ptr_ty = PtrType::typed(self.context, global.elem);
+                                    let address = self
+                                        .builder
+                                        .insert(b::addr_of_op(self.context, &global.name, ptr_ty))
+                                        .result();
+                                    self.materialize(LoweredExpr::Address {
+                                        ptr: address,
+                                        elem: global.elem,
+                                    })
+                                };
+                                (sig, Some(callee))
+                            }
+                            _ => unreachable!("call designator is a function or function pointer"),
+                        };
+                        (
+                            Some(name.clone()),
+                            sig,
+                            callee,
+                            ast.children(node).collect::<Vec<_>>(),
+                        )
+                    } else {
+                        let children = ast.children(node).collect::<Vec<_>>();
+                        let callee_node = children[0];
+                        let function_ty = match self.typed.types().kind(designator_ty) {
+                            TypeKind::Function { .. } => designator_ty,
+                            TypeKind::Pointer(pointee) => *pointee,
+                            _ => unreachable!(
+                                "call expression designator is a function or function pointer"
+                            ),
+                        };
+                        (
+                            None,
+                            classify_function_type(self.context, self.typed, function_ty),
+                            Some(self.materialize(self.values[&callee_node])),
+                            children[1..].to_vec(),
+                        )
                     };
-                    let sig = self.signatures[&node_entity(self.typed, node)].clone();
                     let mut args = Vec::new();
                     let mut argument_alignments = Vec::new();
-                    for (index, argument) in ast.children(node).enumerate() {
+                    for (index, &argument) in arguments.iter().enumerate() {
                         let expression = self.values[&argument];
                         if let Some(parameter) = sig.params.get(index) {
                             args.extend(self.lower_abi_argument(argument, expression, parameter)?);
@@ -2948,28 +3031,61 @@ impl FnCodegen<'_> {
                         let slot = self.alloca(elem, size, align);
                         args.insert(0, slot.ptr);
                         argument_alignments.insert(0, 1);
-                        let mut call = b::CallOpBuilder::new(self.context)
-                            .args(args)
-                            .attr("callee", AttributeValue::Str(name.clone()))
-                            .result_address()
-                            .result_type(sig.ret.ty);
-                        if argument_alignments.iter().any(|&alignment| alignment > 1) {
-                            call = call.argument_alignments(&argument_alignments);
+                        if let Some(callee) = callee {
+                            let mut call = b::IndirectCallOpBuilder::new(self.context)
+                                .callee(callee)
+                                .args(args)
+                                .result_address()
+                                .result_type(sig.ret.ty);
+                            if argument_alignments.iter().any(|&alignment| alignment > 1) {
+                                call = call.argument_alignments(&argument_alignments);
+                            }
+                            self.builder.insert(call.build());
+                        } else {
+                            let mut call = b::CallOpBuilder::new(self.context)
+                                .args(args)
+                                .attr(
+                                    "callee",
+                                    AttributeValue::Str(
+                                        name.clone().expect("direct call has a symbol name"),
+                                    ),
+                                )
+                                .result_address()
+                                .result_type(sig.ret.ty);
+                            if argument_alignments.iter().any(|&alignment| alignment > 1) {
+                                call = call.argument_alignments(&argument_alignments);
+                            }
+                            self.builder.insert(call.build());
                         }
-                        self.builder.insert(call.build());
                         LoweredExpr::Address {
                             ptr: slot.ptr,
                             elem,
                         }
                     } else {
-                        let mut call = b::CallOpBuilder::new(self.context)
-                            .args(args)
-                            .attr("callee", AttributeValue::Str(name.clone()))
-                            .result_type(sig.ret.ty);
-                        if argument_alignments.iter().any(|&alignment| alignment > 1) {
-                            call = call.argument_alignments(&argument_alignments);
-                        }
-                        let result = self.builder.insert(call.build()).result();
+                        let result = if let Some(callee) = callee {
+                            let mut call = b::IndirectCallOpBuilder::new(self.context)
+                                .callee(callee)
+                                .args(args)
+                                .result_type(sig.ret.ty);
+                            if argument_alignments.iter().any(|&alignment| alignment > 1) {
+                                call = call.argument_alignments(&argument_alignments);
+                            }
+                            self.builder.insert(call.build()).result()
+                        } else {
+                            let mut call = b::CallOpBuilder::new(self.context)
+                                .args(args)
+                                .attr(
+                                    "callee",
+                                    AttributeValue::Str(
+                                        name.clone().expect("direct call has a symbol name"),
+                                    ),
+                                )
+                                .result_type(sig.ret.ty);
+                            if argument_alignments.iter().any(|&alignment| alignment > 1) {
+                                call = call.argument_alignments(&argument_alignments);
+                            }
+                            self.builder.insert(call.build()).result()
+                        };
                         if let Some(pieces) = sig.ret.aggregate.as_deref() {
                             let (size, align) = source_type_layout(self.typed, source_ty);
                             let (abi_size, abi_align) = abi_storage_layout(self.context, pieces)
@@ -3123,8 +3239,16 @@ impl FnCodegen<'_> {
                 AstKind::Deref => {
                     let child = ast.children(node).next().unwrap();
                     let ptr = self.materialize(self.values[&child]);
-                    let elem = lower_type(self.context, self.typed, node_type(self.typed, node));
-                    LoweredExpr::Address { ptr, elem }
+                    if ast
+                        .get_annotation(node)
+                        .is_some_and(|info| info.category == ValueCategory::Function)
+                    {
+                        LoweredExpr::Value(ptr)
+                    } else {
+                        let elem =
+                            lower_type(self.context, self.typed, node_type(self.typed, node));
+                        LoweredExpr::Address { ptr, elem }
+                    }
                 }
                 kind
                 @ (AstKind::PreInc | AstKind::PreDec | AstKind::PostInc | AstKind::PostDec) => {

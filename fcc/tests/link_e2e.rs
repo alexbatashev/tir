@@ -208,6 +208,97 @@ fn memory_hash_table_matches_host_compiler() {
 }
 
 #[test]
+fn global_function_pointer_matches_host_compiler() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "int add_five(int value) { return value + 5; } int (*function)(int) = add_five; int main(void) { return function(37) == 42 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn function_pointer_call_matches_host_compiler() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "int add_five(int value) { return value + 5; } int main(void) { int (*function)(int) = add_five; return function(37) == 42 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn function_pointer_parameter_matches_host_compiler() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "typedef int (*Unary)(int); int add_five(int value) { return value + 5; } int apply(Unary function, int value) { return function(value); } int main(void) { return apply(add_five, 37) == 42 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn dereferenced_function_pointer_call_matches_host_compiler() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "int add_five(int value) { return value + 5; } int main(void) { int (*function)(int) = add_five; return (*function)(37) == 42 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn returned_function_pointer_call_matches_host_compiler() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "typedef int (*Unary)(int); int add_five(int value) { return value + 5; } Unary choose(void) { return add_five; } int main(void) { return choose()(37) == 42 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn function_pointer_large_record_return_matches_host_compiler() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "struct Triple { long a; long b; long c; }; typedef struct Triple (*Maker)(long); struct Triple make(long value) { struct Triple result = {value, value + 1, value + 2}; return result; } int main(void) { Maker maker = make; struct Triple result = maker(39); return result.a == 39 && result.b == 40 && result.c == 41 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn returned_function_pointer_large_record_return_matches_host_compiler() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "struct Triple { long a; long b; long c; }; typedef struct Triple (*Maker)(long); struct Triple make(long value) { struct Triple result = {value, value + 1, value + 2}; return result; } Maker choose(void) { return make; } int main(void) { struct Triple result = choose()(39); return result.a == 39 && result.b == 40 && result.c == 41 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn function_pointer_large_record_argument_matches_host_compiler() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        "struct Triple { long a; long b; long c; }; typedef long (*Reducer)(struct Triple); long sum(struct Triple value) { return value.a + value.b + value.c; } int main(void) { Reducer reducer = sum; struct Triple value = {13, 14, 15}; return reducer(value) == 42 ? 0 : 1; }\n",
+    );
+}
+
+#[test]
+fn variadic_function_pointer_matches_host_compiler() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "typedef int (*Variadic)(const char *, ...); int call_first(Variadic call, const char *text) { return call(text, 42); }\n",
+        "int call_first(int (*)(const char *, ...), const char *); int first(const char *text, ...) { return text[0]; } int main(void) { return call_first(first, \"x\") == 'x' ? 0 : 1; }\n",
+    );
+}
+
+#[test]
 fn pointer_addition_scales_by_pointee_size() {
     if !cc_available() {
         return;
