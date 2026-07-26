@@ -1404,6 +1404,28 @@ fn four_member_hfa_call_and_return_call_match_host_abi() {
 }
 
 #[test]
+fn union_argument_and_return_match_host_abi() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "union Word { long integer; double fp; }; long check(long i0, long i1, long i2, long i3, long i4, long i5, long i6, double d0, double d1, double d2, double d3, double d4, double d5, double d6, union Word value) { return i0 == 10 && i1 == 11 && i2 == 12 && i3 == 13 && i4 == 14 && i5 == 15 && i6 == 16 && d0 == 1.0 && d1 == 2.0 && d2 == 3.0 && d3 == 4.0 && d4 == 5.0 && d5 == 6.0 && d6 == 7.0 && value.integer == 808 ? 0 : 1; } union Word make(void) { union Word result = {808}; return result; }\n",
+        "union Word { long integer; double fp; }; long check(long, long, long, long, long, long, long, double, double, double, double, double, double, double, union Word); union Word make(void); int main(void) { union Word value = {808}; if (check(10, 11, 12, 13, 14, 15, 16, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, value)) return 1; union Word result = make(); return result.integer == 808 ? 0 : 2; }\n",
+    );
+}
+
+#[test]
+fn union_call_and_return_call_match_host_abi() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "union Word { long integer; double fp; }; long check(long, long, long, long, long, long, long, double, double, double, double, double, double, double, union Word); union Word make(void); int main(void) { union Word value = {808}; if (check(10, 11, 12, 13, 14, 15, 16, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, value)) return 1; union Word result = make(); return result.integer == 808 ? 0 : 2; }\n",
+        "union Word { long integer; double fp; }; long check(long i0, long i1, long i2, long i3, long i4, long i5, long i6, double d0, double d1, double d2, double d3, double d4, double d5, double d6, union Word value) { return i0 == 10 && i1 == 11 && i2 == 12 && i3 == 13 && i4 == 14 && i5 == 15 && i6 == 16 && d0 == 1.0 && d1 == 2.0 && d2 == 3.0 && d3 == 4.0 && d4 == 5.0 && d5 == 6.0 && d6 == 7.0 && value.integer == 808 ? 0 : 1; } union Word make(void) { union Word result = {808}; return result; }\n",
+    );
+}
+
+#[test]
 fn mixed_struct_argument_matches_sysv_host_abi() {
     if !cc_available() || !cfg!(target_arch = "x86_64") {
         return;
