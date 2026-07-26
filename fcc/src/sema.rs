@@ -268,6 +268,7 @@ pub struct NodeSemantics {
     pub conversions: Vec<QualType>,
     pub constant: Option<i64>,
     pub member_index: Option<usize>,
+    pub initializer_path: Option<Vec<usize>>,
 }
 
 #[derive(Default)]
@@ -1131,55 +1132,21 @@ impl Analyzer<'_> {
     }
 
     fn validate_initializer_list(&mut self, target: QualType, initializer: NodeId) {
-        if let TypeKind::Record(id) = self.types.kind(target) {
-            let record = &self.records[self.record_indices[id]];
-            let kind = record.kind;
-            let fields = record
-                .fields
-                .iter()
-                .map(|field| (field.name.clone(), field.ty))
-                .collect::<Vec<_>>();
-            let values = self.ast.children(initializer).collect::<Vec<_>>();
-            let aggregate = if kind == RecordKind::Union {
-                "union"
-            } else {
-                "record"
-            };
-            let positional_field_count = if kind == RecordKind::Union {
-                1
-            } else {
-                fields.len()
-            };
-            let mut next_field = 0;
-            for value in values {
-                if self.ast.get_node(value).kind == AstKind::DesignatedInitializer {
-                    if let Some(index) = self.validate_designated_initializer(target, value) {
-                        next_field = index + 1;
-                    }
-                } else if next_field < positional_field_count {
-                    self.validate_initializer_value(fields[next_field].1, value);
-                    next_field += 1;
+        let aggregate = match self.types.kind(target) {
+            TypeKind::Record(id) => {
+                if self.records[self.record_indices[id]].kind == RecordKind::Union {
+                    "union"
                 } else {
-                    self.diagnostics.push(
-                        InvalidOperands::new(
-                            self.ast.get_node(value).span,
-                            format!("too many initializers for {aggregate}"),
-                            initializer_reference(self.options),
-                        )
-                        .into(),
-                    );
+                    "record"
                 }
             }
-            return;
-        }
-        let (element, length) = match self.types.kind(target) {
-            TypeKind::Array(element, Some(length)) => (*element, *length),
+            TypeKind::Array(_, Some(_)) => "array",
             _ => {
                 self.diagnostics.push(
                     IncompatibleConversion::new(
                         self.ast.get_node(initializer).span,
                         None,
-                        "brace initializer requires an array object",
+                        "brace initializer requires an aggregate object",
                         initializer_reference(self.options),
                     )
                     .into(),
@@ -1188,20 +1155,23 @@ impl Analyzer<'_> {
             }
         };
         let values = self.ast.children(initializer).collect::<Vec<_>>();
-        let mut next_element = 0;
+        let mut next_path = self.first_initializer_path(target);
         for value in values {
             if self.ast.get_node(value).kind == AstKind::DesignatedInitializer {
-                if let Some(index) = self.validate_designated_initializer(target, value) {
-                    next_element = index + 1;
+                if let Some(path) = self.validate_designated_initializer(target, value) {
+                    self.set_initializer_path(value, path.clone());
+                    next_path = self.next_initializer_path(target, &path);
                 }
-            } else if next_element < length as usize {
-                self.validate_initializer_value(element, value);
-                next_element += 1;
+            } else if let Some(path) = next_path {
+                let selected_type = self.initializer_path_type(target, &path).unwrap();
+                self.set_initializer_path(value, path.clone());
+                self.validate_initializer_value(selected_type, value);
+                next_path = self.next_initializer_path(target, &path);
             } else {
                 self.diagnostics.push(
                     InvalidOperands::new(
                         self.ast.get_node(value).span,
-                        "too many initializers for array",
+                        format!("too many initializers for {aggregate}"),
                         initializer_reference(self.options),
                     )
                     .into(),
@@ -1210,11 +1180,69 @@ impl Analyzer<'_> {
         }
     }
 
+    fn first_initializer_path(&self, target: QualType) -> Option<Vec<usize>> {
+        (self.initializer_member_count(target)? != 0).then(|| vec![0])
+    }
+
+    fn initializer_member_count(&self, target: QualType) -> Option<usize> {
+        match self.types.kind(target) {
+            TypeKind::Record(id) => {
+                let record = &self.records[self.record_indices[id]];
+                Some(if record.kind == RecordKind::Union {
+                    usize::from(!record.fields.is_empty())
+                } else {
+                    record.fields.len()
+                })
+            }
+            TypeKind::Array(_, Some(length)) => Some(*length as usize),
+            _ => None,
+        }
+    }
+
+    fn initializer_member_type(&self, target: QualType, index: usize) -> Option<QualType> {
+        match self.types.kind(target) {
+            TypeKind::Record(id) => self.records[self.record_indices[id]]
+                .fields
+                .get(index)
+                .map(|field| field.ty),
+            TypeKind::Array(element, Some(length)) if index < *length as usize => Some(*element),
+            _ => None,
+        }
+    }
+
+    fn initializer_path_type(&self, target: QualType, path: &[usize]) -> Option<QualType> {
+        path.iter().try_fold(target, |target, &index| {
+            self.initializer_member_type(target, index)
+        })
+    }
+
+    fn next_initializer_path(&self, target: QualType, path: &[usize]) -> Option<Vec<usize>> {
+        let mut next = path.to_vec();
+        while let Some(index) = next.pop() {
+            let parent = self.initializer_path_type(target, &next)?;
+            if index + 1 < self.initializer_member_count(parent)? {
+                next.push(index + 1);
+                return Some(next);
+            }
+        }
+        None
+    }
+
+    fn set_initializer_path(&mut self, initializer: NodeId, path: Vec<usize>) {
+        let mut semantics = self
+            .ast
+            .get_annotation(initializer)
+            .cloned()
+            .unwrap_or_default();
+        semantics.initializer_path = Some(path);
+        self.ast.set_annotation(initializer, semantics);
+    }
+
     fn validate_designated_initializer(
         &mut self,
         target: QualType,
         initializer: NodeId,
-    ) -> Option<usize> {
+    ) -> Option<Vec<usize>> {
         let (index, selected, selected_type) = match self.ast.get_leaf_data(initializer).cloned()? {
             AstLeaf::DesignatedInitializer(InitializerDesignator::Field(name)) => {
                 let TypeKind::Record(id) = self.types.kind(target) else {
@@ -1302,8 +1330,13 @@ impl Analyzer<'_> {
                 ..NodeSemantics::default()
             },
         );
-        self.validate_initializer_value(selected_type, selected);
-        Some(index)
+        let mut path = vec![index];
+        if self.ast.get_node(selected).kind == AstKind::DesignatedInitializer {
+            path.extend(self.validate_designated_initializer(selected_type, selected)?);
+        } else {
+            self.validate_initializer_value(selected_type, selected);
+        }
+        Some(path)
     }
 
     fn validate_initializer_value(&mut self, target: QualType, value: NodeId) {
@@ -1994,6 +2027,7 @@ impl Analyzer<'_> {
                         constant: size.map(|value| value as i64),
                         conversions: Vec::new(),
                         member_index: None,
+                        initializer_path: None,
                     },
                 );
                 return;
@@ -2128,6 +2162,7 @@ impl Analyzer<'_> {
                 conversions: Vec::new(),
                 constant,
                 member_index,
+                initializer_path: None,
             },
         );
     }
