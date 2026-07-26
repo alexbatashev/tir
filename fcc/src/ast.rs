@@ -134,6 +134,8 @@ pub enum AstKind {
     Decl,
     /// Children: initializer expressions in source order.
     InitializerList,
+    /// Child: the initializer selected for the named field.
+    DesignatedInitializer,
     /// Child: the assigned value expression.
     Assign,
     AssignExpr,
@@ -253,6 +255,7 @@ pub enum AstLeaf {
         name: String,
         ty: CType,
     },
+    DesignatedInitializer(String),
     Assign(String),
     Label(String),
     Call(String),
@@ -440,6 +443,12 @@ fn render_node(ast: &Ast, id: NodeId, depth: usize, out: &mut String) {
             _ => unreachable!(),
         },
         AstKind::InitializerList => "InitializerList".to_string(),
+        AstKind::DesignatedInitializer => match ast.get_leaf_data(id) {
+            Some(AstLeaf::DesignatedInitializer(name)) => {
+                format!("DesignatedInitializer {name:?}")
+            }
+            _ => unreachable!(),
+        },
         AstKind::Assign => match ast.get_leaf_data(id) {
             Some(AstLeaf::Assign(name)) => format!("Assign {name:?}"),
             _ => unreachable!(),
