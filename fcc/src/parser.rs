@@ -425,266 +425,287 @@ fn expr<'src, I>() -> impl Parser<'src, I, NodeId, Extra<'src>> + Clone
 where
     I: ValueInput<'src, Token = Token, Span = Span>,
 {
-    recursive(|expr| {
-        let assignment = recursive(|assignment| {
-            let literal = select! { Token::IntegerLiteral(n) => n }.map_with(
-                |n, e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
-                    let tok = e.span().start;
-                    let st = &mut e.state().0;
-                    let id = st.add(AstKind::Int, tok);
-                    st.ast.set_leaf_data(id, AstLeaf::Int(n));
-                    id
-                },
-            );
-            let floating = select! { Token::FloatingLiteral(n) => n }.map_with(
-                |n, e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
-                    let tok = e.span().start;
-                    let st = &mut e.state().0;
-                    let id = st.add(AstKind::FloatLiteral, tok);
-                    st.ast.set_leaf_data(id, AstLeaf::Float(n));
-                    id
-                },
-            );
-            let character = select! { Token::CharacterLiteral(value) => value }.map_with(
-                |value, e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
-                    let tok = e.span().start;
-                    let st = &mut e.state().0;
-                    let id = st.add(AstKind::Character, tok);
-                    st.ast.set_leaf_data(id, AstLeaf::Character(value));
-                    id
-                },
-            );
-            let string = select! { Token::StringLiteral(s) => s }.map_with(
-                |s, e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
-                    let tok = e.span().start;
-                    let st = &mut e.state().0;
-                    let id = st.add(AstKind::String, tok);
-                    st.ast.set_leaf_data(id, AstLeaf::String(s));
-                    id
-                },
-            );
-            let call = ident()
-                .then(
-                    assignment
-                        .clone()
-                        .separated_by(just(Token::Comma))
-                        .collect::<Vec<NodeId>>()
-                        .delimited_by(just(Token::LParen), just(Token::RParen)),
-                )
-                .map_with(|(name, args), e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
-                    let tok = e.span().start;
-                    let st = &mut e.state().0;
-                    let id = st.add(AstKind::Call, tok);
-                    st.ast.set_leaf_data(id, AstLeaf::Call(name));
-                    for arg in args {
-                        st.ast.add_edge(id, arg);
-                    }
-                    id
-                });
-            let var = ident().map_with(|name, e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
+    expression_parsers().0
+}
+
+fn assignment_expr<'src, I>() -> impl Parser<'src, I, NodeId, Extra<'src>> + Clone
+where
+    I: ValueInput<'src, Token = Token, Span = Span>,
+{
+    expression_parsers().1
+}
+
+fn expression_parsers<'src, I>() -> (
+    impl Parser<'src, I, NodeId, Extra<'src>> + Clone,
+    impl Parser<'src, I, NodeId, Extra<'src>> + Clone,
+)
+where
+    I: ValueInput<'src, Token = Token, Span = Span>,
+{
+    let mut expr = Recursive::declare();
+    let mut assignment = Recursive::declare();
+    assignment.define({
+        let literal = select! { Token::IntegerLiteral(n) => n }.map_with(
+            |n, e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
                 let tok = e.span().start;
                 let st = &mut e.state().0;
-                let id = st.add(AstKind::Var, tok);
-                st.ast.set_leaf_data(id, AstLeaf::Var(name));
+                let id = st.add(AstKind::Int, tok);
+                st.ast.set_leaf_data(id, AstLeaf::Int(n));
+                id
+            },
+        );
+        let floating = select! { Token::FloatingLiteral(n) => n }.map_with(
+            |n, e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
+                let tok = e.span().start;
+                let st = &mut e.state().0;
+                let id = st.add(AstKind::FloatLiteral, tok);
+                st.ast.set_leaf_data(id, AstLeaf::Float(n));
+                id
+            },
+        );
+        let character = select! { Token::CharacterLiteral(value) => value }.map_with(
+            |value, e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
+                let tok = e.span().start;
+                let st = &mut e.state().0;
+                let id = st.add(AstKind::Character, tok);
+                st.ast.set_leaf_data(id, AstLeaf::Character(value));
+                id
+            },
+        );
+        let string = select! { Token::StringLiteral(s) => s }.map_with(
+            |s, e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
+                let tok = e.span().start;
+                let st = &mut e.state().0;
+                let id = st.add(AstKind::String, tok);
+                st.ast.set_leaf_data(id, AstLeaf::String(s));
+                id
+            },
+        );
+        let call = ident()
+            .then(
+                assignment
+                    .clone()
+                    .separated_by(just(Token::Comma))
+                    .collect::<Vec<NodeId>>()
+                    .delimited_by(just(Token::LParen), just(Token::RParen)),
+            )
+            .map_with(|(name, args), e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
+                let tok = e.span().start;
+                let st = &mut e.state().0;
+                let id = st.add(AstKind::Call, tok);
+                st.ast.set_leaf_data(id, AstLeaf::Call(name));
+                for arg in args {
+                    st.ast.add_edge(id, arg);
+                }
                 id
             });
-            let primary = choice((
-                literal,
-                floating,
-                character,
-                string,
-                call,
-                var,
-                expr.clone()
-                    .delimited_by(just(Token::LParen), just(Token::RParen)),
-            ));
-            let postfix = primary
-                .then(
-                    choice((
-                        just(Token::PlusPlus).to(PostfixOp::Unary(AstKind::PostInc)),
-                        just(Token::MinusMinus).to(PostfixOp::Unary(AstKind::PostDec)),
-                        just(Token::Dot)
-                            .ignore_then(ident())
-                            .map(|name| PostfixOp::Member {
-                                indirect: false,
-                                name,
-                            }),
-                        just(Token::Arrow)
-                            .ignore_then(ident())
-                            .map(|name| PostfixOp::Member {
-                                indirect: true,
-                                name,
-                            }),
-                        expr.clone()
-                            .delimited_by(just(Token::LBracket), just(Token::RBracket))
-                            .map(PostfixOp::Subscript),
-                    ))
-                    .repeated()
-                    .collect::<Vec<_>>(),
-                )
-                .map_with(
-                    |(operand, ops), e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
-                        let tok = e.span().start;
-                        let st = &mut e.state().0;
-                        ops.into_iter().fold(operand, |child, op| match op {
-                            PostfixOp::Unary(kind) => unary(st, kind, child, tok),
-                            PostfixOp::Member { indirect, name } => {
-                                let id = st.add(AstKind::Member, tok);
-                                st.ast.set_leaf_data(id, AstLeaf::Member { name, indirect });
-                                st.ast.add_edge(id, child);
-                                id
-                            }
-                            PostfixOp::Subscript(index) => {
-                                let add = st.add(AstKind::Add, tok);
-                                st.ast.add_edge(add, child);
-                                st.ast.add_edge(add, index);
-                                unary(st, AstKind::Deref, add, tok)
-                            }
-                        })
-                    },
-                );
-            let unary_expr = recursive(|unary_expr| {
-                let type_name = ctype().delimited_by(just(Token::LParen), just(Token::RParen));
-                let cast = type_name.clone().then(unary_expr.clone()).map_with(
-                    |(ty, operand), e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
-                        let tok = e.span().start;
-                        let st = &mut e.state().0;
-                        let id = st.add(AstKind::Cast, tok);
-                        st.ast.set_leaf_data(id, AstLeaf::Type(ty));
-                        st.ast.add_edge(id, operand);
-                        id
-                    },
-                );
-                let sizeof_type = just(Token::KwSizeof).ignore_then(type_name).map_with(
-                    |ty, e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
-                        let tok = e.span().start;
-                        let st = &mut e.state().0;
-                        let id = st.add(AstKind::SizeofType, tok);
-                        st.ast.set_leaf_data(id, AstLeaf::Type(ty));
-                        id
-                    },
-                );
-                let sizeof_expr = just(Token::KwSizeof)
-                    .ignore_then(unary_expr.clone())
-                    .map_with(|operand, e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
-                        let tok = e.span().start;
-                        let st = &mut e.state().0;
-                        unary(st, AstKind::SizeofExpr, operand, tok)
-                    });
-                let prefix = choice((
-                    just(Token::Minus).to(AstKind::Neg),
-                    just(Token::Plus).to(AstKind::Pos),
-                    just(Token::Bang).to(AstKind::Not),
-                    just(Token::Tilde).to(AstKind::BitNot),
-                    just(Token::Amp).to(AstKind::AddressOf),
-                    just(Token::Star).to(AstKind::Deref),
-                    just(Token::PlusPlus).to(AstKind::PreInc),
-                    just(Token::MinusMinus).to(AstKind::PreDec),
+        let var = ident().map_with(|name, e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
+            let tok = e.span().start;
+            let st = &mut e.state().0;
+            let id = st.add(AstKind::Var, tok);
+            st.ast.set_leaf_data(id, AstLeaf::Var(name));
+            id
+        });
+        let primary = choice((
+            literal,
+            floating,
+            character,
+            string,
+            call,
+            var,
+            expr.clone()
+                .delimited_by(just(Token::LParen), just(Token::RParen)),
+        ));
+        let postfix = primary
+            .then(
+                choice((
+                    just(Token::PlusPlus).to(PostfixOp::Unary(AstKind::PostInc)),
+                    just(Token::MinusMinus).to(PostfixOp::Unary(AstKind::PostDec)),
+                    just(Token::Dot)
+                        .ignore_then(ident())
+                        .map(|name| PostfixOp::Member {
+                            indirect: false,
+                            name,
+                        }),
+                    just(Token::Arrow)
+                        .ignore_then(ident())
+                        .map(|name| PostfixOp::Member {
+                            indirect: true,
+                            name,
+                        }),
+                    expr.clone()
+                        .delimited_by(just(Token::LBracket), just(Token::RBracket))
+                        .map(PostfixOp::Subscript),
                 ))
-                .then(unary_expr)
-                .map_with(
-                    |(op, operand), e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
-                        let tok = e.span().start;
-                        unary(&mut e.state().0, op, operand, tok)
-                    },
-                );
-                choice((sizeof_type, cast, sizeof_expr, prefix, postfix.clone())).boxed()
-            });
-            let product = binop(
-                unary_expr,
-                choice((
-                    just(Token::Star).to(AstKind::Mul),
-                    just(Token::Slash).to(AstKind::Div),
-                    just(Token::Percent).to(AstKind::Mod),
-                )),
+                .repeated()
+                .collect::<Vec<_>>(),
+            )
+            .map_with(
+                |(operand, ops), e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
+                    let tok = e.span().start;
+                    let st = &mut e.state().0;
+                    ops.into_iter().fold(operand, |child, op| match op {
+                        PostfixOp::Unary(kind) => unary(st, kind, child, tok),
+                        PostfixOp::Member { indirect, name } => {
+                            let id = st.add(AstKind::Member, tok);
+                            st.ast.set_leaf_data(id, AstLeaf::Member { name, indirect });
+                            st.ast.add_edge(id, child);
+                            id
+                        }
+                        PostfixOp::Subscript(index) => {
+                            let add = st.add(AstKind::Add, tok);
+                            st.ast.add_edge(add, child);
+                            st.ast.add_edge(add, index);
+                            unary(st, AstKind::Deref, add, tok)
+                        }
+                    })
+                },
             );
-            let sum = binop(
-                product,
-                choice((
-                    just(Token::Plus).to(AstKind::Add),
-                    just(Token::Minus).to(AstKind::Sub),
-                )),
+        let unary_expr = recursive(|unary_expr| {
+            let type_name = ctype().delimited_by(just(Token::LParen), just(Token::RParen));
+            let cast = type_name.clone().then(unary_expr.clone()).map_with(
+                |(ty, operand), e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
+                    let tok = e.span().start;
+                    let st = &mut e.state().0;
+                    let id = st.add(AstKind::Cast, tok);
+                    st.ast.set_leaf_data(id, AstLeaf::Type(ty));
+                    st.ast.add_edge(id, operand);
+                    id
+                },
             );
-            let shift = binop(
-                sum,
-                choice((
-                    just(Token::Shl).to(AstKind::Shl),
-                    just(Token::Shr).to(AstKind::Shr),
-                )),
+            let sizeof_type = just(Token::KwSizeof).ignore_then(type_name).map_with(
+                |ty, e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
+                    let tok = e.span().start;
+                    let st = &mut e.state().0;
+                    let id = st.add(AstKind::SizeofType, tok);
+                    st.ast.set_leaf_data(id, AstLeaf::Type(ty));
+                    id
+                },
             );
-            let relational = binop(
-                shift,
-                choice((
-                    just(Token::Le).to(AstKind::Le),
-                    just(Token::Ge).to(AstKind::Ge),
-                    just(Token::Lt).to(AstKind::Lt),
-                    just(Token::Gt).to(AstKind::Gt),
-                )),
+            let sizeof_expr = just(Token::KwSizeof)
+                .ignore_then(unary_expr.clone())
+                .map_with(|operand, e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
+                    let tok = e.span().start;
+                    let st = &mut e.state().0;
+                    unary(st, AstKind::SizeofExpr, operand, tok)
+                });
+            let prefix = choice((
+                just(Token::Minus).to(AstKind::Neg),
+                just(Token::Plus).to(AstKind::Pos),
+                just(Token::Bang).to(AstKind::Not),
+                just(Token::Tilde).to(AstKind::BitNot),
+                just(Token::Amp).to(AstKind::AddressOf),
+                just(Token::Star).to(AstKind::Deref),
+                just(Token::PlusPlus).to(AstKind::PreInc),
+                just(Token::MinusMinus).to(AstKind::PreDec),
+            ))
+            .then(unary_expr)
+            .map_with(
+                |(op, operand), e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
+                    let tok = e.span().start;
+                    unary(&mut e.state().0, op, operand, tok)
+                },
             );
-            let equality = binop(
-                relational,
-                choice((
-                    just(Token::EqEq).to(AstKind::Eq),
-                    just(Token::BangEq).to(AstKind::Ne),
-                )),
-            );
-            let bit_and = binop(equality, just(Token::Amp).to(AstKind::BitAnd));
-            let bit_xor = binop(bit_and, just(Token::Caret).to(AstKind::BitXor));
-            let bit_or = binop(bit_xor, just(Token::Pipe).to(AstKind::BitOr));
-            let logical_and = binop(bit_or, just(Token::AmpAmp).to(AstKind::LogAnd));
-            let logical_or = binop(logical_and, just(Token::PipePipe).to(AstKind::LogOr));
-            let conditional = logical_or
-                .then(
-                    just(Token::Question)
-                        .ignore_then(expr.clone())
-                        .then_ignore(just(Token::Colon))
-                        .then(assignment.clone())
-                        .or_not(),
-                )
-                .map_with(
-                    |(condition, tail), e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
-                        let Some((then_value, else_value)) = tail else {
-                            return condition;
-                        };
-                        let tok = e.span().start;
-                        let st = &mut e.state().0;
-                        let id = st.add(AstKind::Conditional, tok);
-                        st.ast.add_edge(id, condition);
-                        st.ast.add_edge(id, then_value);
-                        st.ast.add_edge(id, else_value);
-                        id
-                    },
-                )
-                .boxed();
-            conditional
-                .then(
-                    choice((
-                        just(Token::Assign).to(AstKind::AssignExpr),
-                        just(Token::PlusAssign).to(AstKind::AddAssign),
-                        just(Token::MinusAssign).to(AstKind::SubAssign),
-                        just(Token::StarAssign).to(AstKind::MulAssign),
-                        just(Token::SlashAssign).to(AstKind::DivAssign),
-                        just(Token::PercentAssign).to(AstKind::ModAssign),
-                        just(Token::ShlAssign).to(AstKind::ShlAssign),
-                        just(Token::ShrAssign).to(AstKind::ShrAssign),
-                        just(Token::AmpAssign).to(AstKind::AndAssign),
-                        just(Token::CaretAssign).to(AstKind::XorAssign),
-                        just(Token::PipeAssign).to(AstKind::OrAssign),
-                    ))
+            choice((sizeof_type, cast, sizeof_expr, prefix, postfix.clone())).boxed()
+        });
+        let product = binop(
+            unary_expr,
+            choice((
+                just(Token::Star).to(AstKind::Mul),
+                just(Token::Slash).to(AstKind::Div),
+                just(Token::Percent).to(AstKind::Mod),
+            )),
+        );
+        let sum = binop(
+            product,
+            choice((
+                just(Token::Plus).to(AstKind::Add),
+                just(Token::Minus).to(AstKind::Sub),
+            )),
+        );
+        let shift = binop(
+            sum,
+            choice((
+                just(Token::Shl).to(AstKind::Shl),
+                just(Token::Shr).to(AstKind::Shr),
+            )),
+        );
+        let relational = binop(
+            shift,
+            choice((
+                just(Token::Le).to(AstKind::Le),
+                just(Token::Ge).to(AstKind::Ge),
+                just(Token::Lt).to(AstKind::Lt),
+                just(Token::Gt).to(AstKind::Gt),
+            )),
+        );
+        let equality = binop(
+            relational,
+            choice((
+                just(Token::EqEq).to(AstKind::Eq),
+                just(Token::BangEq).to(AstKind::Ne),
+            )),
+        );
+        let bit_and = binop(equality, just(Token::Amp).to(AstKind::BitAnd));
+        let bit_xor = binop(bit_and, just(Token::Caret).to(AstKind::BitXor));
+        let bit_or = binop(bit_xor, just(Token::Pipe).to(AstKind::BitOr));
+        let logical_and = binop(bit_or, just(Token::AmpAmp).to(AstKind::LogAnd));
+        let logical_or = binop(logical_and, just(Token::PipePipe).to(AstKind::LogOr));
+        let conditional = logical_or
+            .then(
+                just(Token::Question)
+                    .ignore_then(expr.clone())
+                    .then_ignore(just(Token::Colon))
                     .then(assignment.clone())
                     .or_not(),
-                )
-                .map_with(|(lhs, tail), e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
+            )
+            .map_with(
+                |(condition, tail), e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
+                    let Some((then_value, else_value)) = tail else {
+                        return condition;
+                    };
                     let tok = e.span().start;
-                    match tail {
-                        Some((op, rhs)) => binary(&mut e.state().0, op, lhs, rhs, tok),
-                        None => lhs,
-                    }
-                })
-                .boxed()
-        });
-        binop(assignment, just(Token::Comma).to(AstKind::Comma))
-    })
+                    let st = &mut e.state().0;
+                    let id = st.add(AstKind::Conditional, tok);
+                    st.ast.add_edge(id, condition);
+                    st.ast.add_edge(id, then_value);
+                    st.ast.add_edge(id, else_value);
+                    id
+                },
+            )
+            .boxed();
+        conditional
+            .then(
+                choice((
+                    just(Token::Assign).to(AstKind::AssignExpr),
+                    just(Token::PlusAssign).to(AstKind::AddAssign),
+                    just(Token::MinusAssign).to(AstKind::SubAssign),
+                    just(Token::StarAssign).to(AstKind::MulAssign),
+                    just(Token::SlashAssign).to(AstKind::DivAssign),
+                    just(Token::PercentAssign).to(AstKind::ModAssign),
+                    just(Token::ShlAssign).to(AstKind::ShlAssign),
+                    just(Token::ShrAssign).to(AstKind::ShrAssign),
+                    just(Token::AmpAssign).to(AstKind::AndAssign),
+                    just(Token::CaretAssign).to(AstKind::XorAssign),
+                    just(Token::PipeAssign).to(AstKind::OrAssign),
+                ))
+                .then(assignment.clone())
+                .or_not(),
+            )
+            .map_with(|(lhs, tail), e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
+                let tok = e.span().start;
+                match tail {
+                    Some((op, rhs)) => binary(&mut e.state().0, op, lhs, rhs, tok),
+                    None => lhs,
+                }
+            })
+            .boxed()
+    });
+    expr.define(binop(
+        assignment.clone(),
+        just(Token::Comma).to(AstKind::Comma),
+    ));
+    (expr, assignment)
 }
 
 /// A left-associative binary-operator level: a `child` operand followed by any
@@ -729,16 +750,6 @@ fn unary(st: &mut ParseState, op: AstKind, operand: NodeId, tok: usize) -> NodeI
     let id = st.add(op, tok);
     st.ast.add_edge(id, operand);
     id
-}
-
-fn collect_initializer_elements(ast: &Ast, node: NodeId, elements: &mut Vec<NodeId>) {
-    if ast.get_node(node).kind == AstKind::Comma {
-        for child in ast.children(node) {
-            collect_initializer_elements(ast, child, elements);
-        }
-    } else {
-        elements.push(node);
-    }
 }
 
 fn initializer<'src, I>() -> impl Parser<'src, I, NodeId, Extra<'src>> + Clone
@@ -793,15 +804,11 @@ where
                 let st = &mut e.state().0;
                 let id = st.add(AstKind::InitializerList, tok);
                 for value in values {
-                    let mut elements = Vec::new();
-                    collect_initializer_elements(&st.ast, value, &mut elements);
-                    for element in elements {
-                        st.ast.add_edge(id, element);
-                    }
+                    st.ast.add_edge(id, value);
                 }
                 id
             })
-            .or(expr())
+            .or(assignment_expr())
     })
 }
 
