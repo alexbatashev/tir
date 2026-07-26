@@ -1,0 +1,14 @@
+// RUN: tir mc --march=x86_64 --stage=regalloc %s | filecheck %s
+
+// A stack-passed scalar f64 that is returned directly stays in the XMM
+// register file selected by the ABI return instruction.
+
+module {
+  func @ninth(%0: !f64, %1: !f64, %2: !f64, %3: !f64, %4: !f64, %5: !f64, %6: !f64, %7: !f64, %8: !f64) -> !f64 {
+    return %8
+  }
+  module_end
+}
+
+// CHECK: x86_64.movsd_load_disp {dst = xmm{{[0-9]+}}, base = rsp, imm = 8}
+// CHECK: x86_64.movsd {dst = xmm0, src = xmm{{[0-9]+}}}

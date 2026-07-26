@@ -401,6 +401,7 @@ impl CallLowering {
             Callee::Direct(name) => Box::new(
                 super::VirtualCallOpBuilder::new(context)
                     .attr("callee", AttributeValue::Str(name))
+                    .outgoing_stack_size(u64::from(outgoing_size))
                     .attr("clobbers", clobbers)
                     .build(),
             ),
@@ -413,6 +414,7 @@ impl CallLowering {
                             indirect_class,
                         ),
                     )
+                    .outgoing_stack_size(u64::from(outgoing_size))
                     .attr("clobbers", clobbers)
                     .build(),
             ),

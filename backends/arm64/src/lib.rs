@@ -280,44 +280,20 @@ impl tir::backend::call_lowering::CallEmitter for Arm64CallEmitter {
 
     fn call_prefix(
         &self,
-        context: &tir::Context,
-        abi: &tir::backend::abi::AbiInfo,
-        outgoing_size: u32,
+        _context: &tir::Context,
+        _abi: &tir::backend::abi::AbiInfo,
+        _outgoing_size: u32,
     ) -> Vec<Box<dyn Operation>> {
-        if outgoing_size == 0 {
-            return Vec::new();
-        }
-        vec![Box::new(
-            SubImmediateOpBuilder::new(context)
-                .attr("rd", phys(&abi.sp))
-                .attr("rn", phys(&abi.sp))
-                .attr(
-                    "imm",
-                    tir::attributes::AttributeValue::Int(i64::from(outgoing_size)),
-                )
-                .build(),
-        )]
+        Vec::new()
     }
 
     fn call_suffix(
         &self,
-        context: &tir::Context,
-        abi: &tir::backend::abi::AbiInfo,
-        outgoing_size: u32,
+        _context: &tir::Context,
+        _abi: &tir::backend::abi::AbiInfo,
+        _outgoing_size: u32,
     ) -> Vec<Box<dyn Operation>> {
-        if outgoing_size == 0 {
-            return Vec::new();
-        }
-        vec![Box::new(
-            AddImmediateOpBuilder::new(context)
-                .attr("rd", phys(&abi.sp))
-                .attr("rn", phys(&abi.sp))
-                .attr(
-                    "imm",
-                    tir::attributes::AttributeValue::Int(i64::from(outgoing_size)),
-                )
-                .build(),
-        )]
+        Vec::new()
     }
 }
 

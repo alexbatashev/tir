@@ -25,7 +25,9 @@ use crate::backend::abi::{
     GroupRollback, align_argument_group, reserve_indirect_result_argument, value_kind,
 };
 use crate::backend::liveness::{self, Liveness, PhysReg};
-use crate::backend::{SymbolOp, VirtualBranchOp, VirtualReturnOp};
+use crate::backend::{
+    SymbolOp, VirtualBranchOp, VirtualCallOp, VirtualIndirectCallOp, VirtualReturnOp,
+};
 use crate::ptr::AllocaOp;
 
 /// Architectural metadata for one register class.
@@ -505,6 +507,13 @@ pub trait TargetRegAlloc: Send + Sync {
         unimplemented!("this target has tied operands but no copy emitter")
     }
 
+    /// Extra bytes the stable function frame needs whenever it contains a call.
+    /// Targets use this for call-site alignment that is not part of the outgoing
+    /// argument area.
+    fn call_frame_alignment_pad(&self) -> u32 {
+        0
+    }
+
     /// Prologue instructions reserving a frame of `size` bytes (e.g. `addi sp, sp,
     /// -size`) and saving the callee-saved registers the allocation used, each at
     /// its reserved `[frame + offset]` slot. Inserted at the top of the entry block
@@ -637,7 +646,9 @@ impl Pass for RegisterAllocationPass {
         )?;
         let affinities: Vec<_> = abi.copies.iter().map(|copy| (copy.src, copy.dst)).collect();
 
+        let (outgoing_size, has_calls) = outgoing_stack_layout(context, &blocks)?;
         let mut frame = FrameState::new(self.abi.stack.slot_size);
+        frame.reserve(outgoing_size);
         let stack_allocas = collect_stack_allocas(context, &blocks, &mut frame);
         let assignment = loop {
             // Recomputed each round: spills insert ops within blocks but never add
@@ -708,7 +719,12 @@ impl Pass for RegisterAllocationPass {
             self.abi.stack.save_style == crate::backend::abi::SaveStyle::FrameSlots,
         );
 
-        let frame_size = frame.size(self.abi.stack.align);
+        let call_alignment_pad = if has_calls {
+            self.target.call_frame_alignment_pad()
+        } else {
+            0
+        };
+        let frame_size = frame.size(self.abi.stack.align) + call_alignment_pad;
         self.insert_stack_alloca_addresses(context, rewriter, &assignment, &stack_allocas)?;
         erase_stack_allocas(context, rewriter, &stack_allocas)?;
         self.insert_incoming_stack_arg_loads(
@@ -1124,6 +1140,29 @@ struct FrameLayout<'a> {
     saves: &'a [(PhysReg, i64)],
 }
 
+fn outgoing_stack_layout(context: &Context, blocks: &[BlockId]) -> Result<(u32, bool), PassError> {
+    let mut size = 0;
+    let mut has_calls = false;
+    for &block in blocks {
+        for op_id in context.get_block(block).op_ids() {
+            let op = context.get_op(op_id);
+            let outgoing = if let Some(call) = op.clone().as_op::<VirtualCallOp>() {
+                call.outgoing_stack_size()
+            } else if let Some(call) = op.as_op::<VirtualIndirectCallOp>() {
+                call.outgoing_stack_size()
+            } else {
+                continue;
+            };
+            has_calls = true;
+            let outgoing = u32::try_from(outgoing).map_err(|_| {
+                PassError::InvalidRuleSet("outgoing call frame exceeds 32-bit size".to_string())
+            })?;
+            size = size.max(outgoing);
+        }
+    }
+    Ok((size, has_calls))
+}
+
 /// Tracks spill stack-slot assignment across spill rounds.
 struct FrameState {
     slot_size: u32,
@@ -1148,6 +1187,10 @@ impl FrameState {
 
     fn alloc_slot(&mut self) -> i64 {
         self.alloc(self.slot_size, self.slot_size)
+    }
+
+    fn reserve(&mut self, size: u32) {
+        self.next_offset = self.next_offset.max(i64::from(size));
     }
 
     fn alloc(&mut self, size: u32, align: u32) -> i64 {
@@ -1630,9 +1673,6 @@ fn abi_precolor(
             for (operand_index, value) in body_op.operands.iter().copied().enumerate() {
                 let vreg = value.number();
                 let class = vreg_class_in(context, blocks, vreg);
-                let Some(rc) = class.or_else(|| info.default_integer_class(abi)) else {
-                    continue;
-                };
                 let kind = value_kind(context, value);
                 let slot = next_slot.entry(kind).or_insert(0usize);
                 let Some(sequence) = abi.rets.iter().find(|sequence| sequence.kind == kind) else {
@@ -1642,11 +1682,11 @@ fn abi_precolor(
                     continue;
                 };
                 *slot += 1;
-                let ret_pin = if register.0.file() == rc.file() {
-                    (rc, register.1)
-                } else {
-                    register
+                let rc = match class {
+                    Some(class) if class.file() == register.0.file() => class,
+                    _ => register.0,
                 };
+                let ret_pin = (rc, register.1);
 
                 let ty = context.get_value(value).ty();
                 let outgoing = context.create_value(ty, None).id().number();
