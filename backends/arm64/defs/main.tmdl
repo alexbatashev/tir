@@ -30,6 +30,17 @@ register_class GPR for [ARMv8A64] {
     }
 }
 
+register_class GPR32 for [ARMv8A64] {
+    file = GPR;
+    param ENCODING_LEN: Integer = 5;
+    param WIDTH: Integer = 32;
+
+    registers {
+        w0..w30 => {},
+        w31("wzr") => { traits = [hardwired_zero] },
+    }
+}
+
 // On AArch64 the 5-bit GPR field value 31 names the zero register (`xzr`) in most
 // operand positions, but the stack pointer (`sp`) in the base register of
 // addressing modes and in the `rd`/`rn` of add/sub-immediate. `GPRsp` is the same
@@ -694,6 +705,35 @@ template BitfieldFixed for [ARMv8A64] {
     operands {
         rd: GPR,
         rn: GPR,
+    }
+
+    encoding {
+        0..4 => rd,
+        5..9 => rn,
+        10..15 => IMMS,
+        16..21 => IMMR,
+        22 => 0b1,
+        23..28 => 0b100110,
+        29..30 => OPC,
+        31 => SF,
+    }
+
+    asm {
+        "{self.MNEMONIC} {rd}, {rn}"
+    }
+}
+
+template SignExtendFixed for [ARMv8A64] {
+    schedule { units = [WriteIALU]; }
+    param MNEMONIC: String;
+    param SF: bits<1> = 0b1;
+    param OPC: bits<2>;
+    param IMMR: bits<6> = 0b000000;
+    param IMMS: bits<6>;
+
+    operands {
+        rd: GPR,
+        rn: GPR32,
     }
 
     encoding {

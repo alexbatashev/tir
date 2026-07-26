@@ -658,7 +658,7 @@ instruction ArithmeticShiftRightImm for [ARMv8A64] : ShiftRightImmTemplate {
 }
 
 // Sign-extend aliases of SBFM (immr = 0, imms = width - 1).
-instruction SignExtendByte for [ARMv8A64] : BitfieldFixed {
+instruction SignExtendByte for [ARMv8A64] : SignExtendFixed {
     param MNEMONIC: String = "sxtb";
     param OPC: bits<2> = 0b00;
     param IMMS: bits<6> = 0b000111;
@@ -668,7 +668,7 @@ instruction SignExtendByte for [ARMv8A64] : BitfieldFixed {
     }
 }
 
-instruction SignExtendHalfword for [ARMv8A64] : BitfieldFixed {
+instruction SignExtendHalfword for [ARMv8A64] : SignExtendFixed {
     param MNEMONIC: String = "sxth";
     param OPC: bits<2> = 0b00;
     param IMMS: bits<6> = 0b001111;
@@ -678,13 +678,13 @@ instruction SignExtendHalfword for [ARMv8A64] : BitfieldFixed {
     }
 }
 
-instruction SignExtendWord for [ARMv8A64] : BitfieldFixed {
+instruction SignExtendWord for [ARMv8A64] : SignExtendFixed {
     param MNEMONIC: String = "sxtw";
     param OPC: bits<2> = 0b00;
     param IMMS: bits<6> = 0b011111;
 
     behavior {
-        rd = sext(extract(rn, 31, 0), self.XLEN);
+        rd = sext(rn, self.XLEN);
     }
 }
 
