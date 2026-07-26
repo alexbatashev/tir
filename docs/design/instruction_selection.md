@@ -395,6 +395,12 @@ constant requires it in a register and the compiled target pattern identifies
 the terminal rule as a materializer. Introducibility does not depend on a
 synthetic e-graph shape.
 
+A proven constant result consumed by an unselected operation such as a return or
+call is forced to root a materializer even when the result came from folding a
+pure operation rather than a literal `constant`. The cover selects the cheapest
+target instruction for the folded result type; it does not preserve the original
+operation chain merely to reproduce its intermediate register widths.
+
 Target axiom files may partition the remaining values and reconstruct them with
 formal target instruction behaviors. ARM64 clears one nonzero 16-bit lane at a
 time, recursively materializes the smaller value with `movz`, and restores the
