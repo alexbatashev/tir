@@ -1379,6 +1379,30 @@ fn two_word_struct_call_matches_host_abi() {
     );
 }
 
+#[cfg(target_arch = "aarch64")]
+#[test]
+fn four_member_hfa_argument_and_return_match_host_abi() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "struct Quad { double first; double second; double third; double fourth; }; long check(double a, double b, double c, double d, double e, double f, struct Quad value) { return a == 1.0 && b == 2.0 && c == 3.0 && d == 4.0 && e == 5.0 && f == 6.0 && value.first == 4.25 && value.second == 5.5 && value.third == 6.75 && value.fourth == 7.125 ? 0 : 1; } struct Quad make(void) { struct Quad result = {4.25, 5.5, 6.75, 7.125}; return result; }\n",
+        "struct Quad { double first; double second; double third; double fourth; }; long check(double, double, double, double, double, double, struct Quad); struct Quad make(void); int main(void) { struct Quad value = {4.25, 5.5, 6.75, 7.125}; if (check(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, value)) return 1; struct Quad result = make(); return result.first == 4.25 && result.second == 5.5 && result.third == 6.75 && result.fourth == 7.125 ? 0 : 2; }\n",
+    );
+}
+
+#[cfg(target_arch = "aarch64")]
+#[test]
+fn four_member_hfa_call_and_return_call_match_host_abi() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_object_executes_with_host(
+        "struct Quad { double first; double second; double third; double fourth; }; long check(double, double, double, double, double, double, struct Quad); struct Quad make(void); int main(void) { struct Quad value = {4.25, 5.5, 6.75, 7.125}; if (check(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, value)) return 1; struct Quad result = make(); return result.first == 4.25 && result.second == 5.5 && result.third == 6.75 && result.fourth == 7.125 ? 0 : 2; }\n",
+        "struct Quad { double first; double second; double third; double fourth; }; long check(double a, double b, double c, double d, double e, double f, struct Quad value) { return a == 1.0 && b == 2.0 && c == 3.0 && d == 4.0 && e == 5.0 && f == 6.0 && value.first == 4.25 && value.second == 5.5 && value.third == 6.75 && value.fourth == 7.125 ? 0 : 1; } struct Quad make(void) { struct Quad result = {4.25, 5.5, 6.75, 7.125}; return result; }\n",
+    );
+}
+
 #[test]
 fn mixed_struct_argument_matches_sysv_host_abi() {
     if !cc_available() || !cfg!(target_arch = "x86_64") {
