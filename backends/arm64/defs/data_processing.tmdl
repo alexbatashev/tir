@@ -423,8 +423,6 @@ template MoveWideKeepFixed for [ARMv8A64] {
     param MNEMONIC: String = "movk";
     param OPNAME: String;
     param HW: bits<2>;
-    param SHIFT: String;
-    param SCALE: bits<49>;
     schedule { units = [WriteIALU]; }
 
     operands {
@@ -435,43 +433,62 @@ template MoveWideKeepFixed for [ARMv8A64] {
     encoding {
         0..4 => rd,
         5..20 => imm,
-        21..22 => self.HW,
+        21..22 => HW,
         23..28 => 0b100101,
         29..30 => 0b11,
         31 => 0b1,
     }
 
-    asm {
-        "{self.MNEMONIC} {rd}, {imm}, {self.SHIFT}"
-    }
-
-    behavior {
-        rd = (rd & ~(zext(0b1111111111111111, self.XLEN)
-            * zext(self.SCALE, self.XLEN)))
-            | (zext(imm, self.XLEN) * zext(self.SCALE, self.XLEN));
-    }
 }
 
 instruction MoveWideKeep16 for [ARMv8A64] : MoveWideKeepFixed {
     param OPNAME: String = "movk_lsl16";
     param HW: bits<2> = 0b01;
-    param SHIFT: String = "1";
-    param SCALE: bits<49> = 0b10000000000000000;
+
+    asm {
+        "{self.MNEMONIC} {rd}, {imm}, 1"
+    }
+
+    behavior {
+        rd = (rd & ~(zext(0b1111111111111111, self.XLEN)
+            * zext(0b10000000000000000, self.XLEN)))
+            | (zext(imm, self.XLEN)
+                * zext(0b10000000000000000, self.XLEN));
+    }
 }
 
 instruction MoveWideKeep32 for [ARMv8A64] : MoveWideKeepFixed {
     param OPNAME: String = "movk_lsl32";
     param HW: bits<2> = 0b10;
-    param SHIFT: String = "2";
-    param SCALE: bits<49> = 0b100000000000000000000000000000000;
+
+    asm {
+        "{self.MNEMONIC} {rd}, {imm}, 2"
+    }
+
+    behavior {
+        rd = (rd & ~(zext(0b1111111111111111, self.XLEN)
+            * zext(0b100000000000000000000000000000000, self.XLEN)))
+            | (zext(imm, self.XLEN)
+                * zext(0b100000000000000000000000000000000, self.XLEN));
+    }
 }
 
 instruction MoveWideKeep48 for [ARMv8A64] : MoveWideKeepFixed {
     param OPNAME: String = "movk_lsl48";
     param HW: bits<2> = 0b11;
-    param SHIFT: String = "3";
-    param SCALE: bits<49> =
-        0b1000000000000000000000000000000000000000000000000;
+
+    asm {
+        "{self.MNEMONIC} {rd}, {imm}, 3"
+    }
+
+    behavior {
+        rd = (rd & ~(zext(0b1111111111111111, self.XLEN)
+            * zext(0b1000000000000000000000000000000000000000000000000,
+                self.XLEN)))
+            | (zext(imm, self.XLEN)
+                * zext(0b1000000000000000000000000000000000000000000000000,
+                    self.XLEN));
+    }
 }
 
 // Logical shifted-register `eor` with a non-zero shift amount (the xorshift RNG
