@@ -435,7 +435,15 @@ where
     expression_parsers().1
 }
 
+fn constant_expr<'src, I>() -> impl Parser<'src, I, NodeId, Extra<'src>> + Clone
+where
+    I: ValueInput<'src, Token = Token, Span = Span>,
+{
+    expression_parsers().2
+}
+
 fn expression_parsers<'src, I>() -> (
+    impl Parser<'src, I, NodeId, Extra<'src>> + Clone,
     impl Parser<'src, I, NodeId, Extra<'src>> + Clone,
     impl Parser<'src, I, NodeId, Extra<'src>> + Clone,
 )
@@ -444,7 +452,7 @@ where
 {
     let mut expr = Recursive::declare();
     let mut assignment = Recursive::declare();
-    assignment.define({
+    let conditional = {
         let literal = select! { Token::IntegerLiteral(n) => n }.map_with(
             |n, e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
                 let tok = e.span().start;
@@ -651,7 +659,7 @@ where
         let bit_or = binop(bit_xor, just(Token::Pipe).to(AstKind::BitOr));
         let logical_and = binop(bit_or, just(Token::AmpAmp).to(AstKind::LogAnd));
         let logical_or = binop(logical_and, just(Token::PipePipe).to(AstKind::LogOr));
-        let conditional = logical_or
+        logical_or
             .then(
                 just(Token::Question)
                     .ignore_then(expr.clone())
@@ -673,8 +681,11 @@ where
                     id
                 },
             )
-            .boxed();
+            .boxed()
+    };
+    assignment.define(
         conditional
+            .clone()
             .then(
                 choice((
                     just(Token::Assign).to(AstKind::AssignExpr),
@@ -699,13 +710,13 @@ where
                     None => lhs,
                 }
             })
-            .boxed()
-    });
+            .boxed(),
+    );
     expr.define(binop(
         assignment.clone(),
         just(Token::Comma).to(AstKind::Comma),
     ));
-    (expr, assignment)
+    (expr, assignment, conditional)
 }
 
 /// A left-associative binary-operator level: a `child` operand followed by any
@@ -1321,7 +1332,33 @@ impl<'a> DeclParser<'a> {
         &self.tokens[start..self.pos]
     }
 
-    fn parse_specs(&mut self, st: &mut ParseState, tok: usize) -> Result<DeclSpecs, String> {
+    fn take_enumerator_value(&mut self) -> &'a [Token] {
+        let start = self.pos;
+        let mut delimiter_depth = 0_i32;
+        let mut conditional_depth = 0_u32;
+        while let Some(token) = self.tokens.get(self.pos) {
+            match token {
+                Token::LParen | Token::LBracket => delimiter_depth += 1,
+                Token::RParen | Token::RBracket => delimiter_depth -= 1,
+                Token::Question if delimiter_depth == 0 => conditional_depth += 1,
+                Token::Colon if delimiter_depth == 0 && conditional_depth != 0 => {
+                    conditional_depth -= 1;
+                }
+                Token::Comma | Token::RBrace if delimiter_depth == 0 && conditional_depth == 0 => {
+                    break;
+                }
+                _ => {}
+            }
+            self.pos += 1;
+        }
+        &self.tokens[start..self.pos]
+    }
+
+    fn parse_specs(
+        &mut self,
+        state: &mut SimpleState<ParseState>,
+        tok: usize,
+    ) -> Result<DeclSpecs, String> {
         let mut storage = Vec::new();
         let mut qualifiers = Vec::new();
         let mut spec_tokens = Vec::new();
@@ -1339,14 +1376,15 @@ impl<'a> DeclParser<'a> {
                 Some(Token::KwStruct) => {
                     self.next();
                     let (record_ty, record_node) =
-                        self.parse_record(st, tok, RecordKind::Struct)?;
+                        self.parse_record(state, tok, RecordKind::Struct)?;
                     ty = Some(record_ty);
                     type_decl = record_node;
                     break;
                 }
                 Some(Token::KwUnion) => {
                     self.next();
-                    let (record_ty, record_node) = self.parse_record(st, tok, RecordKind::Union)?;
+                    let (record_ty, record_node) =
+                        self.parse_record(state, tok, RecordKind::Union)?;
                     ty = Some(record_ty);
                     type_decl = record_node;
                     break;
@@ -1372,28 +1410,26 @@ impl<'a> DeclParser<'a> {
                                 None => return Err("unterminated enum declaration".to_string()),
                             };
                             let value = if self.eat(&Token::Assign) {
-                                let value_tok = tok + self.pos;
-                                let Some(Token::IntegerLiteral(value)) = self.next() else {
-                                    return Err(
-                                        "expected integer literal enumerator value".to_string()
-                                    );
-                                };
-                                let value_node = st.add(AstKind::Int, value_tok);
-                                st.ast.set_leaf_data(value_node, AstLeaf::Int(value));
-                                Some(value_node)
+                                let expression_offset = tok + self.pos;
+                                let expression = self.take_enumerator_value();
+                                Some(parse_external_constant_expression(
+                                    state,
+                                    expression_offset,
+                                    expression,
+                                )?)
                             } else {
                                 None
                             };
-                            st.declare_ordinary(enumerator_name.clone());
-                            let enumerator = st.add(AstKind::Enumerator, enumerator_tok);
-                            st.ast.set_leaf_data(
+                            state.0.declare_ordinary(enumerator_name.clone());
+                            let enumerator = state.0.add(AstKind::Enumerator, enumerator_tok);
+                            state.0.ast.set_leaf_data(
                                 enumerator,
                                 AstLeaf::Enumerator {
                                     name: enumerator_name,
                                 },
                             );
                             if let Some(value) = value {
-                                st.ast.add_edge(enumerator, value);
+                                state.0.ast.add_edge(enumerator, value);
                             }
                             enumerators.push(enumerator);
                             if !self.eat(&Token::Comma) {
@@ -1401,11 +1437,13 @@ impl<'a> DeclParser<'a> {
                                 break;
                             }
                         }
-                        let declaration = st.add(AstKind::EnumDecl, tok);
-                        st.ast
+                        let declaration = state.0.add(AstKind::EnumDecl, tok);
+                        state
+                            .0
+                            .ast
                             .set_leaf_data(declaration, AstLeaf::Enum { name: name.clone() });
                         for enumerator in enumerators {
-                            st.ast.add_edge(declaration, enumerator);
+                            state.0.ast.add_edge(declaration, enumerator);
                         }
                         type_decl = Some(declaration);
                     }
@@ -1464,7 +1502,7 @@ impl<'a> DeclParser<'a> {
 
     fn parse_record(
         &mut self,
-        st: &mut ParseState,
+        state: &mut SimpleState<ParseState>,
         tok: usize,
         kind: RecordKind,
     ) -> Result<(CType, Option<NodeId>), String> {
@@ -1476,7 +1514,7 @@ impl<'a> DeclParser<'a> {
             _ => None,
         };
         let defining = self.peek() == Some(&Token::LBrace);
-        let record_id = st.record_id(kind, name.as_deref(), defining);
+        let record_id = state.0.record_id(kind, name.as_deref(), defining);
         let mut record = None;
         if self.eat(&Token::LBrace) {
             let mut fields = Vec::new();
@@ -1484,10 +1522,10 @@ impl<'a> DeclParser<'a> {
                 if self.is_done() {
                     return Err("unterminated record declaration".to_string());
                 }
-                fields.extend(self.parse_field_decl(st, tok)?);
+                fields.extend(self.parse_field_decl(state, tok)?);
             }
-            let id = st.add(AstKind::RecordDecl, tok);
-            st.ast.set_leaf_data(
+            let id = state.0.add(AstKind::RecordDecl, tok);
+            state.0.ast.set_leaf_data(
                 id,
                 AstLeaf::Record {
                     id: record_id,
@@ -1496,15 +1534,19 @@ impl<'a> DeclParser<'a> {
                 },
             );
             for field in fields {
-                st.ast.add_edge(id, field);
+                state.0.ast.add_edge(id, field);
             }
             record = Some(id);
         }
         Ok((CType::Record(kind, record_id, name), record))
     }
 
-    fn parse_field_decl(&mut self, st: &mut ParseState, tok: usize) -> Result<Vec<NodeId>, String> {
-        let specs = self.parse_specs(st, tok)?;
+    fn parse_field_decl(
+        &mut self,
+        state: &mut SimpleState<ParseState>,
+        tok: usize,
+    ) -> Result<Vec<NodeId>, String> {
+        let specs = self.parse_specs(state, tok)?;
         let mut fields = Vec::new();
         loop {
             self.consume_attrs()?;
@@ -1512,8 +1554,8 @@ impl<'a> DeclParser<'a> {
             self.consume_attrs()?;
             decl.ty = self.take_attrs(decl.ty);
             self.consume_bitfield()?;
-            let id = st.add(AstKind::Field, tok);
-            st.ast.set_leaf_data(
+            let id = state.0.add(AstKind::Field, tok);
+            state.0.ast.set_leaf_data(
                 id,
                 AstLeaf::Field {
                     name: decl.name,
@@ -1674,13 +1716,13 @@ impl<'a> DeclParser<'a> {
     }
 
     fn parse_specs_for_param(&mut self) -> Result<CType, String> {
-        let mut scratch = ParseState {
+        let mut scratch = SimpleState(ParseState {
             ast: Ast::new(),
             spans: Vec::new(),
             token_offset: 0,
             name_scopes: vec![NameScope::default()],
             next_record: 0,
-        };
+        });
         self.parse_specs(&mut scratch, 0).map(|specs| specs.ty)
     }
 
@@ -2009,7 +2051,7 @@ fn parse_external_tokens(
     tokens: &[Token],
 ) -> Result<NodeId, String> {
     let mut parser = DeclParser::new(tokens);
-    let specs = parser.parse_specs(&mut state.0, tok)?;
+    let specs = parser.parse_specs(state, tok)?;
     let is_typedef = specs
         .storage
         .iter()
@@ -2159,6 +2201,27 @@ fn parse_external_initializer(
         return Err(error.to_string());
     }
     initializer.ok_or_else(|| "expected initializer".to_string())
+}
+
+fn parse_external_constant_expression(
+    state: &mut SimpleState<ParseState>,
+    token_offset: usize,
+    tokens: &[Token],
+) -> Result<NodeId, String> {
+    if tokens.is_empty() {
+        return Err("expected enumerator value".to_string());
+    }
+    let previous_offset = state.0.token_offset;
+    state.0.token_offset = token_offset;
+    let (expression, errors) = constant_expr()
+        .then_ignore(end())
+        .parse_with_state(tokens, state)
+        .into_output_errors();
+    state.0.token_offset = previous_offset;
+    if let Some(error) = errors.first() {
+        return Err(error.to_string());
+    }
+    expression.ok_or_else(|| "expected enumerator value".to_string())
 }
 
 fn external_decl<'src, I>() -> impl Parser<'src, I, NodeId, Extra<'src>> + Clone
