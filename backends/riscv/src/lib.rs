@@ -491,19 +491,33 @@ fn lower_vector_len(
 }
 
 /// Emit the branch-if-nonzero fallback for a condition no branch rule fused:
-/// `bne cond, x0, dest`.
+/// `andi tmp, cond, 1` + `bne tmp, x0, dest`. The condition is a width-1
+/// value, so only bit 0 of its register is defined — branching on the whole
+/// register would read undefined bits.
 fn emit_branch_nonzero(
     context: &tir::Context,
     condition: tir::ValueId,
     dest: tir::BlockId,
 ) -> Vec<Box<dyn Operation>> {
-    vec![Box::new(
-        BranchNotEqOpBuilder::new(context)
-            .attr("rs1", virt(condition.number(), RegClass::GPR.id()))
-            .attr("rs2", phys(&(RegClass::GPR.id(), 0)))
-            .attr("imm", tir::attributes::AttributeValue::Block(dest))
-            .build(),
-    )]
+    let bit = context
+        .create_value(tir::builtin::IntegerType::new(context, 1), None)
+        .id();
+    vec![
+        Box::new(
+            AndImmOpBuilder::new(context)
+                .attr("rd", virt(bit.number(), RegClass::GPR.id()))
+                .attr("rs1", virt(condition.number(), RegClass::GPR.id()))
+                .attr("imm", tir::attributes::AttributeValue::Int(1))
+                .build(),
+        ),
+        Box::new(
+            BranchNotEqOpBuilder::new(context)
+                .attr("rs1", virt(bit.number(), RegClass::GPR.id()))
+                .attr("rs2", phys(&(RegClass::GPR.id(), 0)))
+                .attr("imm", tir::attributes::AttributeValue::Block(dest))
+                .build(),
+        ),
+    ]
 }
 
 /// Build a register-register move (`addi rd, rs, 0`).
@@ -1329,8 +1343,9 @@ mod tests {
         let mut fb = IRBuilder::new(func.body());
         let add = ops::addi(&context, x_id, x_id, i32).build();
         fb.insert(add);
-        // A bare i1 condition (a block argument): no branch rule can fuse it, so
-        // selection falls back to `bne cond, x0, t` plus the deferred `vbr f`.
+        // A bare i1 condition (a block argument): no branch rule can fuse it,
+        // so selection falls back to `andi` the defined bit out + `bne … x0, t`
+        // plus the deferred `vbr f`.
         fb.insert(ops::cond_br(&context, cond_id, vec![], vec![], t.id(), f.id()).build());
 
         let mut mb = IRBuilder::new(module.body());
@@ -1347,7 +1362,7 @@ mod tests {
         // flow remains.
         assert_eq!(
             body_op_names(&context, region.id()),
-            vec!["addw", "bne", "vbr", "symbol_end"]
+            vec!["addw", "andi", "bne", "vbr", "symbol_end"]
         );
         let mut buf = String::new();
         let mut fmt = IRFormatter::new(&mut buf);

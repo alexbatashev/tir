@@ -1841,7 +1841,14 @@ impl Analyzer<'_> {
                     && operands
                         .iter()
                         .all(|&ty| matches!(self.types.kind(ty), TypeKind::Pointer(_)));
-                if arithmetic || pointers {
+                if arithmetic {
+                    // The result is `int`, but the operands are still brought to
+                    // their common type first, so the comparison never sees two
+                    // different widths.
+                    let common = self.common_arithmetic_type(operands[0], operands[1]);
+                    self.record_operand_conversions(node, &operands, common);
+                    (int, ValueCategory::Value)
+                } else if pointers {
                     (int, ValueCategory::Value)
                 } else if operands
                     .iter()

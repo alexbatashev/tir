@@ -85,11 +85,12 @@ module {
     %2 = constant {value = 0} : !i64
     return %2
   }
-  // A bare i1 condition has no comparison to fuse: the guard seed rewrites it to
-  // `%0 != 0`, which the derived `bne … x0` zero-form selects against the
-  // hardwired zero register.
+  // A bare i1 condition has no comparison to fuse, and a width-1 value only
+  // defines the low bit of its register, so the branch must read that bit
+  // alone: `andi` the bit out, then compare that against the hardwired zero.
   // CHECK: asm.symbol {name = "fallback"
-  // CHECK: riscv.bne {rs1 = %virt23:GPR, rs2 = x0, imm = ^bb1}
+  // CHECK: riscv.andi {rd = %virt{{[0-9]+}}:GPR, rs1 = %virt23:GPR, imm = 1}
+  // CHECK-NEXT: riscv.bne {rs1 = %virt{{[0-9]+}}:GPR, rs2 = x0, imm = ^bb1}
   // CHECK-NEXT: asm.vbr ^bb2
 
   func @eq_zero(%0: !i64) -> !i64 {

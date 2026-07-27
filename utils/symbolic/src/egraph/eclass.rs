@@ -1,6 +1,7 @@
 use super::{ENode, Id};
 
 /// An equivalence class: e-nodes proven equal, plus back-edges (parents) for congruence repair.
+#[derive(Clone)]
 pub struct EClass<L: ENode> {
     pub(super) id: Id,
     pub(super) nodes: Vec<L>,

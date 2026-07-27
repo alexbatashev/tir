@@ -1,5 +1,4 @@
 execute/20000112-1.c
-execute/20000217-1.c
 execute/20000223-1.c
 execute/20000227-1.c
 execute/20000314-1.c
@@ -36,7 +35,6 @@ execute/20000910-1.c
 execute/20000910-2.c
 execute/20000914-1.c
 execute/20000917-1.c
-execute/20001009-1.c
 execute/20001009-2.c
 execute/20001011-1.c
 execute/20001024-1.c
@@ -46,7 +44,6 @@ execute/20001101.c
 execute/20001111-1.c
 execute/20001121-1.c
 execute/20001124-1.c
-execute/20001130-2.c
 execute/20001203-1.c
 execute/20001203-2.c
 execute/20001228-1.c
@@ -55,7 +52,6 @@ execute/20010122-1.c
 execute/20010123-1.c
 execute/20010129-1.c
 execute/20010209-1.c
-execute/20010224-1.c
 execute/20010325-1.c
 execute/20010329-1.c
 execute/20010409-1.c
@@ -74,20 +70,16 @@ execute/20011008-3.c
 execute/20011019-1.c
 execute/20011024-1.c
 execute/20011109-1.c
-execute/20011109-2.c
 execute/20011113-1.c
 execute/20011114-1.c
 execute/20011115-1.c
 execute/20011121-1.c
-execute/20011126-2.c
 execute/20011128-1.c
 execute/20011217-1.c
 execute/20011223-1.c
-execute/20020103-1.c
 execute/20020107-1.c
 execute/20020118-1.c
 execute/20020129-1.c
-execute/20020201-1.c
 execute/20020206-1.c
 execute/20020206-2.c
 execute/20020213-1.c
@@ -118,7 +110,6 @@ execute/20020716-1.c
 execute/20020720-1.c
 execute/20020810-1.c
 execute/20020819-1.c
-execute/20020904-1.c
 execute/20020920-1.c
 execute/20021010-1.c
 execute/20021010-2.c
@@ -136,9 +127,7 @@ execute/20021127-1.c
 execute/20021219-1.c
 execute/20030105-1.c
 execute/20030109-1.c
-execute/20030120-1.c
 execute/20030128-1.c
-execute/20030209-1.c
 execute/20030216-1.c
 execute/20030218-1.c
 execute/20030221-1.c
@@ -146,7 +135,6 @@ execute/20030222-1.c
 execute/20030224-2.c
 execute/20030323-1.c
 execute/20030330-1.c
-execute/20030401-1.c
 execute/20030403-1.c
 execute/20030408-1.c
 execute/20030501-1.c
@@ -174,7 +162,6 @@ execute/20031211-2.c
 execute/20031214-1.c
 execute/20031215-1.c
 execute/20040208-1.c
-execute/20040218-1.c
 execute/20040223-1.c
 execute/20040302-1.c
 execute/20040307-1.c
@@ -218,8 +205,6 @@ execute/20041218-1.c
 execute/20041218-2.c
 execute/20050104-1.c
 execute/20050106-1.c
-execute/20050119-1.c
-execute/20050119-2.c
 execute/20050121-1.c
 execute/20050125-1.c
 execute/20050131-1.c
@@ -239,11 +224,7 @@ execute/20050826-1.c
 execute/20050826-2.c
 execute/20050929-1.c
 execute/20051012-1.c
-execute/20051110-1.c
-execute/20051110-2.c
-execute/20051113-1.c
 execute/20060102-1.c
-execute/20060412-1.c
 execute/20060420-1.c
 execute/20060905-1.c
 execute/20060929-1.c
@@ -282,10 +263,8 @@ execute/20080522-1.c
 execute/20080529-1.c
 execute/20080604-1.c
 execute/20080719-1.c
-execute/20080813-1.c
 execute/20081103-1.c
 execute/20081112-1.c
-execute/20081117-1.c
 execute/20081218-1.c
 execute/20090113-2.c
 execute/20090113-3.c
@@ -393,7 +372,6 @@ execute/921013-1.c
 execute/921016-1.c
 execute/921017-1.c
 execute/921019-1.c
-execute/921019-2.c
 execute/921029-1.c
 execute/921110-1.c
 execute/921112-1.c
@@ -443,20 +421,13 @@ execute/930929-1.c
 execute/930930-1.c
 execute/930930-2.c
 execute/931002-1.c
-execute/931004-1.c
 execute/931004-10.c
-execute/931004-11.c
 execute/931004-12.c
-execute/931004-13.c
 execute/931004-14.c
 execute/931004-2.c
-execute/931004-3.c
 execute/931004-4.c
-execute/931004-5.c
 execute/931004-6.c
-execute/931004-7.c
 execute/931004-8.c
-execute/931004-9.c
 execute/931005-1.c
 execute/931009-1.c
 execute/931012-1.c
@@ -485,9 +456,7 @@ execute/950503-1.c
 execute/950512-1.c
 execute/950605-1.c
 execute/950607-1.c
-execute/950612-1.c
 execute/950621-1.c
-execute/950628-1.c
 execute/950704-1.c
 execute/950706-1.c
 execute/950809-1.c
@@ -495,7 +464,6 @@ execute/950906-1.c
 execute/950929-1.c
 execute/951003-1.c
 execute/951115-1.c
-execute/951204-1.c
 execute/960117-1.c
 execute/960209-1.c
 execute/960215-1.c
@@ -516,7 +484,6 @@ execute/960512-1.c
 execute/960513-1.c
 execute/960521-1.c
 execute/960608-1.c
-execute/960801-1.c
 execute/960802-1.c
 execute/960830-1.c
 execute/960909-1.c
@@ -525,9 +492,7 @@ execute/961026-1.c
 execute/961112-1.c
 execute/961122-1.c
 execute/961125-1.c
-execute/961206-1.c
 execute/961213-1.c
-execute/961223-1.c
 execute/970217-1.c
 execute/970923-1.c
 execute/980205.c
@@ -544,7 +509,6 @@ execute/980602-1.c
 execute/980604-1.c
 execute/980605-1.c
 execute/980608-1.c
-execute/980617-1.c
 execute/980707-1.c
 execute/980709-1.c
 execute/980716-1.c
@@ -557,9 +521,6 @@ execute/990106-2.c
 execute/990128-1.c
 execute/990130-1.c
 execute/990208-1.c
-execute/990211-1.c
-execute/990222-1.c
-execute/990324-1.c
 execute/990326-1.c
 execute/990413-2.c
 execute/990513-1.c
@@ -569,7 +530,6 @@ execute/990525-2.c
 execute/990531-1.c
 execute/990604-1.c
 execute/990628-1.c
-execute/990811-1.c
 execute/990826-0.c
 execute/991014-1.c
 execute/991023-1.c
@@ -580,7 +540,6 @@ execute/991201-1.c
 execute/991202-1.c
 execute/991216-2.c
 execute/991221-1.c
-execute/991227-1.c
 execute/991228-1.c
 execute/alias-1.c
 execute/alias-2.c
@@ -728,7 +687,6 @@ execute/complex-6.c
 execute/complex-7.c
 execute/const-addr-expr-1.c
 execute/conversion.c
-execute/cvt-1.c
 execute/dbra-1.c
 execute/divcmp-1.c
 execute/divcmp-2.c
@@ -828,7 +786,6 @@ execute/int-compare.c
 execute/ipa-sra-1.c
 execute/ipa-sra-2.c
 execute/longlong.c
-execute/loop-1.c
 execute/loop-12.c
 execute/loop-15.c
 execute/loop-2.c
@@ -841,8 +798,6 @@ execute/loop-2g.c
 execute/loop-3.c
 execute/loop-3b.c
 execute/loop-3c.c
-execute/loop-6.c
-execute/loop-7.c
 execute/loop-8.c
 execute/loop-9.c
 execute/loop-ivopts-1.c
@@ -880,7 +835,6 @@ execute/nestfunc-5.c
 execute/nestfunc-6.c
 execute/nestfunc-7.c
 execute/p18298.c
-execute/packed-1.c
 execute/packed-aligned.c
 execute/pending-4.c
 execute/postmod-1.c
@@ -983,7 +937,6 @@ execute/pr17377.c
 execute/pr19005.c
 execute/pr19449.c
 execute/pr20100-1.c
-execute/pr20187-1.c
 execute/pr20466-1.c
 execute/pr20601-1.c
 execute/pr20621-1.c
@@ -1006,7 +959,6 @@ execute/pr23941.c
 execute/pr24135.c
 execute/pr24141.c
 execute/pr24716.c
-execute/pr25125.c
 execute/pr25737.c
 execute/pr27073.c
 execute/pr27260.c
@@ -1021,7 +973,6 @@ execute/pr28982a.c
 execute/pr28982b.c
 execute/pr29006.c
 execute/pr29156.c
-execute/pr29695-2.c
 execute/pr29798.c
 execute/pr30314.c
 execute/pr30778.c
@@ -1037,7 +988,6 @@ execute/pr33631.c
 execute/pr33870-1.c
 execute/pr33870.c
 execute/pr33992.c
-execute/pr34099-2.c
 execute/pr34130.c
 execute/pr34154.c
 execute/pr34176.c
@@ -1047,7 +997,6 @@ execute/pr34768-1.c
 execute/pr34768-2.c
 execute/pr34971.c
 execute/pr34982.c
-execute/pr35163.c
 execute/pr35231.c
 execute/pr35456.c
 execute/pr35472.c
@@ -1078,8 +1027,6 @@ execute/pr38969.c
 execute/pr39100.c
 execute/pr39120.c
 execute/pr39228.c
-execute/pr39233.c
-execute/pr39240.c
 execute/pr39339.c
 execute/pr39501.c
 execute/pr40022.c
@@ -1093,15 +1040,12 @@ execute/pr41395-2.c
 execute/pr41463.c
 execute/pr41750.c
 execute/pr41917.c
-execute/pr41919.c
 execute/pr41935.c
 execute/pr42142.c
 execute/pr42154.c
 execute/pr42231.c
 execute/pr42248.c
 execute/pr42269-2.c
-execute/pr42512.c
-execute/pr42544.c
 execute/pr42614.c
 execute/pr42691.c
 execute/pr42833.c
@@ -1116,7 +1060,6 @@ execute/pr44164.c
 execute/pr44468.c
 execute/pr44575.c
 execute/pr44683.c
-execute/pr44828.c
 execute/pr44852.c
 execute/pr44858.c
 execute/pr44942.c
@@ -1131,7 +1074,6 @@ execute/pr46909-2.c
 execute/pr47148.c
 execute/pr47155.c
 execute/pr47237.c
-execute/pr47299.c
 execute/pr47337.c
 execute/pr47538.c
 execute/pr47925.c
@@ -1152,7 +1094,6 @@ execute/pr49712.c
 execute/pr49768.c
 execute/pr49886.c
 execute/pr50865.c
-execute/pr51023.c
 execute/pr51323.c
 execute/pr51447.c
 execute/pr51581-1.c
@@ -1225,7 +1166,6 @@ execute/pr59413.c
 execute/pr59643.c
 execute/pr59747.c
 execute/pr60003.c
-execute/pr60017.c
 execute/pr60062.c
 execute/pr60454.c
 execute/pr60822.c
@@ -1483,9 +1423,7 @@ execute/stkalign.c
 execute/strcmp-1.c
 execute/strcpy-1.c
 execute/strcpy-2.c
-execute/strct-pack-1.c
 execute/strct-pack-3.c
-execute/strct-pack-4.c
 execute/strct-stdarg-1.c
 execute/strct-varg-1.c
 execute/string-opt-17.c
@@ -1505,7 +1443,6 @@ execute/struct-ini-1.c
 execute/struct-ini-2.c
 execute/struct-ini-4.c
 execute/struct-ret-1.c
-execute/struct-ret-2.c
 execute/tstdi-1.c
 execute/user-printf.c
 execute/usmul.c

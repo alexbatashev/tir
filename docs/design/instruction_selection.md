@@ -638,8 +638,9 @@ per-target op lowerings.
 ### Zero-compare branches
 
 Two idioms branch on whether a value is zero without materializing the zero: a
-bare i1 condition and a `cmpi x, 0` guard. Both are served by *derived* rules,
-so `cond_nonzero` is now a fallback of last resort.
+bare i1 condition and a `cmpi x, 0` guard. Both are served by *derived* rules
+whenever the guard's width matches the rule's register class; a narrower guard
+falls back to `cond_nonzero`.
 
 Target-independent, SMT-checked axioms rewrite every integer comparison with a
 literal-zero operand to the `Cmp(a, zext(0b0, W))` shape the derived rules
@@ -661,13 +662,12 @@ wire one operand to that physical register, the zeroed slot lowered as
 On arm64 the `cbz`/`cbnz` path emits the same `zext(0b0, W)` shape, so `cmpi x,
 0` and a bare i1 both select `cbz`/`cbnz`.
 
-Branch-rule matching additionally lets a width-1 class bind a register-width
-operand: `CompiledIselPattern::search` (`isel/pattern.rs`) passes
-`bool_binds_wide` through `boundary_ok_impl`, relaxing the width check for a
-1-bit class. A materialized i1 occupies its register as 0/1 and the branch reads
-the same bits the fallback would test, so a bare i1 reaches the register-width
-zero-compare rule. The relaxation is scoped to branch-rule search, not general
-boundary filtering.
+Width is not negotiable here. A zero-compare definer reads *every* bit of the
+register it tests, so a width-1 value — whose bits above bit 0 are undefined
+under the low-bits value model — must not bind it. TMDL therefore marks both
+operands of an aliased zero-compare (x86 `test c,c`) whole-width, and
+`boundary_ok` rejects a narrower class. A bare i1 guard that no rule accepts is
+lowered by `BranchEmitters::cond_nonzero`, which masks bit 0 before branching.
 
 ### Flag-mediated branches (x86 EFLAGS, AArch64 PSTATE)
 

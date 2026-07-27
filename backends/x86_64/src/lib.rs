@@ -95,7 +95,9 @@ mod isa {
     }
 
     /// Emit the branch-if-nonzero fallback for a condition no branch rule
-    /// fused: `test cond, cond` + `jne dest`.
+    /// fused: `test cond, 1` + `jne dest`. The condition is a width-1 value, so
+    /// only bit 0 of its register is defined — a whole-register `test` would
+    /// branch on undefined bits.
     fn emit_branch_nonzero(
         context: &tir::Context,
         condition: tir::ValueId,
@@ -103,9 +105,9 @@ mod isa {
     ) -> Vec<Box<dyn Operation>> {
         vec![
             Box::new(
-                TestOpBuilder::new(context)
-                    .attr("dst", virt(condition.number(), RegClass::GPR.id()))
-                    .attr("src", virt(condition.number(), RegClass::GPR.id()))
+                TestImm32OpBuilder::new(context)
+                    .attr("dst", virt(condition.number(), RegClass::GPR32.id()))
+                    .attr("imm", AttributeValue::Int(1))
                     .build(),
             ),
             Box::new(

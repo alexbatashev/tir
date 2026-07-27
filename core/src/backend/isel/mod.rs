@@ -222,10 +222,6 @@ impl RegisterRequirement {
             )
     }
 
-    fn accepts_low_bits(&self, ty: &tir::sem::SemType) -> bool {
-        self.capability.accepts(ty)
-    }
-
     fn accepts_low_view_source(&self, ty: &tir::sem::SemType) -> bool {
         use tir::sem::{SemType, Width};
         matches!(
@@ -578,7 +574,14 @@ impl FunctionSelection {
     /// a block input, or the result of any op but a bare `constant`/`constantf`
     /// (which is erased once selection or the target's pre-RA hook is done with
     /// it). Only such a value satisfies a register operand externally.
+    ///
+    /// A proven-constant class carries none: whatever op computed it (a `constant`,
+    /// or an `extsi` of one) is erased in favour of a constant materializer, so its
+    /// value defines no register.
     fn has_surviving_value(&self, context: &Context, class: Id) -> bool {
+        if class_int_binding(&self.egraph, class).is_some() {
+            return false;
+        }
         self.any_class_value(class, |v| {
             self.value_to_def.get(v).is_none_or(|op| {
                 let op = context.get_op(*op);
@@ -1366,6 +1369,11 @@ impl InstructionSelectPass {
             let class = egraph.find(root);
             ops_by_root.entry(class).or_default().push(op);
             op_root.insert(op, class);
+        }
+        // `roots_by_op` iterates in hash order; the per-class lists decide
+        // emission order, so they are sorted into program order.
+        for ops in ops_by_root.values_mut() {
+            ops.sort_unstable();
         }
 
         // Every value a class computes: the input leaves it interned plus every op

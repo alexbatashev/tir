@@ -165,21 +165,29 @@ impl Arm64Dialect {
 /// Emit the deferred unconditional branch (`vbr`, finalized to `b` after
 /// register allocation), forwarding any block arguments.
 /// Emit the branch-if-nonzero fallback for a condition no branch rule fused:
-/// `cmp cond, xzr` + `b.ne dest`.
+/// `and bit, cond, #1` + `cbnz bit, dest`. The condition is a width-1 value,
+/// so only bit 0 of its register is defined — comparing the whole register
+/// would branch on undefined bits. `immr = imms = 0` encodes the mask `#1`.
 fn emit_branch_nonzero(
     context: &tir::Context,
     condition: tir::ValueId,
     dest: tir::BlockId,
 ) -> Vec<Box<dyn Operation>> {
+    let bit = context
+        .create_value(tir::builtin::IntegerType::new(context, 1), None)
+        .id();
     vec![
         Box::new(
-            CompareOpBuilder::new(context)
+            AndImmediateOpBuilder::new(context)
+                .attr("rd", virt(bit.number(), RegClass::GPRsp.id()))
                 .attr("rn", virt(condition.number(), RegClass::GPR.id()))
-                .attr("rm", phys(&(RegClass::GPR.id(), XZR)))
+                .attr("immr", tir::attributes::AttributeValue::Int(0))
+                .attr("imms", tir::attributes::AttributeValue::Int(0))
                 .build(),
         ),
         Box::new(
-            BranchNotEqOpBuilder::new(context)
+            CompareBranchNonZeroOpBuilder::new(context)
+                .attr("rt", virt(bit.number(), RegClass::GPR.id()))
                 .attr("imm", tir::attributes::AttributeValue::Block(dest))
                 .build(),
         ),
@@ -778,9 +786,9 @@ mod tests {
         let mut fb = IRBuilder::new(func.body());
         let add = ops::addi(&context, x_id, x_id, i64).build();
         fb.insert(add);
-        // A bare i1 condition (a block argument): the value-is-0/1 bridge lets
-        // the derived zero-compare branch fuse it into `cbnz cond, t` plus the
-        // deferred `vbr f`.
+        // A bare i1 condition (a block argument) defines only bit 0 of its
+        // register, so it lowers through the masking fallback: `and #1` plus
+        // `cbnz`, then the deferred `vbr f`.
         fb.insert(ops::cond_br(&context, cond_id, vec![], vec![], t.id(), f.id()).build());
 
         let mut mb = IRBuilder::new(module.body());
@@ -801,7 +809,7 @@ mod tests {
             .into_iter()
             .map(|id| context.get_op(id).name().as_str())
             .collect();
-        assert_eq!(body, vec!["add", "cbnz", "vbr", "symbol_end"]);
+        assert_eq!(body, vec!["add", "and_imm", "cbnz", "vbr", "symbol_end"]);
 
         let mut buf = String::new();
         let mut fmt = IRFormatter::new(&mut buf);

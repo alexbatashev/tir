@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub const INF_COST: u64 = u64::MAX / 4;
 
@@ -71,7 +71,7 @@ impl PbqpMatrix {
 #[derive(Clone, Debug)]
 pub struct PbqpProblem {
     node_costs: Vec<Vec<u64>>,
-    edges: HashMap<(usize, usize), PbqpMatrix>,
+    edges: BTreeMap<(usize, usize), PbqpMatrix>,
     coherence_sets: Vec<Vec<PbqpAlternative>>,
 }
 
@@ -79,7 +79,7 @@ impl PbqpProblem {
     pub fn new() -> Self {
         Self {
             node_costs: Vec::new(),
-            edges: HashMap::new(),
+            edges: BTreeMap::new(),
             coherence_sets: Vec::new(),
         }
     }
@@ -170,13 +170,13 @@ struct Solver {
     /// Per-node neighbor set, maintained alongside `problem.edges` so neighbor
     /// queries are O(degree) rather than a full O(edges) scan — the difference
     /// between the solver being usable and unusable at register-allocation scale.
-    adjacency: Vec<HashSet<usize>>,
+    adjacency: Vec<BTreeSet<usize>>,
 }
 
 impl Solver {
     fn new(problem: PbqpProblem) -> Self {
         let active = vec![true; problem.node_count()];
-        let mut adjacency = vec![HashSet::new(); problem.node_count()];
+        let mut adjacency = vec![BTreeSet::new(); problem.node_count()];
         for &(a, b) in problem.edges.keys() {
             adjacency[a].insert(b);
             adjacency[b].insert(a);
@@ -858,5 +858,29 @@ mod tests {
         let solution = solve(&problem).expect("PBQP should try the feasible Rn alternative");
         assert_eq!(solution.choices[center.index()], 1);
         assert_eq!(solution.total_cost, 1);
+    }
+
+    /// Equal-cost optima must not be decided by hash iteration order: the same
+    /// problem built with its edges added in a different order must solve the
+    /// same way, or the compiler's output depends on the process's hash seed.
+    #[test]
+    fn solution_is_independent_of_edge_insertion_order() {
+        let ring = |reversed: bool| {
+            let mut problem = PbqpProblem::new();
+            let nodes: Vec<_> = (0..8).map(|_| problem.add_node(vec![0, 0])).collect();
+            let differ = PbqpMatrix::new(2, 2, vec![1, 0, 0, 1]);
+            let mut edges: Vec<_> = (0..nodes.len())
+                .map(|i| (nodes[i], nodes[(i + 1) % nodes.len()]))
+                .collect();
+            if reversed {
+                edges.reverse();
+            }
+            for (lhs, rhs) in edges {
+                problem.add_edge(lhs, rhs, differ.clone());
+            }
+            solve(&problem).expect("PBQP should be solvable")
+        };
+
+        assert_eq!(ring(false), ring(true));
     }
 }

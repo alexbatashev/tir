@@ -397,6 +397,18 @@ fn emit_aliased_zero_branch_rules(
     isel_rule_emitters: &mut Vec<proc_macro2::TokenStream>,
     isel_rule_inits: &mut Vec<proc_macro2::TokenStream>,
 ) {
+    let float_classes: HashSet<String> = files
+        .iter()
+        .flat_map(|file| file.register_classes())
+        .filter(|class| class.has_float_registers())
+        .map(|class| class.name.clone())
+        .collect();
+    let polymorphic_classes: HashSet<String> = files
+        .iter()
+        .flat_map(|file| file.register_classes())
+        .filter(|class| class.has_polymorphic_registers())
+        .map(|class| class.name.clone())
+        .collect();
     let mut emitted_preludes: HashSet<String> = HashSet::new();
     for (b, b_sem) in branches {
         for (d, d_sem) in definers {
@@ -548,6 +560,14 @@ fn emit_aliased_zero_branch_rules(
             let d_mnemonic_lit = proc_macro2::Literal::string(&d.mnemonic);
             let b_mnemonic_lit = proc_macro2::Literal::string(&b.mnemonic);
             let pair_features = feature_slice(&shared_isas);
+            // The definer compares the aliased operand against zero, so it reads
+            // every bit of the register: a narrower value must not bind.
+            let operand_register_call = emit_operand_registers(
+                &[(0, class_a.clone())],
+                &HashSet::from([0]),
+                &float_classes,
+                &polymorphic_classes,
+            );
 
             isel_rule_emitters.push(quote! {
                 fn #pattern_fn_ident(_context: &tir::Context) -> tir::sem::SemGraph {
@@ -590,7 +610,8 @@ fn emit_aliased_zero_branch_rules(
                         .with_prelude_emitter(#prelude_fn_ident)
                         .with_operand_constraints(vec![
                             (0, tir::graph::OperandConstraint::Register)
-                        ]),
+                        ])
+                        #operand_register_call,
                     );
                 }
             });

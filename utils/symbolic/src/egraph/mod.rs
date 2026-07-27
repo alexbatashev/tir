@@ -44,7 +44,7 @@ pub struct EGraph<L: ENode> {
     memo: IndexMap<u64, Vec<(L, Id)>>,
     /// Canonical base class id -> e-class; absorbed ids removed on `union`. Scoped
     /// unions never touch it, so `pop_context` restores it for free.
-    classes: HashMap<Id, EClass<L>>,
+    classes: IndexMap<Id, EClass<L>>,
     /// [`ENode::op_key`] bucket -> class ids holding such a node, so
     /// [`Self::classes_with_op`] skips classes a concrete-rooted pattern can't match.
     /// Append-only, caller-dedup'd: over-approximates, never misses a live class.
@@ -56,7 +56,7 @@ pub struct EGraph<L: ENode> {
     /// one hash-cons per open context so a nested `pop_context` restores the enclosing
     /// table. Base `classes`/`memo` stay immutable underneath.
     scope_members: IndexMap<Id, Vec<Id>>,
-    scope_classes: HashMap<Id, EClass<L>>,
+    scope_classes: IndexMap<Id, EClass<L>>,
     scope_memo: Vec<IndexMap<u64, Vec<(L, Id)>>>,
     /// Undo log of base insertions per open context: `make_class` still writes the
     /// new class into base `classes`/`classes_by_op`/children's `parents` while scoped
@@ -86,11 +86,11 @@ impl<L: ENode> EGraph<L> {
         Self {
             unionfind: ScopedDisjointSet::new(0),
             memo: IndexMap::new(),
-            classes: HashMap::new(),
+            classes: IndexMap::new(),
             classes_by_op: IndexMap::new(),
             pending: Vec::new(),
             scope_members: IndexMap::new(),
-            scope_classes: HashMap::new(),
+            scope_classes: IndexMap::new(),
             scope_memo: Vec::new(),
             scope_created: Vec::new(),
         }
@@ -114,7 +114,7 @@ impl<L: ENode> EGraph<L> {
     }
 
     /// Class table for the current scope: the overlay while open, else the base.
-    fn current_classes(&self) -> &HashMap<Id, EClass<L>> {
+    fn current_classes(&self) -> &IndexMap<Id, EClass<L>> {
         if self.in_scope() {
             &self.scope_classes
         } else {
@@ -891,13 +891,13 @@ mod tests {
         let mut g = EGraph::new();
         let a = sym(&mut g, 0);
         g.rebuild();
-        let before = g.classes[&a].parents.len();
+        let before = g.classes.get(&a).unwrap().parents.len();
 
         g.push_context();
         neg(&mut g, a);
-        assert_eq!(g.classes[&a].parents.len(), before + 1);
+        assert_eq!(g.classes.get(&a).unwrap().parents.len(), before + 1);
         g.pop_context();
-        assert_eq!(g.classes[&a].parents.len(), before);
+        assert_eq!(g.classes.get(&a).unwrap().parents.len(), before);
     }
 
     #[test]
@@ -934,7 +934,7 @@ mod tests {
         g.rebuild();
         let base_classes = g.num_classes();
         let base_size = g.total_size();
-        let a_parents = g.classes[&a].parents.len();
+        let a_parents = g.classes.get(&a).unwrap().parents.len();
 
         g.push_context();
         g.saturate([&comm], 10, 1000);
@@ -943,7 +943,7 @@ mod tests {
 
         assert_eq!(g.num_classes(), base_classes);
         assert_eq!(g.total_size(), base_size);
-        assert_eq!(g.classes[&a].parents.len(), a_parents);
+        assert_eq!(g.classes.get(&a).unwrap().parents.len(), a_parents);
     }
 
     #[test]

@@ -168,6 +168,30 @@ impl<K: Eq + Hash, V: Clone, I: AsIndex> IndexMap<K, V, I> {
         self.indices.clear();
         self.data.clear();
     }
+
+    /// The values in insertion order — the reason to reach for this map over a
+    /// `HashMap` when a traversal decides what the compiler emits.
+    pub fn values(&self) -> impl Iterator<Item = &V> {
+        self.data.iter().filter_map(Option::as_ref)
+    }
+
+    pub fn len(&self) -> usize {
+        self.indices.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.indices.is_empty()
+    }
+}
+
+impl<K: Eq + Hash, V: Clone, I: AsIndex> FromIterator<(K, V)> for IndexMap<K, V, I> {
+    fn from_iter<T: IntoIterator<Item = (K, V)>>(iter: T) -> Self {
+        let mut map = Self::new();
+        for (key, value) in iter {
+            map.insert(key, value);
+        }
+        map
+    }
 }
 
 pub struct IntoIter<K: Eq + Hash, V: Clone, I: AsIndex> {

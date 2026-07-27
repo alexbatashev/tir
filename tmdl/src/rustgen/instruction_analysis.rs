@@ -292,8 +292,12 @@ fn value_zero_form_operands(
 /// and says nothing about operand widths. Right-shift values and
 /// division/remainder operands qualify only under an *untyped* node: a typed
 /// node (a word form like `sraw`) already pins its operands through width
-/// inference. Low-bits-preserving operators (add/and/shl/mul low half) are
-/// exempt: a narrower value's upper garbage never reaches its own low bits.
+/// inference.
+///
+/// Sensitivity reaches *through* low-bits-preserving operators rather than
+/// stopping at them: `and`'s own result keeps a narrow operand's garbage out of
+/// its low bits, but `(dst & src) == 0` (x86 `test` + `jcc`) still compares
+/// every bit of that garbage, so both operands are sensitive.
 fn width_sensitive_symbols(
     dag: &impl tir::graph::Dag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
     node_widths: &[Option<u32>],
@@ -314,14 +318,27 @@ fn width_sensitive_symbols(
         };
         let children: Vec<tir::graph::NodeId> = dag.children(node).collect();
         for &slot in sensitive_children {
-            if let Some(child) = children.get(slot)
-                && let Some(tir::sem::SymPayload::SymbolId(symbol)) = dag.get_leaf_data(*child)
-            {
-                out.insert(*symbol);
+            if let Some(child) = children.get(slot) {
+                collect_symbols(dag, *child, &mut out);
             }
         }
     }
     out
+}
+
+/// Every operand symbol appearing in `node`'s subtree.
+fn collect_symbols(
+    dag: &impl tir::graph::Dag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
+    node: tir::graph::NodeId,
+    out: &mut HashSet<u32>,
+) {
+    if let Some(tir::sem::SymPayload::SymbolId(symbol)) = dag.get_leaf_data(node) {
+        out.insert(*symbol);
+        return;
+    }
+    for child in dag.children(node) {
+        collect_symbols(dag, child, out);
+    }
 }
 
 /// Emit each register operand's storage domain and whether its instruction

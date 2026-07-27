@@ -1,0 +1,26 @@
+// RUN: fcc compile --march riscv64 --stage ir -o - %S/../Inputs/compare_promotion.c | filecheck %s
+
+// A comparison applies the usual arithmetic conversions to its operands, so a
+// char is promoted to int before `cmpi` — the operands never differ in width.
+// CHECK: %[[NARROW:.*]] = ptr.load {{.*}} : !i8
+// CHECK: %[[PROMOTED:.*]] = extsi %[[NARROW]] : !i32
+// CHECK: cmpi %[[PROMOTED]], {{.*}} {predicate = "ne"}
+
+// Promotion also decides signedness: both operands become `int`, so an
+// unsigned char compares signed.
+// CHECK: func @below
+// CHECK: cmpi {{.*}} {predicate = "slt"}
+
+// `!` compares its operand against zero, so a comparison result feeding it is
+// widened to its C type first rather than compared against an `int` zero.
+// CHECK: func @negate
+// CHECK: %[[INNER:.*]] = cmpi {{.*}} {predicate = "sge"}
+// CHECK: %[[WIDENED:.*]] = extui %[[INNER]] : !i32
+// CHECK: cmpi %[[WIDENED]], {{.*}} {predicate = "eq"}
+
+// A narrow value used as a condition is promoted before its `!= 0` test, so no
+// comparison is left at a sub-`int` width.
+// CHECK: func @truth
+// CHECK: %[[FLAG:.*]] = ptr.load {{.*}} : !i8
+// CHECK: %[[WIDE:.*]] = extui %[[FLAG]] : !i32
+// CHECK: cmpi %[[WIDE]], {{.*}} {predicate = "ne"}

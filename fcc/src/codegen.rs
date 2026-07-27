@@ -2475,6 +2475,31 @@ impl FnCodegen<'_> {
         if ty == IntegerType::new(self.context, 1) {
             return value;
         }
+        self.compare_against_zero(value, "ne")
+    }
+
+    /// `value <predicate> 0`, at `int` width like every other C comparison: a
+    /// promoted value is nonzero exactly when the original is, and
+    /// zero-extension preserves that for either signedness.
+    fn compare_against_zero(&mut self, value: ValueId, predicate: &str) -> ValueId {
+        let ty = self.context.get_value(value).ty();
+        let narrow = {
+            let data = self.context.get_type_data(ty);
+            (data.as_ref() as &dyn std::any::Any)
+                .downcast_ref::<IntegerType>()
+                .is_some_and(|integer| integer.width() < 32)
+        };
+        let (value, ty) = if narrow {
+            let i32_ty = IntegerType::new(self.context, 32);
+            (
+                self.builder
+                    .insert(b::extui(self.context, value, i32_ty).build())
+                    .result(),
+                i32_ty,
+            )
+        } else {
+            (value, ty)
+        };
         let zero = self
             .builder
             .insert(b::constant(self.context, 0, ty).build())
@@ -2484,7 +2509,7 @@ impl FnCodegen<'_> {
                 b::CmpIOpBuilder::new(self.context)
                     .lhs(value)
                     .rhs(zero)
-                    .predicate("ne")
+                    .predicate(predicate)
                     .result_type(IntegerType::new(self.context, 1))
                     .build(),
             )
@@ -3200,23 +3225,7 @@ impl FnCodegen<'_> {
                                 .result()
                         }
                         AstKind::Not => {
-                            let operand_ty =
-                                lower_type(self.context, self.typed, node_type(self.typed, child));
-                            let zero = self
-                                .builder
-                                .insert(b::constant(self.context, 0, operand_ty).build())
-                                .result();
-                            let comparison = self
-                                .builder
-                                .insert(
-                                    b::CmpIOpBuilder::new(self.context)
-                                        .lhs(operand)
-                                        .rhs(zero)
-                                        .predicate("eq")
-                                        .result_type(IntegerType::new(self.context, 1))
-                                        .build(),
-                                )
-                                .result();
+                            let comparison = self.compare_against_zero(operand, "eq");
                             self.builder
                                 .insert(b::extui(self.context, comparison, result_ty).build())
                                 .result()
@@ -3296,7 +3305,9 @@ impl FnCodegen<'_> {
                     let rhs_node = children.next().unwrap();
                     let lhs = self.materialize(self.values[&lhs_node]);
                     let rhs = self.materialize(self.values[&rhs_node]);
-                    let operand_ty = node_type(self.typed, lhs_node);
+                    // The common type of the usual arithmetic conversions, not
+                    // the operand's own type: it decides signed vs unsigned.
+                    let operand_ty = converted_node_type(self.typed, lhs_node);
                     let value = match self.typed.types().kind(operand_ty) {
                         TypeKind::Double => self.lower_double_compare(kind, lhs, rhs),
                         _ => self.lower_integer_compare(kind, lhs, rhs, operand_ty),

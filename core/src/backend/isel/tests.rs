@@ -2090,11 +2090,11 @@ fn emit_zero_branch_marker(
     Ok(Box::new(ops::br(context, vec![src, src], dest).build()))
 }
 
-/// A bare i1 condition bridges to `Ne(c, zext(0, w))`, so a derived
-/// zero-compare branch rule fuses it — its register-width operand binds the
-/// 1-bit condition — instead of the branch-if-nonzero fallback.
+/// A width-1 condition defines only the low bit of its register, so a
+/// zero-compare branch rule that reads the *whole* register must not bind it:
+/// the guard falls back to the branch-if-nonzero emitter, which masks.
 #[test]
-fn bare_bool_guard_selects_zero_compare_branch() {
+fn bare_bool_guard_refuses_whole_width_zero_compare_branch() {
     let rule = Rule::new(
         "cbnz-marker",
         zero_branch_pattern(),
@@ -2112,12 +2112,12 @@ fn bare_bool_guard_selects_zero_compare_branch() {
     let names: Vec<_> = body.iter().map(|op| op.name().as_str()).collect();
     assert_eq!(names, vec!["br", "br"]);
 
-    let fused = body[0].clone().as_op::<tir::builtin::BranchOp>().unwrap();
-    assert_eq!(fused.dest(), b.true_dest);
+    let taken = body[0].clone().as_op::<tir::builtin::BranchOp>().unwrap();
+    assert_eq!(taken.dest(), b.true_dest);
     assert_eq!(
-        fused.dest_args(),
-        vec![b.args[0], b.args[0]],
-        "the zero-compare rule must fuse, not the nonzero fallback"
+        taken.dest_args(),
+        vec![b.args[0]],
+        "a whole-width zero-compare rule must not bind the 1-bit condition"
     );
     let fallthrough = body[1].clone().as_op::<tir::builtin::BranchOp>().unwrap();
     assert_eq!(fallthrough.dest(), b.false_dest);
