@@ -16,3 +16,7 @@ int truth(_Bool flag) {
     }
     return 0;
 }
+
+int both(int lhs, int rhs) {
+    return (lhs == 1) & (rhs == 1);
+}

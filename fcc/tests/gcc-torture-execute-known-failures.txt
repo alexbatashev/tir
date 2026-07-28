@@ -957,7 +957,6 @@ execute/pr23941.c
 execute/pr24135.c
 execute/pr24141.c
 execute/pr24716.c
-execute/pr25737.c
 execute/pr27073.c
 execute/pr27260.c
 execute/pr27285.c

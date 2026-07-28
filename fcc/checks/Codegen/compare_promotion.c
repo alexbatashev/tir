@@ -24,3 +24,12 @@
 // CHECK: %[[FLAG:.*]] = ptr.load {{.*}} : !i8
 // CHECK: %[[WIDE:.*]] = extui %[[FLAG]] : !i32
 // CHECK: cmpi %[[WIDE]], {{.*}} {predicate = "ne"}
+
+// Comparison results have type `int`, so bitwise operands are widened before
+// the operation.
+// CHECK: func @both
+// CHECK: %[[LEFT:.*]] = cmpi {{.*}} {predicate = "eq"}
+// CHECK: %[[RIGHT:.*]] = cmpi {{.*}} {predicate = "eq"}
+// CHECK: %[[LEFT_WIDE:.*]] = extui %[[LEFT]] : !i32
+// CHECK: %[[RIGHT_WIDE:.*]] = extui %[[RIGHT]] : !i32
+// CHECK: andi %[[LEFT_WIDE]], %[[RIGHT_WIDE]] : !i32

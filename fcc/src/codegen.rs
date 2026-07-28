@@ -2478,6 +2478,15 @@ impl FnCodegen<'_> {
         self.compare_against_zero(value, "ne")
     }
 
+    fn promote_boolean_result(&mut self, value: ValueId, target: TypeId) -> ValueId {
+        if self.context.get_value(value).ty() != IntegerType::new(self.context, 1) {
+            return value;
+        }
+        self.builder
+            .insert(b::extui(self.context, value, target).build())
+            .result()
+    }
+
     /// `value <predicate> 0`, at `int` width like every other C comparison: a
     /// promoted value is nonzero exactly when the original is, and
     /// zero-extension preserves that for either signedness.
@@ -3188,10 +3197,14 @@ impl FnCodegen<'_> {
                 | AstKind::Shl
                 | AstKind::Shr) => {
                     let mut children = ast.children(node);
-                    let lhs = self.values[&children.next().unwrap()];
-                    let rhs = self.values[&children.next().unwrap()];
-                    let lhs = self.materialize(lhs);
-                    let rhs = self.materialize(rhs);
+                    let lhs_node = children.next().unwrap();
+                    let rhs_node = children.next().unwrap();
+                    let result_ty =
+                        lower_type(self.context, self.typed, node_type(self.typed, node));
+                    let lhs = self.materialize(self.values[&lhs_node]);
+                    let rhs = self.materialize(self.values[&rhs_node]);
+                    let lhs = self.promote_boolean_result(lhs, result_ty);
+                    let rhs = self.promote_boolean_result(rhs, result_ty);
                     LoweredExpr::Value(self.lower_integer_binary(
                         kind,
                         lhs,
@@ -3321,11 +3334,22 @@ impl FnCodegen<'_> {
                 AstKind::Cast => {
                     let child = ast.children(node).next().unwrap();
                     let value = self.materialize(self.values[&child]);
-                    LoweredExpr::Value(self.convert_scalar(
-                        value,
-                        node_type(self.typed, child),
-                        node_type(self.typed, node),
-                    ))
+                    let source = node_type(self.typed, child);
+                    let target = node_type(self.typed, node);
+                    let value = if self.typed.integer_width(source).is_some()
+                        && matches!(self.typed.types().kind(target), TypeKind::Pointer(_))
+                        && ast
+                            .get_annotation(child)
+                            .is_some_and(|semantics| semantics.constant == Some(0))
+                    {
+                        let target = lower_type(self.context, self.typed, target);
+                        self.builder
+                            .insert(b::constant(self.context, 0, target).build())
+                            .result()
+                    } else {
+                        self.convert_scalar(value, source, target)
+                    };
+                    LoweredExpr::Value(value)
                 }
                 kind @ (AstKind::AddAssign
                 | AstKind::SubAssign
