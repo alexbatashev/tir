@@ -167,7 +167,6 @@ execute/20040302-1.c
 execute/20040307-1.c
 execute/20040308-1.c
 execute/20040309-1.c
-execute/20040313-1.c
 execute/20040409-1.c
 execute/20040409-1w.c
 execute/20040409-2.c
@@ -179,7 +178,6 @@ execute/20040423-1.c
 execute/20040520-1.c
 execute/20040625-1.c
 execute/20040629-1.c
-execute/20040703-1.c
 execute/20040705-1.c
 execute/20040705-2.c
 execute/20040707-1.c

@@ -19,8 +19,8 @@ pub fn run(sh: &Shell, root: &Path, bless: bool) -> anyhow::Result<()> {
     let checkout = root.join("target/test-suites/gcc");
     fetch_gcc(sh, &checkout)?;
 
-    cmd!(sh, "cargo build -p fcc --bin fcc").run()?;
-    let fcc = root.join("target/debug/fcc");
+    cmd!(sh, "cargo build --release -p fcc --bin fcc").run()?;
+    let fcc = root.join("target/release/fcc");
     let corpus = checkout.join(TORTURE_PATH);
     let mut execute_files = Vec::new();
     collect_c_files(&corpus.join("execute"), &mut execute_files)?;
