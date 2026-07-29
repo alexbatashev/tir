@@ -6,7 +6,7 @@
 //! `ptr.load` and writes become `ptr.store`. Arithmetic uses the `builtin`
 //! integer ops; C-only literals and variadic markers use the local `cir` dialect.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use tir::attributes::AttributeValue;
 use tir::backend::abi::{Overflow, ValueKind, type_kind};
@@ -267,16 +267,27 @@ pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnost
     }
     let mut signatures = HashMap::new();
     let mut globals = HashMap::new();
+    let mut defined_functions = HashSet::new();
+    let mut declared_functions = HashSet::new();
+    // Entities already given storage: an initialized definition claims the
+    // object outright, and repeated tentative definitions reserve it once.
+    let mut reserved_globals = HashSet::new();
     for &item in &items {
         match ast.get_node(item).kind {
             AstKind::Prototype | AstKind::Function => {
                 let (entity, sig) = lower_signature(context, typed, item)?;
+                if ast.get_node(item).kind == AstKind::Function {
+                    defined_functions.insert(entity);
+                }
                 signatures.insert(entity, sig);
             }
             AstKind::Global => {
                 let AstLeaf::Global { name, .. } = ast.get_leaf_data(item).unwrap() else {
                     unreachable!("global node carries a global payload");
                 };
+                if ast.children(item).next().is_some() {
+                    reserved_globals.insert(node_entity(typed, item));
+                }
                 globals.insert(
                     node_entity(typed, item),
                     Global {
@@ -322,6 +333,12 @@ pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnost
                     unreachable!("prototype node carries a function payload");
                 };
                 let entity = node_entity(typed, item);
+                // A symbol is named once however many times C declares it: the
+                // definition already declares it, and a repeated prototype
+                // re-declares the same entity rather than overloading it.
+                if defined_functions.contains(&entity) || !declared_functions.insert(entity) {
+                    continue;
+                }
                 let sig = signatures.get(&entity).unwrap();
                 module_builder.insert(b::declare_op(
                     context,
@@ -340,9 +357,12 @@ pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnost
                 };
                 let source_ty = node_type(typed, item);
                 let (size, align) = source_type_layout(typed, source_ty);
-                let global = &globals[&node_entity(typed, item)];
+                let entity = node_entity(typed, item);
+                let global = &globals[&entity];
                 let Some(initializer) = ast.children(item).next() else {
-                    if !is_extern {
+                    // A tentative definition reserves storage only when no
+                    // other declaration of the object defines it.
+                    if !is_extern && reserved_globals.insert(entity) {
                         module_builder.insert(
                             cir::ZeroGlobalOpBuilder::new(context)
                                 .attr("sym_name", AttributeValue::Str(global.name.clone()))
@@ -443,14 +463,6 @@ fn lower_type(context: &Context, typed: &TypedAst, ty: QualType) -> TypeId {
 
 fn source_type_layout(typed: &TypedAst, ty: QualType) -> (u64, u64) {
     match typed.types().kind(ty) {
-        TypeKind::Integer(_) => {
-            let size = u64::from(typed.integer_width(ty).unwrap() / 8);
-            (size, size)
-        }
-        TypeKind::Pointer(_) => {
-            let size = u64::from(typed.target().pointer_width() / 8);
-            (size, size)
-        }
         TypeKind::Array(element, Some(length)) => {
             let (size, align) = source_type_layout(typed, *element);
             (size * length, align)
@@ -459,11 +471,7 @@ fn source_type_layout(typed: &TypedAst, ty: QualType) -> (u64, u64) {
             let record = typed.record(*id).unwrap();
             (record.size, record.align)
         }
-        TypeKind::Float => (4, 4),
-        TypeKind::Double => (8, 8),
-        TypeKind::LongDouble => (16, 16),
-        TypeKind::Enum(_) => (4, 4),
-        _ => (1, 1),
+        kind => typed.target().scalar_layout(kind).unwrap_or((1, 1)),
     }
 }
 

@@ -997,8 +997,42 @@ impl tir::backend::TargetMachine for RiscvTarget {
         context.register_reg_classes(register_info().classes);
     }
 
+    fn data_layout(&self) -> Option<tir::attributes::AttributeValue> {
+        let pointer = self.config.xlen;
+        Some(tir::data_layout_spec(
+            tir::Endianness::Little,
+            self.abi().stack.align * 8,
+            &[
+                ("i1", 8, 8),
+                ("i8", 8, 8),
+                ("i16", 16, 16),
+                ("i32", 32, 32),
+                ("i64", 64, 64),
+                ("f32", 32, 32),
+                ("f64", 64, 64),
+                ("p", pointer, pointer),
+            ],
+        ))
+    }
+
+    fn target_env(&self) -> Option<tir::attributes::AttributeValue> {
+        // Lowercased TMDL feature names, which `--mattr` accepts alongside the
+        // march extension letters.
+        let features: Vec<String> = self
+            .config
+            .features
+            .iter()
+            .map(|feature| feature.name().to_ascii_lowercase())
+            .collect();
+        Some(tir::target_env_spec(
+            self.config.canonical_name(),
+            &features,
+        ))
+    }
+
     fn isel_pass(&self, context: &tir::Context) -> tir::backend::isel::InstructionSelectPass {
         create_isel_pass_for(context, &self.config.features, self.abi())
+            .with_data_layout(self.data_layout())
     }
 
     fn regalloc_pass(&self) -> tir::backend::regalloc::RegisterAllocationPass {
