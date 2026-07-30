@@ -160,11 +160,18 @@ pub fn parse(
     if !version_diagnostics.is_empty() {
         return Err(version_diagnostics);
     }
-    let mut filtered = Vec::with_capacity(tokens.len());
+    let mut filtered: Vec<Token> = Vec::with_capacity(tokens.len());
     let mut byte_spans = Vec::with_capacity(tokens.len());
     for (tok, span) in tokens {
         if !matches!(tok, Token::Whitespace(_) | Token::Comment(_)) {
-            filtered.push(keyword_for_standard(tok.clone(), options));
+            let token = keyword_for_standard(tok.clone(), options);
+            if let (Some(Token::StringLiteral(left)), Token::StringLiteral(right)) =
+                (filtered.last_mut(), &token)
+            {
+                left.push_str(right);
+                continue;
+            }
+            filtered.push(token);
             byte_spans.push(*span);
         }
     }
@@ -1163,21 +1170,28 @@ fn function<'src, I>() -> impl Parser<'src, I, NodeId, Extra<'src>> + Clone
 where
     I: ValueInput<'src, Token = Token, Span = Span>,
 {
-    let param = ctype().then(ident().or_not()).map_with(
-        |(ty, name), e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
-            let tok = e.span().start;
-            let st = &mut e.state().0;
-            let id = st.add(AstKind::Param, tok);
-            st.ast.set_leaf_data(
-                id,
-                AstLeaf::Param {
-                    name: name.unwrap_or_default(),
-                    ty,
-                },
-            );
-            id
-        },
-    );
+    let array_suffix = just(Token::LBracket).then_ignore(just(Token::RBracket));
+    let param = ctype()
+        .then(ident().or_not())
+        .then(array_suffix.repeated().collect::<Vec<_>>())
+        .map_with(
+            |((mut ty, name), array_suffixes), e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
+                let tok = e.span().start;
+                let st = &mut e.state().0;
+                for _ in array_suffixes {
+                    ty = CType::Array(Box::new(ty), None);
+                }
+                let id = st.add(AstKind::Param, tok);
+                st.ast.set_leaf_data(
+                    id,
+                    AstLeaf::Param {
+                        name: name.unwrap_or_default(),
+                        ty,
+                    },
+                );
+                id
+            },
+        );
     let varargs =
         just(Token::Ellipsis).map_with(|_, e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
             let tok = e.span().start;
