@@ -113,18 +113,18 @@ pub struct CParam {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArrayLength {
     spelling: String,
-    expression: NodeId,
+    expression: Option<NodeId>,
 }
 
 impl ArrayLength {
-    pub(crate) fn new(spelling: String, expression: NodeId) -> Self {
+    pub(crate) fn new(spelling: String, expression: Option<NodeId>) -> Self {
         Self {
             spelling,
             expression,
         }
     }
 
-    pub(crate) fn expression(&self) -> NodeId {
+    pub(crate) fn expression(&self) -> Option<NodeId> {
         self.expression
     }
 }

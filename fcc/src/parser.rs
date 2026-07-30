@@ -47,7 +47,7 @@ enum PostfixOp {
     Call(Vec<NodeId>),
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct NameScope {
     typedefs: HashSet<String>,
     ordinary: HashSet<String>,
@@ -866,7 +866,7 @@ where
                         let spelling = literal.spelling.clone();
                         let expression = st.add(AstKind::Int, tok);
                         st.ast.set_leaf_data(expression, AstLeaf::Int(literal));
-                        ArrayLength::new(spelling, expression)
+                        ArrayLength::new(spelling, Some(expression))
                     });
                     CType::Array(Box::new(element), length)
                 });
@@ -1668,9 +1668,9 @@ impl<'a> DeclParser<'a> {
                         None
                     } else {
                         let spelling = tokens_text(&len);
-                        let expression =
-                            parse_external_constant_expression(state, length_tok, &len)?;
-                        Some(ArrayLength::new(spelling, expression))
+                        Some(parse_external_array_length(
+                            state, length_tok, &len, spelling,
+                        )?)
                     };
                     dimensions.push(length);
                     if !self.eat(&Token::LBracket) {
@@ -1777,8 +1777,9 @@ impl<'a> DeclParser<'a> {
                 None
             } else {
                 let spelling = tokens_text(&len);
-                let expression = parse_external_constant_expression(state, length_tok, &len)?;
-                Some(ArrayLength::new(spelling, expression))
+                Some(parse_external_array_length(
+                    state, length_tok, &len, spelling,
+                )?)
             };
             base = CType::Array(Box::new(base), length);
         }
@@ -2364,6 +2365,30 @@ fn parse_external_constant_expression(
         return Err(error.to_string());
     }
     expression.ok_or_else(|| "expected enumerator value".to_string())
+}
+
+fn parse_external_array_length(
+    state: &mut SimpleState<ParseState>,
+    token_offset: usize,
+    tokens: &[Token],
+    spelling: String,
+) -> Result<ArrayLength, String> {
+    let mut scratch = SimpleState(ParseState {
+        ast: Ast::new(),
+        spans: Vec::new(),
+        token_offset: 0,
+        name_scopes: state.0.name_scopes.clone(),
+        next_record: state.0.next_record,
+    });
+    let (expression, errors) = constant_expr()
+        .then_ignore(end())
+        .parse_with_state(tokens, &mut scratch)
+        .into_output_errors();
+    if expression.is_none() || !errors.is_empty() {
+        return Ok(ArrayLength::new(spelling, None));
+    }
+    parse_external_constant_expression(state, token_offset, tokens)
+        .map(|expression| ArrayLength::new(spelling, Some(expression)))
 }
 
 fn declaration_tokens<'src, I>() -> impl Parser<'src, I, Vec<Token>, Extra<'src>> + Clone

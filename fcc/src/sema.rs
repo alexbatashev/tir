@@ -2916,7 +2916,7 @@ impl Analyzer<'_> {
     }
 
     fn constant_array_length(&mut self, length: &ArrayLength) -> Option<u64> {
-        let expression = length.expression();
+        let expression = length.expression()?;
         if self.ast.get_annotation(expression).is_none() {
             self.node(expression);
         }
