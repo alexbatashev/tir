@@ -14,7 +14,7 @@ use xshell::{cmd, Shell};
 const GCC_REPOSITORY: &str = "https://github.com/gcc-mirror/gcc.git";
 const GCC_REVISION: &str = "9aab80ddc5b2fa0eef80008e718067ab45f42c50";
 const TORTURE_PATH: &str = "gcc/testsuite/gcc.c-torture";
-const COMPILE_TIMEOUT: Duration = Duration::from_secs(180);
+const COMPILE_TIMEOUT: Duration = Duration::from_secs(60);
 const RUN_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
 const PROGRESS_CASE_INTERVAL: usize = 250;
