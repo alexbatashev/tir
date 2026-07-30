@@ -437,7 +437,6 @@ compile/layout.c
 compile/limits-caselabels.c
 compile/limits-declparen.c
 compile/limits-externdecl.c
-compile/limits-structnest.c
 compile/lll.c
 compile/load8.c
 compile/loadhicc.c
