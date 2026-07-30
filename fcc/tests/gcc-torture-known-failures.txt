@@ -278,7 +278,6 @@ compile/980506-1.c
 compile/980726-1.c
 compile/980825-1.c
 compile/981001-2.c
-compile/981001-3.c
 compile/981001-4.c
 compile/981006-1.c
 compile/981223-1.c
@@ -435,16 +434,9 @@ compile/labels-1.c
 compile/labels-2.c
 compile/labels-3.c
 compile/layout.c
-compile/limits-blockid.c
 compile/limits-caselabels.c
 compile/limits-declparen.c
-compile/limits-enumconst.c
-compile/limits-externalid.c
 compile/limits-externdecl.c
-compile/limits-fndefn.c
-compile/limits-idexternal.c
-compile/limits-idinternal.c
-compile/limits-structmem.c
 compile/limits-structnest.c
 compile/lll.c
 compile/load8.c
@@ -458,7 +450,6 @@ compile/m1.c
 compile/m2.c
 compile/m5.c
 compile/m68.c
-compile/m68k-byte-addr.c
 compile/mangle-1.c
 compile/mbyte.c
 compile/mcmp.c
@@ -583,7 +574,6 @@ compile/pr33617.c
 compile/pr33641.c
 compile/pr33855.c
 compile/pr34091.c
-compile/pr34093.c
 compile/pr34334.c
 compile/pr34856.c
 compile/pr34885.c
@@ -911,7 +901,6 @@ execute/20020213-1.c
 execute/20020215-1.c
 execute/20020225-2.c
 execute/20020227-1.c
-execute/20020307-1.c
 execute/20020314-1.c
 execute/20020320-1.c
 execute/20020402-3.c
@@ -928,7 +917,6 @@ execute/20021010-2.c
 execute/20021024-1.c
 execute/20021111-1.c
 execute/20021118-2.c
-execute/20021120-1.c
 execute/20021120-3.c
 execute/20030105-1.c
 execute/20030222-1.c
@@ -953,9 +941,6 @@ execute/20040411-1.c
 execute/20040423-1.c
 execute/20040520-1.c
 execute/20040625-1.c
-execute/20040629-1.c
-execute/20040705-1.c
-execute/20040705-2.c
 execute/20040707-1.c
 execute/20040709-1.c
 execute/20040709-2.c
@@ -1209,7 +1194,6 @@ execute/ashldi-1.c
 execute/ashrdi-1.c
 execute/bcp-1.c
 execute/bf-sign-1.c
-execute/bitops-1.c
 execute/bswap-1.c
 execute/bswap-2.c
 execute/built-in-setjmp.c
@@ -1432,7 +1416,6 @@ execute/pr109040.c
 execute/pr109938.c
 execute/pr109986.c
 execute/pr110252-2.c
-execute/pr110666-1.c
 execute/pr110817-1.c
 execute/pr111431-1.c
 execute/pr111613.c
