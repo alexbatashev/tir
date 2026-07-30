@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -192,6 +194,8 @@ fn pair_libraries(files: &[PathBuf]) -> Vec<(PathBuf, Option<PathBuf>)> {
 }
 
 fn run_with_timeout(command: &mut Command, timeout: Duration) -> bool {
+    #[cfg(unix)]
+    command.process_group(0);
     let Ok(mut child) = command.spawn() else {
         return false;
     };
@@ -306,7 +310,13 @@ fn parse_allowlist(contents: &str) -> anyhow::Result<BTreeSet<String>> {
 mod tests {
     use std::collections::BTreeSet;
     use std::path::PathBuf;
+    #[cfg(unix)]
+    use std::process::Command;
+    #[cfg(unix)]
+    use std::time::Duration;
 
+    #[cfg(unix)]
+    use super::run_with_timeout;
     use super::{classify_results, pair_libraries, parse_allowlist};
 
     #[test]
@@ -358,5 +368,13 @@ mod tests {
         let expected = BTreeSet::from(["compile/removed.c".to_string()]);
         let result = classify_results(&expected, &[]);
         assert_eq!(result.missing_entries, ["compile/removed.c"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timed_command_runs_in_its_own_process_group() {
+        let mut command = Command::new("sh");
+        command.args(["-c", r#"test "$(ps -o pgid= -p $$ | tr -d ' ')" = "$$""#]);
+        assert!(run_with_timeout(&mut command, Duration::from_secs(1)));
     }
 }
