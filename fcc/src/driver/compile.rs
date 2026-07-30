@@ -144,6 +144,7 @@ pub(super) fn emit_machine_code(
         &opts.undefines,
         &opts.include_dirs,
         opts.lang_options,
+        opts.march.as_deref(),
     );
     let context = fcc_context();
     target.register_dialects(&context);
@@ -206,7 +207,11 @@ pub(super) fn emit_machine_code(
 
 /// Preprocess `source`, reporting any `#error`/`#warning` diagnostics. Exits if
 /// any of them is an error.
-fn add_default_defines(defines: &mut HashMap<String, Token>, options: LangOptions) {
+fn add_default_defines(
+    defines: &mut HashMap<String, Token>,
+    options: LangOptions,
+    march: Option<&str>,
+) {
     use logos::Logos;
     let mut predefined = vec![
         ("__GNUC__", "4"),
@@ -231,6 +236,9 @@ fn add_default_defines(defines: &mut HashMap<String, Token>, options: LangOption
                 .unwrap_or(Token::Hash)
         });
     }
+    defines
+        .entry("__VERSION__".to_string())
+        .or_insert_with(|| Token::StringLiteral(format!("fcc {}", env!("CARGO_PKG_VERSION"))));
     let stdc_version = match options.std_version {
         crate::lang_options::StdVersion::C89 => None,
         crate::lang_options::StdVersion::C99 => Some("199901L"),
@@ -248,8 +256,8 @@ fn add_default_defines(defines: &mut HashMap<String, Token>, options: LangOption
                     .unwrap()
             });
     }
-    let arch_define = match std::env::consts::ARCH {
-        "aarch64" => "__arm64__",
+    let arch_define = match march.unwrap_or(std::env::consts::ARCH) {
+        "aarch64" | "arm64" => "__arm64__",
         "x86_64" => "__x86_64__",
         _ => return,
     };
@@ -265,8 +273,9 @@ pub(super) fn preprocess(
     undefines: &[String],
     include_dirs: &[PathBuf],
     options: LangOptions,
+    march: Option<&str>,
 ) -> Vec<(Token, crate::diagnostics::Span)> {
-    add_default_defines(&mut defines, options);
+    add_default_defines(&mut defines, options, march);
     for name in undefines {
         defines.remove(name);
     }
@@ -294,6 +303,7 @@ pub(super) fn parse_source(
     undefines: &[String],
     include_dirs: &[PathBuf],
     options: LangOptions,
+    march: Option<&str>,
 ) -> crate::ast::Ast {
     let tokens = preprocess(
         name,
@@ -302,6 +312,7 @@ pub(super) fn parse_source(
         undefines,
         include_dirs,
         options,
+        march,
     );
     crate::parser::parse(&tokens, options).unwrap_or_else(|diags| {
         for diag in &diags {
@@ -327,6 +338,7 @@ mod tests {
                 std_version: StdVersion::C89,
                 gnu_extensions: false,
             },
+            None,
         );
         assert!(!defines.contains_key("__STDC_VERSION__"));
     }
@@ -340,6 +352,7 @@ mod tests {
                 std_version: StdVersion::C99,
                 gnu_extensions: false,
             },
+            None,
         );
         assert_eq!(defines["__STDC_VERSION__"].to_string(), "199901L");
     }

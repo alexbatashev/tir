@@ -194,6 +194,7 @@ fn run_compile_action(
                 &opts.undefines,
                 &opts.include_dirs,
                 opts.lang_options,
+                opts.march.as_deref(),
             ) {
                 write!(out, "{tok}").unwrap();
             }
@@ -206,6 +207,7 @@ fn run_compile_action(
                 &opts.undefines,
                 &opts.include_dirs,
                 opts.lang_options,
+                opts.march.as_deref(),
             )
             .into_iter()
             .map(|(tok, _)| tok)
@@ -220,6 +222,7 @@ fn run_compile_action(
                 &opts.undefines,
                 &opts.include_dirs,
                 opts.lang_options,
+                opts.march.as_deref(),
             );
             write!(out, "{}", crate::ast::render(&unit)).unwrap();
         }
@@ -231,6 +234,7 @@ fn run_compile_action(
                 &opts.undefines,
                 &opts.include_dirs,
                 opts.lang_options,
+                opts.march.as_deref(),
             );
             let context = fcc_context();
             let module = lower_to_ir(
