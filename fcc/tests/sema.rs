@@ -595,6 +595,21 @@ fn enum_expression_is_a_valid_array_subscript() {
 }
 
 #[test]
+fn arrays_convert_to_pointers_in_value_contexts() {
+    let source = "int consume(char *value); \
+                  char *global_values[1] = {(char *)\"global\"}; \
+                  int entry(void) { \
+                      char local[2]; \
+                      char *pointer; \
+                      pointer = local; \
+                      consume(local); \
+                      return (char *)local == pointer; \
+                  }";
+
+    assert!(accepts(source, "c17".parse().unwrap()));
+}
+
+#[test]
 fn call_requires_function_type() {
     let output = diagnostics(
         "int main(void) { int value; return value(); }",

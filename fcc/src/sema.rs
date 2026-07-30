@@ -967,6 +967,7 @@ impl Analyzer<'_> {
                 .get_annotation(expression)
                 .and_then(|info| info.ty)
                 .unwrap_or(return_ty);
+            let source = self.assignment_source(return_ty, source, expression);
             if !self.assignment_compatible(return_ty, source, expression) {
                 self.diagnostics.push(
                     IncompatibleConversion::new(
@@ -1238,6 +1239,7 @@ impl Analyzer<'_> {
             .get_annotation(initializer)
             .and_then(|info| info.ty)
             .unwrap_or(target);
+        let source = self.assignment_source(target, source, initializer);
         if !self.assignment_compatible(target, source, initializer) {
             self.diagnostics.push(
                 IncompatibleConversion::new(
@@ -1479,6 +1481,7 @@ impl Analyzer<'_> {
             .get_annotation(value)
             .and_then(|info| info.ty)
             .unwrap_or(target);
+        let source = self.assignment_source(target, source, value);
         if !self.assignment_compatible(target, source, value) {
             self.diagnostics.push(
                 IncompatibleConversion::new(
@@ -2085,7 +2088,9 @@ impl Analyzer<'_> {
                     return;
                 };
                 let target = self.canonical_type(&parsed);
+                let operand = self.ast.children(node).next().unwrap();
                 let source = self.child_types(node).first().copied().unwrap_or(error);
+                let source = self.value_conversion(operand, source);
                 let valid = matches!(self.types.kind(target), TypeKind::Void)
                     || self.is_scalar(target) && self.is_scalar(source);
                 if !valid
@@ -2174,6 +2179,7 @@ impl Analyzer<'_> {
                     .get_annotation(rhs)
                     .and_then(|info| info.ty)
                     .unwrap_or(error);
+                let source = self.assignment_source(symbol.ty, source, rhs);
                 if symbol.ty.qualifiers.is_const() {
                     self.diagnostics.push(
                         ModifiableLvalueRequired::new(
@@ -2222,6 +2228,7 @@ impl Analyzer<'_> {
                         .get_annotation(rhs)
                         .and_then(|info| info.ty)
                         .unwrap_or(error);
+                    let source = self.assignment_source(lhs_ty, source, rhs);
                     if !self.assignment_compatible(lhs_ty, source, rhs) {
                         self.diagnostics.push(
                             IncompatibleConversion::new(
@@ -2373,6 +2380,7 @@ impl Analyzer<'_> {
                 .get_annotation(argument)
                 .and_then(|info| info.ty)
                 .unwrap_or(error);
+            let source = self.assignment_source(parameter, source, argument);
             if !self.assignment_compatible(parameter, source, argument) {
                 self.diagnostics.push(
                     IncompatibleConversion::new(
@@ -2572,6 +2580,29 @@ impl Analyzer<'_> {
             semantics.conversions.push(target);
             self.ast.set_annotation(node, semantics);
         }
+    }
+
+    fn assignment_source(
+        &mut self,
+        target: QualType,
+        source: QualType,
+        source_node: NodeId,
+    ) -> QualType {
+        if matches!(self.types.kind(target), TypeKind::Array(_, _)) {
+            source
+        } else {
+            self.value_conversion(source_node, source)
+        }
+    }
+
+    fn value_conversion(&mut self, node: NodeId, source: QualType) -> QualType {
+        let target = match self.types.kind(source).clone() {
+            TypeKind::Array(element, _) => self.types.intern(TypeKind::Pointer(element)),
+            TypeKind::Function { .. } => self.types.intern(TypeKind::Pointer(source)),
+            _ => return source,
+        };
+        self.record_conversion(node, target);
+        target
     }
 
     fn is_arithmetic(&self, ty: QualType) -> bool {
