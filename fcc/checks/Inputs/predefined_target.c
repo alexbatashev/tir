@@ -3,3 +3,9 @@ int arm64_target;
 #else
 int wrong_target;
 #endif
+
+#if __CHAR_BIT__ == 8
+int char_bit;
+#else
+int wrong_char_bit;
+#endif
