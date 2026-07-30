@@ -19,6 +19,7 @@ const RUN_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
 const PROGRESS_CASE_INTERVAL: usize = 250;
 const PROGRESS_TIME_INTERVAL: Duration = Duration::from_secs(30);
+const UNSTABLE_EXECUTE_TESTS: &[&str] = &["execute/pr34099-2.c"];
 
 pub fn run(sh: &Shell, root: &Path, bless: bool) -> anyhow::Result<()> {
     let checkout = root.join("target/test-suites/gcc");
@@ -38,6 +39,7 @@ pub fn run(sh: &Shell, root: &Path, bless: bool) -> anyhow::Result<()> {
     let parser = check_phase(
         "parser",
         &root.join("fcc/tests/gcc-torture-known-failures.txt"),
+        &[],
         run_parser(&fcc, &corpus, files)?,
         bless,
     )?;
@@ -45,6 +47,7 @@ pub fn run(sh: &Shell, root: &Path, bless: bool) -> anyhow::Result<()> {
     let execute = check_phase(
         "execute",
         &root.join("fcc/tests/gcc-torture-execute-known-failures.txt"),
+        UNSTABLE_EXECUTE_TESTS,
         run_execute(&fcc, &corpus, &workspace, execute_files)?,
         bless,
     )?;
@@ -59,18 +62,23 @@ pub fn run(sh: &Shell, root: &Path, bless: bool) -> anyhow::Result<()> {
 fn check_phase(
     label: &str,
     allowlist_path: &Path,
+    unstable: &[&str],
     results: Vec<(String, bool)>,
     bless: bool,
 ) -> anyhow::Result<bool> {
-    let failures = results
+    let mut failures = results
         .iter()
         .filter_map(|(path, passed)| (!passed).then_some(path.as_str()))
-        .collect::<Vec<_>>();
+        .collect::<BTreeSet<_>>();
     if bless {
+        failures.extend(unstable.iter().copied());
         let contents = if failures.is_empty() {
             String::new()
         } else {
-            format!("{}\n", failures.join("\n"))
+            format!(
+                "{}\n",
+                failures.iter().copied().collect::<Vec<_>>().join("\n")
+            )
         };
         fs::write(allowlist_path, contents)?;
         println!(
@@ -81,7 +89,10 @@ fn check_phase(
     }
 
     let expected = parse_allowlist(&fs::read_to_string(allowlist_path)?)?;
-    let classification = classify_results(&expected, &results);
+    if let Some(path) = unstable.iter().find(|path| !expected.contains(**path)) {
+        anyhow::bail!("unstable GCC torture test is not an expected failure: {path}");
+    }
+    let classification = classify_results(&expected, unstable, &results);
     println!(
         "GCC torture {label}: {}/{} passed, {} expected failures",
         results.len() - failures.len(),
@@ -297,7 +308,11 @@ struct Classification {
     missing_entries: Vec<String>,
 }
 
-fn classify_results(expected: &BTreeSet<String>, results: &[(String, bool)]) -> Classification {
+fn classify_results(
+    expected: &BTreeSet<String>,
+    unstable: &[&str],
+    results: &[(String, bool)],
+) -> Classification {
     let mut unexpected_failures = Vec::new();
     let mut stale_failures = Vec::new();
     let result_paths = results
@@ -307,7 +322,7 @@ fn classify_results(expected: &BTreeSet<String>, results: &[(String, bool)]) -> 
     for (path, passed) in results {
         match (*passed, expected.contains(path)) {
             (false, false) => unexpected_failures.push(path.clone()),
-            (true, true) => stale_failures.push(path.clone()),
+            (true, true) if !unstable.contains(&path.as_str()) => stale_failures.push(path.clone()),
             _ => {}
         }
     }
@@ -375,7 +390,11 @@ mod tests {
 
     #[test]
     fn unlisted_failure_is_a_regression() {
-        let result = classify_results(&BTreeSet::new(), &[("compile/new.c".to_string(), false)]);
+        let result = classify_results(
+            &BTreeSet::new(),
+            &[],
+            &[("compile/new.c".to_string(), false)],
+        );
         assert_eq!(result.unexpected_failures, ["compile/new.c"]);
         assert!(result.stale_failures.is_empty());
     }
@@ -383,8 +402,20 @@ mod tests {
     #[test]
     fn listed_success_is_stale() {
         let expected = BTreeSet::from(["execute/fixed.c".to_string()]);
-        let result = classify_results(&expected, &[("execute/fixed.c".to_string(), true)]);
+        let result = classify_results(&expected, &[], &[("execute/fixed.c".to_string(), true)]);
         assert_eq!(result.stale_failures, ["execute/fixed.c"]);
+        assert!(result.unexpected_failures.is_empty());
+    }
+
+    #[test]
+    fn unstable_success_is_not_stale() {
+        let expected = BTreeSet::from(["execute/unstable.c".to_string()]);
+        let result = classify_results(
+            &expected,
+            &["execute/unstable.c"],
+            &[("execute/unstable.c".to_string(), true)],
+        );
+        assert!(result.stale_failures.is_empty());
         assert!(result.unexpected_failures.is_empty());
     }
 
@@ -396,7 +427,7 @@ mod tests {
     #[test]
     fn missing_allowlist_path_is_reported() {
         let expected = BTreeSet::from(["compile/removed.c".to_string()]);
-        let result = classify_results(&expected, &[]);
+        let result = classify_results(&expected, &[], &[]);
         assert_eq!(result.missing_entries, ["compile/removed.c"]);
     }
 
