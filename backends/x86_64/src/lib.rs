@@ -254,11 +254,12 @@ mod isa {
             context: &tir::Context,
             _abi: &tir::backend::abi::AbiInfo,
             _outgoing_size: u32,
+            vector_register_args: u8,
         ) -> Vec<Box<dyn Operation>> {
             vec![Box::new(
                 MovImm32OpBuilder::new(context)
                     .attr("dst", phys(RegClass::GPR32.id(), 0))
-                    .attr("imm", AttributeValue::Int(0))
+                    .attr("imm", AttributeValue::Int(i64::from(vector_register_args)))
                     .build(),
             )]
         }
@@ -435,6 +436,10 @@ mod isa {
         );
         escape!(sib MovLoadDispOp, MovLoadDispSibOpBuilder, ["dst", "base", "imm"]);
         escape!(sib MovStoreDispOp, MovStoreDispSibOpBuilder, ["base", "imm", "src"]);
+        escape!(sib Mov32LoadDispOp, Mov32LoadDispSibOpBuilder, ["dst", "base", "imm"]);
+        escape!(sib Mov32StoreDispOp, Mov32StoreDispSibOpBuilder, ["base", "imm", "src"]);
+        escape!(sib Mov8LoadDispOp, Mov8LoadDispSibOpBuilder, ["dst", "base", "imm"]);
+        escape!(sib Mov8StoreDispOp, Mov8StoreDispSibOpBuilder, ["base", "imm", "src"]);
         escape!(sib MovsdLoadDispOp, MovsdLoadDispSibOpBuilder, ["dst", "base", "imm"]);
         escape!(sib MovsdStoreDispOp, MovsdStoreDispSibOpBuilder, ["base", "imm", "src"]);
 
@@ -844,6 +849,20 @@ mod isa {
                         .attr("src", virt(value, class))
                         .build(),
                 ),
+                "GPR32" => Box::new(
+                    Mov32StoreDispOpBuilder::new(context)
+                        .attr("base", phys(frame.0, frame.1))
+                        .attr("imm", AttributeValue::Int(offset))
+                        .attr("src", virt(value, class))
+                        .build(),
+                ),
+                "GPR8" => Box::new(
+                    Mov8StoreDispOpBuilder::new(context)
+                        .attr("base", phys(frame.0, frame.1))
+                        .attr("imm", AttributeValue::Int(offset))
+                        .attr("src", virt(value, class))
+                        .build(),
+                ),
                 "XMM" => Box::new(
                     MovsdStoreDispOpBuilder::new(context)
                         .attr("base", phys(frame.0, frame.1))
@@ -866,6 +885,20 @@ mod isa {
             match class.name() {
                 "GPR" => Box::new(
                     MovLoadDispOpBuilder::new(context)
+                        .attr("dst", virt(value, class))
+                        .attr("base", phys(frame.0, frame.1))
+                        .attr("imm", AttributeValue::Int(offset))
+                        .build(),
+                ),
+                "GPR32" => Box::new(
+                    Mov32LoadDispOpBuilder::new(context)
+                        .attr("dst", virt(value, class))
+                        .attr("base", phys(frame.0, frame.1))
+                        .attr("imm", AttributeValue::Int(offset))
+                        .build(),
+                ),
+                "GPR8" => Box::new(
+                    Mov8LoadDispOpBuilder::new(context)
                         .attr("dst", virt(value, class))
                         .attr("base", phys(frame.0, frame.1))
                         .attr("imm", AttributeValue::Int(offset))
@@ -1038,21 +1071,23 @@ mod isa {
         fn emit_frame_address(
             &self,
             context: &tir::Context,
-            dst: &tir::backend::liveness::PhysReg,
+            dst: u32,
+            class: tir::backend::regalloc::RegClassId,
             frame: &tir::backend::liveness::PhysReg,
             offset: i64,
         ) -> Result<Vec<Box<dyn Operation>>, tir::PassError> {
-            if dst.0.name() != "GPR" {
+            if class.name() != "GPR" {
                 return Err(tir::PassError::InvalidRuleSet(format!(
                     "x86-64 stack allocation addresses for register class {} are not supported",
-                    dst.0.name()
+                    class.name()
                 )));
             }
-            let mut ops = vec![mv(context, phys(dst.0, dst.1), phys(frame.0, frame.1))];
+            let dst = virt(dst, class);
+            let mut ops = vec![mv(context, dst.clone(), phys(frame.0, frame.1))];
             if offset != 0 {
                 ops.push(Box::new(
                     AddImmOpBuilder::new(context)
-                        .attr("dst", phys(dst.0, dst.1))
+                        .attr("dst", dst)
                         .attr("imm", AttributeValue::Int(offset))
                         .build(),
                 ));

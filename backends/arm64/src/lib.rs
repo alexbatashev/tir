@@ -291,6 +291,7 @@ impl tir::backend::call_lowering::CallEmitter for Arm64CallEmitter {
         _context: &tir::Context,
         _abi: &tir::backend::abi::AbiInfo,
         _outgoing_size: u32,
+        _vector_register_args: u8,
     ) -> Vec<Box<dyn Operation>> {
         Vec::new()
     }
@@ -474,19 +475,20 @@ impl tir::backend::regalloc::TargetRegAlloc for Arm64RegAlloc {
     fn emit_frame_address(
         &self,
         context: &tir::Context,
-        dst: &tir::backend::liveness::PhysReg,
+        dst: u32,
+        class: tir::backend::regalloc::RegClassId,
         frame: &tir::backend::liveness::PhysReg,
         offset: i64,
     ) -> Result<Vec<Box<dyn Operation>>, tir::PassError> {
-        if !matches!(dst.0.name(), "GPR" | "GPRsp") {
+        if !matches!(class.name(), "GPR" | "GPRsp") {
             return Err(tir::PassError::InvalidRuleSet(format!(
                 "arm64 stack allocation addresses for register class {} are not supported",
-                dst.0.name()
+                class.name()
             )));
         }
         Ok(vec![Box::new(
             AddImmediateOpBuilder::new(context)
-                .attr("rd", phys(dst))
+                .attr("rd", virt(dst, class))
                 .attr("rn", phys(frame))
                 .attr("imm", tir::attributes::AttributeValue::Int(offset))
                 .build(),

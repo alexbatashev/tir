@@ -643,6 +643,7 @@ impl tir::backend::call_lowering::CallEmitter for RiscvCallEmitter {
         _context: &tir::Context,
         _abi: &tir::backend::abi::AbiInfo,
         _outgoing_size: u32,
+        _vector_register_args: u8,
     ) -> Vec<Box<dyn Operation>> {
         Vec::new()
     }
@@ -938,19 +939,20 @@ impl tir::backend::regalloc::TargetRegAlloc for RiscvRegAlloc {
     fn emit_frame_address(
         &self,
         context: &tir::Context,
-        dst: &tir::backend::liveness::PhysReg,
+        dst: u32,
+        class: tir::backend::regalloc::RegClassId,
         frame: &tir::backend::liveness::PhysReg,
         offset: i64,
     ) -> Result<Vec<Box<dyn Operation>>, tir::PassError> {
-        if dst.0.name() != "GPR" {
+        if class.name() != "GPR" {
             return Err(tir::PassError::InvalidRuleSet(format!(
                 "riscv stack allocation addresses for register class {} are not supported",
-                dst.0.name()
+                class.name()
             )));
         }
         Ok(vec![Box::new(
             AddImmOpBuilder::new(context)
-                .attr("rd", phys(dst))
+                .attr("rd", virt(dst, class))
                 .attr("rs1", phys(frame))
                 .attr("imm", tir::attributes::AttributeValue::Int(offset))
                 .build(),
