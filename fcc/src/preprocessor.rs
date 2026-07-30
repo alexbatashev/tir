@@ -992,7 +992,61 @@ fn substitute_arguments(
             });
         }
     }
-    substituted
+    paste_tokens(substituted)
+}
+
+fn paste_tokens(tokens: Vec<ExpansionToken>) -> Vec<ExpansionToken> {
+    let mut input = VecDeque::from(tokens);
+    let mut output = Vec::new();
+    while let Some(operator) = input.pop_front() {
+        if operator.token != Token::HashHash {
+            output.push(operator);
+            continue;
+        }
+        while output
+            .last()
+            .is_some_and(|token: &ExpansionToken| is_whitespace(&token.token))
+        {
+            output.pop();
+        }
+        let Some(left) = output.pop() else {
+            output.push(operator);
+            continue;
+        };
+        let right = loop {
+            match input.pop_front() {
+                Some(token) if is_whitespace(&token.token) => {}
+                token => break token,
+            }
+        };
+        let Some(right) = right else {
+            output.push(left);
+            output.push(operator);
+            break;
+        };
+        let spelling = format!("{}{}", left.token, right.token);
+        let mut lexer = Token::lexer(&spelling);
+        let Some(Ok(token)) = lexer.next() else {
+            output.push(left);
+            output.push(operator);
+            output.push(right);
+            continue;
+        };
+        if lexer.next().is_some() {
+            output.push(left);
+            output.push(operator);
+            output.push(right);
+            continue;
+        }
+        let mut hideset = left.hideset;
+        hideset.extend(right.hideset);
+        output.push(ExpansionToken {
+            token,
+            span: left.span,
+            hideset,
+        });
+    }
+    output
 }
 
 fn expand_tokens(
