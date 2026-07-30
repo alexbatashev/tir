@@ -1,4 +1,6 @@
+use std::path::Path;
 use std::path::PathBuf;
+use std::process::Command;
 
 /// The toolchain's default system include directories, in search order. Only
 /// directories that exist are returned, deduplicated.
@@ -19,11 +21,28 @@ pub(crate) fn system_include_dirs() -> Vec<PathBuf> {
 }
 
 fn linux_dirs() -> Vec<PathBuf> {
-    vec![
+    let mut paths = Vec::new();
+    if let Some(path) = compiler_include_dir() {
+        paths.push(path);
+    }
+    paths.extend([
         PathBuf::from("/usr/local/include"),
         PathBuf::from(format!("/usr/include/{}-linux-gnu", std::env::consts::ARCH)),
         PathBuf::from("/usr/include"),
-    ]
+    ]);
+    paths
+}
+
+fn compiler_include_dir() -> Option<PathBuf> {
+    let output = Command::new("cc")
+        .arg("-print-file-name=include")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = Path::new(std::str::from_utf8(&output.stdout).ok()?.trim());
+    path.is_absolute().then(|| path.to_path_buf())
 }
 
 fn macos_dirs() -> Vec<PathBuf> {
