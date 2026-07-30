@@ -562,6 +562,23 @@ fn empty_parameter_list_is_a_prototype_only_in_c23() {
 }
 
 #[test]
+fn c17_void_prototype_matches_empty_list_definition() {
+    assert!(accepts(
+        "int check(void); int check() { return 1; }",
+        "c17".parse().unwrap(),
+    ));
+
+    let output = diagnostics(
+        "int check(int value); int check() { return 1; }",
+        "c17".parse().unwrap(),
+    );
+    assert!(
+        output.contains("conflicting declarations for 'check'"),
+        "{output}"
+    );
+}
+
+#[test]
 fn adjusts_array_parameters_to_pointers() {
     let source =
         "int entry(int argc, char **argv); int entry(int argc, char *argv[]) { return argc; }";

@@ -641,7 +641,7 @@ impl Analyzer<'_> {
             },
         );
         if let Some(previous) = previous {
-            if previous.ty != ty || previous.typedef != typedef {
+            if !self.declaration_types_compatible(previous.ty, ty) || previous.typedef != typedef {
                 self.diagnostics.push(
                     ConflictingDeclaration::new(
                         span,
@@ -676,6 +676,36 @@ impl Analyzer<'_> {
                     constant: None,
                 },
             );
+        }
+    }
+
+    fn declaration_types_compatible(&self, left: QualType, right: QualType) -> bool {
+        if left == right {
+            return true;
+        }
+        match (self.types.kind(left), self.types.kind(right)) {
+            (
+                TypeKind::Function {
+                    ret: left_ret,
+                    params: left_params,
+                    varargs: left_varargs,
+                    prototype: left_prototype,
+                },
+                TypeKind::Function {
+                    ret: right_ret,
+                    params: right_params,
+                    varargs: right_varargs,
+                    prototype: right_prototype,
+                },
+            ) => {
+                left_ret == right_ret
+                    && left_params.is_empty()
+                    && right_params.is_empty()
+                    && !left_varargs
+                    && !right_varargs
+                    && left_prototype != right_prototype
+            }
+            _ => false,
         }
     }
 
