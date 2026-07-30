@@ -5,6 +5,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -16,6 +17,8 @@ const TORTURE_PATH: &str = "gcc/testsuite/gcc.c-torture";
 const COMPILE_TIMEOUT: Duration = Duration::from_secs(180);
 const RUN_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
+const PROGRESS_CASE_INTERVAL: usize = 250;
+const PROGRESS_TIME_INTERVAL: Duration = Duration::from_secs(30);
 
 pub fn run(sh: &Shell, root: &Path, bless: bool) -> anyhow::Result<()> {
     let checkout = root.join("target/test-suites/gcc");
@@ -126,7 +129,7 @@ fn run_parser(
     corpus: &Path,
     files: Vec<PathBuf>,
 ) -> anyhow::Result<Vec<(String, bool)>> {
-    Ok(run_parallel(files, |file| {
+    Ok(run_parallel("parser", files, |file| {
         let passed = Command::new(fcc)
             .args(["compile", "-std=gnu17", "--stage", "ast", "-o", "-"])
             .arg(file)
@@ -149,7 +152,7 @@ fn run_execute(
 ) -> anyhow::Result<Vec<(String, bool)>> {
     fs::create_dir_all(workspace)?;
     let cases = pair_libraries(&files);
-    Ok(run_parallel(cases, |(test, library)| {
+    Ok(run_parallel("execute", cases, |(test, library)| {
         let path = relative_path(corpus, test);
         let program = workspace.join(path.replace('/', "_"));
         let mut command = Command::new(fcc);
@@ -223,6 +226,7 @@ fn relative_path(corpus: &Path, file: &Path) -> String {
 }
 
 fn run_parallel<T: Send + Sync>(
+    label: &str,
     items: Vec<T>,
     task: impl Fn(&T) -> (String, bool) + Sync,
 ) -> Vec<(String, bool)> {
@@ -231,11 +235,13 @@ fn run_parallel<T: Send + Sync>(
     let results = Arc::new(Mutex::new(Vec::with_capacity(items.len())));
     let workers = std::thread::available_parallelism().map_or(1, usize::from);
     let task = &task;
+    let (completed_sender, completed_receiver) = mpsc::channel();
     std::thread::scope(|scope| {
         for _ in 0..workers {
             let items = Arc::clone(&items);
             let next = Arc::clone(&next);
             let results = Arc::clone(&results);
+            let completed_sender = completed_sender.clone();
             scope.spawn(move || loop {
                 let index = next.fetch_add(1, Ordering::Relaxed);
                 let Some(item) = items.get(index) else {
@@ -243,12 +249,36 @@ fn run_parallel<T: Send + Sync>(
                 };
                 let result = task(item);
                 results.lock().unwrap().push(result);
+                let _ = completed_sender.send(());
             });
+        }
+        drop(completed_sender);
+
+        let mut completed = 0;
+        while completed < items.len() {
+            match completed_receiver.recv_timeout(PROGRESS_TIME_INTERVAL) {
+                Ok(()) => {
+                    completed += 1;
+                    if !should_report_progress(completed, items.len()) {
+                        continue;
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+            println!(
+                "GCC torture {label} progress: {completed}/{} cases",
+                items.len()
+            );
         }
     });
     let mut results = Arc::into_inner(results).unwrap().into_inner().unwrap();
     results.sort_by(|left, right| left.0.cmp(&right.0));
     results
+}
+
+fn should_report_progress(completed: usize, total: usize) -> bool {
+    completed == total || completed.is_multiple_of(PROGRESS_CASE_INTERVAL)
 }
 
 fn print_paths(label: &str, paths: &[String]) {
@@ -317,7 +347,7 @@ mod tests {
 
     #[cfg(unix)]
     use super::run_with_timeout;
-    use super::{classify_results, pair_libraries, parse_allowlist};
+    use super::{classify_results, pair_libraries, parse_allowlist, should_report_progress};
 
     #[test]
     fn library_companion_is_linked_with_its_test() {
@@ -376,5 +406,13 @@ mod tests {
         let mut command = Command::new("sh");
         command.args(["-c", r#"test "$(ps -o pgid= -p $$ | tr -d ' ')" = "$$""#]);
         assert!(run_with_timeout(&mut command, Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn progress_is_reported_at_intervals_and_completion() {
+        assert!(!should_report_progress(249, 1_000));
+        assert!(should_report_progress(250, 1_000));
+        assert!(!should_report_progress(999, 1_000));
+        assert!(should_report_progress(1_000, 1_000));
     }
 }
