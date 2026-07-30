@@ -79,7 +79,7 @@ enum PreprocToken {
     #[regex(r"(0[xX][0-9a-fA-F][0-9a-fA-F_]*|[0-9][0-9_]*)([uU]([lL]|ll|LL)?|([lL]|ll|LL)[uU]?)?", |lex| {
         let s = lex
             .slice()
-            .trim_end_matches(|c| matches!(c, 'u' | 'U' | 'l' | 'L'))
+            .trim_end_matches(['u', 'U', 'l', 'L'])
             .replace('_', "");
         if s.starts_with("0x") || s.starts_with("0X") {
             i64::from_str_radix(&s[2..], 16).ok()
