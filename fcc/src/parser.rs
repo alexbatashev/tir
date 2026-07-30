@@ -850,11 +850,11 @@ fn decl_body<'src, I>() -> impl Parser<'src, I, NodeId, Extra<'src>> + Clone
 where
     I: ValueInput<'src, Token = Token, Span = Span>,
 {
-    let array_length = select! { Token::IntegerLiteral(value) => value.spelling }
+    let array_length = select! { Token::IntegerLiteral(value) => value }
         .or_not()
         .delimited_by(just(Token::LBracket), just(Token::RBracket));
     ctype()
-        .then(ident().then(array_length.repeated().collect::<Vec<Option<String>>>()))
+        .then(ident().then(array_length.repeated().collect::<Vec<_>>()))
         .then(just(Token::Assign).ignore_then(initializer()).or_not())
         .map_with(
             |((ty, (name, dimensions)), init), e: &mut MapExtra<'src, '_, I, Extra<'src>>| {
@@ -862,6 +862,12 @@ where
                 let st = &mut e.state().0;
                 st.declare_ordinary(name.clone());
                 let ty = dimensions.into_iter().rev().fold(ty, |element, length| {
+                    let length = length.map(|literal| {
+                        let spelling = literal.spelling.clone();
+                        let expression = st.add(AstKind::Int, tok);
+                        st.ast.set_leaf_data(expression, AstLeaf::Int(literal));
+                        ArrayLength::new(spelling, expression)
+                    });
                     CType::Array(Box::new(element), length)
                 });
                 let id = st.add(AstKind::Decl, tok);
@@ -1656,8 +1662,17 @@ impl<'a> DeclParser<'a> {
             if self.eat(&Token::LBracket) {
                 let mut dimensions = Vec::new();
                 loop {
+                    let length_tok = tok + self.pos;
                     let len = self.collect_until_matching(Token::LBracket, Token::RBracket)?;
-                    dimensions.push((!len.is_empty()).then_some(tokens_text(&len)));
+                    let length = if len.is_empty() {
+                        None
+                    } else {
+                        let spelling = tokens_text(&len);
+                        let expression =
+                            parse_external_constant_expression(state, length_tok, &len)?;
+                        Some(ArrayLength::new(spelling, expression))
+                    };
+                    dimensions.push(length);
                     if !self.eat(&Token::LBracket) {
                         break;
                     }
@@ -1719,7 +1734,7 @@ impl<'a> DeclParser<'a> {
                         Err(_) => {
                             self.pos = pos;
                             self.attrs = attrs;
-                            self.parse_abstract_declarator(specs)?
+                            self.parse_abstract_declarator(state, tok, specs)?
                         }
                     };
                     CParam {
@@ -1740,7 +1755,12 @@ impl<'a> DeclParser<'a> {
         Ok((params, varargs, true))
     }
 
-    fn parse_abstract_declarator(&mut self, mut base: CType) -> Result<Declarator, String> {
+    fn parse_abstract_declarator(
+        &mut self,
+        state: &mut SimpleState<ParseState>,
+        tok: usize,
+        mut base: CType,
+    ) -> Result<Declarator, String> {
         while self.eat(&Token::Star) {
             let attrs = self.consume_pointer_attrs()?;
             base = CType::Pointer(Box::new(base));
@@ -1751,9 +1771,16 @@ impl<'a> DeclParser<'a> {
         self.consume_attrs()?;
 
         while self.eat(&Token::LBracket) {
+            let length_tok = tok + self.pos;
             let len = self.collect_until_matching(Token::LBracket, Token::RBracket)?;
-            let len = (!len.is_empty()).then_some(tokens_text(&len));
-            base = CType::Array(Box::new(base), len);
+            let length = if len.is_empty() {
+                None
+            } else {
+                let spelling = tokens_text(&len);
+                let expression = parse_external_constant_expression(state, length_tok, &len)?;
+                Some(ArrayLength::new(spelling, expression))
+            };
+            base = CType::Array(Box::new(base), length);
         }
 
         if !matches!(self.peek(), Some(Token::Comma | Token::RParen)) {

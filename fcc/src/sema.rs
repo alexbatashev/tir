@@ -4,7 +4,7 @@ use tir::backend::abi::{ArgumentGroupAlignment, ClassifierKind, Overflow, ValueK
 use tir::graph::{Dag, MutDag, NodeId};
 
 use crate::ast::{
-    Ast, AstKind, AstLeaf, CParam, CType, InitializerDesignator, RecordId, RecordKind,
+    ArrayLength, Ast, AstKind, AstLeaf, CParam, CType, InitializerDesignator, RecordId, RecordKind,
 };
 use crate::diagnostics::{
     ArgumentMismatch, CalledObjectNotFunction, CompleteObjectTypeRequired, ConflictingDeclaration,
@@ -2839,7 +2839,9 @@ impl Analyzer<'_> {
         match derived {
             CType::Pointer(_) => self.types.intern(TypeKind::Pointer(inner)),
             CType::Array(_, length) => {
-                let length = length.as_deref().and_then(|value| value.parse().ok());
+                let length = length
+                    .as_ref()
+                    .and_then(|length| self.constant_array_length(length));
                 self.types.intern(TypeKind::Array(inner, length))
             }
             CType::Const(_) => with_qualifier(inner, Qualifiers::CONST),
@@ -2848,6 +2850,17 @@ impl Analyzer<'_> {
             CType::Attributed(_, _) => inner,
             _ => unreachable!("not a derived type"),
         }
+    }
+
+    fn constant_array_length(&mut self, length: &ArrayLength) -> Option<u64> {
+        let expression = length.expression();
+        if self.ast.get_annotation(expression).is_none() {
+            self.node(expression);
+        }
+        self.ast
+            .get_annotation(expression)
+            .and_then(|semantics| semantics.constant)
+            .and_then(|value| value.try_into().ok())
     }
 
     fn canonical_leaf_type(&mut self, parsed: &CType) -> QualType {

@@ -58,7 +58,7 @@ pub enum CType {
     Volatile(Box<CType>),
     Restrict(Box<CType>),
     Pointer(Box<CType>),
-    Array(Box<CType>, Option<String>),
+    Array(Box<CType>, Option<ArrayLength>),
     Function {
         ret: Box<CType>,
         params: Vec<CParam>,
@@ -108,6 +108,25 @@ pub enum RecordKind {
 pub struct CParam {
     pub name: String,
     pub ty: CType,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArrayLength {
+    spelling: String,
+    expression: NodeId,
+}
+
+impl ArrayLength {
+    pub(crate) fn new(spelling: String, expression: NodeId) -> Self {
+        Self {
+            spelling,
+            expression,
+        }
+    }
+
+    pub(crate) fn expression(&self) -> NodeId {
+        self.expression
+    }
 }
 
 /// The structural kind of an AST node. How its children are interpreted depends
@@ -313,7 +332,7 @@ fn render_ctype(ty: &CType) -> String {
     out.push_str(&render_leaf_ctype(leaf));
     while let Some(length) = lengths.pop() {
         if let Some(length) = length {
-            out.push_str(&format!(", {length}"));
+            out.push_str(&format!(", {}", length.spelling));
         }
         out.push(')');
     }

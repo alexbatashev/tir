@@ -570,6 +570,18 @@ fn adjusts_array_parameters_to_pointers() {
 }
 
 #[test]
+fn accepts_integer_constant_expression_array_bounds() {
+    let source = "enum Limits { NUM_CORE_STATES = 7, TOTAL_DATA_SIZE = 2000, MULTITHREAD = 1 }; \
+                  int entry(void) { \
+                      int counts[NUM_CORE_STATES]; \
+                      char data[TOTAL_DATA_SIZE * MULTITHREAD]; \
+                      return sizeof(counts) + sizeof(data); \
+                  }";
+
+    assert!(accepts(source, "c17".parse().unwrap()));
+}
+
+#[test]
 fn call_requires_function_type() {
     let output = diagnostics(
         "int main(void) { int value; return value(); }",
