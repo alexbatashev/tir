@@ -764,7 +764,7 @@ impl Analyzer<'_> {
         for child in children {
             match self.ast.get_leaf_data(child).cloned() {
                 Some(AstLeaf::Param { ty, .. }) => {
-                    let ty = self.canonical_type(&ty);
+                    let ty = self.canonical_parameter_type(&ty);
                     self.ast.set_annotation(
                         child,
                         NodeSemantics {
@@ -1110,7 +1110,11 @@ impl Analyzer<'_> {
         let span = self.ast.get_node(node).span;
         self.validate_parsed_type(span, &parsed_ty);
         let children = self.ast.children(node).collect::<Vec<_>>();
-        let mut ty = self.canonical_type(&parsed_ty);
+        let mut ty = if self.ast.get_node(node).kind == AstKind::Param {
+            self.canonical_parameter_type(&parsed_ty)
+        } else {
+            self.canonical_type(&parsed_ty)
+        };
         let previous = self.scopes.last().unwrap().get(&name).cloned();
         let redefined = previous.is_some();
         let entity = self.new_entity();
@@ -2913,8 +2917,17 @@ impl Analyzer<'_> {
     fn canonical_params(&mut self, params: &[CParam]) -> Vec<QualType> {
         params
             .iter()
-            .map(|param| self.canonical_type(&param.ty))
+            .map(|param| self.canonical_parameter_type(&param.ty))
             .collect()
+    }
+
+    fn canonical_parameter_type(&mut self, parsed: &CType) -> QualType {
+        let ty = self.canonical_type(parsed);
+        match self.types.kind(ty).clone() {
+            TypeKind::Array(element, _) => self.types.intern(TypeKind::Pointer(element)),
+            TypeKind::Function { .. } => self.types.intern(TypeKind::Pointer(ty)),
+            _ => ty,
+        }
     }
 }
 

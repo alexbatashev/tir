@@ -562,6 +562,14 @@ fn empty_parameter_list_is_a_prototype_only_in_c23() {
 }
 
 #[test]
+fn adjusts_array_parameters_to_pointers() {
+    let source =
+        "int entry(int argc, char **argv); int entry(int argc, char *argv[]) { return argc; }";
+
+    assert!(accepts(source, "c17".parse().unwrap()));
+}
+
+#[test]
 fn call_requires_function_type() {
     let output = diagnostics(
         "int main(void) { int value; return value(); }",
