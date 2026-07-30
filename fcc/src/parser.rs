@@ -1309,6 +1309,26 @@ struct DeclSpecs {
     type_decl: Option<NodeId>,
 }
 
+struct DeclSpecPrefix {
+    storage: Vec<Token>,
+    qualifiers: Vec<Token>,
+    attrs: Vec<String>,
+    base: DeclSpecBase,
+}
+
+enum DeclSpecBase {
+    Complete(CType, Option<NodeId>),
+    Record(RecordKind),
+}
+
+struct RecordFrame {
+    kind: RecordKind,
+    id: RecordId,
+    name: Option<String>,
+    fields: Vec<NodeId>,
+    pending_field: Option<DeclSpecPrefix>,
+}
+
 struct Declarator {
     name: String,
     ty: CType,
@@ -1396,13 +1416,30 @@ impl<'a> DeclParser<'a> {
         state: &mut SimpleState<ParseState>,
         tok: usize,
     ) -> Result<DeclSpecs, String> {
+        let prefix = self.parse_spec_prefix(state, tok)?;
+        match prefix.base {
+            DeclSpecBase::Complete(ref ty, type_decl) => {
+                let ty = ty.clone();
+                Ok(finish_decl_specs(prefix, ty, type_decl))
+            }
+            DeclSpecBase::Record(kind) => {
+                let (ty, type_decl) = self.parse_record(state, tok, kind)?;
+                Ok(finish_decl_specs(prefix, ty, type_decl))
+            }
+        }
+    }
+
+    fn parse_spec_prefix(
+        &mut self,
+        state: &mut SimpleState<ParseState>,
+        tok: usize,
+    ) -> Result<DeclSpecPrefix, String> {
         let mut storage = Vec::new();
         let mut qualifiers = Vec::new();
         let mut spec_tokens = Vec::new();
-        let mut type_decl = None;
-        let mut ty = None;
+        let mut attrs = std::mem::take(&mut self.attrs);
 
-        loop {
+        let base = loop {
             match self.peek() {
                 Some(Token::KwTypedef | Token::KwExtern | Token::KwStatic | Token::KwInline) => {
                     storage.push(self.next().unwrap());
@@ -1412,19 +1449,11 @@ impl<'a> DeclParser<'a> {
                 }
                 Some(Token::KwStruct) => {
                     self.next();
-                    let (record_ty, record_node) =
-                        self.parse_record(state, tok, RecordKind::Struct)?;
-                    ty = Some(record_ty);
-                    type_decl = record_node;
-                    break;
+                    break DeclSpecBase::Record(RecordKind::Struct);
                 }
                 Some(Token::KwUnion) => {
                     self.next();
-                    let (record_ty, record_node) =
-                        self.parse_record(state, tok, RecordKind::Union)?;
-                    ty = Some(record_ty);
-                    type_decl = record_node;
-                    break;
+                    break DeclSpecBase::Record(RecordKind::Union);
                 }
                 Some(Token::KwEnum) => {
                     self.next();
@@ -1435,7 +1464,7 @@ impl<'a> DeclParser<'a> {
                         },
                         _ => None,
                     };
-                    if self.eat(&Token::LBrace) {
+                    let type_decl = if self.eat(&Token::LBrace) {
                         let mut enumerators = Vec::new();
                         while !self.eat(&Token::RBrace) {
                             let enumerator_tok = tok + self.pos;
@@ -1482,10 +1511,11 @@ impl<'a> DeclParser<'a> {
                         for enumerator in enumerators {
                             state.0.ast.add_edge(declaration, enumerator);
                         }
-                        type_decl = Some(declaration);
-                    }
-                    ty = Some(CType::Enum(name));
-                    break;
+                        Some(declaration)
+                    } else {
+                        None
+                    };
+                    break DeclSpecBase::Complete(CType::Enum(name), type_decl);
                 }
                 Some(
                     Token::KwVoid
@@ -1502,38 +1532,26 @@ impl<'a> DeclParser<'a> {
                 ) => spec_tokens.push(self.next().unwrap()),
                 Some(Token::Identifier(name)) if is_decl_attr_name(name) => {
                     let attr = self.parse_attr()?;
-                    self.attrs.push(attr);
+                    attrs.push(attr);
                 }
-                Some(Token::Identifier(_)) if spec_tokens.is_empty() && ty.is_none() => {
+                Some(Token::Identifier(_)) if spec_tokens.is_empty() => {
                     if let Token::Identifier(name) = self.next().unwrap() {
-                        ty = Some(CType::Named(name));
+                        break DeclSpecBase::Complete(CType::Named(name), None);
                     }
-                    break;
+                    unreachable!();
                 }
-                _ => break,
+                _ if !spec_tokens.is_empty() => {
+                    break DeclSpecBase::Complete(builtin_type(&spec_tokens), None);
+                }
+                _ => return Err("expected declaration type".to_string()),
             }
-        }
+        };
 
-        if ty.is_none() && !spec_tokens.is_empty() {
-            ty = Some(builtin_type(&spec_tokens));
-        }
-
-        let mut ty = ty.ok_or_else(|| "expected declaration type".to_string())?;
-        for qualifier in qualifiers.into_iter().rev() {
-            ty = match qualifier {
-                Token::KwConst => CType::Const(Box::new(ty)),
-                Token::KwVolatile => CType::Volatile(Box::new(ty)),
-                Token::KwRestrict => CType::Restrict(Box::new(ty)),
-                _ => ty,
-            };
-        }
-        if !self.attrs.is_empty() {
-            ty = CType::Attributed(Box::new(ty), std::mem::take(&mut self.attrs));
-        }
-        Ok(DeclSpecs {
-            ty,
+        Ok(DeclSpecPrefix {
             storage,
-            type_decl,
+            qualifiers,
+            attrs,
+            base,
         })
     }
 
@@ -1543,6 +1561,62 @@ impl<'a> DeclParser<'a> {
         tok: usize,
         kind: RecordKind,
     ) -> Result<(CType, Option<NodeId>), String> {
+        let (ty, frame) = self.begin_record(state, kind);
+        let Some(frame) = frame else {
+            return Ok((ty, None));
+        };
+        let mut frames = vec![frame];
+        loop {
+            if self.eat(&Token::RBrace) {
+                let (ty, record) = finish_record(state, tok, frames.pop().unwrap());
+                let Some(parent) = frames.last_mut() else {
+                    return Ok((ty, Some(record)));
+                };
+                let prefix = parent.pending_field.take().unwrap();
+                let specs = finish_decl_specs(prefix, ty, Some(record));
+                parent
+                    .fields
+                    .extend(self.parse_field_declarators(state, tok, specs.ty)?);
+                continue;
+            }
+            if self.is_done() {
+                return Err("unterminated record declaration".to_string());
+            }
+
+            let prefix = self.parse_spec_prefix(state, tok)?;
+            match prefix.base {
+                DeclSpecBase::Complete(ref ty, type_decl) => {
+                    let ty = ty.clone();
+                    let specs = finish_decl_specs(prefix, ty, type_decl);
+                    frames
+                        .last_mut()
+                        .unwrap()
+                        .fields
+                        .extend(self.parse_field_declarators(state, tok, specs.ty)?);
+                }
+                DeclSpecBase::Record(kind) => {
+                    let (ty, frame) = self.begin_record(state, kind);
+                    if let Some(frame) = frame {
+                        frames.last_mut().unwrap().pending_field = Some(prefix);
+                        frames.push(frame);
+                    } else {
+                        let specs = finish_decl_specs(prefix, ty, None);
+                        frames
+                            .last_mut()
+                            .unwrap()
+                            .fields
+                            .extend(self.parse_field_declarators(state, tok, specs.ty)?);
+                    }
+                }
+            }
+        }
+    }
+
+    fn begin_record(
+        &mut self,
+        state: &mut SimpleState<ParseState>,
+        kind: RecordKind,
+    ) -> (CType, Option<RecordFrame>) {
         let name = match self.peek() {
             Some(Token::Identifier(_)) => match self.next().unwrap() {
                 Token::Identifier(name) => Some(name),
@@ -1552,42 +1626,27 @@ impl<'a> DeclParser<'a> {
         };
         let defining = self.peek() == Some(&Token::LBrace);
         let record_id = state.0.record_id(kind, name.as_deref(), defining);
-        let mut record = None;
-        if self.eat(&Token::LBrace) {
-            let mut fields = Vec::new();
-            while !self.eat(&Token::RBrace) {
-                if self.is_done() {
-                    return Err("unterminated record declaration".to_string());
-                }
-                fields.extend(self.parse_field_decl(state, tok)?);
-            }
-            let id = state.0.add(AstKind::RecordDecl, tok);
-            state.0.ast.set_leaf_data(
-                id,
-                AstLeaf::Record {
-                    id: record_id,
-                    kind,
-                    name: name.clone(),
-                },
-            );
-            for field in fields {
-                state.0.ast.add_edge(id, field);
-            }
-            record = Some(id);
-        }
-        Ok((CType::Record(kind, record_id, name), record))
+        let ty = CType::Record(kind, record_id, name.clone());
+        let frame = self.eat(&Token::LBrace).then_some(RecordFrame {
+            kind,
+            id: record_id,
+            name,
+            fields: Vec::new(),
+            pending_field: None,
+        });
+        (ty, frame)
     }
 
-    fn parse_field_decl(
+    fn parse_field_declarators(
         &mut self,
         state: &mut SimpleState<ParseState>,
         tok: usize,
+        ty: CType,
     ) -> Result<Vec<NodeId>, String> {
-        let specs = self.parse_specs(state, tok)?;
         let mut fields = Vec::new();
         loop {
             self.consume_attrs()?;
-            let mut decl = self.parse_declarator(state, tok, specs.ty.clone())?;
+            let mut decl = self.parse_declarator(state, tok, ty.clone())?;
             self.consume_attrs()?;
             decl.ty = self.take_attrs(decl.ty);
             self.consume_bitfield()?;
@@ -1878,6 +1937,49 @@ impl<'a> DeclParser<'a> {
         }
         Err(format!("expected {close}"))
     }
+}
+
+fn finish_decl_specs(
+    prefix: DeclSpecPrefix,
+    mut ty: CType,
+    type_decl: Option<NodeId>,
+) -> DeclSpecs {
+    for qualifier in prefix.qualifiers.into_iter().rev() {
+        ty = match qualifier {
+            Token::KwConst => CType::Const(Box::new(ty)),
+            Token::KwVolatile => CType::Volatile(Box::new(ty)),
+            Token::KwRestrict => CType::Restrict(Box::new(ty)),
+            _ => ty,
+        };
+    }
+    if !prefix.attrs.is_empty() {
+        ty = CType::Attributed(Box::new(ty), prefix.attrs);
+    }
+    DeclSpecs {
+        ty,
+        storage: prefix.storage,
+        type_decl,
+    }
+}
+
+fn finish_record(
+    state: &mut SimpleState<ParseState>,
+    tok: usize,
+    frame: RecordFrame,
+) -> (CType, NodeId) {
+    let record = state.0.add(AstKind::RecordDecl, tok);
+    state.0.ast.set_leaf_data(
+        record,
+        AstLeaf::Record {
+            id: frame.id,
+            kind: frame.kind,
+            name: frame.name.clone(),
+        },
+    );
+    for field in frame.fields {
+        state.0.ast.add_edge(record, field);
+    }
+    (CType::Record(frame.kind, frame.id, frame.name), record)
 }
 
 fn builtin_type(tokens: &[Token]) -> CType {
@@ -2395,109 +2497,41 @@ fn declaration_tokens<'src, I>() -> impl Parser<'src, I, Vec<Token>, Extra<'src>
 where
     I: ValueInput<'src, Token = Token, Span = Span>,
 {
-    let group = recursive(|group| {
-        let atom = any()
-            .filter(|tok: &Token| {
-                !matches!(
-                    tok,
-                    Token::LBrace
-                        | Token::RBrace
-                        | Token::LParen
-                        | Token::RParen
-                        | Token::LBracket
-                        | Token::RBracket
-                )
-            })
-            .map(|tok| vec![tok]);
-        choice((
-            group
-                .clone()
-                .repeated()
-                .collect::<Vec<Vec<Token>>>()
-                .map(|parts| {
-                    let mut toks = vec![Token::LBrace];
-                    toks.extend(parts.into_iter().flatten());
-                    toks.push(Token::RBrace);
-                    toks
-                })
-                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
-            group
-                .clone()
-                .repeated()
-                .collect::<Vec<Vec<Token>>>()
-                .map(|parts| {
-                    let mut toks = vec![Token::LParen];
-                    toks.extend(parts.into_iter().flatten());
-                    toks.push(Token::RParen);
-                    toks
-                })
-                .delimited_by(just(Token::LParen), just(Token::RParen)),
-            group
-                .repeated()
-                .collect::<Vec<Vec<Token>>>()
-                .map(|parts| {
-                    let mut toks = vec![Token::LBracket];
-                    toks.extend(parts.into_iter().flatten());
-                    toks.push(Token::RBracket);
-                    toks
-                })
-                .delimited_by(just(Token::LBracket), just(Token::RBracket)),
-            atom,
-        ))
-    });
-    let outer_atom = any()
-        .filter(|tok: &Token| {
-            !matches!(
-                tok,
-                Token::Semicolon
-                    | Token::LBrace
-                    | Token::RBrace
-                    | Token::LParen
-                    | Token::RParen
-                    | Token::LBracket
-                    | Token::RBracket
-            )
-        })
-        .map(|tok| vec![tok]);
-    choice((
-        group
-            .clone()
-            .repeated()
-            .collect::<Vec<Vec<Token>>>()
-            .map(|parts| {
-                let mut toks = vec![Token::LBrace];
-                toks.extend(parts.into_iter().flatten());
-                toks.push(Token::RBrace);
-                toks
-            })
-            .delimited_by(just(Token::LBrace), just(Token::RBrace)),
-        group
-            .clone()
-            .repeated()
-            .collect::<Vec<Vec<Token>>>()
-            .map(|parts| {
-                let mut toks = vec![Token::LParen];
-                toks.extend(parts.into_iter().flatten());
-                toks.push(Token::RParen);
-                toks
-            })
-            .delimited_by(just(Token::LParen), just(Token::RParen)),
-        group
-            .repeated()
-            .collect::<Vec<Vec<Token>>>()
-            .map(|parts| {
-                let mut toks = vec![Token::LBracket];
-                toks.extend(parts.into_iter().flatten());
-                toks.push(Token::RBracket);
-                toks
-            })
-            .delimited_by(just(Token::LBracket), just(Token::RBracket)),
-        outer_atom,
-    ))
-    .repeated()
-    .collect::<Vec<Vec<Token>>>()
-    .then_ignore(just(Token::Semicolon))
-    .map(|parts| parts.into_iter().flatten().collect())
+    custom(|input| {
+        let mut tokens = Vec::new();
+        let mut closing_delimiters = Vec::new();
+        loop {
+            let before = input.cursor();
+            let Some(token) = input.next() else {
+                return Err(Rich::custom(
+                    input.span_since(&before),
+                    "unterminated declaration",
+                ));
+            };
+            match &token {
+                Token::LBrace => closing_delimiters.push(Token::RBrace),
+                Token::LParen => closing_delimiters.push(Token::RParen),
+                Token::LBracket => closing_delimiters.push(Token::RBracket),
+                Token::RBrace | Token::RParen | Token::RBracket => {
+                    let Some(expected) = closing_delimiters.pop() else {
+                        return Err(Rich::custom(
+                            input.span_since(&before),
+                            format!("unexpected closing delimiter {token}"),
+                        ));
+                    };
+                    if token != expected {
+                        return Err(Rich::custom(
+                            input.span_since(&before),
+                            format!("expected {expected}, found {token}"),
+                        ));
+                    }
+                }
+                Token::Semicolon if closing_delimiters.is_empty() => return Ok(tokens),
+                _ => {}
+            }
+            tokens.push(token);
+        }
+    })
 }
 
 fn local_decl<'src, I>() -> impl Parser<'src, I, NodeId, Extra<'src>> + Clone
