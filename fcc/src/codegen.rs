@@ -1914,7 +1914,7 @@ impl FnCodegen<'_> {
                 }
                 Ok(())
             }
-            AstKind::EnumDecl => Ok(()),
+            AstKind::EnumDecl | AstKind::Empty => Ok(()),
             AstKind::Decl => {
                 let AstLeaf::Decl { .. } = ast.get_leaf_data(stmt).unwrap() else {
                     unreachable!("decl node carries a decl payload");
