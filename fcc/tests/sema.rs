@@ -582,6 +582,19 @@ fn accepts_integer_constant_expression_array_bounds() {
 }
 
 #[test]
+fn enum_expression_is_a_valid_array_subscript() {
+    let source = "enum State { FIRST }; \
+                  int entry(void) { \
+                      int counts[1]; \
+                      enum State state = FIRST; \
+                      counts[state]++; \
+                      return counts[state]; \
+                  }";
+
+    assert!(accepts(source, "c17".parse().unwrap()));
+}
+
+#[test]
 fn call_requires_function_type() {
     let output = diagnostics(
         "int main(void) { int value; return value(); }",

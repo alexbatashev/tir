@@ -1760,12 +1760,14 @@ impl Analyzer<'_> {
                     ) {
                         (
                             TypeKind::Pointer(_),
-                            TypeKind::Integer(_),
+                            TypeKind::Integer(_) | TypeKind::Enum(_),
                             AstKind::Add | AstKind::Sub,
                         ) => Some(operands[0]),
-                        (TypeKind::Integer(_), TypeKind::Pointer(_), AstKind::Add) => {
-                            Some(operands[1])
-                        }
+                        (
+                            TypeKind::Integer(_) | TypeKind::Enum(_),
+                            TypeKind::Pointer(_),
+                            AstKind::Add,
+                        ) => Some(operands[1]),
                         _ => None,
                     }
                 } else {
