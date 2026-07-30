@@ -23,4 +23,4 @@ jobs:
         with:
           path: target/test-suites/gcc
           key: gcc-torture-9aab80ddc5b2fa0eef80008e718067ab45f42c50
-      - run: cargo run --release -p xtask -- fcc-torture
+      - run: cargo xtask fcc-torture
