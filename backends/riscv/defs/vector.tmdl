@@ -8,17 +8,27 @@
 // these control registers rather than baking VLEN/SEW in, so an OPIVV op is
 // genuinely parametric over the configured element width and length.
 
-isa RVV requires [RV32I | RV64I] {}
+isa RVV requires [RV32I | RV64I] {
+    // The physical vector register width in bits. Implementations may differ;
+    // this model fixes it at the Zvl128b minimum, the same assumption the
+    // riscv-insert-vsetvli pass makes when sizing register groups.
+    param VLEN: Integer = 128;
+}
 
 // Vector control and status registers (addressed by their architectural CSR
 // numbers). `vlenb` is read-only and reports VLEN/8; `vtype`/`vl`/`vstart` are
-// written by `vsetvl{i}` and the vector unit.
+// written by `vsetvl{i}` and the vector unit. `vxsat`/`vxrm` are the
+// fixed-point saturation flag and rounding mode (also aliased by `vcsr`);
+// fixed-point behaviors read `vxrm` and accumulate into `vxsat`.
 register_class VCSR for [RVV] {
     param ENCODING_LEN: Integer = 12;
     param WIDTH: Integer = self.XLEN;
 
     registers {
         vstart => { index = 0x008 },
+        vxsat  => { index = 0x009 },
+        vxrm   => { index = 0x00A },
+        vcsr   => { index = 0x00F },
         vl     => { index = 0xC20 },
         vtype  => { index = 0xC21 },
         vlenb  => { index = 0xC22 },
@@ -29,16 +39,19 @@ register_class VCSR for [RVV] {
 // instruction behaviors must never decode packed bitfields: a structural
 // pattern over bit-slicing would not match the dialect ops' clean semantic
 // shape. Instead each field the behaviors consume is its own register —
-// `vset{i}vli` writes both the packed CSR (what the architecture shows) and
+// `vset{i}vl{i}` writes both the packed CSR (what the architecture shows) and
 // these fields (what the semantics read), and the simulator carries them like
 // any other register. Reads of `VCFG::sew` surface as `sew` demand attributes
 // on selected instructions, exactly like `VCSR::vl` reads surface as `vl`.
+// `lmul` is the signed LMUL exponent (vlmul interpreted as two's complement:
+// 0..3 = m1/m2/m4/m8, 111/110/101 = mf2/mf4/mf8).
 register_class VCFG for [RVV] {
     param ENCODING_LEN: Integer = 3;
     param WIDTH: Integer = self.XLEN;
 
     registers {
         sew => { index = 0 },
+        lmul => { index = 1 },
     }
 }
 
@@ -136,11 +149,14 @@ register_class VRM8 for [RVV] {
     }
 }
 
-// `vset{i}vli` configure the vector unit: they write `VCSR::vl` (the active
-// element count, granted in full in this model: `rd = avl`), the packed
-// `VCSR::vtype` CSR from the `vtypei` immediate, and the decomposed
-// `VCFG::sew` field the OPIVV behaviors read. Tail/mask policy bits and LMUL
-// are carried in `vtypei` but not yet consumed by any behavior.
+// `vset{i}vl{i}` configure the vector unit. They compute VLMAX =
+// VLEN * LMUL / SEW from the requested vtype, grant `vl = min(AVL, VLMAX)`
+// (a legal choice for the spec's `ceil(AVL/2) <= vl <= VLMAX` freedom), and
+// write the packed `vtype` CSR, the decomposed `VCFG` fields behaviors read,
+// and the grant to `vl` and `rd`. An illegal vtype (reserved vsew/vlmul
+// encodings, nonzero reserved bits, or SEW > LMUL * ELEN with ELEN = 64) sets
+// `vtype.vill` and clears `vl` instead. The rs1 = x0, rd = x0 form keeps the
+// current `vl` and requires the LMUL/SEW ratio to be unchanged.
 //
 // Instruction selection never introduces these by value matching. The OPIVV
 // ops' implicit `VCSR::vl`/`VCFG::sew` reads surface as `vl`/`sew` demand
@@ -149,6 +165,82 @@ register_class VRM8 for [RVV] {
 // where the configured state changes. A `vector.vector_len` op lowers directly
 // to `vsetvli` with a live `rd`, both granting the count and establishing the
 // configuration.
+
+// The shared vset{i}vl{i} logic, as inlined helper functions. `vt` is the
+// requested vtype value (the vtypei immediate, or the rs2 register for
+// vsetvl).
+
+// SEW = 2^(vsew + 3): the element width the vsew field encodes.
+fn sew_pow(vt) {
+    zext(extract(vt, 5, 3), self.XLEN) + zext(0b011, self.XLEN)
+}
+
+// LMUL = 2^vlmul with vlmul a signed field (mf8/mf4/mf2 are negative).
+fn lmul_pow(vt) {
+    sext(extract(vt, 2, 0), self.XLEN)
+}
+
+// VLMAX = VLEN * LMUL / SEW: every quantity is a power of two, so this is a
+// shift in each direction.
+fn vlmax(vt) {
+    group_bits = if lmul_pow(vt) < zext(0b0, self.XLEN) {
+        zext(self.VLEN, self.XLEN) >> (zext(0b0, self.XLEN) - lmul_pow(vt))
+    } else {
+        zext(self.VLEN, self.XLEN) << lmul_pow(vt)
+    };
+    group_bits >> sew_pow(vt)
+}
+
+// Reserved encodings: vsew 1xx is reserved, vlmul = 0b100 is reserved, and
+// SEW must not exceed LMUL * ELEN (ELEN = 64), i.e. vsew + 3 <= vlmul + 6.
+fn vtype_fields_illegal(vt) {
+    (extract(vt, 5, 5) != zext(0b0, 1))
+        | (extract(vt, 2, 0) == zext(0b100, 3))
+        | (sew_pow(vt) > lmul_pow(vt) + zext(0b110, self.XLEN))
+}
+
+// The keep-vl form (rs1 = rd = x0) additionally requires a valid previous
+// vtype and an unchanged LMUL/SEW ratio. Reads the OLD configuration, so call
+// before `apply_vtype`.
+fn keep_vl_illegal(vt) {
+    old_ratio = VCFG::lmul - log2Ceil(VCFG::sew);
+    (extract(VCSR::vtype, self.XLEN - 1, self.XLEN - 1) != zext(0b0, 1))
+        | (old_ratio != lmul_pow(vt) - sew_pow(vt))
+}
+
+// An illegal request sets vtype.vill and clears vl; the grant is zero.
+fn set_vill() {
+    VCSR::vtype = zext(0b1, self.XLEN) << (self.XLEN - 1);
+    VCSR::vl = zext(0b0, self.XLEN);
+    VCSR::vstart = zext(0b0, self.XLEN);
+    rd = zext(0b0, self.XLEN);
+}
+
+// A legal request publishes the packed vtype (given as `packed`), the
+// decomposed VCFG fields, and clears vstart.
+fn apply_vtype(vt, packed) {
+    VCFG::sew = zext(0b1, self.XLEN) << sew_pow(vt);
+    VCFG::lmul = lmul_pow(vt);
+    VCSR::vtype = packed;
+    VCSR::vstart = zext(0b0, self.XLEN);
+}
+
+// The grant: the request when it fits, VLMAX otherwise.
+fn grant(vlmax, requested) {
+    if requested ~< vlmax { requested } else { vlmax }
+}
+
+// VLMAX of the *current* configuration (reads VCFG, unlike `vlmax` which
+// evaluates a requested vtype). Used by slides and gathers.
+fn current_vlmax() {
+    group_bits = if VCFG::lmul < zext(0b0, self.XLEN) {
+        zext(self.VLEN, self.XLEN) >> (zext(0b0, self.XLEN) - VCFG::lmul)
+    } else {
+        zext(self.VLEN, self.XLEN) << VCFG::lmul
+    };
+    group_bits / VCFG::sew
+}
+
 instruction VSetVli for [RVV] {
     param MNEMONIC: String = "vsetvli";
     param OPCODE: bits<7> = 0b1010111;
@@ -174,10 +266,25 @@ instruction VSetVli for [RVV] {
     }
 
     behavior {
-        rd = avl;
-        VCSR::vl = avl;
-        VCSR::vtype = zext(vtypei, self.XLEN);
-        VCFG::sew = zext(0b1000, self.XLEN) << zext(extract(vtypei, 5, 3), self.XLEN);
+        keep_vl = (regnum(avl) == zext(0b0, 5)) & (regnum(rd) == zext(0b0, 5));
+        illegal = (extract(vtypei, 10, 8) != zext(0b0, 3))
+            | vtype_fields_illegal(vtypei)
+            | (keep_vl & keep_vl_illegal(vtypei));
+
+        if illegal == zext(0b1, 1) {
+            set_vill()
+        } else {
+            apply_vtype(vtypei, zext(vtypei, self.XLEN));
+            requested = if keep_vl == zext(0b1, 1) {
+                VCSR::vl
+            } else if regnum(avl) == zext(0b0, 5) {
+                vlmax(vtypei)
+            } else {
+                avl
+            };
+            VCSR::vl = grant(vlmax(vtypei), requested);
+            rd = VCSR::vl;
+        }
     }
 
     schedule { units = [WriteIALU]; }
@@ -207,15 +314,68 @@ instruction VSetIVli for [RVV] {
         "{self.MNEMONIC} {rd}, {avl}, {vtypei}"
     }
 
-    // No `rd` write here: a `rd = zext(avl, XLEN)` behavior would generate a
-    // value rule whose pattern matches real zero-extensions of small constants,
-    // letting selection materialize scalar constants through the vector unit.
-    // The insertion pass always discards vsetivli's grant (`rd = x0`), and the
-    // grant equals the immediate anyway in this full-grant model.
     behavior {
-        VCSR::vl = zext(avl, self.XLEN);
-        VCSR::vtype = zext(vtypei, self.XLEN);
-        VCFG::sew = zext(0b1000, self.XLEN) << zext(extract(vtypei, 5, 3), self.XLEN);
+        illegal = (extract(vtypei, 9, 8) != zext(0b0, 2)) | vtype_fields_illegal(vtypei);
+
+        if illegal == zext(0b1, 1) {
+            set_vill()
+        } else {
+            apply_vtype(vtypei, zext(vtypei, self.XLEN));
+            VCSR::vl = grant(vlmax(vtypei), zext(avl, self.XLEN));
+            rd = VCSR::vl;
+        }
+    }
+
+    schedule { units = [WriteIALU]; }
+}
+
+// `vsetvl` takes the vtype from a register: the whole XLEN value is
+// interpreted as a vtype, so any bit above vma (including a set vill) makes
+// the request illegal.
+instruction VSetVL for [RVV] {
+    param MNEMONIC: String = "vsetvl";
+    param OPCODE: bits<7> = 0b1010111;
+    param FUNCT3: bits<3> = 0b111;
+
+    operands {
+        rd: GPR,
+        avl: GPR,
+        vt: GPR,
+    }
+
+    encoding {
+        0..6 => OPCODE,
+        7..11 => rd,
+        12..14 => FUNCT3,
+        15..19 => avl,
+        20..24 => vt,
+        25..31 => 0b1000000,
+    }
+
+    asm {
+        "{self.MNEMONIC} {rd}, {avl}, {vt}"
+    }
+
+    behavior {
+        keep_vl = (regnum(avl) == zext(0b0, 5)) & (regnum(rd) == zext(0b0, 5));
+        illegal = (extract(vt, self.XLEN - 1, 8) != zext(0b0, self.XLEN - 8))
+            | vtype_fields_illegal(vt)
+            | (keep_vl & keep_vl_illegal(vt));
+
+        if illegal == zext(0b1, 1) {
+            set_vill()
+        } else {
+            apply_vtype(vt, zext(extract(vt, 7, 0), self.XLEN));
+            requested = if keep_vl == zext(0b1, 1) {
+                VCSR::vl
+            } else if regnum(avl) == zext(0b0, 5) {
+                vlmax(vt)
+            } else {
+                avl
+            };
+            VCSR::vl = grant(vlmax(vt), requested);
+            rd = VCSR::vl;
+        }
     }
 
     schedule { units = [WriteIALU]; }
@@ -265,69 +425,3 @@ whole_register_moves!(
     (VMove8R, "vmv8r.v", VRM8, 7)
 )
 
-// OP-V, vector-vector (OPIVV) form: `op.vv vd, vs2, vs1`.
-template VArithVV for [RVV] {
-    param MNEMONIC: String;
-    param FUNCT6: bits<6>;
-    param FUNCT3: bits<3> = 0b000;
-    param VM: bits<1> = 0b1;
-    param OPCODE: bits<7> = 0b1010111;
-
-    operands {
-        vd: VR,
-        vs2: VR,
-        vs1: VR,
-    }
-
-    encoding {
-        0..6 => OPCODE,
-        7..11 => vd,
-        12..14 => FUNCT3,
-        15..19 => vs1,
-        20..24 => vs2,
-        25 => VM,
-        26..31 => FUNCT6,
-    }
-
-    asm {
-        "{self.MNEMONIC} {vd}, {vs2}, {vs1}"
-    }
-
-    schedule { units = [WriteIALU]; }
-}
-
-// Each OPIVV instruction maps over the `vl` active elements of `VCFG::sew`
-// bits each: it splits each source register into that many lanes, pairs them,
-// applies the elementwise operation, and concatenates the results back into
-// the destination register. This is the same split/map/concat shape the
-// target-independent `vector` dialect ops produce, so instruction selection
-// matches a `vector.add` against `vadd.vv` structurally: the `VCSR::vl` read
-// binds to the dialect op's lane count (its `vl` demand) and the `VCFG::sew`
-// read binds to the element width from the vector type (its `sew` demand).
-
-instruction VAdd for [RVV] : VArithVV {
-    param MNEMONIC: String = "vadd.vv";
-    param FUNCT6: bits<6> = 0b000000;
-
-    behavior {
-        vd = concat(map(zip(split(vs2, VCSR::vl, VCFG::sew), split(vs1, VCSR::vl, VCFG::sew)), |a, b| a + b));
-    }
-}
-
-instruction VSub for [RVV] : VArithVV {
-    param MNEMONIC: String = "vsub.vv";
-    param FUNCT6: bits<6> = 0b000010;
-
-    behavior {
-        vd = concat(map(zip(split(vs2, VCSR::vl, VCFG::sew), split(vs1, VCSR::vl, VCFG::sew)), |a, b| a - b));
-    }
-}
-
-instruction VMul for [RVV] : VArithVV {
-    param MNEMONIC: String = "vmul.vv";
-    param FUNCT6: bits<6> = 0b100101;
-
-    behavior {
-        vd = concat(map(zip(split(vs2, VCSR::vl, VCFG::sew), split(vs1, VCSR::vl, VCFG::sew)), |a, b| a * b));
-    }
-}

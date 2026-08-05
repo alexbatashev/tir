@@ -36,6 +36,7 @@ where
                     instruction_def().map(Item::Instruction),
                     unit_def().map(Item::Unit),
                     machine_def().map(Item::Machine),
+                    fn_def().map(Item::Fn),
                 )))
                 .map(|(doc, mut item)| {
                     item.set_doc(doc);
@@ -1667,6 +1668,30 @@ where
     any().filter(is_ident).map(|t| t.as_ident().to_string())
 }
 
+/// `fn name(p1, p2) { body }` — a pure expression-level helper, inlined at
+/// call sites before semantic analysis (see `fninline`).
+fn fn_def<'src, I>() -> impl Parser<'src, I, FnDef, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    just(Token::KwFn)
+        .ignore_then(ident())
+        .then(
+            ident()
+                .separated_by(just(Token::Comma))
+                .allow_trailing()
+                .collect::<Vec<_>>()
+                .delimited_by(just(Token::LParen), just(Token::RParen)),
+        )
+        .then(expr())
+        .map_with(|((name, params), body), e| FnDef {
+            name,
+            params,
+            body,
+            span: e.span(),
+        })
+}
+
 fn register_traits<'src, I>()
 -> impl Parser<'src, I, Vec<RegisterTrait>, extra::Err<Rich<'src, Token<'src>, Span>>>
 where
@@ -1773,10 +1798,17 @@ where
                 "map" => Some(BuiltinFunction::Map),
                 "reduce" => Some(BuiltinFunction::Reduce),
                 "zip" => Some(BuiltinFunction::Zip),
+                "iota" => Some(BuiltinFunction::Iota),
                 "fadd" => Some(BuiltinFunction::FAdd),
                 "fsub" => Some(BuiltinFunction::FSub),
                 "fmul" => Some(BuiltinFunction::FMul),
                 "fdiv" => Some(BuiltinFunction::FDiv),
+                "fmin" => Some(BuiltinFunction::FMin),
+                "fmax" => Some(BuiltinFunction::FMax),
+                "asfloat" => Some(BuiltinFunction::AsFloat),
+                "fcvt" => Some(BuiltinFunction::FCvt),
+                "fma" => Some(BuiltinFunction::Fma),
+                "sqrt" => Some(BuiltinFunction::Sqrt),
                 "sitofp" => Some(BuiltinFunction::SIToFP),
                 "uitofp" => Some(BuiltinFunction::UIToFP),
                 "fptosi" => Some(BuiltinFunction::FPToSI),
@@ -1841,7 +1873,32 @@ where
                 })
             });
 
-        let atom = lambda
+        // Inline conditional for value positions (e.g. lambda bodies):
+        // `if cond { a } else { b }` with single-expression arms, unlike the
+        // statement-level `if` whose arms are statement blocks. Starts with
+        // KwIf, unambiguous at atom position; the else arm is mandatory since
+        // a value is always needed.
+        let inline_if = recursive(|inline_if| {
+            let arm = expr
+                .clone()
+                .delimited_by(just(Token::LBrace), just(Token::RBrace));
+            just(Token::KwIf)
+                .ignore_then(expr.clone())
+                .then(arm.clone())
+                .then_ignore(just(Token::KwElse))
+                .then(inline_if.or(arm))
+                .map_with(|((cond, then), else_), e| {
+                    Expr::If(If {
+                        cond: Box::new(cond),
+                        then: Box::new(then),
+                        else_: Some(Box::new(else_)),
+                        span: e.span(),
+                    })
+                })
+        });
+
+        let atom = inline_if
+            .or(lambda)
             .or(literal_or_ident)
             .or(expr
                 .clone()

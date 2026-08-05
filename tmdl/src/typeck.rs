@@ -293,9 +293,26 @@ fn infer<'a>(
         }
 
         ast::Expr::Block(block) => {
+            // Statements see a block-local environment: an assignment to a
+            // fresh name introduces a behavior-local binding visible to the
+            // later statements of the same block. The binding is the value's
+            // type; reads of it are just reads of the defining expression
+            // (the lowering substitutes it).
+            let mut block_env = env.clone();
             let mut ty = Type::Integer;
             for stmt in &block.stmts {
-                ty = infer(stmt, env, tvg, subst, cache, diags, file_name);
+                if let ast::Expr::Assign(asgn) = stmt
+                    && let ast::Expr::Ident(id) = &*asgn.dest
+                    && block_env.get(&id.name).is_none()
+                {
+                    let val_ty =
+                        infer(&asgn.value, &block_env, tvg, subst, cache, diags, file_name);
+                    block_env.bind(id.name.clone(), TypeScheme::mono(val_ty.clone()));
+                    cache.insert(stmt, val_ty.clone());
+                    ty = val_ty;
+                    continue;
+                }
+                ty = infer(stmt, &block_env, tvg, subst, cache, diags, file_name);
             }
             if block.last_expr_return {
                 ty
@@ -365,7 +382,9 @@ fn infer<'a>(
                 for arg in &call.arguments {
                     infer(arg, env, tvg, subst, cache, diags, file_name);
                 }
-                Type::Integer
+                // A count: Integer in spec-time expressions (widths), but a
+                // small bitvector when computed from a runtime register value.
+                Type::Var(tvg.fresh())
             }
             // `regnum(op)` -> bits<ENCODING_LEN>: the operand's encoding index.
             // The width is the operand class's `ENCODING_LEN`, not tracked here;
@@ -432,7 +451,9 @@ fn infer<'a>(
                 ast::BuiltinFunction::FAdd
                 | ast::BuiltinFunction::FSub
                 | ast::BuiltinFunction::FMul
-                | ast::BuiltinFunction::FDiv,
+                | ast::BuiltinFunction::FDiv
+                | ast::BuiltinFunction::FMin
+                | ast::BuiltinFunction::FMax,
             ) => {
                 let lhs_ty = infer(&call.arguments[0], env, tvg, subst, cache, diags, file_name);
                 for arg in &call.arguments[1..] {
@@ -442,7 +463,12 @@ fn infer<'a>(
                 lhs_ty.apply(subst)
             }
             ast::Expr::BuiltinFunction(
-                ast::BuiltinFunction::SIToFP | ast::BuiltinFunction::UIToFP,
+                ast::BuiltinFunction::SIToFP
+                | ast::BuiltinFunction::UIToFP
+                | ast::BuiltinFunction::AsFloat
+                | ast::BuiltinFunction::FCvt
+                | ast::BuiltinFunction::Fma
+                | ast::BuiltinFunction::Sqrt,
             ) => {
                 for arg in &call.arguments {
                     infer(arg, env, tvg, subst, cache, diags, file_name);
@@ -495,29 +521,33 @@ fn infer<'a>(
                 );
                 Type::Con("bits".into(), vec![Type::Var(tvg.fresh())])
             }
-            // `zip(a, b)` -> vec<pair<A, B>>: pairs two iterators lane-wise.
+            // `iota(n, w)` -> vec<bits<w>>: lane indices 0..n-1. The lane width
+            // comes from the second argument, not tracked here.
+            ast::Expr::BuiltinFunction(ast::BuiltinFunction::Iota) => {
+                for arg in &call.arguments {
+                    infer(arg, env, tvg, subst, cache, diags, file_name);
+                }
+                vec_ty(Type::Con("bits".into(), vec![Type::Var(tvg.fresh())]))
+            }
+            // `zip(a, b, ...)` -> vec<pair<A, B, ...>>: combines iterators
+            // lane-wise; a `map` lambda with one parameter per zipped iterator
+            // destructures each lane.
             ast::Expr::BuiltinFunction(ast::BuiltinFunction::Zip) => {
-                let lhs_ty = infer(&call.arguments[0], env, tvg, subst, cache, diags, file_name);
-                let rhs_ty = infer(&call.arguments[1], env, tvg, subst, cache, diags, file_name);
-                let a = Type::Var(tvg.fresh());
-                let b = Type::Var(tvg.fresh());
-                constrain(
-                    &lhs_ty,
-                    &vec_ty(a.clone()),
-                    subst,
-                    call.span,
-                    diags,
-                    file_name,
-                );
-                constrain(
-                    &rhs_ty,
-                    &vec_ty(b.clone()),
-                    subst,
-                    call.span,
-                    diags,
-                    file_name,
-                );
-                vec_ty(Type::Con("pair".into(), vec![a, b]))
+                let mut components = Vec::with_capacity(call.arguments.len());
+                for arg in &call.arguments {
+                    let arg_ty = infer(arg, env, tvg, subst, cache, diags, file_name);
+                    let component = Type::Var(tvg.fresh());
+                    constrain(
+                        &arg_ty,
+                        &vec_ty(component.clone()),
+                        subst,
+                        call.span,
+                        diags,
+                        file_name,
+                    );
+                    components.push(component);
+                }
+                vec_ty(Type::Con("pair".into(), components))
             }
             // `map(iter, |x| ...)` -> vec<R>: applies the lambda to each lane. A
             // two-parameter lambda destructures a zipped pair element.
@@ -688,9 +718,9 @@ fn vec_ty(elem: Type) -> Type {
 }
 
 /// Parameter types for a `map` lambda over elements of type `elem`. A unary
-/// lambda takes the element; a binary lambda destructures a zipped `pair`
-/// element into its two components (best-effort, leaving them free if `elem` is
-/// not yet known to be a pair).
+/// lambda takes the element; a lambda with two or more parameters destructures
+/// a zipped `pair` element into its components (best-effort, leaving them free
+/// if `elem` is not yet known to be a pair).
 fn map_param_tys(
     elem: &Type,
     lambda_arg: &ast::Expr,
@@ -701,24 +731,17 @@ fn map_param_tys(
         ast::Expr::Lambda(l) => l.params.len(),
         _ => 1,
     };
-    match arity {
-        2 => {
-            let a = Type::Var(tvg.fresh());
-            let b = Type::Var(tvg.fresh());
-            let pair = Type::Con("pair".into(), vec![a.clone(), b.clone()]);
-            if let Ok(s) = unify(&elem.apply(subst), &pair) {
-                let old = mem::take(subst);
-                *subst = old.compose(&s);
-                vec![a.apply(subst), b.apply(subst)]
-            } else {
-                vec![a, b]
-            }
-        }
-        n => {
-            let mut tys = vec![elem.clone()];
-            tys.extend((1..n).map(|_| Type::Var(tvg.fresh())));
-            tys
-        }
+    if arity < 2 {
+        return vec![elem.clone()];
+    }
+    let tys: Vec<Type> = (0..arity).map(|_| Type::Var(tvg.fresh())).collect();
+    let pair = Type::Con("pair".into(), tys.clone());
+    if let Ok(s) = unify(&elem.apply(subst), &pair) {
+        let old = mem::take(subst);
+        *subst = old.compose(&s);
+        tys.iter().map(|ty| ty.apply(subst)).collect()
+    } else {
+        tys
     }
 }
 
@@ -759,9 +782,14 @@ mod tests {
         let (tokens, _lex_errs) = crate::lexer::lex(src);
         let (file, parse_errs) = crate::parser::parse(src, &tokens, "test.tmdl");
         assert!(parse_errs.is_empty(), "parse errors: {parse_errs:?}");
-        let files = vec![file.expect("file parses")];
+        let mut files = vec![file.expect("file parses")];
+        let mut out: Vec<(String, String)> = crate::fninline::inline_functions(&mut files)
+            .into_iter()
+            .map(|(f, d)| (f, d.to_string()))
+            .collect();
         let (_cache, diags) = check(&files);
-        diags.into_iter().map(|(f, d)| (f, d.to_string())).collect()
+        out.extend(diags.into_iter().map(|(f, d)| (f, d.to_string())));
+        out
     }
 
     const VECTOR_PRELUDE: &str = "
@@ -807,6 +835,206 @@ mod tests {
             }}"
         );
         assert!(type_check_source(&src).is_empty());
+    }
+
+    #[test]
+    fn functional_iota_type_checks() {
+        let src = format!(
+            "{VECTOR_PRELUDE}
+            instruction VId for [RVV] : VArithVV {{
+                param MNEMONIC: String = \"vid.v\";
+                behavior {{
+                    vd = concat(iota(4, 32));
+                }}
+            }}"
+        );
+        assert!(type_check_source(&src).is_empty());
+    }
+
+    #[test]
+    fn functional_iota_zipped_with_split_type_checks() {
+        let src = format!(
+            "{VECTOR_PRELUDE}
+            instruction VSlideUp for [RVV] : VArithVV {{
+                param MNEMONIC: String = \"vslideup.vx\";
+                behavior {{
+                    vd = concat(map(zip(iota(4, 32), split(vs2, 4)), |i, x| x + i));
+                }}
+            }}"
+        );
+        assert!(type_check_source(&src).is_empty());
+    }
+
+    #[test]
+    fn functional_three_way_zip_type_checks() {
+        // The masked-op shape: computed lanes, old destination lanes, and the
+        // mask register's bits combined by a ternary lambda.
+        let src = format!(
+            "{VECTOR_PRELUDE}
+            instruction VAddMasked for [RVV] : VArithVV {{
+                param MNEMONIC: String = \"vadd.vv\";
+                behavior {{
+                    vd = concat(map(zip(split(vs2, 4), split(vs1, 4), split(vd, 4)), |a, b, old| if a == b {{ a }} else {{ old }}));
+                }}
+            }}"
+        );
+        assert!(type_check_source(&src).is_empty());
+    }
+
+    #[test]
+    fn functional_lambda_capture_type_checks() {
+        // The scalar-broadcast shape (RVV .vx form): the lambda captures an
+        // outer operand alongside its lane parameter.
+        let src = format!(
+            "{VECTOR_PRELUDE}
+            instruction VAddVX for [RVV] : VArithVV {{
+                param MNEMONIC: String = \"vadd.vx\";
+                behavior {{
+                    vd = concat(map(split(vs2, 4), |a| a + vs1));
+                }}
+            }}"
+        );
+        assert!(type_check_source(&src).is_empty());
+    }
+
+    #[test]
+    fn behavior_local_binding_type_checks() {
+        // An assignment to a fresh name introduces a behavior-local binding
+        // visible to later statements in the same block.
+        let src = "
+            isa Test { param XLEN: Integer = 32; }
+            register_class GPR for [Test] {
+                param ENCODING_LEN: Integer = 5;
+                param WIDTH: Integer = self.XLEN;
+                registers { r0..r31 => {}, }
+            }
+            instruction Foo for [Test] {
+                operands { rd: GPR, rs1: GPR, rs2: GPR, }
+                behavior {
+                    tmp = rs1 + rs2;
+                    rd = tmp + rs1;
+                }
+            }
+        ";
+        assert!(type_check_source(src).is_empty());
+    }
+
+    #[test]
+    fn behavior_local_read_before_write_still_errors() {
+        let src = "
+            isa Test { param XLEN: Integer = 32; }
+            register_class GPR for [Test] {
+                param ENCODING_LEN: Integer = 5;
+                param WIDTH: Integer = self.XLEN;
+                registers { r0..r31 => {}, }
+            }
+            instruction Foo for [Test] {
+                operands { rd: GPR, rs1: GPR, rs2: GPR, }
+                behavior {
+                    rd = tmp + rs1;
+                    tmp = rs1 + rs2;
+                }
+            }
+        ";
+        let diagnostics = type_check_source(src);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|(_, d)| d.contains("unbound variable 'tmp'")),
+            "expected an unbound-variable diagnostic, got: {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn log2ceil_of_a_register_mixes_with_bits_arithmetic() {
+        // log2Ceil of a bitvector value is a small count usable in bits
+        // arithmetic (e.g. recovering an exponent from a power-of-two width).
+        let src = "
+            isa Test { param XLEN: Integer = 32; }
+            register_class GPR for [Test] {
+                param ENCODING_LEN: Integer = 5;
+                param WIDTH: Integer = self.XLEN;
+                registers { r0..r31 => {}, }
+            }
+            instruction Foo for [Test] {
+                operands { rd: GPR, rs1: GPR, rs2: GPR, }
+                behavior { rd = rs1 - log2Ceil(rs2); }
+            }
+        ";
+        assert!(type_check_source(src).is_empty());
+    }
+
+    const FN_PRELUDE: &str = "
+        isa Test { param XLEN: Integer = 32; }
+        register_class GPR for [Test] {
+            param ENCODING_LEN: Integer = 5;
+            param WIDTH: Integer = self.XLEN;
+            registers { r0..r31 => {}, }
+        }
+    ";
+
+    #[test]
+    fn function_call_inlines_and_type_checks() {
+        let src = format!(
+            "{FN_PRELUDE}
+            fn double(x) {{ x + x }}
+            instruction Foo for [Test] {{
+                operands {{ rd: GPR, rs1: GPR, rs2: GPR, }}
+                behavior {{ rd = double(rs1) + rs2; }}
+            }}"
+        );
+        assert!(type_check_source(&src).is_empty());
+    }
+
+    #[test]
+    fn function_call_inside_lambda_type_checks() {
+        let src = format!(
+            "{VECTOR_PRELUDE}
+            fn lane_add(a, b) {{ a + b }}
+            instruction VAdd for [RVV] : VArithVV {{
+                param MNEMONIC: String = \"vadd.vv\";
+                behavior {{
+                    vd = concat(map(zip(split(vs2, 4), split(vs1, 4)), |x, y| lane_add(x, y)));
+                }}
+            }}"
+        );
+        assert!(type_check_source(&src).is_empty());
+    }
+
+    #[test]
+    fn recursive_function_is_an_error() {
+        let src = format!(
+            "{FN_PRELUDE}
+            fn f(x) {{ f(x) }}
+            instruction Foo for [Test] {{
+                operands {{ rd: GPR, rs1: GPR, rs2: GPR, }}
+                behavior {{ rd = f(rs1); }}
+            }}"
+        );
+        let diagnostics = type_check_source(&src);
+        assert!(
+            diagnostics.iter().any(|(_, d)| d.contains("recursive")),
+            "expected a recursion diagnostic, got: {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn function_arity_mismatch_is_an_error() {
+        let src = format!(
+            "{FN_PRELUDE}
+            fn f(x) {{ x }}
+            instruction Foo for [Test] {{
+                operands {{ rd: GPR, rs1: GPR, rs2: GPR, }}
+                behavior {{ rd = f(rs1, rs2); }}
+            }}"
+        );
+        let diagnostics = type_check_source(&src);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|(_, d)| d.contains("takes 1 arguments")),
+            "expected an arity diagnostic, got: {diagnostics:?}"
+        );
     }
 
     #[test]

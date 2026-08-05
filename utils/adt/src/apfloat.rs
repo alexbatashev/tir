@@ -465,6 +465,43 @@ impl APFloat {
         )
     }
 
+    /// IEEE 754-2019 minimumNumber: the non-NaN operand when exactly one is
+    /// NaN, the canonical NaN when both are; -0.0 is smaller than +0.0.
+    /// (Named `minnum`, LLVM-style: `Ord::min` would shadow an inherent `min`.)
+    pub fn minnum(&self, other: &APFloat) -> Self {
+        self.extreme(other, true)
+    }
+
+    /// IEEE 754-2019 maximumNumber: the non-NaN operand when exactly one is
+    /// NaN, the canonical NaN when both are; +0.0 is larger than -0.0.
+    pub fn maxnum(&self, other: &APFloat) -> Self {
+        self.extreme(other, false)
+    }
+
+    fn extreme(&self, other: &APFloat, pick_less: bool) -> Self {
+        self.assert_same_format(other);
+        match (self.is_nan(), other.is_nan()) {
+            (true, true) => {
+                return APFloat::nan(self.exp_width, self.mant_width, self.explicit_leading_bit);
+            }
+            (true, false) => return other.clone(),
+            (false, true) => return self.clone(),
+            (false, false) => {}
+        }
+        if self.is_zero() && other.is_zero() && self.sign != other.sign {
+            return if pick_less == self.sign {
+                self.clone()
+            } else {
+                other.clone()
+            };
+        }
+        if self.lt(other) == pick_less {
+            self.clone()
+        } else {
+            other.clone()
+        }
+    }
+
     fn shift_mantissa_left(&self, shift: u32) -> (u64, u64) {
         if shift == 0 {
             return (self.mantissa_high, self.mantissa_low);
@@ -653,5 +690,42 @@ mod tests {
         let b = APFloat::from_f64(f64::NAN);
         assert_eq!(a, b);
         assert_eq!(a.cmp(&b), Ordering::Equal);
+    }
+
+    #[test]
+    fn min_max_pick_the_extreme_operand() {
+        let a = APFloat::from_f64(1.5);
+        let b = APFloat::from_f64(-2.5);
+        assert_eq!(a.minnum(&b).to_f64(), -2.5);
+        assert_eq!(a.maxnum(&b).to_f64(), 1.5);
+        assert_eq!(b.minnum(&a).to_f64(), -2.5);
+        assert_eq!(b.maxnum(&a).to_f64(), 1.5);
+    }
+
+    #[test]
+    fn min_max_return_the_non_nan_operand() {
+        let nan = APFloat::from_f64(f64::NAN);
+        let one = APFloat::from_f64(1.0);
+        assert_eq!(nan.minnum(&one).to_f64(), 1.0);
+        assert_eq!(one.minnum(&nan).to_f64(), 1.0);
+        assert_eq!(nan.maxnum(&one).to_f64(), 1.0);
+        assert_eq!(one.maxnum(&nan).to_f64(), 1.0);
+    }
+
+    #[test]
+    fn min_max_of_two_nans_is_nan() {
+        let nan = APFloat::from_f64(f64::NAN);
+        assert!(nan.minnum(&nan).is_nan());
+        assert!(nan.maxnum(&nan).is_nan());
+    }
+
+    #[test]
+    fn min_max_distinguish_signed_zero() {
+        let pos = APFloat::from_f64(0.0);
+        let neg = APFloat::from_f64(-0.0);
+        assert!(pos.minnum(&neg).is_negative());
+        assert!(!pos.maxnum(&neg).is_negative());
+        assert!(neg.minnum(&pos).is_negative());
+        assert!(!neg.maxnum(&pos).is_negative());
     }
 }

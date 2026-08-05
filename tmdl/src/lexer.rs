@@ -133,6 +133,8 @@ pub enum Token<'a> {
     KwExcept,
     /// `macro`
     KwMacro,
+    /// `fn`
+    KwFn,
 }
 
 impl<'a> Token<'a> {
@@ -229,6 +231,7 @@ pub(crate) fn lexer<'src>()
         "try" => Token::KwTry,
         "except" => Token::KwExcept,
         "macro" => Token::KwMacro,
+        "fn" => Token::KwFn,
         _ => Token::Identifier(ident),
     });
 
@@ -326,6 +329,7 @@ impl<'a> fmt::Display for Token<'a> {
             Token::KwTry => f.write_str("try"),
             Token::KwExcept => f.write_str("except"),
             Token::KwMacro => f.write_str("macro"),
+            Token::KwFn => f.write_str("fn"),
         }
     }
 }

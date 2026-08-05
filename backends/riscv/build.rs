@@ -15,6 +15,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         "./defs/zicsr.tmdl",
         "./defs/perf.tmdl",
         "./defs/vector.tmdl",
+        "./defs/vector_int.tmdl",
+        "./defs/vector_mask.tmdl",
+        "./defs/vector_red.tmdl",
+        "./defs/vector_perm.tmdl",
+        "./defs/vector_widen.tmdl",
+        "./defs/vector_fixed.tmdl",
+        "./defs/vector_mem.tmdl",
+        "./defs/vector_float.tmdl",
         "./defs/syntacore_scr1.tmdl",
     ];
     for input in &inputs {

@@ -482,6 +482,18 @@ pub enum Item {
     Instruction(Instruction),
     Unit(SchedClassDecl),
     Machine(Machine),
+    Fn(FnDef),
+}
+
+/// A pure expression-level helper: `fn name(p1, p2) { body }`. Calls are
+/// inlined on the AST before semantic analysis (see `fninline`), so the rest
+/// of the pipeline never sees them.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FnDef {
+    pub name: String,
+    pub params: Vec<String>,
+    pub body: Expr,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -686,12 +698,29 @@ pub enum BuiltinFunction {
     /// `zip(a, b)`: pair two iterators lane-wise so a `map` lambda can read both
     /// sides as separate parameters.
     Zip,
+    /// `iota(n, w)`: an iterator of `n` lanes of `w` bits holding the values
+    /// 0..n-1 — the lane indices. Zip it with another iterator to give a `map`
+    /// lambda positional awareness (RVV `vid.v`, slides, gathers, per-lane
+    /// addresses).
+    Iota,
     /// IEEE 754 binary floating-point arithmetic over register bits; the format
     /// is the binary32/binary64 interchange format of the operand width.
     FAdd,
     FSub,
     FMul,
     FDiv,
+    /// IEEE 754-2019 minimumNumber/maximumNumber over register bits.
+    FMin,
+    FMax,
+    /// `asfloat(x)`: reinterpret register bits as the binary float of their
+    /// width (16/32/64), giving IEEE-compare semantics to `<`, `==`, etc.
+    AsFloat,
+    /// `fcvt(x, exp, mant)`: convert register bits between IEEE binary formats.
+    FCvt,
+    /// `fma(a, b, c)`: IEEE 754 fused multiply-add, one rounding.
+    Fma,
+    /// `sqrt(x)`: IEEE 754 square root.
+    Sqrt,
     /// Signed integer to IEEE 754 binary floating point.
     SIToFP,
     /// Unsigned integer to IEEE 754 binary floating point.
@@ -949,6 +978,7 @@ impl Item {
             Item::Instruction(item) => item.doc.as_deref(),
             Item::Unit(item) => item.doc.as_deref(),
             Item::Machine(item) => item.doc.as_deref(),
+            Item::Fn(_) => None,
         }
     }
 
@@ -961,6 +991,7 @@ impl Item {
             Item::Instruction(item) => item.doc = doc,
             Item::Unit(item) => item.doc = doc,
             Item::Machine(item) => item.doc = doc,
+            Item::Fn(_) => {}
         }
     }
 }
@@ -1736,10 +1767,22 @@ impl Call {
                 ctx.add_node(tir::sem::SymKind::IterConcat, &[iter])
             }
             BuiltinFunction::Zip => {
-                assert!(self.arguments.len() == 2, "zip requires 2 arguments");
-                let lhs = self.arguments[0].lower_with_ctx(ctx);
-                let rhs = self.arguments[1].lower_with_ctx(ctx);
-                ctx.add_node(tir::sem::SymKind::Zip, &[lhs, rhs])
+                assert!(
+                    self.arguments.len() >= 2,
+                    "zip requires at least 2 arguments"
+                );
+                let children: Vec<_> = self
+                    .arguments
+                    .iter()
+                    .map(|arg| arg.lower_with_ctx(ctx))
+                    .collect();
+                ctx.add_node(tir::sem::SymKind::Zip, &children)
+            }
+            BuiltinFunction::Iota => {
+                assert!(self.arguments.len() == 2, "iota requires 2 arguments");
+                let count = self.arguments[0].lower_with_ctx(ctx);
+                let width = self.arguments[1].lower_with_ctx(ctx);
+                ctx.add_node(tir::sem::SymKind::Iota, &[count, width])
             }
             BuiltinFunction::Map => {
                 assert!(self.arguments.len() == 2, "map requires 2 arguments");
@@ -1756,12 +1799,16 @@ impl Call {
             BuiltinFunction::FAdd
             | BuiltinFunction::FSub
             | BuiltinFunction::FMul
-            | BuiltinFunction::FDiv => {
+            | BuiltinFunction::FDiv
+            | BuiltinFunction::FMin
+            | BuiltinFunction::FMax => {
                 let kind = match builtin {
                     BuiltinFunction::FAdd => tir::sem::SymKind::FAdd,
                     BuiltinFunction::FSub => tir::sem::SymKind::FSub,
                     BuiltinFunction::FMul => tir::sem::SymKind::FMul,
-                    _ => tir::sem::SymKind::FDiv,
+                    BuiltinFunction::FDiv => tir::sem::SymKind::FDiv,
+                    BuiltinFunction::FMin => tir::sem::SymKind::FMin,
+                    _ => tir::sem::SymKind::FMax,
                 };
                 assert!(
                     self.arguments.len() == 2,
@@ -1770,6 +1817,30 @@ impl Call {
                 let lhs = self.arguments[0].lower_with_ctx(ctx);
                 let rhs = self.arguments[1].lower_with_ctx(ctx);
                 ctx.add_node(kind, &[lhs, rhs])
+            }
+            BuiltinFunction::AsFloat => {
+                assert!(self.arguments.len() == 1, "asfloat requires 1 argument");
+                let input = self.arguments[0].lower_with_ctx(ctx);
+                ctx.add_node(tir::sem::SymKind::AsFloat, &[input])
+            }
+            BuiltinFunction::FCvt => {
+                assert!(self.arguments.len() == 3, "fcvt requires 3 arguments");
+                let input = self.arguments[0].lower_with_ctx(ctx);
+                let exponent = self.arguments[1].lower_with_ctx(ctx);
+                let mantissa = self.arguments[2].lower_with_ctx(ctx);
+                ctx.add_node(tir::sem::SymKind::FCvt, &[input, exponent, mantissa])
+            }
+            BuiltinFunction::Fma => {
+                assert!(self.arguments.len() == 3, "fma requires 3 arguments");
+                let a = self.arguments[0].lower_with_ctx(ctx);
+                let b = self.arguments[1].lower_with_ctx(ctx);
+                let c = self.arguments[2].lower_with_ctx(ctx);
+                ctx.add_node(tir::sem::SymKind::Fma, &[a, b, c])
+            }
+            BuiltinFunction::Sqrt => {
+                assert!(self.arguments.len() == 1, "sqrt requires 1 argument");
+                let input = self.arguments[0].lower_with_ctx(ctx);
+                ctx.add_node(tir::sem::SymKind::Sqrt, &[input])
             }
             BuiltinFunction::SIToFP => {
                 assert!(self.arguments.len() == 3, "sitofp requires 3 arguments");
@@ -1816,6 +1887,7 @@ impl Item {
             Item::Template(tmpl) => &tmpl.name,
             Item::Unit(su) => &su.name,
             Item::Machine(m) => &m.name,
+            Item::Fn(f) => &f.name,
         }
     }
 

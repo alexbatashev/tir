@@ -57,6 +57,33 @@ TMDL files contain a sequence of items in any order:
 - `register_class` — defines physical registers for one or more ISAs.
 - `template` — reusable instruction template with parameters/operands/encoding/asm.
 - `instruction` — concrete instruction (may inherit from a template) with behavior.
+- `fn` — a pure expression-level helper, inlined at call sites (see below).
+
+### Function Helpers
+
+```
+fn saturating_add(a, b) {
+    sum = zext(a, self.XLEN + 1) + zext(b, self.XLEN + 1);
+    if extract(sum, self.XLEN, self.XLEN) == zext(0b1, 1) { sext(0b1, self.XLEN) } else { extract(sum, self.XLEN - 1, 0) }
+}
+
+instruction AddSat for [RV32I] : RType {
+    ...
+    behavior { rd = saturating_add(rs1, rs2); }
+}
+```
+
+A `fn` item declares a helper usable in `behavior` bodies (including inside
+`map`/`reduce` lambdas). Calls are **inlined on the AST** before semantic
+analysis: the body is substituted with the argument expressions at each call
+site, so there is no runtime call and nothing downstream (instruction
+selection, verification, codegen) is aware of helpers. Bodies may use locals,
+`if`/`else`, and everything else expressions allow; free names (operands,
+register paths, `self` parameters) resolve in the *caller's* scope. Functions
+may call functions, but recursion is rejected, as is an arity mismatch.
+Assignment to a fresh name inside a behavior block introduces a local binding
+visible to later statements of the same block.
+
 
 ### ISA Definition
 
@@ -233,11 +260,23 @@ instruction Add for [RV32I, RV64I] : RType {
   - `map(iter, |x| ...)` — apply a lambda to each lane.
   - `zip(a, b)` — pair two iterators lane-wise, so a binary `map` lambda
     (`map(zip(a, b), |x, y| ...)`) reads both sides as separate parameters.
+    Accepts more than two iterators: a `map` over `zip(a, b, c)` takes a
+    three-parameter lambda (`|x, y, z| ...`), one parameter per zipped
+    iterator.
   - `reduce(iter, |acc, x| ...)` — left-fold a binary lambda over the lanes
     (e.g. a horizontal add).
+  - `iota(n, w)` — an iterator of `n` lanes of `w` bits holding the lane
+    indices 0..n-1. Zip it with another iterator to give a `map` lambda
+    positional awareness (lane index alongside lane value).
   - Lambdas use Rust syntax — `|x| body` or `|a, b| body` — and are valid only
     as the function argument of `map`/`reduce`. A lane-wise vector add is
     `concat(map(zip(split(vs2, n), split(vs1, n)), |a, b| a + b))`.
+  - Lane values may be sub-byte wide (e.g. a mask register split into 1-bit
+    lanes); the simulator packs and unpacks them bit by bit.
+  - An inline conditional `if cond { a } else { b }` (single-expression arms,
+    mandatory `else`) is available in value positions such as lambda bodies —
+    e.g. a masked lane update is
+    `map(zip(mask, new, old), |m, n, o| if m { n } else { o })`.
 - Optional `asm`/`encoding` sections can be provided or inherited.
 
 ## Encoding Section Details

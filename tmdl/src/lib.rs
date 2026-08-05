@@ -3,6 +3,7 @@ mod btor2gen;
 mod compiler;
 mod error;
 mod expander;
+mod fninline;
 mod json;
 mod lexer;
 mod markdown;

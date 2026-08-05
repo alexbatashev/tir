@@ -83,8 +83,12 @@ fn compile_asm_template(template: &str) -> Vec<AsmAction> {
             }
             c if c.is_ascii_alphabetic() || c == '_' => {
                 let start = i;
+                // Dots stay in the keyword (e.g. the `v0.t` mask suffix): the
+                // assembly lexer keeps them in the identifier too.
                 while i < bytes.len()
-                    && ((bytes[i] as char).is_ascii_alphanumeric() || bytes[i] as char == '_')
+                    && ((bytes[i] as char).is_ascii_alphanumeric()
+                        || bytes[i] as char == '_'
+                        || bytes[i] as char == '.')
                 {
                     i += 1;
                 }

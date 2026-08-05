@@ -24,7 +24,12 @@ pub fn infer_types<V>(
         let inferred = match kind {
             SymKind::Symbol | SymKind::Arg => inference.fresh_type(),
             SymKind::Constant => inference.fresh_bits(),
-            SymKind::FAdd | SymKind::FSub | SymKind::FMul | SymKind::FDiv => {
+            SymKind::FAdd
+            | SymKind::FSub
+            | SymKind::FMul
+            | SymKind::FDiv
+            | SymKind::FMin
+            | SymKind::FMax => {
                 let ty = inference.fresh_float();
                 inference.unify(&child(0), &ty)?;
                 inference.unify(&child(1), &ty)?;
@@ -52,6 +57,21 @@ pub fn infer_types<V>(
                 const_u64(graph, children[1])
                     .map(|width| SemType::bits(width as u32))
                     .unwrap_or_else(|| inference.fresh_bits())
+            }
+            SymKind::AsFloat => inference.fresh_float(),
+            SymKind::FCvt => {
+                let operand = inference.fresh_float();
+                inference.unify(&child(0), &operand)?;
+                for slot in 1..3 {
+                    let width = inference.fresh_bits();
+                    inference.unify(&child(slot), &width)?;
+                }
+                match (const_u64(graph, children[1]), const_u64(graph, children[2])) {
+                    (Some(exponent), Some(mantissa)) => SemType::Float(
+                        crate::lang::FloatFormat::new(exponent as u32, mantissa as u32),
+                    ),
+                    _ => inference.fresh_float(),
+                }
             }
             SymKind::Eq | SymKind::Ne | SymKind::Lt | SymKind::Le | SymKind::Gt | SymKind::Ge => {
                 let operand = inference.fresh_type();
@@ -158,12 +178,30 @@ pub fn infer_types<V>(
                 .unwrap_or_else(|| inference.fresh_bits()),
             SymKind::StoreMemory | SymKind::Fence => SemType::Unit,
             SymKind::Split => SemType::Iterator(Box::new(inference.fresh_type())),
+            SymKind::Iota => {
+                let lane = const_u64(graph, children[1])
+                    .map(|w| SemType::bits(w as u32))
+                    .unwrap_or_else(|| inference.fresh_bits());
+                SemType::Iterator(Box::new(lane))
+            }
             SymKind::Zip => {
-                let lhs = inference.fresh_type();
-                let rhs = inference.fresh_type();
-                inference.unify(&child(0), &SemType::Iterator(Box::new(lhs.clone())))?;
-                inference.unify(&child(1), &SemType::Iterator(Box::new(rhs.clone())))?;
-                SemType::Iterator(Box::new(SemType::Pair(Box::new(lhs), Box::new(rhs))))
+                // An n-ary zip's element is its component types nested
+                // right-associatively: zip(a, b, c) lanes are Pair(a, Pair(b, c)).
+                let mut components = Vec::with_capacity(children.len());
+                for slot in 0..children.len() {
+                    let component = inference.fresh_type();
+                    inference.unify(
+                        &child(slot),
+                        &SemType::Iterator(Box::new(component.clone())),
+                    )?;
+                    components.push(component);
+                }
+                let element = components
+                    .into_iter()
+                    .rev()
+                    .reduce(|rest, component| SemType::Pair(Box::new(component), Box::new(rest)))
+                    .expect("zip requires at least 2 operands");
+                SemType::Iterator(Box::new(element))
             }
             SymKind::Map => {
                 let element = inference.fresh_type();
@@ -232,9 +270,21 @@ pub fn infer_widths<V>(
                 | SymKind::FAdd
                 | SymKind::FSub
                 | SymKind::FMul
-                | SymKind::FDiv => child_width(0),
+                | SymKind::FDiv
+                | SymKind::FMin
+                | SymKind::FMax => child_width(0),
 
                 SymKind::SIToFP | SymKind::UIToFP => match (
+                    children.get(1).and_then(|&c| const_u64(graph, c)),
+                    children.get(2).and_then(|&c| const_u64(graph, c)),
+                ) {
+                    (Some(exponent), Some(mantissa)) => Some(1 + exponent as u32 + mantissa as u32),
+                    _ => None,
+                },
+
+                SymKind::AsFloat => child_width(0),
+
+                SymKind::FCvt => match (
                     children.get(1).and_then(|&c| const_u64(graph, c)),
                     children.get(2).and_then(|&c| const_u64(graph, c)),
                 ) {
@@ -288,6 +338,7 @@ pub fn infer_widths<V>(
                 | SymKind::Zip
                 | SymKind::IterConcat
                 | SymKind::Split
+                | SymKind::Iota
                 | SymKind::Reduce
                 | SymKind::Arg => None,
                 _ => unreachable!("operator has no width rule"),

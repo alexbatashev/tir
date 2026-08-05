@@ -1,0 +1,453 @@
+//! Vector permutation instructions from the RISC-V Vector extension: register
+//! slides, scalar slides, gathers, and the integer scalar moves.
+//!
+//! Lane references use the shift formulation: element `k` of a source register
+//! is `extract(vs2 >> (k * sew), sew - 1, 0)`, which reads as zero when `k`
+//! runs off the register — the shift saturates. Gathers and down-slides
+//! additionally guard the index against VLMAX, which the shift alone does not
+//! cover for fractional LMUL (and which the spec requires to produce zero).
+//!
+//! vcompress is not modeled: packing the active lanes of a register needs a
+//! data-dependent cross-lane compaction (a per-lane "index of the i-th set
+//! bit"), which the behavior language cannot express today; the instruction
+//! keeps its encoding and assembly but has no semantics (`todo()`).
+
+// Slide/gather forms: OPIVX (rs1 offset/index) and OPIVI (uimm5).
+template OpSlideVX for [RVV] {
+    param MNEMONIC: String;
+    param FUNCT6: bits<6>;
+    param FUNCT3: bits<3> = 0b100;
+    param VM: bits<1> = 0b1;
+    param OPCODE: bits<7> = 0b1010111;
+
+    operands {
+        vd: VR,
+        vs2: VR,
+        rs1: GPR,
+    }
+
+    encoding {
+        0..6 => OPCODE,
+        7..11 => vd,
+        12..14 => FUNCT3,
+        15..19 => rs1,
+        20..24 => vs2,
+        25 => VM,
+        26..31 => FUNCT6,
+    }
+
+    asm {
+        "{self.MNEMONIC} {vd}, {vs2}, {rs1}"
+    }
+
+    schedule { units = [WriteIALU]; }
+}
+
+template OpSlideVXM for [RVV] : OpSlideVX {
+    param VM: bits<1> = 0b0;
+
+    asm {
+        "{self.MNEMONIC} {vd}, {vs2}, {rs1}, v0.t"
+    }
+}
+
+template OpSlideVI for [RVV] {
+    param MNEMONIC: String;
+    param FUNCT6: bits<6>;
+    param FUNCT3: bits<3> = 0b011;
+    param VM: bits<1> = 0b1;
+    param OPCODE: bits<7> = 0b1010111;
+
+    operands {
+        vd: VR,
+        vs2: VR,
+        imm: bits<5>,
+    }
+
+    encoding {
+        0..6 => OPCODE,
+        7..11 => vd,
+        12..14 => FUNCT3,
+        15..19 => imm,
+        20..24 => vs2,
+        25 => VM,
+        26..31 => FUNCT6,
+    }
+
+    asm {
+        "{self.MNEMONIC} {vd}, {vs2}, {imm}"
+    }
+
+    schedule { units = [WriteIALU]; }
+}
+
+template OpSlideVIM for [RVV] : OpSlideVI {
+    param VM: bits<1> = 0b0;
+
+    asm {
+        "{self.MNEMONIC} {vd}, {vs2}, {imm}, v0.t"
+    }
+}
+
+// vrgather.vv is OPIVV; vslide1up/down are OPMVX.
+template OpGatherVV for [RVV] {
+    param MNEMONIC: String;
+    param FUNCT6: bits<6>;
+    param FUNCT3: bits<3> = 0b000;
+    param VM: bits<1> = 0b1;
+    param OPCODE: bits<7> = 0b1010111;
+
+    operands {
+        vd: VR,
+        vs2: VR,
+        vs1: VR,
+    }
+
+    encoding {
+        0..6 => OPCODE,
+        7..11 => vd,
+        12..14 => FUNCT3,
+        15..19 => vs1,
+        20..24 => vs2,
+        25 => VM,
+        26..31 => FUNCT6,
+    }
+
+    asm {
+        "{self.MNEMONIC} {vd}, {vs2}, {vs1}"
+    }
+
+    schedule { units = [WriteIALU]; }
+}
+
+template OpGatherVVM for [RVV] : OpGatherVV {
+    param VM: bits<1> = 0b0;
+
+    asm {
+        "{self.MNEMONIC} {vd}, {vs2}, {vs1}, v0.t"
+    }
+}
+
+template OpSlide1VX for [RVV] : OpSlideVX {
+    param FUNCT3: bits<3> = 0b110;
+}
+
+template OpSlide1VXM for [RVV] : OpSlide1VX {
+    param VM: bits<1> = 0b0;
+
+    asm {
+        "{self.MNEMONIC} {vd}, {vs2}, {rs1}, v0.t"
+    }
+}
+
+// Element k of vs2 (zero when k runs off the register).
+fn elem_at(vs2, k) {
+    extract(vs2 >> (k * VCFG::sew), (VCFG::sew - zext(0b1, self.XLEN)), 0)
+}
+
+// The scalar source of a .vx form, truncated to SEW.
+fn scalar_sew(rs1) {
+    extract(rs1, (VCFG::sew - zext(0b1, self.XLEN)), 0)
+}
+
+// vslideup: lanes below the offset keep the old destination; lanes at or
+// above it take vs2[i - offset].
+instruction VSlideupVX for [RVV] : OpSlideVX {
+    param MNEMONIC: String = "vslideup.vx";
+    param FUNCT6: bits<6> = 0b001110;
+
+    behavior {
+        vd = concat(map(zip(iota(VCSR::vl, self.XLEN), split(vd, VCSR::vl, VCFG::sew)), |i, old| if i ~< rs1 { old } else { elem_at(vs2, i - rs1) }));
+    }
+}
+
+instruction VSlideupVXM for [RVV] : OpSlideVXM {
+    param MNEMONIC: String = "vslideup.vx";
+    param OPNAME: String = "vslideup.vx.m";
+    param FUNCT6: bits<6> = 0b001110;
+
+    behavior {
+        vd = concat(map(zip(split(VR::v0, VCSR::vl, 1), iota(VCSR::vl, self.XLEN), split(vd, VCSR::vl, VCFG::sew)), |m, i, old| if m & (i ~>= rs1) { elem_at(vs2, i - rs1) } else { old }));
+    }
+}
+
+instruction VSlideupVI for [RVV] : OpSlideVI {
+    param MNEMONIC: String = "vslideup.vi";
+    param FUNCT6: bits<6> = 0b001110;
+
+    behavior {
+        vd = concat(map(zip(iota(VCSR::vl, self.XLEN), split(vd, VCSR::vl, VCFG::sew)), |i, old| if i ~< zext(imm, self.XLEN) { old } else { elem_at(vs2, i - zext(imm, self.XLEN)) }));
+    }
+}
+
+instruction VSlideupVIM for [RVV] : OpSlideVIM {
+    param MNEMONIC: String = "vslideup.vi";
+    param OPNAME: String = "vslideup.vi.m";
+    param FUNCT6: bits<6> = 0b001110;
+
+    behavior {
+        vd = concat(map(zip(split(VR::v0, VCSR::vl, 1), iota(VCSR::vl, self.XLEN), split(vd, VCSR::vl, VCFG::sew)), |m, i, old| if m & (i ~>= zext(imm, self.XLEN)) { elem_at(vs2, i - zext(imm, self.XLEN)) } else { old }));
+    }
+}
+
+// vslidedown: lane i takes vs2[i + offset], zero past VLMAX.
+instruction VSlidedownVX for [RVV] : OpSlideVX {
+    param MNEMONIC: String = "vslidedown.vx";
+    param FUNCT6: bits<6> = 0b001111;
+
+    behavior {
+        vd = concat(map(iota(VCSR::vl, self.XLEN), |i| if (i + rs1) ~< current_vlmax() { elem_at(vs2, i + rs1) } else { zext(0b0, VCFG::sew) }));
+    }
+}
+
+instruction VSlidedownVXM for [RVV] : OpSlideVXM {
+    param MNEMONIC: String = "vslidedown.vx";
+    param OPNAME: String = "vslidedown.vx.m";
+    param FUNCT6: bits<6> = 0b001111;
+
+    behavior {
+        vd = concat(map(zip(split(VR::v0, VCSR::vl, 1), iota(VCSR::vl, self.XLEN), split(vd, VCSR::vl, VCFG::sew)), |m, i, old| if m { if (i + rs1) ~< current_vlmax() { elem_at(vs2, i + rs1) } else { zext(0b0, VCFG::sew) } } else { old }));
+    }
+}
+
+instruction VSlidedownVI for [RVV] : OpSlideVI {
+    param MNEMONIC: String = "vslidedown.vi";
+    param FUNCT6: bits<6> = 0b001111;
+
+    behavior {
+        vd = concat(map(iota(VCSR::vl, self.XLEN), |i| if (i + zext(imm, self.XLEN)) ~< current_vlmax() { elem_at(vs2, i + zext(imm, self.XLEN)) } else { zext(0b0, VCFG::sew) }));
+    }
+}
+
+instruction VSlidedownVIM for [RVV] : OpSlideVIM {
+    param MNEMONIC: String = "vslidedown.vi";
+    param OPNAME: String = "vslidedown.vi.m";
+    param FUNCT6: bits<6> = 0b001111;
+
+    behavior {
+        vd = concat(map(zip(split(VR::v0, VCSR::vl, 1), iota(VCSR::vl, self.XLEN), split(vd, VCSR::vl, VCFG::sew)), |m, i, old| if m { if (i + zext(imm, self.XLEN)) ~< current_vlmax() { elem_at(vs2, i + zext(imm, self.XLEN)) } else { zext(0b0, VCFG::sew) } } else { old }));
+    }
+}
+
+// vslide1up: lane 0 takes the scalar; lane i takes vs2[i - 1].
+instruction VSlide1upVX for [RVV] : OpSlide1VX {
+    param MNEMONIC: String = "vslide1up.vx";
+    param FUNCT6: bits<6> = 0b001110;
+
+    behavior {
+        vd = concat(map(iota(VCSR::vl, self.XLEN), |i| if i == zext(0b0, self.XLEN) { scalar_sew(rs1) } else { elem_at(vs2, i - zext(0b1, self.XLEN)) }));
+    }
+}
+
+instruction VSlide1upVXM for [RVV] : OpSlide1VXM {
+    param MNEMONIC: String = "vslide1up.vx";
+    param OPNAME: String = "vslide1up.vx.m";
+    param FUNCT6: bits<6> = 0b001110;
+
+    behavior {
+        vd = concat(map(zip(split(VR::v0, VCSR::vl, 1), iota(VCSR::vl, self.XLEN), split(vd, VCSR::vl, VCFG::sew)), |m, i, old| if m { if i == zext(0b0, self.XLEN) { scalar_sew(rs1) } else { elem_at(vs2, i - zext(0b1, self.XLEN)) } } else { old }));
+    }
+}
+
+// vslide1down: lane i takes vs2[i + 1]; the last active lane takes the scalar.
+instruction VSlide1downVX for [RVV] : OpSlide1VX {
+    param MNEMONIC: String = "vslide1down.vx";
+    param FUNCT6: bits<6> = 0b001111;
+
+    behavior {
+        vd = concat(map(iota(VCSR::vl, self.XLEN), |i| if (i + zext(0b1, self.XLEN)) ~< VCSR::vl { elem_at(vs2, i + zext(0b1, self.XLEN)) } else { scalar_sew(rs1) }));
+    }
+}
+
+instruction VSlide1downVXM for [RVV] : OpSlide1VXM {
+    param MNEMONIC: String = "vslide1down.vx";
+    param OPNAME: String = "vslide1down.vx.m";
+    param FUNCT6: bits<6> = 0b001111;
+
+    behavior {
+        vd = concat(map(zip(split(VR::v0, VCSR::vl, 1), iota(VCSR::vl, self.XLEN), split(vd, VCSR::vl, VCFG::sew)), |m, i, old| if m { if (i + zext(0b1, self.XLEN)) ~< VCSR::vl { elem_at(vs2, i + zext(0b1, self.XLEN)) } else { scalar_sew(rs1) } } else { old }));
+    }
+}
+
+// vrgather: lane i takes vs2[idx], zero when the index reaches VLMAX.
+instruction VRgatherVV for [RVV] : OpGatherVV {
+    param MNEMONIC: String = "vrgather.vv";
+    param FUNCT6: bits<6> = 0b001100;
+
+    behavior {
+        vd = concat(map(split(vs1, VCSR::vl, VCFG::sew), |idx| if zext(idx, self.XLEN) ~< current_vlmax() { elem_at(vs2, zext(idx, self.XLEN)) } else { zext(0b0, VCFG::sew) }));
+    }
+}
+
+instruction VRgatherVVM for [RVV] : OpGatherVVM {
+    param MNEMONIC: String = "vrgather.vv";
+    param OPNAME: String = "vrgather.vv.m";
+    param FUNCT6: bits<6> = 0b001100;
+
+    behavior {
+        vd = concat(map(zip(split(VR::v0, VCSR::vl, 1), split(vs1, VCSR::vl, VCFG::sew), split(vd, VCSR::vl, VCFG::sew)), |m, idx, old| if m { if zext(idx, self.XLEN) ~< current_vlmax() { elem_at(vs2, zext(idx, self.XLEN)) } else { zext(0b0, VCFG::sew) } } else { old }));
+    }
+}
+
+instruction VRgatherVX for [RVV] : OpSlideVX {
+    param MNEMONIC: String = "vrgather.vx";
+    param FUNCT6: bits<6> = 0b001100;
+
+    behavior {
+        vd = concat(map(iota(VCSR::vl, self.XLEN), |i| if rs1 ~< current_vlmax() { elem_at(vs2, rs1) } else { zext(0b0, VCFG::sew) }));
+    }
+}
+
+instruction VRgatherVXM for [RVV] : OpSlideVXM {
+    param MNEMONIC: String = "vrgather.vx";
+    param OPNAME: String = "vrgather.vx.m";
+    param FUNCT6: bits<6> = 0b001100;
+
+    behavior {
+        vd = concat(map(zip(split(VR::v0, VCSR::vl, 1), split(vd, VCSR::vl, VCFG::sew)), |m, old| if m { if rs1 ~< current_vlmax() { elem_at(vs2, rs1) } else { zext(0b0, VCFG::sew) } } else { old }));
+    }
+}
+
+instruction VRgatherVI for [RVV] : OpSlideVI {
+    param MNEMONIC: String = "vrgather.vi";
+    param FUNCT6: bits<6> = 0b001100;
+
+    behavior {
+        vd = concat(map(iota(VCSR::vl, self.XLEN), |i| if zext(imm, self.XLEN) ~< current_vlmax() { elem_at(vs2, zext(imm, self.XLEN)) } else { zext(0b0, VCFG::sew) }));
+    }
+}
+
+instruction VRgatherVIM for [RVV] : OpSlideVIM {
+    param MNEMONIC: String = "vrgather.vi";
+    param OPNAME: String = "vrgather.vi.m";
+    param FUNCT6: bits<6> = 0b001100;
+
+    behavior {
+        vd = concat(map(zip(split(VR::v0, VCSR::vl, 1), split(vd, VCSR::vl, VCFG::sew)), |m, old| if m { if zext(imm, self.XLEN) ~< current_vlmax() { elem_at(vs2, zext(imm, self.XLEN)) } else { zext(0b0, VCFG::sew) } } else { old }));
+    }
+}
+
+// vrgatherei16: the indices are packed 16-bit lanes of vs1 regardless of SEW.
+instruction VRgatherei16VV for [RVV] : OpGatherVV {
+    param MNEMONIC: String = "vrgatherei16.vv";
+    param FUNCT6: bits<6> = 0b001110;
+
+    behavior {
+        vd = concat(map(split(vs1, VCSR::vl, 16), |idx| if zext(idx, self.XLEN) ~< current_vlmax() { elem_at(vs2, zext(idx, self.XLEN)) } else { zext(0b0, VCFG::sew) }));
+    }
+}
+
+instruction VRgatherei16VVM for [RVV] : OpGatherVVM {
+    param MNEMONIC: String = "vrgatherei16.vv";
+    param OPNAME: String = "vrgatherei16.vv.m";
+    param FUNCT6: bits<6> = 0b001110;
+
+    behavior {
+        vd = concat(map(zip(split(VR::v0, VCSR::vl, 1), split(vs1, VCSR::vl, 16), split(vd, VCSR::vl, VCFG::sew)), |m, idx, old| if m { if zext(idx, self.XLEN) ~< current_vlmax() { elem_at(vs2, zext(idx, self.XLEN)) } else { zext(0b0, VCFG::sew) } } else { old }));
+    }
+}
+
+// vcompress packs the active elements of vs2 at the bottom of vd. Modeling it
+// needs a per-lane "index of the i-th set bit" computation, which the
+// behavior language cannot express; the encoding and assembly are specified,
+// the semantics are not.
+instruction VCompressVM for [RVV] {
+    param MNEMONIC: String = "vcompress.vm";
+    param FUNCT6: bits<6> = 0b010111;
+    param FUNCT3: bits<3> = 0b010;
+    param OPCODE: bits<7> = 0b1010111;
+
+    operands {
+        vd: VR,
+        vs2: VR,
+        vs1: VR,
+    }
+
+    encoding {
+        0..6 => OPCODE,
+        7..11 => vd,
+        12..14 => FUNCT3,
+        15..19 => vs1,
+        20..24 => vs2,
+        25 => 0b1,
+        26..31 => FUNCT6,
+    }
+
+    asm {
+        "{self.MNEMONIC} {vd}, {vs2}, {vs1}"
+    }
+
+    behavior {
+        todo()
+    }
+
+    schedule { units = [WriteIALU]; }
+}
+
+// Integer scalar moves. vmv.x.s reads element 0 of vs2 regardless of vl
+// (truncating when SEW > XLEN, sign-extending otherwise); vmv.s.x writes
+// element 0 of vd only when vl > 0, leaving the rest to the tail policy
+// (zero here, a legal tail-agnostic choice).
+instruction VMvXS for [RVV] {
+    param MNEMONIC: String = "vmv.x.s";
+    param FUNCT6: bits<6> = 0b010000;
+    param FUNCT3: bits<3> = 0b010;
+    param OPCODE: bits<7> = 0b1010111;
+
+    operands {
+        rd: GPR,
+        vs2: VR,
+    }
+
+    encoding {
+        0..6 => OPCODE,
+        7..11 => rd,
+        12..14 => FUNCT3,
+        15..19 => 0b0,
+        20..24 => vs2,
+        25 => 0b1,
+        26..31 => FUNCT6,
+    }
+
+    asm {
+        "{self.MNEMONIC} {rd}, {vs2}"
+    }
+
+    behavior {
+        rd = if VCFG::sew ~> zext(self.XLEN, self.XLEN) { extract(vs2, self.XLEN - 1, 0) } else { sext(extract(vs2, (VCFG::sew - zext(0b1, self.XLEN)), 0), self.XLEN) };
+    }
+
+    schedule { units = [WriteIALU]; }
+}
+
+instruction VMvSX for [RVV] {
+    param MNEMONIC: String = "vmv.s.x";
+    param FUNCT6: bits<6> = 0b010000;
+    param FUNCT3: bits<3> = 0b110;
+    param OPCODE: bits<7> = 0b1010111;
+
+    operands {
+        vd: VR,
+        rs1: GPR,
+    }
+
+    encoding {
+        0..6 => OPCODE,
+        7..11 => vd,
+        12..14 => FUNCT3,
+        15..19 => rs1,
+        20..24 => 0b0,
+        25 => 0b1,
+        26..31 => FUNCT6,
+    }
+
+    asm {
+        "{self.MNEMONIC} {vd}, {rs1}"
+    }
+
+    behavior {
+        vd = if VCSR::vl == zext(0b0, self.XLEN) { vd } else { sext(extract(rs1, if VCFG::sew ~> zext(self.XLEN, self.XLEN) { zext(self.XLEN - 1, self.XLEN) } else { VCFG::sew - zext(0b1, self.XLEN) }, 0), VCFG::sew) };
+    }
+
+    schedule { units = [WriteIALU]; }
+}
