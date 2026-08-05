@@ -248,6 +248,7 @@ fn emit_instructions<'a>(
             && defined_register_operands.len() <= 1
             && !behavior_references_pc(&inst.behavior, &pc_classes)
             && !behavior_has_atomic_ops(&inst.behavior)
+            && !behavior_has_dynamic_sized_memory_access(&inst.behavior)
             && !behavior_reads_flag_register(&inst.behavior, &flag_classes)
         {
             analyze_instruction_semantics(
@@ -1172,6 +1173,7 @@ fn emit_instructions<'a>(
 
         if let Some(rhs) = codegen_rhs
             && !behavior_has_atomic_ops(&inst.behavior)
+            && !behavior_has_dynamic_sized_memory_access(&inst.behavior)
             && let Some(impl_ts) = emit_as_sem_expr_impl(rhs, &name_ident, &numeric_params)
         {
             as_sem_expr_impls.push(impl_ts);
@@ -1658,6 +1660,12 @@ fn emit_instructions<'a>(
                     ) -> Result<(), ()> {
                         #builder_binding = #builder_ident::new(context);
                         #(#parse_steps)*
+                        // A trailing comma means the input has more operands than
+                        // this form — another candidate with the same mnemonic
+                        // (e.g. a masked ", v0.t" twin) must get its turn.
+                        if matches!(#parser_param.peek(), Some(tir::backend::Token::Comma)) {
+                            return Err(());
+                        }
                         let op = op_builder.build();
                         builder.insert(op);
                         Ok(())

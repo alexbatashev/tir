@@ -273,6 +273,7 @@ pub(super) enum BuiltinFunction {
     Map,
     Reduce,
     Zip,
+    Iota,
     #[serde(rename = "fadd")]
     FAdd,
     #[serde(rename = "fsub")]
@@ -281,6 +282,18 @@ pub(super) enum BuiltinFunction {
     FMul,
     #[serde(rename = "fdiv")]
     FDiv,
+    #[serde(rename = "fmin")]
+    FMin,
+    #[serde(rename = "fmax")]
+    FMax,
+    #[serde(rename = "asfloat")]
+    AsFloat,
+    #[serde(rename = "fcvt")]
+    FCvt,
+    #[serde(rename = "fma")]
+    Fma,
+    #[serde(rename = "sqrt")]
+    Sqrt,
     #[serde(rename = "sitofp")]
     SIToFP,
     #[serde(rename = "uitofp")]
@@ -315,10 +328,17 @@ impl From<ast::BuiltinFunction> for BuiltinFunction {
             ast::BuiltinFunction::Map => Self::Map,
             ast::BuiltinFunction::Reduce => Self::Reduce,
             ast::BuiltinFunction::Zip => Self::Zip,
+            ast::BuiltinFunction::Iota => Self::Iota,
             ast::BuiltinFunction::FAdd => Self::FAdd,
             ast::BuiltinFunction::FSub => Self::FSub,
             ast::BuiltinFunction::FMul => Self::FMul,
             ast::BuiltinFunction::FDiv => Self::FDiv,
+            ast::BuiltinFunction::FMin => Self::FMin,
+            ast::BuiltinFunction::FMax => Self::FMax,
+            ast::BuiltinFunction::AsFloat => Self::AsFloat,
+            ast::BuiltinFunction::FCvt => Self::FCvt,
+            ast::BuiltinFunction::Fma => Self::Fma,
+            ast::BuiltinFunction::Sqrt => Self::Sqrt,
             ast::BuiltinFunction::SIToFP => Self::SIToFP,
             ast::BuiltinFunction::UIToFP => Self::UIToFP,
             ast::BuiltinFunction::FPToSI => Self::FPToSI,

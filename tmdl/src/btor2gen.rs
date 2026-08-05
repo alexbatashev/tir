@@ -361,6 +361,10 @@ fn emit(graph: &ExprPostGraph, node: NodeId, r: &Resolver<'_>, b: &mut Btor2) ->
         | ExprKind::FSub
         | ExprKind::FMul
         | ExprKind::FDiv
+        | ExprKind::FMin
+        | ExprKind::FMax
+        | ExprKind::AsFloat
+        | ExprKind::FCvt
         | ExprKind::SIToFP
         | ExprKind::UIToFP
         | ExprKind::FPToSI
@@ -369,6 +373,7 @@ fn emit(graph: &ExprPostGraph, node: NodeId, r: &Resolver<'_>, b: &mut Btor2) ->
         | ExprKind::Zip
         | ExprKind::IterConcat
         | ExprKind::Split
+        | ExprKind::Iota
         | ExprKind::Reduce
         | ExprKind::Arg
         | ExprKind::LoadReserved

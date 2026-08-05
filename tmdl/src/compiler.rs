@@ -212,6 +212,12 @@ impl Compiler {
         crate::ast::resolve_register_class_inheritance(&mut parsed_files);
         crate::ast::resolve_abi_inheritance(&mut parsed_files);
 
+        let inline_diags = crate::fninline::inline_functions(&mut parsed_files);
+        if !inline_diags.is_empty() {
+            print_diags(inline_diags, &self.inputs, &sources);
+            return Ok(None);
+        }
+
         let sema_diags = sema_analyze(&parsed_files, self.text_only);
         if !sema_diags.is_empty() {
             print_diags(sema_diags, &self.inputs, &sources);

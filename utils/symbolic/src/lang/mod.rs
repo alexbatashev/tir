@@ -144,6 +144,23 @@ pub enum SymKind {
     StateIf,
     StateTry,
     StateHandler,
+    /// `[n, w]`: an iterator of `n` lanes of `w` bits holding the values
+    /// 0..n-1 — the lane indices. Gives `map`/`zip` lambdas positional
+    /// awareness (RVV `vid.v`, slides, gathers, per-lane addresses).
+    // #[arity = 2]
+    Iota,
+    /// IEEE 754-2019 minimumNumber/maximumNumber over binary floats (one NaN
+    /// operand yields the other; both NaN yields the canonical NaN).
+    FMin,
+    FMax,
+    /// Reinterpret an integer's bit pattern as the binary float of its width
+    /// (16/32/64) — the float-domain view needed by IEEE-correct compares.
+    // #[arity = 1]
+    AsFloat,
+    /// `[value, exponent width, mantissa width]`: convert a float (given as its
+    /// register bits) between IEEE binary formats.
+    // #[arity = 3]
+    FCvt,
 }
 
 impl SymKind {
@@ -176,6 +193,7 @@ impl SymKind {
             | SymKind::Bitcast
             | SymKind::Log2Ceil
             | SymKind::Sqrt
+            | SymKind::AsFloat
             | SymKind::IterConcat => 1,
             SymKind::If
             | SymKind::Clamp
@@ -185,7 +203,8 @@ impl SymKind {
             | SymKind::Fence
             | SymKind::Fma
             | SymKind::SIToFP
-            | SymKind::UIToFP => 3,
+            | SymKind::UIToFP
+            | SymKind::FCvt => 3,
             SymKind::StoreMemory | SymKind::StoreConditional => 4,
             SymKind::AtomicRmw => 5,
             _ => 2,
@@ -198,6 +217,7 @@ impl SymKind {
     pub fn accepts_arity(&self, n: usize) -> bool {
         match self {
             SymKind::Split => n == 2 || n == 3,
+            SymKind::Zip => n >= 2,
             SymKind::StateAssign
             | SymKind::StateStore
             | SymKind::StateStoreConditional

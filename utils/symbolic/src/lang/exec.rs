@@ -284,9 +284,10 @@ fn eval_divrem(kind: SymKind, c: &impl Fn(usize) -> Value) -> Option<Value> {
 /// bit-reinterpreting integer path. Only binary32/binary64 registers exist.
 fn float_format(width: u32, op: &str) -> (u32, u32) {
     match width {
+        16 => (5, 10),
         32 => (8, 23),
         64 => (11, 52),
-        other => panic!("{op} requires a 32- or 64-bit operand, got {other} bits"),
+        other => panic!("{op} requires a 16-, 32- or 64-bit operand, got {other} bits"),
     }
 }
 
@@ -400,6 +401,27 @@ fn split_bits(value: Value, n: usize) -> Value {
 
 fn split_bits_lanes(value: Value, n: usize, width: usize) -> Value {
     let bits = as_raw_bits(value);
+    if !width.is_multiple_of(8) {
+        // Sub-byte lanes (e.g. an RVV mask register's 1-bit elements): extract
+        // bit ranges directly. Lane values are APInts, so the existing
+        // 64-bit lane ceiling applies here too.
+        assert!(
+            width <= 64,
+            "sub-byte lanes wider than 64 bits are unsupported, got {width}"
+        );
+        let lanes = (0..n)
+            .map(|lane| {
+                let mut lane_value = 0u64;
+                for bit in 0..width {
+                    let at = lane * width + bit;
+                    let byte = bits.bytes().get(at / 8).copied().unwrap_or(0);
+                    lane_value |= (u64::from(byte >> (at % 8)) & 1) << bit;
+                }
+                Value::Int(APInt::new(width as u32, lane_value))
+            })
+            .collect();
+        return Value::Iterator(lanes);
+    }
     let lanes = bits
         .split_lanes(n, width)
         .into_iter()
@@ -413,16 +435,36 @@ fn concat_lanes(value: Value) -> Value {
     let Value::Iterator(lanes) = value else {
         panic!("concat requires an iterator operand");
     };
-    let raw: Vec<RawBits> = lanes
+    // Each lane as (width in bits, little-endian bytes holding at least those bits).
+    let lanes: Vec<(usize, Vec<u8>)> = lanes
         .into_iter()
         .map(|lane| match lane {
-            Value::Int(i) => RawBits::from_apint(&i),
-            Value::Float(f) => RawBits::from_apfloat(&f),
-            Value::RawBits(b) => b,
+            Value::Int(i) => (i.width() as usize, i.to_u64().to_le_bytes().to_vec()),
+            Value::Float(f) => (f.bit_width() as usize, RawBits::from_apfloat(&f).bytes().to_vec()),
+            Value::RawBits(b) => (b.width(), b.bytes().to_vec()),
             Value::Iterator(_) => panic!("concat lanes must be scalar"),
         })
         .collect();
-    Value::RawBits(RawBits::concat(&raw))
+    if lanes.iter().all(|(width, _)| width.is_multiple_of(8)) {
+        let raw: Vec<RawBits> = lanes
+            .into_iter()
+            .map(|(width, bytes)| RawBits::from_bytes(bytes[..width / 8].to_vec()))
+            .collect();
+        return Value::RawBits(RawBits::concat(&raw));
+    }
+    // Sub-byte lanes (packed mask bits): assemble the value bit by bit.
+    let total: usize = lanes.iter().map(|(width, _)| width).sum();
+    let mut storage = vec![0u8; total.div_ceil(8)];
+    let mut at = 0;
+    for (width, bytes) in &lanes {
+        for bit in 0..*width {
+            if (bytes[bit / 8] >> (bit % 8)) & 1 == 1 {
+                storage[at / 8] |= 1 << (at % 8);
+            }
+            at += 1;
+        }
+    }
+    Value::RawBits(RawBits::from_bytes(storage))
 }
 
 fn eval_node<V, M: Memory>(
@@ -506,17 +548,23 @@ fn eval_node<V, M: Memory>(
             }
         }
         SymKind::Zip => {
-            let (Value::Iterator(lhs), Value::Iterator(rhs)) = (c(0), c(1)) else {
-                panic!("zip requires iterator operands");
-            };
+            let arity = graph.children(node).count();
+            let iters: Vec<Vec<Value>> = (0..arity)
+                .map(|slot| match c(slot) {
+                    Value::Iterator(elems) => elems,
+                    _ => panic!("zip requires iterator operands"),
+                })
+                .collect();
+            let len = iters[0].len();
             assert!(
-                lhs.len() == rhs.len(),
+                iters.iter().all(|iter| iter.len() == len),
                 "zip requires equal-length iterators"
             );
             Value::Iterator(
-                lhs.into_iter()
-                    .zip(rhs)
-                    .map(|(a, b)| Value::Iterator(vec![a, b]))
+                (0..len)
+                    .map(|lane| {
+                        Value::Iterator(iters.iter().map(|iter| iter[lane].clone()).collect())
+                    })
                     .collect(),
             )
         }
@@ -534,6 +582,15 @@ fn eval_node<V, M: Memory>(
             }
         }
         SymKind::IterConcat => concat_lanes(c(0)),
+        SymKind::Iota => {
+            let count = as_int!(c(0), "iota").to_u64();
+            let width = as_int!(c(1), "iota").to_u64() as u32;
+            Value::Iterator(
+                (0..count)
+                    .map(|index| Value::Int(APInt::new(width, index)))
+                    .collect(),
+            )
+        }
         SymKind::Symbol => {
             let SymPayload::SymbolId(id) = graph.get_leaf_data(node).unwrap() else {
                 panic!("Symbol node must have SymbolId payload");
@@ -557,6 +614,29 @@ fn eval_node<V, M: Memory>(
         SymKind::FSub => float_binop(c(0), c(1), APFloat::sub, "fsub"),
         SymKind::FMul => float_binop(c(0), c(1), APFloat::mul, "fmul"),
         SymKind::FDiv => float_binop(c(0), c(1), APFloat::div, "fdiv"),
+        SymKind::FMin => float_binop(c(0), c(1), APFloat::minnum, "fmin"),
+        SymKind::FMax => float_binop(c(0), c(1), APFloat::maxnum, "fmax"),
+        SymKind::AsFloat => match c(0) {
+            Value::Int(v) => {
+                let (exp, mant) = float_format(v.width(), "asfloat");
+                Value::Float(APFloat::from_bits(exp, mant, false, v.to_u64() as u128))
+            }
+            Value::Float(f) => Value::Float(f),
+            _ => panic!("asfloat requires a scalar operand"),
+        },
+        SymKind::FCvt => {
+            let (value, width) = match c(0) {
+                Value::Int(v) => (v.to_u64() as u128, v.width()),
+                Value::Float(f) => (f.to_bits(), f.bit_width()),
+                _ => panic!("fcvt requires a scalar operand"),
+            };
+            let (exp, mant) = float_format(width, "fcvt");
+            let exponent = as_int!(c(1), "fcvt").to_u64() as u32;
+            let mantissa = as_int!(c(2), "fcvt").to_u64() as u32;
+            let converted =
+                APFloat::from_bits(exp, mant, false, value).convert(exponent, mantissa, false);
+            Value::Int(APInt::new(converted.bit_width(), converted.to_bits() as u64))
+        }
         SymKind::SIToFP => {
             let value = as_int!(c(0), "sitofp").to_i64();
             let exponent = as_int!(c(1), "sitofp").to_u64() as u32;
@@ -1204,6 +1284,73 @@ mod tests {
         assert_eq!(as_i64(execute(&g, &[fv(3.0), fv(2.0)])), 0);
     }
 
+    #[test]
+    fn float_min_returns_the_smaller_or_non_nan_operand() {
+        let mut g = Graph::new();
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
+        inner(&mut g, SymKind::FMin, &[a, b]);
+        assert_eq!(as_f64(execute(&g, &[fv(1.5), fv(-2.5)])), -2.5);
+        assert_eq!(as_f64(execute(&g, &[fv(f64::NAN), fv(-2.5)])), -2.5);
+        assert_eq!(as_f64(execute(&g, &[fv(1.5), fv(f64::NAN)])), 1.5);
+    }
+
+    #[test]
+    fn float_max_returns_the_larger_or_non_nan_operand() {
+        let mut g = Graph::new();
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
+        inner(&mut g, SymKind::FMax, &[a, b]);
+        assert_eq!(as_f64(execute(&g, &[fv(1.5), fv(-2.5)])), 1.5);
+        assert_eq!(as_f64(execute(&g, &[fv(f64::NAN), fv(-2.5)])), -2.5);
+        assert_eq!(as_f64(execute(&g, &[fv(1.5), fv(f64::NAN)])), 1.5);
+    }
+
+    #[test]
+    fn asfloat_reinterprets_register_bits_as_float() {
+        // asfloat(0x3f800000) == 1.0f32; comparisons on the reinterpreted
+        // values are IEEE-correct: NaN != NaN, -0.0 == +0.0.
+        let mut g = Graph::new();
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
+        let fa = inner(&mut g, SymKind::AsFloat, &[a]);
+        let fb = inner(&mut g, SymKind::AsFloat, &[b]);
+        inner(&mut g, SymKind::Lt, &[fa, fb]);
+        let one = APInt::new(32, 0x3f80_0000);
+        let two = APInt::new(32, 0x4000_0000);
+        assert_eq!(as_i64(execute(&g, &[Value::Int(one.clone()), Value::Int(two)])), 1);
+
+        let mut g = Graph::new();
+        let a = sym(&mut g, 0);
+        let fa = inner(&mut g, SymKind::AsFloat, &[a]);
+        inner(&mut g, SymKind::Eq, &[fa, fa]);
+        let nan = APInt::new(32, 0x7fc0_0000);
+        assert_eq!(as_i64(execute(&g, &[Value::Int(nan)])), 0);
+
+        let mut g = Graph::new();
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
+        let fa = inner(&mut g, SymKind::AsFloat, &[a]);
+        let fb = inner(&mut g, SymKind::AsFloat, &[b]);
+        inner(&mut g, SymKind::Eq, &[fa, fb]);
+        let pos_zero = APInt::new(32, 0);
+        let neg_zero = APInt::new(32, 0x8000_0000);
+        assert_eq!(as_i64(execute(&g, &[Value::Int(pos_zero), Value::Int(neg_zero)])), 1);
+    }
+
+    #[test]
+    fn fcvt_converts_between_float_formats() {
+        // fcvt(1.5f32 bits, 11, 52) -> 1.5f64 bits.
+        let mut g = Graph::new();
+        let a = sym(&mut g, 0);
+        let e = int_con(&mut g, 11);
+        let m = int_con(&mut g, 52);
+        inner(&mut g, SymKind::FCvt, &[a, e, m]);
+        let one_half_f32 = Value::Int(APInt::new(32, 0x3fc0_0000));
+        let out = execute(&g, &[one_half_f32]);
+        assert_eq!(as_u64(out), 0x3ff8_0000_0000_0000);
+    }
+
     // ── Iterator nodes ─────────────────────────────────────────────────────
 
     #[test]
@@ -1285,6 +1432,113 @@ mod tests {
 
         let out = execute(&g, &[rb(&[0x01, 0x02]), rb(&[0x03, 0x04])]);
         assert_eq!(raw_bytes(out), vec![0x04, 0x06]);
+    }
+
+    #[test]
+    fn iota_produces_lane_indices() {
+        // iota(4, 8) -> lanes [0, 1, 2, 3] of 8 bits each; concatenated they
+        // form 0x03020100 (lane 0 low).
+        let mut g = Graph::new();
+        let n = int_con(&mut g, 4);
+        let w = int_con(&mut g, 8);
+        let iota = inner(&mut g, SymKind::Iota, &[n, w]);
+        inner(&mut g, SymKind::IterConcat, &[iota]);
+
+        assert_eq!(raw_bytes(execute(&g, &[])), vec![0x00, 0x01, 0x02, 0x03]);
+    }
+
+    #[test]
+    fn iota_zipped_with_split_exposes_index_and_lane() {
+        // map(zip(iota(2, 8), split(0x0201, 2)), |i, x| i + x)
+        //   -> [0 + 1, 1 + 2] = [1, 3].
+        let mut g = Graph::new();
+        let bits = sym(&mut g, 0);
+        let n = int_con(&mut g, 2);
+        let w = int_con(&mut g, 8);
+        let iota = inner(&mut g, SymKind::Iota, &[n, w]);
+        let split = inner(&mut g, SymKind::Split, &[bits, n]);
+        let zip = inner(&mut g, SymKind::Zip, &[iota, split]);
+        let i = arg(&mut g, 0);
+        let x = arg(&mut g, 1);
+        let body = inner(&mut g, SymKind::Add, &[i, x]);
+        let map = inner(&mut g, SymKind::Map, &[zip, body]);
+        inner(&mut g, SymKind::IterConcat, &[map]);
+
+        assert_eq!(raw_bytes(execute(&g, &[rb(&[0x01, 0x02])])), vec![1, 3]);
+    }
+
+    #[test]
+    fn three_way_zip_binds_ternary_lambda_positionally() {
+        // concat(map(zip(a, b, c), |x, y, z| x + y + z)) for
+        // a=[1,2], b=[3,4], c=[5,6] -> lanes [9, 12].
+        let mut g = Graph::new();
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
+        let c_sym = sym(&mut g, 2);
+        let n = int_con(&mut g, 2);
+        let split_a = inner(&mut g, SymKind::Split, &[a, n]);
+        let split_b = inner(&mut g, SymKind::Split, &[b, n]);
+        let split_c = inner(&mut g, SymKind::Split, &[c_sym, n]);
+        let zip = inner(&mut g, SymKind::Zip, &[split_a, split_b, split_c]);
+        let x = arg(&mut g, 0);
+        let y = arg(&mut g, 1);
+        let z = arg(&mut g, 2);
+        let xy = inner(&mut g, SymKind::Add, &[x, y]);
+        let body = inner(&mut g, SymKind::Add, &[xy, z]);
+        let map = inner(&mut g, SymKind::Map, &[zip, body]);
+        inner(&mut g, SymKind::IterConcat, &[map]);
+
+        let out = execute(&g, &[rb(&[0x01, 0x02]), rb(&[0x03, 0x04]), rb(&[0x05, 0x06])]);
+        assert_eq!(raw_bytes(out), vec![9, 12]);
+    }
+
+    #[test]
+    fn masked_select_via_zip_and_if() {
+        // The RVV masked-op shape: lanes of new value, old destination, and a
+        // 1-bit mask combined as |m, new, old| if m { new } else { old }.
+        // new=[10,20], old=[1,2], mask=[1,0] -> [10, 2].
+        let mut g = Graph::new();
+        let new = sym(&mut g, 0);
+        let old = sym(&mut g, 1);
+        let mask = sym(&mut g, 2);
+        let n = int_con(&mut g, 2);
+        let one = int_con(&mut g, 1);
+        let new_lanes = inner(&mut g, SymKind::Split, &[new, n]);
+        let old_lanes = inner(&mut g, SymKind::Split, &[old, n]);
+        let mask_lanes = inner(&mut g, SymKind::Split, &[mask, n, one]);
+        let zip = inner(&mut g, SymKind::Zip, &[mask_lanes, new_lanes, old_lanes]);
+        let m = arg(&mut g, 0);
+        let new_lane = arg(&mut g, 1);
+        let old_lane = arg(&mut g, 2);
+        let zero = int_con(&mut g, 0);
+        let cond = inner(&mut g, SymKind::Ne, &[m, zero]);
+        let body = inner(&mut g, SymKind::If, &[cond, new_lane, old_lane]);
+        let map = inner(&mut g, SymKind::Map, &[zip, body]);
+        inner(&mut g, SymKind::IterConcat, &[map]);
+
+        let out = execute(&g, &[rb(&[10, 20]), rb(&[1, 2]), rb(&[0b01])]);
+        assert_eq!(raw_bytes(out), vec![10, 2]);
+    }
+
+    #[test]
+    fn compare_lanes_concat_into_packed_mask_bits() {
+        // The RVV compare shape: concat(map(zip(a, b), |x, y| x == y)) packs
+        // 1-bit result lanes. a=[1,2], b=[1,3] -> mask bits [1, 0] -> 0b01.
+        let mut g = Graph::new();
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
+        let n = int_con(&mut g, 2);
+        let split_a = inner(&mut g, SymKind::Split, &[a, n]);
+        let split_b = inner(&mut g, SymKind::Split, &[b, n]);
+        let zip = inner(&mut g, SymKind::Zip, &[split_a, split_b]);
+        let x = arg(&mut g, 0);
+        let y = arg(&mut g, 1);
+        let body = inner(&mut g, SymKind::Eq, &[x, y]);
+        let map = inner(&mut g, SymKind::Map, &[zip, body]);
+        inner(&mut g, SymKind::IterConcat, &[map]);
+
+        let out = execute(&g, &[rb(&[1, 2]), rb(&[1, 3])]);
+        assert_eq!(raw_bytes(out), vec![0b01]);
     }
 
     // ── Atomics ─────────────────────────────────────────────────────────────

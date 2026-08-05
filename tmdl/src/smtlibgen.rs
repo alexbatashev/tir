@@ -1641,11 +1641,15 @@ fn emit_sem_expr(
         | SymKind::FSub
         | SymKind::FMul
         | SymKind::FDiv
+        | SymKind::FMin
+        | SymKind::FMax
+        | SymKind::AsFloat
+        | SymKind::FCvt
         | SymKind::SIToFP
         | SymKind::UIToFP => None,
         SymKind::FPToSI | SymKind::FPToUI => None,
         SymKind::Map | SymKind::Zip | SymKind::IterConcat => None,
-        SymKind::Split | SymKind::Reduce | SymKind::Arg => None,
+        SymKind::Split | SymKind::Iota | SymKind::Reduce | SymKind::Arg => None,
         // Load-reserved reads memory (the reservation is a state effect, set by
         // `BehaviorEmitter`); the atomic RMW's value facet is the OLD word.
         SymKind::LoadReserved => read_mem(0, 1),

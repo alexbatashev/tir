@@ -15,6 +15,34 @@ const MODEL_CHECK_SOURCES: &[(&str, &str)] = &[
     ("zicsr.tmdl", include_str!("../defs/zicsr.tmdl")),
     ("perf.tmdl", include_str!("../defs/perf.tmdl")),
     ("vector.tmdl", include_str!("../defs/vector.tmdl")),
+    (
+        "vector_int.tmdl",
+        include_str!("../defs/vector_int.tmdl"),
+    ),
+    (
+        "vector_mask.tmdl",
+        include_str!("../defs/vector_mask.tmdl"),
+    ),
+    (
+        "vector_red.tmdl",
+        include_str!("../defs/vector_red.tmdl"),
+    ),
+    (
+        "vector_perm.tmdl",
+        include_str!("../defs/vector_perm.tmdl"),
+    ),
+    (
+        "vector_widen.tmdl",
+        include_str!("../defs/vector_widen.tmdl"),
+    ),
+    (
+        "vector_fixed.tmdl",
+        include_str!("../defs/vector_fixed.tmdl"),
+    ),
+    (
+        "vector_mem.tmdl",
+        include_str!("../defs/vector_mem.tmdl"),
+    ),
 ];
 
 mod compress;

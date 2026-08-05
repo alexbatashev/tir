@@ -1,0 +1,50 @@
+# RUN: tir mc --march=rv64iv --filetype=obj-ascii %s | filecheck %s --check-prefix=BYTES
+
+# RVV fixed-point arithmetic (saturating, averaging, scaling shifts, clips).
+# Encodings verified bit for bit against LLVM's assembler.
+.global vfixedtest
+vfixedtest:
+    vsaddu.vv v1, v2, v3
+    vsaddu.vi v1, v2, 5
+    vsadd.vv v1, v2, v3, v0.t
+    vsadd.vx v1, v2, x13
+    vssubu.vv v1, v2, v3
+    vssub.vx v1, v2, x13
+    vsmul.vv v1, v2, v3
+    vsmul.vx v1, v2, x13, v0.t
+    vssrl.vv v1, v2, v3
+    vssrl.vi v1, v2, 5
+    vssra.vv v1, v2, v3
+    vssra.vx v1, v2, x13
+    vaaddu.vv v1, v2, v3
+    vaadd.vv v1, v2, v3
+    vaadd.vx v1, v2, x13, v0.t
+    vasubu.vv v1, v2, v3
+    vasub.vx v1, v2, x13
+    vnclipu.wv v1, v2, v3
+    vnclipu.wi v1, v2, 5
+    vnclip.wv v1, v2, v3
+    vnclip.wx v1, v2, x13, v0.t
+
+# BYTES: vfixedtest:
+# BYTES-NEXT: [0xD7, 0x80, 0x21, 0x82]
+# BYTES-NEXT: [0xD7, 0xB0, 0x22, 0x82]
+# BYTES-NEXT: [0xD7, 0x80, 0x21, 0x84]
+# BYTES-NEXT: [0xD7, 0xC0, 0x26, 0x86]
+# BYTES-NEXT: [0xD7, 0x80, 0x21, 0x8A]
+# BYTES-NEXT: [0xD7, 0xC0, 0x26, 0x8E]
+# BYTES-NEXT: [0xD7, 0x80, 0x21, 0x9E]
+# BYTES-NEXT: [0xD7, 0xC0, 0x26, 0x9C]
+# BYTES-NEXT: [0xD7, 0x80, 0x21, 0xAA]
+# BYTES-NEXT: [0xD7, 0xB0, 0x22, 0xAA]
+# BYTES-NEXT: [0xD7, 0x80, 0x21, 0xAE]
+# BYTES-NEXT: [0xD7, 0xC0, 0x26, 0xAE]
+# BYTES-NEXT: [0xD7, 0xA0, 0x21, 0x22]
+# BYTES-NEXT: [0xD7, 0xA0, 0x21, 0x26]
+# BYTES-NEXT: [0xD7, 0xE0, 0x26, 0x24]
+# BYTES-NEXT: [0xD7, 0xA0, 0x21, 0x2A]
+# BYTES-NEXT: [0xD7, 0xE0, 0x26, 0x2E]
+# BYTES-NEXT: [0xD7, 0x80, 0x21, 0xBA]
+# BYTES-NEXT: [0xD7, 0xB0, 0x22, 0xBA]
+# BYTES-NEXT: [0xD7, 0x80, 0x21, 0xBE]
+# BYTES-NEXT: [0xD7, 0xC0, 0x26, 0xBC]

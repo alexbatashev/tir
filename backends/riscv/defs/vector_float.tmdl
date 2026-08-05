@@ -1,0 +1,4 @@
+  File "/tmp/opencode/gen_vector_float.py", line 491
+    // a zero sign, a documented approximation of the fold order freedom).
+                                                                        ^
+SyntaxError: unmatched ')'

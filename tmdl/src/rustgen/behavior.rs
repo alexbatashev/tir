@@ -79,6 +79,59 @@ fn behavior_has_atomic_ops(expr: &ast::Expr) -> bool {
     }
 }
 
+/// Whether the behavior loads or stores with a non-constant size (e.g. RVV
+/// unit-stride forms sized by `vl`). A static selection pattern cannot
+/// express a dynamic access size, and leaving such rules in would let plain
+/// scalar loads/stores match them by binding the size, so they are excluded
+/// from instruction selection and op-sem pattern generation.
+fn behavior_has_dynamic_sized_memory_access(expr: &ast::Expr) -> bool {
+    let is_dynamic_sized = |e: &ast::Expr| {
+        matches!(e, ast::Expr::Call(ast::Call { callee, arguments, .. }) if matches!(
+            callee.as_ref(),
+            ast::Expr::BuiltinFunction(ast::BuiltinFunction::Load | ast::BuiltinFunction::Store)
+        ) && !matches!(arguments.get(1), Some(ast::Expr::Lit(ast::Lit::Int(_)))))
+    };
+    if is_dynamic_sized(expr) {
+        return true;
+    }
+    match expr {
+        ast::Expr::Assign(a) => {
+            behavior_has_dynamic_sized_memory_access(&a.dest)
+                || behavior_has_dynamic_sized_memory_access(&a.value)
+        }
+        ast::Expr::Binary(b) => {
+            behavior_has_dynamic_sized_memory_access(&b.lhs)
+                || behavior_has_dynamic_sized_memory_access(&b.rhs)
+        }
+        ast::Expr::Unary(u) => behavior_has_dynamic_sized_memory_access(&u.x),
+        ast::Expr::Block(b) => b.stmts.iter().any(behavior_has_dynamic_sized_memory_access),
+        ast::Expr::Call(c) => c.arguments.iter().any(behavior_has_dynamic_sized_memory_access),
+        ast::Expr::Field(f) => behavior_has_dynamic_sized_memory_access(&f.base),
+        ast::Expr::If(i) => {
+            behavior_has_dynamic_sized_memory_access(&i.cond)
+                || behavior_has_dynamic_sized_memory_access(&i.then)
+                || i.else_
+                    .as_ref()
+                    .is_some_and(|e| behavior_has_dynamic_sized_memory_access(e))
+        }
+        ast::Expr::IndexAccess(i) => behavior_has_dynamic_sized_memory_access(&i.base),
+        ast::Expr::Slice(s) => behavior_has_dynamic_sized_memory_access(&s.base),
+        ast::Expr::Try(t) => {
+            behavior_has_dynamic_sized_memory_access(&t.body)
+                || t
+                    .handlers
+                    .iter()
+                    .any(|h| behavior_has_dynamic_sized_memory_access(&h.body))
+        }
+        ast::Expr::Lambda(l) => behavior_has_dynamic_sized_memory_access(&l.body),
+        ast::Expr::Ident(_)
+        | ast::Expr::Lit(_)
+        | ast::Expr::Path(_)
+        | ast::Expr::BuiltinFunction(_)
+        | ast::Expr::Invalid => false,
+    }
+}
+
 fn emit_behavior_exec(
     expr: &ast::Expr,
     trap_handler: Option<&ast::TrapHandler>,
