@@ -142,6 +142,143 @@ buffers {
 }
 ```
 
+### Resource groups and micro-ops
+
+`group` declares a reusable expression over existing units. It never creates
+capacity. `|` selects one available route and `&` reserves every operand of the
+route. A postfix `<N>` keeps that resource occupied for `N` cycles.
+
+```
+unit P0 { count = 1; }
+unit P1 { count = 1; }
+unit Multiply { count = 1; }
+
+group Int = P0 | P1;
+
+bind WriteIALU {
+  latency = 1;
+  uop(Int);
+}
+
+bind WriteIMul {
+  latency = 3;
+  uop(Int & Multiply<3>);
+}
+```
+
+Multiple `uop(...)` statements emit multiple micro-ops. The equivalent repeated
+form is `uop(Int, count = 2)`. Groups may overlap freely; contention always occurs
+on their underlying `unit` declarations. The older `uses = [ALU, ...]` form remains
+available and means one legacy reservation that requires every listed resource.
+
+## Fetch and decode frontend
+
+An out-of-order machine may describe the byte fetch path, decoder topology, and
+decoded-instruction cache directly:
+
+```
+frontend {
+  fetch {
+    bytes_per_cycle = 16;
+    window_bytes = 32;
+    alignment = 16;
+    queue_bytes = 64;
+  }
+  decode {
+    slots = [complex, simple, simple, simple];
+    uops_per_cycle = 6;
+    queue_uops = 64;
+    decoder simple { max_uops_per_instruction = 1; }
+    decoder complex { max_uops_per_instruction = 4; }
+  }
+  decoded_cache {
+    sets = 32;
+    ways = 8;
+    line_bytes = 32;
+    line_uops = 6;
+    deliver_uops_per_cycle = 6;
+  }
+}
+```
+
+The instruction encoder supplies exact PCs and byte lengths to `tir sched`.
+Bindings normally derive their decoded micro-op count from their `uop` statements.
+Exceptional classes may override it and require a particular decoder kind:
+
+```
+bind WriteComplex {
+  decode_uops = 3;
+  decoder = complex;
+  uop(P0);
+}
+```
+
+The semantic checker rejects missing or non-positive capacities, unknown decoder
+slots, decoder requirements with no capable slot, unknown resources, cyclic groups,
+and non-positive micro-op counts or occupancies.
+
+## Rename-stage behavior
+
+Cores that rename registers resolve some instructions before execution, so their
+measured cost is bounded by rename/issue width rather than by any execution unit.
+Two optional bind fields model this:
+
+```
+bind WriteIMove {
+  latency = 0;
+  eliminated = true;
+}
+
+bind WriteIXor {
+  latency = 1;
+  uop(Int);
+  zero_idiom = true;
+}
+```
+
+`eliminated = true` marks a class the rename stage completes: the instruction
+reserves no execution resource and its result is available the cycle it issues,
+while still consuming front-end bandwidth, issue width and a reorder-buffer slot.
+It still waits for its sources — renaming a not-yet-written register cannot make
+the value arrive earlier. Because such a class has no execution cost, the checker
+rejects combining it with `uses`, `uop(...)` or a non-zero `latency`.
+
+`zero_idiom = true` marks a class *eligible* to break dependencies. The decision
+is per instruction instance: when the registers it reads are all among the
+registers it writes, the instruction's value does not depend on its inputs, so
+the engine drops its input dependencies and treats the instance as eliminated.
+Every other instance of the same class executes normally with the bound latency
+and micro-ops.
+
+## Fusion
+
+Cores fuse certain adjacent operations into a single micro-op. Both kinds are
+expressible:
+
+**Macro-fusion** merges two adjacent instructions (x86: a flag-writing ALU op
+followed by a conditional branch). A machine declares fusable pairs over
+*mnemonics*; every instruction carrying the mnemonic participates:
+
+```
+fusion {
+    first = [test, and];
+    second = [je, jne, jl, jge];
+}
+```
+
+A `first` instruction immediately followed by a `second` instruction decodes,
+issues, and retires as one micro-op executing on the second instruction's
+resources, with the pair's register accesses unioned and both encodings counted
+against fetch. Multiple `fusion` blocks may be declared (x86 pairs differ by
+condition group). The checker rejects mnemonics that match no instruction.
+
+**Micro-fusion** (one instruction whose front-end cost is smaller than its
+execution micro-op count, e.g. an x86 load+ALU form) needs no dedicated
+syntax: declare the execution micro-ops with `uop(...)` and the fused
+front-end cost with `decode_uops`. A bind with two `uop`s and
+`decode_uops = 1` is a micro-fused instruction — it consumes one decode slot
+and one window entry but both execution units.
+
 ## Scheduling classes and binding
 
 An ISA declares machine-independent **scheduling classes** — groups of operations

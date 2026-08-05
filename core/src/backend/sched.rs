@@ -70,6 +70,63 @@ pub struct Forward {
     pub latency: u16,
 }
 
+/// One concrete execution-resource reservation within a micro-op route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResourceUse {
+    pub resource: &'static str,
+    pub cycles: u16,
+}
+
+/// Resources reserved together when this route is selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResourceRoute {
+    pub resources: &'static [ResourceUse],
+}
+
+/// One micro-op with one or more alternative execution routes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MicroOp {
+    pub routes: &'static [ResourceRoute],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrontendFetch {
+    pub bytes_per_cycle: u16,
+    pub window_bytes: u16,
+    pub alignment: u16,
+    pub queue_bytes: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Decoder {
+    pub name: &'static str,
+    pub max_uops_per_instruction: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrontendDecode {
+    pub slots: &'static [&'static str],
+    pub uops_per_cycle: u16,
+    pub queue_uops: u16,
+    pub decoders: &'static [Decoder],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecodedCache {
+    pub sets: u16,
+    pub ways: u16,
+    pub line_bytes: u16,
+    pub line_uops: u16,
+    pub deliver_uops_per_cycle: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Frontend {
+    pub fetch: FrontendFetch,
+    pub decode: FrontendDecode,
+    pub decoded_cache: Option<DecodedCache>,
+}
+
 /// The concrete scheduling cost of an instruction on a particular machine: the
 /// resolution of its `unit` membership against that machine's `bind`s.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +143,24 @@ pub struct InstrSchedClass {
     pub rthroughput: u16,
     /// Resources (by [`ProcResource::name`]) this instruction occupies.
     pub resources: &'static [&'static str],
+    /// Micro-op resource routes. Empty for the legacy `uses = [...]` form.
+    pub uops: &'static [MicroOp],
+    /// Number of micro-ops entering the frontend queues for this instruction.
+    pub decode_uops: u16,
+    /// Required decoder kind, or `None` when any capable slot may decode it.
+    pub decoder: Option<&'static str>,
+    /// Consecutive cycles for which the selected decoder slot remains occupied.
+    pub decode_cycles: u16,
+    /// The instruction completes in the rename stage: it reserves no execution
+    /// resource and its result is available the cycle it issues (move
+    /// elimination). It still costs front-end bandwidth, issue width and a ROB
+    /// slot, and still waits for its sources.
+    pub eliminated: bool,
+    /// The instruction is a dependency-breaking idiom when its sources are a
+    /// subset of its destinations (`xor eax, eax`). Such an instance drops its
+    /// input dependencies and is handled like `eliminated`; other instances
+    /// execute normally.
+    pub zero_idiom: bool,
 }
 
 impl InstrSchedClass {
@@ -97,6 +172,12 @@ impl InstrSchedClass {
         read_cycle: 0,
         rthroughput: 1,
         resources: &[],
+        uops: &[],
+        decode_uops: 1,
+        decoder: None,
+        decode_cycles: 1,
+        eliminated: false,
+        zero_idiom: false,
     };
 
     /// The cycle, relative to issue, at which the result becomes available.
@@ -110,6 +191,7 @@ impl InstrSchedClass {
 pub struct MachineModel {
     pub name: &'static str,
     pub issue_width: u16,
+    pub frontend: Option<Frontend>,
     pub resources: &'static [ProcUnit],
     pub buffers: &'static [BufferSize],
     /// Ordered pipeline stages; each phase's index is its cycle offset from issue.
@@ -121,16 +203,30 @@ pub struct MachineModel {
     /// Physical register-file sizes for renaming, keyed by physical-file name. A
     /// file absent here defaults to its architectural register count.
     pub reg_files: &'static [RegFile],
-    /// Per-instruction scheduling classes keyed by operation mnemonic, sorted by
-    /// mnemonic for binary search. Resolved at TMDL-compile time.
+    /// Per-instruction scheduling classes keyed by stable operation identity,
+    /// sorted for binary search. Resolved at TMDL-compile time.
     pub sched: &'static [(&'static str, InstrSchedClass)],
+    /// Macro-fusion rules: an instruction whose key is in a group's `first`,
+    /// immediately followed by one whose key is in its `second`, decodes and
+    /// executes as a single micro-op.
+    pub fusions: &'static [FusionGroup],
+}
+
+/// One macro-fusion rule, over scheduling keys (see [`MachineModel::fusions`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FusionGroup {
+    pub first: &'static [&'static str],
+    pub second: &'static [&'static str],
 }
 
 impl MachineModel {
-    /// The scheduling class for an operation mnemonic, or [`InstrSchedClass::DEFAULT`]
-    /// if this machine has no specific entry for it.
-    pub fn sched_class(&self, mnemonic: &str) -> InstrSchedClass {
-        match self.sched.binary_search_by_key(&mnemonic, |(m, _)| m) {
+    /// The scheduling class for an operation identity, or
+    /// [`InstrSchedClass::DEFAULT`] if this machine has no specific entry for it.
+    pub fn sched_class(&self, operation: &str) -> InstrSchedClass {
+        match self
+            .sched
+            .binary_search_by_key(&operation, |(name, _)| name)
+        {
             Ok(i) => self.sched[i].1,
             Err(_) => InstrSchedClass::DEFAULT,
         }

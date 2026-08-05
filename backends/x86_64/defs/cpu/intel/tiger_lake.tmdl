@@ -1,0 +1,203 @@
+machine TigerLake ("tiger-lake") for [X86_64] {
+    issue_width = 5;
+
+    frontend {
+        fetch {
+            bytes_per_cycle = 16;
+            window_bytes = 32;
+            alignment = 8;
+            queue_bytes = 32;
+        }
+        decode {
+            slots = [simple, simple, simple, lcp];
+            uops_per_cycle = 4;
+            queue_uops = 32;
+            decoder simple { max_uops_per_instruction = 1; }
+            decoder lcp { max_uops_per_instruction = 1; }
+        }
+    }
+
+    buffers {
+        // Effective out-of-order window measured on hardware with independent
+        // long-latency chains; the reorder buffer itself is larger, but this is
+        // where dispatch stalls in practice.
+        rob = 230;
+    }
+
+    // Abstract execution units. Per-class capacities are the measured
+    // dependency-free throughput floors (inference split): imul, rip-relative
+    // lea 1/cycle; scaled lea 2; shifts and conditionals 2; 3-byte forms 3
+    // (a predecode effect the front-end model cannot yet express); everything
+    // else sustains the full 4.
+    unit Res0 { count = 1; }
+    unit Res1 { count = 1; }
+    unit Res2 { count = 1; }
+    unit Res3 { count = 1; }
+
+    group Any4 = Res0 | Res1 | Res2 | Res3;
+    group Any3 = Res0 | Res1 | Res2;
+    group Pair03 = Res1 | Res3;
+    group Pair23 = Res2 | Res3;
+    group Pair01 = Res0 | Res1;
+
+    bind WriteIALU {
+        latency = 1;
+        uop(Any4);
+    }
+    bind WriteIALU3B {
+        latency = 1;
+        uop(Any3);
+    }
+    bind WriteIMove3B {
+        latency = 1;
+        uop(Any3);
+    }
+    bind WriteIALUImm16 {
+        latency = 1;
+        uop(Any4);
+        decoder = lcp;
+        decode_cycles = 3;
+    }
+    // High-byte accesses pay the partial-register merge; the forms are 3-byte
+    // encodings, so the 3-byte predecode ceiling applies to them too.
+    bind WriteIHighByte {
+        latency = 3;
+        uop(Any3);
+    }
+    bind WriteIShift {
+        latency = 1;
+        uop(Pair23);
+    }
+    bind WriteIConditional {
+        latency = 1;
+        uop(Pair23);
+    }
+    bind WriteIExtend {
+        latency = 1;
+        uop(Any4);
+    }
+    bind WriteIMoveWide {
+        latency = 1;
+        uop(Any4);
+    }
+    bind WriteIMoveByte {
+        latency = 1;
+        uop(Any4);
+    }
+    bind WriteIMoveImmediate {
+        latency = 1;
+        uop(Any4);
+    }
+    bind WriteIMoveImmediate16 {
+        latency = 1;
+        uop(Any4);
+        decoder = lcp;
+        decode_cycles = 3;
+    }
+    bind WriteIMoveAbsolute {
+        latency = 1;
+        uop(Any4);
+    }
+    bind WriteIMul {
+        latency = 3;
+        uop(Res1);
+    }
+    bind WriteFPAdd {
+        latency = 4;
+        uop(Pair01);
+    }
+    bind WriteFPMul {
+        latency = 4;
+        uop(Pair01);
+    }
+    bind WriteFPDiv {
+        latency = 13;
+        uop(Res0);
+    }
+    bind WriteFPMove {
+        latency = 1;
+        uop(Any4);
+    }
+    bind WriteSIToFP {
+        latency = 4;
+        uop(Res0);
+    }
+    bind WriteFPToSI {
+        latency = 1;
+        uop(Res0);
+    }
+    bind WriteFPCompare {
+        latency = 1;
+        uop(Res0);
+    }
+    // Measured floors per address form: unscaled 4/cycle, scaled 2/cycle,
+    // rip-relative 1/cycle.
+    bind WriteILeaSimple {
+        latency = 1;
+        uop(Any4);
+    }
+    bind WriteILeaComplex {
+        latency = 1;
+        uop(Pair03);
+    }
+    bind WriteILeaRip {
+        latency = 1;
+        uop(Res1);
+    }
+    // Branch binds are structural (branch-capable pair, jump port); the
+    // measurement corpus is branchless, so they are unmeasured priors.
+    bind WriteJcc {
+        latency = 1;
+        uop(Pair23);
+    }
+    bind WriteJump {
+        latency = 1;
+        uop(Res3);
+    }
+
+    // Macro-fusion: a flag-writing ALU op immediately followed by a
+    // conditional branch decodes and executes as one micro-op. test/and pair
+    // with every jcc; cmp/add/sub with all but the sign/overflow conditions.
+    fusion {
+        first = [test, and];
+        second = [je, jne, jl, jge, jb, jae, jle, jg, jbe, ja, js, jns, jo, jno];
+    }
+    fusion {
+        first = [cmp, add, sub];
+        second = [je, jne, jl, jge, jb, jae, jle, jg, jbe, ja];
+    }
+
+    // Dependency-breaking idioms the renamer recognizes: xor/sub of a register
+    // with itself (64/32-bit forms only; narrower writes merge and stay
+    // dependent).
+    override Xor {
+        latency = 1;
+        uop(Any3);
+        zero_idiom = true;
+    }
+    override Xor32 {
+        latency = 1;
+        uop(Any3);
+        zero_idiom = true;
+    }
+    override Xor32Norex {
+        latency = 1;
+        uop(Any4);
+        zero_idiom = true;
+    }
+    override Sub {
+        latency = 1;
+        uop(Any3);
+        zero_idiom = true;
+    }
+    override Sub32 {
+        latency = 1;
+        uop(Any3);
+        zero_idiom = true;
+    }
+    override Sub32Norex {
+        latency = 1;
+        uop(Any4);
+        zero_idiom = true;
+    }
+}

@@ -15,7 +15,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use tir::backend::regalloc::RegClassId;
 use tir::{BlockId, Context};
 
-pub use crate::analysis::defuse::{OpRegs, RegRef, op_regs};
+pub use crate::analysis::defuse::{OpRegs, RegRef, execution_regs, op_regs};
 
 /// A physical register: its class handle and encoding index.
 pub type PhysReg = (RegClassId, u16);
@@ -317,9 +317,13 @@ mod tests {
             attributes: A {
                 r: "Register",
             },
-            roles: R {
-                r: Def,
-            },
+            interfaces: [tir::attributes::RegisterSemantics],
+        }
+    }
+
+    impl tir::attributes::RegisterSemantics for PhysDefOp {
+        fn attribute_roles(&self) -> &'static [(&'static str, tir::attributes::AttributeRole)] {
+            &[("r", tir::attributes::AttributeRole::Def)]
         }
     }
 
@@ -330,9 +334,13 @@ mod tests {
             attributes: A {
                 r: "Register",
             },
-            roles: R {
-                r: Use,
-            },
+            interfaces: [tir::attributes::RegisterSemantics],
+        }
+    }
+
+    impl tir::attributes::RegisterSemantics for PhysUseOp {
+        fn attribute_roles(&self) -> &'static [(&'static str, tir::attributes::AttributeRole)] {
+            &[("r", tir::attributes::AttributeRole::Use)]
         }
     }
 
@@ -340,6 +348,10 @@ mod tests {
         name: "R",
         file: "R",
         group_width: 1,
+        view: crate::backend::regalloc::RegisterView {
+            bit_offset: 0,
+            merge: false,
+        },
     };
 
     fn r() -> RegClassId {
@@ -448,6 +460,10 @@ mod tests {
     fn phys_op(context: &Context, block: &Arc<Block>, class: RegClassId, index: u16, is_def: bool) {
         use tir::attributes::{AttributeValue, RegisterAttr};
 
+        // The test dialect is never registered, so hook the role interfaces in
+        // directly.
+        PhysDefOp::register_interfaces(context);
+        PhysUseOp::register_interfaces(context);
         let register = AttributeValue::Register(RegisterAttr::Physical { class, index });
         let id = if is_def {
             PhysDefOpBuilder::new(context)

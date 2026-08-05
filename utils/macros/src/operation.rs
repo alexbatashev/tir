@@ -11,7 +11,6 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         dialect,
         regions,
         attributes,
-        roles,
         operands,
         results,
         interfaces,
@@ -98,7 +97,6 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
     };
 
     let attribute_verifier = make_attribute_verifier(&attributes);
-    let roles_table = make_roles_table(&struct_name, &roles);
 
     // Operand support in builder
     let mut operand_fields = vec![];
@@ -885,7 +883,6 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
 
         impl #struct_name {
             #region_accessors
-            #roles_table
             #result_accessor
         }
 
@@ -993,7 +990,6 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
                     result_vec,
                     regions,
                     attributes,
-                    #struct_name::attribute_roles(),
                 );
 
                 let instance = self.context.add_operation(instance);
@@ -1040,7 +1036,6 @@ struct Operation {
     dialect: String,
     regions: Vec<Region>,
     attributes: Vec<AttrSpec>,
-    roles: Vec<RoleSpec>,
     operands: Vec<ValueSpec>,
     results: Vec<ValueSpec>,
     interfaces: Vec<Path>,
@@ -1138,21 +1133,6 @@ impl Parse for Operation {
             })
             .unwrap_or_default();
 
-        let roles = struct_
-            .fields
-            .iter()
-            .find_map(|f| match &f.member {
-                Member::Named(ident) => {
-                    if ident.to_string().as_str() == "roles" {
-                        get_roles(&f.expr)
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            })
-            .unwrap_or_default();
-
         let operands = struct_
             .fields
             .iter()
@@ -1239,7 +1219,6 @@ impl Parse for Operation {
             dialect,
             regions,
             attributes,
-            roles,
             operands,
             results,
             interfaces,
@@ -1370,54 +1349,6 @@ fn make_attribute_verifier(specs: &[AttrSpec]) -> proc_macro2::TokenStream {
         }
     });
     quote! { #(#checks)* }
-}
-
-#[derive(Clone)]
-struct RoleSpec {
-    name: String,
-    role: String,
-}
-
-fn get_roles(expr: &Expr) -> Option<Vec<RoleSpec>> {
-    if let Expr::Struct(s) = expr {
-        Some(
-            s.fields
-                .iter()
-                .map(|f| {
-                    let name = field_name(f);
-                    let role = expr_as_string(&f.expr);
-                    RoleSpec { name, role }
-                })
-                .collect(),
-        )
-    } else {
-        None
-    }
-}
-
-fn make_roles_table(_op_ident: &Ident, roles: &[RoleSpec]) -> proc_macro2::TokenStream {
-    // Always emit `attribute_roles()` (empty when no roles) so `build()` can thread
-    // the table onto every `OpInstance` uniformly, and the core can read register
-    // def/use roles without resolving the op back to its concrete type.
-    let mut pairs = Vec::new();
-    for r in roles {
-        let name = r.name.clone();
-        let role_ts = match r.role.as_str() {
-            "Def" => quote! { tir::attributes::AttributeRole::Def },
-            "Use" => quote! { tir::attributes::AttributeRole::Use },
-            "Clobber" => quote! { tir::attributes::AttributeRole::Clobber },
-            "ReadWrite" => quote! { tir::attributes::AttributeRole::ReadWrite },
-            _ => quote! { tir::attributes::AttributeRole::None },
-        };
-        pairs.push(quote! { ( #name, #role_ts ) });
-    }
-    let len = pairs.len();
-    quote! {
-        pub fn attribute_roles() -> &'static [(&'static str, tir::attributes::AttributeRole)] {
-            const ROLES: [(&str, tir::attributes::AttributeRole); #len] = [ #(#pairs),* ];
-            &ROLES
-        }
-    }
 }
 
 fn make_region_accessors(regions: &[Region]) -> proc_macro2::TokenStream {

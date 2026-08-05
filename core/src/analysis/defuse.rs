@@ -11,8 +11,9 @@
 //! and register allocation share [`op_regs`] for their own ordered scans.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use crate::attributes::{AttributeRole, AttributeValue, RegisterAttr};
+use crate::attributes::{AttributeRole, AttributeValue, RegisterAttr, RegisterSemantics};
 use crate::backend::regalloc::RegClassId;
 use crate::{
     Context, OpId, OpInstance,
@@ -46,8 +47,14 @@ fn role_reads(role: AttributeRole) -> bool {
 }
 
 /// Resolve the register operands of one op from its SSA operands/results and its
-/// register-valued attributes (consulting the op's `attribute_roles`).
-pub fn op_regs(op: &OpInstance) -> OpRegs {
+/// register-valued attributes (consulting the opcode's
+/// [`RegisterSemantics`] interface).
+pub fn op_regs(op: &Arc<OpInstance>) -> OpRegs {
+    let attribute_roles = op
+        .clone()
+        .as_interface::<dyn RegisterSemantics>()
+        .map(|semantics| semantics.attribute_roles())
+        .unwrap_or_default();
     let mut regs = OpRegs::default();
 
     // Builtin SSA ops (e.g. the block terminator) name registers positionally.
@@ -79,8 +86,7 @@ pub fn op_regs(op: &OpInstance) -> OpRegs {
                 .collect(),
             _ => continue,
         };
-        let role = op
-            .attribute_roles
+        let role = attribute_roles
             .iter()
             .find(|(name, _)| *name == attr.name)
             .map(|(_, role)| *role)
@@ -113,6 +119,54 @@ pub fn op_regs(op: &OpInstance) -> OpRegs {
             }
         }
     }
+
+    regs
+}
+
+/// The architectural registers an operation reads and writes when it executes:
+/// its operands, plus the fixed registers its behavior names by path (x86
+/// `EFLAGS::zf`, `GPR::rax`), plus the read a write through a merging
+/// sub-register view implies. This is the view a timing model reconstructs
+/// dependencies from.
+///
+/// Register allocation uses [`op_regs`] instead: it assigns operands, and the
+/// fixed-register protocol reaches it through the fixed-register operands
+/// selection emits — the same accesses in the notation the allocator can act
+/// on.
+pub fn execution_regs(op: &Arc<OpInstance>) -> OpRegs {
+    let mut regs = op_regs(op);
+
+    let implicit_regs = op
+        .clone()
+        .as_interface::<dyn RegisterSemantics>()
+        .map(|semantics| semantics.implicit_regs())
+        .unwrap_or_default();
+    for implicit in implicit_regs {
+        let reg_ref = RegRef::Physical {
+            class: implicit.class,
+            index: implicit.index,
+        };
+        if role_writes(implicit.role) {
+            regs.defs.push(reg_ref);
+        }
+        if role_reads(implicit.role) {
+            regs.uses.push(reg_ref);
+        }
+    }
+
+    // A write through a merging sub-register view (an x86 8/16-bit destination)
+    // preserves the rest of the physical register, so it reads it too. A
+    // zero-extending view (x86 32-bit) writes the whole register and does not.
+    let merging: Vec<RegRef> = regs
+        .defs
+        .iter()
+        .filter(|def| match def {
+            RegRef::Physical { class, .. } => class.view.merge,
+            RegRef::Virtual { .. } => false,
+        })
+        .copied()
+        .collect();
+    regs.uses.extend(merging);
 
     regs
 }

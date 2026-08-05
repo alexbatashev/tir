@@ -311,11 +311,6 @@ pub struct OpInstance {
     pub results: Vec<ValueId>,
     pub regions: Vec<RegionId>,
     pub attributes: Vec<crate::attributes::NamedAttribute>,
-    /// Def/use role of each named register attribute, threaded from the op's
-    /// generated `attribute_roles()` table. Lets the context maintain a def-use
-    /// chain over machine-IR register operands (which live in attributes, not
-    /// `operands`). Empty for ops without roles (e.g. builtin SSA ops).
-    pub attribute_roles: &'static [(&'static str, crate::attributes::AttributeRole)],
 }
 
 impl OpInstance {
@@ -325,7 +320,6 @@ impl OpInstance {
         results: Vec<ValueId>,
         regions: Vec<RegionId>,
         attributes: Vec<crate::attributes::NamedAttribute>,
-        attribute_roles: &'static [(&'static str, crate::attributes::AttributeRole)],
     ) -> Self {
         Self {
             id: OpId::invalid(),
@@ -336,7 +330,6 @@ impl OpInstance {
             results,
             regions,
             attributes,
-            attribute_roles,
         }
     }
 
@@ -348,7 +341,6 @@ impl OpInstance {
         results: Vec<ValueId>,
         regions: Vec<RegionId>,
         attributes: Vec<crate::attributes::NamedAttribute>,
-        attribute_roles: &'static [(&'static str, crate::attributes::AttributeRole)],
     ) -> Self {
         let (dialect, name) = identity;
         Self {
@@ -360,7 +352,6 @@ impl OpInstance {
             results,
             regions,
             attributes,
-            attribute_roles,
         }
     }
 

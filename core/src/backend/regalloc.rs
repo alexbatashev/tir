@@ -4,7 +4,7 @@
 //! every register operand is carried in an op attribute as
 //! [`RegisterAttr::Virtual`] (its `id` is the SSA value number),
 //! [`RegisterAttr::FixedUse`], or [`RegisterAttr::Physical`]. It reads the def/use
-//! role of each register operand from the op's generated `attribute_roles` table,
+//! role of each register operand from the opcode's registered register semantics,
 //! computes liveness, builds an interference graph, and solves an optimal coloring
 //! with the shared PBQP solver ([`tir::pbqp`]). The chosen physical registers are
 //! written back by rewriting every `Virtual` attribute to `Physical`.
@@ -13,6 +13,7 @@
 //! convention policy come from the selected [`crate::backend::abi::AbiInfo`].
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use tir::attributes::{AttributeRole, AttributeValue, RegisterAttr};
 use tir::pbqp::{self, INF_COST, PbqpMatrix, PbqpNodeId, PbqpProblem};
@@ -44,6 +45,9 @@ pub struct RegClassInfo {
     /// 1 for ordinary classes; an RVV LMUL>1 group class covers 2/4/8 (e.g.
     /// `VRM2` index 8 is the architectural pair v8..v9).
     pub group_width: u16,
+    /// Where this class's architectural view sits in its storage element and
+    /// whether a write merges into it (see [`RegisterView`]).
+    pub view: RegisterView,
 }
 
 /// A handle to a register class: a pointer to its `'static` [`RegClassInfo`].
@@ -1865,8 +1869,11 @@ fn rewrite_registers(context: &Context, blocks: &[BlockId], assignment: &HashMap
     }
 }
 
-fn role_of(op: &tir::OpInstance, name: &str) -> AttributeRole {
-    op.attribute_roles
+fn role_of(op: &Arc<tir::OpInstance>, name: &str) -> AttributeRole {
+    op.clone()
+        .as_interface::<dyn tir::attributes::RegisterSemantics>()
+        .map(|semantics| semantics.attribute_roles())
+        .unwrap_or_default()
         .iter()
         .find(|(n, _)| *n == name)
         .map(|(_, r)| *r)
@@ -1899,6 +1906,10 @@ mod tests {
                 name: "R",
                 file: "R",
                 group_width: 1,
+                view: RegisterView {
+                    bit_offset: 0,
+                    merge: false,
+                },
             }],
         }
     }
@@ -2292,11 +2303,19 @@ mod tests {
             name: "GPR",
             file: "GPR",
             group_width: 1,
+            view: RegisterView {
+                bit_offset: 0,
+                merge: false,
+            },
         },
         RegClassInfo {
             name: "GPRsp",
             file: "GPR",
             group_width: 1,
+            view: RegisterView {
+                bit_offset: 0,
+                merge: false,
+            },
         },
     ];
 
@@ -2345,11 +2364,19 @@ mod tests {
                 name: "A",
                 file: "A",
                 group_width: 1,
+                view: RegisterView {
+                    bit_offset: 0,
+                    merge: false,
+                },
             },
             RegClassInfo {
                 name: "B",
                 file: "B",
                 group_width: 1,
+                view: RegisterView {
+                    bit_offset: 0,
+                    merge: false,
+                },
             },
         ];
         let info = RegisterInfo { classes: CLASSES };
@@ -2380,11 +2407,19 @@ mod tests {
                 name: "VR",
                 file: "VR",
                 group_width: 1,
+                view: RegisterView {
+                    bit_offset: 0,
+                    merge: false,
+                },
             },
             RegClassInfo {
                 name: "VRM2",
                 file: "VR",
                 group_width: 2,
+                view: RegisterView {
+                    bit_offset: 0,
+                    merge: false,
+                },
             },
         ];
         let info = RegisterInfo { classes: CLASSES };
@@ -2421,11 +2456,19 @@ mod tests {
                 name: "GPR",
                 file: "GPR",
                 group_width: 1,
+                view: RegisterView {
+                    bit_offset: 0,
+                    merge: false,
+                },
             },
             RegClassInfo {
                 name: "GPRsp",
                 file: "GPR",
                 group_width: 1,
+                view: RegisterView {
+                    bit_offset: 0,
+                    merge: false,
+                },
             },
         ];
         let info = RegisterInfo { classes: CLASSES };

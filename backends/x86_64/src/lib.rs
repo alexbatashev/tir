@@ -7,6 +7,7 @@ const MODEL_CHECK_SOURCES: &[(&str, &str)] = &[
     ("conditional.tmdl", include_str!("../defs/conditional.tmdl")),
     ("memory_ext.tmdl", include_str!("../defs/memory_ext.tmdl")),
     ("float.tmdl", include_str!("../defs/float.tmdl")),
+    ("perf.tmdl", include_str!("../defs/perf.tmdl")),
 ];
 
 pub use isa::{Feature, get_isel_rules, register_info, register_views, register_widths};
@@ -86,7 +87,10 @@ mod isa {
             .attr("imm", AttributeValue::Int(bits))
             .build();
         let move_bits = MovqXmmGprOpBuilder::new(context)
-            .attr("dst", virt(constant.result().number(), RegClass::XMM.id()))
+            .attr(
+                "dst",
+                virt(constant.result().number(), RegClass::XMMzx.id()),
+            )
             .attr("src", virt(temp.number(), RegClass::GPR.id()))
             .build();
         rewriter.insert_op_before(op, &materialize)?;
@@ -859,7 +863,7 @@ mod isa {
                         .attr("src", virt(value, class))
                         .build(),
                 ),
-                "XMM" => Box::new(
+                "XMM" | "XMMzx" => Box::new(
                     MovsdStoreDispOpBuilder::new(context)
                         .attr("base", phys(frame.0, frame.1))
                         .attr("imm", AttributeValue::Int(offset))
@@ -900,7 +904,7 @@ mod isa {
                         .attr("imm", AttributeValue::Int(offset))
                         .build(),
                 ),
-                "XMM" => Box::new(
+                "XMM" | "XMMzx" => Box::new(
                     MovsdLoadDispOpBuilder::new(context)
                         .attr("dst", virt(value, class))
                         .attr("base", phys(frame.0, frame.1))
@@ -955,7 +959,7 @@ mod isa {
                         .attr("src", virt(src))
                         .build(),
                 ),
-                "XMM" => Box::new(
+                "XMM" | "XMMzx" => Box::new(
                     MovsdOpBuilder::new(context)
                         .attr("dst", virt(dst))
                         .attr("src", virt(src))
@@ -1015,7 +1019,7 @@ mod isa {
             frame: &tir::backend::liveness::PhysReg,
             offset: i64,
         ) -> Result<Vec<Box<dyn Operation>>, tir::PassError> {
-            if class.name() != "GPR" {
+            if !matches!(class.name(), "GPR" | "GPRaddrIndex") {
                 return Err(tir::PassError::InvalidRuleSet(format!(
                     "x86-64 stack allocation addresses for register class {} are not supported",
                     class.name()
@@ -1513,6 +1517,11 @@ mod isa {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tiger_lake_uses_measured_ooo_window() {
+        assert_eq!(crate::isa::tiger_lake_model().buffer("rob"), Some(230));
+    }
+
     #[test]
     fn x86_64_target_enables_its_x86_prerequisite() {
         let config = crate::TargetConfig::parse("x86_64", None, None).unwrap();

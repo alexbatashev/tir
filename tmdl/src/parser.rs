@@ -843,6 +843,12 @@ enum BindField {
     Uses(Vec<String>),
     Reads(String),
     Writes(String),
+    Uop(MicroOp),
+    DecodeUops(i64),
+    Decoder(String),
+    DecodeCycles(i64),
+    Eliminated(bool),
+    ZeroIdiom(bool),
 }
 
 /// The timing fields common to a `bind` and an `override` body.
@@ -853,6 +859,12 @@ struct BindFields {
     reads: Option<String>,
     writes: Option<String>,
     uses: Vec<String>,
+    uops: Vec<MicroOp>,
+    decode_uops: Option<i64>,
+    decoder: Option<String>,
+    decode_cycles: Option<i64>,
+    eliminated: Option<bool>,
+    zero_idiom: Option<bool>,
 }
 
 fn aggregate_bind_fields(fields: Vec<BindField>) -> BindFields {
@@ -864,6 +876,12 @@ fn aggregate_bind_fields(fields: Vec<BindField>) -> BindFields {
             BindField::Uses(u) => out.uses = u,
             BindField::Reads(p) => out.reads = Some(p),
             BindField::Writes(p) => out.writes = Some(p),
+            BindField::Uop(uop) => out.uops.push(uop),
+            BindField::DecodeUops(value) => out.decode_uops = Some(value),
+            BindField::Decoder(value) => out.decoder = Some(value),
+            BindField::DecodeCycles(value) => out.decode_cycles = Some(value),
+            BindField::Eliminated(value) => out.eliminated = Some(value),
+            BindField::ZeroIdiom(value) => out.zero_idiom = Some(value),
         }
     }
     out
@@ -877,6 +895,30 @@ where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
     let ident = select! { Token::Identifier(i) => i.to_string() };
+    let bool_lit = select! {
+        Token::Identifier("true") => true,
+        Token::Identifier("false") => false,
+    };
+    let uop = just(Token::Identifier("uop"))
+        .ignore_then(
+            resource_expr()
+                .then(
+                    just(Token::Comma)
+                        .ignore_then(just(Token::Identifier("count")))
+                        .ignore_then(just(Token::Equals))
+                        .ignore_then(int_lit())
+                        .or_not(),
+                )
+                .delimited_by(just(Token::LParen), just(Token::RParen)),
+        )
+        .then_ignore(just(Token::Semicolon))
+        .map_with(|(resources, count), e| {
+            BindField::Uop(MicroOp {
+                resources,
+                count: count.unwrap_or(1),
+                span: e.span(),
+            })
+        });
     choice((
         just(Token::Identifier("latency"))
             .ignore_then(just(Token::Equals))
@@ -903,7 +945,81 @@ where
             .ignore_then(ident)
             .then_ignore(just(Token::Semicolon))
             .map(BindField::Writes),
+        uop,
+        just(Token::Identifier("decode_uops"))
+            .ignore_then(just(Token::Equals))
+            .ignore_then(int_lit())
+            .then_ignore(just(Token::Semicolon))
+            .map(BindField::DecodeUops),
+        just(Token::Identifier("decoder"))
+            .ignore_then(just(Token::Equals))
+            .ignore_then(ident)
+            .then_ignore(just(Token::Semicolon))
+            .map(BindField::Decoder),
+        just(Token::Identifier("decode_cycles"))
+            .ignore_then(just(Token::Equals))
+            .ignore_then(int_lit())
+            .then_ignore(just(Token::Semicolon))
+            .map(BindField::DecodeCycles),
+        just(Token::Identifier("eliminated"))
+            .ignore_then(just(Token::Equals))
+            .ignore_then(bool_lit)
+            .then_ignore(just(Token::Semicolon))
+            .map(BindField::Eliminated),
+        just(Token::Identifier("zero_idiom"))
+            .ignore_then(just(Token::Equals))
+            .ignore_then(bool_lit)
+            .then_ignore(just(Token::Semicolon))
+            .map(BindField::ZeroIdiom),
     ))
+}
+
+/// A machine resource expression. `&` binds more tightly than `|`; `<N>` is a
+/// postfix reservation duration on one resource or parenthesized expression.
+fn resource_expr<'src, I>()
+-> impl Parser<'src, I, ResourceExpr, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    recursive(|expr| {
+        let atom = select! { Token::Identifier(i) => ResourceExpr::Resource(i.to_string()) }
+            .or(expr.delimited_by(just(Token::LParen), just(Token::RParen)));
+        let occupied = atom
+            .then(
+                int_lit()
+                    .delimited_by(just(Token::LAngle), just(Token::RAngle))
+                    .or_not(),
+            )
+            .map(|(resource, cycles)| match cycles {
+                Some(cycles) => ResourceExpr::Occupied {
+                    resource: Box::new(resource),
+                    cycles,
+                },
+                None => resource,
+            });
+        let all = occupied
+            .separated_by(just(Token::Ampersand))
+            .at_least(1)
+            .collect::<Vec<_>>()
+            .map(|mut resources| {
+                if resources.len() == 1 {
+                    resources.pop().unwrap()
+                } else {
+                    ResourceExpr::All(resources)
+                }
+            });
+        all.separated_by(just(Token::Pipe))
+            .at_least(1)
+            .collect::<Vec<_>>()
+            .map(|mut resources| {
+                if resources.len() == 1 {
+                    resources.pop().unwrap()
+                } else {
+                    ResourceExpr::Any(resources)
+                }
+            })
+            .boxed()
+    })
 }
 
 /// A braced `bind`/`override` body: zero or more timing fields.
@@ -926,8 +1042,140 @@ enum MachineBody {
     Override(MachineOverride),
     Forward(Forward),
     Resource(MachineUnit),
+    ResourceGroup(MachineResourceGroup),
+    Frontend(Frontend),
     Bind(UnitBind),
     RegFiles(Vec<(String, i64)>),
+    Fusion(FusionDecl),
+}
+
+#[derive(Clone)]
+enum DecodeField {
+    Slots(Vec<String>),
+    UopsPerCycle(i64),
+    QueueUops(i64),
+    Decoder(Decoder),
+}
+
+fn frontend_def<'src, I>()
+-> impl Parser<'src, I, Frontend, extra::Err<Rich<'src, Token<'src>, Span>>>
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    let fetch = just(Token::Identifier("fetch"))
+        .ignore_then(
+            kv_int_pair()
+                .repeated()
+                .collect::<Vec<_>>()
+                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+        )
+        .map_with(|fields, e| FrontendFetch {
+            bytes_per_cycle: int_field(&fields, "bytes_per_cycle"),
+            window_bytes: int_field(&fields, "window_bytes"),
+            alignment: int_field(&fields, "alignment"),
+            queue_bytes: int_field(&fields, "queue_bytes"),
+            span: e.span(),
+        });
+
+    let ident = select! { Token::Identifier(i) => i.to_string() };
+    let decoder = just(Token::Identifier("decoder"))
+        .ignore_then(ident)
+        .then(
+            kv_int_pair()
+                .repeated()
+                .collect::<Vec<_>>()
+                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+        )
+        .map_with(|(name, fields), e| {
+            DecodeField::Decoder(Decoder {
+                name,
+                max_uops_per_instruction: int_field(&fields, "max_uops_per_instruction"),
+                span: e.span(),
+            })
+        });
+    let decode_field = choice((
+        just(Token::Identifier("slots"))
+            .ignore_then(just(Token::Equals))
+            .ignore_then(ident_list())
+            .then_ignore(just(Token::Semicolon))
+            .map(DecodeField::Slots),
+        just(Token::Identifier("uops_per_cycle"))
+            .ignore_then(just(Token::Equals))
+            .ignore_then(int_lit())
+            .then_ignore(just(Token::Semicolon))
+            .map(DecodeField::UopsPerCycle),
+        just(Token::Identifier("queue_uops"))
+            .ignore_then(just(Token::Equals))
+            .ignore_then(int_lit())
+            .then_ignore(just(Token::Semicolon))
+            .map(DecodeField::QueueUops),
+        decoder,
+    ));
+    let decode = just(Token::Identifier("decode"))
+        .ignore_then(
+            decode_field
+                .repeated()
+                .collect::<Vec<_>>()
+                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+        )
+        .map_with(|fields, e| {
+            let mut slots = Vec::new();
+            let mut uops_per_cycle = 0;
+            let mut queue_uops = 0;
+            let mut decoders = Vec::new();
+            for field in fields {
+                match field {
+                    DecodeField::Slots(value) => slots = value,
+                    DecodeField::UopsPerCycle(value) => uops_per_cycle = value,
+                    DecodeField::QueueUops(value) => queue_uops = value,
+                    DecodeField::Decoder(value) => decoders.push(value),
+                }
+            }
+            FrontendDecode {
+                slots,
+                uops_per_cycle,
+                queue_uops,
+                decoders,
+                span: e.span(),
+            }
+        });
+
+    let decoded_cache = just(Token::Identifier("decoded_cache"))
+        .ignore_then(
+            kv_int_pair()
+                .repeated()
+                .collect::<Vec<_>>()
+                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+        )
+        .map_with(|fields, e| DecodedCache {
+            sets: int_field(&fields, "sets"),
+            ways: int_field(&fields, "ways"),
+            line_bytes: int_field(&fields, "line_bytes"),
+            line_uops: int_field(&fields, "line_uops"),
+            deliver_uops_per_cycle: int_field(&fields, "deliver_uops_per_cycle"),
+            span: e.span(),
+        });
+
+    just(Token::Identifier("frontend"))
+        .ignore_then(
+            fetch
+                .then(decode)
+                .then(decoded_cache.or_not())
+                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+        )
+        .map_with(|((fetch, decode), decoded_cache), e| Frontend {
+            fetch,
+            decode,
+            decoded_cache,
+            span: e.span(),
+        })
+}
+
+fn int_field(fields: &[(String, i64)], name: &str) -> i64 {
+    fields
+        .iter()
+        .find(|(field, _)| field == name)
+        .map_or(0, |(_, value)| *value)
 }
 
 /// Parse a pipeline-stage protection mode identifier into [`Protection`].
@@ -1016,6 +1264,21 @@ where
             })
         });
 
+    let resource_group = just(Token::Identifier("group"))
+        .ignore_then(ident)
+        .then_ignore(just(Token::Equals))
+        .then(resource_expr())
+        .then_ignore(just(Token::Semicolon))
+        .map_with(|(name, resources), e| {
+            MachineBody::ResourceGroup(MachineResourceGroup {
+                name,
+                resources,
+                span: e.span(),
+            })
+        });
+
+    let frontend = frontend_def().map(MachineBody::Frontend);
+
     // `reg_file { GPR { count = 128; } FPR { count = 96; } }` — physical register
     // file sizes for renaming, keyed by physical-file name.
     let reg_file_entry = ident
@@ -1054,6 +1317,12 @@ where
                 reads: f.reads,
                 writes: f.writes,
                 uses: f.uses,
+                uops: f.uops,
+                decode_uops: f.decode_uops,
+                decoder: f.decoder,
+                decode_cycles: f.decode_cycles,
+                eliminated: f.eliminated,
+                zero_idiom: f.zero_idiom,
                 span: e.span(),
             })
         });
@@ -1070,6 +1339,12 @@ where
                 reads: f.reads,
                 writes: f.writes,
                 uses: f.uses,
+                uops: f.uops,
+                decode_uops: f.decode_uops,
+                decoder: f.decoder,
+                decode_cycles: f.decode_cycles,
+                eliminated: f.eliminated,
+                zero_idiom: f.zero_idiom,
                 span: e.span(),
             })
         });
@@ -1095,6 +1370,33 @@ where
             })
         });
 
+    // `fusion { first = [cmp, test]; second = [je, jne]; }` — mnemonic lists.
+    let mnemonic_list = |field: &'static str| {
+        let mnemonic = select! { Token::Identifier(i) => i.to_string() };
+        just(Token::Identifier(field))
+            .ignore_then(just(Token::Equals))
+            .ignore_then(
+                mnemonic
+                    .separated_by(just(Token::Comma))
+                    .collect::<Vec<String>>()
+                    .delimited_by(just(Token::LBracket), just(Token::RBracket)),
+            )
+            .then_ignore(just(Token::Semicolon))
+    };
+    let fusion = just(Token::Identifier("fusion"))
+        .ignore_then(
+            mnemonic_list("first")
+                .then(mnemonic_list("second"))
+                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+        )
+        .map_with(|(first, second), e| {
+            MachineBody::Fusion(FusionDecl {
+                first,
+                second,
+                span: e.span(),
+            })
+        });
+
     let machine_alias = just(Token::LParen)
         .ignore_then(select! { Token::StringLit(s) => s.to_string() })
         .then_ignore(just(Token::RParen))
@@ -1112,8 +1414,11 @@ where
                 r#override,
                 forward,
                 resource,
+                resource_group,
+                frontend,
                 reg_file,
                 bind,
+                fusion,
             ))
             .repeated()
             .collect::<Vec<_>>()
@@ -1124,20 +1429,26 @@ where
             let mut buffers = Vec::new();
             let mut pipeline = Vec::new();
             let mut resources = Vec::new();
+            let mut resource_groups = Vec::new();
+            let mut frontend = None;
             let mut reg_files = Vec::new();
             let mut binds = Vec::new();
             let mut overrides = Vec::new();
             let mut forwards = Vec::new();
+            let mut fusions = Vec::new();
             for b in body {
                 match b {
                     MachineBody::IssueWidth(v) => issue_width = Some(v),
                     MachineBody::Buffers(v) => buffers = v,
                     MachineBody::Pipeline(v) => pipeline = v,
                     MachineBody::Resource(r) => resources.push(r),
+                    MachineBody::ResourceGroup(r) => resource_groups.push(r),
+                    MachineBody::Frontend(value) => frontend = Some(value),
                     MachineBody::RegFiles(rf) => reg_files = rf,
                     MachineBody::Bind(bd) => binds.push(bd),
                     MachineBody::Override(ov) => overrides.push(ov),
                     MachineBody::Forward(fw) => forwards.push(fw),
+                    MachineBody::Fusion(fu) => fusions.push(fu),
                 }
             }
             Machine {
@@ -1149,9 +1460,12 @@ where
                 buffers,
                 pipeline,
                 resources,
+                resource_groups,
+                frontend,
                 reg_files,
                 binds,
                 overrides,
+                fusions,
                 forwards,
                 span: e.span(),
             }
