@@ -6,6 +6,8 @@ const MODEL_CHECK_SOURCES: &[(&str, &str)] = &[
     ("arith_ext.tmdl", include_str!("../defs/arith_ext.tmdl")),
     ("conditional.tmdl", include_str!("../defs/conditional.tmdl")),
     ("memory_ext.tmdl", include_str!("../defs/memory_ext.tmdl")),
+    ("atomics.tmdl", include_str!("../defs/atomics.tmdl")),
+    ("ordering.tmdl", include_str!("../defs/ordering.tmdl")),
     ("float.tmdl", include_str!("../defs/float.tmdl")),
     ("perf.tmdl", include_str!("../defs/perf.tmdl")),
 ];
@@ -371,6 +373,35 @@ mod isa {
                 }
             };
         }
+        macro_rules! escape_norex {
+            ($Op:ty, $Sib:ident, $Rbp:ident, $Norex:ident, $reg:literal, $limit:expr, [$($a:literal),*]) => {
+                if let Some(inner) = op.as_op::<$Op>() {
+                    let Some(base) = base_index(&inner) else {
+                        return Ok(false);
+                    };
+                    let replacement: Option<Box<dyn Operation>> = match base {
+                        4 | 12 => Some(Box::new(
+                            $Sib::new(context)$(.attr($a, attr(&inner, $a)))*.build(),
+                        )),
+                        5 | 13 => Some(Box::new(
+                            $Rbp::new(context)$(.attr($a, attr(&inner, $a)))*.build(),
+                        )),
+                        _ if base < 8
+                            && matches!(reg_index(&inner, $reg), Some(reg) if reg < $limit) =>
+                        {
+                            Some(Box::new(
+                                $Norex::new(context)$(.attr($a, attr(&inner, $a)))*.build(),
+                            ))
+                        }
+                        _ => None,
+                    };
+                    return match replacement {
+                        Some(replacement) => replace(rewriter, replacement),
+                        None => Ok(false),
+                    };
+                }
+            };
+        }
 
         escape!(
             MovLoadOp,
@@ -414,28 +445,40 @@ mod isa {
             MovsxdLoadRbpOpBuilder,
             ["dst", "base"]
         );
-        escape!(
+        escape_norex!(
             Mov32LoadOp,
             Mov32LoadSibOpBuilder,
             Mov32LoadRbpOpBuilder,
+            Mov32LoadNorexOpBuilder,
+            "dst",
+            8,
             ["dst", "base"]
         );
-        escape!(
+        escape_norex!(
             Mov32StoreOp,
             Mov32StoreSibOpBuilder,
             Mov32StoreRbpOpBuilder,
+            Mov32StoreNorexOpBuilder,
+            "src",
+            8,
             ["base", "src"]
         );
-        escape!(
+        escape_norex!(
             Mov16StoreOp,
             Mov16StoreSibOpBuilder,
             Mov16StoreRbpOpBuilder,
+            Mov16StoreNorexOpBuilder,
+            "src",
+            8,
             ["base", "src"]
         );
-        escape!(
+        escape_norex!(
             Mov8StoreOp,
             Mov8StoreSibOpBuilder,
             Mov8StoreRbpOpBuilder,
+            Mov8StoreNorexOpBuilder,
+            "src",
+            4,
             ["base", "src"]
         );
         escape!(sib MovLoadDispOp, MovLoadDispSibOpBuilder, ["dst", "base", "imm"]);
@@ -444,8 +487,14 @@ mod isa {
         escape!(sib Mov32StoreDispOp, Mov32StoreDispSibOpBuilder, ["base", "imm", "src"]);
         escape!(sib Mov8LoadDispOp, Mov8LoadDispSibOpBuilder, ["dst", "base", "imm"]);
         escape!(sib Mov8StoreDispOp, Mov8StoreDispSibOpBuilder, ["base", "imm", "src"]);
+        escape!(sib MovssLoadDispOp, MovssLoadDispSibOpBuilder, ["dst", "base", "imm"]);
+        escape!(sib MovssStoreDispOp, MovssStoreDispSibOpBuilder, ["base", "imm", "src"]);
         escape!(sib MovsdLoadDispOp, MovsdLoadDispSibOpBuilder, ["dst", "base", "imm"]);
         escape!(sib MovsdStoreDispOp, MovsdStoreDispSibOpBuilder, ["base", "imm", "src"]);
+        escape!(sib MovssLoadDispNorexOp, MovssLoadDispSibNorexOpBuilder, ["dst", "base", "imm"]);
+        escape!(sib MovssStoreDispNorexOp, MovssStoreDispSibNorexOpBuilder, ["base", "imm", "src"]);
+        escape!(sib MovsdLoadDispNorexOp, MovsdLoadDispSibNorexOpBuilder, ["dst", "base", "imm"]);
+        escape!(sib MovsdStoreDispNorexOp, MovsdStoreDispSibNorexOpBuilder, ["base", "imm", "src"]);
 
         // REX-free canonicalization: drop the REX byte GNU as omits when every
         // register index is low (< 8, or < 4 for the 8-bit forms that must avoid
@@ -485,6 +534,57 @@ mod isa {
                                     .build(),
                             ),
                         ),
+                        _ => Ok(false),
+                    };
+                }
+            };
+        }
+        macro_rules! rr_named_norex {
+            ($Op:ty, $Norex:ident, $dst:literal, $src:literal, $t:expr) => {
+                if let Some(inner) = op.as_op::<$Op>() {
+                    return match (reg_index(&inner, $dst), reg_index(&inner, $src)) {
+                        (Some(d), Some(s)) if d < $t && s < $t => replace(
+                            rewriter,
+                            Box::new(
+                                $Norex::new(context)
+                                    .attr($dst, attr(&inner, $dst))
+                                    .attr($src, attr(&inner, $src))
+                                    .build(),
+                            ),
+                        ),
+                        _ => Ok(false),
+                    };
+                }
+            };
+        }
+        macro_rules! rr_imm_norex {
+            ($Op:ty, $Norex:ident, $t:expr) => {
+                if let Some(inner) = op.as_op::<$Op>() {
+                    return match (reg_index(&inner, "dst"), reg_index(&inner, "src")) {
+                        (Some(d), Some(s)) if d < $t && s < $t => replace(
+                            rewriter,
+                            Box::new(
+                                $Norex::new(context)
+                                    .attr("dst", attr(&inner, "dst"))
+                                    .attr("src", attr(&inner, "src"))
+                                    .attr("imm", attr(&inner, "imm"))
+                                    .build(),
+                            ),
+                        ),
+                        _ => Ok(false),
+                    };
+                }
+            };
+        }
+        macro_rules! mem_norex {
+            ($Op:ty, $Norex:ident, $reg:literal, [$($a:literal),*]) => {
+                if let Some(inner) = op.as_op::<$Op>() {
+                    return match (reg_index(&inner, $reg), reg_index(&inner, "base")) {
+                        (Some(r), Some(b)) if r < LO && b < LO => {
+                            let builder = $Norex::new(context);
+                            $( let builder = builder.attr($a, attr(&inner, $a)); )*
+                            replace(rewriter, Box::new(builder.build()))
+                        }
                         _ => Ok(false),
                     };
                 }
@@ -574,6 +674,8 @@ mod isa {
         rr_norex!(Or32Op, Or32NorexOpBuilder, LO);
         rr_norex!(Xor32Op, Xor32NorexOpBuilder, LO);
         rr_norex!(Mov32Op, Mov32NorexOpBuilder, LO);
+        rr_norex!(Imul32Op, Imul32NorexOpBuilder, LO);
+        rr_imm_norex!(ImulImm32Op, ImulImm32NorexOpBuilder, LO);
         rr_norex!(Add16Op, Add16NorexOpBuilder, LO);
         rr_norex!(Sub16Op, Sub16NorexOpBuilder, LO);
         rr_norex!(And16Op, And16NorexOpBuilder, LO);
@@ -656,6 +758,15 @@ mod isa {
         g1_imm64!(CmpImmOp, CmpImm8sOpBuilder);
 
         // mov/test immediates: no 0x83 form, only the REX-free downgrade.
+        // Direct isel picks of the 0x83 imm8 short forms still need the
+        // REX-free downgrade.
+        ri_norex!(AddImm8s32Op, AddImm8s32NorexOpBuilder, LO);
+        ri_norex!(OrImm8s32Op, OrImm8s32NorexOpBuilder, LO);
+        ri_norex!(AndImm8s32Op, AndImm8s32NorexOpBuilder, LO);
+        ri_norex!(XorImm8s32Op, XorImm8s32NorexOpBuilder, LO);
+        ri_norex!(SubImm8s32Op, SubImm8s32NorexOpBuilder, LO);
+        ri_norex!(CmpImm8s32Op, CmpImm8s32NorexOpBuilder, LO);
+
         ri_norex!(MovImm32Op, MovImm32NorexOpBuilder, LO);
         ri_norex!(TestImm32Op, TestImm32NorexOpBuilder, LO);
         ri_norex!(MovImm16Op, MovImm16NorexOpBuilder, LO);
@@ -703,6 +814,13 @@ mod isa {
         rr_norex!(Test32Op, Test32NorexOpBuilder, LO);
         reg1_norex!(Neg32Op, Neg32NorexOpBuilder, "dst", LO);
         reg1_norex!(Not32Op, Not32NorexOpBuilder, "dst", LO);
+        reg1_norex!(SignedDivide32Op, SignedDivide32NorexOpBuilder, "dst", LO);
+        reg1_norex!(
+            UnsignedDivide32Op,
+            UnsignedDivide32NorexOpBuilder,
+            "dst",
+            LO
+        );
         reg1_norex!(ShlCl32Op, ShlCl32NorexOpBuilder, "dst", LO);
         reg1_norex!(ShrCl32Op, ShrCl32NorexOpBuilder, "dst", LO);
         reg1_norex!(SarCl32Op, SarCl32NorexOpBuilder, "dst", LO);
@@ -710,11 +828,72 @@ mod isa {
         ri_norex!(RorImm32Op, RorImm32NorexOpBuilder, LO);
 
         // Low-xmm SSE: drop the empty REX when both xmm operands are xmm0..xmm7.
+        rr_norex!(AddssOp, AddssNorexOpBuilder, LO);
+        rr_norex!(SubssOp, SubssNorexOpBuilder, LO);
+        rr_norex!(MulssOp, MulssNorexOpBuilder, LO);
+        rr_norex!(DivssOp, DivssNorexOpBuilder, LO);
+        rr_norex!(MovssOp, MovssNorexOpBuilder, LO);
         rr_norex!(AddsdOp, AddsdNorexOpBuilder, LO);
         rr_norex!(SubsdOp, SubsdNorexOpBuilder, LO);
         rr_norex!(MulsdOp, MulsdNorexOpBuilder, LO);
         rr_norex!(DivsdOp, DivsdNorexOpBuilder, LO);
         rr_norex!(MovsdOp, MovsdNorexOpBuilder, LO);
+        rr_norex!(Cvtsi2ss32Op, Cvtsi2ss32NorexOpBuilder, LO);
+        rr_norex!(Cvttss2si32Op, Cvttss2si32NorexOpBuilder, LO);
+        rr_norex!(Cvtsi2sd32Op, Cvtsi2sd32NorexOpBuilder, LO);
+        rr_norex!(Cvttsd2si32Op, Cvttsd2si32NorexOpBuilder, LO);
+        rr_norex!(MovdXmmGpr32Op, MovdXmmGpr32NorexOpBuilder, LO);
+        rr_norex!(MovdGpr32XmmOp, MovdGpr32XmmNorexOpBuilder, LO);
+        rr_named_norex!(UcomissOp, UcomissNorexOpBuilder, "lhs", "rhs", LO);
+        rr_named_norex!(UcomisdOp, UcomisdNorexOpBuilder, "lhs", "rhs", LO);
+        mem_norex!(
+            MovssLoadDispOp,
+            MovssLoadDispNorexOpBuilder,
+            "dst",
+            ["dst", "base", "imm"]
+        );
+        mem_norex!(
+            MovssStoreDispOp,
+            MovssStoreDispNorexOpBuilder,
+            "src",
+            ["base", "imm", "src"]
+        );
+        mem_norex!(
+            MovssLoadDispSibOp,
+            MovssLoadDispSibNorexOpBuilder,
+            "dst",
+            ["dst", "base", "imm"]
+        );
+        mem_norex!(
+            MovssStoreDispSibOp,
+            MovssStoreDispSibNorexOpBuilder,
+            "src",
+            ["base", "imm", "src"]
+        );
+        mem_norex!(
+            MovsdLoadDispOp,
+            MovsdLoadDispNorexOpBuilder,
+            "dst",
+            ["dst", "base", "imm"]
+        );
+        mem_norex!(
+            MovsdStoreDispOp,
+            MovsdStoreDispNorexOpBuilder,
+            "src",
+            ["base", "imm", "src"]
+        );
+        mem_norex!(
+            MovsdLoadDispSibOp,
+            MovsdLoadDispSibNorexOpBuilder,
+            "dst",
+            ["dst", "base", "imm"]
+        );
+        mem_norex!(
+            MovsdStoreDispSibOp,
+            MovsdStoreDispSibNorexOpBuilder,
+            "src",
+            ["base", "imm", "src"]
+        );
 
         Ok(false)
     }
@@ -824,9 +1003,55 @@ mod isa {
         AttributeValue::Register(RegisterAttr::Physical { class, index })
     }
 
+    /// The move family a register class is copied and spilled with. A class is a
+    /// view over a register file, so the family follows from that view — the file
+    /// it draws from, the width of the view and where the view starts — and never
+    /// from the class name: `GPR32` and the REX-free `GPR32low` are the same
+    /// 32-bit view of the GPR file and move alike.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum MoveKind {
+        Gpr64,
+        Gpr32,
+        Gpr16,
+        Gpr8,
+        Gpr8High,
+        Xmm64,
+        Xmm32,
+    }
+
     /// Register allocation target. Frame adjustment is `add rsp, ±size`; GPR
     /// spills use the displacement-based `mov` memory forms.
-    struct X86RegAlloc;
+    struct X86RegAlloc {
+        /// Architectural width per register class under the enabled features
+        /// (`GPR` is `XLEN` wide, so this is not a compile-time constant).
+        widths: Vec<(&'static str, u32)>,
+    }
+
+    impl X86RegAlloc {
+        fn new(features: &[Feature]) -> Self {
+            Self {
+                widths: register_widths(features),
+            }
+        }
+
+        fn move_kind(&self, class: tir::backend::regalloc::RegClassId) -> Option<MoveKind> {
+            let width = self
+                .widths
+                .iter()
+                .find(|(name, _)| *name == class.name())
+                .map(|(_, width)| *width)?;
+            match (class.file(), width, class.view.bit_offset) {
+                ("GPR", 64, 0) => Some(MoveKind::Gpr64),
+                ("GPR", 32, 0) => Some(MoveKind::Gpr32),
+                ("GPR", 16, 0) => Some(MoveKind::Gpr16),
+                ("GPR", 8, 0) => Some(MoveKind::Gpr8),
+                ("GPR", 8, 8) => Some(MoveKind::Gpr8High),
+                ("XMM128", 64, 0) => Some(MoveKind::Xmm64),
+                ("XMM128", 32, 0) => Some(MoveKind::Xmm32),
+                _ => None,
+            }
+        }
+    }
 
     impl tir::backend::regalloc::TargetRegAlloc for X86RegAlloc {
         fn register_info(&self) -> tir::backend::regalloc::RegisterInfo {
@@ -841,36 +1066,43 @@ mod isa {
             frame: &tir::backend::liveness::PhysReg,
             offset: i64,
         ) -> Box<dyn Operation> {
-            match class.name() {
-                "GPR" => Box::new(
+            match self.move_kind(class) {
+                Some(MoveKind::Gpr64) => Box::new(
                     MovStoreDispOpBuilder::new(context)
                         .attr("base", phys(frame.0, frame.1))
                         .attr("imm", AttributeValue::Int(offset))
                         .attr("src", virt(value, class))
                         .build(),
                 ),
-                "GPR32" => Box::new(
+                Some(MoveKind::Gpr32) => Box::new(
                     Mov32StoreDispOpBuilder::new(context)
                         .attr("base", phys(frame.0, frame.1))
                         .attr("imm", AttributeValue::Int(offset))
                         .attr("src", virt(value, class))
                         .build(),
                 ),
-                "GPR8" => Box::new(
+                Some(MoveKind::Gpr8) => Box::new(
                     Mov8StoreDispOpBuilder::new(context)
                         .attr("base", phys(frame.0, frame.1))
                         .attr("imm", AttributeValue::Int(offset))
                         .attr("src", virt(value, class))
                         .build(),
                 ),
-                "XMM" | "XMMzx" => Box::new(
+                Some(MoveKind::Xmm64) => Box::new(
                     MovsdStoreDispOpBuilder::new(context)
                         .attr("base", phys(frame.0, frame.1))
                         .attr("imm", AttributeValue::Int(offset))
                         .attr("src", virt(value, class))
                         .build(),
                 ),
-                other => unimplemented!("x86-64 spilling for {other} is not implemented"),
+                Some(MoveKind::Xmm32) => Box::new(
+                    MovssStoreDispOpBuilder::new(context)
+                        .attr("base", phys(frame.0, frame.1))
+                        .attr("imm", AttributeValue::Int(offset))
+                        .attr("src", virt(value, class))
+                        .build(),
+                ),
+                _ => unimplemented!("x86-64 spilling for {} is not implemented", class.name()),
             }
         }
 
@@ -882,36 +1114,43 @@ mod isa {
             frame: &tir::backend::liveness::PhysReg,
             offset: i64,
         ) -> Box<dyn Operation> {
-            match class.name() {
-                "GPR" => Box::new(
+            match self.move_kind(class) {
+                Some(MoveKind::Gpr64) => Box::new(
                     MovLoadDispOpBuilder::new(context)
                         .attr("dst", virt(value, class))
                         .attr("base", phys(frame.0, frame.1))
                         .attr("imm", AttributeValue::Int(offset))
                         .build(),
                 ),
-                "GPR32" => Box::new(
+                Some(MoveKind::Gpr32) => Box::new(
                     Mov32LoadDispOpBuilder::new(context)
                         .attr("dst", virt(value, class))
                         .attr("base", phys(frame.0, frame.1))
                         .attr("imm", AttributeValue::Int(offset))
                         .build(),
                 ),
-                "GPR8" => Box::new(
+                Some(MoveKind::Gpr8) => Box::new(
                     Mov8LoadDispOpBuilder::new(context)
                         .attr("dst", virt(value, class))
                         .attr("base", phys(frame.0, frame.1))
                         .attr("imm", AttributeValue::Int(offset))
                         .build(),
                 ),
-                "XMM" | "XMMzx" => Box::new(
+                Some(MoveKind::Xmm64) => Box::new(
                     MovsdLoadDispOpBuilder::new(context)
                         .attr("dst", virt(value, class))
                         .attr("base", phys(frame.0, frame.1))
                         .attr("imm", AttributeValue::Int(offset))
                         .build(),
                 ),
-                other => unimplemented!("x86-64 spilling for {other} is not implemented"),
+                Some(MoveKind::Xmm32) => Box::new(
+                    MovssLoadDispOpBuilder::new(context)
+                        .attr("dst", virt(value, class))
+                        .attr("base", phys(frame.0, frame.1))
+                        .attr("imm", AttributeValue::Int(offset))
+                        .build(),
+                ),
+                _ => unimplemented!("x86-64 spilling for {} is not implemented", class.name()),
             }
         }
 
@@ -928,44 +1167,50 @@ mod isa {
                     class: Some(class),
                 })
             };
-            match class.name() {
-                "GPR" => Box::new(
+            match self.move_kind(class) {
+                Some(MoveKind::Gpr64) => Box::new(
                     MovOpBuilder::new(context)
                         .attr("dst", virt(dst))
                         .attr("src", virt(src))
                         .build(),
                 ),
-                "GPR32" => Box::new(
+                Some(MoveKind::Gpr32) => Box::new(
                     Mov32OpBuilder::new(context)
                         .attr("dst", virt(dst))
                         .attr("src", virt(src))
                         .build(),
                 ),
-                "GPR16" => Box::new(
+                Some(MoveKind::Gpr16) => Box::new(
                     Mov16OpBuilder::new(context)
                         .attr("dst", virt(dst))
                         .attr("src", virt(src))
                         .build(),
                 ),
-                "GPR8" => Box::new(
+                Some(MoveKind::Gpr8) => Box::new(
                     Mov8OpBuilder::new(context)
                         .attr("dst", virt(dst))
                         .attr("src", virt(src))
                         .build(),
                 ),
-                "GPR8H" => Box::new(
+                Some(MoveKind::Gpr8High) => Box::new(
                     Mov8HOpBuilder::new(context)
                         .attr("dst", virt(dst))
                         .attr("src", virt(src))
                         .build(),
                 ),
-                "XMM" | "XMMzx" => Box::new(
+                Some(MoveKind::Xmm64) => Box::new(
                     MovsdOpBuilder::new(context)
                         .attr("dst", virt(dst))
                         .attr("src", virt(src))
                         .build(),
                 ),
-                other => unreachable!("unknown x86-64 register class {other}"),
+                Some(MoveKind::Xmm32) => Box::new(
+                    MovssOpBuilder::new(context)
+                        .attr("dst", virt(dst))
+                        .attr("src", virt(src))
+                        .build(),
+                ),
+                None => unreachable!("unknown x86-64 register class {}", class.name()),
             }
         }
 
@@ -1019,7 +1264,7 @@ mod isa {
             frame: &tir::backend::liveness::PhysReg,
             offset: i64,
         ) -> Result<Vec<Box<dyn Operation>>, tir::PassError> {
-            if !matches!(class.name(), "GPR" | "GPRaddrIndex") {
+            if self.move_kind(class) != Some(MoveKind::Gpr64) {
                 return Err(tir::PassError::InvalidRuleSet(format!(
                     "x86-64 stack allocation addresses for register class {} are not supported",
                     class.name()
@@ -1059,6 +1304,13 @@ mod isa {
     const R_X86_64_PLT32: u32 = 4;
     const R_X86_64_64: u32 = 1;
 
+    /// The mnemonic an op name encodes. The base-ISA (`_legacy`) forms of the
+    /// pc-relative branches share their 64-bit counterpart's encoding, so they
+    /// relocate and measure their displacement identically.
+    fn branch_mnemonic(op: &str) -> &str {
+        op.strip_suffix("_legacy").unwrap_or(op)
+    }
+
     fn object_format() -> tir::backend::binary::ObjectFormatInfo {
         use tir::backend::binary::{EM_X86_64, ElfClass, ObjectFormatInfo, RelocKind};
         ObjectFormatInfo {
@@ -1066,7 +1318,7 @@ mod isa {
             elf_class: ElfClass::Elf64,
             elf_flags: 0,
             absolute_reloc: |width| (width == 8).then_some(R_X86_64_64),
-            reloc_for: |op| match op {
+            reloc_for: |op| match branch_mnemonic(op) {
                 // `call rel32`: the disp32 follows the 1-byte opcode.
                 "call" => Some(RelocKind {
                     r_type: R_X86_64_PLT32,
@@ -1099,7 +1351,7 @@ mod isa {
             // (RIP points past the branch when the displacement applies).
             pc_rel_from_end: |op| {
                 matches!(
-                    op,
+                    branch_mnemonic(op),
                     "jmp"
                         | "je"
                         | "jne"
@@ -1132,14 +1384,20 @@ mod isa {
         pub fn parse(
             march: &str,
             _mcpu: Option<&str>,
-            _mattr: Option<&str>,
+            mattr: Option<&str>,
         ) -> Result<Self, String> {
             match march.trim().to_ascii_lowercase().replace('-', "_").as_str() {
                 "x86_64" | "amd64" | "x64" => {}
                 other => return Err(format!("unknown x86-64 architecture '{other}'")),
             }
-            let features = vec![Feature::X86, Feature::X86_64];
+            let mut features = vec![Feature::X86, Feature::X86_64, Feature::SSE, Feature::SSE2];
+            if let Some(mattr) = mattr {
+                apply_mattr(&mut features, mattr)?;
+            }
             validate_features(&features)?;
+            if !features.contains(&Feature::X86_64) {
+                return Err("--mattr must not disable the base ISA 'X86_64'".to_string());
+            }
             Ok(Self { features })
         }
 
@@ -1147,6 +1405,28 @@ mod isa {
         pub fn features(&self) -> &[Feature] {
             &self.features
         }
+    }
+
+    fn apply_mattr(features: &mut Vec<Feature>, mattr: &str) -> Result<(), String> {
+        for item in mattr.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            let (add, name) = if let Some(name) = item.strip_prefix('+') {
+                (true, name)
+            } else if let Some(name) = item.strip_prefix('-') {
+                (false, name)
+            } else {
+                return Err(format!(
+                    "invalid --mattr entry '{item}' (expected '+feature' or '-feature')"
+                ));
+            };
+            let feature = Feature::from_name(&name.to_ascii_lowercase().replace('-', "_"))
+                .ok_or_else(|| format!("unknown x86-64 feature '{name}' in --mattr"))?;
+            if add && !features.contains(&feature) {
+                features.push(feature);
+            } else if !add {
+                features.retain(|f| *f != feature);
+            }
+        }
+        Ok(())
     }
 
     struct X86Target {
@@ -1217,7 +1497,7 @@ mod isa {
 
         fn regalloc_pass(&self) -> tir::backend::regalloc::RegisterAllocationPass {
             tir::backend::regalloc::RegisterAllocationPass::with_abi(
-                Box::new(X86RegAlloc),
+                Box::new(X86RegAlloc::new(self.config.features())),
                 self.abi(),
             )
         }
@@ -1449,6 +1729,286 @@ mod isa {
         }
 
         #[test]
+        fn scalar_single_low_becomes_norex_high_stays() {
+            let low = canon!(|c| AddssOpBuilder::new(c)
+                .attr("dst", phys(RegClass::XMM32.id(), 0))
+                .attr("src", phys(RegClass::XMM32.id(), 1))
+                .build());
+            assert!(low.contains("addss_norex"));
+            let high = canon!(|c| AddssOpBuilder::new(c)
+                .attr("dst", phys(RegClass::XMM32.id(), 8))
+                .attr("src", phys(RegClass::XMM32.id(), 1))
+                .build());
+            assert!(high.contains("x86_64.addss "));
+            assert!(!high.contains("norex"));
+        }
+
+        #[test]
+        fn scalar_compare_and_conversion_low_become_norex() {
+            let compare = canon!(|c| UcomissOpBuilder::new(c)
+                .attr("lhs", phys(RegClass::XMM32.id(), 0))
+                .attr("rhs", phys(RegClass::XMM32.id(), 1))
+                .build());
+            assert!(compare.contains("ucomiss_norex"));
+
+            let conversion = canon!(|c| Cvtsi2ss32OpBuilder::new(c)
+                .attr("dst", phys(RegClass::XMM32.id(), 0))
+                .attr("src", g32(0))
+                .build());
+            assert!(conversion.contains("cvtsi2ss32_norex"));
+        }
+
+        #[test]
+        fn legacy_integer_parsers_belong_to_x86() {
+            let (parsers, _) = get_instruction_parsers(&[Feature::X86]);
+            assert!(parsers.contains_key("add"));
+            assert!(parsers.contains_key("setne"));
+            assert!(!parsers.contains_key("addsd"));
+
+            let context = tir::Context::with_default_dialects();
+            let parser = tir::backend::AsmParser::new(parsers);
+            for instruction in [
+                "add eax, ebx",
+                "mov ah, bh",
+                "mov edi, 42",
+                "mov eax, [rbx]",
+                "mov [rbx], ecx",
+                "mov [rbx], cx",
+                "mov [rbx], cl",
+                "movzx eax, bl",
+                "movsx eax, cx",
+                "movzx eax, byte ptr [rbx]",
+                "movsx eax, word ptr [rbx]",
+                "imul eax, ebx",
+                "idiv ebx",
+                "div ebx",
+                "cdq",
+                "shl eax",
+                "neg ax",
+                "jmp 4",
+                "je 4",
+                "call 4",
+                "ret",
+                "jmp *rax",
+                "call *rax",
+                "push rax",
+                "pop rax",
+            ] {
+                assert!(
+                    parser.parse_asm(&context, instruction).is_ok(),
+                    "X86 rejected {instruction}"
+                );
+            }
+            for instruction in ["add rax, rbx", "add r8d, eax", "addsd xmm0, xmm1"] {
+                assert!(
+                    parser.parse_asm(&context, instruction).is_err(),
+                    "X86 accepted {instruction}"
+                );
+            }
+        }
+
+        #[test]
+        fn extended_xmm_registers_require_long_mode() {
+            let context = tir::Context::with_default_dialects();
+            let (sse, _) = get_instruction_parsers(&[Feature::X86, Feature::SSE]);
+            let sse = tir::backend::AsmParser::new(sse);
+            assert!(sse.parse_asm(&context, "addss xmm0, xmm1").is_ok());
+            assert!(sse.parse_asm(&context, "addss xmm8, xmm1").is_err());
+            assert!(sse.parse_asm(&context, "addsd xmm0, xmm1").is_err());
+            assert!(sse.parse_asm(&context, "ucomiss xmm0, xmm1").is_ok());
+            assert!(sse.parse_asm(&context, "ucomiss xmm8, xmm1").is_err());
+            assert!(sse.parse_asm(&context, "cvtsi2ss xmm0, eax").is_ok());
+            assert!(sse.parse_asm(&context, "cvtsi2ss xmm8, eax").is_err());
+            assert!(sse.parse_asm(&context, "cvtsi2ss xmm0, r8d").is_err());
+            assert!(sse.parse_asm(&context, "cvttss2si eax, xmm0").is_ok());
+            assert!(sse.parse_asm(&context, "cvttss2si r8d, xmm0").is_err());
+            assert!(sse.parse_asm(&context, "cvttss2si eax, xmm8").is_err());
+            assert!(sse.parse_asm(&context, "movss xmm0, [rax + 8]").is_ok());
+            assert!(sse.parse_asm(&context, "movss xmm8, [rax + 8]").is_err());
+            assert!(sse.parse_asm(&context, "movss xmm0, [r8 + 8]").is_err());
+
+            let (sse2, _) = get_instruction_parsers(&[Feature::X86, Feature::SSE, Feature::SSE2]);
+            let sse2 = tir::backend::AsmParser::new(sse2);
+            assert!(sse2.parse_asm(&context, "addsd xmm0, xmm1").is_ok());
+            assert!(sse2.parse_asm(&context, "addsd xmm8, xmm1").is_err());
+            assert!(sse2.parse_asm(&context, "ucomisd xmm0, xmm1").is_ok());
+            assert!(sse2.parse_asm(&context, "ucomisd xmm8, xmm1").is_err());
+            assert!(sse2.parse_asm(&context, "cvtsi2sd xmm0, eax").is_ok());
+            assert!(sse2.parse_asm(&context, "cvtsi2sd xmm8, eax").is_err());
+            assert!(sse2.parse_asm(&context, "cvtsi2sd xmm0, r8d").is_err());
+            assert!(sse2.parse_asm(&context, "cvttsd2si eax, xmm0").is_ok());
+            assert!(sse2.parse_asm(&context, "cvttsd2si r8d, xmm0").is_err());
+            assert!(sse2.parse_asm(&context, "cvttsd2si eax, xmm8").is_err());
+            assert!(sse2.parse_asm(&context, "movd xmm0, eax").is_ok());
+            assert!(sse2.parse_asm(&context, "movd eax, xmm0").is_ok());
+            assert!(sse2.parse_asm(&context, "movd xmm8, eax").is_err());
+            assert!(sse2.parse_asm(&context, "movd xmm0, r8d").is_err());
+            assert!(sse2.parse_asm(&context, "movd r8d, xmm0").is_err());
+            assert!(sse2.parse_asm(&context, "movq rax, xmm0").is_err());
+            assert!(sse2.parse_asm(&context, "cvtsi2sd xmm0, rax").is_err());
+            assert!(sse2.parse_asm(&context, "cvttsd2si rax, xmm0").is_err());
+            assert!(sse2.parse_asm(&context, "movsd xmm0, [rax + 8]").is_ok());
+            assert!(sse2.parse_asm(&context, "movsd xmm8, [rax + 8]").is_err());
+            assert!(sse2.parse_asm(&context, "movsd xmm0, [r8 + 8]").is_err());
+
+            let (long_mode, _) = get_instruction_parsers(&[
+                Feature::X86,
+                Feature::SSE,
+                Feature::SSE2,
+                Feature::X86_64,
+            ]);
+            let long_mode = tir::backend::AsmParser::new(long_mode);
+            assert!(long_mode.parse_asm(&context, "addss xmm8, xmm1").is_ok());
+            assert!(long_mode.parse_asm(&context, "addsd xmm8, xmm1").is_ok());
+            assert!(long_mode.parse_asm(&context, "ucomiss xmm8, xmm1").is_ok());
+            assert!(long_mode.parse_asm(&context, "ucomisd xmm8, xmm1").is_ok());
+            assert!(long_mode.parse_asm(&context, "cvtsi2ss xmm8, r8d").is_ok());
+            assert!(long_mode.parse_asm(&context, "cvtsi2sd xmm8, r8d").is_ok());
+            assert!(long_mode.parse_asm(&context, "cvttss2si r8d, xmm8").is_ok());
+            assert!(long_mode.parse_asm(&context, "cvttsd2si r8d, xmm8").is_ok());
+            assert!(long_mode.parse_asm(&context, "movd xmm8, r8d").is_ok());
+            assert!(long_mode.parse_asm(&context, "movd r8d, xmm8").is_ok());
+            assert!(long_mode.parse_asm(&context, "movq rax, xmm0").is_ok());
+            assert!(long_mode.parse_asm(&context, "cvtsi2sd xmm0, rax").is_ok());
+            assert!(long_mode.parse_asm(&context, "cvttsd2si rax, xmm0").is_ok());
+            assert!(
+                long_mode
+                    .parse_asm(&context, "movss xmm8, [r8 + 8]")
+                    .is_ok()
+            );
+            assert!(
+                long_mode
+                    .parse_asm(&context, "movsd xmm8, [r8 + 8]")
+                    .is_ok()
+            );
+            assert_eq!(isa_params(&[Feature::X86]), vec![("XLEN", 32)]);
+            assert_eq!(
+                isa_params(&[Feature::X86, Feature::X86_64]),
+                vec![("XLEN", 64)]
+            );
+        }
+
+        #[test]
+        fn atomic_register_extensions_require_long_mode() {
+            let context = tir::Context::with_default_dialects();
+            let (x86, _) = get_instruction_parsers(&[Feature::X86]);
+            assert!(x86.contains_key("xchg"));
+            assert!(x86.contains_key("lock"));
+            let x86 = tir::backend::AsmParser::new(x86);
+            for instruction in [
+                "xchg [rax + 8], ebx",
+                "lock xadd [rax + 8], ebx",
+                "lock xor [rax + 8], ebx",
+                "lock and [rax + 8], ebx",
+                "lock or [rax + 8], ebx",
+                "xchg [rsp + 8], ebx",
+            ] {
+                assert!(
+                    x86.parse_asm(&context, instruction).is_ok(),
+                    "X86 rejected {instruction}"
+                );
+            }
+            for instruction in [
+                "xchg [rax + 8], rbx",
+                "xchg [r8 + 8], ebx",
+                "lock xadd [rax + 8], r8d",
+                "lock xor [rax + 8], r8d",
+            ] {
+                assert!(
+                    x86.parse_asm(&context, instruction).is_err(),
+                    "X86 accepted {instruction}"
+                );
+            }
+
+            let (long_mode, _) = get_instruction_parsers(&[
+                Feature::X86,
+                Feature::SSE,
+                Feature::SSE2,
+                Feature::X86_64,
+            ]);
+            let long_mode = tir::backend::AsmParser::new(long_mode);
+            for instruction in [
+                "xchg [rax + 8], rbx",
+                "xchg [r12 + 8], r9",
+                "lock xadd [r12 + 8], r9",
+                "lock xor [r12 + 8], r9",
+            ] {
+                assert!(
+                    long_mode.parse_asm(&context, instruction).is_ok(),
+                    "X86_64 rejected {instruction}"
+                );
+            }
+        }
+
+        #[test]
+        fn memory_ordering_instructions_follow_sse_levels() {
+            let context = tir::Context::with_default_dialects();
+
+            let (x86, _) = get_instruction_parsers(&[Feature::X86]);
+            let x86 = tir::backend::AsmParser::new(x86);
+            for instruction in ["sfence", "lfence", "mfence", "pause"] {
+                assert!(x86.parse_asm(&context, instruction).is_err());
+            }
+
+            let (sse, _) = get_instruction_parsers(&[Feature::X86, Feature::SSE]);
+            let sse = tir::backend::AsmParser::new(sse);
+            assert!(sse.parse_asm(&context, "sfence").is_ok());
+            for instruction in ["lfence", "mfence", "pause"] {
+                assert!(sse.parse_asm(&context, instruction).is_err());
+            }
+
+            let (sse2, _) = get_instruction_parsers(&[Feature::X86, Feature::SSE, Feature::SSE2]);
+            let sse2 = tir::backend::AsmParser::new(sse2);
+            for instruction in ["sfence", "lfence", "mfence", "pause"] {
+                assert!(sse2.parse_asm(&context, instruction).is_ok());
+            }
+        }
+
+        // A REX-free subclass is a view over the GPR file, so copying one is the
+        // file's move at the subclass's width, not an unknown class.
+        #[test]
+        fn subclass_copies_use_the_file_move_at_the_class_width() {
+            let context = tir::Context::with_default_dialects();
+            let target = X86RegAlloc::new(&[Feature::X86, Feature::X86_64]);
+            let copy = |class| {
+                let op = tir::backend::regalloc::TargetRegAlloc::emit_copy(
+                    &target, &context, class, 0, 1,
+                );
+                context.get_op(op.id()).name().as_str().to_string()
+            };
+
+            assert_eq!(copy(RegClass::GPR32low.id()), "mov32");
+            assert_eq!(copy(RegClass::GPR16low.id()), "mov16");
+            assert_eq!(copy(RegClass::GPR8low.id()), "mov8");
+            assert_eq!(copy(RegClass::GPRlow.id()), "mov");
+            assert_eq!(copy(RegClass::XMMlow.id()), "movsd");
+            assert_eq!(copy(RegClass::XMM32low.id()), "movss");
+        }
+
+        #[test]
+        fn scalar_single_spills_use_movss() {
+            let context = tir::Context::with_default_dialects();
+            let target = X86RegAlloc::new(&[Feature::X86, Feature::X86_64]);
+            let class = RegClass::XMM32.id();
+            let frame = (RegClass::GPR.id(), 4);
+            let store = tir::backend::regalloc::TargetRegAlloc::emit_spill_store(
+                &target, &context, 0, class, &frame, 8,
+            );
+            let reload = tir::backend::regalloc::TargetRegAlloc::emit_spill_reload(
+                &target, &context, 0, class, &frame, 8,
+            );
+
+            assert_eq!(
+                context.get_op(store.id()).name().as_str(),
+                "movss_store_disp"
+            );
+            assert_eq!(
+                context.get_op(reload.id()).name().as_str(),
+                "movss_load_disp"
+            );
+        }
+
+        #[test]
         fn byte_forms_use_the_al_cl_dl_bl_threshold() {
             let al = canon!(|c| Add8OpBuilder::new(c)
                 .attr("dst", phys(RegClass::GPR8.id(), 3))
@@ -1493,6 +2053,52 @@ mod isa {
         }
 
         #[test]
+        fn legacy_multiply_and_divide_drop_empty_rex() {
+            let multiply = canon!(|c| Imul32OpBuilder::new(c)
+                .attr("dst", g32(0))
+                .attr("src", g32(3))
+                .build());
+            assert!(multiply.contains("imul32_norex"));
+
+            let multiply_immediate = canon!(|c| ImulImm32OpBuilder::new(c)
+                .attr("dst", g32(0))
+                .attr("src", g32(3))
+                .attr("imm", AttributeValue::Int(7))
+                .build());
+            assert!(multiply_immediate.contains("imul_imm32_norex"));
+
+            let divide = canon!(|c| SignedDivide32OpBuilder::new(c).attr("dst", g32(3)).build());
+            assert!(divide.contains("signed_divide32_norex"));
+        }
+
+        #[test]
+        fn legacy_memory_drops_empty_rex() {
+            let load = canon!(|c| Mov32LoadOpBuilder::new(c)
+                .attr("dst", g32(0))
+                .attr("base", phys(RegClass::GPR.id(), 3))
+                .build());
+            assert!(load.contains("mov_load32_norex"));
+
+            let store = canon!(|c| Mov32StoreOpBuilder::new(c)
+                .attr("base", phys(RegClass::GPR.id(), 3))
+                .attr("src", g32(1))
+                .build());
+            assert!(store.contains("mov_store32_norex"));
+
+            let store16 = canon!(|c| Mov16StoreOpBuilder::new(c)
+                .attr("base", phys(RegClass::GPR.id(), 3))
+                .attr("src", phys(RegClass::GPR16.id(), 1))
+                .build());
+            assert!(store16.contains("mov_store16_norex"));
+
+            let store8 = canon!(|c| Mov8StoreOpBuilder::new(c)
+                .attr("base", phys(RegClass::GPR.id(), 3))
+                .attr("src", phys(RegClass::GPR8.id(), 1))
+                .build());
+            assert!(store8.contains("mov_store8_norex"));
+        }
+
+        #[test]
         fn singletons_drop_rex_when_low() {
             let push = canon!(|c| PushOpBuilder::new(c)
                 .attr("reg", phys(RegClass::GPR.id(), 3))
@@ -1523,11 +2129,16 @@ mod tests {
     }
 
     #[test]
-    fn x86_64_target_enables_its_x86_prerequisite() {
+    fn x86_64_target_enables_required_features() {
         let config = crate::TargetConfig::parse("x86_64", None, None).unwrap();
         assert_eq!(
             config.features(),
-            &[crate::Feature::X86, crate::Feature::X86_64]
+            &[
+                crate::Feature::X86,
+                crate::Feature::X86_64,
+                crate::Feature::SSE,
+                crate::Feature::SSE2,
+            ]
         );
         assert!(crate::TargetConfig::parse("x86", None, None).is_err());
     }
