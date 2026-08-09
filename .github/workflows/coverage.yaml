@@ -27,6 +27,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+      - uses: rui314/setup-mold@v1
       - uses: mozilla-actions/sccache-action@v0.0.10
       - uses: Swatinem/rust-cache@v2
         with:
@@ -46,6 +47,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+      - uses: rui314/setup-mold@v1
       - uses: taiki-e/install-action@nextest
       - uses: mozilla-actions/sccache-action@v0.0.10
       - uses: Swatinem/rust-cache@v2
@@ -76,6 +78,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
+      - uses: rui314/setup-mold@v1
       - uses: taiki-e/install-action@nextest
       - uses: Swatinem/rust-cache@v2
       - run: cargo nextest run --workspace --locked

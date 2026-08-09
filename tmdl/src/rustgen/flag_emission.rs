@@ -201,7 +201,7 @@ fn emit_flag_branch_rules(
                     pattern_widths[index] = *forced;
                 }
             }
-            let (pattern_stmts, _root_var) =
+            let pattern_expr =
                 emit_dag_as_code(&canon_pattern, canon_root, &pattern_widths);
             let operand_register_call = emit_operand_register_call(
                 &d.ops,
@@ -239,9 +239,8 @@ fn emit_flag_branch_rules(
 
             isel_rule_emitters.push(quote! {
                 fn #pattern_fn_ident(_context: &tir::Context) -> tir::sem::SemGraph {
-                    use tir::graph::MutDag;
                     let mut g = tir::sem::SemGraph::new();
-                    #(#pattern_stmts)*
+                    #pattern_expr;
                     g
                 }
 
@@ -511,7 +510,7 @@ fn emit_aliased_zero_branch_rules(
                     pattern_widths[index] = *forced;
                 }
             }
-            let (pattern_stmts, _root_var) =
+            let pattern_expr =
                 emit_dag_as_code(&canon_pattern, canon_root, &pattern_widths);
 
             let prelude_fn_ident = format_ident!(
@@ -571,9 +570,8 @@ fn emit_aliased_zero_branch_rules(
 
             isel_rule_emitters.push(quote! {
                 fn #pattern_fn_ident(_context: &tir::Context) -> tir::sem::SemGraph {
-                    use tir::graph::MutDag;
                     let mut g = tir::sem::SemGraph::new();
-                    #(#pattern_stmts)*
+                    #pattern_expr;
                     g
                 }
 
@@ -808,7 +806,7 @@ fn emit_flag_reader_rules(
                     pattern_widths[index] = *forced;
                 }
             }
-            let (pattern_stmts, _root_var) =
+            let pattern_expr =
                 emit_dag_as_code(&canon_pattern, canon_root, &pattern_widths);
             let sensitive_symbols = width_sensitive_symbols(&canon_pattern, &pattern_widths);
             // The rule reads registers from both composed instructions: the
@@ -938,9 +936,8 @@ fn emit_flag_reader_rules(
 
             isel_rule_emitters.push(quote! {
                 fn #pattern_fn_ident(_context: &tir::Context) -> tir::sem::SemGraph {
-                    use tir::graph::MutDag;
                     let mut g = tir::sem::SemGraph::new();
-                    #(#pattern_stmts)*
+                    #pattern_expr;
                     g
                 }
 
