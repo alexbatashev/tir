@@ -1,0 +1,23 @@
+// RUN: tir mc --march=x86_64 --stage=regalloc %s | filecheck %s
+
+// The copies destructing block arguments are coalescing candidates like any
+// other pre-allocation copy: the forwarded value and the parameter it feeds
+// want one register, and the copy must disappear once they get it.
+
+module {
+  func @fwd(%0: !i64, %1: !i64) -> !i64 {
+    %2 = addi %0, %1 : !i64
+    br ^bb1(%2 : !i64)
+  ^bb1(%3: !i64):
+    %4 = addi %3, %3 : !i64
+    return %4
+  }
+  module_end
+}
+
+// The sum is computed straight into the register `^bb1` reads its parameter
+// from, so the edge copy that would move it there is gone.
+// CHECK:      x86_64.add {dst = [[V:r[a-z0-9]+]], src = rsi}
+// CHECK-NEXT: asm.vbr ^bb1
+// CHECK:      ^bb1
+// CHECK: x86_64.add {dst = {{r[a-z0-9]+}}, src = [[V]]}

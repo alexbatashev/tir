@@ -127,7 +127,11 @@ impl Pass for TiedOperandLoweringPass {
 /// parameter defined in every predecessor. The copies of one edge form a
 /// parallel copy (all sources read before any destination is written), so they
 /// are sequentialized with a fresh temporary per cycle (e.g. a loop edge that
-/// swaps two parameters).
+/// swaps two parameters). Each copy carries [`ABI_COPY_ATTR`]: parameter and
+/// forwarded value want one register, and a copy whose ends coalesce is a
+/// self-move. Sequentialization stays correct because only a copy the allocator
+/// gave one register at both ends is erased, and a value still needed as a
+/// source interferes with the destination that would overwrite it.
 pub struct BlockArgLoweringPass {
     target: Box<dyn TargetRegAlloc>,
     abi: &'static crate::backend::abi::AbiInfo,
@@ -212,7 +216,9 @@ impl Pass for BlockArgLoweringPass {
                 let op_ref = op_ref_in(context, block_id, op_id);
                 for (dst, src, class) in sequence_parallel_copies(context, pairs) {
                     let copy = self.target.emit_copy(context, class, dst, src);
+                    let copy_id = copy.id();
                     rewriter.insert_op_before(&op_ref, copy.as_ref())?;
+                    mark_op(context, copy_id, ABI_COPY_ATTR, AttributeValue::Bool(true));
                 }
                 context.set_op_operands(op_id, Vec::new());
             }
@@ -221,8 +227,9 @@ impl Pass for BlockArgLoweringPass {
     }
 }
 
-/// Marks a copy inserted to keep a register pin local — an ABI boundary here, a
-/// fixed-register instruction operand in [`crate::backend::regalloc`]. Register
+/// Marks a copy whose two ends want the same register — an ABI boundary or a
+/// block-argument edge here, a fixed-register instruction operand in
+/// [`crate::backend::regalloc`]. Register
 /// allocation reads the endpoints as a coalescing affinity, erases the copy when
 /// both land in one register, and strips the mark.
 pub(crate) const ABI_COPY_ATTR: &str = "abi_copy";

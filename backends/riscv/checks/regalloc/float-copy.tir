@@ -1,11 +1,14 @@
 // RUN: tir mc --march=rv64id --stage=regalloc %s | filecheck %s --check-prefix=COPY
 // RUN: tir mc --march=rv64id --filetype=obj-ascii %s | filecheck %s --check-prefix=ENC
 
+// The forwarded value stays live past the edge, so its copy into the block
+// parameter cannot be coalesced away and has to be a real f64 move.
+
 module {
   func @forward(%0: !f64) -> !f64 {
     br ^bb1(%0 : !f64)
     ^bb1(%1: !f64):
-    %2 = addf %1, %1 : !f64
+    %2 = addf %1, %0 : !f64
     return %2
   }
   module_end
