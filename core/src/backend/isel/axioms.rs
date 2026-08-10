@@ -29,6 +29,12 @@
 //! low `n` bits of a fresh register-wide symbol that the RHS reads whole — so
 //! the proof also covers the undefined upper register bits the emitted
 //! instructions actually see.
+//!
+//! An axiom over a loop-carried `theta` is proved by induction instead: the
+//! identity is discharged once with every `theta` read as its `init` port (the
+//! base case) and once as its `next` port (the step). An RHS that nests a
+//! `theta` under a `theta` unrolls the loop and never saturates, so it is
+//! rejected at parse.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{LazyLock, Mutex};
@@ -191,11 +197,31 @@ enum Side {
 enum ProofObligation {
     /// Discharged by the [`SmtOracle`] over the realized LHS and RHS.
     Equivalence,
-    /// `theta(x, x) = x`: a loop-carried value whose initial and next values are
-    /// the same term. Base case and preservation step are both that term, so the
-    /// invariant holds by induction — there is no finite expression for the
-    /// oracle to bit-blast.
+    /// An identity over a loop-carried value, discharged by induction over the
+    /// iterations as a pair of [`ProofObligation::Equivalence`] obligations: the
+    /// property holds of the `init` port (base case) and of the `next` port
+    /// (step). The step needs no explicit hypothesis: an axiom's operands are
+    /// opaque holes, so the term realized at iteration `t + 1` is `next` itself,
+    /// with no occurrence of the iteration-`t` value for a hypothesis to
+    /// constrain.
     ThetaInvariant,
+}
+
+/// Which loop-carried port a `theta` node realizes as in one proof instance.
+#[derive(Clone, Copy)]
+enum ThetaPort {
+    Init,
+    Next,
+}
+
+/// The fixed context of one realized proof instance.
+struct Realization<'a> {
+    widths: &'a [u64],
+    register_width: u32,
+    side: Side,
+    root_sym: Option<NodeId>,
+    /// `None` for an obligation whose realization holds no `theta`.
+    theta_port: Option<ThetaPort>,
 }
 
 pub(crate) struct Axiom {
@@ -437,12 +463,14 @@ pub(crate) fn parse_axiom(text: &str) -> Result<Axiom, String> {
             }
         }
     }
-    let obligation = if is_theta_invariant_collapse(&lhs, &rhs) {
+    let obligation = if contains_kind(&lhs, SymKind::Theta) || contains_kind(&rhs, SymKind::Theta) {
+        // An RHS theta nested under a theta re-grows the shape it matched, so
+        // saturation would never reach a fixpoint. Unrolling is a structural
+        // transform, not a rewrite rule.
+        if grows_theta_under_theta(&rhs) {
+            return Err(format!("axiom `{name}` unrolls a theta under itself"));
+        }
         ProofObligation::ThetaInvariant
-    } else if contains_kind(&lhs, SymKind::Theta) {
-        return Err("theta-unrolling axioms are prohibited".into());
-    } else if contains_kind(&rhs, SymKind::Theta) {
-        return Err("theta axioms require a supported induction obligation".into());
     } else {
         ProofObligation::Equivalence
     };
@@ -474,25 +502,16 @@ fn contains_kind(node: &AxNode, expected: SymKind) -> bool {
     }
 }
 
-fn same_node(lhs: &AxNode, rhs: &AxNode) -> bool {
-    match (lhs, rhs) {
-        (AxNode::Hole(a, av), AxNode::Hole(b, bv)) => a == b && av == bv,
-        (AxNode::Root, AxNode::Root) => true,
-        (AxNode::Node(a, ac), AxNode::Node(b, bc)) => {
-            a == b && ac.len() == bc.len() && ac.iter().zip(bc).all(|(a, b)| same_node(a, b))
-        }
+/// Whether a `theta` in `node` has another `theta` below it.
+fn grows_theta_under_theta(node: &AxNode) -> bool {
+    match node {
+        AxNode::Node(SymKind::Theta, children) => children
+            .iter()
+            .any(|child| contains_kind(child, SymKind::Theta)),
+        AxNode::Node(_, children) => children.iter().any(grows_theta_under_theta),
+        AxNode::Keep(inner) => grows_theta_under_theta(inner),
         _ => false,
     }
-}
-
-fn is_theta_invariant_collapse(lhs: &AxNode, rhs: &AxNode) -> bool {
-    matches!(
-        lhs,
-        AxNode::Node(SymKind::Theta, children)
-            if children.len() == 2
-                && same_node(&children[0], &children[1])
-                && same_node(&children[0], rhs)
-    )
 }
 
 fn parse_value_guard(
@@ -785,36 +804,45 @@ impl Axiom {
     /// Prove one width instantiation with the [`SmtOracle`]; `widths` follows
     /// the width names' declaration order (`vars` first, then `root`).
     pub(crate) fn prove(&self, widths: &[u64]) -> bool {
-        if matches!(self.obligation, ProofObligation::ThetaInvariant) {
-            return true;
+        match self.obligation {
+            ProofObligation::Equivalence => self.prove_instance(widths, None),
+            ProofObligation::ThetaInvariant => {
+                self.prove_instance(widths, Some(ThetaPort::Init))
+                    && self.prove_instance(widths, Some(ThetaPort::Next))
+            }
         }
+    }
+
+    /// One equivalence instance of this axiom's obligation, with every `theta`
+    /// realized as `theta_port`.
+    fn prove_instance(&self, widths: &[u64], theta_port: Option<ThetaPort>) -> bool {
         let register_width = self.register_width(widths);
         let mut lhs = SemGraph::new();
         let mut rhs = SemGraph::new();
+        let realization = |side, root_sym| Realization {
+            widths,
+            register_width,
+            side,
+            root_sym,
+            theta_port,
+        };
         let (built, symbol_count) = if self.uses_root {
             // Lemma over an opaque root value: lhs is a bare symbol, `root` in
             // the rhs is the same symbol.
             let root_sym = sym(&mut rhs, 0);
             sym(&mut lhs, 0);
             let built = self
-                .realize(
-                    &self.rhs,
-                    &mut rhs,
-                    widths,
-                    register_width,
-                    Side::Rhs,
-                    Some(root_sym),
-                )
+                .realize(&self.rhs, &mut rhs, &realization(Side::Rhs, Some(root_sym)))
                 .is_some();
             (built, 1)
         } else {
             // Register realization: each var is the low bits of a full-width
             // register symbol in the lhs; the rhs reads the register whole.
             let built = self
-                .realize(&self.lhs, &mut lhs, widths, register_width, Side::Lhs, None)
+                .realize(&self.lhs, &mut lhs, &realization(Side::Lhs, None))
                 .is_some()
                 && self
-                    .realize(&self.rhs, &mut rhs, widths, register_width, Side::Rhs, None)
+                    .realize(&self.rhs, &mut rhs, &realization(Side::Rhs, None))
                     .is_some();
             (built, self.vars.len())
         };
@@ -836,24 +864,18 @@ impl Axiom {
 
     /// Build one side of the proof. A declared var is a register-wide symbol —
     /// narrowed to its class width through an extract on the LHS, read whole on
-    /// the RHS; a width-name hole is the constant carrying that width.
-    fn realize(
-        &self,
-        node: &AxNode,
-        g: &mut SemGraph,
-        widths: &[u64],
-        register_width: u32,
-        side: Side,
-        root_sym: Option<NodeId>,
-    ) -> Option<NodeId> {
+    /// the RHS; a width-name hole is the constant carrying that width. A `theta`
+    /// realizes as the port this instance proves.
+    fn realize(&self, node: &AxNode, g: &mut SemGraph, r: &Realization) -> Option<NodeId> {
+        let widths = r.widths;
         match node {
-            AxNode::Root => root_sym,
+            AxNode::Root => r.root_sym,
             AxNode::Hole(_, Some(i)) => {
                 let s = sym(g, *i as u32);
                 let class_w = self.vars[*i].1.value(widths) as u32;
-                if side == Side::Rhs || class_w == register_width {
+                if r.side == Side::Rhs || class_w == r.register_width {
                     Some(s)
-                } else if class_w < register_width {
+                } else if class_w < r.register_width {
                     let hi = con(g, (class_w - 1) as u64, 16);
                     let lo = con(g, 0, 16);
                     Some(op(g, SymKind::Extract, &[s, hi, lo]))
@@ -868,20 +890,27 @@ impl Axiom {
             }
             AxNode::Const(e, width) => {
                 let width = match width {
-                    ConstWidth::Register => register_width,
+                    ConstWidth::Register => r.register_width,
                     ConstWidth::Fixed(w) => *w,
                 };
                 Some(con(g, e.eval(widths)?, width))
             }
-            AxNode::ConstMatch(e) => Some(con(g, e.eval(widths)?, register_width)),
+            AxNode::ConstMatch(e) => Some(con(g, e.eval(widths)?, r.register_width)),
+            AxNode::Node(SymKind::Theta, children) => {
+                let port = match r.theta_port? {
+                    ThetaPort::Init => 0,
+                    ThetaPort::Next => 1,
+                };
+                self.realize(&children[port], g, r)
+            }
             AxNode::Node(kind, children) => {
                 let children = children
                     .iter()
-                    .map(|c| self.realize(c, g, widths, register_width, side, root_sym))
+                    .map(|c| self.realize(c, g, r))
                     .collect::<Option<Vec<_>>>()?;
                 Some(op(g, *kind, &children))
             }
-            AxNode::Keep(inner) => self.realize(inner, g, widths, register_width, side, root_sym),
+            AxNode::Keep(inner) => self.realize(inner, g, r),
         }
     }
 
@@ -1522,15 +1551,51 @@ mod tests {
     #[test]
     fn theta_unrolling_axiom_is_rejected() {
         let error = parse_axiom(
-            "(axiom theta-unroll
+            "(axiom unroll-carried
                (vars (init w) (next w)) (root w)
                (lhs (theta init next))
-               (rhs next))",
+               (rhs (theta init (theta next next))))",
         )
         .err()
         .expect("theta unrolling must be rejected");
 
-        assert!(error.contains("theta-unrolling"), "{error}");
+        assert!(error.contains("unroll-carried"), "{error}");
+    }
+
+    #[test]
+    fn invariant_theta_axiom_is_proved_by_induction() {
+        let axiom = super::super::theory::axioms()
+            .into_iter()
+            .find(|axiom| axiom.name == "theta-same")
+            .expect("core theory must declare theta-same");
+
+        assert!(axiom.prove(&[64]));
+    }
+
+    #[test]
+    fn theta_axiom_failing_the_base_case_is_not_proved() {
+        // The carried value equals its next-expression from the second iteration
+        // on only: at the init port it is `i`, so the base case fails.
+        let axiom = parse_axiom(
+            "(axiom theta-next (vars (i w) (n w)) (root w)
+               (lhs (theta i n)) (rhs n))",
+        )
+        .unwrap();
+
+        assert!(!axiom.prove(&[64]));
+    }
+
+    #[test]
+    fn theta_axiom_failing_the_induction_step_is_not_proved() {
+        // The initial value holds at the init port but is not preserved: after
+        // one iteration the carried value is `n`.
+        let axiom = parse_axiom(
+            "(axiom theta-init (vars (i w) (n w)) (root w)
+               (lhs (theta i n)) (rhs i))",
+        )
+        .unwrap();
+
+        assert!(!axiom.prove(&[64]));
     }
 
     #[test]

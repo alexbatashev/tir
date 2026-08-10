@@ -84,7 +84,8 @@ use the function's gated-SSA analysis:
 
 `Theta` is a value-sequence gate, distinct from effect-side `StateIf`. It has no
 finite-expression evaluator; selection may preserve it as CFG edge assignments,
-and the theory may only use the inductive invariant `theta(x, x) = x`.
+and theory axioms over it are discharged by induction over the iterations (see
+[Saturation with proved rewrites](#2-saturation-with-proved-rewrites)).
 
 ### What a node is
 
@@ -231,11 +232,18 @@ zero-comparison shape axioms use it: their `zext(const(0, 1), W)` form exists
 for zero-register branch matching without feeding back through the boolean
 `*-via-if` identities and multiplying equivalent comparison forms.
 
-`if(c, x, x) = x` is verified as an ordinary equivalence.
-`theta(x, x) = x` uses the theory loader's `ThetaInvariant` obligation: the
-identical initial and next values establish the base and preservation steps.
-Other axioms containing `Theta` are rejected so saturation cannot introduce a
-θ-unrolling cycle.
+`if(c, x, x) = x` is verified as an ordinary equivalence. An axiom over a
+`Theta` carries the `ThetaInvariant` obligation instead, proved by induction
+over the iterations as two equivalence obligations: the identity must hold with
+every `theta` read as its `init` port (base case) and with every `theta` read as
+its `next` port (step). The step needs no explicit hypothesis — an axiom's
+operands are opaque holes, so nothing in the realized terms refers to the
+previous iteration's value. `theta(x, x) = x` discharges both cases as `x = x`;
+`theta(i, n) = n` is rejected by its base case.
+
+An axiom whose RHS nests a `Theta` under a `Theta` unrolls the loop, so it
+would never saturate; the loader rejects it structurally, naming the axiom.
+Unrolling is a structural transform on the IR, not a rewrite rule.
 
 ### `isel.sexp` syntax
 

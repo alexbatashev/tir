@@ -78,6 +78,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn theta_unrolling_axiom_fails_the_load_by_name() {
+        let error = parse_theory(
+            "(theory (axiom unroll-carried (vars (i w) (n w)) (root w)
+               (lhs (theta i n)) (rhs (theta i (theta n n)))))",
+        )
+        .err()
+        .expect("a theory unrolling a theta must not load");
+
+        assert!(error.contains("unroll-carried"), "{error}");
+    }
+
+    #[test]
     fn checked_theory_declares_builtin_axioms() {
         let theory = theory();
 
