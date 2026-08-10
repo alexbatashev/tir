@@ -664,6 +664,74 @@ instruction Mov32StoreDispSib for [X86_64] {
     }
 }
 
+instruction Mov16LoadDispSib for [X86_64] {
+    param OPNAME: String = "mov_load16_disp_sib";
+    param MNEMONIC: String = "mov";
+
+    operands {
+        dst: GPR16,
+        base: GPRsib,
+        imm: bits<32>,
+    }
+
+    encoding {
+        0..7 => 0x66,
+        8 => base[3],
+        9 => 0b0,
+        10 => dst[3],
+        11 => 0b0,
+        12..15 => 0b0100,
+        16..23 => 0x8B,
+        24..26 => 0b100,
+        27..29 => dst[0..2],
+        30..31 => 0b10,
+        32..39 => 0x24,
+        40..71 => imm,
+    }
+
+    asm {
+        "{self.MNEMONIC} {dst}, [{base} + {imm}]"
+    }
+
+    behavior {
+        dst = load(base + sext(imm, self.XLEN), 2, 0b0);
+    }
+}
+
+instruction Mov16StoreDispSib for [X86_64] {
+    param OPNAME: String = "mov_store16_disp_sib";
+    param MNEMONIC: String = "mov";
+
+    operands {
+        base: GPRsib,
+        imm: bits<32>,
+        src: GPR16,
+    }
+
+    encoding {
+        0..7 => 0x66,
+        8 => base[3],
+        9 => 0b0,
+        10 => src[3],
+        11 => 0b0,
+        12..15 => 0b0100,
+        16..23 => 0x89,
+        24..26 => 0b100,
+        27..29 => src[0..2],
+        30..31 => 0b10,
+        32..39 => 0x24,
+        40..71 => imm,
+    }
+
+    asm {
+        "{self.MNEMONIC} [{base} + {imm}], {src}"
+    }
+
+    behavior {
+        store(base + sext(imm, self.XLEN), 2, src);
+    }
+}
+
 instruction Mov8LoadDispSib for [X86_64] {
     param OPNAME: String = "mov_load8_disp_sib";
     param MNEMONIC: String = "mov";
@@ -1055,6 +1123,72 @@ instruction Mov32StoreDisp for [X86_64] {
 
     behavior {
         store(base + sext(imm, self.XLEN), 4, src);
+    }
+}
+
+instruction Mov16LoadDisp for [X86_64] {
+    param OPNAME: String = "mov_load16_disp";
+    param MNEMONIC: String = "mov";
+
+    operands {
+        dst: GPR16,
+        base: GPR,
+        imm: bits<32>,
+    }
+
+    encoding {
+        0..7 => 0x66,
+        8 => base[3],
+        9 => 0b0,
+        10 => dst[3],
+        11 => 0b0,
+        12..15 => 0b0100,
+        16..23 => 0x8B,
+        24..26 => base[0..2],
+        27..29 => dst[0..2],
+        30..31 => 0b10,
+        32..63 => imm,
+    }
+
+    asm {
+        "{self.MNEMONIC} {dst}, [{base} + {imm}]"
+    }
+
+    behavior {
+        dst = load(base + sext(imm, self.XLEN), 2, 0b0);
+    }
+}
+
+instruction Mov16StoreDisp for [X86_64] {
+    param OPNAME: String = "mov_store16_disp";
+    param MNEMONIC: String = "mov";
+
+    operands {
+        base: GPR,
+        imm: bits<32>,
+        src: GPR16,
+    }
+
+    encoding {
+        0..7 => 0x66,
+        8 => base[3],
+        9 => 0b0,
+        10 => src[3],
+        11 => 0b0,
+        12..15 => 0b0100,
+        16..23 => 0x89,
+        24..26 => base[0..2],
+        27..29 => src[0..2],
+        30..31 => 0b10,
+        32..63 => imm,
+    }
+
+    asm {
+        "{self.MNEMONIC} [{base} + {imm}], {src}"
+    }
+
+    behavior {
+        store(base + sext(imm, self.XLEN), 2, src);
     }
 }
 

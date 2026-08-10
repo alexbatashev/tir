@@ -485,6 +485,8 @@ mod isa {
         escape!(sib MovStoreDispOp, MovStoreDispSibOpBuilder, ["base", "imm", "src"]);
         escape!(sib Mov32LoadDispOp, Mov32LoadDispSibOpBuilder, ["dst", "base", "imm"]);
         escape!(sib Mov32StoreDispOp, Mov32StoreDispSibOpBuilder, ["base", "imm", "src"]);
+        escape!(sib Mov16LoadDispOp, Mov16LoadDispSibOpBuilder, ["dst", "base", "imm"]);
+        escape!(sib Mov16StoreDispOp, Mov16StoreDispSibOpBuilder, ["base", "imm", "src"]);
         escape!(sib Mov8LoadDispOp, Mov8LoadDispSibOpBuilder, ["dst", "base", "imm"]);
         escape!(sib Mov8StoreDispOp, Mov8StoreDispSibOpBuilder, ["base", "imm", "src"]);
         escape!(sib MovssLoadDispOp, MovssLoadDispSibOpBuilder, ["dst", "base", "imm"]);
@@ -1081,6 +1083,13 @@ mod isa {
                         .attr("src", virt(value, class))
                         .build(),
                 ),
+                Some(MoveKind::Gpr16) => Box::new(
+                    Mov16StoreDispOpBuilder::new(context)
+                        .attr("base", phys(frame.0, frame.1))
+                        .attr("imm", AttributeValue::Int(offset))
+                        .attr("src", virt(value, class))
+                        .build(),
+                ),
                 Some(MoveKind::Gpr8) => Box::new(
                     Mov8StoreDispOpBuilder::new(context)
                         .attr("base", phys(frame.0, frame.1))
@@ -1124,6 +1133,13 @@ mod isa {
                 ),
                 Some(MoveKind::Gpr32) => Box::new(
                     Mov32LoadDispOpBuilder::new(context)
+                        .attr("dst", virt(value, class))
+                        .attr("base", phys(frame.0, frame.1))
+                        .attr("imm", AttributeValue::Int(offset))
+                        .build(),
+                ),
+                Some(MoveKind::Gpr16) => Box::new(
+                    Mov16LoadDispOpBuilder::new(context)
                         .attr("dst", virt(value, class))
                         .attr("base", phys(frame.0, frame.1))
                         .attr("imm", AttributeValue::Int(offset))

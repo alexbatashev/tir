@@ -14,6 +14,8 @@ enc16:
 	shl ax, 3
 	add r8w, r9w
 	mov r10w, r11w
+	mov cx, [rbx + 8]
+	mov [rbx + 8], cx
 
 # CHECK: enc16:
 # add ax, bx: 66 prefix, REX.W=0 -> 40, opcode 01, ModR/M=11 reg(bx=3) rm(ax=0) = D8.
@@ -33,3 +35,7 @@ enc16:
 # CHECK-NEXT: [0x66, 0x45, 0x01, 0xC8]
 # mov r10w, r11w: REX.RB=45, opcode 89, ModR/M=11 reg(r11w&7=3) rm(r10w&7=2) = DA.
 # CHECK-NEXT: [0x66, 0x45, 0x89, 0xDA]
+# mov cx, [rbx + 8]: opcode 8B, ModR/M=10 reg(cx=1) rm(rbx=3) = 8B, disp32=8.
+# Divergence: GNU as picks disp8 (66 8b 4b 08); TIR always uses disp32.
+# CHECK-NEXT: [0x66, 0x40, 0x8B, 0x8B, 0x08, 0x00, 0x00, 0x00]
+# CHECK-NEXT: [0x66, 0x40, 0x89, 0x8B, 0x08, 0x00, 0x00, 0x00]
