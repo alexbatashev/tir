@@ -33,6 +33,34 @@ compiler provides, never a restriction on input. A construct that reaches a
 fallback path with worse codegen is a bug against the performance targets.
 Machine-level CFG exists after destruction in the machine dialects as today.
 
+## Canonical constructs (per the RVSDG specification, Reissmann et al. 2020)
+
+The core's structural vocabulary follows the paper exactly; scf raises onto it:
+
+- **θ (loop)**: tail-controlled, input/output signature equal to the region's
+  arguments, region's first result is the continuation predicate; the body
+  always runs once. The ONLY loop construct — `scf.for`/`scf.while` raise to
+  γ-wrapping-θ; `do` maps directly. (The e-graph view's `SymKind::Theta(init,
+  latch)` is the per-value projection of one loop variable through a θ op, not
+  the op itself.)
+- **γ (decision)**: n-ary from day one — k+1 regions of matching signature,
+  integer predicate selects one; symmetric split/join (switch without
+  fallthrough is one γ, not a chain).
+- **λ/δ/φ/ω (inter-procedural)**: functions are values — a λ's output feeds
+  apply-nodes by edges, context variables capture dependencies; δ models
+  globals with initializer regions; φ keeps mutual recursion acyclic; ω is the
+  translation unit, imports as region arguments, exports as results. Uniform
+  def-use at every level: dead-function removal is dead-node elimination, and
+  congruence (CNE) extends to structural nodes. No symbol tables in the core.
+- **Edges**: value- or state-typed; every input/result is the user of exactly
+  one edge; the graph is acyclic, always. Multiple independent states model
+  disjoint memory (the per-alloca chains).
+- **Raising for arbitrary CFG input** follows Bahmann's control-flow
+  restructuring (predicate insertion, no node cloning, no SSA required) +
+  structural analysis + demand annotation; fcc emitting structured scf is the
+  sanctioned shortcut for limited-control-flow input. Destruction: SCFR
+  (today's scf_to_cfg) with PCFR as the future option.
+
 ## Extensibility: interfaces, nothing else
 
 Behavior belongs to ops, expressed through the interfaces they implement —
