@@ -536,10 +536,10 @@ impl LowerCirControlFlowPass {
         let Some(body) = Self::single_block(context, op.regions[0]) else {
             return false;
         };
-        let terminates_normally = body
-            .op_ids()
-            .last()
-            .is_some_and(|op_id| context.get_op(*op_id).as_op::<cir::YieldOp>().is_some());
+        let terminates_normally = body.op_ids().last().is_some_and(|op_id| {
+            let op = context.get_op(*op_id);
+            op.clone().as_op::<cir::YieldOp>().is_some() || op.as_op::<cir::BreakOp>().is_some()
+        });
         let scope = Self::entry_block(context, op.regions[0]).arguments()[0].id();
         terminates_normally
             && Self::condition_operand(context, op.regions[1]).is_some()
@@ -946,12 +946,27 @@ impl LowerCirControlFlowPass {
         let scope = arguments[0].id();
         let block = context.create_block(arguments);
         region.add_block(block.id());
-        for source in [source, condition.clone()] {
+        // A break-terminated body leaves before the condition is evaluated, so the
+        // condition region's ops (and their side effects) must not be inlined.
+        let leaves_loop = context
+            .get_op(*source.op_ids().last().unwrap())
+            .as_op::<cir::BreakOp>()
+            .is_some();
+        let sources = if leaves_loop {
+            vec![source]
+        } else {
+            vec![source, condition.clone()]
+        };
+        for source in sources {
             let op_ids = source.op_ids();
             for op_id in op_ids.iter().take(op_ids.len() - 1) {
                 source.remove_op(*op_id);
                 block.insert(block.len(), *op_id);
             }
+        }
+        if leaves_loop {
+            IRBuilder::new(block).insert(scf::ops::r#break(context, scope).build());
+            return Ok(region.id());
         }
         let terminator = context.get_op(*condition.op_ids().last().unwrap());
         let value = terminator.operands[0];

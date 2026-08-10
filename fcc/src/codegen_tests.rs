@@ -404,6 +404,27 @@ int main(void) { printf("hello"); return 0; }"#,
     }
 
     #[test]
+    fn break_terminated_do_body_lowers_without_unstructured_branches() {
+        // The condition must not be inlined: break leaves before it is evaluated.
+        let lowered = lower_cir_control_flow(
+            r#"int bump(void);
+               int f(int n) {
+                   int total = 0;
+                   do {
+                       total = total + n;
+                       break;
+                   } while (bump());
+                   return total;
+               }"#,
+        );
+
+        assert!(!lowered.contains("cond_br"), "{lowered}");
+        assert!(!lowered.contains("br ^"), "{lowered}");
+        assert!(lowered.contains("scf.break"), "{lowered}");
+        assert!(!lowered.contains("call @bump"), "{lowered}");
+    }
+
+    #[test]
     fn multiblock_cir_while_lowers_directly_to_cfg() {
         let context = fcc_context();
         let module = tir::parse::ir::parse_ir::<tir::builtin::ModuleOp>(
