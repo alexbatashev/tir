@@ -1,4 +1,4 @@
-// RUN: tir opt --pass mem2reg %s | filecheck %s
+// RUN: tir opt --pass mem2reg --verify %s | filecheck %s
 
 module {
   func @stored_pointer(%initial: !i32, %replacement: !i32) -> !i32 {

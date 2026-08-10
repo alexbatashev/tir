@@ -130,6 +130,28 @@ fn collect_slots(context: &Context, op_ids: &[OpId]) -> BTreeMap<ValueId, SlotSt
     slots
 }
 
+/// Whether the slot's loads and stores all name one type. Promotion reconstructs
+/// a single SSA value per slot and substitutes it for the loads, so a slot whose
+/// values disagree on type — a frontend spelling one pointer both opaque and
+/// typed, say — has no type to give that value and stays in memory.
+fn values_agree_on_type(context: &Context, state: &SlotState) -> bool {
+    let mut types = state
+        .loads
+        .iter()
+        .map(|&load| load_result(context, load))
+        .chain(
+            state
+                .stores
+                .iter()
+                .map(|&store| store_value(context, store)),
+        )
+        .map(|value| context.get_value(value).ty());
+    let Some(ty) = types.next() else {
+        return true;
+    };
+    types.all(|other| other == ty)
+}
+
 fn store_value(context: &Context, store: OpId) -> ValueId {
     context
         .get_op(store)

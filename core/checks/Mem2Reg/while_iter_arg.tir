@@ -1,4 +1,4 @@
-// RUN: tir opt --pass mem2reg %s | filecheck %s
+// RUN: tir opt --pass mem2reg --verify %s | filecheck %s
 
 // An `scf.while` observes the carried value in its condition region and forwards
 // it to the body, so promoting a slot updated by the body adds one port to both

@@ -7,13 +7,14 @@
 
 use std::sync::Arc;
 
+use crate::attributes::AttributeValue;
 use crate::builtin::TokenType;
 use crate::{
     Block, Conditional, Context, LoopLike, MemoryRead, MemoryWrite, OpId, OpInstance, Operation,
     OperationRef, PassError, PromotableAllocation, RegionId, Rewriter, TypeId, ValueId, scf,
 };
 
-use super::collect_slots;
+use super::{collect_slots, values_agree_on_type};
 
 pub(super) fn run(
     context: &Context,
@@ -33,6 +34,10 @@ pub(super) fn run(
         if state.loads.is_empty() {
             erase_all(context, rewriter, state.stores.iter().copied())?;
             erase_all(context, rewriter, [alloca])?;
+            continue;
+        }
+
+        if !values_agree_on_type(context, state) {
             continue;
         }
 
@@ -292,10 +297,24 @@ impl Promoter<'_> {
         self.append_operand(terminator, value);
     }
 
+    /// Append `value` to a terminator's trailing variadic group, keeping the
+    /// operand segment sizes that describe that grouping in step.
     fn append_operand(&self, op_id: OpId, value: ValueId) {
-        let mut operands = self.context.get_op(op_id).operands.clone();
+        let op = self.context.get_op(op_id);
+        let mut operands = op.operands.clone();
         operands.push(value);
         self.context.set_op_operands(op_id, operands);
+
+        let mut attributes = op.attributes.clone();
+        if let Some(attribute) = attributes
+            .iter_mut()
+            .find(|attribute| attribute.name == "operand_segment_sizes")
+            && let AttributeValue::Array(sizes) = &mut attribute.value
+            && let Some(AttributeValue::UInt(last)) = sizes.last_mut()
+        {
+            *last += 1;
+            self.context.set_op_attributes(op_id, attributes);
+        }
     }
 
     /// The value reaching this point, materializing a read of the untouched slot

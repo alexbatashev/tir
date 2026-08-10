@@ -1,5 +1,5 @@
-// RUN: tir opt --pass mem2reg %s | filecheck %s
-// RUN: tir opt --pass builtin.func(mem2reg) %s | filecheck %s
+// RUN: tir opt --pass mem2reg --verify %s | filecheck %s
+// RUN: tir opt --pass builtin.func(mem2reg) --verify %s | filecheck %s
 // RUN: not tir opt --pass builtin.func(nope) %s
 
 module {

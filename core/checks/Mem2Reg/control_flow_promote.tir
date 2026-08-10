@@ -1,5 +1,5 @@
-// RUN: tir opt --pass mem2reg %s | filecheck %s
-// RUN: tir opt --pass builtin.func(mem2reg) %s | filecheck %s
+// RUN: tir opt --pass mem2reg --verify %s | filecheck %s
+// RUN: tir opt --pass builtin.func(mem2reg) --verify %s | filecheck %s
 
 // The store lives in the entry block, which dominates the entry of the scf.if
 // region holding the load (entering the region passes through the parent op).

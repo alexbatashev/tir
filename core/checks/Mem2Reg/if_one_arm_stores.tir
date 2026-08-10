@@ -1,4 +1,4 @@
-// RUN: tir opt --pass mem2reg %s | filecheck %s
+// RUN: tir opt --pass mem2reg --verify %s | filecheck %s
 
 // Only the `then` arm defines the slot. The arm that does not store yields the
 // value reaching the conditional, so the merge still has one value per arm.

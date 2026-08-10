@@ -8,7 +8,7 @@ use crate::analysis::DominatorTree;
 use crate::graph::{Dag, NodeId};
 use crate::{BlockId, Context, OpId, OperationRef, PassError, Rewriter};
 
-use super::{SlotState, collect_slots, load_result, store_value};
+use super::{SlotState, collect_slots, load_result, store_value, values_agree_on_type};
 
 pub(super) fn run(
     context: &Context,
@@ -20,7 +20,7 @@ pub(super) fn run(
 
     let mut erase: BTreeSet<OpId> = BTreeSet::new();
     for slot in slots.values() {
-        if !is_promotable(slot, &layout, dom_tree) {
+        if !is_promotable(context, slot, &layout, dom_tree) {
             continue;
         }
 
@@ -103,8 +103,16 @@ impl OpLayout {
 
 /// A slot promotes only when its single (or absent) store is the unambiguous
 /// definition reaching every load — exactly the question dominance answers.
-fn is_promotable(slot: &SlotState, layout: &OpLayout, dom_tree: &DominatorTree) -> bool {
+fn is_promotable(
+    context: &Context,
+    slot: &SlotState,
+    layout: &OpLayout,
+    dom_tree: &DominatorTree,
+) -> bool {
     if slot.escapes || slot.alloca.is_none() || slot.stores.len() > 1 {
+        return false;
+    }
+    if !values_agree_on_type(context, slot) {
         return false;
     }
 

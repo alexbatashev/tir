@@ -1,4 +1,4 @@
-// RUN: tir opt --pass mem2reg %s | filecheck %s
+// RUN: tir opt --pass mem2reg --verify %s | filecheck %s
 
 // A slot the loop body updates becomes a carried port: the value entering the
 // loop is the init, the body reads the carried argument and yields its update,

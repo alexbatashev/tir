@@ -1,4 +1,4 @@
-// RUN: tir opt --pass mem2reg %s | filecheck %s
+// RUN: tir opt --pass mem2reg --verify %s | filecheck %s
 
 // Both arms define the slot, so the value merges through the conditional: the
 // `scf.if` grows one result and each arm yields the value it stored.

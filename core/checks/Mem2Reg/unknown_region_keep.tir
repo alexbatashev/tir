@@ -1,4 +1,4 @@
-// RUN: tir opt --pass mem2reg %s | filecheck %s
+// RUN: tir opt --pass mem2reg --verify %s | filecheck %s
 
 // The slot is read inside a region that is neither a conditional nor a loop, so
 // nothing tells the pass what reaches that read or what leaves the region. The

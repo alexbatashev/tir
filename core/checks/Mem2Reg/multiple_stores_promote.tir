@@ -1,4 +1,4 @@
-// RUN: tir opt --pass mem2reg %s | filecheck %s
+// RUN: tir opt --pass mem2reg --verify %s | filecheck %s
 
 // Structured SSA construction tracks the value reaching each load, so a slot
 // with several stores promotes: the load reads the last stored value.

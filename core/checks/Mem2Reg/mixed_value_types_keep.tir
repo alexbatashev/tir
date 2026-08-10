@@ -1,0 +1,26 @@
+// RUN: tir opt --pass mem2reg --verify %s | filecheck %s
+
+// The arms store pointers spelled differently — opaque and typed — so the slot
+// has no single type to reconstruct: growing a result for it would give the
+// conditional arms disagreeing yields. The slot stays in memory.
+
+module {
+  func @mixed(%0: !i1, %1: !ptr.p, %2: !ptr.p<!unit>) -> !ptr.p {
+    %3 = ptr.alloca {size = 8, align = 8} : !ptr.p
+    scf.if %0 {
+      ptr.store %1, %3
+      scf.yield
+    } else {
+      ptr.store %2, %3
+      scf.yield
+    }
+    %4 = ptr.load %3 : !ptr.p
+    return %4
+  }
+  module_end
+}
+
+// CHECK-LABEL: func @mixed
+// CHECK: ptr.alloca
+// CHECK: scf.if %0 {
+// CHECK: ptr.load

@@ -1,4 +1,4 @@
-// RUN: tir opt --pass mem2reg %s | filecheck %s
+// RUN: tir opt --pass mem2reg --verify %s | filecheck %s
 
 // A loop body that leaves through `scf.break` never reaches its yield, so the
 // break edge is where the slot's value leaves the loop: the carried port grows

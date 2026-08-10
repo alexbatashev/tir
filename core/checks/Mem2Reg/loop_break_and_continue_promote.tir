@@ -1,4 +1,4 @@
-// RUN: tir opt --pass mem2reg %s | filecheck %s
+// RUN: tir opt --pass mem2reg --verify %s | filecheck %s
 
 // One loop leaving through both a `continue` and a `break`: each exit carries the
 // value reaching it, so the carried port is fed on all three edges out of the body.

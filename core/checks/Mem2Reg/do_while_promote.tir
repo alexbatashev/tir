@@ -1,4 +1,4 @@
-// RUN: tir opt --pass mem2reg %s | filecheck %s
+// RUN: tir opt --pass mem2reg --verify %s | filecheck %s
 
 // The shape a `do` loop leaves behind: the body, then a guard that repeats or
 // leaves the loop. The slot the body updates promotes through the carried port,

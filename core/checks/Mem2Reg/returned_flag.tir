@@ -1,4 +1,4 @@
-// RUN: tir opt --pass mem2reg %s | filecheck %s
+// RUN: tir opt --pass mem2reg --verify %s | filecheck %s
 
 // The shape a structured early return leaves behind: a flag slot the loop
 // condition reads, a value slot written under a guard inside the loop, and a

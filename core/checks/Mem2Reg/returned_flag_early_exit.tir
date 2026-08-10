@@ -1,4 +1,4 @@
-// RUN: tir opt --pass mem2reg %s | filecheck %s
+// RUN: tir opt --pass mem2reg --verify %s | filecheck %s
 
 // The shape a structured early return out of a loop leaves behind: the return
 // value written under a guard, the flag tested right after, and an `scf.break`
