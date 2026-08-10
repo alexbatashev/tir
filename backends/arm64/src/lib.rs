@@ -759,6 +759,13 @@ mod tests {
     use crate::{Arm64Dialect, RegClass, create_isel_pass, create_regalloc_stage};
 
     #[test]
+    fn guarded_relaxations_hold_for_all_rules() {
+        let context = Context::with_default_dialects();
+        let rules = crate::get_isel_rules(&context, crate::Feature::ALL);
+        tir::backend::isel::prove_guarded_relaxations(&rules).unwrap();
+    }
+
+    #[test]
     fn generated_abi_matches_aapcs64_register_convention() {
         let abi = crate::default_abi();
         let int_args = abi

@@ -9,7 +9,7 @@ use tir::{
 use super::{
     BranchEmitters, EmitRequest, ImmRange, InstructionSelectPass, IselCostModel,
     LATENCY_COST_SCALE, RegisterCapability, RegisterRequirement, Rule, RuleEmitFn, RuleKind,
-    RuleMatch, SemEGraph, SemNode, template_node,
+    RuleMatch, SemEGraph, SemNode, prove_guarded_relaxations, template_node,
 };
 
 #[test]
@@ -3304,7 +3304,7 @@ fn guarded_div(guard_rhs: u64, else_swapped: bool) -> SemGraph {
 fn guarded_div_rule_with_correct_relaxation_is_accepted() {
     let rule = Rule::new("div", div_pattern(), LATENCY_COST_SCALE, emit_unreachable)
         .with_guarded_semantics(guarded_div(0, false));
-    assert!(InstructionSelectPass::try_new(vec![rule]).is_ok());
+    assert!(prove_guarded_relaxations(&[rule]).is_ok());
 }
 
 #[test]
@@ -3313,7 +3313,7 @@ fn guarded_div_rule_with_wrong_guard_region_is_rejected() {
     // the behavior at `b == 1` (where `div(a,1) == a`, not all-ones).
     let rule = Rule::new("div", div_pattern(), LATENCY_COST_SCALE, emit_unreachable)
         .with_guarded_semantics(guarded_div(1, false));
-    match InstructionSelectPass::try_new(vec![rule]) {
+    match prove_guarded_relaxations(&[rule]) {
         Err(tir::PassError::InvalidRuleSet(msg)) => assert!(msg.contains("div")),
         Err(other) => panic!("expected InvalidRuleSet, got {other:?}"),
         Ok(_) => panic!("expected InvalidRuleSet, rule was accepted"),
@@ -3325,7 +3325,7 @@ fn guarded_div_rule_with_mismatched_else_arm_is_rejected() {
     // The else arm computes `div(b, a)` while the selection pattern is `div(a, b)`.
     let rule = Rule::new("div", div_pattern(), LATENCY_COST_SCALE, emit_unreachable)
         .with_guarded_semantics(guarded_div(0, true));
-    match InstructionSelectPass::try_new(vec![rule]) {
+    match prove_guarded_relaxations(&[rule]) {
         Err(tir::PassError::InvalidRuleSet(msg)) => assert!(msg.contains("div")),
         Err(other) => panic!("expected InvalidRuleSet, got {other:?}"),
         Ok(_) => panic!("expected InvalidRuleSet, rule was accepted"),

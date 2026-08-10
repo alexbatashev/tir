@@ -31,10 +31,8 @@
 //! instructions actually see.
 
 use std::collections::{HashMap, HashSet};
-#[cfg(debug_assertions)]
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 
-#[cfg(debug_assertions)]
 use tir::sem::{EquivalenceOracle, SmtOracle, sym};
 use tir::{
     Context,
@@ -220,7 +218,6 @@ pub(crate) struct Axiom {
     lhs: AxNode,
     rhs: AxNode,
     /// The RHS references the matched root itself (excludes var references).
-    #[cfg(debug_assertions)]
     uses_root: bool,
     obligation: ProofObligation,
     /// Declared `(phase post-saturation)`: applied once after the iterative
@@ -460,7 +457,6 @@ pub(crate) fn parse_axiom(text: &str) -> Result<Axiom, String> {
         value_guards,
         lhs,
         rhs,
-        #[cfg(debug_assertions)]
         uses_root,
         obligation,
         post_saturation,
@@ -694,8 +690,6 @@ impl Axiom {
 
         let name = format!("axiom-{}", self.name);
         let post_saturation = self.post_saturation;
-        #[cfg(debug_assertions)]
-        let proofs: Mutex<HashMap<Vec<u64>, bool>> = Mutex::default();
         IselRewrite {
             name,
             searcher,
@@ -734,22 +728,8 @@ impl Axiom {
                         _ => return,
                     }
                 }
-                #[cfg(debug_assertions)]
-                {
-                    let mut proofs = proofs.lock().unwrap();
-                    let proven = match proofs.get(&widths) {
-                        Some(&p) => p,
-                        None => {
-                            let p = self.prove(&widths);
-                            proofs.insert(widths.clone(), p);
-                            p
-                        }
-                    };
-                    assert!(
-                        proven,
-                        "invalid semantic invariant `{}` for widths {widths:?}",
-                        self.name
-                    );
+                if super::verify_axioms() {
+                    self.verify(&widths);
                 }
                 if let Some(id) = self.instantiate(ctx, &self.rhs, eg, m, &holes, &widths) {
                     eg.union(m.root, id);
@@ -782,9 +762,28 @@ impl Axiom {
         widths.into_iter().collect()
     }
 
+    /// Discharge this instantiation's proof obligation, panicking on an unsound
+    /// axiom. Results are memoized process-wide: the same axiom recurs at the same
+    /// widths across every block, function and freshly built pass.
+    fn verify(&self, widths: &[u64]) {
+        type ProofCache = Mutex<HashMap<(String, Vec<u64>), bool>>;
+        static PROOFS: LazyLock<ProofCache> = LazyLock::new(Mutex::default);
+        let key = (self.name.clone(), widths.to_vec());
+        let cached = PROOFS.lock().unwrap().get(&key).copied();
+        let proven = cached.unwrap_or_else(|| {
+            let proven = self.prove(widths);
+            PROOFS.lock().unwrap().insert(key, proven);
+            proven
+        });
+        assert!(
+            proven,
+            "invalid semantic invariant `{}` for widths {widths:?}",
+            self.name
+        );
+    }
+
     /// Prove one width instantiation with the [`SmtOracle`]; `widths` follows
     /// the width names' declaration order (`vars` first, then `root`).
-    #[cfg(debug_assertions)]
     pub(crate) fn prove(&self, widths: &[u64]) -> bool {
         if matches!(self.obligation, ProofObligation::ThetaInvariant) {
             return true;
@@ -838,7 +837,6 @@ impl Axiom {
     /// Build one side of the proof. A declared var is a register-wide symbol —
     /// narrowed to its class width through an extract on the LHS, read whole on
     /// the RHS; a width-name hole is the constant carrying that width.
-    #[cfg(debug_assertions)]
     fn realize(
         &self,
         node: &AxNode,
@@ -1291,12 +1289,10 @@ mod tests {
         assert!(class_kinds(&eg, root).contains(&SymKind::ShiftRightLogic));
     }
 
-    #[cfg(debug_assertions)]
     #[test]
-    #[should_panic(expected = "invalid semantic invariant")]
-    fn unsound_axiom_fails_debug_validation() {
+    fn unsound_axiom_is_not_proved() {
         // zext realized with an *arithmetic* right shift copies the sign bit —
-        // false, so debug validation must reject it.
+        // false, so verification must reject it.
         let axiom = parse_axiom(
             "(axiom zext-via-ashr
                (vars (x n)) (root w) (where (< n w))
@@ -1304,9 +1300,7 @@ mod tests {
                (rhs (ashr (shl x (- w n)) (- w n))))",
         )
         .unwrap();
-        let ctx = Context::with_default_dialects();
-        let (mut eg, _) = extension_egraph(&ctx, SymKind::ZExt);
-        apply_all(&ctx, &mut eg, &axiom.compile());
+        assert!(!axiom.prove(&[16, 64]));
     }
 
     #[test]
@@ -1741,12 +1735,10 @@ mod tests {
         assert!(fired.nodes(root).len() > 1, "width 16 satisfies `(= n 16)`");
     }
 
-    #[cfg(debug_assertions)]
     #[test]
-    #[should_panic(expected = "invalid semantic invariant")]
-    fn unsound_narrowing_axiom_fails_debug_validation() {
+    fn unsound_narrowing_axiom_is_not_proved() {
         // Masking to `n - 1` bits drops bit `n - 1`, so it does not equal the
-        // low `n` bits, so debug validation must reject it.
+        // low `n` bits, so verification must reject it.
         let axiom = parse_axiom(
             "(axiom trunc-off-by-one
                (vars (x w)) (root n) (where (< n w))
@@ -1754,9 +1746,7 @@ mod tests {
                (rhs (extract (and x (ones (- n 1))) (- n 1) 0)))",
         )
         .unwrap();
-        let ctx = Context::with_default_dialects();
-        let (mut eg, _) = extract_egraph(&ctx, 15, 0);
-        apply_all(&ctx, &mut eg, &axiom.compile());
+        assert!(!axiom.prove(&[32, 16]));
     }
 
     #[test]

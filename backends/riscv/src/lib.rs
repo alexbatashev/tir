@@ -1233,6 +1233,13 @@ mod tests {
     use crate::{RegClass, RiscvDialect, create_isel_pass, create_regalloc_stage};
 
     #[test]
+    fn guarded_relaxations_hold_for_all_rules() {
+        let context = Context::with_default_dialects();
+        let rules = crate::get_isel_rules(&context, crate::Feature::ALL);
+        tir::backend::isel::prove_guarded_relaxations(&rules).unwrap();
+    }
+
+    #[test]
     fn target_abi_matches_lp64d_register_convention() {
         let abi = crate::riscv_abi_by_name("lp64d").unwrap();
         let args = |kind| {

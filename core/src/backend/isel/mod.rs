@@ -20,6 +20,7 @@ mod tests;
 mod theory;
 
 use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
 
 use tir::{
     AnalysisManager, Block, BlockId, BranchGuard, BranchTerminator, Context, OpId, Operation,
@@ -805,11 +806,25 @@ pub struct InstructionSelectPass {
     solved: HashSet<OpId>,
 }
 
+/// Whether the SMT obligations behind the semantic invariants and the guarded
+/// relaxations are discharged. They validate the target description, they are not
+/// inputs to selection, so running hundreds of SAT queries on every compile buys
+/// nothing: `TIR_VERIFY_AXIOMS` turns them on for the target-definition test runs
+/// that actually need the check.
+pub(crate) fn verify_axioms() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("TIR_VERIFY_AXIOMS").is_some())
+}
+
 /// Prove, for every rule carrying [`Rule::guarded_semantics`], that relaxing the
 /// guarded behavior to its pure [`Rule::pattern`] is sound: the pure op equals the
 /// guarded behavior wherever the IR op is defined. An unprovable rule is reported
 /// as [`PassError::InvalidRuleSet`] naming the rule and the failed obligation.
-fn prove_guarded_relaxations(rules: &[Rule]) -> Result<(), PassError> {
+///
+/// Pass construction runs this only under [`verify_axioms`]; each backend's test
+/// suite calls it directly over its full generated ruleset, so the obligation stays
+/// enforced per commit without re-proving on every compile.
+pub fn prove_guarded_relaxations(rules: &[Rule]) -> Result<(), PassError> {
     for rule in rules {
         let Some(guarded) = &rule.guarded_semantics else {
             continue;
@@ -1020,9 +1035,12 @@ impl InstructionSelectPass {
 
     /// Build the pass, returning [`PassError::InvalidRuleSet`] naming the offending
     /// rule when a guarded rule's guard-relaxation obligation
-    /// `D(pattern) => guarded_semantics == pattern` does not hold.
+    /// `D(pattern) => guarded_semantics == pattern` does not hold — checked only
+    /// under [`verify_axioms`].
     pub fn try_new(rules: Vec<Rule>) -> Result<Self, PassError> {
-        prove_guarded_relaxations(&rules)?;
+        if verify_axioms() {
+            prove_guarded_relaxations(&rules)?;
+        }
         Ok(Self::build(rules))
     }
 

@@ -2121,6 +2121,14 @@ mod isa {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn guarded_relaxations_hold_for_all_rules() {
+        let context = tir::Context::with_default_dialects();
+        let config = crate::TargetConfig::parse("x86_64", None, None).unwrap();
+        let rules = crate::get_isel_rules(&context, config.features());
+        tir::backend::isel::prove_guarded_relaxations(&rules).unwrap();
+    }
+
+    #[test]
     fn tiger_lake_uses_measured_ooo_window() {
         assert_eq!(crate::isa::tiger_lake_model().buffer("rob"), Some(230));
     }

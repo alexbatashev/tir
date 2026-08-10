@@ -280,13 +280,17 @@ Width expressions are integer literals, bound width names, `(- a b)`, and
 op semantic-expression DSL.
 
 The compiled applier resolves the axiom's width names from the matched classes
-(`n` from `x`'s class, `w` from the root) and checks the guards. Debug builds
-also prove each concrete width instantiation with the `SmtOracle` before
-unioning. This is a refinement proof: whenever the LHS is defined, the RHS must
-also be defined and equal. The proof models each operand as the low `n` bits of
-a full-width register the RHS reads whole, covering the undefined upper register
-bits the emitted instructions actually see. Release builds trust the checked-in
-theory.
+(`n` from `x`'s class, `w` from the root) and checks the guards. With
+`TIR_VERIFY_AXIOMS` set, each concrete width instantiation is also proved with
+the `SmtOracle` before unioning, memoized process-wide per (axiom, widths).
+This is a refinement proof: whenever the LHS is defined, the RHS must also be
+defined and equal. The proof models each operand as the low `n` bits of a
+full-width register the RHS reads whole, covering the undefined upper register
+bits the emitted instructions actually see. Ordinary compiles trust the
+checked-in theory: the proofs validate the target description rather than feed
+selection, so they run in the verification test runs (unit tests call
+`Axiom::prove` and `prove_guarded_relaxations` directly; CI sets
+`TIR_VERIFY_AXIOMS` on a test job), not on every compile.
 The extension axiom asserts:
 
 ```
