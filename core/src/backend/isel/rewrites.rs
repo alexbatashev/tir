@@ -71,7 +71,7 @@ fn saturate_impl(
     eg: &mut SemEGraph,
     rewrites: &[IselRewrite],
     limits: SaturationLimits,
-    mut roots: Option<HashSet<Id>>,
+    mut roots: Option<Vec<Id>>,
 ) {
     for _ in 0..limits.max_iterations {
         let mut matches = Vec::new();
@@ -124,14 +124,19 @@ fn saturate_impl(
     eg.rebuild();
 }
 
-pub(crate) fn reachable_roots(eg: &SemEGraph, roots: impl IntoIterator<Item = Id>) -> HashSet<Id> {
-    let mut reachable = HashSet::new();
+/// Discovery order is deterministic (DFS from `roots` in the given order):
+/// callers iterate the result into searching and application, where order
+/// decides which node wins a cost tie downstream.
+pub(crate) fn reachable_roots(eg: &SemEGraph, roots: impl IntoIterator<Item = Id>) -> Vec<Id> {
+    let mut seen = HashSet::new();
+    let mut reachable = Vec::new();
     let mut pending: Vec<_> = roots.into_iter().collect();
     while let Some(root) = pending.pop() {
         let root = eg.find(root);
-        if !reachable.insert(root) {
+        if !seen.insert(root) {
             continue;
         }
+        reachable.push(root);
         for node in eg.nodes(root) {
             pending.extend(node.children().iter().map(|child| eg.find(*child)));
         }

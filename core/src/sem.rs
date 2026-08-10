@@ -18,7 +18,6 @@ pub use tir_symbolic::lang::{
 };
 
 mod discover;
-#[cfg(debug_assertions)]
 pub(crate) use discover::sym;
 pub use discover::{
     EquivalenceOracle, FuzzOracle, SmtOracle, confirm_bool_via_if, confirm_extension_via_shifts,

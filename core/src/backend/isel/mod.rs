@@ -1856,7 +1856,7 @@ impl InstructionSelectPass {
         block: &Block,
         fs: &FunctionSelection,
         dom: &DominatorTree,
-        match_roots: &HashSet<Id>,
+        match_roots: &[Id],
         base_matches: Option<&[Vec<EMatch<u32>>]>,
     ) -> Result<BlockPlan, String> {
         let block_id = block.id();
@@ -2370,14 +2370,14 @@ impl InstructionSelectPass {
         op_refs: &HashMap<OpId, OperationRef>,
         block_op_by_root: &HashMap<Id, OpId>,
         guard_classes: &HashSet<Id>,
-        match_roots: &HashSet<Id>,
+        match_roots: &[Id],
         base_matches: Option<&[Vec<EMatch<u32>>]>,
     ) -> Vec<PbqpIselMatch> {
         let mut matches = Vec::new();
-        let local_roots: Vec<_> = match_roots.iter().copied().collect();
+        let local_roots = match_roots;
         let mut local_roots_by_op: HashMap<u64, Vec<Id>> = HashMap::new();
         if base_matches.is_none() {
-            for &root in &local_roots {
+            for &root in local_roots {
                 for node in fs.egraph.nodes(root) {
                     // Roots are appended in outer-loop order, so a repeated
                     // op key within one root's nodes is always the last entry.
@@ -2408,7 +2408,7 @@ impl InstructionSelectPass {
                         .get(&node.op_key())
                         .map(Vec::as_slice)
                         .unwrap_or(&[]),
-                    PatternNode::Var(_) => local_roots.as_slice(),
+                    PatternNode::Var(_) => local_roots,
                 };
                 fresh = compiled.search_roots_with_legality(
                     &fs.egraph,
@@ -2662,20 +2662,28 @@ fn gate_kind_is_speculatable(kind: SymKind) -> bool {
         )
 }
 
-fn block_root_seeds(block: &Block, fs: &FunctionSelection) -> HashSet<Id> {
-    let mut roots: HashSet<_> = block
+/// Op order then control-guard order, first occurrence kept: the seeds feed
+/// scoped saturation and match search, whose order must be reproducible.
+fn block_root_seeds(block: &Block, fs: &FunctionSelection) -> Vec<Id> {
+    let mut seen = HashSet::new();
+    let mut roots: Vec<Id> = Vec::new();
+    let candidates = block
         .op_ids()
         .into_iter()
         .filter_map(|op| fs.op_root.get(&op).copied())
-        .collect();
-    roots.extend(
-        fs.control
-            .get(&block.id())
-            .into_iter()
-            .flatten()
-            .filter_map(ControlReification::guard)
-            .map(|guard| guard.class),
-    );
+        .chain(
+            fs.control
+                .get(&block.id())
+                .into_iter()
+                .flatten()
+                .filter_map(ControlReification::guard)
+                .map(|guard| guard.class),
+        );
+    for root in candidates {
+        if seen.insert(root) {
+            roots.push(root);
+        }
+    }
     roots
 }
 
