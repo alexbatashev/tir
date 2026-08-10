@@ -52,6 +52,14 @@ enum BreakScope {
     Switch(Slot),
 }
 
+/// What a structured `return` must do with the control flow that encloses the
+/// statement sequence it appears in.
+#[derive(Clone, Copy)]
+enum Tail {
+    Fallthrough,
+    ExitLoop(ValueId),
+}
+
 enum SwitchItem {
     Case(i64),
     Default,
@@ -78,6 +86,11 @@ struct FnCodegen<'a> {
     loop_scopes: Vec<ValueId>,
     break_scopes: Vec<BreakScope>,
     terminated: bool,
+    /// Set for functions whose returns are not in tail position. `return` then
+    /// records its value and raises the flag instead of terminating a block, so
+    /// the whole function stays structured.
+    return_flag: Option<Slot>,
+    return_slot: Option<Slot>,
     /// Lowered values in the expression subtree currently being emitted. The AST
     /// is a DAG, so shared children reuse their first lowering.
     values: HashMap<NodeId, LoweredExpr>,
@@ -1300,6 +1313,8 @@ fn lower_function(
         loop_scopes: Vec::new(),
         break_scopes: Vec::new(),
         terminated: false,
+        return_flag: None,
+        return_slot: None,
         values: HashMap::new(),
     };
     cg.lower_body(func, &param_ids[parameter_start..], &signature.params)?;
@@ -1948,22 +1963,242 @@ impl FnCodegen<'_> {
             self.locals.insert(node_entity(self.typed, param), slot);
         }
 
-        for stmt in ast.children(func).skip(params.len()) {
-            self.lower_stmt(stmt)?;
-        }
-        let returns_void = match self.typed.types().kind(node_type(self.typed, func)) {
-            TypeKind::Function { ret, .. } => {
-                matches!(self.typed.types().kind(*ret), TypeKind::Void)
-            }
-            _ => false,
+        let TypeKind::Function { ret: result, .. } =
+            self.typed.types().kind(node_type(self.typed, func))
+        else {
+            unreachable!("function node has function type");
         };
-        if returns_void && !self.terminated {
+        let result = *result;
+        let returns_void = matches!(self.typed.types().kind(result), TypeKind::Void);
+
+        let statements = ast.children(func).skip(params.len()).collect::<Vec<_>>();
+        if self.needs_return_flag(&statements) {
+            self.open_return_slots(result, returns_void);
+        }
+        self.lower_statements(&statements, Tail::Fallthrough)?;
+
+        if self.return_flag.is_some() {
+            let operand = self.structured_return_operand(result, returns_void);
+            self.builder
+                .insert(b::r#return(self.context, operand).build());
+            self.terminated = true;
+        } else if returns_void && !self.terminated {
             self.builder
                 .insert(b::r#return(self.context, Operand::none()).build());
             self.terminated = true;
         }
 
         Ok(())
+    }
+
+    /// A function needs the flag whenever a `return` can be reached with
+    /// statements still to run: those returns cannot be block terminators
+    /// without introducing unstructured control flow.
+    fn needs_return_flag(&self, statements: &[NodeId]) -> bool {
+        let Some((last, rest)) = statements.split_last() else {
+            return false;
+        };
+        rest.iter().any(|&s| self.contains_return(s))
+            || (self.ast.get_node(*last).kind != AstKind::Return && self.contains_return(*last))
+    }
+
+    fn contains_return(&self, statement: NodeId) -> bool {
+        self.ast.get_node(statement).kind == AstKind::Return
+            || self
+                .ast
+                .children(statement)
+                .any(|child| self.contains_return(child))
+    }
+
+    fn open_return_slots(&mut self, result: QualType, returns_void: bool) {
+        let i32_ty = IntegerType::new(self.context, 32);
+        let flag = self.alloca(i32_ty, 4, 4);
+        let zero = self
+            .builder
+            .insert(b::constant(self.context, 0, i32_ty).build())
+            .result();
+        self.builder
+            .insert(p::store(self.context, zero, flag.ptr).build());
+        self.return_flag = Some(flag);
+        if returns_void || self.return_abi.indirect {
+            return;
+        }
+        let elem = lower_type(self.context, self.typed, result);
+        let (size, align) = source_type_layout(self.typed, result);
+        let (size, align) = match self.return_abi.aggregate.as_deref() {
+            Some(pieces) => match abi_storage_layout(self.context, pieces) {
+                Some((abi_size, abi_align)) => (size.max(abi_size), align.max(abi_align)),
+                None => (size, align),
+            },
+            None => (size, align),
+        };
+        self.return_slot = Some(self.alloca(elem, size, align));
+    }
+
+    fn structured_return_operand(&mut self, result: QualType, returns_void: bool) -> Operand {
+        if returns_void {
+            return Operand::none();
+        }
+        if self.return_abi.indirect {
+            return if self.return_abi.ty == UnitType::new(self.context) {
+                Operand::none()
+            } else {
+                Operand::from(self.indirect_return.unwrap())
+            };
+        }
+        let slot = self.return_slot.unwrap();
+        if self.return_abi.aggregate.is_some() {
+            return Operand::from(self.abi_return_value(slot.ptr, result));
+        }
+        Operand::from(
+            self.builder
+                .insert(p::load(self.context, slot.ptr, slot.elem).build())
+                .result(),
+        )
+    }
+
+    /// Lower a statement sequence, guarding what follows a `return` against
+    /// having already returned. In a loop body the guard leaves the loop
+    /// instead, so neither the remaining body, the step nor the loop condition
+    /// runs again.
+    fn lower_statements(&mut self, statements: &[NodeId], tail: Tail) -> Result<(), Diagnostic> {
+        for (index, &statement) in statements.iter().enumerate() {
+            self.lower_stmt(statement)?;
+            // `self.terminated` means the statement left the region for good
+            // (`break`, `continue`), so whatever follows is unreachable and
+            // needs no guard.
+            if self.terminated || self.return_flag.is_none() || !self.contains_return(statement) {
+                continue;
+            }
+            let rest = &statements[index + 1..];
+            if rest.is_empty() && matches!(tail, Tail::Fallthrough) {
+                break;
+            }
+            self.lower_if_not_returned(
+                |cg| cg.lower_statements(rest, tail),
+                |cg| {
+                    if let Tail::ExitLoop(scope) = tail {
+                        cg.builder
+                            .insert(cir::ops::r#break(cg.context, scope).build());
+                    }
+                    Ok(())
+                },
+            )?;
+            break;
+        }
+        Ok(())
+    }
+
+    fn lower_loop_body(&mut self, body: NodeId, scope: ValueId) -> Result<(), Diagnostic> {
+        if self.return_flag.is_none() {
+            return self.lower_stmt(body);
+        }
+        let statements = if self.ast.get_node(body).kind == AstKind::Block {
+            self.ast.children(body).collect::<Vec<_>>()
+        } else {
+            vec![body]
+        };
+        self.lower_statements(&statements, Tail::ExitLoop(scope))
+    }
+
+    fn lower_for_condition(&mut self, condition: NodeId) -> Result<ValueId, Diagnostic> {
+        if self.ast.get_node(condition).kind == AstKind::Empty {
+            return Ok(self
+                .builder
+                .insert(b::constant(self.context, 1, IntegerType::new(self.context, 1)).build())
+                .result());
+        }
+        self.lower_condition(condition)
+    }
+
+    fn lower_for_step(&mut self, step: NodeId) -> Result<(), Diagnostic> {
+        match self.ast.get_node(step).kind {
+            AstKind::Empty => {}
+            AstKind::Assign => self.lower_stmt(step)?,
+            _ => {
+                self.lower_expr(step)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The loop condition of a `for` whose body may return: the condition
+    /// itself must not be evaluated once the function has returned, so it is
+    /// guarded rather than combined with the flag.
+    fn lower_running_condition(
+        &mut self,
+        condition: NodeId,
+        held: Slot,
+    ) -> Result<ValueId, Diagnostic> {
+        self.lower_if_not_returned(
+            |cg| {
+                let value = cg.lower_for_condition(condition)?;
+                let value = cg
+                    .builder
+                    .insert(b::extui(cg.context, value, held.elem).build())
+                    .result();
+                cg.builder
+                    .insert(p::store(cg.context, value, held.ptr).build());
+                Ok(())
+            },
+            |cg| {
+                let zero = cg
+                    .builder
+                    .insert(b::constant(cg.context, 0, held.elem).build())
+                    .result();
+                cg.builder
+                    .insert(p::store(cg.context, zero, held.ptr).build());
+                Ok(())
+            },
+        )?;
+        let value = self
+            .builder
+            .insert(p::load(self.context, held.ptr, held.elem).build())
+            .result();
+        Ok(self.truth_value(value))
+    }
+
+    fn lower_if_not_returned(
+        &mut self,
+        then: impl FnOnce(&mut Self) -> Result<(), Diagnostic>,
+        otherwise: impl FnOnce(&mut Self) -> Result<(), Diagnostic>,
+    ) -> Result<(), Diagnostic> {
+        let condition = self.has_not_returned();
+        let then_region = self.context.create_region();
+        let then_block = self.context.create_block(vec![]);
+        then_region.add_block(then_block.id());
+        self.in_block(then_block.clone(), |cg| {
+            then(cg)?;
+            cg.ensure_cir_yield(then_block);
+            Ok(())
+        })?;
+        let else_region = self.context.create_region();
+        let else_block = self.context.create_block(vec![]);
+        else_region.add_block(else_block.id());
+        self.in_block(else_block.clone(), |cg| {
+            otherwise(cg)?;
+            cg.ensure_cir_yield(else_block);
+            Ok(())
+        })?;
+        self.builder.insert(
+            cir::ops::r#if(
+                self.context,
+                condition,
+                Some(then_region.id()),
+                Some(else_region.id()),
+            )
+            .build(),
+        );
+        Ok(())
+    }
+
+    fn has_not_returned(&mut self) -> ValueId {
+        let flag = self.return_flag.unwrap();
+        let value = self
+            .builder
+            .insert(p::load(self.context, flag.ptr, flag.elem).build())
+            .result();
+        self.compare_against_zero(value, "eq")
     }
 
     fn lower_stmt(&mut self, stmt: NodeId) -> Result<(), Diagnostic> {
@@ -2033,6 +2268,9 @@ impl FnCodegen<'_> {
                 Ok(())
             }
             AstKind::Return => {
+                if self.return_flag.is_some() {
+                    return self.lower_structured_return(ast.children(stmt).next());
+                }
                 let operand = match ast.children(stmt).next() {
                     Some(e) if self.return_abi.indirect => {
                         self.lower_indirect_return(e)?;
@@ -2057,10 +2295,8 @@ impl FnCodegen<'_> {
                 Ok(())
             }
             AstKind::Block => {
-                for child in ast.children(stmt) {
-                    self.lower_stmt(child)?;
-                }
-                Ok(())
+                let statements = ast.children(stmt).collect::<Vec<_>>();
+                self.lower_statements(&statements, Tail::Fallthrough)
             }
             AstKind::While => {
                 let mut children = ast.children(stmt);
@@ -2086,7 +2322,7 @@ impl FnCodegen<'_> {
                 self.loop_scopes.push(scope.id());
                 self.break_scopes.push(BreakScope::Loop(scope.id()));
                 self.in_block(body_block.clone(), |cg| {
-                    cg.lower_stmt(body)?;
+                    cg.lower_loop_body(body, scope.id())?;
                     cg.ensure_cir_yield(body_block);
                     Ok(())
                 })?;
@@ -2117,7 +2353,7 @@ impl FnCodegen<'_> {
                 self.loop_scopes.push(scope.id());
                 self.break_scopes.push(BreakScope::Loop(scope.id()));
                 self.in_block(body_block.clone(), |cg| {
-                    cg.lower_stmt(body)?;
+                    cg.lower_loop_body(body, scope.id())?;
                     cg.ensure_cir_yield(body_block);
                     Ok(())
                 })?;
@@ -2155,19 +2391,20 @@ impl FnCodegen<'_> {
                 let scope = self
                     .context
                     .create_value(TokenType::new(self.context), None);
+                // A `for` body cannot leave the loop with a break: its step
+                // belongs to the loop body once structured, so `cir.for` only
+                // stays structured while its scope is unused. A `return` in the
+                // body therefore stops the step and the next condition instead.
+                let returns = self.return_flag.is_some() && self.contains_return(*body);
+                let held = returns.then(|| self.alloca(IntegerType::new(self.context, 32), 4, 4));
 
                 let condition_region = self.context.create_region();
                 let condition_block = self.context.create_block(vec![]);
                 condition_region.add_block(condition_block.id());
                 self.in_block(condition_block, |cg| {
-                    let value = if ast.get_node(*condition).kind == AstKind::Empty {
-                        cg.builder
-                            .insert(
-                                b::constant(cg.context, 1, IntegerType::new(cg.context, 1)).build(),
-                            )
-                            .result()
-                    } else {
-                        cg.lower_condition(*condition)?
+                    let value = match held {
+                        Some(held) => cg.lower_running_condition(*condition, held)?,
+                        None => cg.lower_for_condition(*condition)?,
                     };
                     cg.builder
                         .insert(cir::ops::condition(cg.context, value).build());
@@ -2180,7 +2417,11 @@ impl FnCodegen<'_> {
                 self.loop_scopes.push(scope.id());
                 self.break_scopes.push(BreakScope::Loop(scope.id()));
                 self.in_block(body_block.clone(), |cg| {
-                    cg.lower_stmt(*body)?;
+                    if returns {
+                        cg.lower_stmt(*body)?;
+                    } else {
+                        cg.lower_loop_body(*body, scope.id())?;
+                    }
                     cg.ensure_cir_yield(body_block);
                     Ok(())
                 })?;
@@ -2191,12 +2432,10 @@ impl FnCodegen<'_> {
                 let step_block = self.context.create_block(vec![]);
                 step_region.add_block(step_block.id());
                 self.in_block(step_block.clone(), |cg| {
-                    match ast.get_node(*step).kind {
-                        AstKind::Empty => {}
-                        AstKind::Assign => cg.lower_stmt(*step)?,
-                        _ => {
-                            cg.lower_expr(*step)?;
-                        }
+                    if returns {
+                        cg.lower_if_not_returned(|cg| cg.lower_for_step(*step), |_| Ok(()))?;
+                    } else {
+                        cg.lower_for_step(*step)?;
                     }
                     cg.ensure_cir_yield(step_block);
                     Ok(())
@@ -2513,6 +2752,20 @@ impl FnCodegen<'_> {
             .builder
             .insert(b::andi(self.context, selected, not_done, i32_ty).build())
             .result();
+        // A `return` inside a case leaves the switch, so no later item — not
+        // even one reached by fallthrough — may run.
+        let condition = if self.return_flag.is_some() {
+            let not_returned = self.has_not_returned();
+            let not_returned = self
+                .builder
+                .insert(b::extui(self.context, not_returned, i32_ty).build())
+                .result();
+            self.builder
+                .insert(b::andi(self.context, condition, not_returned, i32_ty).build())
+                .result()
+        } else {
+            condition
+        };
         self.truth_value(condition)
     }
 
@@ -2791,9 +3044,9 @@ impl FnCodegen<'_> {
 
     fn lower_return_value(&mut self, node: NodeId) -> Result<ValueId, Diagnostic> {
         let expression = self.lower_expr_value(node)?;
-        let Some(pieces) = self.return_abi.aggregate.as_deref() else {
+        if self.return_abi.aggregate.is_none() {
             return Ok(self.materialize(expression));
-        };
+        }
         let LoweredExpr::Address { ptr, .. } = expression else {
             return Err(unsupported(
                 self.ast,
@@ -2801,7 +3054,13 @@ impl FnCodegen<'_> {
                 "non-addressable aggregate return value".to_string(),
             ));
         };
-        let ptr = self.prepare_abi_source(ptr, node_type(self.typed, node), pieces);
+        Ok(self.abi_return_value(ptr, node_type(self.typed, node)))
+    }
+
+    /// Load the ABI return value of an aggregate held at `ptr`.
+    fn abi_return_value(&mut self, ptr: ValueId, source_ty: QualType) -> ValueId {
+        let pieces = self.return_abi.aggregate.clone().unwrap();
+        let ptr = self.prepare_abi_source(ptr, source_ty, &pieces);
         let values = pieces
             .iter()
             .map(|piece| {
@@ -2812,17 +3071,64 @@ impl FnCodegen<'_> {
             })
             .collect::<Vec<_>>();
         if let [value] = values.as_slice() {
-            return Ok(*value);
+            return *value;
         }
-        Ok(self
-            .builder
+        self.builder
             .insert(
                 b::MakeTupleOpBuilder::new(self.context)
                     .elements(values)
                     .result_type(self.return_abi.ty)
                     .build(),
             )
-            .result())
+            .result()
+    }
+
+    /// Record a `return` in the function's return slots; the single `return`
+    /// terminator is emitted once, at the end of the function.
+    fn lower_structured_return(&mut self, value: Option<NodeId>) -> Result<(), Diagnostic> {
+        match value {
+            Some(node) if self.return_abi.indirect => self.lower_indirect_return(node)?,
+            Some(node) if self.return_abi.aggregate.is_some() => {
+                let slot = self.return_slot.unwrap();
+                let expression = self.lower_expr_value(node)?;
+                let LoweredExpr::Address { ptr: source, .. } = expression else {
+                    return Err(unsupported(
+                        self.ast,
+                        node,
+                        "non-addressable aggregate return value".to_string(),
+                    ));
+                };
+                let (size, _) = source_type_layout(self.typed, node_type(self.typed, node));
+                let size = self
+                    .builder
+                    .insert(
+                        b::constant(
+                            self.context,
+                            size as i64,
+                            IntegerType::new(self.context, 64),
+                        )
+                        .build(),
+                    )
+                    .result();
+                self.builder
+                    .insert(p::memcpy(self.context, slot.ptr, source, size).build());
+            }
+            Some(node) => {
+                let slot = self.return_slot.unwrap();
+                let value = self.lower_expr(node)?;
+                self.builder
+                    .insert(p::store(self.context, value, slot.ptr).build());
+            }
+            None => {}
+        }
+        let flag = self.return_flag.unwrap();
+        let one = self
+            .builder
+            .insert(b::constant(self.context, 1, flag.elem).build())
+            .result();
+        self.builder
+            .insert(p::store(self.context, one, flag.ptr).build());
+        Ok(())
     }
 
     fn lower_indirect_return(&mut self, node: NodeId) -> Result<(), Diagnostic> {

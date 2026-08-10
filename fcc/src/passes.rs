@@ -368,6 +368,8 @@ impl LowerCirControlFlowPass {
             })
     }
 
+    // sea: unstructured remainder — `goto` has no structured spelling; it needs
+    // Bahmann-Reissmann restructuring before it can reach scf.
     fn resolve_gotos(
         context: &Context,
         rewriter: &mut Rewriter,
@@ -503,6 +505,9 @@ impl LowerCirControlFlowPass {
             if op.is::<cir::ForOp>() {
                 return Self::for_is_structured(context, &op);
             }
+            if op.is::<cir::DoOp>() {
+                return Self::do_is_structured(context, &op);
+            }
             op.regions.is_empty()
         })
     }
@@ -512,11 +517,53 @@ impl LowerCirControlFlowPass {
             && Self::body_is_structured(context, op.regions[1])
     }
 
+    // sea: unstructured remainder — a `break` or `continue` in a `for` body
+    // uses the loop scope, and `scf.while` has no latch to run the step on a
+    // continue, so such loops keep the direct CFG path.
     fn for_is_structured(context: &Context, op: &tir::OpInstance) -> bool {
         Self::condition_operand(context, op.regions[0]).is_some()
             && Self::body_is_structured(context, op.regions[1])
             && Self::body_is_structured(context, op.regions[2])
             && !Self::loop_scope_is_used(context, op.regions[1])
+    }
+
+    // sea: unstructured remainder — see the `continue` case below.
+    /// A `do` loop becomes `scf.while` with the condition appended to the body,
+    /// so a `continue` — which in C jumps to that condition — has no structured
+    /// spelling and keeps the loop on the direct path.
+    fn do_is_structured(context: &Context, op: &tir::OpInstance) -> bool {
+        let Some(body) = Self::single_block(context, op.regions[0]) else {
+            return false;
+        };
+        let terminates_normally = body
+            .op_ids()
+            .last()
+            .is_some_and(|op_id| context.get_op(*op_id).as_op::<cir::YieldOp>().is_some());
+        let scope = Self::entry_block(context, op.regions[0]).arguments()[0].id();
+        terminates_normally
+            && Self::condition_operand(context, op.regions[1]).is_some()
+            && Self::body_is_structured(context, op.regions[0])
+            && !Self::region_has_continue(context, op.regions[0], scope)
+    }
+
+    fn region_has_continue(context: &Context, region: RegionId, scope: ValueId) -> bool {
+        context
+            .get_region(region)
+            .iter(context.clone())
+            .any(|block| {
+                block.op_ids().into_iter().any(|op_id| {
+                    let op = context.get_op(op_id);
+                    let continues = op
+                        .clone()
+                        .as_op::<cir::ContinueOp>()
+                        .is_some_and(|exit| exit.operands()[0] == scope);
+                    continues
+                        || op
+                            .regions
+                            .iter()
+                            .any(|region| Self::region_has_continue(context, *region, scope))
+                })
+            })
     }
 
     fn loop_scope_is_used(context: &Context, body: RegionId) -> bool {
@@ -853,6 +900,57 @@ impl LowerCirControlFlowPass {
         Ok(region.id())
     }
 
+    /// Build the `scf.while` body of a `do` loop: the loop body, then the
+    /// condition, then a guard that leaves the loop when it is false.
+    fn structured_do_body(
+        context: &Context,
+        rewriter: &mut Rewriter,
+        body_region: RegionId,
+        condition_region: RegionId,
+    ) -> Result<RegionId, PassError> {
+        let source = Self::single_block(context, body_region).unwrap();
+        let condition = Self::single_block(context, condition_region).unwrap();
+        let region = context.create_region();
+        let arguments = source
+            .arguments()
+            .iter()
+            .map(|argument| {
+                let replacement = context.create_value(argument.ty(), None);
+                context.replace_value_uses(argument.id(), replacement.id());
+                replacement
+            })
+            .collect::<Vec<_>>();
+        let scope = arguments[0].id();
+        let block = context.create_block(arguments);
+        region.add_block(block.id());
+        for source in [source, condition.clone()] {
+            let op_ids = source.op_ids();
+            for op_id in op_ids.iter().take(op_ids.len() - 1) {
+                source.remove_op(*op_id);
+                block.insert(block.len(), *op_id);
+            }
+        }
+        let terminator = context.get_op(*condition.op_ids().last().unwrap());
+        let value = terminator.operands[0];
+        rewriter.erase_op(&OperationRef::new(terminator, Some(condition), None))?;
+
+        let repeat = context.create_region();
+        let repeat_block = context.create_block(vec![]);
+        repeat.add_block(repeat_block.id());
+        IRBuilder::new(repeat_block).insert(scf::ops::r#yield(context, vec![]).build());
+        let exit = context.create_region();
+        let exit_block = context.create_block(vec![]);
+        exit.add_block(exit_block.id());
+        IRBuilder::new(exit_block).insert(scf::ops::r#break(context, scope).build());
+
+        let mut builder = IRBuilder::new(block);
+        builder.insert(
+            scf::ops::r#if(context, value, vec![], Some(repeat.id()), Some(exit.id())).build(),
+        );
+        builder.insert(scf::ops::r#yield(context, vec![]).build());
+        Ok(region.id())
+    }
+
     fn lower_structured(
         context: &Context,
         rewriter: &mut Rewriter,
@@ -870,6 +968,20 @@ impl LowerCirControlFlowPass {
             let body = Self::structured_for_body(context, op.regions[1], op.regions[2])?;
             Box::new(
                 scf::ops::r#while(context, vec![], vec![], Some(condition), Some(body)).build(),
+            )
+        } else if op.clone().as_op::<cir::DoOp>().is_some() {
+            let condition = context.create_region();
+            let condition_block = context.create_block(vec![]);
+            condition.add_block(condition_block.id());
+            let always = b::constant(context, 1, IntegerType::new(context, 1)).build();
+            let always_value = always.result();
+            let mut builder = IRBuilder::new(condition_block);
+            builder.insert(always);
+            builder.insert(scf::ops::condition(context, always_value, vec![]).build());
+            let body = Self::structured_do_body(context, rewriter, op.regions[0], op.regions[1])?;
+            Box::new(
+                scf::ops::r#while(context, vec![], vec![], Some(condition.id()), Some(body))
+                    .build(),
             )
         } else {
             let then_body = Self::structured_body(context, rewriter, op.regions[0])?;
@@ -1067,6 +1179,8 @@ impl Pass for LowerCirControlFlowPass {
                 Self::while_is_structured(context, &control)
             } else if control.clone().as_op::<cir::ForOp>().is_some() {
                 Self::for_is_structured(context, &control)
+            } else if control.clone().as_op::<cir::DoOp>().is_some() {
+                Self::do_is_structured(context, &control)
             } else if control.clone().as_op::<cir::IfOp>().is_some() {
                 control
                     .regions

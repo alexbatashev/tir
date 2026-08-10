@@ -261,6 +261,45 @@ int main(void) { printf("hello"); return 0; }"#,
     }
 
     #[test]
+    fn early_return_lowers_to_structured_control_flow() {
+        let lowered = lower_cir_control_flow("int f(int x) { if (x) return 1; return 2; }");
+
+        assert!(!lowered.contains("cond_br"), "{lowered}");
+        assert!(!lowered.contains("br ^"), "{lowered}");
+        assert!(lowered.contains("scf.if"), "{lowered}");
+    }
+
+    #[test]
+    fn return_inside_loop_leaves_the_loop_structurally() {
+        let lowered = lower_cir_control_flow(
+            "int f(int n) { int i = 0; while (i < n) { if (i == 3) return i; i = i + 1; } return 0; }",
+        );
+
+        assert!(!lowered.contains("cond_br"), "{lowered}");
+        assert!(!lowered.contains("br ^"), "{lowered}");
+        assert!(lowered.contains("scf.while"), "{lowered}");
+        assert!(lowered.contains("scf.break"), "{lowered}");
+    }
+
+    #[test]
+    fn unreachable_return_after_break_emits_no_operations() {
+        let ir = compile("int f(int c, int x) { while (c) { break; if (x) return 1; } return 0; }");
+
+        assert_eq!(ir.matches("cir.break").count(), 1, "{ir}");
+    }
+
+    #[test]
+    fn do_while_lowers_to_scf() {
+        let lowered = lower_cir_control_flow(
+            "int f(int n) { int t = 0; do { t = t + 1; if (t == 3) { return 3; } } while (t < n); return t; }",
+        );
+
+        assert!(!lowered.contains("cond_br"), "{lowered}");
+        assert!(!lowered.contains("br ^"), "{lowered}");
+        assert!(lowered.contains("scf.while"), "{lowered}");
+    }
+
+    #[test]
     fn structured_break_preserves_token_scope_in_scf() {
         let lowered =
             lower_cir_control_flow("int f(int stop) { while (1) { if (stop) break; } return 0; }");
@@ -269,6 +308,48 @@ int main(void) { printf("hello"); return 0; }"#,
         assert!(lowered.contains("scf.while"), "{lowered}");
         assert!(lowered.contains("scf.break"), "{lowered}");
         assert!(!lowered.contains("cond_br"), "{lowered}");
+    }
+
+    /// Sea requires the mid-end to see structured control flow only. After the
+    /// CIR lowering the remaining sources of branches are `goto` and a
+    /// `continue` inside a `for`, whose step has no structured spelling.
+    #[test]
+    fn c_constructs_lower_without_unstructured_branches() {
+        let lowered = lower_cir_control_flow(
+            r#"int f(int n, int m) {
+                   int total = 0;
+                   int i;
+                   if (n < 0 && m > 0) {
+                       return -1;
+                   }
+                   for (i = 0; i < n; i = i + 1) {
+                       switch (i & 1) {
+                       case 0:
+                           total = total + (m ? i : -i);
+                           break;
+                       default:
+                           if (total > 100) {
+                               return total;
+                           }
+                           total = total - 2;
+                           break;
+                       }
+                       do {
+                           total = total - 1;
+                       } while (total > n);
+                   }
+                   while (total < 0 || n > m) {
+                       total = total + 1;
+                       if (total == 7) {
+                           return 7;
+                       }
+                   }
+                   return total;
+               }"#,
+        );
+
+        assert!(!lowered.contains("cond_br"), "{lowered}");
+        assert!(!lowered.contains("br ^"), "{lowered}");
     }
 
     #[test]

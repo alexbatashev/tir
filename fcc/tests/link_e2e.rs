@@ -209,6 +209,100 @@ fn scalar_call_chain_matches_host_compiler() {
 }
 
 #[test]
+fn scalar_early_return_matches_host_compiler() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(include_str!("scalar/early_return.c"));
+}
+
+/// `do` loops become `scf.while` with the condition appended to the body, which
+/// only holds while `break` and `continue` keep their meaning.
+#[test]
+fn do_while_control_matches_host_compiler() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        r#"int printf(const char *format, ...);
+int main(void) {
+    int i = 0;
+    int s = 0;
+    int j = 0;
+    do {
+        i = i + 1;
+        if (i == 3) {
+            continue;
+        }
+        if (i == 7) {
+            break;
+        }
+        s = s + i;
+    } while (i < 10);
+    printf("%d %d\n", i, s);
+    do {
+        j = j + 2;
+    } while (j < 5);
+    printf("%d\n", j);
+    do {
+        s = s + 1;
+        if (s > 20) {
+            break;
+        }
+    } while (1);
+    printf("%d\n", s);
+    return s & 63;
+}
+"#,
+    );
+}
+
+/// A returned aggregate is held in a slot until the single `return`, both when
+/// it travels in registers and when the caller supplies the storage.
+#[test]
+fn aggregate_early_return_matches_host_compiler() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        r#"int printf(const char *format, ...);
+struct Small { int a; int b; };
+struct Big { int v[8]; };
+struct Small pick(int n) {
+    struct Small s;
+    if (n > 0) {
+        s.a = 1;
+        s.b = n;
+        return s;
+    }
+    s.a = -1;
+    s.b = 0;
+    return s;
+}
+struct Big fill(int n) {
+    struct Big b;
+    int i;
+    for (i = 0; i < 8; i = i + 1) {
+        b.v[i] = i * n;
+        if (i == 5) {
+            b.v[7] = 99;
+            return b;
+        }
+    }
+    return b;
+}
+int main(void) {
+    struct Small s = pick(4);
+    struct Small t = pick(-4);
+    struct Big g = fill(2);
+    printf("%d %d %d %d %d\n", s.a, s.b, t.a, t.b, g.v[7]);
+    return s.b + t.a + g.v[3];
+}
+"#,
+    );
+}
+
+#[test]
 fn scalar_branch_mix_matches_host_compiler() {
     if !cc_available() {
         return;
