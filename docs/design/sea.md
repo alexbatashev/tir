@@ -51,11 +51,15 @@ elsewhere), speculative transforms (build a view over a candidate subtree,
 measure, commit or drop), and cheap parallelism (immutable shared green
 nodes).
 
-**Unstructured control flow** lives at the boundaries, not in the core: the
-frontend raises everything to structured form before entry (fcc lowers all CF
-to scf; goto later via Bahmann-Reissmann restructuring), and machine-level
-CFG exists after destruction in the machine dialects as today. The core is
-structured, period — that is what makes the gate interfaces total over it.
+**Unstructured control flow is first-class input.** C is unstructured by
+default — break, continue, goto, fallthrough are the language, not edge
+cases. The system's obligation: accept any CFG and restructure it totally
+(Bahmann-Reissmann perfect reconstruction covers every CFG, irreducible
+included), so "the core is structured" is a guarantee the compiler provides,
+never a restriction on input. A construct that reaches a fallback path with
+worse codegen than its unstructured lowering is a bug against the
+performance targets, tracked as such. Machine-level CFG exists after
+destruction in the machine dialects as today.
 
 ## 2. Structured-op interfaces (unchanged from rev 2 except attachment)
 
