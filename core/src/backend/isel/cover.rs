@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 
 use tir::{
     ValueId,
-    pbqp::{self, INF_COST, PbqpMatrix, PbqpProblem, PbqpSolution},
+    pbqp::{self, INF_COST, PbqpMatrix, PbqpProblem},
     sem::SymKind,
 };
 use tir_symbolic::egraph::Id;
@@ -133,14 +133,11 @@ pub(crate) struct ClassPolicies<'a> {
     pub(crate) reifiable_gate: &'a dyn Fn(Id) -> bool,
 }
 
-pub(crate) type CoverSolutionCache = HashMap<PbqpProblem, PbqpSolution>;
-
 pub(crate) fn build_eclass_cover(
     egraph: &SemEGraph,
     classes: &[Id],
     policies: &ClassPolicies,
     matches: &[PbqpIselMatch],
-    cache: &mut CoverSolutionCache,
 ) -> Option<ClassCover> {
     let classes: Vec<Id> = classes.to_vec();
     let index: HashMap<Id, usize> = classes.iter().enumerate().map(|(i, &c)| (c, i)).collect();
@@ -203,10 +200,10 @@ pub(crate) fn build_eclass_cover(
         }
     }
 
-    let effect_footprints: Vec<HashSet<Id>> = matches
+    let effect_footprints: Vec<Vec<Id>> = matches
         .iter()
         .map(|matched| {
-            matched
+            let mut footprint: Vec<Id> = matched
                 .bindings
                 .pattern_nodes
                 .iter()
@@ -216,25 +213,38 @@ pub(crate) fn build_eclass_cover(
                         && !class_is_pure(egraph, binding.class)
                 })
                 .map(|binding| egraph.find(binding.class))
-                .collect()
+                .collect();
+            footprint.sort();
+            footprint.dedup();
+            footprint
         })
         .collect();
-    for (lhs, left) in matches.iter().enumerate() {
-        let Some(li) = class_index(left.root) else {
-            continue;
-        };
-        for (rhs, right) in matches.iter().enumerate().skip(lhs + 1) {
-            if effect_footprints[lhs].is_disjoint(&effect_footprints[rhs]) {
-                continue;
-            }
-            let Some(ri) = class_index(right.root) else {
+    // Only matches sharing an effect class can conflict, so index by class
+    // instead of comparing every pair of matches.
+    let mut matches_by_effect: HashMap<Id, Vec<usize>> = HashMap::new();
+    for (index, footprint) in effect_footprints.iter().enumerate() {
+        for &class in footprint {
+            matches_by_effect.entry(class).or_default().push(index);
+        }
+    }
+    for sharing in matches_by_effect.values() {
+        for (position, &lhs) in sharing.iter().enumerate() {
+            let Some(li) = class_index(matches[lhs].root) else {
                 continue;
             };
-            if li != ri {
-                edge_pairs.insert(ordered_pair(li, ri));
+            for &rhs in &sharing[position + 1..] {
+                let Some(ri) = class_index(matches[rhs].root) else {
+                    continue;
+                };
+                if li != ri {
+                    edge_pairs.insert(ordered_pair(li, ri));
+                }
             }
         }
     }
+
+    let mut edge_pairs: Vec<(usize, usize)> = edge_pairs.into_iter().collect();
+    edge_pairs.sort_unstable();
     for (li, ri) in edge_pairs {
         let left_class = classes[li];
         let right_class = classes[ri];
@@ -272,14 +282,7 @@ pub(crate) fn build_eclass_cover(
         );
     }
 
-    let solution = match cache.get(&problem) {
-        Some(solution) => solution.clone(),
-        None => {
-            let solution = pbqp::solve(&problem).ok()?;
-            cache.insert(problem, solution.clone());
-            solution
-        }
-    };
+    let solution = pbqp::solve(&problem).ok()?;
     let choices = solution
         .choices
         .iter()
@@ -297,14 +300,15 @@ fn ordered_pair(lhs: usize, rhs: usize) -> (usize, usize) {
 fn effect_tiles_conflict(
     lhs: &PbqpIselAlternative,
     rhs: &PbqpIselAlternative,
-    footprints: &[HashSet<Id>],
+    footprints: &[Vec<Id>],
 ) -> bool {
     let (PbqpIselAlternative::Tile { match_id: lhs }, PbqpIselAlternative::Tile { match_id: rhs }) =
         (lhs, rhs)
     else {
         return false;
     };
-    !footprints[*lhs].is_disjoint(&footprints[*rhs])
+    let (lhs, rhs) = (&footprints[*lhs], &footprints[*rhs]);
+    lhs.iter().any(|class| rhs.binary_search(class).is_ok())
 }
 
 /// Drop matches dominated by an interchangeable alternative: same root class,
@@ -354,31 +358,46 @@ pub(crate) fn prune_dominated_matches(
             .push(index);
     }
 
+    let comparison_key = |index: usize| {
+        (
+            matches[index].cost,
+            patterns[matches[index].pattern_index].specificity,
+            &footprints[index].3,
+        )
+    };
+    let dominates = |a: usize, b: usize| {
+        let (cost_a, spec_a, demands_a) = comparison_key(a);
+        let (cost_b, spec_b, demands_b) = comparison_key(b);
+        let demands_le = demands_a.iter().zip(demands_b).all(|(da, db)| da <= db);
+        cost_a <= cost_b
+            && spec_a >= spec_b
+            && demands_le
+            && (cost_a < cost_b || spec_a > spec_b || demands_a != demands_b)
+    };
+
     let mut keep = vec![true; matches.len()];
     for group in groups.values() {
-        for &a in group {
-            for &b in group {
-                if a == b || !keep[a] || !keep[b] {
-                    continue;
-                }
-                let (cost_a, spec_a) = (
-                    matches[a].cost,
-                    patterns[matches[a].pattern_index].specificity,
-                );
-                let (cost_b, spec_b) = (
-                    matches[b].cost,
-                    patterns[matches[b].pattern_index].specificity,
-                );
-                let (demands_a, demands_b) = (&footprints[a].3, &footprints[b].3);
-                let demands_le = demands_a.iter().zip(demands_b).all(|(da, db)| da <= db);
-                if cost_a <= cost_b
-                    && spec_a >= spec_b
-                    && demands_le
-                    && (cost_a < cost_b || spec_a > spec_b || demands_a != demands_b)
-                {
-                    keep[b] = false;
-                }
+        // Domination depends only on the comparison key, and it is a strict
+        // partial order over distinct keys, so one comparison per pair of
+        // distinct keys decides every member of the group.
+        let mut representatives: Vec<usize> = Vec::new();
+        let mut representative_of: Vec<usize> = Vec::with_capacity(group.len());
+        for &index in group {
+            let existing = representatives
+                .iter()
+                .position(|&other| comparison_key(other) == comparison_key(index));
+            representative_of.push(existing.unwrap_or(representatives.len()));
+            if existing.is_none() {
+                representatives.push(index);
             }
+        }
+
+        let dominated: Vec<bool> = representatives
+            .iter()
+            .map(|&b| representatives.iter().any(|&a| a != b && dominates(a, b)))
+            .collect();
+        for (&index, &representative) in group.iter().zip(&representative_of) {
+            keep[index] = !dominated[representative];
         }
     }
 

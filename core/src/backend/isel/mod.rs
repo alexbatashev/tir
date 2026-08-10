@@ -42,9 +42,8 @@ pub use tir_symbolic::egraph::EMatch;
 
 use builder::SemDagBuilder;
 use cover::{
-    BoundaryDemand, CaptureBindings, CoverSolutionCache, FullMatchBindings, PatternNodeBinding,
-    PbqpIselAlternative, PbqpIselMatch, build_eclass_cover, completeness_error,
-    prune_dominated_matches,
+    BoundaryDemand, CaptureBindings, FullMatchBindings, PatternNodeBinding, PbqpIselAlternative,
+    PbqpIselMatch, build_eclass_cover, completeness_error, prune_dominated_matches,
 };
 use emit::{BlockPlan, GuardBranch, ScheduledEmit, TerminatorPlan, resolve_match, schedule_tiles};
 use node::{
@@ -1174,7 +1173,6 @@ impl InstructionSelectPass {
         // e-match is block-independent: search once here and reuse for all such
         // blocks (fact-bearing blocks re-search under their scope).
         let base_matches = self.base_value_matches(&fs, context);
-        let mut cover_cache = CoverSolutionCache::new();
         let mut visited = HashSet::new();
         if let Some(root) = dom.root() {
             self.solve_dominator_subtree(
@@ -1185,7 +1183,6 @@ impl InstructionSelectPass {
                 root,
                 false,
                 &base_matches,
-                &mut cover_cache,
                 &mut visited,
             );
         }
@@ -1197,15 +1194,7 @@ impl InstructionSelectPass {
                 if block.is_empty() || visited.contains(&block.id()) {
                     continue;
                 }
-                let plan = self.solve_block(
-                    context,
-                    &block,
-                    &mut fs,
-                    &dom,
-                    false,
-                    &base_matches,
-                    &mut cover_cache,
-                );
+                let plan = self.solve_block(context, &block, &mut fs, &dom, false, &base_matches);
                 self.plans.insert(block.id(), plan);
             }
         }
@@ -1221,7 +1210,6 @@ impl InstructionSelectPass {
         node: NodeId,
         inherited_scope: bool,
         base_matches: &[Vec<EMatch<u32>>],
-        cover_cache: &mut CoverSolutionCache,
         visited: &mut HashSet<BlockId>,
     ) {
         let Some(block_id) = dom.block(node) else {
@@ -1241,8 +1229,7 @@ impl InstructionSelectPass {
 
         let block = context.get_block(block_id);
         if !block.is_empty() {
-            let plan =
-                self.solve_block(context, &block, fs, dom, scoped, base_matches, cover_cache);
+            let plan = self.solve_block(context, &block, fs, dom, scoped, base_matches);
             self.plans.insert(block_id, plan);
         }
 
@@ -1256,7 +1243,6 @@ impl InstructionSelectPass {
                 child,
                 scoped,
                 base_matches,
-                cover_cache,
                 visited,
             );
         }
@@ -1638,7 +1624,6 @@ impl InstructionSelectPass {
         dom: &DominatorTree,
         scoped: bool,
         base_matches: &[Vec<EMatch<u32>>],
-        cover_cache: &mut CoverSolutionCache,
     ) -> Result<BlockPlan, String> {
         let root_seeds = block_root_seeds(block, fs);
         if scoped {
@@ -1655,7 +1640,7 @@ impl InstructionSelectPass {
         // Under a scope the graph differs from the base, so re-search; a fact-free
         // block reuses the cached base matches.
         let cached = (!scoped).then_some(base_matches);
-        self.solve_block_inner(context, block, fs, dom, &match_roots, cached, cover_cache)
+        self.solve_block_inner(context, block, fs, dom, &match_roots, cached)
     }
 
     /// Create a trampoline block forwarding `args` to `dest` through the target's
@@ -1873,7 +1858,6 @@ impl InstructionSelectPass {
         dom: &DominatorTree,
         match_roots: &HashSet<Id>,
         base_matches: Option<&[Vec<EMatch<u32>>]>,
-        cover_cache: &mut CoverSolutionCache,
     ) -> Result<BlockPlan, String> {
         let block_id = block.id();
         let op_ids = block.op_ids();
@@ -2038,7 +2022,6 @@ impl InstructionSelectPass {
                 reifiable_gate: &|class| fs.is_reifiable_gate(class),
             },
             &matches,
-            cover_cache,
         )
         .ok_or_else(|| {
             let ops = op_ids
@@ -2396,8 +2379,10 @@ impl InstructionSelectPass {
         if base_matches.is_none() {
             for &root in &local_roots {
                 for node in fs.egraph.nodes(root) {
+                    // Roots are appended in outer-loop order, so a repeated
+                    // op key within one root's nodes is always the last entry.
                     let roots = local_roots_by_op.entry(node.op_key()).or_default();
-                    if !roots.contains(&root) {
+                    if roots.last() != Some(&root) {
                         roots.push(root);
                     }
                 }
