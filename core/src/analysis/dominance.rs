@@ -432,7 +432,7 @@ mod tests {
         let region = context.create_region();
         let block = context.create_block(vec![]);
         region.add_block(block.id());
-        IRBuilder::new(block).insert(crate::scf::ops::r#yield(context, Operand::none()).build());
+        IRBuilder::new(block).insert(crate::scf::ops::r#yield(context, vec![]).build());
         region.id()
     }
 
@@ -552,7 +552,7 @@ mod tests {
         let if_op = crate::scf::ops::r#if(
             &context,
             cond_id,
-            None,
+            vec![],
             Some(then_region),
             Some(else_region),
         )
@@ -647,8 +647,8 @@ mod tests {
             lb.id(),
             ub.id(),
             step.id(),
-            Operand::none(),
-            None,
+            vec![],
+            vec![],
             Some(body),
         )
         .build();

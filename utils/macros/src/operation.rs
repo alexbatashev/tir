@@ -25,6 +25,13 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
     // with or without it. Used by structured control flow, whose value is absent when
     // the construct is purely side-effecting.
     let result_optional = results.iter().any(|r| r.ty.starts_with('?'));
+    // A `*`-prefixed result makes the op n-ary: it produces one value per type given
+    // to the builder. Used by structured control flow, which carries n values.
+    let result_variadic = results.iter().any(|r| r.variadic);
+    assert!(
+        !result_variadic || results.len() == 1,
+        "a variadic result must be the only declared result"
+    );
     let op_fn_name = op_fn_ident(&name);
     let operand_names: Vec<String> = operands.iter().map(|o| o.name.clone()).collect();
 
@@ -448,31 +455,44 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         })
         .collect();
 
-    let result_builder_field = if has_results {
+    let result_builder_field = if !has_results {
+        quote! {}
+    } else if result_variadic {
+        quote! { result_types: Vec<tir::TypeId>, }
+    } else {
         quote! { result_type: Option<tir::TypeId>, }
-    } else {
-        quote! {}
     };
 
-    let result_builder_default = if has_results {
+    let result_builder_default = if !has_results {
+        quote! {}
+    } else if result_variadic {
+        quote! { result_types: Vec::new(), }
+    } else {
         quote! { result_type: None, }
-    } else {
-        quote! {}
     };
 
-    let result_builder_method = if has_results {
+    let result_builder_method = if !has_results {
+        quote! {}
+    } else if result_variadic {
+        quote! {
+            pub fn result_types(mut self, types: Vec<tir::TypeId>) -> Self {
+                self.result_types = types;
+                self
+            }
+        }
+    } else {
         quote! {
             pub fn result_type(mut self, ty: tir::TypeId) -> Self {
                 self.result_type = Some(ty);
                 self
             }
         }
-    } else {
-        quote! {}
     };
 
     let result_fn_param = if !has_results {
         quote! {}
+    } else if result_variadic {
+        quote! { result_types: Vec<tir::TypeId>, }
     } else if result_optional {
         quote! { result_type: Option<tir::TypeId>, }
     } else {
@@ -481,6 +501,8 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
 
     let result_fn_builder = if !has_results {
         quote! {}
+    } else if result_variadic {
+        quote! { builder = builder.result_types(result_types); }
     } else if result_optional {
         quote! {
             if let Some(result_type) = result_type {
@@ -530,7 +552,15 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         })
         .collect();
 
-    let result_count_check = if result_optional {
+    let result_spec_index = if result_variadic {
+        quote! { 0usize }
+    } else {
+        quote! { result_index }
+    };
+
+    let result_count_check = if result_variadic {
+        quote! {}
+    } else if result_optional {
         quote! {
             if self.0.results.len() > result_specs.len() {
                 return Err(tir::Error::VerificationError(format!(
@@ -557,6 +587,14 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
     let result_build = if !has_results {
         quote! {
             let result_vec: Vec<tir::ValueId> = vec![];
+        }
+    } else if result_variadic {
+        quote! {
+            let result_vec: Vec<tir::ValueId> = self
+                .result_types
+                .iter()
+                .map(|ty| self.context.create_value(*ty, None).id())
+                .collect();
         }
     } else if result_optional {
         quote! {
@@ -777,9 +815,11 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
 
                 #result_count_check
 
-                for idx in 0..self.0.results.len() {
+                for result_index in 0..self.0.results.len() {
+                    // A variadic result declares one spec covering every result value.
+                    let idx = #result_spec_index;
                     let (result_name, _type_spec) = result_specs[idx];
-                    let value_id = self.0.results[idx];
+                    let value_id = self.0.results[result_index];
                     if !context.has_value(value_id) {
                         return Err(tir::Error::VerificationError(format!(
                             "{} result '{}' references unknown value %{id}",

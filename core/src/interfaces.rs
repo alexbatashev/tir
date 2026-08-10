@@ -38,14 +38,21 @@ pub trait Symbol {
     }
 }
 
-/// An operation whose nested regions execute under a known fact about a value — e.g.
-/// a structured `if` whose then/else bodies run when the condition is true/false.
-/// Lets a flow-sensitive rewriter assume that fact inside the region without knowing
-/// the concrete control-flow op.
-pub trait RegionGuard {
+/// A structured conditional (γ): disjoint sub-regions, one of which runs depending on
+/// a deciding operand, and `k` results whose values come from the yield of whichever
+/// region ran. Lets a flow-sensitive rewriter read the selection — and assume the
+/// region's fact inside it — without knowing the concrete control-flow op.
+pub trait Conditional {
+    /// The operand deciding which region runs.
+    fn decision(&self) -> ValueId;
+
+    /// The `k` values `region` yields, aligned with the op's results.
+    fn region_yields(&self, region: RegionId) -> Vec<ValueId>;
+
     /// For each guarded region, the value known to equal a boolean inside it
     /// (`true` => 1, `false` => 0).
     fn guarded_regions(&self) -> Vec<(RegionId, ValueId, bool)>;
+
     fn verify_interface(
         &self,
         _this: &dyn Operation,
@@ -176,31 +183,48 @@ pub trait BranchTerminator {
     }
 }
 
-/// A structured loop that carries one value across iterations: it enters the body as a
-/// region argument, starts at an init value, and updates to the value the body yields on
-/// the back edge. The op's single result is the carried value at loop exit. Lets a
-/// flow-sensitive analysis build μ gates without knowing the concrete loop op.
+/// A structured loop (θ) with `n` carried ports. Port `j` starts at `inits()[j]`,
+/// enters each iteration as the body region argument `carried_args()[j]`, and updates
+/// to `latched()[j]`, the value the body yields on the back edge. `finals()[j]` — the
+/// op's result — is the carried value *after* the loop exits, a distinct quantity from
+/// the per-iteration `carried_args()[j]`, never congruent to it. All four accessors are
+/// aligned and of equal arity `n`. Lets a flow-sensitive analysis build μ and η gates
+/// without knowing the concrete loop op.
 pub trait LoopLike {
-    /// The pre-loop initial value of the carried value.
-    fn init(&self) -> ValueId;
-    /// The body region argument through which the value enters each iteration — where
-    /// the loop body observes the carried value.
-    fn carried_arg(&self) -> ValueId;
-    /// The value the body yields on the back edge: the next iteration's carried value.
-    fn latched(&self) -> ValueId;
+    /// The pre-loop initial value of each carried port.
+    fn inits(&self) -> Vec<ValueId>;
+    /// The body region arguments through which the carried values enter each iteration.
+    fn carried_args(&self) -> Vec<ValueId>;
+    /// The values the body yields on the back edge: the next iteration's carried values.
+    fn latched(&self) -> Vec<ValueId>;
+    /// The op's results: the carried values at loop exit.
+    fn finals(&self) -> Vec<ValueId>;
 
     fn verify_interface(
         &self,
         _this: &dyn Operation,
         _context: &Context,
     ) -> Result<(), crate::Error> {
+        let arities = [
+            self.inits().len(),
+            self.carried_args().len(),
+            self.latched().len(),
+            self.finals().len(),
+        ];
+        if arities.iter().any(|&n| n != arities[0]) {
+            return Err(crate::Error::VerificationError(format!(
+                "loop carried ports must be aligned: {} inits, {} carried arguments, \
+                 {} latched values, {} results",
+                arities[0], arities[1], arities[2], arities[3]
+            )));
+        }
         Ok(())
     }
 }
 
 /// A [`BranchTerminator`] whose successor edges run under a known boolean fact — e.g.
 /// `cond_br %c` enters its true successor when `%c` is 1 and its false successor when
-/// `%c` is 0. The CFG analog of [`RegionGuard`], letting a flow-sensitive analysis
+/// `%c` is 0. The CFG analog of [`Conditional`], letting a flow-sensitive analysis
 /// recover the predicate gating a merge without knowing the concrete branch op.
 pub trait BranchGuard {
     /// For each guarded successor edge, the value known to equal a boolean when that

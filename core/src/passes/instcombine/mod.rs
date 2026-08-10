@@ -24,8 +24,8 @@ use std::rc::Rc;
 use crate::analysis::{DominatingEdgeFacts, DominatorTree, GSA, GateNode};
 use crate::graph::Dag;
 use crate::{
-    AnalysisManager, BlockId, ConstantLike, Context, OpId, OperationRef, Pass, PassError,
-    PassTarget, PreservedAnalyses, RegionGuard, RegionId, Rewriter, TypeId, ValueId,
+    AnalysisManager, BlockId, Conditional, ConstantLike, Context, OpId, OperationRef, Pass,
+    PassError, PassTarget, PreservedAnalyses, RegionId, Rewriter, TypeId, ValueId,
     builtin::{FuncOp, ops},
     utils::APInt,
 };
@@ -284,7 +284,7 @@ impl Driver<'_> {
             }
             let guarded = instance
                 .clone()
-                .as_interface::<dyn RegionGuard>()
+                .as_interface::<dyn Conditional>()
                 .map(|g| g.guarded_regions())
                 .unwrap_or_default();
             for &sub in &instance.regions {

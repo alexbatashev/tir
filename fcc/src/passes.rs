@@ -8,8 +8,8 @@ use tir::builtin::{
 };
 use tir::ptr::{AllocaOp, PtrType, ops as p};
 use tir::{
-    Block, BlockId, Context, IRBuilder, Operand, Operation, OperationRef, Pass, PassError,
-    PassTarget, RegionId, Rewriter, ValueId, scf,
+    Block, BlockId, Context, IRBuilder, Operation, OperationRef, Pass, PassError, PassTarget,
+    RegionId, Rewriter, ValueId, scf,
 };
 
 use crate::cir;
@@ -800,7 +800,7 @@ impl LowerCirControlFlowPass {
             } else if terminator.clone().as_op::<cir::ContinueOp>().is_some() {
                 Box::new(scf::ops::r#continue(context, terminator.operands[0]).build())
             } else {
-                Box::new(scf::ops::r#yield(context, Operand::none()).build())
+                Box::new(scf::ops::r#yield(context, vec![]).build())
             };
         rewriter.replace_op(
             &OperationRef::new(terminator, Some(block), None),
@@ -824,7 +824,7 @@ impl LowerCirControlFlowPass {
         }
         let terminator = context.get_op(*block.op_ids().last().unwrap());
         let condition = terminator.operands[0];
-        let replacement = scf::ops::condition(context, condition, Operand::none()).build();
+        let replacement = scf::ops::condition(context, condition, vec![]).build();
         rewriter.replace_op(
             &OperationRef::new(terminator, Some(block), None),
             &replacement,
@@ -849,7 +849,7 @@ impl LowerCirControlFlowPass {
                 block.insert(block.len(), *op_id);
             }
         }
-        IRBuilder::new(block).insert(scf::ops::r#yield(context, Operand::none()).build());
+        IRBuilder::new(block).insert(scf::ops::r#yield(context, vec![]).build());
         Ok(region.id())
     }
 
@@ -863,15 +863,13 @@ impl LowerCirControlFlowPass {
             let condition = Self::structured_condition(context, rewriter, op.regions[0])?;
             let body = Self::structured_body(context, rewriter, op.regions[1])?;
             Box::new(
-                scf::ops::r#while(context, Operand::none(), None, Some(condition), Some(body))
-                    .build(),
+                scf::ops::r#while(context, vec![], vec![], Some(condition), Some(body)).build(),
             )
         } else if op.clone().as_op::<cir::ForOp>().is_some() {
             let condition = Self::structured_condition(context, rewriter, op.regions[0])?;
             let body = Self::structured_for_body(context, op.regions[1], op.regions[2])?;
             Box::new(
-                scf::ops::r#while(context, Operand::none(), None, Some(condition), Some(body))
-                    .build(),
+                scf::ops::r#while(context, vec![], vec![], Some(condition), Some(body)).build(),
             )
         } else {
             let then_body = Self::structured_body(context, rewriter, op.regions[0])?;
@@ -880,7 +878,7 @@ impl LowerCirControlFlowPass {
                 scf::ops::r#if(
                     context,
                     op.operands[0],
-                    None,
+                    vec![],
                     Some(then_body),
                     Some(else_body),
                 )

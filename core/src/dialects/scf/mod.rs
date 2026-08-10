@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::builtin::{IntegerType, TokenType};
 use crate::{
-    Context, Error, LoopLike, Operation, RegionGuard, Terminator, TokenScope, TypeId, ValueId,
+    Conditional, Context, Error, LoopLike, Operation, Terminator, TokenScope, TypeId, ValueId,
     dialect, operation,
 };
 
@@ -44,10 +44,10 @@ operation! {
             lower_bound: "crate::builtin::IndexType",
             upper_bound: "crate::builtin::IndexType",
             step: "crate::builtin::IndexType",
-            init: "?AnyConstraint",
+            inits: "*AnyConstraint",
         },
         results: R {
-            result: "?AnyConstraint",
+            results: "*AnyConstraint",
         },
         regions: R {
             body: Region {
@@ -59,17 +59,17 @@ operation! {
 }
 
 impl LoopOp for ForOp {
-    fn result(&self) -> Option<ValueId> {
-        self.0.results.first().copied()
+    fn loop_results(&self) -> Vec<ValueId> {
+        self.0.results.clone()
     }
-    fn init_operand(&self) -> Option<ValueId> {
-        self.operands().get(3).copied()
+    fn init_operands(&self) -> Vec<ValueId> {
+        self.operands()[3..].to_vec()
     }
     fn body_block(&self) -> Arc<tir::Block> {
         self.body()
     }
-    fn iter_arg(&self) -> ValueId {
-        carried_argument(&self.loop_context(), &self.body_block()).id()
+    fn iter_args(&self) -> Vec<ValueId> {
+        carried_arguments(&self.loop_context(), &self.body_block())
     }
     fn loop_context(&self) -> Context {
         self.0.context.upgrade()
@@ -77,14 +77,17 @@ impl LoopOp for ForOp {
 }
 
 impl tir::LoopLike for ForOp {
-    fn init(&self) -> ValueId {
-        self.init_operand().unwrap()
+    fn inits(&self) -> Vec<ValueId> {
+        self.init_operands()
     }
-    fn carried_arg(&self) -> ValueId {
-        carried_argument(&self.loop_context(), &self.body_block()).id()
+    fn carried_args(&self) -> Vec<ValueId> {
+        carried_arguments(&self.loop_context(), &self.body_block())
     }
-    fn latched(&self) -> ValueId {
-        latched_value(self)
+    fn latched(&self) -> Vec<ValueId> {
+        latched_values(self)
+    }
+    fn finals(&self) -> Vec<ValueId> {
+        self.loop_results()
     }
 }
 
@@ -127,18 +130,19 @@ impl ForOp {
         let step = parse_value_id(parser)?;
         let scope = parse_scope(parser, context)?;
         let carried = parse_iter_args(parser, context)?;
-        let body_carried = carried.as_ref().map(|carried| carried.acc.clone());
+        let body_carried = carried.iter().map(|c| c.acc.clone()).collect();
         let body = parse_loop_body(parser, context, scope, body_carried)?;
 
-        let mut builder = ForOpBuilder::new(context)
-            .lower_bound(lower_bound)
-            .upper_bound(upper_bound)
-            .step(step)
-            .body(body);
-        if let Some(carried) = &carried {
-            builder = builder.init(carried.init).result_type(carried.ty);
-        }
-        Ok(Box::new(builder.build()))
+        Ok(Box::new(
+            ForOpBuilder::new(context)
+                .lower_bound(lower_bound)
+                .upper_bound(upper_bound)
+                .step(step)
+                .body(body)
+                .inits(carried.iter().map(|c| c.init).collect())
+                .result_types(carried.iter().map(|c| c.ty).collect())
+                .build(),
+        ))
     }
 }
 
@@ -149,10 +153,10 @@ operation! {
         format: "custom",
         verifier: "true",
         operands: O {
-            init: "?AnyConstraint",
+            inits: "*AnyConstraint",
         },
         results: R {
-            result: "?AnyConstraint",
+            results: "*AnyConstraint",
         },
         regions: R {
             condition_region: Region {
@@ -167,17 +171,21 @@ operation! {
 }
 
 impl LoopOp for WhileOp {
-    fn result(&self) -> Option<ValueId> {
-        self.0.results.first().copied()
+    fn loop_results(&self) -> Vec<ValueId> {
+        self.0.results.clone()
     }
-    fn init_operand(&self) -> Option<ValueId> {
-        self.operands().first().copied()
+    fn init_operands(&self) -> Vec<ValueId> {
+        self.operands().to_vec()
     }
     fn body_block(&self) -> Arc<tir::Block> {
         self.body()
     }
-    fn iter_arg(&self) -> ValueId {
-        self.condition_region().arguments()[0].id()
+    fn iter_args(&self) -> Vec<ValueId> {
+        self.condition_region()
+            .arguments()
+            .iter()
+            .map(tir::Value::id)
+            .collect()
     }
     fn loop_context(&self) -> Context {
         self.0.context.upgrade()
@@ -185,14 +193,17 @@ impl LoopOp for WhileOp {
 }
 
 impl tir::LoopLike for WhileOp {
-    fn init(&self) -> ValueId {
-        self.init_operand().unwrap()
+    fn inits(&self) -> Vec<ValueId> {
+        self.init_operands()
     }
-    fn carried_arg(&self) -> ValueId {
-        carried_argument(&self.loop_context(), &self.body_block()).id()
+    fn carried_args(&self) -> Vec<ValueId> {
+        carried_arguments(&self.loop_context(), &self.body_block())
     }
-    fn latched(&self) -> ValueId {
-        latched_value(self)
+    fn latched(&self) -> Vec<ValueId> {
+        latched_values(self)
+    }
+    fn finals(&self) -> Vec<ValueId> {
+        self.loop_results()
     }
 }
 
@@ -224,11 +235,11 @@ impl WhileOp {
         tir::region_format::print_op_region(fmt, &context, self, 0)?;
         fmt.write(" do")?;
         print_scope(fmt, &context, self.body_block())?;
-        if !self.0.results.is_empty() {
-            fmt.write(format!(
-                "(%{})",
-                carried_argument(&context, &self.body_block()).id().number()
-            ))?;
+        let body_carried = carried_arguments(&context, &self.body_block());
+        if !body_carried.is_empty() {
+            fmt.write("(")?;
+            print_value_list(fmt, &body_carried)?;
+            fmt.write(")")?;
         }
         tir::region_format::print_op_region(fmt, &context, self, 1)
     }
@@ -247,13 +258,14 @@ impl WhileOp {
         let body_carried = parse_body_carried(parser, context, &carried)?;
         let body = parse_loop_body(parser, context, scope, body_carried)?;
 
-        let mut builder = WhileOpBuilder::new(context)
-            .condition_region(condition_region)
-            .body(body);
-        if let Some(carried) = &carried {
-            builder = builder.init(carried.init).result_type(carried.ty);
-        }
-        Ok(Box::new(builder.build()))
+        Ok(Box::new(
+            WhileOpBuilder::new(context)
+                .condition_region(condition_region)
+                .body(body)
+                .inits(carried.iter().map(|c| c.init).collect())
+                .result_types(carried.iter().map(|c| c.ty).collect())
+                .build(),
+        ))
     }
 }
 
@@ -261,15 +273,37 @@ operation! {
     ConditionOp {
         name: "condition",
         dialect: "scf",
+        format: "custom",
         operands: O {
             condition: "crate::Integer<1>",
-            value: "?AnyConstraint",
+            values: "*AnyConstraint",
         },
         interfaces: [Terminator],
     }
 }
 
 impl Terminator for ConditionOp {}
+
+impl ConditionOp {
+    fn custom_print(&self, fmt: &mut tir::IRFormatter) -> Result<(), std::fmt::Error> {
+        fmt.write("scf.condition ")?;
+        print_value_list(fmt, self.operands())?;
+        fmt.write("\n")
+    }
+
+    fn custom_parse(
+        parser: &mut tir::parse::text::Parser,
+        context: &Context,
+    ) -> Result<Box<dyn Operation>, (tir::parse::Span, Error)> {
+        let condition = parse_value_id(parser)?;
+        Ok(Box::new(
+            ConditionOpBuilder::new(context)
+                .condition(condition)
+                .values(parse_trailing_values(parser)?)
+                .build(),
+        ))
+    }
+}
 
 operation! {
     IfOp {
@@ -281,7 +315,7 @@ operation! {
             condition: "crate::Integer<1>",
         },
         results: R {
-            result: "?AnyConstraint",
+            results: "*AnyConstraint",
         },
         regions: R {
             then_body: Region {
@@ -291,11 +325,20 @@ operation! {
                 single_block: true,
             }
         },
-        interfaces: [RegionGuard],
+        interfaces: [Conditional],
     }
 }
 
-impl tir::RegionGuard for IfOp {
+impl tir::Conditional for IfOp {
+    fn decision(&self) -> ValueId {
+        self.condition()
+    }
+
+    fn region_yields(&self, region: tir::RegionId) -> Vec<ValueId> {
+        let context = self.0.context.upgrade();
+        region_yielded_values(&context, region)
+    }
+
     fn guarded_regions(&self) -> Vec<(tir::RegionId, ValueId, bool)> {
         vec![
             (self.0.regions[0], self.condition(), true),
@@ -310,11 +353,16 @@ impl tir::Verifiable for IfOp {
         verify_single_block_region_has_terminator(context, self.then_body(), "scf.if then body")?;
         verify_single_block_region_has_terminator(context, self.else_body(), "scf.if else body")?;
 
-        // A value-producing `scf.if` is a γ merge: each arm must yield a value of the
-        // result type; a resultless `scf.if` must yield nothing.
-        let result_ty = self.0.results.first().map(|&r| context.get_value(r).ty());
-        verify_region_yield(context, self.then_body(), result_ty, "scf.if then body")?;
-        verify_region_yield(context, self.else_body(), result_ty, "scf.if else body")
+        // A value-producing `scf.if` is a γ merge: each arm must yield one value per
+        // result, of the matching type; a resultless `scf.if` must yield nothing.
+        let result_types = self
+            .0
+            .results
+            .iter()
+            .map(|&r| context.get_value(r).ty())
+            .collect::<Vec<_>>();
+        verify_region_yield(context, self.then_body(), &result_types, "scf.if then body")?;
+        verify_region_yield(context, self.else_body(), &result_types, "scf.if else body")
     }
 }
 
@@ -325,14 +373,12 @@ impl IfOp {
 
     fn custom_print(&self, fmt: &mut tir::IRFormatter) -> Result<(), std::fmt::Error> {
         let context = self.0.context.upgrade();
-        if let Some(&result) = self.0.results.first() {
-            fmt.write(format!("%{} = ", result.number()))?;
+        if !self.0.results.is_empty() {
+            print_value_list(fmt, &self.0.results)?;
+            fmt.write(" = ")?;
         }
         fmt.write(format!("scf.if %{}", self.condition().number()))?;
-        if let Some(&result) = self.0.results.first() {
-            fmt.write(" -> ")?;
-            context.print_type(context.get_value(result).ty(), fmt)?;
-        }
+        print_result_types(fmt, &context, &self.0.results)?;
         tir::region_format::print_op_region(fmt, &context, self, 0)?;
         fmt.write(" else")?;
         tir::region_format::print_op_region(fmt, &context, self, 1)
@@ -343,19 +389,19 @@ impl IfOp {
         context: &Context,
     ) -> Result<Box<dyn Operation>, (tir::parse::Span, Error)> {
         let condition = parse_value_id(parser)?;
-        let result_type = parse_result_type(parser, context)?;
+        let result_types = parse_result_types(parser, context)?;
         let then_body = parser.parse_region(context)?.id();
         expect_token(parser, "else")?;
         let else_body = parser.parse_region(context)?.id();
 
-        let mut builder = IfOpBuilder::new(context)
-            .condition(condition)
-            .then_body(then_body)
-            .else_body(else_body);
-        if let Some(ty) = result_type {
-            builder = builder.result_type(ty);
-        }
-        Ok(Box::new(builder.build()))
+        Ok(Box::new(
+            IfOpBuilder::new(context)
+                .condition(condition)
+                .then_body(then_body)
+                .else_body(else_body)
+                .result_types(result_types)
+                .build(),
+        ))
     }
 }
 
@@ -389,14 +435,45 @@ operation! {
     YieldOp {
         name: "yield",
         dialect: "scf",
+        format: "custom",
         operands: O {
-            value: "?AnyConstraint",
+            values: "*AnyConstraint",
         },
         interfaces: [Terminator],
     }
 }
 
 impl Terminator for YieldOp {}
+
+impl YieldOp {
+    fn custom_print(&self, fmt: &mut tir::IRFormatter) -> Result<(), std::fmt::Error> {
+        fmt.write("scf.yield")?;
+        if !self.operands().is_empty() {
+            fmt.write(" ")?;
+            print_value_list(fmt, self.operands())?;
+        }
+        fmt.write("\n")
+    }
+
+    fn custom_parse(
+        parser: &mut tir::parse::text::Parser,
+        context: &Context,
+    ) -> Result<Box<dyn Operation>, (tir::parse::Span, Error)> {
+        let mut values = vec![];
+        while let Some(name) = parser.parse_value_ref() {
+            let value = parser
+                .resolve_value(name)
+                .ok_or_else(|| (parser.span(), Error::UnknownValueRef(name.to_string())))?;
+            values.push(value);
+            if !parser.parse_token(",") {
+                break;
+            }
+        }
+        Ok(Box::new(
+            YieldOpBuilder::new(context).values(values).build(),
+        ))
+    }
+}
 
 fn parse_value_id(
     parser: &mut tir::parse::text::Parser,
@@ -421,16 +498,18 @@ fn expect_token(
 }
 
 /// The per-op specifics a structured loop exposes for μ-gate construction, printing,
-/// and verification: its optional result, optional init operand, and body block.
+/// and verification: its results, init operands, and body block.
 trait LoopOp: Operation {
-    fn result(&self) -> Option<ValueId>;
-    fn init_operand(&self) -> Option<ValueId>;
+    fn loop_results(&self) -> Vec<ValueId>;
+    fn init_operands(&self) -> Vec<ValueId>;
     fn body_block(&self) -> Arc<tir::Block>;
-    fn iter_arg(&self) -> ValueId;
+    /// The values bound by the printed `iter_args` clause: where the loop observes the
+    /// carried values on entry to an iteration.
+    fn iter_args(&self) -> Vec<ValueId>;
     fn loop_context(&self) -> Context;
 }
 
-/// A parsed `iter_args(%acc = %init) -> <ty>` clause: the created carried block
+/// A parsed `iter_args(%acc = %init) -> <ty>` port: the created carried block
 /// argument, its init operand, and the carried type.
 struct Carried {
     acc: Value,
@@ -438,43 +517,79 @@ struct Carried {
     ty: TypeId,
 }
 
-/// The value a loop body yields on its back edge: the next iteration's carried value.
-fn latched_value(op: &impl LoopOp) -> ValueId {
+/// The values a loop body yields on its back edge: the next iteration's carried values.
+fn latched_values(op: &impl LoopOp) -> Vec<ValueId> {
     let context = op.loop_context();
     let body = op.body_block();
-    context.get_op(*body.op_ids().last().unwrap()).operands[0]
+    context
+        .get_op(*body.op_ids().last().unwrap())
+        .operands
+        .clone()
 }
 
-/// Print a `%r = ` binding for a value-producing loop, nothing for a side-effecting one.
-fn print_result_prefix(
-    fmt: &mut tir::IRFormatter,
-    op: &impl LoopOp,
-) -> Result<(), std::fmt::Error> {
-    if let Some(result) = op.result() {
-        fmt.write(format!("%{} = ", result.number()))?;
+/// Print a comma-separated `%a, %b` list.
+fn print_value_list(fmt: &mut tir::IRFormatter, values: &[ValueId]) -> Result<(), std::fmt::Error> {
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            fmt.write(", ")?;
+        }
+        fmt.write(format!("%{}", value.number()))?;
     }
     Ok(())
 }
 
-/// Print the `iter_args(%acc = %init) -> <ty>` clause of a value-producing loop.
+/// Print the ` -> <ty>, <ty>` clause of a value-producing structured op.
+fn print_result_types(
+    fmt: &mut tir::IRFormatter,
+    context: &Context,
+    results: &[ValueId],
+) -> Result<(), std::fmt::Error> {
+    if results.is_empty() {
+        return Ok(());
+    }
+    fmt.write(" -> ")?;
+    for (index, &result) in results.iter().enumerate() {
+        if index > 0 {
+            fmt.write(", ")?;
+        }
+        context.print_type(context.get_value(result).ty(), fmt)?;
+    }
+    Ok(())
+}
+
+/// Print a `%r0, %r1 = ` binding for a value-producing loop, nothing for a
+/// side-effecting one.
+fn print_result_prefix(
+    fmt: &mut tir::IRFormatter,
+    op: &impl LoopOp,
+) -> Result<(), std::fmt::Error> {
+    let results = op.loop_results();
+    if results.is_empty() {
+        return Ok(());
+    }
+    print_value_list(fmt, &results)?;
+    fmt.write(" = ")
+}
+
+/// Print the `iter_args(%acc = %init, ...) -> <ty>, <ty>` clause of a carrying loop.
 fn print_loop_tail(
     fmt: &mut tir::IRFormatter,
     context: &Context,
     op: &impl LoopOp,
 ) -> Result<(), std::fmt::Error> {
-    let Some(result) = op.result() else {
+    let results = op.loop_results();
+    if results.is_empty() {
         return Ok(());
-    };
-    let acc = op.iter_arg();
-    let init = op
-        .init_operand()
-        .expect("value-producing loop has an init operand");
-    fmt.write(format!(
-        " iter_args(%{} = %{}) -> ",
-        acc.number(),
-        init.number()
-    ))?;
-    context.print_type(context.get_value(result).ty(), fmt)
+    }
+    fmt.write(" iter_args(")?;
+    for (index, (acc, init)) in op.iter_args().iter().zip(op.init_operands()).enumerate() {
+        if index > 0 {
+            fmt.write(", ")?;
+        }
+        fmt.write(format!("%{} = %{}", acc.number(), init.number()))?;
+    }
+    fmt.write(")")?;
+    print_result_types(fmt, context, &results)
 }
 
 fn print_scope(
@@ -510,36 +625,61 @@ fn parse_scope(
     Ok(Some(scope))
 }
 
-/// Parse an optional `iter_args(%acc = %init) -> <ty>` clause, creating the carried
-/// block argument bound to `%acc`.
+/// Parse an optional `iter_args(%acc = %init, ...) -> <ty>, <ty>` clause, creating one
+/// carried block argument per port, bound to its `%acc` name.
 fn parse_iter_args(
     parser: &mut tir::parse::text::Parser,
     context: &Context,
-) -> Result<Option<Carried>, (tir::parse::Span, Error)> {
+) -> Result<Vec<Carried>, (tir::parse::Span, Error)> {
     if !parser.parse_token("iter_args") {
-        return Ok(None);
+        return Ok(vec![]);
     }
     expect_token(parser, "(")?;
-    let acc_name = parser
-        .parse_value_ref()
-        .ok_or_else(|| (parser.span(), Error::ExpectedValueRef))?
-        .to_string();
-    expect_token(parser, "=")?;
-    let init = parse_value_id(parser)?;
+    let mut ports = vec![];
+    loop {
+        let acc_name = parser
+            .parse_value_ref()
+            .ok_or_else(|| (parser.span(), Error::ExpectedValueRef))?
+            .to_string();
+        expect_token(parser, "=")?;
+        ports.push((acc_name, parse_value_id(parser)?));
+        if !parser.parse_token(",") {
+            break;
+        }
+    }
     expect_token(parser, ")")?;
-    let ty =
-        parse_result_type(parser, context)?.ok_or_else(|| (parser.span(), Error::ExpectedType))?;
-    let acc = context.create_value(ty, None);
-    parser.define_value(&acc_name, acc.id());
-    Ok(Some(Carried { acc, init, ty }))
+    let types = parse_result_types(parser, context)?;
+    if types.len() != ports.len() {
+        return Err((parser.span(), Error::ExpectedType));
+    }
+    Ok(ports
+        .into_iter()
+        .zip(types)
+        .map(|((acc_name, init), ty)| {
+            let acc = context.create_value(ty, None);
+            parser.define_value(&acc_name, acc.id());
+            Carried { acc, init, ty }
+        })
+        .collect())
 }
 
-/// Parse a loop body, seeding its entry block with the carried argument when present.
+/// Parse an optional `, %a, %b` trailing operand list.
+fn parse_trailing_values(
+    parser: &mut tir::parse::text::Parser,
+) -> Result<Vec<ValueId>, (tir::parse::Span, Error)> {
+    let mut values = vec![];
+    while parser.parse_token(",") {
+        values.push(parse_value_id(parser)?);
+    }
+    Ok(values)
+}
+
+/// Parse a loop body, seeding its entry block with the carried arguments.
 fn parse_loop_body(
     parser: &mut tir::parse::text::Parser,
     context: &Context,
     scope: Option<Value>,
-    carried: Option<Value>,
+    carried: Vec<Value>,
 ) -> Result<tir::RegionId, (tir::parse::Span, Error)> {
     let entry_args = scope.into_iter().chain(carried).collect();
     Ok(parser
@@ -547,43 +687,56 @@ fn parse_loop_body(
         .id())
 }
 
+/// Parse `scf.while`'s `do(%b0, %b1)` clause, creating one body argument per carried
+/// port; a non-carrying loop has no clause.
 fn parse_body_carried(
     parser: &mut tir::parse::text::Parser,
     context: &Context,
-    carried: &Option<Carried>,
-) -> Result<Option<Value>, (tir::parse::Span, Error)> {
-    let Some(carried) = carried else {
-        return Ok(None);
-    };
+    carried: &[Carried],
+) -> Result<Vec<Value>, (tir::parse::Span, Error)> {
+    if carried.is_empty() {
+        return Ok(vec![]);
+    }
     expect_token(parser, "(")?;
-    let name = parser
-        .parse_value_ref()
-        .ok_or_else(|| (parser.span(), Error::ExpectedValueRef))?
-        .to_string();
+    let mut values = vec![];
+    for port in carried {
+        if !values.is_empty() {
+            expect_token(parser, ",")?;
+        }
+        let name = parser
+            .parse_value_ref()
+            .ok_or_else(|| (parser.span(), Error::ExpectedValueRef))?
+            .to_string();
+        let value = context.create_value(port.ty, None);
+        parser.define_value(&name, value.id());
+        values.push(value);
+    }
     expect_token(parser, ")")?;
-    let value = context.create_value(carried.ty, None);
-    parser.define_value(&name, value.id());
-    Ok(Some(value))
+    Ok(values)
 }
 
-fn carried_argument(context: &Context, body: &Arc<tir::Block>) -> Value {
+/// The loop body's carried arguments: every entry argument but the token scope.
+fn carried_arguments(context: &Context, body: &Arc<tir::Block>) -> Vec<ValueId> {
+    let token = TokenType::new(context);
     body.arguments()
         .iter()
-        .find(|argument| argument.ty() != TokenType::new(context))
-        .cloned()
-        .expect("value-producing loop has a carried argument")
+        .filter(|argument| argument.ty() != token)
+        .map(Value::id)
+        .collect()
 }
 
-/// Verify a loop's carried value: a result requires a matching init operand, a single
-/// carried body argument, and a matching yielded value; a resultless loop has none.
+/// Verify a loop's carried ports: the init operands, the body's carried arguments, the
+/// yielded values and the results must all have the same arity, matching pairwise in
+/// type.
 fn verify_loop_carried<T: LoopOp + Operation>(context: &Context, op: &T) -> Result<(), Error> {
     let label = format!("{}.{}", T::dialect(), T::name());
     let body = op.body_block();
     let terminator = context.get_op(*body.op_ids().last().unwrap());
-    let yielded = terminator
-        .is::<YieldOp>()
-        .then(|| terminator.operands.first().copied())
-        .flatten();
+    let yielded = if terminator.is::<YieldOp>() {
+        terminator.operands.clone()
+    } else {
+        vec![]
+    };
     let token = TokenType::new(context);
     let scope_args = body
         .arguments()
@@ -614,35 +767,52 @@ fn verify_loop_carried<T: LoopOp + Operation>(context: &Context, op: &T) -> Resu
         )));
     }
 
-    match op.result() {
-        Some(result) => {
-            let ty = context.get_value(result).ty();
-            let init = op.init_operand().ok_or_else(|| {
-                Error::VerificationError(format!("{label} with a result needs an init operand"))
-            })?;
-            if context.get_value(init).ty() != ty {
-                return Err(Error::VerificationError(format!(
-                    "{label} init type must match the result type"
-                )));
-            }
-            if body_args.len() != 1 || body_args[0].ty() != ty {
-                return Err(Error::VerificationError(format!(
-                    "{label} body must carry one argument of the result type"
-                )));
-            }
-            if !terminator.is::<YieldOp>() || yielded.map(|v| context.get_value(v).ty()) != Some(ty)
-            {
-                return Err(Error::VerificationError(format!(
-                    "{label} body must yield the carried value"
-                )));
-            }
+    let results = op.loop_results();
+    let inits = op.init_operands();
+    let arity = results.len();
+    if inits.len() != arity {
+        return Err(Error::VerificationError(format!(
+            "{label} has {} results but {} init operands",
+            arity,
+            inits.len()
+        )));
+    }
+    if body_args.len() != arity {
+        return Err(Error::VerificationError(format!(
+            "{label} has {} results but its body carries {} arguments",
+            arity,
+            body_args.len()
+        )));
+    }
+    if arity > 0 && !terminator.is::<YieldOp>() {
+        return Err(Error::VerificationError(format!(
+            "{label} with results must end its body with scf.yield"
+        )));
+    }
+    if yielded.len() != arity {
+        return Err(Error::VerificationError(format!(
+            "{label} has {} results but its body yields {} values",
+            arity,
+            yielded.len()
+        )));
+    }
+
+    for (port, &result) in results.iter().enumerate() {
+        let ty = context.get_value(result).ty();
+        if context.get_value(inits[port]).ty() != ty {
+            return Err(Error::VerificationError(format!(
+                "{label} init {port} type must match the type of result {port}"
+            )));
         }
-        None => {
-            if op.init_operand().is_some() || !body_args.is_empty() || yielded.is_some() {
-                return Err(Error::VerificationError(format!(
-                    "{label} without a result must not carry a value"
-                )));
-            }
+        if body_args[port].ty() != ty {
+            return Err(Error::VerificationError(format!(
+                "{label} body argument {port} type must match the type of result {port}"
+            )));
+        }
+        if context.get_value(yielded[port]).ty() != ty {
+            return Err(Error::VerificationError(format!(
+                "{label} yielded value {port} type must match the type of result {port}"
+            )));
         }
     }
     Ok(())
@@ -657,71 +827,92 @@ fn verify_while_condition(context: &Context, op: &WhileOp) -> Result<(), Error> 
         ));
     }
     let arguments = block.arguments();
-    match op.0.results.first().copied() {
-        Some(result) => {
-            let ty = context.get_value(result).ty();
-            if arguments.len() != 1 || arguments[0].ty() != ty {
-                return Err(Error::VerificationError(
-                    "scf.while condition must carry the result type".to_string(),
-                ));
-            }
-            if terminator.operands.len() != 2
-                || context.get_value(terminator.operands[1]).ty() != ty
-            {
-                return Err(Error::VerificationError(
-                    "scf.condition must forward the carried value".to_string(),
-                ));
-            }
+    let results = &op.0.results;
+    if arguments.len() != results.len() {
+        return Err(Error::VerificationError(format!(
+            "scf.while has {} results but its condition carries {} arguments",
+            results.len(),
+            arguments.len()
+        )));
+    }
+    // `scf.condition` forwards the deciding boolean plus one value per carried port.
+    if terminator.operands.len() != results.len() + 1 {
+        return Err(Error::VerificationError(format!(
+            "scf.while has {} results but its scf.condition forwards {} values",
+            results.len(),
+            terminator.operands.len().saturating_sub(1)
+        )));
+    }
+    for (port, &result) in results.iter().enumerate() {
+        let ty = context.get_value(result).ty();
+        if arguments[port].ty() != ty {
+            return Err(Error::VerificationError(format!(
+                "scf.while condition argument {port} type must match the type of result {port}"
+            )));
         }
-        None => {
-            if !arguments.is_empty() || terminator.operands.len() != 1 {
-                return Err(Error::VerificationError(
-                    "resultless scf.while must not carry a condition value".to_string(),
-                ));
-            }
+        if context.get_value(terminator.operands[port + 1]).ty() != ty {
+            return Err(Error::VerificationError(format!(
+                "scf.condition forwarded value {port} type must match the type of result {port}"
+            )));
         }
     }
     Ok(())
 }
 
-/// Parse an optional `-> <type>` result-type clause.
-fn parse_result_type(
+/// Parse an optional `-> <type>, <type>` result-type clause.
+fn parse_result_types(
     parser: &mut tir::parse::text::Parser,
     context: &Context,
-) -> Result<Option<tir::TypeId>, (tir::parse::Span, Error)> {
+) -> Result<Vec<tir::TypeId>, (tir::parse::Span, Error)> {
     if !parser.parse_token("->") {
-        return Ok(None);
+        return Ok(vec![]);
     }
-    let ty = parser
-        .parse_type(context)?
-        .ok_or_else(|| (parser.span(), Error::ExpectedType))?;
-    Ok(Some(ty))
+    let mut types = vec![];
+    loop {
+        types.push(
+            parser
+                .parse_type(context)?
+                .ok_or_else(|| (parser.span(), Error::ExpectedType))?,
+        );
+        if !parser.parse_token(",") {
+            return Ok(types);
+        }
+    }
 }
 
-/// Check that a structured region's terminator yields a value of `expected` type, or
-/// yields nothing when `expected` is `None`. Assumes the terminator already exists.
+/// The values a structured region's single block yields through its terminator.
+fn region_yielded_values(context: &Context, region: tir::RegionId) -> Vec<ValueId> {
+    let Some(block) = context.get_region(region).iter(context.clone()).next() else {
+        return vec![];
+    };
+    let Some(&terminator) = block.op_ids().last() else {
+        return vec![];
+    };
+    context.get_op(terminator).operands.clone()
+}
+
+/// Check that a structured region's terminator yields one value per result, matching in
+/// type. Assumes the terminator already exists.
 fn verify_region_yield(
     context: &Context,
     block: Arc<tir::Block>,
-    expected: Option<tir::TypeId>,
+    expected: &[tir::TypeId],
     label: &str,
 ) -> Result<(), Error> {
     let terminator = context.get_op(*block.op_ids().last().unwrap());
     let operands = &terminator.operands;
-    match expected {
-        Some(ty) => {
-            if operands.len() != 1 || context.get_value(operands[0]).ty() != ty {
-                return Err(Error::VerificationError(format!(
-                    "{label} must yield one value matching the result type"
-                )));
-            }
-        }
-        None => {
-            if !operands.is_empty() {
-                return Err(Error::VerificationError(format!(
-                    "{label} must not yield a value"
-                )));
-            }
+    if operands.len() != expected.len() {
+        return Err(Error::VerificationError(format!(
+            "{label} must yield {} values, but yields {}",
+            expected.len(),
+            operands.len()
+        )));
+    }
+    for (index, (&operand, &ty)) in operands.iter().zip(expected).enumerate() {
+        if context.get_value(operand).ty() != ty {
+            return Err(Error::VerificationError(format!(
+                "{label} yielded value {index} type must match the type of result {index}"
+            )));
         }
     }
     Ok(())
@@ -768,7 +959,7 @@ mod tests {
         let block = context.create_block(vec![]);
         region.add_block(block.id());
         let mut builder = IRBuilder::new(block);
-        builder.insert(ops::r#yield(context, tir::Operand::none()).build());
+        builder.insert(ops::r#yield(context, vec![]).build());
         region.id()
     }
 
@@ -793,7 +984,7 @@ mod tests {
         let if_op = ops::r#if(
             &context,
             condition.id(),
-            None,
+            vec![],
             Some(terminated_region(&context)),
             Some(terminated_region(&context)),
         )

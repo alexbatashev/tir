@@ -48,9 +48,9 @@ pub use diagnostics::{print_error_range, print_parse_error};
 pub use dialect::{Dialect, OperationParser};
 pub use error::Error;
 pub use interfaces::{
-    BranchGuard, BranchTerminator, Commutative, ConstantFold, ConstantLike, IntegerArithmetic,
-    LoopLike, MemoryRead, MemoryWrite, OpCost, PromotableAllocation, RegionGuard, SameOperandType,
-    Symbol, Terminator, TokenScope, Visibility,
+    BranchGuard, BranchTerminator, Commutative, Conditional, ConstantFold, ConstantLike,
+    IntegerArithmetic, LoopLike, MemoryRead, MemoryWrite, OpCost, PromotableAllocation,
+    SameOperandType, Symbol, Terminator, TokenScope, Visibility,
 };
 pub use ir_formatter::IRFormatter;
 pub use layout::{DATA_LAYOUT, DataLayout, Endianness, data_layout_spec};

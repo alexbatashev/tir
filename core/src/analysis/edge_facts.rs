@@ -366,11 +366,12 @@ mod tests {
         then_region.add_block(then_block.id());
         terminate(
             &then_block,
-            crate::scf::ops::r#yield(&context, Operand::none()).build(),
+            crate::scf::ops::r#yield(&context, vec![]).build(),
         );
         let then_entry = then_block.id();
 
-        let if_op = crate::scf::ops::r#if(&context, c, None, Some(then_region.id()), None).build();
+        let if_op =
+            crate::scf::ops::r#if(&context, c, vec![], Some(then_region.id()), None).build();
         let mut builder = IRBuilder::new(entry.clone());
         builder.insert(if_op);
         builder.insert(ops::r#return(&context, Operand::none()).build());

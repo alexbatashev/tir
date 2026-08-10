@@ -145,7 +145,7 @@ impl ScfToCfgPass {
         op: Arc<crate::OpInstance>,
         loop_targets: &mut HashMap<ValueId, LoopTargets>,
     ) -> Result<(), PassError> {
-        let init = op.operands.first().copied();
+        let inits = op.operands.clone();
         let condition = Self::move_body(context, op.regions[0]);
         let (body, scope) = Self::move_loop_body(context, op.regions[1]);
         let continuation = Self::split_after(context, &block, &op);
@@ -164,8 +164,7 @@ impl ScfToCfgPass {
         }
 
         Self::erase(rewriter, &block, op)?;
-        IRBuilder::new(block)
-            .insert(b::br(context, init.into_iter().collect(), condition.id()).build());
+        IRBuilder::new(block).insert(b::br(context, inits, condition.id()).build());
         let terminator = context.get_op(*condition.op_ids().last().unwrap());
         if !terminator.is::<scf::ConditionOp>() {
             return Err(PassError::InvalidRuleSet(
@@ -201,7 +200,7 @@ impl ScfToCfgPass {
         let lower = op.operands[0];
         let upper = op.operands[1];
         let step = op.operands[2];
-        let init = op.operands.get(3).copied();
+        let inits = op.operands[3..].to_vec();
         let (body, scope) = Self::move_loop_body(context, op.regions[0]);
         let index_type = context.get_value(lower).ty();
         let mut header_values = vec![context.create_value(index_type, None)];
@@ -235,7 +234,7 @@ impl ScfToCfgPass {
 
         Self::erase(rewriter, &block, op)?;
         let mut entry_args = vec![lower];
-        entry_args.extend(init);
+        entry_args.extend(inits);
         IRBuilder::new(block).insert(b::br(context, entry_args, header.id()).build());
 
         let induction = header.arguments()[0].id();

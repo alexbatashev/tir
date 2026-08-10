@@ -65,17 +65,30 @@ pub(crate) fn parse_single_op<'src>(
 ) -> Result<Box<dyn Operation>, (Span, Error)> {
     parser.skip_trivia();
 
-    // Optional SSA result assignment prefix (e.g. "%2 ="). The builder allocates the
-    // concrete ValueId; we bind the textual name to it once the op exists so later
-    // operands resolve by name rather than by a literal id.
+    // Optional SSA result assignment prefix (e.g. "%2 =" or "%2, %3 ="). The builder
+    // allocates the concrete ValueIds; we bind the textual names to them once the op
+    // exists so later operands resolve by name rather than by a literal id.
     let mark = parser.pos();
-    let result_name = match parser.parse_value_ref() {
-        Some(name) if parser.parse_token("=") => Some(name.to_string()),
-        _ => {
-            parser.set_pos(mark);
-            None
+    let mut result_names = Vec::new();
+    loop {
+        match parser.parse_value_ref() {
+            Some(name) => result_names.push(name.to_string()),
+            None => {
+                result_names.clear();
+                break;
+            }
         }
-    };
+        if parser.parse_token(",") {
+            continue;
+        }
+        if !parser.parse_token("=") {
+            result_names.clear();
+        }
+        break;
+    }
+    if result_names.is_empty() {
+        parser.set_pos(mark);
+    }
 
     if let Some(name) = parser.parse_ident() {
         let (dialect, name) = if parser.parse_token(".") {
@@ -94,10 +107,9 @@ pub(crate) fn parse_single_op<'src>(
             .map_err(|e| (parser.span(), e))?;
 
         let op = op_parser(parser, context)?;
-        if let Some(name) = result_name
-            && let Some(result) = context.get_op(op.id()).results.first()
-        {
-            parser.define_value(&name, *result);
+        let results = context.get_op(op.id()).results.clone();
+        for (name, result) in result_names.iter().zip(results) {
+            parser.define_value(name, result);
         }
         Ok(op)
     } else {

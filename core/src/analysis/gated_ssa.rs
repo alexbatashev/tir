@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    BlockId, BranchGuard, BranchTerminator, Context, LoopLike, OpId, RegionGuard, RegionId,
-    Terminator, ValueId,
+    BlockId, BranchGuard, BranchTerminator, Conditional, Context, LoopLike, OpId, Terminator,
+    ValueId,
     analysis::{Analysis, AnalysisManager, DominatorTree, PreservedAnalyses},
     graph::{Dag, GenericDag, MutDag, NodeId},
 };
@@ -195,7 +195,7 @@ struct Builder<'a> {
     /// Block arguments that are phis (their block has branch predecessors), mapped to
     /// their block and argument index.
     phis: HashMap<ValueId, (BlockId, usize)>,
-    /// Result of a structured conditional ([`RegionGuard`]) → `(cond, true, false)` γ
+    /// Result of a structured conditional ([`Conditional`]) → `(cond, true, false)` γ
     /// inputs.
     gamma: HashMap<ValueId, (ValueId, ValueId, ValueId)>,
     /// Loop-carried region argument ([`LoopCarried`]) → `(init, latch)` μ inputs.
@@ -458,7 +458,7 @@ fn collect_phis(
 
 /// Structured-control-flow gates collected from the region's ops.
 struct StructuredGates {
-    /// γ: result of a [`RegionGuard`] op → `(cond, true_input, false_input)`.
+    /// γ: result of a [`Conditional`] op → `(cond, true_input, false_input)`.
     gamma: HashMap<ValueId, (ValueId, ValueId, ValueId)>,
     /// μ: carried region argument of a [`LoopCarried`] op → `(init, latch)`.
     mu: HashMap<ValueId, (ValueId, ValueId)>,
@@ -466,7 +466,7 @@ struct StructuredGates {
     loop_result: HashMap<ValueId, ValueId>,
 }
 
-/// Scan the region's ops for structured control flow: a [`RegionGuard`] op that
+/// Scan the region's ops for structured control flow: a [`Conditional`] op that
 /// produces a value yields a γ over its arms' yielded values; a [`LoopCarried`] op
 /// yields a μ over its carried region argument, with its result an η over that μ.
 fn structured_gates(context: &Context, blocks: &[BlockId]) -> StructuredGates {
@@ -477,19 +477,25 @@ fn structured_gates(context: &Context, blocks: &[BlockId]) -> StructuredGates {
     for &block in blocks {
         for op in context.get_block(block).op_ids() {
             let instance = context.get_op(op);
-            // A structured gate exists only when the op produces a value: a resultless
+            // A structured gate exists only where the op produces a value: a resultless
             // `scf.if`/loop is side-effecting and carries nothing.
-            let Some(result) = instance.results.first().copied() else {
+            let results = instance.results.clone();
+            if results.is_empty() {
                 continue;
-            };
+            }
 
-            if let Some(guard) = instance.clone().as_interface::<dyn RegionGuard>() {
-                if let Some(inputs) = gamma_inputs(context, guard.as_ref()) {
-                    gamma.insert(result, inputs);
+            if let Some(guard) = instance.clone().as_interface::<dyn Conditional>() {
+                for (index, &result) in results.iter().enumerate() {
+                    if let Some(inputs) = gamma_inputs(guard.as_ref(), index) {
+                        gamma.insert(result, inputs);
+                    }
                 }
             } else if let Some(lp) = instance.clone().as_interface::<dyn LoopLike>() {
-                mu.insert(lp.carried_arg(), (lp.init(), lp.latched()));
-                loop_result.insert(result, lp.carried_arg());
+                let (carried, inits, latched) = (lp.carried_args(), lp.inits(), lp.latched());
+                for (port, &result) in results.iter().enumerate() {
+                    mu.insert(carried[port], (inits[port], latched[port]));
+                    loop_result.insert(result, carried[port]);
+                }
             }
         }
     }
@@ -501,33 +507,20 @@ fn structured_gates(context: &Context, blocks: &[BlockId]) -> StructuredGates {
     }
 }
 
-/// The γ inputs `(cond, true_input, false_input)` of a two-armed [`RegionGuard`]: the
-/// condition and the values its true/false regions yield.
-fn gamma_inputs(context: &Context, guard: &dyn RegionGuard) -> Option<(ValueId, ValueId, ValueId)> {
-    let mut cond = None;
+/// The γ inputs `(cond, true_input, false_input)` for result `index` of a two-armed
+/// [`Conditional`]: the condition and the values its true/false regions yield there.
+fn gamma_inputs(guard: &dyn Conditional, index: usize) -> Option<(ValueId, ValueId, ValueId)> {
     let mut true_val = None;
     let mut false_val = None;
-    for (region, c, taken_when_true) in guard.guarded_regions() {
-        let yielded = region_yield_value(context, region)?;
-        cond = Some(c);
+    for (region, _, taken_when_true) in guard.guarded_regions() {
+        let yielded = guard.region_yields(region).get(index).copied()?;
         if taken_when_true {
             true_val = Some(yielded);
         } else {
             false_val = Some(yielded);
         }
     }
-    Some((cond?, true_val?, false_val?))
-}
-
-/// The single value yielded by a structured region's terminator.
-fn region_yield_value(context: &Context, region: RegionId) -> Option<ValueId> {
-    let block = context
-        .get_region(region)
-        .iter(context.clone())
-        .next()?
-        .id();
-    let terminator = context.get_block(block).op_ids().last().copied()?;
-    context.get_op(terminator).operands.first().copied()
+    Some((guard.decision(), true_val?, false_val?))
 }
 
 #[cfg(test)]
@@ -783,7 +776,7 @@ mod tests {
         region.add_block(block.id());
         let mut b = IRBuilder::new(block);
         b.insert(def);
-        b.insert(crate::scf::ops::r#yield(context, Operand::from(value)).build());
+        b.insert(crate::scf::ops::r#yield(context, vec![value]).build());
         region.id()
     }
 
@@ -812,7 +805,7 @@ mod tests {
         let if_op = crate::scf::ops::r#if(
             &context,
             cond_id,
-            Some(i32),
+            vec![i32],
             Some(then_region),
             Some(else_region),
         )
@@ -841,6 +834,70 @@ mod tests {
         assert_eq!(gs.op_of(kids[2]), Some(false_op));
     }
 
+    /// A region defining two constants and yielding both. Returns the region and the
+    /// two defining op ids, in yield order.
+    fn two_value_region(context: &Context, ty: TypeId, values: [i64; 2]) -> (RegionId, Vec<OpId>) {
+        let first = ops::constant(context, values[0], ty).build();
+        let second = ops::constant(context, values[1], ty).build();
+        let yielded = vec![first.result(), second.result()];
+        let defs = vec![first.id(), second.id()];
+        let region = context.create_region();
+        let block = context.create_block(vec![]);
+        region.add_block(block.id());
+        let mut b = IRBuilder::new(block);
+        b.insert(first);
+        b.insert(second);
+        b.insert(crate::scf::ops::r#yield(context, yielded).build());
+        (region.id(), defs)
+    }
+
+    #[test]
+    fn gamma_per_result_of_multi_result_if() {
+        let context = Context::with_default_dialects();
+        let i1 = IntegerType::new(&context, 1);
+        let i32 = IntegerType::new(&context, 32);
+        let cond = context.create_value(i1, None);
+        let cond_id = cond.id();
+
+        let (then_region, then_defs) = two_value_region(&context, i32, [1, 2]);
+        let (else_region, else_defs) = two_value_region(&context, i32, [3, 4]);
+
+        let region = context.create_region();
+        let entry = context.create_block(vec![cond]);
+        region.add_block(entry.id());
+
+        let if_op = crate::scf::ops::r#if(
+            &context,
+            cond_id,
+            vec![i32, i32],
+            Some(then_region),
+            Some(else_region),
+        )
+        .build();
+        let results = context.get_op(if_op.id()).results.clone();
+        let mut eb = IRBuilder::new(entry.clone());
+        eb.insert(if_op);
+        eb.insert(ops::r#return(&context, Operand::from(results[0])).build());
+
+        let gs = GSA::new(&context, func_with_region(&context, region.id()));
+
+        // Every result of the conditional gets its own γ over that result's arm values.
+        for (index, &result) in results.iter().enumerate() {
+            let node = gs.node_of(result).unwrap();
+            assert_eq!(
+                *gs.gate(node),
+                GateNode::Gamma {
+                    value: result,
+                    cond: cond_id,
+                }
+            );
+            let kids = children(&gs, node);
+            assert_eq!(gs.value_of(kids[0]), Some(cond_id));
+            assert_eq!(gs.op_of(kids[1]), Some(then_defs[index]));
+            assert_eq!(gs.op_of(kids[2]), Some(else_defs[index]));
+        }
+    }
+
     /// A loop body carrying `acc`: `%next = addi %acc, 1; scf.yield %next`. Returns the
     /// body region, the carried block argument, and the latch (`addi`) op id.
     fn counting_body(context: &Context, i32: TypeId) -> (RegionId, ValueId, OpId) {
@@ -858,7 +915,7 @@ mod tests {
         let mut bb = IRBuilder::new(block);
         bb.insert(step);
         bb.insert(next);
-        bb.insert(crate::scf::ops::r#yield(context, Operand::from(next_val)).build());
+        bb.insert(crate::scf::ops::r#yield(context, vec![next_val]).build());
         (region.id(), acc_id, next_op)
     }
 
@@ -905,8 +962,8 @@ mod tests {
             lb.id(),
             ub.id(),
             step.id(),
-            Operand::from(init_val),
-            Some(i32),
+            vec![init_val],
+            vec![i32],
             Some(body),
         )
         .build();
@@ -921,6 +978,86 @@ mod tests {
     }
 
     #[test]
+    fn mu_and_eta_per_carried_port() {
+        let context = Context::with_default_dialects();
+        let index = crate::builtin::IndexType::new(&context);
+        let i32 = IntegerType::new(&context, 32);
+        let lb = context.create_value(index, None);
+        let ub = context.create_value(index, None);
+        let step = context.create_value(index, None);
+
+        // A body carrying two ports: `%next_j = addi %acc_j, 1; scf.yield %next_0, %next_1`.
+        let accs = [
+            context.create_value(i32, None),
+            context.create_value(i32, None),
+        ];
+        let acc_ids = [accs[0].id(), accs[1].id()];
+        let body_region = context.create_region();
+        let body_block = context.create_block(accs.to_vec());
+        body_region.add_block(body_block.id());
+        let one = ops::constant(&context, 1, i32).build();
+        let one_val = one.result();
+        let mut bb = IRBuilder::new(body_block);
+        bb.insert(one);
+        let latch_ops: Vec<OpId> = acc_ids
+            .iter()
+            .map(|&acc| {
+                let next = ops::addi(&context, acc, one_val, i32).build();
+                let id = next.id();
+                bb.insert(next);
+                id
+            })
+            .collect();
+        let latched = latch_ops
+            .iter()
+            .map(|&op| context.get_op(op).results[0])
+            .collect();
+        bb.insert(crate::scf::ops::r#yield(&context, latched).build());
+
+        let inits: Vec<_> = [0, 10]
+            .iter()
+            .map(|&value| ops::constant(&context, value, i32).build())
+            .collect();
+        let init_ops: Vec<OpId> = inits.iter().map(|op| op.id()).collect();
+        let init_vals: Vec<ValueId> = inits.iter().map(|op| op.result()).collect();
+
+        let region = context.create_region();
+        let entry = context.create_block(vec![]);
+        region.add_block(entry.id());
+
+        let for_op = crate::scf::ops::r#for(
+            &context,
+            lb.id(),
+            ub.id(),
+            step.id(),
+            init_vals,
+            vec![i32, i32],
+            Some(body_region.id()),
+        )
+        .build();
+        let results = context.get_op(for_op.id()).results.clone();
+        let mut eb = IRBuilder::new(entry.clone());
+        for init in inits {
+            eb.insert(init);
+        }
+        eb.insert(for_op);
+        eb.insert(ops::r#return(&context, Operand::from(results[0])).build());
+
+        let gs = GSA::new(&context, func_with_region(&context, region.id()));
+
+        // Each carried port gets its own μ, and each result its own η over that μ.
+        for port in 0..results.len() {
+            assert_mu(
+                &gs,
+                results[port],
+                acc_ids[port],
+                init_ops[port],
+                latch_ops[port],
+            );
+        }
+    }
+
+    #[test]
     fn mu_for_scf_while_result() {
         let context = Context::with_default_dialects();
         let i1 = IntegerType::new(&context, 1);
@@ -932,9 +1069,8 @@ mod tests {
         let condition_region = context.create_region();
         let condition_block = context.create_block(vec![before.clone()]);
         condition_region.add_block(condition_block.id());
-        IRBuilder::new(condition_block).insert(
-            crate::scf::ops::condition(&context, cond.id(), Operand::from(before.id())).build(),
-        );
+        IRBuilder::new(condition_block)
+            .insert(crate::scf::ops::condition(&context, cond.id(), vec![before.id()]).build());
 
         let init = ops::constant(&context, 0, i32).build();
         let init_val = init.result();
@@ -946,8 +1082,8 @@ mod tests {
 
         let while_op = crate::scf::ops::r#while(
             &context,
-            Operand::from(init_val),
-            Some(i32),
+            vec![init_val],
+            vec![i32],
             Some(condition_region.id()),
             Some(body),
         )
