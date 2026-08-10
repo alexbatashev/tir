@@ -380,6 +380,9 @@ impl Pass for ScfToCfgPass {
             )?;
             changed = true;
         }
+        if changed {
+            super::cfg_cleanup::fold_trivial_blocks(context, rewriter, region)?;
+        }
         Ok(if changed {
             PreservedAnalyses::none()
         } else {

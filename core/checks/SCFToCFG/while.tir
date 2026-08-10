@@ -13,7 +13,7 @@ module {
 }
 
 // CHECK-NOT: scf.
-// CHECK: br ^bb
-// CHECK: cond_br %{{[0-9]+}}, ^bb{{[0-9]+}}, ^bb{{[0-9]+}}
-// CHECK: br ^bb
+// CHECK: br ^[[HEADER:bb[0-9]+]]
+// CHECK: ^[[HEADER]]:
+// CHECK-NEXT: cond_br %{{[0-9]+}}, ^[[HEADER]], ^bb{{[0-9]+}}
 // CHECK: return

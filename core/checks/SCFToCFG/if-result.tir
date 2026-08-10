@@ -13,8 +13,6 @@ module {
 }
 
 // CHECK-NOT: scf.
-// CHECK: cond_br %{{[0-9]+}}, ^bb{{[0-9]+}}, ^bb{{[0-9]+}}
-// CHECK: br ^bb{{[0-9]+}}(%{{[0-9]+}} : !i32)
-// CHECK: br ^bb{{[0-9]+}}(%{{[0-9]+}} : !i32)
-// CHECK: ^bb{{[0-9]+}}(%[[RESULT:[0-9]+]]: !i32):
-// CHECK: return %[[RESULT]]
+// CHECK: cond_br %{{[0-9]+}}, ^[[JOIN:bb[0-9]+]](%{{[0-9]+}} : !i32), ^bb{{[0-9]+}}(%{{[0-9]+}} : !i32)
+// CHECK-NEXT: ^[[JOIN]](%[[RESULT:[0-9]+]]: !i32):
+// CHECK-NEXT: return %[[RESULT]]

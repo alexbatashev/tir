@@ -23,6 +23,6 @@ module {
 
 // CHECK-NOT: scf.
 // CHECK: %[[SUM:[0-9]+]] = addi
-// CHECK: ^[[EXIT:bb[0-9]+]](%[[RESULT:[0-9]+]]: !i32):
+// CHECK-NEXT: cond_br %{{[0-9]+}}, ^[[EXIT:bb[0-9]+]](%[[SUM]] : !i32), ^bb{{[0-9]+}}(%{{[0-9]+}} : !i32)
+// CHECK: ^[[EXIT]](%[[RESULT:[0-9]+]]: !i32):
 // CHECK-NEXT: return %[[RESULT]]
-// CHECK: br ^[[EXIT]](%[[SUM]] : !i32)

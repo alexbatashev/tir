@@ -1,5 +1,6 @@
 //! Transformation passes over generic TIR interfaces.
 
+mod cfg_cleanup;
 pub mod dce;
 pub mod instcombine;
 pub mod lower_memory_intrinsics;

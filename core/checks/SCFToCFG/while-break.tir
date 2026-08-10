@@ -14,5 +14,4 @@ module {
 
 // CHECK-NOT: scf.
 // CHECK: cond_br
-// CHECK: br ^bb
 // CHECK: return
