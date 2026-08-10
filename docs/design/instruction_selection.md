@@ -866,7 +866,10 @@ at emit time. For a class:
 2. otherwise a register value `V` from the class's candidates, choosing the first
    legal under, in preference order:
    - a same-block def **preceding** `C` (`is_before`), earliest first, then
-   - a **block argument / entry input** (always in a register), then
+   - an **entry input**, or a **block argument of a block that dominates `B`**
+     (always in a register, but written by that block's incoming edges — two
+     mutually exclusive blocks may carry equal arguments while only one of them
+     ran), then
    - a def in a **strict dominator** of `B` that the original IR already used
      across blocks — i.e. `V ∈ externally_bound`, so it is guaranteed
      materialized (closest dominator first, via `dom_distance`).

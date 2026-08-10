@@ -496,6 +496,10 @@ struct FunctionSelection {
     /// The block defining each value, or `None` for a block argument / entry input
     /// (always available in a register).
     value_block: HashMap<ValueId, Option<BlockId>>,
+    /// The block each block argument belongs to. Its register is written by the
+    /// incoming edges, so it holds the argument only in blocks that block
+    /// dominates. Entry inputs are absent (available everywhere).
+    arg_block: HashMap<ValueId, BlockId>,
     /// E-classes used as an operand by more than one consumer (function-wide). A
     /// memory effect in such a class cannot be internalized into a match.
     shared_classes: HashSet<Id>,
@@ -637,13 +641,13 @@ impl FunctionSelection {
     }
 
     /// The register value to bind `class` as an operand of consumer op `consumer`
-    /// in `block`, under the dominance rule: a block argument / entry input; a
-    /// same-block def preceding the consumer; or a value defined in a strict
-    /// dominator that the original IR already used across blocks (so it is
-    /// guaranteed materialized). `None` when no such value exists (the class may
-    /// still bind as an immediate, or be materialized as an introduced instruction).
-    /// Preference order — same-block earliest, then closest dominator — is
-    /// deterministic.
+    /// in `block`, under the dominance rule: an entry input or an argument of a
+    /// dominating block; a same-block def preceding the consumer; or a value
+    /// defined in a strict dominator that the original IR already used across
+    /// blocks (so it is guaranteed materialized). `None` when no such value
+    /// exists (the class may still bind as an immediate, or be materialized as
+    /// an introduced instruction). Preference order — same-block earliest, then
+    /// closest dominator — is deterministic.
     fn register_value(
         &self,
         dom: &DominatorTree,
@@ -666,7 +670,19 @@ impl FunctionSelection {
             };
             for &v in candidates {
                 let key = match self.value_block.get(&v).copied().flatten() {
-                    None => (1u8, 0usize, v.number()),
+                    None => {
+                        // A block argument lives in a register only where its own
+                        // block has run: mutually exclusive blocks may hold equal
+                        // arguments, but only one of them was written.
+                        if self
+                            .arg_block
+                            .get(&v)
+                            .is_some_and(|&owner| !dom.dominates(owner, block))
+                        {
+                            continue;
+                        }
+                        (1u8, 0usize, v.number())
+                    }
                     Some(def_block) if def_block == block => {
                         let def = self.value_to_def[&v];
                         if !context.get_block(block).is_before(def, consumer) {
@@ -1495,8 +1511,12 @@ impl InstructionSelectPass {
         }
 
         // A value used as an operand by more than one consumer must stay a register.
+        let mut arg_block: HashMap<ValueId, BlockId> = HashMap::new();
         let mut operand_uses: HashMap<ValueId, usize> = HashMap::new();
         for &block_id in &block_ids {
+            for argument in context.get_block(block_id).arguments() {
+                arg_block.insert(argument.id(), block_id);
+            }
             for op_id in context.get_block(block_id).op_ids() {
                 for operand in &context.get_op(op_id).operands {
                     *operand_uses.entry(*operand).or_insert(0) += 1;
@@ -1605,6 +1625,7 @@ impl InstructionSelectPass {
             op_position,
             value_to_def,
             value_block,
+            arg_block,
             shared_classes,
             demand,
             control,

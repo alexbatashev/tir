@@ -2211,3 +2211,36 @@ fn global_pointer_assembly_uses_a_symbolic_directive() {
 
     assert!(assembly.contains("pointer:\n\t.quad target\n"));
 }
+
+/// Two mutually exclusive branches computing the same predicate produce two
+/// equal γ merges. Selection may not bind one block's argument register inside
+/// the other branch: that register holds a value only on the path it merges.
+#[test]
+fn duplicate_predicate_in_exclusive_branches_matches_host_compiler() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(
+        r#"int printf(const char *format, ...);
+int run(char *s) {
+    int st = 0;
+    char *p = s;
+    for (; *p && st != 1; p++) {
+        char sym = *p;
+        if (st == 0) {
+            if (sym >= '0' && sym <= '9') st = 4;
+            else if (sym == '.') st = 5;
+            else st = 1;
+        } else if (st == 5) {
+            if (!(sym >= '0' && sym <= '9')) st = 1;
+        }
+    }
+    return st * 100 + (int)(p - s);
+}
+int main(void) {
+    printf("%d\n", run((char *)".500"));
+    return 0;
+}
+"#,
+    );
+}
