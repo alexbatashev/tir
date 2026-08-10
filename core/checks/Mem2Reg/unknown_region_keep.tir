@@ -1,0 +1,26 @@
+// RUN: tir opt --pass mem2reg %s | filecheck %s
+
+// The slot is read inside a region that is neither a conditional nor a loop, so
+// nothing tells the pass what reaches that read or what leaves the region. The
+// slot is left in memory.
+
+module {
+  func @opaque(%0: !i32) -> !i32 {
+    %1 = ptr.alloca {size = 4, align = 4} : !ptr.p<!i32>
+    ptr.store %0, %1
+    module {
+      %2 = ptr.load %1 : !i32
+      module_end
+    }
+    %3 = ptr.load %1 : !i32
+    return %3
+  }
+  module_end
+}
+
+// CHECK-LABEL: func @opaque
+// CHECK: ptr.alloca
+// CHECK: ptr.store
+// CHECK: ptr.load
+// CHECK: ptr.load
+// CHECK: return

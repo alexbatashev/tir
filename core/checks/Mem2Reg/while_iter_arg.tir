@@ -1,0 +1,34 @@
+// RUN: tir opt --pass mem2reg %s | filecheck %s
+
+// An `scf.while` observes the carried value in its condition region and forwards
+// it to the body, so promoting a slot updated by the body adds one port to both
+// regions and one forwarded value to `scf.condition`.
+
+module {
+  func @spin(%0: !i1, %1: !i32) -> !i32 {
+    %2 = ptr.alloca {size = 4, align = 4} : !ptr.p<!i32>
+    ptr.store %1, %2
+    scf.while {
+      scf.condition %0
+    } do {
+      %3 = ptr.load %2 : !i32
+      %4 = addi %3, %3 : !i32
+      ptr.store %4, %2
+      scf.yield
+    }
+    %5 = ptr.load %2 : !i32
+    return %5
+  }
+  module_end
+}
+
+// CHECK-LABEL: func @spin
+// CHECK-NOT: ptr.
+// CHECK: %[[RESULT:[0-9]+]] = scf.while iter_args(%[[COND:[0-9]+]] = %1) -> !i32 {
+// CHECK-NEXT: scf.condition %0, %[[COND]]
+// CHECK-NEXT: }
+// CHECK-NEXT: do(%[[BODY:[0-9]+]]) {
+// CHECK-NEXT: %[[NEXT:[0-9]+]] = addi %[[BODY]], %[[BODY]] : !i32
+// CHECK-NEXT: scf.yield %[[NEXT]]
+// CHECK-NEXT: }
+// CHECK-NEXT: return %[[RESULT]]

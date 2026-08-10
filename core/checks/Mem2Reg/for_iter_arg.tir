@@ -1,0 +1,29 @@
+// RUN: tir opt --pass mem2reg %s | filecheck %s
+
+// A slot the loop body updates becomes a carried port: the value entering the
+// loop is the init, the body reads the carried argument and yields its update,
+// and the loop result is what the slot holds afterwards.
+
+module {
+  func @count(%0: !index, %1: !index, %2: !index, %3: !i32) -> !i32 {
+    %4 = ptr.alloca {size = 4, align = 4} : !ptr.p<!i32>
+    ptr.store %3, %4
+    scf.for %0, %1, %2 {
+      %5 = ptr.load %4 : !i32
+      %6 = addi %5, %5 : !i32
+      ptr.store %6, %4
+      scf.yield
+    }
+    %7 = ptr.load %4 : !i32
+    return %7
+  }
+  module_end
+}
+
+// CHECK-LABEL: func @count
+// CHECK-NOT: ptr.
+// CHECK: %[[RESULT:[0-9]+]] = scf.for %0, %1, %2 iter_args(%[[CARRIED:[0-9]+]] = %3) -> !i32 {
+// CHECK-NEXT: %[[NEXT:[0-9]+]] = addi %[[CARRIED]], %[[CARRIED]] : !i32
+// CHECK-NEXT: scf.yield %[[NEXT]]
+// CHECK-NEXT: }
+// CHECK-NEXT: return %[[RESULT]]

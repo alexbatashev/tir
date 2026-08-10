@@ -1,0 +1,27 @@
+// RUN: tir opt --pass mem2reg %s | filecheck %s
+
+// A loop body that leaves through `scf.break` never reaches its yield, so there
+// is no back edge to carry the slot's value on. The slot stays in memory rather
+// than being promoted in part.
+
+module {
+  func @early(%0: !i1, %1: !i32) -> !i32 {
+    %2 = ptr.alloca {size = 4, align = 4} : !ptr.p<!i32>
+    ptr.store %1, %2
+    scf.while {
+      scf.condition %0
+    } do scope(%3) {
+      ptr.store %1, %2
+      scf.break %3
+    }
+    %4 = ptr.load %2 : !i32
+    return %4
+  }
+  module_end
+}
+
+// CHECK-LABEL: func @early
+// CHECK: ptr.alloca
+// CHECK: ptr.store
+// CHECK: ptr.load
+// CHECK: return
