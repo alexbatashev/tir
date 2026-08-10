@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use tir_symbolic::egraph::{EGraph, Id, Pattern, Rewrite, Rhs, Substitution, Var};
+use tir_symbolic::egraph::{EGraph, ENode, Id, Pattern, Rewrite, Rhs, Substitution, Var};
 
 use crate::utils::APInt;
 use crate::{
@@ -40,9 +40,11 @@ impl Ruleset {
     }
 }
 
-pub fn builtin_ruleset(context: &Context) -> Ruleset {
+pub fn builtin_ruleset(context: &Context, eg: &EGraph<Node>) -> Ruleset {
     let mut ruleset = generated_ruleset(context);
-    ruleset.push(const_fold(context.clone()), None);
+    for template in fold_templates(eg) {
+        ruleset.push(const_fold(context.clone(), &template), None);
+    }
     ruleset
 }
 
@@ -111,9 +113,43 @@ fn emit_shl() -> EmitFn {
     })
 }
 
-fn const_fold(context: Context) -> Rule {
+/// One LHS template per distinct seeded-op signature in `eg`, so const folding
+/// searches the classes holding such an op instead of every class. Only a seeded
+/// op ever folds and rewrites introduce none, so the seeded graph fixes the set.
+fn fold_templates(eg: &EGraph<Node>) -> Vec<Node> {
+    let mut templates: Vec<Node> = Vec::new();
+    for class in eg.classes() {
+        for node in class.nodes() {
+            if !matches!(
+                node,
+                Node::Op {
+                    prov: OpProv::Seeded(_),
+                    ..
+                }
+            ) {
+                continue;
+            }
+            let template = node
+                .op_template(node.children().to_vec())
+                .expect("an op node has an op template");
+            if !templates.iter().any(|seen| {
+                seen.matches(&template) && seen.children().len() == template.children().len()
+            }) {
+                templates.push(template);
+            }
+        }
+    }
+    templates
+}
+
+fn const_fold(context: Context, template: &Node) -> Rule {
     let mut lhs = Pattern::new();
-    lhs.var(Var::Symbol(0));
+    let args: Vec<Id> = (0..template.children().len())
+        .map(|index| lhs.var(Var::Symbol(index as Sym)))
+        .collect();
+    let mut root = template.clone();
+    root.children_mut().copy_from_slice(&args);
+    lhs.add(root);
     Rewrite::new(
         "const-fold",
         lhs,

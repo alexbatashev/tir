@@ -68,6 +68,7 @@ impl Pass for InstCombinePass {
         }
         let root = op.op().id;
         let seeded = seed::seed(context, root, &analyses.get::<GSA>(context, root));
+        let ruleset = builtin_ruleset(context, &seeded.eg);
         let mut driver = Driver {
             context,
             eg: seeded.eg,
@@ -75,7 +76,7 @@ impl Pass for InstCombinePass {
             arg_block: seeded.arg_block,
             dom: analyses.get::<DominatorTree>(context, root),
             edge_facts: analyses.get::<DominatingEdgeFacts>(context, root),
-            ruleset: builtin_ruleset(context),
+            ruleset,
         };
         let body = context.get_op(root).regions[0];
         driver.process_region(body, rewriter)?;

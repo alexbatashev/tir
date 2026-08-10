@@ -100,6 +100,30 @@ impl Node {
         Node::Gate(GateNode::Input(value), Vec::new())
     }
 
+    /// LHS template matching any op sharing this node's operator identity, at any
+    /// result type, with `args` as its pattern children. `None` for a non-op node.
+    pub fn op_template(&self, args: Vec<Id>) -> Option<Self> {
+        let Node::Op {
+            dialect,
+            name,
+            attrs,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        Some(Self::Op {
+            dialect,
+            name,
+            ty: any_type(),
+            attrs: attrs.clone(),
+            commutative: false,
+            cost: 0,
+            prov: OpProv::Introduced(usize::MAX),
+            args,
+        })
+    }
+
     pub fn op_type(&self) -> Option<TypeId> {
         match self {
             Node::Op { ty, .. } => Some(*ty),
