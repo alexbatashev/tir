@@ -1,149 +1,181 @@
-# Sea: the gated value+state graph
+# Sea: TIR's core IR
 
-Status: Stage-2 design, pending review. Companion to the approved redesign plan;
-supersedes `gated_ssa.rs` (deleted in this stage) and, for control flow,
-generalizes the flat-gate proposal in tir-plans `design-cfg-egraph.md` — its
-P1-P3 rewrite content carries over unchanged as the intra-region story.
+Status: Stage-2 design, revision 2, pending review. Supersedes `gated_ssa.rs`
+(deleted in Stage 2). For control flow it generalizes tir-plans
+`design-cfg-egraph.md`; that proposal's P1-P3 rewrite content carries over
+unchanged as the in-region story.
 
 ## 1. What sea is
 
-The compiler's working representation between the frontend dialects and machine
-emission: every op stored hash-consed in a region-hierarchical e-graph, memory
-and other effects threaded as explicit state values. Congruence closure over
-this graph is Alpern-Wegman-Zadeck value numbering; hash-consing is Havlak's
-thinning; saturation, cost extraction, and PBQP covering are the optimizer and
-the instruction selector on the same object.
+The IR — a full replacement for the current Context/op storage, not an
+optimizer sidecar. It has two layers:
 
-Sea changes the storage and computational model only. The extensibility model
-is untouched: ops are dialect-defined first-class types — identity is
-(dialect, name), with attributes, verifiers, and interfaces — and pass
-scheduling to concrete op types (`nest::<FuncOp>`, `PassTarget`) works exactly
-as today. Nothing in core or in the optimizer names a concrete op.
+**The substrate: ops, regions, direct manipulation.** Ops are dialect-defined
+first-class types — identity is (dialect, name), with attributes, results,
+verifiers, interfaces — stored in data-oriented arenas (§4). Ops own regions;
+passes walk, create, replace, erase, and move ops and regions imperatively
+through a rewriter API, and schedule against concrete op types
+(`nest::<FuncOp>`, `PassTarget`) exactly as today. A dialect-conversion
+framework (§5) does progressive lowering between dialects with type
+conversion. This layer is what gpu/openmp-style transforms, outlining,
+inlining, and every future pass we have not imagined program against. Nothing
+here requires the e-graph.
 
-## 2. The interface contracts
+**The optimization layer: gated graph regions.** A region comes in one of two
+kinds, declared by its owning op:
 
-The optimizer binds exclusively to interfaces. Each contract below carries
-*laws*: proof obligations an implementing op discharges through the existing
-oracle machinery (SmtOracle / induction obligations), the same way guarded
-rules prove their relaxations today. An op that cannot discharge the laws
-cannot claim the interface — extensibility without escape hatches.
+- **CFG region**: ordered blocks with block arguments and terminators.
+  Unstructured by design — it implements none of the structured interfaces,
+  and that is a feature, not a gap. Machine code after destruction lives
+  here; frontends and hand-written dialects may produce it freely. It is
+  manipulated imperatively only.
+- **Graph region**: a single implicit block whose pure value ops are stored
+  hash-consed (the region *is* an e-graph), with memory and other effects
+  threaded as explicit state values. Equality saturation, cost extraction,
+  and PBQP covering operate here. Congruence closure over this form is
+  Alpern-Wegman-Zadeck value numbering; hash-consing is Havlak's thinning.
 
-### 2.1 `Gamma` (decision)
+Raising (CFG → graph, restructuring) and destruction (graph → CFG, at
+emission or on demand) convert between the kinds. The mid-level pipeline
+keeps function bodies in graph form; nothing forces it — a body that stays
+CFG simply doesn't benefit from the optimizer.
 
-An op with n ≥ 2 disjoint sub-regions, a deciding value operand, and k results;
-each region yields k values through its terminator.
+## 2. Structured-op interfaces
 
-- ports: `decide: Value`, regions `r_0..r_{n-1}`, results `y_0..y_{k-1}`
-- semantics: `y_j = region_{decide}(inputs).yield_j`; exactly one region's
-  effects occur.
-- laws (per implementing op, SMT `ite` obligations):
-  G1 selection: `decide = i ⊢ y_j = r_i.yield_j`
-  G2 totality: `decide` is always in range (or the op declares a default
-  region).
-  G3 speculation boundary: a region is *speculatable* iff pure and non-trapping;
-  only then may rewrites collapse the Gamma into a value-level `If` term.
-- canonical impl: `scf.if` (n = 2). A future `switch` is just another impl.
+The optimizer binds exclusively to interfaces; it never names a concrete op.
+Names follow the existing TIR convention (`LoopLike`, `MemoryRead`); the
+theory literature's γ/θ/λ appear only as parenthetical shorthand here. Each
+interface carries *laws*: proof obligations an implementing op discharges
+through the existing oracle machinery, the same way guarded isel rules prove
+their relaxations. An op that cannot discharge the laws cannot claim the
+interface.
 
-### 2.2 `Theta` (loop)
+CFG regions implement none of these. An op whose regions are CFG is opaque to
+gate reasoning until raised.
 
-An op with one body region and k loop-carried ports (plus any number of
-region-invariant inputs).
+### 2.1 `Conditional` (γ)
 
-- ports: `init_0..k`, body arguments `carried_0..k` (the μ role), body yields
-  `next_0..k`, results `final_0..k` (the η role), and a continuation value the
-  body yields (`continue: i1`).
-- semantics: `carried^0 = init`; `carried^{t+1} = next(carried^t)` while
-  `continue(carried^t)`; `final = carried^T` at the first `t = T` where
-  `continue` is false.
-- laws:
-  T1 μ/η distinction: `final_j` is never congruent to `carried_j` (they are
-  equal only at `t = T`) — structurally enforced: distinct classes by
-  construction, no law can merge them.
-  T2 invariance: `next_j = carried_j ⊢ final_j = init_j`'s general form
-  `theta(x, x) = x` — induction obligation (base at `init`, step through
-  `next`), the design-cfg-egraph P2 obligation kind.
-  T3 no unrolling under saturation: any rewrite whose RHS nests the op's own
-  body is rejected at ruleset load (non-terminating).
-- canonical impls: `scf.for`, `scf.while`. Requires the n-ary carrying
-  generalization (today `LoopLike` models one carried value and fcc builds
-  `scf.while` with zero iter-args).
+An op with n ≥ 2 disjoint graph sub-regions, a deciding operand, k results;
+each region yields k values.
 
-### 2.3 `Isolated` + `Function` (callable)
+- laws (SMT `ite` obligations): C1 selection — `decide = i ⊢ result_j =
+  region_i.yield_j`; C2 totality — `decide` in range or a default region
+  declared; C3 speculation boundary — a region is speculatable iff pure and
+  non-trapping; only then may rewrites collapse the op into a value-level
+  `If` term (cmov/csel candidacy).
+- canonical impl: `scf.if`. A switch, a GPU divergence construct, or an
+  openmp conditional are other impls with their own semantics.
 
-- `Isolated`: the region references nothing from enclosing regions except
-  through declared ports (today's implicit FuncOp property, made a checkable
-  interface). Required for region extraction (outlining, offload) and for
-  per-region parallel compilation.
-- `Function`: `Isolated` + a symbol, an ABI reference, and a call contract
-  (argument/result ports typed against a signature). Canonical impl:
-  `builtin.func`. A GPU kernel or coroutine is a different op implementing the
-  same interface with different call semantics; the inliner (a λ-copy region
-  rewrite) works over the interface and asks the impl whether inlining is
-  legal (e.g. a kernel says no across the host/device boundary).
-- law F1: calls compose — the callee's declared effects (state ports) are the
-  only effects a call site exhibits.
+### 2.2 `LoopLike` (θ) — generalized from today's interface
 
-### 2.4 `State` (effects as values)
+One body graph region, n loop-carried ports (today's interface models one;
+this is the n-ary generalization), region-invariant inputs, a continuation
+condition yielded by the body, and n final results.
 
-Memory and ordering effects are ordinary values of the existing `!token`-style
-state type, threaded: a load takes a state, a store takes and produces one.
-`MemoryRead`/`MemoryWrite` grow state accessors; Gamma/Theta carry state
-through their ports like any other value (a region that touches memory has a
-state port — this replaces `TokenScope`).
+- laws: L1 carried/final distinction — `final_j` is never congruent to
+  `carried_j` (equal only on the last iteration; structurally distinct
+  classes, no law may merge them — this is Stage 1's `Eta`, made native);
+  L2 invariance — `next_j = carried_j ⊢ final_j = init_j`, an induction
+  obligation (base at init, step through next); L3 no unrolling under
+  saturation — a rewrite nesting the body inside itself is rejected at
+  ruleset load. Unrolling is a legal *structural* transform on the substrate
+  (body cloning), just not a saturation rule.
+- canonical impls: `scf.for`, `scf.while`. An `omp.wsloop` or a hardware
+  pipelined-loop op implement the same interface with their own semantics.
 
-- granularity: one chain per non-escaping alloca + one conservative chain for
-  everything else. Alias analysis later refines chains; the contract doesn't
-  change.
-- laws (the mem2reg-as-rewrites kernel, SMT obligations over the state
-  algebra):
-  S1 forwarding: `load(store(s, p, v), p) = v`
-  S2 dead store: `store(store(s, p, _), p, v) = store(s, p, v)`
-  S3 commutation: `p ≠ q ⊢` loads/stores on `p` commute past stores on `q`
-  (chain-disjointness is the trivial case).
-- isel consequence: memory e-nodes are keyed by their state operand, deleting
-  `SemPayload::Opaque` serials; loads CSE exactly when their state and address
-  classes agree — a legal congruence instead of a forbidden one.
+### 2.3 `IsolatedFromAbove` and `FunctionLike` (λ)
 
-## 3. Storage (data-oriented)
+- `IsolatedFromAbove`: the op's regions reference nothing from enclosing
+  regions except through declared operands. Today FuncOp's implicit
+  property; made checkable. The unit of region extraction (outlining,
+  gpu.launch capture) and of parallel compilation.
+- `FunctionLike`: `IsolatedFromAbove` + symbol + signature + call contract.
+  `builtin.func` is one impl; a GPU kernel, an openmp outlined body, or a
+  coroutine are others, each answering the inliner's legality query
+  differently (a kernel refuses inlining across the host/device boundary).
+- law F1: a call site exhibits exactly the callee's declared effects (its
+  state ports).
 
-- One arena per `Isolated` region tree; single-writer; parallelism across
-  isolated regions. No `Arc`, no locks in the compiled-code path.
-- Ops in SoA columns: `op_type: Vec<u32>` (interned (dialect, name) id),
-  `payload`, children/ports in shared CSR arrays; dense u32 ids throughout;
-  64-byte-aligned column chunks. Pure fixed-arity value terms and
-  region-carrying ops live in the same columns — region lists are just another
-  CSR segment, empty for pure terms.
-- E-graph native: union-find as flat `Vec<u32>` (path halving), open-addressing
-  hash-cons over column data, congruence rebuild by sorted runs.
-- Scopes and speculative rewrites: column watermark + undo log, O(delta)
-  push/pop.
-- Interface dispatch: per-op-type vtable index resolved at registration into
-  dense arrays — no hash lookups on hot paths.
-- Determinism by construction: dense append-only ids give stable traversal;
-  no bare-HashMap iteration anywhere order can leak.
+### 2.4 State threading (memory as values)
 
-## 4. What binds where
+Memory/ordering effects are values of the `!token`-style state type: a load
+takes a state, a store takes and produces one. `MemoryRead`/`MemoryWrite`
+grow state accessors; `Conditional`/`LoopLike` regions that touch memory
+carry state through their ports like any value (replacing `TokenScope`).
+
+- granularity: one chain per non-escaping alloca + one conservative chain;
+  alias analysis later refines chains without changing the contract.
+- laws (SMT obligations; this kernel IS mem2reg once memory is threaded):
+  S1 forwarding `load(store(s,p,v),p) = v`; S2 dead store
+  `store(store(s,p,_),p,v) = store(s,p,v)`; S3 disjoint commutation.
+- isel consequence: memory e-nodes keyed by state operand; `SemPayload::
+  Opaque` serials die; load CSE becomes a legal congruence.
+
+## 3. Direct manipulation and future passes
+
+Explicitly supported, on the substrate, without touching the e-graph:
+
+- **Dialect conversion** (§5): pattern-based progressive lowering with type
+  converters — cir → scf, sea → machine dialects, future x → y.
+- **Region surgery**: wrap (put a loop body under `omp.parallel`), outline
+  (extract an `IsolatedFromAbove` op → `gpu.func` + launch), clone
+  (unrolling, peeling, inlining via `FunctionLike`), splice.
+- **Pass targeting**: concrete op types remain the scheduling unit.
+- Op creation/mutation in CFG regions is positional and in-place. In graph
+  regions ops are hash-consed terms, so "mutation" is create-new +
+  replace-uses (functional update) — the rewriter API makes both feel the
+  same; only the identity semantics differ.
+
+## 4. Storage (data-oriented)
+
+- One arena per `IsolatedFromAbove` tree; single-writer; parallelism across
+  isolated ops. No `Arc`, no locks on the compiled-code path.
+- SoA columns: interned op-type id (u32), payloads (fixed-size,
+  niche-packed), operands/results/regions/blocks as CSR segments (empty for
+  pure terms); dense u32 ids; 64-byte-aligned chunks; kind-major scans.
+- Graph regions add the e-graph layer over the same columns: flat union-find
+  (path halving), open-addressing hash-cons indexing into columns,
+  congruence rebuild by sorted runs, scopes as watermark + undo log
+  (O(delta) push/pop).
+- Interface dispatch: dense per-op-type vtable arrays resolved at
+  registration; no hash lookups on hot paths.
+- Determinism by construction: dense append-only ids, no bare-HashMap
+  iteration where order can leak.
+
+## 5. Dialect conversion framework
+
+Generalizes today's one-off lowerings (`scf_to_cfg`, cir lowering, isel
+emission plumbing) into one mechanism: a conversion target (legal/illegal op
+sets per dialect), typed rewrite patterns (imperative, on the substrate), and
+type conversion with materializations. Destruction (graph → CFG) and raising
+(CFG → graph restructuring, Bahmann-Reissmann when goto arrives) are
+conversions in this framework, not special passes. Machine dialects are
+ordinary conversion targets.
+
+## 6. What binds where
 
 | machinery | binds to |
 |---|---|
-| builder (scf/cir → sea) | Gamma/Theta/State interfaces of the source ops |
-| saturation (axioms, PDL, target rules) | flat terms within one region; region ports are leaves |
-| gate laws (G*, T*, S*) | interfaces — verified per impl at registration/CI |
-| extraction (cost / PBQP) | terms + a per-gate `reify` alternative (design-cfg-egraph §3.3) |
-| destruction (sea → machine CFG) | Gamma/Theta reification; relocated scf_to_cfg logic |
+| builder / raising | `Conditional`/`LoopLike`/state interfaces of source ops |
+| saturation (axioms, PDL, target rules) | flat terms within one graph region; ports are leaves |
+| interface laws (C*, L*, S*, F1) | verified per impl at registration/CI via the oracle |
+| extraction (cost / PBQP) | terms + per-gate `reify` alternative |
+| destruction / conversions | the conversion framework (§5) |
+| imperative passes, gpu/openmp, inliner | substrate rewriter + interfaces; no e-graph knowledge |
 | pass manager | concrete op types, as today |
 
-## 5. Stage 2 scope (in order)
+## 7. Stage 2 scope (in order)
 
-1. Interface definitions + law obligations wired to the oracle (this doc's §2),
-   including the n-ary carrying generalization of scf and plural `LoopLike`.
-2. fcc lowers ALL control flow to scf (short-circuit included) — no raw
-   `cond_br` reaches the mid-end; `gated_ssa.rs` is deleted.
-3. `core/src/sea`: arenas, columns, e-graph, builder from scf/cir; state
-   threading per §2.4.
-4. isel substrate swap: same TMDL rules and PBQP over sea; Opaque serials die;
-   old path behind a flag until every backend LIT and the JIT suite are
-   byte-equal or reviewed-better.
+1. Interface definitions + law obligations wired to the oracle: n-ary
+   `LoopLike`, `Conditional`, `IsolatedFromAbove`/`FunctionLike`, state
+   accessors on `MemoryRead`/`MemoryWrite`.
+2. fcc lowers all control flow to scf (short-circuit included); mid-end sees
+   no raw `cond_br`; `gated_ssa.rs` deleted.
+3. `core/src/sea`: arenas, columns, region kinds, graph-region e-graph,
+   builder from scf/cir, state threading.
+4. isel substrate swap: TMDL rules + PBQP over sea graph regions; Opaque
+   serials die; old path behind a flag until byte-equal or reviewed-better.
 
-Out of scope for Stage 2: EGVN unification (Stage 3), authority flip (Stage 4),
-alias classes beyond per-alloca chains, n-way Gamma impls beyond `scf.if`.
+Out of scope for Stage 2: the conversion framework's full generality (only
+what the substrate swap needs), EGVN (Stage 3), authority flip (Stage 4),
+alias classes, additional `Conditional`/`LoopLike` impls beyond scf.
