@@ -216,6 +216,17 @@ fn scalar_early_return_matches_host_compiler() {
     assert_fcc_matches_host(include_str!("scalar/early_return.c"));
 }
 
+/// A flag merged out of both arms of an `if` inside a loop: promotion leaves an
+/// arm and the code after it holding identical constants, which must not be
+/// unified across the region boundary.
+#[test]
+fn scalar_loop_flag_merge_matches_host_compiler() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(include_str!("scalar/loop_flag_merge.c"));
+}
+
 /// `break` and `continue` keep their C meaning inside the `scf.while` a `for`
 /// or a `do` becomes: the step and the trailing condition still run on a
 /// `continue`, and a `break` skips both.

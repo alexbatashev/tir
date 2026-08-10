@@ -252,7 +252,7 @@ impl Driver<'_> {
             return false;
         };
         if ab != bb {
-            return self.dom.dominates(ab, bb);
+            return self.dom.dominates(ab, bb) && self.reaches_into(a, ab, bb);
         }
         match (
             self.context.get_value(a).defining_op(),
@@ -262,6 +262,35 @@ impl Driver<'_> {
             // A block argument precedes every op in its block.
             (None, _) => true,
             (Some(_), None) => false,
+        }
+    }
+
+    /// Whether `a`, defined in `ab`, is in scope in `bb`. A block dominates the
+    /// blocks of the regions its operations hold, but only the part of it that
+    /// runs before the holding operation reaches inside, so `a` must precede that
+    /// operation. Vacuously true when `bb` is not nested under `ab`.
+    fn reaches_into(&self, a: ValueId, ab: BlockId, bb: BlockId) -> bool {
+        let Some(holder) = self.holder_in(ab, bb) else {
+            return true;
+        };
+        match self.context.get_value(a).defining_op() {
+            Some(a_op) => self.context.get_block(ab).is_before(a_op, holder),
+            // A block argument precedes every op in its block.
+            None => true,
+        }
+    }
+
+    /// The operation of `block` whose regions transitively contain `inner`.
+    fn holder_in(&self, block: BlockId, inner: BlockId) -> Option<OpId> {
+        let mut current = inner;
+        loop {
+            let region = self.context.parent_region(current)?;
+            let holder = self.context.get_region(region).parent_op()?;
+            let parent = self.context.get_op(holder).parent_block()?;
+            if parent == block {
+                return Some(holder);
+            }
+            current = parent;
         }
     }
 
