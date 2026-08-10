@@ -273,6 +273,7 @@ fn gate_matches(a: &GateNode, b: &GateNode) -> bool {
         (GateNode::Input(x), GateNode::Input(y)) => x == y,
         (GateNode::Gamma { .. }, GateNode::Gamma { .. }) => true,
         (GateNode::Mu { .. }, GateNode::Mu { .. }) => true,
+        (GateNode::Eta { .. }, GateNode::Eta { .. }) => true,
         (GateNode::Phi { .. }, GateNode::Phi { .. }) => true,
         _ => false,
     }
@@ -287,6 +288,7 @@ fn hash_gate(gate: &GateNode, h: &mut impl Hasher) {
         GateNode::Gamma { .. } => 1u8.hash(h),
         GateNode::Mu { .. } => 2u8.hash(h),
         GateNode::Phi { .. } => 3u8.hash(h),
+        GateNode::Eta { .. } => 4u8.hash(h),
         GateNode::Op(_) => unreachable!("an op is a Node::Op, never a Node::Gate"),
     }
 }

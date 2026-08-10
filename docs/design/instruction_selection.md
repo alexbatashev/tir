@@ -77,7 +77,10 @@ use the function's gated-SSA analysis:
 - a μ loop-carried value becomes `Theta(init, latch)`. The builder first
   memoizes an opaque placeholder, builds the latch through that placeholder, and
   unions it with the `Theta` class to form the recursive e-graph cycle;
-- an irreducible `Phi` retains the opaque-leaf behavior.
+- an irreducible `Phi` retains the opaque-leaf behavior;
+- an `Eta` (a value leaving a structured loop) is an opaque input leaf: the
+  post-loop value equals the carried μ value only on the final iteration, so it
+  must not join the `Theta` class. Selecting through loop exits is future work.
 
 `Theta` is a value-sequence gate, distinct from effect-side `StateIf`. It has no
 finite-expression evaluator; selection may preserve it as CFG edge assignments,

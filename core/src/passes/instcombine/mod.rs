@@ -90,7 +90,10 @@ impl Pass for InstCombinePass {
 fn gate_value(gate: &GateNode) -> ValueId {
     match gate {
         GateNode::Input(v) => *v,
-        GateNode::Gamma { value, .. } | GateNode::Mu { value } | GateNode::Phi { value } => *value,
+        GateNode::Gamma { value, .. }
+        | GateNode::Mu { value }
+        | GateNode::Eta { value }
+        | GateNode::Phi { value } => *value,
         GateNode::Op(_) => unreachable!("an op is a Node::Op, never a Node::Gate"),
     }
 }

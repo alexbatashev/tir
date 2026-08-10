@@ -75,7 +75,10 @@ impl Seeder<'_> {
         let id = match gate {
             GateNode::Op(op) => self.seed_op(n, op),
             GateNode::Mu { value } => return self.seed_mu(n, value),
-            GateNode::Input(_) | GateNode::Gamma { .. } | GateNode::Phi { .. } => {
+            GateNode::Input(_)
+            | GateNode::Gamma { .. }
+            | GateNode::Eta { .. }
+            | GateNode::Phi { .. } => {
                 let args = self.kids(n);
                 self.eg.add(Node::Gate(gate, args))
             }

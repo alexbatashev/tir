@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 mod pattern;
 mod postorder;
@@ -82,32 +82,47 @@ impl<N, L, A> GenericDag<N, L, A> {
         }
     }
 
-    fn contains_descendant(&self, root: NodeId, target: NodeId) -> bool {
-        if root == target {
-            return true;
-        }
-
-        self.edges.get(&root).is_some_and(|children| {
-            children
-                .iter()
-                .any(|&child| self.contains_descendant(child, target))
-        })
+    fn children_of(&self, node: NodeId) -> &[NodeId] {
+        self.edges
+            .get(&node)
+            .map(Vec::as_slice)
+            .unwrap_or(&EMPTY_CHILDREN)
     }
 
-    fn nth_preorder(&self, node: NodeId, remaining: &mut usize) -> Option<NodeId> {
-        if *remaining == 0 {
-            return Some(node);
-        }
-        *remaining -= 1;
-
-        self.edges.get(&node).and_then(|children| {
-            for &child in children {
-                if let Some(found) = self.nth_preorder(child, remaining) {
-                    return Some(found);
-                }
+    /// Depth-first search from `root`, visiting each node once. Graphs seeded from
+    /// gated SSA contain cycles (a μ gate's back edge), so an unguarded walk would
+    /// not terminate.
+    fn contains_descendant(&self, root: NodeId, target: NodeId) -> bool {
+        let mut visited = HashSet::new();
+        let mut stack = vec![root];
+        while let Some(node) = stack.pop() {
+            if node == target {
+                return true;
             }
-            None
-        })
+            if !visited.insert(node) {
+                continue;
+            }
+            stack.extend(self.children_of(node).iter().copied());
+        }
+        false
+    }
+
+    /// The `remaining`-th node of the depth-first preorder from `node`, children in
+    /// edge order and each node counted once.
+    fn nth_preorder(&self, node: NodeId, remaining: &mut usize) -> Option<NodeId> {
+        let mut visited = HashSet::new();
+        let mut stack = vec![node];
+        while let Some(node) = stack.pop() {
+            if !visited.insert(node) {
+                continue;
+            }
+            if *remaining == 0 {
+                return Some(node);
+            }
+            *remaining -= 1;
+            stack.extend(self.children_of(node).iter().rev().copied());
+        }
+        None
     }
 }
 
@@ -219,5 +234,42 @@ impl<N, L, A> MutDag for GenericDag<N, L, A> {
 
     fn set_annotation(&mut self, n: NodeId, a: Self::Annotation) {
         self.annotations.insert(n, a);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A cyclic value graph (μ back edges make one) must not hang the traversals.
+    /// Node 0 is unreachable from the cycle, so a descendant search must give up.
+    fn cyclic() -> GenericDag<&'static str, ()> {
+        let mut dag: GenericDag<&'static str, ()> = GenericDag::new();
+        dag.add_node("unrelated");
+        let a = dag.add_node("a");
+        let b = dag.add_node("b");
+        dag.add_edge(b, a);
+        dag.add_edge(a, b);
+        dag
+    }
+
+    #[test]
+    fn preorder_terminates_on_a_cycle() {
+        let dag = cyclic();
+        let nodes: Vec<usize> = dag
+            .preorder(NodeId::from_index(2))
+            .map(NodeId::index)
+            .collect();
+        assert_eq!(nodes, vec![2, 1]);
+    }
+
+    #[test]
+    fn postorder_terminates_on_a_cycle() {
+        let dag = cyclic();
+        let nodes: Vec<usize> = dag
+            .postorder(NodeId::from_index(2))
+            .map(NodeId::index)
+            .collect();
+        assert_eq!(nodes, vec![1, 2]);
     }
 }

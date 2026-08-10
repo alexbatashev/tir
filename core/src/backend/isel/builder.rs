@@ -298,6 +298,11 @@ impl<'a> SemDagBuilder<'a> {
                 .collect();
             let theta = self.add_op(SymKind::Theta, children, value_ty);
             self.egraph.union(placeholder, theta)
+        } else if let Some((GateNode::Eta { .. }, _)) = gate {
+            // The value leaving a loop equals the carried value on the final iteration
+            // only, so it must not select as the Theta it gates. Opaque until selection
+            // models η.
+            self.add_input_value(value, value_ty)
         } else if let Some(def_op_id) = self.value_to_def.get(&value).copied() {
             let def = self.context.get_op(def_op_id);
             if def.is::<crate::builtin::ConstantOp>() {

@@ -80,6 +80,7 @@ fn class_value_type(context: &Context, eg: &EGraph<Node>, class: Id) -> Option<T
             GateNode::Input(value)
             | GateNode::Gamma { value, .. }
             | GateNode::Mu { value }
+            | GateNode::Eta { value }
             | GateNode::Phi { value } => Some(context.get_value(*value).ty()),
             GateNode::Op(_) => unreachable!("operations use Node::Op"),
         },

@@ -24,6 +24,12 @@ pub enum GateNode {
     /// μ gate replacing a loop-header block-argument phi. Edges are
     /// `[init, latch]`: the pre-loop input and the value latched on the back edge.
     Mu { value: ValueId },
+    /// η gate for a value leaving a structured loop: the single edge goes to the μ of
+    /// the carried value. It exists so the post-loop value is not identified with the
+    /// in-loop one — they are equal only on the final iteration. The loop-termination
+    /// predicate is not an edge: `scf.for`'s is implicit in its bounds, so an η carries
+    /// no condition rather than carrying one for some loops and not others.
+    Eta { value: ValueId },
     /// An n-way phi that could not be reduced to a γ/μ gate. Edges are the incoming
     /// values in predecessor order.
     Phi { value: ValueId },
@@ -105,6 +111,7 @@ impl GSA {
             GateNode::Input(v)
             | GateNode::Gamma { value: v, .. }
             | GateNode::Mu { value: v }
+            | GateNode::Eta { value: v }
             | GateNode::Phi { value: v } => Some(*v),
         }
     }
@@ -117,15 +124,9 @@ impl GSA {
         }
     }
 
-    /// IR values feeding `value`'s gated-SSA node, in edge order. A structured
-    /// loop result shares its carried value's μ node, so it reads that value's
-    /// inputs.
+    /// IR values feeding `value`'s gated-SSA node, in edge order.
     pub fn inputs_of(&self, value: ValueId) -> Option<&[ValueId]> {
-        if let Some(inputs) = self.gate_inputs.get(&value) {
-            return Some(inputs);
-        }
-        let gate_value = self.value_of(self.node_of(value)?)?;
-        self.gate_inputs.get(&gate_value).map(Vec::as_slice)
+        self.gate_inputs.get(&value).map(Vec::as_slice)
     }
 }
 
@@ -199,8 +200,7 @@ struct Builder<'a> {
     gamma: HashMap<ValueId, (ValueId, ValueId, ValueId)>,
     /// Loop-carried region argument ([`LoopCarried`]) → `(init, latch)` μ inputs.
     mu: HashMap<ValueId, (ValueId, ValueId)>,
-    /// Structured loop result → its carried region argument; the result shares the
-    /// carried value's μ node.
+    /// Structured loop result → its carried region argument, the η gate's input.
     loop_result: HashMap<ValueId, ValueId>,
     inner: GenericDag<GateNode, ()>,
     nodes: HashMap<ValueId, NodeId>,
@@ -227,14 +227,6 @@ impl Builder<'_> {
             return node;
         }
 
-        // A structured loop's result is the carried value at exit: it shares the μ node
-        // of its carried region argument rather than getting one of its own.
-        if let Some(&carried) = self.loop_result.get(&value) {
-            let node = self.node_for_value(carried);
-            self.nodes.insert(value, node);
-            return node;
-        }
-
         if let Some(op) = self.context.get_value(value).defining_op() {
             let node = self.inner.add_node(GateNode::Op(op));
             self.nodes.insert(value, node);
@@ -251,7 +243,8 @@ impl Builder<'_> {
     }
 
     /// The gate replacing `value` and the inputs feeding it, in edge order, if `value`
-    /// is an unstructured phi, a structured γ result, or a structured μ carried value.
+    /// is an unstructured phi, a structured γ result, a structured μ carried value, or
+    /// a structured loop result (η).
     fn gate_plan(&self, value: ValueId) -> Option<(GateNode, Vec<ValueId>)> {
         if let Some(&(block, index)) = self.phis.get(&value) {
             return Some(self.plan_gate(block, index, value));
@@ -262,6 +255,9 @@ impl Builder<'_> {
         if let Some(&(init, latch)) = self.mu.get(&value) {
             return Some((GateNode::Mu { value }, vec![init, latch]));
         }
+        if let Some(&carried) = self.loop_result.get(&value) {
+            return Some((GateNode::Eta { value }, vec![carried]));
+        }
         None
     }
 
@@ -269,46 +265,51 @@ impl Builder<'_> {
     /// its inputs in edge order.
     fn plan_gate(&self, block: BlockId, index: usize, value: ValueId) -> (GateNode, Vec<ValueId>) {
         let incoming = self.incoming(block, index);
+        let phi = || {
+            (
+                GateNode::Phi { value },
+                incoming.iter().map(|&(_, v)| v).collect(),
+            )
+        };
 
-        if let Some(gate) = self.mu_gate(block, value, &incoming) {
-            return gate;
+        if incoming
+            .iter()
+            .any(|&(pred, _)| self.dom.dominates(block, pred))
+        {
+            // A loop header. A μ holds one init and one latch, so any other shape
+            // (two back edges, two entry edges) would have to drop an input — stay an
+            // opaque phi instead of claiming a value the block does not have.
+            return self.mu_gate(block, value, &incoming).unwrap_or_else(phi);
         }
         if let Some(gate) = self.gamma_gate(block, value, &incoming) {
             return gate;
         }
 
-        let inputs = incoming.into_iter().map(|(_, v)| v).collect();
-        (GateNode::Phi { value }, inputs)
+        phi()
     }
 
-    /// μ gate for a loop header: some incoming edge comes from a block the header
-    /// dominates (the back edge). Inputs are `[init, latch]`.
+    /// μ gate for a loop header: exactly one incoming edge comes from a block the
+    /// header dominates (the back edge) and exactly one does not. Inputs are
+    /// `[init, latch]`.
     fn mu_gate(
         &self,
         block: BlockId,
         value: ValueId,
         incoming: &[(BlockId, ValueId)],
     ) -> Option<(GateNode, Vec<ValueId>)> {
-        if !incoming
-            .iter()
-            .any(|&(pred, _)| self.dom.dominates(block, pred))
-        {
-            return None;
-        }
-
         let mut init = None;
         let mut latch = None;
         for &(pred, v) in incoming {
-            if self.dom.dominates(block, pred) {
-                latch.get_or_insert(v);
+            let slot = if self.dom.dominates(block, pred) {
+                &mut latch
             } else {
-                init.get_or_insert(v);
+                &mut init
+            };
+            if slot.replace(v).is_some() {
+                return None;
             }
         }
-        match (init, latch) {
-            (Some(init), Some(latch)) => Some((GateNode::Mu { value }, vec![init, latch])),
-            _ => None,
-        }
+        Some((GateNode::Mu { value }, vec![init?, latch?]))
     }
 
     /// γ gate for a two-way merge: the immediately dominating terminator is a
@@ -467,7 +468,7 @@ struct StructuredGates {
 
 /// Scan the region's ops for structured control flow: a [`RegionGuard`] op that
 /// produces a value yields a γ over its arms' yielded values; a [`LoopCarried`] op
-/// yields a μ over its carried region argument, with its result aliasing that argument.
+/// yields a μ over its carried region argument, with its result an η over that μ.
 fn structured_gates(context: &Context, blocks: &[BlockId]) -> StructuredGates {
     let mut gamma = HashMap::new();
     let mut mu = HashMap::new();
@@ -670,6 +671,72 @@ mod tests {
     }
 
     #[test]
+    fn two_latches_stay_a_phi() {
+        let context = Context::with_default_dialects();
+        let i1 = IntegerType::new(&context, 1);
+        let i32 = IntegerType::new(&context, 32);
+        let cond = context.create_value(i1, None);
+        let cond_id = cond.id();
+
+        let region = context.create_region();
+        let entry = context.create_block(vec![cond]);
+        let iv = context.create_value(i32, None);
+        let iv_id = iv.id();
+        let header = context.create_block(vec![iv]);
+        let body = context.create_block(vec![]);
+        let latch_a = context.create_block(vec![]);
+        let latch_b = context.create_block(vec![]);
+        let exit = context.create_block(vec![]);
+        for block in [&entry, &header, &body, &latch_a, &latch_b, &exit] {
+            region.add_block(block.id());
+        }
+
+        let init = ops::constant(&context, 0, i32).build();
+        let init_val = init.result();
+        let mut eb = IRBuilder::new(entry.clone());
+        eb.insert(init);
+        eb.insert(ops::br(&context, vec![init_val], header.id()).build());
+
+        IRBuilder::new(header.clone())
+            .insert(ops::cond_br(&context, cond_id, vec![], vec![], body.id(), exit.id()).build());
+        IRBuilder::new(body.clone()).insert(
+            ops::cond_br(
+                &context,
+                cond_id,
+                vec![],
+                vec![],
+                latch_a.id(),
+                latch_b.id(),
+            )
+            .build(),
+        );
+
+        let one = ops::constant(&context, 1, i32).build();
+        let one_val = one.result();
+        let mut ab = IRBuilder::new(latch_a.clone());
+        ab.insert(one);
+        ab.insert(ops::br(&context, vec![one_val], header.id()).build());
+
+        let two = ops::constant(&context, 2, i32).build();
+        let two_val = two.result();
+        let mut bb = IRBuilder::new(latch_b.clone());
+        bb.insert(two);
+        bb.insert(ops::br(&context, vec![two_val], header.id()).build());
+
+        IRBuilder::new(exit.clone()).insert(ops::r#return(&context, Operand::from(iv_id)).build());
+
+        let gs = GSA::new(&context, func_with_region(&context, region.id()));
+
+        // A μ has room for one latch only; with two, the gate must keep every input.
+        let node = gs.node_of(iv_id).unwrap();
+        assert_eq!(*gs.gate(node), GateNode::Phi { value: iv_id });
+        let inputs = gs.inputs_of(iv_id).unwrap();
+        assert!(inputs.contains(&init_val));
+        assert!(inputs.contains(&one_val));
+        assert!(inputs.contains(&two_val));
+    }
+
+    #[test]
     fn entry_arguments_are_inputs() {
         let context = Context::with_default_dialects();
         let i32 = IntegerType::new(&context, 32);
@@ -795,11 +862,15 @@ mod tests {
         (region.id(), acc_id, next_op)
     }
 
-    /// Assert the loop's result shares one μ node with its carried argument, gated over
+    /// Assert the loop's result is an η over the carried argument's μ, itself gated over
     /// `[init, latch]` with the latch reading the μ back.
     fn assert_mu(gs: &GSA, result: ValueId, acc_id: ValueId, init_op: OpId, latch_op: OpId) {
-        let node = gs.node_of(result).unwrap();
-        assert_eq!(gs.node_of(acc_id), Some(node));
+        let eta = gs.node_of(result).unwrap();
+        assert_eq!(*gs.gate(eta), GateNode::Eta { value: result });
+        assert_eq!(gs.inputs_of(result), Some([acc_id].as_slice()));
+
+        let node = gs.node_of(acc_id).unwrap();
+        assert_eq!(children(gs, eta), vec![node]);
         assert_eq!(*gs.gate(node), GateNode::Mu { value: acc_id });
 
         let kids = children(gs, node);
