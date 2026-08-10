@@ -1,0 +1,21 @@
+// RUN: tir opt --verify --pass builtin.func(sea-roundtrip) %s | filecheck %s
+
+// `scf.for` does not expose its induction variable as a body argument, so the
+// trip test the tail-controlled normalization needs cannot be reconstructed.
+// The raiser reports that rather than guessing, and the function is left alone.
+
+module {
+  func @f(%0: !index, %1: !index, %2: !index) {
+    scf.for %0, %1, %2 {
+      scf.yield
+    }
+    return
+  }
+  module_end
+}
+
+// CHECK-LABEL: func @f
+// CHECK-NEXT: scf.for %0, %1, %2 {
+// CHECK-NEXT: scf.yield
+// CHECK-NEXT: }
+// CHECK-NEXT: return

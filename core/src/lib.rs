@@ -28,6 +28,7 @@ mod region;
 pub mod region_format;
 pub mod schema;
 mod scoped_attr;
+pub mod sea;
 pub mod sem;
 pub mod symbol_table;
 mod target_env;

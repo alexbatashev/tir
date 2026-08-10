@@ -161,6 +161,12 @@ pub(super) fn emit_machine_code(
     let function_pipeline = pm.nest::<tir::builtin::FuncOp>();
     function_pipeline.add_pass(crate::passes::LowerCirControlFlowPass::new());
     function_pipeline.add_pass(tir::passes::Mem2RegPass::new());
+    // The sea round trip is the identity, so interposing it here must not change
+    // any program's behavior. `TIR_SEA_ROUNDTRIP=1` turns the end-to-end suite
+    // into that check without touching the default pipeline.
+    if std::env::var_os("TIR_SEA_ROUNDTRIP").is_some() {
+        function_pipeline.add_pass(tir::passes::SeaRoundTripPass::new());
+    }
     function_pipeline.add_pass(tir::passes::InstCombinePass::new());
     function_pipeline.add_pass(tir::passes::ScfToCfgPass::new());
     let module_op = context.get_op(module.id());

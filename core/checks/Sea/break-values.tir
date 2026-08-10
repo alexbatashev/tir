@@ -1,0 +1,51 @@
+// RUN: tir opt --verify --pass builtin.func(sea-roundtrip) %s | filecheck %s
+
+// A valued `scf.break` maps through the γ/θ result plumbing: the conditional
+// holding the exits gains a leading `broke` result, and a second γ on `broke`
+// decides the θ continuation predicate — the exiting path yields 0 rather than
+// re-evaluating the loop condition, so nothing is speculated.
+
+module {
+  func @f(%0: !i1, %1: !i32) -> !i32 {
+    %2 = scf.while iter_args(%3 = %1) -> !i32 {
+      scf.condition %0, %3
+    } do scope(%4)(%5) {
+      %6 = addi %5, %5 : !i32
+      scf.if %0 {
+        scf.break %4, %6
+      } else {
+        scf.yield
+      }
+      scf.yield %5
+    }
+    return %2
+  }
+  module_end
+}
+
+// CHECK-LABEL: func @f
+// CHECK: do scope(%[[SCOPE:[0-9]+]])(%[[ACC:[0-9]+]], %[[INV:[0-9]+]]) {
+// CHECK-NEXT: %[[SUM:[0-9]+]] = addi %[[ACC]], %[[ACC]] : !i32
+// The exit γ: the `then` arm broke, carrying the value the break carried.
+// CHECK-NEXT: %[[BROKE:[0-9]+]], %[[CARRIED:[0-9]+]] = scf.if %[[INV]] -> !i1, !i32 {
+// CHECK-NEXT: %[[ONE:[0-9]+]] = constant {value = 1} : !i1
+// CHECK-NEXT: scf.yield %[[ONE]], %[[SUM]]
+// CHECK-NEXT: }
+// CHECK-NEXT: else {
+// CHECK-NEXT: %[[ZERO:[0-9]+]] = constant {value = 0} : !i1
+// CHECK-NEXT: scf.yield %[[ZERO]], %[[ACC]]
+// CHECK-NEXT: }
+// The continuation γ: broken stops the loop, unbroken re-evaluates the condition.
+// CHECK-NEXT: %[[PRED:[0-9]+]], %[[NEXT:[0-9]+]] = scf.if %[[BROKE]] -> !i1, !i32 {
+// CHECK-NEXT: %[[STOP:[0-9]+]] = constant {value = 0} : !i1
+// CHECK-NEXT: scf.yield %[[STOP]], %[[CARRIED]]
+// CHECK-NEXT: }
+// CHECK-NEXT: else {
+// CHECK-NEXT: scf.yield %[[INV]], %[[CARRIED]]
+// CHECK-NEXT: }
+// CHECK-NEXT: scf.if %[[PRED]] {
+// CHECK-NEXT: scf.yield
+// CHECK-NEXT: }
+// CHECK-NEXT: else {
+// CHECK-NEXT: scf.break %[[SCOPE]], %[[NEXT]], %[[INV]]
+// CHECK-NEXT: }
