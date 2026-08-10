@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use crate::builtin::TokenType;
 use crate::{
     Block, Conditional, Context, LoopLike, MemoryRead, MemoryWrite, OpId, OpInstance, Operation,
     OperationRef, PassError, PromotableAllocation, RegionId, Rewriter, TypeId, ValueId, scf,
@@ -48,6 +49,7 @@ pub(super) fn run(
             slot,
             alloca,
             uninitialized: None,
+            scopes: vec![],
             erase: vec![],
         };
         promoter.walk(&home, None);
@@ -75,6 +77,10 @@ struct Promoter<'a> {
     /// it: a re-read of the still-uninitialized location. Created on demand, and
     /// its presence is what keeps the allocation alive.
     uninitialized: Option<ValueId>,
+    /// The token scopes of the loops whose carried port is being grown, innermost last.
+    /// An `scf.break`/`scf.continue` naming one of them leaves through that port and so
+    /// carries the value reaching it.
+    scopes: Vec<ValueId>,
     erase: Vec<OpId>,
 }
 
@@ -104,8 +110,15 @@ impl Promoter<'_> {
                     current = Some(value);
                     self.erase.push(op_id);
                 }
-                SlotUse::Nested if references_slot(self.context, &op, self.slot) => {
+                SlotUse::Nested
+                    if references_slot(self.context, &op, self.slot)
+                        || exits_scopes(self.context, &op, &self.scopes) =>
+                {
                     current = self.walk_nested(block, op, current);
+                }
+                _ if exits_scope(&op, &self.scopes) => {
+                    let value = self.reaching(current);
+                    self.append_operand(op_id, value);
                 }
                 _ => {}
             }
@@ -178,6 +191,10 @@ impl Promoter<'_> {
         let ty = self.context.get_value(init).ty();
         let is_while = op.is::<scf::WhileOp>();
 
+        let body_region = *op.regions.last().expect("a loop has a body");
+        let scope = loop_scope(self.context, body_region);
+        self.scopes.extend(scope);
+
         // `scf.while` observes the carried value first in its condition region,
         // which forwards what the body sees; `scf.for` carries straight into the
         // body.
@@ -191,7 +208,10 @@ impl Promoter<'_> {
             self.carry_into(op.regions[0], ty)
         };
         let latched = self.reaching(carried);
-        self.append_yielded(*op.regions.last().expect("a loop has a body"), latched);
+        self.append_yielded(body_region, latched);
+        if scope.is_some() {
+            self.scopes.pop();
+        }
 
         let mut inits = op.operands.clone();
         inits.push(init);
@@ -259,13 +279,23 @@ impl Promoter<'_> {
         *results.last().expect("the grown op carries the slot")
     }
 
-    /// Append `value` to what a structured region yields on its back or exit edge.
+    /// Append `value` to what a structured region yields on its back or exit edge. A
+    /// region leaving through an early exit took the value there instead, on the edge
+    /// that exit branches along.
     fn append_yielded(&self, region: RegionId, value: ValueId) {
         let block = single_block(self.context, region).expect("checked by `supported`");
         let terminator = *block.op_ids().last().expect("regions are terminated");
-        let mut operands = self.context.get_op(terminator).operands.clone();
+        let op = self.context.get_op(terminator);
+        if op.is::<scf::BreakOp>() || op.is::<scf::ContinueOp>() {
+            return;
+        }
+        self.append_operand(terminator, value);
+    }
+
+    fn append_operand(&self, op_id: OpId, value: ValueId) {
+        let mut operands = self.context.get_op(op_id).operands.clone();
         operands.push(value);
-        self.context.set_op_operands(terminator, operands);
+        self.context.set_op_operands(op_id, operands);
     }
 
     /// The value reaching this point, materializing a read of the untouched slot
@@ -317,10 +347,33 @@ impl Promoter<'_> {
     }
 }
 
+/// The loop body's token scope: the value its `scf.break`/`scf.continue` name.
+fn loop_scope(context: &Context, body: RegionId) -> Option<ValueId> {
+    let token = TokenType::new(context);
+    single_block(context, body)?
+        .arguments()
+        .iter()
+        .find(|argument| argument.ty() == token)
+        .map(|argument| argument.id())
+}
+
+/// Whether `op` leaves one of the loops whose port is being grown.
+fn exits_scope(op: &Arc<OpInstance>, scopes: &[ValueId]) -> bool {
+    (op.is::<scf::BreakOp>() || op.is::<scf::ContinueOp>()) && scopes.contains(&op.operands[0])
+}
+
+/// Whether anything inside `op`'s regions leaves one of those loops.
+fn exits_scopes(context: &Context, op: &Arc<OpInstance>, scopes: &[ValueId]) -> bool {
+    nested_ops(context, op)
+        .iter()
+        .any(|&op_id| exits_scope(&context.get_op(op_id), scopes))
+}
+
 /// Whether the slot can be promoted through every structured operation that
-/// mentions it: only conditionals and loops built from single-block regions that
-/// end in a yield (a condition, for a loop's condition region) can carry a value.
-/// Anything else — an unknown region, an early exit out of a loop — is left in
+/// mentions it: only conditionals and loops built from single-block regions whose
+/// every exit carries a value — a yield, a condition for a loop's condition region,
+/// or a `break`/`continue` out of a loop the walk itself grows. Anything else — an
+/// unknown region, an exit out of a loop enclosing the allocation — is left in
 /// memory rather than promoted in part.
 fn supported(context: &Context, home: &Arc<Block>, slot: ValueId) -> bool {
     // The stand-in for an undefined value copies one of the slot's own reads, so
@@ -330,13 +383,20 @@ fn supported(context: &Context, home: &Arc<Block>, slot: ValueId) -> bool {
         .map(|&op_id| context.get_op(op_id))
         .filter(|op| reads_slot(op, slot))
         .all(|op| op.operands == [slot] && op.regions.is_empty());
-    reads_reproducible && gates_carry_values(context, home, slot)
+    reads_reproducible && gates_carry_values(context, home, slot, &mut vec![])
 }
 
-fn gates_carry_values(context: &Context, block: &Arc<Block>, slot: ValueId) -> bool {
+fn gates_carry_values(
+    context: &Context,
+    block: &Arc<Block>,
+    slot: ValueId,
+    scopes: &mut Vec<ValueId>,
+) -> bool {
     for op_id in block.op_ids() {
         let op = context.get_op(op_id);
-        if op.regions.is_empty() || !references_slot(context, &op, slot) {
+        if op.regions.is_empty()
+            || (!references_slot(context, &op, slot) && !exits_scopes(context, &op, scopes))
+        {
             continue;
         }
 
@@ -349,51 +409,42 @@ fn gates_carry_values(context: &Context, block: &Arc<Block>, slot: ValueId) -> b
         if !is_conditional && !is_loop {
             return false;
         }
+        // A loop only grows a port — and so only carries values on its exits — when
+        // something inside it writes the slot.
+        let scope = if is_loop && stores_slot(context, &op, slot) {
+            loop_scope(context, *op.regions.last().expect("a loop has a body"))
+        } else {
+            None
+        };
+        scopes.extend(scope);
 
-        // Growing a port means the gate's yield decides what leaves it, so nothing
-        // inside may leave another way. A gate the slot only reads through needs no
-        // port, and the value reaching it already dominates those reads.
-        if stores_slot(context, &op, slot) && !yields_are_the_only_exits(context, &op) {
-            return false;
-        }
-
-        for &nested in &op.regions {
+        let carried = op.regions.iter().enumerate().all(|(index, &nested)| {
             let Some(nested_block) = single_block(context, nested) else {
                 return false;
             };
-            if !gates_carry_values(context, &nested_block, slot) {
+            // A loop's condition region ends in a condition; every other structured
+            // region must yield or leave through a loop exit. An exit out of a loop
+            // that grows no port needs no value: the slot dies with that loop's body.
+            let terminator = context.get_op(*nested_block.op_ids().last().expect("terminated"));
+            let expects_condition = op.is::<scf::WhileOp>() && index == 0;
+            if terminator.is::<scf::ConditionOp>() != expects_condition {
                 return false;
             }
+            let exits = terminator.is::<scf::BreakOp>() || terminator.is::<scf::ContinueOp>();
+            if !expects_condition && !terminator.is::<scf::YieldOp>() && !exits {
+                return false;
+            }
+            gates_carry_values(context, &nested_block, slot, scopes)
+        });
+
+        if scope.is_some() {
+            scopes.pop();
+        }
+        if !carried {
+            return false;
         }
     }
 
-    true
-}
-
-/// Whether every region nested in `op` runs to its yield: single-block, gate-shaped
-/// all the way down, with no `break`, `continue` or `return` cutting a region short.
-fn yields_are_the_only_exits(context: &Context, op: &Arc<OpInstance>) -> bool {
-    for (index, &region) in op.regions.iter().enumerate() {
-        let Some(block) = single_block(context, region) else {
-            return false;
-        };
-        let terminator = context.get_op(*block.op_ids().last().expect("terminated"));
-        // A loop's condition region ends in a condition; every other structured
-        // region must yield, so the promoted value has somewhere to travel.
-        let expects_condition = op.is::<scf::WhileOp>() && index == 0;
-        if terminator.is::<scf::ConditionOp>() != expects_condition {
-            return false;
-        }
-        if !expects_condition && !terminator.is::<scf::YieldOp>() {
-            return false;
-        }
-        for op_id in block.op_ids() {
-            let nested = context.get_op(op_id);
-            if !nested.regions.is_empty() && !yields_are_the_only_exits(context, &nested) {
-                return false;
-            }
-        }
-    }
     true
 }
 

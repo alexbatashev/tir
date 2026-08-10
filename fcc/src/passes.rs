@@ -839,9 +839,9 @@ impl LowerCirControlFlowPass {
         let terminator = context.get_op(*block.op_ids().last().unwrap());
         let replacement: Box<dyn Operation> =
             if terminator.clone().as_op::<cir::BreakOp>().is_some() {
-                Box::new(scf::ops::r#break(context, terminator.operands[0]).build())
+                Box::new(scf::ops::r#break(context, terminator.operands[0], vec![]).build())
             } else if terminator.clone().as_op::<cir::ContinueOp>().is_some() {
-                Box::new(scf::ops::r#continue(context, terminator.operands[0]).build())
+                Box::new(scf::ops::r#continue(context, terminator.operands[0], vec![]).build())
             } else {
                 Box::new(scf::ops::r#yield(context, vec![]).build())
             };
@@ -916,7 +916,7 @@ impl LowerCirControlFlowPass {
         }
         let mut builder = IRBuilder::new(block);
         if leaves_loop {
-            builder.insert(scf::ops::r#break(context, scope).build());
+            builder.insert(scf::ops::r#break(context, scope, vec![]).build());
         } else {
             builder.insert(scf::ops::r#yield(context, vec![]).build());
         }
@@ -965,7 +965,7 @@ impl LowerCirControlFlowPass {
             }
         }
         if leaves_loop {
-            IRBuilder::new(block).insert(scf::ops::r#break(context, scope).build());
+            IRBuilder::new(block).insert(scf::ops::r#break(context, scope, vec![]).build());
             return Ok(region.id());
         }
         let terminator = context.get_op(*condition.op_ids().last().unwrap());
@@ -979,7 +979,7 @@ impl LowerCirControlFlowPass {
         let exit = context.create_region();
         let exit_block = context.create_block(vec![]);
         exit.add_block(exit_block.id());
-        IRBuilder::new(exit_block).insert(scf::ops::r#break(context, scope).build());
+        IRBuilder::new(exit_block).insert(scf::ops::r#break(context, scope, vec![]).build());
 
         let mut builder = IRBuilder::new(block);
         builder.insert(

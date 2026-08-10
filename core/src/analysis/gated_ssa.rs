@@ -2,8 +2,9 @@ use std::collections::{HashMap, HashSet};
 
 use crate::{
     BlockId, BranchGuard, BranchTerminator, Conditional, Context, LoopLike, OpId, Terminator,
-    ValueId,
+    TokenScope, ValueId,
     analysis::{Analysis, AnalysisManager, DominatorTree, PreservedAnalyses},
+    builtin::TokenType,
     graph::{Dag, GenericDag, MutDag, NodeId},
 };
 
@@ -491,6 +492,12 @@ fn structured_gates(context: &Context, blocks: &[BlockId]) -> StructuredGates {
                     }
                 }
             } else if let Some(lp) = instance.clone().as_interface::<dyn LoopLike>() {
+                // A μ holds one init and one latch and an η one exit, so a loop the body
+                // can also leave early would have to drop an input — stay opaque instead
+                // of claiming a value the loop does not have.
+                if leaves_early(context, &instance) {
+                    continue;
+                }
                 let (carried, inits, latched) = (lp.carried_args(), lp.inits(), lp.latched());
                 for (port, &result) in results.iter().enumerate() {
                     mu.insert(carried[port], (inits[port], latched[port]));
@@ -505,6 +512,21 @@ fn structured_gates(context: &Context, blocks: &[BlockId]) -> StructuredGates {
         mu,
         loop_result,
     }
+}
+
+/// Whether the loop's body can leave other than through its back edge: something names
+/// the token its early exits consume.
+fn leaves_early(context: &Context, instance: &std::sync::Arc<crate::OpInstance>) -> bool {
+    let Some(scope) = instance.clone().as_interface::<dyn TokenScope>() else {
+        return false;
+    };
+    let token = TokenType::new(context);
+    scope
+        .token_scope_regions()
+        .into_iter()
+        .flat_map(|region| context.get_region(region).iter(context.clone()))
+        .flat_map(|block| block.arguments().to_vec())
+        .any(|argument| argument.ty() == token && context.is_value_used(argument.id()))
 }
 
 /// The γ inputs `(cond, true_input, false_input)` for result `index` of a two-armed
@@ -1096,5 +1118,88 @@ mod tests {
 
         let gs = GSA::new(&context, func_with_region(&context, region.id()));
         assert_mu(&gs, while_result, acc_id, init_op, latch_op);
+    }
+
+    /// A body that can `break` feeds the carried port on two edges and the result on
+    /// two exits, which a μ/η pair cannot hold: the loop stays opaque.
+    #[test]
+    fn no_mu_for_a_loop_that_can_break() {
+        let context = Context::with_default_dialects();
+        let index = crate::builtin::IndexType::new(&context);
+        let i1 = IntegerType::new(&context, 1);
+        let i32 = IntegerType::new(&context, 32);
+        let lb = context.create_value(index, None);
+        let ub = context.create_value(index, None);
+        let step = context.create_value(index, None);
+
+        let scope = context.create_value(crate::builtin::TokenType::new(&context), None);
+        let acc = context.create_value(i32, None);
+        let (scope_id, acc_id) = (scope.id(), acc.id());
+        let body = context.create_region();
+        let body_block = context.create_block(vec![scope, acc]);
+        body.add_block(body_block.id());
+
+        let one = ops::constant(&context, 1, i32).build();
+        let next = ops::addi(&context, acc_id, one.result(), i32).build();
+        let next_val = next.result();
+        let decision = ops::constant(&context, 1, i1).build();
+        let decision_val = decision.result();
+
+        let leave = context.create_region();
+        let leave_block = context.create_block(vec![]);
+        leave.add_block(leave_block.id());
+        IRBuilder::new(leave_block)
+            .insert(crate::scf::ops::r#break(&context, scope_id, vec![next_val]).build());
+        let stay = context.create_region();
+        let stay_block = context.create_block(vec![]);
+        stay.add_block(stay_block.id());
+        IRBuilder::new(stay_block).insert(crate::scf::ops::r#yield(&context, vec![]).build());
+
+        let mut bb = IRBuilder::new(body_block);
+        bb.insert(one);
+        bb.insert(next);
+        bb.insert(decision);
+        bb.insert(
+            crate::scf::ops::r#if(
+                &context,
+                decision_val,
+                vec![],
+                Some(leave.id()),
+                Some(stay.id()),
+            )
+            .build(),
+        );
+        bb.insert(crate::scf::ops::r#yield(&context, vec![next_val]).build());
+
+        let init = ops::constant(&context, 0, i32).build();
+        let init_val = init.result();
+        let region = context.create_region();
+        let entry = context.create_block(vec![]);
+        region.add_block(entry.id());
+        let for_op = crate::scf::ops::r#for(
+            &context,
+            lb.id(),
+            ub.id(),
+            step.id(),
+            vec![init_val],
+            vec![i32],
+            Some(body.id()),
+        )
+        .build();
+        let for_result = for_op.result();
+        let mut eb = IRBuilder::new(entry);
+        eb.insert(init);
+        eb.insert(for_op);
+        eb.insert(ops::r#return(&context, Operand::from(for_result)).build());
+
+        let gs = GSA::new(&context, func_with_region(&context, region.id()));
+        assert!(!matches!(
+            gs.gate(gs.node_of(for_result).unwrap()),
+            GateNode::Eta { .. }
+        ));
+        assert!(!matches!(
+            gs.gate(gs.node_of(acc_id).unwrap()),
+            GateNode::Mu { .. }
+        ));
     }
 }

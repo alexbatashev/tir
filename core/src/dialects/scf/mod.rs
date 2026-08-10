@@ -409,8 +409,10 @@ operation! {
     BreakOp {
         name: "break",
         dialect: "scf",
+        format: "custom",
         operands: O {
             scope: "crate::builtin::TokenType",
+            values: "*AnyConstraint",
         },
         interfaces: [Terminator],
     }
@@ -418,18 +420,69 @@ operation! {
 
 impl Terminator for BreakOp {}
 
+impl BreakOp {
+    fn custom_print(&self, fmt: &mut tir::IRFormatter) -> Result<(), std::fmt::Error> {
+        print_exit(fmt, "scf.break", self.operands())
+    }
+
+    fn custom_parse(
+        parser: &mut tir::parse::text::Parser,
+        context: &Context,
+    ) -> Result<Box<dyn Operation>, (tir::parse::Span, Error)> {
+        let scope = parse_value_id(parser)?;
+        Ok(Box::new(
+            BreakOpBuilder::new(context)
+                .scope(scope)
+                .values(parse_trailing_values(parser)?)
+                .build(),
+        ))
+    }
+}
+
 operation! {
     ContinueOp {
         name: "continue",
         dialect: "scf",
+        format: "custom",
         operands: O {
             scope: "crate::builtin::TokenType",
+            values: "*AnyConstraint",
         },
         interfaces: [Terminator],
     }
 }
 
 impl Terminator for ContinueOp {}
+
+impl ContinueOp {
+    fn custom_print(&self, fmt: &mut tir::IRFormatter) -> Result<(), std::fmt::Error> {
+        print_exit(fmt, "scf.continue", self.operands())
+    }
+
+    fn custom_parse(
+        parser: &mut tir::parse::text::Parser,
+        context: &Context,
+    ) -> Result<Box<dyn Operation>, (tir::parse::Span, Error)> {
+        let scope = parse_value_id(parser)?;
+        Ok(Box::new(
+            ContinueOpBuilder::new(context)
+                .scope(scope)
+                .values(parse_trailing_values(parser)?)
+                .build(),
+        ))
+    }
+}
+
+/// Print `scf.break %scope, %v0, %v1`: the scope token, then one value per carried port.
+fn print_exit(
+    fmt: &mut tir::IRFormatter,
+    mnemonic: &'static str,
+    operands: &[ValueId],
+) -> Result<(), std::fmt::Error> {
+    fmt.write(format!("{mnemonic} "))?;
+    print_value_list(fmt, operands)?;
+    fmt.write("\n")
+}
 
 operation! {
     YieldOp {
@@ -518,13 +571,22 @@ struct Carried {
 }
 
 /// The values a loop body yields on its back edge: the next iteration's carried values.
+/// A body that leaves through an exit terminator reports the values that exit carries,
+/// which follow its scope token.
 fn latched_values(op: &impl LoopOp) -> Vec<ValueId> {
     let context = op.loop_context();
     let body = op.body_block();
-    context
-        .get_op(*body.op_ids().last().unwrap())
-        .operands
-        .clone()
+    exit_values(&context.get_op(*body.op_ids().last().unwrap())).to_vec()
+}
+
+/// The carried values a structured terminator transfers: everything a `scf.break` or
+/// `scf.continue` carries past its scope token, and everything else's operands.
+fn exit_values(terminator: &Arc<tir::OpInstance>) -> &[ValueId] {
+    if terminator.is::<BreakOp>() || terminator.is::<ContinueOp>() {
+        &terminator.operands[1..]
+    } else {
+        &terminator.operands
+    }
 }
 
 /// Print a comma-separated `%a, %b` list.
@@ -732,11 +794,7 @@ fn verify_loop_carried<T: LoopOp + Operation>(context: &Context, op: &T) -> Resu
     let label = format!("{}.{}", T::dialect(), T::name());
     let body = op.body_block();
     let terminator = context.get_op(*body.op_ids().last().unwrap());
-    let yielded = if terminator.is::<YieldOp>() {
-        terminator.operands.clone()
-    } else {
-        vec![]
-    };
+    let yielded = exit_values(&terminator).to_vec();
     let token = TokenType::new(context);
     let scope_args = body
         .arguments()
@@ -760,7 +818,7 @@ fn verify_loop_carried<T: LoopOp + Operation>(context: &Context, op: &T) -> Resu
         )));
     }
     if (terminator.is::<BreakOp>() || terminator.is::<ContinueOp>())
-        && (scope_args.len() != 1 || terminator.operands != [scope_args[0].id()])
+        && (scope_args.len() != 1 || terminator.operands[0] != scope_args[0].id())
     {
         return Err(Error::VerificationError(format!(
             "{label} exit must consume its body token scope"
@@ -782,11 +840,6 @@ fn verify_loop_carried<T: LoopOp + Operation>(context: &Context, op: &T) -> Resu
             "{label} has {} results but its body carries {} arguments",
             arity,
             body_args.len()
-        )));
-    }
-    if arity > 0 && !terminator.is::<YieldOp>() {
-        return Err(Error::VerificationError(format!(
-            "{label} with results must end its body with scf.yield"
         )));
     }
     if yielded.len() != arity {
@@ -813,6 +866,53 @@ fn verify_loop_carried<T: LoopOp + Operation>(context: &Context, op: &T) -> Resu
             return Err(Error::VerificationError(format!(
                 "{label} yielded value {port} type must match the type of result {port}"
             )));
+        }
+    }
+
+    match scope_args.first() {
+        Some(scope) => verify_scope_exits(context, &body, scope.id(), &results, &label),
+        None => Ok(()),
+    }
+}
+
+/// Verify every `scf.break`/`scf.continue` leaving through `scope`: an exit edge feeds
+/// the loop's carried ports, so it carries one value per port, matching in type.
+fn verify_scope_exits(
+    context: &Context,
+    block: &Arc<tir::Block>,
+    scope: ValueId,
+    results: &[ValueId],
+    label: &str,
+) -> Result<(), Error> {
+    for op_id in block.op_ids() {
+        let op = context.get_op(op_id);
+        for &region in &op.regions {
+            for nested in context.get_region(region).iter(context.clone()) {
+                verify_scope_exits(context, &nested, scope, results, label)?;
+            }
+        }
+        let is_exit = op.is::<BreakOp>() || op.is::<ContinueOp>();
+        if !is_exit || op.operands[0] != scope {
+            continue;
+        }
+        let carried = &op.operands[1..];
+        if carried.len() != results.len() {
+            return Err(Error::VerificationError(format!(
+                "{label} carries {} values but its {}.{} carries {}",
+                results.len(),
+                op.dialect(),
+                op.name(),
+                carried.len()
+            )));
+        }
+        for (port, (&value, &result)) in carried.iter().zip(results).enumerate() {
+            if context.get_value(value).ty() != context.get_value(result).ty() {
+                return Err(Error::VerificationError(format!(
+                    "{}.{} value {port} type must match the type of {label} result {port}",
+                    op.dialect(),
+                    op.name()
+                )));
+            }
         }
     }
     Ok(())
@@ -880,7 +980,8 @@ fn parse_result_types(
     }
 }
 
-/// The values a structured region's single block yields through its terminator.
+/// The values a structured region's single block yields through its terminator. A region
+/// that leaves through an early exit never reaches the join, so it yields nothing there.
 fn region_yielded_values(context: &Context, region: tir::RegionId) -> Vec<ValueId> {
     let Some(block) = context.get_region(region).iter(context.clone()).next() else {
         return vec![];
@@ -888,7 +989,12 @@ fn region_yielded_values(context: &Context, region: tir::RegionId) -> Vec<ValueI
     let Some(&terminator) = block.op_ids().last() else {
         return vec![];
     };
-    context.get_op(terminator).operands.clone()
+    let terminator = context.get_op(terminator);
+    if terminator.is::<YieldOp>() {
+        terminator.operands.clone()
+    } else {
+        vec![]
+    }
 }
 
 /// Check that a structured region's terminator yields one value per result, matching in
@@ -900,6 +1006,11 @@ fn verify_region_yield(
     label: &str,
 ) -> Result<(), Error> {
     let terminator = context.get_op(*block.op_ids().last().unwrap());
+    // An arm that leaves through `scf.break`/`scf.continue` never reaches the join, so
+    // it owes it no value; what it carries is checked against the loop it exits.
+    if !terminator.is::<YieldOp>() {
+        return Ok(());
+    }
     let operands = &terminator.operands;
     if operands.len() != expected.len() {
         return Err(Error::VerificationError(format!(

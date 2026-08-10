@@ -109,12 +109,12 @@ impl ScfToCfgPass {
             let target = loop_targets.get(&terminator.operands[0]).ok_or_else(|| {
                 PassError::InvalidRuleSet("scf.break has no enclosing loop".to_string())
             })?;
-            (vec![], target.break_dest)
+            (terminator.operands[1..].to_vec(), target.break_dest)
         } else if terminator.is::<scf::ContinueOp>() {
             let target = loop_targets.get(&terminator.operands[0]).ok_or_else(|| {
                 PassError::InvalidRuleSet("scf.continue has no enclosing loop".to_string())
             })?;
-            (vec![], target.continue_dest)
+            (terminator.operands[1..].to_vec(), target.continue_dest)
         } else if terminator.clone().as_op::<ReturnOp>().is_some() {
             return Ok(());
         } else {

@@ -392,6 +392,9 @@ fn run_pipeline(run: &str, test_path: &Path, tools: &HashMap<String, Tool>) -> R
             )));
         }
 
+        let merge_stderr = tokens.iter().any(|token| token == "2>&1");
+        tokens.retain(|token| token != "2>&1");
+
         let mut invert = false;
         if tokens[0] == "not" {
             invert = true;
@@ -439,6 +442,9 @@ fn run_pipeline(run: &str, test_path: &Path, tools: &HashMap<String, Tool>) -> R
                 )));
             }
             piped_input = output.stdout;
+            if merge_stderr {
+                piped_input.extend_from_slice(&output.stderr);
+            }
 
             if is_last && !piped_input.is_empty() {
                 // Nothing consumes the output; that's fine.
