@@ -28,6 +28,22 @@ mod tests {
         (context, module)
     }
 
+    fn codegen_error(src: &str) -> String {
+        let file = intern_file("<test>", src);
+        let tokens: Vec<_> = Token::lexer(src)
+            .spanned()
+            .map(|(r, span)| (r.unwrap(), Span::new(file, span.start)))
+            .collect();
+        let options = Default::default();
+        let unit = parse(&tokens, options).expect("parse");
+        let unit = analyze(unit, options).expect("sema");
+        let context = fcc_context();
+        let diagnostic = codegen(&context, &unit).err().expect("codegen rejects");
+        let mut output = Vec::new();
+        diagnostic.write(&mut output, false).unwrap();
+        String::from_utf8(output).unwrap()
+    }
+
     fn compile(src: &str) -> String {
         let (_context, module) = lower(src);
         let mut out = String::new();
@@ -236,6 +252,11 @@ int main(void) { printf("hello"); return 0; }"#,
         let mut lowered = String::new();
         let mut fmt = tir::IRFormatter::new(&mut lowered);
         tir::Operation::print(&module, &mut fmt).expect("print");
+        // Sea takes structured control flow only: no C construct may reach the
+        // mid-end as a branch, so every function this helper lowers is held to
+        // it, not just the ones whose test says so.
+        assert!(!lowered.contains("cond_br"), "{lowered}");
+        assert!(!lowered.contains("br ^"), "{lowered}");
         lowered
     }
 
@@ -401,6 +422,177 @@ int main(void) { printf("hello"); return 0; }"#,
         assert!(!lowered.contains("cond_br"), "{lowered}");
         assert!(!lowered.contains("br ^"), "{lowered}");
         assert!(lowered.contains("scf.break"), "{lowered}");
+    }
+
+    /// A `goto` whose label follows it skips the statements in between, which
+    /// the pending-jump variable expresses without leaving the region.
+    #[test]
+    fn forward_goto_lowers_without_unstructured_branches() {
+        let lowered = lower_cir_control_flow(
+            "int f(int c) { int x = 0; if (c) goto done; x = 1; done: return x; }",
+        );
+
+        assert!(!lowered.contains("cond_br"), "{lowered}");
+        assert!(!lowered.contains("br ^"), "{lowered}");
+        assert!(!lowered.contains("cir.goto"), "{lowered}");
+        assert!(!lowered.contains("cir.label"), "{lowered}");
+    }
+
+    /// Two `goto`s to one label share the pending-jump slot, so the label needs
+    /// no second resume point.
+    #[test]
+    fn two_gotos_to_one_label_lower_without_unstructured_branches() {
+        let lowered = lower_cir_control_flow(
+            r#"int f(int a, int b) {
+                   int x = 0;
+                   if (a) goto done;
+                   x = 1;
+                   if (b) goto done;
+                   x = 2;
+               done:
+                   return x;
+               }"#,
+        );
+
+        assert!(!lowered.contains("cond_br"), "{lowered}");
+        assert!(!lowered.contains("br ^"), "{lowered}");
+    }
+
+    /// A `goto` out of nested loops leaves each of them structurally, exactly
+    /// as an early `return` does.
+    #[test]
+    fn goto_out_of_nested_loops_lowers_without_unstructured_branches() {
+        let lowered = lower_cir_control_flow(
+            r#"int f(int n) {
+                   int i = 0;
+                   int j = 0;
+                   while (i < n) {
+                       for (j = 0; j < n; j = j + 1) {
+                           if (i * j > 6) goto done;
+                       }
+                       i = i + 1;
+                   }
+               done:
+                   return i * 100 + j;
+               }"#,
+        );
+
+        assert!(!lowered.contains("cond_br"), "{lowered}");
+        assert!(!lowered.contains("br ^"), "{lowered}");
+        assert!(lowered.contains("scf.break"), "{lowered}");
+    }
+
+    /// A loop written out of a `goto` becomes the dispatch loop the label's
+    /// segment runs in.
+    #[test]
+    fn backward_goto_lowers_to_a_dispatch_loop() {
+        let lowered = lower_cir_control_flow(
+            r#"int f(int n) {
+                   int i = 0;
+               again:
+                   i = i + 1;
+                   if (i < n) goto again;
+                   return i;
+               }"#,
+        );
+
+        assert!(!lowered.contains("cond_br"), "{lowered}");
+        assert!(!lowered.contains("br ^"), "{lowered}");
+        assert!(lowered.contains("scf.while"), "{lowered}");
+    }
+
+    /// C allows a jump past a declaration into a compound statement; the block
+    /// is spliced into the sequence that encloses it, which puts its label on
+    /// the same footing as any other.
+    #[test]
+    fn goto_into_a_compound_statement_lowers_without_unstructured_branches() {
+        let lowered = lower_cir_control_flow(
+            r#"int f(int c) {
+                   if (c) goto inside;
+                   {
+                       int x = 2;
+                       inside:
+                       c = c + 1;
+                   }
+                   return c;
+               }"#,
+        );
+
+        assert!(!lowered.contains("cond_br"), "{lowered}");
+        assert!(!lowered.contains("br ^"), "{lowered}");
+    }
+
+    /// A `goto` into a loop body enters the loop without evaluating its
+    /// condition, and the loop runs normally from there.
+    #[test]
+    fn goto_into_a_loop_body_lowers_without_unstructured_branches() {
+        let lowered = lower_cir_control_flow(
+            r#"int f(int enter) {
+                   int value = 0;
+                   int total = 0;
+                   if (enter) goto inside;
+                   while (value < 2) {
+                       total = total + 10;
+                   inside:
+                       total = total + 1;
+                       value = value + 1;
+                   }
+                   return total;
+               }"#,
+        );
+
+        assert!(!lowered.contains("cond_br"), "{lowered}");
+        assert!(!lowered.contains("br ^"), "{lowered}");
+    }
+
+    /// A `goto` out of a `switch` case stops the switch, whose later items must
+    /// not run even when they are reached by fallthrough.
+    #[test]
+    fn goto_out_of_a_switch_lowers_without_unstructured_branches() {
+        let lowered = lower_cir_control_flow(
+            r#"int f(int n) {
+                   int total = 0;
+                   switch (n) {
+                   case 0:
+                       total = 1;
+                       goto done;
+                   case 1:
+                       total = 2;
+                       break;
+                   default:
+                       total = 3;
+                   }
+                   total = total + 10;
+               done:
+                   return total;
+               }"#,
+        );
+
+        assert!(!lowered.contains("cond_br"), "{lowered}");
+        assert!(!lowered.contains("br ^"), "{lowered}");
+    }
+
+    /// A `switch` body is flattened into guarded items rather than lowered as a
+    /// statement sequence, so a label inside one is no resume point. That is the
+    /// one `goto` fcc turns down, and it says so instead of branching.
+    #[test]
+    fn goto_to_a_label_inside_a_switch_body_is_rejected() {
+        let error = codegen_error(
+            r#"int f(int n) {
+                   if (n) goto inside;
+                   switch (n) {
+                   case 0:
+                   inside:
+                       return 1;
+                   }
+                   return 0;
+               }"#,
+        );
+
+        assert!(
+            error.contains("goto to a label inside a switch body"),
+            "{error}"
+        );
     }
 
     #[test]

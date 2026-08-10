@@ -1266,6 +1266,18 @@ int main(void) { return sum_to(5) == 10 ? 0 : 1; }
     );
 }
 
+/// Every `goto` shape fcc must lower without a branch: cleanup exits, two
+/// jumps to one label, exits from nested loops, a loop written out of a
+/// backward jump, an irreducible pair of labels, and jumps into a compound
+/// statement, a loop body and out of a `switch`.
+#[test]
+fn scalar_goto_shapes_match_host_compiler() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(include_str!("scalar/goto_shapes.c"));
+}
+
 #[test]
 fn goto_can_enter_a_loop_body() {
     if !cc_available() {
