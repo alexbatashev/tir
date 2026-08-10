@@ -216,6 +216,17 @@ fn scalar_early_return_matches_host_compiler() {
     assert_fcc_matches_host(include_str!("scalar/early_return.c"));
 }
 
+/// `break` and `continue` keep their C meaning inside the `scf.while` a `for`
+/// or a `do` becomes: the step and the trailing condition still run on a
+/// `continue`, and a `break` skips both.
+#[test]
+fn scalar_loop_control_matches_host_compiler() {
+    if !cc_available() {
+        return;
+    }
+    assert_fcc_matches_host(include_str!("scalar/loop_control.c"));
+}
+
 /// `do` loops become `scf.while` with the condition appended to the body, which
 /// only holds while `break` and `continue` keep their meaning.
 #[test]

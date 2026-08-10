@@ -352,6 +352,57 @@ int main(void) { printf("hello"); return 0; }"#,
         assert!(!lowered.contains("br ^"), "{lowered}");
     }
 
+    /// `break` and `continue` in a `for`, and `continue` in a `do`, are the loop
+    /// exits whose C meaning does not match the `scf.while` body they land in:
+    /// the step and the trailing condition must still run on a `continue`.
+    #[test]
+    fn loop_control_constructs_lower_without_unstructured_branches() {
+        let lowered = lower_cir_control_flow(
+            r#"int f(int n) {
+                   int total = 0;
+                   int i;
+                   int j;
+                   for (i = 0; i < n; i = i + 1) {
+                       if (i == 1) {
+                           continue;
+                       }
+                       if (i == 7) {
+                           break;
+                       }
+                       total = total + i;
+                   }
+                   j = 0;
+                   do {
+                       j = j + 1;
+                       if (j == 2) {
+                           continue;
+                       }
+                       total = total + j;
+                   } while (j < n);
+                   for (i = 0; i < n; i = i + 1) {
+                       while (total > 0) {
+                           total = total - 1;
+                           if (total == 3) {
+                               continue;
+                           }
+                           if (total == 1) {
+                               break;
+                           }
+                       }
+                       if (i == 2) {
+                           continue;
+                       }
+                       total = total + 1;
+                   }
+                   return total;
+               }"#,
+        );
+
+        assert!(!lowered.contains("cond_br"), "{lowered}");
+        assert!(!lowered.contains("br ^"), "{lowered}");
+        assert!(lowered.contains("scf.break"), "{lowered}");
+    }
+
     #[test]
     fn multiblock_cir_while_lowers_directly_to_cfg() {
         let context = fcc_context();

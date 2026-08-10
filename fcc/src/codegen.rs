@@ -91,6 +91,11 @@ struct FnCodegen<'a> {
     /// the whole function stays structured.
     return_flag: Option<Slot>,
     return_slot: Option<Slot>,
+    /// Set while lowering the body of a loop whose `continue` cannot be a
+    /// `cir.continue`: a `for` runs its step and a `do` its condition on the
+    /// way to the next iteration, and both trail the body once structured.
+    /// `continue` raises the flag and the rest of the body is skipped instead.
+    continue_flag: Option<Slot>,
     /// Lowered values in the expression subtree currently being emitted. The AST
     /// is a DAG, so shared children reuse their first lowering.
     values: HashMap<NodeId, LoweredExpr>,
@@ -1315,6 +1320,7 @@ fn lower_function(
         terminated: false,
         return_flag: None,
         return_slot: None,
+        continue_flag: None,
         values: HashMap::new(),
     };
     cg.lower_body(func, &param_ids[parameter_start..], &signature.params)?;
@@ -2010,6 +2016,19 @@ impl FnCodegen<'_> {
                 .any(|child| self.contains_return(child))
     }
 
+    /// A `continue` binds to the nearest enclosing loop, so the ones a nested
+    /// loop owns say nothing about the statements around that loop.
+    fn contains_continue(&self, statement: NodeId) -> bool {
+        match self.ast.get_node(statement).kind {
+            AstKind::Continue => true,
+            AstKind::While | AstKind::DoWhile | AstKind::For => false,
+            _ => self
+                .ast
+                .children(statement)
+                .any(|child| self.contains_continue(child)),
+        }
+    }
+
     fn open_return_slots(&mut self, result: QualType, returns_void: bool) {
         let i32_ty = IntegerType::new(self.context, 32);
         let flag = self.alloca(i32_ty, 4, 4);
@@ -2060,33 +2079,54 @@ impl FnCodegen<'_> {
     /// Lower a statement sequence, guarding what follows a `return` against
     /// having already returned. In a loop body the guard leaves the loop
     /// instead, so neither the remaining body, the step nor the loop condition
-    /// runs again.
+    /// runs again. A `continue` that raised a flag guards the same way, but the
+    /// loop is left running: only the rest of the body is skipped.
     fn lower_statements(&mut self, statements: &[NodeId], tail: Tail) -> Result<(), Diagnostic> {
         for (index, &statement) in statements.iter().enumerate() {
             self.lower_stmt(statement)?;
             // `self.terminated` means the statement left the region for good
             // (`break`, `continue`), so whatever follows is unreachable and
             // needs no guard.
-            if self.terminated || self.return_flag.is_none() || !self.contains_return(statement) {
+            let returns = self.return_flag.is_some() && self.contains_return(statement);
+            let continues = self.continue_flag.is_some() && self.contains_continue(statement);
+            if self.terminated || !(returns || continues) {
                 continue;
             }
             let rest = &statements[index + 1..];
-            if rest.is_empty() && matches!(tail, Tail::Fallthrough) {
+            let leaves_loop = returns && matches!(tail, Tail::ExitLoop(_));
+            if rest.is_empty() && !leaves_loop {
                 break;
             }
-            self.lower_if_not_returned(
-                |cg| cg.lower_statements(rest, tail),
-                |cg| {
-                    if let Tail::ExitLoop(scope) = tail {
-                        cg.builder
-                            .insert(cir::ops::r#break(cg.context, scope).build());
-                    }
-                    Ok(())
-                },
-            )?;
+            let guarded = |cg: &mut Self| {
+                if !returns {
+                    return cg.lower_statements(rest, tail);
+                }
+                cg.lower_if_not_returned(
+                    |cg| cg.lower_statements(rest, tail),
+                    |cg| {
+                        if let Tail::ExitLoop(scope) = tail {
+                            cg.builder
+                                .insert(cir::ops::r#break(cg.context, scope).build());
+                        }
+                        Ok(())
+                    },
+                )
+            };
+            if continues {
+                self.lower_if_not_continued(guarded)?;
+            } else {
+                guarded(self)?;
+            }
             break;
         }
         Ok(())
+    }
+
+    /// The flag a `for` or `do` body needs to hold a `continue`, or `None` when
+    /// the body has none of its own.
+    fn loop_continue_flag(&mut self, body: NodeId) -> Option<Slot> {
+        self.contains_continue(body)
+            .then(|| self.alloca(IntegerType::new(self.context, 32), 4, 4))
     }
 
     fn lower_loop_body(&mut self, body: NodeId, scope: ValueId) -> Result<(), Diagnostic> {
@@ -2164,6 +2204,23 @@ impl FnCodegen<'_> {
         otherwise: impl FnOnce(&mut Self) -> Result<(), Diagnostic>,
     ) -> Result<(), Diagnostic> {
         let condition = self.has_not_returned();
+        self.lower_guard(condition, then, otherwise)
+    }
+
+    fn lower_if_not_continued(
+        &mut self,
+        then: impl FnOnce(&mut Self) -> Result<(), Diagnostic>,
+    ) -> Result<(), Diagnostic> {
+        let condition = self.has_not_continued();
+        self.lower_guard(condition, then, |_| Ok(()))
+    }
+
+    fn lower_guard(
+        &mut self,
+        condition: ValueId,
+        then: impl FnOnce(&mut Self) -> Result<(), Diagnostic>,
+        otherwise: impl FnOnce(&mut Self) -> Result<(), Diagnostic>,
+    ) -> Result<(), Diagnostic> {
         let then_region = self.context.create_region();
         let then_block = self.context.create_block(vec![]);
         then_region.add_block(then_block.id());
@@ -2194,11 +2251,29 @@ impl FnCodegen<'_> {
 
     fn has_not_returned(&mut self) -> ValueId {
         let flag = self.return_flag.unwrap();
+        self.flag_is_clear(flag)
+    }
+
+    fn has_not_continued(&mut self) -> ValueId {
+        let flag = self.continue_flag.unwrap();
+        self.flag_is_clear(flag)
+    }
+
+    fn flag_is_clear(&mut self, flag: Slot) -> ValueId {
         let value = self
             .builder
             .insert(p::load(self.context, flag.ptr, flag.elem).build())
             .result();
         self.compare_against_zero(value, "eq")
+    }
+
+    fn store_flag(&mut self, flag: Slot, value: i64) {
+        let value = self
+            .builder
+            .insert(b::constant(self.context, value, flag.elem).build())
+            .result();
+        self.builder
+            .insert(p::store(self.context, value, flag.ptr).build());
     }
 
     fn lower_stmt(&mut self, stmt: NodeId) -> Result<(), Diagnostic> {
@@ -2319,6 +2394,7 @@ impl FnCodegen<'_> {
                 let body_region = self.context.create_region();
                 let body_block = self.context.create_block(vec![scope.clone()]);
                 body_region.add_block(body_block.id());
+                let outer_continue_flag = self.continue_flag.take();
                 self.loop_scopes.push(scope.id());
                 self.break_scopes.push(BreakScope::Loop(scope.id()));
                 self.in_block(body_block.clone(), |cg| {
@@ -2328,6 +2404,7 @@ impl FnCodegen<'_> {
                 })?;
                 self.break_scopes.pop();
                 self.loop_scopes.pop();
+                self.continue_flag = outer_continue_flag;
 
                 self.builder.insert(
                     cir::ops::r#while(
@@ -2347,18 +2424,24 @@ impl FnCodegen<'_> {
                 let scope = self
                     .context
                     .create_value(TokenType::new(self.context), None);
+                let continue_flag = self.loop_continue_flag(body);
                 let body_region = self.context.create_region();
                 let body_block = self.context.create_block(vec![scope.clone()]);
                 body_region.add_block(body_block.id());
+                let outer_continue_flag = std::mem::replace(&mut self.continue_flag, continue_flag);
                 self.loop_scopes.push(scope.id());
                 self.break_scopes.push(BreakScope::Loop(scope.id()));
                 self.in_block(body_block.clone(), |cg| {
+                    if let Some(flag) = continue_flag {
+                        cg.store_flag(flag, 0);
+                    }
                     cg.lower_loop_body(body, scope.id())?;
                     cg.ensure_cir_yield(body_block);
                     Ok(())
                 })?;
                 self.break_scopes.pop();
                 self.loop_scopes.pop();
+                self.continue_flag = outer_continue_flag;
 
                 let condition_region = self.context.create_region();
                 let condition_block = self.context.create_block(vec![]);
@@ -2391,12 +2474,13 @@ impl FnCodegen<'_> {
                 let scope = self
                     .context
                     .create_value(TokenType::new(self.context), None);
-                // A `for` body cannot leave the loop with a break: its step
-                // belongs to the loop body once structured, so `cir.for` only
-                // stays structured while its scope is unused. A `return` in the
-                // body therefore stops the step and the next condition instead.
+                // A `return` in the body must stop the step and the next
+                // condition, which a `break` cannot express: the step belongs
+                // to the loop body once structured, and C runs it on the way
+                // out of an iteration that a `break` does not take.
                 let returns = self.return_flag.is_some() && self.contains_return(*body);
                 let held = returns.then(|| self.alloca(IntegerType::new(self.context, 32), 4, 4));
+                let continue_flag = self.loop_continue_flag(*body);
 
                 let condition_region = self.context.create_region();
                 let condition_block = self.context.create_block(vec![]);
@@ -2414,9 +2498,13 @@ impl FnCodegen<'_> {
                 let body_region = self.context.create_region();
                 let body_block = self.context.create_block(vec![scope.clone()]);
                 body_region.add_block(body_block.id());
+                let outer_continue_flag = std::mem::replace(&mut self.continue_flag, continue_flag);
                 self.loop_scopes.push(scope.id());
                 self.break_scopes.push(BreakScope::Loop(scope.id()));
                 self.in_block(body_block.clone(), |cg| {
+                    if let Some(flag) = continue_flag {
+                        cg.store_flag(flag, 0);
+                    }
                     if returns {
                         cg.lower_stmt(*body)?;
                     } else {
@@ -2427,6 +2515,7 @@ impl FnCodegen<'_> {
                 })?;
                 self.break_scopes.pop();
                 self.loop_scopes.pop();
+                self.continue_flag = outer_continue_flag;
 
                 let step_region = self.context.create_region();
                 let step_block = self.context.create_block(vec![]);
@@ -2532,9 +2621,14 @@ impl FnCodegen<'_> {
                 Ok(())
             }
             AstKind::Continue => {
-                let scope = *self.loop_scopes.last().unwrap();
-                self.builder
-                    .insert(cir::ops::r#continue(self.context, scope).build());
+                match self.continue_flag {
+                    Some(flag) => self.store_flag(flag, 1),
+                    None => {
+                        let scope = *self.loop_scopes.last().unwrap();
+                        self.builder
+                            .insert(cir::ops::r#continue(self.context, scope).build());
+                    }
+                }
                 self.terminated = true;
                 Ok(())
             }
@@ -2752,20 +2846,23 @@ impl FnCodegen<'_> {
             .builder
             .insert(b::andi(self.context, selected, not_done, i32_ty).build())
             .result();
-        // A `return` inside a case leaves the switch, so no later item — not
-        // even one reached by fallthrough — may run.
-        let condition = if self.return_flag.is_some() {
-            let not_returned = self.has_not_returned();
-            let not_returned = self
+        // A `return` or a `continue` inside a case leaves the switch, so no
+        // later item — not even one reached by fallthrough — may run.
+        let mut condition = condition;
+        for flag in [self.return_flag, self.continue_flag] {
+            let Some(flag) = flag else {
+                continue;
+            };
+            let clear = self.flag_is_clear(flag);
+            let clear = self
                 .builder
-                .insert(b::extui(self.context, not_returned, i32_ty).build())
+                .insert(b::extui(self.context, clear, i32_ty).build())
                 .result();
-            self.builder
-                .insert(b::andi(self.context, condition, not_returned, i32_ty).build())
-                .result()
-        } else {
-            condition
-        };
+            condition = self
+                .builder
+                .insert(b::andi(self.context, condition, clear, i32_ty).build())
+                .result();
+        }
         self.truth_value(condition)
     }
 

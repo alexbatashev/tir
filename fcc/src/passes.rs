@@ -517,20 +517,21 @@ impl LowerCirControlFlowPass {
             && Self::body_is_structured(context, op.regions[1])
     }
 
-    // sea: unstructured remainder — a `break` or `continue` in a `for` body
-    // uses the loop scope, and `scf.while` has no latch to run the step on a
-    // continue, so such loops keep the direct CFG path.
+    /// A `for` loop becomes `scf.while` with the step appended to the body, so
+    /// a `continue` — which in C runs that step — must not be an `scf.continue`.
+    /// fcc raises a flag instead and never emits one here; hand-written CIR that
+    /// does keeps the loop on the direct path.
     fn for_is_structured(context: &Context, op: &tir::OpInstance) -> bool {
+        let scope = Self::entry_block(context, op.regions[1]).arguments()[0].id();
         Self::condition_operand(context, op.regions[0]).is_some()
             && Self::body_is_structured(context, op.regions[1])
             && Self::body_is_structured(context, op.regions[2])
-            && !Self::loop_scope_is_used(context, op.regions[1])
+            && !Self::region_has_continue(context, op.regions[1], scope)
     }
 
-    // sea: unstructured remainder — see the `continue` case below.
     /// A `do` loop becomes `scf.while` with the condition appended to the body,
-    /// so a `continue` — which in C jumps to that condition — has no structured
-    /// spelling and keeps the loop on the direct path.
+    /// so a `continue` — which in C jumps to that condition — must not be an
+    /// `scf.continue`, exactly as in a `for`.
     fn do_is_structured(context: &Context, op: &tir::OpInstance) -> bool {
         let Some(body) = Self::single_block(context, op.regions[0]) else {
             return false;
@@ -564,11 +565,6 @@ impl LowerCirControlFlowPass {
                             .any(|region| Self::region_has_continue(context, *region, scope))
                 })
             })
-    }
-
-    fn loop_scope_is_used(context: &Context, body: RegionId) -> bool {
-        let scope = Self::entry_block(context, body).arguments()[0].id();
-        context.is_value_used(scope)
     }
 
     fn next_control_op_in_region(
@@ -879,6 +875,9 @@ impl LowerCirControlFlowPass {
         Ok(region.id())
     }
 
+    /// Build the `scf.while` body of a `for` loop: the loop body followed by the
+    /// step, which C runs on every path that reaches the end of the body. A
+    /// `break` leaves the loop and so skips the step.
     fn structured_for_body(
         context: &Context,
         body_region: RegionId,
@@ -887,16 +886,40 @@ impl LowerCirControlFlowPass {
         let body = Self::single_block(context, body_region).unwrap();
         let step = Self::single_block(context, step_region).unwrap();
         let region = context.create_region();
-        let block = context.create_block(vec![]);
+        let arguments = body
+            .arguments()
+            .iter()
+            .map(|argument| {
+                let replacement = context.create_value(argument.ty(), None);
+                context.replace_value_uses(argument.id(), replacement.id());
+                replacement
+            })
+            .collect::<Vec<_>>();
+        let scope = arguments[0].id();
+        let block = context.create_block(arguments);
         region.add_block(block.id());
-        for source in [body, step] {
+        let leaves_loop = context
+            .get_op(*body.op_ids().last().unwrap())
+            .as_op::<cir::BreakOp>()
+            .is_some();
+        let sources = if leaves_loop {
+            vec![body]
+        } else {
+            vec![body, step]
+        };
+        for source in sources {
             let op_ids = source.op_ids();
             for op_id in op_ids.iter().take(op_ids.len() - 1) {
                 source.remove_op(*op_id);
                 block.insert(block.len(), *op_id);
             }
         }
-        IRBuilder::new(block).insert(scf::ops::r#yield(context, vec![]).build());
+        let mut builder = IRBuilder::new(block);
+        if leaves_loop {
+            builder.insert(scf::ops::r#break(context, scope).build());
+        } else {
+            builder.insert(scf::ops::r#yield(context, vec![]).build());
+        }
         Ok(region.id())
     }
 
