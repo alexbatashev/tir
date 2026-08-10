@@ -10,9 +10,14 @@ mod runner;
 #[cfg(test)]
 mod test_lang;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use tir_adt::{IndexMap, ScopedDisjointSet};
+use tir_adt::{FxBuildHasher, IndexMap, ScopedDisjointSet};
+
+type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
+/// Hash-cons table: [`ENode::hash_cons`] bucket -> `[(canonical node, class)]`.
+/// Never iterated, so a hash map keeps it deterministic.
+type Memo<L> = FxHashMap<u64, Vec<(L, Id)>>;
 
 pub use eclass::*;
 pub use enode::*;
@@ -39,31 +44,72 @@ pub struct EGraph<L: ENode> {
     /// Class-id equivalence; the sole authority on equality (all comparison flows
     /// through [`Self::find`]). Scoped unions layer here, discarded by `pop_context`.
     unionfind: ScopedDisjointSet,
-    /// Base hash-cons: [`ENode::hash_cons`] bucket -> `[(canonical node, class)]`.
-    /// Collisions only share a bucket; identity is `matches` + equal children.
-    memo: IndexMap<u64, Vec<(L, Id)>>,
+    /// Base hash-cons. Collisions only share a bucket; identity is `matches` + equal children.
+    memo: Memo<L>,
     /// Canonical base class id -> e-class; absorbed ids removed on `union`. Scoped
-    /// unions never touch it, so `pop_context` restores it for free.
+    /// unions never touch it, so `pop_context` restores it for free. Insertion order
+    /// is ascending id, which is the class iteration order callers observe.
     classes: IndexMap<Id, EClass<L>>,
+    /// Running `classes` node total, so [`Self::total_size`] costs nothing.
+    total_nodes: usize,
     /// [`ENode::op_key`] bucket -> class ids holding such a node, so
     /// [`Self::classes_with_op`] skips classes a concrete-rooted pattern can't match.
     /// Append-only, caller-dedup'd: over-approximates, never misses a live class.
     classes_by_op: IndexMap<u64, Vec<Id>>,
     /// Classes touched by a `union` since the last `rebuild`, awaiting repair.
     pending: Vec<Id>,
-    /// Scope overlay, live only inside a scope. `scope_members`/`scope_classes` cache
-    /// the scope partition (rebuilt by [`Self::aggregate_scope`]); `scope_memo` stacks
-    /// one hash-cons per open context so a nested `pop_context` restores the enclosing
-    /// table. Base `classes`/`memo` stay immutable underneath.
-    scope_members: IndexMap<Id, Vec<Id>>,
-    scope_classes: IndexMap<Id, EClass<L>>,
-    scope_memo: Vec<IndexMap<u64, Vec<(L, Id)>>>,
+    /// Scope overlay, live only inside a scope. One `scope_members` frame per open
+    /// context holds that scope's partition (base reps grouped under their scoped
+    /// rep, merged groups only); `scope_memo` stacks one hash-cons per context so a
+    /// nested `pop_context` restores the enclosing table. Base `classes`/`memo` stay
+    /// immutable underneath.
+    scope_members: Vec<FxHashMap<Id, Vec<Id>>>,
+    /// Read-side aggregation of the innermost frame, refreshed by [`Self::refresh_view`].
+    view: ScopeView<L>,
+    scope_memo: Vec<Memo<L>>,
     /// Undo log of base insertions per open context: `make_class` still writes the
     /// new class into base `classes`/`classes_by_op`/children's `parents` while scoped
     /// (so the overlay, which reads base, sees it), but `pop_context` reverts exactly
     /// these so a popped scope leaves the base structurally identical. One frame per
     /// context; nested pops revert only the innermost.
     scope_created: Vec<Vec<ScopeCreated>>,
+}
+
+/// Aggregated read view of the innermost scope, as of the last refresh. Only merged
+/// groups are materialized; every other class is read straight from the base.
+struct ScopeView<L: ENode> {
+    /// Scoped rep -> its aggregated e-class.
+    classes: FxHashMap<Id, EClass<L>>,
+    /// What [`EGraph::classes`] emits at a merged group's base class: `Some(rep)` at
+    /// the group's first member, `None` (skip) at the rest.
+    plan: FxHashMap<Id, Option<Id>>,
+    /// Base classes present at the refresh. Classes minted afterwards stay invisible
+    /// to the view until the next one, as the old full re-aggregation had them.
+    watermark: usize,
+    num_classes: usize,
+    total_size: usize,
+}
+
+impl<L: ENode> ScopeView<L> {
+    fn clear(&mut self) {
+        self.classes.clear();
+        self.plan.clear();
+        self.watermark = 0;
+        self.num_classes = 0;
+        self.total_size = 0;
+    }
+}
+
+impl<L: ENode> Default for ScopeView<L> {
+    fn default() -> Self {
+        Self {
+            classes: FxHashMap::default(),
+            plan: FxHashMap::default(),
+            watermark: 0,
+            num_classes: 0,
+            total_size: 0,
+        }
+    }
 }
 
 /// One base class minted by [`EGraph::make_class`] inside a scope, with what its
@@ -85,12 +131,13 @@ impl<L: ENode> EGraph<L> {
     pub fn new() -> Self {
         Self {
             unionfind: ScopedDisjointSet::new(0),
-            memo: IndexMap::new(),
+            memo: Memo::default(),
             classes: IndexMap::new(),
+            total_nodes: 0,
             classes_by_op: IndexMap::new(),
             pending: Vec::new(),
-            scope_members: IndexMap::new(),
-            scope_classes: IndexMap::new(),
+            scope_members: Vec::new(),
+            view: ScopeView::default(),
             scope_memo: Vec::new(),
             scope_created: Vec::new(),
         }
@@ -102,33 +149,34 @@ impl<L: ENode> EGraph<L> {
 
     /// Total number of e-nodes across all (current-scope) classes.
     pub fn total_size(&self) -> usize {
-        self.current_classes().values().map(EClass::len).sum()
+        if self.in_scope() {
+            self.view.total_size
+        } else {
+            self.total_nodes
+        }
     }
 
     pub fn num_classes(&self) -> usize {
-        self.current_classes().len()
+        if self.in_scope() {
+            self.view.num_classes
+        } else {
+            self.classes.len()
+        }
     }
 
     fn in_scope(&self) -> bool {
         self.unionfind.depth() > 0
     }
 
-    /// Class table for the current scope: the overlay while open, else the base.
-    fn current_classes(&self) -> &IndexMap<Id, EClass<L>> {
-        if self.in_scope() {
-            &self.scope_classes
-        } else {
-            &self.classes
-        }
-    }
-
     /// Enter an assumption scope: unions until the matching `pop_context` are local;
     /// base classes and hash-cons stay untouched.
     pub fn push_context(&mut self) {
+        let frame = self.scope_members.last().cloned().unwrap_or_default();
         self.unionfind.push_context();
-        self.scope_memo.push(IndexMap::new());
+        self.scope_memo.push(Memo::default());
         self.scope_created.push(Vec::new());
-        self.aggregate_scope();
+        self.scope_members.push(frame);
+        self.refresh_view();
     }
 
     /// Leave the scope, discarding its unions, overlay, and any classes added inside
@@ -139,8 +187,7 @@ impl<L: ENode> EGraph<L> {
         }
         self.unionfind.pop_context();
         self.scope_memo.pop();
-        self.scope_members.clear();
-        self.scope_classes.clear();
+        self.scope_members.pop();
         // Drop union work queued against classes that vanished with the scope; a
         // survivor kept here would panic the next base `repair`.
         self.pending = self
@@ -150,7 +197,9 @@ impl<L: ENode> EGraph<L> {
             .filter(|&id| self.classes.contains_key(&self.find(id)))
             .collect();
         if self.in_scope() {
-            self.aggregate_scope();
+            self.refresh_view();
+        } else {
+            self.view.clear();
         }
     }
 
@@ -170,7 +219,9 @@ impl<L: ENode> EGraph<L> {
                     self.classes_by_op.remove(&c.op_key);
                 }
             }
-            self.classes.remove(&c.id);
+            if let Some(class) = self.classes.remove(&c.id) {
+                self.total_nodes -= class.nodes.len();
+            }
         }
     }
 
@@ -185,15 +236,34 @@ impl<L: ENode> EGraph<L> {
 
     pub fn class(&self, id: Id) -> &EClass<L> {
         let root = self.find(id);
-        // Fall back to base for a node added since the last scope rebuild.
-        self.current_classes()
-            .get(&root)
+        // Fall back to base for a class the view does not merge, or one added since
+        // the last scope rebuild.
+        (!self.view.classes.is_empty())
+            .then(|| self.view.classes.get(&root))
+            .flatten()
             .or_else(|| self.classes.get(&root))
             .expect("live e-class")
     }
 
     pub fn classes(&self) -> impl Iterator<Item = &EClass<L>> + '_ {
-        self.current_classes().values()
+        let scoped = self.in_scope();
+        let base = (!scoped)
+            .then(|| self.classes.values())
+            .into_iter()
+            .flatten();
+        let view = scoped
+            .then(|| {
+                self.classes
+                    .values()
+                    .take(self.view.watermark)
+                    .filter_map(|class| match self.view.plan.get(&class.id) {
+                        Some(rep) => rep.map(|rep| &self.view.classes[&rep]),
+                        None => Some(class),
+                    })
+            })
+            .into_iter()
+            .flatten();
+        base.chain(view)
     }
 
     /// Canonical current-scope classes holding a node in `op` bucket, each once.
@@ -202,7 +272,8 @@ impl<L: ENode> EGraph<L> {
         let Some(ids) = self.classes_by_op.get(&op) else {
             return Vec::new();
         };
-        let mut seen = std::collections::HashSet::with_capacity(ids.len());
+        let mut seen: HashSet<Id, FxBuildHasher> =
+            HashSet::with_capacity_and_hasher(ids.len(), FxBuildHasher::default());
         ids.iter()
             .map(|&id| self.find(id))
             .filter(|&root| seen.insert(root))
@@ -221,7 +292,8 @@ impl<L: ENode> EGraph<L> {
     /// made under a scope aggregates over this slice.
     pub fn scope_members(&self, id: Id) -> &[Id] {
         self.scope_members
-            .get(&id)
+            .last()
+            .and_then(|frame| frame.get(&id))
             .map(Vec::as_slice)
             .unwrap_or(&[])
     }
@@ -258,13 +330,10 @@ impl<L: ENode> EGraph<L> {
         }
         let survivor = Id::from_raw(self.unionfind.union(ra.0, rb.0));
         let absorbed = if survivor == ra { rb } else { ra };
-        if self.in_scope() {
+        if let Some(frame) = self.scope_members.last_mut() {
             // Scope overlay only; base classes stay intact for `pop_context`.
-            let taken = self
-                .scope_members
-                .remove(&absorbed)
-                .unwrap_or_else(|| vec![absorbed]);
-            self.scope_members
+            let taken = frame.remove(&absorbed).unwrap_or_else(|| vec![absorbed]);
+            frame
                 .entry(survivor)
                 .or_insert_with(|| vec![survivor])
                 .extend(taken);
@@ -293,10 +362,11 @@ impl<L: ENode> EGraph<L> {
         let rules: Vec<&Rewrite<L, S>> = rules.into_iter().collect();
         let mut iters = 0;
         loop {
-            if iters >= iter_limit || self.total_size() >= node_limit {
+            let size = self.total_size();
+            if iters >= iter_limit || size >= node_limit {
                 break;
             }
-            let before = (self.num_classes(), self.total_size());
+            let before = (self.num_classes(), size);
 
             let searched: Vec<_> = rules
                 .iter()
@@ -344,7 +414,7 @@ impl<L: ENode> EGraph<L> {
     fn rebuild_scope(&mut self) {
         // Scope hash-cons accumulated across rounds; per-round dedup avoids the same
         // quadratic the base path avoids.
-        let mut memo: HashMap<u64, Vec<(L, Id)>> = HashMap::new();
+        let mut memo: Memo<L> = Memo::default();
         while !self.pending.is_empty() {
             let mut todo = std::mem::take(&mut self.pending);
             for rep in &mut todo {
@@ -356,7 +426,8 @@ impl<L: ENode> EGraph<L> {
                 let rep = self.find(rep);
                 let members = self
                     .scope_members
-                    .get(&rep)
+                    .last()
+                    .and_then(|frame| frame.get(&rep))
                     .cloned()
                     .unwrap_or_else(|| vec![rep]);
                 for base_rep in members {
@@ -387,36 +458,44 @@ impl<L: ENode> EGraph<L> {
                 }
             }
         }
-        self.aggregate_scope();
+        self.refresh_view();
     }
 
-    /// Rebuild the scope view: `scope_members` groups base reps under each scope rep,
-    /// `scope_classes` aggregates their e-nodes for the read API.
-    fn aggregate_scope(&mut self) {
-        let mut members: IndexMap<Id, Vec<Id>> = IndexMap::new();
-        let mut nodes: IndexMap<Id, Vec<L>> = IndexMap::new();
-        for class in self.classes.values() {
-            let root = self.find(class.id);
-            members.entry(root).or_default().push(class.id);
-            nodes
-                .entry(root)
-                .or_default()
-                .extend(class.nodes.iter().cloned());
+    /// Re-aggregate the read view from the innermost scope frame. Only merged groups
+    /// are materialized, so the cost is the size of the assumption's collapse, not of
+    /// the graph. Members are sorted so a group's e-nodes concatenate in base order.
+    fn refresh_view(&mut self) {
+        let mut frame = self.scope_members.pop().expect("open scope");
+        self.view.classes.clear();
+        self.view.plan.clear();
+        let mut absorbed = 0;
+        for (&rep, members) in frame.iter_mut() {
+            members.sort_unstable();
+            members.dedup();
+            let mut nodes = Vec::new();
+            for member in members.iter() {
+                if let Some(class) = self.classes.get(member) {
+                    nodes.extend(class.nodes.iter().cloned());
+                }
+            }
+            self.view.plan.insert(members[0], Some(rep));
+            for &member in &members[1..] {
+                self.view.plan.insert(member, None);
+            }
+            absorbed += members.len() - 1;
+            self.view.classes.insert(
+                rep,
+                EClass {
+                    id: rep,
+                    nodes,
+                    parents: Vec::new(),
+                },
+            );
         }
-        self.scope_members = members;
-        self.scope_classes = nodes
-            .into_iter()
-            .map(|(id, nodes)| {
-                (
-                    id,
-                    EClass {
-                        id,
-                        nodes,
-                        parents: Vec::new(),
-                    },
-                )
-            })
-            .collect();
+        self.view.watermark = self.classes.len();
+        self.view.num_classes = self.view.watermark - absorbed;
+        self.view.total_size = self.total_nodes;
+        self.scope_members.push(frame);
     }
 
     fn class_mut(&mut self, id: Id) -> &mut EClass<L> {
@@ -448,7 +527,7 @@ impl<L: ENode> EGraph<L> {
         Self::bucket_lookup(&self.memo, node).map(|id| self.find(id))
     }
 
-    fn bucket_lookup(memo: &IndexMap<u64, Vec<(L, Id)>>, node: &L) -> Option<Id> {
+    fn bucket_lookup(memo: &Memo<L>, node: &L) -> Option<Id> {
         memo.get(&node.hash_cons())?
             .iter()
             .find(|(stored, _)| is_congruent(stored, node))
@@ -508,6 +587,7 @@ impl<L: ENode> EGraph<L> {
             self.memo_insert(node.clone(), id);
         }
         self.classes.insert(id, EClass::new(id, node));
+        self.total_nodes += 1;
         // Inside a scope, log this base insertion so `pop_context` can revert it.
         if let Some(frame) = self.scope_created.last_mut() {
             frame.push(ScopeCreated {
@@ -531,8 +611,8 @@ impl<L: ENode> EGraph<L> {
             }
         }
 
-        let mut new_parents: Vec<(L, Id)> = Vec::new();
-        let mut index: HashMap<u64, Vec<usize>> = HashMap::new();
+        let mut new_parents: Vec<(L, Id)> = Vec::with_capacity(parents.len());
+        let mut index: FxHashMap<u64, Vec<usize>> = FxHashMap::default();
         for (mut p_node, p_class) in parents {
             self.canonicalize(&mut p_node);
             let p_class = self.find(p_class);
@@ -944,6 +1024,95 @@ mod tests {
         assert_eq!(g.num_classes(), base_classes);
         assert_eq!(g.total_size(), base_size);
         assert_eq!(g.classes.get(&a).unwrap().parents.len(), a_parents);
+    }
+
+    #[test]
+    fn scope_merge_aggregates_nodes_in_base_order() {
+        let mut g = EGraph::new();
+        let a = sym(&mut g, 0);
+        sym(&mut g, 1);
+        let c = sym(&mut g, 2);
+        g.rebuild();
+
+        g.push_context();
+        g.union(c, a);
+        g.rebuild();
+        let root = g.find(a);
+        assert_eq!(g.scope_members(root), &[a, c][..]);
+        let nodes = g.nodes(root);
+        assert!(matches!(nodes[0], Math::Sym(0)));
+        assert!(matches!(nodes[1], Math::Sym(2)));
+        assert_eq!(g.num_classes(), 2);
+        assert_eq!(g.total_size(), 3);
+
+        g.pop_context();
+        assert_eq!(g.num_classes(), 3);
+        assert!(g.scope_members(root).is_empty());
+        assert_eq!(g.nodes(g.find(a)).len(), 1);
+    }
+
+    #[test]
+    fn nested_pop_restores_outer_scope_partition() {
+        let mut g = EGraph::new();
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
+        let c = sym(&mut g, 2);
+        let d = sym(&mut g, 3);
+        g.rebuild();
+
+        g.push_context();
+        g.union(a, b);
+        g.rebuild();
+        let outer = g.find(a);
+
+        g.push_context();
+        g.union(c, d);
+        g.rebuild();
+        assert_eq!(g.num_classes(), 2);
+        g.pop_context();
+
+        assert_eq!(g.num_classes(), 3);
+        assert_eq!(g.total_size(), 4);
+        assert_eq!(g.scope_members(outer), &[a, b][..]);
+        assert_eq!(g.nodes(outer).len(), 2);
+        assert!(!g.connected(c, d));
+
+        g.pop_context();
+        assert_eq!(g.num_classes(), 4);
+    }
+
+    #[test]
+    fn scope_class_view_is_snapshot_until_rebuild() {
+        let mut g = EGraph::new();
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
+        g.rebuild();
+
+        g.push_context();
+        g.union(a, b);
+        // No rebuild yet: the aggregated view still shows the pre-union partition.
+        assert_eq!(g.num_classes(), 2);
+        assert_eq!(g.total_size(), 2);
+        g.rebuild();
+        assert_eq!(g.num_classes(), 1);
+        assert_eq!(g.total_size(), 2);
+        g.pop_context();
+    }
+
+    #[test]
+    fn classes_iterate_scope_roots_at_first_member_position() {
+        let mut g = EGraph::new();
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
+        let c = sym(&mut g, 2);
+        g.rebuild();
+
+        g.push_context();
+        g.union(a, c);
+        g.rebuild();
+        let seen: Vec<Id> = g.classes().map(|class| class.id()).collect();
+        assert_eq!(seen, vec![g.find(a), b]);
+        g.pop_context();
     }
 
     #[test]

@@ -1,10 +1,9 @@
-use std::collections::HashMap;
-
+use super::FxHashMap;
 use crate::egraph::{EGraph, ENode, Id};
 
 /// Cheapest representative e-node per e-class, chosen by [`EGraph::extract_best`].
 pub struct Extraction<L: ENode> {
-    best: HashMap<Id, L>,
+    best: FxHashMap<Id, L>,
 }
 
 impl<L: ENode> Extraction<L> {
@@ -21,40 +20,132 @@ impl<L: ENode> EGraph<L> {
     /// is skipped and revisited to a fixpoint, so a cycle is costed through its
     /// non-cyclic input. Scope-aware via [`EGraph::classes`]/[`EGraph::find`].
     pub fn extract_best(&self, cost_of: impl Fn(&L) -> u64) -> Extraction<L> {
-        let mut cost: HashMap<Id, u64> = HashMap::new();
-        let mut best: HashMap<Id, L> = HashMap::new();
-        loop {
-            let mut changed = false;
-            for class in self.classes() {
-                let id = self.find(class.id());
-                for node in class.nodes() {
-                    let Some(total) = self.node_cost(node, &cost_of, &cost) else {
-                        continue;
-                    };
-                    if cost.get(&id).is_none_or(|&best| total < best) {
-                        cost.insert(id, total);
-                        best.insert(id, node.clone());
-                        changed = true;
+        let graph = FlatGraph::new(self, cost_of);
+        let mut cost: Vec<Option<u64>> = vec![None; graph.classes.len()];
+        let mut best: Vec<Option<usize>> = vec![None; graph.classes.len()];
+
+        // Rounds sweep the e-nodes in scan order — class order, then node order —
+        // so which node wins a cost tie is the same as a full re-scan's. Only the
+        // parents of a class improved in the previous sweep can improve in the next,
+        // so `dirty` shrinks to the propagation frontier.
+        let mut dirty = vec![true; graph.nodes.len()];
+        let mut next = vec![false; graph.nodes.len()];
+        let mut queued = graph.nodes.len();
+        while queued > 0 {
+            queued = 0;
+            for position in 0..graph.nodes.len() {
+                if !std::mem::replace(&mut dirty[position], false) {
+                    continue;
+                }
+                let node = &graph.nodes[position];
+                let Some(total) = graph.cost_of(node, &cost) else {
+                    continue;
+                };
+                if cost[node.class].is_none_or(|best| total < best) {
+                    cost[node.class] = Some(total);
+                    best[node.class] = Some(position);
+                    for &parent in &graph.parents[node.class] {
+                        // A parent still ahead of the sweep sees the improvement in
+                        // this round, exactly as a full re-scan would; an earlier one
+                        // waits for the next.
+                        if parent > position {
+                            dirty[parent] = true;
+                        } else if !std::mem::replace(&mut next[parent], true) {
+                            queued += 1;
+                        }
                     }
                 }
             }
-            if !changed {
-                break;
-            }
+            std::mem::swap(&mut dirty, &mut next);
+            next.fill(false);
         }
-        Extraction { best }
+
+        Extraction {
+            best: graph
+                .classes
+                .iter()
+                .zip(&best)
+                .filter_map(|(&id, &position)| Some((id, graph.nodes[position?].node.clone())))
+                .collect(),
+        }
+    }
+}
+
+/// The e-graph flattened for extraction: dense class slots and e-nodes in scan
+/// order, with operator cost and child slots resolved once so the cost fixpoint
+/// touches neither the union-find nor a hash map.
+struct FlatGraph<'a, L: ENode> {
+    /// Slot -> canonical class id.
+    classes: Vec<Id>,
+    nodes: Vec<FlatNode<'a, L>>,
+    /// Class slot -> positions of the e-nodes taking it as a child.
+    parents: Vec<Vec<usize>>,
+    /// Child slots, sliced by [`FlatNode::children`].
+    children: Vec<usize>,
+}
+
+struct FlatNode<'a, L> {
+    node: &'a L,
+    class: usize,
+    base: u64,
+    children: std::ops::Range<usize>,
+    /// A child outside the class table can never be costed, so neither can this node.
+    costable: bool,
+}
+
+impl<'a, L: ENode> FlatGraph<'a, L> {
+    fn new(eg: &'a EGraph<L>, cost_of: impl Fn(&L) -> u64) -> Self {
+        let mut index: FxHashMap<Id, usize> = FxHashMap::default();
+        let mut classes: Vec<Id> = Vec::new();
+        let mut nodes: Vec<FlatNode<'a, L>> = Vec::new();
+        for class in eg.classes() {
+            let id = eg.find(class.id());
+            let slot = *index.entry(id).or_insert_with(|| {
+                classes.push(id);
+                classes.len() - 1
+            });
+            nodes.extend(class.nodes().iter().map(|node| FlatNode {
+                node,
+                class: slot,
+                base: cost_of(node),
+                children: 0..0,
+                costable: true,
+            }));
+        }
+
+        let mut children = Vec::new();
+        let mut parents = vec![Vec::new(); classes.len()];
+        for (position, entry) in nodes.iter_mut().enumerate() {
+            let start = children.len();
+            for &child in entry.node.children() {
+                match index.get(&eg.find(child)) {
+                    Some(&slot) => {
+                        children.push(slot);
+                        parents[slot].push(position);
+                    }
+                    None => entry.costable = false,
+                }
+            }
+            entry.children = start..children.len();
+        }
+
+        Self {
+            classes,
+            nodes,
+            parents,
+            children,
+        }
     }
 
-    /// `cost_of(node)` plus each child class's best cost, or `None` if any is un-costed.
-    fn node_cost(
-        &self,
-        node: &L,
-        cost_of: &impl Fn(&L) -> u64,
-        cost: &HashMap<Id, u64>,
-    ) -> Option<u64> {
-        let mut total = cost_of(node);
-        for &child in node.children() {
-            total = total.saturating_add(*cost.get(&self.find(child))?);
+    /// The node's operator cost plus each child class's best cost, or `None` if any
+    /// child is un-costed.
+    fn cost_of(&self, node: &FlatNode<'a, L>, cost: &[Option<u64>]) -> Option<u64> {
+        if !node.costable {
+            return None;
+        }
+        let mut total = node.base;
+        for &slot in &self.children[node.children.clone()] {
+            total = total.saturating_add(cost[slot]?);
         }
         Some(total)
     }
@@ -95,6 +186,24 @@ mod tests {
         let extraction = g.extract_best(unit);
         // neg(a) costs 1 (op) + 0 (leaf) = 1; the chosen node is the neg.
         assert!(matches!(extraction.node(g.find(na)).unwrap(), Math::Neg(_)));
+    }
+
+    #[test]
+    fn ties_keep_the_first_node_to_reach_the_minimum() {
+        // add(a, b) and add(b, a) merged: equal cost, so the node the scan reaches
+        // first stays chosen.
+        let mut g = EGraph::new();
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
+        let ab = add(&mut g, a, b);
+        let ba = add(&mut g, b, a);
+        g.union(ab, ba);
+        g.rebuild();
+
+        let extraction = g.extract_best(unit);
+        let root = g.find(ab);
+        let chosen = extraction.node(root).unwrap();
+        assert_eq!(chosen.children(), g.nodes(root)[0].children());
     }
 
     #[test]

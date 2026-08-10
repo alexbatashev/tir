@@ -1,4 +1,6 @@
-use tir_adt::{APFloat, APInt};
+use std::collections::HashSet;
+
+use tir_adt::{APFloat, APInt, FxBuildHasher};
 
 use crate::egraph::{EGraph, ENode, Id};
 
@@ -184,7 +186,7 @@ impl<N: ENode, S: Clone + PartialEq> Pattern<N, S> {
         // Bindings borrow the pattern's `Var`s; names are cloned only when a full match is emitted.
         let mut subst: Vec<(&Var<S>, Id)> = Vec::new();
         let mut bound: Vec<Option<Id>> = vec![None; self.nodes.len()];
-        let mut seen = std::collections::HashSet::new();
+        let mut seen: HashSet<Id, FxBuildHasher> = HashSet::default();
         for root in roots {
             let root = eg.find(root);
             if !seen.insert(root) {
