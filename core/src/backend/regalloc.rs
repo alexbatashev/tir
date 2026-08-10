@@ -846,15 +846,24 @@ impl RegisterAllocationPass {
                 let op_ref = op_ref_in(context, block_id, op_id);
                 let mut attributes = op.attributes.clone();
                 for (attr_index, value, class, index, is_use) in fixed_registers {
-                    let fixed = if is_use {
-                        let ty = context.get_value(ValueId::from_number(value)).ty();
-                        let fixed = context.create_value(ty, None).id().number();
+                    let ty = context.get_value(ValueId::from_number(value)).ty();
+                    let fixed = context.create_value(ty, None).id().number();
+                    // A fixed register is a point constraint at this instruction, not
+                    // a home for the value's whole live range: copying in before a
+                    // use and out after a def keeps the pin local, so the value may
+                    // live across another instruction that claims the same register.
+                    // The copy carries a coalescing mark and disappears whenever both
+                    // ends land in one register.
+                    let copy = if is_use {
                         let copy = self.target.emit_copy(context, class, fixed, value);
                         rewriter.insert_op_before(&op_ref, copy.as_ref())?;
-                        fixed
+                        copy
                     } else {
-                        value
+                        let copy = self.target.emit_copy(context, class, value, fixed);
+                        insert_after(context, rewriter, block_id, op_id, copy.as_ref())?;
+                        copy
                     };
+                    mark_coalescable(context, copy.id());
                     attributes[attr_index].value =
                         AttributeValue::Register(RegisterAttr::Virtual {
                             id: fixed,
@@ -1283,6 +1292,17 @@ pub(crate) fn op_ref_in(context: &Context, block_id: BlockId, op_id: OpId) -> Op
         Some(context.get_block(block_id)),
         None,
     )
+}
+
+/// Mark a copy the allocator may coalesce away: it reads the endpoints as an
+/// affinity and erases the copy when both land in one register.
+fn mark_coalescable(context: &Context, op_id: OpId) {
+    let mut attributes = context.get_op(op_id).attributes.clone();
+    attributes.push(crate::attributes::NamedAttribute {
+        name: prealloc::ABI_COPY_ATTR.to_string(),
+        value: AttributeValue::Bool(true),
+    });
+    context.set_op_attributes(op_id, attributes);
 }
 
 /// Insert `new_op` immediately after `op_id` in its block (before the following op,

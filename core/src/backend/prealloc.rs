@@ -221,9 +221,10 @@ impl Pass for BlockArgLoweringPass {
     }
 }
 
-/// Marks a copy this stage inserted to bridge an ABI boundary (argument or
-/// return). Register allocation reads the endpoints as a coalescing affinity,
-/// erases the copy when both land in one register, and strips the mark.
+/// Marks a copy inserted to keep a register pin local — an ABI boundary here, a
+/// fixed-register instruction operand in [`crate::backend::regalloc`]. Register
+/// allocation reads the endpoints as a coalescing affinity, erases the copy when
+/// both land in one register, and strips the mark.
 pub(crate) const ABI_COPY_ATTR: &str = "abi_copy";
 
 /// Marks the placeholder load of an incoming stack argument and carries its

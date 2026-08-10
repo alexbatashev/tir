@@ -90,6 +90,22 @@ fn ordered(a: u32, b: u32) -> (u32, u32) {
     (a.min(b), a.max(b))
 }
 
+/// Every virtual register some instruction in `blocks` names, as a use or a def.
+fn referenced_vregs(context: &Context, blocks: &[BlockId]) -> BTreeSet<u32> {
+    let mut referenced = BTreeSet::new();
+    for &block_id in blocks {
+        for op_id in context.get_block(block_id).op_ids() {
+            let regs = op_regs(&context.get_op(op_id));
+            for r in regs.uses.iter().chain(&regs.defs) {
+                if let RegRef::Virtual { id, .. } = r {
+                    referenced.insert(*id);
+                }
+            }
+        }
+    }
+    referenced
+}
+
 /// Analyze liveness over `blocks` (in program order), using `successors` for the
 /// inter-block dataflow: `successors(b)` returns the control-flow successor blocks
 /// of `b`. A value defined in one block and used in another is live across the
@@ -101,12 +117,22 @@ pub fn analyze(
     successors: impl Fn(BlockId) -> Vec<BlockId>,
 ) -> Liveness {
     let mut result = Liveness::default();
+    let referenced = referenced_vregs(context, blocks);
 
     // 1. Gather per-block, per-op register info; discover vreg classes.
     let mut block_infos: Vec<BlockInfo> = Vec::new();
     for &block_id in blocks {
         let block = context.get_block(block_id);
-        let params: Vec<u32> = block.arguments().iter().map(|v| v.id().number()).collect();
+        // Block parameters were lowered to explicit copies before allocation, so a
+        // parameter is a value only while some instruction still names it. One that
+        // spilling has rewritten away carries nothing, and keeping it would leave
+        // the allocator a candidate whose spilling can never relieve pressure.
+        let params: Vec<u32> = block
+            .arguments()
+            .iter()
+            .map(|v| v.id().number())
+            .filter(|vreg| referenced.contains(vreg))
+            .collect();
 
         let mut ops = Vec::new();
         let mut exposed_uses = BTreeSet::new();
