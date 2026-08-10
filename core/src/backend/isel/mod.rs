@@ -1399,15 +1399,22 @@ impl InstructionSelectPass {
                                 .as_interface::<dyn BranchTerminator>()
                                 .map(|branch| branch.successor_operands())
                                 .unwrap_or_default();
-                            let edge_args = |dest| {
+                            // Both interfaces list one entry per edge in the same
+                            // order, and two edges may lead to one block while
+                            // forwarding different values, so an edge's arguments
+                            // are taken by position rather than by destination.
+                            let edge_args = |edge: usize, dest| {
                                 operands
-                                    .iter()
-                                    .find(|(succ, _)| *succ == dest)
+                                    .get(edge)
+                                    .filter(|(succ, _)| *succ == dest)
                                     .map(|(_, args)| args.clone())
                                     .unwrap_or_default()
                             };
-                            let true_args = edge_args(true_dest);
-                            let false_args = edge_args(false_dest);
+                            let (true_args, false_args) = if *a_taken {
+                                (edge_args(0, true_dest), edge_args(1, false_dest))
+                            } else {
+                                (edge_args(1, true_dest), edge_args(0, false_dest))
+                            };
                             let class = builder.build_from_value(*a_cond);
                             control
                                 .entry(block_id)
