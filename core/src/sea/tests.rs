@@ -1,10 +1,13 @@
-use crate::builtin::IntegerType;
+use crate::attributes::{AttributeValue, NamedAttribute};
+use crate::builtin::{IntegerType, UnitType};
 use crate::{Context, TypeId};
 
 use super::graph::{Graph, NodeId, Origin, PortType, RegionId};
-use super::{kinds, mutate};
+use super::view::{View, ViewCache};
+use super::{commit, kinds, mutate};
 
 struct Fixture {
+    context: Context,
     graph: Graph,
     i1: TypeId,
     i32: TypeId,
@@ -16,6 +19,7 @@ fn fixture() -> Fixture {
     let i32 = IntegerType::new(&context, 32);
     Fixture {
         graph: Graph::new(i1, &[]),
+        context,
         i1,
         i32,
     }
@@ -36,6 +40,321 @@ impl Fixture {
         self.graph
             .add_node(op, &[input], &[PortType::Value(ty)], &[], Vec::new())
     }
+
+    fn constant(&mut self, value: i64, ty: TypeId) -> Origin {
+        let op = self.graph.op_type("builtin", "constant");
+        let node = self
+            .graph
+            .add_node(
+                op,
+                &[],
+                &[PortType::Value(ty)],
+                &[],
+                vec![NamedAttribute::new("value", AttributeValue::Int(value))],
+            )
+            .expect("a constant has no inputs to reject");
+        Origin::output(node, 0)
+    }
+
+    fn addi(&mut self, lhs: Origin, rhs: Origin, ty: TypeId) -> Origin {
+        let op = self.graph.op_type("builtin", "addi");
+        let node = self
+            .graph
+            .add_node(op, &[lhs, rhs], &[PortType::Value(ty)], &[], Vec::new())
+            .expect("both operands are scheduled earlier");
+        Origin::output(node, 0)
+    }
+
+    /// A node on the state chain: it reads `state` after its operands and
+    /// produces one value plus the state that follows it.
+    fn stateful(
+        &mut self,
+        name: &'static str,
+        operands: &[Origin],
+        state: Origin,
+        ty: TypeId,
+    ) -> (Origin, Origin) {
+        let op = self.graph.op_type("test", name);
+        let mut inputs = operands.to_vec();
+        inputs.push(state);
+        let node = self
+            .graph
+            .add_node(
+                op,
+                &inputs,
+                &[PortType::Value(ty), PortType::State],
+                &[],
+                Vec::new(),
+            )
+            .expect("every input is scheduled earlier");
+        (Origin::output(node, 0), Origin::output(node, 1))
+    }
+
+    /// Seal a λ region with `results` and give it its λ node.
+    fn close_lambda(&mut self, region: RegionId, results: &[Origin]) -> NodeId {
+        self.graph
+            .close_region(region, results)
+            .expect("the results are visible in their own region");
+        let function = PortType::Value(UnitType::new(&self.context));
+        self.graph
+            .add_node(kinds::LAMBDA, &[], &[function], &[region], Vec::new())
+            .expect("a λ over a closed region with no context variables")
+    }
+}
+
+/// A λ whose body adds zero to its argument, plus the origins the tests assert
+/// on: the argument and the sum.
+fn add_zero_lambda(f: &mut Fixture) -> (NodeId, RegionId, Origin, Origin) {
+    let i32 = f.i32;
+    let body = f
+        .graph
+        .open_region(&[PortType::Value(i32), PortType::State]);
+    let argument = Origin::argument(body, 0);
+    let zero = f.constant(0, i32);
+    let sum = f.addi(argument, zero, i32);
+    let lambda = f.close_lambda(body, &[sum, Origin::argument(body, 1)]);
+    (lambda, body, argument, sum)
+}
+
+/// A λ that forwards one of two constants, so a test has something to splice.
+fn splicable_lambda(f: &mut Fixture) -> (NodeId, NodeId, Origin) {
+    let i32 = f.i32;
+    let body = f.graph.open_region(&[PortType::State]);
+    let first = f.constant(1, i32);
+    let second = f.constant(2, i32);
+    let user = f.forward(first, i32).expect("the constant is earlier");
+    let lambda = f.close_lambda(body, &[Origin::argument(body, 0)]);
+    (lambda, user, second)
+}
+
+#[test]
+fn the_view_proves_an_addition_of_zero_is_its_operand() {
+    let mut f = fixture();
+    let (lambda, body, argument, sum) = add_zero_lambda(&mut f);
+    f.graph
+        .finish(&[Origin::output(lambda, 0)])
+        .expect("the λ is the only export");
+
+    let mut view = View::build(&f.context, &f.graph, body);
+    assert_ne!(view.class(sum), view.class(argument), "before saturation");
+
+    view.saturate(&f.context);
+
+    assert_eq!(view.class(sum), view.class(argument));
+}
+
+#[test]
+fn a_stateful_node_anchors_the_values_around_it() {
+    let mut f = fixture();
+    let i32 = f.i32;
+    let body = f
+        .graph
+        .open_region(&[PortType::Value(i32), PortType::State]);
+    let address = Origin::argument(body, 0);
+    let state = Origin::argument(body, 1);
+    let (first, state) = f.stateful("load", &[address], state, i32);
+    let (_, state) = f.stateful("store", &[address, first], state, i32);
+    let (second, state) = f.stateful("load", &[address], state, i32);
+    let lambda = f.close_lambda(body, &[second, state]);
+    f.graph
+        .finish(&[Origin::output(lambda, 0)])
+        .expect("the λ is the only export");
+
+    let mut view = View::build(&f.context, &f.graph, body);
+    view.saturate(&f.context);
+
+    assert_ne!(
+        view.class(first),
+        view.class(second),
+        "two loads of one address split by a store are not the same value"
+    );
+}
+
+#[test]
+fn a_cached_view_survives_an_edit_to_a_sibling_lambda() {
+    let mut f = fixture();
+    let (first, body, argument, sum) = add_zero_lambda(&mut f);
+    let (second, user, replacement) = splicable_lambda(&mut f);
+    f.graph
+        .finish(&[Origin::output(first, 0), Origin::output(second, 0)])
+        .expect("both λs are exported");
+
+    let mut cache = ViewCache::default();
+    cache.view(&f.context, &f.graph, body).saturate(&f.context);
+    mutate::splice(&mut f.graph, user, 0, replacement).expect("same type, scheduled earlier");
+
+    let view = cache.view(&f.context, &f.graph, body);
+    assert_eq!(
+        view.class(sum),
+        view.class(argument),
+        "the saturation survived, so the view was not rebuilt"
+    );
+}
+
+#[test]
+fn a_cached_view_is_rebuilt_after_an_edit_to_its_own_lambda() {
+    let mut f = fixture();
+    let i32 = f.i32;
+    let body = f
+        .graph
+        .open_region(&[PortType::Value(i32), PortType::State]);
+    let argument = Origin::argument(body, 0);
+    let zero = f.constant(0, i32);
+    let one = f.constant(1, i32);
+    let sum = f.addi(argument, zero, i32);
+    let user = sum.node().expect("the sum is a node output");
+    let lambda = f.close_lambda(body, &[sum, Origin::argument(body, 1)]);
+    f.graph
+        .finish(&[Origin::output(lambda, 0)])
+        .expect("the λ is the only export");
+
+    let mut cache = ViewCache::default();
+    cache.view(&f.context, &f.graph, body).saturate(&f.context);
+    mutate::splice(&mut f.graph, user, 1, one).expect("same type, scheduled earlier");
+
+    let view = cache.view(&f.context, &f.graph, body);
+    assert_ne!(
+        view.class(sum),
+        view.class(argument),
+        "the edit reached this region, so the view was rebuilt unsaturated"
+    );
+}
+
+/// Two allocas nobody's pointer escapes, a store into the first and a load out
+/// of the second: the load must not read the state the store produced, or the
+/// two disjoint slots would be ordered against each other.
+#[test]
+fn disjoint_allocas_get_independent_state_chains() {
+    let context = Context::with_default_dialects();
+    let i32 = IntegerType::new(&context, 32);
+    let slot_type = crate::ptr::PtrType::typed(&context, i32);
+    let parameter = context.create_value(i32, None);
+    let stored = parameter.id();
+    let region = context.create_region();
+    let block = context.create_block(vec![parameter]);
+    region.add_block(block.id());
+
+    let func = crate::builtin::ops::func(&context, "f", i32, Some(region.id())).build();
+    let mut builder = crate::IRBuilder::new(func.body());
+    let first = builder.insert(crate::ptr::ops::alloca(&context, 4u64, 4u64, slot_type).build());
+    let second = builder.insert(crate::ptr::ops::alloca(&context, 4u64, 4u64, slot_type).build());
+    builder.insert(crate::ptr::ops::store(&context, stored, first.result()).build());
+    let load = builder.insert(crate::ptr::ops::load(&context, second.result(), i32).build());
+    builder.insert(crate::builtin::ops::r#return(&context, load.result()).build());
+
+    let raised = super::raise_function(&context, &func).expect("straight-line code raises");
+    assert_eq!(
+        raised.chains, 3,
+        "two tracked slots plus the conservative one"
+    );
+
+    let body = raised.graph.subregions(raised.lambda)[0];
+    let node_of = |name: &str, position: usize| {
+        raised
+            .graph
+            .region_nodes(body)
+            .iter()
+            .copied()
+            .filter(|&node| raised.graph.op_type_name(raised.graph.op_of(node)).1 == name)
+            .nth(position)
+            .expect("the raised node")
+    };
+    let (store_node, load_node) = (node_of("store", 0), node_of("load", 0));
+    let load_state = *raised
+        .graph
+        .inputs(load_node)
+        .last()
+        .expect("a load reads a state chain");
+
+    assert_ne!(
+        load_state.node(),
+        Some(store_node),
+        "the load of one slot must not read the state the store to the other produced"
+    );
+    assert!(raised.graph.verify().is_ok());
+}
+
+/// A constant carries no type in the e-graph — a null pointer and an integer
+/// zero of the same width are one class — so a commit must build one per type it
+/// is read at, never hand a pointer to an integer port.
+#[test]
+fn a_constant_class_is_built_once_per_type_it_is_read_at() {
+    let mut f = fixture();
+    let context = f.context.clone();
+    let i64 = IntegerType::new(&context, 64);
+    let pointer = crate::ptr::PtrType::typed(&context, i64);
+
+    let body = f
+        .graph
+        .open_region(&[PortType::Value(i64), PortType::State]);
+    let null = f.constant(0, pointer);
+    let (_, state) = f.stateful("keep", &[null], Origin::argument(body, 1), i64);
+    let zero = f.constant(0, i64);
+    let op = f.graph.op_type("builtin", "muli");
+    let product = f
+        .graph
+        .add_node(
+            op,
+            &[Origin::argument(body, 0), zero],
+            &[PortType::Value(i64)],
+            &[],
+            Vec::new(),
+        )
+        .expect("both operands are scheduled earlier");
+    let lambda = f.close_lambda(body, &[Origin::output(product, 0), state]);
+    f.graph
+        .finish(&[Origin::output(lambda, 0)])
+        .expect("the λ is the only export");
+
+    let mut view = View::build(&context, &f.graph, body);
+    view.saturate(&context);
+    let replacement = commit::commit(&mut f.graph, &view, lambda)
+        .expect("the staged body is well formed")
+        .expect("multiplying by zero is the zero constant");
+
+    let staged = f.graph.subregions(replacement)[0];
+    assert_eq!(
+        f.graph.origin_type(f.graph.region_results(staged)[0]),
+        PortType::Value(i64),
+        "the integer result must not be given the pointer-typed null"
+    );
+    assert!(f.graph.verify().is_ok());
+}
+
+#[test]
+fn a_commit_replaces_the_lambda_it_canonicalized_and_nothing_else() {
+    let mut f = fixture();
+    let (first, body, _, _) = add_zero_lambda(&mut f);
+    let (second, _, _) = splicable_lambda(&mut f);
+    let omega = f.graph.omega_region();
+    f.graph
+        .finish(&[Origin::output(first, 0), Origin::output(second, 0)])
+        .expect("both λs are exported");
+
+    let mut view = View::build(&f.context, &f.graph, body);
+    view.saturate(&f.context);
+    let replacement = commit::commit(&mut f.graph, &view, first)
+        .expect("the staged body is well formed")
+        .expect("the extraction dropped the addition");
+
+    assert_eq!(
+        f.graph.region_results(omega)[0],
+        Origin::output(replacement, 0)
+    );
+    assert_eq!(
+        f.graph.region_results(omega)[1],
+        Origin::output(second, 0),
+        "the sibling export still names the λ it always did"
+    );
+    assert_eq!(f.graph.version(second), 0, "the untouched sibling λ");
+    assert!(f.graph.verify().is_ok());
+
+    let staged = f.graph.subregions(replacement)[0];
+    assert_eq!(
+        f.graph.region_results(staged)[0],
+        Origin::argument(staged, 0),
+        "the body yields its argument directly"
+    );
 }
 
 #[test]

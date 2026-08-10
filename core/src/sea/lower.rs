@@ -32,7 +32,7 @@ pub fn lower_function(context: &Context, raised: &Raised, block: &Arc<Block>) ->
         .arguments()
         .iter()
         .map(|value| Some(value.id()))
-        .chain(std::iter::once(None))
+        .chain(std::iter::repeat_n(None, raised.chains))
         .collect();
     if arguments.len() != graph.region_arguments(region).len() {
         return Err(Error::new(

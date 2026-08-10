@@ -39,16 +39,22 @@
 //!
 //! # Memory
 //!
-//! One conservative state edge threads every operation that is not provably
-//! pure, in program order, and is carried through every γ and θ signature.
-//! Per-alloca chains are a later increment.
+//! Memory is modeled as independent state chains, one per non-escaping `alloca`
+//! plus one conservative chain for everything else. An operation that is not
+//! provably pure threads exactly one of them, in program order; every γ and θ
+//! signature carries all of them. Two chains name disjoint memory, so a store to
+//! one alloca no longer orders a load of another — which is what store-to-load
+//! forwarding and dead-store elimination will need to be ordinary rewrites.
 
 use std::sync::Arc;
 
 use crate::attributes::{AttributeValue, NamedAttribute};
 use crate::builtin::{FuncOp, IntegerType, TokenType, UnitType};
 use crate::dialects::scf;
-use crate::{Block, Context, OpId, OpInstance, RegionId as IrRegion, TypeId, Value, ValueId};
+use crate::{
+    Block, Context, MemoryRead, MemoryWrite, OpId, OpInstance, PromotableAllocation,
+    RegionId as IrRegion, TypeId, Value, ValueId,
+};
 
 use super::Error;
 use super::graph::{Graph, NodeId, Origin, PortType, RegionId};
@@ -58,27 +64,31 @@ use super::kinds;
 pub struct Raised {
     pub graph: Graph,
     /// The λ node the function became. Its region's leading arguments are the
-    /// function's parameters and its trailing argument is the memory state.
+    /// function's parameters and its trailing arguments are the memory states,
+    /// one per chain.
     pub lambda: NodeId,
+    /// How many state chains the signatures carry.
+    pub chains: usize,
 }
 
 /// Raise `func` onto a fresh graph. Returns the shape that could not be mapped,
 /// naming why, rather than raising something unsound.
 pub fn raise_function(context: &Context, func: &FuncOp) -> Result<Raised, Error> {
     let i1 = IntegerType::new(context, 1);
+    let body = func.body();
     let mut raiser = Raiser {
         context,
         graph: Graph::new(i1, &[]),
         i1,
+        chains: Chains::discover(context, &body),
     };
 
-    let body = func.body();
     let parameters: Vec<&Value> = body.arguments().iter().collect();
     let mut arguments: Vec<PortType> = parameters
         .iter()
         .map(|value| PortType::Value(value.ty()))
         .collect();
-    arguments.push(PortType::State);
+    arguments.extend(raiser.states());
 
     let region = raiser.graph.open_region(&arguments);
     let mut scope = Scope {
@@ -87,7 +97,7 @@ pub fn raise_function(context: &Context, func: &FuncOp) -> Result<Raised, Error>
             .enumerate()
             .map(|(index, value)| (value.id(), Origin::argument(region, index as u32)))
             .collect(),
-        state: Origin::argument(region, parameters.len() as u32),
+        state: raiser.state_arguments(region, parameters.len()),
     };
 
     let tail = raiser.raise_block(&mut scope, &body)?;
@@ -95,7 +105,7 @@ pub fn raise_function(context: &Context, func: &FuncOp) -> Result<Raised, Error>
         return Err(Error::new("a function body must end with builtin.return"));
     };
     let mut results = scope.resolve_all(&values)?;
-    results.push(scope.state);
+    results.extend_from_slice(&scope.state);
     raiser.graph.close_region(region, &results)?;
 
     let function = PortType::Value(UnitType::new(context));
@@ -104,17 +114,104 @@ pub fn raise_function(context: &Context, func: &FuncOp) -> Result<Raised, Error>
         .add_node(kinds::LAMBDA, &[], &[function], &[region], Vec::new())?;
     raiser.graph.finish(&[Origin::output(lambda, 0)])?;
 
+    let chains = raiser.chains.count();
     Ok(Raised {
         graph: raiser.graph,
         lambda,
+        chains,
     })
 }
 
-/// The values visible in one sea region, and the memory state reaching the point
-/// being raised.
+/// The memory the state edges keep apart: one chain per non-escaping `alloca`,
+/// plus the conservative chain everything else threads. A slot whose pointer is
+/// used as anything but the address of a load or a store may be reached through
+/// that use, so it is not tracked and its traffic joins the conservative chain.
+struct Chains {
+    slots: Vec<ValueId>,
+}
+
+impl Chains {
+    fn discover(context: &Context, body: &Arc<Block>) -> Self {
+        let mut allocated = Vec::new();
+        let mut escaped = Vec::new();
+        collect_slots(context, body, &mut allocated, &mut escaped);
+        Chains {
+            slots: allocated
+                .into_iter()
+                .filter(|slot| !escaped.contains(slot))
+                .collect(),
+        }
+    }
+
+    /// The conservative chain plus one per tracked slot.
+    fn count(&self) -> usize {
+        self.slots.len() + 1
+    }
+
+    /// The chain `op` threads: the slot it names, or the conservative one.
+    fn of(&self, op: &Arc<OpInstance>) -> usize {
+        let location = op
+            .clone()
+            .as_interface::<dyn PromotableAllocation>()
+            .map(|slot| slot.promoted_location())
+            .or_else(|| {
+                op.clone()
+                    .as_interface::<dyn MemoryRead>()
+                    .map(|read| read.read_location())
+            })
+            .or_else(|| {
+                op.clone()
+                    .as_interface::<dyn MemoryWrite>()
+                    .map(|write| write.write_location())
+            });
+        location
+            .and_then(|value| self.slots.iter().position(|&slot| slot == value))
+            .map_or(0, |index| index + 1)
+    }
+}
+
+/// Every allocated slot of a block and its nested regions, and every value whose
+/// use makes a slot reachable elsewhere. The rule is `mem2reg`'s, restated here
+/// because that pass keeps its classification private to its own promotion.
+fn collect_slots(
+    context: &Context,
+    block: &Arc<Block>,
+    allocated: &mut Vec<ValueId>,
+    escaped: &mut Vec<ValueId>,
+) {
+    for id in block.op_ids() {
+        let op = context.get_op(id);
+        if let Some(slot) = op.clone().as_interface::<dyn PromotableAllocation>() {
+            allocated.push(slot.promoted_location());
+            continue;
+        }
+        let read = op
+            .clone()
+            .as_interface::<dyn MemoryRead>()
+            .map(|read| read.read_location());
+        let write = op.clone().as_interface::<dyn MemoryWrite>();
+        let written = write.as_ref().map(|write| write.write_location());
+        if let Some(value) = write.map(|write| write.written_value()) {
+            escaped.push(value);
+        }
+        for &operand in &op.operands {
+            if Some(operand) != read && Some(operand) != written {
+                escaped.push(operand);
+            }
+        }
+        for &region in &op.regions {
+            for nested in context.get_region(region).iter(context.clone()) {
+                collect_slots(context, &nested, allocated, escaped);
+            }
+        }
+    }
+}
+
+/// The values visible in one sea region, and the memory state of each chain
+/// reaching the point being raised.
 struct Scope {
     bindings: Vec<(ValueId, Origin)>,
-    state: Origin,
+    state: Vec<Origin>,
 }
 
 impl Scope {
@@ -154,9 +251,29 @@ struct Raiser<'a> {
     context: &'a Context,
     graph: Graph,
     i1: TypeId,
+    chains: Chains,
 }
 
 impl Raiser<'_> {
+    /// The state ports every structural signature carries, one per chain.
+    fn states(&self) -> Vec<PortType> {
+        vec![PortType::State; self.chains.count()]
+    }
+
+    /// The chain origins a region's arguments carry from `first` on.
+    fn state_arguments(&self, region: RegionId, first: usize) -> Vec<Origin> {
+        (0..self.chains.count())
+            .map(|chain| Origin::argument(region, (first + chain) as u32))
+            .collect()
+    }
+
+    /// The chain origins a node's outputs carry from `first` on.
+    fn state_outputs(&self, node: NodeId, first: usize) -> Vec<Origin> {
+        (0..self.chains.count())
+            .map(|chain| Origin::output(node, (first + chain) as u32))
+            .collect()
+    }
+
     fn raise_block(&mut self, scope: &mut Scope, block: &Arc<Block>) -> Result<Tail, Error> {
         let ops = block.op_ids();
         let (&terminator, body) = ops
@@ -212,15 +329,18 @@ impl Raiser<'_> {
                 op.name()
             )));
         }
-        let stateful = is_stateful(op);
+        // A stateful operation joins exactly one chain, whatever the signatures
+        // around it carry: it touches one region of memory, or the conservative
+        // one standing for all the memory nothing proved disjoint.
+        let chain = is_stateful(op).then(|| self.chains.of(op));
         let mut inputs = scope.resolve_all(&op.operands)?;
         let mut outputs: Vec<PortType> = op
             .results
             .iter()
             .map(|&result| PortType::Value(self.context.get_value(result).ty()))
             .collect();
-        if stateful {
-            inputs.push(scope.state);
+        if let Some(chain) = chain {
+            inputs.push(scope.state[chain]);
             outputs.push(PortType::State);
         }
 
@@ -233,8 +353,8 @@ impl Raiser<'_> {
         for (port, &result) in op.results.iter().enumerate() {
             scope.bind(result, Origin::output(node, port as u32));
         }
-        if stateful {
-            scope.state = Origin::output(node, op.results.len() as u32);
+        if let Some(chain) = chain {
+            scope.state[chain] = Origin::output(node, op.results.len() as u32);
         }
         Ok(())
     }
@@ -250,14 +370,14 @@ impl Raiser<'_> {
 
         let mut argument_types: Vec<PortType> =
             carried.iter().map(|&o| self.graph.origin_type(o)).collect();
-        argument_types.push(PortType::State);
+        argument_types.extend(self.states());
 
         let mut outputs: Vec<PortType> = op
             .results
             .iter()
             .map(|&result| PortType::Value(self.context.get_value(result).ty()))
             .collect();
-        outputs.push(PortType::State);
+        outputs.extend(self.states());
 
         let mut regions = Vec::new();
         for arm in arms {
@@ -272,21 +392,21 @@ impl Raiser<'_> {
                 ));
             };
             let mut results = inner.resolve_all(&values)?;
-            results.push(inner.state);
+            results.extend_from_slice(&inner.state);
             self.graph.close_region(region, &results)?;
             regions.push(region);
         }
 
         let mut inputs = vec![scope.resolve(op.operands[0])?];
         inputs.extend_from_slice(&carried);
-        inputs.push(scope.state);
+        inputs.extend_from_slice(&scope.state);
         let gamma = self
             .graph
             .add_node(kinds::GAMMA, &inputs, &outputs, &regions, Vec::new())?;
         for (port, &result) in op.results.iter().enumerate() {
             scope.bind(result, Origin::output(gamma, port as u32));
         }
-        scope.state = Origin::output(gamma, op.results.len() as u32);
+        scope.state = self.state_outputs(gamma, op.results.len());
         Ok(())
     }
 
@@ -321,7 +441,7 @@ impl Raiser<'_> {
             .collect();
         let mut port_types = carried_types.clone();
         port_types.extend(invariants.iter().map(|&o| self.graph.origin_type(o)));
-        port_types.push(PortType::State);
+        port_types.extend(self.states());
 
         let rotate = !self.is_trivially_true(&condition_block, &carried_arguments);
         let mut entry = scope.resolve_all(&op.operands)?;
@@ -332,7 +452,7 @@ impl Raiser<'_> {
             entry = forwarded;
         }
         entry.extend_from_slice(&invariants);
-        entry.push(scope.state);
+        entry.extend_from_slice(&scope.state);
 
         let plan = LoopPlan {
             condition_region,
@@ -345,12 +465,13 @@ impl Raiser<'_> {
         };
 
         let mut outputs = carried_types;
-        outputs.push(PortType::State);
+        outputs.extend(self.states());
 
         // A plain θ keeps the whole port tuple on its outputs; the rotating γ
-        // publishes only the carried ports and the state.
+        // publishes only the carried ports and the states.
+        let first_state = port_types.len() - self.chains.count();
         let state_port = match predicate {
-            None => port_types.len() - 1,
+            None => first_state,
             Some(_) => ports,
         };
         let node = match predicate {
@@ -364,14 +485,14 @@ impl Raiser<'_> {
                 let mut results: Vec<Origin> = (0..ports)
                     .map(|port| Origin::output(theta, port as u32))
                     .collect();
-                results.push(Origin::output(theta, (port_types.len() - 1) as u32));
+                results.extend(self.state_outputs(theta, first_state));
                 self.graph.close_region(taken, &results)?;
 
                 let skipped = self.graph.open_region(&port_types);
                 let mut results: Vec<Origin> = (0..ports)
                     .map(|port| Origin::argument(skipped, port as u32))
                     .collect();
-                results.push(Origin::argument(skipped, (port_types.len() - 1) as u32));
+                results.extend(self.state_arguments(skipped, first_state));
                 self.graph.close_region(skipped, &results)?;
 
                 let mut inputs = vec![test];
@@ -389,7 +510,7 @@ impl Raiser<'_> {
         for (port, &result) in op.results.iter().enumerate() {
             scope.bind(result, Origin::output(node, port as u32));
         }
-        scope.state = Origin::output(node, state_port as u32);
+        scope.state = self.state_outputs(node, state_port);
         Ok(())
     }
 
@@ -398,7 +519,7 @@ impl Raiser<'_> {
         let body = self.graph.open_region(&plan.port_types);
         let mut inner = Scope {
             bindings: Vec::new(),
-            state: Origin::argument(body, (plan.port_types.len() - 1) as u32),
+            state: self.state_arguments(body, plan.port_types.len() - self.chains.count()),
         };
         for (port, &value) in plan.carried_arguments.iter().enumerate() {
             inner.bind(value, Origin::argument(body, port as u32));
@@ -461,7 +582,7 @@ impl Raiser<'_> {
                 let carried = (0..plan.ports)
                     .map(|port| Origin::output(gamma, (port + 1) as u32))
                     .collect();
-                inner.state = Origin::output(gamma, (plan.ports + 1) as u32);
+                inner.state = self.state_outputs(gamma, plan.ports + 1);
                 (Some(Origin::output(gamma, 0)), carried)
             }
         };
@@ -479,7 +600,7 @@ impl Raiser<'_> {
         for index in 0..plan.free.len() {
             results.push(Origin::argument(body, (plan.ports + index) as u32));
         }
-        results.push(inner.state);
+        results.extend_from_slice(&inner.state);
         Ok(results)
     }
 
@@ -513,7 +634,7 @@ impl Raiser<'_> {
             .iter()
             .map(|&o| self.graph.origin_type(o))
             .collect();
-        argument_types.push(PortType::State);
+        argument_types.extend(self.states());
 
         let mut regions = Vec::new();
         for arm in arms {
@@ -547,17 +668,17 @@ impl Raiser<'_> {
             };
             let mut results = vec![broke];
             results.extend(carried);
-            results.push(arm_scope.state);
+            results.extend_from_slice(&arm_scope.state);
             self.graph.close_region(region, &results)?;
             regions.push(region);
         }
 
         let mut inputs = vec![inner.resolve(op.operands[0])?];
         inputs.extend_from_slice(&captured);
-        inputs.push(inner.state);
+        inputs.extend_from_slice(&inner.state);
         let mut outputs = vec![PortType::Value(self.i1)];
         outputs.extend(plan.port_types[..plan.ports].iter().copied());
-        outputs.push(PortType::State);
+        outputs.extend(self.states());
         self.graph
             .add_node(kinds::GAMMA, &inputs, &outputs, &regions, Vec::new())
     }
@@ -578,8 +699,8 @@ impl Raiser<'_> {
 
         let mut argument_types: Vec<PortType> = plan.port_types[..plan.ports].to_vec();
         argument_types.extend(captured.iter().map(|&o| self.graph.origin_type(o)));
-        argument_types.push(PortType::State);
-        let state_port = (argument_types.len() - 1) as u32;
+        argument_types.extend(self.states());
+        let state_port = argument_types.len() - self.chains.count();
 
         let running = self.graph.open_region(&argument_types);
         let entry: Vec<Origin> = (0..plan.ports)
@@ -596,29 +717,29 @@ impl Raiser<'_> {
                     )
                 })
                 .collect(),
-            state: Origin::argument(running, state_port),
+            state: self.state_arguments(running, state_port),
         };
         let (predicate, forwarded) =
             self.inline_condition(&mut running_scope, &condition_block, &entry)?;
         let mut results = vec![predicate];
         results.extend(forwarded);
-        results.push(running_scope.state);
+        results.extend_from_slice(&running_scope.state);
         self.graph.close_region(running, &results)?;
 
         let left = self.graph.open_region(&argument_types);
         let zero = self.constant(0)?;
         let mut results = vec![zero];
         results.extend((0..plan.ports).map(|port| Origin::argument(left, port as u32)));
-        results.push(Origin::argument(left, state_port));
+        results.extend(self.state_arguments(left, state_port));
         self.graph.close_region(left, &results)?;
 
         let mut inputs = vec![broke];
         inputs.extend_from_slice(latched);
         inputs.extend_from_slice(&captured);
-        inputs.push(inner.state);
+        inputs.extend_from_slice(&inner.state);
         let mut outputs = vec![PortType::Value(self.i1)];
         outputs.extend(plan.port_types[..plan.ports].iter().copied());
-        outputs.push(PortType::State);
+        outputs.extend(self.states());
         let gamma = self.graph.add_node(
             kinds::GAMMA,
             &inputs,
@@ -627,7 +748,7 @@ impl Raiser<'_> {
             Vec::new(),
         )?;
 
-        inner.state = Origin::output(gamma, (plan.ports + 1) as u32);
+        inner.state = self.state_outputs(gamma, plan.ports + 1);
         let mut results = vec![Origin::output(gamma, 0)];
         results.extend((0..plan.ports).map(|port| Origin::output(gamma, (port + 1) as u32)));
         Ok(results)
@@ -738,7 +859,7 @@ impl Raiser<'_> {
                 .enumerate()
                 .map(|(index, &value)| (value, Origin::argument(region, index as u32)))
                 .collect(),
-            state: Origin::argument(region, free.len() as u32),
+            state: self.state_arguments(region, free.len()),
         }
     }
 

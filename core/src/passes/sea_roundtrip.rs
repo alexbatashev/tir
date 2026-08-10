@@ -61,7 +61,7 @@ impl Pass for SeaRoundTripPass {
 }
 
 /// Drop `id` and everything nested inside it from the live IR.
-fn erase(context: &Context, block: &Arc<crate::Block>, id: crate::OpId) {
+pub(super) fn erase(context: &Context, block: &Arc<crate::Block>, id: crate::OpId) {
     let op = context.get_op(id);
     erase_nested(context, &op);
     block.remove_op(id);

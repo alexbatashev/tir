@@ -1,0 +1,24 @@
+// RUN: tir opt --verify --pass builtin.func(sea-canonicalize) %s | filecheck %s
+
+// The e-graph never sees a state edge: the loads and the stores are anchors, so
+// the commit stages them in the order the state chain fixed, and the second load
+// stays a load rather than merging with the first. Only the pure arithmetic
+// between them is canonicalized — the multiplication by one collapses.
+
+module {
+  func @f(%0: !ptr.p<!i32>) -> !i32 {
+    %1 = ptr.load %0 : !i32
+    %2 = constant {value = 1} : !i32
+    %3 = muli %1, %2 : !i32
+    ptr.store %3, %0
+    %4 = ptr.load %0 : !i32
+    return %4
+  }
+  module_end
+}
+
+// CHECK-LABEL: func @f
+// CHECK-NEXT: %[[FIRST:[0-9]+]] = ptr.load %0 : !i32
+// CHECK-NEXT: ptr.store %[[FIRST]], %0
+// CHECK-NEXT: %[[SECOND:[0-9]+]] = ptr.load %0 : !i32
+// CHECK-NEXT: return %[[SECOND]]

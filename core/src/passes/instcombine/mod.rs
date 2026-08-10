@@ -11,8 +11,8 @@
 //! The engine holds no op-specific knowledge — identity, cost, folding and
 //! constant-reading come from op interfaces; op construction is owned by the rewrites.
 
-mod node;
-mod rules;
+pub(crate) mod node;
+pub(crate) mod rules;
 mod seed;
 
 use std::collections::{HashMap, HashSet};
@@ -32,6 +32,14 @@ use crate::{
 
 use node::{Node, OpProv};
 use rules::{Ruleset, builtin_ruleset};
+
+/// The PDL-compiled rewrites on their own, for a seeder that is not this pass.
+/// [`builtin_ruleset`]'s other half — the constant folder — keys on live IR ops
+/// through [`OpProv::Seeded`], which only an IR seeding produces; these rules
+/// read nothing but the e-graph, so any [`Node`] vocabulary can reuse them.
+pub(crate) fn value_rewrites(context: &Context) -> Vec<rules::Rule> {
+    rules::generated_ruleset(context).rewrites
+}
 
 const ITER_LIMIT: usize = 30;
 const NODE_LIMIT: usize = 100_000;

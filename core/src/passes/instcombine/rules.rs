@@ -12,8 +12,8 @@ use crate::{
 
 use super::node::{Node, OpProv};
 
-type Sym = u32;
-type Rule = Rewrite<Node, Sym>;
+pub(crate) type Sym = u32;
+pub(crate) type Rule = Rewrite<Node, Sym>;
 
 pub type EmitFn = Box<
     dyn Fn(&Context, &[ValueId], TypeId, &OperationRef, &mut Rewriter) -> Result<ValueId, PassError>

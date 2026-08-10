@@ -5,20 +5,25 @@
 //! `docs/design/sea.md`. [`graph`] holds the storage and its invariants,
 //! [`kinds`] the canonical structural op types and their signature laws,
 //! [`mutate`] the edit API, and [`raise`]/[`lower`] the translation to and from
-//! the `scf` dialect.
+//! the `scf` dialect. [`view`] is the red layer: the e-graph rendering of a
+//! region's pure value terms, which [`commit`] lands back as one edit.
 
+pub mod commit;
 pub mod graph;
 pub mod kinds;
 pub mod lower;
 pub mod mutate;
 pub mod raise;
+pub mod view;
 
 #[cfg(test)]
 mod tests;
 
+pub use commit::commit;
 pub use graph::{Graph, NodeId, OpTypeId, Origin, PortType, RegionId};
 pub use lower::lower_function;
 pub use raise::{Raised, raise_function};
+pub use view::{View, ViewCache};
 
 /// What went wrong building, verifying, or translating a graph. Messages name
 /// the mismatch and the port it happened on.

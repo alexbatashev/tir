@@ -167,6 +167,13 @@ pub(super) fn emit_machine_code(
     if std::env::var_os("TIR_SEA_ROUNDTRIP").is_some() {
         function_pipeline.add_pass(tir::passes::SeaRoundTripPass::new());
     }
+    // Canonicalizing through the sea's e-graph view is semantics-preserving, so
+    // interposing it must not change any program's behavior either.
+    // `TIR_SEA_CANON=1` turns the end-to-end suite into that check; instcombine
+    // still runs after it, so this is additive validation, not a replacement.
+    if std::env::var_os("TIR_SEA_CANON").is_some() {
+        function_pipeline.add_pass(tir::passes::SeaCanonicalizePass::new());
+    }
     function_pipeline.add_pass(tir::passes::InstCombinePass::new());
     function_pipeline.add_pass(tir::passes::ScfToCfgPass::new());
     let module_op = context.get_op(module.id());
