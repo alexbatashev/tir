@@ -1,5 +1,7 @@
-//! Seeds the e-graph from gated SSA: each [`GateNode`] maps to a [`Node`] (op → `Node::Op`,
-//! constant → `Node::Const`). The only cycle, a μ gate's latch back-edge, is broken with a placeholder.
+//! Seeds the e-graph from gated SSA: each [`GateNode`] maps to a [`Node`] of the
+//! shared vocabulary — an op to its IR identity, a constant to its literal, a
+//! gate to the semantic projection it is. The only cycle, a μ gate's latch
+//! back-edge, is broken with a placeholder.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -10,7 +12,7 @@ use crate::analysis::{GSA, GateNode};
 use crate::graph::{Dag, NodeId};
 use crate::{BlockId, Commutative, ConstantLike, Context, OpId, OpInstance, ValueId};
 
-use super::node::Node;
+use crate::sem::{Prov, SemNode as Node};
 
 /// The seeded e-graph plus the driver's maps: each value's class, and each block argument's block.
 pub struct Seeded {
@@ -74,13 +76,13 @@ impl Seeder<'_> {
         let gate = *self.gsa.gate(n);
         let id = match gate {
             GateNode::Op(op) => self.seed_op(n, op),
-            GateNode::Mu { value } => return self.seed_mu(n, value),
+            GateNode::Mu { .. } => return self.seed_mu(n, gate),
             GateNode::Input(_)
             | GateNode::Gamma { .. }
             | GateNode::Eta { .. }
             | GateNode::Phi { .. } => {
                 let args = self.kids(n);
-                self.eg.add(Node::Gate(gate, args))
+                self.eg.add(Node::gate(gate, args))
             }
         };
         self.id_of.insert(n, id);
@@ -91,10 +93,9 @@ impl Seeder<'_> {
         let instance = self.context.get_op(op);
 
         if let Some(constant) = instance.clone().as_interface::<dyn ConstantLike>() {
-            return self.eg.add(Node::Const {
-                value: constant.constant_value(),
-                origin: Some(op),
-            });
+            return self
+                .eg
+                .add(Node::constant(constant.constant_value(), Prov::Op(op)));
         }
 
         if is_pure_value(&instance) {
@@ -118,11 +119,15 @@ impl Seeder<'_> {
     }
 
     /// μ gate: pre-register a placeholder so the latch back-edge resolves to it instead of recursing, then add the real μ and merge.
-    fn seed_mu(&mut self, n: NodeId, value: ValueId) -> Id {
+    fn seed_mu(&mut self, n: NodeId, gate: GateNode) -> Id {
+        let value = match gate {
+            GateNode::Mu { value } => value,
+            _ => unreachable!("only a mu gate seeds a placeholder"),
+        };
         let placeholder = self.eg.add(Node::input(value));
         self.id_of.insert(n, placeholder);
         let args = self.kids(n);
-        let mu = self.eg.add(Node::Gate(GateNode::Mu { value }, args));
+        let mu = self.eg.add(Node::gate(gate, args));
         self.eg.union(placeholder, mu);
         self.eg.rebuild();
         placeholder

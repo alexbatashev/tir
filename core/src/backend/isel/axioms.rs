@@ -1296,7 +1296,7 @@ mod tests {
     }
 
     fn class_kinds(eg: &SemEGraph, class: Id) -> HashSet<SymKind> {
-        eg.nodes(class).iter().map(|n| n.kind).collect()
+        eg.nodes(class).iter().filter_map(|n| n.sym()).collect()
     }
 
     fn shift_pair_axiom(ext: &str, shr: &str) -> Axiom {

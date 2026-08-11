@@ -18,10 +18,10 @@ use std::collections::{HashMap, HashSet};
 
 use tir_symbolic::egraph::{Extraction, Id};
 
-use crate::analysis::GateNode;
+use crate::TypeId;
 use crate::attributes::{AttributeValue, NamedAttribute};
-use crate::passes::instcombine::node::{Node, cost};
-use crate::{TypeId, ValueId};
+use crate::sem::node::cost;
+use crate::sem::{Kind, SemNode as Node};
 
 use super::Error;
 use super::graph::{Graph, NodeId, Origin, PortType, RegionId};
@@ -235,53 +235,39 @@ impl Stager<'_> {
         node: &Node,
         expected: PortType,
     ) -> Result<Origin, Error> {
-        match node {
-            // A gate is never rebuilt: it stands for the origin it was seeded
-            // from, which the staged body already holds.
-            Node::Gate(gate, _) => {
-                let anchor = self.view.anchor(gate_value(gate)).ok_or_else(|| {
-                    Error::new("an extracted leaf stands for no origin of the region")
-                })?;
-                self.moved_origin(anchor)
+        // A gate or a leaf is never rebuilt: it stands for the origin it was
+        // seeded from, which the staged body already holds.
+        if let Some(value) = node.value() {
+            let anchor = self.view.anchor(value).ok_or_else(|| {
+                Error::new("an extracted leaf stands for no origin of the region")
+            })?;
+            return self.moved_origin(anchor);
+        }
+        match &node.kind {
+            Kind::Ir(op) => {
+                let ty = node.ty.expect("an op term carries its result type");
+                let output = PortType::Value(ty);
+                let inputs = node
+                    .children
+                    .iter()
+                    .map(|&arg| self.materialize(graph, arg, output))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let op_type = graph.op_type(op.dialect, op.name);
+                let node = graph.add_node(op_type, &inputs, &[output], &[], op.attrs.clone())?;
+                Ok(Origin::output(node, 0))
             }
-            Node::Const { value, .. } => {
+            Kind::Sym(_) | Kind::Merge(_) => {
+                let literal = node
+                    .int()
+                    .ok_or_else(|| Error::new("an extracted term stands for no origin"))?;
                 let op = graph.op_type("builtin", "constant");
                 let attributes = vec![NamedAttribute::new(
                     "value",
-                    AttributeValue::Int(value.to_i64()),
+                    AttributeValue::Int(literal.to_i64()),
                 )];
                 let node = graph.add_node(op, &[], &[expected], &[], attributes)?;
                 Ok(Origin::output(node, 0))
             }
-            Node::Op {
-                dialect,
-                name,
-                ty,
-                attrs,
-                args,
-                ..
-            } => {
-                let output = PortType::Value(*ty);
-                let inputs = args
-                    .iter()
-                    .map(|&arg| self.materialize(graph, arg, output))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let op = graph.op_type(dialect, name);
-                let node = graph.add_node(op, &inputs, &[output], &[], attrs.clone())?;
-                Ok(Origin::output(node, 0))
-            }
         }
-    }
-}
-
-/// The value a gate stands for, whatever kind of gate it is.
-fn gate_value(gate: &GateNode) -> ValueId {
-    match gate {
-        GateNode::Input(value)
-        | GateNode::Gamma { value, .. }
-        | GateNode::Mu { value }
-        | GateNode::Eta { value }
-        | GateNode::Phi { value } => *value,
-        GateNode::Op(_) => unreachable!("an op is a Node::Op, never a Node::Gate"),
     }
 }

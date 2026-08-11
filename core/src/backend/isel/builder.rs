@@ -14,7 +14,7 @@ use tir_adt::APInt;
 use tir_symbolic::egraph::Id;
 
 use super::node::{
-    SemEGraph, SemNode, SemPayload, class_is_pure, ir_type, minimal_unsigned_apint, semantic_type,
+    SemEGraph, SemPayload, class_is_pure, ir_type, minimal_unsigned_apint, semantic_type,
     template_node, type_width,
 };
 
@@ -107,12 +107,9 @@ impl<'a> SemDagBuilder<'a> {
     /// mints a distinct leaf: two unknown computations are never assumed equal.
     pub(crate) fn add_opaque(&mut self) -> Id {
         let serial = self.next_opaque_serial();
-        self.egraph.add(SemNode {
-            kind: SymKind::Symbol,
-            payload: Some(SemPayload::Opaque(serial)),
-            ty: None,
-            children: Vec::new(),
-        })
+        let mut node = template_node(SymKind::Symbol, None, None);
+        node.payload = Some(SemPayload::Opaque(serial));
+        self.egraph.add(node)
     }
 
     /// Build an operator node, canonicalizing commutative operands so `a op b` and
@@ -127,12 +124,10 @@ impl<'a> SemDagBuilder<'a> {
         if kind.is_commutative() {
             children.sort();
         }
-        self.egraph.add(SemNode {
-            kind,
-            payload,
-            ty,
-            children,
-        })
+        let mut node = template_node(kind, None, ty);
+        node.payload = payload;
+        node.children = children;
+        self.egraph.add(node)
     }
 
     fn add_op(&mut self, kind: SymKind, children: Vec<Id>, ty: Option<TypeId>) -> Id {
@@ -263,11 +258,13 @@ impl<'a> SemDagBuilder<'a> {
             .egraph
             .nodes(class)
             .iter()
-            .find(|n| super::node::is_comparison(n.kind))?
+            .find(|n| n.sym().is_some_and(super::node::is_comparison))?
             .clone();
         Some((
             class,
-            comparison.kind,
+            comparison
+                .sym()
+                .expect("a comparison node is a semantic operator"),
             comparison.children[0],
             comparison.children[1],
         ))

@@ -12,33 +12,33 @@
 //! * A **simple node** with no state port is its operator over its operands'
 //!   classes — a constant-like one is the constant it holds, so equal constants
 //!   share a class whatever op spells them.
-//! * A **γ** whose arms are all pure contributes one value-level gate per value
-//!   output: `Gamma(predicate, then, else)`. Purity is the speculation licence —
-//!   the term evaluates both arms, so an arm that could trap or write memory is
-//!   not eligible and the γ stays an anchor.
-//! * A **θ** with a pure body contributes the per-value `Mu(init, latch)`
+//! * A **γ** contributes one value-level `If(predicate, then, else)` per output
+//!   port whose computing slice is pure. Purity is the speculation licence — the
+//!   term evaluates both arms — and it is asked per port, not per γ: a port an
+//!   arm computes off the state chain stays an anchor while its siblings gate.
+//! * A **θ** with a pure body contributes the per-value `Theta(init, latch)`
 //!   projection of one loop variable, built by the placeholder-union
-//!   construction: a leaf stands for the loop-carried value while the body is
-//!   seeded over it, then the real gate is unioned onto it. The θ node itself is
-//!   never a term; only its loop variables are.
+//!   construction: a leaf stands for the loop-*carried* value while the body is
+//!   seeded over it, then the real projection is unioned onto it. The value the
+//!   loop leaves behind is a different value, so the θ's output anchors and never
+//!   joins that class. The θ node itself is never a term; only its loop variables
+//!   are.
 //!
-//! # The vocabulary bridge
+//! # Anchors are synthetic values
 //!
-//! The terms are `instcombine`'s [`Node`], so the PDL-compiled rewrites apply as
-//! they stand. Its payloads name live IR, which the green layer has none of, so
-//! the bridge mints one synthetic [`crate::Value`] per anchored origin: it
-//! carries the origin's type — which is what the rules read a class's width
-//! from — and its identity separates anchors that must not merge. The reverse
-//! map takes an extracted leaf back to the origin it stands for.
+//! A term's payloads name live IR, which the green layer has none of, so the view
+//! mints one synthetic [`crate::Value`] per anchored origin: it carries the
+//! origin's type — which is what the rules read a class's width from — and its
+//! identity separates anchors that must not merge. [`View::anchor`] takes an
+//! extracted leaf back to the origin it stands for.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use tir_symbolic::egraph::{EGraph, Extraction, Id};
 
-use crate::analysis::GateNode;
-use crate::passes::instcombine::node::Node;
 use crate::passes::instcombine::value_rewrites;
+use crate::sem::{Prov, SemNode as Node};
 use crate::{Commutative, ConstantLike, Context, OpCost, OpInstance, TypeId, ValueId};
 
 use super::graph::{Graph, NodeId, Origin, PortType, RegionId};
@@ -319,10 +319,7 @@ impl Builder<'_> {
         let ty = self.output_type(node);
         let probe = self.probe(node, ty);
         let seeded = match probe.clone().as_interface::<dyn ConstantLike>() {
-            Some(constant) => Node::Const {
-                value: constant.constant_value(),
-                origin: None,
-            },
+            Some(constant) => Node::constant(constant.constant_value(), Prov::None),
             None => {
                 let Some(mut args) = self.operand_classes(node) else {
                     self.anchor_outputs(node);
@@ -385,6 +382,28 @@ impl Builder<'_> {
             .all(|&node| !kinds::is_structural(self.graph.op_of(node)) && self.is_pure(node))
     }
 
+    /// Whether the slice of `arm` computing its `port`-th result is speculatable:
+    /// every node that result reaches is a pure simple node, so evaluating it on
+    /// the path the γ did not take costs a computation and nothing else. What the
+    /// arm's other nodes do is not this port's business.
+    fn slice_is_pure(&self, arm: RegionId, port: usize) -> bool {
+        let mut pending = vec![self.graph.region_results(arm)[port]];
+        let mut seen = HashSet::new();
+        while let Some(origin) = pending.pop() {
+            let Some(node) = origin.node() else {
+                continue;
+            };
+            if !seen.insert(node) {
+                continue;
+            }
+            if kinds::is_structural(self.graph.op_of(node)) || !self.is_pure(node) {
+                return false;
+            }
+            pending.extend(self.graph.inputs(node).iter().copied());
+        }
+        true
+    }
+
     /// Bind a subregion's arguments to the classes its owner's inputs carry, then
     /// seed its nodes into the same e-graph.
     fn inline(&mut self, region: RegionId, arguments: &[Origin]) {
@@ -397,16 +416,15 @@ impl Builder<'_> {
         self.seed_nested(region);
     }
 
-    /// A two-armed γ over speculatable arms becomes one gate per value output.
-    /// Reports whether it was modeled; anything else falls back to an anchor.
+    /// The speculation licence is per output port: a port's term evaluates the
+    /// slice of each arm that computes *that* result, so a γ whose other ports
+    /// touch state still gates the ones that do not. Reports whether it was
+    /// modeled; anything else falls back to an anchor.
     fn seed_gamma(&mut self, node: NodeId) -> bool {
         let regions = self.graph.subregions(node).to_vec();
         let [otherwise, taken] = regions[..] else {
             return false;
         };
-        if !self.region_is_pure(otherwise) || !self.region_is_pure(taken) {
-            return false;
-        }
         let inputs = self.graph.inputs(node).to_vec();
         let Some(&condition) = self.class_of.get(&inputs[0]) else {
             return false;
@@ -418,22 +436,21 @@ impl Builder<'_> {
             let PortType::Value(ty) = output else {
                 continue;
             };
+            let origin = Origin::output(node, port as u32);
             let arms = [taken, otherwise].map(|arm| {
                 let result = self.graph.region_results(arm)[port];
-                self.class_of.get(&result).copied()
+                self.slice_is_pure(arm, port)
+                    .then(|| self.class_of.get(&result).copied())
+                    .flatten()
             });
             let [Some(then), Some(otherwise)] = arms else {
-                self.anchor(Origin::output(node, port as u32), ty);
+                self.anchor(origin, ty);
                 continue;
             };
-            let origin = Origin::output(node, port as u32);
             let value = self.context.create_value(ty, None).id();
-            let gate = Node::Gate(
-                // The payload names the origin the gate stands for; the condition
-                // is child 0, which is what matching and extraction read.
-                GateNode::Gamma { value, cond: value },
-                vec![condition, then, otherwise],
-            );
+            // The provenance names the origin the gate stands for; the condition
+            // is child 0, which is what matching and extraction read.
+            let gate = Node::gamma(value, vec![condition, then, otherwise]);
             let id = self.eg.add(gate.clone());
             self.anchor_of.insert(value, origin);
             self.record(origin, id, ty, gate);
@@ -441,9 +458,14 @@ impl Builder<'_> {
         true
     }
 
-    /// A θ over a pure body projects each loop variable as `Mu(init, latch)`,
+    /// A θ over a pure body projects each loop variable as `Theta(init, latch)`,
     /// built placeholder-first so the latch term may reference the class it
     /// defines. Reports whether it was modeled.
+    ///
+    /// The placeholder stands for the value the body *carries*, never for the one
+    /// the loop leaves behind: the θ output is the last iteration's, so seeding
+    /// both into one class would prove a final value congruent to a carried one.
+    /// The output anchors instead, and no union ever brings the two together.
     fn seed_theta(&mut self, node: NodeId) -> bool {
         let regions = self.graph.subregions(node).to_vec();
         let [body] = regions[..] else {
@@ -458,14 +480,12 @@ impl Builder<'_> {
             let PortType::Value(ty) = output else {
                 continue;
             };
-            let origin = Origin::output(node, port as u32);
+            self.anchor(Origin::output(node, port as u32), ty);
             let value = self.context.create_value(ty, None).id();
-            let leaf = Node::input(value);
-            let id = self.eg.add(leaf.clone());
-            self.anchor_of.insert(value, origin);
+            let id = self.eg.add(Node::input(value));
             self.class_of
                 .insert(Origin::argument(body, port as u32), id);
-            self.record(origin, id, ty, leaf);
+            self.types.push((id, ty));
             placeholders.push((port, value, id));
         }
         self.seed_nested(body);
@@ -480,9 +500,7 @@ impl Builder<'_> {
             else {
                 continue;
             };
-            let mu = self
-                .eg
-                .add(Node::Gate(GateNode::Mu { value }, vec![init, latch]));
+            let mu = self.eg.add(Node::theta(value, init, latch));
             self.eg.union(placeholder, mu);
         }
         self.eg.rebuild();

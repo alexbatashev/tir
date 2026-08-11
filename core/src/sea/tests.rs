@@ -532,3 +532,117 @@ fn replacing_a_subtree_reschedules_it_before_the_users() {
     assert_eq!(f.graph.position(user), Some(2));
     assert!(f.graph.verify().is_ok());
 }
+
+/// A λ holding a θ that carries one i32, incrementing it every iteration. Reports
+/// the λ body, the θ node and its body region.
+fn counting_loop(f: &mut Fixture) -> (RegionId, NodeId, RegionId) {
+    let (i1, i32) = (f.i1, f.i32);
+    let outer = f
+        .graph
+        .open_region(&[PortType::Value(i32), PortType::State]);
+    let init = Origin::argument(outer, 0);
+
+    let body = f.graph.open_region(&[PortType::Value(i32)]);
+    let one = f.constant(1, i32);
+    let next = f.addi(Origin::argument(body, 0), one, i32);
+    let keep_going = f.constant(1, i1);
+    f.graph
+        .close_region(body, &[keep_going, next])
+        .expect("the predicate and the latched value are visible");
+
+    let theta = f
+        .graph
+        .add_node(
+            kinds::THETA,
+            &[init],
+            &[PortType::Value(i32)],
+            &[body],
+            Vec::new(),
+        )
+        .expect("the θ signature matches its region");
+    let lambda = f.close_lambda(
+        outer,
+        &[Origin::output(theta, 0), Origin::argument(outer, 1)],
+    );
+    f.graph
+        .finish(&[Origin::output(lambda, 0)])
+        .expect("the λ is the only export");
+    (outer, theta, body)
+}
+
+#[test]
+fn a_theta_output_is_never_the_value_the_loop_carries() {
+    let mut f = fixture();
+    let (outer, theta, body) = counting_loop(&mut f);
+
+    let mut view = View::build(&f.context, &f.graph, outer);
+    view.saturate(&f.context);
+
+    let output = view.class(Origin::output(theta, 0));
+    let carried = view.class(Origin::argument(body, 0));
+    assert!(output.is_some() && carried.is_some());
+    assert_ne!(
+        output, carried,
+        "the value a loop leaves behind is not the value its body reads"
+    );
+}
+
+/// A γ whose first output is computed by a pure slice and whose second comes off
+/// the state chain. Reports the λ body and the γ node.
+fn half_pure_gamma(f: &mut Fixture) -> (RegionId, NodeId) {
+    let (i1, i32) = (f.i1, f.i32);
+    let outer = f
+        .graph
+        .open_region(&[PortType::Value(i32), PortType::State]);
+    let address = Origin::argument(outer, 0);
+    let state = Origin::argument(outer, 1);
+    let predicate = f.constant(1, i1);
+
+    let arm = |f: &mut Fixture| {
+        let region = f
+            .graph
+            .open_region(&[PortType::Value(i32), PortType::State]);
+        let argument = Origin::argument(region, 0);
+        let doubled = f.addi(argument, argument, i32);
+        let (loaded, next) = f.stateful("load", &[argument], Origin::argument(region, 1), i32);
+        f.graph
+            .close_region(region, &[doubled, loaded, next])
+            .expect("every result is visible in the arm");
+        region
+    };
+    let otherwise = arm(f);
+    let taken = arm(f);
+
+    let gamma = f
+        .graph
+        .add_node(
+            kinds::GAMMA,
+            &[predicate, address, state],
+            &[PortType::Value(i32), PortType::Value(i32), PortType::State],
+            &[otherwise, taken],
+            Vec::new(),
+        )
+        .expect("both arms match the γ signature");
+    let lambda = f.close_lambda(outer, &[Origin::output(gamma, 0), Origin::output(gamma, 2)]);
+    f.graph
+        .finish(&[Origin::output(lambda, 0)])
+        .expect("the λ is the only export");
+    (outer, gamma)
+}
+
+#[test]
+fn a_gamma_gates_the_ports_whose_arms_are_pure_and_anchors_the_rest() {
+    let mut f = fixture();
+    let (outer, gamma) = half_pure_gamma(&mut f);
+
+    let view = View::build(&f.context, &f.graph, outer);
+
+    assert!(
+        view.models(Origin::output(gamma, 0)),
+        "a port both arms compute purely is a term"
+    );
+    assert!(
+        !view.models(Origin::output(gamma, 1)),
+        "a port an arm computes off the state chain stays an anchor"
+    );
+}

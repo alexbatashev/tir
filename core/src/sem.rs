@@ -18,6 +18,9 @@ pub use tir_symbolic::lang::{
 };
 
 mod discover;
+pub mod node;
+pub use node::{IrOp, Kind, MergeKind, Prov, SemNode, SemPayload, template_node};
+
 pub(crate) use discover::sym;
 pub use discover::{
     EquivalenceOracle, FuzzOracle, SmtOracle, confirm_bool_via_if, confirm_extension_via_shifts,

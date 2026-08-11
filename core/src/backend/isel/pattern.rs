@@ -11,7 +11,7 @@ use tir_symbolic::egraph::{EMatch, Id, Pattern, PatternNode, Substitution, Var};
 
 use super::node::{
     SemEGraph, SemNode, class_int_binding, class_register_type, class_semantic_type,
-    low_extract_source, low_extract_width,
+    low_extract_source, low_extract_width, template_node,
 };
 use super::{ImmRange, RegisterRequirement};
 
@@ -390,12 +390,11 @@ fn compile_isel_pattern_node(
         }
         SymKind::Constant => match expr.get_leaf_data(node) {
             Some(SymPayload::Int(value)) => {
-                let compiled = pattern.add(SemNode {
-                    kind: SymKind::Constant,
-                    payload: Some(super::SemPayload::Expr(SymPayload::Int(value.clone()))),
-                    ty: expr.get_actual_type(node),
-                    children: Vec::new(),
-                });
+                let compiled = pattern.add(template_node(
+                    SymKind::Constant,
+                    Some(SymPayload::Int(value.clone())),
+                    expr.get_actual_type(node),
+                ));
                 // A constant is pure and folds into the encoding, so any number of
                 // matches may embed the same constant class.
                 node_meta.push(PatternNodeMeta {
@@ -427,12 +426,9 @@ fn compile_isel_pattern_node(
                     )
                 })
                 .collect::<Option<Vec<Id>>>()?;
-            let compiled = pattern.add(SemNode {
-                kind: *kind,
-                payload: None,
-                ty: expr.get_actual_type(node),
-                children,
-            });
+            let mut compiled = template_node(*kind, None, expr.get_actual_type(node));
+            compiled.children = children;
+            let compiled = pattern.add(compiled);
             node_meta.push(PatternNodeMeta {
                 semantic_type: Some(inferred_types[node.index()].clone()),
                 ..Default::default()

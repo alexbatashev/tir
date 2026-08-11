@@ -5,12 +5,9 @@ use tir_symbolic::egraph::{EGraph, ENode, Id, Pattern, Rewrite, Rhs, Substitutio
 use crate::utils::APInt;
 use crate::{
     ConstantFold, Context, OperationRef, PassError, Rewriter, TypeId, ValueId,
-    analysis::GateNode,
     builtin::{IntegerType, ops},
-    sem::Value,
+    sem::{Prov, SemNode as Node, Value},
 };
-
-use super::node::{Node, OpProv};
 
 pub(crate) type Sym = u32;
 pub(crate) type Rule = Rewrite<Node, Sym>;
@@ -55,10 +52,9 @@ fn operand(substitution: &Substitution<Sym>, index: u32) -> Id {
 }
 
 fn const_value(eg: &EGraph<Node>, class: Id) -> Option<APInt> {
-    eg.nodes(eg.find(class)).iter().find_map(|node| match node {
-        Node::Const { value, .. } => Some(value.clone()),
-        _ => None,
-    })
+    eg.nodes(eg.find(class))
+        .iter()
+        .find_map(|node| node.int().cloned())
 }
 
 fn class_type(eg: &EGraph<Node>, class: Id) -> Option<TypeId> {
@@ -74,17 +70,9 @@ fn class_int_width(context: &Context, eg: &EGraph<Node>, class: Id) -> Option<u3
 }
 
 fn class_value_type(context: &Context, eg: &EGraph<Node>, class: Id) -> Option<TypeId> {
-    eg.nodes(eg.find(class)).iter().find_map(|node| match node {
-        Node::Op { ty, .. } => Some(*ty),
-        Node::Gate(gate, _) => match gate {
-            GateNode::Input(value)
-            | GateNode::Gamma { value, .. }
-            | GateNode::Mu { value }
-            | GateNode::Eta { value }
-            | GateNode::Phi { value } => Some(context.get_value(*value).ty()),
-            GateNode::Op(_) => unreachable!("operations use Node::Op"),
-        },
-        Node::Const { .. } => None,
+    eg.nodes(eg.find(class)).iter().find_map(|node| {
+        node.op_type()
+            .or_else(|| node.value().map(|value| context.get_value(value).ty()))
     })
 }
 
@@ -121,13 +109,7 @@ fn fold_templates(eg: &EGraph<Node>) -> Vec<Node> {
     let mut templates: Vec<Node> = Vec::new();
     for class in eg.classes() {
         for node in class.nodes() {
-            if !matches!(
-                node,
-                Node::Op {
-                    prov: OpProv::Seeded(_),
-                    ..
-                }
-            ) {
+            if !matches!(node.prov, Prov::Op(_)) || node.op_type().is_none() {
                 continue;
             }
             let template = node
@@ -165,21 +147,17 @@ fn const_fold(context: Context, template: &Node) -> Rule {
 
 fn fold_class(context: &Context, eg: &EGraph<Node>, class: Id) -> Option<APInt> {
     eg.nodes(class).iter().find_map(|node| {
-        let Node::Op {
-            prov: OpProv::Seeded(op),
-            args,
-            ..
-        } = node
-        else {
+        let (Prov::Op(op), true) = (node.prov, node.op_type().is_some()) else {
             return None;
         };
-        if !context.has_operation(*op) {
+        let args = &node.children;
+        if !context.has_operation(op) {
             return None;
         }
         // A folded class materializes as `builtin.constant`, which only holds an
         // integer, so an op computing anything else (an address, say) must keep
         // its own form however constant its operands are.
-        if !produces_integer(context, *op) {
+        if !produces_integer(context, op) {
             return None;
         }
         let operands: Vec<Value> = args
@@ -187,7 +165,7 @@ fn fold_class(context: &Context, eg: &EGraph<Node>, class: Id) -> Option<APInt> 
             .map(|&class| const_value(eg, class).map(Value::Int))
             .collect::<Option<_>>()?;
         match context
-            .get_op(*op)
+            .get_op(op)
             .as_interface::<dyn ConstantFold>()?
             .fold(&operands)
         {
@@ -208,10 +186,7 @@ fn produces_integer(context: &Context, op: crate::OpId) -> bool {
 }
 
 fn konst(value: APInt) -> Node {
-    Node::Const {
-        value,
-        origin: None,
-    }
+    Node::constant(value, Prov::None)
 }
 
 include!(concat!(env!("OUT_DIR"), "/instcombine_rules.rs"));

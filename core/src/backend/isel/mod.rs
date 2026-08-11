@@ -2508,7 +2508,8 @@ impl InstructionSelectPass {
                         if !compiled.node_meta[child.index()].is_boundary {
                             continue;
                         }
-                        if matches!(node.kind, SymKind::SExt | SymKind::ZExt) && operand == 1 {
+                        if matches!(node.sym(), Some(SymKind::SExt | SymKind::ZExt)) && operand == 1
+                        {
                             structural_boundaries.insert(child);
                         } else {
                             value_boundaries.insert(child);
@@ -2644,7 +2645,7 @@ fn gate_pattern_is_speculatable(pattern: &CompiledIselPattern, node: Id) -> bool
     match pattern.pattern.node(node) {
         PatternNode::Var(_) => true,
         PatternNode::Node(node) => {
-            gate_kind_is_speculatable(node.kind)
+            node.sym().is_some_and(gate_kind_is_speculatable)
                 && node
                     .children
                     .iter()
@@ -2659,7 +2660,7 @@ fn gate_class_is_speculatable(egraph: &SemEGraph, class: Id, visited: &mut HashS
         return true;
     }
     egraph.nodes(class).iter().all(|node| {
-        gate_kind_is_speculatable(node.kind)
+        node.sym().is_some_and(gate_kind_is_speculatable)
             && node
                 .children
                 .iter()
@@ -2792,7 +2793,7 @@ fn seed_bare_condition_terms(
             || egraph
                 .nodes(class)
                 .iter()
-                .any(|node| is_comparison(node.kind))
+                .any(|node| node.sym().is_some_and(is_comparison))
         {
             continue;
         }

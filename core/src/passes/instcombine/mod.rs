@@ -11,7 +11,6 @@
 //! The engine holds no op-specific knowledge — identity, cost, folding and
 //! constant-reading come from op interfaces; op construction is owned by the rewrites.
 
-pub(crate) mod node;
 pub(crate) mod rules;
 mod seed;
 
@@ -21,7 +20,7 @@ use tir_symbolic::egraph::{EGraph, Extraction, Id};
 
 use std::rc::Rc;
 
-use crate::analysis::{DominatingEdgeFacts, DominatorTree, GSA, GateNode};
+use crate::analysis::{DominatingEdgeFacts, DominatorTree, GSA};
 use crate::graph::Dag;
 use crate::{
     AnalysisManager, BlockId, Conditional, ConstantLike, Context, OpId, OperationRef, Pass,
@@ -30,13 +29,14 @@ use crate::{
     utils::APInt,
 };
 
-use node::{Node, OpProv};
+use crate::sem::node::cost;
+use crate::sem::{Prov, SemNode as Node};
 use rules::{Ruleset, builtin_ruleset};
 
 /// The PDL-compiled rewrites on their own, for a seeder that is not this pass.
 /// [`builtin_ruleset`]'s other half — the constant folder — keys on live IR ops
-/// through [`OpProv::Seeded`], which only an IR seeding produces; these rules
-/// read nothing but the e-graph, so any [`Node`] vocabulary can reuse them.
+/// through [`Prov::Op`], which only an IR seeding produces; these rules read
+/// nothing but the e-graph, so any seeding of the vocabulary can reuse them.
 pub(crate) fn value_rewrites(context: &Context) -> Vec<rules::Rule> {
     rules::generated_ruleset(context).rewrites
 }
@@ -94,18 +94,6 @@ impl Pass for InstCombinePass {
     }
 }
 
-/// The block-argument value a gate stands for at write-back.
-fn gate_value(gate: &GateNode) -> ValueId {
-    match gate {
-        GateNode::Input(v) => *v,
-        GateNode::Gamma { value, .. }
-        | GateNode::Mu { value }
-        | GateNode::Eta { value }
-        | GateNode::Phi { value } => *value,
-        GateNode::Op(_) => unreachable!("an op is a Node::Op, never a Node::Gate"),
-    }
-}
-
 /// Rewrites each region under the assumptions that hold there, and *before* its
 /// children's scopes open so the base classes a child scope reads are final.
 struct Driver<'a> {
@@ -126,7 +114,7 @@ impl Driver<'_> {
     ) -> Result<(), PassError> {
         self.eg
             .saturate(&self.ruleset.rewrites, ITER_LIMIT, NODE_LIMIT);
-        let extraction = self.eg.extract_best(node::cost);
+        let extraction = self.eg.extract_best(cost);
 
         let blocks: Vec<BlockId> = self
             .context
@@ -185,7 +173,7 @@ impl Driver<'_> {
             _ => false,
         };
         // A pushed fact changes what extracts cheapest; reuse the parent's otherwise.
-        let local = pushed.then(|| self.eg.extract_best(node::cost));
+        let local = pushed.then(|| self.eg.extract_best(cost));
         let extraction = local.as_ref().unwrap_or(parent_extraction);
 
         for op_id in self.context.get_block(block).op_ids() {
@@ -347,10 +335,9 @@ impl Driver<'_> {
             .get(&value)
             .copied()
             .unwrap_or_else(|| self.eg.add(Node::input(value)));
-        let constant = self.eg.add(Node::Const {
-            value: APInt::new(1, holds as u64),
-            origin: None,
-        });
+        let constant = self
+            .eg
+            .add(Node::constant(APInt::new(1, holds as u64), Prov::None));
         self.eg.union(cond, constant);
         self.eg.rebuild();
     }
@@ -371,31 +358,30 @@ impl Driver<'_> {
             return Ok(value);
         }
         let node = extraction.node(class).expect("extracted class has a node");
-        let value = match node {
-            // A gate is never rebuilt; it stands for its block-argument value.
-            Node::Gate(gate, _) => gate_value(gate),
-            Node::Const { value, origin } => match origin {
-                Some(op) => self.context.get_op(*op).results[0],
-                None => {
-                    let op = ops::constant(self.context, value.to_i64(), expected_ty).build();
-                    rewriter.insert_op_before(target, &op)?;
-                    op.result()
+        // Provenance decides how a term becomes IR again: a gate stands for its
+        // block-argument value, a seeded op or constant for the op that already
+        // computes it, a rule-introduced op for its emitter, and a constant no op
+        // holds is built here.
+        let value = match node.prov {
+            Prov::Value(value) => value,
+            Prov::Op(op) => self.context.get_op(op).results[0],
+            Prov::Introduced(idx) => {
+                let ty = node.ty.expect("an op node carries its result type");
+                let mut operands = Vec::with_capacity(node.children.len());
+                for &arg in &node.children {
+                    operands.push(self.materialize(extraction, arg, ty, target, rewriter, memo)?);
                 }
-            },
-            Node::Op { prov, args, ty, .. } => match prov {
-                OpProv::Seeded(op) => self.context.get_op(*op).results[0],
-                OpProv::Introduced(idx) => {
-                    let mut operands = Vec::with_capacity(args.len());
-                    for &arg in args {
-                        operands
-                            .push(self.materialize(extraction, arg, *ty, target, rewriter, memo)?);
-                    }
-                    let emit = self.ruleset.emits[*idx]
-                        .as_ref()
-                        .expect("an introduced op supplies an emit");
-                    emit(self.context, &operands, *ty, target, rewriter)?
-                }
-            },
+                let emit = self.ruleset.emits[idx]
+                    .as_ref()
+                    .expect("an introduced op supplies an emit");
+                emit(self.context, &operands, ty, target, rewriter)?
+            }
+            Prov::None => {
+                let literal = node.int().expect("an unprovenanced node is a constant");
+                let op = ops::constant(self.context, literal.to_i64(), expected_ty).build();
+                rewriter.insert_op_before(target, &op)?;
+                op.result()
+            }
         };
         memo.insert(class, value);
         Ok(value)
