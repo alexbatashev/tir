@@ -17,12 +17,14 @@ does the rest.
 | module | responsibility |
 |--------|----------------|
 | `isel/mod.rs` | public API (`Rule`, `EmitRequest`, cost-model traits), the pass driver, the shared `FunctionSelection`, and per-block solving |
-| `isel/node.rs` | the `SemNode` label, `SemPayload`, and e-class helpers (`class_int_binding`, `class_value_binding`, widths) |
+| `sem/node.rs` | the `SemNode` label and `SemPayload` — the vocabulary, shared with the sea view |
+| `sem/egraph.rs` | `SemEGraph` and the vocabulary's e-class readings (`class_int_binding`, widths, IR↔semantic types) |
+| `isel/node.rs` | what selection reads beyond that: low-bit register views, `class_value_binding`, `class_register_type` |
 | `isel/builder.rs` | `SemDagBuilder`: the function's IR ops → one shared semantic e-graph, including memory effects |
 | `isel/pattern.rs` | `compile_isel_pattern`: rule semantics → `tir_symbolic::egraph::Pattern`s + per-node metadata |
-| `isel/axioms.rs` | s-expression axioms and their compilation into proved rewrites |
+| `sem/axioms.rs` | s-expression axioms and their compilation into proved rewrites |
 | `defs/isel.sexp` | checked target-independent semantic invariants |
-| `isel/rewrites.rs` | theory-family selection and saturation driver |
+| `sem/rewrites.rs` | theory-family selection and saturation driver, shared with the sea view |
 | `isel/cover.rs` | PBQP construction, match dominance pruning, completeness check |
 | `isel/emit.rs` | `BlockPlan` and `EmissionBuilder`: cover → per-op decisions |
 
@@ -213,7 +215,7 @@ over them.
 Before tiling, the e-graph is saturated with target-independent algebraic
 identities (`self.rewrites`). These are **not** hand-written selection rules;
 they describe equivalent forms of the operation semantics as s-expression
-axioms (`isel/axioms.rs`):
+axioms (`sem/axioms.rs`):
 
 ```
 (axiom sext-bridge

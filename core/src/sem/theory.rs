@@ -1,6 +1,6 @@
 use std::sync::OnceLock;
 
-use tir::sem::{SemExpr, parse};
+use crate::sem::{SemExpr, parse};
 
 use super::axioms::{Axiom, parse_axiom};
 
@@ -11,7 +11,7 @@ pub(crate) struct Theory {
 pub(crate) fn theory() -> &'static Theory {
     static THEORY: OnceLock<Theory> = OnceLock::new();
     THEORY.get_or_init(|| {
-        parse_theory(include_str!("../../../defs/isel.sexp"))
+        parse_theory(include_str!("../../defs/isel.sexp"))
             .expect("core/defs/isel.sexp must be a valid isel theory")
     })
 }

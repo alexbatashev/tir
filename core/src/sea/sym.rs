@@ -23,8 +23,8 @@ use std::sync::Arc;
 
 use tir_symbolic::egraph::{EGraph, Id};
 
-use crate::backend::isel::node::{ir_type, semantic_type};
 use crate::graph::{Dag, MetaDag, NodeId};
+use crate::sem::egraph::{ir_type, semantic_type};
 use crate::sem::{
     SemGraph, SemNode as Node, SemType, SymKind, SymPayload, infer_types, template_node,
 };

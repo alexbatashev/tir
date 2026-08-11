@@ -1,27 +1,19 @@
-//! The e-graph node label for semantic instruction selection, plus the small
-//! shared helpers that read types and operand bindings off e-classes.
-//!
-//! The label itself is [`tir::sem::SemNode`] — the one vocabulary the sea view,
-//! the peephole and selection all speak.
+//! What instruction selection reads off an e-class beyond the vocabulary's own
+//! readings ([`tir::sem::egraph`]): the framework's value model (a low-bit view
+//! of a register), the register a class is carried in, and the purity a fused
+//! match needs.
 
 use std::collections::HashMap;
 
 use tir::{
-    Context, TypeId, ValueId,
-    builtin::{FloatType, IntegerType},
-    sem::{FloatFormat, SemType, SymKind, SymPayload},
+    Context, ValueId,
+    sem::{
+        SemType, SymKind,
+        egraph::{SemEGraph, class_int_binding, class_semantic_type},
+    },
 };
 use tir_adt::APInt;
-use tir_symbolic::egraph::{EGraph, ENode, Id};
-
-pub(crate) use tir::sem::template_node;
-pub use tir::sem::{SemNode, SemPayload};
-
-/// The semantic e-graph instruction selection operates over: e-classes of
-/// equivalent semantic expressions for the values computed across the whole
-/// function, shared by every block and covered per block inside per-block
-/// assumption scopes.
-pub type SemEGraph = EGraph<SemNode>;
+use tir_symbolic::egraph::{ENode, Id};
 
 /// If the class is a low-bit truncation `Extract(v, hi, 0)`, its operand class
 /// `v`. Such a value *is* the low `hi+1` bits of `v`'s register — the framework's
@@ -57,14 +49,6 @@ pub(crate) fn low_extract_width(egraph: &SemEGraph, class: Id) -> Option<u32> {
     })
 }
 
-/// The constant a class is proven to hold, if any member is an integer literal.
-pub(crate) fn class_int_binding(egraph: &SemEGraph, class: Id) -> Option<APInt> {
-    egraph.nodes(class).iter().find_map(|n| match &n.payload {
-        Some(SemPayload::Expr(SymPayload::Int(v))) => Some(v.clone()),
-        _ => None,
-    })
-}
-
 /// The register value carrying a class: an input value, then the first IR value
 /// the class computes (from `class_values`, the map recording which values a
 /// class stands for). The representative feeds cost-model approximation only.
@@ -77,7 +61,7 @@ pub(crate) fn class_value_binding(
         .nodes(class)
         .iter()
         .find_map(|n| match n.payload.as_ref() {
-            Some(SemPayload::Expr(SymPayload::Value(v))) => Some(*v),
+            Some(tir::sem::SemPayload::Expr(tir::sem::SymPayload::Value(v))) => Some(*v),
             _ => None,
         })
         .or_else(|| {
@@ -85,69 +69,6 @@ pub(crate) fn class_value_binding(
                 .get(&egraph.find(class))
                 .and_then(|values| values.first().copied())
         })
-}
-
-/// The negated comparison at the same operand order (`!(a < b)` is `a >= b`).
-pub(crate) fn complement_comparison(kind: SymKind) -> Option<SymKind> {
-    Some(match kind {
-        SymKind::Eq => SymKind::Ne,
-        SymKind::Ne => SymKind::Eq,
-        SymKind::Lt => SymKind::Ge,
-        SymKind::Ge => SymKind::Lt,
-        SymKind::Gt => SymKind::Le,
-        SymKind::Le => SymKind::Gt,
-        SymKind::ULt => SymKind::UGe,
-        SymKind::UGe => SymKind::ULt,
-        SymKind::UGt => SymKind::ULe,
-        SymKind::ULe => SymKind::UGt,
-        _ => return None,
-    })
-}
-
-/// Whether the kind is a boolean comparison.
-pub(crate) fn is_comparison(kind: SymKind) -> bool {
-    complement_comparison(kind).is_some()
-}
-
-/// The bit-width of an IR integer or float type, or `None` for any other type.
-pub(crate) fn type_width(context: &Context, ty: TypeId) -> Option<u32> {
-    let data = context.get_type_data(ty);
-    let any = data.as_ref() as &dyn std::any::Any;
-    any.downcast_ref::<IntegerType>()
-        .map(IntegerType::width)
-        .or_else(|| {
-            any.downcast_ref::<tir::builtin::FloatType>()
-                .map(tir::builtin::FloatType::bit_width)
-        })
-}
-
-/// The context-independent semantic type represented by an IR type. Register
-/// classes are intentionally absent: this describes the value, not its storage.
-pub(crate) fn semantic_type(context: &Context, ty: TypeId) -> Option<SemType> {
-    let data = context.get_type_data(ty);
-    let any = data.as_ref() as &dyn std::any::Any;
-    any.downcast_ref::<IntegerType>()
-        .map(|ty| SemType::bits(ty.width()))
-        .or_else(|| {
-            any.downcast_ref::<FloatType>()
-                .map(|ty| SemType::Float(FloatFormat::new(ty.exp_width(), ty.mant_width())))
-        })
-}
-
-pub(crate) fn ir_type(context: &Context, ty: &SemType) -> Option<TypeId> {
-    use tir::sem::Width;
-    match ty {
-        SemType::Bits(Width::Const(width)) | SemType::RawBits(Width::Const(width)) => {
-            Some(IntegerType::new(context, *width))
-        }
-        SemType::Float(format) => match (&format.exponent, &format.mantissa) {
-            (Width::Const(exponent), Width::Const(mantissa)) => {
-                Some(FloatType::new(context, *exponent, *mantissa))
-            }
-            _ => None,
-        },
-        _ => None,
-    }
 }
 
 pub(crate) fn minimal_unsigned_apint(value: u64) -> APInt {
@@ -181,23 +102,6 @@ pub(crate) fn kind_is_pure(kind: SymKind) -> bool {
             | SymKind::AtomicRmw
             | SymKind::Fence
     )
-}
-
-/// The integer width of an e-class, taken from whichever member carries a known
-/// integer type.
-pub(crate) fn class_width(ctx: &Context, egraph: &SemEGraph, class: Id) -> Option<u32> {
-    egraph
-        .nodes(class)
-        .iter()
-        .find_map(|n| n.ty.and_then(|ty| type_width(ctx, ty)))
-}
-
-/// A ground semantic type carried by any typed member of an e-class.
-pub(crate) fn class_semantic_type(ctx: &Context, egraph: &SemEGraph, class: Id) -> Option<SemType> {
-    egraph
-        .nodes(class)
-        .iter()
-        .find_map(|node| node.ty.and_then(|ty| semantic_type(ctx, ty)))
 }
 
 /// The semantic type a register must hold for an e-class. Pointers preserve

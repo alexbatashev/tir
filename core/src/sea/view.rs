@@ -45,15 +45,15 @@ use std::sync::Arc;
 
 use tir_symbolic::egraph::{EGraph, Extraction, Id};
 
+use crate::attributes::{AttributeValue, NamedAttribute};
 use crate::passes::instcombine::value_rewrites;
+use crate::scoped_attr::AttributeDict;
+use crate::sem::rewrites::{IselRewrite, SaturationLimits, discover_rewrites, saturate};
 use crate::sem::{Prov, SemNode as Node};
-use crate::{Commutative, ConstantLike, Context, OpCost, OpInstance, TypeId, ValueId};
+use crate::{Commutative, ConstantLike, Context, DATA_LAYOUT, OpCost, OpInstance, TypeId, ValueId};
 
 use super::graph::{Graph, NodeId, Origin, PortType, RegionId};
 use super::{kinds, sym};
-
-const ITER_LIMIT: usize = 30;
-const NODE_LIMIT: usize = 100_000;
 
 /// The e-graph rendering of one region, valid for the version of that region's
 /// owner it was built at.
@@ -78,11 +78,20 @@ pub struct View {
 }
 
 impl View {
-    /// Render `region` — the pure value terms of it — as an e-graph.
-    pub fn build(context: &Context, graph: &Graph, region: RegionId) -> Self {
+    /// Render `region` — the pure value terms of it — as an e-graph. `layout` is
+    /// the data layout in scope where the region's λ came from: an op whose
+    /// semantics are width-dependent reads it, and the green layer has no IR
+    /// scope to resolve one from (see [`Builder::probe`]).
+    pub fn build(
+        context: &Context,
+        graph: &Graph,
+        region: RegionId,
+        layout: Option<&AttributeDict>,
+    ) -> Self {
         let mut builder = Builder {
             context,
             graph,
+            layout,
             eg: EGraph::new(),
             class_of: HashMap::new(),
             anchored: HashSet::new(),
@@ -163,9 +172,28 @@ impl View {
 
     /// Saturate with the proved rewrites. Between this and a commit the view is
     /// not IR: a class holds every form its term was proved equal to.
+    ///
+    /// Both rulesets run in one driver. The peephole rules are keyed on the op
+    /// identity, the selection axioms on the semantic vocabulary, and the view
+    /// seeds a term in both — so a form either discovers is one the other may
+    /// match next iteration, which two sequential saturations would not give.
     pub fn saturate(&mut self, context: &Context) {
-        let rewrites = value_rewrites(context);
-        self.eg.saturate(&rewrites, ITER_LIMIT, NODE_LIMIT);
+        let mut rewrites: Vec<IselRewrite> =
+            value_rewrites(context).into_iter().map(peephole).collect();
+        rewrites.extend(discover_rewrites());
+        saturate(
+            context,
+            &mut self.eg,
+            &rewrites,
+            SaturationLimits::default(),
+        );
+    }
+
+    /// Every form the class was proved to hold, canonicalized. Extraction names
+    /// one winner per class; a covering pass chooses among all of them, and this
+    /// is what it reads.
+    pub fn candidates(&self, class: Id) -> impl Iterator<Item = &Node> {
+        self.eg.nodes(self.eg.find(class)).iter()
     }
 
     /// Whether `extraction` chose, for any origin, a different term than the one
@@ -195,6 +223,18 @@ impl View {
     }
 }
 
+/// A peephole rule as the saturation driver's rewrite: the same searcher over
+/// the same vocabulary, applied by the engine's own right-hand side. The two
+/// rulesets are declared in different shapes, not driven by different engines.
+fn peephole(rule: crate::passes::instcombine::rules::Rule) -> IselRewrite {
+    IselRewrite {
+        name: rule.name.clone(),
+        searcher: rule.lhs.clone(),
+        apply: Box::new(move |_, eg, matched| rule.apply_match(eg, matched)),
+        post_saturation: false,
+    }
+}
+
 /// A region's key: the version stamp of the structural node that owns it. Every
 /// mutation bumps the owners on the spine from the region it edited up to ω, so
 /// this changes exactly when the region — or something containing it — changed.
@@ -214,7 +254,13 @@ impl ViewCache {
     /// The view of `region`, revalidated against its owner's version stamp: an
     /// edit elsewhere in the graph leaves it warm, an edit reaching this region
     /// rebuilds it.
-    pub fn view(&mut self, context: &Context, graph: &Graph, region: RegionId) -> &mut View {
+    pub fn view(
+        &mut self,
+        context: &Context,
+        graph: &Graph,
+        region: RegionId,
+        layout: Option<&AttributeDict>,
+    ) -> &mut View {
         let version = version_of(graph, region);
         let stale = self
             .entries
@@ -222,7 +268,7 @@ impl ViewCache {
             .is_none_or(|view| view.version != version);
         if stale {
             self.entries
-                .insert(region, View::build(context, graph, region));
+                .insert(region, View::build(context, graph, region, layout));
         }
         self.entries.get_mut(&region).expect("just inserted")
     }
@@ -231,6 +277,9 @@ impl ViewCache {
 struct Builder<'a> {
     context: &'a Context,
     graph: &'a Graph,
+    /// The data layout the probes declare, so a width-dependent op's semantics
+    /// resolve one.
+    layout: Option<&'a AttributeDict>,
     eg: EGraph<Node>,
     class_of: HashMap<Origin, Id>,
     anchored: HashSet<Origin>,
@@ -368,16 +417,28 @@ impl Builder<'_> {
     /// A detached instance of the node's op, carrying its attributes and a value
     /// of its result type. Interfaces are registered per `(dialect, name)`, so
     /// this is how the green layer asks an op what it is without an IR to ask in.
+    ///
+    /// A detached instance belongs to no scope, so the layout the viewed λ was
+    /// raised under rides along as the probe's own `data_layout` — otherwise an
+    /// op whose semantics are the pointer width (`ptr.null`, `ptr.cmp`) would
+    /// declare none and seed nothing.
     fn probe(&self, node: NodeId, ty: TypeId) -> Arc<OpInstance> {
         let identity = self.graph.op_type_name(self.graph.op_of(node));
         let result = self.context.create_value(ty, None).id();
+        let mut attributes = self.graph.attributes(node).to_vec();
+        if let Some(layout) = self.layout {
+            attributes.push(NamedAttribute::new(
+                DATA_LAYOUT,
+                AttributeValue::Dict(layout.clone()),
+            ));
+        }
         Arc::new(OpInstance::new_dynamic(
             identity,
             self.context.as_context_ref(),
             Vec::new(),
             vec![result],
             Vec::new(),
-            self.graph.attributes(node).to_vec(),
+            attributes,
         ))
     }
 
@@ -499,8 +560,12 @@ impl Builder<'_> {
             self.anchor(Origin::output(node, port as u32), ty);
             let value = self.context.create_value(ty, None).id();
             let id = self.eg.add(Node::input(value).typed(ty));
-            self.class_of
-                .insert(Origin::argument(body, port as u32), id);
+            let carried = Origin::argument(body, port as u32);
+            self.class_of.insert(carried, id);
+            // The placeholder is a leaf like any other, so an extraction that
+            // chooses it must reach the origin it stands for: the body argument
+            // carrying the loop variable.
+            self.anchor_of.insert(value, carried);
             self.types.push((id, ty));
             placeholders.push((port, value, ty, id));
         }
@@ -527,9 +592,9 @@ impl Builder<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::isel::rewrites::{SaturationLimits, discover_rewrites, saturate};
     use crate::builtin::{IntegerType, UnitType};
     use crate::sem::SymKind;
+    use crate::sem::rewrites::{SaturationLimits, discover_rewrites, saturate};
 
     /// The selection theory is written in the semantic vocabulary and its
     /// axioms bind on class *widths*, so a view whose classes hold only the op
@@ -566,7 +631,7 @@ mod tests {
             .finish(&[Origin::output(lambda, 0)])
             .expect("the λ is the only export");
 
-        let mut view = View::build(&context, &graph, body);
+        let mut view = View::build(&context, &graph, body, None);
         saturate(
             &context,
             &mut view.eg,

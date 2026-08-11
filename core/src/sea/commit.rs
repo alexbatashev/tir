@@ -18,10 +18,11 @@ use std::collections::{HashMap, HashSet};
 
 use tir_symbolic::egraph::{Extraction, Id};
 
-use crate::TypeId;
 use crate::attributes::{AttributeValue, NamedAttribute};
+use crate::builtin::IntegerType;
 use crate::sem::node::cost;
 use crate::sem::{Kind, SemNode as Node};
+use crate::{Context, TypeId};
 
 use super::Error;
 use super::graph::{Graph, NodeId, Origin, PortType, RegionId};
@@ -32,15 +33,23 @@ use super::view::View;
 /// its place, or `None` when the extraction chose the terms the region already
 /// held. A failed commit leaves a staged region that no node owns, so its graph
 /// must be discarded rather than used.
-pub fn commit(graph: &mut Graph, view: &View, lambda: NodeId) -> Result<Option<NodeId>, Error> {
-    let extraction = view.egraph().extract_best(materializable_cost);
+pub fn commit(
+    context: &Context,
+    graph: &mut Graph,
+    view: &View,
+    lambda: NodeId,
+) -> Result<Option<NodeId>, Error> {
+    let types = view.class_types();
+    let extraction = view
+        .egraph()
+        .extract_best(|class, node| materializable_cost(context, &types, class, node));
     if !view.improved(&extraction) {
         return Ok(None);
     }
     let mut stager = Stager {
         view,
         extraction: &extraction,
-        types: view.class_types(),
+        types,
         moved: HashMap::new(),
         materialized: HashMap::new(),
         active: HashSet::new(),
@@ -59,13 +68,38 @@ pub fn commit(graph: &mut Graph, view: &View, lambda: NodeId) -> Result<Option<N
 /// equalities to discover through, never a form to land. Selection consumes
 /// them directly, so this constraint is a property of *materializing into scf*
 /// and lifts where isel emission takes over.
-fn materializable_cost(node: &Node) -> u64 {
+///
+/// A literal is bound by the same property: it folds to a `builtin.constant`,
+/// which holds an integer. The vocabulary is bit-level, so a pointer class is
+/// proved equal to its address — `ptr.null` to the literal zero — and landing
+/// that literal would retype the value. Such a class is rebuilt from the
+/// operation naming it instead.
+fn materializable_cost(
+    context: &Context,
+    types: &HashMap<Id, TypeId>,
+    class: Id,
+    node: &Node,
+) -> u64 {
     match &node.kind {
-        // A gate or a leaf names the origin it was seeded from; a literal folds
-        // to a `constant`.
-        Kind::Sym(_) | Kind::Merge(_) if node.value().is_none() && node.int().is_none() => u64::MAX,
-        _ => cost(node),
+        Kind::Ir(_) => cost(node),
+        // A gate or a leaf names the origin it was seeded from.
+        _ if node.value().is_some() => cost(node),
+        _ if node.int().is_some() && reads_as_integer(context, types, class) => cost(node),
+        _ => u64::MAX,
     }
+}
+
+/// Whether the region reads `class` at an integer type. A class no seeding
+/// typed, or one two seedings disagree on, carries the reader's own type into
+/// [`Stager::materialize`], which is where the literal is typed then.
+fn reads_as_integer(context: &Context, types: &HashMap<Id, TypeId>, class: Id) -> bool {
+    let Some(&ty) = types.get(&class) else {
+        return true;
+    };
+    let data = context.get_type_data(ty);
+    (data.as_ref() as &dyn std::any::Any)
+        .downcast_ref::<IntegerType>()
+        .is_some()
 }
 
 struct Stager<'a> {

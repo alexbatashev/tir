@@ -1,26 +1,23 @@
 //! Instruction selection over semantic e-graphs.
 //!
 //! The whole function's operations are lowered into one shared e-graph of
-//! semantic expressions ([`builder`]), saturated with proved algebraic rewrites
-//! ([`rewrites`]), and then covered *per block* while traversing the
+//! semantic expressions ([`builder`]), saturated with the proved algebraic
+//! rewrites the vocabulary owns ([`tir::sem::rewrites`]), and then covered *per
+//! block* while traversing the
 //! dominating-edge assumption scopes — by the target's instruction patterns
 //! ([`pattern`]), e-matched by the shared [`tir_symbolic::egraph`] engine, via a
 //! PBQP instance over e-classes ([`cover`]). The solved cover becomes an emission
 //! plan ([`emit`]) the pass commits through the rewriter.
 
-mod axioms;
 mod builder;
 mod cover;
 mod emit;
-pub(crate) mod node;
+mod node;
 mod pattern;
-pub(crate) mod rewrites;
 #[cfg(test)]
 mod tests;
-mod theory;
 
 use std::collections::{HashMap, HashSet};
-use std::sync::OnceLock;
 
 use tir::{
     AnalysisManager, Block, BlockId, BranchGuard, BranchTerminator, Context, OpId, Operation,
@@ -30,14 +27,15 @@ use tir::{
     graph::{Dag, MutDag, NodeId, OperandConstraint},
     sem::{
         EquivalenceOracle, SemGraph, SmtOracle, SymKind, SymPayload, canonicalize_for_selection,
-        definedness_condition, infer_widths,
+        definedness_condition,
+        egraph::{class_int_binding, class_width, complement_comparison, is_comparison},
+        infer_widths, template_node,
     },
 };
 use tir_adt::APInt;
 use tir_symbolic::egraph::{ENode, Id, PatternNode, Var};
 
-pub use node::{SemEGraph, SemNode, SemPayload};
-pub use rewrites::{IselRewrite, SaturationLimits};
+pub use tir::sem::{IselRewrite, SaturationLimits, SemEGraph, SemNode, SemPayload};
 pub use tir_symbolic::egraph::EMatch;
 
 use builder::SemDagBuilder;
@@ -46,12 +44,10 @@ use cover::{
     PbqpIselMatch, build_eclass_cover, completeness_error, prune_dominated_matches,
 };
 use emit::{BlockPlan, GuardBranch, ScheduledEmit, TerminatorPlan, resolve_match, schedule_tiles};
-use node::{
-    class_int_binding, class_width, is_comparison, is_low_extract_view, kind_is_pure,
-    low_extract_source, template_node,
-};
+use node::{is_low_extract_view, kind_is_pure, low_extract_source};
 use pattern::{CompiledIselPattern, compile_isel_pattern};
-use rewrites::discover_rewrites;
+use tir::sem::axioms::{self, verify_axioms};
+use tir::sem::rewrites::{self, discover_rewrites};
 
 #[derive(Debug, Clone)]
 pub struct RuleMatch {
@@ -819,16 +815,6 @@ pub struct InstructionSelectPass {
     emitted_values: HashMap<ValueId, ValueId>,
     /// Function roots already solved, so a re-visit does not rebuild the graph.
     solved: HashSet<OpId>,
-}
-
-/// Whether the SMT obligations behind the semantic invariants and the guarded
-/// relaxations are discharged. They validate the target description, they are not
-/// inputs to selection, so running hundreds of SAT queries on every compile buys
-/// nothing: `TIR_VERIFY_AXIOMS` turns them on for the target-definition test runs
-/// that actually need the check.
-pub(crate) fn verify_axioms() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("TIR_VERIFY_AXIOMS").is_some())
 }
 
 /// Prove, for every rule carrying [`Rule::guarded_semantics`], that relaxing the
@@ -2755,7 +2741,7 @@ fn assert_fact(context: &Context, egraph: &mut SemEGraph, expr: &ConditionExpr, 
     egraph.union(expr.condition, known);
     if let Some((compare, kind, lhs, rhs)) = expr.compare {
         egraph.union(compare, known);
-        if let Some(complement) = node::complement_comparison(kind) {
+        if let Some(complement) = complement_comparison(kind) {
             let mut node = template_node(
                 complement,
                 None,

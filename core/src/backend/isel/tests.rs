@@ -1132,9 +1132,9 @@ fn saturation_bridges_sign_extension_to_shift_pair() {
     sext_node.children = vec![v, width];
     let sext = egraph.add(sext_node);
 
-    let rewrite = super::theory::axioms()
+    let rewrite = tir::sem::theory::axioms()
         .into_iter()
-        .map(super::axioms::Axiom::compile)
+        .map(tir::sem::axioms::Axiom::compile)
         .find(|rewrite| rewrite.name == "axiom-sext-bridge")
         .expect("sext bridge enabled");
     super::rewrites::saturate(
@@ -3330,4 +3330,56 @@ fn guarded_div_rule_with_mismatched_else_arm_is_rejected() {
         Err(other) => panic!("expected InvalidRuleSet, got {other:?}"),
         Ok(_) => panic!("expected InvalidRuleSet, rule was accepted"),
     }
+}
+
+/// The `eq-zero` axiom is what puts a comparison against zero into the shape a
+/// zero-register rule is written in, so the compiled pattern must find it.
+#[test]
+fn comparison_zero_shape_matches_zero_register_rule() {
+    use tir::sem::{SaturationLimits, con, op, sym, theory};
+    use tir_adt::APInt;
+
+    let ctx = Context::with_default_dialects();
+    let i1 = IntegerType::new(&ctx, 1);
+    let i64 = IntegerType::new(&ctx, 64);
+    let mut egraph = SemEGraph::new();
+    let value = egraph.add(template_node(
+        SymKind::Symbol,
+        Some(SymPayload::SymbolId(0)),
+        Some(i64),
+    ));
+    let zero = egraph.add(template_node(
+        SymKind::Constant,
+        Some(SymPayload::Int(APInt::new(64, 0))),
+        Some(i64),
+    ));
+    let mut comparison = template_node(SymKind::Eq, None, Some(i1));
+    comparison.children = vec![value, zero];
+    let root = egraph.add(comparison);
+    let rewrite = theory::axioms()
+        .into_iter()
+        .find(|axiom| axiom.name == "eq-zero")
+        .expect("core theory must declare eq-zero")
+        .compile();
+    super::rewrites::saturate(
+        &ctx,
+        &mut egraph,
+        std::slice::from_ref(&rewrite),
+        SaturationLimits::default(),
+    );
+
+    let mut pattern = SemGraph::new();
+    let value = sym(&mut pattern, 0);
+    let zero = con(&mut pattern, 0, 1);
+    let width = sym(&mut pattern, 1);
+    let zext = op(&mut pattern, SymKind::ZExt, &[zero, width]);
+    op(&mut pattern, SymKind::Eq, &[value, zext]);
+    let compiled = super::pattern::compile_isel_pattern(0, &pattern, &[], &[], &[], None).unwrap();
+
+    assert!(
+        compiled
+            .search(&egraph, &ctx)
+            .iter()
+            .any(|m| egraph.find(m.root) == egraph.find(root))
+    );
 }

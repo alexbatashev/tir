@@ -114,7 +114,7 @@ impl Driver<'_> {
     ) -> Result<(), PassError> {
         self.eg
             .saturate(&self.ruleset.rewrites, ITER_LIMIT, NODE_LIMIT);
-        let extraction = self.eg.extract_best(cost);
+        let extraction = self.eg.extract_best(|_, node| cost(node));
 
         let blocks: Vec<BlockId> = self
             .context
@@ -173,7 +173,7 @@ impl Driver<'_> {
             _ => false,
         };
         // A pushed fact changes what extracts cheapest; reuse the parent's otherwise.
-        let local = pushed.then(|| self.eg.extract_best(cost));
+        let local = pushed.then(|| self.eg.extract_best(|_, node| cost(node)));
         let extraction = local.as_ref().unwrap_or(parent_extraction);
 
         for op_id in self.context.get_block(block).op_ids() {

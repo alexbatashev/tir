@@ -37,21 +37,30 @@
 //! rejected at parse.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{LazyLock, Mutex, OnceLock};
 
-use tir::sem::{EquivalenceOracle, SmtOracle, sym};
-use tir::{
-    Context,
-    graph::NodeId,
-    sem::{SemExpr, SemGraph, SymKind, SymPayload, Value, con, execute, op, op_kind, parse},
-};
 use tir_adt::APInt;
 use tir_symbolic::egraph::{EMatch, Id, Pattern, Var};
 
-use super::node::{
-    SemEGraph, SemNode, class_int_binding, class_width, is_comparison, template_node,
+use crate::sem::{
+    EquivalenceOracle, SemExpr, SemGraph, SmtOracle, SymKind, SymPayload, Value, con, execute, op,
+    op_kind, parse, sym,
 };
+use crate::{Context, graph::NodeId};
+
+use super::egraph::{SemEGraph, class_int_binding, class_width, is_comparison};
+use super::node::{SemNode, template_node};
 use super::rewrites::IselRewrite;
+
+/// Whether the SMT obligations behind the semantic invariants and the guarded
+/// relaxations are discharged. They validate the target description, they are not
+/// inputs to selection, so running hundreds of SAT queries on every compile buys
+/// nothing: `TIR_VERIFY_AXIOMS` turns them on for the target-definition test runs
+/// that actually need the check.
+pub(crate) fn verify_axioms() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("TIR_VERIFY_AXIOMS").is_some())
+}
 
 /// A width position in `vars`/`root`: a literal to check or a name to bind.
 #[derive(Clone)]
@@ -225,7 +234,7 @@ struct Realization<'a> {
 }
 
 pub(crate) struct Axiom {
-    name: String,
+    pub(crate) name: String,
     /// Width names in declaration order; a resolved `Vec<u64>` in this order is
     /// the proof-memo key.
     width_names: Vec<String>,
@@ -747,7 +756,7 @@ impl Axiom {
                         _ => return,
                     }
                 }
-                if super::verify_axioms() {
+                if verify_axioms() {
                     self.verify(&widths);
                 }
                 if let Some(id) = self.instantiate(ctx, &self.rhs, eg, m, &holes, &widths) {
@@ -1420,49 +1429,6 @@ mod tests {
                         .any(|child| child.kind == SymKind::ZExt)
                 })
         }));
-    }
-
-    #[test]
-    fn comparison_zero_shape_matches_zero_register_rule() {
-        let ctx = Context::with_default_dialects();
-        let i1 = IntegerType::new(&ctx, 1);
-        let i64 = IntegerType::new(&ctx, 64);
-        let mut eg = SemEGraph::new();
-        let value = eg.add(template_node(
-            SymKind::Symbol,
-            Some(SymPayload::SymbolId(0)),
-            Some(i64),
-        ));
-        let zero = eg.add(template_node(
-            SymKind::Constant,
-            Some(SymPayload::Int(APInt::new(64, 0))),
-            Some(i64),
-        ));
-        let mut comparison = template_node(SymKind::Eq, None, Some(i1));
-        comparison.children = vec![value, zero];
-        let root = eg.add(comparison);
-        let axiom = super::super::theory::axioms()
-            .into_iter()
-            .find(|axiom| axiom.name == "eq-zero")
-            .unwrap();
-        apply_all(&ctx, &mut eg, &axiom.compile());
-
-        let mut pattern = SemGraph::new();
-        let value = sym(&mut pattern, 0);
-        let zero = con(&mut pattern, 0, 1);
-        let width = sym(&mut pattern, 1);
-        let zext = op(&mut pattern, SymKind::ZExt, &[zero, width]);
-        op(&mut pattern, SymKind::Eq, &[value, zext]);
-        let compiled =
-            super::super::pattern::compile_isel_pattern(0, &pattern, &[], &[], &[], None).unwrap();
-
-        assert!(!compiled.search(&eg, &ctx).is_empty());
-        assert!(
-            compiled
-                .search(&eg, &ctx)
-                .iter()
-                .any(|m| eg.find(m.root) == eg.find(root))
-        );
     }
 
     #[test]

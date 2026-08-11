@@ -135,7 +135,7 @@ fn the_view_proves_an_addition_of_zero_is_its_operand() {
         .finish(&[Origin::output(lambda, 0)])
         .expect("the λ is the only export");
 
-    let mut view = View::build(&f.context, &f.graph, body);
+    let mut view = View::build(&f.context, &f.graph, body, None);
     assert_ne!(view.class(sum), view.class(argument), "before saturation");
 
     view.saturate(&f.context);
@@ -160,7 +160,7 @@ fn a_stateful_node_anchors_the_values_around_it() {
         .finish(&[Origin::output(lambda, 0)])
         .expect("the λ is the only export");
 
-    let mut view = View::build(&f.context, &f.graph, body);
+    let mut view = View::build(&f.context, &f.graph, body, None);
     view.saturate(&f.context);
 
     assert_ne!(
@@ -180,10 +180,12 @@ fn a_cached_view_survives_an_edit_to_a_sibling_lambda() {
         .expect("both λs are exported");
 
     let mut cache = ViewCache::default();
-    cache.view(&f.context, &f.graph, body).saturate(&f.context);
+    cache
+        .view(&f.context, &f.graph, body, None)
+        .saturate(&f.context);
     mutate::splice(&mut f.graph, user, 0, replacement).expect("same type, scheduled earlier");
 
-    let view = cache.view(&f.context, &f.graph, body);
+    let view = cache.view(&f.context, &f.graph, body, None);
     assert_eq!(
         view.class(sum),
         view.class(argument),
@@ -209,10 +211,12 @@ fn a_cached_view_is_rebuilt_after_an_edit_to_its_own_lambda() {
         .expect("the λ is the only export");
 
     let mut cache = ViewCache::default();
-    cache.view(&f.context, &f.graph, body).saturate(&f.context);
+    cache
+        .view(&f.context, &f.graph, body, None)
+        .saturate(&f.context);
     mutate::splice(&mut f.graph, user, 1, one).expect("same type, scheduled earlier");
 
-    let view = cache.view(&f.context, &f.graph, body);
+    let view = cache.view(&f.context, &f.graph, body, None);
     assert_ne!(
         view.class(sum),
         view.class(argument),
@@ -306,9 +310,9 @@ fn a_constant_class_is_built_once_per_type_it_is_read_at() {
         .finish(&[Origin::output(lambda, 0)])
         .expect("the λ is the only export");
 
-    let mut view = View::build(&context, &f.graph, body);
+    let mut view = View::build(&context, &f.graph, body, None);
     view.saturate(&context);
-    let replacement = commit::commit(&mut f.graph, &view, lambda)
+    let replacement = commit::commit(&f.context, &mut f.graph, &view, lambda)
         .expect("the staged body is well formed")
         .expect("multiplying by zero is the zero constant");
 
@@ -351,9 +355,9 @@ fn a_commit_rebuilds_the_op_a_semantic_term_shares_a_class_with() {
         .finish(&[Origin::output(lambda, 0)])
         .expect("the λ is the only export");
 
-    let mut view = View::build(&f.context, &f.graph, body);
+    let mut view = View::build(&f.context, &f.graph, body, None);
     view.saturate(&f.context);
-    let replacement = commit::commit(&mut f.graph, &view, lambda)
+    let replacement = commit::commit(&f.context, &mut f.graph, &view, lambda)
         .expect("the staged body is well formed")
         .expect("the extraction dropped the addition");
 
@@ -378,9 +382,9 @@ fn a_commit_replaces_the_lambda_it_canonicalized_and_nothing_else() {
         .finish(&[Origin::output(first, 0), Origin::output(second, 0)])
         .expect("both λs are exported");
 
-    let mut view = View::build(&f.context, &f.graph, body);
+    let mut view = View::build(&f.context, &f.graph, body, None);
     view.saturate(&f.context);
-    let replacement = commit::commit(&mut f.graph, &view, first)
+    let replacement = commit::commit(&f.context, &mut f.graph, &view, first)
         .expect("the staged body is well formed")
         .expect("the extraction dropped the addition");
 
@@ -622,7 +626,7 @@ fn a_theta_output_is_never_the_value_the_loop_carries() {
     let mut f = fixture();
     let (outer, theta, body) = counting_loop(&mut f);
 
-    let mut view = View::build(&f.context, &f.graph, outer);
+    let mut view = View::build(&f.context, &f.graph, outer, None);
     view.saturate(&f.context);
 
     let output = view.class(Origin::output(theta, 0));
@@ -682,7 +686,7 @@ fn a_gamma_gates_the_ports_whose_arms_are_pure_and_anchors_the_rest() {
     let mut f = fixture();
     let (outer, gamma) = half_pure_gamma(&mut f);
 
-    let view = View::build(&f.context, &f.graph, outer);
+    let view = View::build(&f.context, &f.graph, outer, None);
 
     assert!(
         view.models(Origin::output(gamma, 0)),
@@ -691,5 +695,161 @@ fn a_gamma_gates_the_ports_whose_arms_are_pure_and_anchors_the_rest() {
     assert!(
         !view.models(Origin::output(gamma, 1)),
         "a port an arm computes off the state chain stays an anchor"
+    );
+}
+
+/// `ptr.null` is the all-zero address at the pointer width the data layout in
+/// scope declares, so the view seeds its semantics only where it knows one.
+#[test]
+fn a_null_pointer_seeds_its_semantics_from_the_layout_in_scope() {
+    let mut f = fixture();
+    let pointer = crate::ptr::PtrType::opaque(&f.context);
+    let body = f.graph.open_region(&[]);
+    let null = f.graph.op_type("ptr", "null");
+    let node = f
+        .graph
+        .add_node(null, &[], &[PortType::Value(pointer)], &[], Vec::new())
+        .expect("a null has no inputs to reject");
+    let lambda = f.close_lambda(body, &[Origin::output(node, 0)]);
+    f.graph
+        .finish(&[Origin::output(lambda, 0)])
+        .expect("the λ is the only export");
+
+    let AttributeValue::Dict(layout) =
+        crate::data_layout_spec(crate::Endianness::Little, 128, &[("p", 64, 64)])
+    else {
+        unreachable!("a layout spec is a dict")
+    };
+    let view = View::build(&f.context, &f.graph, body, Some(&layout));
+
+    let class = view
+        .class(Origin::output(node, 0))
+        .expect("a null pointer is a term");
+    assert!(
+        view.egraph().nodes(class).iter().any(|node| {
+            node.int()
+                .is_some_and(|address| address.width() == 64 && address.to_u64() == 0)
+        }),
+        "the null address must be seeded at the layout's pointer width"
+    );
+}
+
+/// The placeholder standing for a loop-carried value is a leaf like any other,
+/// so an extraction reaching a nested class through it must resolve the origin
+/// it stands for: the body argument the loop variable arrives on.
+#[test]
+fn a_loop_carried_placeholder_resolves_to_the_body_argument() {
+    let mut f = fixture();
+    let (outer, _, body) = counting_loop(&mut f);
+
+    let view = View::build(&f.context, &f.graph, outer, None);
+
+    let carried = Origin::argument(body, 0);
+    let class = view.class(carried).expect("the carried value is a term");
+    let placeholder = view
+        .candidates(class)
+        .find_map(|node| node.value())
+        .expect("the class holds the placeholder leaf");
+    assert_eq!(view.anchor(placeholder), Some(carried));
+}
+
+/// Extraction names one winner per class; a covering pass reads every form the
+/// class holds, at whatever id it asks with.
+#[test]
+fn a_class_reports_its_canonical_members() {
+    use crate::sem::SymKind;
+
+    let mut f = fixture();
+    let i32 = f.i32;
+    let body = f.graph.open_region(&[PortType::Value(i32)]);
+    let zero = f.constant(0, i32);
+    let muli = f.graph.op_type("builtin", "muli");
+    let product = f
+        .graph
+        .add_node(
+            muli,
+            &[Origin::argument(body, 0), zero],
+            &[PortType::Value(i32)],
+            &[],
+            Vec::new(),
+        )
+        .expect("both operands are visible in the region");
+    let product = Origin::output(product, 0);
+    let lambda = f.close_lambda(body, &[product]);
+    f.graph
+        .finish(&[Origin::output(lambda, 0)])
+        .expect("the λ is the only export");
+
+    let mut view = View::build(&f.context, &f.graph, body, None);
+    let seeded = view.class(product).expect("the product is a term");
+    view.saturate(&f.context);
+
+    let class = view.class(product).expect("the product is still a term");
+    let members: Vec<_> = view.candidates(seeded).collect();
+    assert_eq!(
+        members.len(),
+        view.egraph().nodes(class).len(),
+        "an id from before the folding union reads the class it landed in"
+    );
+    assert!(
+        members
+            .iter()
+            .any(|node| node.kind.ir().is_some_and(|op| op.name == "muli")),
+        "the op identity the peephole rules match"
+    );
+    assert!(
+        members.iter().any(|node| node.sym() == Some(SymKind::Mul)),
+        "the semantic form the selection axioms match"
+    );
+    assert!(
+        members
+            .iter()
+            .any(|node| node.int().is_some_and(|value| value.to_u64() == 0)),
+        "the constant the peephole proved it equal to"
+    );
+}
+
+/// The null address is the literal zero in the semantic vocabulary, but
+/// `builtin.constant` holds an integer — so a class the region reads as a
+/// pointer is rebuilt from the operation that names it, never from the literal.
+#[test]
+fn a_pointer_class_is_never_rebuilt_from_the_literal_address() {
+    let mut f = fixture();
+    let i32 = f.i32;
+    let pointer = crate::ptr::PtrType::opaque(&f.context);
+    let body = f.graph.open_region(&[PortType::Value(i32)]);
+    let null = f.graph.op_type("ptr", "null");
+    let address = f
+        .graph
+        .add_node(null, &[], &[PortType::Value(pointer)], &[], Vec::new())
+        .expect("a null has no inputs to reject");
+    let zero = f.constant(0, i32);
+    let sum = f.addi(Origin::argument(body, 0), zero, i32);
+    let lambda = f.close_lambda(body, &[Origin::output(address, 0), sum]);
+    f.graph
+        .finish(&[Origin::output(lambda, 0)])
+        .expect("the λ is the only export");
+
+    let AttributeValue::Dict(layout) =
+        crate::data_layout_spec(crate::Endianness::Little, 128, &[("p", 64, 64)])
+    else {
+        unreachable!("a layout spec is a dict")
+    };
+    let mut view = View::build(&f.context, &f.graph, body, Some(&layout));
+    view.saturate(&f.context);
+    let replacement = commit::commit(&f.context, &mut f.graph, &view, lambda)
+        .expect("the staged body is well formed")
+        .expect("adding zero is an improvement worth committing");
+
+    let staged = f.graph.subregions(replacement)[0];
+    let spelled: Vec<_> = f
+        .graph
+        .region_nodes(staged)
+        .iter()
+        .map(|&node| f.graph.op_type_name(f.graph.op_of(node)))
+        .collect();
+    assert!(
+        spelled.contains(&("ptr", "null")),
+        "the null address must survive as its operation, got {spelled:?}"
     );
 }

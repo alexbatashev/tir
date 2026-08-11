@@ -318,7 +318,7 @@ fn bench_extract(c: &mut Criterion) {
     let (_, g) = pre_saturated();
     let mut group = c.benchmark_group("tir_math/extract");
     group.bench_function("best", |b| {
-        b.iter(|| black_box(g.extract_best(extract_cost)));
+        b.iter(|| black_box(g.extract_best(|_, node| extract_cost(node))));
     });
     group.finish();
 }

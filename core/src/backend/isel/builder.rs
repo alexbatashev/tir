@@ -8,15 +8,16 @@ use tir::{
     attributes::AttributeValue,
     builtin::{FloatType, IntegerType},
     graph::{Dag, MetaDag, NodeId},
-    sem::{SemGraph, SemType, SymKind, SymPayload, infer_types},
+    sem::{
+        SemGraph, SemPayload, SemType, SymKind, SymPayload,
+        egraph::{SemEGraph, ir_type, semantic_type, type_width},
+        infer_types, template_node,
+    },
 };
 use tir_adt::APInt;
 use tir_symbolic::egraph::Id;
 
-use super::node::{
-    SemEGraph, SemPayload, class_is_pure, ir_type, minimal_unsigned_apint, semantic_type,
-    template_node, type_width,
-};
+use super::node::{class_is_pure, minimal_unsigned_apint};
 
 /// Builds a block's semantic expressions straight into the e-graph: every lowered
 /// node is hash-consed by [`SemEGraph::add`], so the e-graph *is* the interned DAG
@@ -258,7 +259,7 @@ impl<'a> SemDagBuilder<'a> {
             .egraph
             .nodes(class)
             .iter()
-            .find(|n| n.sym().is_some_and(super::node::is_comparison))?
+            .find(|n| n.sym().is_some_and(tir::sem::egraph::is_comparison))?
             .clone();
         Some((
             class,

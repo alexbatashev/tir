@@ -1,12 +1,15 @@
 use std::collections::{HashMap, HashSet};
 
-use tir::{BlockId, Context, OpId, TypeId, ValueId, analysis::DominatorTree};
+use tir::{
+    BlockId, Context, OpId, TypeId, ValueId, analysis::DominatorTree,
+    sem::egraph::class_int_binding,
+};
 use tir_symbolic::egraph::Id;
 
 use super::{
     FunctionSelection, RuleMatch,
     cover::{BoundaryDemand, PbqpIselMatch},
-    node::{class_int_binding, class_is_pure},
+    node::class_is_pure,
 };
 
 #[derive(Clone, Debug, Default)]

@@ -6,14 +6,15 @@ use std::collections::{HashMap, HashSet};
 use tir::{
     ValueId,
     pbqp::{self, INF_COST, PbqpMatrix, PbqpProblem},
-    sem::SymKind,
+    sem::{
+        SymKind,
+        egraph::{SemEGraph, class_int_binding},
+    },
 };
 use tir_symbolic::egraph::Id;
 
 use super::RuleMatch;
-use super::node::{
-    SemEGraph, class_int_binding, class_is_pure, class_value_binding, is_low_extract_view,
-};
+use super::node::{class_is_pure, class_value_binding, is_low_extract_view};
 use super::pattern::CompiledIselPattern;
 
 /// The cost charged for keeping a gate as control flow. A conservative fixed

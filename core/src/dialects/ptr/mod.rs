@@ -221,7 +221,7 @@ impl NullOp {
         >,
     ) -> Option<tir::graph::NodeId> {
         let context = self.0.context.upgrade();
-        let width = crate::DataLayout::for_op(&context, self.0.id)?.pointer_size()?;
+        let width = crate::DataLayout::for_instance(&context, &self.0)?.pointer_size()?;
         let node = g.add_node(tir::sem::SymKind::Constant);
         g.set_leaf_data(
             node,
@@ -269,7 +269,7 @@ impl CmpOp {
         use tir::sem::SymKind;
 
         let context = self.0.context.upgrade();
-        crate::DataLayout::for_op(&context, self.0.id)?.pointer_size()?;
+        crate::DataLayout::for_instance(&context, &self.0)?.pointer_size()?;
 
         let (kind, swap) = match predicate(self)? {
             "eq" => (SymKind::Eq, false),

@@ -17,9 +17,15 @@ pub use tir_symbolic::lang::{
     scalar_op_named,
 };
 
+pub(crate) mod axioms;
 mod discover;
+pub(crate) mod egraph;
 pub mod node;
+pub(crate) mod rewrites;
+pub(crate) mod theory;
+pub use egraph::SemEGraph;
 pub use node::{IrOp, Kind, MergeKind, Prov, SemNode, SemPayload, template_node};
+pub use rewrites::{IselRewrite, SaturationLimits};
 
 pub(crate) use discover::sym;
 pub use discover::{

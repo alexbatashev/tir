@@ -46,6 +46,20 @@ impl DataLayout {
         scoped_dict(context, op, DATA_LAYOUT).map(|entries| Self { entries })
     }
 
+    /// The layout in scope at `instance`: the scope chain of its id, falling back
+    /// to the dict the instance carries itself. A detached instance — the sea
+    /// view's probe of an op type — belongs to no scope, so the layout resolved
+    /// where the code came from rides along as its own attribute.
+    pub fn for_instance(context: &Context, instance: &crate::OpInstance) -> Option<Self> {
+        Self::for_op(context, instance.id).or_else(|| {
+            instance
+                .attributes
+                .iter()
+                .find(|attribute| attribute.name == DATA_LAYOUT)
+                .and_then(|attribute| Self::from_value(&attribute.value))
+        })
+    }
+
     /// The layout in scope at `op` over `default`: the target's own spec acts as
     /// the outermost scope, so IR entries override it key by key while entries
     /// the IR never mentions keep the target's value.

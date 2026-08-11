@@ -52,9 +52,11 @@ use crate::attributes::{AttributeValue, NamedAttribute};
 use crate::builtin::{FuncOp, IntegerType, TokenType, UnitType};
 use crate::dialects::scf;
 use crate::{
-    Block, Context, MemoryRead, MemoryWrite, OpId, OpInstance, PromotableAllocation,
+    Block, Context, MemoryRead, MemoryWrite, OpId, OpInstance, Operation, PromotableAllocation,
     RegionId as IrRegion, TypeId, Value, ValueId,
 };
+
+use crate::scoped_attr::{AttributeDict, scoped_dict};
 
 use super::Error;
 use super::graph::{Graph, NodeId, Origin, PortType, RegionId};
@@ -69,6 +71,10 @@ pub struct Raised {
     pub lambda: NodeId,
     /// How many state chains the signatures carry.
     pub chains: usize,
+    /// The data layout in scope at the function. The green layer holds no IR to
+    /// resolve one from, so the view carries it to the ops whose semantics are
+    /// stated in the pointer width.
+    pub layout: Option<AttributeDict>,
 }
 
 /// Raise `func` onto a fresh graph. Returns the shape that could not be mapped,
@@ -119,6 +125,7 @@ pub fn raise_function(context: &Context, func: &FuncOp) -> Result<Raised, Error>
         graph: raiser.graph,
         lambda,
         chains,
+        layout: scoped_dict(context, func.id(), crate::DATA_LAYOUT),
     })
 }
 

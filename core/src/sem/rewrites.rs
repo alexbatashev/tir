@@ -1,13 +1,18 @@
-//! The proved algebraic rewrites used to saturate the program e-graph before
-//! covering, plus the small saturation driver over the [`tir_symbolic`] e-graph.
+//! The proved algebraic rewrites the semantic e-graph saturates with, plus the
+//! small saturation driver over the [`tir_symbolic`] e-graph.
+//!
+//! Both consumers of the vocabulary use them: instruction selection saturates a
+//! whole function's e-graph before covering, and the sea view saturates a
+//! region's before extraction.
 
 use std::collections::HashSet;
 
-use tir::Context;
 use tir_symbolic::egraph::{EMatch, ENode, Id, Pattern};
 
-use super::node::{SemEGraph, SemNode};
+use super::egraph::SemEGraph;
+use super::node::SemNode;
 use super::theory::axioms;
+use crate::Context;
 
 /// The right-hand side of an [`IselRewrite`]: given the e-graph and a match, assert
 /// the proven equivalence (typically by building nodes and unioning the result with

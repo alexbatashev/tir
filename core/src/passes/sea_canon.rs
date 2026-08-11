@@ -53,11 +53,11 @@ impl Pass for SeaCanonicalizePass {
 
         let body = raised.graph.subregions(raised.lambda)[0];
         let mut views = sea::ViewCache::default();
-        let view = views.view(context, &raised.graph, body);
+        let view = views.view(context, &raised.graph, body, raised.layout.as_ref());
         view.saturate(context);
         // A commit that cannot stage leaves a region no node owns, so the graph
         // it staged into is unusable and the function keeps the IR it has.
-        match sea::commit(&mut raised.graph, view, raised.lambda) {
+        match sea::commit(context, &mut raised.graph, view, raised.lambda) {
             Ok(Some(lambda)) => raised.lambda = lambda,
             Ok(None) => {}
             Err(_) => return Ok(PreservedAnalyses::all()),

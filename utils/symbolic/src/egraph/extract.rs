@@ -15,11 +15,14 @@ impl<L: ENode> Extraction<L> {
 }
 
 impl<L: ENode> EGraph<L> {
-    /// Greedy bottom-up extraction: per class, the node minimizing `cost_of(node)`
-    /// plus each child's chosen cost. Cycle-tolerant — a node with un-costed children
-    /// is skipped and revisited to a fixpoint, so a cycle is costed through its
-    /// non-cyclic input. Scope-aware via [`EGraph::classes`]/[`EGraph::find`].
-    pub fn extract_best(&self, cost_of: impl Fn(&L) -> u64) -> Extraction<L> {
+    /// Greedy bottom-up extraction: per class, the node minimizing
+    /// `cost_of(class, node)` plus each child's chosen cost. The class is the
+    /// canonical id the node would represent, so a cost model may reject a form
+    /// the class cannot be spelled in. Cycle-tolerant — a node with un-costed
+    /// children is skipped and revisited to a fixpoint, so a cycle is costed
+    /// through its non-cyclic input. Scope-aware via
+    /// [`EGraph::classes`]/[`EGraph::find`].
+    pub fn extract_best(&self, cost_of: impl Fn(Id, &L) -> u64) -> Extraction<L> {
         let graph = FlatGraph::new(self, cost_of);
         let mut cost: Vec<Option<u64>> = vec![None; graph.classes.len()];
         let mut best: Vec<Option<usize>> = vec![None; graph.classes.len()];
@@ -94,7 +97,7 @@ struct FlatNode<'a, L> {
 }
 
 impl<'a, L: ENode> FlatGraph<'a, L> {
-    fn new(eg: &'a EGraph<L>, cost_of: impl Fn(&L) -> u64) -> Self {
+    fn new(eg: &'a EGraph<L>, cost_of: impl Fn(Id, &L) -> u64) -> Self {
         let mut index: FxHashMap<Id, usize> = FxHashMap::default();
         let mut classes: Vec<Id> = Vec::new();
         let mut nodes: Vec<FlatNode<'a, L>> = Vec::new();
@@ -107,7 +110,7 @@ impl<'a, L: ENode> FlatGraph<'a, L> {
             nodes.extend(class.nodes().iter().map(|node| FlatNode {
                 node,
                 class: slot,
-                base: cost_of(node),
+                base: cost_of(id, node),
                 children: 0..0,
                 costable: true,
             }));
@@ -174,7 +177,7 @@ mod tests {
         g.union(nn, a);
         g.rebuild();
 
-        let extraction = g.extract_best(unit);
+        let extraction = g.extract_best(|_, node| unit(node));
         assert!(matches!(extraction.node(g.find(a)).unwrap(), Math::Sym(0)));
     }
 
@@ -183,7 +186,7 @@ mod tests {
         let mut g = EGraph::new();
         let a = sym(&mut g, 0);
         let na = neg(&mut g, a);
-        let extraction = g.extract_best(unit);
+        let extraction = g.extract_best(|_, node| unit(node));
         // neg(a) costs 1 (op) + 0 (leaf) = 1; the chosen node is the neg.
         assert!(matches!(extraction.node(g.find(na)).unwrap(), Math::Neg(_)));
     }
@@ -200,7 +203,7 @@ mod tests {
         g.union(ab, ba);
         g.rebuild();
 
-        let extraction = g.extract_best(unit);
+        let extraction = g.extract_best(|_, node| unit(node));
         let root = g.find(ab);
         let chosen = extraction.node(root).unwrap();
         assert_eq!(chosen.children(), g.nodes(root)[0].children());
@@ -215,7 +218,7 @@ mod tests {
         let na = neg(&mut g, a);
         g.union(a, na);
         g.rebuild();
-        let extraction = g.extract_best(unit);
+        let extraction = g.extract_best(|_, node| unit(node));
         assert!(extraction.node(g.find(a)).is_some());
     }
 }

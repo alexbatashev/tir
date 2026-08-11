@@ -5,14 +5,15 @@ use std::collections::{HashMap, HashSet};
 use tir::{
     Context,
     graph::{Dag, MetaDag, NodeId, OperandConstraint},
-    sem::{SemGraph, SemType, SymKind, SymPayload, TypeUnifier, infer_types},
+    sem::{
+        SemGraph, SemNode, SemType, SymKind, SymPayload, TypeUnifier,
+        egraph::{SemEGraph, class_int_binding, class_semantic_type},
+        infer_types, template_node,
+    },
 };
 use tir_symbolic::egraph::{EMatch, Id, Pattern, PatternNode, Substitution, Var};
 
-use super::node::{
-    SemEGraph, SemNode, class_int_binding, class_register_type, class_semantic_type,
-    low_extract_source, low_extract_width, template_node,
-};
+use super::node::{class_register_type, low_extract_source, low_extract_width};
 use super::{ImmRange, RegisterRequirement};
 
 /// A rule's pattern compiled for e-matching: the [`Pattern`] itself plus the
