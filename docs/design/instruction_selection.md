@@ -119,8 +119,8 @@ distinguishes.
 ```
 
 `SymKind` / `SymPayload<ValueId>` come from each op's `semantic_expr` (the sem-DSL), so a
-multi-node expansion (e.g. a load becomes `LoadMemory(add(addr, 0), bytes,
-meta)`) lands as several e-nodes.
+multi-node expansion (e.g. a load becomes `LoadMemory(add(addr, 0), bytes, meta,
+state)`) lands as several e-nodes.
 
 ### Opaque payloads: things that must never merge
 
@@ -130,26 +130,59 @@ node of the same kind (a pattern payload of `None` is a wildcard). It is used
 for:
 
 - **un-lowerable sub-expressions** (`add_opaque`): two unknown computations are
-  never assumed equal;
-- **memory effects and their addressing wrappers** (`add_op_unique`): loads are
-  not pure values (two loads of one address differ across an intervening
-  store), so their e-classes must never merge; the synthetic `addr + 0`
-  wrapper stays private to one memory op for the same reason.
+  never assumed equal.
+
+Memory effects used to be spelled this way too. They are not any more: a memory
+term carries the state chain it reads, and *that* is what keeps two accesses
+apart (see below). An opaque serial only ever said "do not merge"; a state
+operand says why, and says it in a form the rules and the cover can read.
 
 ### Memory ops
 
 Ops implementing `MemoryRead` / `MemoryWrite` are lowered by
-`build_memory_effect` into `LoadMemory` / `StoreMemory` nodes whose address is
-wrapped as `addr + 0` so the targets' base+offset addressing patterns
-match a bare pointer. The wrapper is unioned with the bare address class only
-when that class is pure: an effectful address (a loaded pointer) must keep its
-effect node as the sole materialization of its class, or the cover could pick
-the arithmetic view and leave the effect with no rule to materialize it. The
+`build_memory_effect` into `LoadMemory(addr, bytes, meta, state)` /
+`StoreMemory(addr, bytes, value, space, state)` — the target vocabulary's shape
+with the chain the access reads appended, which is the same shape the sea view
+seeds (`core/src/sea/view.rs`, `core/src/sea/state.rs`). The state operand *is*
+memory identity: two reads of one address on one chain are one term and select
+one instruction, a write takes the chain to a state nothing before it names, and
+the accesses after it read that. The chain never orders anything — the emission
+schedule is the block's own op order (`schedule_tiles` serializes the effect
+tiles by position), and a state edge only names identity.
+
+The chains both paths thread are conservative, because neither substrate has the
+control flow: a fresh unknown chain (an opaque leaf) starts every block and
+follows every operation whose effect the lowering cannot spell — a call, an
+`alloca`, anything with no declared semantics or with effectful ones. Inside such
+a straight-line run the lowering order *is* the execution order, so a read
+reaches the writes that happened on it and nothing else. The view path spells the
+same thing as one region argument of state per run (`isel/seed.rs`).
+
+Rules say nothing about state: a TMDL memory pattern is arity 3/4, and
+`compile_isel_pattern` appends the state operand to every memory node it compiles
+(`PatternNodeMeta::is_state`). That operand is matched and ignored — not a
+boundary, so the cover demands no register for a chain; not legality-constrained,
+so it accepts whatever chain the access reads; and not an operand of the rule, so
+no emitter ever sees it. It binds the chain class so the cover can read it: a
+state binding is excluded from a match's *effect footprint* (the interior classes
+the instruction recomputes, which two tiles may not both own) and from the
+compatibility rule that forces an internalized effect to stay untiled. Every
+access on a chain names it, and two reads of one state are not two effects.
+
+The address is wrapped as `addr + 0` so the targets' base+offset addressing
+patterns match a bare pointer. On the operation-lowered path the wrapper is
+unioned with the bare address class only when that class is pure: an effectful
+address (a loaded pointer) keeps its effect node as the sole materialization of
+its class and reads the wrapper as its own class instead. The view path records
+the equality whatever the address computes — the wrapper names the class it reads,
+so a tile rooted there would have to register-read itself, which selection already
+refuses. The
 interfaces are the only trigger; there is no op-name
 matching. Pointer-valued memory effects use the address width the `data_layout`
 in scope declares, falling back to the target's own description (see
 [target_description.md](target_description.md)), so their byte width remains
-target-defined without embedding an ISA or ABI choice in the core builder.
+target-defined without embedding an ISA or ABI choice in the core builder; the
+view resolves the same fact off the probe the region's λ carries.
 `class_is_pure` also
 treats the atomic and synchronization kinds
 (`LoadReserved`, `StoreConditional`, `AtomicRmw`, `Fence`) as impure, so like
@@ -509,7 +542,8 @@ Classes in `must_materialize` are never offered Internal alternatives at all.
 
 Edges connect each match's **root class to every class the match binds**, so
 the match's requirements don't depend on the choices of intermediate pattern
-nodes. The compatibility matrix sets `INF_COST` for incoherent pairs and asks
+nodes. A state operand binds no requirement — it names the chain the access
+reads — so it draws no edge and pulls no chain class into the closure. The compatibility matrix sets `INF_COST` for incoherent pairs and asks
 `alternatives_compatible` (via `child_requirement`):
 
 ```

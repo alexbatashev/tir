@@ -1,0 +1,26 @@
+// RUN: tir mc --march=rv64i --stage=isel %s | filecheck %s
+
+// Two reads of one address on one state chain are one access: the state operand
+// is the whole of a memory term's identity, so the loads hash-cons and select a
+// single lw. A store in between takes the chain to a different state, so the
+// reads around it stay two.
+
+module {
+  func @reload(%0: !ptr.p<!i32>, %1: !i32) -> !i32 {
+    %2 = ptr.load %0 : !i32
+    %3 = ptr.load %0 : !i32
+    %4 = addi %2, %3 : !i32
+    ptr.store %1, %0
+    %5 = ptr.load %0 : !i32
+    %6 = addi %4, %5 : !i32
+    return %6
+  }
+  module_end
+}
+
+// CHECK: riscv.lw {rd = %[[FIRST:.*]]:GPR, rs1 = %virt0:GPR, imm = 0}
+// CHECK-NOT: riscv.lw
+// CHECK: riscv.addw {rd = %[[SUM:.*]]:GPR, rs1 = %[[FIRST]]:GPR, rs2 = %[[FIRST]]:GPR}
+// CHECK: riscv.sw {rs1 = %virt0:GPR, rs2 = %virt1:GPR, imm = 0}
+// CHECK: riscv.lw {rd = %[[RELOADED:.*]]:GPR, rs1 = %virt0:GPR, imm = 0}
+// CHECK: riscv.addw {rd = {{.*}}:GPR, rs1 = %[[SUM]]:GPR, rs2 = %[[RELOADED]]:GPR}

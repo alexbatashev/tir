@@ -1432,6 +1432,11 @@ impl InstructionSelectPass {
             };
             if let Seeder::Ops(builder) = &mut seeder {
                 for &block_id in &block_ids {
+                    // Blocks are lowered in region order, which is not an
+                    // execution order: what ran before a block is a join the
+                    // straight-line chain does not model, so each block reads a
+                    // fresh unknown state.
+                    builder.break_state();
                     for op_id in context.get_block(block_id).op_ids() {
                         let op = context.get_op(op_id);
                         if let Some(root) = builder.build_for_op(&op).or_else(|| {
@@ -2402,6 +2407,9 @@ impl InstructionSelectPass {
             let mut captures = CaptureBindings::new();
             for (var, class) in m.subst.entries() {
                 let Var::Symbol(symbol) = var else { continue };
+                if compiled.is_state_symbol(*symbol) {
+                    continue;
+                }
                 captures.bind(*symbol, fs.egraph.find(class));
             }
 
@@ -2583,6 +2591,9 @@ impl InstructionSelectPass {
                 let mut captures = CaptureBindings::new();
                 for (var, class) in m.subst.entries() {
                     let Var::Symbol(symbol) = var else { continue };
+                    if compiled.is_state_symbol(*symbol) {
+                        continue;
+                    }
                     captures.bind(*symbol, fs.egraph.find(class));
                 }
 
@@ -2642,6 +2653,7 @@ impl InstructionSelectPass {
                             pattern_node,
                             class,
                             is_boundary,
+                            is_state: meta.is_state,
                             demand,
                             view_offset: meta
                                 .register
@@ -2932,6 +2944,9 @@ fn closure_classes(
         };
         for &i in indices {
             for binding in &matches[i].bindings.pattern_nodes {
+                if binding.is_state {
+                    continue;
+                }
                 let bound = egraph.find(binding.class);
                 if covered.insert(bound) {
                     work.push(bound);

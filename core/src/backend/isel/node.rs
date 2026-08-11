@@ -93,6 +93,14 @@ pub(crate) fn class_is_pure(egraph: &SemEGraph, class: Id) -> bool {
     })
 }
 
+/// Whether a term of this kind names an access to memory, and therefore carries
+/// the state chain it reads as its last operand — the arity both seedings spell
+/// (`super::builder::SemDagBuilder::build_memory_effect`, [`tir::sea::View`]) and
+/// the one `super::pattern` compiles a rule's memory node up to.
+pub(crate) fn is_memory_kind(kind: SymKind) -> bool {
+    matches!(kind, SymKind::LoadMemory | SymKind::StoreMemory)
+}
+
 /// Whether the kind is a pure value expression (see [`class_is_pure`]).
 pub(crate) fn kind_is_pure(kind: SymKind) -> bool {
     !matches!(

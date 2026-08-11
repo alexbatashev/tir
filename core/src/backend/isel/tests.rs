@@ -1718,9 +1718,9 @@ fn emit_store_marker(
 /// Memory lowering is driven purely by the `MemoryRead`/`MemoryWrite` interfaces:
 /// a `ptr.store` and a `ptr.load` of the same slot must lower to the target's
 /// store/load patterns with the base pointer and stored value bound as operands.
-/// The same-slot case also guards the addressing-wrapper uniqueness: were the
-/// synthetic `addr + sext(0)` nodes shared, no block with two memory ops could
-/// be covered at all.
+/// The same-slot case also guards what keeps the two accesses apart: the store
+/// takes the chain to a state the load then reads, so the rules' arity-3/4
+/// memory patterns must still match terms carrying that state operand.
 #[test]
 fn memory_ops_select_via_interfaces() {
     let context = Context::with_default_dialects();
@@ -3455,10 +3455,11 @@ fn view_seeding_resolves_an_anchored_leaf_to_its_ir_value() {
     assert_eq!(seeding.anchors.get(&leaf), Some(&x_id));
 }
 
-/// A function the view cannot render — memory is state, which the view anchors
-/// and no selection rule can then root — stays on the operation-lowered path.
+/// Memory enters the view as state-threaded terms, so a function touching it
+/// seeds like any other: the load roots the `LoadMemory` shape over the chain it
+/// reads, which is what the target's addressing patterns match against.
 #[test]
-fn view_seeding_declines_a_function_touching_memory() {
+fn view_seeding_renders_a_load_over_its_state() {
     let context = Context::with_default_dialects();
     let i32 = IntegerType::new(&context, 32);
     let ptr = tir::ptr::PtrType::typed(&context, i32);
@@ -3470,16 +3471,28 @@ fn view_seeding_declines_a_function_touching_memory() {
     let func = ops::func(&context, "loader", i32, Some(region.id())).build();
     let mut fb = IRBuilder::new(func.body());
     let load = tir::ptr::ops::load(&context, p_id, i32).build();
+    let load_id = load.id();
     let loaded = load.result();
     fb.insert(load);
     fb.insert(ops::r#return(&context, loaded).build());
 
+    let seeding = super::seed::seed_from_view(
+        &context,
+        &tir::OperationRef::new(context.get_op(func.id()), None, None),
+        None,
+    )
+    .expect("a memory function seeds from the view");
+
+    let class = seeding.op_roots[&load_id];
+    let arities: Vec<usize> = seeding
+        .egraph
+        .nodes(class)
+        .iter()
+        .filter(|node| node.sym() == Some(SymKind::LoadMemory))
+        .map(|node| node.children.len())
+        .collect();
     assert!(
-        super::seed::seed_from_view(
-            &context,
-            &tir::OperationRef::new(context.get_op(func.id()), None, None),
-            None,
-        )
-        .is_none()
+        arities.contains(&4),
+        "the load must be a term over its state operand, got {arities:?}"
     );
 }

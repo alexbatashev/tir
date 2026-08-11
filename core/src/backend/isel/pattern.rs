@@ -13,7 +13,7 @@ use tir::{
 };
 use tir_symbolic::egraph::{EMatch, Id, Pattern, PatternNode, Substitution, Var};
 
-use super::node::{class_register_type, low_extract_source, low_extract_width};
+use super::node::{class_register_type, is_memory_kind, low_extract_source, low_extract_width};
 use super::{ImmRange, RegisterRequirement};
 
 /// A rule's pattern compiled for e-matching: the [`Pattern`] itself plus the
@@ -37,6 +37,11 @@ pub(crate) struct CompiledIselPattern {
 pub(crate) struct PatternNodeMeta {
     /// An operand capture point (a `Var::Symbol` leaf).
     pub(crate) is_boundary: bool,
+    /// The state operand appended to a memory node ([`memory_state_symbol`]):
+    /// matched to name the chain the access reads, and nothing else. It is not
+    /// an operand — no register, no immediate, no legality of its own — so the
+    /// cover reads the chain off it without demanding anything for it.
+    pub(crate) is_state: bool,
     /// A constant template: pure, folded into the encoding, never consumed by
     /// the match — boundary-like for the cover.
     pub(crate) is_constant: bool,
@@ -104,6 +109,19 @@ impl CompiledIselPattern {
                 class_register_type(ctx, egraph, matched.root, pointer_width)
                     .is_none_or(|actual| register.accepts(&actual))
             })
+    }
+
+    /// Whether `symbol` names a state operand this compilation appended to a
+    /// memory node rather than an operand the rule declares. A chain is matched
+    /// to name the access, never handed to an emitter.
+    pub(crate) fn is_state_symbol(&self, symbol: u32) -> bool {
+        (0..self.pattern.len()).any(|index| {
+            self.node_meta[index].is_state
+                && matches!(
+                    self.pattern.node(Id::from_raw(index as u32)),
+                    PatternNode::Var(Var::Symbol(bound)) if *bound == symbol
+                )
+        })
     }
 
     /// The operand symbols the pattern reads as registers.
@@ -316,6 +334,14 @@ pub(crate) fn compile_isel_pattern(
     })
 }
 
+/// The symbol naming the state operand of the memory node at `node`. Rule
+/// operands are numbered from zero upwards, so counting down from the top keeps
+/// the two apart, and one symbol per source node keeps two accesses in one
+/// pattern from being forced onto one chain.
+fn memory_state_symbol(node: NodeId) -> u32 {
+    u32::MAX - node.index() as u32
+}
+
 fn canonical_pattern_root(expr: &SemGraph, root: NodeId) -> NodeId {
     if *expr.get_node(root) != SymKind::Add {
         return root;
@@ -411,7 +437,7 @@ fn compile_isel_pattern_node(
         kind => {
             // Children compile first: a pattern node's operands must have
             // smaller ids than the node itself.
-            let children = expr
+            let mut children = expr
                 .children(node)
                 .map(|child| {
                     compile_isel_pattern_node(
@@ -427,6 +453,19 @@ fn compile_isel_pattern_node(
                     )
                 })
                 .collect::<Option<Vec<Id>>>()?;
+            // A rule spells a memory access at the target vocabulary's arity;
+            // the program spells it over the state chain it reads, which is the
+            // whole of its identity. The chain is matched and ignored, so the
+            // two arities meet without the rule saying anything about state.
+            if is_memory_kind(*kind) {
+                let state = pattern.var(Var::Symbol(memory_state_symbol(node)));
+                node_meta.push(PatternNodeMeta {
+                    is_state: true,
+                    duplicable: true,
+                    ..Default::default()
+                });
+                children.push(state);
+            }
             let mut compiled = template_node(*kind, None, expr.get_actual_type(node));
             compiled.children = children;
             let compiled = pattern.add(compiled);

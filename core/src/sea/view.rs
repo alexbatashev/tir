@@ -62,8 +62,8 @@ use crate::sem::egraph::{minimal_unsigned_apint, type_width};
 use crate::sem::rewrites::{IselRewrite, SaturationLimits, discover_rewrites, saturate};
 use crate::sem::{Prov, SemNode as Node, SymKind, template_node};
 use crate::{
-    Commutative, ConstantLike, Context, DATA_LAYOUT, MemoryRead, MemoryWrite, OpCost, OpInstance,
-    TypeId, ValueId,
+    Commutative, ConstantLike, Context, DATA_LAYOUT, DataLayout, MemoryRead, MemoryWrite, OpCost,
+    OpInstance, TypeId, ValueId,
 };
 
 use super::graph::{Graph, NodeId, Origin, PortType, RegionId};
@@ -621,7 +621,7 @@ impl Builder<'_> {
         };
         let (Some(address), Some(accessed)) = (
             self.operand_class(&probe, values, location),
-            accessed.and_then(|ty| type_width(self.context, ty)),
+            accessed.and_then(|ty| self.accessed_width(&probe, ty)),
         ) else {
             return false;
         };
@@ -686,6 +686,17 @@ impl Builder<'_> {
             }
         }
         true
+    }
+
+    /// How many bits an access of `ty` spells. A pointer carries no width of its
+    /// own — it is a data-layout fact, which the probe carries where the green
+    /// layer has no scope to resolve one from ([`DataLayout::for_instance`]).
+    fn accessed_width(&self, probe: &Arc<OpInstance>, ty: TypeId) -> Option<u32> {
+        type_width(self.context, ty).or_else(|| {
+            let data = self.context.get_type_data(ty);
+            (data.as_ref() as &dyn std::any::Any).downcast_ref::<crate::ptr::PtrType>()?;
+            DataLayout::for_instance(self.context, probe)?.pointer_size()
+        })
     }
 
     /// The ports of a node the memory vocabulary can spell: every input a value

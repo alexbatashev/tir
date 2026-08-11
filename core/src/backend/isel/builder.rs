@@ -33,6 +33,9 @@ pub(crate) struct SemDagBuilder<'a> {
     pub(crate) value_to_class: HashMap<ValueId, Id>,
     /// Serial of the next opaque leaf; each un-lowerable node gets its own.
     opaque_serial: u32,
+    /// The state chain the next memory access reads, or `None` where it is
+    /// unknown and the next access mints a fresh one ([`Self::state`]).
+    state: Option<Id>,
 }
 
 impl<'a> SemDagBuilder<'a> {
@@ -51,7 +54,30 @@ impl<'a> SemDagBuilder<'a> {
             pointer_width,
             value_to_class: HashMap::new(),
             opaque_serial: 0,
+            state: None,
         }
+    }
+
+    /// The chain the next memory access reads. An unknown chain is an opaque
+    /// leaf: nothing merges through it, so the accesses after one are still
+    /// terms over *something*.
+    fn state(&mut self) -> Id {
+        match self.state {
+            Some(state) => state,
+            None => {
+                let state = self.add_opaque();
+                self.state = Some(state);
+                state
+            }
+        }
+    }
+
+    /// Forget the current chain, so the next access reads a fresh unknown one.
+    /// The state edges this builder threads are straight-line: a block boundary
+    /// is a join the linear order does not model, and an operation whose effect
+    /// the builder cannot spell may have written anything.
+    pub(crate) fn break_state(&mut self) {
+        self.state = None;
     }
 
     fn add_leaf(
@@ -78,8 +104,7 @@ impl<'a> SemDagBuilder<'a> {
     }
 
     /// Add the `addr + 0` form used by base+offset addressing patterns and record
-    /// its exact equality with the bare address used by direct-base patterns. The
-    /// node stays unique to this memory operation; only its value class is shared.
+    /// its exact equality with the bare address used by direct-base patterns.
     ///
     /// The equality is recorded only for pure addresses: an effectful address
     /// (e.g. a loaded pointer) must keep its effect node as the class's sole
@@ -87,7 +112,7 @@ impl<'a> SemDagBuilder<'a> {
     /// that view and leave the effect with no rule to materialize it.
     fn zero_offset_address(&mut self, address: Id) -> Id {
         let zero = self.add_u64_const(0);
-        let with_zero = self.add_op_unique(SymKind::Add, vec![address, zero], None);
+        let with_zero = self.add_op(SymKind::Add, vec![address, zero], None);
         if class_is_pure(self.egraph, address) {
             self.egraph.union(with_zero, address)
         } else {
@@ -115,35 +140,13 @@ impl<'a> SemDagBuilder<'a> {
 
     /// Build an operator node, canonicalizing commutative operands so `a op b` and
     /// `b op a` hash-cons to the same e-node (mirroring the program's CSE).
-    fn add_op_node(
-        &mut self,
-        kind: SymKind,
-        mut children: Vec<Id>,
-        ty: Option<TypeId>,
-        payload: Option<SemPayload>,
-    ) -> Id {
+    fn add_op(&mut self, kind: SymKind, mut children: Vec<Id>, ty: Option<TypeId>) -> Id {
         if kind.is_commutative() {
             children.sort();
         }
         let mut node = template_node(kind, None, ty);
-        node.payload = payload;
         node.children = children;
         self.egraph.add(node)
-    }
-
-    fn add_op(&mut self, kind: SymKind, children: Vec<Id>, ty: Option<TypeId>) -> Id {
-        self.add_op_node(kind, children, ty, None)
-    }
-
-    /// Like [`Self::add_op`], but never hash-conses with another node: the opaque
-    /// serial in the payload keeps the label distinct, and an untyped pattern node
-    /// of the same kind still matches it (a pattern payload of `None` is a
-    /// wildcard). Used for memory effects and their addressing arithmetic, which
-    /// are not pure values: two loads of the same address are not interchangeable
-    /// across an intervening store, so their e-classes must never merge.
-    fn add_op_unique(&mut self, kind: SymKind, children: Vec<Id>, ty: Option<TypeId>) -> Id {
-        let payload = Some(SemPayload::Opaque(self.next_opaque_serial()));
-        self.add_op_node(kind, children, ty, payload)
     }
 
     pub(crate) fn build_for_op(&mut self, op: &std::sync::Arc<OpInstance>) -> Option<Id> {
@@ -158,8 +161,20 @@ impl<'a> SemDagBuilder<'a> {
         } else {
             let operands = self.build_operands(&op.operands);
             let mut graph = SemGraph::new();
-            let root = op.clone().as_dyn_op().semantic_expr(&mut graph)?;
-            self.lower_typed(&graph, root, &operands)
+            let Some(root) = op.clone().as_dyn_op().semantic_expr(&mut graph) else {
+                // Nothing says what this operation does, so nothing says it left
+                // memory alone: the chain it may have written is not one the
+                // accesses after it may read through.
+                if !op.is::<crate::builtin::ConstantOp>() {
+                    self.break_state();
+                }
+                return None;
+            };
+            let class = self.lower_typed(&graph, root, &operands);
+            if !class_is_pure(self.egraph, class) {
+                self.break_state();
+            }
+            class
         };
         for result in &op.results {
             self.value_to_class.insert(*result, class);
@@ -192,9 +207,12 @@ impl<'a> SemDagBuilder<'a> {
             let address = self.zero_offset_address(address);
             let bytes = self.add_u64_const(u64::from(bytes));
             let metadata = self.add_u64_const(0);
-            return Some(self.add_op_unique(
+            let state = self.state();
+            // A read leaves memory as it found it, so the chain runs on
+            // unchanged; two reads of one address on one chain are one term.
+            return Some(self.add_op(
                 SymKind::LoadMemory,
-                vec![address, bytes, metadata],
+                vec![address, bytes, metadata, state],
                 Some(result_ty),
             ));
         }
@@ -212,11 +230,16 @@ impl<'a> SemDagBuilder<'a> {
             let bytes = self.add_u64_const(u64::from(bytes));
             let value = self.build_from_value(value);
             let address_space = self.add_u64_const(0);
-            return Some(self.add_op_unique(
+            let state = self.state();
+            let store = self.add_op(
                 SymKind::StoreMemory,
-                vec![address, bytes, value, address_space],
+                vec![address, bytes, value, address_space, state],
                 None,
-            ));
+            );
+            // The write takes memory to a state nothing before it names, so the
+            // term *is* the chain the accesses after it read.
+            self.state = Some(store);
+            return Some(store);
         }
 
         None

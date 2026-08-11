@@ -10,10 +10,15 @@
 //! semantics), so the two substrates agree on what is opaque; what they do not
 //! agree on is *who says so*, which is the point of the swap.
 //!
-//! What the view does not render, this declines: memory is state, and a state
-//! edge anchors, so a load would arrive at the cover as a leaf no rule can root.
-//! Such a function stays on the operation-lowered path until the view models
-//! memory (`docs/design/sea.md`, "MemoryRead/MemoryWrite grow state accessors").
+//! Memory is state, and the reconstructed region has no structure to thread a
+//! chain through: the CFG was destroyed before the backend, so what ran before a
+//! block is not something the region's linear node order names. So the chains
+//! are conservative — one fresh region argument per straight-line run of
+//! accesses, cut at every block boundary and at every operation whose effect the
+//! reconstruction does not model. Inside a run the order *is* the execution
+//! order, so a read reaches the writes that happened on it and nothing else.
+//! What the chains never do is order anything: the schedule an emission lands is
+//! the block's own op order, and a state edge only names identity.
 
 use std::collections::HashMap;
 
@@ -21,14 +26,14 @@ use tir_symbolic::egraph::Id;
 
 use crate::builtin::{IntegerType, UnitType};
 use crate::sea::{Graph, NodeId, Origin, PortType, View, kinds};
-use crate::sem::egraph::SemEGraph;
-use crate::sem::{Prov, SemGraph, SemNode};
+use crate::sem::egraph::{SemEGraph, minimal_unsigned_apint};
+use crate::sem::{Prov, SemGraph, SemNode, SymKind, template_node};
 use crate::{
     AttributeDict, Context, MemoryRead, MemoryWrite, OpId, OpInstance, OperationRef, Terminator,
     TypeId, ValueId,
 };
 
-use super::node::class_is_pure;
+use super::node::{class_is_pure, is_memory_kind};
 
 /// What a view-seeded function hands selection: the e-graph, and the two
 /// readings that replace the operation lowering's side tables.
@@ -54,11 +59,13 @@ pub(crate) fn seed_from_view(
     let plan = Plan::of(context, function)?;
 
     let mut graph = Graph::new(IntegerType::new(context, 1), &[]);
-    let arguments: Vec<PortType> = plan
+    let mut arguments: Vec<PortType> = plan
         .anchored
         .iter()
         .map(|&(_, ty)| PortType::Value(ty))
         .collect();
+    let first_chain = arguments.len();
+    arguments.resize(first_chain + plan.chains, PortType::State);
     let body = graph.open_region(&arguments);
 
     let mut origins: HashMap<ValueId, Origin> = plan
@@ -67,30 +74,41 @@ pub(crate) fn seed_from_view(
         .enumerate()
         .map(|(index, &(value, _))| (value, Origin::argument(body, index as u32)))
         .collect();
+    let mut chains: Vec<Origin> = (0..plan.chains)
+        .map(|chain| Origin::argument(body, (first_chain + chain) as u32))
+        .collect();
     let mut nodes: Vec<(OpId, NodeId)> = Vec::new();
-    for &op_id in &plan.rendered {
-        let op = context.get_op(op_id);
-        let inputs: Vec<Origin> = op
+    for rendered in &plan.rendered {
+        let op = context.get_op(rendered.op);
+        let mut inputs: Vec<Origin> = op
             .operands
             .iter()
             .map(|operand| origins.get(operand).copied())
             .collect::<Option<_>>()?;
-        let result = op.results[0];
-        let ty = context.get_value(result).ty();
+        let mut outputs: Vec<PortType> = op
+            .results
+            .iter()
+            .map(|&result| PortType::Value(context.get_value(result).ty()))
+            .collect();
+        if let Some(chain) = rendered.chain {
+            inputs.push(chains[chain]);
+            outputs.push(PortType::State);
+        }
         let op_type = graph.op_type(op.dialect().as_str(), op.name().as_str());
         let node = graph
-            .add_node(
-                op_type,
-                &inputs,
-                &[PortType::Value(ty)],
-                &[],
-                op.attributes.clone(),
-            )
+            .add_node(op_type, &inputs, &outputs, &[], op.attributes.clone())
             .ok()?;
-        origins.insert(result, Origin::output(node, 0));
-        nodes.push((op_id, node));
+        for (port, &result) in op.results.iter().enumerate() {
+            origins.insert(result, Origin::output(node, port as u32));
+        }
+        if let Some(chain) = rendered.chain {
+            chains[chain] = Origin::output(node, op.results.len() as u32);
+        }
+        nodes.push((rendered.op, node));
     }
-    graph.close_region(body, &[]).ok()?;
+    // The chains leave the region: what a caller does with the memory they name
+    // is not something this rendering knows, so no law may drop a write on one.
+    graph.close_region(body, &chains).ok()?;
     let function_type = PortType::Value(UnitType::new(context));
     let lambda = graph
         .add_node(kinds::LAMBDA, &[], &[function_type], &[body], Vec::new())
@@ -102,18 +120,24 @@ pub(crate) fn seed_from_view(
     for (&value, &origin) in &origins {
         value_to_class.insert(value, view.class(origin)?);
     }
+    // An operation roots the class of its first output: the value a read or a
+    // pure term computes, and the chain a write produces.
     let op_roots: HashMap<OpId, Id> = nodes
         .iter()
         .map(|&(op_id, node)| Some((op_id, view.class(Origin::output(node, 0))?)))
         .collect::<Option<_>>()?;
-    // A rendered class holding an effectful term would reach the cover as a
-    // value the schedule no longer orders. Nothing declaring memory gets here,
-    // so this is the guard against an op whose semantics say otherwise.
-    if op_roots
-        .values()
-        .any(|&class| !class_is_pure(view.egraph(), class))
-    {
-        return None;
+    for (rendered, &(op_id, node)) in plan.rendered.iter().zip(&nodes) {
+        // An origin the view gave up on is an opaque leaf no rule can root, so
+        // the operation behind it would reach the cover with nothing to select.
+        if !view.models(Origin::output(node, 0)) {
+            return None;
+        }
+        // Only a memory term is effectful, and the schedule orders it. A pure
+        // operation whose semantics say otherwise would reach the cover as a
+        // value nothing orders.
+        if rendered.chain.is_none() && !class_is_pure(view.egraph(), op_roots[&op_id]) {
+            return None;
+        }
     }
 
     let mut anchors = HashMap::new();
@@ -131,6 +155,7 @@ pub(crate) fn seed_from_view(
     let class_types = view.class_types();
     let mut egraph = view.into_egraph();
     type_constant_classes(&mut egraph, &class_types);
+    wrap_memory_addresses(&mut egraph);
 
     Some(ViewSeeding {
         egraph,
@@ -164,20 +189,69 @@ fn type_constant_classes(egraph: &mut SemEGraph, class_types: &HashMap<Id, TypeI
     egraph.rebuild();
 }
 
-/// Which operations the view renders as terms, and which values it anchors.
+/// Record `addr = addr + 0` for every address a memory term reads, which is what
+/// makes the targets' base+offset patterns match a bare pointer. Addressing is a
+/// selection concern and not the region's — the view spells an access over the
+/// address the operation names — so the form the rules need is seeded here, as
+/// the operation-lowered path spells it (`SemDagBuilder::zero_offset_address`).
+///
+/// The equality with the bare address is recorded only where the address is pure,
+/// as that path does: an effectful address (a loaded pointer) keeps its effect
+/// node as the sole materialization of its class, and the access reads the
+/// wrapper as a class of its own instead — which is also what keeps the wrapper
+/// legal as a match interior where the effect it reads is shared.
+fn wrap_memory_addresses(egraph: &mut SemEGraph) {
+    let mut terms: Vec<(Id, SemNode)> = Vec::new();
+    for class in egraph.classes() {
+        for term in egraph.nodes(class.id()) {
+            if term.sym().is_some_and(is_memory_kind) {
+                terms.push((class.id(), term.clone()));
+            }
+        }
+    }
+    let zero = egraph.add(SemNode::constant(minimal_unsigned_apint(0), Prov::None));
+    for (class, term) in terms {
+        let address = term.children[0];
+        let mut wrapper = template_node(SymKind::Add, None, None);
+        wrapper.children = vec![address, zero];
+        let wrapper = egraph.add(wrapper);
+        if class_is_pure(egraph, address) {
+            egraph.union(wrapper, address);
+        }
+        let mut wrapped = term;
+        wrapped.children[0] = wrapper;
+        let wrapped = egraph.add(wrapped);
+        egraph.union(class, wrapped);
+    }
+    egraph.rebuild();
+}
+
+/// Which operations the view renders as terms, which values it anchors, and how
+/// many state chains the region threads.
 struct Plan {
-    rendered: Vec<OpId>,
+    rendered: Vec<Rendered>,
     anchored: Vec<(ValueId, TypeId)>,
+    chains: usize,
+}
+
+/// An operation the region renders, with the chain it threads — `None` for a
+/// pure term, which touches no state at all.
+struct Rendered {
+    op: OpId,
+    chain: Option<usize>,
 }
 
 impl Plan {
     /// Walk the function in region order, splitting its operations into the ones
     /// the view renders and the values it anchors (every block argument, and the
-    /// results of everything else). `None` for a function the view does not
-    /// render at all.
+    /// results of everything else). A memory access joins the chain in scope; a
+    /// block boundary and an operation the rendering does not model cut it, so
+    /// the next access starts a fresh one. `None` for a function the view does
+    /// not render at all.
     fn of(context: &Context, function: &OperationRef) -> Option<Self> {
         let mut rendered = Vec::new();
         let mut anchored: Vec<(ValueId, TypeId)> = Vec::new();
+        let mut chains = 0;
         let anchor = |values: &[ValueId], anchored: &mut Vec<(ValueId, TypeId)>| {
             anchored.extend(
                 values
@@ -194,13 +268,9 @@ impl Plan {
                     .map(|argument| argument.id())
                     .collect();
                 anchor(&arguments, &mut anchored);
+                let mut chain = None;
                 for op_id in block.op_ids() {
                     let op = context.get_op(op_id);
-                    if op.clone().as_interface::<dyn MemoryRead>().is_some()
-                        || op.clone().as_interface::<dyn MemoryWrite>().is_some()
-                    {
-                        return None;
-                    }
                     // A floating-point constant selects only where the target
                     // declares a materializer for it, which the view has no
                     // reading of: rendered it would root a class no rule covers,
@@ -208,16 +278,43 @@ impl Plan {
                     if op.is::<crate::builtin::ConstantFOp>() {
                         return None;
                     }
-                    if renders(&op) {
-                        rendered.push(op_id);
+                    if accesses_memory(&op) {
+                        // The memory vocabulary names one value at most, so an
+                        // access computing more is not one it can spell.
+                        if op.results.len() > 1 {
+                            return None;
+                        }
+                        let chain = *chain.get_or_insert_with(|| {
+                            chains += 1;
+                            chains - 1
+                        });
+                        rendered.push(Rendered {
+                            op: op_id,
+                            chain: Some(chain),
+                        });
+                    } else if renders(&op) {
+                        rendered.push(Rendered {
+                            op: op_id,
+                            chain: None,
+                        });
                     } else {
                         anchor(&op.results, &mut anchored);
+                        chain = None;
                     }
                 }
             }
         }
-        Some(Plan { rendered, anchored })
+        Some(Plan {
+            rendered,
+            anchored,
+            chains,
+        })
     }
+}
+
+fn accesses_memory(op: &std::sync::Arc<OpInstance>) -> bool {
+    op.clone().as_interface::<dyn MemoryRead>().is_some()
+        || op.clone().as_interface::<dyn MemoryWrite>().is_some()
 }
 
 /// Whether the view renders `op` as a term: one value result computed from its

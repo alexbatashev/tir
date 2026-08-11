@@ -72,6 +72,10 @@ pub(crate) struct PatternNodeBinding {
     pub(crate) pattern_node: Id,
     pub(crate) class: Id,
     pub(crate) is_boundary: bool,
+    /// The chain the matched access reads ([`super::pattern::PatternNodeMeta`]).
+    /// It names the access; the match neither computes it nor consumes it, so
+    /// the effect model reads it and demands nothing for it.
+    pub(crate) is_state: bool,
     pub(crate) demand: BoundaryDemand,
     /// Where this operand's register class views its storage element (see
     /// [`super::RegisterRequirement::view_offset`]).
@@ -194,6 +198,9 @@ pub(crate) fn build_eclass_cover(
             continue;
         };
         for binding in &m.bindings.pattern_nodes {
+            if binding.is_state {
+                continue;
+            }
             if let Some(ci) = class_index(binding.class)
                 && ri != ci
             {
@@ -202,6 +209,10 @@ pub(crate) fn build_eclass_cover(
         }
     }
 
+    // A match's footprint is the effects it *performs* inside its own
+    // instruction — the interior classes it recomputes. The chain a memory
+    // access reads is not one of them: every access on a chain names it, and two
+    // reads of one state are not two effects, so a state binding stays out.
     let effect_footprints: Vec<Vec<Id>> = matches
         .iter()
         .map(|matched| {
@@ -211,6 +222,7 @@ pub(crate) fn build_eclass_cover(
                 .iter()
                 .filter(|binding| {
                     !binding.is_boundary
+                        && !binding.is_state
                         && binding.pattern_node != matched.pattern_root
                         && !class_is_pure(egraph, binding.class)
                 })
@@ -332,7 +344,7 @@ pub(crate) fn prune_dominated_matches(
         for binding in &m.bindings.pattern_nodes {
             if binding.is_boundary {
                 boundaries.push((binding.class, binding.view_offset, binding.demand));
-            } else if binding.pattern_node != m.pattern_root {
+            } else if binding.pattern_node != m.pattern_root && !binding.is_state {
                 internals.push(binding.class);
             }
         }
@@ -493,7 +505,10 @@ pub(crate) fn alternatives_compatible(
             {
                 demanded_offsets.push(binding.view_offset);
             }
-        } else if binding.pattern_node != matched.pattern_root && !class_is_pure(egraph, child) {
+        } else if binding.pattern_node != matched.pattern_root
+            && !binding.is_state
+            && !class_is_pure(egraph, child)
+        {
             owned_effect = true;
         }
     }

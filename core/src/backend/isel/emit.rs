@@ -84,7 +84,11 @@ pub(crate) fn schedule_tiles(
                 .bindings
                 .pattern_nodes
                 .iter()
-                .any(|binding| !binding.is_boundary && !class_is_pure(egraph, binding.class))
+                .any(|binding| {
+                    !binding.is_boundary
+                        && !binding.is_state
+                        && !class_is_pure(egraph, binding.class)
+                })
         })
         .map(|(&class, _)| class)
         .collect();
