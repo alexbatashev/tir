@@ -14,7 +14,7 @@ use crate::expander::{Diag, MacroTable, StringArena, collect_macros, expand};
 use crate::lexer::{Token, lex};
 use crate::markdown::{generate_markdown, generate_markdown_book};
 use crate::parser::parse;
-use crate::rustgen::{generate_operation_list, generate_rust, generate_rust_modules};
+use crate::rustgen::{SEM_BLOB_FILE, generate_operation_list, generate_rust_modules};
 use crate::sema_analyze;
 use crate::smtlibgen::generate_smtlib;
 use crate::{Span, Spanned};
@@ -336,42 +336,34 @@ impl Compiler {
 
         match &self.action {
             Action::EmitRust => {
-                if self.split_inputs.is_empty() {
-                    let output: Box<dyn Write> = self.create_output_writer()?;
-                    generate_rust(
-                        self.dialect.as_ref().unwrap(),
-                        &parsed_files,
-                        &item_cache,
-                        self.text_only,
-                        self.custom_assembly,
-                        output,
-                    )?;
-                } else {
-                    let generated = generate_rust_modules(
-                        self.dialect.as_ref().unwrap(),
-                        &parsed_files,
-                        &item_cache,
-                        self.text_only,
-                        self.custom_assembly,
-                        &self.split_inputs,
-                    )?;
-                    let mut output = self.create_output_writer()?;
-                    output.write_all(generated.root.as_bytes())?;
-                    output.flush()?;
-                    let output_dir = match &self.output {
-                        OutputKind::File(path) => PathBuf::from(path)
+                let generated = generate_rust_modules(
+                    self.dialect.as_ref().unwrap(),
+                    &parsed_files,
+                    &item_cache,
+                    self.text_only,
+                    self.custom_assembly,
+                    &self.split_inputs,
+                )?;
+                let mut output = self.create_output_writer()?;
+                output.write_all(generated.root.as_bytes())?;
+                output.flush()?;
+                // Stdout output is for inspection only: the generated Rust
+                // embeds the sem blob by relative path, so there is nowhere to
+                // put it.
+                let output_dir = match &self.output {
+                    OutputKind::File(path) => Some(
+                        PathBuf::from(path)
                             .parent()
                             .filter(|parent| !parent.as_os_str().is_empty())
                             .unwrap_or_else(|| std::path::Path::new("."))
                             .to_path_buf(),
-                        OutputKind::Batch(path) => PathBuf::from(path),
-                        OutputKind::Stdout => {
-                            return Err(TMDLError::Codegen(
-                                "split Rust output cannot be written to stdout".to_string(),
-                            ));
-                        }
-                    };
+                    ),
+                    OutputKind::Batch(path) => Some(PathBuf::from(path)),
+                    OutputKind::Stdout => None,
+                };
+                if let Some(output_dir) = output_dir {
                     fs::create_dir_all(&output_dir)?;
+                    fs::write(output_dir.join(SEM_BLOB_FILE), &generated.sem_blob)?;
                     for (file_name, contents) in generated.modules {
                         fs::write(output_dir.join(file_name), contents)?;
                     }

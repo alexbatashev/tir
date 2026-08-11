@@ -74,8 +74,8 @@ instruction TCsrSet for [RegIsa] {
 // CHECK: "rs1",
 // CHECK: __syms[{{[0-9]+}}] = Some(tir::sem::int_value(64, index as u64));
 
-// The guard's condition is a Ne over the captured index symbol and zero.
-// CHECK: SymKind::Ne
+// The guard's condition is a Ne over the captured index symbol and zero; the
+// condition itself lives in the sem blob (tmdl/tests/sem_blob.rs).
 
 // The CSR write is emitted under the guard.
 // CHECK: if value.to_u64() != 0 {

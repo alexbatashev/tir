@@ -1,30 +1,19 @@
 // A memory-access size written as a const expression over ISA parameters
 // (`self.XLEN / 8`) resolves to the concrete per-ISA byte count. Such an access
 // is not dynamically sized, so the instruction still roots a selection rule.
+// The folded size itself lives in the sem blob and is checked by
+// tmdl/tests/sem_blob.rs.
 
 // RUN: tmdlc --action=emit-rust --dialect=test --output=- %S/../Inputs/param-mem-size.tmdl | filecheck %s
 
-// The interpreted behavior loads eight bytes; the division is folded away.
+// The division is folded away, so no program in this dialect divides.
+// CHECK-NOT: SymKind::Div
+
 // CHECK: impl tir::backend::MachineInstruction for LoadWordOp
-// CHECK-NOT: SymKind::Div
-// CHECK: SemPayloadDesc::Int {
-// CHECK-NEXT: width: 4,
-// CHECK-NEXT: value: 8,
-// CHECK: SymKind::LoadMemory
-
 // CHECK: impl tir::backend::MachineInstruction for LoadDynOp
-
 // CHECK: impl tir::backend::MachineInstruction for StoreWordOp
-// CHECK-NOT: SymKind::Div
-// CHECK: SemPayloadDesc::Int {
-// CHECK-NEXT: width: 4,
-// CHECK-NEXT: value: 8,
-// CHECK: SymKind::StoreMemory
 
-// The op semantics carries the same concrete size.
 // CHECK: impl tir::sem::AsSemExpr for LoadWordOp
-// CHECK-NOT: SymKind::Div
-// CHECK: SymKind::LoadMemory
 
 // CHECK: fn isel_pattern_loadword
 // CHECK: isel_pattern_loadword(context)

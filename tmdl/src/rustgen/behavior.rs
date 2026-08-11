@@ -797,16 +797,14 @@ fn emit_dag_as_code(
     root: tir::graph::NodeId,
     widths: &[Option<u32>],
 ) -> proc_macro2::TokenStream {
-    let mut ops: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut ops: Vec<tir::sem::SemOp> = Vec::new();
     let mut node_indices: HashMap<usize, u32> = HashMap::new();
     let mut has_typed_node = false;
     for (counter, node_id) in dag.postorder(root).enumerate() {
-        let kind_ts = emit_expr_kind_ts(dag.get_node(node_id));
-        ops.push(quote! { tir::sem::SemOp::Node(#kind_ts) });
+        ops.push(tir::sem::SemOp::Node(*dag.get_node(node_id)));
 
         if let Some(data) = dag.get_leaf_data(node_id) {
-            let data_ts = emit_payload_desc_ts(data);
-            ops.push(quote! { tir::sem::SemOp::Payload(#data_ts) });
+            ops.push(tir::sem::SemOp::Payload(payload_desc(data)));
         }
 
         if !matches!(
@@ -823,65 +821,54 @@ fn emit_dag_as_code(
         ) && dag.get_leaf_data(node_id).is_none()
             && let Some(Some(width)) = widths.get(node_id.index()).copied()
         {
-            let width_lit = proc_macro2::Literal::u32_unsuffixed(width);
-            ops.push(quote! { tir::sem::SemOp::Typed(#width_lit) });
+            ops.push(tir::sem::SemOp::Typed(width));
             has_typed_node = true;
         }
 
-        let parent_lit = proc_macro2::Literal::u32_unsuffixed(counter as u32);
         let children: Vec<tir::graph::NodeId> = dag.children(node_id).collect();
         for child_id in children {
-            let child_lit = proc_macro2::Literal::u32_unsuffixed(node_indices[&child_id.index()]);
-            ops.push(quote! { tir::sem::SemOp::Edge(#parent_lit, #child_lit) });
+            ops.push(tir::sem::SemOp::Edge(
+                counter as u32,
+                node_indices[&child_id.index()],
+            ));
         }
 
         node_indices.insert(node_id.index(), counter as u32);
     }
 
+    let offset_lit = proc_macro2::Literal::u32_unsuffixed(intern_sem_ops(&ops));
     if has_typed_node {
         quote! {
             {
-                use tir::sem::ExtendSemOpsTyped as _;
-                g.extend_sem_ops_typed(_context, &[#(#ops),*])
+                use tir::sem::ExtendSemBytesTyped as _;
+                g.extend_sem_bytes_typed(_context, SEM_KINDS, SEM_BLOB, #offset_lit)
             }
         }
     } else {
         quote! {
             {
-                use tir::sem::ExtendSemOps as _;
-                g.extend_sem_ops(&[#(#ops),*])
+                use tir::sem::ExtendSemBytes as _;
+                g.extend_sem_bytes(SEM_KINDS, SEM_BLOB, #offset_lit)
             }
         }
     }
 }
 
-fn emit_payload_desc_ts(
-    payload: &tir::sem::SymPayload<tir::ValueId>,
-) -> proc_macro2::TokenStream {
-    use tir::sem::SymPayload;
+fn payload_desc(payload: &tir::sem::SymPayload<tir::ValueId>) -> tir::sem::SemPayloadDesc {
+    use tir::sem::{SemPayloadDesc, SymPayload};
     match payload {
-        SymPayload::SymbolId(id) => {
-            let id_lit = proc_macro2::Literal::u32_unsuffixed(*id);
-            quote! { tir::sem::SemPayloadDesc::SymbolId(#id_lit) }
-        }
-        SymPayload::Value(value) => {
-            let value_lit = proc_macro2::Literal::u32_unsuffixed(value.number());
-            quote! { tir::sem::SemPayloadDesc::Value(#value_lit) }
-        }
-        SymPayload::Int(v) => {
-            let width = proc_macro2::Literal::u32_unsuffixed(v.width());
-            let signed = v.is_signed();
-            let val = if signed {
-                proc_macro2::Literal::u64_unsuffixed(v.to_i64() as u64)
+        SymPayload::SymbolId(id) => SemPayloadDesc::SymbolId(*id),
+        SymPayload::Value(value) => SemPayloadDesc::Value(value.number()),
+        SymPayload::Int(v) => SemPayloadDesc::Int {
+            width: v.width(),
+            value: if v.is_signed() {
+                v.to_i64() as u64
             } else {
-                proc_macro2::Literal::u64_unsuffixed(v.to_u64())
-            };
-            quote! { tir::sem::SemPayloadDesc::Int { width: #width, value: #val, signed: #signed } }
-        }
-        SymPayload::Float(f) => {
-            let val = proc_macro2::Literal::f64_unsuffixed(f.to_f64());
-            quote! { tir::sem::SemPayloadDesc::Float(#val) }
-        }
+                v.to_u64()
+            },
+            signed: v.is_signed(),
+        },
+        SymPayload::Float(f) => SemPayloadDesc::Float(f.to_f64()),
     }
 }
 

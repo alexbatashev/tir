@@ -88,6 +88,23 @@ split-debuginfo = "unpacked"
 debug = false
 opt-level = 2
 
+# The generated backends are by far the largest rustc inputs in the tree (riscv
+# is 500k lines of generated Rust) and their source only changes when their
+# .tmdl does, so incremental state buys nothing and costs both memory and a
+# multi-GB slice of target/. With debug info dropped too, a clean riscv build
+# goes from 7.4 GB peak RSS / 2m41s to 6.4 GB / 2m07s.
+[profile.dev.package.tir-riscv]
+debug = false
+incremental = false
+
+[profile.dev.package.tir-arm64]
+debug = false
+incremental = false
+
+[profile.dev.package.tir-x86_64]
+debug = false
+incremental = false
+
 [profile.dev.package.filecheck]
 debug = false
 opt-level = 3

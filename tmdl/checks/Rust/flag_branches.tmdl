@@ -169,21 +169,17 @@ instruction SelectEq for [FlagIsa] {
 // CHECK: let src = m.value_binding(0)
 // CHECK: "rn",
 
-// zf == 1 composes to Eq over the definer's operands.
+// zf == 1 composes to Eq over the definer's operands, sf != of to the signed
+// Lt (proved through the sign/overflow formula, not recognized syntactically),
+// and a flag-reading select to an If — the composed patterns live in the sem
+// blob (tmdl/tests/sem_blob.rs). The overflow guard alone derives nothing: no
+// canonical comparison is equivalent to it.
 // CHECK: fn isel_pattern_brancheq_via_cmp(
-// CHECK: tir::sem::SymKind::Eq
-
-// sf != of composes to the signed Lt (proved through the sign/overflow
-// formula, not recognized syntactically). The overflow guard alone derives
-// nothing — no canonical comparison is equivalent to it.
 // CHECK: fn isel_pattern_branchlt_via_cmp(
-// CHECK: tir::sem::SymKind::Lt
 // CHECK-NOT: branchoverflow_via_cmp
 
-// A flag-reading select derives the same proved comparison, retaining both
-// value arms and the destination tie in its value rule.
+// The select rule retains both value arms and the destination tie.
 // CHECK: fn isel_pattern_selecteq_via_cmp(
-// CHECK: tir::sem::SymKind::If
 // CHECK: fn emit_isel_selecteq_via_cmp(
 // CHECK: "dst_tied",
 // CHECK: "src",

@@ -16,20 +16,9 @@ use crate::utils::{
 pub struct GeneratedRust {
     pub root: String,
     pub modules: Vec<(String, String)>,
-}
-
-pub fn generate_rust<'a>(
-    dialect: &str,
-    files: &'a [ast::File],
-    item_cache: &HashMap<&'a str, &'a ast::Item>,
-    text_only: bool,
-    custom_assembly: bool,
-    mut output: Box<dyn Write>,
-) -> Result<(), TMDLError> {
-    let generated =
-        generate_rust_modules(dialect, files, item_cache, text_only, custom_assembly, &[])?;
-    output.write_all(generated.root.as_bytes())?;
-    Ok(())
+    /// The serialized sem programs the generated code embeds; written to
+    /// [`SEM_BLOB_FILE`] beside the Rust.
+    pub sem_blob: Vec<u8>,
 }
 
 pub fn generate_rust_modules<'a>(
@@ -40,6 +29,7 @@ pub fn generate_rust_modules<'a>(
     custom_assembly: bool,
     split_inputs: &[String],
 ) -> Result<GeneratedRust, TMDLError> {
+    begin_sem_blob();
     let features = emit_features(files)?;
     let register_traits = emit_register_trait_helpers(files)?;
     let registers = emit_register_parsers_and_printers(files)?;
@@ -148,7 +138,18 @@ pub fn generate_rust_modules<'a>(
         quote! { #(#module_sections)* }
     };
 
+    let (sem_blob, sem_kinds) = finish_sem_blob();
+    let sem_kind_entries = sem_kinds.iter().map(emit_expr_kind_ts);
+    let sem_program_store = quote! {
+        #[allow(dead_code)]
+        static SEM_BLOB: &[u8] = include_bytes!(#SEM_BLOB_FILE);
+        #[allow(dead_code)]
+        static SEM_KINDS: &[tir::sem::SymKind] = &[#(#sem_kind_entries),*];
+    };
+
     let final_rust = quote! {
+        #sem_program_store
+
         #features
         #register_traits
 
@@ -169,6 +170,7 @@ pub fn generate_rust_modules<'a>(
     Ok(GeneratedRust {
         root: format_rust(final_rust),
         modules,
+        sem_blob,
     })
 }
 
@@ -290,6 +292,7 @@ pub fn generate_operation_list(
 // Top-level emitters
 // ---------------------------------------------------------------------------
 
+include!("sem_blob.rs");
 include!("features.rs");
 include!("instructions.rs");
 include!("registers.rs");

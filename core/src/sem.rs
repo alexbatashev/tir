@@ -38,8 +38,8 @@ pub(crate) use discover::{con, op};
 /// carry its originating op and inferred type.
 pub type SemGraph = PostOrderDag<SymKind, SymPayload<ValueId>, NodeMeta>;
 
-/// A payload literal in a serialized [`SemOp`] program. Plain-old-data so op
-/// arrays are const-promotable; decoded to [`SymPayload`] on replay.
+/// A payload literal in a serialized [`SemOp`] program; decoded to
+/// [`SymPayload`] on replay.
 #[derive(Clone, Copy, Debug)]
 pub enum SemPayloadDesc {
     SymbolId(u32),
@@ -70,9 +70,11 @@ impl SemPayloadDesc {
 /// One step of a serialized semantic-graph construction. TMDL-generated
 /// backends used to build every graph with one `add_node`/`add_edge` call per
 /// statement; hundreds of thousands of such statements dominated rustc time on
-/// the generated crates, so codegen now emits const `SemOp` arrays replayed by
-/// [`ExtendSemOps::extend_sem_ops`]. `Payload`/`Typed` apply to the most
-/// recently added node; `Edge` indices count nodes of the current array from 0.
+/// the generated crates. Codegen therefore serializes these steps into a binary
+/// blob ([`SemBlobBuilder`]) the generated crate embeds with `include_bytes!`,
+/// so rustc sees one constant per crate instead of one per step.
+/// `Payload`/`Typed` apply to the most recently added node; `Edge` indices count
+/// nodes of the current program from 0.
 #[derive(Clone, Copy, Debug)]
 pub enum SemOp {
     Node(SymKind),
@@ -106,33 +108,224 @@ where
     *nodes.last().expect("empty sem op array")
 }
 
-/// Replays a [`SemOp`] array into any semantic-graph sink; returns the root
-/// (the last node, as op arrays are emitted in post order).
-pub trait ExtendSemOps: MutDag<Node = SymKind, Leaf = SymPayload<ValueId>> + Sized {
-    fn extend_sem_ops(&mut self, ops: &[SemOp]) -> NodeId {
-        replay_sem_ops(self, ops, |_, _, _| {
-            unreachable!("SemOp::Typed requires extend_sem_ops_typed")
+// ── Serialized sem programs ─────────────────────────────────────────────────
+
+const SEM_BLOB_MAGIC: [u8; 4] = *b"TSEM";
+const SEM_BLOB_VERSION: u8 = 1;
+
+const TAG_NODE: u8 = 0;
+const TAG_SYMBOL_ID: u8 = 1;
+const TAG_VALUE: u8 = 2;
+const TAG_INT: u8 = 3;
+const TAG_FLOAT: u8 = 4;
+const TAG_TYPED: u8 = 5;
+const TAG_EDGE: u8 = 6;
+
+/// Serializes sem programs into one blob: a `TSEM` header followed by records,
+/// each a byte length and that many bytes of tagged [`SemOp`]s. [`Self::intern`]
+/// returns the offset a program was placed at, which is all the generated crate
+/// embeds per program. Node kinds are indices into the [`Self::finish`] kind
+/// table rather than raw discriminants, so the blob needs no stable numbering
+/// for [`SymKind`].
+///
+/// Output is a pure function of the interned programs and their order: the maps
+/// are only ever looked up in, never iterated.
+pub struct SemBlobBuilder {
+    bytes: Vec<u8>,
+    kinds: Vec<SymKind>,
+    records: std::collections::HashMap<Vec<u8>, u32>,
+}
+
+impl Default for SemBlobBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SemBlobBuilder {
+    pub fn new() -> Self {
+        let mut bytes = SEM_BLOB_MAGIC.to_vec();
+        bytes.push(SEM_BLOB_VERSION);
+        Self {
+            bytes,
+            kinds: Vec::new(),
+            records: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Appends `ops` as a record, reusing an identical earlier one; returns the
+    /// record's offset.
+    pub fn intern(&mut self, ops: &[SemOp]) -> u32 {
+        let mut body = Vec::new();
+        for op in ops {
+            self.encode_op(*op, &mut body);
+        }
+        if let Some(&existing) = self.records.get(&body) {
+            return existing;
+        }
+        let offset = self.bytes.len() as u32;
+        self.bytes
+            .extend_from_slice(&(body.len() as u32).to_le_bytes());
+        self.bytes.extend_from_slice(&body);
+        self.records.insert(body, offset);
+        offset
+    }
+
+    /// The blob and the kind table its node codes index.
+    pub fn finish(self) -> (Vec<u8>, Vec<SymKind>) {
+        (self.bytes, self.kinds)
+    }
+
+    fn encode_op(&mut self, op: SemOp, out: &mut Vec<u8>) {
+        match op {
+            SemOp::Node(kind) => {
+                let code = self.kind_code(kind);
+                out.push(TAG_NODE);
+                out.extend_from_slice(&code.to_le_bytes());
+            }
+            SemOp::Payload(SemPayloadDesc::SymbolId(id)) => {
+                out.push(TAG_SYMBOL_ID);
+                out.extend_from_slice(&id.to_le_bytes());
+            }
+            SemOp::Payload(SemPayloadDesc::Value(number)) => {
+                out.push(TAG_VALUE);
+                out.extend_from_slice(&number.to_le_bytes());
+            }
+            SemOp::Payload(SemPayloadDesc::Int {
+                width,
+                value,
+                signed,
+            }) => {
+                out.push(TAG_INT);
+                out.extend_from_slice(&width.to_le_bytes());
+                out.extend_from_slice(&value.to_le_bytes());
+                out.push(u8::from(signed));
+            }
+            SemOp::Payload(SemPayloadDesc::Float(value)) => {
+                out.push(TAG_FLOAT);
+                out.extend_from_slice(&value.to_bits().to_le_bytes());
+            }
+            SemOp::Typed(width) => {
+                out.push(TAG_TYPED);
+                out.extend_from_slice(&width.to_le_bytes());
+            }
+            SemOp::Edge(parent, child) => {
+                out.push(TAG_EDGE);
+                out.extend_from_slice(&parent.to_le_bytes());
+                out.extend_from_slice(&child.to_le_bytes());
+            }
+        }
+    }
+
+    fn kind_code(&mut self, kind: SymKind) -> u16 {
+        match self.kinds.iter().position(|known| *known == kind) {
+            Some(code) => code as u16,
+            None => {
+                self.kinds.push(kind);
+                (self.kinds.len() - 1) as u16
+            }
+        }
+    }
+}
+
+struct SemBlobReader<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+}
+
+impl SemBlobReader<'_> {
+    fn u8(&mut self) -> u8 {
+        let value = self.bytes[self.pos];
+        self.pos += 1;
+        value
+    }
+
+    fn u16(&mut self) -> u16 {
+        let value = u16::from_le_bytes(self.bytes[self.pos..self.pos + 2].try_into().unwrap());
+        self.pos += 2;
+        value
+    }
+
+    fn u32(&mut self) -> u32 {
+        let value = u32::from_le_bytes(self.bytes[self.pos..self.pos + 4].try_into().unwrap());
+        self.pos += 4;
+        value
+    }
+
+    fn u64(&mut self) -> u64 {
+        let value = u64::from_le_bytes(self.bytes[self.pos..self.pos + 8].try_into().unwrap());
+        self.pos += 8;
+        value
+    }
+}
+
+/// Decodes the program at `offset` of a [`SemBlobBuilder`] blob; `kinds` is the
+/// table returned alongside it.
+pub fn decode_sem_ops(blob: &[u8], offset: u32, kinds: &[SymKind]) -> Vec<SemOp> {
+    assert_eq!(blob[..4], SEM_BLOB_MAGIC, "not a sem blob");
+    assert_eq!(blob[4], SEM_BLOB_VERSION, "unsupported sem blob version");
+    let mut reader = SemBlobReader {
+        bytes: blob,
+        pos: offset as usize,
+    };
+    let end = reader.pos + 4 + reader.u32() as usize;
+    let mut ops = Vec::new();
+    while reader.pos < end {
+        ops.push(match reader.u8() {
+            TAG_NODE => SemOp::Node(kinds[reader.u16() as usize]),
+            TAG_SYMBOL_ID => SemOp::Payload(SemPayloadDesc::SymbolId(reader.u32())),
+            TAG_VALUE => SemOp::Payload(SemPayloadDesc::Value(reader.u32())),
+            TAG_INT => SemOp::Payload(SemPayloadDesc::Int {
+                width: reader.u32(),
+                value: reader.u64(),
+                signed: reader.u8() != 0,
+            }),
+            TAG_FLOAT => SemOp::Payload(SemPayloadDesc::Float(f64::from_bits(reader.u64()))),
+            TAG_TYPED => SemOp::Typed(reader.u32()),
+            TAG_EDGE => SemOp::Edge(reader.u32(), reader.u32()),
+            tag => unreachable!("unknown sem op tag {tag}"),
+        });
+    }
+    ops
+}
+
+/// Replays the program at `offset` into any semantic-graph sink; returns the
+/// root (the last node, as programs are serialized in post order).
+pub trait ExtendSemBytes: MutDag<Node = SymKind, Leaf = SymPayload<ValueId>> + Sized {
+    fn extend_sem_bytes(&mut self, kinds: &[SymKind], blob: &[u8], offset: u32) -> NodeId {
+        replay_sem_ops(self, &decode_sem_ops(blob, offset, kinds), |_, _, _| {
+            unreachable!("SemOp::Typed requires extend_sem_bytes_typed")
         })
     }
 }
 
-impl<G: MutDag<Node = SymKind, Leaf = SymPayload<ValueId>>> ExtendSemOps for G {}
+impl<G: MutDag<Node = SymKind, Leaf = SymPayload<ValueId>>> ExtendSemBytes for G {}
 
-/// [`ExtendSemOps`] for graphs that carry [`NodeMeta`], resolving
+/// [`ExtendSemBytes`] for graphs that carry [`NodeMeta`], resolving
 /// [`SemOp::Typed`] widths against the context's interned integer types.
-pub trait ExtendSemOpsTyped:
+pub trait ExtendSemBytesTyped:
     MutDag<Node = SymKind, Leaf = SymPayload<ValueId>, Annotation = NodeMeta> + Sized
 {
-    fn extend_sem_ops_typed(&mut self, context: &crate::Context, ops: &[SemOp]) -> NodeId {
+    fn extend_sem_bytes_typed(
+        &mut self,
+        context: &crate::Context,
+        kinds: &[SymKind],
+        blob: &[u8],
+        offset: u32,
+    ) -> NodeId {
         use crate::graph::MetaMutDag as _;
-        replay_sem_ops(self, ops, |g, node, width| {
-            g.set_actual_type(node, crate::builtin::IntegerType::new(context, width));
-        })
+        replay_sem_ops(
+            self,
+            &decode_sem_ops(blob, offset, kinds),
+            |g, node, width| {
+                g.set_actual_type(node, crate::builtin::IntegerType::new(context, width));
+            },
+        )
     }
 }
 
-impl<G: MutDag<Node = SymKind, Leaf = SymPayload<ValueId>, Annotation = NodeMeta>> ExtendSemOpsTyped
-    for G
+impl<G: MutDag<Node = SymKind, Leaf = SymPayload<ValueId>, Annotation = NodeMeta>>
+    ExtendSemBytesTyped for G
 {
 }
 
