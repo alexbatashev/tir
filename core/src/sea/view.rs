@@ -64,6 +64,9 @@ pub struct View {
     /// A subregion's origins are not listed: they are only there to spell the
     /// gates, and a commit rebuilds no region but the one it views.
     seeded: Vec<(Origin, Node)>,
+    /// The type every seeding of a class read it at, before saturation moved the
+    /// class ids around.
+    types: Vec<(Id, TypeId)>,
 }
 
 impl View {
@@ -77,6 +80,7 @@ impl View {
             anchored: HashSet::new(),
             anchor_of: HashMap::new(),
             seeded: Vec::new(),
+            types: Vec::new(),
             nesting: 0,
         };
         builder.seed_arguments(region);
@@ -91,6 +95,7 @@ impl View {
             anchored: builder.anchored,
             anchor_of: builder.anchor_of,
             seeded: builder.seeded,
+            types: builder.types,
         }
     }
 
@@ -116,6 +121,29 @@ impl View {
     /// The origin a leaf stands for.
     pub fn anchor(&self, value: ValueId) -> Option<Origin> {
         self.anchor_of.get(&value).copied()
+    }
+
+    /// The type each class was seeded at, canonicalized against the unions
+    /// saturation made. A class every seeding agrees on types the values a commit
+    /// materializes for it — a constant carries no type of its own, and the
+    /// operation reading it need not have its operands' type. A class two
+    /// seedings disagree on is left untyped rather than guessed at.
+    pub fn class_types(&self) -> HashMap<Id, TypeId> {
+        let mut types: HashMap<Id, Option<TypeId>> = HashMap::new();
+        for &(id, ty) in &self.types {
+            types
+                .entry(self.eg.find(id))
+                .and_modify(|known| {
+                    if *known != Some(ty) {
+                        *known = None;
+                    }
+                })
+                .or_insert(Some(ty));
+        }
+        types
+            .into_iter()
+            .filter_map(|(id, ty)| ty.map(|ty| (id, ty)))
+            .collect()
     }
 
     /// Whether the view renders `origin` as a term. An anchored origin has a
@@ -200,6 +228,7 @@ struct Builder<'a> {
     anchored: HashSet<Origin>,
     anchor_of: HashMap<ValueId, Origin>,
     seeded: Vec<(Origin, Node)>,
+    types: Vec<(Id, TypeId)>,
     /// How deep below the viewed region the seeding currently is.
     nesting: u32,
 }
@@ -264,12 +293,13 @@ impl Builder<'_> {
         let id = self.eg.add(node.clone());
         self.anchor_of.insert(value, origin);
         self.anchored.insert(origin);
-        self.record(origin, id, node);
+        self.record(origin, id, ty, node);
         id
     }
 
-    fn record(&mut self, origin: Origin, id: Id, node: Node) {
+    fn record(&mut self, origin: Origin, id: Id, ty: TypeId, node: Node) {
         self.class_of.insert(origin, id);
+        self.types.push((id, ty));
         if self.nesting == 0 {
             self.seeded.push((origin, node));
         }
@@ -319,7 +349,7 @@ impl Builder<'_> {
             }
         };
         let id = self.eg.add(seeded.clone());
-        self.record(Origin::output(node, 0), id, seeded);
+        self.record(Origin::output(node, 0), id, ty, seeded);
     }
 
     /// A detached instance of the node's op, carrying its attributes and a value
@@ -406,7 +436,7 @@ impl Builder<'_> {
             );
             let id = self.eg.add(gate.clone());
             self.anchor_of.insert(value, origin);
-            self.record(origin, id, gate);
+            self.record(origin, id, ty, gate);
         }
         true
     }
@@ -435,7 +465,7 @@ impl Builder<'_> {
             self.anchor_of.insert(value, origin);
             self.class_of
                 .insert(Origin::argument(body, port as u32), id);
-            self.record(origin, id, leaf);
+            self.record(origin, id, ty, leaf);
             placeholders.push((port, value, id));
         }
         self.seed_nested(body);

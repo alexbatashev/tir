@@ -1,0 +1,21 @@
+// RUN: tir opt --verify --pass builtin.func(sea-canonicalize) %s | filecheck %s
+
+// A materialized constant is typed by the class it stands for, not by the result
+// of the operation reading it: `cmpi`'s operands are `!i32` though its result is
+// `!i1`, and a `!i1` literal would compare against a truncated 100.
+
+module {
+  func @f(%0: !i32) -> !i1 {
+    %1 = constant {value = 0} : !i32
+    %2 = addi %0, %1 : !i32
+    %3 = constant {value = 100} : !i32
+    %4 = cmpi %2, %3 {predicate = "slt"} : !i1
+    return %4
+  }
+  module_end
+}
+
+// CHECK-LABEL: func @f
+// CHECK-NEXT: %[[C:[0-9]+]] = constant {value = 100} : !i32
+// CHECK-NEXT: %[[CMP:[0-9]+]] = cmpi %0, %[[C]] {predicate = "slt"} : !i1
+// CHECK-NEXT: return %[[CMP]]

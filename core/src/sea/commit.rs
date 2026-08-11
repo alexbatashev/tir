@@ -18,10 +18,10 @@ use std::collections::{HashMap, HashSet};
 
 use tir_symbolic::egraph::{Extraction, Id};
 
-use crate::ValueId;
 use crate::analysis::GateNode;
 use crate::attributes::{AttributeValue, NamedAttribute};
 use crate::passes::instcombine::node::{Node, cost};
+use crate::{TypeId, ValueId};
 
 use super::Error;
 use super::graph::{Graph, NodeId, Origin, PortType, RegionId};
@@ -40,6 +40,7 @@ pub fn commit(graph: &mut Graph, view: &View, lambda: NodeId) -> Result<Option<N
     let mut stager = Stager {
         view,
         extraction: &extraction,
+        types: view.class_types(),
         moved: HashMap::new(),
         materialized: HashMap::new(),
         active: HashSet::new(),
@@ -50,6 +51,8 @@ pub fn commit(graph: &mut Graph, view: &View, lambda: NodeId) -> Result<Option<N
 struct Stager<'a> {
     view: &'a View,
     extraction: &'a Extraction<Node>,
+    /// The type the region seeded each class at.
+    types: HashMap<Id, TypeId>,
     /// Where each origin of the old graph now lives.
     moved: HashMap<Origin, Origin>,
     /// A class is materialized once per type it is read at: a constant carries
@@ -192,7 +195,10 @@ impl Stager<'_> {
     }
 
     /// Build the extraction's choice for `class`, memoized per class so a shared
-    /// subterm is built once. `expected` types a constant, which carries none.
+    /// subterm is built once. `expected` types a constant, which carries none:
+    /// the type the region seeded the class at when it has one, since an
+    /// operation's operands need not share its result type, and the reader's own
+    /// type otherwise.
     fn materialize(
         &mut self,
         graph: &mut Graph,
@@ -200,6 +206,10 @@ impl Stager<'_> {
         expected: PortType,
     ) -> Result<Origin, Error> {
         let class = self.view.egraph().find(class);
+        let expected = self
+            .types
+            .get(&class)
+            .map_or(expected, |&ty| PortType::Value(ty));
         if let Some(&origin) = self.materialized.get(&(class, expected)) {
             return Ok(origin);
         }
