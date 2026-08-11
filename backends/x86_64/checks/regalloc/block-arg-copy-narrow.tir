@@ -1,0 +1,23 @@
+// RUN: tir mc --march=x86_64 --stage=regalloc %s | filecheck %s
+
+// A block-argument copy moves the whole value, so its width follows the carried
+// type and not the narrowest operand that happens to name the same virtual
+// register. Here an `i16` is both forwarded across an edge and read as an `i8`
+// by a truncation; copying it in the byte class the truncation pins would leave
+// the parameter's high byte holding whatever the destination register carried
+// before.
+
+module {
+  func @narrow(%0: !i1, %1: !i16) -> !i16 {
+    %2 = trunci %1 : !i8
+    %3 = extui %2 : !i16
+    cond_br %0, ^bb1(%1 : !i16), ^bb1(%3 : !i16)
+  ^bb1(%4: !i16):
+    return %4
+  }
+  module_end
+}
+
+// CHECK: asm.symbol
+// CHECK-NOT: x86_64.mov8
+// CHECK: x86_64.mov {dst = rax, src = rsi}

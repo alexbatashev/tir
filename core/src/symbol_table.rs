@@ -59,11 +59,16 @@ impl SymbolTable {
         self.symbols.get(name).map_or(&[], Vec::as_slice)
     }
 
-    /// The overload of `name` whose argument types are exactly `args`.
-    pub fn resolve(&self, name: &str, args: &[TypeId]) -> Option<&SymbolEntry> {
-        self.lookup(name)
-            .iter()
-            .find(|entry| entry.signature.as_deref() == Some(args))
+    /// The overload of `name` matching `args`: argument types are exactly the
+    /// signature, or — when the signature ends in a variadic tail — exactly its
+    /// fixed prefix followed by any number of further arguments.
+    pub fn resolve(&self, context: &Context, name: &str, args: &[TypeId]) -> Option<&SymbolEntry> {
+        self.lookup(name).iter().find(|entry| {
+            entry
+                .signature
+                .as_deref()
+                .is_some_and(|signature| signature_accepts(context, signature, args))
+        })
     }
 
     pub fn names(&self) -> impl Iterator<Item = &str> {
@@ -128,7 +133,7 @@ pub fn resolve_symbol_use(
                 "symbol '@{name}' is not a function"
             )));
         }
-        Some(args) => table.resolve(name, args).ok_or_else(|| {
+        Some(args) => table.resolve(context, name, args).ok_or_else(|| {
             crate::Error::VerificationError(format!(
                 "no overload matches {}; candidates: {}",
                 format_symbol(context, name, Some(args)),
@@ -151,6 +156,15 @@ pub fn resolve_symbol_use(
 /// The symbol a reference resolved to.
 pub struct ResolvedSymbol {
     pub result_type: Option<TypeId>,
+}
+
+fn signature_accepts(context: &Context, signature: &[TypeId], args: &[TypeId]) -> bool {
+    match signature.split_last() {
+        Some((&last, fixed)) if context.get_type_data(last).is_variadic_tail() => {
+            args.len() >= fixed.len() && &args[..fixed.len()] == fixed
+        }
+        _ => signature == args,
+    }
 }
 
 fn describe_candidates(context: &Context, name: &str, candidates: &[SymbolEntry]) -> String {

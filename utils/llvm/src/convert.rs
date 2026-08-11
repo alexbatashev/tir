@@ -48,7 +48,7 @@ fn declare_external_callees(
                 .map(|arg| context.get_value(*arg).ty())
                 .collect();
             let callee = call.callee();
-            if table.resolve(&callee, &args).is_some()
+            if table.resolve(context, &callee, &args).is_some()
                 || declarations
                     .iter()
                     .any(|(name, types, _)| name == &callee && types == &args)

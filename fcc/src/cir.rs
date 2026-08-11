@@ -654,6 +654,10 @@ impl Type for VarArgsType {
         fmt.write("varargs")
     }
 
+    fn is_variadic_tail(&self) -> bool {
+        true
+    }
+
     fn eq(&self, other: &dyn Type) -> bool {
         (other as &dyn Any).downcast_ref::<VarArgsType>().is_some()
     }
@@ -753,4 +757,61 @@ pub fn string_op(context: &Context, value: &str, result_type: TypeId) -> StringO
         .attr("value", AttributeValue::Str(value.to_string()))
         .result_type(result_type)
         .build()
+}
+
+#[cfg(test)]
+mod tests {
+    use tir::{Context, Operation, builtin::ModuleOp, parse::ir::parse_ir, verify_op_tree};
+
+    fn verify(module: &str) -> Result<(), tir::Error> {
+        let context = Context::with_default_dialects();
+        context.register_dialect::<super::CirDialect>();
+        let module = parse_ir::<ModuleOp>(&context, module).expect("parse module");
+        verify_op_tree(&context, module.id())
+    }
+
+    #[test]
+    fn variadic_call_accepts_arguments_beyond_the_fixed_prefix() {
+        verify(
+            r#"module {
+  declare @printf(!ptr.p, !cir.varargs) -> !i32
+  func @caller(%0: !ptr.p, %1: !i32) -> !i32 {
+    %2 = call @printf(%0, %1 : !ptr.p, !i32) -> !i32
+    return %2
+  }
+  module_end
+}"#,
+        )
+        .expect("a variadic call verifies");
+    }
+
+    #[test]
+    fn variadic_call_accepts_an_empty_tail() {
+        verify(
+            r#"module {
+  declare @printf(!ptr.p, !cir.varargs) -> !i32
+  func @caller(%0: !ptr.p) -> !i32 {
+    %1 = call @printf(%0 : !ptr.p) -> !i32
+    return %1
+  }
+  module_end
+}"#,
+        )
+        .expect("a variadic call with no variadic argument verifies");
+    }
+
+    #[test]
+    fn variadic_call_rejects_a_mismatched_fixed_prefix() {
+        verify(
+            r#"module {
+  declare @printf(!ptr.p, !cir.varargs) -> !i32
+  func @caller(%0: !i64, %1: !i32) -> !i32 {
+    %2 = call @printf(%0, %1 : !i64, !i32) -> !i32
+    return %2
+  }
+  module_end
+}"#,
+        )
+        .expect_err("the fixed prefix must still match");
+    }
 }

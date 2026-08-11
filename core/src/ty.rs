@@ -34,6 +34,12 @@ pub trait Type: StdAny + Sync + Send + TypeConstraint {
     where
         Self: Sized;
     fn print(&self, fmt: &mut IRFormatter<'_>) -> Result<(), std::fmt::Error>;
+    /// Whether this type stands for "any number of further arguments" when it
+    /// ends a function signature. Overload resolution then matches the fixed
+    /// prefix and accepts any tail, including an empty one.
+    fn is_variadic_tail(&self) -> bool {
+        false
+    }
     /// Structural equality. A type built from another type holds the context's
     /// interned `Arc` for it (see [`Context::get_type_data`]), so nested types
     /// compare by address rather than by walking the nesting — otherwise

@@ -194,19 +194,23 @@ impl Pass for BlockArgLoweringPass {
                 }
 
                 // Pair each parameter with its forwarded value and the register
-                // class to copy it in: the narrower class an instruction naming
-                // either endpoint pins it to, else the file its type lives in. A
-                // value that only ever travels from one block parameter to the
-                // next is named by no instruction at all, and the copies of its
-                // edges must still agree — which only its type can decide.
+                // class to copy it in. A copy moves the whole value, so the class
+                // follows the parameter's type — the only thing that says how
+                // much there is to move. An instruction naming either endpoint
+                // may pin a narrower class (x86 reads the low byte of a 16-bit
+                // value through `GPR8`), and copying through that class would
+                // leave the rest of the parameter holding whatever the
+                // destination carried before; such a class only decides the copy
+                // when the type names no file at all.
                 let mut pairs: Vec<(u32, u32, RegClassId)> = Vec::new();
                 for (&param, &arg) in params.iter().zip(args.iter()) {
                     if param.number() == arg {
                         continue;
                     }
-                    let class = vreg_class_in(context, &blocks, arg)
+                    let class = info
+                        .default_class(self.abi, value_kind(context, param))
+                        .or_else(|| vreg_class_in(context, &blocks, arg))
                         .or_else(|| vreg_class_in(context, &blocks, param.number()))
-                        .or_else(|| info.default_class(self.abi, value_kind(context, param)))
                         .ok_or_else(|| {
                             PassError::InvalidRuleSet(format!(
                                 "block argument vreg {arg} has no register class"
