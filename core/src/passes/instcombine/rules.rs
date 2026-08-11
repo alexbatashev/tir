@@ -176,6 +176,12 @@ fn fold_class(context: &Context, eg: &EGraph<Node>, class: Id) -> Option<APInt> 
         if !context.has_operation(*op) {
             return None;
         }
+        // A folded class materializes as `builtin.constant`, which only holds an
+        // integer, so an op computing anything else (an address, say) must keep
+        // its own form however constant its operands are.
+        if !produces_integer(context, *op) {
+            return None;
+        }
         let operands: Vec<Value> = args
             .iter()
             .map(|&class| const_value(eg, class).map(Value::Int))
@@ -188,6 +194,16 @@ fn fold_class(context: &Context, eg: &EGraph<Node>, class: Id) -> Option<APInt> 
             Some(Value::Int(value)) => Some(value),
             _ => None,
         }
+    })
+}
+
+fn produces_integer(context: &Context, op: crate::OpId) -> bool {
+    let instance = context.get_op(op);
+    instance.results.first().is_some_and(|&result| {
+        let ty = context.get_type_data(context.get_value(result).ty());
+        (ty.as_ref() as &dyn std::any::Any)
+            .downcast_ref::<IntegerType>()
+            .is_some()
     })
 }
 

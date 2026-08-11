@@ -6,7 +6,7 @@ use tir::attributes::AttributeValue;
 use tir::builtin::{
     BranchOp, CondBranchOp, FuncOp, IntegerType, ModuleOp, ReturnOp, TokenType, ops as b,
 };
-use tir::ptr::{AllocaOp, PtrType, ops as p};
+use tir::ptr::{PtrType, ops as p};
 use tir::{
     Block, BlockId, Context, IRBuilder, Operation, OperationRef, Pass, PassError, PassTarget,
     RegionId, Rewriter, ValueId, scf,
@@ -150,7 +150,7 @@ impl LowerCirStructsPass {
         source: ValueId,
     ) -> Result<(), PassError> {
         for field in &layouts[name].fields {
-            let pointer_type = PtrType::typed(context, field.ty);
+            let pointer_type = PtrType::opaque(context);
             let destination = Self::offset_pointer(
                 context,
                 rewriter,
@@ -261,40 +261,6 @@ impl Pass for LowerCirStructsPass {
                 copy.operands()[1],
             )?;
             rewriter.erase_op(&target)?;
-        }
-
-        for target in &descendants {
-            if target.as_op::<AllocaOp>().is_none() {
-                continue;
-            }
-            let target = Self::refresh(context, target);
-            if let Some(allocation) = target.as_op::<AllocaOp>() {
-                let result_type = context.get_value(allocation.result()).ty();
-                let result_type = context.get_type_data(result_type);
-                let Some(pointer) =
-                    (result_type.as_ref() as &dyn std::any::Any).downcast_ref::<PtrType>()
-                else {
-                    continue;
-                };
-                let Some(pointee) = pointer.pointee(context) else {
-                    continue;
-                };
-                let pointee = context.get_type_data(pointee);
-                if (pointee.as_ref() as &dyn std::any::Any)
-                    .downcast_ref::<cir::StructType>()
-                    .is_none()
-                {
-                    continue;
-                }
-                let replacement = p::alloca(
-                    context,
-                    allocation.size(),
-                    allocation.align(),
-                    PtrType::opaque(context),
-                )
-                .build();
-                rewriter.replace_op(&target, &replacement)?;
-            }
         }
 
         for target in &descendants {

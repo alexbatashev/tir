@@ -140,6 +140,10 @@ pub enum PassError {
     MissingBlock(&'static str),
     InvalidRuleSet(String),
     RewriteFailed(OpId),
+    InvalidIR {
+        pass: &'static str,
+        error: crate::Error,
+    },
 }
 
 impl std::fmt::Display for PassError {
@@ -150,6 +154,9 @@ impl std::fmt::Display for PassError {
             }
             PassError::InvalidRuleSet(message) => write!(f, "invalid rule set: {message}"),
             PassError::RewriteFailed(op) => write!(f, "failed to rewrite op {op:?}"),
+            PassError::InvalidIR { pass, error } => {
+                write!(f, "pass '{pass}' produced invalid IR: {error:?}")
+            }
         }
     }
 }
@@ -243,6 +250,15 @@ pub trait Pass: Send {
     fn name(&self) -> &'static str;
     fn target(&self) -> PassTarget {
         PassTarget::Any
+    }
+
+    /// The IR contract this pass leaves behind. Instruction selection rewrites
+    /// SSA operations into machine instructions, which record their destination
+    /// as a register attribute instead of an SSA result (see
+    /// [`Rewriter::replace_op`]); [`crate::verify_op_tree`] checks the SSA
+    /// contract, so it does not describe that output.
+    fn emits_machine_ir(&self) -> bool {
+        false
     }
 
     /// Run on `op`, reporting which cached analyses stayed valid. Return
@@ -351,6 +367,49 @@ fn matches_op_name(op: &OpInstance, spec: &str) -> bool {
     }
 }
 
+/// Whether `op`'s tree has entered the machine layer — it holds a target
+/// instruction, or one of the `asm` dialect's containers and pseudos. A machine
+/// instruction declares no SSA results; it claims its destination through a
+/// register attribute (see [`Rewriter::replace_op`]). The SSA contract
+/// [`crate::verify_op_tree`] checks therefore does not describe such a tree, and
+/// no verifier expresses the machine contract yet.
+fn is_machine_ir(context: &Context, op_id: OpId) -> bool {
+    if !context.has_operation(op_id) {
+        return false;
+    }
+    let instance = context.get_op(op_id);
+    if instance.dialect().as_str() == "asm"
+        || instance.has_interface::<dyn crate::backend::MachineInstruction>()
+    {
+        return true;
+    }
+    instance.regions.iter().any(|region_id| {
+        context
+            .get_region(*region_id)
+            .iter(context.clone())
+            .any(|block| {
+                block
+                    .op_ids()
+                    .into_iter()
+                    .any(|child| is_machine_ir(context, child))
+            })
+    })
+}
+
+/// Whether the pass manager re-verifies the IR after every pass that reports a
+/// change. Opt-in via `TIR_VERIFY_IR=1` until the known invalid-IR producers
+/// (pointer cmpi, un-narrowed compound-assign constants, varargs call
+/// verification, index cmpi in scf-to-cfg) are fixed; then the default flips to
+/// debug builds.
+fn ir_verification_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| match std::env::var("TIR_VERIFY_IR").as_deref() {
+        Ok("0") => false,
+        Ok("1") => true,
+        _ => false,
+    })
+}
+
 enum PassNode {
     Pass(Box<dyn Pass>),
     Nested {
@@ -361,11 +420,22 @@ enum PassNode {
 
 pub struct PassManager {
     passes: Vec<PassNode>,
+    verify_ir: Option<bool>,
 }
 
 impl PassManager {
     pub fn new() -> Self {
-        Self { passes: vec![] }
+        Self {
+            passes: vec![],
+            verify_ir: None,
+        }
+    }
+
+    /// Force post-pass IR verification on or off for this pipeline, overriding
+    /// the `TIR_VERIFY_IR` environment default.
+    pub fn verify_ir(&mut self, enabled: bool) -> &mut Self {
+        self.verify_ir = Some(enabled);
+        self
     }
 
     pub fn add_pass<P: Pass + 'static>(&mut self, pass: P) -> &mut Self {
@@ -410,26 +480,51 @@ impl PassManager {
     ) -> Result<(), PassError> {
         let mut rewriter = Rewriter::new(context.clone());
         for entry in &mut self.passes {
-            PassManager::run_entry(entry, context, &root, &mut rewriter, analyses)?;
+            Self::run_entry(
+                entry,
+                self.verify_ir,
+                context,
+                &root,
+                &mut rewriter,
+                analyses,
+            )?;
         }
         Ok(())
     }
 
     fn run_entry(
         entry: &mut PassNode,
+        verify_ir: Option<bool>,
         context: &Context,
         root: &OperationRef,
         rewriter: &mut Rewriter,
         analyses: &AnalysisManager,
     ) -> Result<(), PassError> {
         match entry {
-            PassNode::Pass(pass) => PassManager::walk_ops(context, root, &mut |op_ref| {
-                if pass.target().matches(op_ref.op()) {
-                    let preserved = pass.run(&op_ref, context, rewriter, analyses)?;
-                    analyses.invalidate(&preserved);
+            PassNode::Pass(pass) => {
+                let mut mutated = false;
+                PassManager::walk_ops(context, root, &mut |op_ref| {
+                    if pass.target().matches(op_ref.op()) {
+                        let preserved = pass.run(&op_ref, context, rewriter, analyses)?;
+                        mutated |= !preserved.preserves_all();
+                        analyses.invalidate(&preserved);
+                    }
+                    Ok(())
+                })?;
+                if mutated
+                    && verify_ir.unwrap_or_else(ir_verification_enabled)
+                    && !pass.emits_machine_ir()
+                    && !is_machine_ir(context, root.op.id)
+                {
+                    crate::verify_op_tree(context, root.op.id).map_err(|error| {
+                        PassError::InvalidIR {
+                            pass: pass.name(),
+                            error,
+                        }
+                    })?;
                 }
                 Ok(())
-            }),
+            }
             PassNode::Nested { op_name, manager } => {
                 PassManager::walk_ops(context, root, &mut |op_ref| {
                     if matches_op_name(op_ref.op(), op_name) {
@@ -512,6 +607,80 @@ mod tests {
             rewriter.replace_op(op, &new_op)?;
             Ok(PreservedAnalyses::none())
         }
+    }
+
+    /// Erases the addi while the `return` still reads its result, leaving a
+    /// dangling operand. `claim_unchanged` decides what the pass reports about
+    /// the damage it did.
+    struct BreakIRPass {
+        claim_unchanged: bool,
+    }
+
+    impl Pass for BreakIRPass {
+        fn name(&self) -> &'static str {
+            "break-ir"
+        }
+
+        fn target(&self) -> PassTarget {
+            PassTarget::operation::<AddIOp>()
+        }
+
+        fn run(
+            &mut self,
+            op: &super::OperationRef,
+            _context: &Context,
+            rewriter: &mut super::Rewriter,
+            _analyses: &AnalysisManager,
+        ) -> Result<PreservedAnalyses, PassError> {
+            rewriter.erase_op(op)?;
+            Ok(if self.claim_unchanged {
+                PreservedAnalyses::all()
+            } else {
+                PreservedAnalyses::none()
+            })
+        }
+    }
+
+    fn run_break_ir(claim_unchanged: bool) -> Result<(), PassError> {
+        let context = Context::with_default_dialects();
+        let i32 = IntegerType::new(&context, 32);
+        let region = context.create_region();
+        let arg = context.create_value(i32, None);
+        let block = context.create_block(vec![arg]);
+        region.add_block(block.id());
+        let func = ops::func(&context, "demo", i32, Some(region.id())).build();
+        let body = func.body();
+
+        let mut builder = IRBuilder::new(body.clone());
+        let add = ops::addi(
+            &context,
+            body.arguments()[0].id(),
+            body.arguments()[0].id(),
+            i32,
+        )
+        .build();
+        let add_result = add.result();
+        builder.insert(add);
+        builder.insert(ops::r#return(&context, add_result).build());
+
+        let mut pm = PassManager::new();
+        pm.verify_ir(true);
+        pm.add_pass(BreakIRPass { claim_unchanged });
+        pm.run(&context, context.get_op(func.id()))
+    }
+
+    #[test]
+    fn invalid_ir_after_a_pass_names_that_pass() {
+        let error = run_break_ir(false).expect_err("erasing a still-used op must be caught");
+        assert!(
+            error.to_string().contains("break-ir"),
+            "error should name the offending pass, got: {error}"
+        );
+    }
+
+    #[test]
+    fn a_pass_preserving_everything_is_not_verified() {
+        run_break_ir(true).expect("a pass claiming it changed nothing skips verification");
     }
 
     #[test]

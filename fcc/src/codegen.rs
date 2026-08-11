@@ -528,16 +528,7 @@ fn lower_type(context: &Context, typed: &TypedAst, ty: QualType) -> TypeId {
     match typed.types().kind(ty) {
         TypeKind::Void => UnitType::new(context),
         TypeKind::Integer(_) => IntegerType::new(context, typed.integer_width(ty).unwrap()),
-        TypeKind::Pointer(pointee) => {
-            if matches!(typed.types().kind(*pointee), TypeKind::Record(_)) {
-                PtrType::opaque(context)
-            } else {
-                PtrType::typed(context, lower_type(context, typed, *pointee))
-            }
-        }
-        TypeKind::Array(pointee, _) => {
-            PtrType::typed(context, lower_type(context, typed, *pointee))
-        }
+        TypeKind::Pointer(_) | TypeKind::Array(_, _) => PtrType::opaque(context),
         TypeKind::Enum(_) => IntegerType::new(context, 32),
         TypeKind::Double => FloatType::f64(context),
         TypeKind::Error | TypeKind::Float | TypeKind::LongDouble | TypeKind::Function { .. } => {
@@ -1376,7 +1367,7 @@ fn lower_function(
 
 impl FnCodegen<'_> {
     fn alloca(&mut self, elem: TypeId, size: u64, align: u64) -> Slot {
-        let ptr_ty = PtrType::typed(self.context, elem);
+        let ptr_ty = PtrType::opaque(self.context);
         let op = self
             .builder
             .insert(p::alloca(self.context, size, align, ptr_ty).build());
@@ -1397,7 +1388,7 @@ impl FnCodegen<'_> {
                 let target = lower_type(self.context, self.typed, target);
                 LoweredExpr::Value(
                     self.builder
-                        .insert(b::constant(self.context, 0, target).build())
+                        .insert(p::null(self.context, target).build())
                         .result(),
                 )
             } else if matches!(self.typed.types().kind(source), TypeKind::Array(_, _))
@@ -1754,12 +1745,7 @@ impl FnCodegen<'_> {
             .result()
     }
 
-    fn offset_address(&mut self, base: ValueId, offset: u64, element: QualType) -> ValueId {
-        let element = lower_type(self.context, self.typed, element);
-        self.offset_address_ir(base, offset, element)
-    }
-
-    fn offset_address_ir(&mut self, base: ValueId, offset: u64, element: TypeId) -> ValueId {
+    fn offset_address(&mut self, base: ValueId, offset: u64) -> ValueId {
         if offset == 0 {
             return base;
         }
@@ -1769,15 +1755,7 @@ impl FnCodegen<'_> {
             .insert(b::constant(self.context, offset as i64, offset_ty).build())
             .result();
         self.builder
-            .insert(
-                p::ptradd(
-                    self.context,
-                    base,
-                    offset,
-                    PtrType::typed(self.context, element),
-                )
-                .build(),
-            )
+            .insert(p::ptradd(self.context, base, offset, PtrType::opaque(self.context)).build())
             .result()
     }
 
@@ -1852,7 +1830,7 @@ impl FnCodegen<'_> {
                 .iter()
                 .filter(|(path, _)| path.first() == Some(&index))
                 .collect::<Vec<_>>();
-            let member_address = self.offset_address(address, offset, member);
+            let member_address = self.offset_address(address, offset);
             if member_entries.is_empty() {
                 self.zero_initialize(member, member_address, initializer)?;
                 continue;
@@ -1879,7 +1857,7 @@ impl FnCodegen<'_> {
         initializer: NodeId,
     ) -> Result<(), Diagnostic> {
         let (selected_type, offset) = initializer_subobject(self.typed, target, path).unwrap();
-        let selected_address = self.offset_address(address, offset, selected_type);
+        let selected_address = self.offset_address(address, offset);
         self.lower_initializer(selected_type, selected_address, initializer)
     }
 
@@ -1905,7 +1883,7 @@ impl FnCodegen<'_> {
                     .collect();
             }
             for (field, offset) in fields {
-                let field_address = self.offset_address(address, offset, field);
+                let field_address = self.offset_address(address, offset);
                 self.zero_initialize(field, field_address, initializer)?;
             }
             return Ok(());
@@ -1914,7 +1892,7 @@ impl FnCodegen<'_> {
             let (element, length) = (*element, *length);
             let element_size = source_type_layout(self.typed, element).0;
             for index in 0..length {
-                let element_address = self.offset_address(address, index * element_size, element);
+                let element_address = self.offset_address(address, index * element_size);
                 self.zero_initialize(element, element_address, initializer)?;
             }
             return Ok(());
@@ -2008,7 +1986,7 @@ impl FnCodegen<'_> {
                 values
             };
             for (piece, value) in abi_param.pieces.iter().zip(values) {
-                let address = self.offset_address_ir(slot.ptr, piece.offset, piece.ty);
+                let address = self.offset_address(slot.ptr, piece.offset);
                 self.builder
                     .insert(p::store(self.context, value, address).build());
             }
@@ -3640,10 +3618,21 @@ impl FnCodegen<'_> {
         } else {
             (value, ty)
         };
-        let zero = self
-            .builder
-            .insert(b::constant(self.context, 0, ty).build())
-            .result();
+        let is_pointer = {
+            let data = self.context.get_type_data(ty);
+            (data.as_ref() as &dyn std::any::Any)
+                .downcast_ref::<PtrType>()
+                .is_some()
+        };
+        let zero = if is_pointer {
+            self.builder
+                .insert(p::null(self.context, ty).build())
+                .result()
+        } else {
+            self.builder
+                .insert(b::constant(self.context, 0, ty).build())
+                .result()
+        };
         self.builder
             .insert(
                 b::CmpIOpBuilder::new(self.context)
@@ -3756,7 +3745,7 @@ impl FnCodegen<'_> {
                 .pieces
                 .iter()
                 .map(|piece| {
-                    let address = self.offset_address_ir(ptr, piece.offset, piece.ty);
+                    let address = self.offset_address(ptr, piece.offset);
                     self.builder
                         .insert(p::load(self.context, address, piece.ty).build())
                         .result()
@@ -3821,7 +3810,7 @@ impl FnCodegen<'_> {
                     .result(),
                 ValueKind::Vector => unreachable!("ABI padding uses scalar carriers"),
             };
-            let address = self.offset_address_ir(destination, piece.offset, piece.ty);
+            let address = self.offset_address(destination, piece.offset);
             self.builder
                 .insert(p::store(self.context, zero, address).build());
         }
@@ -3863,7 +3852,7 @@ impl FnCodegen<'_> {
         let values = pieces
             .iter()
             .map(|piece| {
-                let address = self.offset_address_ir(ptr, piece.offset, piece.ty);
+                let address = self.offset_address(ptr, piece.offset);
                 self.builder
                     .insert(p::load(self.context, address, piece.ty).build())
                     .result()
@@ -4060,8 +4049,7 @@ impl FnCodegen<'_> {
                     let AstLeaf::String(value) = ast.get_leaf_data(node).unwrap() else {
                         unreachable!("string node carries a string payload");
                     };
-                    let i8_ty = IntegerType::new(self.context, 8);
-                    let ptr_ty = PtrType::typed(self.context, i8_ty);
+                    let ptr_ty = PtrType::opaque(self.context);
                     LoweredExpr::Value(
                         self.builder
                             .insert(cir::string_op(self.context, value, ptr_ty))
@@ -4102,7 +4090,7 @@ impl FnCodegen<'_> {
                             }
                         } else {
                             let global = &self.globals[&entity];
-                            let ptr_ty = PtrType::typed(self.context, global.elem);
+                            let ptr_ty = PtrType::opaque(self.context);
                             LoweredExpr::Address {
                                 ptr: self
                                     .builder
@@ -4131,14 +4119,7 @@ impl FnCodegen<'_> {
                         ));
                     };
                     let elem = lower_type(self.context, self.typed, node_type(self.typed, node));
-                    let ptr_ty = if matches!(
-                        self.typed.types().kind(node_type(self.typed, node)),
-                        TypeKind::Record(_)
-                    ) {
-                        PtrType::opaque(self.context)
-                    } else {
-                        PtrType::typed(self.context, elem)
-                    };
+                    let ptr_ty = PtrType::opaque(self.context);
                     let field = ast.get_annotation(node).unwrap().member_index.unwrap() as u64;
                     let base_ty = node_type(self.typed, base_node);
                     let record = match self.typed.types().kind(base_ty) {
@@ -4188,7 +4169,7 @@ impl FnCodegen<'_> {
                                     })
                                 } else {
                                     let global = &self.globals[&entity];
-                                    let ptr_ty = PtrType::typed(self.context, global.elem);
+                                    let ptr_ty = PtrType::opaque(self.context);
                                     let address = self
                                         .builder
                                         .insert(b::addr_of_op(self.context, &global.name, ptr_ty))
@@ -4323,8 +4304,7 @@ impl FnCodegen<'_> {
                                         )
                                         .result()
                                 };
-                                let address =
-                                    self.offset_address_ir(slot.ptr, piece.offset, piece.ty);
+                                let address = self.offset_address(slot.ptr, piece.offset);
                                 self.builder
                                     .insert(p::store(self.context, value, address).build());
                             }
@@ -4551,7 +4531,7 @@ impl FnCodegen<'_> {
                     {
                         let target = lower_type(self.context, self.typed, target);
                         self.builder
-                            .insert(b::constant(self.context, 0, target).build())
+                            .insert(p::null(self.context, target).build())
                             .result()
                     } else {
                         self.convert_scalar(value, source, target)

@@ -1,0 +1,25 @@
+// RUN: tir opt --pass mem2reg --verify %s | filecheck %s
+
+// The counterpart of mixed_value_types_keep: the arms store pointers spelled
+// the same way, so the slot has one type to reconstruct and is promoted. This
+// is the shape a front end that spells every pointer opaquely produces.
+
+module {
+  func @uniform(%0: !i1, %1: !ptr.p, %2: !ptr.p) -> !ptr.p {
+    %3 = ptr.alloca {size = 8, align = 8} : !ptr.p
+    scf.if %0 {
+      ptr.store %1, %3
+      scf.yield
+    } else {
+      ptr.store %2, %3
+      scf.yield
+    }
+    %4 = ptr.load %3 : !ptr.p
+    return %4
+  }
+  module_end
+}
+
+// CHECK-LABEL: func @uniform
+// CHECK-NOT: ptr.alloca
+// CHECK-NOT: ptr.load

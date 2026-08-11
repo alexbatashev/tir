@@ -151,8 +151,11 @@ int main(void) { printf("hello"); return 0; }"#,
 
     #[test]
     fn emits_struct_definition_and_type() {
+        // A nested record is what still names a struct *type* in the IR: every
+        // pointer is spelled opaquely, so only a field of struct type keeps the
+        // `!cir.struct` spelling.
         let ir = compile(
-            "struct Pair { char tag; int value; }; int main(void) { struct Pair pair; return 0; }",
+            "struct Pair { char tag; int value; }; struct Boxed { struct Pair pair; }; int main(void) { struct Boxed boxed; return 0; }",
         );
 
         assert!(ir.contains("cir.define_struct"), "{ir}");

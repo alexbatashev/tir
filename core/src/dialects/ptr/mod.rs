@@ -18,8 +18,8 @@ use crate::Any as AnyConstraint;
 
 pub mod ops {
     pub use super::{
-        AllocaOp, LoadOp, MemcpyOp, MemsetOp, PtrAddOp, PtrDiffOp, StoreOp, alloca, load, memcpy,
-        memset, ptradd, ptrdiff, store,
+        AllocaOp, LoadOp, MemcpyOp, MemsetOp, NullOp, PtrAddOp, PtrDiffOp, StoreOp, alloca, load,
+        memcpy, memset, null, ptradd, ptrdiff, store,
     };
 }
 
@@ -28,6 +28,7 @@ dialect! {
         name: "ptr",
         operations: [
             AllocaOp,
+            NullOp,
             PtrAddOp,
             PtrDiffOp,
             LoadOp,
@@ -194,6 +195,39 @@ fn uint_attribute(op: &impl Operation, name: &str) -> u64 {
             _ => None,
         })
         .unwrap()
+}
+
+operation! {
+    NullOp {
+        name: "null",
+        dialect: "ptr",
+        results: R {
+            result: "crate::ptr::PtrType",
+        },
+        sem: "(set result $null_address)",
+    }
+}
+
+impl NullOp {
+    /// The null pointer: the all-zero address, at the pointer width the data
+    /// layout in scope declares. Without a layout the address width is unknown,
+    /// so the op offers no semantics rather than guessing one.
+    fn null_address(
+        &self,
+        g: &mut impl tir::graph::MutDag<
+            Node = tir::sem::SymKind,
+            Leaf = tir::sem::SymPayload<tir::ValueId>,
+        >,
+    ) -> Option<tir::graph::NodeId> {
+        let context = self.0.context.upgrade();
+        let width = crate::DataLayout::for_op(&context, self.0.id)?.pointer_size()?;
+        let node = g.add_node(tir::sem::SymKind::Constant);
+        g.set_leaf_data(
+            node,
+            tir::sem::SymPayload::Int(tir::utils::APInt::new(width, 0)),
+        );
+        Some(node)
+    }
 }
 
 operation! {

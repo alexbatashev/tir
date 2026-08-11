@@ -63,6 +63,11 @@ impl PreservedAnalyses {
         self
     }
 
+    /// Whether the pass reported that it left the IR alone.
+    pub fn preserves_all(&self) -> bool {
+        self.all
+    }
+
     pub fn is_preserved<A: Analysis>(&self) -> bool {
         self.all || self.preserved.contains(&TypeId::of::<A>())
     }

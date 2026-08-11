@@ -11,7 +11,7 @@ void clear(struct node *node)
 }
 
 // IR-LABEL: func @clear
-// IR: %[[ZERO:.*]] = constant {value = 0} : !ptr.p
+// IR: %[[ZERO:.*]] = ptr.null : !ptr.p
 // IR: ptr.store %[[ZERO]]
 
 // ASM-LABEL: clear:

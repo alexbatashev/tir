@@ -2862,6 +2862,10 @@ impl Pass for InstructionSelectPass {
         PassTarget::Any
     }
 
+    fn emits_machine_ir(&self) -> bool {
+        true
+    }
+
     fn run(
         &mut self,
         op: &OperationRef,
