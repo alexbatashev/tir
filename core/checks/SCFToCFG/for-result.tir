@@ -1,6 +1,8 @@
 // RUN: tir opt --pass builtin.func(scf-to-cfg) %s | filecheck %s
 
-module {
+#data_layout = {types = {p = {abi = 64, size = 64}}}
+
+module {data_layout = #data_layout} {
   func @count(%0: !index, %1: !index, %2: !index) -> !i32 {
     %3 = constant {value = 0} : !i32
     %4 = scf.for %0, %1, %2 iter_args(%5 = %3) -> !i32 {

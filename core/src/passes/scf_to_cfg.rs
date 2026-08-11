@@ -202,7 +202,17 @@ impl ScfToCfgPass {
         let step = op.operands[2];
         let inits = op.operands[3..].to_vec();
         let (body, scope) = Self::move_loop_body(context, op.regions[0]);
-        let index_type = context.get_value(lower).ty();
+        // The loop counter leaves the abstract `!index` behind here: the
+        // compare and the step it feeds are ordinary integer arithmetic, so the
+        // bounds are reinterpreted at the width the layout gives an index.
+        let index_width = crate::DataLayout::for_op(context, op.id)
+            .and_then(|layout| layout.index_width())
+            .ok_or_else(|| {
+                PassError::InvalidRuleSet(
+                    "scf.for lowering needs a data layout to size the loop counter".to_string(),
+                )
+            })?;
+        let index_type = IntegerType::new(context, index_width);
         let mut header_values = vec![context.create_value(index_type, None)];
         header_values.extend(
             body.arguments()
@@ -233,9 +243,18 @@ impl ScfToCfgPass {
         }
 
         Self::erase(rewriter, &block, op)?;
+        let mut entry_builder = IRBuilder::new(block);
+        let mut to_index = |value| {
+            entry_builder
+                .insert(b::bitcast(context, value, index_type).build())
+                .result()
+        };
+        let lower = to_index(lower);
+        let upper = to_index(upper);
+        let step = to_index(step);
         let mut entry_args = vec![lower];
         entry_args.extend(inits);
-        IRBuilder::new(block).insert(b::br(context, entry_args, header.id()).build());
+        entry_builder.insert(b::br(context, entry_args, header.id()).build());
 
         let induction = header.arguments()[0].id();
         let carried = header.arguments()[1..]

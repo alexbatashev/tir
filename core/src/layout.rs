@@ -93,6 +93,12 @@ impl DataLayout {
         self.class_layout("p").map(|(size, _)| size)
     }
 
+    /// Width of an index, in bits. An index addresses memory, so it is as wide
+    /// as a pointer.
+    pub fn index_width(&self) -> Option<u32> {
+        self.pointer_size()
+    }
+
     /// Size and ABI alignment of a layout class named directly (`i32`, `f64`,
     /// `p`), in bits. For front ends, which map their own types onto a class
     /// before they hold a TIR type to key on.

@@ -448,6 +448,8 @@ operation! {
 
 impl tir::Verifiable for BitcastOp {
     fn verify_impl(&self, context: &Context) -> Result<(), Error> {
+        // An index is a scalar too, but only a data layout says how wide.
+        let layout = crate::DataLayout::for_op(context, self.0.id);
         let width = |value| {
             let ty = context.get_value(value).ty();
             let ty = context.get_type_data(ty);
@@ -458,12 +460,16 @@ impl tir::Verifiable for BitcastOp {
                     ty.downcast_ref::<crate::builtin::FloatType>()
                         .map(crate::builtin::FloatType::bit_width)
                 })
+                .or_else(|| {
+                    ty.downcast_ref::<crate::builtin::IndexType>()
+                        .and_then(|_| layout.as_ref()?.index_width())
+                })
         };
         let input_width = width(self.operands()[0]);
         let result_width = width(self.result());
         if input_width.is_none() || result_width.is_none() {
             return Err(Error::VerificationError(
-                "bitcast requires scalar integer or floating-point types".to_string(),
+                "bitcast requires scalar integer, floating-point or index types".to_string(),
             ));
         }
         if input_width != result_width {

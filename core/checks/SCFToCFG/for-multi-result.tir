@@ -3,7 +3,9 @@
 // Every carried port becomes a block argument threaded through the header, the
 // body and the continuation.
 
-module {
+#data_layout = {types = {p = {abi = 64, size = 64}}}
+
+module {data_layout = #data_layout} {
   func @count(%0: !index, %1: !index, %2: !index) -> !i32 {
     %3 = constant {value = 0} : !i32
     %4 = constant {value = 1} : !i64
@@ -18,6 +20,6 @@ module {
 }
 
 // CHECK-NOT: scf.
-// CHECK: br ^bb{{[0-9]+}}(%{{[0-9]+}}, %{{[0-9]+}}, %{{[0-9]+}} : !index, !i32, !i64)
+// CHECK: br ^bb{{[0-9]+}}(%{{[0-9]+}}, %{{[0-9]+}}, %{{[0-9]+}} : !i64, !i32, !i64)
 // CHECK: cond_br %{{[0-9]+}}, ^bb{{[0-9]+}}(%{{[0-9]+}}, %{{[0-9]+}} : !i32, !i64), ^bb{{[0-9]+}}(%{{[0-9]+}}, %{{[0-9]+}} : !i32, !i64)
 // CHECK: return
