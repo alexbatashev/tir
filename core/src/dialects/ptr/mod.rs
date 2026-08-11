@@ -18,8 +18,8 @@ use crate::Any as AnyConstraint;
 
 pub mod ops {
     pub use super::{
-        AllocaOp, LoadOp, MemcpyOp, MemsetOp, NullOp, PtrAddOp, PtrDiffOp, StoreOp, alloca, load,
-        memcpy, memset, null, ptradd, ptrdiff, store,
+        AllocaOp, CmpOp, CmpOpBuilder, LoadOp, MemcpyOp, MemsetOp, NullOp, PtrAddOp, PtrDiffOp,
+        StoreOp, alloca, cmp, load, memcpy, memset, null, ptradd, ptrdiff, store,
     };
 }
 
@@ -28,6 +28,7 @@ dialect! {
         name: "ptr",
         operations: [
             AllocaOp,
+            CmpOp,
             NullOp,
             PtrAddOp,
             PtrDiffOp,
@@ -228,6 +229,104 @@ impl NullOp {
         );
         Some(node)
     }
+}
+
+operation! {
+    CmpOp {
+        name: "cmp",
+        dialect: "ptr",
+        verifier: "true",
+        attributes: A {
+            predicate: "Str",
+        },
+        operands: O {
+            lhs: "crate::ptr::PtrType",
+            rhs: "crate::ptr::PtrType",
+        },
+        results: R {
+            result: "crate::Integer<1>",
+        },
+        sem: "(set result $cmp_expr)",
+    }
+}
+
+/// Predicates a pointer comparison can express. Addresses are unsigned, so a
+/// signed comparison of two of them has no meaning to declare.
+const POINTER_PREDICATES: [&str; 6] = ["eq", "ne", "ult", "ule", "ugt", "uge"];
+
+impl CmpOp {
+    /// The comparison of the two addresses, as unsigned integers at the width
+    /// the data layout in scope declares for a pointer. Without a layout the
+    /// address width is unknown, so the op offers no semantics rather than
+    /// guessing one.
+    fn cmp_expr(
+        &self,
+        g: &mut impl tir::graph::MutDag<
+            Node = tir::sem::SymKind,
+            Leaf = tir::sem::SymPayload<tir::ValueId>,
+        >,
+    ) -> Option<tir::graph::NodeId> {
+        use tir::sem::SymKind;
+
+        let context = self.0.context.upgrade();
+        crate::DataLayout::for_op(&context, self.0.id)?.pointer_size()?;
+
+        let (kind, swap) = match predicate(self)? {
+            "eq" => (SymKind::Eq, false),
+            "ne" => (SymKind::Ne, false),
+            "ult" => (SymKind::ULt, false),
+            "ugt" => (SymKind::ULt, true),
+            "uge" => (SymKind::UGe, false),
+            "ule" => (SymKind::UGe, true),
+            _ => return None,
+        };
+
+        let mut operand = |index: u32| {
+            let leaf = g.add_node(SymKind::Symbol);
+            g.set_leaf_data(leaf, tir::sem::SymPayload::SymbolId(index));
+            leaf
+        };
+        let (lhs, rhs) = if swap {
+            (operand(1), operand(0))
+        } else {
+            (operand(0), operand(1))
+        };
+        let node = g.add_node(kind);
+        g.add_edge(node, lhs);
+        g.add_edge(node, rhs);
+        Some(node)
+    }
+}
+
+impl CmpOpBuilder {
+    pub fn predicate(self, pred: &str) -> Self {
+        self.attr("predicate", AttributeValue::Str(pred.to_string()))
+    }
+}
+
+impl tir::Verifiable for CmpOp {
+    fn verify_impl(&self, _context: &Context) -> Result<(), Error> {
+        match predicate(self) {
+            Some(pred) if POINTER_PREDICATES.contains(&pred) => Ok(()),
+            Some(pred) => Err(Error::VerificationError(format!(
+                "ptr.cmp predicate '{pred}' is not a pointer comparison (expected {})",
+                POINTER_PREDICATES.join(", ")
+            ))),
+            None => Err(Error::VerificationError(
+                "ptr.cmp requires a string 'predicate' attribute".to_string(),
+            )),
+        }
+    }
+}
+
+fn predicate(op: &impl Operation) -> Option<&str> {
+    op.attributes()
+        .iter()
+        .find(|attribute| attribute.name == "predicate")
+        .and_then(|attribute| match &attribute.value {
+            AttributeValue::Str(value) => Some(value.as_str()),
+            _ => None,
+        })
 }
 
 operation! {

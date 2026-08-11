@@ -17,6 +17,8 @@ void corrupt(ee_u32 blksize, ee_u8 *memblock, ee_s16 seed, ee_s16 step)
 }
 
 // IR: ptr.ptradd
+// A relational pointer comparison is an unsigned address comparison.
+// IR: ptr.cmp %{{[0-9]+}}, %{{[0-9]+}} {predicate = "ult"} : !i1
 // IR-NOT: addi {{.*}} : !ptr
 
 // ASM: corrupt:
