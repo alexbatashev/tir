@@ -457,7 +457,7 @@ pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnost
                         && declared_globals.insert(entity)
                     {
                         module_builder.insert(
-                            cir::ExternGlobalOpBuilder::new(context)
+                            b::DeclareOpBuilder::new(context)
                                 .attr("sym_name", AttributeValue::Str(global.name.clone()))
                                 .build(),
                         );
@@ -4910,10 +4910,6 @@ pub fn lower_data(context: &Context, module: &ModuleOp) -> Result<(), tir::PassE
             rewriter.erase_op(&tir::OperationRef::new(op, Some(module_body.clone()), None))?;
         } else if let Some(global) = op.clone().as_op::<cir::ZeroGlobalOp>() {
             zero_globals.push((global.sym_name(), global.size(), global.align()));
-            rewriter.erase_op(&tir::OperationRef::new(op, Some(module_body.clone()), None))?;
-        } else if op.is::<cir::ExternGlobalOp>() {
-            // A declaration reserves nothing: the reference to it becomes a
-            // relocation against an undefined symbol.
             rewriter.erase_op(&tir::OperationRef::new(op, Some(module_body.clone()), None))?;
         }
     }

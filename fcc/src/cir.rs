@@ -11,11 +11,11 @@ use tir::{
 
 pub mod ops {
     pub use super::{
-        BreakOp, ConditionOp, ContinueOp, CopyStructOp, DefineStructOp, DoOp, ExternGlobalOp,
-        ForOp, GetMemberOp, GlobalOp, GlobalStringOp, IfOp, StringOp, VaArgOp, VaEndOp, VaStartOp,
-        WhileOp, YieldOp, ZeroGlobalOp, r#break, condition, r#continue, copy_struct, define_struct,
-        r#do, extern_global, r#for, get_member, global, global_string, r#if, string, va_arg,
-        va_end, va_start, r#while, r#yield, zero_global,
+        BreakOp, ConditionOp, ContinueOp, CopyStructOp, DefineStructOp, DoOp, ForOp, GetMemberOp,
+        GlobalOp, GlobalStringOp, IfOp, StringOp, VaArgOp, VaEndOp, VaStartOp, WhileOp, YieldOp,
+        ZeroGlobalOp, r#break, condition, r#continue, copy_struct, define_struct, r#do, r#for,
+        get_member, global, global_string, r#if, string, va_arg, va_end, va_start, r#while,
+        r#yield, zero_global,
     };
 }
 
@@ -27,7 +27,6 @@ dialect! {
             GlobalOp,
             GlobalStringOp,
             ZeroGlobalOp,
-            ExternGlobalOp,
             DefineStructOp,
             GetMemberOp,
             CopyStructOp,
@@ -75,7 +74,7 @@ operation! {
 /// A named object: it owns its name outright, so it carries no signature and
 /// cannot be overloaded.
 macro_rules! data_symbol {
-    ($op:ty, $is_definition:literal) => {
+    ($op:ty) => {
         impl Symbol for $op {
             fn symbol_name(&self) -> String {
                 self.sym_name()
@@ -94,35 +93,14 @@ macro_rules! data_symbol {
             }
 
             fn is_definition(&self) -> bool {
-                $is_definition
+                true
             }
         }
     };
 }
 
-data_symbol!(GlobalOp, true);
-data_symbol!(ZeroGlobalOp, true);
-
-operation! {
-    ExternGlobalOp {
-        name: "extern_global",
-        dialect: "cir",
-        interfaces: [Symbol],
-        attributes: A {
-            sym_name: "Str",
-        },
-    }
-}
-
-// An object another translation unit defines: it names the symbol this module
-// refers to without giving it storage.
-data_symbol!(ExternGlobalOp, false);
-
-impl ExternGlobalOp {
-    pub fn sym_name(&self) -> String {
-        string_attribute(self, "sym_name")
-    }
-}
+data_symbol!(GlobalOp);
+data_symbol!(ZeroGlobalOp);
 
 impl GlobalStringOp {
     pub fn sym_name(&self) -> String {

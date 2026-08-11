@@ -1,0 +1,17 @@
+// RUN: tir opt %s | filecheck %s
+
+// An object another module defines carries no signature: the declaration
+// names the symbol and nothing else.
+
+module {
+  declare @counter
+  func @main() -> !ptr.p {
+    %0 = addr_of {sym_name = "counter"} : !ptr.p
+    return %0
+  }
+  module_end
+}
+
+// CHECK: module {
+// CHECK-NEXT: declare @counter
+// CHECK-NEXT: func @main() -> !ptr.p {

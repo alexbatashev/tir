@@ -1,0 +1,16 @@
+// RUN: tir opt --verify %s | filecheck %s
+
+// A data declaration is the symbol a reference to an object defined elsewhere
+// resolves to.
+
+module {
+  declare @counter
+  func @counter_address() -> !ptr.p {
+    %0 = addr_of {sym_name = "counter"} : !ptr.p
+    return %0
+  }
+  module_end
+}
+
+// CHECK: declare @counter
+// CHECK: addr_of {sym_name = "counter"}

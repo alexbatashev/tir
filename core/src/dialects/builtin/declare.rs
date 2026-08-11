@@ -4,16 +4,17 @@ use crate::{Context, Error, IRFormatter, Operation, Symbol, TypeId, Visibility, 
 
 use crate as tir;
 
+// Declares a symbol another module defines: a function, carrying `ret_type`
+// and `arg_types`, or a data object, carrying neither.
 operation! {
     DeclareOp {
         name: "declare",
         dialect: "builtin",
         format: "custom",
+        verifier: "true",
         interfaces: [Symbol],
         attributes: A {
             sym_name: "Str",
-            ret_type: "Type",
-            arg_types: "Array",
         },
     }
 }
@@ -24,11 +25,11 @@ impl Symbol for DeclareOp {
     }
 
     fn symbol_signature(&self) -> Option<Vec<TypeId>> {
-        Some(self.arg_types())
+        self.arg_types()
     }
 
     fn symbol_result_type(&self) -> Option<TypeId> {
-        Some(self.ret_type())
+        self.ret_type()
     }
 
     fn symbol_visibility(&self) -> Visibility {
@@ -37,6 +38,40 @@ impl Symbol for DeclareOp {
 
     fn is_definition(&self) -> bool {
         false
+    }
+}
+
+impl tir::Verifiable for DeclareOp {
+    fn verify_impl(&self, _context: &Context) -> Result<(), Error> {
+        let name = self.sym_name();
+        let carries = |attr_name: &str| self.attributes().iter().any(|attr| attr.name == attr_name);
+        match (carries("ret_type"), carries("arg_types")) {
+            (false, false) => Ok(()),
+            (true, true) => {
+                if self.ret_type().is_none() {
+                    return Err(Error::VerificationError(format!(
+                        "declare '@{name}' attribute 'ret_type' must be a type"
+                    )));
+                }
+                if self.arg_types().is_none() {
+                    return Err(Error::VerificationError(format!(
+                        "declare '@{name}' attribute 'arg_types' must be an array of types"
+                    )));
+                }
+                Ok(())
+            }
+            (ret, _) => {
+                let (present, missing) = if ret {
+                    ("ret_type", "arg_types")
+                } else {
+                    ("arg_types", "ret_type")
+                };
+                Err(Error::VerificationError(format!(
+                    "declare '@{name}' carries '{present}' without '{missing}': a function \
+                     declaration carries both, a data declaration neither"
+                )))
+            }
+        }
     }
 }
 
@@ -52,7 +87,8 @@ impl DeclareOp {
             .expect("declare must carry sym_name")
     }
 
-    pub fn ret_type(&self) -> TypeId {
+    /// `None` for a data declaration, which has no signature.
+    pub fn ret_type(&self) -> Option<TypeId> {
         self.attributes()
             .iter()
             .find(|attr| attr.name == "ret_type")
@@ -60,26 +96,23 @@ impl DeclareOp {
                 AttributeValue::Type(ty) => Some(ty),
                 _ => None,
             })
-            .expect("declare must carry ret_type")
     }
 
-    pub fn arg_types(&self) -> Vec<TypeId> {
+    /// `None` for a data declaration, which has no signature.
+    pub fn arg_types(&self) -> Option<Vec<TypeId>> {
         self.attributes()
             .iter()
             .find(|attr| attr.name == "arg_types")
             .and_then(|attr| match &attr.value {
-                AttributeValue::Array(items) => Some(
-                    items
-                        .iter()
-                        .map(|item| match item {
-                            AttributeValue::Type(ty) => *ty,
-                            _ => panic!("declare arg_types must contain only types"),
-                        })
-                        .collect(),
-                ),
+                AttributeValue::Array(items) => items
+                    .iter()
+                    .map(|item| match item {
+                        AttributeValue::Type(ty) => Some(*ty),
+                        _ => None,
+                    })
+                    .collect(),
                 _ => None,
             })
-            .expect("declare must carry arg_types")
     }
 
     fn custom_print(&self, fmt: &mut IRFormatter) -> Result<(), std::fmt::Error> {
@@ -88,15 +121,19 @@ impl DeclareOp {
             Visibility::Private => " private",
             Visibility::Public => "",
         };
-        fmt.write(format!("declare{visibility} @{}(", self.sym_name()))?;
-        for (idx, ty) in self.arg_types().iter().enumerate() {
+        fmt.write(format!("declare{visibility} @{}", self.sym_name()))?;
+        let (Some(arg_types), Some(ret_type)) = (self.arg_types(), self.ret_type()) else {
+            return fmt.write("\n");
+        };
+        fmt.write("(")?;
+        for (idx, ty) in arg_types.iter().enumerate() {
             if idx > 0 {
                 fmt.write(", ")?;
             }
             context.print_type(*ty, fmt)?;
         }
         fmt.write(") -> ")?;
-        context.print_type(self.ret_type(), fmt)?;
+        context.print_type(ret_type, fmt)?;
         fmt.write("\n")
     }
 
@@ -111,8 +148,13 @@ impl DeclareOp {
             .parse_symbol_name()
             .ok_or_else(|| (parser.span(), Error::ExpectedSymbolName))?
             .to_string();
+        let mut builder =
+            DeclareOpBuilder::new(context).attr("sym_name", AttributeValue::Str(sym_name));
+        if is_private {
+            builder = builder.attr("sym_visibility", AttributeValue::Str("private".to_string()));
+        }
         if !parser.parse_token("(") {
-            return Err((parser.span(), Error::ExpectedToken("(")));
+            return Ok(Box::new(builder.build()));
         }
 
         let mut arg_types = Vec::new();
@@ -139,13 +181,9 @@ impl DeclareOp {
             .parse_type(context)?
             .ok_or_else(|| (parser.span(), Error::ExpectedType))?;
 
-        let mut builder = DeclareOpBuilder::new(context)
-            .attr("sym_name", AttributeValue::Str(sym_name))
+        let builder = builder
             .attr("ret_type", AttributeValue::Type(ret_type))
             .attr("arg_types", arg_types_attr(&arg_types));
-        if is_private {
-            builder = builder.attr("sym_visibility", AttributeValue::Str("private".to_string()));
-        }
 
         Ok(Box::new(builder.build()))
     }
@@ -202,4 +240,34 @@ pub fn declare_op(context: &Context, name: &str, ret: TypeId, args: &[TypeId]) -
         .attr("ret_type", AttributeValue::Type(ret))
         .attr("arg_types", arg_types_attr(args))
         .build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Operation;
+    use crate::builtin::IntegerType;
+
+    /// A half-signature declare is neither a function nor a data declaration,
+    /// and the text form cannot express it: only a builder can build one.
+    #[test]
+    fn declare_carrying_a_return_type_without_arguments_is_rejected() {
+        let context = Context::with_default_dialects();
+        let declaration = DeclareOpBuilder::new(&context)
+            .attr("sym_name", AttributeValue::Str("counter".to_string()))
+            .attr(
+                "ret_type",
+                AttributeValue::Type(IntegerType::new(&context, 32)),
+            )
+            .build();
+
+        let error = declaration
+            .verify(&context)
+            .expect_err("a data declaration must not carry a return type");
+
+        assert!(
+            format!("{error:?}").contains("carries 'ret_type' without 'arg_types'"),
+            "{error:?}"
+        );
+    }
 }

@@ -145,7 +145,9 @@ fn ensure_declaration(
             .filter(|declaration| declaration.sym_name() == name)
     });
     if let Some(declaration) = declaration {
-        if declaration.ret_type() != return_type || declaration.arg_types() != argument_types {
+        if declaration.ret_type() != Some(return_type)
+            || declaration.arg_types().as_deref() != Some(argument_types)
+        {
             return Err(PassError::InvalidRuleSet(format!(
                 "existing {name} declaration has an incompatible type"
             )));
