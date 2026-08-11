@@ -2328,6 +2328,18 @@ impl Analyzer<'_> {
                         );
                         (error, ValueCategory::Value)
                     } else {
+                        // `E1 op= E2` is `E1 = E1 op E2`: the operation itself
+                        // runs at the usual-arithmetic-conversions common type,
+                        // and only the store narrows back to E1's type.
+                        if let Some(rhs) = children.get(1).copied()
+                            && let Some(rhs_ty) =
+                                self.ast.get_annotation(rhs).and_then(|info| info.ty)
+                            && self.is_arithmetic(lhs_ty)
+                            && self.is_arithmetic(rhs_ty)
+                        {
+                            let common = self.common_arithmetic_type(lhs_ty, rhs_ty);
+                            self.record_conversion(rhs, common);
+                        }
                         (lhs_ty, ValueCategory::Value)
                     }
                 }

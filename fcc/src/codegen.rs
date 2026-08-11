@@ -4564,16 +4564,22 @@ impl FnCodegen<'_> {
                         .insert(p::load(self.context, ptr, elem).build())
                         .result();
                     let source_ty = node_type(self.typed, lhs_node);
-                    let value = match self.typed.types().kind(source_ty) {
-                        TypeKind::Pointer(_) => self.lower_pointer_offset(
+                    let value = if let TypeKind::Pointer(_) = self.typed.types().kind(source_ty) {
+                        self.lower_pointer_offset(
                             lhs,
                             rhs,
                             node_type(self.typed, rhs_node),
                             source_ty,
                             kind == AstKind::SubAssign,
-                        ),
-                        TypeKind::Double => self.lower_double_binary(kind, lhs, rhs),
-                        _ => self.lower_integer_binary(kind, lhs, rhs, source_ty),
+                        )
+                    } else {
+                        let operand_ty = converted_node_type(self.typed, rhs_node);
+                        let lhs = self.convert_scalar(lhs, source_ty, operand_ty);
+                        let result = match self.typed.types().kind(operand_ty) {
+                            TypeKind::Double => self.lower_double_binary(kind, lhs, rhs),
+                            _ => self.lower_integer_binary(kind, lhs, rhs, operand_ty),
+                        };
+                        self.convert_scalar(result, operand_ty, source_ty)
                     };
                     self.builder
                         .insert(p::store(self.context, value, ptr).build());
