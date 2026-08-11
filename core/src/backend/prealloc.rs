@@ -164,7 +164,6 @@ impl Pass for BlockArgLoweringPass {
     ) -> Result<PreservedAnalyses, PassError> {
         let blocks = symbol_body_blocks(context, op);
         let info = self.target.register_info();
-        let default_class = info.default_integer_class(self.abi);
         for &block_id in &blocks {
             for op_id in context.get_block(block_id).op_ids() {
                 let op = context.get_op(op_id);
@@ -180,11 +179,11 @@ impl Pass for BlockArgLoweringPass {
                         "vbr with block arguments is missing its 'dest' target".to_string(),
                     ));
                 };
-                let params: Vec<u32> = context
+                let params: Vec<ValueId> = context
                     .get_block(dest)
                     .arguments()
                     .iter()
-                    .map(|v| v.id().number())
+                    .map(|v| v.id())
                     .collect();
                 if params.len() != args.len() {
                     return Err(PassError::InvalidRuleSet(format!(
@@ -195,22 +194,25 @@ impl Pass for BlockArgLoweringPass {
                 }
 
                 // Pair each parameter with its forwarded value and the register
-                // class to copy it in (from either endpoint's uses, else the
-                // default integer class).
+                // class to copy it in: the narrower class an instruction naming
+                // either endpoint pins it to, else the file its type lives in. A
+                // value that only ever travels from one block parameter to the
+                // next is named by no instruction at all, and the copies of its
+                // edges must still agree — which only its type can decide.
                 let mut pairs: Vec<(u32, u32, RegClassId)> = Vec::new();
                 for (&param, &arg) in params.iter().zip(args.iter()) {
-                    if param == arg {
+                    if param.number() == arg {
                         continue;
                     }
                     let class = vreg_class_in(context, &blocks, arg)
-                        .or_else(|| vreg_class_in(context, &blocks, param))
-                        .or(default_class)
+                        .or_else(|| vreg_class_in(context, &blocks, param.number()))
+                        .or_else(|| info.default_class(self.abi, value_kind(context, param)))
                         .ok_or_else(|| {
                             PassError::InvalidRuleSet(format!(
                                 "block argument vreg {arg} has no register class"
                             ))
                         })?;
-                    pairs.push((param, arg, class));
+                    pairs.push((param.number(), arg, class));
                 }
 
                 let op_ref = op_ref_in(context, block_id, op_id);

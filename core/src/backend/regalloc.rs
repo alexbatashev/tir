@@ -194,9 +194,19 @@ impl RegisterInfo {
     }
 
     pub fn default_integer_class(&self, abi: &crate::backend::abi::AbiInfo) -> Option<RegClassId> {
+        self.default_class(abi, crate::backend::abi::ValueKind::Int)
+    }
+
+    /// The class a value of `kind` lives in when no instruction naming it has
+    /// pinned a narrower one: the file the ABI passes such values through.
+    pub fn default_class(
+        &self,
+        abi: &crate::backend::abi::AbiInfo,
+        kind: crate::backend::abi::ValueKind,
+    ) -> Option<RegClassId> {
         abi.args
             .iter()
-            .find(|sequence| sequence.kind == crate::backend::abi::ValueKind::Int)
+            .find(|sequence| sequence.kind == kind)
             .and_then(|sequence| sequence.regs.first())
             .map(|register| register.0)
     }

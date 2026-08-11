@@ -1,0 +1,26 @@
+// RUN: tir mc --march=x86_64 --stage=regalloc %s | filecheck %s
+
+// The class a block-argument copy moves through follows the type of the value it
+// carries. A `double` that is only ever forwarded from one block parameter to the
+// next — the shape a rotated loop's condition block leaves behind — is named by
+// no machine operand when its edges are destructed, so nothing but its type says
+// which file it lives in. Copying it through a general-purpose register there
+// contradicts every float copy of the same register elsewhere and leaves the
+// allocator with a register-class conflict.
+
+module {
+  func @fwd(%0: !i1, %1: !f64) -> !f64 {
+    cond_br %0, ^bb1(%1 : !f64), ^bb1(%1 : !f64)
+  ^bb1(%2: !f64):
+    return %2
+  }
+  module_end
+}
+
+// CHECK: asm.symbol
+// CHECK-NOT: x86_64.mov {
+// CHECK:      x86_64.movsd {dst = [[P:xmm[0-9]+]], src = xmm0}
+// CHECK:      ^bb1(%{{[0-9]+}}: !f64):
+// CHECK-NEXT: x86_64.movsd {dst = xmm0, src = [[P]]}
+// CHECK:      ^bb2:
+// CHECK-NEXT: x86_64.movsd {dst = [[P]], src = xmm0}
