@@ -8,11 +8,16 @@
 //! nothing for another reader to see, because the staged nodes are not reachable
 //! from ω until the replacement.
 //!
-//! What the view anchored is staged verbatim: the state-carrying nodes in their
-//! original order, and the subregions of the structural ones copied node for
-//! node. Only the pure value terms come from the extraction, and only in the
-//! region the view rendered — a nested region is a view of its own, for a commit
-//! of its own.
+//! What the view anchored is staged verbatim: the state-carrying nodes it could
+//! not spell, in their original order, and the subregions of the structural ones
+//! copied node for node. Only the pure value terms come from the extraction, and
+//! only in the region the view rendered — a nested region is a view of its own,
+//! for a commit of its own.
+//!
+//! A memory operation the view *did* model sits between the two: the extraction
+//! supplies its operands and may drop it outright, but the region's node order
+//! supplies its position, because the state edges give memory its identity and
+//! not its schedule ([`Stager::stage_memory`]).
 
 use std::collections::{HashMap, HashSet};
 
@@ -148,10 +153,13 @@ impl Stager<'_> {
         self.map_arguments(old, staged, arguments.len());
 
         for node in graph.region_nodes(old).to_vec() {
-            if self.is_term(graph, node) {
+            if !self.is_term(graph, node) {
+                self.stage_node(graph, node, true)?;
                 continue;
             }
-            self.stage_node(graph, node, true)?;
+            if graph.outputs(node).contains(&PortType::State) {
+                self.stage_memory(graph, node)?;
+            }
         }
 
         let results = graph
@@ -173,6 +181,48 @@ impl Stager<'_> {
                 .all(|port| self.view.models(Origin::output(node, port as u32)))
     }
 
+    /// Re-create a memory operation the view modeled. Its *identity* is the
+    /// state operand, but its *schedule* is the region's node order — an access
+    /// is landed where the region held it, never where the state DAG's topology
+    /// would allow, since a read leaves the chain it read and orders nothing on
+    /// its own. The classes the staged node defines are registered as
+    /// materialized, so the chain and the loaded value read back off it.
+    ///
+    /// A node the laws of [`super::state`] took out has nothing to rebuild: a
+    /// load the store before it forwarded, or a store the next one overwrote,
+    /// whose outgoing chain is now the incoming one.
+    fn stage_memory(&mut self, graph: &mut Graph, node: NodeId) -> Result<(), Error> {
+        let outputs = graph.outputs(node).to_vec();
+        let ports = || (0..outputs.len() as u32).map(|port| Origin::output(node, port));
+        let chain = Origin::output(node, outputs.len() as u32 - 1);
+        // A write's whole effect is the chain it produces: the laws took it out
+        // exactly where that chain is the one it read. A read produces no chain
+        // of its own, so what it leaves behind is its value.
+        let dead = match outputs.len() {
+            1 => {
+                self.view.class(chain)
+                    == graph
+                        .inputs(node)
+                        .last()
+                        .and_then(|&state| self.view.class(state))
+            }
+            _ => !self.view.rebuilt(Origin::output(node, 0), self.extraction),
+        };
+        if dead {
+            return Ok(());
+        }
+
+        let staged = self.stage_node(graph, node, true)?;
+        for (port, origin) in ports().enumerate() {
+            if let Some(class) = self.view.class(origin) {
+                let key = self.materialization_key(class, outputs[port]);
+                self.materialized
+                    .insert(key, Origin::output(staged, port as u32));
+            }
+        }
+        Ok(())
+    }
+
     fn map_arguments(&mut self, old: RegionId, staged: RegionId, count: usize) {
         for index in 0..count as u32 {
             self.moved.insert(
@@ -185,7 +235,12 @@ impl Stager<'_> {
     /// Re-create one node the view did not model, and every region it owns. Its
     /// inputs come from the extraction only in the region the view rendered;
     /// inside a copied region every origin is read from the copy.
-    fn stage_node(&mut self, graph: &mut Graph, node: NodeId, viewed: bool) -> Result<(), Error> {
+    fn stage_node(
+        &mut self,
+        graph: &mut Graph,
+        node: NodeId,
+        viewed: bool,
+    ) -> Result<NodeId, Error> {
         let inputs = graph
             .inputs(node)
             .to_vec()
@@ -208,7 +263,7 @@ impl Stager<'_> {
             self.moved
                 .insert(Origin::output(node, port), Origin::output(staged, port));
         }
-        Ok(())
+        Ok(staged)
     }
 
     /// Copy a region the view did not render, node for node.
@@ -259,11 +314,7 @@ impl Stager<'_> {
         class: Id,
         expected: PortType,
     ) -> Result<Origin, Error> {
-        let class = self.view.egraph().find(class);
-        let expected = self
-            .types
-            .get(&class)
-            .map_or(expected, |&ty| PortType::Value(ty));
+        let (class, expected) = self.materialization_key(class, expected);
         if let Some(&origin) = self.materialized.get(&(class, expected)) {
             return Ok(origin);
         }
@@ -281,6 +332,17 @@ impl Stager<'_> {
         self.active.remove(&class);
         self.materialized.insert((class, expected), origin);
         Ok(origin)
+    }
+
+    /// How a class is keyed in [`Self::materialized`]: canonical, at the type the
+    /// region seeded it at where every seeding agreed on one.
+    fn materialization_key(&self, class: Id, expected: PortType) -> (Id, PortType) {
+        let class = self.view.egraph().find(class);
+        let expected = self
+            .types
+            .get(&class)
+            .map_or(expected, |&ty| PortType::Value(ty));
+        (class, expected)
     }
 
     fn build(

@@ -27,6 +27,18 @@ pub(crate) fn class_int_binding(egraph: &SemEGraph, class: Id) -> Option<APInt> 
     })
 }
 
+/// An unsigned literal at its minimal width. Widths identify a constant class,
+/// so the byte counts and metadata the memory vocabulary carries must be spelled
+/// this one way wherever they are seeded.
+pub(crate) fn minimal_unsigned_apint(value: u64) -> APInt {
+    let width = if value == 0 {
+        1
+    } else {
+        64 - value.leading_zeros()
+    };
+    APInt::new(width, value)
+}
+
 /// The negated comparison at the same operand order (`!(a < b)` is `a >= b`).
 pub(crate) fn complement_comparison(kind: SymKind) -> Option<SymKind> {
     Some(match kind {

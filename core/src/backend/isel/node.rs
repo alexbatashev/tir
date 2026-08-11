@@ -77,15 +77,6 @@ pub(crate) fn class_value_binding(
         })
 }
 
-pub(crate) fn minimal_unsigned_apint(value: u64) -> APInt {
-    let width = if value == 0 {
-        1
-    } else {
-        64 - value.leading_zeros()
-    };
-    APInt::new(width, value)
-}
-
 /// Whether duplicating the class's computation is sound: every member is a pure
 /// value expression, so two fused matches may each recompute it inside their
 /// instruction. Memory effects are excluded — two reads of the same address are

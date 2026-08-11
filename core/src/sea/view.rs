@@ -1,14 +1,21 @@
 //! The e-graph view over one sea region.
 //!
-//! The view is red: it renders a region's *pure value terms* as an e-graph and
-//! nothing else. What it does not model, it anchors — a state-typed edge, an
-//! operation that touches one, a structural node it may not speculate through.
-//! An anchor is an opaque leaf standing for one origin of the region, so the
-//! schedule the state edges express is never something saturation can reorder.
+//! The view is red: it renders a region's value terms and its memory accesses as
+//! an e-graph, and nothing else. What it does not model, it anchors — a chain it
+//! cannot spell, an operation that consumes one opaquely, a structural node it
+//! may not speculate through. An anchor is an opaque leaf standing for one origin
+//! of the region, so nothing ever merges through it.
 //!
 //! # What becomes a term
 //!
-//! * A **region argument** of value type is a leaf.
+//! * A **region argument** is a leaf: of its type where it carries a value, and
+//!   untyped where it carries a state chain.
+//! * A **memory access** is its operator over its operands *and the chain it
+//!   reads* ([`Builder::seed_memory`]), in both vocabularies at once — the
+//!   `LoadMemory`/`StoreMemory` shape the state laws are written in
+//!   ([`super::state`]) and the operation's own identity, which a commit
+//!   rebuilds. The state operand is the whole of memory identity: two accesses
+//!   merge exactly where the chain says they must.
 //! * A **simple node** with no state port is its operator over its operands'
 //!   classes — a constant-like one is the constant it holds, so equal constants
 //!   share a class whatever op spells them.
@@ -22,7 +29,9 @@
 //!   seeded over it, then the real projection is unioned onto it. The value the
 //!   loop leaves behind is a different value, so the θ's output anchors and never
 //!   joins that class. The θ node itself is never a term; only its loop variables
-//!   are.
+//!   are. Both a γ and a θ hand back their chains opaque: what happened on them
+//!   happened on one path, or some number of times, so the accesses *after* one
+//!   are still terms — over something nothing forwards through.
 //!
 //! Every one of those terms is seeded *twice* where the op says what it
 //! computes: once as the op's identity, which the peephole rules match, and
@@ -46,11 +55,16 @@ use std::sync::Arc;
 use tir_symbolic::egraph::{EGraph, Extraction, Id};
 
 use crate::attributes::{AttributeValue, NamedAttribute};
+use crate::builtin::UnitType;
 use crate::passes::instcombine::value_rewrites;
 use crate::scoped_attr::AttributeDict;
+use crate::sem::egraph::{minimal_unsigned_apint, type_width};
 use crate::sem::rewrites::{IselRewrite, SaturationLimits, discover_rewrites, saturate};
-use crate::sem::{Prov, SemNode as Node};
-use crate::{Commutative, ConstantLike, Context, DATA_LAYOUT, OpCost, OpInstance, TypeId, ValueId};
+use crate::sem::{Prov, SemNode as Node, SymKind, template_node};
+use crate::{
+    Commutative, ConstantLike, Context, DATA_LAYOUT, MemoryRead, MemoryWrite, OpCost, OpInstance,
+    TypeId, ValueId,
+};
 
 use super::graph::{Graph, NodeId, Origin, PortType, RegionId};
 use super::{kinds, sym};
@@ -75,6 +89,10 @@ pub struct View {
     /// The type every seeding of a class read it at, before saturation moved the
     /// class ids around.
     types: Vec<(Id, TypeId)>,
+    /// The state classes something outside the modeled terms reads: the chains
+    /// the region exports, and the ones a node the view did not model consumes.
+    /// A law that would drop a write may not touch these ([`super::state`]).
+    escaping: Vec<Id>,
 }
 
 impl View {
@@ -98,12 +116,14 @@ impl View {
             anchor_of: HashMap::new(),
             seeded: Vec::new(),
             types: Vec::new(),
+            escaping: Vec::new(),
             nesting: 0,
         };
         builder.seed_arguments(region);
         for &node in graph.region_nodes(region) {
             builder.seed_node(node);
         }
+        builder.record_exports(region);
         View {
             region,
             version: version_of(graph, region),
@@ -113,6 +133,7 @@ impl View {
             anchor_of: builder.anchor_of,
             seeded: builder.seeded,
             types: builder.types,
+            escaping: builder.escaping,
         }
     }
 
@@ -190,6 +211,7 @@ impl View {
         let mut rewrites: Vec<IselRewrite> =
             value_rewrites(context).into_iter().map(peephole).collect();
         rewrites.extend(discover_rewrites());
+        rewrites.extend(super::state::state_laws(self.escaping.clone()));
         saturate(
             context,
             &mut self.eg,
@@ -209,15 +231,26 @@ impl View {
     /// the region seeded. A commit that would rebuild the region unchanged is
     /// not worth the edit.
     pub fn improved(&self, extraction: &Extraction<Node>) -> bool {
-        self.seeded.iter().any(|(origin, seeded)| {
-            let Some(class) = self.class(*origin) else {
-                return false;
-            };
-            match extraction.node(class) {
-                Some(chosen) => self.canonical_key(chosen) != self.canonical_key(seeded),
-                None => false,
-            }
-        })
+        self.seeded
+            .iter()
+            .any(|(origin, _)| !self.rebuilt(*origin, extraction))
+    }
+
+    /// Whether `extraction` chose, for `origin`, the very term the region seeded
+    /// it as. A commit rebuilds the operation behind an origin only where this
+    /// holds: an origin the extraction reads back as something else has no
+    /// operation left to land — the forwarded load, the overwritten store.
+    pub fn rebuilt(&self, origin: Origin, extraction: &Extraction<Node>) -> bool {
+        let Some((_, seeded)) = self.seeded.iter().find(|(seeded, _)| *seeded == origin) else {
+            return false;
+        };
+        let Some(class) = self.class(origin) else {
+            return false;
+        };
+        match extraction.node(class) {
+            Some(chosen) => self.canonical_key(chosen) == self.canonical_key(seeded),
+            None => true,
+        }
     }
 
     /// A node's hash with its children canonicalized, so a term seeded before a
@@ -283,6 +316,17 @@ impl ViewCache {
     }
 }
 
+/// A stateful node's ports, split into what it computes and the chain it
+/// threads ([`Builder::memory_shape`]).
+struct MemoryShape {
+    /// The index of the state operand in the node's input list.
+    state_input: usize,
+    /// The origin of the chain the node produces.
+    state_output: Origin,
+    /// The types of the values the node computes, in port order.
+    results: Vec<TypeId>,
+}
+
 struct Builder<'a> {
     context: &'a Context,
     graph: &'a Graph,
@@ -295,6 +339,7 @@ struct Builder<'a> {
     anchor_of: HashMap<ValueId, Origin>,
     seeded: Vec<(Origin, Node)>,
     types: Vec<(Id, TypeId)>,
+    escaping: Vec<Id>,
     /// How deep below the viewed region the seeding currently is.
     nesting: u32,
 }
@@ -302,9 +347,11 @@ struct Builder<'a> {
 impl Builder<'_> {
     fn seed_arguments(&mut self, region: RegionId) {
         for (index, &port) in self.graph.region_arguments(region).iter().enumerate() {
-            if let PortType::Value(ty) = port {
-                self.anchor(Origin::argument(region, index as u32), ty);
-            }
+            let origin = Origin::argument(region, index as u32);
+            match port {
+                PortType::Value(ty) => self.anchor(origin, ty),
+                PortType::State => self.anchor_state(origin),
+            };
         }
     }
 
@@ -316,11 +363,46 @@ impl Builder<'_> {
         if op == kinds::THETA && self.seed_theta(node) {
             return;
         }
-        if !kinds::is_structural(op) && self.is_pure(node) {
-            self.seed_simple(node);
-            return;
+        if !kinds::is_structural(op) {
+            if self.is_pure(node) {
+                self.seed_simple(node);
+                return;
+            }
+            if self.seed_memory(node) {
+                return;
+            }
         }
+        self.escape_states(node);
         self.anchor_outputs(node);
+    }
+
+    /// Every chain `node` reads escapes the terms: whatever the node does with
+    /// it, the view does not model, so no law may drop a write it can see.
+    fn escape_states(&mut self, node: NodeId) {
+        for (port, origin) in self.graph.inputs(node).to_vec().into_iter().enumerate() {
+            if self.graph.input_types(node)[port] == PortType::State
+                && let Some(&class) = self.class_of.get(&origin)
+            {
+                self.escaping.push(class);
+            }
+        }
+    }
+
+    /// The chains the region hands back to its caller.
+    fn record_exports(&mut self, region: RegionId) {
+        for (port, &origin) in self
+            .graph
+            .region_results(region)
+            .to_vec()
+            .iter()
+            .enumerate()
+        {
+            if self.graph.region_result_types(region)[port] == PortType::State
+                && let Some(&class) = self.class_of.get(&origin)
+            {
+                self.escaping.push(class);
+            }
+        }
     }
 
     /// A node whose result the e-graph may reason about: one value output, no
@@ -345,10 +427,35 @@ impl Builder<'_> {
 
     fn anchor_outputs(&mut self, node: NodeId) {
         for (port, &output) in self.graph.outputs(node).to_vec().iter().enumerate() {
-            if let PortType::Value(ty) = output {
-                self.anchor(Origin::output(node, port as u32), ty);
-            }
+            let origin = Origin::output(node, port as u32);
+            match output {
+                PortType::Value(ty) => self.anchor(origin, ty),
+                PortType::State => self.anchor_state(origin),
+            };
         }
+    }
+
+    /// Seed a state edge as an opaque leaf. A chain the view cannot spell — the
+    /// one a call or a `memset` produces — still has a class, so the operations
+    /// downstream of it are terms over *something*; nothing merges through it,
+    /// which is what makes the fallback conservative rather than wrong.
+    ///
+    /// A state edge carries no value, so the leaf is untyped: the width-dependent
+    /// axioms read a class's type, and a chain has none to read.
+    fn anchor_state(&mut self, origin: Origin) -> Id {
+        let value = self
+            .context
+            .create_value(UnitType::new(self.context), None)
+            .id();
+        let node = Node::input(value);
+        let id = self.eg.add(node.clone());
+        self.anchor_of.insert(value, origin);
+        self.anchored.insert(origin);
+        self.class_of.insert(origin, id);
+        if self.nesting == 0 {
+            self.seeded.push((origin, node));
+        }
+        id
     }
 
     /// Seed `origin` as an opaque leaf of type `ty`, and remember which origin it
@@ -383,7 +490,7 @@ impl Builder<'_> {
 
     fn seed_simple(&mut self, node: NodeId) {
         let ty = self.output_type(node);
-        let probe = self.probe(node, ty);
+        let probe = self.probe(node, &[ty]);
         let Some(operands) = self.operand_classes(node) else {
             self.anchor_outputs(node);
             return;
@@ -436,7 +543,7 @@ impl Builder<'_> {
     /// raised under rides along as the probe's own `data_layout` — otherwise an
     /// op whose semantics are the pointer width (`ptr.null`, `ptr.cmp`) would
     /// declare none and seed nothing.
-    fn probe(&self, node: NodeId, ty: TypeId) -> Arc<OpInstance> {
+    fn probe(&self, node: NodeId, results: &[TypeId]) -> Arc<OpInstance> {
         let identity = self.graph.op_type_name(self.graph.op_of(node));
         let operands: Vec<ValueId> = self
             .graph
@@ -445,7 +552,10 @@ impl Builder<'_> {
             .filter_map(|port| port.value_type())
             .map(|ty| self.context.create_value(ty, None).id())
             .collect();
-        let result = self.context.create_value(ty, None).id();
+        let results: Vec<ValueId> = results
+            .iter()
+            .map(|&ty| self.context.create_value(ty, None).id())
+            .collect();
         let mut attributes = self.graph.attributes(node).to_vec();
         if let Some(layout) = self.layout {
             attributes.push(NamedAttribute::new(
@@ -457,10 +567,167 @@ impl Builder<'_> {
             identity,
             self.context.as_context_ref(),
             operands,
-            vec![result],
+            results,
             Vec::new(),
             attributes,
         ))
+    }
+
+    /// Seed a memory operation as a term over the state it reads.
+    ///
+    /// A load is `LoadMemory(address, bytes, metadata, state)` and a store
+    /// `StoreMemory(address, bytes, value, space, state)` — the target
+    /// vocabulary's shapes with the chain appended, which is the *whole* of
+    /// memory identity here. Two loads of one address on one state class
+    /// hash-cons, and that congruence is load-over-store forwarding's other
+    /// half; two on different chains, or split by a store, never do. The
+    /// operation's own identity is seeded over the same operands and unioned
+    /// on, so a commit has an op to rebuild ([`super::commit`]).
+    ///
+    /// Which of a node's ports is which comes from the interfaces, not from a
+    /// position: [`MemoryRead::read_location`] and [`MemoryWrite::write_location`]
+    /// name operands of the probe, and the operand order is the node's.
+    ///
+    /// A read does not change memory, so a load's outgoing chain is the class of
+    /// its incoming one — a store's forwarding reaches past an intervening load.
+    /// Nothing reorders on that account: the schedule a commit lands is the
+    /// region's own node order, never the state DAG's topology.
+    ///
+    /// Reports whether the node was modeled. A stateful operation the memory
+    /// vocabulary cannot spell whole — a `memset`, whose written extent is an
+    /// operand rather than its value's width — anchors, and the chain it
+    /// produces blocks forwarding through it.
+    fn seed_memory(&mut self, node: NodeId) -> bool {
+        let Some(shape) = self.memory_shape(node) else {
+            return false;
+        };
+        let probe = self.probe(node, &shape.results);
+        let Some(operands) = self.operand_classes(node) else {
+            return false;
+        };
+        let state = operands[shape.state_input];
+        let values = &operands[..shape.state_input];
+
+        let read = probe.clone().as_interface::<dyn MemoryRead>();
+        let write = probe.clone().as_interface::<dyn MemoryWrite>();
+        let (location, stored, accessed) = match (&read, &write) {
+            (Some(read), _) => (read.read_location(), None, shape.results.first().copied()),
+            (_, Some(write)) => (
+                write.write_location(),
+                Some(write.written_value()),
+                Some(self.context.get_value(write.written_value()).ty()),
+            ),
+            _ => return false,
+        };
+        let (Some(address), Some(accessed)) = (
+            self.operand_class(&probe, values, location),
+            accessed.and_then(|ty| type_width(self.context, ty)),
+        ) else {
+            return false;
+        };
+
+        let bytes = self.constant(u64::from(accessed / 8));
+        let (kind, mut children) = match stored {
+            None => {
+                let metadata = self.constant(0);
+                (SymKind::LoadMemory, vec![address, bytes, metadata])
+            }
+            Some(stored) => {
+                let Some(value) = self.operand_class(&probe, values, stored) else {
+                    return false;
+                };
+                let space = self.constant(0);
+                (SymKind::StoreMemory, vec![address, bytes, value, space])
+            }
+        };
+        children.push(state);
+        let mut term = template_node(kind, None, shape.results.first().copied());
+        term.children = children;
+        let semantics = self.eg.add(term);
+
+        // The op identity reads the same operands plus the chain, so two
+        // spellings of one access are one class exactly when the vocabulary says
+        // they are.
+        let cost = probe
+            .clone()
+            .as_interface::<dyn OpCost>()
+            .map_or(1, |c| c.cost());
+        let (dialect, name) = self.graph.op_type_name(self.graph.op_of(node));
+        let ty = shape
+            .results
+            .first()
+            .copied()
+            .unwrap_or_else(|| UnitType::new(self.context));
+        let identity = Node::sea(
+            dialect,
+            name,
+            ty,
+            self.graph.attributes(node).to_vec(),
+            false,
+            cost,
+            operands,
+        );
+        let id = self.eg.add(identity.clone());
+        self.eg.union(id, semantics);
+
+        match shape.results.first() {
+            // A read: its value is the term, and the chain it hands on is the one
+            // it read.
+            Some(&ty) => {
+                self.record(Origin::output(node, 0), id, ty, identity);
+                self.class_of.insert(shape.state_output, state);
+            }
+            // A write: the chain it produces *is* the term.
+            None => {
+                self.class_of.insert(shape.state_output, id);
+                if self.nesting == 0 {
+                    self.seeded.push((shape.state_output, identity));
+                }
+            }
+        }
+        true
+    }
+
+    /// The ports of a node the memory vocabulary can spell: every input a value
+    /// but the last, which is the one chain [`super::raise`] threads, and one
+    /// output at most — the value a read produces — before the chain. An access
+    /// that computes more than that is not one the vocabulary names.
+    fn memory_shape(&self, node: NodeId) -> Option<MemoryShape> {
+        let inputs = self.graph.input_types(node);
+        let outputs = self.graph.outputs(node);
+        let (PortType::State, values) = inputs.split_last()? else {
+            return None;
+        };
+        let (PortType::State, results) = outputs.split_last()? else {
+            return None;
+        };
+        if results.len() > 1 || values.iter().any(|port| port.value_type().is_none()) {
+            return None;
+        }
+        Some(MemoryShape {
+            state_input: values.len(),
+            state_output: Origin::output(node, results.len() as u32),
+            results: results
+                .iter()
+                .map(|port| port.value_type())
+                .collect::<Option<_>>()?,
+        })
+    }
+
+    /// The class the node's operand list holds for the probe's `value` operand.
+    fn operand_class(&self, probe: &Arc<OpInstance>, values: &[Id], value: ValueId) -> Option<Id> {
+        let index = probe
+            .operands
+            .iter()
+            .position(|&operand| operand == value)?;
+        values.get(index).copied()
+    }
+
+    /// An unsigned literal of the memory vocabulary — a byte count, a metadata
+    /// or address-space code — at the one width every seeding spells it.
+    fn constant(&mut self, value: u64) -> Id {
+        self.eg
+            .add(Node::constant(minimal_unsigned_apint(value), Prov::None))
     }
 
     fn operand_classes(&self, node: NodeId) -> Option<Vec<Id>> {
@@ -527,14 +794,22 @@ impl Builder<'_> {
         let Some(&condition) = self.class_of.get(&inputs[0]) else {
             return false;
         };
+        // Whatever the arms do with the chains they were handed, the gates do not
+        // model it, so a law may not drop a write the γ can see.
+        self.escape_states(node);
         self.inline(taken, &inputs[1..]);
         self.inline(otherwise, &inputs[1..]);
 
         for (port, &output) in self.graph.outputs(node).to_vec().iter().enumerate() {
+            let origin = Origin::output(node, port as u32);
+            // A chain a γ hands back is opaque: the writes on it happened on one
+            // path. Anchoring it rather than leaving it classless keeps the chain
+            // spellable, so the accesses *after* the γ are still terms — over
+            // something nothing forwards through.
             let PortType::Value(ty) = output else {
+                self.anchor_state(origin);
                 continue;
             };
-            let origin = Origin::output(node, port as u32);
             let arms = [taken, otherwise].map(|arm| {
                 let result = self.graph.region_results(arm)[port];
                 self.slice_is_pure(arm, port)
@@ -572,13 +847,18 @@ impl Builder<'_> {
         if !self.region_is_pure(body) {
             return false;
         }
+        // Like a γ's, the chains a θ hands back are opaque — the writes on them
+        // happened some number of times ([`Self::seed_gamma`]).
+        self.escape_states(node);
         let outputs = self.graph.outputs(node).to_vec();
         let mut placeholders = Vec::new();
         for (port, &output) in outputs.iter().enumerate() {
+            let origin = Origin::output(node, port as u32);
             let PortType::Value(ty) = output else {
+                self.anchor_state(origin);
                 continue;
             };
-            self.anchor(Origin::output(node, port as u32), ty);
+            self.anchor(origin, ty);
             let value = self.context.create_value(ty, None).id();
             let id = self.eg.add(Node::input(value).typed(ty));
             let carried = Origin::argument(body, port as u32);

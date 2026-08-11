@@ -853,3 +853,380 @@ fn a_pointer_class_is_never_rebuilt_from_the_literal_address() {
         "the null address must survive as its operation, got {spelled:?}"
     );
 }
+
+/// A function with one non-escaping slot: a store into it, then a load out of
+/// it. Reports the raised graph, its body region, and the store and load nodes.
+fn stored_then_loaded_slot(context: &Context) -> (super::raise::Raised, RegionId, NodeId, NodeId) {
+    let i32 = IntegerType::new(context, 32);
+    let slot_type = crate::ptr::PtrType::typed(context, i32);
+    let parameter = context.create_value(i32, None);
+    let stored = parameter.id();
+    let region = context.create_region();
+    let block = context.create_block(vec![parameter]);
+    region.add_block(block.id());
+
+    let func = crate::builtin::ops::func(context, "f", i32, Some(region.id())).build();
+    let mut builder = crate::IRBuilder::new(func.body());
+    let slot = builder.insert(crate::ptr::ops::alloca(context, 4u64, 4u64, slot_type).build());
+    builder.insert(crate::ptr::ops::store(context, stored, slot.result()).build());
+    let load = builder.insert(crate::ptr::ops::load(context, slot.result(), i32).build());
+    builder.insert(crate::builtin::ops::r#return(context, load.result()).build());
+
+    let raised = super::raise_function(context, &func).expect("straight-line code raises");
+    let body = raised.graph.subregions(raised.lambda)[0];
+    let node_of = |name: &str| {
+        raised
+            .graph
+            .region_nodes(body)
+            .iter()
+            .copied()
+            .find(|&node| raised.graph.op_type_name(raised.graph.op_of(node)).1 == name)
+            .expect("the raised node")
+    };
+    let (store, load) = (node_of("store"), node_of("load"));
+    (raised, body, store, load)
+}
+
+/// Memory is a term over the state it reads: the load's class carries the
+/// `LoadMemory` shape, and its state operand is the class the store produced.
+/// That operand is the whole of memory identity on the view path — two loads
+/// merge only where they agree on it.
+#[test]
+fn a_load_seeds_the_state_it_reads_as_its_operand() {
+    let context = Context::with_default_dialects();
+    let (raised, body, store, load) = stored_then_loaded_slot(&context);
+
+    let view = View::build(&context, &raised.graph, body, None);
+    let loaded = view
+        .class(Origin::output(load, 0))
+        .expect("a load is a term over the state it reads");
+    let stored_state = view
+        .class(Origin::output(store, 0))
+        .expect("a store's result is the state that follows it");
+
+    let states: Vec<_> = view
+        .egraph()
+        .nodes(loaded)
+        .iter()
+        .filter(|node| node.kind == crate::sem::SymKind::LoadMemory)
+        .map(|node| {
+            view.egraph()
+                .find(*node.children.last().expect("a state operand"))
+        })
+        .collect();
+    assert_eq!(
+        states,
+        vec![stored_state],
+        "the load must read the state the store produced"
+    );
+}
+
+/// S1, load-over-store forwarding: a load whose chain is a store to the same
+/// address at the same width is the value that store put there.
+#[test]
+fn a_load_reads_back_what_the_store_on_its_chain_put_there() {
+    let context = Context::with_default_dialects();
+    let (raised, body, store, load) = stored_then_loaded_slot(&context);
+
+    let mut view = View::build(&context, &raised.graph, body, None);
+    view.saturate(&context);
+
+    let stored = view
+        .class(raised.graph.inputs(store)[0])
+        .expect("the stored value is a term");
+    assert_eq!(
+        view.class(Origin::output(load, 0)),
+        Some(stored),
+        "the load must be the value the store put at that address"
+    );
+}
+
+/// S3, disjoint-chain commutation: separate chains never interact, so no law
+/// states it. A store to one non-escaping slot is not on the chain a load of
+/// another reads, and forwarding reaches straight through it.
+#[test]
+fn a_store_to_a_disjoint_slot_does_not_block_forwarding() {
+    let context = Context::with_default_dialects();
+    let i32 = IntegerType::new(&context, 32);
+    let slot_type = crate::ptr::PtrType::typed(&context, i32);
+    let first_value = context.create_value(i32, None);
+    let second_value = context.create_value(i32, None);
+    let (stored, other) = (first_value.id(), second_value.id());
+    let region = context.create_region();
+    let block = context.create_block(vec![first_value, second_value]);
+    region.add_block(block.id());
+
+    let func = crate::builtin::ops::func(&context, "f", i32, Some(region.id())).build();
+    let mut builder = crate::IRBuilder::new(func.body());
+    let mine = builder.insert(crate::ptr::ops::alloca(&context, 4u64, 4u64, slot_type).build());
+    let theirs = builder.insert(crate::ptr::ops::alloca(&context, 4u64, 4u64, slot_type).build());
+    builder.insert(crate::ptr::ops::store(&context, stored, mine.result()).build());
+    builder.insert(crate::ptr::ops::store(&context, other, theirs.result()).build());
+    let load = builder.insert(crate::ptr::ops::load(&context, mine.result(), i32).build());
+    builder.insert(crate::builtin::ops::r#return(&context, load.result()).build());
+
+    let raised = super::raise_function(&context, &func).expect("straight-line code raises");
+    let body = raised.graph.subregions(raised.lambda)[0];
+    let node_of = |name: &str, position: usize| {
+        raised
+            .graph
+            .region_nodes(body)
+            .iter()
+            .copied()
+            .filter(|&node| raised.graph.op_type_name(raised.graph.op_of(node)).1 == name)
+            .nth(position)
+            .expect("the raised node")
+    };
+    let (store, load) = (node_of("store", 0), node_of("load", 0));
+
+    let mut view = View::build(&context, &raised.graph, body, None);
+    view.saturate(&context);
+
+    let mine = view
+        .class(raised.graph.inputs(store)[0])
+        .expect("the stored value is a term");
+    assert_eq!(
+        view.class(Origin::output(load, 0)),
+        Some(mine),
+        "a write to another slot's chain is not on this load's chain at all"
+    );
+}
+
+/// S2, dead-store elimination: a write nothing reads before the next write to
+/// the same extent leaves the chain where it found it.
+#[test]
+fn a_store_the_next_one_overwrites_leaves_the_chain_alone() {
+    let context = Context::with_default_dialects();
+    let i32 = IntegerType::new(&context, 32);
+    let slot_type = crate::ptr::PtrType::typed(&context, i32);
+    let first_value = context.create_value(i32, None);
+    let second_value = context.create_value(i32, None);
+    let (dead, live) = (first_value.id(), second_value.id());
+    let region = context.create_region();
+    let block = context.create_block(vec![first_value, second_value]);
+    region.add_block(block.id());
+
+    let func = crate::builtin::ops::func(&context, "f", i32, Some(region.id())).build();
+    let mut builder = crate::IRBuilder::new(func.body());
+    let slot = builder.insert(crate::ptr::ops::alloca(&context, 4u64, 4u64, slot_type).build());
+    builder.insert(crate::ptr::ops::store(&context, dead, slot.result()).build());
+    builder.insert(crate::ptr::ops::store(&context, live, slot.result()).build());
+    let load = builder.insert(crate::ptr::ops::load(&context, slot.result(), i32).build());
+    builder.insert(crate::builtin::ops::r#return(&context, load.result()).build());
+
+    let raised = super::raise_function(&context, &func).expect("straight-line code raises");
+    let body = raised.graph.subregions(raised.lambda)[0];
+    let store_of = |position: usize| {
+        raised
+            .graph
+            .region_nodes(body)
+            .iter()
+            .copied()
+            .filter(|&node| raised.graph.op_type_name(raised.graph.op_of(node)).1 == "store")
+            .nth(position)
+            .expect("the raised store")
+    };
+    let overwritten = store_of(0);
+
+    let mut view = View::build(&context, &raised.graph, body, None);
+    view.saturate(&context);
+
+    assert_eq!(
+        view.class(Origin::output(overwritten, 0)),
+        view.class(*raised.graph.inputs(overwritten).last().expect("a chain")),
+        "the overwritten store must leave the chain as it found it"
+    );
+}
+
+/// A forwarded load has no operation to rebuild: the commit lands the value the
+/// store put there and the load is gone, while the store — whose chain the
+/// region exports — stays where the region held it.
+#[test]
+fn a_commit_drops_a_load_the_store_before_it_forwarded() {
+    let context = Context::with_default_dialects();
+    let (mut raised, body, _, _) = stored_then_loaded_slot(&context);
+
+    let mut view = View::build(&context, &raised.graph, body, None);
+    view.saturate(&context);
+    let replacement = commit::commit(&context, &mut raised.graph, &view, raised.lambda)
+        .expect("the staged body is well formed")
+        .expect("the extraction forwarded the load");
+
+    let staged = raised.graph.subregions(replacement)[0];
+    let names: Vec<_> = raised
+        .graph
+        .region_nodes(staged)
+        .iter()
+        .map(|&node| raised.graph.op_type_name(raised.graph.op_of(node)).1)
+        .collect();
+    assert!(
+        !names.contains(&"load"),
+        "the forwarded load has no operation to rebuild, got {names:?}"
+    );
+    assert!(
+        names.contains(&"store"),
+        "the write the region's chain exports must stay, got {names:?}"
+    );
+    let exported = *raised
+        .graph
+        .region_results(staged)
+        .last()
+        .expect("the region exports its chain");
+    assert_eq!(
+        raised.graph.origin_type(exported),
+        PortType::State,
+        "the chain the region exports must still be a chain"
+    );
+    assert!(raised.graph.verify().is_ok());
+}
+
+/// A function over two pointer parameters, so every access shares the
+/// conservative chain. `accesses` names, in order, the access to build: a store
+/// of the first or second value into the like-numbered pointer, or a load out of
+/// one. Reports the raised graph, its body and the staged nodes' names.
+fn conservative_chain(accesses: &[(&str, usize)]) -> (Context, super::raise::Raised, RegionId) {
+    let context = Context::with_default_dialects();
+    let i32 = IntegerType::new(&context, 32);
+    let pointer = crate::ptr::PtrType::typed(&context, i32);
+    let arguments: Vec<_> = [pointer, pointer, i32, i32]
+        .into_iter()
+        .map(|ty| context.create_value(ty, None))
+        .collect();
+    let values: Vec<_> = arguments.iter().map(|value| value.id()).collect();
+    let region = context.create_region();
+    let block = context.create_block(arguments);
+    region.add_block(block.id());
+
+    let func = crate::builtin::ops::func(&context, "f", i32, Some(region.id())).build();
+    let mut builder = crate::IRBuilder::new(func.body());
+    let mut loaded = None;
+    for &(access, slot) in accesses {
+        match access {
+            "store" => {
+                builder.insert(
+                    crate::ptr::ops::store(&context, values[2 + slot], values[slot]).build(),
+                );
+            }
+            _ => {
+                loaded = Some(
+                    builder
+                        .insert(crate::ptr::ops::load(&context, values[slot], i32).build())
+                        .result(),
+                )
+            }
+        }
+    }
+    let returned = loaded.unwrap_or(values[2]);
+    builder.insert(crate::builtin::ops::r#return(&context, returned).build());
+
+    let raised = super::raise_function(&context, &func).expect("straight-line code raises");
+    let body = raised.graph.subregions(raised.lambda)[0];
+    (context, raised, body)
+}
+
+fn staged_names(graph: &Graph, region: RegionId) -> Vec<&'static str> {
+    graph
+        .region_nodes(region)
+        .iter()
+        .map(|&node| graph.op_type_name(graph.op_of(node)).1)
+        .collect()
+}
+
+/// A read leaves the chain it read, so nothing in the state DAG orders it
+/// against the write that follows. The schedule a commit lands is the region's
+/// own node order, and it must keep the load between the two writes.
+#[test]
+fn a_commit_keeps_a_load_between_the_writes_it_sat_between() {
+    let (context, mut raised, body) =
+        conservative_chain(&[("store", 0), ("load", 1), ("store", 0)]);
+
+    let mut view = View::build(&context, &raised.graph, body, None);
+    view.saturate(&context);
+    let staged = match commit::commit(&context, &mut raised.graph, &view, raised.lambda)
+        .expect("the staged body is well formed")
+    {
+        Some(replacement) => raised.graph.subregions(replacement)[0],
+        None => body,
+    };
+
+    let accesses: Vec<_> = staged_names(&raised.graph, staged)
+        .into_iter()
+        .filter(|name| matches!(*name, "load" | "store"))
+        .collect();
+    assert_eq!(accesses, vec!["store", "load", "store"]);
+    assert!(raised.graph.verify().is_ok());
+}
+
+/// Forwarding reads the chain, and a write to another address is on it: the
+/// load's state is that write, not the one it would read back from, so no law
+/// fires and the access stays.
+#[test]
+fn a_load_does_not_forward_past_a_write_on_its_own_chain() {
+    let (context, raised, body) = conservative_chain(&[("store", 0), ("store", 1), ("load", 0)]);
+
+    let mut view = View::build(&context, &raised.graph, body, None);
+    view.saturate(&context);
+
+    let load = raised
+        .graph
+        .region_nodes(body)
+        .iter()
+        .copied()
+        .find(|&node| raised.graph.op_type_name(raised.graph.op_of(node)).1 == "load")
+        .expect("the raised load");
+    let stored = view
+        .class(raised.graph.inputs(load)[0])
+        .expect("the address is a term");
+    assert_ne!(
+        view.class(Origin::output(load, 0)),
+        Some(stored),
+        "an intervening write to another address blocks forwarding"
+    );
+}
+
+/// The vocabulary is bit-level: a byte count alone would let a slot written as
+/// an integer be read back as the float a consumer spells it, which is a value
+/// no region can hold. Forwarding is for the same access, types included.
+#[test]
+fn a_load_does_not_forward_a_store_of_another_type() {
+    let context = Context::with_default_dialects();
+    let i64 = IntegerType::new(&context, 64);
+    let f64 = crate::builtin::FloatType::new(&context, 11, 52);
+    let slot_type = crate::ptr::PtrType::opaque(&context);
+    let parameter = context.create_value(i64, None);
+    let stored = parameter.id();
+    let region = context.create_region();
+    let block = context.create_block(vec![parameter]);
+    region.add_block(block.id());
+
+    let func = crate::builtin::ops::func(&context, "f", f64, Some(region.id())).build();
+    let mut builder = crate::IRBuilder::new(func.body());
+    let slot = builder.insert(crate::ptr::ops::alloca(&context, 8u64, 8u64, slot_type).build());
+    builder.insert(crate::ptr::ops::store(&context, stored, slot.result()).build());
+    let load = builder.insert(crate::ptr::ops::load(&context, slot.result(), f64).build());
+    builder.insert(crate::builtin::ops::r#return(&context, load.result()).build());
+
+    let raised = super::raise_function(&context, &func).expect("straight-line code raises");
+    let body = raised.graph.subregions(raised.lambda)[0];
+    let load = raised
+        .graph
+        .region_nodes(body)
+        .iter()
+        .copied()
+        .find(|&node| raised.graph.op_type_name(raised.graph.op_of(node)).1 == "load")
+        .expect("the raised load");
+
+    let mut view = View::build(&context, &raised.graph, body, None);
+    view.saturate(&context);
+
+    let loaded = view
+        .class(Origin::output(load, 0))
+        .expect("a load is a term");
+    let bits = view
+        .class(Origin::argument(body, 0))
+        .expect("the stored value is a term");
+    assert_ne!(
+        loaded, bits,
+        "a float read of an integer write is a reinterpretation, not the value"
+    );
+}

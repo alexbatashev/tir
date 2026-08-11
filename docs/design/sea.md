@@ -75,11 +75,43 @@ The structured-control interfaces are the ones already landed on this branch:
   `scf.if` implements it; any dialect's conditional can.
 - `LoopLike` (n-ary): aligned inits / carried args / latched / finals.
   `scf.for`/`scf.while` implement it.
-- `MemoryRead`/`MemoryWrite` grow state accessors when memory becomes
-  state-threaded; one chain per non-escaping alloca plus a conservative
-  chain. Store-to-load forwarding and dead-store elimination then land as
-  ordinary proved rewrites; isel keys memory nodes on state operands and the
-  `Opaque` serials die.
+- `MemoryRead`/`MemoryWrite` are read through by the view's memory seeding: an
+  access is a term over the chain it reads, which is the whole of memory
+  identity there (see "The state laws" below).
+
+## The state laws
+
+`raise` threads one state chain per non-escaping `alloca` plus a conservative
+chain; the view seeds every access as a term over the chain it reads —
+`LoadMemory(address, bytes, metadata, state)`,
+`StoreMemory(address, bytes, value, space, state)` — and unions the operation's
+own identity onto the same class. Identity *is* the state operand: two loads
+that agree on address and chain hash-cons, two that do not never meet, and no
+opaque serial is needed to keep them apart.
+
+- **S1, load-over-store forwarding.** `Load(Store(s, a, n, v), a, n) = v`, at
+  one IR type. Congruence is the other half.
+- **S2, dead-store elimination.** A write the next write to the same extent
+  overwrites leaves the chain as it found it — where nothing else reads that
+  chain, which the applier checks against the states the region exports and the
+  ones nodes the view did not model consume.
+- **S3, disjoint-chain commutation, is structural.** Separate chains never
+  appear in each other's terms, so there is nothing to state; it is asserted by
+  test.
+
+**These two are definitional, not proved.** Every other equality the view
+saturates with is an obligation the `SmtOracle` discharges by bit-blasting to
+unsat, and that pipeline is QF_BV: `tir_symbolic::bitblast` reports the memory
+kinds unsupported, and the reference interpreter's memory is a concrete byte
+array rather than an array model. There is no oracle here to ask, so the laws
+are stated as the *meaning* of a read and a write over the state algebra, the
+way `Add` means addition — never as an obligation nobody discharged. What keeps
+them honest is that both read the state operand, so a law that fires has already
+been told the two accesses alias exactly.
+
+Identity is the state edge; the **schedule** is the region's node order. A read
+leaves the chain it read, so the state DAG does not order a load against the
+write after it, and a commit lands every access where the region held it.
 
 Soundness obligations live where the theory already lives, not in a new
 framework: theta axioms are proved by induction in the axiom prover;

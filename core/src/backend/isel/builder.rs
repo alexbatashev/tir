@@ -10,14 +10,14 @@ use tir::{
     graph::{Dag, MetaDag, NodeId},
     sem::{
         SemGraph, SemPayload, SemType, SymKind, SymPayload,
-        egraph::{SemEGraph, ir_type, semantic_type, type_width},
+        egraph::{SemEGraph, ir_type, minimal_unsigned_apint, semantic_type, type_width},
         infer_types, template_node,
     },
 };
 use tir_adt::APInt;
 use tir_symbolic::egraph::Id;
 
-use super::node::{class_is_pure, minimal_unsigned_apint};
+use super::node::class_is_pure;
 
 /// Builds a block's semantic expressions straight into the e-graph: every lowered
 /// node is hash-consed by [`SemEGraph::add`], so the e-graph *is* the interned DAG
