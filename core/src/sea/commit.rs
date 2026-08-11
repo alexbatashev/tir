@@ -33,7 +33,7 @@ use super::view::View;
 /// held. A failed commit leaves a staged region that no node owns, so its graph
 /// must be discarded rather than used.
 pub fn commit(graph: &mut Graph, view: &View, lambda: NodeId) -> Result<Option<NodeId>, Error> {
-    let extraction = view.egraph().extract_best(cost);
+    let extraction = view.egraph().extract_best(materializable_cost);
     if !view.improved(&extraction) {
         return Ok(None);
     }
@@ -46,6 +46,26 @@ pub fn commit(graph: &mut Graph, view: &View, lambda: NodeId) -> Result<Option<N
         active: HashSet::new(),
     };
     stager.stage(graph, lambda).map(Some)
+}
+
+/// The extraction cost a commit reads: [`cost`], except that a bare semantic
+/// term is unselectable.
+///
+/// A region holds ops, so [`Stager::build`] rebuilds an op identity, folds a
+/// constant, and reads a gate or a leaf back from the origin it stands for —
+/// there is nothing it can make of an `Add` or an `Extract`. The view seeds
+/// those anyway, unioned onto the very classes the ops occupy, because that is
+/// what puts the semantic rulesets on the program's values; here they are
+/// equalities to discover through, never a form to land. Selection consumes
+/// them directly, so this constraint is a property of *materializing into scf*
+/// and lifts where isel emission takes over.
+fn materializable_cost(node: &Node) -> u64 {
+    match &node.kind {
+        // A gate or a leaf names the origin it was seeded from; a literal folds
+        // to a `constant`.
+        Kind::Sym(_) | Kind::Merge(_) if node.value().is_none() && node.int().is_none() => u64::MAX,
+        _ => cost(node),
+    }
 }
 
 struct Stager<'a> {

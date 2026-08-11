@@ -321,6 +321,53 @@ fn a_constant_class_is_built_once_per_type_it_is_read_at() {
     assert!(f.graph.verify().is_ok());
 }
 
+/// The Stager rebuilds op identities, constants and the origins gates and
+/// leaves stand for. Semantic seeding puts terms of the *semantic* vocabulary on
+/// those same classes, and none of them is anything a region can hold, so an
+/// extraction must keep choosing the op identity.
+#[test]
+fn a_commit_rebuilds_the_op_a_semantic_term_shares_a_class_with() {
+    let mut f = fixture();
+    let (i32, i64) = (f.i32, IntegerType::new(&f.context, 64));
+
+    let body = f
+        .graph
+        .open_region(&[PortType::Value(i32), PortType::State]);
+    let extsi = f.graph.op_type("builtin", "extsi");
+    let extended = f
+        .graph
+        .add_node(
+            extsi,
+            &[Origin::argument(body, 0)],
+            &[PortType::Value(i64)],
+            &[],
+            Vec::new(),
+        )
+        .expect("the argument is scheduled earlier");
+    let zero = f.constant(0, i64);
+    let sum = f.addi(Origin::output(extended, 0), zero, i64);
+    let lambda = f.close_lambda(body, &[sum, Origin::argument(body, 1)]);
+    f.graph
+        .finish(&[Origin::output(lambda, 0)])
+        .expect("the λ is the only export");
+
+    let mut view = View::build(&f.context, &f.graph, body);
+    view.saturate(&f.context);
+    let replacement = commit::commit(&mut f.graph, &view, lambda)
+        .expect("the staged body is well formed")
+        .expect("the extraction dropped the addition");
+
+    let staged = f.graph.subregions(replacement)[0];
+    let result = f.graph.region_results(staged)[0];
+    let node = result.node().expect("the extension is a node output");
+    assert_eq!(
+        f.graph.op_type_name(f.graph.op_of(node)).1,
+        "extsi",
+        "the sign extension must be rebuilt as the op, not as its semantics"
+    );
+    assert!(f.graph.verify().is_ok());
+}
+
 #[test]
 fn a_commit_replaces_the_lambda_it_canonicalized_and_nothing_else() {
     let mut f = fixture();

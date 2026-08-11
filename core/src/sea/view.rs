@@ -24,6 +24,14 @@
 //!   joins that class. The θ node itself is never a term; only its loop variables
 //!   are.
 //!
+//! Every one of those terms is seeded *twice* where the op says what it
+//! computes: once as the op's identity, which the peephole rules match, and
+//! once as the semantic expansion the selection theory is written in, unioned
+//! onto the same class ([`super::sym`]). A rule keyed on either vocabulary then
+//! fires on the same value. Both carry the port's IR type verbatim — the
+//! width-dependent axioms read a class's width off it — and so do the gates and
+//! the leaves.
+//!
 //! # Anchors are synthetic values
 //!
 //! A term's payloads name live IR, which the green layer has none of, so the view
@@ -42,7 +50,7 @@ use crate::sem::{Prov, SemNode as Node};
 use crate::{Commutative, ConstantLike, Context, OpCost, OpInstance, TypeId, ValueId};
 
 use super::graph::{Graph, NodeId, Origin, PortType, RegionId};
-use super::kinds;
+use super::{kinds, sym};
 
 const ITER_LIMIT: usize = 30;
 const NODE_LIMIT: usize = 100_000;
@@ -289,7 +297,7 @@ impl Builder<'_> {
     /// stands for.
     fn anchor(&mut self, origin: Origin, ty: TypeId) -> Id {
         let value = self.context.create_value(ty, None).id();
-        let node = Node::input(value);
+        let node = Node::input(value).typed(ty);
         let id = self.eg.add(node.clone());
         self.anchor_of.insert(value, origin);
         self.anchored.insert(origin);
@@ -318,13 +326,14 @@ impl Builder<'_> {
     fn seed_simple(&mut self, node: NodeId) {
         let ty = self.output_type(node);
         let probe = self.probe(node, ty);
+        let Some(operands) = self.operand_classes(node) else {
+            self.anchor_outputs(node);
+            return;
+        };
         let seeded = match probe.clone().as_interface::<dyn ConstantLike>() {
             Some(constant) => Node::constant(constant.constant_value(), Prov::None),
             None => {
-                let Some(mut args) = self.operand_classes(node) else {
-                    self.anchor_outputs(node);
-                    return;
-                };
+                let mut args = operands.clone();
                 let commutative = probe.has_interface::<dyn Commutative>();
                 if commutative {
                     args.sort_by_key(|id| id.index());
@@ -346,6 +355,13 @@ impl Builder<'_> {
             }
         };
         let id = self.eg.add(seeded.clone());
+        // The op's declared semantics name the same value, so both vocabularies
+        // land on one class (see [`super::sym`]). The operands go in unsorted:
+        // an expansion reads input `i` by position, whatever order the
+        // commutative identity was spelled in.
+        if let Some(expansion) = sym::expand(self.context, &mut self.eg, &probe, &operands) {
+            self.eg.union(id, expansion);
+        }
         self.record(Origin::output(node, 0), id, ty, seeded);
     }
 
@@ -450,7 +466,7 @@ impl Builder<'_> {
             let value = self.context.create_value(ty, None).id();
             // The provenance names the origin the gate stands for; the condition
             // is child 0, which is what matching and extraction read.
-            let gate = Node::gamma(value, vec![condition, then, otherwise]);
+            let gate = Node::gamma(value, vec![condition, then, otherwise]).typed(ty);
             let id = self.eg.add(gate.clone());
             self.anchor_of.insert(value, origin);
             self.record(origin, id, ty, gate);
@@ -482,17 +498,17 @@ impl Builder<'_> {
             };
             self.anchor(Origin::output(node, port as u32), ty);
             let value = self.context.create_value(ty, None).id();
-            let id = self.eg.add(Node::input(value));
+            let id = self.eg.add(Node::input(value).typed(ty));
             self.class_of
                 .insert(Origin::argument(body, port as u32), id);
             self.types.push((id, ty));
-            placeholders.push((port, value, id));
+            placeholders.push((port, value, ty, id));
         }
         self.seed_nested(body);
 
         let inputs = self.graph.inputs(node).to_vec();
         let results = self.graph.region_results(body).to_vec();
-        for (port, value, placeholder) in placeholders {
+        for (port, value, ty, placeholder) in placeholders {
             // The θ region's first result is the continuation predicate, so the
             // latch of port `p` is result `p + 1`.
             let latched = self.class_of.get(&results[port + 1]).copied();
@@ -500,10 +516,76 @@ impl Builder<'_> {
             else {
                 continue;
             };
-            let mu = self.eg.add(Node::theta(value, init, latch));
+            let mu = self.eg.add(Node::theta(value, init, latch).typed(ty));
             self.eg.union(placeholder, mu);
         }
         self.eg.rebuild();
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::isel::rewrites::{SaturationLimits, discover_rewrites, saturate};
+    use crate::builtin::{IntegerType, UnitType};
+    use crate::sem::SymKind;
+
+    /// The selection theory is written in the semantic vocabulary and its
+    /// axioms bind on class *widths*, so a view whose classes hold only the op
+    /// identity binds none of them. Seeded semantically and typed, the class of
+    /// an `extsi` binds `sext-bridge` and gains the shift pair the axiom proves
+    /// it equal to.
+    #[test]
+    fn a_view_class_binds_a_width_dependent_selection_axiom() {
+        let context = Context::with_default_dialects();
+        let i1 = IntegerType::new(&context, 1);
+        let narrow = IntegerType::new(&context, 32);
+        let wide = IntegerType::new(&context, 64);
+        let mut graph = Graph::new(i1, &[]);
+
+        let body = graph.open_region(&[PortType::Value(narrow)]);
+        let extsi = graph.op_type("builtin", "extsi");
+        let extended = graph
+            .add_node(
+                extsi,
+                &[Origin::argument(body, 0)],
+                &[PortType::Value(wide)],
+                &[],
+                Vec::new(),
+            )
+            .expect("the argument is visible in its own region");
+        graph
+            .close_region(body, &[Origin::output(extended, 0)])
+            .expect("the extension is visible in its region");
+        let function = PortType::Value(UnitType::new(&context));
+        let lambda = graph
+            .add_node(kinds::LAMBDA, &[], &[function], &[body], Vec::new())
+            .expect("a λ over a closed region");
+        graph
+            .finish(&[Origin::output(lambda, 0)])
+            .expect("the λ is the only export");
+
+        let mut view = View::build(&context, &graph, body);
+        saturate(
+            &context,
+            &mut view.eg,
+            &discover_rewrites(),
+            SaturationLimits::default(),
+        );
+
+        let class = view
+            .class(Origin::output(extended, 0))
+            .expect("the extension is a term");
+        let kinds: Vec<SymKind> = view
+            .eg
+            .nodes(class)
+            .iter()
+            .filter_map(|n| n.sym())
+            .collect();
+        assert!(
+            kinds.contains(&SymKind::ShiftRightArithmetic),
+            "the sign extension must be proved equal to its shift pair, got {kinds:?}"
+        );
     }
 }

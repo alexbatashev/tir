@@ -12,9 +12,9 @@ mod axioms;
 mod builder;
 mod cover;
 mod emit;
-mod node;
+pub(crate) mod node;
 mod pattern;
-mod rewrites;
+pub(crate) mod rewrites;
 #[cfg(test)]
 mod tests;
 mod theory;

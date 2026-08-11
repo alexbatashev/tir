@@ -364,6 +364,13 @@ impl SemNode {
         }
     }
 
+    /// The same term, read at `ty`. A gate or a leaf carries the port's value
+    /// type so the width-dependent rules bind on its class like any other.
+    pub fn typed(mut self, ty: TypeId) -> Self {
+        self.ty = Some(ty);
+        self
+    }
+
     /// The IR value the node stands for at write-back.
     pub fn value(&self) -> Option<ValueId> {
         match self.prov {
