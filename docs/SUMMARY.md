@@ -3,6 +3,7 @@
 - [Introduction](./intro.md)
 - [Developer's Guide](./dev_guide.md)
 - [TIR Internals](./design/index.md)
+  - [The Core IR](./design/ir.md)
   - [Defining Dialects](./design/defining_dialects.md)
   - [Data Layout and Target Environment](./design/target_description.md)
   - [Instruction Selection](./design/instruction_selection.md)
