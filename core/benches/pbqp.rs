@@ -28,6 +28,68 @@ fn dense_problem(node_count: usize, alternative_count: usize) -> PbqpProblem {
     problem
 }
 
+/// The shape a large basic block produces: many sparse nodes, a tree of
+/// expression classes plus sibling constraints, so exact reductions cascade and
+/// R2 introduces fill-in edges between the surviving neighbors.
+fn block_problem(node_count: usize, alternative_count: usize) -> PbqpProblem {
+    let mut problem = PbqpProblem::new();
+    for node in 0..node_count {
+        problem.add_node(
+            (0..alternative_count)
+                .map(|alternative| ((node + alternative) % 7) as u64)
+                .collect(),
+        );
+    }
+
+    let matrix = |seed: usize| {
+        PbqpMatrix::new(
+            alternative_count,
+            alternative_count,
+            (0..alternative_count)
+                .flat_map(|row| {
+                    (0..alternative_count).map(move |col| ((row * 3 + col * 5 + seed) % 11) as u64)
+                })
+                .collect(),
+        )
+    };
+
+    for node in 1..node_count {
+        problem.add_edge(
+            PbqpNodeId::from_index(node),
+            PbqpNodeId::from_index((node - 1) / 2),
+            matrix(node),
+        );
+        if node % 2 == 1 && node + 1 < node_count {
+            problem.add_edge(
+                PbqpNodeId::from_index(node),
+                PbqpNodeId::from_index(node + 1),
+                matrix(node + 2),
+            );
+        }
+    }
+    problem
+}
+
+fn bench_block_search(c: &mut Criterion) {
+    let mut group = c.benchmark_group("pbqp/block_search");
+    group.sample_size(20);
+    for node_count in [512, 4096] {
+        let problem = block_problem(node_count, 8);
+        group.bench_with_input(
+            BenchmarkId::from_parameter(node_count),
+            &problem,
+            |b, problem| {
+                b.iter_batched(
+                    || problem.clone(),
+                    |problem| black_box(solve(&problem).expect("PBQP should be solvable")),
+                    BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+    group.finish();
+}
+
 fn bench_dense_search(c: &mut Criterion) {
     let mut group = c.benchmark_group("pbqp/dense_search");
     for node_count in [16, 32] {
@@ -47,5 +109,5 @@ fn bench_dense_search(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_dense_search);
+criterion_group!(benches, bench_dense_search, bench_block_search);
 criterion_main!(benches);

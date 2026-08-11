@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeSet, VecDeque};
 
 pub const INF_COST: u64 = u64::MAX / 4;
 
@@ -58,9 +58,11 @@ impl PbqpMatrix {
         self.costs[row * self.cols + col] = cost;
     }
 
-    fn add_assign(&mut self, row: usize, col: usize, cost: u64) {
-        let idx = row * self.cols + col;
-        self.costs[idx] = add_cost(self.costs[idx], cost);
+    fn add_assign_matrix(&mut self, other: &PbqpMatrix) {
+        debug_assert_eq!((self.rows, self.cols), (other.rows, other.cols));
+        for (cost, added) in self.costs.iter_mut().zip(&other.costs) {
+            *cost = add_cost(*cost, *added);
+        }
     }
 
     fn is_zero(&self) -> bool {
@@ -68,10 +70,140 @@ impl PbqpMatrix {
     }
 }
 
+/// One stored edge, oriented so that `lhs < rhs` and the matrix's rows index
+/// `lhs`'s alternatives.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct PbqpEdge {
+    lhs: u32,
+    rhs: u32,
+    matrix: PbqpMatrix,
+}
+
+/// A neighbor together with the edge reaching it, so walking a neighborhood
+/// never searches for the connecting cost matrix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct Adjacent {
+    neighbor: u32,
+    edge: u32,
+}
+
+/// Per-node adjacency over a flat edge arena. Adjacency lists stay sorted by
+/// neighbor, so every traversal is reproducible regardless of insertion order
+/// and a pair lookup is a binary search over one node's degree rather than a
+/// search over every edge in the problem. Removed arena slots are recycled, so
+/// the reduction/rollback churn of a solve does not grow the arena without
+/// bound.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+struct EdgeStore {
+    edges: Vec<Option<PbqpEdge>>,
+    free: Vec<u32>,
+    adjacency: Vec<Vec<Adjacent>>,
+}
+
+impl EdgeStore {
+    fn add_node(&mut self) {
+        self.adjacency.push(Vec::new());
+    }
+
+    fn slots(&self) -> usize {
+        self.edges.len()
+    }
+
+    fn slot_mut(&mut self, slot: usize) -> Option<&mut PbqpEdge> {
+        self.edges[slot].as_mut()
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &PbqpEdge> {
+        self.edges.iter().flatten()
+    }
+
+    fn neighbors(&self, node: usize) -> &[Adjacent] {
+        &self.adjacency[node]
+    }
+
+    fn degree(&self, node: usize) -> usize {
+        self.adjacency[node].len()
+    }
+
+    fn edge(&self, edge: u32) -> &PbqpEdge {
+        self.edges[edge as usize]
+            .as_ref()
+            .expect("PBQP edge index must be live")
+    }
+
+    fn matrix_mut(&mut self, edge: u32) -> &mut PbqpMatrix {
+        &mut self.edges[edge as usize]
+            .as_mut()
+            .expect("PBQP edge index must be live")
+            .matrix
+    }
+
+    fn find(&self, lhs: usize, rhs: usize) -> Option<u32> {
+        self.position(lhs, rhs)
+            .map(|position| self.adjacency[lhs][position].edge)
+    }
+
+    fn position(&self, node: usize, neighbor: usize) -> Option<usize> {
+        self.adjacency[node]
+            .binary_search_by_key(&(neighbor as u32), |adjacent| adjacent.neighbor)
+            .ok()
+    }
+
+    /// Store an edge already oriented as `lhs < rhs`; the pair must be absent.
+    fn insert(&mut self, lhs: usize, rhs: usize, matrix: PbqpMatrix) -> u32 {
+        let edge = PbqpEdge {
+            lhs: lhs as u32,
+            rhs: rhs as u32,
+            matrix,
+        };
+        let index = match self.free.pop() {
+            Some(slot) => {
+                self.edges[slot as usize] = Some(edge);
+                slot
+            }
+            None => {
+                self.edges.push(Some(edge));
+                (self.edges.len() - 1) as u32
+            }
+        };
+        self.link(lhs, rhs, index);
+        self.link(rhs, lhs, index);
+        index
+    }
+
+    fn link(&mut self, node: usize, neighbor: usize, edge: u32) {
+        let entry = Adjacent {
+            neighbor: neighbor as u32,
+            edge,
+        };
+        let position = self.adjacency[node]
+            .binary_search_by_key(&entry.neighbor, |adjacent| adjacent.neighbor)
+            .expect_err("a PBQP edge must not be inserted twice");
+        self.adjacency[node].insert(position, entry);
+    }
+
+    fn remove(&mut self, lhs: usize, rhs: usize) -> Option<PbqpMatrix> {
+        let edge = self.find(lhs, rhs)?;
+        self.unlink(lhs, rhs);
+        self.unlink(rhs, lhs);
+        self.free.push(edge);
+        self.edges[edge as usize]
+            .take()
+            .map(|removed| removed.matrix)
+    }
+
+    fn unlink(&mut self, node: usize, neighbor: usize) {
+        let position = self
+            .position(node, neighbor)
+            .expect("PBQP adjacency must be symmetric");
+        self.adjacency[node].remove(position);
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct PbqpProblem {
     node_costs: Vec<Vec<u64>>,
-    edges: BTreeMap<(usize, usize), PbqpMatrix>,
+    edges: EdgeStore,
     coherence_sets: Vec<Vec<PbqpAlternative>>,
 }
 
@@ -79,7 +211,7 @@ impl PbqpProblem {
     pub fn new() -> Self {
         Self {
             node_costs: Vec::new(),
-            edges: BTreeMap::new(),
+            edges: EdgeStore::default(),
             coherence_sets: Vec::new(),
         }
     }
@@ -88,6 +220,7 @@ impl PbqpProblem {
         assert!(!costs.is_empty(), "PBQP node must have alternatives");
         let id = PbqpNodeId::from_index(self.node_costs.len());
         self.node_costs.push(costs);
+        self.edges.add_node();
         id
     }
 
@@ -97,16 +230,12 @@ impl PbqpProblem {
         assert_eq!(self.node_costs[a].len(), matrix.rows());
         assert_eq!(self.node_costs[b].len(), matrix.cols());
 
-        self.edges
-            .entry((a, b))
-            .and_modify(|existing| {
-                for row in 0..existing.rows() {
-                    for col in 0..existing.cols() {
-                        existing.add_assign(row, col, matrix.get(row, col));
-                    }
-                }
-            })
-            .or_insert(matrix);
+        match self.edges.find(a, b) {
+            Some(edge) => self.edges.matrix_mut(edge).add_assign_matrix(&matrix),
+            None => {
+                self.edges.insert(a, b, matrix);
+            }
+        }
     }
 
     pub fn add_coherence_set(&mut self, alternatives: Vec<PbqpAlternative>) {
@@ -226,9 +355,12 @@ impl RnView<'_> {
 
     /// The active neighbors of the decided node.
     pub fn neighbors(&self) -> Vec<PbqpNodeId> {
-        self.solver.adjacency[self.node]
+        self.solver
+            .problem
+            .edges
+            .neighbors(self.node)
             .iter()
-            .map(|&node| PbqpNodeId::from_index(node))
+            .map(|adjacent| PbqpNodeId::from_index(adjacent.neighbor as usize))
             .collect()
     }
 
@@ -310,11 +442,6 @@ struct Solver {
     active: Vec<bool>,
     active_count: usize,
     reductions: Vec<Reduction>,
-    /// Per-node neighbor set, maintained alongside `problem.edges` so neighbor
-    /// queries are O(degree) rather than a full O(edges) scan — the difference
-    /// between the solver being usable and unusable at register-allocation scale.
-    adjacency: Vec<BTreeSet<usize>>,
-    degrees: Vec<usize>,
     reducible: BTreeSet<usize>,
     finite_alternatives: Vec<usize>,
     coherence_groups_by_alternative: Vec<Vec<Vec<usize>>>,
@@ -327,16 +454,8 @@ impl Solver {
     fn new(problem: PbqpProblem) -> Self {
         let node_count = problem.node_count();
         let active = vec![true; node_count];
-        let mut adjacency = vec![BTreeSet::new(); node_count];
-        for &(a, b) in problem.edges.keys() {
-            adjacency[a].insert(b);
-            adjacency[b].insert(a);
-        }
-        let degrees: Vec<_> = adjacency.iter().map(BTreeSet::len).collect();
-        let reducible = degrees
-            .iter()
-            .enumerate()
-            .filter_map(|(node, &degree)| (degree <= 2).then_some(node))
+        let reducible = (0..node_count)
+            .filter(|&node| problem.edges.degree(node) <= 2)
             .collect();
         let finite_alternatives: Vec<usize> = problem
             .node_costs
@@ -369,8 +488,6 @@ impl Solver {
             active,
             active_count: node_count,
             reductions: Vec::new(),
-            adjacency,
-            degrees,
             reducible,
             finite_alternatives,
             coherence_groups_by_alternative,
@@ -463,92 +580,47 @@ impl Solver {
 
     fn normalize_edges(&mut self) -> bool {
         let mut changed = false;
-        let keys: Vec<_> = self.problem.edges.keys().copied().collect();
         let mut zero_edges = Vec::new();
 
-        for key @ (lhs, rhs) in keys {
-            if !self.active[lhs] || !self.active[rhs] {
+        for slot in 0..self.problem.edges.slots() {
+            let Solver {
+                problem,
+                active,
+                finite_alternatives,
+                ..
+            } = self;
+            let PbqpProblem {
+                node_costs, edges, ..
+            } = problem;
+            let Some(edge) = edges.slot_mut(slot) else {
+                continue;
+            };
+            let (lhs, rhs) = (edge.lhs as usize, edge.rhs as usize);
+            if !active[lhs] || !active[rhs] {
                 continue;
             }
 
-            let matrix = self.problem.edges.get_mut(&key).unwrap();
-            for row in 0..matrix.rows() {
-                if self.problem.node_costs[lhs][row] >= INF_COST {
-                    for col in 0..matrix.cols() {
-                        matrix.set(row, col, INF_COST);
-                    }
-                    continue;
-                }
-
-                let min = (0..matrix.cols())
-                    .map(|col| matrix.get(row, col))
-                    .min()
-                    .unwrap_or(INF_COST);
-                if min >= INF_COST {
-                    add_tracked_cost(
-                        &mut self.problem.node_costs[lhs][row],
-                        &mut self.finite_alternatives[lhs],
-                        INF_COST,
-                    );
-                    changed = true;
-                } else if min > 0 {
-                    add_tracked_cost(
-                        &mut self.problem.node_costs[lhs][row],
-                        &mut self.finite_alternatives[lhs],
-                        min,
-                    );
-                    for col in 0..matrix.cols() {
-                        let cost = matrix.get(row, col);
-                        if cost < INF_COST {
-                            matrix.set(row, col, cost - min);
-                        }
-                    }
-                    changed = true;
-                }
-            }
-
-            for col in 0..matrix.cols() {
-                if self.problem.node_costs[rhs][col] >= INF_COST {
-                    for row in 0..matrix.rows() {
-                        matrix.set(row, col, INF_COST);
-                    }
-                    continue;
-                }
-
-                let min = (0..matrix.rows())
-                    .map(|row| matrix.get(row, col))
-                    .min()
-                    .unwrap_or(INF_COST);
-                if min >= INF_COST {
-                    add_tracked_cost(
-                        &mut self.problem.node_costs[rhs][col],
-                        &mut self.finite_alternatives[rhs],
-                        INF_COST,
-                    );
-                    changed = true;
-                } else if min > 0 {
-                    add_tracked_cost(
-                        &mut self.problem.node_costs[rhs][col],
-                        &mut self.finite_alternatives[rhs],
-                        min,
-                    );
-                    for row in 0..matrix.rows() {
-                        let cost = matrix.get(row, col);
-                        if cost < INF_COST {
-                            matrix.set(row, col, cost - min);
-                        }
-                    }
-                    changed = true;
-                }
-            }
+            let matrix = &mut edge.matrix;
+            changed |= normalize_axis(
+                matrix,
+                &mut node_costs[lhs],
+                &mut finite_alternatives[lhs],
+                Axis::Rows,
+            );
+            changed |= normalize_axis(
+                matrix,
+                &mut node_costs[rhs],
+                &mut finite_alternatives[rhs],
+                Axis::Cols,
+            );
 
             if matrix.is_zero() {
-                zero_edges.push(key);
+                zero_edges.push((lhs, rhs));
             }
         }
 
-        for key in zero_edges {
-            self.remove_edge(key.0, key.1);
+        for (lhs, rhs) in zero_edges {
+            self.remove_edge(lhs, rhs);
             changed = true;
         }
 
@@ -592,7 +664,8 @@ impl Solver {
                 }
             }
 
-            for neighbor in self.neighbors(node) {
+            for adjacent in self.neighbors(node) {
+                let neighbor = adjacent.neighbor as usize;
                 for alternative in 0..self.problem.node_costs[neighbor].len() {
                     let candidate = PbqpAlternative {
                         node: PbqpNodeId::from_index(neighbor),
@@ -601,7 +674,8 @@ impl Solver {
                     if self.problem.node_costs[neighbor][alternative] >= INF_COST {
                         continue;
                     }
-                    if !self.has_supported_pair(candidate, node) && self.mark_impossible(candidate)
+                    if !self.has_supported_pair(adjacent.edge, candidate, node)
+                        && self.mark_impossible(candidate)
                     {
                         queue.push_back(candidate);
                         changed = true;
@@ -621,11 +695,11 @@ impl Solver {
         self.ensure_feasible()
     }
 
-    fn has_supported_pair(&self, alternative: PbqpAlternative, neighbor: usize) -> bool {
+    fn has_supported_pair(&self, edge: u32, alternative: PbqpAlternative, neighbor: usize) -> bool {
         let node = alternative.node.index();
         (0..self.problem.node_costs[neighbor].len()).any(|neighbor_alt| {
             self.problem.node_costs[neighbor][neighbor_alt] < INF_COST
-                && self.edge_cost(node, alternative.alternative, neighbor, neighbor_alt) < INF_COST
+                && self.edge_cost_at(edge, node, alternative.alternative, neighbor_alt) < INF_COST
         })
     }
 
@@ -688,11 +762,13 @@ impl Solver {
     }
 
     fn degree(&self, node: usize) -> usize {
-        self.degrees[node]
+        self.problem.edges.degree(node)
     }
 
-    fn neighbors(&self, node: usize) -> Vec<usize> {
-        self.adjacency[node].iter().copied().collect()
+    /// The node's neighborhood, in ascending neighbor order, copied out so the
+    /// caller may mutate the solver while walking it.
+    fn neighbors(&self, node: usize) -> Vec<Adjacent> {
+        self.problem.edges.neighbors(node).to_vec()
     }
 
     fn reduce_fixed(&mut self, node: usize) -> Result<(), PbqpSolveError> {
@@ -703,7 +779,8 @@ impl Solver {
     }
 
     fn reduce_r1(&mut self, node: usize) -> Result<(), PbqpSolveError> {
-        let neighbor = self.neighbors(node)[0];
+        let adjacent = self.problem.edges.neighbors(node)[0];
+        let neighbor = adjacent.neighbor as usize;
         let mut choices = vec![None; self.problem.node_costs[neighbor].len()];
         let mut impossible = VecDeque::new();
 
@@ -713,7 +790,7 @@ impl Solver {
             for node_alt in 0..self.problem.node_costs[node].len() {
                 let cost = add_cost(
                     self.problem.node_costs[node][node_alt],
-                    self.edge_cost(node, node_alt, neighbor, neighbor_alt),
+                    self.edge_cost_at(adjacent.edge, node, node_alt, neighbor_alt),
                 );
                 if cost < best {
                     best = cost;
@@ -740,26 +817,38 @@ impl Solver {
     }
 
     fn reduce_r2(&mut self, node: usize) -> Result<(), PbqpSolveError> {
-        let mut neighbors = self.neighbors(node);
-        neighbors.sort_unstable();
-        let left = neighbors[0];
-        let right = neighbors[1];
+        // Adjacency is kept in ascending neighbor order, so the fill-in edge is
+        // already oriented and needs no transpose.
+        let neighborhood = self.problem.edges.neighbors(node);
+        let (to_left, to_right) = (neighborhood[0], neighborhood[1]);
+        let left = to_left.neighbor as usize;
+        let right = to_right.neighbor as usize;
+        let node_alternatives = self.problem.node_costs[node].len();
         let mut folded = PbqpMatrix::zero(
             self.problem.node_costs[left].len(),
             self.problem.node_costs[right].len(),
         );
         let mut choices = vec![None; folded.rows() * folded.cols()];
+        let mut left_side = Vec::with_capacity(node_alternatives);
 
         for left_alt in 0..folded.rows() {
+            left_side.clear();
+            left_side.extend((0..node_alternatives).map(|node_alt| {
+                add_cost(
+                    self.problem.node_costs[node][node_alt],
+                    self.edge_cost_at(to_left.edge, left, left_alt, node_alt),
+                )
+            }));
             for right_alt in 0..folded.cols() {
                 let mut best = INF_COST;
                 let mut best_alt = None;
-                for node_alt in 0..self.problem.node_costs[node].len() {
-                    let left_cost = self.edge_cost(left, left_alt, node, node_alt);
-                    let right_cost = self.edge_cost(node, node_alt, right, right_alt);
+                for (node_alt, &left_cost) in left_side.iter().enumerate() {
+                    if left_cost >= best {
+                        continue;
+                    }
                     let cost = add_cost(
-                        self.problem.node_costs[node][node_alt],
-                        add_cost(left_cost, right_cost),
+                        left_cost,
+                        self.edge_cost_at(to_right.edge, node, node_alt, right_alt),
                     );
                     if cost < best {
                         best = cost;
@@ -773,7 +862,7 @@ impl Solver {
 
         self.remove_incident_edges(node);
         self.deactivate(node);
-        self.add_or_accumulate_edge(left, right, folded);
+        let fill_in = self.add_or_accumulate_edge(left, right, folded);
         self.reductions.push(Reduction::R2 {
             node,
             left,
@@ -782,7 +871,7 @@ impl Solver {
             choices_by_neighbor_alts: choices,
         });
         let mut impossible = VecDeque::new();
-        self.prune_unsupported_alternatives(left, right, &mut impossible);
+        self.prune_unsupported_alternatives(fill_in, left, right, &mut impossible);
         self.propagate_new_infinities(impossible)
     }
 
@@ -826,9 +915,10 @@ impl Solver {
 
     fn reduce_rn(&mut self, node: usize, alternative: usize) -> Result<(), PbqpSolveError> {
         let mut impossible = VecDeque::new();
-        for neighbor in self.neighbors(node) {
+        for adjacent in self.neighbors(node) {
+            let neighbor = adjacent.neighbor as usize;
             for neighbor_alt in 0..self.problem.node_costs[neighbor].len() {
-                let cost = self.edge_cost(node, alternative, neighbor, neighbor_alt);
+                let cost = self.edge_cost_at(adjacent.edge, node, alternative, neighbor_alt);
                 if self.add_node_cost(neighbor, neighbor_alt, cost) {
                     impossible.push_back(PbqpAlternative {
                         node: PbqpNodeId::from_index(neighbor),
@@ -857,47 +947,63 @@ impl Solver {
     }
 
     fn edge_cost(&self, lhs: usize, lhs_alt: usize, rhs: usize, rhs_alt: usize) -> u64 {
-        let (a, a_alt, b, b_alt) = if lhs < rhs {
-            (lhs, lhs_alt, rhs, rhs_alt)
-        } else {
-            (rhs, rhs_alt, lhs, lhs_alt)
-        };
         self.problem
             .edges
-            .get(&(a, b))
-            .map(|matrix| matrix.get(a_alt, b_alt))
-            .unwrap_or(0)
+            .find(lhs, rhs)
+            .map_or(0, |edge| self.edge_cost_at(edge, lhs, lhs_alt, rhs_alt))
     }
 
-    fn add_or_accumulate_edge(&mut self, lhs: usize, rhs: usize, matrix: PbqpMatrix) {
+    /// The cost `edge` charges, read from the endpoint `node`'s side. Every
+    /// reduction reaches its edges through the adjacency lists, so the matrix is
+    /// indexed directly instead of being searched for by node pair.
+    #[inline]
+    fn edge_cost_at(&self, edge: u32, node: usize, node_alt: usize, other_alt: usize) -> u64 {
+        let edge = self.problem.edges.edge(edge);
+        if edge.lhs as usize == node {
+            edge.matrix.get(node_alt, other_alt)
+        } else {
+            edge.matrix.get(other_alt, node_alt)
+        }
+    }
+
+    /// Merge `matrix` into the edge between `lhs` and `rhs`, creating it if the
+    /// pair is not yet connected, and answer the edge it landed on. Merging
+    /// accumulates into the stored matrix in place, so R2 fill-in costs a single
+    /// pass over the fill-in matrix and no reallocation.
+    fn add_or_accumulate_edge(&mut self, lhs: usize, rhs: usize, matrix: PbqpMatrix) -> u32 {
         let (a, b, matrix) = orient_matrix(
             PbqpNodeId::from_index(lhs),
             PbqpNodeId::from_index(rhs),
             matrix,
         );
-        if let Some(existing) = self.problem.edges.get_mut(&(a, b)) {
-            if self.recording_undo {
-                self.undo.push(Undo::EdgeChanged {
-                    lhs: a,
-                    rhs: b,
-                    old_matrix: existing.clone(),
-                });
-            }
-            for row in 0..existing.rows() {
-                for col in 0..existing.cols() {
-                    existing.add_assign(row, col, matrix.get(row, col));
+        match self.problem.edges.find(a, b) {
+            Some(edge) => {
+                if self.recording_undo {
+                    self.undo.push(Undo::EdgeChanged {
+                        lhs: a,
+                        rhs: b,
+                        old_matrix: self.problem.edges.edge(edge).matrix.clone(),
+                    });
                 }
+                self.problem
+                    .edges
+                    .matrix_mut(edge)
+                    .add_assign_matrix(&matrix);
+                edge
             }
-        } else {
-            self.insert_edge_raw(a, b, matrix);
-            if self.recording_undo {
-                self.undo.push(Undo::EdgeAdded { lhs: a, rhs: b });
+            None => {
+                let edge = self.insert_edge_raw(a, b, matrix);
+                if self.recording_undo {
+                    self.undo.push(Undo::EdgeAdded { lhs: a, rhs: b });
+                }
+                edge
             }
         }
     }
 
     fn prune_unsupported_alternatives(
         &mut self,
+        edge: u32,
         lhs: usize,
         rhs: usize,
         impossible: &mut VecDeque<PbqpAlternative>,
@@ -909,7 +1015,7 @@ impl Solver {
                     alternative,
                 };
                 if self.problem.node_costs[node][alternative] < INF_COST
-                    && !self.has_supported_pair(candidate, neighbor)
+                    && !self.has_supported_pair(edge, candidate, neighbor)
                     && self.mark_impossible(candidate)
                 {
                     impossible.push_back(candidate);
@@ -919,9 +1025,8 @@ impl Solver {
     }
 
     fn remove_incident_edges(&mut self, node: usize) {
-        let neighbors: Vec<usize> = self.adjacency[node].iter().copied().collect();
-        for neighbor in neighbors {
-            self.remove_edge(node, neighbor);
+        while let Some(adjacent) = self.problem.edges.neighbors(node).first().copied() {
+            self.remove_edge(node, adjacent.neighbor as usize);
         }
     }
 
@@ -939,29 +1044,21 @@ impl Solver {
     }
 
     fn remove_edge_raw(&mut self, lhs: usize, rhs: usize) -> Option<PbqpMatrix> {
-        let matrix = self.problem.edges.remove(&(lhs, rhs))?;
-        self.adjacency[lhs].remove(&rhs);
-        self.adjacency[rhs].remove(&lhs);
-        self.degrees[lhs] -= 1;
-        self.degrees[rhs] -= 1;
+        let matrix = self.problem.edges.remove(lhs, rhs)?;
         self.refresh_reducible(lhs);
         self.refresh_reducible(rhs);
         Some(matrix)
     }
 
-    fn insert_edge_raw(&mut self, lhs: usize, rhs: usize, matrix: PbqpMatrix) {
-        let previous = self.problem.edges.insert((lhs, rhs), matrix);
-        debug_assert!(previous.is_none());
-        self.adjacency[lhs].insert(rhs);
-        self.adjacency[rhs].insert(lhs);
-        self.degrees[lhs] += 1;
-        self.degrees[rhs] += 1;
+    fn insert_edge_raw(&mut self, lhs: usize, rhs: usize, matrix: PbqpMatrix) -> u32 {
+        let edge = self.problem.edges.insert(lhs, rhs, matrix);
         self.refresh_reducible(lhs);
         self.refresh_reducible(rhs);
+        edge
     }
 
     fn deactivate(&mut self, node: usize) {
-        debug_assert_eq!(self.degrees[node], 0);
+        debug_assert_eq!(self.degree(node), 0);
         if self.recording_undo {
             self.undo.push(Undo::NodeDeactivated { node });
         }
@@ -972,7 +1069,7 @@ impl Solver {
     }
 
     fn refresh_reducible(&mut self, node: usize) {
-        if self.active[node] && self.degrees[node] <= 2 {
+        if self.active[node] && self.problem.edges.degree(node) <= 2 {
             self.reducible.insert(node);
         } else {
             self.reducible.remove(&node);
@@ -1032,11 +1129,12 @@ impl Solver {
                     rhs,
                     old_matrix,
                 } => {
-                    *self
+                    let edge = self
                         .problem
                         .edges
-                        .get_mut(&(lhs, rhs))
-                        .expect("a changed PBQP edge must exist during rollback") = old_matrix;
+                        .find(lhs, rhs)
+                        .expect("a changed PBQP edge must exist during rollback");
+                    *self.problem.edges.matrix_mut(edge) = old_matrix;
                 }
                 Undo::NodeDeactivated { node } => {
                     self.active[node] = true;
@@ -1116,6 +1214,67 @@ fn orient_matrix(
     }
 }
 
+/// Which side of an edge's cost matrix a normalization pass folds into its
+/// node's alternative costs.
+#[derive(Clone, Copy)]
+enum Axis {
+    Rows,
+    Cols,
+}
+
+/// Subtract each line's minimum from the matrix and charge it to the owning
+/// node's alternative instead — the standard PBQP normalization, which is what
+/// makes an all-zero edge removable.
+fn normalize_axis(
+    matrix: &mut PbqpMatrix,
+    costs: &mut [u64],
+    finite_alternatives: &mut usize,
+    axis: Axis,
+) -> bool {
+    let (lines, span) = match axis {
+        Axis::Rows => (matrix.rows(), matrix.cols()),
+        Axis::Cols => (matrix.cols(), matrix.rows()),
+    };
+    let cell = |line: usize, offset: usize| match axis {
+        Axis::Rows => (line, offset),
+        Axis::Cols => (offset, line),
+    };
+
+    let mut changed = false;
+    for (line, cost) in costs.iter_mut().enumerate().take(lines) {
+        if *cost >= INF_COST {
+            for offset in 0..span {
+                let (row, col) = cell(line, offset);
+                matrix.set(row, col, INF_COST);
+            }
+            continue;
+        }
+
+        let min = (0..span)
+            .map(|offset| {
+                let (row, col) = cell(line, offset);
+                matrix.get(row, col)
+            })
+            .min()
+            .unwrap_or(INF_COST);
+        if min >= INF_COST {
+            add_tracked_cost(cost, finite_alternatives, INF_COST);
+            changed = true;
+        } else if min > 0 {
+            add_tracked_cost(cost, finite_alternatives, min);
+            for offset in 0..span {
+                let (row, col) = cell(line, offset);
+                let current = matrix.get(row, col);
+                if current < INF_COST {
+                    matrix.set(row, col, current - min);
+                }
+            }
+            changed = true;
+        }
+    }
+    changed
+}
+
 fn add_cost(lhs: u64, rhs: u64) -> u64 {
     if lhs >= INF_COST || rhs >= INF_COST {
         INF_COST
@@ -1147,8 +1306,12 @@ fn evaluate_solution(problem: &PbqpProblem, choices: &[usize]) -> Result<u64, Pb
         total = add_cost(total, *cost);
     }
 
-    for (&(lhs, rhs), matrix) in &problem.edges {
-        total = add_cost(total, matrix.get(choices[lhs], choices[rhs]));
+    for edge in problem.edges.iter() {
+        total = add_cost(
+            total,
+            edge.matrix
+                .get(choices[edge.lhs as usize], choices[edge.rhs as usize]),
+        );
     }
 
     if total >= INF_COST {
@@ -1358,6 +1521,22 @@ mod tests {
         };
 
         assert_eq!(ring(false), ring(true));
+    }
+
+    /// Two edges over the same pair are one edge charging both costs, and the
+    /// second one's orientation is the caller's, not the store's.
+    #[test]
+    fn repeated_edges_accumulate_in_the_stored_orientation() {
+        let mut problem = PbqpProblem::new();
+        let a = problem.add_node(vec![0, 0]);
+        let b = problem.add_node(vec![0, 0]);
+        problem.add_edge(a, b, PbqpMatrix::new(2, 2, vec![7, 0, 0, 0]));
+        problem.add_edge(b, a, PbqpMatrix::new(2, 2, vec![0, 9, 1, 9]));
+
+        // Charged: [[7, 1], [9, 9]] — cheapest at a=0, b=1.
+        let solution = solve(&problem).expect("PBQP should be solvable");
+        assert_eq!(solution.choices, vec![0, 1]);
+        assert_eq!(solution.total_cost, 1);
     }
 
     struct ReverseOrder;
