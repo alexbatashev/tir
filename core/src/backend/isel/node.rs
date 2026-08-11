@@ -52,16 +52,22 @@ pub(crate) fn low_extract_width(egraph: &SemEGraph, class: Id) -> Option<u32> {
 /// The register value carrying a class: an input value, then the first IR value
 /// the class computes (from `class_values`, the map recording which values a
 /// class stands for). The representative feeds cost-model approximation only.
+///
+/// A view-seeded leaf names the view's own synthetic value, so `anchors` takes
+/// it back to the IR value the anchored origin was rendered from.
 pub(crate) fn class_value_binding(
     egraph: &SemEGraph,
     class_values: &HashMap<Id, Vec<ValueId>>,
+    anchors: &HashMap<ValueId, ValueId>,
     class: Id,
 ) -> Option<ValueId> {
     egraph
         .nodes(class)
         .iter()
         .find_map(|n| match n.payload.as_ref() {
-            Some(tir::sem::SemPayload::Expr(tir::sem::SymPayload::Value(v))) => Some(*v),
+            Some(tir::sem::SemPayload::Expr(tir::sem::SymPayload::Value(v))) => {
+                Some(anchors.get(v).copied().unwrap_or(*v))
+            }
             _ => None,
         })
         .or_else(|| {
@@ -84,11 +90,16 @@ pub(crate) fn minimal_unsigned_apint(value: u64) -> APInt {
 /// value expression, so two fused matches may each recompute it inside their
 /// instruction. Memory effects are excluded — two reads of the same address are
 /// not interchangeable across an intervening write.
+///
+/// An operation identity ([`tir::sem::Kind::Ir`]) is pure: the sea view seeds one
+/// only for a node with no state port, and no other seeding produces one. A
+/// gated-SSA merge is not — it is the schedule, not a value expression.
 pub(crate) fn class_is_pure(egraph: &SemEGraph, class: Id) -> bool {
-    egraph
-        .nodes(class)
-        .iter()
-        .all(|n| n.sym().is_some_and(kind_is_pure))
+    egraph.nodes(class).iter().all(|n| match &n.kind {
+        tir::sem::Kind::Sym(kind) => kind_is_pure(*kind),
+        tir::sem::Kind::Ir(_) => true,
+        tir::sem::Kind::Merge(_) => false,
+    })
 }
 
 /// Whether the kind is a pure value expression (see [`class_is_pure`]).

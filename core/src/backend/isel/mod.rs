@@ -14,6 +14,7 @@ mod cover;
 mod emit;
 mod node;
 mod pattern;
+mod seed;
 #[cfg(test)]
 mod tests;
 
@@ -507,6 +508,10 @@ struct FunctionSelection {
     /// Canonical classes seeded from reducible γ/μ gates. An algebraic `If`
     /// introduced by an axiom is not control flow and must not gain reification.
     reifiable_gates: HashSet<Id>,
+    /// The IR value each anchored leaf of a view-seeded graph stands for. Empty
+    /// when the operations were lowered one by one, whose leaves already name
+    /// the IR value they read.
+    anchors: HashMap<ValueId, ValueId>,
     /// Each dominating-edge condition prepared against the base graph: the
     /// condition's class and, when its definer is a comparison, the comparison
     /// class with its kind and operand classes. Keyed by the condition value; the
@@ -741,6 +746,67 @@ impl FunctionSelection {
     }
 }
 
+/// Where a function's semantic e-graph comes from: the operations lowered one
+/// by one ([`builder`]), or the sea view's rendering of the region they form
+/// ([`seed`]). Both answer the same two questions selection asks while it reads
+/// the terminators — the class of an IR value, and the comparison a guard
+/// condition computes.
+enum Seeder<'a> {
+    Ops(SemDagBuilder<'a>),
+    View {
+        egraph: &'a mut SemEGraph,
+        classes: HashMap<ValueId, Id>,
+    },
+}
+
+impl Seeder<'_> {
+    fn class_of(&mut self, context: &Context, value: ValueId) -> Id {
+        match self {
+            Seeder::Ops(builder) => builder.build_from_value(value),
+            // Every value the view rendered or anchored already has a class; a
+            // value it never saw (a terminator's own operand) reads as a leaf,
+            // exactly as the operation lowering spells one.
+            Seeder::View { egraph, classes } => *classes.entry(value).or_insert_with(|| {
+                let ty = context.get_value(value).ty();
+                egraph.add(template_node(
+                    SymKind::Symbol,
+                    Some(SymPayload::Value(value)),
+                    Some(ty),
+                ))
+            }),
+        }
+    }
+
+    /// The canonical comparison the condition computes: `(class, kind, lhs, rhs)`.
+    /// The view seeds an operation's semantics onto its own class, so the
+    /// comparison is read off that class rather than rebuilt from the definer.
+    fn defining_compare(&mut self, value: ValueId) -> Option<(Id, SymKind, Id, Id)> {
+        match self {
+            Seeder::Ops(builder) => builder.build_defining_compare(value),
+            Seeder::View { egraph, classes } => {
+                let class = *classes.get(&value)?;
+                let comparison = egraph
+                    .nodes(class)
+                    .iter()
+                    .find(|node| node.sym().is_some_and(is_comparison))?;
+                Some((
+                    class,
+                    comparison.sym()?,
+                    comparison.children[0],
+                    comparison.children[1],
+                ))
+            }
+        }
+    }
+
+    fn into_classes(self) -> HashMap<ValueId, Id> {
+        match self {
+            Seeder::Ops(builder) => builder.value_to_class,
+            Seeder::View { classes, .. } => classes,
+        }
+    }
+}
+
 /// A dominating-edge condition prepared against the base graph (see
 /// [`FunctionSelection::prepared`]).
 struct ConditionExpr {
@@ -808,6 +874,9 @@ pub struct InstructionSelectPass {
     cost_model: Box<dyn IselCostModel>,
     op_lowerings: Vec<OpLowering>,
     call_lowering: Option<crate::backend::call_lowering::CallLowering>,
+    /// Whether the function's e-graph is seeded from the sea view rather than
+    /// by lowering its operations one by one (`TIR_SEA_ISEL`).
+    sea_seeding: bool,
     /// The solved emission plan of every block (or the error explaining why it
     /// cannot be selected), populated up front when the pass visits each function.
     plans: HashMap<BlockId, Result<BlockPlan, String>>,
@@ -1088,6 +1157,7 @@ impl InstructionSelectPass {
             rewrites,
             branch_emitters: None,
             cost_model: Box::new(DefaultIselCostModel),
+            sea_seeding: std::env::var_os("TIR_SEA_ISEL").is_some(),
             op_lowerings: vec![],
             call_lowering: None,
             plans: HashMap::new(),
@@ -1313,47 +1383,77 @@ impl InstructionSelectPass {
         }
 
         // Pointer width is a data layout fact, so it comes from the layout in
-        // scope at this function, over the target's own.
-        let pointer_width = crate::DataLayout::for_op_with_default(
+        // scope at this function, over the target's own — the same layout the
+        // view's probes carry, since a detached probe resolves none itself.
+        let layout = crate::DataLayout::for_op_with_default(
             context,
             op.op().id,
             self.default_layout.as_ref(),
-        )
-        .and_then(|layout| layout.pointer_size());
+        );
+        let pointer_width = layout.as_ref().and_then(crate::DataLayout::pointer_size);
 
         // Lower every block's ops through one builder so its `value_to_class`
         // memoization unifies classes across blocks (cross-block CSE). Class ids
         // are resolved through `find` afterwards because saturation may merge them.
-        let mut egraph = SemEGraph::new();
+        let seeding = self
+            .sea_seeding
+            .then(|| {
+                seed::seed_from_view(context, op, layout.as_ref().map(crate::DataLayout::spec))
+            })
+            .flatten();
+        let (mut egraph, anchors, view_seeding) = match seeding {
+            Some(seeding) => (
+                seeding.egraph,
+                seeding.anchors,
+                Some((seeding.value_to_class, seeding.op_roots)),
+            ),
+            None => (SemEGraph::new(), HashMap::new(), None),
+        };
         let mut roots_by_op: HashMap<OpId, Id> = HashMap::new();
         let mut control: HashMap<BlockId, Vec<ControlReification>> = HashMap::new();
         let mut prepared: HashMap<ValueId, ConditionExpr> = HashMap::new();
         let mut constant_candidates: Vec<(OpId, Id)> = Vec::new();
         let value_to_class = {
-            let mut builder =
-                SemDagBuilder::new(context, &value_to_def, gsa, &mut egraph, pointer_width);
-            for &block_id in &block_ids {
-                for op_id in context.get_block(block_id).op_ids() {
-                    let op = context.get_op(op_id);
-                    if let Some(root) = builder.build_for_op(&op).or_else(|| {
-                        op.is::<crate::builtin::ConstantOp>()
-                            .then(|| builder.build_from_value(op.results[0]))
-                    }) {
-                        roots_by_op.insert(op_id, root);
-                    } else if (op.is::<crate::builtin::ConstantFOp>()
-                        && op.results.first().is_some_and(|result| {
-                            let ty = context.get_value(*result).ty();
-                            let data = context.get_type_data(ty);
-                            (data.as_ref() as &dyn std::any::Any)
-                                .downcast_ref::<tir::builtin::FloatType>()
-                                .is_some_and(|ty| {
-                                    self.float_constant_materializer_widths
-                                        .contains(&ty.bit_width())
-                                })
-                        }))
-                        && let Some(&result) = op.results.first()
-                    {
-                        constant_candidates.push((op_id, builder.build_from_value(result)));
+            let mut seeder = match view_seeding {
+                Some((classes, view_roots)) => {
+                    roots_by_op.extend(view_roots);
+                    Seeder::View {
+                        egraph: &mut egraph,
+                        classes,
+                    }
+                }
+                None => Seeder::Ops(SemDagBuilder::new(
+                    context,
+                    &value_to_def,
+                    gsa,
+                    &mut egraph,
+                    pointer_width,
+                )),
+            };
+            if let Seeder::Ops(builder) = &mut seeder {
+                for &block_id in &block_ids {
+                    for op_id in context.get_block(block_id).op_ids() {
+                        let op = context.get_op(op_id);
+                        if let Some(root) = builder.build_for_op(&op).or_else(|| {
+                            op.is::<crate::builtin::ConstantOp>()
+                                .then(|| builder.build_from_value(op.results[0]))
+                        }) {
+                            roots_by_op.insert(op_id, root);
+                        } else if (op.is::<crate::builtin::ConstantFOp>()
+                            && op.results.first().is_some_and(|result| {
+                                let ty = context.get_value(*result).ty();
+                                let data = context.get_type_data(ty);
+                                (data.as_ref() as &dyn std::any::Any)
+                                    .downcast_ref::<tir::builtin::FloatType>()
+                                    .is_some_and(|ty| {
+                                        self.float_constant_materializer_widths
+                                            .contains(&ty.bit_width())
+                                    })
+                            }))
+                            && let Some(&result) = op.results.first()
+                        {
+                            constant_candidates.push((op_id, builder.build_from_value(result)));
+                        }
                     }
                 }
             }
@@ -1401,7 +1501,7 @@ impl InstructionSelectPass {
                             } else {
                                 (edge_args(1, true_dest), edge_args(0, false_dest))
                             };
-                            let class = builder.build_from_value(*a_cond);
+                            let class = seeder.class_of(context, *a_cond);
                             control
                                 .entry(block_id)
                                 .or_default()
@@ -1437,16 +1537,18 @@ impl InstructionSelectPass {
             // scope can assert it while the graph is otherwise assumption-free.
             for &block_id in &block_ids {
                 for fact in facts.facts(block_id) {
-                    prepared
-                        .entry(fact.condition)
-                        .or_insert_with(|| ConditionExpr {
-                            condition: builder.build_from_value(fact.condition),
-                            compare: builder.build_defining_compare(fact.condition),
-                        });
+                    if prepared.contains_key(&fact.condition) {
+                        continue;
+                    }
+                    let expr = ConditionExpr {
+                        condition: seeder.class_of(context, fact.condition),
+                        compare: seeder.defining_compare(fact.condition),
+                    };
+                    prepared.insert(fact.condition, expr);
                 }
             }
 
-            builder.value_to_class
+            seeder.into_classes()
         };
 
         // Standalone constants have no semantic root. When the target patterns
@@ -1623,6 +1725,7 @@ impl InstructionSelectPass {
             demand,
             control,
             reifiable_gates,
+            anchors,
             prepared,
         }
     }
@@ -2579,9 +2682,10 @@ impl InstructionSelectPass {
                 // Cost is op-relative when there is a backing op in B; a
                 // rewrite-introduced root has no op, so it takes the rule's
                 // target-independent base cost.
-                let rule_match = bindings
-                    .captures
-                    .to_rule_match(&fs.egraph, &fs.class_values);
+                let rule_match =
+                    bindings
+                        .captures
+                        .to_rule_match(&fs.egraph, &fs.class_values, &fs.anchors);
                 let cost = if let Some(op_ref) = block_op.and_then(|id| op_refs.get(&id)) {
                     self.cost_model
                         .node_cost(context, op_ref, rule, &rule_match)

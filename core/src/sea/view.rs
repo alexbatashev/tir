@@ -129,6 +129,15 @@ impl View {
         &self.eg
     }
 
+    /// Give up the view and keep its e-graph. A consumer that saturates with its
+    /// own ruleset and never commits — instruction selection, which covers the
+    /// classes rather than extracting one term per class — owns the graph from
+    /// there on; the readings it needs first ([`View::class`], [`View::anchor`])
+    /// are taken while the view is still whole.
+    pub fn into_egraph(self) -> EGraph<Node> {
+        self.eg
+    }
+
     /// The class an origin of the viewed region belongs to, or `None` for the
     /// state edges, which are not terms.
     pub fn class(&self, origin: Origin) -> Option<Id> {
@@ -414,9 +423,14 @@ impl Builder<'_> {
         self.record(Origin::output(node, 0), id, ty, seeded);
     }
 
-    /// A detached instance of the node's op, carrying its attributes and a value
-    /// of its result type. Interfaces are registered per `(dialect, name)`, so
-    /// this is how the green layer asks an op what it is without an IR to ask in.
+    /// A detached instance of the node's op, carrying its attributes, a value of
+    /// its result type and one of each input's. Interfaces are registered per
+    /// `(dialect, name)`, so this is how the green layer asks an op what it is
+    /// without an IR to ask in — and an op whose semantics are a function of its
+    /// own signature (`vector.add`, whose lane count is a static constant or its
+    /// `vl` operand depending on whether it has one) reads that signature off
+    /// the instance, so the probe carries the node's whole port list, not only
+    /// its result.
     ///
     /// A detached instance belongs to no scope, so the layout the viewed λ was
     /// raised under rides along as the probe's own `data_layout` — otherwise an
@@ -424,6 +438,13 @@ impl Builder<'_> {
     /// declare none and seed nothing.
     fn probe(&self, node: NodeId, ty: TypeId) -> Arc<OpInstance> {
         let identity = self.graph.op_type_name(self.graph.op_of(node));
+        let operands: Vec<ValueId> = self
+            .graph
+            .input_types(node)
+            .into_iter()
+            .filter_map(|port| port.value_type())
+            .map(|ty| self.context.create_value(ty, None).id())
+            .collect();
         let result = self.context.create_value(ty, None).id();
         let mut attributes = self.graph.attributes(node).to_vec();
         if let Some(layout) = self.layout {
@@ -435,7 +456,7 @@ impl Builder<'_> {
         Arc::new(OpInstance::new_dynamic(
             identity,
             self.context.as_context_ref(),
-            Vec::new(),
+            operands,
             vec![result],
             Vec::new(),
             attributes,

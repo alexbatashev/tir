@@ -48,6 +48,7 @@ impl CaptureBindings {
         &self,
         egraph: &SemEGraph,
         class_values: &HashMap<Id, Vec<ValueId>>,
+        anchors: &HashMap<ValueId, ValueId>,
     ) -> RuleMatch {
         // A class can carry both a proven constant and a register value (an
         // assumption merges a condition with its truth value); record both so
@@ -58,7 +59,7 @@ impl CaptureBindings {
             if let Some(v) = class_int_binding(egraph, *class) {
                 int_bindings.push((*sym, v));
             }
-            if let Some(v) = class_value_binding(egraph, class_values, *class) {
+            if let Some(v) = class_value_binding(egraph, class_values, anchors, *class) {
                 value_bindings.push((*sym, v));
             }
         }

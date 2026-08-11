@@ -3383,3 +3383,103 @@ fn comparison_zero_shape_matches_zero_register_rule() {
             .any(|m| egraph.find(m.root) == egraph.find(root))
     );
 }
+
+/// The view seeds an op both as its identity and as the semantic expansion the
+/// selection theory is written in, so a class rooted by an `addi` holds the
+/// `Add` term a rule matches.
+#[test]
+fn view_seeding_gives_an_op_class_its_semantic_term() {
+    let context = Context::with_default_dialects();
+    let i32 = IntegerType::new(&context, 32);
+    let x = context.create_value(i32, None);
+    let y = context.create_value(i32, None);
+    let (x_id, y_id) = (x.id(), y.id());
+    let region = context.create_region();
+    let block = context.create_block(vec![x, y]);
+    region.add_block(block.id());
+    let func = ops::func(&context, "add", i32, Some(region.id())).build();
+    let mut fb = IRBuilder::new(func.body());
+    let add = ops::addi(&context, x_id, y_id, i32).build();
+    let (add_id, add_result) = (add.id(), add.result());
+    fb.insert(add);
+    fb.insert(ops::r#return(&context, add_result).build());
+
+    let seeding = super::seed::seed_from_view(
+        &context,
+        &tir::OperationRef::new(context.get_op(func.id()), None, None),
+        None,
+    )
+    .expect("a pure function seeds from the view");
+
+    let class = *seeding.op_roots.get(&add_id).expect("the addi is a root");
+    assert!(
+        seeding
+            .egraph
+            .nodes(class)
+            .iter()
+            .any(|node| node.sym() == Some(SymKind::Add)),
+        "the op's class must hold its semantic expansion"
+    );
+    assert_eq!(seeding.value_to_class.get(&add_result), Some(&class));
+}
+
+/// A block argument is no term of the view: it stands behind a synthetic leaf,
+/// and selection reads the IR value it means back through the anchor.
+#[test]
+fn view_seeding_resolves_an_anchored_leaf_to_its_ir_value() {
+    let context = Context::with_default_dialects();
+    let i32 = IntegerType::new(&context, 32);
+    let x = context.create_value(i32, None);
+    let x_id = x.id();
+    let region = context.create_region();
+    let block = context.create_block(vec![x]);
+    region.add_block(block.id());
+    let func = ops::func(&context, "identity", i32, Some(region.id())).build();
+    IRBuilder::new(func.body()).insert(ops::r#return(&context, x_id).build());
+
+    let seeding = super::seed::seed_from_view(
+        &context,
+        &tir::OperationRef::new(context.get_op(func.id()), None, None),
+        None,
+    )
+    .expect("a pure function seeds from the view");
+
+    let class = *seeding
+        .value_to_class
+        .get(&x_id)
+        .expect("the argument has a class");
+    let leaf = seeding.egraph.nodes(class)[0]
+        .value()
+        .expect("an anchored argument is a leaf standing for a value");
+    assert_ne!(leaf, x_id, "the leaf is the view's own synthetic value");
+    assert_eq!(seeding.anchors.get(&leaf), Some(&x_id));
+}
+
+/// A function the view cannot render — memory is state, which the view anchors
+/// and no selection rule can then root — stays on the operation-lowered path.
+#[test]
+fn view_seeding_declines_a_function_touching_memory() {
+    let context = Context::with_default_dialects();
+    let i32 = IntegerType::new(&context, 32);
+    let ptr = tir::ptr::PtrType::typed(&context, i32);
+    let p = context.create_value(ptr, None);
+    let p_id = p.id();
+    let region = context.create_region();
+    let block = context.create_block(vec![p]);
+    region.add_block(block.id());
+    let func = ops::func(&context, "loader", i32, Some(region.id())).build();
+    let mut fb = IRBuilder::new(func.body());
+    let load = tir::ptr::ops::load(&context, p_id, i32).build();
+    let loaded = load.result();
+    fb.insert(load);
+    fb.insert(ops::r#return(&context, loaded).build());
+
+    assert!(
+        super::seed::seed_from_view(
+            &context,
+            &tir::OperationRef::new(context.get_op(func.id()), None, None),
+            None,
+        )
+        .is_none()
+    );
+}

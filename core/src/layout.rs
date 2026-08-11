@@ -89,6 +89,13 @@ impl DataLayout {
         }
     }
 
+    /// The spec the layout reads its entries from, for a consumer that must
+    /// carry it where the IR scope chain does not reach — the sea view's
+    /// detached probes (see [`DataLayout::for_instance`]).
+    pub fn spec(&self) -> &AttributeDict {
+        &self.entries
+    }
+
     pub fn endianness(&self) -> Option<Endianness> {
         match self.entries.get("endianness")? {
             AttributeValue::Str(value) if value == "little" => Some(Endianness::Little),
