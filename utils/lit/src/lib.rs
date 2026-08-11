@@ -406,6 +406,26 @@ fn run_pipeline(run: &str, test_path: &Path, tools: &HashMap<String, Tool>) -> R
             )));
         }
 
+        // `env NAME=VALUE ... cmd` is handled here rather than by exec'ing
+        // /usr/bin/env, so that `cmd` still goes through tool-name resolution.
+        let mut envs: Vec<(String, String)> = Vec::new();
+        if tokens[0] == "env" {
+            tokens.remove(0);
+            while !tokens.is_empty() {
+                let Some((name, value)) = tokens[0].split_once('=') else {
+                    break;
+                };
+                let assignment = (name.to_string(), value.to_string());
+                tokens.remove(0);
+                envs.push(assignment);
+            }
+            if tokens.is_empty() {
+                return Err(Failed::from(format!(
+                    "`env` with no command in `RUN: {run}`"
+                )));
+            }
+        }
+
         let program = tokens.remove(0);
         let is_last = idx + 1 == stages.len();
 
@@ -428,7 +448,7 @@ fn run_pipeline(run: &str, test_path: &Path, tools: &HashMap<String, Tool>) -> R
                 .get(&program)
                 .map(Tool::resolve)
                 .unwrap_or_else(|| PathBuf::from(&program));
-            let output = run_subprocess(&resolved, &tokens, &piped_input).map_err(|e| {
+            let output = run_subprocess(&resolved, &tokens, &envs, &piped_input).map_err(|e| {
                 Failed::from(format!("failed to spawn `{program}`: {e}\nRUN: {run}"))
             })?;
 
@@ -458,10 +478,12 @@ fn run_pipeline(run: &str, test_path: &Path, tools: &HashMap<String, Tool>) -> R
 fn run_subprocess(
     program: &Path,
     args: &[String],
+    envs: &[(String, String)],
     input: &[u8],
 ) -> std::io::Result<std::process::Output> {
     let mut child = Command::new(program)
         .args(args)
+        .envs(envs.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -578,6 +600,33 @@ mod tests {
 
         let err = run_case(&case, &HashMap::new()).unwrap_err();
         assert_eq!(err.message(), Some("XPASS: xpass.tir"));
+    }
+
+    #[cfg(unix)]
+    fn probe_case(run_line: &str) -> (TestCase, HashMap<String, Tool>) {
+        let case = TestCase {
+            name: "env.tir".to_string(),
+            path: PathBuf::from("env.tir"),
+            run_lines: vec![run_line.to_string()],
+            xfail: false,
+            ignored: false,
+        };
+        let tools = HashMap::from([("probe".to_string(), Tool::path("/usr/bin/printenv"))]);
+        (case, tools)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn env_prefix_sets_variables_for_a_mapped_tool() {
+        let (case, tools) = probe_case("env TIR_LIT_ENV_PROBE=set probe TIR_LIT_ENV_PROBE");
+        assert!(run_case(&case, &tools).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_without_env_prefix_does_not_see_the_variable() {
+        let (case, tools) = probe_case("probe TIR_LIT_ENV_PROBE");
+        assert!(run_case(&case, &tools).is_err());
     }
 
     fn features(tokens: &[&str]) -> HashSet<String> {

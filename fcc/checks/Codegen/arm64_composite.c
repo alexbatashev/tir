@@ -1,5 +1,6 @@
 // RUN: fcc compile --march arm64 --mabi aapcs64 --stage ir -o - %s | filecheck %s
 // RUN: fcc compile --march arm64 --mabi aapcs64 --stage asm -o - %s | filecheck %s --check-prefix=ASM
+// RUN: env TIR_SEA_CANON=1 fcc compile --march arm64 --mabi aapcs64 --stage asm -o - %s | filecheck %s --check-prefix=ASM
 
 struct Mixed {
     double fp;
@@ -23,6 +24,11 @@ struct Mixed make_mixed(double fp, long integer) {
 // ASM-LABEL: consume_mixed:
 // ASM: str x0
 // ASM: str x1
+// A mixed struct is no HFA: the double parameter arrives in d0 but leaves as
+// the low half of the x0/x1 return pair, with the long parameter in x1. Which
+// register carries which field is the ABI fact; whether x1 is reloaded from the
+// slot or forwarded from x0 is a scheduling choice.
 // ASM-LABEL: make_mixed:
-// ASM: ldr x0
-// ASM: ldr x1
+// ASM-DAG: str d0, [{{x[0-9]+}}, 0]
+// ASM-DAG: ldr x0, [{{x[0-9]+}}, 0]
+// ASM-DAG: {{(ldr|orr) x1}}

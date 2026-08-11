@@ -1,5 +1,6 @@
 // RUN: fcc compile --march riscv64 --mabi lp64d --stage ir -o - %s | filecheck %s
 // RUN: fcc compile --march riscv64 --mabi lp64d --stage asm -o - %s | filecheck %s --check-prefix=ASM
+// RUN: env TIR_SEA_CANON=1 fcc compile --march riscv64 --mabi lp64d --stage asm -o - %s | filecheck %s --check-prefix=ASM
 
 struct FloatInt {
     double value;
@@ -27,6 +28,10 @@ struct IntFloat make_int_float(long tag, double value) {
 // ASM-LABEL: consume_float_int:
 // ASM: fsd f10, 0({{.*}})
 // ASM: sd x10, 8({{.*}})
+// The mirrored aggregate keeps the same banks in the reversed field order: tag
+// in x10, value in f10, both on the way in and on the way out. f10 needs no
+// reload when it still holds the value.
 // ASM-LABEL: make_int_float:
-// ASM: ld x10, 0({{.*}})
-// ASM: fld f10, 8({{.*}})
+// ASM-DAG: sd x10, 0({{.*}})
+// ASM-DAG: fsd f10, 8({{.*}})
+// ASM-DAG: ld x10, 0({{.*}})

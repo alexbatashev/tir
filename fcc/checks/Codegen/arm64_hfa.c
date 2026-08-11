@@ -1,5 +1,6 @@
 // RUN: fcc compile --march arm64 --mabi aapcs64 --stage ir -o - %s | filecheck %s
 // RUN: fcc compile --march arm64 --mabi aapcs64 --stage asm -o - %s | filecheck %s --check-prefix=ASM
+// RUN: env TIR_SEA_CANON=1 fcc compile --march arm64 --mabi aapcs64 --stage asm -o - %s | filecheck %s --check-prefix=ASM
 
 struct Pair {
     double left;
@@ -36,8 +37,14 @@ struct Quad make_quad(double a, double b, double c, double d) {
 // ASM: str d1
 // ASM-LABEL: call_consume_pair:
 // ASM: bl consume_pair
+// A four-double HFA is passed and returned in d0-d3, element i in d(i): the
+// stores pin the parameter-to-field mapping, the loads pin the field-to-result
+// mapping. d3 needs no reload when it still holds element 3.
 // ASM-LABEL: make_quad:
-// ASM: ldr d0
-// ASM: ldr d1
-// ASM: ldr d2
-// ASM: ldr d3
+// ASM-DAG: str d0, [{{x[0-9]+}}, 0]
+// ASM-DAG: str d1, [{{x[0-9]+}}, 8]
+// ASM-DAG: str d2, [{{x[0-9]+}}, 16]
+// ASM-DAG: str d3, [{{x[0-9]+}}, 24]
+// ASM-DAG: ldr d0, [{{x[0-9]+}}, 0]
+// ASM-DAG: ldr d1, [{{x[0-9]+}}, 8]
+// ASM-DAG: ldr d2, [{{x[0-9]+}}, 16]

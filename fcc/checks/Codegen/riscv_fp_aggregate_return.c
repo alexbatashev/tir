@@ -1,5 +1,6 @@
 // RUN: fcc compile --march riscv64 --mabi lp64d --stage ir -o - %s | filecheck %s
 // RUN: fcc compile --march riscv64 --mabi lp64d --stage asm -o - %s | filecheck %s --check-prefix=ASM
+// RUN: env TIR_SEA_CANON=1 fcc compile --march riscv64 --mabi lp64d --stage asm -o - %s | filecheck %s --check-prefix=ASM
 
 struct Scalar {
     double value;
@@ -38,9 +39,13 @@ double call_external_pair(void) {
 // CHECK: tuple_get %[[CALL]] {index = 0} : !f64
 // CHECK: tuple_get %[[CALL]] {index = 1} : !f64
 
+// A two-double aggregate travels entirely in the FP argument/result registers:
+// left in f10, right in f11, both on the way in and on the way out. f11 needs
+// no reload when it still holds the right element.
 // ASM-LABEL: make_pair:
-// ASM: fld f10, 0({{.*}})
-// ASM: fld f11, 8({{.*}})
+// ASM-DAG: fsd f10, 0({{.*}})
+// ASM-DAG: fsd f11, 8({{.*}})
+// ASM-DAG: fld f10, 0({{.*}})
 // ASM-LABEL: call_external_pair:
 // ASM: jal x1, external_pair
 // ASM: fsd f{{[0-9]+}}, 0({{.*}})
