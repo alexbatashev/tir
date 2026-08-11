@@ -1989,12 +1989,15 @@ impl Analyzer<'_> {
                     _ => unreachable!(),
                 };
                 if valid {
-                    let result = if kind == AstKind::Not {
-                        int
+                    if kind == AstKind::Not {
+                        (int, ValueCategory::Value)
                     } else {
-                        self.integer_promotion(operand)
-                    };
-                    (result, ValueCategory::Value)
+                        // The operation runs at the promoted type, so the
+                        // operand is converted to it like a binary operand is.
+                        let result = self.integer_promotion(operand);
+                        self.record_operand_conversions(node, &[operand], result);
+                        (result, ValueCategory::Value)
+                    }
                 } else if self.types.kind(operand) == &TypeKind::Error {
                     (error, ValueCategory::Value)
                 } else {

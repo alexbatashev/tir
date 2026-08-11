@@ -397,16 +397,13 @@ fn is_machine_ir(context: &Context, op_id: OpId) -> bool {
 }
 
 /// Whether the pass manager re-verifies the IR after every pass that reports a
-/// change. Opt-in via `TIR_VERIFY_IR=1` until the known invalid-IR producers
-/// (pointer cmpi, un-narrowed compound-assign constants, varargs call
-/// verification, index cmpi in scf-to-cfg) are fixed; then the default flips to
-/// debug builds.
+/// change. On in debug builds; `TIR_VERIFY_IR` overrides either way.
 fn ir_verification_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| match std::env::var("TIR_VERIFY_IR").as_deref() {
         Ok("0") => false,
         Ok("1") => true,
-        _ => false,
+        _ => cfg!(debug_assertions),
     })
 }
 

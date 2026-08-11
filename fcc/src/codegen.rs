@@ -335,6 +335,9 @@ pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnost
     // Entities already given storage: an initialized definition claims the
     // object outright, and repeated tentative definitions reserve it once.
     let mut reserved_globals = HashSet::new();
+    // Objects this unit gives storage to, and those it only names.
+    let mut defined_globals = HashSet::new();
+    let mut declared_globals = HashSet::new();
     for &item in &items {
         match ast.get_node(item).kind {
             AstKind::Prototype | AstKind::Function => {
@@ -345,11 +348,17 @@ pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnost
                 signatures.insert(entity, sig);
             }
             AstKind::Global => {
-                let AstLeaf::Global { name, .. } = ast.get_leaf_data(item).unwrap() else {
+                let AstLeaf::Global {
+                    name, is_extern, ..
+                } = ast.get_leaf_data(item).unwrap()
+                else {
                     unreachable!("global node carries a global payload");
                 };
                 if ast.children(item).next().is_some() {
                     reserved_globals.insert(node_entity(typed, item));
+                }
+                if !*is_extern || ast.children(item).next().is_some() {
+                    defined_globals.insert(node_entity(typed, item));
                 }
                 globals.insert(
                     node_entity(typed, item),
@@ -441,6 +450,19 @@ pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnost
                 let entity = node_entity(typed, item);
                 let global = &globals[&entity];
                 let Some(initializer) = ast.children(item).next() else {
+                    // An object this unit never defines is declared instead:
+                    // references to it must still name a symbol of the module.
+                    if *is_extern
+                        && !defined_globals.contains(&entity)
+                        && declared_globals.insert(entity)
+                    {
+                        module_builder.insert(
+                            cir::ExternGlobalOpBuilder::new(context)
+                                .attr("sym_name", AttributeValue::Str(global.name.clone()))
+                                .build(),
+                        );
+                        continue;
+                    }
                     // A tentative definition reserves storage only when no
                     // other declaration of the object defines it.
                     if !is_extern && reserved_globals.insert(entity) {
@@ -1452,26 +1474,44 @@ impl FnCodegen<'_> {
         if let Some(source_width) = self.typed.integer_width(source)
             && matches!(self.typed.types().kind(target), TypeKind::Pointer(_))
         {
-            let target_width = self.typed.target().pointer_width();
-            let target_ty = IntegerType::new(self.context, target_width);
-            if source_width < target_width {
-                return if self.typed.integer_is_signed(source).unwrap() {
+            let address_width = self.typed.target().pointer_width();
+            let address_ty = IntegerType::new(self.context, address_width);
+            let address = if source_width < address_width {
+                if self.typed.integer_is_signed(source).unwrap() {
                     self.builder
-                        .insert(b::extsi(self.context, value, target_ty).build())
+                        .insert(b::extsi(self.context, value, address_ty).build())
                         .result()
                 } else {
                     self.builder
-                        .insert(b::extui(self.context, value, target_ty).build())
+                        .insert(b::extui(self.context, value, address_ty).build())
                         .result()
-                };
-            }
-            if source_width > target_width {
-                return self
+                }
+            } else if source_width > address_width {
+                self.builder
+                    .insert(b::trunci(self.context, value, address_ty).build())
+                    .result()
+            } else {
+                value
+            };
+            return self.address_as_pointer(address);
+        }
+        if matches!(self.typed.types().kind(source), TypeKind::Pointer(_))
+            && let Some(target_width) = self.typed.integer_width(target)
+        {
+            let address = self.pointer_as_address(value);
+            let address_width = self.typed.target().pointer_width();
+            let target_ty = lower_type(self.context, self.typed, target);
+            return match target_width.cmp(&address_width) {
+                std::cmp::Ordering::Less => self
                     .builder
-                    .insert(b::trunci(self.context, value, target_ty).build())
-                    .result();
-            }
-            return value;
+                    .insert(b::trunci(self.context, address, target_ty).build())
+                    .result(),
+                std::cmp::Ordering::Greater => self
+                    .builder
+                    .insert(b::extui(self.context, address, target_ty).build())
+                    .result(),
+                std::cmp::Ordering::Equal => address,
+            };
         }
         let (Some(source_width), Some(target_width)) = (
             self.typed.integer_width(source),
@@ -1597,6 +1637,45 @@ impl FnCodegen<'_> {
         self.builder
             .insert(
                 b::CmpIOpBuilder::new(self.context)
+                    .lhs(lhs)
+                    .rhs(rhs)
+                    .predicate(predicate)
+                    .result_type(IntegerType::new(self.context, 1))
+                    .build(),
+            )
+            .result()
+    }
+
+    /// A pointer's address as an integer: the distance from the null pointer,
+    /// which is the address zero.
+    fn pointer_as_address(&mut self, pointer: ValueId) -> ValueId {
+        let address_ty = IntegerType::new(self.context, self.typed.target().pointer_width());
+        let null = self.null_pointer();
+        self.builder
+            .insert(p::ptrdiff(self.context, pointer, null, address_ty).build())
+            .result()
+    }
+
+    /// The pointer an address names: the offset from the null pointer.
+    fn address_as_pointer(&mut self, address: ValueId) -> ValueId {
+        let null = self.null_pointer();
+        self.builder
+            .insert(p::ptradd(self.context, null, address, PtrType::opaque(self.context)).build())
+            .result()
+    }
+
+    fn null_pointer(&mut self) -> ValueId {
+        self.builder
+            .insert(p::null(self.context, PtrType::opaque(self.context)).build())
+            .result()
+    }
+
+    /// Pointers compare as unsigned addresses, so a relational C comparison of
+    /// two of them maps onto the unsigned predicates alone.
+    fn lower_pointer_compare(&mut self, predicate: &str, lhs: ValueId, rhs: ValueId) -> ValueId {
+        self.builder
+            .insert(
+                p::CmpOpBuilder::new(self.context)
                     .lhs(lhs)
                     .rhs(rhs)
                     .predicate(predicate)
@@ -3624,15 +3703,14 @@ impl FnCodegen<'_> {
                 .downcast_ref::<PtrType>()
                 .is_some()
         };
-        let zero = if is_pointer {
-            self.builder
-                .insert(p::null(self.context, ty).build())
-                .result()
-        } else {
-            self.builder
-                .insert(b::constant(self.context, 0, ty).build())
-                .result()
-        };
+        if is_pointer {
+            let null = self.null_pointer();
+            return self.lower_pointer_compare(predicate, value, null);
+        }
+        let zero = self
+            .builder
+            .insert(b::constant(self.context, 0, ty).build())
+            .result();
         self.builder
             .insert(
                 b::CmpIOpBuilder::new(self.context)
@@ -4510,6 +4588,17 @@ impl FnCodegen<'_> {
                     let operand_ty = converted_node_type(self.typed, lhs_node);
                     let value = match self.typed.types().kind(operand_ty) {
                         TypeKind::Double => self.lower_double_compare(kind, lhs, rhs),
+                        TypeKind::Pointer(_) | TypeKind::Array(_, _) => {
+                            let predicate = match kind {
+                                AstKind::Lt => "ult",
+                                AstKind::Gt => "ugt",
+                                AstKind::Le => "ule",
+                                AstKind::Ge => "uge",
+                                AstKind::Eq => "eq",
+                                _ => "ne",
+                            };
+                            self.lower_pointer_compare(predicate, lhs, rhs)
+                        }
                         _ => self.lower_integer_compare(kind, lhs, rhs, operand_ty),
                     };
                     LoweredExpr::Value(value)
@@ -4821,6 +4910,10 @@ pub fn lower_data(context: &Context, module: &ModuleOp) -> Result<(), tir::PassE
             rewriter.erase_op(&tir::OperationRef::new(op, Some(module_body.clone()), None))?;
         } else if let Some(global) = op.clone().as_op::<cir::ZeroGlobalOp>() {
             zero_globals.push((global.sym_name(), global.size(), global.align()));
+            rewriter.erase_op(&tir::OperationRef::new(op, Some(module_body.clone()), None))?;
+        } else if op.is::<cir::ExternGlobalOp>() {
+            // A declaration reserves nothing: the reference to it becomes a
+            // relocation against an undefined symbol.
             rewriter.erase_op(&tir::OperationRef::new(op, Some(module_body.clone()), None))?;
         }
     }
