@@ -26,11 +26,13 @@ object ◀─ emission ◀─ machine CFG ◀─ selection from the e-graph view
                        (order derived by scheduling)
 ```
 
-- **cir** (and any future frontend dialect) owns frontend control flow. The
-  frontend is responsible for producing *structured* output; fcc restructures
-  at the AST level (early returns, break/continue, goto via predicate
-  insertion). Unstructured control flow is first-class *input* to the
-  compiler, never a mid-end form.
+- **cir** (and any future frontend dialect) owns frontend control flow, and
+  may emit either structured scf directly (preferred where the AST is
+  structured — it preserves loop bounds) or an arbitrary CFG. Unstructured
+  control flow is first-class *input*: the `restructure` pass (§5.2)
+  totally converts any CFG region — irreducible included — to the structured
+  form. Structure is a guarantee the compiler provides, never a restriction
+  on input.
 - **scf** is the middle-end form: structured regions whose conditional and
   loop semantics are read through interfaces. This form is RVSDG in the
   paper's sense — an acyclic, region-hierarchical, state-threaded program —
@@ -206,7 +208,8 @@ or implementing an interface; it never means teaching core code about an op.
 | loop guard *(name TBD at implementation)* | conditional-execution reading of head-controlled loops: exposes the zero-trip guard **structurally** — operands + predicate for a counted loop, condition region + inputs for a general one — because the guard is not a materialized `Value`. Either an extension of `Conditional` or a minimal sibling; decided with the seeder (§7.2) as the consumer |
 | `LoopLike` | n-ary iteration: `inits() / carried_args() / latched() / finals()`, arity-verified. Counted loops additionally expose bounds/step untouched |
 | `TokenScope` | regions whose entry args are non-forwarding control tokens |
-| `Terminator`, `BranchTerminator` | CFG structure where a CFG exists (frontend dialects, machine IR): successors and per-edge operands |
+| `Terminator`, `BranchTerminator` | CFG structure where a CFG exists (frontend dialects, boundary input, machine IR): successors and per-edge operands |
+| `BranchGuard` | guarded successors of a conditional terminator; consumed by `restructure` at the CFG boundary |
 | `MemoryRead` / `MemoryWrite` | location, value, **and state accessors**: the state operand read, and (for writes) the state result produced (§6) |
 | `PromotableAllocation` | the value naming an allocation eligible for chain-splitting |
 | `ConstantLike`, `ConstantFold`, `Commutative`, `IntegerArithmetic`, `SameOperandType`, `OpCost` | value semantics for folding, e-graph seeding, and extraction cost |
@@ -245,14 +248,33 @@ Corollaries developers should internalize:
   form. `mem2reg`-era dominance machinery does not exist here; nothing in
   the mid-end computes a dominator tree (§8).
 
-### 5.2 What happened to unstructured control flow
+### 5.2 Arbitrary CFG: total restructuring
 
-The frontend restructures; the middle end is structured, period; the machine
-CFG appears at emission. Hand-written CFG-form IR remains valid input for
-frontends and machine-level testing, but the backend contract is *structured
-regions in, machine CFG out*. General CFG restructuring
-(Bahmann-Reissmann) is future frontend work; fcc's AST-level structuring
-covers C today (sole documented refusal: `goto` into a `switch` body).
+The middle end is structured, period — and that is a *conversion guarantee*,
+not an input restriction. The `restructure` pass implements
+Bahmann-Reissmann control-flow restructuring over any CFG region, read
+through `Terminator`/`BranchTerminator`/`BranchGuard` (dialect-agnostic):
+
+1. **Loop restructuring**: strongly connected components become
+   single-entry/single-exit tail-controlled loops; multiple entries and
+   exits are funneled through dispatch predicates carried as loop values,
+   dispatched with `scf.switch`. Irreducible graphs are handled the same
+   way — no node cloning, linear size growth.
+2. **Branch restructuring**: the remaining acyclic graph becomes nested
+   conditional trees; continuation points that several paths share are
+   selected by predicate values rather than duplicated.
+
+Consumers: fcc emits flat CFG for functions containing `goto` (all other
+constructs lower structured directly, preserving counted-loop shape) and
+`restructure` raises them — there are no refused shapes. Hand-written
+CFG-form `.tir` and tir-jit input take the same path. The backend contract
+is *structured regions in, machine CFG out*; the machine CFG reappears only
+at emission-time destruction.
+
+Correctness is pinned two ways: LIT snapshots for the canonical hard shapes
+(irreducible double-entry loops, multi-exit loops, jumps into loop bodies,
+goto-into-switch), and a fuzz harness comparing execution of restructured
+versus original CFGs through the JIT.
 
 ## 6. Memory: explicit state
 
@@ -433,6 +455,7 @@ and their single survivors:
 | PBQP in `core` with dead coherence machinery | generic math stranded behind the compiler | `tir-pbqp` utils crate (§9) |
 | `DominatingEdgeFacts` | dominator-scoped facts on a CFG the mid-end no longer has | gate-context scoping in selection |
 | loop-rotation / scf canonicalization | γ∘θ is the *view's* reading, not an IR shape | guard-aware seeding |
+| fcc's AST-level goto machinery (per-construct predicate insertion, one refused shape) | one restructurer for one frontend, with a hole | the total `restructure` pass (§5.2) |
 
 The pattern behind every row: compute a thing in one place, from the form
 that states it most directly, and store it in exactly one representation.
