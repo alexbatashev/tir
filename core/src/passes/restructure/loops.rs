@@ -11,10 +11,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::cfg::{Cfg, Edge, Loop, Node, NodeId, Rhs, Src, Term, VarId};
 
-/// An edge to retarget: its position in the node's terminator, where it should
-/// land instead, and what it assigns on the way.
-type Rewrite = (usize, NodeId, Vec<(VarId, Rhs)>);
-
 pub fn restructure(cfg: &mut Cfg) {
     let nodes = reachable(cfg, cfg.entry);
     let mut entry = cfg.entry;
@@ -28,7 +24,7 @@ fn reachable(cfg: &Cfg, from: NodeId) -> BTreeSet<NodeId> {
     let mut seen = BTreeSet::from([from]);
     let mut pending = vec![from];
     while let Some(node) = pending.pop() {
-        for successor in cfg.successors(node) {
+        for successor in cfg.structural_successors(node) {
             if seen.insert(successor) {
                 pending.push(successor);
             }
@@ -50,7 +46,7 @@ fn inner_successors(cfg: &Cfg, node: NodeId, nodes: &BTreeSet<NodeId>) -> Vec<No
     if matches!(cfg.nodes[node].term, Term::LoopTail { .. }) {
         return vec![];
     }
-    cfg.successors(node)
+    cfg.structural_successors(node)
         .into_iter()
         .filter(|successor| nodes.contains(successor))
         .collect()
@@ -176,49 +172,46 @@ fn restructure_loop(
         },
         loop_body: None,
     });
+    let id = cfg.loops.len();
     let head = cfg.add_node(Node {
         block: None,
         assigns: Vec::new(),
         term: Term::Jump(Edge::new(body_entry)),
-        loop_body: Some(cfg.loops.len()),
+        loop_body: Some(id),
     });
     cfg.loops.push(Loop { body_entry, tail });
 
-    let index_of = |list: &[NodeId], node: NodeId| list.iter().position(|&it| it == node).unwrap();
+    // Edges are rewired as the structure sees them: a component member that is
+    // already a loop leaves through its own tail, not through its head.
     for &node in nodes.iter() {
         let inside = members.contains(&node);
-        let mut rewrites: Vec<Rewrite> = Vec::new();
-        for (position, edge) in cfg.edges(node).into_iter().enumerate() {
-            let target = edge.target;
-            if entries.contains(&target) {
-                let mut assigns = Vec::new();
+        cfg.edit_structural_edges(node, |edge| {
+            if let Some(index) = entries.iter().position(|&entry| entry == edge.target) {
                 if let Some(var) = entry_var {
-                    assigns.push((var, Rhs::Const(index_of(&entries, target) as i64)));
+                    edge.assigns.push((var, Rhs::Const(index as i64)));
                 }
-                if inside {
-                    assigns.push((repeat_var, Rhs::Const(1)));
-                    rewrites.push((position, tail, assigns));
-                } else {
-                    rewrites.push((position, head, assigns));
-                }
-            } else if inside && !members.contains(&target) {
-                let mut assigns = vec![(repeat_var, Rhs::Const(0))];
+                edge.target = match inside {
+                    true => {
+                        edge.assigns.push((repeat_var, Rhs::Const(1)));
+                        tail
+                    }
+                    false => head,
+                };
+            } else if inside && !members.contains(&edge.target) {
+                edge.assigns.push((repeat_var, Rhs::Const(0)));
                 if let Some(var) = exit_var {
-                    assigns.push((var, Rhs::Const(index_of(&exits, target) as i64)));
+                    let index = exits.iter().position(|&exit| exit == edge.target).unwrap();
+                    edge.assigns.push((var, Rhs::Const(index as i64)));
                 }
-                rewrites.push((position, tail, assigns));
+                edge.target = tail;
             }
-        }
-        for (position, target, assigns) in rewrites {
-            let edge = cfg.edges_mut(node).into_iter().nth(position).unwrap();
-            edge.target = target;
-            edge.assigns.extend(assigns);
-        }
+        });
     }
 
     if members.contains(entry) {
         if let Some(var) = entry_var {
-            cfg.nodes[head].assigns = vec![(var, Rhs::Const(index_of(&entries, *entry) as i64))];
+            let index = entries.iter().position(|&it| it == *entry).unwrap();
+            cfg.nodes[head].assigns = vec![(var, Rhs::Const(index as i64))];
         }
         *entry = head;
     }
@@ -232,9 +225,11 @@ fn restructure_loop(
     nodes.insert(head);
     nodes.insert(exit_node);
 
+    // Restructuring the body may find a component holding its entry, in which
+    // case the body is entered at that component's head instead.
     let mut body_entry_slot = body_entry;
     restructure_region(cfg, body, &mut body_entry_slot, tail);
-    cfg.loops.last_mut().unwrap().body_entry = body_entry_slot;
+    cfg.loops[id].body_entry = body_entry_slot;
     if let Term::Jump(edge) = &mut cfg.nodes[head].term {
         edge.target = body_entry_slot;
     }
@@ -258,7 +253,7 @@ fn entry_vertices(
         if members.contains(&node) {
             continue;
         }
-        for successor in cfg.successors(node) {
+        for successor in cfg.structural_successors(node) {
             if members.contains(&successor) {
                 entries.insert(successor);
             }
@@ -271,7 +266,7 @@ fn entry_vertices(
 fn exit_targets(cfg: &Cfg, members: &BTreeSet<NodeId>) -> Vec<NodeId> {
     let mut exits = BTreeSet::new();
     for &node in members {
-        for successor in cfg.successors(node) {
+        for successor in cfg.structural_successors(node) {
             if !members.contains(&successor) {
                 exits.insert(successor);
             }

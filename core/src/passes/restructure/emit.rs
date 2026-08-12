@@ -108,6 +108,7 @@ impl Emitter<'_> {
         let assigns = self.cfg.nodes[node].assigns.clone();
         self.assign(&assigns, block, env)?;
         for op in self.cfg.ops(node) {
+            self.bind_undefined_reads(op, block, env)?;
             self.retarget_operands(op, env);
             self.context.get_block(block).append(op);
             for &result in &self.context.get_op(op).results {
@@ -128,13 +129,13 @@ impl Emitter<'_> {
     ) -> Result<(), PassError> {
         match args {
             Some(args) => {
-                let operands = args
-                    .iter()
-                    .map(|&var| self.read(env, var))
-                    .collect::<Result<Vec<_>, _>>()?;
+                let operands = self.port_values(args, block, env)?;
                 self.context.set_op_operands(op, operands);
             }
-            None => self.retarget_operands(op, env),
+            None => {
+                self.bind_undefined_reads(op, block, env)?;
+                self.retarget_operands(op, env);
+            }
         }
         self.context.get_block(block).append(op);
         Ok(())
@@ -180,7 +181,7 @@ impl Emitter<'_> {
 
         let op = match decision {
             Decision::If(pred) => {
-                let condition = self.read_src(env, pred)?;
+                let condition = self.read_src(block, env, pred)?;
                 scf::IfOpBuilder::new(self.context)
                     .condition(condition)
                     .then_body(regions[0])
@@ -190,7 +191,7 @@ impl Emitter<'_> {
                     .id()
             }
             Decision::Switch(var, cases) => {
-                let predicate = self.read(env, var)?;
+                let predicate = self.read(block, env, var)?;
                 scf::SwitchOpBuilder::new(self.context)
                     .predicate(predicate)
                     .cases(cases)
@@ -214,7 +215,7 @@ impl Emitter<'_> {
         region.add_block(block.id());
         let mut inner = env.clone();
         self.statements(arm, block.id(), &mut inner)?;
-        let yielded = self.port_values(ports, &inner, block.id())?;
+        let yielded = self.port_values(ports, block.id(), &inner)?;
         block.append(
             scf::YieldOpBuilder::new(self.context)
                 .values(yielded)
@@ -256,8 +257,8 @@ impl Emitter<'_> {
             inner.insert(*port, argument.id());
         }
         self.statements(body, condition_block.id(), &mut inner)?;
-        let repeat = self.read_src(&inner, pred)?;
-        let carried = self.port_values(&ports, &inner, condition_block.id())?;
+        let repeat = self.read_src(condition_block.id(), &inner, pred)?;
+        let carried = self.port_values(&ports, condition_block.id(), &inner)?;
         condition_block.append(
             scf::ConditionOpBuilder::new(self.context)
                 .condition(repeat)
@@ -285,7 +286,7 @@ impl Emitter<'_> {
                 .id(),
         );
 
-        let inits = self.port_values(&ports, env, block)?;
+        let inits = self.port_values(&ports, block, env)?;
         let op = scf::WhileOpBuilder::new(self.context)
             .condition_region(condition_region.id())
             .body(body_region.id())
@@ -369,8 +370,8 @@ impl Emitter<'_> {
     fn port_values(
         &self,
         ports: &[VarId],
-        env: &Env,
         block: BlockId,
+        env: &Env,
     ) -> Result<Vec<ValueId>, PassError> {
         ports
             .iter()
@@ -381,16 +382,39 @@ impl Emitter<'_> {
             .collect()
     }
 
-    fn read(&self, env: &Env, var: VarId) -> Result<ValueId, PassError> {
-        env.get(&var)
-            .copied()
-            .ok_or_else(|| unsupported("a predicate that no path assigns"))
+    /// A variable read where nothing assigned it belongs to code no path
+    /// reaches — the value it named is gone with the blocks that held it, so
+    /// the read is bound to an invented one.
+    fn bind_undefined_reads(
+        &self,
+        op: OpId,
+        block: BlockId,
+        env: &mut Env,
+    ) -> Result<(), PassError> {
+        for value in super::cfg::deep_operands(self.context, op) {
+            let Some(&var) = self.cfg.value_var.get(&value) else {
+                continue;
+            };
+            if env.contains_key(&var) {
+                continue;
+            }
+            let invented = self.constant(block, 0, self.cfg.var_types[var])?;
+            env.insert(var, invented);
+        }
+        Ok(())
     }
 
-    fn read_src(&self, env: &Env, src: Src) -> Result<ValueId, PassError> {
+    fn read(&self, block: BlockId, env: &Env, var: VarId) -> Result<ValueId, PassError> {
+        match env.get(&var) {
+            Some(&value) => Ok(value),
+            None => self.constant(block, 0, self.cfg.var_types[var]),
+        }
+    }
+
+    fn read_src(&self, block: BlockId, env: &Env, src: Src) -> Result<ValueId, PassError> {
         match src {
             Src::Value(value) => Ok(self.resolve(env, value)),
-            Src::Var(var) => self.read(env, var),
+            Src::Var(var) => self.read(block, env, var),
         }
     }
 

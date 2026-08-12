@@ -2116,6 +2116,7 @@ dependencies = [
  "libfuzzer-sys",
  "tir",
  "tir-arm64",
+ "tir-jit",
  "tir-pdl",
  "tir-riscv",
  "tmdl",

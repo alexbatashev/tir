@@ -64,16 +64,30 @@ impl Jit {
         self.host_symbols.insert(name.into(), addr as usize);
     }
 
-    /// Compile a TIR IR module (textual form) into executable memory.
-    pub fn compile(&self, ir: &str) -> Result<Module, JitError> {
+    /// A context the compiled module can be built in: the target's dialects
+    /// are registered, which selection needs.
+    pub fn context(&self) -> Result<Context, JitError> {
         let target = tir::backend::select_target(&self.march, self.mcpu.as_deref(), None)
             .map_err(JitError::UnknownTarget)?;
-
         let context = Context::with_default_dialects();
         target.register_dialects(&context);
+        Ok(context)
+    }
 
+    /// Compile a TIR IR module (textual form) into executable memory.
+    pub fn compile(&self, ir: &str) -> Result<Module, JitError> {
+        let context = self.context()?;
         let module = tir::parse::ir::parse_ir::<ModuleOp>(&context, ir)
             .map_err(|(span, err)| JitError::Parse(format!("at byte {}: {err:?}", span.0)))?;
+        self.compile_module(&context, &module)
+    }
+
+    /// Compile a module already built in `context`, which must come from
+    /// [`Jit::context`]. The module is consumed in place: the pipeline rewrites
+    /// it into machine IR.
+    pub fn compile_module(&self, context: &Context, module: &ModuleOp) -> Result<Module, JitError> {
+        let target = tir::backend::select_target(&self.march, self.mcpu.as_deref(), None)
+            .map_err(JitError::UnknownTarget)?;
         let module_op = context.get_op(module.id());
 
         // Promote memory to SSA so alloca/load/store IR reaches selectable form,
@@ -81,21 +95,21 @@ impl Jit {
         let mut pm = PassManager::new();
         pm.nest::<FuncOp>()
             .add_pass(tir::passes::Mem2RegPass::new());
-        pm.run(&context, module_op.clone())
+        pm.run(context, module_op.clone())
             .map_err(|e| JitError::Pipeline(format!("mem2reg: {e}")))?;
 
-        let mut pm = build_pipeline(target.as_ref(), &context, StopAfter::Finalize);
-        pm.run(&context, module_op)
+        let mut pm = build_pipeline(target.as_ref(), context, StopAfter::Finalize);
+        pm.run(context, module_op)
             .map_err(|e| JitError::Pipeline(e.to_string()))?;
 
         let fmt = target
             .object_format()
             .ok_or_else(|| JitError::NoObjectSupport(self.march.clone()))?;
         let writer = target
-            .binary_writer(&context)
+            .binary_writer(context)
             .ok_or_else(|| JitError::NoObjectSupport(self.march.clone()))?;
         let obj = writer
-            .write_module(&context, &module, &fmt)
+            .write_module(context, module, &fmt)
             .map_err(|e| JitError::Emit {
                 message: e.to_string(),
             })?;
