@@ -36,6 +36,7 @@ pub fn lower_function_and_return(
                 _ => None,
             })
             .unwrap_or_else(|| "unknown".to_string());
+        let def_use = tir::analysis::DefUse::new(context, func.id());
         let mut tuple_extracts = Vec::new();
         let mut arguments = Vec::new();
         let function_arguments = func.body().arguments().to_vec();
@@ -76,11 +77,11 @@ pub fn lower_function_and_return(
 
             let element_types = tuple.elements(context);
             let mut elements = vec![None; element_types.len()];
-            for usage in context.value_uses(argument.id()) {
-                if usage.operand_index() != Some(0) {
+            for user in def_use.users_of(argument.id().number()) {
+                let extract_instance = context.get_op(*user);
+                if extract_instance.operands.first() != Some(&argument.id()) {
                     continue;
                 }
-                let extract_instance = context.get_op(usage.op());
                 let Some(extract) = extract_instance.clone().as_op::<TupleGetOp>() else {
                     continue;
                 };
@@ -95,10 +96,10 @@ pub fn lower_function_and_return(
                     }
                     None => *element = Some(extract.result()),
                 }
-                let block = context.parent_block(usage.op()).ok_or_else(|| {
+                let block = context.parent_block(*user).ok_or_else(|| {
                     PassError::InvalidRuleSet("tuple_get has no parent block".to_string())
                 })?;
-                tuple_extracts.push((usage.op(), block));
+                tuple_extracts.push((*user, block));
             }
 
             let group = element_types
@@ -180,12 +181,16 @@ pub fn lower_function_and_return(
                 .values(values)
                 .build(),
         )?;
-        if let Some((value, defining_op)) = tuple_source
-            && context.value_uses(value).is_empty()
-        {
+        if let Some((value, defining_op)) = tuple_source {
             let block = context.parent_block(defining_op).ok_or_else(|| {
                 PassError::InvalidRuleSet("tuple construction has no parent block".to_string())
             })?;
+            let enclosing = context.parent_op(defining_op).ok_or_else(|| {
+                PassError::InvalidRuleSet("tuple construction has no enclosing op".to_string())
+            })?;
+            if tir::analysis::DefUse::new(context, enclosing).is_used(value.number()) {
+                return Ok(true);
+            }
             rewriter.erase_op(&OperationRef::new(
                 context.get_op(defining_op),
                 Some(context.get_block(block)),

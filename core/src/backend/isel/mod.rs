@@ -22,7 +22,7 @@ use std::collections::{HashMap, HashSet};
 use tir::{
     AnalysisManager, Block, BlockId, BranchGuard, BranchTerminator, Context, OpId, Operation,
     OperationRef, Pass, PassError, PassTarget, Rewriter, Terminator, TypeId, ValueId,
-    analysis::{DominatingEdgeFacts, DominatorTree, GSA, GateNode},
+    analysis::{DefUse, DominatingEdgeFacts, DominatorTree, GSA, GateNode},
     graph::{Dag, MutDag, NodeId, OperandConstraint},
     sem::{
         EquivalenceOracle, SemGraph, SmtOracle, SymKind, SymPayload, canonicalize_for_selection,
@@ -1168,8 +1168,9 @@ impl InstructionSelectPass {
         let dom = analyses.get::<DominatorTree>(context, root);
         let facts = analyses.get::<DominatingEdgeFacts>(context, root);
         let gsa = analyses.get::<GSA>(context, root);
+        let def_use = analyses.get::<DefUse>(context, root);
 
-        let mut fs = self.build_function_selection(context, op, &facts, &gsa);
+        let mut fs = self.build_function_selection(context, op, &facts, &gsa, &def_use);
         // A fact-free block sees exactly the base graph, so every value pattern's
         // e-match is block-independent: search once here and reuse for all such
         // blocks (fact-bearing blocks re-search under their scope).
@@ -1289,6 +1290,7 @@ impl InstructionSelectPass {
         op: &OperationRef,
         facts: &DominatingEdgeFacts,
         gsa: &GSA,
+        def_use: &DefUse,
     ) -> FunctionSelection {
         // Function-wide value/op layout: with a single `value_to_def` a cross-block
         // operand expands to its defining expression naturally (no remat special
@@ -1549,13 +1551,13 @@ impl InstructionSelectPass {
             .filter_map(|guard| value_to_def.get(&guard.condition).copied())
             .collect();
         let needs_register = |result: ValueId, class: Id, def_block: BlockId| {
-            let unselected_use = context.get_value(result).uses().iter().any(|u| {
-                if roots_by_op.contains_key(&u.op()) || guard_condition_ops.contains(&u.op()) {
+            let unselected_use = def_use.users_of(result.number()).iter().any(|user| {
+                if roots_by_op.contains_key(user) || guard_condition_ops.contains(user) {
                     return false;
                 }
                 // A guard's condition is recomputed by branch selection, but an
                 // edge argument the same terminator forwards needs the register.
-                match guard_by_op.get(&u.op()) {
+                match guard_by_op.get(user) {
                     Some(guard) => {
                         result != guard.condition
                             || guard.true_args.contains(&result)
@@ -1564,11 +1566,10 @@ impl InstructionSelectPass {
                     None => true,
                 }
             });
-            let cross_block = context
-                .get_value(result)
-                .uses()
+            let cross_block = def_use
+                .users_of(result.number())
                 .iter()
-                .any(|u| op_block.get(&u.op()).copied() != Some(def_block));
+                .any(|user| op_block.get(user).copied() != Some(def_block));
             let cross_block_register = cross_block
                 && class_int_binding(&egraph, class).is_some_and(|value| {
                     !self

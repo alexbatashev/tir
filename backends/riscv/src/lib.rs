@@ -1825,22 +1825,16 @@ mod tests {
         assert_eq!(body, vec!["slliw", "vret", "symbol_end"]);
 
         // The def-use chain now spans the machine-IR register layer: `a` feeds
-        // slliw's rs1 (a register operand carried in an attribute, not `operands`),
-        // so it reports a use referencing slliw with no operand index.
-        assert!(
-            context.is_value_used(a),
-            "block arg a should be used by slliw"
-        );
-        let uses = context.value_uses(a);
-        assert_eq!(uses.len(), 1);
-        assert_eq!(uses[0].op(), slliw.id);
-        assert_eq!(uses[0].operand_index(), None);
+        // slliw's rs1, a register operand carried in an attribute rather than in
+        // `operands`.
+        let def_use = tir::analysis::DefUse::new(&context, module.id());
+        assert_eq!(def_use.users_of(a.number()), [slliw.id]);
 
         // slliw's rd value is defined by slliw (def-site followed the rewrite off the
         // erased source op), and the folded constant is genuinely unused.
         assert_eq!(context.get_value(sr).defining_op(), Some(slliw.id));
         assert!(
-            !context.is_value_used(three_r),
+            !def_use.is_used(three_r.number()),
             "folded constant should be dead"
         );
     }

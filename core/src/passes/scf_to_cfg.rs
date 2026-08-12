@@ -54,10 +54,20 @@ impl ScfToCfgPass {
         let continuation = rewriter.split_block(block.id(), position + 1);
         for &result in &op.results {
             let ty = context.get_value(result).ty();
-            let argument = rewriter.append_block_argument(continuation.id(), ty);
-            context.replace_value_uses(result, argument.id());
+            rewriter.append_block_argument(continuation.id(), ty);
         }
         context.get_block(continuation.id())
+    }
+
+    /// Retarget what the structured operation produced onto the continuation's
+    /// arguments. Runs once the continuation is part of the region: a use is
+    /// rewritten where the tree reaches it, and the split block leaves the tree
+    /// until it is added back.
+    fn redirect_results(context: &Context, results: &[ValueId], continuation: &Arc<Block>) {
+        let arguments = context.get_block(continuation.id()).arguments().to_vec();
+        for (&result, argument) in results.iter().zip(arguments) {
+            context.replace_value_uses(result, argument.id());
+        }
     }
 
     fn move_body(context: &Context, region: RegionId) -> Arc<Block> {
@@ -148,11 +158,13 @@ impl ScfToCfgPass {
         let inits = op.operands.clone();
         let condition = Self::move_body(context, op.regions[0]);
         let (body, scope) = Self::move_loop_body(context, op.regions[1]);
+        let results = op.results.clone();
         let continuation = Self::split_after(context, rewriter, &block, &op);
         let region = context.get_region(function_region);
         region.add_block(condition.id());
         region.add_block(body.id());
         region.add_block(continuation.id());
+        Self::redirect_results(context, &results, &continuation);
         if let Some(scope) = scope {
             loop_targets.insert(
                 scope,
@@ -226,12 +238,14 @@ impl ScfToCfgPass {
             .map(|argument| context.create_value(argument.ty(), None))
             .collect();
         let latch = context.create_block(latch_values);
+        let results = op.results.clone();
         let continuation = Self::split_after(context, rewriter, &block, &op);
         let region = context.get_region(function_region);
         region.add_block(header.id());
         region.add_block(body.id());
         region.add_block(latch.id());
         region.add_block(continuation.id());
+        Self::redirect_results(context, &results, &continuation);
         if let Some(scope) = scope {
             loop_targets.insert(
                 scope,
@@ -306,11 +320,13 @@ impl ScfToCfgPass {
         let condition = op.operands[0];
         let then_block = Self::move_body(context, op.regions[0]);
         let else_block = Self::move_body(context, op.regions[1]);
+        let results = op.results.clone();
         let continuation = Self::split_after(context, rewriter, &block, &op);
         let region = context.get_region(function_region);
         region.add_block(then_block.id());
         region.add_block(else_block.id());
         region.add_block(continuation.id());
+        Self::redirect_results(context, &results, &continuation);
 
         Self::erase(rewriter, &block, op)?;
         IRBuilder::new(block).insert(
@@ -376,6 +392,7 @@ impl ScfToCfgPass {
                 Ok((Self::move_body(context, region), case))
             })
             .collect::<Result<Vec<_>, PassError>>()?;
+        let results = op.results.clone();
         let continuation = Self::split_after(context, rewriter, &block, &op);
         let region = context.get_region(function_region);
         let predicate_type = context.get_value(predicate).ty();
@@ -416,6 +433,7 @@ impl ScfToCfgPass {
         }
         region.add_block(default_block.id());
         region.add_block(continuation.id());
+        Self::redirect_results(context, &results, &continuation);
 
         for (arm, _) in &cases {
             Self::replace_terminator_with_branch(

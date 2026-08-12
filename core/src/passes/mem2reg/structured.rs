@@ -266,7 +266,6 @@ impl Promoter<'_> {
             self.context.replace_value_uses(old, new);
         }
         block.replace_op(op.id, grown.id());
-        self.context.detach_op_uses(&op);
         self.context.remove_operation(op.id);
         *results.last().expect("the grown op carries the slot")
     }

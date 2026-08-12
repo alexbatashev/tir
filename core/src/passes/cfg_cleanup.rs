@@ -9,6 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::analysis::DefUse;
 use crate::builtin::ops as b;
 use crate::builtin::{BranchOp, CondBranchOp};
 use crate::{
@@ -56,17 +57,21 @@ fn successors_of(context: &Context, block: BlockId) -> Vec<BlockId> {
 /// A parameter read by a block the jump-only block dominates keeps that block
 /// alive: folding the edges past it would strip the only definition of a value
 /// still in use.
-fn jump_only_target(context: &Context, block: BlockId) -> Option<(BlockId, Vec<ValueId>)> {
+fn jump_only_target(
+    context: &Context,
+    def_use: &DefUse,
+    block: BlockId,
+) -> Option<(BlockId, Vec<ValueId>)> {
     let block = context.get_block(block);
     let [op_id] = block.op_ids()[..] else {
         return None;
     };
     let branch = context.get_op(op_id).as_op::<BranchOp>()?;
     let parameters_escape = block.arguments().iter().any(|parameter| {
-        context
-            .value_uses(parameter.id())
+        def_use
+            .users_of(parameter.id().number())
             .iter()
-            .any(|use_site| use_site.op() != op_id)
+            .any(|user| *user != op_id)
     });
     (!parameters_escape).then(|| (branch.dest(), branch.dest_args()))
 }
@@ -77,12 +82,13 @@ fn jump_only_target(context: &Context, block: BlockId) -> Option<(BlockId, Vec<V
 /// chain, hence also the predecessor the edge now leaves from.
 fn resolve_edge(
     context: &Context,
+    def_use: &DefUse,
     mut dest: BlockId,
     mut args: Vec<ValueId>,
 ) -> (BlockId, Vec<ValueId>) {
     let mut visited = HashSet::new();
     while visited.insert(dest) {
-        let Some((next, next_args)) = jump_only_target(context, dest) else {
+        let Some((next, next_args)) = jump_only_target(context, def_use, dest) else {
             break;
         };
         let substitution: HashMap<ValueId, ValueId> = context
@@ -106,6 +112,13 @@ fn thread_edges(
     rewriter: &mut Rewriter,
     region: RegionId,
 ) -> Result<bool, PassError> {
+    let root = context
+        .get_region(region)
+        .parent_op()
+        .ok_or_else(|| PassError::InvalidRuleSet("cleanup needs an owned region".to_string()))?;
+    // The index answers "does anything but this branch read the block's
+    // parameters", so it has to describe the IR each rewrite leaves behind.
+    let mut def_use = DefUse::new(context, root);
     let mut changed = false;
     for block_id in blocks(context, region) {
         let Some(op_id) = terminator_of(context, block_id) else {
@@ -113,14 +126,14 @@ fn thread_edges(
         };
         let op = context.get_op(op_id);
         let replacement = if let Some(branch) = op.clone().as_op::<BranchOp>() {
-            let (dest, args) = resolve_edge(context, branch.dest(), branch.dest_args());
+            let (dest, args) = resolve_edge(context, &def_use, branch.dest(), branch.dest_args());
             (dest != branch.dest())
                 .then(|| Box::new(b::br(context, args, dest).build()) as Box<dyn crate::Operation>)
         } else if let Some(branch) = op.clone().as_op::<CondBranchOp>() {
             let (true_dest, true_args) =
-                resolve_edge(context, branch.true_dest(), branch.true_args());
+                resolve_edge(context, &def_use, branch.true_dest(), branch.true_args());
             let (false_dest, false_args) =
-                resolve_edge(context, branch.false_dest(), branch.false_args());
+                resolve_edge(context, &def_use, branch.false_dest(), branch.false_args());
             (true_dest != branch.true_dest() || false_dest != branch.false_dest()).then(|| {
                 Box::new(
                     b::cond_br(
@@ -143,6 +156,7 @@ fn thread_edges(
                 &OperationRef::new(op, Some(block), None),
                 replacement.as_ref(),
             )?;
+            def_use = DefUse::new(context, root);
             changed = true;
         }
     }

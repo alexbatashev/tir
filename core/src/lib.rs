@@ -75,7 +75,7 @@ pub use scoped_attr::{AttributeDict, scoped_dict};
 pub use symbol_table::{SymbolEntry, SymbolTable};
 pub use target_env::{TARGET_ENV, TargetEnv, target_env_spec};
 pub use ty::{Any, Type, TypeConstraint, TypeId, TypeParser};
-pub use value::{Use, UseSite, Value, ValueId};
+pub use value::{Value, ValueId};
 
 pub use dialects::builtin;
 pub use dialects::builtin::Integer;

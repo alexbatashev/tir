@@ -115,6 +115,10 @@ struct ContextInstance {
     /// [`Region::add_block`]. Together with [`Region::parent_op`] it lets walks
     /// climb from an op to its enclosing ops.
     block_parent: Vec<Option<RegionId>>,
+    /// Def-site index for block arguments: the block whose argument list a value
+    /// entered. The counterpart of [`Value::defining_op`] for values no operation
+    /// defines, and what bounds the scope a use of such a value can sit in.
+    value_block: Vec<Option<BlockId>>,
     /// Structural version per op, bumped along the spine root-ward by every
     /// tree edit; see [`Context::op_version`].
     op_version: Vec<u32>,
@@ -197,28 +201,6 @@ impl ContextInstance {
     }
 }
 
-/// The values `op` reads: its SSA operands plus the virtual registers its
-/// role-tagged attributes name (the same set [`Context::add_operation`] registers
-/// uses for). A value the op only defines may appear too; callers filter by op id.
-fn used_values(op: &OpInstance) -> Vec<ValueId> {
-    use crate::attributes::{AttributeValue, RegisterAttr};
-
-    let mut touched: Vec<ValueId> = op.operands.clone();
-    for attr in &op.attributes {
-        if let AttributeValue::Register(register) = &attr.value {
-            match register {
-                RegisterAttr::Virtual { id, .. }
-                | RegisterAttr::FixedUse { id, .. }
-                | RegisterAttr::FixedDef { id, .. } => {
-                    touched.push(ValueId::from_number(*id));
-                }
-                RegisterAttr::Physical { .. } => {}
-            }
-        }
-    }
-    touched
-}
-
 fn type_hash(ty: &dyn Type) -> u64 {
     let mut hasher = DefaultHasher::new();
     hasher.write(ty.dialect().as_bytes());
@@ -240,6 +222,7 @@ impl Context {
             last_block_id: AtomicU32::new(0),
             op_parent: Vec::new(),
             block_parent: Vec::new(),
+            value_block: Vec::new(),
             op_version: Vec::new(),
             dirty_ops: Vec::new(),
             dialects: HashMap::new(),
@@ -356,21 +339,15 @@ impl Context {
             }
         }
 
-        // Register this op as a use of each operand value, so `Value::uses` is a live
-        // def-use chain. Detached again when the op is erased or replaced.
-        for (index, operand) in instance.operands.iter().enumerate() {
-            if let Some(value) = slab_get_mut(&mut inner.values, operand.index()) {
-                Arc::make_mut(value).add_use(op_id, crate::UseSite::Operand(index));
-            }
-        }
-
-        // Mirror the SSA def-use wiring over role-tagged register attributes: a
-        // `Use` register is a use of its virtual value; a `Def` register is that
-        // value's def-site. Virtual register ids are value numbers; physical
-        // registers have none and are skipped — they are not SSA. ReadWrite
-        // counts as both.
+        // A `Def`-role register attribute is the def-site of its virtual value, the
+        // machine-IR spelling of an SSA result. Virtual register ids are value
+        // numbers; physical registers have none and are skipped — they are not SSA.
+        // ReadWrite defines too.
         for (attr_name, role) in attribute_roles {
             use crate::attributes::{AttributeRole, AttributeValue, RegisterAttr};
+            if !matches!(role, AttributeRole::Def | AttributeRole::ReadWrite) {
+                continue;
+            }
             let Some(attr) = instance.attributes.iter().find(|a| a.name == *attr_name) else {
                 continue;
             };
@@ -384,15 +361,8 @@ impl Context {
                 RegisterAttr::Physical { .. } => continue,
             };
             let value_id = ValueId::from_number(*id);
-            let Some(value) = slab_get_mut(&mut inner.values, value_id.index()) else {
-                continue;
-            };
-            let value = Arc::make_mut(value);
-            if matches!(role, AttributeRole::Use | AttributeRole::ReadWrite) {
-                value.add_use(op_id, crate::UseSite::Attribute(attr_name));
-            }
-            if matches!(role, AttributeRole::Def | AttributeRole::ReadWrite) {
-                value.set_defining_op(op_id);
+            if let Some(value) = slab_get_mut(&mut inner.values, value_id.index()) {
+                Arc::make_mut(value).set_defining_op(op_id);
             }
         }
 
@@ -458,52 +428,31 @@ impl Context {
         }
     }
 
-    /// Replace a single operation's SSA operand at `index`, keeping the
-    /// context-owned def-use lists in sync. Used by register allocation to
-    /// retarget a terminator's return value onto a freshly copied register.
+    /// Replace a single operation's SSA operand at `index`. Used by register
+    /// allocation to retarget a terminator's return value onto a freshly copied
+    /// register.
     pub fn set_op_operand(&self, id: OpId, index: usize, new: ValueId) {
         let mut inner = self.0.write();
-        let old = match slab_get(&inner.operations, id.index())
-            .and_then(|op| op.operands.get(index).copied())
+        match slab_get(&inner.operations, id.index()).and_then(|op| op.operands.get(index).copied())
         {
-            Some(old) if old != new => old,
+            Some(old) if old != new => {}
             _ => return,
-        };
+        }
         if let Some(op) = slab_get_mut(&mut inner.operations, id.index()) {
             Arc::make_mut(op).operands[index] = new;
-        }
-        if let Some(old_value) = slab_get_mut(&mut inner.values, old.index()) {
-            Arc::make_mut(old_value).remove_use(id, crate::UseSite::Operand(index));
-        }
-        if let Some(new_value) = slab_get_mut(&mut inner.values, new.index()) {
-            Arc::make_mut(new_value).add_use(id, crate::UseSite::Operand(index));
         }
         inner.edit_op(id);
     }
 
-    /// Replace all of an operation's SSA operands, keeping the def-use lists in
-    /// sync. Register allocation uses this to clear a branch's forwarded block
-    /// arguments once they have been lowered to explicit copies.
+    /// Replace all of an operation's SSA operands. Register allocation uses this
+    /// to clear a branch's forwarded block arguments once they have been lowered
+    /// to explicit copies.
     pub fn set_op_operands(&self, id: OpId, operands: Vec<ValueId>) {
         let mut inner = self.0.write();
-        let old = match slab_get(&inner.operations, id.index()) {
-            Some(op) => op.operands.clone(),
-            None => return,
-        };
-        for (index, value) in old.iter().enumerate() {
-            if let Some(v) = slab_get_mut(&mut inner.values, value.index()) {
-                Arc::make_mut(v).remove_use(id, crate::UseSite::Operand(index));
-            }
-        }
         if let Some(op) = slab_get_mut(&mut inner.operations, id.index()) {
-            Arc::make_mut(op).operands = operands.clone();
+            Arc::make_mut(op).operands = operands;
+            inner.edit_op(id);
         }
-        for (index, value) in operands.iter().enumerate() {
-            if let Some(v) = slab_get_mut(&mut inner.values, value.index()) {
-                Arc::make_mut(v).add_use(id, crate::UseSite::Operand(index));
-            }
-        }
-        inner.edit_op(id);
     }
 
     pub fn create_value(&self, ty: TypeId, defining_op: Option<OpId>) -> Value {
@@ -526,73 +475,72 @@ impl Context {
         slab_get(&inner.values, id.index()).unwrap().clone()
     }
 
-    /// The operands that reference `id`, as `(op, operand-index)` pairs. See
-    /// [`Value::uses`] for what is and isn't tracked.
-    pub fn value_uses(&self, id: ValueId) -> Vec<crate::Use> {
-        let inner = self.0.read();
-        slab_get(&inner.values, id.index())
-            .map(|v| v.uses().to_vec())
-            .unwrap_or_default()
-    }
-
-    /// Whether any operand references `id`.
-    pub fn is_value_used(&self, id: ValueId) -> bool {
-        let inner = self.0.read();
-        slab_get(&inner.values, id.index()).is_some_and(|v| v.is_used())
-    }
-
-    /// Drop every use contributed by `op` from the values it referenced. Called when
-    /// an op leaves the live IR (erase/replace) to keep `Value::uses` consistent.
-    /// Visits both SSA `operands` and virtual register operands carried in attributes
-    /// (the same set `add_operation` registered); `remove_uses_of` filters by op id,
-    /// so visiting a value the op only *defined* is harmless. `defining_op` is left
-    /// untouched — on replace, the new op has already claimed the def-site.
-    pub(crate) fn detach_op_uses(&self, op: &OpInstance) {
-        let mut inner = self.0.write();
-        for value_id in used_values(op) {
-            if let Some(value) = slab_get_mut(&mut inner.values, value_id.index()) {
-                Arc::make_mut(value).remove_uses_of(op.id);
-            }
-        }
-    }
-
-    /// Replace every SSA operand use of `old` with `new` across the live IR.
+    /// Replace every SSA operand use of `old` with `new`.
     ///
-    /// This keeps the context-owned def-use lists in sync with the rewritten
-    /// operations. Register-attribute uses are intentionally left untouched: they
-    /// are not SSA operands and currently belong to machine IR, not high-level
-    /// scalar promotion.
+    /// The green core keeps no use lists, so the uses are found by walking the
+    /// scope a use of `old` can sit in (see [`Context::use_scope`]); the
+    /// [`DefUse`](crate::analysis::DefUse) analysis is the cached index passes
+    /// query. Register-attribute uses are intentionally left untouched: they are
+    /// not SSA operands and belong to machine IR.
     pub fn replace_value_uses(&self, old: ValueId, new: ValueId) {
         if old == new {
             return;
         }
 
+        let ops = match self.use_scope(old) {
+            Some(root) => self.ops_under(root),
+            None => self.live_ops(),
+        };
+
         let mut inner = self.0.write();
-        let uses = slab_get(&inner.values, old.index())
-            .map(|v| v.uses().to_vec())
-            .unwrap_or_default();
-
-        for use_site in uses {
-            let crate::UseSite::Operand(index) = use_site.site() else {
-                continue;
-            };
-
-            let Some(op) = slab_get_mut(&mut inner.operations, use_site.op().index()) else {
-                continue;
-            };
-            if op.operands.get(index).copied() != Some(old) {
+        for op in ops {
+            let uses_old = slab_get(&inner.operations, op.index())
+                .is_some_and(|instance| instance.operands.contains(&old));
+            if !uses_old {
                 continue;
             }
-            Arc::make_mut(op).operands[index] = new;
-
-            if let Some(old_value) = slab_get_mut(&mut inner.values, old.index()) {
-                Arc::make_mut(old_value).remove_use(use_site.op(), use_site.site());
+            if let Some(instance) = slab_get_mut(&mut inner.operations, op.index()) {
+                for operand in Arc::make_mut(instance).operands.iter_mut() {
+                    if *operand == old {
+                        *operand = new;
+                    }
+                }
             }
-            if let Some(new_value) = slab_get_mut(&mut inner.values, new.index()) {
-                Arc::make_mut(new_value).add_use(use_site.op(), use_site.site());
-            }
-            inner.edit_op(use_site.op());
+            inner.edit_op(op);
         }
+    }
+
+    /// The operation whose subtree holds every use of `value`: the one enclosing
+    /// its definition, since SSA confines a use to the region tree the definition
+    /// sits in. `None` for a value whose def-site left the tree, which forces a
+    /// scan of everything live.
+    fn use_scope(&self, value: ValueId) -> Option<OpId> {
+        let inner = self.0.read();
+        match slab_get(&inner.values, value.index())?.defining_op() {
+            Some(op) => inner.enclosing_op_of(op),
+            None => inner.enclosing_op(*slab_get(&inner.value_block, value.index())?),
+        }
+    }
+
+    /// Every operation nested under `root`, at any depth.
+    fn ops_under(&self, root: OpId) -> Vec<OpId> {
+        let blocks: Vec<BlockId> = self
+            .get_op(root)
+            .regions
+            .iter()
+            .flat_map(|region| self.get_region(*region).block_ids())
+            .collect();
+        self.subtree(&blocks).0
+    }
+
+    fn live_ops(&self) -> Vec<OpId> {
+        let inner = self.0.read();
+        inner
+            .operations
+            .iter()
+            .flatten()
+            .map(|instance| instance.id)
+            .collect()
     }
 
     pub fn has_value(&self, id: ValueId) -> bool {
@@ -609,11 +557,7 @@ impl Context {
 
     pub fn is_block_argument(&self, id: ValueId) -> bool {
         let inner = self.0.read();
-        inner
-            .blocks
-            .iter()
-            .flatten()
-            .any(|block| block.arguments().iter().any(|arg| arg.id() == id))
+        slab_get(&inner.value_block, id.index()).is_some()
     }
 
     pub fn create_region(&self) -> Arc<Region> {
@@ -641,6 +585,9 @@ impl Context {
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
         );
 
+        for argument in &arguments {
+            slab_put(&mut inner.value_block, argument.id().index(), block_id);
+        }
         let block = Arc::new(Block::new(block_id, arguments, context));
         slab_put(&mut inner.blocks, block_id.index(), block.clone());
 
@@ -655,6 +602,7 @@ impl Context {
         let mut inner = self.0.write();
         if let Some(entry) = slab_get_mut(&mut inner.blocks, block.index()) {
             Arc::make_mut(entry).arguments_mut().push(value.clone());
+            slab_put(&mut inner.value_block, value.id().index(), block);
             inner.edit_block(block);
         }
         value
@@ -724,21 +672,13 @@ impl Context {
         (ops, visited_blocks)
     }
 
-    /// Take the subtree under `blocks` out of the live IR: drop the uses its ops
-    /// hold, clear the parent links a walk would follow, and remove the ops from
-    /// the arena. Bumps no version — the caller reports the edit.
+    /// Take the subtree under `blocks` out of the live IR: clear the parent links
+    /// a walk would follow and remove the ops from the arena. Bumps no version —
+    /// the caller reports the edit.
     fn detach_subtree(&self, blocks: &[BlockId]) {
         let (ops, blocks) = self.subtree(blocks);
         let mut inner = self.0.write();
         for op in ops {
-            let used = slab_get(&inner.operations, op.index())
-                .map(|instance| used_values(instance))
-                .unwrap_or_default();
-            for value_id in used {
-                if let Some(value) = slab_get_mut(&mut inner.values, value_id.index()) {
-                    Arc::make_mut(value).remove_uses_of(op);
-                }
-            }
             if let Some(slot) = inner.op_parent.get_mut(op.index()) {
                 *slot = None;
             }
@@ -1257,7 +1197,7 @@ mod staging_tests {
         assert!(context.take_dirty_ops().is_empty());
         assert!(!context.has_operation(staged_op), "staged ops are dropped");
         assert!(
-            !context.is_value_used(f.constant),
+            !crate::analysis::DefUse::new(&context, f.func).is_used(f.constant.number()),
             "a discarded staging leaves no uses of live values behind"
         );
     }
@@ -1316,13 +1256,10 @@ mod staging_tests {
         assert_eq!(context.get_op(add.id()).operands, vec![f.constant; 2]);
         assert_eq!(context.parent_block(add.id()), Some(block));
         assert_eq!(context.parent_region(block), Some(f.then_region));
-        assert!(
-            context
-                .value_uses(f.constant)
-                .iter()
-                .all(|u| u.op() == add.id())
+        assert_eq!(
+            crate::analysis::DefUse::new(&context, f.func).users_of(f.constant.number()),
+            [add.id(); 2]
         );
-        assert_eq!(context.value_uses(f.constant).len(), 2);
         crate::verify_op_tree(&context, f.func).expect("the committed tree verifies");
     }
 
@@ -1368,7 +1305,7 @@ mod staging_tests {
             vec![fresh.result(); 2],
             "surviving uses read the staged replacement"
         );
-        assert!(!context.is_value_used(f.old));
+        assert!(!crate::analysis::DefUse::new(&context, f.module).is_used(f.old.number()));
     }
 
     #[test]
@@ -1655,45 +1592,63 @@ mod tests {
     }
 
     #[test]
-    fn adding_an_op_registers_operand_uses() {
+    fn replacing_value_uses_reaches_a_nested_region() {
         let context = Context::with_default_dialects();
+        let (_, _, body) = module_with_function(&context);
         let i32 = builtin::IntegerType::new(&context, 32);
-        let lhs = context.create_value(i32, None);
-        let rhs = context.create_value(i32, None);
+        let i1 = builtin::IntegerType::new(&context, 1);
+        let a = context.create_value(i32, None);
+        let b = context.create_value(i32, None);
+        let cond = context.create_value(i1, None);
 
-        assert!(!context.is_value_used(lhs.id()));
+        let then_region = context.create_region();
+        let then_block = context.create_block(vec![]);
+        then_region.add_block(then_block.id());
+        let nested = builtin::ops::addi(&context, a.id(), a.id(), i32).build();
+        then_block.append(nested.id());
+        then_block.append(crate::scf::ops::r#yield(&context, vec![]).build().id());
+        let else_region = context.create_region();
+        let else_block = context.create_block(vec![]);
+        else_region.add_block(else_block.id());
+        else_block.append(crate::scf::ops::r#yield(&context, vec![]).build().id());
+        body.append(
+            crate::scf::ops::r#if(
+                &context,
+                cond.id(),
+                vec![],
+                Some(then_region.id()),
+                Some(else_region.id()),
+            )
+            .build()
+            .id(),
+        );
 
-        let add = builtin::ops::addi(&context, lhs.id(), rhs.id(), i32).build();
+        context.replace_value_uses(a.id(), b.id());
 
-        // The local `lhs` handle is a pre-use snapshot; the live value carries the use.
-        assert!(context.is_value_used(lhs.id()));
-        let uses = context.value_uses(lhs.id());
-        assert_eq!(uses.len(), 1);
-        assert_eq!(uses[0].op(), add.id());
-        assert_eq!(uses[0].operand_index(), Some(0));
-        assert_eq!(context.value_uses(rhs.id())[0].operand_index(), Some(1));
+        assert_eq!(context.get_op(nested.id()).operands, vec![b.id(); 2]);
     }
 
     #[test]
-    fn an_operand_used_twice_records_both_indices() {
+    fn replacing_uses_of_a_block_argument_rewrites_its_readers() {
         let context = Context::with_default_dialects();
-        let i32 = builtin::IntegerType::new(&context, 32);
-        let x = context.create_value(i32, None);
+        let context_ref = &context;
+        let i32 = builtin::IntegerType::new(context_ref, 32);
+        let region = context.create_region();
+        let argument = context.create_value(i32, None);
+        let block = context.create_block(vec![argument.clone()]);
+        region.add_block(block.id());
+        let func = builtin::ops::func(&context, "demo", i32, Some(region.id())).build();
+        let module = builtin::ops::module(&context, None).build();
+        module.body().append(func.id());
+        let reader = builtin::ops::addi(&context, argument.id(), argument.id(), i32).build();
+        block.append(reader.id());
+        let replacement = context.create_value(i32, None);
 
-        let add = builtin::ops::addi(&context, x.id(), x.id(), i32).build();
+        context.replace_value_uses(argument.id(), replacement.id());
 
-        let mut indices: Vec<usize> = context
-            .value_uses(x.id())
-            .iter()
-            .filter_map(|u| u.operand_index())
-            .collect();
-        indices.sort();
-        assert_eq!(indices, vec![0, 1]);
-        assert!(
-            context
-                .value_uses(x.id())
-                .iter()
-                .all(|u| u.op() == add.id())
+        assert_eq!(
+            context.get_op(reader.id()).operands,
+            vec![replacement.id(); 2]
         );
     }
 

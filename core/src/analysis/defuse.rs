@@ -186,6 +186,34 @@ pub struct DefUse {
 }
 
 impl DefUse {
+    /// Index the ops nested under `root` directly, for a caller with no
+    /// [`AnalysisManager`] to cache the result in.
+    pub fn new<O: Into<OpId>>(context: &Context, root: O) -> Self {
+        let mut result = Self::default();
+        let mut stack = context.get_op(root.into()).regions.clone();
+        while let Some(region) = stack.pop() {
+            for block in context.get_region(region).iter(context.clone()) {
+                for op_id in block.op_ids() {
+                    let instance = context.get_op(op_id);
+                    stack.extend(instance.regions.iter().copied());
+                    result.ops.push(op_id);
+                    let regs = op_regs(&instance);
+                    for def in regs.defs {
+                        if let RegRef::Virtual { id, .. } = def {
+                            result.defs.entry(id).or_default().push(op_id);
+                        }
+                    }
+                    for used in regs.uses {
+                        if let RegRef::Virtual { id, .. } = used {
+                            result.users.entry(id).or_default().push(op_id);
+                        }
+                    }
+                }
+            }
+        }
+        result
+    }
+
     /// Every op nested under the root, in walk order.
     pub fn ops(&self) -> &[OpId] {
         &self.ops
@@ -217,29 +245,7 @@ impl DefUse {
 
 impl Analysis for DefUse {
     fn build(_: &AnalysisManager, context: &Context, op: OpId) -> Self {
-        let mut result = Self::default();
-        let mut stack = context.get_op(op).regions.clone();
-        while let Some(region) = stack.pop() {
-            for block in context.get_region(region).iter(context.clone()) {
-                for op_id in block.op_ids() {
-                    let instance = context.get_op(op_id);
-                    stack.extend(instance.regions.iter().copied());
-                    result.ops.push(op_id);
-                    let regs = op_regs(&instance);
-                    for def in regs.defs {
-                        if let RegRef::Virtual { id, .. } = def {
-                            result.defs.entry(id).or_default().push(op_id);
-                        }
-                    }
-                    for used in regs.uses {
-                        if let RegRef::Virtual { id, .. } = used {
-                            result.users.entry(id).or_default().push(op_id);
-                        }
-                    }
-                }
-            }
-        }
-        result
+        Self::new(context, op)
     }
 }
 

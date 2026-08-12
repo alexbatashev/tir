@@ -443,6 +443,7 @@ mod tests {
         region.add_block(block.id());
 
         let func = crate::builtin::ops::func(&context, "caller", i32_ty, Some(region.id())).build();
+        let func_id = crate::Operation::id(&func);
         let mut builder = IRBuilder::new(func.body());
         let call = super::CallOpBuilder::new(&context)
             .args(vec![a_id])
@@ -456,7 +457,8 @@ mod tests {
         builder.insert(call);
         builder.insert(crate::builtin::ops::r#return(&context, result).build());
 
-        assert!(context.is_value_used(a_id));
-        assert!(context.is_value_used(result));
+        let def_use = crate::analysis::DefUse::new(&context, func_id);
+        assert!(def_use.is_used(a_id.number()));
+        assert!(def_use.is_used(result.number()));
     }
 }

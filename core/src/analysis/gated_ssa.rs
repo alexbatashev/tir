@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crate::{
     BlockId, BranchGuard, BranchTerminator, Conditional, Context, LoopLike, OpId, Terminator,
     TokenScope, ValueId,
-    analysis::{Analysis, AnalysisManager, DominatorTree},
+    analysis::{Analysis, AnalysisManager, DefUse, DominatorTree},
     builtin::TokenType,
     graph::{Dag, GenericDag, MutDag, NodeId},
 };
@@ -58,7 +58,7 @@ impl GSA {
             gamma,
             mu,
             loop_result,
-        } = structured_gates(context, &blocks);
+        } = structured_gates(context, root, &blocks);
 
         let mut builder = Builder {
             context,
@@ -465,7 +465,8 @@ struct StructuredGates {
 /// Scan the region's ops for structured control flow: a [`Conditional`] op that
 /// produces a value yields a γ over its arms' yielded values; a [`LoopCarried`] op
 /// yields a μ over its carried region argument, with its result an η over that μ.
-fn structured_gates(context: &Context, blocks: &[BlockId]) -> StructuredGates {
+fn structured_gates(context: &Context, root: OpId, blocks: &[BlockId]) -> StructuredGates {
+    let def_use = DefUse::new(context, root);
     let mut gamma = HashMap::new();
     let mut mu = HashMap::new();
     let mut loop_result = HashMap::new();
@@ -490,7 +491,7 @@ fn structured_gates(context: &Context, blocks: &[BlockId]) -> StructuredGates {
                 // A μ holds one init and one latch and an η one exit, so a loop the body
                 // can also leave early would have to drop an input — stay opaque instead
                 // of claiming a value the loop does not have.
-                if leaves_early(context, &instance) {
+                if leaves_early(context, &def_use, &instance) {
                     continue;
                 }
                 let (carried, inits, latched) = (lp.carried_args(), lp.inits(), lp.latched());
@@ -511,7 +512,11 @@ fn structured_gates(context: &Context, blocks: &[BlockId]) -> StructuredGates {
 
 /// Whether the loop's body can leave other than through its back edge: something names
 /// the token its early exits consume.
-fn leaves_early(context: &Context, instance: &std::sync::Arc<crate::OpInstance>) -> bool {
+fn leaves_early(
+    context: &Context,
+    def_use: &DefUse,
+    instance: &std::sync::Arc<crate::OpInstance>,
+) -> bool {
     let Some(scope) = instance.clone().as_interface::<dyn TokenScope>() else {
         return false;
     };
@@ -521,7 +526,7 @@ fn leaves_early(context: &Context, instance: &std::sync::Arc<crate::OpInstance>)
         .into_iter()
         .flat_map(|region| context.get_region(region).iter(context.clone()))
         .flat_map(|block| block.arguments().to_vec())
-        .any(|argument| argument.ty() == token && context.is_value_used(argument.id()))
+        .any(|argument| argument.ty() == token && def_use.is_used(argument.id().number()))
 }
 
 /// The γ inputs `(cond, true_input, false_input)` for result `index` of a two-armed

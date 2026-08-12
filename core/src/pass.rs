@@ -363,10 +363,7 @@ impl Rewriter {
                     self.context.replace_value_uses(*old, *new);
                 }
             }
-            // The replaced-out op no longer references its operands; the new op
-            // registered its own uses when it was added to the context. Drop the old
-            // op from the arena so it doesn't linger as a phantom.
-            self.context.detach_op_uses(&target.op);
+            // Drop the old op from the arena so it doesn't linger as a phantom.
             self.context.remove_operation(target.op.id);
             Ok(())
         } else {
@@ -380,7 +377,6 @@ impl Rewriter {
             .as_ref()
             .ok_or(PassError::MissingBlock(target.name().as_str()))?;
         if block.remove_op(target.op.id) {
-            self.context.detach_op_uses(&target.op);
             self.context.remove_operation(target.op.id);
             Ok(())
         } else {
@@ -1045,6 +1041,7 @@ mod tests {
         )
         .build();
         let func_body = func.body();
+        let func_id = func.id();
 
         let mut func_builder = IRBuilder::new(func_body.clone());
         let add = ops::addi(
@@ -1078,12 +1075,14 @@ mod tests {
 
         assert_eq!(op_names, vec!["subi", "return"]);
 
-        // The use-list followed the rewrite: param0 is now used by the subi (the
-        // replacement), not the erased addi.
+        // The def-use chain followed the rewrite: param0 is now read by the subi
+        // (the replacement), not by the erased addi.
         let subi_id = func_body.op_ids()[0];
-        let uses = context.value_uses(func_body.arguments()[0].id());
-        assert_eq!(uses.len(), 1, "param0 should have exactly one use");
-        assert_eq!(uses[0].op(), subi_id);
+        assert_eq!(
+            crate::analysis::DefUse::new(&context, func_id)
+                .users_of(func_body.arguments()[0].id().number()),
+            [subi_id]
+        );
 
         // The replaced-out addi is gone from the arena, not just the block.
         assert!(
@@ -1093,7 +1092,7 @@ mod tests {
     }
 
     #[test]
-    fn erasing_an_op_detaches_its_operand_uses() {
+    fn erasing_an_op_drops_its_operand_uses() {
         let context = Context::with_default_dialects();
         let i32 = IntegerType::new(&context, 32);
 
@@ -1115,14 +1114,15 @@ mod tests {
         let neg_id = neg.id();
         let neg_ref = super::OperationRef::new(context.get_op(neg_id), Some(body.clone()), None);
         b.insert(neg);
-        assert!(context.is_value_used(body.arguments()[0].id()));
+        let argument = body.arguments()[0].id().number();
+        assert!(crate::analysis::DefUse::new(&context, func.id()).is_used(argument));
 
         let mut rewriter = super::Rewriter::new(context.clone());
         rewriter.erase_op(&neg_ref).expect("erase should succeed");
 
         assert!(
-            !context.is_value_used(body.arguments()[0].id()),
-            "erasing the only consumer must clear the value's uses"
+            !crate::analysis::DefUse::new(&context, func.id()).is_used(argument),
+            "erasing the only consumer must leave the value unused"
         );
         // The erased op is gone from the arena, not just the block.
         assert!(

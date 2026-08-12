@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use tir::analysis::DefUse;
 use tir::attributes::{AttributeValue, RegisterAttr};
 use tir::builtin::{
     CallOp, IndirectCallOp, MakeTupleOp, MakeTupleOpBuilder, ReturnOp, TupleGetOp,
@@ -457,20 +458,20 @@ impl CallLowering {
         {
             let registers = tuple_return_registers(context, self.abi, tuple)?;
             let mut extracts = Vec::new();
-            for usage in context.value_uses(result) {
+            for user in enclosing_def_use(context, op)?.users_of(result.number()) {
                 if self
                     .tuple_argument_elements
                     .keys()
-                    .any(|(call, _)| *call == usage.op())
+                    .any(|(call, _)| call == user)
                 {
                     continue;
                 }
-                if usage.operand_index() != Some(0) {
+                let instance = context.get_op(*user);
+                if instance.operands.first() != Some(&result) {
                     return Err(PassError::InvalidRuleSet(
                         "tuple call result has a non-extraction use".to_string(),
                     ));
                 }
-                let instance = context.get_op(usage.op());
                 let extract = instance.clone().as_op::<TupleGetOp>().ok_or_else(|| {
                     PassError::InvalidRuleSet(
                         "tuple call result has a non-extraction use".to_string(),
@@ -479,7 +480,7 @@ impl CallLowering {
                 let register = registers.get(extract.index()).copied().ok_or_else(|| {
                     PassError::InvalidRuleSet("tuple extraction index is out of bounds".to_string())
                 })?;
-                let block = context.parent_block(usage.op()).ok_or_else(|| {
+                let block = context.parent_block(*user).ok_or_else(|| {
                     PassError::InvalidRuleSet("tuple extraction has no parent block".to_string())
                 })?;
                 extracts.push((
@@ -555,18 +556,30 @@ fn insert_tuple_extractions(
     Ok(elements)
 }
 
+/// The use index of the function `op` sits in, rebuilt on demand: the pass has no
+/// analysis manager to cache it in, and rewrites it as it goes.
+fn enclosing_def_use(context: &Context, op: &OperationRef) -> Result<DefUse, PassError> {
+    let root = context.parent_op(op.op().id).ok_or_else(|| {
+        PassError::InvalidRuleSet("call lowering needs an enclosing function".to_string())
+    })?;
+    Ok(DefUse::new(context, root))
+}
+
 fn erase_dead_tuple_arguments(
     context: &Context,
     rewriter: &mut Rewriter,
     tuple_arguments: &[(OpId, ValueId)],
 ) -> Result<(), PassError> {
     for &(tuple, value) in tuple_arguments {
-        if context.is_value_used(value) {
-            continue;
-        }
         let block = context.parent_block(tuple).ok_or_else(|| {
             PassError::InvalidRuleSet("tuple construction has no parent block".to_string())
         })?;
+        let root = context.parent_op(tuple).ok_or_else(|| {
+            PassError::InvalidRuleSet("tuple construction has no enclosing op".to_string())
+        })?;
+        if DefUse::new(context, root).is_used(value.number()) {
+            continue;
+        }
         rewriter.erase_op(&OperationRef::new(
             context.get_op(tuple),
             Some(context.get_block(block)),
