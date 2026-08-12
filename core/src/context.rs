@@ -197,6 +197,28 @@ impl ContextInstance {
     }
 }
 
+/// The values `op` reads: its SSA operands plus the virtual registers its
+/// role-tagged attributes name (the same set [`Context::add_operation`] registers
+/// uses for). A value the op only defines may appear too; callers filter by op id.
+fn used_values(op: &OpInstance) -> Vec<ValueId> {
+    use crate::attributes::{AttributeValue, RegisterAttr};
+
+    let mut touched: Vec<ValueId> = op.operands.clone();
+    for attr in &op.attributes {
+        if let AttributeValue::Register(register) = &attr.value {
+            match register {
+                RegisterAttr::Virtual { id, .. }
+                | RegisterAttr::FixedUse { id, .. }
+                | RegisterAttr::FixedDef { id, .. } => {
+                    touched.push(ValueId::from_number(*id));
+                }
+                RegisterAttr::Physical { .. } => {}
+            }
+        }
+    }
+    touched
+}
+
 fn type_hash(ty: &dyn Type) -> u64 {
     let mut hasher = DefaultHasher::new();
     hasher.write(ty.dialect().as_bytes());
@@ -526,24 +548,8 @@ impl Context {
     /// so visiting a value the op only *defined* is harmless. `defining_op` is left
     /// untouched — on replace, the new op has already claimed the def-site.
     pub(crate) fn detach_op_uses(&self, op: &OpInstance) {
-        use crate::attributes::{AttributeValue, RegisterAttr};
-
-        let mut touched: Vec<ValueId> = op.operands.clone();
-        for attr in &op.attributes {
-            if let AttributeValue::Register(register) = &attr.value {
-                match register {
-                    RegisterAttr::Virtual { id, .. }
-                    | RegisterAttr::FixedUse { id, .. }
-                    | RegisterAttr::FixedDef { id, .. } => {
-                        touched.push(ValueId::from_number(*id));
-                    }
-                    RegisterAttr::Physical { .. } => {}
-                }
-            }
-        }
-
         let mut inner = self.0.write();
-        for value_id in touched {
+        for value_id in used_values(op) {
             if let Some(value) = slab_get_mut(&mut inner.values, value_id.index()) {
                 Arc::make_mut(value).remove_uses_of(op.id);
             }
@@ -652,6 +658,99 @@ impl Context {
             inner.edit_block(block);
         }
         value
+    }
+
+    /// Begin building a region body off to the side of the live IR.
+    ///
+    /// The staged blocks belong to no region, so building them bumps no version
+    /// and dirties no subtree. Hand the result to
+    /// [`Context::replace_region_contents`] to swap it in, or drop it to discard.
+    pub fn stage_region(&self) -> StagedRegion {
+        StagedRegion {
+            context: self.clone(),
+            blocks: Vec::new(),
+            remap: Vec::new(),
+            discard: true,
+        }
+    }
+
+    /// Swap `staged` in as `region`'s contents, in one edit.
+    ///
+    /// The old contents leave the tree: their ops are removed from the arena, the
+    /// uses they held on surviving values are dropped, and their parent links are
+    /// cleared, so no walk reaches into them. Uses of old values recorded with
+    /// [`StagedRegion::replace_value`] are then retargeted to their staged
+    /// replacements. The swap itself bumps the spine exactly once, at `region`'s
+    /// owner, and dirties that one subtree.
+    pub fn replace_region_contents(&self, region: RegionId, mut staged: StagedRegion) {
+        staged.discard = false;
+        let handle = self.get_region(region);
+        let owner = handle.parent_op();
+
+        self.detach_subtree(&handle.block_ids());
+        handle.set_blocks(staged.blocks.clone());
+
+        {
+            let mut inner = self.0.write();
+            for &block in &staged.blocks {
+                slab_put(&mut inner.block_parent, block.index(), region);
+            }
+            if let Some(owner) = owner {
+                inner.edit_subtree(owner);
+            }
+        }
+
+        for &(old, new) in &staged.remap {
+            self.replace_value_uses(old, new);
+        }
+    }
+
+    /// Every op and block under `blocks`, transitively through nested regions.
+    /// Collected without the context lock held, so no region lock is ever taken
+    /// under it.
+    fn subtree(&self, blocks: &[BlockId]) -> (Vec<OpId>, Vec<BlockId>) {
+        let mut pending = blocks.to_vec();
+        let mut visited_blocks = Vec::new();
+        let mut ops = Vec::new();
+        while let Some(block) = pending.pop() {
+            visited_blocks.push(block);
+            for op in self.get_block(block).op_ids() {
+                ops.push(op);
+                for region in &self.get_op(op).regions {
+                    pending.extend(self.get_region(*region).block_ids());
+                }
+            }
+        }
+        (ops, visited_blocks)
+    }
+
+    /// Take the subtree under `blocks` out of the live IR: drop the uses its ops
+    /// hold, clear the parent links a walk would follow, and remove the ops from
+    /// the arena. Bumps no version — the caller reports the edit.
+    fn detach_subtree(&self, blocks: &[BlockId]) {
+        let (ops, blocks) = self.subtree(blocks);
+        let mut inner = self.0.write();
+        for op in ops {
+            let used = slab_get(&inner.operations, op.index())
+                .map(|instance| used_values(instance))
+                .unwrap_or_default();
+            for value_id in used {
+                if let Some(value) = slab_get_mut(&mut inner.values, value_id.index()) {
+                    Arc::make_mut(value).remove_uses_of(op);
+                }
+            }
+            if let Some(slot) = inner.op_parent.get_mut(op.index()) {
+                *slot = None;
+            }
+            if let Some(slot) = inner.operations.get_mut(op.index()) {
+                *slot = None;
+            }
+        }
+        for block in blocks {
+            if let Some(slot) = inner.block_parent.get_mut(block.index()) {
+                *slot = None;
+            }
+        }
     }
 
     /// Insert `op` into `block` at `index`, recording the new parent.
@@ -930,6 +1029,60 @@ impl Context {
     }
 }
 
+/// A region body under construction, detached from the live IR.
+///
+/// Its blocks, values and ops live in the context's arenas from the moment they
+/// are built, but they belong to no region until the staging is committed: they
+/// print nowhere, bump no version, and dirty no subtree. Staged ops may take
+/// values defined outside the region as operands; those uses become live with the
+/// commit and are dropped again if the staging is discarded.
+///
+/// Created by [`Context::stage_region`]; committed by
+/// [`Context::replace_region_contents`], discarded by dropping it.
+pub struct StagedRegion {
+    context: Context,
+    blocks: Vec<BlockId>,
+    remap: Vec<(ValueId, ValueId)>,
+    discard: bool,
+}
+
+impl StagedRegion {
+    /// Append a block carrying one argument per entry of `argument_types`. The
+    /// first staged block becomes the region's entry.
+    pub fn append_block(&mut self, argument_types: &[TypeId]) -> BlockId {
+        let arguments = argument_types
+            .iter()
+            .map(|&ty| self.context.create_value(ty, None))
+            .collect();
+        let block = self.context.create_block(arguments);
+        self.blocks.push(block.id());
+        block.id()
+    }
+
+    /// The `index`-th argument of a staged block, for staged ops to consume.
+    pub fn block_argument(&self, block: BlockId, index: usize) -> Value {
+        self.context.get_block(block).arguments()[index].clone()
+    }
+
+    /// Append `op` after everything the staged block holds.
+    pub fn append_op(&self, block: BlockId, op: OpId) {
+        self.context.append_op(block, op);
+    }
+
+    /// On commit, retarget every use of `old` that outlives the swap to `new`.
+    pub fn replace_value(&mut self, old: ValueId, new: ValueId) {
+        self.remap.push((old, new));
+    }
+}
+
+impl Drop for StagedRegion {
+    fn drop(&mut self) {
+        if self.discard {
+            self.context.detach_subtree(&self.blocks);
+        }
+    }
+}
+
 impl Default for Context {
     fn default() -> Self {
         Context::with_default_dialects()
@@ -983,6 +1136,278 @@ impl<I: GetFromContext> DoubleEndedIterator for ContextIterator<I> {
             let element = self.elements[self.current_back].get_from_context(&self.context);
             Some(element)
         }
+    }
+}
+
+#[cfg(test)]
+mod staging_tests {
+    use super::Context;
+    use crate::{
+        Block, BlockId, IRFormatter, OpId, Operand, Operation, RegionId, ValueId, builtin, scf,
+    };
+    use std::sync::Arc;
+
+    /// `module { func demo(%cond) { %c = 1; scf.if %cond { %old = 7; scf.yield }; return } }`
+    /// — a region owned by an op nested inside a function, so a commit to it has a
+    /// spine to bump and live values around it to reference.
+    struct Fixture {
+        module: OpId,
+        func: OpId,
+        if_op: OpId,
+        then_region: RegionId,
+        then_block: BlockId,
+        /// `%old`, defined inside the region a commit replaces.
+        old: ValueId,
+        /// `%c`, defined outside it and still live after a commit.
+        constant: ValueId,
+        module_body: Arc<Block>,
+    }
+
+    fn fixture(context: &Context) -> Fixture {
+        let i1 = builtin::IntegerType::new(context, 1);
+        let i32_ty = builtin::IntegerType::new(context, 32);
+        let unit = builtin::UnitType::new(context);
+
+        let then_region = context.create_region();
+        let then_block = context.create_block(vec![]);
+        then_region.add_block(then_block.id());
+        let old = builtin::ops::constant(context, 7, i32_ty).build();
+        then_block.append(old.id());
+        then_block.append(scf::ops::r#yield(context, vec![]).build().id());
+
+        let else_region = context.create_region();
+        let else_block = context.create_block(vec![]);
+        else_region.add_block(else_block.id());
+        else_block.append(scf::ops::r#yield(context, vec![]).build().id());
+
+        let body = context.create_region();
+        let cond = context.create_value(i1, None);
+        let entry = context.create_block(vec![cond.clone()]);
+        body.add_block(entry.id());
+        let constant = builtin::ops::constant(context, 1, i32_ty).build();
+        entry.append(constant.id());
+        let if_op = scf::ops::r#if(
+            context,
+            cond.id(),
+            vec![],
+            Some(then_region.id()),
+            Some(else_region.id()),
+        )
+        .build();
+        entry.append(if_op.id());
+        entry.append(
+            builtin::ops::r#return(context, Operand::none())
+                .build()
+                .id(),
+        );
+
+        let func = builtin::ops::func(context, "demo", unit, Some(body.id())).build();
+        let module = builtin::ops::module(context, None).build();
+        module.body().append(func.id());
+
+        Fixture {
+            module: module.id(),
+            func: func.id(),
+            if_op: if_op.id(),
+            then_region: then_region.id(),
+            then_block: then_block.id(),
+            old: old.result(),
+            constant: constant.result(),
+            module_body: context.get_block(module.body().id()),
+        }
+    }
+
+    fn printed(context: &Context, module: OpId) -> String {
+        let mut out = String::new();
+        let mut fmt = IRFormatter::new(&mut out);
+        let op = context.get_dyn_op(context.get_op(module));
+        crate::print_ir(op.as_ref(), context, &mut fmt).expect("print must succeed");
+        out
+    }
+
+    /// A staged `^block: scf.yield` body, ready to swap into an `scf.if` region.
+    fn staged_yield(context: &Context) -> super::StagedRegion {
+        let mut staged = context.stage_region();
+        let block = staged.append_block(&[]);
+        staged.append_op(block, scf::ops::r#yield(context, vec![]).build().id());
+        staged
+    }
+
+    #[test]
+    fn a_discarded_staging_leaves_the_tree_untouched() {
+        let context = Context::with_default_dialects();
+        let f = fixture(&context);
+        let i32_ty = builtin::IntegerType::new(&context, 32);
+        let before = printed(&context, f.module);
+        let module_version = context.op_version(f.module);
+        let if_version = context.op_version(f.if_op);
+        context.take_dirty_ops();
+
+        let staged_op = {
+            let mut staged = context.stage_region();
+            let block = staged.append_block(&[]);
+            let add = builtin::ops::addi(&context, f.constant, f.constant, i32_ty).build();
+            staged.append_op(block, add.id());
+            add.id()
+        };
+
+        assert_eq!(printed(&context, f.module), before, "the IR is unchanged");
+        assert_eq!(context.op_version(f.module), module_version);
+        assert_eq!(context.op_version(f.if_op), if_version);
+        assert!(context.take_dirty_ops().is_empty());
+        assert!(!context.has_operation(staged_op), "staged ops are dropped");
+        assert!(
+            !context.is_value_used(f.constant),
+            "a discarded staging leaves no uses of live values behind"
+        );
+    }
+
+    #[test]
+    fn a_commit_bumps_the_spine_once() {
+        let context = Context::with_default_dialects();
+        let f = fixture(&context);
+        let module_version = context.op_version(f.module);
+        let func_version = context.op_version(f.func);
+        let if_version = context.op_version(f.if_op);
+        context.take_dirty_ops();
+
+        context.replace_region_contents(f.then_region, staged_yield(&context));
+
+        assert_eq!(context.op_version(f.if_op), if_version + 1);
+        assert_eq!(context.op_version(f.func), func_version + 1);
+        assert_eq!(context.op_version(f.module), module_version + 1);
+        assert_eq!(
+            context.take_dirty_ops(),
+            vec![f.if_op],
+            "the region's owner is the one dirtied subtree"
+        );
+    }
+
+    #[test]
+    fn a_commit_detaches_the_old_subtree() {
+        let context = Context::with_default_dialects();
+        let f = fixture(&context);
+        let old_op = context.get_value(f.old).defining_op().unwrap();
+
+        context.replace_region_contents(f.then_region, staged_yield(&context));
+
+        assert!(!context.has_operation(old_op));
+        assert_eq!(context.parent_block(old_op), None);
+        assert_eq!(context.parent_op(old_op), None);
+        assert_eq!(context.parent_region(f.then_block), None);
+        assert!(!printed(&context, f.module).contains("7"));
+        // Nothing dirtied walks into the detached subtree.
+        crate::verify_op_tree(&context, f.if_op).expect("the committed tree verifies");
+    }
+
+    #[test]
+    fn staged_ops_keep_their_live_operands() {
+        let context = Context::with_default_dialects();
+        let f = fixture(&context);
+        let i32_ty = builtin::IntegerType::new(&context, 32);
+
+        let mut staged = context.stage_region();
+        let block = staged.append_block(&[]);
+        let add = builtin::ops::addi(&context, f.constant, f.constant, i32_ty).build();
+        staged.append_op(block, add.id());
+        staged.append_op(block, scf::ops::r#yield(&context, vec![]).build().id());
+        context.replace_region_contents(f.then_region, staged);
+
+        assert_eq!(context.get_op(add.id()).operands, vec![f.constant; 2]);
+        assert_eq!(context.parent_block(add.id()), Some(block));
+        assert_eq!(context.parent_region(block), Some(f.then_region));
+        assert!(
+            context
+                .value_uses(f.constant)
+                .iter()
+                .all(|u| u.op() == add.id())
+        );
+        assert_eq!(context.value_uses(f.constant).len(), 2);
+        crate::verify_op_tree(&context, f.func).expect("the committed tree verifies");
+    }
+
+    #[test]
+    fn staged_blocks_carry_their_arguments() {
+        let context = Context::with_default_dialects();
+        let f = fixture(&context);
+        let i32_ty = builtin::IntegerType::new(&context, 32);
+
+        let mut staged = context.stage_region();
+        let block = staged.append_block(&[i32_ty]);
+        let argument = staged.block_argument(block, 0).id();
+        let add = builtin::ops::addi(&context, argument, f.constant, i32_ty).build();
+        staged.append_op(block, add.id());
+        staged.append_op(block, scf::ops::r#yield(&context, vec![]).build().id());
+        context.replace_region_contents(f.then_region, staged);
+
+        let committed = context.get_block(block);
+        assert_eq!(committed.arguments().len(), 1);
+        assert_eq!(committed.arguments()[0].id(), argument);
+        assert_eq!(context.get_op(add.id()).operands[0], argument);
+    }
+
+    #[test]
+    fn a_commit_remaps_uses_of_replaced_values() {
+        let context = Context::with_default_dialects();
+        let f = fixture(&context);
+        let i32_ty = builtin::IntegerType::new(&context, 32);
+        // A use of the old region's value that outlives the swap.
+        let user = builtin::ops::addi(&context, f.old, f.old, i32_ty).build();
+        f.module_body.append(user.id());
+
+        let mut staged = context.stage_region();
+        let block = staged.append_block(&[]);
+        let fresh = builtin::ops::constant(&context, 9, i32_ty).build();
+        staged.append_op(block, fresh.id());
+        staged.append_op(block, scf::ops::r#yield(&context, vec![]).build().id());
+        staged.replace_value(f.old, fresh.result());
+        context.replace_region_contents(f.then_region, staged);
+
+        assert_eq!(
+            context.get_op(user.id()).operands,
+            vec![fresh.result(); 2],
+            "surviving uses read the staged replacement"
+        );
+        assert!(!context.is_value_used(f.old));
+    }
+
+    #[test]
+    fn a_commit_keeps_analyses_of_untouched_functions() {
+        use crate::{Analysis, AnalysisManager, OpId as Id};
+        struct Probe;
+        impl Analysis for Probe {
+            fn build(_: &AnalysisManager, _: &Context, _: Id) -> Self {
+                Probe
+            }
+        }
+
+        let context = Context::with_default_dialects();
+        let f = fixture(&context);
+        let unit = builtin::UnitType::new(&context);
+        let sibling_body = context.create_region();
+        let sibling_entry = context.create_block(vec![]);
+        sibling_body.add_block(sibling_entry.id());
+        sibling_entry.append(
+            builtin::ops::r#return(&context, Operand::none())
+                .build()
+                .id(),
+        );
+        let sibling = builtin::ops::func(&context, "sib", unit, Some(sibling_body.id())).build();
+        f.module_body.append(sibling.id());
+
+        let analyses = AnalysisManager::new();
+        analyses.get::<Probe>(&context, sibling.id());
+        analyses.get::<Probe>(&context, f.func);
+
+        context.replace_region_contents(f.then_region, staged_yield(&context));
+
+        assert!(
+            analyses
+                .get_cached::<Probe>(&context, sibling.id())
+                .is_some(),
+            "a sibling function's analyses survive a commit elsewhere"
+        );
+        assert!(analyses.get_cached::<Probe>(&context, f.func).is_none());
     }
 }
 

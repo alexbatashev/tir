@@ -65,6 +65,17 @@ impl Region {
         removed
     }
 
+    pub(crate) fn block_ids(&self) -> Vec<BlockId> {
+        self.blocks.read().clone()
+    }
+
+    /// Replace the whole block list at once. Only [`Context::replace_region_contents`]
+    /// uses this: it owns the parent bookkeeping and the single version bump the
+    /// swap is allowed to make, which the per-block mutators above would each repeat.
+    pub(crate) fn set_blocks(&self, blocks: Vec<BlockId>) {
+        *self.blocks.write() = blocks;
+    }
+
     pub fn iter(&self, context: Context) -> ContextIterator<BlockId> {
         ContextIterator::new(context, self.blocks.read().clone())
     }

@@ -44,7 +44,7 @@ pub mod parse;
 pub use analysis::{Analysis, AnalysisManager};
 pub use block::{Block, BlockId};
 pub use builder::{IRBuilder, InsertionPoint};
-pub use context::{Context, ContextIterator, ContextRef, GetFromContext};
+pub use context::{Context, ContextIterator, ContextRef, GetFromContext, StagedRegion};
 pub use diagnostics::{print_error_range, print_parse_error};
 pub use dialect::{Dialect, OperationParser};
 pub use error::Error;
