@@ -1,0 +1,30 @@
+// RUN: tir opt --pass restructure --verify %s | filecheck %s
+
+// Two edges close the loop. Both leave through the same tail, so the body is
+// one region however many `continue`s reach it.
+
+module {
+  func @cont(%0: !i1, %1: !i32) -> !i32 {
+    br ^bb1(%1 : !i32)
+  ^bb1(%2: !i32):
+    %3 = addi %2, %2 : !i32
+    cond_br %0, ^bb2, ^bb3
+  ^bb2:
+    br ^bb1(%3 : !i32)
+  ^bb3:
+    %4 = subi %3, %1 : !i32
+    cond_br %0, ^bb1(%4 : !i32), ^bb4
+  ^bb4:
+    return %3
+  }
+  module_end
+}
+
+// CHECK-LABEL: func @cont
+// CHECK-NOT: br
+// CHECK: scf.while iter_args
+// CHECK: addi
+// CHECK: subi
+// CHECK: scf.condition
+// CHECK-NOT: scf.switch
+// CHECK: return
