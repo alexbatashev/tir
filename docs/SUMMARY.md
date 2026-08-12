@@ -7,6 +7,7 @@
   - [Defining Dialects](./design/defining_dialects.md)
   - [Data Layout and Target Environment](./design/target_description.md)
   - [Instruction Selection](./design/instruction_selection.md)
+  - [CoreMark Memory Baseline](./design/memory-baseline.md)
   - [Cycle-Approximate Simulation](./design/simulator.md)
   - [Object Emission](./design/object_emission.md)
   - [RISC-V Compressed Instructions](./design/riscv_compression.md)
