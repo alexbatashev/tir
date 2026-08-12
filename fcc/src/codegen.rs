@@ -3642,6 +3642,7 @@ impl FnCodegen<'_> {
     }
 
     fn ensure_cir_yield(&mut self, block: std::sync::Arc<tir::Block>) {
+        let block = self.context.get_block(block.id());
         let terminated = block.op_ids().last().is_some_and(|op| {
             self.context
                 .get_op(*op)
@@ -4998,7 +4999,7 @@ pub fn lower_data(context: &Context, module: &ModuleOp) -> Result<(), tir::PassE
             section_builder.insert(symbol);
         }
         section_builder.insert(SectionEndOpBuilder::new(context).build());
-        let end = module_body.op_ids().len().saturating_sub(1);
+        let end = context.get_block(module_body.id()).len().saturating_sub(1);
         module_body.insert(end, section.id());
     }
 
@@ -5025,7 +5026,7 @@ pub fn lower_data(context: &Context, module: &ModuleOp) -> Result<(), tir::PassE
             section_builder.insert(symbol);
         }
         section_builder.insert(SectionEndOpBuilder::new(context).build());
-        let end = module_body.op_ids().len().saturating_sub(1);
+        let end = context.get_block(module_body.id()).len().saturating_sub(1);
         module_body.insert(end, section.id());
     }
 
@@ -5056,7 +5057,7 @@ pub fn lower_data(context: &Context, module: &ModuleOp) -> Result<(), tir::PassE
     section_builder.insert(SectionEndOpBuilder::new(context).build());
 
     // Splice the section in ahead of the module terminator.
-    let end = module_body.op_ids().len().saturating_sub(1);
+    let end = context.get_block(module_body.id()).len().saturating_sub(1);
     module_body.insert(end, section.id());
     Ok(())
 }

@@ -37,27 +37,23 @@ impl ScfToCfgPass {
         None
     }
 
+    /// Split `block` after `op`, giving the continuation one argument per result
+    /// the structured operation produced.
     fn split_after(
         context: &Context,
+        rewriter: &mut Rewriter,
         block: &Arc<Block>,
         op: &Arc<crate::OpInstance>,
     ) -> Arc<Block> {
-        let result_args = op
-            .results
-            .iter()
-            .map(|result| context.create_value(context.get_value(*result).ty(), None))
-            .collect();
-        let continuation = context.create_block(result_args);
-        let op_ids = block.op_ids();
-        let position = op_ids.iter().position(|id| *id == op.id).unwrap();
-        for op_id in op_ids.into_iter().skip(position + 1) {
-            block.remove_op(op_id);
-            continuation.insert(continuation.len(), op_id);
+        let block = context.get_block(block.id());
+        let position = block.op_ids().iter().position(|id| *id == op.id).unwrap();
+        let continuation = rewriter.split_block(block.id(), position + 1);
+        for &result in &op.results {
+            let ty = context.get_value(result).ty();
+            let argument = rewriter.append_block_argument(continuation.id(), ty);
+            context.replace_value_uses(result, argument.id());
         }
-        for (result, argument) in op.results.iter().zip(continuation.arguments()) {
-            context.replace_value_uses(*result, argument.id());
-        }
-        continuation
+        context.get_block(continuation.id())
     }
 
     fn move_body(context: &Context, region: RegionId) -> Arc<Block> {
@@ -89,7 +85,7 @@ impl ScfToCfgPass {
         let body = context.create_block(arguments);
         for op_id in source.op_ids() {
             source.remove_op(op_id);
-            body.insert(body.len(), op_id);
+            body.append(op_id);
         }
         (body, scope)
     }
@@ -101,7 +97,7 @@ impl ScfToCfgPass {
         destination: crate::BlockId,
         loop_targets: &HashMap<ValueId, LoopTargets>,
     ) -> Result<(), PassError> {
-        let terminator_id = *block.op_ids().last().unwrap();
+        let terminator_id = *context.get_block(block.id()).op_ids().last().unwrap();
         let terminator = context.get_op(terminator_id);
         let (operands, destination) = if terminator.is::<scf::YieldOp>() {
             (terminator.operands.clone(), destination)
@@ -148,7 +144,7 @@ impl ScfToCfgPass {
         let inits = op.operands.clone();
         let condition = Self::move_body(context, op.regions[0]);
         let (body, scope) = Self::move_loop_body(context, op.regions[1]);
-        let continuation = Self::split_after(context, &block, &op);
+        let continuation = Self::split_after(context, rewriter, &block, &op);
         let region = context.get_region(function_region);
         region.add_block(condition.id());
         region.add_block(body.id());
@@ -226,7 +222,7 @@ impl ScfToCfgPass {
             .map(|argument| context.create_value(argument.ty(), None))
             .collect();
         let latch = context.create_block(latch_values);
-        let continuation = Self::split_after(context, &block, &op);
+        let continuation = Self::split_after(context, rewriter, &block, &op);
         let region = context.get_region(function_region);
         region.add_block(header.id());
         region.add_block(body.id());
@@ -306,7 +302,7 @@ impl ScfToCfgPass {
         let condition = op.operands[0];
         let then_block = Self::move_body(context, op.regions[0]);
         let else_block = Self::move_body(context, op.regions[1]);
-        let continuation = Self::split_after(context, &block, &op);
+        let continuation = Self::split_after(context, rewriter, &block, &op);
         let region = context.get_region(function_region);
         region.add_block(then_block.id());
         region.add_block(else_block.id());

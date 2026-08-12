@@ -168,7 +168,7 @@ impl<'src> TextParser<'src> {
             }
 
             let op = parse_single_op(self, context)?;
-            current.insert(current.len(), op.id());
+            current.append(op.id());
         }
     }
 

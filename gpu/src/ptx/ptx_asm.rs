@@ -593,7 +593,7 @@ pub fn parse(context: &Context, text: &str) -> Result<ModuleOp, String> {
             .attr("ptx_header", AttributeValue::Str(kernel.header))
             .attr("ptx_regs", AttributeValue::Str(kernel.regs))
             .build();
-        section_body.insert(section_body.len(), symbol.id());
+        section_body.append(symbol.id());
         let body = symbol.body();
         for item in body_items(&kernel.body) {
             let id = match item {
@@ -606,12 +606,9 @@ pub fn parse(context: &Context, text: &str) -> Result<ModuleOp, String> {
                     build_op(context, op_name, attrs)
                 }
             };
-            body.insert(body.len(), id);
+            body.append(id);
         }
-        body.insert(
-            body.len(),
-            tir::backend::SymbolEndOpBuilder::new(context).build().id(),
-        );
+        body.append(tir::backend::SymbolEndOpBuilder::new(context).build().id());
     }
 
     Ok(module)

@@ -458,7 +458,7 @@ impl LowerCirControlFlowPass {
         let position = op_ids.iter().position(|id| *id == op.id).unwrap();
         for op_id in op_ids.into_iter().skip(position + 1) {
             block.remove_op(op_id);
-            continuation.insert(continuation.len(), op_id);
+            continuation.append(op_id);
         }
         continuation
     }
@@ -485,6 +485,7 @@ impl LowerCirControlFlowPass {
         mapping: &HashMap<BlockId, BlockId>,
     ) -> Result<(), PassError> {
         for block in blocks {
+            let block = context.get_block(block.id());
             for op_id in block.op_ids() {
                 let op = context.get_op(op_id);
                 let replacement: Option<Box<dyn Operation>> =
@@ -560,7 +561,7 @@ impl LowerCirControlFlowPass {
         for (old, new) in old_blocks.iter().zip(&blocks) {
             for op_id in old.op_ids() {
                 old.remove_op(op_id);
-                new.insert(new.len(), op_id);
+                new.append(op_id);
             }
         }
         Self::rewrite_internal_branches(context, rewriter, &blocks, &mapping)?;
@@ -573,6 +574,7 @@ impl LowerCirControlFlowPass {
         block: &Arc<Block>,
         destination: BlockId,
     ) -> Result<(), PassError> {
+        let block = context.get_block(block.id());
         let terminator = context.get_op(*block.op_ids().last().unwrap());
         let branch = b::br(context, vec![], destination).build();
         rewriter.replace_op(
@@ -588,6 +590,7 @@ impl LowerCirControlFlowPass {
         true_dest: BlockId,
         false_dest: BlockId,
     ) -> Result<(), PassError> {
+        let block = context.get_block(block.id());
         let terminator = context.get_op(*block.op_ids().last().unwrap());
         let condition = terminator
             .clone()
@@ -613,6 +616,7 @@ impl LowerCirControlFlowPass {
         loop_targets: &HashMap<ValueId, LoopTargets>,
     ) -> Result<(), PassError> {
         for block in blocks {
+            let block = context.get_block(block.id());
             let terminator = context.get_op(*block.op_ids().last().unwrap());
             let destination = if terminator.clone().as_op::<cir::YieldOp>().is_some() {
                 Some(normal_dest)
@@ -647,7 +651,7 @@ impl LowerCirControlFlowPass {
                 ));
             };
             if let Some(destination) = destination {
-                Self::replace_with_branch(context, rewriter, block, destination)?;
+                Self::replace_with_branch(context, rewriter, &block, destination)?;
             }
         }
         Ok(())
@@ -673,8 +677,9 @@ impl LowerCirControlFlowPass {
         region.add_block(block.id());
         for op_id in source.op_ids() {
             source.remove_op(op_id);
-            block.insert(block.len(), op_id);
+            block.append(op_id);
         }
+        let block = context.get_block(block.id());
         let terminator = context.get_op(*block.op_ids().last().unwrap());
         let replacement: Box<dyn Operation> =
             if terminator.clone().as_op::<cir::BreakOp>().is_some() {
@@ -702,8 +707,9 @@ impl LowerCirControlFlowPass {
         region.add_block(block.id());
         for op_id in source.op_ids() {
             source.remove_op(op_id);
-            block.insert(block.len(), op_id);
+            block.append(op_id);
         }
+        let block = context.get_block(block.id());
         let terminator = context.get_op(*block.op_ids().last().unwrap());
         let condition = terminator.operands[0];
         let replacement = scf::ops::condition(context, condition, vec![]).build();
@@ -750,7 +756,7 @@ impl LowerCirControlFlowPass {
             let op_ids = source.op_ids();
             for op_id in op_ids.iter().take(op_ids.len() - 1) {
                 source.remove_op(*op_id);
-                block.insert(block.len(), *op_id);
+                block.append(*op_id);
             }
         }
         let mut builder = IRBuilder::new(block);
@@ -800,13 +806,14 @@ impl LowerCirControlFlowPass {
             let op_ids = source.op_ids();
             for op_id in op_ids.iter().take(op_ids.len() - 1) {
                 source.remove_op(*op_id);
-                block.insert(block.len(), *op_id);
+                block.append(*op_id);
             }
         }
         if leaves_loop {
             IRBuilder::new(block).insert(scf::ops::r#break(context, scope, vec![]).build());
             return Ok(region.id());
         }
+        let condition = context.get_block(condition.id());
         let terminator = context.get_op(*condition.op_ids().last().unwrap());
         let value = terminator.operands[0];
         rewriter.erase_op(&OperationRef::new(terminator, Some(condition), None))?;

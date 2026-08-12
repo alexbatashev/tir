@@ -1682,7 +1682,7 @@ impl InstructionSelectPass {
     ) -> BlockId {
         let trampoline = context.create_block(vec![]);
         let vbr = (emitters.uncond)(context, dest, args);
-        trampoline.insert(trampoline.len(), vbr.id());
+        trampoline.append(vbr.id());
         if let Some(region) = context.parent_region(source) {
             context.get_region(region).add_block(trampoline.id());
         }
@@ -1737,14 +1737,14 @@ impl InstructionSelectPass {
                 if let Some(anchor) = &tile_anchor {
                     rewriter.insert_op_before(anchor, op.as_ref())?;
                 } else {
-                    block_arc.insert(block_arc.len(), op.id());
+                    block_arc.append(op.id());
                 }
             }
             let op = (rule.emit_fn)(context, &request, &m)?;
             if let Some(anchor) = &tile_anchor {
                 rewriter.insert_op_before(anchor, op.as_ref())?;
             } else {
-                block_arc.insert(block_arc.len(), op.id());
+                block_arc.append(op.id());
             }
             for (&old, new) in scheduled
                 .results

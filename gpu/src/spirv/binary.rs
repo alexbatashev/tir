@@ -894,7 +894,7 @@ impl<'a> Reader<'a> {
                     (id, Some((o[1], result)))
                 }
             };
-            block.insert(block.len(), op_id);
+            block.append(op_id);
             if let Some((spirv_id, value)) = result {
                 self.values.insert(spirv_id, value);
             }

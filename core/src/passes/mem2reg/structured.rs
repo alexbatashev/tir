@@ -249,21 +249,8 @@ impl Promoter<'_> {
     /// Give `region`'s block one more entry argument for the slot and walk it with
     /// that argument reaching its start.
     fn carry_into(&mut self, region: RegionId, ty: TypeId) -> Option<ValueId> {
-        let old = single_block(self.context, region).expect("checked by `supported`");
-        let argument = self.context.create_value(ty, None);
-        let carried = argument.id();
-        let mut arguments = old.arguments().to_vec();
-        arguments.push(argument);
-
-        let block = self.context.create_block(arguments);
-        for op_id in old.op_ids() {
-            old.remove_op(op_id);
-            block.insert(block.len(), op_id);
-        }
-        let region = self.context.get_region(region);
-        region.remove_block(old.id());
-        region.add_block(block.id());
-
+        let block = single_block(self.context, region).expect("checked by `supported`");
+        let carried = self.context.append_block_argument(block.id(), ty).id();
         self.walk(&block, Some(carried))
     }
 

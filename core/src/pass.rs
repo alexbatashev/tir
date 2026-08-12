@@ -3,7 +3,7 @@ use std::sync::Arc;
 use linkme::distributed_slice;
 
 use crate::{
-    Block, Context, OpId, OpInstance, Operation,
+    Block, Context, OpId, OpInstance, Operation, Value,
     analysis::{AnalysisManager, PreservedAnalyses},
 };
 
@@ -287,6 +287,63 @@ impl Rewriter {
         &self.context
     }
 
+    /// Give `block` one more entry argument. The block keeps its id, so the
+    /// branches naming it as a destination stay valid.
+    pub fn append_block_argument(&mut self, block: crate::BlockId, ty: crate::TypeId) -> Value {
+        self.context.append_block_argument(block, ty)
+    }
+
+    /// Move everything `block` holds from `at` onward into a fresh block, which
+    /// is returned detached: the caller decides where in a region it belongs.
+    pub fn split_block(&mut self, block: crate::BlockId, at: usize) -> Arc<Block> {
+        let source = self.context.get_block(block);
+        let tail = source.op_ids().split_off(at);
+        let split = self.context.create_block(vec![]);
+        for op in tail {
+            source.remove_op(op);
+            split.append(op);
+        }
+        self.context.get_block(split.id())
+    }
+
+    /// Copy `op` and everything under it, returning the copy. The copy is
+    /// detached: the caller decides which block it joins.
+    pub fn clone_op(&mut self, op: OpId) -> OpId {
+        crate::clone::clone_op(&self.context, op)
+    }
+
+    /// Copy `region` and everything under it, returning the copy. The copy is
+    /// detached: the caller decides which operation owns it.
+    pub fn clone_region(&mut self, region: crate::RegionId) -> crate::RegionId {
+        crate::clone::clone_region(&self.context, region)
+    }
+
+    /// Move every block of `source` to the end of `destination`, emptying
+    /// `source`.
+    pub fn splice_region(&mut self, source: crate::RegionId, destination: crate::RegionId) {
+        let source = self.context.get_region(source);
+        let destination = self.context.get_region(destination);
+        for block in source
+            .iter(self.context.clone())
+            .map(|block| block.id())
+            .collect::<Vec<_>>()
+        {
+            source.remove_block(block);
+            destination.add_block(block);
+        }
+    }
+
+    /// Move every operation of `source` to the end of `destination`, emptying
+    /// `source`.
+    pub fn splice_block(&mut self, source: crate::BlockId, destination: crate::BlockId) {
+        let source = self.context.get_block(source);
+        let destination = self.context.get_block(destination);
+        for op in source.op_ids() {
+            source.remove_op(op);
+            destination.append(op);
+        }
+    }
+
     pub fn replace_op(
         &mut self,
         target: &OperationRef,
@@ -348,7 +405,11 @@ impl Rewriter {
             .block
             .as_ref()
             .ok_or(PassError::MissingBlock(target.name().as_str()))?;
-        let position = block
+        // `target` may carry a block handle taken before earlier rewrites, so the
+        // position comes from the live block.
+        let position = self
+            .context
+            .get_block(block.id())
             .op_ids()
             .iter()
             .position(|id| *id == target.op.id)
@@ -682,6 +743,149 @@ mod tests {
     }
 
     #[test]
+    fn appending_a_block_argument_keeps_the_block_id() {
+        let context = Context::with_default_dialects();
+        let i32 = IntegerType::new(&context, 32);
+        let block = context.create_block(vec![]);
+        let mut rewriter = super::Rewriter::new(context.clone());
+
+        let argument = rewriter.append_block_argument(block.id(), i32);
+
+        let block = context.get_block(block.id());
+        assert_eq!(
+            block.arguments().iter().map(|a| a.id()).collect::<Vec<_>>(),
+            vec![argument.id()]
+        );
+    }
+
+    #[test]
+    fn splitting_a_block_moves_its_tail_into_a_new_block() {
+        let context = Context::with_default_dialects();
+        let i32 = IntegerType::new(&context, 32);
+        let value = context.create_value(i32, None);
+        let block = context.create_block(vec![]);
+        let mut builder = IRBuilder::new(block.clone());
+        let head = builder.insert(ops::addi(&context, value.id(), value.id(), i32).build());
+        let tail = builder.insert(ops::subi(&context, value.id(), value.id(), i32).build());
+        let mut rewriter = super::Rewriter::new(context.clone());
+
+        let split = rewriter.split_block(block.id(), 1);
+
+        assert_eq!(context.get_block(block.id()).op_ids(), vec![head.id()]);
+        assert_eq!(split.op_ids(), vec![tail.id()]);
+        assert_eq!(context.parent_block(tail.id()), Some(split.id()));
+    }
+
+    #[test]
+    fn splicing_a_block_appends_its_operations_to_another() {
+        let context = Context::with_default_dialects();
+        let i32 = IntegerType::new(&context, 32);
+        let value = context.create_value(i32, None);
+        let destination = context.create_block(vec![]);
+        let source = context.create_block(vec![]);
+        let head = IRBuilder::new(destination.clone())
+            .insert(ops::addi(&context, value.id(), value.id(), i32).build());
+        let moved = IRBuilder::new(source.clone())
+            .insert(ops::subi(&context, value.id(), value.id(), i32).build());
+        let mut rewriter = super::Rewriter::new(context.clone());
+
+        rewriter.splice_block(source.id(), destination.id());
+
+        assert_eq!(
+            context.get_block(destination.id()).op_ids(),
+            vec![head.id(), moved.id()]
+        );
+        assert!(context.get_block(source.id()).is_empty());
+        assert_eq!(context.parent_block(moved.id()), Some(destination.id()));
+    }
+
+    /// A function whose body block takes one argument, adds it to itself and
+    /// returns the sum.
+    fn function_with_one_argument(context: &Context) -> FuncOp {
+        let i32 = IntegerType::new(context, 32);
+        let region = context.create_region();
+        let argument = context.create_value(i32, None);
+        let block = context.create_block(vec![argument.clone()]);
+        region.add_block(block.id());
+        let mut builder = IRBuilder::new(block);
+        let add = builder.insert(ops::addi(context, argument.id(), argument.id(), i32).build());
+        builder.insert(ops::r#return(context, add.result()).build());
+        ops::func(context, "demo", i32, Some(region.id())).build()
+    }
+
+    #[test]
+    fn cloning_an_op_remaps_values_defined_inside_it() {
+        let context = Context::with_default_dialects();
+        let source = function_with_one_argument(&context);
+        let mut rewriter = super::Rewriter::new(context.clone());
+
+        let clone = rewriter.clone_op(source.id());
+
+        let clone = context.get_op(clone);
+        assert_ne!(clone.id, source.id());
+        let body = context
+            .get_region(clone.regions[0])
+            .iter(context.clone())
+            .next()
+            .expect("the clone keeps the body block");
+        let argument = body.arguments()[0].id();
+        assert_ne!(argument, source.body().arguments()[0].id());
+        let add = context.get_op(body.op_ids()[0]);
+        assert_eq!(add.operands, vec![argument, argument]);
+        let r#return = context.get_op(body.op_ids()[1]);
+        assert_eq!(r#return.operands, vec![add.results[0]]);
+    }
+
+    #[test]
+    fn cloning_a_region_remaps_branch_destinations() {
+        let context = Context::with_default_dialects();
+        let region = context.create_region();
+        let entry = context.create_block(vec![]);
+        let target = context.create_block(vec![]);
+        region.add_block(entry.id());
+        region.add_block(target.id());
+        IRBuilder::new(entry).insert(ops::br(&context, vec![], target.id()).build());
+        IRBuilder::new(target.clone())
+            .insert(ops::r#return(&context, crate::Operand::none()).build());
+        let mut rewriter = super::Rewriter::new(context.clone());
+
+        let clone = rewriter.clone_region(region.id());
+
+        let blocks: Vec<_> = context
+            .get_region(clone)
+            .iter(context.clone())
+            .map(|block| block.id())
+            .collect();
+        assert_eq!(blocks.len(), 2);
+        assert!(!blocks.contains(&target.id()));
+        let branch = context
+            .get_op(context.get_block(blocks[0]).op_ids()[0])
+            .as_op::<crate::builtin::BranchOp>()
+            .expect("the clone keeps the branch");
+        assert_eq!(branch.dest(), blocks[1]);
+    }
+
+    #[test]
+    fn splicing_a_region_moves_its_blocks() {
+        let context = Context::with_default_dialects();
+        let source = context.create_region();
+        let destination = context.create_region();
+        let moved = context.create_block(vec![]);
+        source.add_block(moved.id());
+        let mut rewriter = super::Rewriter::new(context.clone());
+
+        rewriter.splice_region(source.id(), destination.id());
+
+        assert_eq!(source.iter(context.clone()).count(), 0);
+        let blocks: Vec<_> = destination
+            .iter(context.clone())
+            .map(|block| block.id())
+            .collect();
+        assert_eq!(blocks, vec![moved.id()]);
+        assert_eq!(context.parent_region(moved.id()), Some(destination.id()));
+    }
+
+    #[test]
     fn a_pass_preserving_everything_is_not_verified() {
         run_break_ir(true).expect("a pass claiming it changed nothing skips verification");
     }
@@ -729,6 +933,8 @@ mod tests {
         pm.run(&context, context.get_op(module.id()))
             .expect("pass pipeline should succeed");
 
+        // Block handles are snapshots; re-read to see what the pipeline left.
+        let func_body = context.get_block(func_body.id());
         let op_names: Vec<_> = func_body
             .op_ids()
             .into_iter()

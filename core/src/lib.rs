@@ -9,6 +9,7 @@ pub mod attributes;
 pub mod backend;
 mod block;
 mod builder;
+mod clone;
 mod context;
 mod diagnostics;
 mod dialect;

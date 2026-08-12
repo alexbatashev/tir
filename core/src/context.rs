@@ -98,8 +98,6 @@ fn slab_put<T>(slab: &mut Vec<Option<T>>, idx: usize, val: T) {
 }
 
 struct ContextInstance {
-    // None for root context itself, reference to a root context if this is a forked Region.
-    root_context: Option<Context>,
     // Arenas are slabs indexed by the dense, monotonic id counters below; see `slab_get`.
     operations: Vec<Option<Arc<OpInstance>>>,
     last_op_id: AtomicU32,
@@ -140,7 +138,6 @@ impl Context {
     /// Create a new empty context with no registered dialects.
     pub fn new() -> Self {
         Context(Arc::new(RwLock::new(ContextInstance {
-            root_context: None,
             operations: Vec::new(),
             last_op_id: AtomicU32::new(0),
             values: Vec::new(),
@@ -188,10 +185,6 @@ impl Context {
             regions_slab: inner.regions.len(),
             regions_live: live(&inner.regions),
         }
-    }
-
-    pub fn root_context(&self) -> Option<Context> {
-        self.0.read().root_context.clone()
     }
 
     pub fn as_context_ref(&self) -> ContextRef {
@@ -551,22 +544,90 @@ impl Context {
         block
     }
 
+    /// Append `value`'s type as a new entry argument of `block` and return the
+    /// argument. Block ids are stable across the edit, so branches naming this
+    /// block keep pointing at it.
+    pub fn append_block_argument(&self, block: BlockId, ty: TypeId) -> Value {
+        let value = self.create_value(ty, None);
+        let mut inner = self.0.write();
+        if let Some(entry) = slab_get_mut(&mut inner.blocks, block.index()) {
+            Arc::make_mut(entry).arguments_mut().push(value.clone());
+        }
+        value
+    }
+
+    /// Insert `op` into `block` at `index`, recording the new parent.
+    pub(crate) fn insert_op(&self, block: BlockId, index: usize, op: OpId) {
+        let mut inner = self.0.write();
+        if let Some(entry) = slab_get_mut(&mut inner.blocks, block.index()) {
+            Arc::make_mut(entry).operations_mut().insert(index, op);
+        }
+        slab_put(&mut inner.op_parent, op.index(), block);
+    }
+
+    /// Insert `op` after everything `block` currently holds.
+    pub(crate) fn append_op(&self, block: BlockId, op: OpId) {
+        let mut inner = self.0.write();
+        if let Some(entry) = slab_get_mut(&mut inner.blocks, block.index()) {
+            Arc::make_mut(entry).operations_mut().push(op);
+        }
+        slab_put(&mut inner.op_parent, op.index(), block);
+    }
+
+    pub(crate) fn replace_op_in_block(&self, block: BlockId, old: OpId, new: OpId) -> bool {
+        let mut inner = self.0.write();
+        let Some(entry) = slab_get_mut(&mut inner.blocks, block.index()) else {
+            return false;
+        };
+        let operations = Arc::make_mut(entry).operations_mut();
+        let Some(position) = operations.iter().position(|id| *id == old) else {
+            return false;
+        };
+        operations[position] = new;
+        if let Some(slot) = inner.op_parent.get_mut(old.index()) {
+            *slot = None;
+        }
+        slab_put(&mut inner.op_parent, new.index(), block);
+        true
+    }
+
+    pub(crate) fn remove_op_from_block(&self, block: BlockId, op: OpId) -> bool {
+        let mut inner = self.0.write();
+        let Some(entry) = slab_get_mut(&mut inner.blocks, block.index()) else {
+            return false;
+        };
+        let operations = Arc::make_mut(entry).operations_mut();
+        let Some(position) = operations.iter().position(|id| *id == op) else {
+            return false;
+        };
+        operations.remove(position);
+        if let Some(slot) = inner.op_parent.get_mut(op.index()) {
+            *slot = None;
+        }
+        true
+    }
+
+    pub(crate) fn set_block_attr(
+        &self,
+        block: BlockId,
+        name: &str,
+        value: crate::attributes::AttributeValue,
+    ) {
+        let mut inner = self.0.write();
+        if let Some(entry) = slab_get_mut(&mut inner.blocks, block.index()) {
+            let attributes = Arc::make_mut(entry).attributes_mut();
+            match attributes.iter_mut().find(|a| a.name == name) {
+                Some(attribute) => attribute.value = value,
+                None => attributes.push(crate::attributes::NamedAttribute::new(name, value)),
+            }
+        }
+    }
+
     /// The block currently holding `op`, or `None` for an op not in any block (the
     /// root op, or one detached by a rewrite). Maintained by `Block`'s membership
     /// mutators; see [`ContextInstance::op_parent`].
     pub fn parent_block(&self, op: OpId) -> Option<BlockId> {
         slab_get(&self.0.read().op_parent, op.index()).copied()
-    }
-
-    pub(crate) fn set_op_parent(&self, op: OpId, block: BlockId) {
-        slab_put(&mut self.0.write().op_parent, op.index(), block);
-    }
-
-    pub(crate) fn clear_op_parent(&self, op: OpId) {
-        let mut inner = self.0.write();
-        if let Some(slot) = inner.op_parent.get_mut(op.index()) {
-            *slot = None;
-        }
     }
 
     /// The region currently holding `block`, or `None` for a detached block.

@@ -192,10 +192,7 @@ fn merge_single_predecessor(
             context.replace_value_uses(parameter.id(), argument);
         }
         rewriter.erase_op(&OperationRef::new(op, Some(block.clone()), None))?;
-        for moved in successor.op_ids() {
-            successor.remove_op(moved);
-            block.insert(block.len(), moved);
-        }
+        rewriter.splice_block(successor_id, block_id);
         context.get_region(region).remove_block(successor_id);
         return Ok(true);
     }

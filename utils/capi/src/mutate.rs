@@ -137,7 +137,7 @@ pub unsafe extern "C" fn tir_block_append_op(
         if !op_exists(ctx, op) {
             return false;
         }
-        block.insert(block.len(), OpId::from_number(op));
+        block.append(OpId::from_number(op));
         true
     })
 }

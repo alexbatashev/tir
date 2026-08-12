@@ -1,7 +1,5 @@
 use std::sync::Arc;
 
-use parking_lot::RwLock;
-
 use crate::{
     Context, ContextIterator, GetFromContext, OpId, Value,
     attributes::{AttributeValue, NamedAttribute},
@@ -11,18 +9,23 @@ use crate::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BlockId(u32);
 
-#[derive(Debug)]
+/// A basic block: a plain value living in the context's block slab, edited in
+/// place through [`Context`] under its write lock.
+///
+/// Like [`crate::OpInstance`], a handle handed out by [`Context::get_block`] is a
+/// snapshot: reads answer from the copy that was current when the handle was
+/// taken, while the mutators below always edit the live block. Re-read the block
+/// from the context to observe an edit.
+#[derive(Debug, Clone)]
 pub struct Block {
     id: BlockId,
     arguments: Vec<Value>,
-    operations: RwLock<Vec<OpId>>,
-    successors: RwLock<Vec<BlockId>>,
-    predecessors: RwLock<Vec<BlockId>>,
+    operations: Vec<OpId>,
     /// Discardable metadata scoped to this block (e.g. `fpmath`), printed in the
     /// block label.
-    attributes: RwLock<Vec<NamedAttribute>>,
-    /// Handle back to the owning context, used to keep its op-to-parent-block index
-    /// in step with every membership change below. Never held across a context lock.
+    attributes: Vec<NamedAttribute>,
+    /// Handle back to the owning context, which stores this block and performs
+    /// every edit below.
     context: ContextRef,
 }
 
@@ -49,21 +52,30 @@ impl Block {
         Self {
             id,
             arguments,
-            operations: RwLock::new(vec![]),
-            successors: RwLock::new(vec![]),
-            predecessors: RwLock::new(vec![]),
-            attributes: RwLock::new(vec![]),
+            operations: vec![],
+            attributes: vec![],
             context,
         }
     }
 
-    pub fn attributes(&self) -> Vec<NamedAttribute> {
-        self.attributes.read().clone()
+    pub(crate) fn operations_mut(&mut self) -> &mut Vec<OpId> {
+        &mut self.operations
+    }
+
+    pub(crate) fn arguments_mut(&mut self) -> &mut Vec<Value> {
+        &mut self.arguments
+    }
+
+    pub(crate) fn attributes_mut(&mut self) -> &mut Vec<NamedAttribute> {
+        &mut self.attributes
+    }
+
+    pub fn attributes(&self) -> &[NamedAttribute] {
+        &self.attributes
     }
 
     pub fn attr(&self, name: &str) -> Option<AttributeValue> {
         self.attributes
-            .read()
             .iter()
             .find(|a| a.name == name)
             .map(|a| a.value.clone())
@@ -71,11 +83,7 @@ impl Block {
 
     /// Set (or replace) a named attribute on this block.
     pub fn set_attr(&self, name: &str, value: AttributeValue) {
-        let mut attrs = self.attributes.write();
-        match attrs.iter_mut().find(|a| a.name == name) {
-            Some(attr) => attr.value = value,
-            None => attrs.push(NamedAttribute::new(name, value)),
-        }
+        self.context.upgrade().set_block_attr(self.id, name, value);
     }
 
     pub fn id(&self) -> BlockId {
@@ -87,71 +95,42 @@ impl Block {
     }
 
     pub fn len(&self) -> usize {
-        self.operations.read().len()
+        self.operations.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.operations.read().is_empty()
-    }
-
-    pub fn successors(&self) -> Vec<BlockId> {
-        self.successors.read().clone()
-    }
-
-    pub fn predecessors(&self) -> Vec<BlockId> {
-        self.predecessors.read().clone()
+        self.operations.is_empty()
     }
 
     pub fn insert(&self, index: usize, id: OpId) {
-        self.operations.write().insert(index, id);
-        self.context.upgrade().set_op_parent(id, self.id);
+        self.context.upgrade().insert_op(self.id, index, id);
+    }
+
+    /// Add `id` after every operation the block currently holds. Unlike
+    /// [`Block::insert`] this asks the live block for its end, so it is correct to
+    /// call in a loop through one handle.
+    pub fn append(&self, id: OpId) {
+        self.context.upgrade().append_op(self.id, id);
     }
 
     pub fn op_ids(&self) -> Vec<OpId> {
-        self.operations.read().clone()
+        self.operations.clone()
     }
 
     pub fn replace_op(&self, old: OpId, new: OpId) -> bool {
-        let replaced = {
-            let mut ops = self.operations.write();
-            match ops.iter().position(|id| *id == old) {
-                Some(position) => {
-                    ops[position] = new;
-                    true
-                }
-                None => false,
-            }
-        };
-        if replaced {
-            let context = self.context.upgrade();
-            context.clear_op_parent(old);
-            context.set_op_parent(new, self.id);
-        }
-        replaced
+        self.context
+            .upgrade()
+            .replace_op_in_block(self.id, old, new)
     }
 
     pub fn remove_op(&self, id: OpId) -> bool {
-        let removed = {
-            let mut ops = self.operations.write();
-            match ops.iter().position(|op_id| *op_id == id) {
-                Some(position) => {
-                    ops.remove(position);
-                    true
-                }
-                None => false,
-            }
-        };
-        if removed {
-            self.context.upgrade().clear_op_parent(id);
-        }
-        removed
+        self.context.upgrade().remove_op_from_block(self.id, id)
     }
 
     /// Returns true if a comes before b in the block, false otherwise
     pub fn is_before(&self, a: OpId, b: OpId) -> bool {
-        let ops = self.operations.read();
-        let a_pos = ops.iter().position(|op_id| *op_id == a);
-        let b_pos = ops.iter().position(|op_id| *op_id == b);
+        let a_pos = self.operations.iter().position(|op_id| *op_id == a);
+        let b_pos = self.operations.iter().position(|op_id| *op_id == b);
 
         if let (Some(a_pos), Some(b_pos)) = (a_pos, b_pos) {
             a_pos < b_pos
@@ -161,7 +140,7 @@ impl Block {
     }
 
     pub fn iter(&self, context: Context) -> ContextIterator<OpId> {
-        ContextIterator::new(context, self.operations.read().clone())
+        ContextIterator::new(context, self.operations.clone())
     }
 }
 

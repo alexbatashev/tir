@@ -466,7 +466,7 @@ mod tests {
             .attr("r", register)
             .build()
             .id();
-        block.insert(block.len(), op);
+        block.append(op);
     }
 
     // A vreg constrained by two classes over one file and view must end up in the
@@ -700,7 +700,7 @@ mod tests {
                 .build()
                 .id()
         };
-        block.insert(block.len(), id);
+        block.append(id);
     }
 
     // A fixed-register read protocol: `def P; def v1; use P; use v1`. `v1` is live
