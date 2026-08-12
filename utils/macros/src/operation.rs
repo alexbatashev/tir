@@ -53,6 +53,25 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
 
         let name_str = r.name.clone();
 
+        if r.variadic {
+            region_fields.push(quote! {
+               #name: Vec<tir::RegionId>
+            });
+            region_defaults.push(quote! {
+               #name: Vec::new()
+            });
+            region_builders.push(quote! {
+               pub fn #name(mut self, ids: Vec<tir::RegionId>) -> Self {
+                   self.#name = ids;
+                   self
+               }
+            });
+            region_fills.push(quote! {
+                regions.extend(self.#name.iter().copied());
+            });
+            continue;
+        }
+
         region_fields.push(quote! {
            #name: Option<tir::RegionId>
         });
@@ -536,7 +555,11 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         .iter()
         .map(|region| {
             let name = format_ident!("{}", region.name);
-            quote! { #name: Option<tir::RegionId> }
+            if region.variadic {
+                quote! { #name: Vec<tir::RegionId> }
+            } else {
+                quote! { #name: Option<tir::RegionId> }
+            }
         })
         .collect();
 
@@ -544,9 +567,13 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         .iter()
         .map(|region| {
             let name = format_ident!("{}", region.name);
-            quote! {
-                if let Some(region) = #name {
-                    builder = builder.#name(region);
+            if region.variadic {
+                quote! { builder = builder.#name(#name); }
+            } else {
+                quote! {
+                    if let Some(region) = #name {
+                        builder = builder.#name(region);
+                    }
                 }
             }
         })
@@ -1095,6 +1122,9 @@ struct Sem {
 struct Region {
     name: String,
     single_block: bool,
+    /// A `variadic: true` region declares a group of zero or more regions rather than
+    /// one, for an op whose arity is decided per instance (an n-ary conditional).
+    variadic: bool,
 }
 
 #[derive(Clone)]
@@ -1295,6 +1325,7 @@ fn get_regions(expr: &Expr) -> Option<Vec<Region>> {
                     Region {
                         name,
                         single_block: true,
+                        variadic: has_true_flag(&f.expr, "variadic"),
                     }
                 })
                 .collect(),
@@ -1302,6 +1333,17 @@ fn get_regions(expr: &Expr) -> Option<Vec<Region>> {
     } else {
         None
     }
+}
+
+/// Whether a `Region { .. }` declaration sets `flag: true`.
+fn has_true_flag(expr: &Expr, flag: &str) -> bool {
+    let Expr::Struct(s) = expr else {
+        return false;
+    };
+    s.fields.iter().any(|f| {
+        field_name(f) == flag
+            && matches!(&f.expr, Expr::Lit(lit) if matches!(&lit.lit, syn::Lit::Bool(b) if b.value))
+    })
 }
 
 #[derive(Clone)]
@@ -1397,7 +1439,9 @@ fn make_region_accessors(regions: &[Region]) -> proc_macro2::TokenStream {
     }
 
     let accessors = regions.iter().enumerate().map(|(index, region)| {
-        if region.single_block {
+        if region.variadic {
+            make_variadic_region_accessor(region, index)
+        } else if region.single_block {
             make_single_block_region_accessor(region, index)
         } else {
             make_region_accessor(region, index)
@@ -1413,6 +1457,17 @@ fn make_region_accessor(region: &Region, index: usize) -> proc_macro2::TokenStre
         pub fn #func_name(&self) -> std::sync::Arc<tir::Region> {
             use tir::Operation;
             self.regions().nth(#index).unwrap()
+        }
+    }
+}
+
+/// A `variadic` region group holds every region from its declaration position on, so it
+/// must be declared last.
+fn make_variadic_region_accessor(region: &Region, index: usize) -> proc_macro2::TokenStream {
+    let func_name = format_ident!("{}", region.name);
+    quote! {
+        pub fn #func_name(&self) -> &[tir::RegionId] {
+            &self.0.regions[#index..]
         }
     }
 }
@@ -1500,7 +1555,7 @@ fn make_generic_printer(
         quote! {}
     };
 
-    let regions = if regions.len() == 1 && regions[0].single_block {
+    let regions = if regions.len() == 1 && regions[0].single_block && !regions[0].variadic {
         make_single_block_region_printer(&regions[0], 0)
     } else {
         quote! {}
@@ -1565,19 +1620,20 @@ fn make_parser(
             quote! { (#name, #ty) }
         })
         .collect();
-    let (region_parsers, region_builders) = if regions.len() == 1 && regions[0].single_block {
-        let region_name = format_ident!("{}", regions[0].name);
-        (
-            quote! {
-               let #region_name = parser.parse_region(context)?.id();
-            },
-            quote! {
-                .#region_name(#region_name)
-            },
-        )
-    } else {
-        (quote! {}, quote! {})
-    };
+    let (region_parsers, region_builders) =
+        if regions.len() == 1 && regions[0].single_block && !regions[0].variadic {
+            let region_name = format_ident!("{}", regions[0].name);
+            (
+                quote! {
+                   let #region_name = parser.parse_region(context)?.id();
+                },
+                quote! {
+                    .#region_name(#region_name)
+                },
+            )
+        } else {
+            (quote! {}, quote! {})
+        };
 
     let operand_parsers: Vec<_> = operands
         .iter()

@@ -13,8 +13,8 @@ use crate::parse::common::Cursor;
 
 pub mod ops {
     pub use super::{
-        BreakOp, ConditionOp, ContinueOp, ForOp, IfOp, WhileOp, YieldOp, r#break, condition,
-        r#continue, r#for, r#if, r#while, r#yield,
+        BreakOp, ConditionOp, ContinueOp, ForOp, IfOp, SwitchOp, WhileOp, YieldOp, r#break,
+        condition, r#continue, r#for, r#if, switch, r#while, r#yield,
     };
 }
 
@@ -25,6 +25,7 @@ dialect! {
             ForOp,
             WhileOp,
             IfOp,
+            SwitchOp,
             ConditionOp,
             BreakOp,
             ContinueOp,
@@ -399,6 +400,187 @@ impl IfOp {
                 .condition(condition)
                 .then_body(then_body)
                 .else_body(else_body)
+                .result_types(result_types)
+                .build(),
+        ))
+    }
+}
+
+// An n-ary γ: the arm whose case value equals the integer predicate runs, and the last
+// arm — the default — runs when none does. The default arm is mandatory rather than
+// optional so the op is total: every predicate value selects exactly one arm, which is
+// what a value-producing switch needs to define its results and what `scf_to_cfg` needs
+// as the last destination of its comparison chain. A C `switch` without a `default:`
+// label lowers to an empty default arm.
+operation! {
+    SwitchOp {
+        name: "switch",
+        dialect: "scf",
+        format: "custom",
+        verifier: "true",
+        operands: O {
+            predicate: "crate::builtin::IntegerType",
+        },
+        attributes: A {
+            cases: "Array",
+        },
+        results: R {
+            results: "*AnyConstraint",
+        },
+        regions: R {
+            arms: Region {
+                single_block: true,
+                variadic: true,
+            }
+        },
+        interfaces: [Conditional],
+    }
+}
+
+impl SwitchOpBuilder {
+    pub fn cases(self, values: Vec<i64>) -> Self {
+        self.attr(
+            "cases",
+            tir::attributes::AttributeValue::Array(
+                values
+                    .into_iter()
+                    .map(tir::attributes::AttributeValue::Int)
+                    .collect(),
+            ),
+        )
+    }
+}
+
+impl tir::Conditional for SwitchOp {
+    fn decision(&self) -> ValueId {
+        self.predicate()
+    }
+
+    fn region_yields(&self, region: tir::RegionId) -> Vec<ValueId> {
+        let context = self.0.context.upgrade();
+        region_yielded_values(&context, region)
+    }
+
+    /// No arm is entered under a boolean fact about an existing value: an arm runs when
+    /// the predicate equals its case value, which [`Conditional::case_values`] reports.
+    fn guarded_regions(&self) -> Vec<(tir::RegionId, ValueId, bool)> {
+        vec![]
+    }
+
+    fn case_values(&self) -> Vec<(tir::RegionId, Option<i64>)> {
+        let cases = self.cases();
+        self.arms()
+            .iter()
+            .enumerate()
+            .map(|(index, &region)| (region, cases.get(index).copied()))
+            .collect()
+    }
+}
+
+impl tir::Verifiable for SwitchOp {
+    fn verify_impl(&self, context: &Context) -> Result<(), Error> {
+        let cases = self.cases();
+        let arms = self.arms();
+        if arms.len() != cases.len() + 1 {
+            return Err(Error::VerificationError(format!(
+                "scf.switch has {} case values but {} arms; every case needs an arm, plus a default",
+                cases.len(),
+                arms.len()
+            )));
+        }
+        for (index, case) in cases.iter().enumerate() {
+            if cases[..index].contains(case) {
+                return Err(Error::VerificationError(format!(
+                    "scf.switch case value {case} appears more than once"
+                )));
+            }
+        }
+
+        let result_types = self
+            .0
+            .results
+            .iter()
+            .map(|&r| context.get_value(r).ty())
+            .collect::<Vec<_>>();
+        for (index, &region) in arms.iter().enumerate() {
+            let label = match cases.get(index) {
+                Some(case) => format!("scf.switch case {case} arm"),
+                None => "scf.switch default arm".to_string(),
+            };
+            let block = context
+                .get_region(region)
+                .iter(context.clone())
+                .next()
+                .ok_or_else(|| Error::VerificationError(format!("{label} must contain a block")))?;
+            verify_single_block_region_has_terminator(context, block.clone(), &label)?;
+            verify_region_yield(context, block, &result_types, &label)?;
+        }
+        Ok(())
+    }
+}
+
+impl SwitchOp {
+    fn predicate(&self) -> ValueId {
+        self.operands()[0]
+    }
+
+    /// The case value selecting each non-default arm, in arm order.
+    fn cases(&self) -> Vec<i64> {
+        self.attributes()
+            .iter()
+            .find(|attr| attr.name == "cases")
+            .and_then(|attr| match &attr.value {
+                tir::attributes::AttributeValue::Array(items) => items
+                    .iter()
+                    .map(|item| match item {
+                        tir::attributes::AttributeValue::Int(value) => Some(*value),
+                        _ => None,
+                    })
+                    .collect::<Option<Vec<_>>>(),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    fn custom_print(&self, fmt: &mut tir::IRFormatter) -> Result<(), std::fmt::Error> {
+        let context = self.0.context.upgrade();
+        if !self.0.results.is_empty() {
+            print_value_list(fmt, &self.0.results)?;
+            fmt.write(" = ")?;
+        }
+        fmt.write(format!("scf.switch %{}", self.predicate().number()))?;
+        print_result_types(fmt, &context, &self.0.results)?;
+        for (index, case) in self.cases().iter().enumerate() {
+            fmt.write(format!(" case {case}"))?;
+            tir::region_format::print_op_region(fmt, &context, self, index)?;
+        }
+        fmt.write(" default")?;
+        tir::region_format::print_op_region(fmt, &context, self, self.0.regions.len() - 1)
+    }
+
+    fn custom_parse(
+        parser: &mut tir::parse::text::Parser,
+        context: &Context,
+    ) -> Result<Box<dyn Operation>, (tir::parse::Span, Error)> {
+        let predicate = parse_value_id(parser)?;
+        let result_types = parse_result_types(parser, context)?;
+        let mut cases = vec![];
+        let mut arms = vec![];
+        while parser.parse_token("case") {
+            let case = parser
+                .parse_number()
+                .ok_or_else(|| (parser.span(), Error::ExpectedToken("case value")))?;
+            cases.push(case);
+            arms.push(parser.parse_region(context)?.id());
+        }
+        expect_token(parser, "default")?;
+        arms.push(parser.parse_region(context)?.id());
+
+        Ok(Box::new(
+            SwitchOpBuilder::new(context)
+                .predicate(predicate)
+                .cases(cases)
+                .arms(arms)
                 .result_types(result_types)
                 .build(),
         ))
@@ -1106,5 +1288,27 @@ mod tests {
         builder.insert(builtin_ops::r#return(&context, tir::Operand::none()).build());
 
         assert!(func.verify(&context).is_ok());
+    }
+
+    #[test]
+    fn switch_reads_as_an_n_ary_conditional() {
+        let context = Context::with_default_dialects();
+        let predicate = context.create_value(IntegerType::new(&context, 32), None);
+        let arms = vec![
+            terminated_region(&context),
+            terminated_region(&context),
+            terminated_region(&context),
+        ];
+        let switch = SwitchOpBuilder::new(&context)
+            .predicate(predicate.id())
+            .cases(vec![3, 7])
+            .arms(arms.clone())
+            .build();
+
+        assert_eq!(switch.decision(), predicate.id());
+        assert_eq!(
+            switch.case_values(),
+            vec![(arms[0], Some(3)), (arms[1], Some(7)), (arms[2], None),]
+        );
     }
 }

@@ -53,6 +53,17 @@ pub trait Conditional {
     /// (`true` => 1, `false` => 0).
     fn guarded_regions(&self) -> Vec<(RegionId, ValueId, bool)>;
 
+    /// The n-ary reading of the selection: for each region, in region order, the value
+    /// of [`Conditional::decision`] that selects it, or `None` for the region that runs
+    /// when no case matches. A two-armed conditional decided by a boolean reads through
+    /// its guards — the `true` arm is case 1, the `false` arm is the default.
+    fn case_values(&self) -> Vec<(RegionId, Option<i64>)> {
+        self.guarded_regions()
+            .into_iter()
+            .map(|(region, _, taken)| (region, taken.then_some(1)))
+            .collect()
+    }
+
     fn verify_interface(
         &self,
         _this: &dyn Operation,

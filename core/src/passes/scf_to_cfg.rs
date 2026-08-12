@@ -29,7 +29,11 @@ impl ScfToCfgPass {
         for block in context.get_region(region).iter(context.clone()) {
             for op_id in block.op_ids() {
                 let op = context.get_op(op_id);
-                if op.is::<scf::ForOp>() || op.is::<scf::WhileOp>() || op.is::<scf::IfOp>() {
+                if op.is::<scf::ForOp>()
+                    || op.is::<scf::WhileOp>()
+                    || op.is::<scf::IfOp>()
+                    || op.is::<scf::SwitchOp>()
+                {
                     return Some((block, op));
                 }
             }
@@ -336,6 +340,101 @@ impl ScfToCfgPass {
         )
     }
 
+    /// Lower `scf.switch` to a chain of equality comparisons: each case block tests the
+    /// predicate and branches to its arm, the last test falling through to the default
+    /// arm, which is why the op always has one.
+    fn lower_switch(
+        context: &Context,
+        rewriter: &mut Rewriter,
+        function_region: RegionId,
+        block: Arc<Block>,
+        op: Arc<crate::OpInstance>,
+        loop_targets: &HashMap<ValueId, LoopTargets>,
+    ) -> Result<(), PassError> {
+        let predicate = op.operands[0];
+        let mut arms = op
+            .clone()
+            .as_interface::<dyn crate::Conditional>()
+            .ok_or_else(|| {
+                PassError::InvalidRuleSet("scf.switch must read as a conditional".to_string())
+            })?
+            .case_values();
+        let Some((default_region, None)) = arms.pop() else {
+            return Err(PassError::InvalidRuleSet(
+                "scf.switch must end with a default arm".to_string(),
+            ));
+        };
+        let default_block = Self::move_body(context, default_region);
+        let cases = arms
+            .into_iter()
+            .map(|(region, case)| {
+                let case = case.ok_or_else(|| {
+                    PassError::InvalidRuleSet(
+                        "scf.switch arm before the default needs a case value".to_string(),
+                    )
+                })?;
+                Ok((Self::move_body(context, region), case))
+            })
+            .collect::<Result<Vec<_>, PassError>>()?;
+        let continuation = Self::split_after(context, rewriter, &block, &op);
+        let region = context.get_region(function_region);
+        let predicate_type = context.get_value(predicate).ty();
+
+        Self::erase(rewriter, &block, op)?;
+        let mut current = block;
+        for (index, (arm, case)) in cases.iter().enumerate() {
+            let last = index + 1 == cases.len();
+            let next = if last {
+                default_block.clone()
+            } else {
+                context.create_block(vec![])
+            };
+            let mut builder = IRBuilder::new(current);
+            let expected = builder
+                .insert(b::constant(context, *case, predicate_type).build())
+                .result();
+            let matches = builder
+                .insert(
+                    b::CmpIOpBuilder::new(context)
+                        .lhs(predicate)
+                        .rhs(expected)
+                        .predicate("eq")
+                        .result_type(IntegerType::new(context, 1))
+                        .build(),
+                )
+                .result();
+            builder
+                .insert(b::cond_br(context, matches, vec![], vec![], arm.id(), next.id()).build());
+            region.add_block(arm.id());
+            if !last {
+                region.add_block(next.id());
+            }
+            current = next;
+        }
+        if cases.is_empty() {
+            IRBuilder::new(current).insert(b::br(context, vec![], default_block.id()).build());
+        }
+        region.add_block(default_block.id());
+        region.add_block(continuation.id());
+
+        for (arm, _) in &cases {
+            Self::replace_terminator_with_branch(
+                context,
+                rewriter,
+                arm,
+                continuation.id(),
+                loop_targets,
+            )?;
+        }
+        Self::replace_terminator_with_branch(
+            context,
+            rewriter,
+            &default_block,
+            continuation.id(),
+            loop_targets,
+        )
+    }
+
     fn lower_one(
         context: &Context,
         rewriter: &mut Rewriter,
@@ -348,6 +447,8 @@ impl ScfToCfgPass {
             Self::lower_while(context, rewriter, function_region, block, op, loop_targets)
         } else if op.clone().as_op::<scf::ForOp>().is_some() {
             Self::lower_for(context, rewriter, function_region, block, op, loop_targets)
+        } else if op.clone().as_op::<scf::SwitchOp>().is_some() {
+            Self::lower_switch(context, rewriter, function_region, block, op, loop_targets)
         } else {
             Self::lower_if(context, rewriter, function_region, block, op, loop_targets)
         }

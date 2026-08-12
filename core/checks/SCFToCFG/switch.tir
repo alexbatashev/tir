@@ -1,0 +1,30 @@
+// RUN: tir opt --pass builtin.func(scf-to-cfg) %s | filecheck %s
+
+module {
+  func @select(%0: !i32) -> !i32 {
+    %1 = scf.switch %0 -> !i32 case 1 {
+      %2 = constant {value = 10} : !i32
+      scf.yield %2
+    }
+    case 2 {
+      %3 = constant {value = 20} : !i32
+      scf.yield %3
+    }
+    default {
+      %4 = constant {value = 30} : !i32
+      scf.yield %4
+    }
+    return %1
+  }
+  module_end
+}
+
+// CHECK-NOT: scf.
+// CHECK: constant {value = 1}
+// CHECK: cmpi
+// CHECK: cond_br %{{[0-9]+}}, ^bb{{[0-9]+}}, ^bb{{[0-9]+}}
+// CHECK: constant {value = 2}
+// CHECK: cmpi
+// CHECK: cond_br %{{[0-9]+}}, ^bb{{[0-9]+}}, ^bb{{[0-9]+}}
+// CHECK: %[[JOIN:[0-9]+]]: !i32
+// CHECK: return %[[JOIN]]

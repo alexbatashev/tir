@@ -1,0 +1,19 @@
+// RUN: tir opt --pass builtin.func(scf-to-cfg) %s | filecheck %s
+
+// A switch with no case arms always runs its default arm: the dispatch chain is empty,
+// the entry block branches straight to it, and block folding leaves one block behind.
+
+module {
+  func @only_default(%0: !i32) {
+    scf.switch %0 default {
+      scf.yield
+    }
+    return
+  }
+  module_end
+}
+
+// CHECK-NOT: scf.
+// CHECK-NOT: cmpi
+// CHECK: func @only_default
+// CHECK-NEXT: return
