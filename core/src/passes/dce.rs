@@ -10,11 +10,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::analysis::{DefUse, DominatorTree, RegRef, op_regs};
+use crate::analysis::{DefUse, RegRef, op_regs};
 use crate::backend::SymbolOp;
 use crate::{
     AnalysisManager, ConstantLike, Context, MemoryWrite, OpInstance, OperationRef, Pass, PassError,
-    PassTarget, PreservedAnalyses, Rewriter, Terminator, builtin::FuncOp,
+    PassTarget, Rewriter, Terminator, builtin::FuncOp,
 };
 
 #[derive(Default)]
@@ -45,9 +45,9 @@ impl Pass for DeadCodeEliminationPass {
         context: &Context,
         rewriter: &mut Rewriter,
         analyses: &AnalysisManager,
-    ) -> Result<PreservedAnalyses, PassError> {
+    ) -> Result<(), PassError> {
         if op.as_op::<FuncOp>().is_none() && op.as_op::<SymbolOp>().is_none() {
-            return Ok(PreservedAnalyses::all());
+            return Ok(());
         }
 
         let defuse = analyses.get::<DefUse>(context, op.op().id);
@@ -55,7 +55,6 @@ impl Pass for DeadCodeEliminationPass {
         let mut use_counts = defuse.use_counts();
         // LIFO over walk order visits consumers before their producers.
         let mut queue: Vec<_> = defuse.ops().to_vec();
-        let mut erased = false;
 
         while let Some(op_id) = queue.pop() {
             if !context.has_operation(op_id) {
@@ -68,7 +67,6 @@ impl Pass for DeadCodeEliminationPass {
 
             let block = instance.parent_block().map(|b| context.get_block(b));
             rewriter.erase_op(&OperationRef::new(instance.clone(), block, None))?;
-            erased = true;
 
             for used in op_regs(&instance).uses {
                 let RegRef::Virtual { id, .. } = used else {
@@ -83,12 +81,7 @@ impl Pass for DeadCodeEliminationPass {
             }
         }
 
-        if !erased {
-            return Ok(PreservedAnalyses::all());
-        }
-        // Only non-terminator ops without regions were erased, so the block
-        // graph — and with it dominance — is intact.
-        Ok(PreservedAnalyses::none().preserve::<DominatorTree>())
+        Ok(())
     }
 }
 

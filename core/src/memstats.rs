@@ -101,6 +101,16 @@ impl PassScope {
     }
 }
 
+/// How many analysis results the pass pipeline is holding after a pass. Entries
+/// are replaced when the IR they describe changes, so this counts live results,
+/// not stale ones.
+pub fn analysis_census(pass: &'static str, entries: usize) {
+    if !enabled() {
+        return;
+    }
+    eprintln!("tir-mem: analyses after={pass} entries={entries}");
+}
+
 /// Node and class counts of a view, plus the bytes its arenas hold: node structs
 /// inline (children and hash-cons indices excluded) and a flat per-class charge
 /// for the class map. An estimate for ranking, not an allocator total.

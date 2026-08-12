@@ -2,7 +2,7 @@
 //! symbol per name, so by lowering time every overload must have been mangled
 //! to a name of its own.
 
-use crate::analysis::{AnalysisManager, PreservedAnalyses};
+use crate::analysis::AnalysisManager;
 use crate::symbol_table::format_symbol;
 use crate::{
     Context, OperationRef, Pass, PassError, PassTarget, Rewriter, SymbolTable, builtin::ModuleOp,
@@ -34,7 +34,7 @@ impl Pass for CheckUniqueSymbolsPass {
         context: &Context,
         _rewriter: &mut Rewriter,
         analyses: &AnalysisManager,
-    ) -> Result<PreservedAnalyses, PassError> {
+    ) -> Result<(), PassError> {
         let table = analyses.get::<SymbolTable>(context, op.op().id);
         let mut overloaded: Vec<_> = table
             .names()
@@ -53,6 +53,6 @@ impl Pass for CheckUniqueSymbolsPass {
                 candidates.join(", ")
             )));
         }
-        Ok(PreservedAnalyses::all())
+        Ok(())
     }
 }

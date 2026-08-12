@@ -6,10 +6,7 @@
 use std::collections::HashMap;
 
 use tir::attributes::{AttributeRole, AttributeValue, RegisterAttr};
-use tir::{
-    AnalysisManager, Context, OperationRef, Pass, PassError, PassTarget, PreservedAnalyses,
-    Rewriter, ValueId,
-};
+use tir::{AnalysisManager, Context, OperationRef, Pass, PassError, PassTarget, Rewriter, ValueId};
 
 use crate::backend::abi::{
     GroupRollback, align_argument_group, reserve_indirect_result_argument, value_kind,
@@ -68,7 +65,7 @@ impl Pass for TiedOperandLoweringPass {
         context: &Context,
         rewriter: &mut Rewriter,
         _analyses: &AnalysisManager,
-    ) -> Result<PreservedAnalyses, PassError> {
+    ) -> Result<(), PassError> {
         for block_id in symbol_body_blocks(context, op) {
             for op_id in context.get_block(block_id).op_ids() {
                 let op = context.get_op(op_id);
@@ -114,7 +111,7 @@ impl Pass for TiedOperandLoweringPass {
                 context.set_op_attributes(op_id, attrs);
             }
         }
-        Ok(PreservedAnalyses::none())
+        Ok(())
     }
 }
 
@@ -161,7 +158,7 @@ impl Pass for BlockArgLoweringPass {
         context: &Context,
         rewriter: &mut Rewriter,
         _analyses: &AnalysisManager,
-    ) -> Result<PreservedAnalyses, PassError> {
+    ) -> Result<(), PassError> {
         let blocks = symbol_body_blocks(context, op);
         let info = self.target.register_info();
         for &block_id in &blocks {
@@ -229,7 +226,7 @@ impl Pass for BlockArgLoweringPass {
                 context.set_op_operands(op_id, Vec::new());
             }
         }
-        Ok(PreservedAnalyses::none())
+        Ok(())
     }
 }
 
@@ -291,11 +288,11 @@ impl Pass for AbiPrecolorPass {
         context: &Context,
         rewriter: &mut Rewriter,
         _analyses: &AnalysisManager,
-    ) -> Result<PreservedAnalyses, PassError> {
+    ) -> Result<(), PassError> {
         let info = self.target.register_info();
         let blocks = symbol_body_blocks(context, op);
         if blocks.is_empty() {
-            return Ok(PreservedAnalyses::all());
+            return Ok(());
         }
 
         // Argument vregs: the symbol's `arg_regs` attribute carries each argument's
@@ -446,7 +443,7 @@ impl Pass for AbiPrecolorPass {
             context.set_op_attributes(op.op().id, attrs);
         }
 
-        Ok(PreservedAnalyses::none())
+        Ok(())
     }
 }
 

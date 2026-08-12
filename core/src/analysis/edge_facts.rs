@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::{
     BlockId, BranchGuard, Context, OpId, Terminator, ValueId,
-    analysis::{Analysis, AnalysisManager, DominatorTree, PreservedAnalyses},
+    analysis::{Analysis, AnalysisManager, DominatorTree},
 };
 
 /// The fact a guarded CFG edge carries: on this edge, `condition` is known to
@@ -166,11 +166,6 @@ fn collect_cfg(context: &Context, root: OpId) -> Cfg {
 impl Analysis for DominatingEdgeFacts {
     fn build(analyses: &AnalysisManager, context: &Context, op: OpId) -> Self {
         Self::compute(context, op, &analyses.get::<DominatorTree>(context, op))
-    }
-
-    /// Derived from dominance, so it dies with it.
-    fn is_invalidated(&self, preserved: &PreservedAnalyses) -> bool {
-        !preserved.is_preserved::<Self>() || !preserved.is_preserved::<DominatorTree>()
     }
 }
 

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tir::analysis::{AnalysisManager, PreservedAnalyses};
+use tir::analysis::AnalysisManager;
 use tir::attributes::AttributeValue;
 use tir::builtin::{
     BranchOp, CondBranchOp, FuncOp, IntegerType, ModuleOp, ReturnOp, TokenType, ops as b,
@@ -213,14 +213,14 @@ impl Pass for LowerCirStructsPass {
         context: &Context,
         rewriter: &mut Rewriter,
         _analyses: &AnalysisManager,
-    ) -> Result<PreservedAnalyses, PassError> {
+    ) -> Result<(), PassError> {
         if operation.as_op::<ModuleOp>().is_none() {
-            return Ok(PreservedAnalyses::all());
+            return Ok(());
         }
         let descendants = Self::descendants(context, operation.op());
         let layouts = Self::layouts(&descendants);
         if layouts.is_empty() {
-            return Ok(PreservedAnalyses::all());
+            return Ok(());
         }
 
         for target in &descendants {
@@ -272,7 +272,7 @@ impl Pass for LowerCirStructsPass {
                 rewriter.erase_op(&target)?;
             }
         }
-        Ok(PreservedAnalyses::none())
+        Ok(())
     }
 }
 
@@ -1049,13 +1049,12 @@ impl Pass for LowerCirControlFlowPass {
         context: &Context,
         rewriter: &mut Rewriter,
         _analyses: &AnalysisManager,
-    ) -> Result<PreservedAnalyses, PassError> {
+    ) -> Result<(), PassError> {
         if op.as_op::<FuncOp>().is_none() {
-            return Ok(PreservedAnalyses::all());
+            return Ok(());
         }
         let function_region = op.op().regions[0];
         let mut loop_targets = HashMap::new();
-        let mut changed = false;
         while let Some((block, control)) = Self::next_control_op_in_region(context, function_region)
         {
             let structured = if control.clone().as_op::<cir::WhileOp>().is_some() {
@@ -1086,12 +1085,7 @@ impl Pass for LowerCirControlFlowPass {
                     &mut loop_targets,
                 )?;
             }
-            changed = true;
         }
-        Ok(if changed {
-            PreservedAnalyses::none()
-        } else {
-            PreservedAnalyses::all()
-        })
+        Ok(())
     }
 }

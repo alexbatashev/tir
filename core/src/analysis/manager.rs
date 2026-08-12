@@ -1,20 +1,22 @@
-//! Op-keyed analysis caching with MLIR-style invalidation.
+//! Op-keyed analysis caching, invalidated by version stamps.
 //!
 //! An [`Analysis`] is any type buildable from the IR rooted at an operation.
 //! The [`AnalysisManager`] caches results per `(root op, analysis type)` and
 //! hands them out as shared [`Rc`]s; an analysis fetches its dependencies
 //! through the manager, so they are computed once and shared.
 //!
-//! Invalidation follows MLIR: after a pass runs, everything it did not
-//! explicitly claim in its returned [`PreservedAnalyses`] is dropped from the
-//! cache. An analysis whose validity also hinges on another analysis overrides
-//! [`Analysis::is_invalidated`] to require its dependencies preserved too.
-//! Invalidation is whole-cache rather than per-op: a pass mutating one
-//! function drops results for every op, trading precision for simplicity.
+//! A cached result records the [`Context::op_version`] it was built at and is
+//! valid exactly while that version still stands. Since every structural edit
+//! bumps the versions of the edited op and all of its ancestors, an analysis
+//! keyed on a function root goes stale on any edit anywhere inside it, and on no
+//! other edit. Dependencies need no bookkeeping: an analysis and everything it
+//! built through the manager share the op, hence the version. Each
+//! `(op, analysis)` holds at most one entry, replaced in place when it goes
+//! stale, so stale results never accumulate.
 
 use std::any::{Any, TypeId};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::{Context, OpId};
@@ -25,59 +27,12 @@ pub trait Analysis: Sized + 'static {
     /// Build the analysis for the IR rooted at `op`. Fetch dependencies through
     /// `analyses` so they are cached and shared.
     fn build(analyses: &AnalysisManager, context: &Context, op: OpId) -> Self;
-
-    /// Whether a cached result went stale given what a pass preserved. The
-    /// default survives only when this analysis itself was preserved; override
-    /// to additionally require dependencies.
-    fn is_invalidated(&self, preserved: &PreservedAnalyses) -> bool {
-        !preserved.is_preserved::<Self>()
-    }
-}
-
-/// The analyses a pass left intact, reported from [`crate::Pass::run`]. Start
-/// from [`Self::none`] and [`Self::preserve`] what the pass provably kept
-/// valid, or return [`Self::all`] when the IR was not touched.
-#[derive(Default)]
-pub struct PreservedAnalyses {
-    all: bool,
-    preserved: HashSet<TypeId>,
-}
-
-impl PreservedAnalyses {
-    /// Nothing survives: the safe report for any pass that mutated the IR.
-    pub fn none() -> Self {
-        Self::default()
-    }
-
-    /// Everything survives: the report for a pass that changed nothing.
-    pub fn all() -> Self {
-        Self {
-            all: true,
-            preserved: HashSet::new(),
-        }
-    }
-
-    /// Mark `A` as still valid.
-    pub fn preserve<A: Analysis>(mut self) -> Self {
-        self.preserved.insert(TypeId::of::<A>());
-        self
-    }
-
-    /// Whether the pass reported that it left the IR alone.
-    pub fn preserves_all(&self) -> bool {
-        self.all
-    }
-
-    pub fn is_preserved<A: Analysis>(&self) -> bool {
-        self.all || self.preserved.contains(&TypeId::of::<A>())
-    }
 }
 
 struct CacheEntry {
     result: Rc<dyn Any>,
-    /// Monomorphized `A::is_invalidated`, so invalidation can consult the
-    /// type-erased entry.
-    is_invalidated: fn(&dyn Any, &PreservedAnalyses) -> bool,
+    /// The op version this result describes.
+    version: u32,
 }
 
 /// Caches analysis results per `(root op, analysis type)` for one pass-manager
@@ -95,62 +50,64 @@ impl AnalysisManager {
         Self::default()
     }
 
-    /// The analysis for `op`, computed on first request.
+    /// The analysis for `op`, computed on first request and after any edit to
+    /// `op`'s subtree.
     pub fn get<A: Analysis>(&self, context: &Context, op: impl Into<OpId>) -> Rc<A> {
         let op = op.into();
-        let key = (op, TypeId::of::<A>());
-        if let Some(entry) = self.cache.borrow().get(&key) {
-            return entry
-                .result
-                .clone()
-                .downcast()
-                .expect("cache entry type matches its key");
+        let version = context.op_version(op);
+        if let Some(result) = self.lookup::<A>(op, version) {
+            return result;
         }
 
         // Built without holding the borrow so `build` can fetch dependencies.
         let result = Rc::new(A::build(self, context, op));
+        // `build` may have edited nothing, but re-read the version rather than
+        // trusting the pre-build one.
         self.cache.borrow_mut().insert(
-            key,
+            (op, TypeId::of::<A>()),
             CacheEntry {
                 result: result.clone(),
-                is_invalidated: |result, preserved| {
-                    result
-                        .downcast_ref::<A>()
-                        .expect("cache entry type matches its key")
-                        .is_invalidated(preserved)
-                },
+                version: context.op_version(op),
             },
         );
         result
     }
 
-    /// The analysis for `op` if it is already cached; never computes.
-    pub fn get_cached<A: Analysis>(&self, op: impl Into<OpId>) -> Option<Rc<A>> {
-        let key = (op.into(), TypeId::of::<A>());
-        self.cache.borrow().get(&key).map(|entry| {
+    /// The analysis for `op` if a current result is cached; never computes.
+    pub fn get_cached<A: Analysis>(&self, context: &Context, op: impl Into<OpId>) -> Option<Rc<A>> {
+        let op = op.into();
+        self.lookup::<A>(op, context.op_version(op))
+    }
+
+    /// The cached result for `op` at `version`, dropping it if it describes an
+    /// older version.
+    fn lookup<A: Analysis>(&self, op: OpId, version: u32) -> Option<Rc<A>> {
+        let key = (op, TypeId::of::<A>());
+        let mut cache = self.cache.borrow_mut();
+        let entry = cache.get(&key)?;
+        if entry.version != version {
+            cache.remove(&key);
+            return None;
+        }
+        Some(
             entry
                 .result
                 .clone()
                 .downcast()
-                .expect("cache entry type matches its key")
-        })
+                .expect("cache entry type matches its key"),
+        )
     }
 
-    /// Drop every cached result invalidated under `preserved`.
-    pub fn invalidate(&self, preserved: &PreservedAnalyses) {
-        if preserved.all {
-            return;
-        }
-        self.cache
-            .borrow_mut()
-            .retain(|_, entry| !(entry.is_invalidated)(entry.result.as_ref(), preserved));
+    /// How many results the cache holds, for the `TIR_MEM_STATS` census.
+    pub fn cached_count(&self) -> usize {
+        self.cache.borrow().len()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Operation, builtin::ops};
+    use crate::{Operand, Operation, builtin::ops};
 
     struct Simple;
 
@@ -160,7 +117,8 @@ mod tests {
         }
     }
 
-    /// Depends on [`Simple`]: built through the manager, invalidated with it.
+    /// Depends on [`Simple`]: built through the manager, so both are keyed on the
+    /// same op version and go stale together.
     struct Dependent;
 
     impl Analysis for Dependent {
@@ -168,14 +126,21 @@ mod tests {
             analyses.get::<Simple>(context, op);
             Dependent
         }
-
-        fn is_invalidated(&self, preserved: &PreservedAnalyses) -> bool {
-            !preserved.is_preserved::<Self>() || !preserved.is_preserved::<Simple>()
-        }
     }
 
     fn test_op(context: &Context) -> OpId {
         ops::module(context, None).build().id()
+    }
+
+    /// Appends an op to `module`'s body, bumping its version.
+    fn edit(context: &Context, module: OpId) {
+        let body = context.get_op(module).regions[0];
+        let block = context
+            .get_region(body)
+            .iter(context.clone())
+            .next()
+            .expect("module has an entry block");
+        block.append(ops::r#return(context, Operand::none()).build().id());
     }
 
     #[test]
@@ -196,39 +161,66 @@ mod tests {
         let op = test_op(&context);
         let am = AnalysisManager::new();
 
-        assert!(am.get_cached::<Simple>(op).is_none());
+        assert!(am.get_cached::<Simple>(&context, op).is_none());
         let built = am.get::<Simple>(&context, op);
-        assert!(Rc::ptr_eq(&built, &am.get_cached::<Simple>(op).unwrap()));
+        assert!(Rc::ptr_eq(
+            &built,
+            &am.get_cached::<Simple>(&context, op).unwrap()
+        ));
     }
 
     #[test]
-    fn invalidation_respects_preserved_set() {
+    fn an_edit_makes_the_cached_analysis_stale() {
         let context = Context::with_default_dialects();
         let op = test_op(&context);
         let am = AnalysisManager::new();
         let first = am.get::<Simple>(&context, op);
 
-        am.invalidate(&PreservedAnalyses::all());
-        assert!(Rc::ptr_eq(&first, &am.get::<Simple>(&context, op)));
+        edit(&context, op);
 
-        am.invalidate(&PreservedAnalyses::none().preserve::<Simple>());
-        assert!(Rc::ptr_eq(&first, &am.get::<Simple>(&context, op)));
-
-        am.invalidate(&PreservedAnalyses::none());
-        assert!(am.get_cached::<Simple>(op).is_none());
+        assert!(am.get_cached::<Simple>(&context, op).is_none());
+        assert!(!Rc::ptr_eq(&first, &am.get::<Simple>(&context, op)));
     }
 
     #[test]
-    fn dependency_populates_cache_and_invalidates_together() {
+    fn an_edit_elsewhere_leaves_the_cached_analysis_alone() {
+        let context = Context::with_default_dialects();
+        let op = test_op(&context);
+        let other = test_op(&context);
+        let am = AnalysisManager::new();
+        let first = am.get::<Simple>(&context, op);
+
+        edit(&context, other);
+
+        assert!(Rc::ptr_eq(&first, &am.get::<Simple>(&context, op)));
+    }
+
+    #[test]
+    fn a_dependency_goes_stale_with_its_dependent() {
         let context = Context::with_default_dialects();
         let op = test_op(&context);
         let am = AnalysisManager::new();
 
         am.get::<Dependent>(&context, op);
-        assert!(am.get_cached::<Simple>(op).is_some());
+        assert!(am.get_cached::<Simple>(&context, op).is_some());
 
-        // Preserving the dependent alone is not enough: its dependency died.
-        am.invalidate(&PreservedAnalyses::none().preserve::<Dependent>());
-        assert!(am.get_cached::<Dependent>(op).is_none());
+        edit(&context, op);
+
+        assert!(am.get_cached::<Dependent>(&context, op).is_none());
+        assert!(am.get_cached::<Simple>(&context, op).is_none());
+    }
+
+    #[test]
+    fn stale_entries_do_not_accumulate() {
+        let context = Context::with_default_dialects();
+        let op = test_op(&context);
+        let am = AnalysisManager::new();
+
+        for _ in 0..8 {
+            am.get::<Simple>(&context, op);
+            edit(&context, op);
+        }
+
+        assert_eq!(am.cached_count(), 1);
     }
 }

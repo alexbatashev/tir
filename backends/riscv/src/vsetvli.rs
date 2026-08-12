@@ -14,10 +14,7 @@
 use tir::attributes::{AttributeValue, RegisterAttr};
 use tir::backend::{SymbolOp, VirtualCallOp, VirtualIndirectCallOp};
 use tir::builtin::IntegerType;
-use tir::{
-    AnalysisManager, Context, OpId, OperationRef, Pass, PassError, PassTarget, PreservedAnalyses,
-    Rewriter,
-};
+use tir::{AnalysisManager, Context, OpId, OperationRef, Pass, PassError, PassTarget, Rewriter};
 
 use crate::{AddImmOpBuilder, VSetIVliOp, VSetIVliOpBuilder, VSetVliOp, VSetVliOpBuilder};
 
@@ -212,9 +209,9 @@ impl Pass for InsertVsetvliPass {
         context: &Context,
         rewriter: &mut Rewriter,
         _analyses: &AnalysisManager,
-    ) -> Result<PreservedAnalyses, PassError> {
+    ) -> Result<(), PassError> {
         let Some(&region_id) = op.op().regions.first() else {
-            return Ok(PreservedAnalyses::all());
+            return Ok(());
         };
         let blocks: Vec<_> = context
             .get_region(region_id)
@@ -222,7 +219,6 @@ impl Pass for InsertVsetvliPass {
             .map(|b| b.id())
             .collect();
 
-        let mut changed = false;
         for block_id in blocks {
             // Unknown at block entry (no cross-block propagation yet) and after
             // calls, which may reconfigure the unit.
@@ -307,7 +303,6 @@ impl Pass for InsertVsetvliPass {
                     }
                     if rewrote {
                         context.set_op_attributes(op_id, attrs);
-                        changed = true;
                     }
                 }
                 let vtypei = vtypei_for(sew, lmul)?;
@@ -323,15 +318,10 @@ impl Pass for InsertVsetvliPass {
                     keys: vec![key],
                     vtypei,
                 });
-                changed = true;
             }
         }
 
-        if changed {
-            Ok(PreservedAnalyses::none())
-        } else {
-            Ok(PreservedAnalyses::all())
-        }
+        Ok(())
     }
 }
 

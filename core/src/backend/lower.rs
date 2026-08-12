@@ -4,10 +4,7 @@
 //! earlier stages (wide constants before register allocation; `vret`/`vbr`
 //! after).
 
-use tir::{
-    AnalysisManager, Context, OperationRef, Pass, PassError, PassTarget, PreservedAnalyses,
-    Rewriter, TypeId,
-};
+use tir::{AnalysisManager, Context, OperationRef, Pass, PassError, PassTarget, Rewriter, TypeId};
 
 use crate::backend::isel::OpLowering;
 use crate::backend::regalloc::RegClassId;
@@ -227,12 +224,12 @@ impl Pass for OpLoweringPass {
         context: &Context,
         rewriter: &mut Rewriter,
         _analyses: &AnalysisManager,
-    ) -> Result<PreservedAnalyses, PassError> {
+    ) -> Result<(), PassError> {
         for lowering in &self.lowerings {
             if lowering(context, op, rewriter)? {
-                return Ok(PreservedAnalyses::none());
+                return Ok(());
             }
         }
-        Ok(PreservedAnalyses::all())
+        Ok(())
     }
 }

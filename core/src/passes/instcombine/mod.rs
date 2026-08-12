@@ -24,7 +24,7 @@ use crate::analysis::{DominatingEdgeFacts, DominatorTree, GSA};
 use crate::graph::Dag;
 use crate::{
     AnalysisManager, BlockId, Conditional, ConstantLike, Context, OpId, OperationRef, Pass,
-    PassError, PassTarget, PreservedAnalyses, RegionId, Rewriter, TypeId, ValueId,
+    PassError, PassTarget, RegionId, Rewriter, TypeId, ValueId,
     builtin::{FuncOp, ops},
     utils::APInt,
 };
@@ -62,9 +62,9 @@ impl Pass for InstCombinePass {
         context: &Context,
         rewriter: &mut Rewriter,
         analyses: &AnalysisManager,
-    ) -> Result<PreservedAnalyses, PassError> {
+    ) -> Result<(), PassError> {
         if op.as_op::<FuncOp>().is_none() {
-            return Ok(PreservedAnalyses::all());
+            return Ok(());
         }
         let root = op.op().id;
         let seeded = seed::seed(context, root, &analyses.get::<GSA>(context, root));
@@ -82,7 +82,7 @@ impl Pass for InstCombinePass {
         driver.process_region(body, rewriter)?;
         // Rewrites erase and insert ops within blocks but never touch the block
         // graph, so dominance survives; the value graph does not.
-        Ok(PreservedAnalyses::none().preserve::<DominatorTree>())
+        Ok(())
     }
 }
 

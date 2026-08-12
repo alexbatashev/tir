@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crate::{
     BlockId, BranchGuard, BranchTerminator, Conditional, Context, LoopLike, OpId, Terminator,
     TokenScope, ValueId,
-    analysis::{Analysis, AnalysisManager, DominatorTree, PreservedAnalyses},
+    analysis::{Analysis, AnalysisManager, DominatorTree},
     builtin::TokenType,
     graph::{Dag, GenericDag, MutDag, NodeId},
 };
@@ -134,11 +134,6 @@ impl GSA {
 impl Analysis for GSA {
     fn build(analyses: &AnalysisManager, context: &Context, op: OpId) -> Self {
         Self::with_dom(context, op, &analyses.get::<DominatorTree>(context, op))
-    }
-
-    /// Derived from dominance, so it dies with it.
-    fn is_invalidated(&self, preserved: &PreservedAnalyses) -> bool {
-        !preserved.is_preserved::<Self>() || !preserved.is_preserved::<DominatorTree>()
     }
 }
 
@@ -788,7 +783,7 @@ mod tests {
         let gs = am.get::<GSA>(&context, func);
         assert!(gs.node_of(arg_id).is_some());
         // Building GSA populated its dominance dependency in the cache.
-        assert!(am.get_cached::<DominatorTree>(func).is_some());
+        assert!(am.get_cached::<DominatorTree>(&context, func).is_some());
     }
 
     /// A region yielding a single value through its terminator.

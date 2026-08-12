@@ -2,10 +2,7 @@ use std::sync::Arc;
 
 use linkme::distributed_slice;
 
-use crate::{
-    Block, Context, OpId, OpInstance, Operation, Value,
-    analysis::{AnalysisManager, PreservedAnalyses},
-};
+use crate::{Block, Context, OpId, OpInstance, Operation, Value, analysis::AnalysisManager};
 
 /// A pass made available to the pipeline parser by name.
 ///
@@ -261,17 +258,17 @@ pub trait Pass: Send {
         false
     }
 
-    /// Run on `op`, reporting which cached analyses stayed valid. Return
-    /// [`PreservedAnalyses::none`] after mutating the IR unless the pass
-    /// provably kept an analysis intact; [`PreservedAnalyses::all`] when
-    /// nothing changed.
+    /// Run on `op`. A pass reports nothing about what it changed: every edit
+    /// bumps the version stamps of the ops it touched (see
+    /// [`Context::op_version`]), which is what invalidates cached analyses and
+    /// triggers post-pass verification.
     fn run(
         &mut self,
         op: &OperationRef,
         context: &Context,
         rewriter: &mut Rewriter,
         analyses: &AnalysisManager,
-    ) -> Result<PreservedAnalyses, PassError>;
+    ) -> Result<(), PassError>;
 }
 
 pub struct Rewriter {
@@ -457,8 +454,36 @@ fn is_machine_ir(context: &Context, op_id: OpId) -> bool {
     })
 }
 
-/// Whether the pass manager re-verifies the IR after every pass that reports a
-/// change. On in debug builds; `TIR_VERIFY_IR` overrides either way.
+/// Verify each edited subtree under `root`, instead of the whole tree: an op an
+/// edit never reached still satisfies whatever it satisfied before. Subtrees the
+/// edit later erased, and those outside `root`, are skipped.
+fn verify_dirty_subtrees(
+    context: &Context,
+    root: OpId,
+    dirty: &[OpId],
+) -> Result<(), crate::Error> {
+    for op in dirty {
+        if context.has_operation(*op) && encloses(context, root, *op) {
+            crate::verify_op_tree(context, *op)?;
+        }
+    }
+    Ok(())
+}
+
+/// Whether `op` is `root` or sits somewhere under it.
+fn encloses(context: &Context, root: OpId, op: OpId) -> bool {
+    let mut current = Some(op);
+    while let Some(id) = current {
+        if id == root {
+            return true;
+        }
+        current = context.parent_op(id);
+    }
+    false
+}
+
+/// Whether the pass manager re-verifies the IR after every pass that changed it.
+/// On in debug builds; `TIR_VERIFY_IR` overrides either way.
 fn ir_verification_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| match std::env::var("TIR_VERIFY_IR").as_deref() {
@@ -563,21 +588,24 @@ impl PassManager {
         match entry {
             PassNode::Pass(pass) => {
                 let scope = crate::memstats::pass_scope(pass.name());
-                let mut mutated = false;
+                let version_before = context.op_version(root.op.id);
                 PassManager::walk_ops(context, root, &mut |op_ref| {
                     if pass.target().matches(op_ref.op()) {
-                        let preserved = pass.run(&op_ref, context, rewriter, analyses)?;
-                        mutated |= !preserved.preserves_all();
-                        analyses.invalidate(&preserved);
+                        pass.run(&op_ref, context, rewriter, analyses)?;
                     }
                     Ok(())
                 })?;
+                // Any edit under `root` bumps its version, so this is the "did
+                // the pass touch the IR" signal, taken from the IR itself rather
+                // than from the pass's own report.
+                let mutated = context.op_version(root.op.id) != version_before;
+                let dirty = context.take_dirty_ops();
                 if mutated
                     && verify_ir.unwrap_or_else(ir_verification_enabled)
                     && !pass.emits_machine_ir()
                     && !is_machine_ir(context, root.op.id)
                 {
-                    crate::verify_op_tree(context, root.op.id).map_err(|error| {
+                    verify_dirty_subtrees(context, root.op.id, &dirty).map_err(|error| {
                         PassError::InvalidIR {
                             pass: pass.name(),
                             error,
@@ -587,6 +615,7 @@ impl PassManager {
                 if let Some(scope) = scope {
                     scope.finish(context.slab_census());
                 }
+                crate::memstats::analysis_census(pass.name(), analyses.cached_count());
                 Ok(())
             }
             PassNode::Nested { op_name, manager } => {
@@ -644,7 +673,7 @@ mod tests {
         builtin::{AddIOp, FuncOp, IntegerType, ops},
     };
 
-    use super::{AnalysisManager, Pass, PassError, PassManager, PassTarget, PreservedAnalyses};
+    use super::{AnalysisManager, Pass, PassError, PassManager, PassTarget};
 
     struct AddToSubPass;
 
@@ -663,22 +692,18 @@ mod tests {
             context: &Context,
             rewriter: &mut super::Rewriter,
             _analyses: &AnalysisManager,
-        ) -> Result<PreservedAnalyses, PassError> {
+        ) -> Result<(), PassError> {
             let add = op.as_op::<AddIOp>().expect("target guarantees AddIOp");
             let operands = add.operands();
             let result_ty = context.get_value(add.result()).ty();
             let new_op = ops::subi(context, operands[0], operands[1], result_ty).build();
-            rewriter.replace_op(op, &new_op)?;
-            Ok(PreservedAnalyses::none())
+            rewriter.replace_op(op, &new_op)
         }
     }
 
     /// Erases the addi while the `return` still reads its result, leaving a
-    /// dangling operand. `claim_unchanged` decides what the pass reports about
-    /// the damage it did.
-    struct BreakIRPass {
-        claim_unchanged: bool,
-    }
+    /// dangling operand.
+    struct BreakIRPass;
 
     impl Pass for BreakIRPass {
         fn name(&self) -> &'static str {
@@ -695,17 +720,58 @@ mod tests {
             _context: &Context,
             rewriter: &mut super::Rewriter,
             _analyses: &AnalysisManager,
-        ) -> Result<PreservedAnalyses, PassError> {
-            rewriter.erase_op(op)?;
-            Ok(if self.claim_unchanged {
-                PreservedAnalyses::all()
-            } else {
-                PreservedAnalyses::none()
-            })
+        ) -> Result<(), PassError> {
+            rewriter.erase_op(op)
         }
     }
 
-    fn run_break_ir(claim_unchanged: bool) -> Result<(), PassError> {
+    /// Reads the IR and leaves it exactly as it found it.
+    struct ReadOnlyPass;
+
+    impl Pass for ReadOnlyPass {
+        fn name(&self) -> &'static str {
+            "read-only"
+        }
+
+        fn run(
+            &mut self,
+            _op: &super::OperationRef,
+            _context: &Context,
+            _rewriter: &mut super::Rewriter,
+            _analyses: &AnalysisManager,
+        ) -> Result<(), PassError> {
+            Ok(())
+        }
+    }
+
+    /// Mutates on every run, without changing what the IR means.
+    struct TouchPass;
+
+    impl Pass for TouchPass {
+        fn name(&self) -> &'static str {
+            "touch"
+        }
+
+        fn target(&self) -> PassTarget {
+            PassTarget::operation::<FuncOp>()
+        }
+
+        fn run(
+            &mut self,
+            op: &super::OperationRef,
+            _context: &Context,
+            _rewriter: &mut super::Rewriter,
+            _analyses: &AnalysisManager,
+        ) -> Result<(), PassError> {
+            let func = op.as_op::<FuncOp>().expect("target guarantees FuncOp");
+            func.body()
+                .set_attr("touched", crate::attributes::AttributeValue::Bool(true));
+            Ok(())
+        }
+    }
+
+    /// `func demo(%0) { %1 = addi %0, %0; return %1 }`, with `pass` run over it.
+    fn run_on_broken_candidate(pass: Box<dyn Pass>) -> Result<(), PassError> {
         let context = Context::with_default_dialects();
         let i32 = IntegerType::new(&context, 32);
         let region = context.create_region();
@@ -729,13 +795,14 @@ mod tests {
 
         let mut pm = PassManager::new();
         pm.verify_ir(true);
-        pm.add_pass(BreakIRPass { claim_unchanged });
+        pm.add_boxed_pass(pass);
         pm.run(&context, context.get_op(func.id()))
     }
 
     #[test]
     fn invalid_ir_after_a_pass_names_that_pass() {
-        let error = run_break_ir(false).expect_err("erasing a still-used op must be caught");
+        let error = run_on_broken_candidate(Box::new(BreakIRPass))
+            .expect_err("erasing a still-used op must be caught");
         assert!(
             error.to_string().contains("break-ir"),
             "error should name the offending pass, got: {error}"
@@ -886,8 +953,76 @@ mod tests {
     }
 
     #[test]
-    fn a_pass_preserving_everything_is_not_verified() {
-        run_break_ir(true).expect("a pass claiming it changed nothing skips verification");
+    fn a_pass_that_changes_nothing_is_not_verified() {
+        run_on_broken_candidate(Box::new(ReadOnlyPass))
+            .expect("a pass that left no version behind skips verification");
+    }
+
+    #[test]
+    fn an_analysis_survives_a_pass_that_changes_nothing() {
+        use crate::analysis::DominatorTree;
+
+        let context = Context::with_default_dialects();
+        let func = function_with_one_argument(&context);
+        let analyses = AnalysisManager::new();
+        let before = analyses.get::<DominatorTree>(&context, func.id());
+
+        let mut pm = PassManager::new();
+        pm.add_pass(ReadOnlyPass);
+        let root = super::OperationRef::new(context.get_op(func.id()), None, None);
+        pm.run_on_op_ref(&context, root, &analyses)
+            .expect("the pass changes nothing");
+
+        assert!(std::rc::Rc::ptr_eq(
+            &before,
+            &analyses.get::<DominatorTree>(&context, func.id())
+        ));
+    }
+
+    #[test]
+    fn repeated_pass_runs_do_not_grow_the_analysis_cache() {
+        use crate::analysis::DominatorTree;
+
+        let context = Context::with_default_dialects();
+        let func = function_with_one_argument(&context);
+        let analyses = AnalysisManager::new();
+        let mut pm = PassManager::new();
+        pm.add_pass(TouchPass);
+
+        let mut counts = Vec::new();
+        for _ in 0..8 {
+            let root = super::OperationRef::new(context.get_op(func.id()), None, None);
+            pm.run_on_op_ref(&context, root, &analyses)
+                .expect("touching a block attribute keeps the IR valid");
+            analyses.get::<DominatorTree>(&context, func.id());
+            counts.push(analyses.cached_count());
+        }
+
+        assert!(
+            counts.iter().all(|count| *count == counts[0]),
+            "each rebuild must replace the stale result, got {counts:?}"
+        );
+    }
+
+    #[test]
+    fn an_analysis_is_rebuilt_after_a_pass_mutates() {
+        use crate::analysis::DominatorTree;
+
+        let context = Context::with_default_dialects();
+        let func = function_with_one_argument(&context);
+        let analyses = AnalysisManager::new();
+        let before = analyses.get::<DominatorTree>(&context, func.id());
+
+        let mut pm = PassManager::new();
+        pm.add_pass(AddToSubPass);
+        let root = super::OperationRef::new(context.get_op(func.id()), None, None);
+        pm.run_on_op_ref(&context, root, &analyses)
+            .expect("rewriting addi to subi keeps the IR valid");
+
+        assert!(!std::rc::Rc::ptr_eq(
+            &before,
+            &analyses.get::<DominatorTree>(&context, func.id())
+        ));
     }
 
     #[test]

@@ -21,8 +21,7 @@ use std::collections::{HashMap, HashSet};
 
 use tir::{
     AnalysisManager, Block, BlockId, BranchGuard, BranchTerminator, Context, OpId, Operation,
-    OperationRef, Pass, PassError, PassTarget, PreservedAnalyses, Rewriter, Terminator, TypeId,
-    ValueId,
+    OperationRef, Pass, PassError, PassTarget, Rewriter, Terminator, TypeId, ValueId,
     analysis::{DominatingEdgeFacts, DominatorTree, GSA, GateNode},
     graph::{Dag, MutDag, NodeId, OperandConstraint},
     sem::{
@@ -2879,7 +2878,7 @@ impl Pass for InstructionSelectPass {
         context: &Context,
         rewriter: &mut Rewriter,
         analyses: &AnalysisManager,
-    ) -> Result<PreservedAnalyses, PassError> {
+    ) -> Result<(), PassError> {
         // The function op is visited before any of its blocks' ops: build the
         // shared graph and solve every block up front — a dominating-edge fact
         // reads the guard condition's *defining op*, which a dominator's commit
@@ -2893,23 +2892,23 @@ impl Pass for InstructionSelectPass {
 
         for lowering in &self.op_lowerings {
             if lowering(context, op, rewriter)? {
-                return Ok(PreservedAnalyses::none());
+                return Ok(());
             }
         }
 
         if let Some(lowering) = &mut self.call_lowering
             && lowering.lower(context, op, rewriter)?
         {
-            return Ok(PreservedAnalyses::none());
+            return Ok(());
         }
 
         // Result-less ops still participate: a store must trigger its block's
         // selection even when no value-producing op precedes it.
         let Some(block) = op.block() else {
-            return Ok(PreservedAnalyses::all());
+            return Ok(());
         };
 
         self.commit_block_solution(context, block, rewriter)?;
-        Ok(PreservedAnalyses::none())
+        Ok(())
     }
 }

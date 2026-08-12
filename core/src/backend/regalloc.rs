@@ -18,7 +18,7 @@ use std::sync::Arc;
 use tir::attributes::{AttributeRole, AttributeValue, RegisterAttr};
 use tir::{
     AnalysisManager, BlockId, Context, OpId, Operation, OperationRef, Pass, PassError, PassTarget,
-    PreservedAnalyses, Rewriter, ValueId,
+    Rewriter, ValueId,
 };
 use tir_pbqp::{self as pbqp, INF_COST, PbqpMatrix, PbqpNodeId, PbqpProblem};
 
@@ -656,11 +656,11 @@ impl Pass for RegisterAllocationPass {
         context: &Context,
         rewriter: &mut Rewriter,
         _analyses: &AnalysisManager,
-    ) -> Result<PreservedAnalyses, PassError> {
+    ) -> Result<(), PassError> {
         let info = self.target.register_info();
         let blocks = symbol_body_blocks(context, op);
         if blocks.is_empty() {
-            return Ok(PreservedAnalyses::all());
+            return Ok(());
         }
 
         let precolor = self.lower_fixed_registers(context, rewriter, op, &blocks)?;
@@ -759,7 +759,7 @@ impl Pass for RegisterAllocationPass {
             self.insert_frame(context, rewriter, &blocks, frame_size, &saves)?;
         }
 
-        Ok(PreservedAnalyses::none())
+        Ok(())
     }
 }
 

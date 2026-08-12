@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::analysis::{AnalysisManager, PreservedAnalyses};
+use crate::analysis::AnalysisManager;
 use crate::builtin::{FuncOp, IntegerType, ReturnOp, TokenType, ops as b};
 use crate::scf;
 use crate::{
@@ -377,9 +377,9 @@ impl Pass for ScfToCfgPass {
         context: &Context,
         rewriter: &mut Rewriter,
         _analyses: &AnalysisManager,
-    ) -> Result<PreservedAnalyses, PassError> {
+    ) -> Result<(), PassError> {
         if op.as_op::<FuncOp>().is_none() {
-            return Ok(PreservedAnalyses::all());
+            return Ok(());
         }
         let region = op.op().regions[0];
         let mut loop_targets = HashMap::new();
@@ -398,10 +398,6 @@ impl Pass for ScfToCfgPass {
         if changed {
             super::cfg_cleanup::fold_trivial_blocks(context, rewriter, region)?;
         }
-        Ok(if changed {
-            PreservedAnalyses::none()
-        } else {
-            PreservedAnalyses::all()
-        })
+        Ok(())
     }
 }

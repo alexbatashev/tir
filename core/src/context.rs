@@ -115,6 +115,12 @@ struct ContextInstance {
     /// [`Region::add_block`]. Together with [`Region::parent_op`] it lets walks
     /// climb from an op to its enclosing ops.
     block_parent: Vec<Option<RegionId>>,
+    /// Structural version per op, bumped along the spine root-ward by every
+    /// tree edit; see [`Context::op_version`].
+    op_version: Vec<u32>,
+    /// Ops whose own subtree an edit touched since the last
+    /// [`Context::take_dirty_ops`], for scoping post-pass verification.
+    dirty_ops: Vec<OpId>,
     dialects: HashMap<&'static str, Arc<dyn Dialect>>,
     /// Register-class names of registered targets, for resolving parsed
     /// `%virtN:CLASS` operands back to a [`RegClassId`].
@@ -125,6 +131,70 @@ struct ContextInstance {
     /// Interned type ids bucketed by [`Type::hash`], so [`Context::get_type_id`]
     /// only runs [`Type::eq`] against colliding candidates.
     type_lookup: HashMap<u64, Vec<TypeId>>,
+}
+
+impl ContextInstance {
+    /// The op enclosing `block`, if the block sits in a region owned by one.
+    fn enclosing_op(&self, block: BlockId) -> Option<OpId> {
+        let region = *slab_get(&self.block_parent, block.index())?;
+        slab_get(&self.regions, region.index())?.parent_op()
+    }
+
+    /// The op enclosing `op`, walking out through its block and region.
+    fn enclosing_op_of(&self, op: OpId) -> Option<OpId> {
+        let block = *slab_get(&self.op_parent, op.index())?;
+        self.enclosing_op(block)
+    }
+
+    fn bump_version(&mut self, op: OpId) {
+        if op.index() >= self.op_version.len() {
+            self.op_version.resize(op.index() + 1, 0);
+        }
+        self.op_version[op.index()] += 1;
+    }
+
+    /// Record that `op`'s subtree changed. Consecutive edits to the same subtree
+    /// collapse; [`Context::take_dirty_ops`] removes the rest of the duplicates.
+    fn mark_dirty(&mut self, op: OpId) {
+        if self.dirty_ops.last() != Some(&op) {
+            self.dirty_ops.push(op);
+        }
+    }
+
+    /// `op`'s subtree changed: bump it and every enclosing op, so an analysis
+    /// keyed on any ancestor (the function root, typically) sees the edit.
+    fn edit_subtree(&mut self, op: OpId) {
+        self.mark_dirty(op);
+        let mut current = Some(op);
+        while let Some(op) = current {
+            self.bump_version(op);
+            current = self.enclosing_op_of(op);
+        }
+    }
+
+    /// `op` itself changed (operands, attributes). The dirtied subtree is its
+    /// owner's, so verification also sees the siblings the edit may have broken.
+    fn edit_op(&mut self, op: OpId) {
+        self.bump_version(op);
+        match self.enclosing_op_of(op) {
+            Some(parent) => self.edit_subtree(parent),
+            None => self.mark_dirty(op),
+        }
+    }
+
+    /// `block`'s contents changed.
+    fn edit_block(&mut self, block: BlockId) {
+        if let Some(op) = self.enclosing_op(block) {
+            self.edit_subtree(op);
+        }
+    }
+
+    /// `region`'s block list changed.
+    fn edit_region(&mut self, region: RegionId) {
+        if let Some(op) = slab_get(&self.regions, region.index()).and_then(|r| r.parent_op()) {
+            self.edit_subtree(op);
+        }
+    }
 }
 
 fn type_hash(ty: &dyn Type) -> u64 {
@@ -148,6 +218,8 @@ impl Context {
             last_block_id: AtomicU32::new(0),
             op_parent: Vec::new(),
             block_parent: Vec::new(),
+            op_version: Vec::new(),
+            dirty_ops: Vec::new(),
             dialects: HashMap::new(),
             reg_classes: HashMap::new(),
             op_interface_converters: HashMap::new(),
@@ -327,7 +399,29 @@ impl Context {
         let mut inner = self.0.write();
         if let Some(existing) = slab_get_mut(&mut inner.operations, id.index()) {
             Arc::make_mut(existing).attributes = attributes;
+            inner.edit_op(id);
         }
+    }
+
+    /// The structural version of `op`: a counter bumped by every edit to `op` or
+    /// to anything under it. Analyses cached against a version are stale as soon
+    /// as it moves; see [`crate::analysis::AnalysisManager`].
+    pub fn op_version(&self, op: OpId) -> u32 {
+        self.0
+            .read()
+            .op_version
+            .get(op.index())
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// The subtrees edited since the last call, innermost-dirtied op per edit and
+    /// deduplicated. The pass manager drains this to scope post-pass verification.
+    pub(crate) fn take_dirty_ops(&self) -> Vec<OpId> {
+        let mut dirty = std::mem::take(&mut self.0.write().dirty_ops);
+        dirty.sort_unstable();
+        dirty.dedup();
+        dirty
     }
 
     /// Remove an op from the operation arena. Called by `Rewriter::erase_op`/
@@ -362,6 +456,7 @@ impl Context {
         if let Some(new_value) = slab_get_mut(&mut inner.values, new.index()) {
             Arc::make_mut(new_value).add_use(id, crate::UseSite::Operand(index));
         }
+        inner.edit_op(id);
     }
 
     /// Replace all of an operation's SSA operands, keeping the def-use lists in
@@ -386,6 +481,7 @@ impl Context {
                 Arc::make_mut(v).add_use(id, crate::UseSite::Operand(index));
             }
         }
+        inner.edit_op(id);
     }
 
     pub fn create_value(&self, ty: TypeId, defining_op: Option<OpId>) -> Value {
@@ -489,6 +585,7 @@ impl Context {
             if let Some(new_value) = slab_get_mut(&mut inner.values, new.index()) {
                 Arc::make_mut(new_value).add_use(use_site.op(), use_site.site());
             }
+            inner.edit_op(use_site.op());
         }
     }
 
@@ -552,6 +649,7 @@ impl Context {
         let mut inner = self.0.write();
         if let Some(entry) = slab_get_mut(&mut inner.blocks, block.index()) {
             Arc::make_mut(entry).arguments_mut().push(value.clone());
+            inner.edit_block(block);
         }
         value
     }
@@ -563,6 +661,7 @@ impl Context {
             Arc::make_mut(entry).operations_mut().insert(index, op);
         }
         slab_put(&mut inner.op_parent, op.index(), block);
+        inner.edit_block(block);
     }
 
     /// Insert `op` after everything `block` currently holds.
@@ -572,6 +671,7 @@ impl Context {
             Arc::make_mut(entry).operations_mut().push(op);
         }
         slab_put(&mut inner.op_parent, op.index(), block);
+        inner.edit_block(block);
     }
 
     pub(crate) fn replace_op_in_block(&self, block: BlockId, old: OpId, new: OpId) -> bool {
@@ -588,6 +688,7 @@ impl Context {
             *slot = None;
         }
         slab_put(&mut inner.op_parent, new.index(), block);
+        inner.edit_block(block);
         true
     }
 
@@ -604,6 +705,7 @@ impl Context {
         if let Some(slot) = inner.op_parent.get_mut(op.index()) {
             *slot = None;
         }
+        inner.edit_block(block);
         true
     }
 
@@ -620,6 +722,7 @@ impl Context {
                 Some(attribute) => attribute.value = value,
                 None => attributes.push(crate::attributes::NamedAttribute::new(name, value)),
             }
+            inner.edit_block(block);
         }
     }
 
@@ -630,6 +733,12 @@ impl Context {
         slab_get(&self.0.read().op_parent, op.index()).copied()
     }
 
+    /// The operation enclosing `op`: the owner of the region holding `op`'s
+    /// block. `None` for a root op or one detached by a rewrite.
+    pub fn parent_op(&self, op: OpId) -> Option<OpId> {
+        self.0.read().enclosing_op_of(op)
+    }
+
     /// The region currently holding `block`, or `None` for a detached block.
     /// Maintained by [`Region::add_block`]; see [`ContextInstance::block_parent`].
     pub fn parent_region(&self, block: BlockId) -> Option<RegionId> {
@@ -637,13 +746,19 @@ impl Context {
     }
 
     pub(crate) fn set_block_parent(&self, block: BlockId, region: RegionId) {
-        slab_put(&mut self.0.write().block_parent, block.index(), region);
+        let mut inner = self.0.write();
+        slab_put(&mut inner.block_parent, block.index(), region);
+        inner.edit_region(region);
     }
 
     pub(crate) fn clear_block_parent(&self, block: BlockId) {
         let mut inner = self.0.write();
+        let region = slab_get(&inner.block_parent, block.index()).copied();
         if let Some(slot) = inner.block_parent.get_mut(block.index()) {
             *slot = None;
+        }
+        if let Some(region) = region {
+            inner.edit_region(region);
         }
     }
 
@@ -874,11 +989,204 @@ impl<I: GetFromContext> DoubleEndedIterator for ContextIterator<I> {
 #[cfg(test)]
 mod tests {
     use super::Context;
-    use crate::{Commutative, Operation, Terminator, builtin};
+    use crate::{Block, Commutative, OpId, Operand, Operation, Terminator, builtin};
+    use std::sync::Arc;
 
     #[test]
     fn default_context() {
         let _ = Context::with_default_dialects();
+    }
+
+    /// `module { func demo { ^entry: } }` — the func body sits two regions deep,
+    /// so an edit there must reach the module to prove root-ward propagation.
+    fn module_with_function(context: &Context) -> (OpId, OpId, Arc<Block>) {
+        let i32 = builtin::IntegerType::new(context, 32);
+        let region = context.create_region();
+        let block = context.create_block(vec![]);
+        region.add_block(block.id());
+        let func = builtin::ops::func(context, "demo", i32, Some(region.id())).build();
+        let module = builtin::ops::module(context, None).build();
+        module.body().append(func.id());
+        (module.id(), func.id(), context.get_block(block.id()))
+    }
+
+    /// Runs `edit` and asserts it bumped the versions of both enclosing ops.
+    fn assert_bumps_spine(context: &Context, module: OpId, func: OpId, edit: impl FnOnce()) {
+        let module_before = context.op_version(module);
+        let func_before = context.op_version(func);
+        edit();
+        assert!(
+            context.op_version(func) > func_before,
+            "the edited op's owner must be dirtied"
+        );
+        assert!(
+            context.op_version(module) > module_before,
+            "the bump must propagate root-ward"
+        );
+    }
+
+    #[test]
+    fn appending_an_op_bumps_the_spine() {
+        let context = Context::with_default_dialects();
+        let (module, func, body) = module_with_function(&context);
+        assert_bumps_spine(&context, module, func, || {
+            body.append(
+                builtin::ops::r#return(&context, Operand::none())
+                    .build()
+                    .id(),
+            );
+        });
+    }
+
+    #[test]
+    fn inserting_an_op_bumps_the_spine() {
+        let context = Context::with_default_dialects();
+        let (module, func, body) = module_with_function(&context);
+        assert_bumps_spine(&context, module, func, || {
+            body.insert(
+                0,
+                builtin::ops::r#return(&context, Operand::none())
+                    .build()
+                    .id(),
+            );
+        });
+    }
+
+    #[test]
+    fn removing_an_op_bumps_the_spine() {
+        let context = Context::with_default_dialects();
+        let (module, func, body) = module_with_function(&context);
+        let ret = builtin::ops::r#return(&context, Operand::none()).build();
+        body.append(ret.id());
+        assert_bumps_spine(&context, module, func, || {
+            assert!(body.remove_op(ret.id()));
+        });
+    }
+
+    #[test]
+    fn replacing_an_op_bumps_the_spine() {
+        let context = Context::with_default_dialects();
+        let (module, func, body) = module_with_function(&context);
+        let old = builtin::ops::r#return(&context, Operand::none()).build();
+        body.append(old.id());
+        let new = builtin::ops::r#return(&context, Operand::none()).build();
+        assert_bumps_spine(&context, module, func, || {
+            assert!(body.replace_op(old.id(), new.id()));
+        });
+    }
+
+    #[test]
+    fn appending_a_block_argument_bumps_the_spine() {
+        let context = Context::with_default_dialects();
+        let (module, func, body) = module_with_function(&context);
+        let i32 = builtin::IntegerType::new(&context, 32);
+        assert_bumps_spine(&context, module, func, || {
+            context.append_block_argument(body.id(), i32);
+        });
+    }
+
+    #[test]
+    fn setting_a_block_attribute_bumps_the_spine() {
+        let context = Context::with_default_dialects();
+        let (module, func, body) = module_with_function(&context);
+        assert_bumps_spine(&context, module, func, || {
+            body.set_attr("fpmath", crate::attributes::AttributeValue::Bool(true));
+        });
+    }
+
+    #[test]
+    fn adding_a_block_to_a_region_bumps_the_spine() {
+        let context = Context::with_default_dialects();
+        let (module, func, _) = module_with_function(&context);
+        let region = context.get_region(context.get_op(func).regions[0]);
+        let extra = context.create_block(vec![]);
+        assert_bumps_spine(&context, module, func, || {
+            region.add_block(extra.id());
+        });
+        assert_bumps_spine(&context, module, func, || {
+            assert!(region.remove_block(extra.id()));
+        });
+    }
+
+    #[test]
+    fn setting_op_attributes_bumps_the_spine() {
+        let context = Context::with_default_dialects();
+        let (module, func, body) = module_with_function(&context);
+        let ret = builtin::ops::r#return(&context, Operand::none()).build();
+        body.append(ret.id());
+        assert_bumps_spine(&context, module, func, || {
+            context.set_op_attributes(ret.id(), vec![]);
+        });
+    }
+
+    #[test]
+    fn setting_an_operand_bumps_the_spine() {
+        let context = Context::with_default_dialects();
+        let (module, func, body) = module_with_function(&context);
+        let i32 = builtin::IntegerType::new(&context, 32);
+        let a = context.create_value(i32, None);
+        let b = context.create_value(i32, None);
+        let add = builtin::ops::addi(&context, a.id(), a.id(), i32).build();
+        body.append(add.id());
+        assert_bumps_spine(&context, module, func, || {
+            context.set_op_operand(add.id(), 1, b.id());
+        });
+        assert_bumps_spine(&context, module, func, || {
+            context.set_op_operands(add.id(), vec![b.id(), b.id()]);
+        });
+    }
+
+    #[test]
+    fn replacing_value_uses_bumps_the_users_spine() {
+        let context = Context::with_default_dialects();
+        let (module, func, body) = module_with_function(&context);
+        let i32 = builtin::IntegerType::new(&context, 32);
+        let a = context.create_value(i32, None);
+        let b = context.create_value(i32, None);
+        let add = builtin::ops::addi(&context, a.id(), a.id(), i32).build();
+        body.append(add.id());
+        assert_bumps_spine(&context, module, func, || {
+            context.replace_value_uses(a.id(), b.id());
+        });
+    }
+
+    #[test]
+    fn an_edit_dirties_only_its_own_subtree() {
+        let context = Context::with_default_dialects();
+        let (_, func, body) = module_with_function(&context);
+        let (_, untouched, _) = module_with_function(&context);
+        context.take_dirty_ops();
+
+        body.append(
+            builtin::ops::r#return(&context, Operand::none())
+                .build()
+                .id(),
+        );
+
+        let dirty = context.take_dirty_ops();
+        assert_eq!(dirty, vec![func], "only the edited subtree is verified");
+        assert!(!dirty.contains(&untouched));
+        assert!(
+            context.take_dirty_ops().is_empty(),
+            "draining leaves nothing behind"
+        );
+    }
+
+    #[test]
+    fn an_untouched_function_keeps_its_version() {
+        let context = Context::with_default_dialects();
+        let (_, edited, body) = module_with_function(&context);
+        let (_, untouched, _) = module_with_function(&context);
+        let before = context.op_version(untouched);
+
+        body.append(
+            builtin::ops::r#return(&context, Operand::none())
+                .build()
+                .id(),
+        );
+
+        assert!(context.op_version(edited) > 0);
+        assert_eq!(context.op_version(untouched), before);
     }
 
     #[test]

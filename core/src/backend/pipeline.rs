@@ -7,7 +7,7 @@
 
 use tir::{
     AnalysisManager, Context, IntegerArithmetic, OperationRef, Pass, PassError, PassManager,
-    PassTarget, PreservedAnalyses, Rewriter,
+    PassTarget, Rewriter,
     builtin::{FuncOp, IntegerType},
 };
 
@@ -79,14 +79,14 @@ impl Pass for TargetIntegerLegalizer {
         context: &Context,
         _rewriter: &mut Rewriter,
         _analyses: &AnalysisManager,
-    ) -> Result<PreservedAnalyses, PassError> {
+    ) -> Result<(), PassError> {
         if op.as_interface::<dyn IntegerArithmetic>().is_none() {
-            return Ok(PreservedAnalyses::all());
+            return Ok(());
         }
         for &value in op.op().operands.iter().chain(op.op().results.iter()) {
             self.check_value(context, value)?;
         }
-        Ok(PreservedAnalyses::all())
+        Ok(())
     }
 }
 

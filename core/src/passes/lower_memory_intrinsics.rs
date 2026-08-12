@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::analysis::{AnalysisManager, PreservedAnalyses};
+use crate::analysis::AnalysisManager;
 use crate::attributes::AttributeValue;
 use crate::builtin::{DeclareOp, IntegerType, ModuleOp, ops as b};
 use crate::ptr::{MemcpyOp, MemsetOp, PtrType};
@@ -74,13 +74,13 @@ impl Pass for LowerMemoryIntrinsicsPass {
         context: &Context,
         rewriter: &mut Rewriter,
         _analyses: &AnalysisManager,
-    ) -> Result<PreservedAnalyses, PassError> {
+    ) -> Result<(), PassError> {
         let module = operation
             .as_op::<ModuleOp>()
             .expect("pass target guarantees builtin.module");
         let (copies, sets) = Self::intrinsics(context, operation.op());
         if copies.is_empty() && sets.is_empty() {
-            return Ok(PreservedAnalyses::all());
+            return Ok(());
         }
 
         let pointer = PtrType::opaque(context);
@@ -127,7 +127,7 @@ impl Pass for LowerMemoryIntrinsicsPass {
                 .build();
             rewriter.replace_op(&operation, &call)?;
         }
-        Ok(PreservedAnalyses::none())
+        Ok(())
     }
 }
 

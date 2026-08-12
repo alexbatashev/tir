@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use crate::analysis::DominatorTree;
 use crate::{
     AnalysisManager, Context, MemoryRead, MemoryWrite, OpId, OperationRef, Pass, PassError,
-    PassTarget, PreservedAnalyses, PromotableAllocation, Rewriter, ValueId, builtin::FuncOp,
+    PassTarget, PromotableAllocation, Rewriter, ValueId, builtin::FuncOp,
 };
 
 mod structured;
@@ -46,12 +46,12 @@ impl Pass for Mem2RegPass {
         context: &Context,
         rewriter: &mut Rewriter,
         analyses: &AnalysisManager,
-    ) -> Result<PreservedAnalyses, PassError> {
+    ) -> Result<(), PassError> {
         if op.as_op::<FuncOp>().is_none() {
-            return Ok(PreservedAnalyses::all());
+            return Ok(());
         }
         let Some(&body) = op.op().regions.first() else {
-            return Ok(PreservedAnalyses::all());
+            return Ok(());
         };
 
         // A structured body is one region tree with `scf` gates at its joins, where
@@ -59,7 +59,7 @@ impl Pass for Mem2RegPass {
         // remainder, promoted by the dominance-based path below.
         if context.get_region(body).iter(context.clone()).count() == 1 {
             structured::run(context, rewriter, body)?;
-            return Ok(PreservedAnalyses::none());
+            return Ok(());
         }
 
         let dom_tree = analyses.get::<DominatorTree>(context, op.op().id);
@@ -67,7 +67,7 @@ impl Pass for Mem2RegPass {
 
         // Promotion only erases loads/stores/allocas — never terminators or
         // blocks — so block-level dominance survives.
-        Ok(PreservedAnalyses::none().preserve::<DominatorTree>())
+        Ok(())
     }
 }
 
