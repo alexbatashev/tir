@@ -242,6 +242,19 @@ impl PbqpProblem {
     pub fn node_count(&self) -> usize {
         self.node_costs.len()
     }
+
+    pub fn edge_count(&self) -> usize {
+        self.edges.iter().count()
+    }
+
+    /// Bytes held by the edge cost matrices — the problem's dominant storage,
+    /// since every edge owns a dense `rows * cols` matrix.
+    pub fn matrix_bytes(&self) -> usize {
+        self.edges
+            .iter()
+            .map(|edge| edge.matrix.costs.len() * std::mem::size_of::<u64>())
+            .sum()
+    }
 }
 
 impl Default for PbqpProblem {

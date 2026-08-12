@@ -295,6 +295,13 @@ pub(crate) fn build_eclass_cover(
         );
     }
 
+    crate::memstats::pbqp_census(
+        "isel-cover",
+        problem.node_count(),
+        problem.edge_count(),
+        problem.matrix_bytes(),
+    );
+
     let solution = pbqp::solve(&problem).ok()?;
     let choices = solution
         .choices

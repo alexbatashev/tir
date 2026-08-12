@@ -466,7 +466,9 @@ impl PassManager {
             block: None,
             position: None,
         };
-        self.run_on_op_ref(context, root, &AnalysisManager::new())
+        let result = self.run_on_op_ref(context, root, &AnalysisManager::new());
+        crate::memstats::summary();
+        result
     }
 
     pub fn run_on_op_ref(
@@ -499,6 +501,7 @@ impl PassManager {
     ) -> Result<(), PassError> {
         match entry {
             PassNode::Pass(pass) => {
+                let scope = crate::memstats::pass_scope(pass.name());
                 let mut mutated = false;
                 PassManager::walk_ops(context, root, &mut |op_ref| {
                     if pass.target().matches(op_ref.op()) {
@@ -519,6 +522,9 @@ impl PassManager {
                             error,
                         }
                     })?;
+                }
+                if let Some(scope) = scope {
+                    scope.finish(context.slab_census());
                 }
                 Ok(())
             }

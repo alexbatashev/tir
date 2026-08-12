@@ -106,6 +106,7 @@ impl Driver<'_> {
     ) -> Result<(), PassError> {
         self.eg
             .saturate(&self.ruleset.rewrites, ITER_LIMIT, NODE_LIMIT);
+        crate::memstats::egraph_census("instcombine", &self.eg);
         let extraction = self.eg.extract_best(|_, node| cost(node));
 
         let blocks: Vec<BlockId> = self

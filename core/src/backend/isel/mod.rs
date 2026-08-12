@@ -1470,6 +1470,8 @@ impl InstructionSelectPass {
 
         rewrites::saturate(context, &mut egraph, &self.rewrites, Default::default());
 
+        crate::memstats::egraph_census("isel", &egraph);
+
         seed_bare_condition_terms(context, &mut egraph, &control);
 
         // Canonicalize the side tables through `find`: saturation may merge classes,

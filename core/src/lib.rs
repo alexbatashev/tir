@@ -18,6 +18,7 @@ pub mod graph;
 mod interfaces;
 mod ir_formatter;
 mod layout;
+pub mod memstats;
 mod operand;
 mod operation;
 mod pass;

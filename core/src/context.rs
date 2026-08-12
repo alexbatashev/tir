@@ -171,6 +171,25 @@ impl Context {
         context
     }
 
+    /// Slab capacities against live-entity counts, for the `TIR_MEM_STATS`
+    /// census (see [`crate::memstats`]).
+    pub fn slab_census(&self) -> crate::memstats::SlabCensus {
+        let inner = self.0.read();
+        fn live<T>(slab: &[Option<T>]) -> usize {
+            slab.iter().filter(|slot| slot.is_some()).count()
+        }
+        crate::memstats::SlabCensus {
+            ops_slab: inner.operations.len(),
+            ops_live: live(&inner.operations),
+            values_slab: inner.values.len(),
+            values_live: live(&inner.values),
+            blocks_slab: inner.blocks.len(),
+            blocks_live: live(&inner.blocks),
+            regions_slab: inner.regions.len(),
+            regions_live: live(&inner.regions),
+        }
+    }
+
     pub fn root_context(&self) -> Option<Context> {
         self.0.read().root_context.clone()
     }

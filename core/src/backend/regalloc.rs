@@ -349,6 +349,13 @@ fn allocate_with_affinities(
         );
     }
 
+    crate::memstats::pbqp_census(
+        "regalloc",
+        problem.node_count(),
+        problem.edge_count(),
+        problem.matrix_bytes(),
+    );
+
     let solution = pbqp::solve(&problem).map_err(|e| RegAllocError::Solver(format!("{e:?}")))?;
 
     let mut assignment = HashMap::new();

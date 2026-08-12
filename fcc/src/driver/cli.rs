@@ -55,6 +55,9 @@ pub struct CompileArgs {
     /// Add a directory to the include search path, e.g. `-I DIR`.
     #[arg(short = 'I', value_name = "DIR")]
     pub(super) include_dirs: Vec<PathBuf>,
+    /// Report memory statistics on stderr, as `TIR_MEM_STATS=1` does.
+    #[arg(long = "mem-report")]
+    mem_report: bool,
     /// C source files, or `-` for stdin.
     inputs: Vec<OsString>,
 }
@@ -92,6 +95,9 @@ where
 }
 
 pub(super) fn run_compile(args: CompileArgs) {
+    if args.mem_report {
+        tir::memstats::enable();
+    }
     let opts = lower(args);
     let actions = build_actions(&opts).unwrap_or_else(|e| {
         eprintln!("fcc: error: {e}");
