@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use crate::builtin::{IntegerType, TokenType};
 use crate::{
-    Conditional, Context, Error, LoopLike, Operation, Terminator, TokenScope, TypeId, ValueId,
-    dialect, operation,
+    Conditional, Context, Error, GuardedLoop, LoopLike, Operation, Terminator, TokenScope, TypeId,
+    ValueId, dialect, operation,
 };
 
 use crate as tir;
@@ -55,7 +55,19 @@ operation! {
                 single_block: true,
             }
         },
-        interfaces: [LoopLike, TokenScope],
+        interfaces: [LoopLike, GuardedLoop, TokenScope],
+    }
+}
+
+/// `scf.for` counts `lb`, `lb + step`, … while the counter is signed-less-than `ub`, so
+/// its body runs at all exactly when `lb < ub` — whatever the sign of `step`.
+impl tir::GuardedLoop for ForOp {
+    fn entry_guard(&self) -> tir::EntryGuard {
+        tir::EntryGuard::Less {
+            ordering: tir::GuardOrdering::Signed,
+            lhs: self.operands()[0],
+            rhs: self.operands()[1],
+        }
     }
 }
 
@@ -167,7 +179,22 @@ operation! {
                 single_block: true,
             }
         },
-        interfaces: [LoopLike, TokenScope],
+        interfaces: [LoopLike, GuardedLoop, TokenScope],
+    }
+}
+
+/// `scf.while` tests its condition region before every iteration, the first one
+/// included, so the zero-trip guard is that region read over the init operands.
+impl tir::GuardedLoop for WhileOp {
+    fn entry_guard(&self) -> tir::EntryGuard {
+        let context = self.loop_context();
+        let block = self.condition_region();
+        let terminator = context.get_op(*block.op_ids().last().unwrap());
+        tir::EntryGuard::Region {
+            region: self.0.regions[0],
+            arguments: block.arguments().iter().map(Value::id).collect(),
+            condition: terminator.operands[0],
+        }
     }
 }
 
@@ -1286,6 +1313,83 @@ mod tests {
             .append_op(builtin_ops::r#return(&context, tir::Operand::none()).build());
 
         assert!(func.verify(&context).is_ok());
+    }
+
+    #[test]
+    fn for_guard_reads_a_bound_comparison_over_its_operands() {
+        let context = Context::with_default_dialects();
+        let index = crate::builtin::IndexType::new(&context);
+        let lower = context.create_value(index, None);
+        let upper = context.create_value(index, None);
+        let step = context.create_value(index, None);
+        let for_op = ForOpBuilder::new(&context)
+            .lower_bound(lower.id())
+            .upper_bound(upper.id())
+            .step(step.id())
+            .body(terminated_region(&context))
+            .inits(vec![])
+            .result_types(vec![])
+            .build();
+
+        let guard = context
+            .get_op(for_op.id())
+            .as_interface::<dyn tir::GuardedLoop>()
+            .expect("scf.for implements GuardedLoop")
+            .entry_guard();
+
+        assert_eq!(
+            guard,
+            tir::EntryGuard::Less {
+                ordering: tir::GuardOrdering::Signed,
+                lhs: lower.id(),
+                rhs: upper.id(),
+            }
+        );
+    }
+
+    #[test]
+    fn while_guard_reads_the_condition_region_over_the_inits() {
+        let context = Context::with_default_dialects();
+        let i32_type = IntegerType::new(&context, 32);
+        let init = context.create_value(i32_type, None);
+        let condition_arg = context.create_value(i32_type, None);
+
+        let condition_region = context.create_region();
+        let condition_block = context.create_block(vec![condition_arg.clone()]);
+        condition_region.add_block(condition_block.id());
+        let decision = condition_block
+            .append_op(builtin_ops::constant(&context, 1, IntegerType::new(&context, 1)).build())
+            .result();
+        condition_block
+            .append_op(ops::condition(&context, decision, vec![condition_arg.id()]).build());
+
+        let body_arg = context.create_value(i32_type, None);
+        let body_region = context.create_region();
+        let body_block = context.create_block(vec![body_arg.clone()]);
+        body_region.add_block(body_block.id());
+        body_block.append_op(ops::r#yield(&context, vec![body_arg.id()]).build());
+
+        let while_op = WhileOpBuilder::new(&context)
+            .condition_region(condition_region.id())
+            .body(body_region.id())
+            .inits(vec![init.id()])
+            .result_types(vec![i32_type])
+            .build();
+
+        let guard = context
+            .get_op(while_op.id())
+            .as_interface::<dyn tir::GuardedLoop>()
+            .expect("scf.while implements GuardedLoop")
+            .entry_guard();
+
+        assert_eq!(
+            guard,
+            tir::EntryGuard::Region {
+                region: condition_region.id(),
+                arguments: vec![condition_arg.id()],
+                condition: decision,
+            }
+        );
     }
 
     #[test]

@@ -205,7 +205,7 @@ or implementing an interface; it never means teaching core code about an op.
 |---|---|
 | `Symbol` | named module-level entity; signature, visibility, is-definition |
 | `Conditional` | n-ary decision: deciding operand, k regions, per-region yields aligned with results. `scf.if` (2 regions), `scf.switch` (k regions) |
-| loop guard *(name TBD at implementation)* | conditional-execution reading of head-controlled loops: exposes the zero-trip guard **structurally** — operands + predicate for a counted loop, condition region + inputs for a general one — because the guard is not a materialized `Value`. Either an extension of `Conditional` or a minimal sibling; decided with the seeder (§7.2) as the consumer |
+| `GuardedLoop` | conditional-execution reading of a loop: `entry_guard() -> EntryGuard` states the zero-trip guard **structurally** — `Less` (ordering + two existing operands) for a counted loop, `Region` (condition region, its arguments aligned with `inits()`, the condition value) for a general one, `AlwaysTaken` for a tail-controlled one — because the guard is not a materialized `Value`. A sibling of `Conditional`, not an extension: a loop has no `decision()` value to hand back and no arm-aligned yields, so widening `Conditional` would either force a comparison into the IR or hollow out its contract for `scf.if`/`scf.switch` |
 | `LoopLike` | n-ary iteration: `inits() / carried_args() / latched() / finals()`, arity-verified. Counted loops additionally expose bounds/step untouched |
 | `TokenScope` | regions whose entry args are non-forwarding control tokens |
 | `Terminator`, `BranchTerminator` | CFG structure where a CFG exists (frontend dialects, boundary input, machine IR): successors and per-edge operands |
@@ -233,7 +233,7 @@ There is deliberately no canonical tail-controlled loop op and no
 loop-rotation pass. A head-controlled loop is semantically γ∘θ — "if the
 guard holds, a do-while" — and that decomposition lives in the e-graph
 view's *terms*, not in the IR: the seeder reads `LoopLike` for the iteration
-and the guard interface for the zero-trip condition, and seeds each loop port
+and `GuardedLoop` for the zero-trip condition, and seeds each loop port
 as `If(guard₀, Theta(init, latch), init)` (§7.2). Rewriting the IR to that
 shape would buy nothing the view doesn't already have, would duplicate the
 condition region textually, and would destroy the counted-loop structure
@@ -389,7 +389,7 @@ outside identity.
   Body-argument and output projections are **distinct terms** (conflating
   them was a known defect of the previous implementation).
 - Head-controlled loops compose: `If(guard₀, Theta(init, latch), init)` per
-  port, with the guard term built in the e-graph from the guard interface —
+  port, with the guard term built in the e-graph from `GuardedLoop` —
   `lb < ub` for counted loops, the condition region seeded over the inits
   for general ones. No IR is rewritten to make this seeding possible.
 - Memory ops seed as `LoadMemory(addr, bytes, meta, state)` /
@@ -502,9 +502,8 @@ format, interfaces, and `sem:` if it has value semantics. With `sem:` it
 folds and participates in e-graph reasoning with no further work. Register
 nothing anywhere else.
 
-**Give a dialect structured control flow.** Implement `Conditional` (and the
-guard interface for head-controlled loops) / `LoopLike` (+ `TokenScope`) on
-your ops. The optimizer, promotion, selection, and destruction consume the
+**Give a dialect structured control flow.** Implement `Conditional` /
+`LoopLike` + `GuardedLoop` (+ `TokenScope`) on your ops. The optimizer, promotion, selection, and destruction consume the
 interfaces; your dialect appears nowhere in core.
 
 **Write an optimization.** If it is an equality over values or memory:

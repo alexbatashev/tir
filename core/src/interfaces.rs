@@ -233,6 +233,67 @@ pub trait LoopLike {
     }
 }
 
+/// How the two sides of an [`EntryGuard::Less`] comparison are ordered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuardOrdering {
+    Signed,
+    Unsigned,
+}
+
+/// The zero-trip test of a [`GuardedLoop`], read as *structure* rather than as a value:
+/// no variant names a `ValueId` that the loop does not already have as an operand or a
+/// region-internal value, so a consumer can build the guard term in its own vocabulary
+/// (an e-graph, a solver) without any operation being materialized in the IR.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntryGuard {
+    /// The loop is tail-controlled: its body runs at least once, so there is no
+    /// zero-trip check to build.
+    AlwaysTaken,
+    /// The body runs iff `lhs < rhs` under `ordering` — a counted loop's bound
+    /// comparison, over the loop's existing operands. A loop counting downwards states
+    /// the same test with the operands swapped; a test that is not a strict ordering
+    /// belongs in [`EntryGuard::Region`].
+    Less {
+        ordering: GuardOrdering,
+        lhs: ValueId,
+        rhs: ValueId,
+    },
+    /// The body runs iff evaluating `region` produces 1 in `condition`, with
+    /// `arguments` — the region's entry arguments, aligned with
+    /// [`LoopLike::inits`] — bound to the loop's init operands.
+    Region {
+        region: RegionId,
+        arguments: Vec<ValueId>,
+        condition: ValueId,
+    },
+}
+
+/// The conditional-execution reading of a [`LoopLike`]: whether its first iteration
+/// runs at all. Together the two interfaces state the γ∘θ decomposition a consumer
+/// needs — `If(entry_guard, Theta(init, latch), init)` per carried port — while the IR
+/// keeps its source shape.
+///
+/// This is a sibling of [`Conditional`], not an extension of it, because the two answer
+/// different questions. A `Conditional` selects among regions that exist and hands back
+/// a decision *value*; a loop's zero-trip guard is a fact about the loop's operands that
+/// no operation computes, so `decision() -> ValueId` has nothing to return, and neither
+/// does `region_yields`/`case_values` mean anything for a loop body that runs `n` times.
+/// Making loops `Conditional` would either force them to materialize a comparison — the
+/// one thing this design exists to avoid — or hollow out `Conditional`'s contract for
+/// its existing implementors.
+pub trait GuardedLoop {
+    /// The condition under which the loop's first iteration runs.
+    fn entry_guard(&self) -> EntryGuard;
+
+    fn verify_interface(
+        &self,
+        _this: &dyn Operation,
+        _context: &Context,
+    ) -> Result<(), crate::Error> {
+        Ok(())
+    }
+}
+
 /// A [`BranchTerminator`] whose successor edges run under a known boolean fact — e.g.
 /// `cond_br %c` enters its true successor when `%c` is 1 and its false successor when
 /// `%c` is 0. The CFG analog of [`Conditional`], letting a flow-sensitive analysis
@@ -324,5 +385,50 @@ pub trait MemoryWrite {
         _context: &Context,
     ) -> Result<(), crate::Error> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate as tir;
+    use crate::Operation;
+
+    tir::helpers::operation! {
+        DoWhileOp {
+            name: "do_while",
+            dialect: "test",
+            regions: R {
+                body: Region {
+                    single_block: true,
+                }
+            },
+            interfaces: [crate::GuardedLoop],
+        }
+    }
+
+    /// A tail-controlled loop: its body always runs once, so the guard reading says
+    /// there is no zero-trip check.
+    impl GuardedLoop for DoWhileOp {
+        fn entry_guard(&self) -> EntryGuard {
+            EntryGuard::AlwaysTaken
+        }
+    }
+
+    #[test]
+    fn a_tail_controlled_loop_reads_as_unconditionally_entered() {
+        let context = Context::with_default_dialects();
+        DoWhileOp::register_interfaces(&context);
+        let region = context.create_region();
+        region.add_block(context.create_block(vec![]).id());
+        let op = DoWhileOpBuilder::new(&context).body(region.id()).build();
+
+        let guard = context
+            .get_op(op.id())
+            .as_interface::<dyn GuardedLoop>()
+            .expect("the test loop implements GuardedLoop")
+            .entry_guard();
+
+        assert_eq!(guard, EntryGuard::AlwaysTaken);
     }
 }
