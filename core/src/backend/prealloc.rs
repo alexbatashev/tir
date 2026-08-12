@@ -71,7 +71,8 @@ impl Pass for TiedOperandLoweringPass {
                 let op = context.get_op(op_id);
                 let mut ties = Vec::new();
                 for attr in &op.attributes {
-                    let Some(base) = attr.name.strip_suffix("_tied") else {
+                    let name = context.resolve(attr.name);
+                    let Some(base) = name.strip_suffix("_tied") else {
                         continue;
                     };
                     if role_of(&op, base) != AttributeRole::ReadWrite {
@@ -83,20 +84,16 @@ impl Pass for TiedOperandLoweringPass {
                         continue;
                     };
                     let Some(AttributeValue::Register(RegisterAttr::Virtual { id: dst, class })) =
-                        op.attributes
-                            .iter()
-                            .find(|a| a.name == base)
-                            .map(|a| &a.value)
+                        op.attr(base)
                     else {
                         continue;
                     };
                     let class = class.ok_or_else(|| {
                         PassError::InvalidRuleSet(format!(
-                            "tied operand {} has no register class",
-                            attr.name
+                            "tied operand {name} has no register class"
                         ))
                     })?;
-                    ties.push((attr.name.clone(), *dst, *src, class));
+                    ties.push((attr.name, *dst, *src, class));
                 }
                 if ties.is_empty() {
                     continue;
@@ -168,10 +165,7 @@ impl Pass for BlockArgLoweringPass {
                     continue;
                 }
                 let args: Vec<u32> = op.operands.iter().map(|v| v.number()).collect();
-                let Some(dest) = op.attributes.iter().find_map(|a| match &a.value {
-                    AttributeValue::Block(b) if a.name == "dest" => Some(*b),
-                    _ => None,
-                }) else {
+                let Some(&AttributeValue::Block(dest)) = op.attr("dest") else {
                     return Err(PassError::InvalidRuleSet(
                         "vbr with block arguments is missing its 'dest' target".to_string(),
                     ));
@@ -266,10 +260,7 @@ impl AbiPrecolorPass {
 
 fn mark_op(context: &Context, op_id: tir::OpId, name: &str, value: AttributeValue) {
     let mut attrs = context.get_op(op_id).attributes.clone();
-    attrs.push(tir::attributes::NamedAttribute {
-        name: name.to_string(),
-        value,
-    });
+    attrs.push(context.named_attribute(name, value));
     context.set_op_attributes(op_id, attrs);
 }
 
@@ -300,25 +291,11 @@ impl Pass for AbiPrecolorPass {
         // in `VR`, floats in `FPR32`/`FPR64`, everything else in `GPR`). Placement
         // is computed up front in one pure pass, then emitted.
         let mut arg_pins: HashMap<u32, PhysReg> = HashMap::new();
-        if let Some(AttributeValue::Array(args)) = op
-            .op()
-            .attributes
-            .iter()
-            .find(|attribute| attribute.name == "arg_regs")
-            .map(|attribute| &attribute.value)
-        {
-            let result_address =
-                op.op()
-                    .attributes
-                    .iter()
-                    .find_map(|attribute| match &attribute.value {
-                        AttributeValue::Register(RegisterAttr::Virtual { id, .. })
-                            if attribute.name == "result_address" =>
-                        {
-                            Some(*id)
-                        }
-                        _ => None,
-                    });
+        if let Some(AttributeValue::Array(args)) = op.op().attr("arg_regs") {
+            let result_address = match op.op().attr("result_address") {
+                Some(AttributeValue::Register(RegisterAttr::Virtual { id, .. })) => Some(*id),
+                _ => None,
+            };
             let plan = plan_arguments(context, &info, self.abi, args, result_address)?;
             let entry = blocks
                 .first()
@@ -422,10 +399,7 @@ impl Pass for AbiPrecolorPass {
                             });
                         }
                     }
-                    attrs.push(tir::attributes::NamedAttribute {
-                        name: ABI_COPY_ATTR.to_string(),
-                        value: AttributeValue::Bool(true),
-                    });
+                    attrs.push(context.named_attribute(ABI_COPY_ATTR, AttributeValue::Bool(true)));
                     context.set_op_attributes(copy_id, attrs);
                 }
             }
@@ -435,8 +409,9 @@ impl Pass for AbiPrecolorPass {
         // pinned `arg_regs` (and `result_address`) entries become `FixedDef`.
         if !arg_pins.is_empty() {
             let mut attrs = op.op().attributes.clone();
+            let pinned = ["arg_regs", "result_address"].map(|name| context.sym(name));
             for attr in &mut attrs {
-                if matches!(attr.name.as_str(), "arg_regs" | "result_address") {
+                if pinned.contains(&Some(attr.name)) {
                     pin_fixed_defs(&mut attr.value, &arg_pins);
                 }
             }

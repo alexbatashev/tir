@@ -159,6 +159,9 @@ pub trait Operation: 'static + Send + Sync + Any + Verifiable + OpDefVerifiable 
     fn operands(&self) -> &[ValueId];
     fn attributes(&self) -> &[crate::attributes::NamedAttribute];
 
+    /// The value of the attribute called `name`; see [`OpInstance::attr`].
+    fn attr(&self, name: &str) -> Option<&crate::attributes::AttributeValue>;
+
     fn operand_names(&self) -> &'static [&'static str] {
         &[]
     }
@@ -224,12 +227,11 @@ pub fn verify_op_tree(context: &Context, op_id: OpId) -> Result<(), Error> {
 
 /// Checks the metadata specs this op contributes to its nested scopes.
 fn verify_scoped_metadata(instance: &Arc<OpInstance>) -> Result<(), Error> {
-    for attribute in &instance.attributes {
-        if attribute.name == crate::DATA_LAYOUT {
-            crate::layout::verify_spec(&attribute.value)?;
-        } else if attribute.name == crate::TARGET_ENV {
-            crate::target_env::verify_spec(&attribute.value)?;
-        }
+    if let Some(value) = instance.attr(crate::DATA_LAYOUT) {
+        crate::layout::verify_spec(value)?;
+    }
+    if let Some(value) = instance.attr(crate::TARGET_ENV) {
+        crate::target_env::verify_spec(value)?;
     }
     Ok(())
 }
@@ -263,13 +265,10 @@ fn verify_token_region_arguments(
         }
     }
     if instance.is::<crate::builtin::FuncOp>()
-        && instance.attributes.iter().any(|attribute| {
-            attribute.name == "ret_type"
-                && matches!(
-                    attribute.value,
-                    crate::attributes::AttributeValue::Type(ty) if ty == token
-                )
-        })
+        && matches!(
+            instance.attr("ret_type"),
+            Some(crate::attributes::AttributeValue::Type(ty)) if *ty == token
+        )
     {
         return Err(Error::VerificationError(
             "token values are not allowed in function signatures".to_string(),
@@ -368,6 +367,22 @@ impl OpInstance {
 
     pub fn dialect(&self) -> DialectName {
         DialectName(self.dialect)
+    }
+
+    /// The value of the attribute called `name`, resolving the name through the
+    /// owning context's interner.
+    pub fn attr(&self, name: &str) -> Option<&crate::attributes::AttributeValue> {
+        let sym = self.context.upgrade().sym(name)?;
+        self.attr_sym(sym)
+    }
+
+    /// [`OpInstance::attr`] for a name already interned, which is the form a
+    /// repeated lookup wants: the comparison is on `u32`s.
+    pub fn attr_sym(&self, name: tir_adt::Sym) -> Option<&crate::attributes::AttributeValue> {
+        self.attributes
+            .iter()
+            .find(|attribute| attribute.name == name)
+            .map(|attribute| &attribute.value)
     }
 
     /// The block that holds this operation, or `None` if it is detached or the root.

@@ -42,7 +42,7 @@ pub fn print_block_label(
             if i > 0 {
                 fmt.write(", ")?;
             }
-            fmt.write(&attr.name)?;
+            fmt.write(context.resolve(attr.name))?;
             fmt.write(" = ")?;
             attr.value.print(fmt, context)?;
         }

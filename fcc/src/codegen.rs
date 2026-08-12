@@ -4936,10 +4936,8 @@ pub fn lower_data(context: &Context, module: &ModuleOp) -> Result<(), tir::PassE
                     continue;
                 };
                 let value = string
-                    .attributes()
-                    .iter()
-                    .find(|attr| attr.name == "value")
-                    .and_then(|attr| match &attr.value {
+                    .attr("value")
+                    .and_then(|value| match value {
                         AttributeValue::Str(s) => Some(s.clone()),
                         _ => None,
                     })

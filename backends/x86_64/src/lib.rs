@@ -136,7 +136,7 @@ mod isa {
         let Some(constant) = op.as_op::<ConstantOp>() else {
             return Ok(false);
         };
-        let value = tir::backend::int_attr(constant.attributes(), "value").ok_or_else(|| {
+        let value = tir::backend::int_attr(&constant, "value").ok_or_else(|| {
             tir::PassError::InvalidRuleSet("constant op without an integer value".to_string())
         })?;
         let dst = virt(constant.result().number(), RegClass::GPR.id());
@@ -292,52 +292,35 @@ mod isa {
         rewriter: &mut tir::Rewriter,
     ) -> Result<bool, tir::PassError> {
         fn base_index(op: &dyn Operation) -> Option<u16> {
-            op.attributes().iter().find_map(|a| match &a.value {
-                AttributeValue::Register(RegisterAttr::Physical { index, .. })
-                    if a.name == "base" =>
-                {
-                    Some(*index)
-                }
-                _ => None,
-            })
+            reg_index(op, "base")
         }
         fn attr(op: &dyn Operation, name: &str) -> AttributeValue {
-            op.attributes()
-                .iter()
-                .find(|a| a.name == name)
-                .map(|a| a.value.clone())
+            op.attr(name)
+                .cloned()
                 .expect("memory op operand attribute present")
         }
         // The allocated index of a physical register operand, or None if the
         // operand is still virtual (canonicalization runs post-RA, so a virtual
         // operand simply means "not this op" and is left unchanged).
         fn reg_index(op: &dyn Operation, name: &str) -> Option<u16> {
-            op.attributes().iter().find_map(|a| match &a.value {
-                AttributeValue::Register(RegisterAttr::Physical { index, .. })
-                    if a.name == name =>
-                {
-                    Some(*index)
-                }
+            match op.attr(name)? {
+                AttributeValue::Register(RegisterAttr::Physical { index, .. }) => Some(*index),
                 _ => None,
-            })
+            }
         }
         fn reg_class(op: &dyn Operation, name: &str) -> Option<tir::backend::regalloc::RegClassId> {
-            op.attributes().iter().find_map(|a| match &a.value {
-                AttributeValue::Register(RegisterAttr::Physical { class, .. })
-                    if a.name == name =>
-                {
-                    Some(*class)
-                }
+            match op.attr(name)? {
+                AttributeValue::Register(RegisterAttr::Physical { class, .. }) => Some(*class),
                 _ => None,
-            })
+            }
         }
         // An immediate operand's integer value, or None for a symbol reference
         // (a relocation that cannot fold to the sign-extended imm8 form).
         fn imm_int(op: &dyn Operation, name: &str) -> Option<i64> {
-            op.attributes().iter().find_map(|a| match &a.value {
-                AttributeValue::Int(v) if a.name == name => Some(*v),
+            match op.attr(name)? {
+                AttributeValue::Int(v) => Some(*v),
                 _ => None,
-            })
+            }
         }
         let replace = |rewriter: &mut tir::Rewriter, new_op: Box<dyn Operation>| {
             rewriter.replace_op(op, new_op.as_ref()).map(|()| true)
@@ -918,18 +901,13 @@ mod isa {
                     "block arguments on branch edges are not supported by codegen yet".to_string(),
                 ));
             }
-            let dest = br
-                .attributes()
-                .iter()
-                .find_map(|attr| match (&attr.value, attr.name == "dest") {
-                    (AttributeValue::Block(block), true) => Some(*block),
-                    _ => None,
-                })
-                .ok_or_else(|| {
-                    tir::PassError::InvalidRuleSet(
-                        "branch is missing its 'dest' target".to_string(),
-                    )
-                })?;
+            let dest = match br.attr("dest") {
+                Some(AttributeValue::Block(block)) => Some(*block),
+                _ => None,
+            }
+            .ok_or_else(|| {
+                tir::PassError::InvalidRuleSet("branch is missing its 'dest' target".to_string())
+            })?;
             let jump = JmpOpBuilder::new(context)
                 .attr("imm", AttributeValue::Block(dest))
                 .build();
@@ -941,16 +919,13 @@ mod isa {
         // the encoder as a fixup, emitted as an R_X86_64_PLT32 relocation since the
         // callee's address is unknown until link time.
         if let Some(call) = op.as_op::<VirtualCallOp>() {
-            let callee = call
-                .attributes()
-                .iter()
-                .find_map(|attr| match (&attr.value, attr.name == "callee") {
-                    (AttributeValue::Str(s), true) => Some(s.clone()),
-                    _ => None,
-                })
-                .ok_or_else(|| {
-                    tir::PassError::InvalidRuleSet("vcall is missing its 'callee'".to_string())
-                })?;
+            let callee = match call.attr("callee") {
+                Some(AttributeValue::Str(s)) => Some(s.clone()),
+                _ => None,
+            }
+            .ok_or_else(|| {
+                tir::PassError::InvalidRuleSet("vcall is missing its 'callee'".to_string())
+            })?;
             let real = CallOpBuilder::new(context)
                 .attr("imm", AttributeValue::Str(callee))
                 .build();
@@ -961,18 +936,15 @@ mod isa {
         // `vcall_indirect` becomes `call *target`; the target register was colored
         // by the allocator through the op's `callee_reg` attribute.
         if let Some(call) = op.as_op::<VirtualIndirectCallOp>() {
-            let target = call
-                .attributes()
-                .iter()
-                .find_map(|attr| match (&attr.value, attr.name == "callee_reg") {
-                    (value @ AttributeValue::Register(_), true) => Some(value.clone()),
-                    _ => None,
-                })
-                .ok_or_else(|| {
-                    tir::PassError::InvalidRuleSet(
-                        "vcall_indirect is missing its 'callee_reg'".to_string(),
-                    )
-                })?;
+            let target = match call.attr("callee_reg") {
+                Some(value @ AttributeValue::Register(_)) => Some(value.clone()),
+                _ => None,
+            }
+            .ok_or_else(|| {
+                tir::PassError::InvalidRuleSet(
+                    "vcall_indirect is missing its 'callee_reg'".to_string(),
+                )
+            })?;
             // `call *reg` needs no REX when the target is rax..rdi; emit the
             // REX-free form directly (this op is created after
             // `canonicalize_encodings` would run).

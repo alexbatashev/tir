@@ -118,10 +118,8 @@ impl GlobalOp {
     }
 
     pub fn bytes(&self) -> Vec<u8> {
-        self.attributes()
-            .iter()
-            .find(|attribute| attribute.name == "bytes")
-            .and_then(|attribute| match &attribute.value {
+        self.attr("bytes")
+            .and_then(|value| match value {
                 AttributeValue::Array(bytes) => bytes
                     .iter()
                     .map(|byte| match byte {
@@ -139,10 +137,8 @@ impl GlobalOp {
     }
 
     pub fn relocations(&self) -> Vec<(u64, String, i64, u64)> {
-        self.attributes()
-            .iter()
-            .find(|attribute| attribute.name == "relocations")
-            .and_then(|attribute| match &attribute.value {
+        self.attr("relocations")
+            .and_then(|value| match value {
                 AttributeValue::Array(relocations) => Some(
                     relocations
                         .iter()
@@ -200,24 +196,17 @@ impl ZeroGlobalOp {
 }
 
 fn string_attribute(operation: &impl Operation, name: &str) -> String {
-    operation
-        .attributes()
-        .iter()
-        .find(|attribute| attribute.name == name)
-        .and_then(|attribute| match &attribute.value {
-            AttributeValue::Str(value) => Some(value.clone()),
-            _ => None,
-        })
-        .unwrap()
+    match operation.attr(name) {
+        Some(AttributeValue::Str(value)) => value.clone(),
+        _ => panic!("{name} must be a string attribute"),
+    }
 }
 
 fn uint_attribute(operation: &impl Operation, name: &str) -> u64 {
     operation
-        .attributes()
-        .iter()
-        .find(|attribute| attribute.name == name)
-        .and_then(|attribute| match attribute.value {
-            AttributeValue::UInt(value) => Some(value),
+        .attr(name)
+        .and_then(|value| match value {
+            AttributeValue::UInt(value) => Some(*value),
             _ => None,
         })
         .unwrap()

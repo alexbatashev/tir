@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-use tir::attributes::{AttributeValue, NamedAttribute, RegisterAttr};
+use tir::attributes::{AttributeValue, NamedAttribute, RegisterAttr, find_attribute};
 use tir::parse::tokens::Parser;
 use tir::{Context, OpInstance, Operation};
 
@@ -86,12 +86,13 @@ pub struct InstrDesc {
 /// the op from the parsed attributes and insert it.
 #[allow(clippy::result_unit_err)]
 pub fn parse_and_insert<'src, T: Operation, F: FnOnce(Vec<NamedAttribute>) -> T>(
+    context: &Context,
     desc: &InstrDesc,
     parser: &mut Parser<'src, Token<'src>>,
     builder: &mut super::AsmCursor,
     build: F,
 ) -> Result<(), ()> {
-    let attributes = parse_operands(desc.parse, parser)?;
+    let attributes = parse_operands(context, desc.parse, parser)?;
     // A trailing comma means the input has more operands than this form — another
     // candidate with the same mnemonic (e.g. a masked ", v0.t" twin) must get its
     // turn.
@@ -103,6 +104,7 @@ pub fn parse_and_insert<'src, T: Operation, F: FnOnce(Vec<NamedAttribute>) -> T>
 }
 
 fn parse_operands<'src>(
+    context: &Context,
     steps: &[ParseStep],
     parser: &mut Parser<'src, Token<'src>>,
 ) -> Result<Vec<NamedAttribute>, ()> {
@@ -145,7 +147,7 @@ fn parse_operands<'src>(
             ParseStep::Register(name, class, parse) => {
                 let index = parse(parser).ok_or(())?;
                 attributes.push(NamedAttribute::new(
-                    *name,
+                    context.intern(name),
                     AttributeValue::Register(RegisterAttr::Physical {
                         class: *class,
                         index,
@@ -154,7 +156,7 @@ fn parse_operands<'src>(
             }
             ParseStep::Immediate(name, signed, range) => {
                 let value = parse_immediate(parser, *signed, sign, *range)?;
-                attributes.push(NamedAttribute::new(*name, value));
+                attributes.push(NamedAttribute::new(context.intern(name), value));
             }
         }
     }
@@ -217,16 +219,18 @@ pub fn print(desc: &InstrDesc, context: &Context, op: &OpInstance) -> Option<Str
     for part in desc.print {
         match part {
             PrintPart::Text(text) => out.push_str(text),
-            PrintPart::Register(name, print) => match &find_attribute(attributes, name)?.value {
-                AttributeValue::Register(RegisterAttr::Physical { index, .. }) => {
-                    out.push_str(&print(*index, false)?)
+            PrintPart::Register(name, print) => {
+                match &find_attribute(context, attributes, name)?.value {
+                    AttributeValue::Register(RegisterAttr::Physical { index, .. }) => {
+                        out.push_str(&print(*index, false)?)
+                    }
+                    AttributeValue::Register(RegisterAttr::Virtual { id, .. }) => {
+                        out.push_str(&format!("%virt{id}"))
+                    }
+                    _ => return None,
                 }
-                AttributeValue::Register(RegisterAttr::Virtual { id, .. }) => {
-                    out.push_str(&format!("%virt{id}"))
-                }
-                _ => return None,
-            },
-            PrintPart::Immediate(name) => match &find_attribute(attributes, name)?.value {
+            }
+            PrintPart::Immediate(name) => match &find_attribute(context, attributes, name)?.value {
                 AttributeValue::Int(value) => out.push_str(&value.to_string()),
                 AttributeValue::UInt(value) => out.push_str(&value.to_string()),
                 AttributeValue::Str(symbol) => out.push_str(symbol),
@@ -241,17 +245,13 @@ pub fn print(desc: &InstrDesc, context: &Context, op: &OpInstance) -> Option<Str
                 },
                 _ => return None,
             },
-            PrintPart::Str(name) => match &find_attribute(attributes, name)?.value {
+            PrintPart::Str(name) => match &find_attribute(context, attributes, name)?.value {
                 AttributeValue::Str(value) => out.push_str(value),
                 _ => return None,
             },
         }
     }
     Some(out)
-}
-
-fn find_attribute<'a>(attributes: &'a [NamedAttribute], name: &str) -> Option<&'a NamedAttribute> {
-    attributes.iter().find(|attribute| attribute.name == name)
 }
 
 /// A target's instruction descriptors, indexed by op name on first use so the

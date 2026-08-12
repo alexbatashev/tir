@@ -436,7 +436,7 @@ fn emit_sym_inits(
                     };
                     steps.push(quote! {
                         {
-                            let (class, index) = tir::backend::register_attr(self.attributes(), #name_lit)
+                            let (class, index) = tir::backend::register_attr(self, #name_lit)
                                 .ok_or(tir::backend::SimTrap::MissingAttribute {
                                     op: #mnemonic_lit,
                                     attribute: #name_lit,
@@ -447,7 +447,7 @@ fn emit_sym_inits(
                 }
                 Type::Integer => steps.push(quote! {
                     {
-                        let value = tir::backend::int_attr(self.attributes(), #name_lit)
+                        let value = tir::backend::int_attr(self, #name_lit)
                             .ok_or(tir::backend::SimTrap::MissingAttribute {
                                 op: #mnemonic_lit,
                                 attribute: #name_lit,
@@ -459,7 +459,7 @@ fn emit_sym_inits(
                     let width_lit = proc_macro2::Literal::u32_unsuffixed(*width as u32);
                     steps.push(quote! {
                         {
-                            let value = tir::backend::int_attr(self.attributes(), #name_lit)
+                            let value = tir::backend::int_attr(self, #name_lit)
                                 .ok_or(tir::backend::SimTrap::MissingAttribute {
                                     op: #mnemonic_lit,
                                     attribute: #name_lit,
@@ -497,7 +497,7 @@ fn emit_sym_inits(
         let name_lit = proc_macro2::Literal::string(name);
         steps.push(quote! {
             {
-                let (_, index) = tir::backend::register_attr(self.attributes(), #name_lit)
+                let (_, index) = tir::backend::register_attr(self, #name_lit)
                     .ok_or(tir::backend::SimTrap::MissingAttribute {
                         op: #mnemonic_lit,
                         attribute: #name_lit,
@@ -541,7 +541,7 @@ fn emit_graph_destination_write(
     if let Some((_, Type::Struct(_))) = ops.iter().find(|(n, _)| n == name) {
         let name_lit = proc_macro2::Literal::string(name);
         return Some(quote! {
-            let (dst_class, dst_idx) = tir::backend::register_attr(self.attributes(), #name_lit).ok_or(
+            let (dst_class, dst_idx) = tir::backend::register_attr(self, #name_lit).ok_or(
                 tir::backend::SimTrap::MissingAttribute {
                     op: #mnemonic_lit,
                     attribute: #name_lit,

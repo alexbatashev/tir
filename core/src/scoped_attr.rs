@@ -39,15 +39,10 @@ pub fn scoped_dict(context: &Context, op: OpId, key: &str) -> Option<AttributeDi
 }
 
 fn own_dict(context: &Context, op: OpId, key: &str) -> Option<AttributeDict> {
-    context
-        .get_op(op)
-        .attributes
-        .iter()
-        .find(|attribute| attribute.name == key)
-        .and_then(|attribute| match &attribute.value {
-            AttributeValue::Dict(entries) => Some(entries.clone()),
-            _ => None,
-        })
+    match context.get_op(op).attr(key) {
+        Some(AttributeValue::Dict(entries)) => Some(entries.clone()),
+        _ => None,
+    }
 }
 
 fn parent_op(context: &Context, op: OpId) -> Option<OpId> {

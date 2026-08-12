@@ -75,6 +75,7 @@ impl Block {
     }
 
     pub fn attr(&self, name: &str) -> Option<AttributeValue> {
+        let name = self.context.upgrade().sym(name)?;
         self.attributes
             .iter()
             .find(|a| a.name == name)

@@ -29,16 +29,10 @@ impl ConstantOpBuilder {
 impl crate::ConstantLike for ConstantOp {
     fn constant_value(&self) -> tir::utils::APInt {
         let context = self.0.context.upgrade();
-        let value = self
-            .0
-            .attributes
-            .iter()
-            .find(|attr| attr.name == "value")
-            .and_then(|attr| match attr.value {
-                tir::attributes::AttributeValue::Int(v) => Some(v),
-                _ => None,
-            })
-            .unwrap_or(0);
+        let value = match self.0.attr("value") {
+            Some(tir::attributes::AttributeValue::Int(v)) => *v,
+            _ => 0,
+        };
         let ty = context.get_value(self.result()).ty();
         let width = (context.get_type_data(ty).as_ref() as &dyn std::any::Any)
             .downcast_ref::<crate::builtin::IntegerType>()
@@ -343,12 +337,10 @@ impl CmpIOp {
     ) -> Option<tir::graph::NodeId> {
         use tir::sem::SymKind;
 
-        let predicate = self.0.attributes.iter().find_map(|a| {
-            (a.name == "predicate").then_some(match &a.value {
-                tir::attributes::AttributeValue::Str(s) => Some(s.as_str()),
-                _ => None,
-            })
-        })??;
+        let predicate = match self.0.attr("predicate")? {
+            tir::attributes::AttributeValue::Str(s) => s.as_str(),
+            _ => return None,
+        };
         let (kind, swap) = match predicate {
             "eq" => (SymKind::Eq, false),
             "ne" => (SymKind::Ne, false),

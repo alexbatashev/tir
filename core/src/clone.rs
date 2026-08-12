@@ -88,10 +88,7 @@ fn clone_op_into(context: &Context, op: OpId, mapping: &mut Mapping) -> OpId {
         .attributes
         .iter()
         .map(|attribute| {
-            NamedAttribute::new(
-                attribute.name.clone(),
-                remap_attribute(&attribute.value, mapping),
-            )
+            NamedAttribute::new(attribute.name, remap_attribute(&attribute.value, mapping))
         })
         .collect();
 

@@ -368,20 +368,14 @@ fn parse_ret_type(
 }
 
 fn callee_attr(op: &impl Operation) -> String {
-    op.attributes()
-        .iter()
-        .find(|a| a.name == "callee")
-        .and_then(|a| match &a.value {
-            AttributeValue::Str(s) => Some(s.clone()),
-            _ => None,
-        })
-        .expect("call must carry a 'callee' symbol name")
+    match op.attr("callee") {
+        Some(AttributeValue::Str(s)) => s.clone(),
+        _ => panic!("call must carry a 'callee' symbol name"),
+    }
 }
 
 fn has_result_address(op: &impl Operation) -> bool {
-    op.attributes().iter().any(|attribute| {
-        attribute.name == "result_address" && attribute.value == AttributeValue::Bool(true)
-    })
+    op.attr("result_address") == Some(&AttributeValue::Bool(true))
 }
 
 #[cfg(test)]

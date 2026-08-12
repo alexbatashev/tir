@@ -179,21 +179,15 @@ impl CondBranchOp {
 }
 
 fn block_attr(op: &impl Operation, name: &str) -> BlockId {
-    op.attributes()
-        .iter()
-        .find(|a| a.name == name)
-        .and_then(|a| match a.value {
-            AttributeValue::Block(id) => Some(id),
-            _ => None,
-        })
-        .unwrap_or_else(|| panic!("{} must be a block reference", name))
+    match op.attr(name) {
+        Some(AttributeValue::Block(id)) => *id,
+        _ => panic!("{name} must be a block reference"),
+    }
 }
 
 fn operand_segments(op: &impl Operation) -> Vec<usize> {
-    op.attributes()
-        .iter()
-        .find(|a| a.name == "operand_segment_sizes")
-        .and_then(|a| match &a.value {
+    op.attr("operand_segment_sizes")
+        .and_then(|value| match value {
             AttributeValue::Array(items) => Some(items),
             _ => None,
         })

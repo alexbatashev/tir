@@ -966,15 +966,12 @@ mod tests {
         name: &str,
     ) -> Option<tir::backend::liveness::PhysReg> {
         use tir::attributes::{AttributeValue, RegisterAttr};
-        op.attributes
-            .iter()
-            .find(|a| a.name == name)
-            .and_then(|a| match &a.value {
-                AttributeValue::Register(RegisterAttr::Physical { class, index }) => {
-                    Some((*class, *index))
-                }
-                _ => None,
-            })
+        match op.attr(name)? {
+            AttributeValue::Register(RegisterAttr::Physical { class, index }) => {
+                Some((*class, *index))
+            }
+            _ => None,
+        }
     }
 
     fn body_blocks_have_no_virtual(context: &Context, region_id: tir::RegionId) {
@@ -990,7 +987,7 @@ mod tests {
                         ),
                         "op {} still has a virtual register in attr {}",
                         op.name().as_str(),
-                        attr.name
+                        context.resolve(attr.name)
                     );
                 }
             }
@@ -1994,8 +1991,9 @@ mod tests {
             .find(|op| op.is::<crate::BranchLinkOp>())
             .expect("the call must finalize to bl");
         // bl targets the callee symbol (a link-time fixup).
-        assert!(bl.attributes.iter().any(|a| a.name == "imm"
-            && matches!(&a.value, tir::attributes::AttributeValue::Str(s) if s == "foo")));
+        assert!(
+            matches!(bl.attr("imm"), Some(tir::attributes::AttributeValue::Str(s)) if s == "foo")
+        );
 
         body_blocks_have_no_virtual(&context, region.id());
     }

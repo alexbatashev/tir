@@ -60,22 +60,14 @@ impl FuncOpBuilder {
 
 impl FuncOp {
     pub fn has_result_address(&self) -> bool {
-        self.attributes().iter().any(|attribute| {
-            attribute.name == "result_address"
-                && attribute.value == tir::attributes::AttributeValue::Bool(true)
-        })
+        self.attr("result_address") == Some(&tir::attributes::AttributeValue::Bool(true))
     }
 
     pub fn ret_type(&self) -> tir::TypeId {
-        self.attributes()
-            .iter()
-            .find_map(|attribute| match attribute.value {
-                tir::attributes::AttributeValue::Type(ty) if attribute.name == "ret_type" => {
-                    Some(ty)
-                }
-                _ => None,
-            })
-            .expect("func must carry ret_type")
+        match self.attr("ret_type") {
+            Some(tir::attributes::AttributeValue::Type(ty)) => *ty,
+            _ => panic!("func must carry ret_type"),
+        }
     }
 
     pub fn argument_alignments(&self) -> Vec<u64> {
@@ -116,15 +108,11 @@ impl FuncOp {
         }
 
         // Print symbol name
-        let sym_name = self
-            .attributes()
-            .iter()
-            .find(|a| a.name == "sym_name")
-            .map(|a| match &a.value {
-                tir::attributes::AttributeValue::Str(s) => s.clone(),
-                _ => panic!("sym_name must be a string"),
-            })
-            .unwrap_or_else(|| "unknown".to_string());
+        let sym_name = match self.attr("sym_name") {
+            Some(tir::attributes::AttributeValue::Str(s)) => s.clone(),
+            Some(_) => panic!("sym_name must be a string"),
+            None => "unknown".to_string(),
+        };
 
         fmt.write(format!(" @{}", sym_name))?;
 

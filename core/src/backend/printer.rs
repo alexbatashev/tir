@@ -9,7 +9,7 @@ use tir::{Context, OpInstance, Operation};
 
 use crate::backend::{
     BlockEndOp, DataRelocOp, LiteralOp, MachineInstruction, SectionEndOp, SectionOp, SymbolEndOp,
-    SymbolOp, int_attr,
+    SymbolOp,
 };
 
 pub type AsmInstructionPrinter = fn(&Context, &OpInstance) -> Option<String>;
@@ -116,7 +116,7 @@ impl AsmPrinter {
                     out.push_str(name);
                     out.push('\n');
                 }
-                if let Some(align) = int_attr(&op.attributes, "align")
+                if let Some(align) = int_attr(&op, "align")
                     && align > 1
                 {
                     out.push_str("\t.balign ");
@@ -152,11 +152,9 @@ impl AsmPrinter {
                 out.push_str(kind);
                 match kind {
                     "byte" | "half" | "word" | "dword" | "space" => {
-                        let value = int_attr(&op.attributes, "value").ok_or(
-                            AsmPrintError::UnsupportedOp {
-                                op: LiteralOp::name(),
-                            },
-                        )?;
+                        let value = int_attr(&op, "value").ok_or(AsmPrintError::UnsupportedOp {
+                            op: LiteralOp::name(),
+                        })?;
                         out.push(' ');
                         out.push_str(&value.to_string());
                         out.push('\n');
@@ -179,12 +177,12 @@ impl AsmPrinter {
                     op: DataRelocOp::name(),
                 };
                 let symbol = string_attr(&op, "symbol").ok_or_else(unsupported)?;
-                let directive = match int_attr(&op.attributes, "width") {
+                let directive = match int_attr(&op, "width") {
                     Some(4) => "word",
                     Some(8) => "quad",
                     _ => return Err(unsupported()),
                 };
-                let addend = int_attr(&op.attributes, "addend").ok_or_else(unsupported)?;
+                let addend = int_attr(&op, "addend").ok_or_else(unsupported)?;
                 out.push_str("\t.");
                 out.push_str(directive);
                 out.push(' ');
@@ -240,14 +238,13 @@ fn escape_asm_string(value: &str) -> String {
     out
 }
 
+fn int_attr(op: &OpInstance, name: &str) -> Option<i64> {
+    op.attr(name).and_then(AttributeValue::as_int)
+}
+
 fn string_attr<'a>(op: &'a OpInstance, name: &str) -> Option<&'a str> {
-    op.attributes.iter().find_map(|attr| {
-        if attr.name != name {
-            return None;
-        }
-        match &attr.value {
-            AttributeValue::Str(value) => Some(value.as_str()),
-            _ => None,
-        }
-    })
+    match op.attr(name)? {
+        AttributeValue::Str(value) => Some(value.as_str()),
+        _ => None,
+    }
 }

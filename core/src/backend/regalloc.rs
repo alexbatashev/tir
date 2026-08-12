@@ -901,9 +901,10 @@ impl RegisterAllocationPass {
         // `result_address`: a `FixedDef` entry pins its value at the function
         // boundary, then reads as an ordinary virtual register again.
         let mut attributes = op.op().attributes.clone();
+        let pinned = ["arg_regs", "result_address"].map(|name| context.sym(name));
         let mut changed = false;
         for attr in &mut attributes {
-            if matches!(attr.name.as_str(), "arg_regs" | "result_address") {
+            if pinned.contains(&Some(attr.name)) {
                 changed |= consume_fixed_defs(&mut attr.value, &mut precolor)?;
             }
         }
@@ -1315,10 +1316,7 @@ pub(crate) fn op_ref_in(context: &Context, block_id: BlockId, op_id: OpId) -> Op
 /// affinity and erases the copy when both land in one register.
 fn mark_coalescable(context: &Context, op_id: OpId) {
     let mut attributes = context.get_op(op_id).attributes.clone();
-    attributes.push(crate::attributes::NamedAttribute {
-        name: prealloc::ABI_COPY_ATTR.to_string(),
-        value: AttributeValue::Bool(true),
-    });
+    attributes.push(context.named_attribute(prealloc::ABI_COPY_ATTR, AttributeValue::Bool(true)));
     context.set_op_attributes(op_id, attributes);
 }
 
@@ -1417,16 +1415,13 @@ fn copy_endpoints(context: &Context, op_id: OpId) -> Option<(u32, u32)> {
 }
 
 fn has_attr(context: &Context, op_id: OpId, name: &str) -> bool {
-    context
-        .get_op(op_id)
-        .attributes
-        .iter()
-        .any(|attr| attr.name == name)
+    context.get_op(op_id).attr(name).is_some()
 }
 
 fn strip_attr(context: &Context, op_id: OpId, name: &str) {
+    let stripped = context.sym(name);
     let mut attrs = context.get_op(op_id).attributes.clone();
-    attrs.retain(|attr| attr.name != name);
+    attrs.retain(|attr| Some(attr.name) != stripped);
     context.set_op_attributes(op_id, attrs);
 }
 
@@ -1489,14 +1484,9 @@ fn collect_stack_arg_loads(
         for op_id in context.get_block(block_id).op_ids() {
             let op = context.get_op(op_id);
             let Some(stack_index) =
-                op.attributes
-                    .iter()
-                    .find_map(|attr| match (&attr.name[..], &attr.value) {
-                        (name, AttributeValue::UInt(index))
-                            if name == prealloc::ABI_STACK_INDEX_ATTR =>
-                        {
-                            Some(*index as usize)
-                        }
+                op.attr(prealloc::ABI_STACK_INDEX_ATTR)
+                    .and_then(|value| match value {
+                        AttributeValue::UInt(index) => Some(*index as usize),
                         _ => None,
                     })
             else {
@@ -1583,7 +1573,7 @@ pub(crate) fn rename_attr(
     let mut attrs = op.attributes.clone();
     let mut changed = false;
     for attr in &mut attrs {
-        let role = role_of(&op, &attr.name);
+        let role = role_of_sym(&op, attr.name);
         let matches_dir = match role_class {
             RoleClass::Read => matches!(role, AttributeRole::Use | AttributeRole::ReadWrite),
             RoleClass::Write => {
@@ -1658,6 +1648,19 @@ fn rewrite_registers(context: &Context, blocks: &[BlockId], assignment: &HashMap
             }
         }
     }
+}
+
+/// [`role_of`] for an interned attribute name.
+pub(crate) fn role_of_sym(op: &Arc<tir::OpInstance>, name: tir::Sym) -> AttributeRole {
+    let context = op.context.upgrade();
+    op.clone()
+        .as_interface::<dyn tir::attributes::RegisterSemantics>()
+        .map(|semantics| semantics.attribute_roles())
+        .unwrap_or_default()
+        .iter()
+        .find(|(n, _)| context.sym(n) == Some(name))
+        .map(|(_, r)| *r)
+        .unwrap_or(AttributeRole::None)
 }
 
 pub(crate) fn role_of(op: &Arc<tir::OpInstance>, name: &str) -> AttributeRole {

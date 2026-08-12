@@ -68,14 +68,10 @@ impl ProgramImage {
                     continue;
                 };
 
-                let symbol_name = symbol
-                    .attributes()
-                    .iter()
-                    .find_map(|attr| match (&*attr.name, &attr.value) {
-                        ("name", AttributeValue::Str(s)) => Some(s.clone()),
-                        _ => None,
-                    })
-                    .ok_or(Error::MissingSymbolName)?;
+                let symbol_name = match symbol.attr("name") {
+                    Some(AttributeValue::Str(name)) => name.clone(),
+                    _ => return Err(Error::MissingSymbolName),
+                };
                 symbols.insert(symbol_name, cur_pc);
                 first_symbol_pc.get_or_insert(cur_pc);
 

@@ -208,22 +208,18 @@ pub fn enclosing_symbol_table(context: &Context, op: OpId) -> Option<OpId> {
 }
 
 pub fn symbol_name_of(op: &impl Operation) -> String {
-    op.attributes()
-        .iter()
-        .find(|attr| attr.name == "sym_name")
-        .and_then(|attr| match &attr.value {
-            AttributeValue::Str(name) => Some(name.clone()),
-            _ => None,
-        })
-        .expect("symbol must carry sym_name")
+    match op.attr("sym_name") {
+        Some(AttributeValue::Str(name)) => name.clone(),
+        _ => panic!("symbol must carry sym_name"),
+    }
 }
 
 /// Reads the optional `sym_visibility` attribute; a symbol without one is public.
 pub fn visibility_of(op: &impl Operation) -> Visibility {
-    let private = op.attributes().iter().any(|attr| {
-        attr.name == "sym_visibility"
-            && matches!(&attr.value, AttributeValue::Str(value) if value == "private")
-    });
+    let private = matches!(
+        op.attr("sym_visibility"),
+        Some(AttributeValue::Str(value)) if value == "private"
+    );
     if private {
         Visibility::Private
     } else {

@@ -224,15 +224,10 @@ impl TupleGetOp {
     }
 
     pub fn index(&self) -> usize {
-        self.attributes()
-            .iter()
-            .find_map(|attribute| match attribute.value {
-                crate::attributes::AttributeValue::UInt(index) if attribute.name == "index" => {
-                    Some(index as usize)
-                }
-                _ => None,
-            })
-            .expect("tuple_get must carry an index")
+        match self.attr("index") {
+            Some(crate::attributes::AttributeValue::UInt(index)) => *index as usize,
+            _ => panic!("tuple_get must carry an index"),
+        }
     }
 }
 

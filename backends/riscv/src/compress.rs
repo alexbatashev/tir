@@ -49,33 +49,29 @@ pub(crate) fn compress_rv64(
 
 /// A physical register operand's index, whatever its class.
 fn reg(op: &dyn Operation, name: &str) -> Option<u16> {
-    op.attributes().iter().find_map(|a| match &a.value {
-        AttributeValue::Register(RegisterAttr::Physical { index, .. }) if a.name == name => {
-            Some(*index)
-        }
+    match op.attr(name)? {
+        AttributeValue::Register(RegisterAttr::Physical { index, .. }) => Some(*index),
         _ => None,
-    })
+    }
 }
 
 /// A register operand's attribute value, passed through to the compressed
 /// form unchanged (encoders mask the index to the field width; printers and
 /// the simulator resolve the class through the shared register file).
 fn reg_attr(op: &dyn Operation, name: &str) -> Option<AttributeValue> {
-    op.attributes().iter().find_map(|a| match &a.value {
-        value @ AttributeValue::Register(RegisterAttr::Physical { .. }) if a.name == name => {
-            Some(value.clone())
-        }
+    match op.attr(name)? {
+        value @ AttributeValue::Register(RegisterAttr::Physical { .. }) => Some(value.clone()),
         _ => None,
-    })
+    }
 }
 
 /// An integer immediate operand. Symbol/block operands (fixups) return None,
 /// keeping their instruction uncompressed.
 fn imm(op: &dyn Operation, name: &str) -> Option<i64> {
-    op.attributes().iter().find_map(|a| match &a.value {
-        AttributeValue::Int(value) if a.name == name => Some(*value),
+    match op.attr(name)? {
+        AttributeValue::Int(value) => Some(*value),
         _ => None,
-    })
+    }
 }
 
 /// x8..x15 (f8..f15): the registers a 3-bit field reaches.

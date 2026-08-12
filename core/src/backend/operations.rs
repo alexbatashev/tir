@@ -212,11 +212,9 @@ impl VirtualIndirectCallOp {
 }
 
 fn outgoing_stack_size(op: &impl Operation) -> u64 {
-    op.attributes()
-        .iter()
-        .find(|attribute| attribute.name == "outgoing_stack_size")
-        .and_then(|attribute| match attribute.value {
-            tir::attributes::AttributeValue::UInt(value) => Some(value),
+    op.attr("outgoing_stack_size")
+        .and_then(|value| match value {
+            tir::attributes::AttributeValue::UInt(value) => Some(*value),
             _ => None,
         })
         .expect("verified virtual calls have an outgoing stack size")

@@ -7,8 +7,11 @@ use std::{
 
 use parking_lot::RwLock;
 
+use tir_adt::{Interner, Sym};
+
 use crate::{
     Block, Dialect, Error, OpId, OpInstance, Operation, OperationParser, Region, TypeId,
+    attributes::{AttributeValue, NamedAttribute},
     block::BlockId,
     builtin::BuiltinDialect,
     dialects::scf::ScfDialect,
@@ -152,6 +155,10 @@ struct ContextInstance {
     /// Interned type ids bucketed by [`Type::hash`], so [`Context::get_type_id`]
     /// only runs [`Type::eq`] against colliding candidates.
     type_lookup: HashMap<u64, Vec<TypeId>>,
+    /// The names attributes are keyed by, so an op carries four bytes per
+    /// attribute name instead of a heap `String` per instance. One table per
+    /// context: a [`Sym`] means nothing outside the context that minted it.
+    names: Interner,
 }
 
 impl ContextInstance {
@@ -218,6 +225,20 @@ impl ContextInstance {
     }
 }
 
+/// The attribute names every registered operation declares, interned ahead of
+/// any IR so schema names get dense low ids in registration order and the hot
+/// path never copies a string: the names are `'static`, contributed by the
+/// `operation!` macro.
+fn schema_vocabulary() -> Interner {
+    let mut names = Interner::new();
+    for schema in crate::schema::OP_SCHEMAS {
+        for attribute in schema.attributes {
+            names.intern_static(attribute.name);
+        }
+    }
+    names
+}
+
 fn type_hash(ty: &dyn Type) -> u64 {
     let mut hasher = DefaultHasher::new();
     hasher.write(ty.dialect().as_bytes());
@@ -247,6 +268,7 @@ impl Context {
             op_interface_converters: HashMap::new(),
             type_cache: vec![],
             type_lookup: HashMap::new(),
+            names: schema_vocabulary(),
         })))
     }
 
@@ -260,6 +282,28 @@ impl Context {
         context.register_dialect::<VectorDialect>();
 
         context
+    }
+
+    /// The id `name` is keyed by in this context, interning it if it is new.
+    pub fn intern(&self, name: &str) -> Sym {
+        self.0.write().names.intern(name)
+    }
+
+    /// The id `name` already has in this context, or `None` if nothing has ever
+    /// been named that here — which is the answer a lookup wants, and costs a
+    /// read lock instead of a write one.
+    pub fn sym(&self, name: &str) -> Option<Sym> {
+        self.0.read().names.lookup(name)
+    }
+
+    /// The name behind `sym`. Only ids this context minted are meaningful.
+    pub fn resolve(&self, sym: Sym) -> String {
+        self.0.read().names.resolve(sym).to_string()
+    }
+
+    /// Pair an attribute name with its value, interning the name.
+    pub fn named_attribute(&self, name: &str, value: AttributeValue) -> NamedAttribute {
+        NamedAttribute::new(self.intern(name), value)
     }
 
     /// Slab capacities against live-entity counts, for the `TIR_MEM_STATS`
@@ -365,10 +409,13 @@ impl Context {
             if !matches!(role, AttributeRole::Def | AttributeRole::ReadWrite) {
                 continue;
             }
-            let Some(attr) = instance.attributes.iter().find(|a| a.name == *attr_name) else {
-                continue;
-            };
-            let AttributeValue::Register(register) = &attr.value else {
+            // Resolved through the held instance: the context lock is not
+            // reentrant, so nothing here may go back through `Context`.
+            let Some(AttributeValue::Register(register)) = inner
+                .names
+                .lookup(attr_name)
+                .and_then(|name| instance.attr_sym(name))
+            else {
                 continue;
             };
             let id = match register {
@@ -653,6 +700,7 @@ impl Context {
     /// segment sizes that describe the grouping in step.
     pub fn append_operand(&self, op: OpId, value: ValueId) {
         let mut inner = self.0.write();
+        let segment_sizes = inner.names.intern("operand_segment_sizes");
         let Some(instance) = slab_get_mut(&mut inner.operations, op.index()) else {
             return;
         };
@@ -661,7 +709,7 @@ impl Context {
         if let Some(attribute) = instance
             .attributes
             .iter_mut()
-            .find(|attribute| attribute.name == "operand_segment_sizes")
+            .find(|attribute| attribute.name == segment_sizes)
             && let crate::attributes::AttributeValue::Array(sizes) = &mut attribute.value
             && let Some(crate::attributes::AttributeValue::UInt(last)) = sizes.last_mut()
         {
@@ -948,6 +996,7 @@ impl Context {
         value: crate::attributes::AttributeValue,
     ) {
         let mut inner = self.0.write();
+        let name = inner.names.intern(name);
         if let Some(entry) = slab_get_mut(&mut inner.blocks, block.index()) {
             let attributes = Arc::make_mut(entry).attributes_mut();
             match attributes.iter_mut().find(|a| a.name == name) {
@@ -1685,6 +1734,56 @@ mod tests {
     #[test]
     fn default_context() {
         let _ = Context::with_default_dialects();
+    }
+
+    #[test]
+    fn an_attribute_name_resolves_back_to_its_spelling() {
+        let context = Context::with_default_dialects();
+
+        let attribute = context.named_attribute("size", crate::attributes::AttributeValue::UInt(4));
+
+        assert_eq!(context.resolve(attribute.name), "size");
+        assert_eq!(context.sym("size"), Some(attribute.name));
+    }
+
+    /// A name no one has used is not an id, so a lookup answers "absent" instead
+    /// of minting one.
+    #[test]
+    fn an_unused_name_has_no_id() {
+        let context = Context::with_default_dialects();
+
+        assert_eq!(context.sym("no_op_declares_this"), None);
+    }
+
+    /// Registered ops' attribute names are interned before any IR exists, so they
+    /// hold the low ids and a lookup never has to intern on a read path.
+    #[test]
+    fn schema_attribute_names_are_interned_up_front() {
+        let context = Context::with_default_dialects();
+
+        let value = context
+            .sym("value")
+            .expect("builtin.constant declares 'value'");
+
+        assert!(context.sym("sym_name").is_some());
+        assert!(value.index() < crate::schema::OP_SCHEMAS.len());
+    }
+
+    /// Ids are per-context: two contexts assign them independently, and the same
+    /// spelling reaches the same attribute in each.
+    #[test]
+    fn ids_are_local_to_one_context() {
+        let first = Context::with_default_dialects();
+        let second = Context::with_default_dialects();
+
+        let only_in_first = first.intern("a_name_only_the_first_context_sees");
+
+        assert_eq!(
+            first.resolve(only_in_first),
+            "a_name_only_the_first_context_sees"
+        );
+        assert_eq!(second.sym("a_name_only_the_first_context_sees"), None);
+        assert_eq!(first.sym("value"), second.sym("value"));
     }
 
     /// `module { func demo { ^entry: } }` — the func body sits two regions deep,

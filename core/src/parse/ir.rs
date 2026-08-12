@@ -162,7 +162,7 @@ impl<'src> TextParser<'src> {
             if let Some((block_index, block_args, attrs)) = self.try_parse_block_label(context)? {
                 *current = self.block_at_region_index(context, region, block_index, block_args)?;
                 for attr in attrs {
-                    current.set_attr(&attr.name, attr.value);
+                    current.set_attr(&context.resolve(attr.name), attr.value);
                 }
                 continue;
             }
@@ -225,7 +225,7 @@ impl<'src> TextParser<'src> {
         };
 
         let attrs = if self.parse_token("{") {
-            self.parse_block_attribute_list()?
+            self.parse_block_attribute_list(context)?
         } else {
             vec![]
         };
@@ -240,7 +240,10 @@ impl<'src> TextParser<'src> {
 
     /// Parse the block-attribute entries of `{name = value, ...}` after the
     /// opening brace: string, float, integer or boolean values.
-    fn parse_block_attribute_list(&mut self) -> ParseResult<Vec<NamedAttribute>> {
+    fn parse_block_attribute_list(
+        &mut self,
+        context: &Context,
+    ) -> ParseResult<Vec<NamedAttribute>> {
         let mut attrs = vec![];
         loop {
             if self.parse_token("}") {
@@ -268,7 +271,7 @@ impl<'src> TextParser<'src> {
                     _ => return Err((self.span(), Error::ExpectedToken("attribute value"))),
                 }
             };
-            attrs.push(NamedAttribute::new(name, value));
+            attrs.push(NamedAttribute::new(context.intern(&name), value));
 
             if self.parse_token("}") {
                 return Ok(attrs);

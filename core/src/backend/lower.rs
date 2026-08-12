@@ -28,14 +28,10 @@ pub fn lower_function_and_return(
         {
             body.append_op(super::SymbolEndOpBuilder::new(context).build());
         }
-        let name = func
-            .attributes()
-            .iter()
-            .find_map(|attr| match &attr.value {
-                AttributeValue::Str(name) if attr.name == "sym_name" => Some(name.clone()),
-                _ => None,
-            })
-            .unwrap_or_else(|| "unknown".to_string());
+        let name = match context.get_op(func.id()).attr("sym_name") {
+            Some(AttributeValue::Str(name)) => name.clone(),
+            _ => "unknown".to_string(),
+        };
         let def_use = tir::analysis::DefUse::new(context, func.id());
         let mut tuple_extracts = Vec::new();
         let mut arguments = Vec::new();

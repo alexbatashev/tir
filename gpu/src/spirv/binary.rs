@@ -1038,10 +1038,7 @@ fn write_name(out: &mut Vec<u32>, id: u32, name: &str) {
     instruction(out, 5, &operands);
 }
 fn attr_value<'a>(op: &'a dyn Operation, name: &str) -> Result<&'a AttributeValue> {
-    op.attributes()
-        .iter()
-        .find(|a| a.name == name)
-        .map(|a| &a.value)
+    op.attr(name)
         .ok_or_else(|| format!("missing attribute {name}"))
 }
 fn attr_str(op: &dyn Operation, name: &str) -> Result<String> {

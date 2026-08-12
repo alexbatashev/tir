@@ -124,7 +124,7 @@ fn lower_constant(
     let Some(constant) = op.as_op::<ConstantOp>() else {
         return Ok(false);
     };
-    let value = tir::backend::int_attr(constant.attributes(), "value").ok_or_else(|| {
+    let value = tir::backend::int_attr(&constant, "value").ok_or_else(|| {
         tir::PassError::InvalidRuleSet("constant op without an integer value".to_string())
     })?;
 
@@ -172,15 +172,11 @@ pub(crate) fn lower_addr_of(
 }
 
 fn block_attr(op: &dyn tir::Operation, name: &str) -> Result<tir::BlockId, tir::PassError> {
-    op.attributes()
-        .iter()
-        .find_map(|attr| match (&attr.value, attr.name == name) {
-            (AttributeValue::Block(block), true) => Some(*block),
-            _ => None,
-        })
-        .ok_or_else(|| {
-            tir::PassError::InvalidRuleSet(format!("branch is missing its '{name}' target"))
-        })
+    match op.attr(name) {
+        Some(AttributeValue::Block(block)) => Some(*block),
+        _ => None,
+    }
+    .ok_or_else(|| tir::PassError::InvalidRuleSet(format!("branch is missing its '{name}' target")))
 }
 
 /// Post-RA: `vret` becomes `jalr x0, x1, 0`; `vbr` becomes `jal x0, dest`.
@@ -250,21 +246,17 @@ pub(crate) fn finalize_virtual_ops(
 }
 
 fn string_attr(op: &dyn tir::Operation, name: &str) -> Result<String, tir::PassError> {
-    op.attributes()
-        .iter()
-        .find_map(|attr| match (&attr.value, attr.name == name) {
-            (AttributeValue::Str(s), true) => Some(s.clone()),
-            _ => None,
-        })
-        .ok_or_else(|| tir::PassError::InvalidRuleSet(format!("call is missing its '{name}'")))
+    match op.attr(name) {
+        Some(AttributeValue::Str(s)) => Some(s.clone()),
+        _ => None,
+    }
+    .ok_or_else(|| tir::PassError::InvalidRuleSet(format!("call is missing its '{name}'")))
 }
 
 fn register_attr(op: &dyn tir::Operation, name: &str) -> Result<AttributeValue, tir::PassError> {
-    op.attributes()
-        .iter()
-        .find_map(|attr| match (&attr.value, attr.name == name) {
-            (value @ AttributeValue::Register(_), true) => Some(value.clone()),
-            _ => None,
-        })
-        .ok_or_else(|| tir::PassError::InvalidRuleSet(format!("call is missing its '{name}'")))
+    match op.attr(name) {
+        Some(value @ AttributeValue::Register(_)) => Some(value.clone()),
+        _ => None,
+    }
+    .ok_or_else(|| tir::PassError::InvalidRuleSet(format!("call is missing its '{name}'")))
 }

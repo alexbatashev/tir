@@ -38,12 +38,13 @@ pub fn print_ir(
 fn collect_aliases(context: &Context, op: OpId, aliases: &mut Vec<(String, AttributeValue)>) {
     let instance = context.get_op(op);
     for attribute in &instance.attributes {
-        let aliased = matches!(attribute.name.as_str(), DATA_LAYOUT | TARGET_ENV)
+        let name = context.resolve(attribute.name);
+        let aliased = matches!(name.as_str(), DATA_LAYOUT | TARGET_ENV)
             && matches!(attribute.value, AttributeValue::Dict(_));
         if !aliased || aliases.iter().any(|(_, value)| *value == attribute.value) {
             continue;
         }
-        let name = unique_name(&attribute.name, aliases);
+        let name = unique_name(&name, aliases);
         aliases.push((name, attribute.value.clone()));
     }
 

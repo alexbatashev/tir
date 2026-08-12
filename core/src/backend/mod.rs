@@ -243,20 +243,13 @@ pub trait MachineInstruction {
 }
 
 pub fn register_attr(
-    attrs: &[tir::attributes::NamedAttribute],
+    op: &impl tir::Operation,
     name: &str,
 ) -> Option<(tir::backend::regalloc::RegClassId, u16)> {
-    attrs.iter().find_map(|attr| {
-        if attr.name != name {
-            return None;
-        }
-        match &attr.value {
-            AttributeValue::Register(RegisterAttr::Physical { class, index }) => {
-                Some((*class, *index))
-            }
-            _ => None,
-        }
-    })
+    match op.attr(name)? {
+        AttributeValue::Register(RegisterAttr::Physical { class, index }) => Some((*class, *index)),
+        _ => None,
+    }
 }
 
 /// Print a virtual branch/terminator op for debugging: its mnemonic, operands as
@@ -305,25 +298,14 @@ pub fn f64_constant_bits(context: &tir::Context, op: &crate::builtin::ConstantFO
     if !is_f64 {
         return None;
     }
-    crate::Operation::attributes(op)
-        .iter()
-        .find_map(|attr| match attr.value {
-            AttributeValue::F64(value) if attr.name == "value" => Some(value.to_bits() as i64),
-            _ => None,
-        })
+    match crate::Operation::attr(op, "value") {
+        Some(AttributeValue::F64(value)) => Some(value.to_bits() as i64),
+        _ => None,
+    }
 }
 
-pub fn int_attr(attrs: &[tir::attributes::NamedAttribute], name: &str) -> Option<i64> {
-    attrs.iter().find_map(|attr| {
-        if attr.name != name {
-            return None;
-        }
-        match attr.value {
-            AttributeValue::Int(i) => Some(i),
-            AttributeValue::UInt(u) => i64::try_from(u).ok(),
-            _ => None,
-        }
-    })
+pub fn int_attr(op: &impl tir::Operation, name: &str) -> Option<i64> {
+    op.attr(name).and_then(AttributeValue::as_int)
 }
 
 pub mod ops {

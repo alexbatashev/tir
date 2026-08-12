@@ -428,7 +428,11 @@ fn capture_group(toks: &[Tok], start: usize) -> Option<(String, usize)> {
 
 /// Try to match one instruction's tokens against a syntax entry, capturing
 /// operand attributes. Returns `None` if the form does not match.
-fn match_syntax(syntax: &InstrSyntax, toks: &[Tok]) -> Option<Vec<NamedAttribute>> {
+fn match_syntax(
+    context: &Context,
+    syntax: &InstrSyntax,
+    toks: &[Tok],
+) -> Option<Vec<NamedAttribute>> {
     let mut pos = 0;
     let mut attrs = Vec::new();
     for part in syntax.parts {
@@ -450,8 +454,8 @@ fn match_syntax(syntax: &InstrSyntax, toks: &[Tok]) -> Option<Vec<NamedAttribute
                     };
                     let (bank, index) = split_reg(reg)?;
                     let class = super::register_info().class(&bank.to_uppercase())?;
-                    attrs.push(NamedAttribute::new(
-                        *name,
+                    attrs.push(context.named_attribute(
+                        name,
                         AttributeValue::Register(RegisterAttr::Physical { class, index }),
                     ));
                     pos += 1;
@@ -486,7 +490,7 @@ fn match_syntax(syntax: &InstrSyntax, toks: &[Tok]) -> Option<Vec<NamedAttribute
                         pos += 1;
                         text
                     };
-                    attrs.push(NamedAttribute::new(*name, AttributeValue::Str(text)));
+                    attrs.push(context.named_attribute(name, AttributeValue::Str(text)));
                 }
             },
         }
@@ -515,6 +519,7 @@ fn lex_first(entry: &InstrSyntax) -> Option<Tok> {
 /// Parse a full instruction statement (already stripped of any trailing newline),
 /// returning `(op_name, attributes)`.
 fn parse_instruction(
+    context: &Context,
     index: &HashMap<String, Vec<&'static InstrSyntax>>,
     line: &str,
 ) -> Result<(&'static str, Vec<NamedAttribute>), String> {
@@ -548,10 +553,10 @@ fn parse_instruction(
         .get(mnemonic)
         .ok_or_else(|| format!("unsupported PTX instruction `{line}`"))?;
     for syntax in candidates {
-        if let Some(mut attrs) = match_syntax(syntax, rest) {
+        if let Some(mut attrs) = match_syntax(context, syntax, rest) {
             if let Some((p, neg)) = &pred {
-                attrs.push(NamedAttribute::new("pred", AttributeValue::Str(p.clone())));
-                attrs.push(NamedAttribute::new("pred_not", AttributeValue::Bool(*neg)));
+                attrs.push(context.named_attribute("pred", AttributeValue::Str(p.clone())));
+                attrs.push(context.named_attribute("pred_not", AttributeValue::Bool(*neg)));
             }
             return Ok((syntax.op_name, attrs));
         }
@@ -603,7 +608,7 @@ pub fn parse(context: &Context, text: &str) -> Result<ModuleOp, String> {
                     .build()
                     .id(),
                 BodyItem::Instruction(line) => {
-                    let (op_name, attrs) = parse_instruction(&index, line.trim())?;
+                    let (op_name, attrs) = parse_instruction(context, &index, line.trim())?;
                     build_op(context, op_name, attrs)
                 }
             };
@@ -620,31 +625,19 @@ pub fn parse(context: &Context, text: &str) -> Result<ModuleOp, String> {
 // ---------------------------------------------------------------------------
 
 fn attr_str(op: &OpInstance, name: &str) -> Option<String> {
-    op.attributes.iter().find(|a| a.name == name).and_then(|a| {
-        if let AttributeValue::Str(s) = &a.value {
-            Some(s.clone())
-        } else {
-            None
-        }
-    })
+    match op.attr(name)? {
+        AttributeValue::Str(s) => Some(s.clone()),
+        _ => None,
+    }
 }
 
 fn attr_bool(op: &OpInstance, name: &str) -> bool {
-    matches!(
-        op.attributes
-            .iter()
-            .find(|a| a.name == name)
-            .map(|a| &a.value),
-        Some(AttributeValue::Bool(true))
-    )
+    matches!(op.attr(name), Some(AttributeValue::Bool(true)))
 }
 
 fn render_operand(op: &OpInstance, name: &str) -> Result<String, String> {
     let value = op
-        .attributes
-        .iter()
-        .find(|a| a.name == name)
-        .map(|a| &a.value)
+        .attr(name)
         .ok_or_else(|| format!("op `{}` missing operand `{name}`", op.name().as_str()))?;
     Ok(match value {
         AttributeValue::Register(RegisterAttr::Physical { class, index }) => {

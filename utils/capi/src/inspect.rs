@@ -326,7 +326,7 @@ pub unsafe extern "C" fn tir_op_attribute_name(
             return std::ptr::null_mut();
         };
         match op.attributes.get(i) {
-            Some(a) => into_cstring(a.name.clone()),
+            Some(a) => into_cstring(ctx.resolve(a.name)),
             None => {
                 set_error(format!("attribute index {i} out of range"));
                 std::ptr::null_mut()

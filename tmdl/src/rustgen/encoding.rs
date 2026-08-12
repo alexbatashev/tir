@@ -170,8 +170,7 @@ fn emit_instruction_encoder(
         let ors = scatter(fields);
         steps.push(quote! {
             {
-                let attr = op.attributes.iter().find(|a| a.name == #name_lit)?;
-                let value = match &attr.value {
+                let value = match op.attr(#name_lit)? {
                     tir::attributes::AttributeValue::Register(
                         tir::attributes::RegisterAttr::Physical { index, .. },
                     ) => *index as u128,
@@ -204,8 +203,7 @@ fn emit_instruction_encoder(
         };
         steps.push(quote! {
             {
-                let attr = op.attributes.iter().find(|a| a.name == #name_lit)?;
-                match &attr.value {
+                match op.attr(#name_lit)? {
                     tir::attributes::AttributeValue::Int(v) => {
                         let v = *v;
                         #int_check

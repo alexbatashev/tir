@@ -19,7 +19,7 @@ use super::{
 };
 use crate::backend::{
     BlockEndOp, DataRelocOp, LiteralOp, MachineInstruction, SectionEndOp, SectionOp, SymbolEndOp,
-    SymbolOp, int_attr,
+    SymbolOp,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -180,7 +180,7 @@ impl BinaryWriter {
             .unwrap_or_else(|| ensure_section(&mut state.obj, ".text"));
         state.current_section = Some(section);
 
-        let align = int_attr(&op.attributes, "align")
+        let align = int_attr(op, "align")
             .and_then(|align| u64::try_from(align).ok())
             .unwrap_or(1)
             .max(1);
@@ -335,7 +335,7 @@ fn emit_literal(op: &Arc<tir::OpInstance>, state: &mut WalkState) -> Result<(), 
             bytes
         }
         "byte" | "half" | "word" | "dword" | "space" => {
-            let value = int_attr(&op.attributes, "value").ok_or_else(unsupported)?;
+            let value = int_attr(op, "value").ok_or_else(unsupported)?;
             match kind {
                 "space" => vec![0u8; usize::try_from(value).map_err(|_| unsupported())?],
                 "dword" => value.to_le_bytes().to_vec(),
@@ -377,11 +377,11 @@ fn emit_data_reloc(
     let symbol = string_attr(op, "symbol")
         .ok_or_else(unsupported)?
         .to_string();
-    let width = int_attr(&op.attributes, "width")
+    let width = int_attr(op, "width")
         .and_then(|width| u8::try_from(width).ok())
         .ok_or_else(unsupported)?;
     let r_type = (fmt.absolute_reloc)(width).ok_or_else(unsupported)?;
-    let addend = int_attr(&op.attributes, "addend").ok_or_else(unsupported)?;
+    let addend = int_attr(op, "addend").ok_or_else(unsupported)?;
     let section = state
         .current_section
         .unwrap_or_else(|| ensure_section(&mut state.obj, ".data"));
@@ -424,14 +424,13 @@ fn ensure_section(obj: &mut ObjectFile, name: &str) -> usize {
     obj.sections.len() - 1
 }
 
+fn int_attr(op: &tir::OpInstance, name: &str) -> Option<i64> {
+    op.attr(name).and_then(AttributeValue::as_int)
+}
+
 fn string_attr<'a>(op: &'a tir::OpInstance, name: &str) -> Option<&'a str> {
-    op.attributes.iter().find_map(|attr| {
-        if attr.name != name {
-            return None;
-        }
-        match &attr.value {
-            AttributeValue::Str(value) => Some(value.as_str()),
-            _ => None,
-        }
-    })
+    match op.attr(name)? {
+        AttributeValue::Str(value) => Some(value.as_str()),
+        _ => None,
+    }
 }

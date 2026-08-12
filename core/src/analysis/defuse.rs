@@ -55,6 +55,18 @@ pub fn op_regs(op: &Arc<OpInstance>) -> OpRegs {
         .as_interface::<dyn RegisterSemantics>()
         .map(|semantics| semantics.attribute_roles())
         .unwrap_or_default();
+    // The roles name attributes; resolve them once against this context's
+    // interner so the per-attribute lookup below is a `u32` compare. An op with
+    // no register semantics (every mid-end op) resolves nothing.
+    let roles: Vec<(Option<tir_adt::Sym>, AttributeRole)> = if attribute_roles.is_empty() {
+        Vec::new()
+    } else {
+        let context = op.context.upgrade();
+        attribute_roles
+            .iter()
+            .map(|(name, role)| (context.sym(name), *role))
+            .collect()
+    };
     let mut regs = OpRegs::default();
 
     // Builtin SSA ops (e.g. the block terminator) name registers positionally.
@@ -86,9 +98,9 @@ pub fn op_regs(op: &Arc<OpInstance>) -> OpRegs {
                 .collect(),
             _ => continue,
         };
-        let role = attribute_roles
+        let role = roles
             .iter()
-            .find(|(name, _)| *name == attr.name)
+            .find(|(name, _)| *name == Some(attr.name))
             .map(|(_, role)| *role)
             .unwrap_or(AttributeRole::None);
 

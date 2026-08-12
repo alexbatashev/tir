@@ -44,7 +44,7 @@ impl Symbol for DeclareOp {
 impl tir::Verifiable for DeclareOp {
     fn verify_impl(&self, _context: &Context) -> Result<(), Error> {
         let name = self.sym_name();
-        let carries = |attr_name: &str| self.attributes().iter().any(|attr| attr.name == attr_name);
+        let carries = |attr_name: &str| self.attr(attr_name).is_some();
         match (carries("ret_type"), carries("arg_types")) {
             (false, false) => Ok(()),
             (true, true) => {
@@ -77,42 +77,32 @@ impl tir::Verifiable for DeclareOp {
 
 impl DeclareOp {
     pub fn sym_name(&self) -> String {
-        self.attributes()
-            .iter()
-            .find(|attr| attr.name == "sym_name")
-            .and_then(|attr| match &attr.value {
-                AttributeValue::Str(name) => Some(name.clone()),
-                _ => None,
-            })
-            .expect("declare must carry sym_name")
+        match self.attr("sym_name") {
+            Some(AttributeValue::Str(name)) => name.clone(),
+            _ => panic!("declare must carry sym_name"),
+        }
     }
 
     /// `None` for a data declaration, which has no signature.
     pub fn ret_type(&self) -> Option<TypeId> {
-        self.attributes()
-            .iter()
-            .find(|attr| attr.name == "ret_type")
-            .and_then(|attr| match attr.value {
-                AttributeValue::Type(ty) => Some(ty),
-                _ => None,
-            })
+        match self.attr("ret_type")? {
+            AttributeValue::Type(ty) => Some(*ty),
+            _ => None,
+        }
     }
 
     /// `None` for a data declaration, which has no signature.
     pub fn arg_types(&self) -> Option<Vec<TypeId>> {
-        self.attributes()
-            .iter()
-            .find(|attr| attr.name == "arg_types")
-            .and_then(|attr| match &attr.value {
-                AttributeValue::Array(items) => items
-                    .iter()
-                    .map(|item| match item {
-                        AttributeValue::Type(ty) => Some(*ty),
-                        _ => None,
-                    })
-                    .collect(),
-                _ => None,
-            })
+        match self.attr("arg_types")? {
+            AttributeValue::Array(items) => items
+                .iter()
+                .map(|item| match item {
+                    AttributeValue::Type(ty) => Some(*ty),
+                    _ => None,
+                })
+                .collect(),
+            _ => None,
+        }
     }
 
     fn custom_print(&self, fmt: &mut IRFormatter) -> Result<(), std::fmt::Error> {
@@ -212,14 +202,10 @@ impl tir::Verifiable for AddressOfOp {
 
 impl AddressOfOp {
     pub fn sym_name(&self) -> String {
-        self.attributes()
-            .iter()
-            .find(|attr| attr.name == "sym_name")
-            .and_then(|attr| match &attr.value {
-                AttributeValue::Str(name) => Some(name.clone()),
-                _ => None,
-            })
-            .expect("addr_of must carry sym_name")
+        match self.attr("sym_name") {
+            Some(AttributeValue::Str(name)) => name.clone(),
+            _ => panic!("addr_of must carry sym_name"),
+        }
     }
 }
 

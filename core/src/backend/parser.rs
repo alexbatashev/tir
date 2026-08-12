@@ -247,9 +247,10 @@ fn resolve_labels(context: &tir::Context, block: &Arc<Block>, labels: &HashMap<S
             .is_some()
         {
             let mut attrs = op.attributes.clone();
+            let imm = context.sym("imm");
             let mut changed = false;
             for attr in &mut attrs {
-                if attr.name != "imm" {
+                if Some(attr.name) != imm {
                     continue;
                 }
                 if let AttributeValue::Str(symbol) = &attr.value

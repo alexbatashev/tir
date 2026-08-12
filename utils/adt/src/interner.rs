@@ -9,6 +9,13 @@ use crate::FxBuildHasher;
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Sym(u32);
 
+impl Sym {
+    /// Position in the interner's id space: ids are handed out in intern order.
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
 /// A string interner mapping equal strings to a single [`Sym`] id.
 ///
 /// Strings are copied into a doubling arena of `String` buffers that are never
@@ -41,6 +48,11 @@ impl Interner {
             return sym;
         }
         self.insert(name)
+    }
+
+    /// The id `name` already has, without interning it.
+    pub fn lookup(&self, name: &str) -> Option<Sym> {
+        self.map.get(name).copied()
     }
 
     pub fn resolve(&self, sym: Sym) -> &str {

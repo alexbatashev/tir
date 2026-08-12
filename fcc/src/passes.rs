@@ -67,27 +67,17 @@ impl LowerCirStructsPass {
     }
 
     fn string_attribute(operation: &impl Operation, name: &str) -> String {
-        operation
-            .attributes()
-            .iter()
-            .find(|attribute| attribute.name == name)
-            .and_then(|attribute| match &attribute.value {
-                AttributeValue::Str(value) => Some(value.clone()),
-                _ => None,
-            })
-            .unwrap()
+        match operation.attr(name) {
+            Some(AttributeValue::Str(value)) => value.clone(),
+            _ => panic!("{name} must be a string attribute"),
+        }
     }
 
     fn uint_attribute(operation: &impl Operation, name: &str) -> u64 {
-        operation
-            .attributes()
-            .iter()
-            .find(|attribute| attribute.name == name)
-            .and_then(|attribute| match attribute.value {
-                AttributeValue::UInt(value) => Some(value),
-                _ => None,
-            })
-            .unwrap()
+        match operation.attr(name) {
+            Some(AttributeValue::UInt(value)) => *value,
+            _ => panic!("{name} must be an unsigned integer attribute"),
+        }
     }
 
     fn layouts(descendants: &[OperationRef]) -> HashMap<String, StructLayout> {
@@ -97,10 +87,8 @@ impl LowerCirStructsPass {
             .map(|definition| {
                 let name = Self::string_attribute(&definition, "sym_name");
                 let fields = definition
-                    .attributes()
-                    .iter()
-                    .find(|attribute| attribute.name == "fields")
-                    .and_then(|attribute| match &attribute.value {
+                    .attr("fields")
+                    .and_then(|value| match value {
                         AttributeValue::Array(fields) => Some(fields),
                         _ => None,
                     })

@@ -496,12 +496,7 @@ fn lower_vector_len(
     };
     // The grant is element-width-specific (VLMAX depends on SEW), so the op
     // names the width it configures for.
-    let Some(AttributeValue::Int(sew)) = inner
-        .attributes
-        .iter()
-        .find(|a| a.name == "sew")
-        .map(|a| a.value.clone())
-    else {
+    let Some(&AttributeValue::Int(sew)) = inner.attr("sew") else {
         return Err(tir::PassError::InvalidRuleSet(
             "vector.vector_len requires a `sew` attribute".to_string(),
         ));
@@ -1805,11 +1800,10 @@ mod tests {
             .find(|op| op.is::<crate::ShiftLeftLogicalImmWordOp>())
             .expect("slliw should be selected");
         assert!(
-            slliw
-                .attributes
-                .iter()
-                .any(|a| a.name == "imm"
-                    && matches!(a.value, tir::attributes::AttributeValue::Int(3))),
+            matches!(
+                slliw.attr("imm"),
+                Some(tir::attributes::AttributeValue::Int(3))
+            ),
             "slliw should fold the immediate 3, got {:?}",
             slliw.attributes
         );
@@ -1883,15 +1877,12 @@ mod tests {
         name: &str,
     ) -> Option<tir::backend::liveness::PhysReg> {
         use tir::attributes::{AttributeValue, RegisterAttr};
-        op.attributes
-            .iter()
-            .find(|a| a.name == name)
-            .and_then(|a| match &a.value {
-                AttributeValue::Register(RegisterAttr::Physical { class, index }) => {
-                    Some((*class, *index))
-                }
-                _ => None,
-            })
+        match op.attr(name)? {
+            AttributeValue::Register(RegisterAttr::Physical { class, index }) => {
+                Some((*class, *index))
+            }
+            _ => None,
+        }
     }
 
     fn body_blocks_have_no_virtual(context: &Context, region_id: tir::RegionId) {
@@ -1907,7 +1898,7 @@ mod tests {
                         ),
                         "op {} still has a virtual register in attr {}",
                         op.name().as_str(),
-                        attr.name
+                        context.resolve(attr.name)
                     );
                 }
             }
@@ -2173,8 +2164,9 @@ mod tests {
             .expect("the call must finalize to jal");
         // jal links through ra and targets the callee symbol (a link-time fixup).
         assert_eq!(phys_of(&jal, "rd"), Some((RegClass::GPR.id(), 1)));
-        assert!(jal.attributes.iter().any(|a| a.name == "imm"
-            && matches!(&a.value, tir::attributes::AttributeValue::Str(s) if s == "foo")));
+        assert!(
+            matches!(jal.attr("imm"), Some(tir::attributes::AttributeValue::Str(s)) if s == "foo")
+        );
 
         body_blocks_have_no_virtual(&context, region.id());
     }

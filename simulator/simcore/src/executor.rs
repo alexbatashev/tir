@@ -725,12 +725,13 @@ impl Executor {
     ) -> String {
         let mut pieces = Vec::new();
         for attr in &op.attributes {
+            let name = context.resolve(attr.name);
             let mut value_buf = String::new();
             let mut formatter = tir::IRFormatter::new(&mut value_buf);
             if attr.value.print(&mut formatter, context).is_ok() {
-                pieces.push(format!("{}={}", attr.name, value_buf));
+                pieces.push(format!("{name}={value_buf}"));
             } else {
-                pieces.push(format!("{}=<print-error>", attr.name));
+                pieces.push(format!("{name}=<print-error>"));
             }
         }
         if pieces.is_empty() {

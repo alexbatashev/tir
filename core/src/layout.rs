@@ -51,13 +51,8 @@ impl DataLayout {
     /// probed with no IR home — belongs to no scope, so the layout resolved where
     /// the code came from rides along as its own attribute.
     pub fn for_instance(context: &Context, instance: &crate::OpInstance) -> Option<Self> {
-        Self::for_op(context, instance.id).or_else(|| {
-            instance
-                .attributes
-                .iter()
-                .find(|attribute| attribute.name == DATA_LAYOUT)
-                .and_then(|attribute| Self::from_value(&attribute.value))
-        })
+        Self::for_op(context, instance.id)
+            .or_else(|| instance.attr(DATA_LAYOUT).and_then(Self::from_value))
     }
 
     /// The layout in scope at `op` over `default`: the target's own spec acts as

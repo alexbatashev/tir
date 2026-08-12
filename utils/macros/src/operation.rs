@@ -227,7 +227,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
     let segment_sizes_attr = if has_variadic {
         quote! {
             attributes.push(tir::attributes::NamedAttribute::new(
-                "operand_segment_sizes",
+                self.context.intern("operand_segment_sizes"),
                 tir::attributes::AttributeValue::Array(
                     operand_segment_sizes
                         .iter()
@@ -700,11 +700,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         quote! {
             // Variadic ops recover their operand grouping from the segment sizes
             // recorded at build time, then validate each declared operand's segment.
-            let segment_sizes: Vec<usize> = match <Self as tir::Operation>::attributes(self)
-                .iter()
-                .find(|a| a.name == "operand_segment_sizes")
-                .map(|a| &a.value)
-            {
+            let segment_sizes: Vec<usize> = match self.0.attr("operand_segment_sizes") {
                 Some(tir::attributes::AttributeValue::Array(items)) => items
                     .iter()
                     .map(|v| match v {
@@ -897,7 +893,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
                 let attr_specs: &[(&str, &str)] = &[#(#attr_spec_literals),*];
 
                 for (attr_name, attr_type) in attr_specs {
-                    let Some(attr) = <Self as tir::Operation>::attributes(self).iter().find(|a| a.name == *attr_name) else {
+                    let Some(value) = self.0.attr(attr_name) else {
                         return Err(tir::Error::VerificationError(format!(
                             "{} missing required attribute '{}'",
                             <Self as tir::Operation>::name(),
@@ -907,17 +903,17 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
 
                     let matches = match *attr_type {
                         "any" => true,
-                        "Str" => matches!(attr.value, tir::attributes::AttributeValue::Str(_)),
-                        "Int" => matches!(attr.value, tir::attributes::AttributeValue::Int(_)),
-                        "UInt" => matches!(attr.value, tir::attributes::AttributeValue::UInt(_)),
-                        "F32" => matches!(attr.value, tir::attributes::AttributeValue::F32(_)),
-                        "F64" => matches!(attr.value, tir::attributes::AttributeValue::F64(_)),
-                        "Bool" => matches!(attr.value, tir::attributes::AttributeValue::Bool(_)),
-                        "Array" => matches!(attr.value, tir::attributes::AttributeValue::Array(_)),
-                        "Dict" => matches!(attr.value, tir::attributes::AttributeValue::Dict(_)),
-                        "Register" => matches!(attr.value, tir::attributes::AttributeValue::Register(_)),
-                        "Type" => matches!(attr.value, tir::attributes::AttributeValue::Type(_)),
-                        "Block" => matches!(attr.value, tir::attributes::AttributeValue::Block(_)),
+                        "Str" => matches!(value, tir::attributes::AttributeValue::Str(_)),
+                        "Int" => matches!(value, tir::attributes::AttributeValue::Int(_)),
+                        "UInt" => matches!(value, tir::attributes::AttributeValue::UInt(_)),
+                        "F32" => matches!(value, tir::attributes::AttributeValue::F32(_)),
+                        "F64" => matches!(value, tir::attributes::AttributeValue::F64(_)),
+                        "Bool" => matches!(value, tir::attributes::AttributeValue::Bool(_)),
+                        "Array" => matches!(value, tir::attributes::AttributeValue::Array(_)),
+                        "Dict" => matches!(value, tir::attributes::AttributeValue::Dict(_)),
+                        "Register" => matches!(value, tir::attributes::AttributeValue::Register(_)),
+                        "Type" => matches!(value, tir::attributes::AttributeValue::Type(_)),
+                        "Block" => matches!(value, tir::attributes::AttributeValue::Block(_)),
                         _ => false,
                     };
 
@@ -1003,6 +999,10 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
                 &self.0.attributes
             }
 
+            fn attr(&self, name: &str) -> Option<&tir::attributes::AttributeValue> {
+                self.0.attr(name)
+            }
+
             fn operand_names(&self) -> &'static [&'static str] {
                 &[#(#operand_name_literals),*]
             }
@@ -1031,6 +1031,13 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
             #result_builder_method
 
             pub fn attr(mut self, name: &str, value: tir::attributes::AttributeValue) -> Self {
+                let attribute = self.context.named_attribute(name, value);
+                self.attributes.push(attribute);
+                self
+            }
+
+            /// [`Self::attr`] for a name already interned in the context.
+            pub fn attr_sym(mut self, name: tir::Sym, value: tir::attributes::AttributeValue) -> Self {
                 self.attributes.push(tir::attributes::NamedAttribute::new(name, value));
                 self
             }
@@ -1425,7 +1432,7 @@ fn make_attribute_verifier(specs: &[AttrSpec]) -> proc_macro2::TokenStream {
     let checks = specs.iter().map(|s| {
         let n = s.name.clone();
         quote! {
-            if !self.attributes.iter().any(|a| a.name == #n) {
+            if !self.attributes.iter().any(|a| Some(a.name) == self.context.sym(#n)) {
                 panic!(concat!("Missing required attribute: ", #n));
             }
         }
@@ -1574,9 +1581,9 @@ fn make_generic_printer(
                 for attr in self.attributes() {
                     if !first { fmt.write(", ")?; }
                     first = false;
-                    fmt.write(&attr.name)?;
-                    fmt.write(" = ")?;
                     let context = self.0.context.upgrade();
+                    fmt.write(context.resolve(attr.name))?;
+                    fmt.write(" = ")?;
                     attr.value.print(fmt, &context)?;
                 }
                 fmt.write("}")?;
@@ -1712,7 +1719,7 @@ fn make_parser(
                                    other => other,
                                };
                            }
-                           parsed_attrs.push(tir::attributes::NamedAttribute::new(name, val));
+                           parsed_attrs.push(tir::attributes::NamedAttribute::new(context.intern(&name), val));
                            if parser.parse_token("}") { break; }
                            if !parser.parse_token(",") { ok = false; break; }
                        } else { ok = false; break; }
@@ -1728,7 +1735,7 @@ fn make_parser(
 
            #region_parsers
 
-            for a in parsed_attrs { builder = builder.attr(&a.name, a.value); }
+            for a in parsed_attrs { builder = builder.attr_sym(a.name, a.value); }
 
             Ok(Box::new(builder
                 #region_builders

@@ -113,15 +113,10 @@ pub fn fp_math_flags(context: &Context, op: OpId) -> FastMathFlags {
         else {
             break;
         };
-        let owner_attr =
-            context
-                .get_op(owner)
-                .attributes
-                .iter()
-                .find_map(|a| match (&*a.name, &a.value) {
-                    (FPMATH_ATTR, AttributeValue::Str(spec)) => Some(spec.clone()),
-                    _ => None,
-                });
+        let owner_attr = match context.get_op(owner).attr(FPMATH_ATTR) {
+            Some(AttributeValue::Str(spec)) => Some(spec.clone()),
+            _ => None,
+        };
         if let Some(spec) = owner_attr {
             return FastMathFlags::parse(&spec).unwrap_or(FastMathFlags::NONE);
         }
@@ -333,12 +328,10 @@ impl CmpFOp {
             Leaf = tir::sem::SymPayload<tir::ValueId>,
         >,
     ) -> Option<tir::graph::NodeId> {
-        let predicate = self.0.attributes.iter().find_map(|attribute| {
-            (attribute.name == "predicate").then_some(match &attribute.value {
-                tir::attributes::AttributeValue::Str(value) => Some(value.as_str()),
-                _ => None,
-            })
-        })??;
+        let predicate = match self.0.attr("predicate")? {
+            tir::attributes::AttributeValue::Str(value) => value.as_str(),
+            _ => return None,
+        };
         cmpf_semantics(g, predicate)
     }
 }

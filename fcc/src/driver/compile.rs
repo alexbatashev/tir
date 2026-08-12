@@ -94,7 +94,7 @@ fn describe_target(
     ];
     for (name, spec) in specs {
         if let Some(spec) = spec {
-            attributes.push(tir::attributes::NamedAttribute::new(name, spec));
+            attributes.push(context.named_attribute(name, spec));
         }
     }
     context.set_op_attributes(module.id(), attributes);

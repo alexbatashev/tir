@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+use tir_adt::Sym;
+
 use crate::backend::regalloc::RegClassId;
 use crate::{BlockId, Context, TypeId};
 
@@ -102,20 +104,47 @@ impl RegisterAttr {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct NamedAttribute {
-    pub name: String,
+    /// The name, interned in the context that owns the attribute (see
+    /// [`Context::intern`]). Comparing attribute names is a `u32` compare.
+    pub name: Sym,
     pub value: AttributeValue,
 }
 
 impl NamedAttribute {
-    pub fn new(name: impl Into<String>, value: AttributeValue) -> Self {
-        Self {
-            name: name.into(),
-            value,
-        }
+    pub fn new(name: Sym, value: AttributeValue) -> Self {
+        Self { name, value }
     }
 }
 
+/// The value of the attribute called `name`, resolving the name through
+/// `context`'s interner. For a list not reached through an [`crate::OpInstance`],
+/// which answers the same question with [`crate::OpInstance::attr`].
+pub fn find_attribute<'a>(
+    context: &Context,
+    attributes: &'a [NamedAttribute],
+    name: &str,
+) -> Option<&'a NamedAttribute> {
+    let sym = context.sym(name)?;
+    attributes.iter().find(|attribute| attribute.name == sym)
+}
+
 impl AttributeValue {
+    /// The integer this value holds, whichever signedness it was written with.
+    pub fn as_int(&self) -> Option<i64> {
+        match self {
+            AttributeValue::Int(value) => Some(*value),
+            AttributeValue::UInt(value) => i64::try_from(*value).ok(),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            AttributeValue::Str(value) => Some(value.as_str()),
+            _ => None,
+        }
+    }
+
     pub fn print(
         &self,
         fmt: &mut crate::IRFormatter,

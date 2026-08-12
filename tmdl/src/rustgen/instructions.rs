@@ -482,7 +482,7 @@ fn emit_instructions<'a>(
             }
         } else {
             quote! {
-                match attr.name.as_str() {
+                match context.resolve(attr.name).as_str() {
                     #(#register_attr_print_arms,)*
                     _ => attr.value.print(fmt, &context)?,
                 }
@@ -528,7 +528,7 @@ fn emit_instructions<'a>(
                                 fmt.write(", ")?;
                             }
                             first = false;
-                            fmt.write(&attr.name)?;
+                            fmt.write(context.resolve(attr.name))?;
                             fmt.write(" = ")?;
                             #custom_print_attr_body
                         }
@@ -1555,13 +1555,14 @@ fn emit_instructions<'a>(
                         parser: &mut tir::parse::tokens::Parser<'src, tir::backend::Token<'src>>,
                     ) -> Result<(), ()> {
                         asm_desc::parse_and_insert(
+                            context,
                             &INSTRUCTION_DESCS[#desc_index],
                             parser,
                             builder,
                             |attributes| {
                                 let mut op_builder = #builder_ident::new(context);
                                 for attribute in attributes {
-                                    op_builder = op_builder.attr(&attribute.name, attribute.value);
+                                    op_builder = op_builder.attr_sym(attribute.name, attribute.value);
                                 }
                                 op_builder.build()
                             },
@@ -1761,9 +1762,10 @@ fn emit_instructions<'a>(
                             fmt.write(", ")?;
                         }
                         first = false;
-                        fmt.write(&attr.name)?;
+                        let name = context.resolve(attr.name);
+                        fmt.write(&name)?;
                         fmt.write(" = ")?;
-                        if register_attributes.contains(&attr.name.as_str()) {
+                        if register_attributes.contains(&name.as_str()) {
                             if let tir::attributes::AttributeValue::Register(
                                 tir::attributes::RegisterAttr::Physical { class, index },
                             ) = &attr.value

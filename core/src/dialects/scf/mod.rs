@@ -526,10 +526,8 @@ impl SwitchOp {
 
     /// The case value selecting each non-default arm, in arm order.
     fn cases(&self) -> Vec<i64> {
-        self.attributes()
-            .iter()
-            .find(|attr| attr.name == "cases")
-            .and_then(|attr| match &attr.value {
+        self.attr("cases")
+            .and_then(|value| match value {
                 tir::attributes::AttributeValue::Array(items) => items
                     .iter()
                     .map(|item| match item {

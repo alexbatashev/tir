@@ -37,22 +37,17 @@ pub mod ops {
 }
 
 fn argument_alignments(op: &impl Operation) -> Vec<u64> {
-    op.attributes()
-        .iter()
-        .find_map(|attribute| {
-            (attribute.name == "argument_alignments").then(|| match &attribute.value {
-                AttributeValue::Array(values) => values
-                    .iter()
-                    .map(|value| match value {
-                        AttributeValue::UInt(value) => *value,
-                        AttributeValue::Int(value) if *value >= 0 => *value as u64,
-                        _ => 0,
-                    })
-                    .collect(),
-                _ => Vec::new(),
+    match op.attr("argument_alignments") {
+        Some(AttributeValue::Array(values)) => values
+            .iter()
+            .map(|value| match value {
+                AttributeValue::UInt(value) => *value,
+                AttributeValue::Int(value) if *value >= 0 => *value as u64,
+                _ => 0,
             })
-        })
-        .unwrap_or_default()
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 fn parse_argument_alignments(
@@ -94,14 +89,10 @@ fn verify_argument_alignments(
     arguments: usize,
     operation: &str,
 ) -> Result<(), Error> {
-    let Some(attribute) = op
-        .attributes()
-        .iter()
-        .find(|attribute| attribute.name == "argument_alignments")
-    else {
+    let Some(attribute) = op.attr("argument_alignments") else {
         return Ok(());
     };
-    let AttributeValue::Array(alignments) = &attribute.value else {
+    let AttributeValue::Array(alignments) = attribute else {
         return Err(Error::VerificationError(format!(
             "{operation} argument alignments must be an array"
         )));

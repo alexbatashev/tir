@@ -356,22 +356,19 @@ impl<'a> SemDagBuilder<'a> {
         value: ValueId,
         value_ty: Option<TypeId>,
     ) -> Id {
-        match def.attributes.iter().find(|a| a.name == "value") {
-            Some(attr) => match &attr.value {
-                AttributeValue::Int(v) => {
-                    let width = value_ty
-                        .and_then(|ty| {
-                            let ty = self.context.get_type_data(ty);
-                            (ty.as_ref() as &dyn std::any::Any)
-                                .downcast_ref::<tir::builtin::IntegerType>()
-                                .map(tir::builtin::IntegerType::width)
-                        })
-                        .unwrap_or(64);
-                    self.add_int(APInt::new_signed(width, *v), value_ty)
-                }
-                _ => self.add_input_value(value, value_ty),
-            },
-            None => self.add_input_value(value, value_ty),
+        match def.attr("value") {
+            Some(AttributeValue::Int(v)) => {
+                let width = value_ty
+                    .and_then(|ty| {
+                        let ty = self.context.get_type_data(ty);
+                        (ty.as_ref() as &dyn std::any::Any)
+                            .downcast_ref::<tir::builtin::IntegerType>()
+                            .map(tir::builtin::IntegerType::width)
+                    })
+                    .unwrap_or(64);
+                self.add_int(APInt::new_signed(width, *v), value_ty)
+            }
+            _ => self.add_input_value(value, value_ty),
         }
     }
 
@@ -384,10 +381,10 @@ impl<'a> SemDagBuilder<'a> {
                 .downcast_ref::<FloatType>()?
                 .bit_width()
         };
-        let value = def.attributes.iter().find_map(|attr| match &attr.value {
-            AttributeValue::F64(value) if attr.name == "value" => Some(*value),
-            _ => None,
-        })?;
+        let value = match def.attr("value")? {
+            AttributeValue::F64(value) => *value,
+            _ => return None,
+        };
         let bits = match width {
             32 => (value as f32).to_bits() as i32 as i64,
             64 => value.to_bits() as i64,

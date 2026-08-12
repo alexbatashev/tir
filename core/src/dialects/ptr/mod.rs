@@ -188,14 +188,10 @@ impl AllocaOp {
 }
 
 fn uint_attribute(op: &impl Operation, name: &str) -> u64 {
-    op.attributes()
-        .iter()
-        .find(|attribute| attribute.name == name)
-        .and_then(|attribute| match attribute.value {
-            AttributeValue::UInt(value) => Some(value),
-            _ => None,
-        })
-        .unwrap()
+    match op.attr(name) {
+        Some(AttributeValue::UInt(value)) => *value,
+        _ => panic!("{name} must be an unsigned integer attribute"),
+    }
 }
 
 operation! {
@@ -320,13 +316,10 @@ impl tir::Verifiable for CmpOp {
 }
 
 fn predicate(op: &impl Operation) -> Option<&str> {
-    op.attributes()
-        .iter()
-        .find(|attribute| attribute.name == "predicate")
-        .and_then(|attribute| match &attribute.value {
-            AttributeValue::Str(value) => Some(value.as_str()),
-            _ => None,
-        })
+    match op.attr("predicate")? {
+        AttributeValue::Str(value) => Some(value.as_str()),
+        _ => None,
+    }
 }
 
 operation! {
