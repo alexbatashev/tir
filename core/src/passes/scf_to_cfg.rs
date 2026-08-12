@@ -78,30 +78,20 @@ impl ScfToCfgPass {
             .unwrap()
     }
 
+    /// The loop body, ready to become a block of the function: the token its
+    /// early exits name is not a value in a CFG, so the argument carrying it
+    /// leaves the block. The remaining arguments stay, as does everything reading
+    /// them.
     fn move_loop_body(context: &Context, region: RegionId) -> (Arc<Block>, Option<ValueId>) {
-        let source = Self::move_body(context, region);
+        let body = Self::move_body(context, region);
         let token = TokenType::new(context);
-        let scope = source
+        let scope = body
             .arguments()
             .iter()
-            .find(|argument| argument.ty() == token)
-            .map(Value::id);
-        let arguments = source
-            .arguments()
-            .iter()
-            .filter(|argument| argument.ty() != token)
-            .map(|argument| {
-                let replacement = context.create_value(argument.ty(), None);
-                context.replace_value_uses(argument.id(), replacement.id());
-                replacement
-            })
-            .collect();
-        let body = context.create_block(arguments);
-        for op_id in source.op_ids() {
-            source.remove_op(op_id);
-            body.append(op_id);
-        }
-        (body, scope)
+            .position(|argument| argument.ty() == token)
+            .map(|index| context.remove_block_argument(body.id(), index).id());
+        context.get_region(region).remove_block(body.id());
+        (context.get_block(body.id()), scope)
     }
 
     fn replace_terminator_with_branch(

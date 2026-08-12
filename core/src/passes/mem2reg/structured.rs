@@ -7,14 +7,13 @@
 
 use std::sync::Arc;
 
-use crate::attributes::AttributeValue;
 use crate::builtin::TokenType;
 use crate::{
-    Block, Conditional, Context, LoopLike, MemoryRead, MemoryWrite, OpId, OpInstance, Operation,
-    OperationRef, PassError, PromotableAllocation, RegionId, Rewriter, TypeId, ValueId, scf,
+    Block, Conditional, Context, LoopLike, MemoryRead, MemoryWrite, OpId, OpInstance, OperationRef,
+    PassError, PromotableAllocation, RegionId, Rewriter, TypeId, ValueId, scf,
 };
 
-use crate::analysis::slots::{collect_slots, values_agree_on_type};
+use crate::analysis::slots::{collect_slots, load_result, values_agree_on_type};
 
 pub(super) fn run(
     context: &Context,
@@ -52,6 +51,7 @@ pub(super) fn run(
         let mut promoter = Promoter {
             context,
             slot,
+            ty: context.get_value(load_result(context, state.loads[0])).ty(),
             alloca,
             uninitialized: None,
             scopes: vec![],
@@ -77,6 +77,9 @@ pub(super) fn run(
 struct Promoter<'a> {
     context: &'a Context,
     slot: ValueId,
+    /// The type of the value the slot holds, shared by its loads and stores and
+    /// so by every port the promotion grows.
+    ty: TypeId,
     alloca: OpId,
     /// The materialized stand-in for the slot's value before anything stores to
     /// it: a re-read of the still-uninitialized location. Created on demand, and
@@ -119,11 +122,11 @@ impl Promoter<'_> {
                     if references_slot(self.context, &op, self.slot)
                         || exits_scopes(self.context, &op, &self.scopes) =>
                 {
-                    current = self.walk_nested(block, op, current);
+                    current = self.walk_nested(op, current);
                 }
                 _ if exits_scope(&op, &self.scopes) => {
                     let value = self.reaching(current);
-                    self.append_operand(op_id, value);
+                    self.context.append_operand(op_id, value);
                 }
                 _ => {}
             }
@@ -133,12 +136,7 @@ impl Promoter<'_> {
 
     /// Promote the slot through one structured operation, growing a result (a
     /// conditional) or a carried port (a loop) when the region tree redefines it.
-    fn walk_nested(
-        &mut self,
-        block: &Arc<Block>,
-        op: Arc<OpInstance>,
-        incoming: Option<ValueId>,
-    ) -> Option<ValueId> {
+    fn walk_nested(&mut self, op: Arc<OpInstance>, incoming: Option<ValueId>) -> Option<ValueId> {
         if !stores_slot(self.context, &op, self.slot) {
             // Read-only inside: the incoming value already dominates every use,
             // so the loads rewrite against it and no port is needed.
@@ -149,158 +147,33 @@ impl Promoter<'_> {
             return incoming;
         }
 
-        if op.clone().as_interface::<dyn Conditional>().is_some() {
-            Some(self.grow_conditional(block, op, incoming))
-        } else {
-            Some(self.grow_loop(block, op, incoming))
-        }
+        Some(self.grow_port(op, incoming))
     }
 
-    fn grow_conditional(
-        &mut self,
-        block: &Arc<Block>,
-        op: Arc<OpInstance>,
-        incoming: Option<ValueId>,
-    ) -> ValueId {
-        let arm_values: Vec<ValueId> = op
-            .regions
-            .iter()
-            .map(|&region| {
-                let arm = single_block(self.context, region).expect("checked by `supported`");
-                let value = self.walk(&arm, incoming);
-                self.reaching(value)
-            })
-            .collect();
-
-        for (&region, &value) in op.regions.iter().zip(&arm_values) {
-            self.append_yielded(region, value);
-        }
-
-        let ty = self.context.get_value(arm_values[0]).ty();
-        let grown = scf::IfOpBuilder::new(self.context)
-            .condition(op.operands[0])
-            .then_body(op.regions[0])
-            .else_body(op.regions[1])
-            .result_types(result_types(self.context, &op, ty))
-            .build();
-        self.replace(block, op, &grown)
-    }
-
-    fn grow_loop(
-        &mut self,
-        block: &Arc<Block>,
-        op: Arc<OpInstance>,
-        incoming: Option<ValueId>,
-    ) -> ValueId {
-        let init = self.reaching(incoming);
-        let ty = self.context.get_value(init).ty();
-        let is_while = op.is::<scf::WhileOp>();
-
-        let body_region = *op.regions.last().expect("a loop has a body");
-        let scope = loop_scope(self.context, body_region);
+    /// Grow one carried port through a structured operation for the slot: a
+    /// conditional gains a result, a loop a whole carried port. Each region is
+    /// walked with the value that reaches its start, and yields the value that
+    /// leaves it.
+    fn grow_port(&mut self, op: Arc<OpInstance>, incoming: Option<ValueId>) -> ValueId {
+        let context = self.context;
+        let is_loop = op.clone().as_interface::<dyn LoopLike>().is_some();
+        let init = is_loop.then(|| self.reaching(incoming));
+        let scope =
+            init.and_then(|_| loop_scope(context, *op.regions.last().expect("a loop has a body")));
         self.scopes.extend(scope);
 
-        // `scf.while` observes the carried value first in its condition region,
-        // which forwards what the body sees; `scf.for` carries straight into the
-        // body.
-        let carried = if is_while {
-            let condition = self.carry_into(op.regions[0], ty);
-            let forwarded = self.reaching(condition);
-            // `scf.condition` forwards the deciding boolean, then one value per port.
-            self.append_yielded(op.regions[0], forwarded);
-            self.carry_into(op.regions[1], ty)
-        } else {
-            self.carry_into(op.regions[0], ty)
-        };
-        let latched = self.reaching(carried);
-        self.append_yielded(body_region, latched);
+        let ty = self.ty;
+        let result = context.grow_port(op.id, ty, init, |region, carried| {
+            let block = single_block(context, region).expect("checked by `supported`");
+            let value = self.walk(&block, carried.or(incoming));
+            let value = self.reaching(value);
+            yields_port(context, region).then_some(value)
+        });
+
         if scope.is_some() {
             self.scopes.pop();
         }
-
-        let mut inits = op.operands.clone();
-        inits.push(init);
-        let result_types = result_types(self.context, &op, ty);
-        let grown: Box<dyn Operation> = if is_while {
-            Box::new(
-                scf::WhileOpBuilder::new(self.context)
-                    .inits(inits)
-                    .condition_region(op.regions[0])
-                    .body(op.regions[1])
-                    .result_types(result_types)
-                    .build(),
-            )
-        } else {
-            let carried_inits = inits.split_off(3);
-            Box::new(
-                scf::ForOpBuilder::new(self.context)
-                    .lower_bound(inits[0])
-                    .upper_bound(inits[1])
-                    .step(inits[2])
-                    .inits(carried_inits)
-                    .body(op.regions[0])
-                    .result_types(result_types)
-                    .build(),
-            )
-        };
-        self.replace(block, op, grown.as_ref())
-    }
-
-    /// Give `region`'s block one more entry argument for the slot and walk it with
-    /// that argument reaching its start.
-    fn carry_into(&mut self, region: RegionId, ty: TypeId) -> Option<ValueId> {
-        let block = single_block(self.context, region).expect("checked by `supported`");
-        let carried = self.context.append_block_argument(block.id(), ty).id();
-        self.walk(&block, Some(carried))
-    }
-
-    /// Swap `op` for the grown operation, keeping the values its old results fed.
-    fn replace(
-        &mut self,
-        block: &Arc<Block>,
-        op: Arc<OpInstance>,
-        grown: &dyn Operation,
-    ) -> ValueId {
-        let results = self.context.get_op(grown.id()).results.clone();
-        for (&old, &new) in op.results.iter().zip(&results) {
-            self.context.replace_value_uses(old, new);
-        }
-        block.replace_op(op.id, grown.id());
-        self.context.remove_operation(op.id);
-        *results.last().expect("the grown op carries the slot")
-    }
-
-    /// Append `value` to what a structured region yields on its back or exit edge. A
-    /// region leaving through an early exit took the value there instead, on the edge
-    /// that exit branches along.
-    fn append_yielded(&self, region: RegionId, value: ValueId) {
-        let block = single_block(self.context, region).expect("checked by `supported`");
-        let terminator = *block.op_ids().last().expect("regions are terminated");
-        let op = self.context.get_op(terminator);
-        if op.is::<scf::BreakOp>() || op.is::<scf::ContinueOp>() {
-            return;
-        }
-        self.append_operand(terminator, value);
-    }
-
-    /// Append `value` to a terminator's trailing variadic group, keeping the
-    /// operand segment sizes that describe that grouping in step.
-    fn append_operand(&self, op_id: OpId, value: ValueId) {
-        let op = self.context.get_op(op_id);
-        let mut operands = op.operands.clone();
-        operands.push(value);
-        self.context.set_op_operands(op_id, operands);
-
-        let mut attributes = op.attributes.clone();
-        if let Some(attribute) = attributes
-            .iter_mut()
-            .find(|attribute| attribute.name == "operand_segment_sizes")
-            && let AttributeValue::Array(sizes) = &mut attribute.value
-            && let Some(AttributeValue::UInt(last)) = sizes.last_mut()
-        {
-            *last += 1;
-            self.context.set_op_attributes(op_id, attributes);
-        }
+        result
     }
 
     /// The value reaching this point, materializing a read of the untouched slot
@@ -350,6 +223,14 @@ impl Promoter<'_> {
         block.insert(position + 1, read.id);
         results[0]
     }
+}
+
+/// Whether a region carries the port out through its terminator. A region that
+/// leaves through a loop exit takes the value along that edge instead.
+fn yields_port(context: &Context, region: RegionId) -> bool {
+    let block = single_block(context, region).expect("checked by `supported`");
+    let terminator = context.get_op(*block.op_ids().last().expect("regions are terminated"));
+    !terminator.is::<scf::BreakOp>() && !terminator.is::<scf::ContinueOp>()
 }
 
 /// The loop body's token scope: the value its `scf.break`/`scf.continue` name.
@@ -534,15 +415,6 @@ fn single_block(context: &Context, region: RegionId) -> Option<Arc<Block>> {
     let mut blocks = context.get_region(region).iter(context.clone());
     let block = blocks.next()?;
     blocks.next().is_none().then_some(block)
-}
-
-/// The grown operation's result types: the ones it already had, plus the slot's.
-fn result_types(context: &Context, op: &Arc<OpInstance>, ty: TypeId) -> Vec<TypeId> {
-    op.results
-        .iter()
-        .map(|&result| context.get_value(result).ty())
-        .chain(std::iter::once(ty))
-        .collect()
 }
 
 fn erase_all(

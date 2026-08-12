@@ -608,6 +608,91 @@ impl Context {
         value
     }
 
+    /// Drop `block`'s `index`-th argument and return it. Nothing may read the
+    /// argument: it stops being a definition with the edit.
+    pub fn remove_block_argument(&self, block: BlockId, index: usize) -> Value {
+        let mut inner = self.0.write();
+        let entry = slab_get_mut(&mut inner.blocks, block.index()).expect("live block");
+        let argument = Arc::make_mut(entry).arguments_mut().remove(index);
+        if let Some(slot) = inner.value_block.get_mut(argument.id().index()) {
+            *slot = None;
+        }
+        inner.edit_block(block);
+        argument
+    }
+
+    /// Append `value` to `op`'s trailing variadic operand group, keeping the
+    /// segment sizes that describe the grouping in step.
+    pub fn append_operand(&self, op: OpId, value: ValueId) {
+        let mut inner = self.0.write();
+        let Some(instance) = slab_get_mut(&mut inner.operations, op.index()) else {
+            return;
+        };
+        let instance = Arc::make_mut(instance);
+        instance.operands.push(value);
+        if let Some(attribute) = instance
+            .attributes
+            .iter_mut()
+            .find(|attribute| attribute.name == "operand_segment_sizes")
+            && let crate::attributes::AttributeValue::Array(sizes) = &mut attribute.value
+            && let Some(crate::attributes::AttributeValue::UInt(last)) = sizes.last_mut()
+        {
+            *last += 1;
+        }
+        inner.edit_op(op);
+    }
+
+    /// Grow `op` by one carried port of type `ty`.
+    ///
+    /// A port that carries a value in — a loop's — takes `init` as one more
+    /// operand and gives each of the op's regions one more entry argument, which
+    /// `latch` receives; a gate that carries nothing in (a conditional) passes
+    /// `None` and its regions keep the arguments they had. `latch` says what each
+    /// region yields for the port — `None` where the region leaves through an
+    /// exit edge that already carries the value. The op gains one result, which
+    /// is returned.
+    ///
+    /// This is the one edit that keeps results, region arguments and yields
+    /// consistent; the ports it grows are what scalar promotion, state threading
+    /// and a view commit all materialize.
+    pub fn grow_port(
+        &self,
+        op: OpId,
+        ty: TypeId,
+        init: Option<ValueId>,
+        mut latch: impl FnMut(RegionId, Option<ValueId>) -> Option<ValueId>,
+    ) -> ValueId {
+        let instance = self.get_op(op);
+
+        for &region in &instance.regions {
+            let entry = self.get_region(region).block_ids()[0];
+            let incoming = init.map(|_| self.append_block_argument(entry, ty).id());
+            if let Some(latched) = latch(region, incoming) {
+                let terminator = *self
+                    .get_block(entry)
+                    .op_ids()
+                    .last()
+                    .expect("a region is terminated");
+                self.append_operand(terminator, latched);
+            }
+        }
+        if let Some(init) = init {
+            self.append_operand(op, init);
+        }
+        self.append_result(op, ty)
+    }
+
+    /// Give `op` one more result of type `ty`.
+    fn append_result(&self, op: OpId, ty: TypeId) -> ValueId {
+        let result = self.create_value(ty, Some(op)).id();
+        let mut inner = self.0.write();
+        if let Some(instance) = slab_get_mut(&mut inner.operations, op.index()) {
+            Arc::make_mut(instance).results.push(result);
+            inner.edit_op(op);
+        }
+        result
+    }
+
     /// Begin building a region body off to the side of the live IR.
     ///
     /// The staged blocks belong to no region, so building them bumps no version
@@ -1349,6 +1434,141 @@ mod staging_tests {
 }
 
 #[cfg(test)]
+mod port_tests {
+    use super::Context;
+    use crate::{OpId, Operation, RegionId, ValueId, builtin, scf};
+
+    /// A loop with no carried port yet, and a constant outside it to carry in.
+    const LOOP: &str = r#"module {
+  func @f(%0: !index, %1: !index, %2: !index) -> !i32 {
+    %3 = constant {value = 7} : !i32
+    scf.for %0, %1, %2 {
+      scf.yield
+    }
+    return %3
+  }
+  module_end
+}"#;
+
+    fn loop_fixture(context: &Context) -> (OpId, OpId, ValueId) {
+        let module: builtin::ModuleOp =
+            crate::parse::ir::parse_ir(context, LOOP).expect("the fixture parses");
+        let func = context
+            .get_region(context.get_op(module.id()).regions[0])
+            .iter(context.clone())
+            .next()
+            .expect("module body")
+            .op_ids()[0];
+        let body = context
+            .get_region(context.get_op(func).regions[0])
+            .iter(context.clone())
+            .next()
+            .expect("function body");
+        let constant = context.get_op(body.op_ids()[0]).results[0];
+        (module.id(), body.op_ids()[1], constant)
+    }
+
+    #[test]
+    fn growing_a_loop_port_carries_one_more_value() {
+        let context = Context::with_default_dialects();
+        let (module, loop_op, constant) = loop_fixture(&context);
+        let i32_ty = builtin::IntegerType::new(&context, 32);
+
+        let result = context.grow_port(loop_op, i32_ty, Some(constant), |_, carried| carried);
+
+        let grown = context.get_op(loop_op);
+        assert_eq!(
+            grown.results,
+            vec![result],
+            "the port's value leaves the op"
+        );
+        assert_eq!(
+            grown.operands.last(),
+            Some(&constant),
+            "the port's initial value enters as one more operand"
+        );
+        let body = single_block(&context, grown.regions[0]);
+        let carried = body.arguments()[0].id();
+        assert_eq!(body.arguments().len(), 1);
+        assert_eq!(
+            context.get_op(*body.op_ids().last().unwrap()).operands,
+            vec![carried],
+            "the region yields what the port carries"
+        );
+        crate::verify_op_tree(&context, module).expect("the grown loop verifies");
+    }
+
+    #[test]
+    fn growing_a_conditional_port_yields_from_every_arm() {
+        let context = Context::with_default_dialects();
+        let (module, _, constant) = loop_fixture(&context);
+        let i1 = builtin::IntegerType::new(&context, 1);
+        let i32_ty = builtin::IntegerType::new(&context, 32);
+        let condition = builtin::ops::constant(&context, 1, i1).build();
+        let arms: Vec<RegionId> = (0..2)
+            .map(|_| {
+                let region = context.create_region();
+                let block = context.create_block(vec![]);
+                region.add_block(block.id());
+                block.append(scf::ops::r#yield(&context, vec![]).build().id());
+                region.id()
+            })
+            .collect();
+        let conditional = scf::ops::r#if(
+            &context,
+            condition.result(),
+            vec![],
+            Some(arms[0]),
+            Some(arms[1]),
+        )
+        .build();
+        let function_body = context.get_block(
+            context
+                .get_region(context.get_op(loop_owner(&context, module)).regions[0])
+                .block_ids()[0],
+        );
+        function_body.insert(0, condition.id());
+        function_body.insert(1, conditional.id());
+
+        let result = context.grow_port(conditional.id(), i32_ty, None, |_, carried| {
+            assert!(carried.is_none(), "a conditional carries nothing in");
+            Some(constant)
+        });
+
+        let grown = context.get_op(conditional.id());
+        assert_eq!(grown.results, vec![result]);
+        assert_eq!(
+            grown.operands,
+            vec![condition.result()],
+            "a conditional carries nothing in"
+        );
+        for &arm in &grown.regions {
+            let block = single_block(&context, arm);
+            assert!(block.arguments().is_empty(), "an arm takes no argument");
+            assert_eq!(
+                context.get_op(*block.op_ids().last().unwrap()).operands,
+                vec![constant],
+                "every arm yields the port's value"
+            );
+        }
+        crate::verify_op_tree(&context, module).expect("the grown conditional verifies");
+    }
+
+    fn loop_owner(context: &Context, module: OpId) -> OpId {
+        context
+            .get_region(context.get_op(module).regions[0])
+            .iter(context.clone())
+            .next()
+            .expect("module body")
+            .op_ids()[0]
+    }
+
+    fn single_block(context: &Context, region: RegionId) -> std::sync::Arc<crate::Block> {
+        context.get_block(context.get_region(region).block_ids()[0])
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::Context;
     use crate::{Block, Commutative, OpId, Operand, Operation, Terminator, builtin};
@@ -1385,6 +1605,24 @@ mod tests {
             context.op_version(module) > module_before,
             "the bump must propagate root-ward"
         );
+    }
+
+    #[test]
+    fn removing_a_block_argument_drops_it() {
+        let context = Context::with_default_dialects();
+        let (module, func, body) = module_with_function(&context);
+        let i32 = builtin::IntegerType::new(&context, 32);
+        let first = context.append_block_argument(body.id(), i32);
+        let second = context.append_block_argument(body.id(), i32);
+
+        assert_bumps_spine(&context, module, func, || {
+            context.remove_block_argument(body.id(), 0);
+        });
+
+        let block = context.get_block(body.id());
+        assert_eq!(block.arguments().len(), 1);
+        assert_eq!(block.arguments()[0].id(), second.id());
+        assert!(!context.is_block_argument(first.id()));
     }
 
     #[test]
