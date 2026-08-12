@@ -17,14 +17,14 @@ does the rest.
 | module | responsibility |
 |--------|----------------|
 | `isel/mod.rs` | public API (`Rule`, `EmitRequest`, cost-model traits), the pass driver, the shared `FunctionSelection`, and per-block solving |
-| `sem/node.rs` | the `SemNode` label and `SemPayload` — the vocabulary, shared with the sea view |
+| `sem/node.rs` | the `SemNode` label and `SemPayload` — the vocabulary |
 | `sem/egraph.rs` | `SemEGraph` and the vocabulary's e-class readings (`class_int_binding`, widths, IR↔semantic types) |
 | `isel/node.rs` | what selection reads beyond that: low-bit register views, `class_value_binding`, `class_register_type` |
 | `isel/builder.rs` | `SemDagBuilder`: the function's IR ops → one shared semantic e-graph, including memory effects |
 | `isel/pattern.rs` | `compile_isel_pattern`: rule semantics → `tir_symbolic::egraph::Pattern`s + per-node metadata |
 | `sem/axioms.rs` | s-expression axioms and their compilation into proved rewrites |
 | `defs/isel.sexp` | checked target-independent semantic invariants |
-| `sem/rewrites.rs` | theory-family selection and saturation driver, shared with the sea view |
+| `sem/rewrites.rs` | theory-family selection and saturation driver |
 | `isel/cover.rs` | PBQP construction, match dominance pruning, completeness check |
 | `isel/emit.rs` | `BlockPlan` and `EmissionBuilder`: cover → per-op decisions |
 
@@ -142,8 +142,7 @@ operand says why, and says it in a form the rules and the cover can read.
 Ops implementing `MemoryRead` / `MemoryWrite` are lowered by
 `build_memory_effect` into `LoadMemory(addr, bytes, meta, state)` /
 `StoreMemory(addr, bytes, value, space, state)` — the target vocabulary's shape
-with the chain the access reads appended, which is the same shape the sea view
-seeds (`core/src/sea/view.rs`, `core/src/sea/state.rs`). The state operand *is*
+with the chain the access reads appended. The state operand *is*
 memory identity: two reads of one address on one chain are one term and select
 one instruction, a write takes the chain to a state nothing before it names, and
 the accesses after it read that. The chain never orders anything — the emission

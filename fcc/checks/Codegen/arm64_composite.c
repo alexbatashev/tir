@@ -1,6 +1,5 @@
 // RUN: fcc compile --march arm64 --mabi aapcs64 --stage ir -o - %s | filecheck %s
 // RUN: fcc compile --march arm64 --mabi aapcs64 --stage asm -o - %s | filecheck %s --check-prefix=ASM
-// RUN: env TIR_SEA_CANON=1 fcc compile --march arm64 --mabi aapcs64 --stage asm -o - %s | filecheck %s --check-prefix=ASM
 
 struct Mixed {
     double fp;

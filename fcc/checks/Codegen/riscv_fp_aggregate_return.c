@@ -1,6 +1,5 @@
 // RUN: fcc compile --march riscv64 --mabi lp64d --stage ir -o - %s | filecheck %s
 // RUN: fcc compile --march riscv64 --mabi lp64d --stage asm -o - %s | filecheck %s --check-prefix=ASM
-// RUN: env TIR_SEA_CANON=1 fcc compile --march riscv64 --mabi lp64d --stage asm -o - %s | filecheck %s --check-prefix=ASM
 
 struct Scalar {
     double value;

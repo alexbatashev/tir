@@ -52,22 +52,16 @@ pub(crate) fn low_extract_width(egraph: &SemEGraph, class: Id) -> Option<u32> {
 /// The register value carrying a class: an input value, then the first IR value
 /// the class computes (from `class_values`, the map recording which values a
 /// class stands for). The representative feeds cost-model approximation only.
-///
-/// A view-seeded leaf names the view's own synthetic value, so `anchors` takes
-/// it back to the IR value the anchored origin was rendered from.
 pub(crate) fn class_value_binding(
     egraph: &SemEGraph,
     class_values: &HashMap<Id, Vec<ValueId>>,
-    anchors: &HashMap<ValueId, ValueId>,
     class: Id,
 ) -> Option<ValueId> {
     egraph
         .nodes(class)
         .iter()
         .find_map(|n| match n.payload.as_ref() {
-            Some(tir::sem::SemPayload::Expr(tir::sem::SymPayload::Value(v))) => {
-                Some(anchors.get(v).copied().unwrap_or(*v))
-            }
+            Some(tir::sem::SemPayload::Expr(tir::sem::SymPayload::Value(v))) => Some(*v),
             _ => None,
         })
         .or_else(|| {
@@ -82,9 +76,9 @@ pub(crate) fn class_value_binding(
 /// instruction. Memory effects are excluded — two reads of the same address are
 /// not interchangeable across an intervening write.
 ///
-/// An operation identity ([`tir::sem::Kind::Ir`]) is pure: the sea view seeds one
-/// only for a node with no state port, and no other seeding produces one. A
-/// gated-SSA merge is not — it is the schedule, not a value expression.
+/// An operation identity ([`tir::sem::Kind::Ir`]) is pure: it is seeded only for
+/// an op with no memory effect. A gated-SSA merge is not — it is the schedule,
+/// not a value expression.
 pub(crate) fn class_is_pure(egraph: &SemEGraph, class: Id) -> bool {
     egraph.nodes(class).iter().all(|n| match &n.kind {
         tir::sem::Kind::Sym(kind) => kind_is_pure(*kind),
@@ -94,9 +88,9 @@ pub(crate) fn class_is_pure(egraph: &SemEGraph, class: Id) -> bool {
 }
 
 /// Whether a term of this kind names an access to memory, and therefore carries
-/// the state chain it reads as its last operand — the arity both seedings spell
-/// (`super::builder::SemDagBuilder::build_memory_effect`, [`tir::sea::View`]) and
-/// the one `super::pattern` compiles a rule's memory node up to.
+/// the state chain it reads as its last operand — the arity
+/// `super::builder::SemDagBuilder::build_memory_effect` spells and the one
+/// `super::pattern` compiles a rule's memory node up to.
 pub(crate) fn is_memory_kind(kind: SymKind) -> bool {
     matches!(kind, SymKind::LoadMemory | SymKind::StoreMemory)
 }

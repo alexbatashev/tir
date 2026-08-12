@@ -247,33 +247,6 @@ impl SemNode {
         )
     }
 
-    /// A term seeded from the green layer, whose operator identity is a
-    /// `(dialect, name)` pair rather than a live IR op. The sea's own
-    /// materializer rebuilds from that identity, so there is no IR write-back
-    /// provenance to carry.
-    pub fn sea(
-        dialect: &'static str,
-        name: &'static str,
-        ty: TypeId,
-        attrs: Vec<NamedAttribute>,
-        commutative: bool,
-        cost: u32,
-        args: Vec<Id>,
-    ) -> Self {
-        Self::ir(
-            IrOp {
-                dialect,
-                name,
-                attrs,
-                commutative,
-                cost,
-            },
-            Some(ty),
-            args,
-            Prov::None,
-        )
-    }
-
     /// An op a rewrite introduced, built by the ruleset's `idx`-th emitter.
     pub fn introduced<O: Operation>(ty: TypeId, cost: u32, idx: usize, args: Vec<Id>) -> Self {
         Self::ir(

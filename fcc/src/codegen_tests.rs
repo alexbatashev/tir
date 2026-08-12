@@ -255,9 +255,9 @@ int main(void) { printf("hello"); return 0; }"#,
         let mut lowered = String::new();
         let mut fmt = tir::IRFormatter::new(&mut lowered);
         tir::Operation::print(&module, &mut fmt).expect("print");
-        // Sea takes structured control flow only: no C construct may reach the
-        // mid-end as a branch, so every function this helper lowers is held to
-        // it, not just the ones whose test says so.
+        // The mid-end takes structured control flow only: no C construct may
+        // reach it as a branch, so every function this helper lowers is held to
+        // that, not just the ones whose test says so.
         assert!(!lowered.contains("cond_br"), "{lowered}");
         assert!(!lowered.contains("br ^"), "{lowered}");
         lowered
@@ -334,7 +334,7 @@ int main(void) { printf("hello"); return 0; }"#,
         assert!(!lowered.contains("cond_br"), "{lowered}");
     }
 
-    /// Sea requires the mid-end to see structured control flow only. After the
+    /// The mid-end must see structured control flow only. After the
     /// CIR lowering the remaining sources of branches are `goto` and a
     /// `continue` inside a `for`, whose step has no structured spelling.
     #[test]

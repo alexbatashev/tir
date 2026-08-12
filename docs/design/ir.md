@@ -2,7 +2,7 @@
 
 Status: approved design, revision 1. Implementation is staged; where this
 document and the code disagree, this document describes the target and the
-code describes the past. Supersedes `docs/design/sea.md`.
+code describes the past.
 
 Normative external reference for the middle-end semantics: the RVSDG paper
 (Reissmann, Reusch, Bahmann, Själander — arXiv 1912.05036). This document

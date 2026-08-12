@@ -33,14 +33,6 @@ use crate::sem::node::cost;
 use crate::sem::{Prov, SemNode as Node};
 use rules::{Ruleset, builtin_ruleset};
 
-/// The PDL-compiled rewrites on their own, for a seeder that is not this pass.
-/// [`builtin_ruleset`]'s other half — the constant folder — keys on live IR ops
-/// through [`Prov::Op`], which only an IR seeding produces; these rules read
-/// nothing but the e-graph, so any seeding of the vocabulary can reuse them.
-pub(crate) fn value_rewrites(context: &Context) -> Vec<rules::Rule> {
-    rules::generated_ruleset(context).rewrites
-}
-
 const ITER_LIMIT: usize = 30;
 const NODE_LIMIT: usize = 100_000;
 

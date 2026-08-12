@@ -2,8 +2,8 @@
 //! it takes off an e-class.
 //!
 //! The label is [`SemNode`]; the classes are read the same way wherever the
-//! e-graph is built — the sea view seeding a region, the selection axioms
-//! binding on class widths, the peephole rules. What is read here is the
+//! e-graph is built — the selection axioms binding on class widths, the
+//! peephole rules. What is read here is the
 //! vocabulary's own business: a class's width, its integer binding, the IR type
 //! a semantic type is spelled as. What a *backend* makes of a class — a
 //! register's type, a low-bit view of one — stays with the backend.

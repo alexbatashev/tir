@@ -47,9 +47,9 @@ impl DataLayout {
     }
 
     /// The layout in scope at `instance`: the scope chain of its id, falling back
-    /// to the dict the instance carries itself. A detached instance — the sea
-    /// view's probe of an op type — belongs to no scope, so the layout resolved
-    /// where the code came from rides along as its own attribute.
+    /// to the dict the instance carries itself. A detached instance — an op type
+    /// probed with no IR home — belongs to no scope, so the layout resolved where
+    /// the code came from rides along as its own attribute.
     pub fn for_instance(context: &Context, instance: &crate::OpInstance) -> Option<Self> {
         Self::for_op(context, instance.id).or_else(|| {
             instance
@@ -87,13 +87,6 @@ impl DataLayout {
             }),
             _ => None,
         }
-    }
-
-    /// The spec the layout reads its entries from, for a consumer that must
-    /// carry it where the IR scope chain does not reach — the sea view's
-    /// detached probes (see [`DataLayout::for_instance`]).
-    pub fn spec(&self) -> &AttributeDict {
-        &self.entries
     }
 
     pub fn endianness(&self) -> Option<Endianness> {

@@ -1,9 +1,8 @@
 //! The proved algebraic rewrites the semantic e-graph saturates with, plus the
 //! small saturation driver over the [`tir_symbolic`] e-graph.
 //!
-//! Both consumers of the vocabulary use them: instruction selection saturates a
-//! whole function's e-graph before covering, and the sea view saturates a
-//! region's before extraction.
+//! Instruction selection saturates a whole function's e-graph with them before
+//! covering.
 
 use std::collections::HashSet;
 

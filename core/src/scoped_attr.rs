@@ -16,8 +16,8 @@ pub type AttributeDict = BTreeMap<String, AttributeValue>;
 /// merge key by key; every other value is replaced wholesale. `None` when no
 /// scope in the chain carries one.
 pub fn scoped_dict(context: &Context, op: OpId, key: &str) -> Option<AttributeDict> {
-    // A detached instance — the sea view probes an op type with no IR home to
-    // ask what it is — belongs to no scope, so it reads no metadata.
+    // A detached instance — an op type probed with no IR home to ask what it is
+    // — belongs to no scope, so it reads no metadata.
     if !context.has_operation(op) {
         return None;
     }
