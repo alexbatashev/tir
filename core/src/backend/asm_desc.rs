@@ -17,7 +17,7 @@ use std::sync::OnceLock;
 
 use tir::attributes::{AttributeValue, NamedAttribute, RegisterAttr};
 use tir::parse::tokens::Parser;
-use tir::{Context, IRBuilder, OpInstance, Operation};
+use tir::{Context, OpInstance, Operation};
 
 use crate::backend::Token;
 use crate::backend::parser::parse_hex;
@@ -88,7 +88,7 @@ pub struct InstrDesc {
 pub fn parse_and_insert<'src, T: Operation, F: FnOnce(Vec<NamedAttribute>) -> T>(
     desc: &InstrDesc,
     parser: &mut Parser<'src, Token<'src>>,
-    builder: &mut IRBuilder,
+    builder: &mut super::AsmCursor,
     build: F,
 ) -> Result<(), ()> {
     let attributes = parse_operands(desc.parse, parser)?;

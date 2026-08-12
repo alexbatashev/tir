@@ -752,7 +752,7 @@ fn arm64_abi_by_name(name: &str) -> Option<&'static tir::backend::abi::AbiInfo> 
 mod tests {
     use tir::backend::AsmDialect;
     use tir::{
-        Context, IRBuilder, IRFormatter, Operation, PassManager,
+        Context, IRFormatter, Operation, PassManager,
         builtin::{FuncOp, IntegerType, UnitType, ops},
     };
 
@@ -865,19 +865,18 @@ mod tests {
         let f_arg = context.create_value(i64, None);
         let f = context.create_block(vec![f_arg]);
 
-        let mut fb = IRBuilder::new(func.body());
         let add = ops::addi(&context, x_id, x_id, i64).build();
         let sum = add.result();
-        fb.insert(add);
+        func.body().append_op(add);
         // A bare i1 condition (a block argument) defines only bit 0 of its
         // register, so it lowers through the masking fallback: `and #1` plus
         // `cbnz`, then the deferred `vbr f`. The add result rides the false
         // edge, so it is demanded and selects.
-        fb.insert(ops::cond_br(&context, cond_id, vec![], vec![sum], t.id(), f.id()).build());
+        func.body()
+            .append_op(ops::cond_br(&context, cond_id, vec![], vec![sum], t.id(), f.id()).build());
 
-        let mut mb = IRBuilder::new(module.body());
-        mb.insert(func);
-        mb.insert(ops::module_end(&context).build());
+        module.body().append_op(func);
+        module.body().append_op(ops::module_end(&context).build());
 
         let mut pm = PassManager::new();
         pm.nest::<FuncOp>().add_pass(create_isel_pass(&context));
@@ -928,7 +927,6 @@ mod tests {
         let t = context.create_block(vec![]);
         let f = context.create_block(vec![]);
 
-        let mut fb = IRBuilder::new(func.body());
         let cmp = tir::builtin::CmpIOpBuilder::new(&context)
             .lhs(a_id)
             .rhs(b_id)
@@ -936,12 +934,12 @@ mod tests {
             .result_type(i1)
             .build();
         let cmp_r = cmp.result();
-        fb.insert(cmp);
-        fb.insert(ops::cond_br(&context, cmp_r, vec![], vec![], t.id(), f.id()).build());
+        func.body().append_op(cmp);
+        func.body()
+            .append_op(ops::cond_br(&context, cmp_r, vec![], vec![], t.id(), f.id()).build());
 
-        let mut mb = IRBuilder::new(module.body());
-        mb.insert(func);
-        mb.insert(ops::module_end(&context).build());
+        module.body().append_op(func);
+        module.body().append_op(ops::module_end(&context).build());
 
         let mut pm = PassManager::new();
         pm.nest::<FuncOp>().add_pass(create_isel_pass(&context));
@@ -1029,15 +1027,14 @@ mod tests {
         let fbody = func.body();
         let args = fbody.arguments();
         let (a, b) = (args[0].id(), args[1].id());
-        let mut fb = IRBuilder::new(func.body());
         let add = ops::addi(&context, a, b, i64).build();
         let add_r = add.result();
-        fb.insert(add);
-        fb.insert(ops::r#return(&context, add_r).build());
+        func.body().append_op(add);
+        func.body()
+            .append_op(ops::r#return(&context, add_r).build());
 
-        let mut mb = IRBuilder::new(module.body());
-        mb.insert(func);
-        mb.insert(ops::module_end(&context).build());
+        module.body().append_op(func);
+        module.body().append_op(ops::module_end(&context).build());
 
         module.verify(&context).expect("invalid module");
         let mut pm = PassManager::new();
@@ -1087,24 +1084,22 @@ mod tests {
         let (a, b, c) = (args[0].id(), args[1].id(), args[2].id());
 
         // t1 = a + b ; t2 = t1 - c ; t3 = t2 & a ; t4 = t3 | b ; return t4
-        let mut fb = IRBuilder::new(func.body());
         let t1 = ops::addi(&context, a, b, i64).build();
         let t1r = t1.result();
-        fb.insert(t1);
+        func.body().append_op(t1);
         let t2 = ops::subi(&context, t1r, c, i64).build();
         let t2r = t2.result();
-        fb.insert(t2);
+        func.body().append_op(t2);
         let t3 = ops::andi(&context, t2r, a, i64).build();
         let t3r = t3.result();
-        fb.insert(t3);
+        func.body().append_op(t3);
         let t4 = ops::ori(&context, t3r, b, i64).build();
         let t4r = t4.result();
-        fb.insert(t4);
-        fb.insert(ops::r#return(&context, t4r).build());
+        func.body().append_op(t4);
+        func.body().append_op(ops::r#return(&context, t4r).build());
 
-        let mut mb = IRBuilder::new(module.body());
-        mb.insert(func);
-        mb.insert(ops::module_end(&context).build());
+        module.body().append_op(func);
+        module.body().append_op(ops::module_end(&context).build());
 
         let mut pm = PassManager::new();
         pm.nest::<FuncOp>().add_pass(create_isel_pass(&context));
@@ -1142,15 +1137,14 @@ mod tests {
         let fbody = func.body();
         let args = fbody.arguments();
         let (a, b) = (args[0].id(), args[1].id());
-        let mut fb = IRBuilder::new(func.body());
         let add = ops::addi(&context, a, b, i64).build();
         let add_r = add.result();
-        fb.insert(add);
-        fb.insert(ops::r#return(&context, add_r).build());
+        func.body().append_op(add);
+        func.body()
+            .append_op(ops::r#return(&context, add_r).build());
 
-        let mut mb = IRBuilder::new(module.body());
-        mb.insert(func);
-        mb.insert(ops::module_end(&context).build());
+        module.body().append_op(func);
+        module.body().append_op(ops::module_end(&context).build());
 
         let mut pm = PassManager::new();
         pm.nest::<FuncOp>().add_pass(create_isel_pass(&context));
@@ -1268,11 +1262,11 @@ mod tests {
             .register_info()
             .class("GPR")
             .unwrap();
-        let mut bb = IRBuilder::new(context.get_block(block.id()));
+        let bb = context.get_block(block.id());
         let mut producers = Vec::new();
         for _ in 0..8 {
             let v = context.create_value(i64, None).id().number();
-            bb.insert(
+            bb.append_op(
                 AddOpBuilder::new(&context)
                     .attr("rd", virt(v, gpr))
                     .attr("rn", virt(a, gpr))
@@ -1284,7 +1278,7 @@ mod tests {
         let mut acc = producers[0];
         for &p in &producers[1..] {
             let s = context.create_value(i64, None).id().number();
-            bb.insert(
+            bb.append_op(
                 AddOpBuilder::new(&context)
                     .attr("rd", virt(s, gpr))
                     .attr("rn", virt(acc, gpr))
@@ -1293,12 +1287,12 @@ mod tests {
             );
             acc = s;
         }
-        bb.insert(
+        bb.append_op(
             VirtualReturnOpBuilder::new(&context)
                 .value(tir::ValueId::from_number(acc))
                 .build(),
         );
-        bb.insert(tir::backend::SymbolEndOpBuilder::new(&context).build());
+        bb.append_op(tir::backend::SymbolEndOpBuilder::new(&context).build());
 
         let symbol = tir::backend::SymbolOpBuilder::new(&context)
             .body(region.id())
@@ -1307,9 +1301,8 @@ mod tests {
                 tir::attributes::AttributeValue::Str("demo".to_string()),
             )
             .build();
-        let mut mb = IRBuilder::new(module.body());
-        mb.insert(symbol);
-        mb.insert(ops::module_end(&context).build());
+        module.body().append_op(symbol);
+        module.body().append_op(ops::module_end(&context).build());
 
         let mut pm = PassManager::new();
         let mut abi = *crate::default_abi();
@@ -1871,7 +1864,6 @@ mod tests {
         let args = fbody.arguments();
         let (a, b) = (args[0].id(), args[1].id());
 
-        let mut fb = IRBuilder::new(func.body());
         let call = tir::builtin::CallOpBuilder::new(&context)
             .args(vec![a, b])
             .attr(
@@ -1881,12 +1873,12 @@ mod tests {
             .result_type(i64)
             .build();
         let call_r = call.result();
-        fb.insert(call);
-        fb.insert(ops::r#return(&context, call_r).build());
+        func.body().append_op(call);
+        func.body()
+            .append_op(ops::r#return(&context, call_r).build());
 
-        let mut mb = IRBuilder::new(module.body());
-        mb.insert(func);
-        mb.insert(ops::module_end(&context).build());
+        module.body().append_op(func);
+        module.body().append_op(ops::module_end(&context).build());
 
         let mut pm = PassManager::new();
         pm.nest::<FuncOp>().add_pass(create_isel_pass(&context));
@@ -1944,7 +1936,6 @@ mod tests {
         let func = ops::func(&context, "caller", i64, Some(region.id())).build();
         let a = func.body().arguments()[0].id();
 
-        let mut fb = IRBuilder::new(func.body());
         let call = tir::builtin::CallOpBuilder::new(&context)
             .args(vec![a])
             .attr(
@@ -1954,12 +1945,12 @@ mod tests {
             .result_type(i64)
             .build();
         let call_r = call.result();
-        fb.insert(call);
-        fb.insert(ops::r#return(&context, call_r).build());
+        func.body().append_op(call);
+        func.body()
+            .append_op(ops::r#return(&context, call_r).build());
 
-        let mut mb = IRBuilder::new(module.body());
-        mb.insert(func);
-        mb.insert(ops::module_end(&context).build());
+        module.body().append_op(func);
+        module.body().append_op(ops::module_end(&context).build());
 
         let mut pm = build_pipeline(&target, &context, StopAfter::Finalize);
         pm.run(&context, context.get_op(module.id()))
@@ -2035,19 +2026,18 @@ mod tests {
         let args = fbody.arguments();
         let (callee, x) = (args[0].id(), args[1].id());
 
-        let mut fb = IRBuilder::new(func.body());
         let call = tir::builtin::IndirectCallOpBuilder::new(&context)
             .callee(callee)
             .args(vec![x])
             .result_type(i64)
             .build();
         let call_r = call.result();
-        fb.insert(call);
-        fb.insert(ops::r#return(&context, call_r).build());
+        func.body().append_op(call);
+        func.body()
+            .append_op(ops::r#return(&context, call_r).build());
 
-        let mut mb = IRBuilder::new(module.body());
-        mb.insert(func);
-        mb.insert(ops::module_end(&context).build());
+        module.body().append_op(func);
+        module.body().append_op(ops::module_end(&context).build());
 
         let mut pm = build_pipeline(&target, &context, StopAfter::Finalize);
         pm.run(&context, context.get_op(module.id()))

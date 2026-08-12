@@ -60,7 +60,7 @@ impl Pass for Mem2RegPass {
 #[cfg(test)]
 mod tests {
     use crate::{
-        Context, IRBuilder, OpId, Operation, PassManager,
+        Context, OpId, Operation, PassManager,
         builtin::{IntegerType, ops as b},
         ptr::{PtrType, ops as p},
     };
@@ -92,21 +92,20 @@ mod tests {
         region.add_block(next.id());
         let func = b::func(&context, "fwd", i32_ty, Some(region.id())).build();
 
-        let mut entry_b = IRBuilder::new(entry.clone());
-        let slot = entry_b
-            .insert(p::alloca(&context, 4u64, 4u64, PtrType::typed(&context, i32_ty)).build());
+        let slot = entry
+            .append_op(p::alloca(&context, 4u64, 4u64, PtrType::typed(&context, i32_ty)).build());
         let slot_ptr = slot.result();
         let alloca_id = slot.id();
-        let store_id = entry_b
-            .insert(p::store(&context, param_id, slot_ptr).build())
+        let store_id = entry
+            .append_op(p::store(&context, param_id, slot_ptr).build())
             .id();
-        entry_b.insert(b::br(&context, vec![], next.id()).build());
+        entry.append_op(b::br(&context, vec![], next.id()).build());
 
-        let mut next_b = IRBuilder::new(next.clone());
-        let load = next_b.insert(p::load(&context, slot_ptr, i32_ty).build());
+        let next_b = next.clone();
+        let load = next_b.append_op(p::load(&context, slot_ptr, i32_ty).build());
         let load_id = load.id();
         let ret_id = next_b
-            .insert(b::r#return(&context, load.result()).build())
+            .append_op(b::r#return(&context, load.result()).build())
             .id();
 
         run_mem2reg(&context, func.id());
@@ -139,24 +138,24 @@ mod tests {
         }
         let func = b::func(&context, "maybe", i32_ty, Some(region.id())).build();
 
-        let mut entry_b = IRBuilder::new(entry.clone());
-        let slot = entry_b
-            .insert(p::alloca(&context, 4u64, 4u64, PtrType::typed(&context, i32_ty)).build());
+        let slot = entry
+            .append_op(p::alloca(&context, 4u64, 4u64, PtrType::typed(&context, i32_ty)).build());
         let slot_ptr = slot.result();
         let alloca_id = slot.id();
-        entry_b.insert(b::cond_br(&context, cond_id, vec![], vec![], then.id(), join.id()).build());
+        entry
+            .append_op(b::cond_br(&context, cond_id, vec![], vec![], then.id(), join.id()).build());
 
-        let mut then_b = IRBuilder::new(then.clone());
+        let then_b = then.clone();
         let store_id = then_b
-            .insert(p::store(&context, param_id, slot_ptr).build())
+            .append_op(p::store(&context, param_id, slot_ptr).build())
             .id();
-        then_b.insert(b::br(&context, vec![], join.id()).build());
+        then_b.append_op(b::br(&context, vec![], join.id()).build());
 
-        let mut join_b = IRBuilder::new(join.clone());
+        let join_b = join.clone();
         let load_id = join_b
-            .insert(p::load(&context, slot_ptr, i32_ty).build())
+            .append_op(p::load(&context, slot_ptr, i32_ty).build())
             .id();
-        join_b.insert(b::r#return(&context, context.get_op(load_id).results[0]).build());
+        join_b.append_op(b::r#return(&context, context.get_op(load_id).results[0]).build());
 
         run_mem2reg(&context, func.id());
 

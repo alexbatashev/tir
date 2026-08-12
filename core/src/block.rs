@@ -113,6 +113,12 @@ impl Block {
         self.context.upgrade().append_op(self.id, id);
     }
 
+    /// Append `op` and hand it back, for building a block in sequence.
+    pub fn append_op<T: crate::Operation>(&self, op: T) -> T {
+        self.append(op.id());
+        op
+    }
+
     pub fn op_ids(&self) -> Vec<OpId> {
         self.operations.clone()
     }

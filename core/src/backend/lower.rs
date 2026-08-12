@@ -26,7 +26,7 @@ pub fn lower_function_and_return(
             .last()
             .is_none_or(|id| !context.get_op(*id).is::<super::SymbolEndOp>())
         {
-            tir::IRBuilder::new(body).insert(super::SymbolEndOpBuilder::new(context).build());
+            body.append_op(super::SymbolEndOpBuilder::new(context).build());
         }
         let name = func
             .attributes()

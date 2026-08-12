@@ -1226,7 +1226,7 @@ fn riscv_abi_by_name(name: &str) -> Option<&'static tir::backend::abi::AbiInfo> 
 mod tests {
     use tir::backend::AsmDialect;
     use tir::{
-        Context, IRBuilder, IRFormatter, Operation, PassManager,
+        Context, IRFormatter, Operation, PassManager,
         builtin::{FuncOp, IntegerType, UnitType, ops},
     };
 
@@ -1347,12 +1347,11 @@ mod tests {
         let target = context.create_block(vec![]);
 
         let func = ops::func(&context, "demo", UnitType::new(&context), Some(region.id())).build();
-        let mut fb = IRBuilder::new(func.body());
-        fb.insert(ops::br(&context, vec![], target.id()).build());
+        func.body()
+            .append_op(ops::br(&context, vec![], target.id()).build());
 
-        let mut mb = IRBuilder::new(module.body());
-        mb.insert(func);
-        mb.insert(ops::module_end(&context).build());
+        module.body().append_op(func);
+        module.body().append_op(ops::module_end(&context).build());
 
         let mut pm = PassManager::new();
         pm.nest::<FuncOp>().add_pass(create_isel_pass(&context));
@@ -1390,19 +1389,18 @@ mod tests {
         let f_arg = context.create_value(i32, None);
         let f = context.create_block(vec![f_arg]);
 
-        let mut fb = IRBuilder::new(func.body());
         let add = ops::addi(&context, x_id, x_id, i32).build();
         let sum = add.result();
-        fb.insert(add);
+        func.body().append_op(add);
         // A bare i1 condition (a block argument): no branch rule can fuse it,
         // so selection falls back to `andi` the defined bit out + `bne … x0, t`
         // plus the deferred `vbr f`. The add result rides the false edge, so it
         // is demanded and selects.
-        fb.insert(ops::cond_br(&context, cond_id, vec![], vec![sum], t.id(), f.id()).build());
+        func.body()
+            .append_op(ops::cond_br(&context, cond_id, vec![], vec![sum], t.id(), f.id()).build());
 
-        let mut mb = IRBuilder::new(module.body());
-        mb.insert(func);
-        mb.insert(ops::module_end(&context).build());
+        module.body().append_op(func);
+        module.body().append_op(ops::module_end(&context).build());
 
         let mut pm = PassManager::new();
         pm.nest::<FuncOp>().add_pass(create_isel_pass(&context));
@@ -1653,24 +1651,22 @@ mod tests {
         let (a, b, c) = (args[0].id(), args[1].id(), args[2].id());
 
         // t1 = a + b ; t2 = t1 - c ; t3 = t2 & a ; t4 = t3 | b ; return t4
-        let mut fb = IRBuilder::new(func.body());
         let t1 = ops::addi(&context, a, b, i32).build();
         let t1r = t1.result();
-        fb.insert(t1);
+        func.body().append_op(t1);
         let t2 = ops::subi(&context, t1r, c, i32).build();
         let t2r = t2.result();
-        fb.insert(t2);
+        func.body().append_op(t2);
         let t3 = ops::andi(&context, t2r, a, i32).build();
         let t3r = t3.result();
-        fb.insert(t3);
+        func.body().append_op(t3);
         let t4 = ops::ori(&context, t3r, b, i32).build();
         let t4r = t4.result();
-        fb.insert(t4);
-        fb.insert(ops::r#return(&context, t4r).build());
+        func.body().append_op(t4);
+        func.body().append_op(ops::r#return(&context, t4r).build());
 
-        let mut mb = IRBuilder::new(module.body());
-        mb.insert(func);
-        mb.insert(ops::module_end(&context).build());
+        module.body().append_op(func);
+        module.body().append_op(ops::module_end(&context).build());
 
         module.verify(&context).expect("invalid module");
         let mut pm = PassManager::new();
@@ -1722,15 +1718,13 @@ mod tests {
         // a << b with b a register. Earlier this matched the immediate shift slliw
         // (whose emit then failed). With operand constraints slliw rejects the
         // register amount, and the Clamp-stripped register word shift sllw wins.
-        let mut fb = IRBuilder::new(func.body());
         let s = ops::shli(&context, a, b, i32).build();
         let sr = s.result();
-        fb.insert(s);
-        fb.insert(ops::r#return(&context, sr).build());
+        func.body().append_op(s);
+        func.body().append_op(ops::r#return(&context, sr).build());
 
-        let mut mb = IRBuilder::new(module.body());
-        mb.insert(func);
-        mb.insert(ops::module_end(&context).build());
+        module.body().append_op(func);
+        module.body().append_op(ops::module_end(&context).build());
 
         let mut pm = PassManager::new();
         pm.nest::<FuncOp>().add_pass(create_isel_pass(&context));
@@ -1767,18 +1761,16 @@ mod tests {
         let a = body.arguments()[0].id();
 
         // a << 3 with 3 an immediate constant. Should pick slliw, not sllw.
-        let mut fb = IRBuilder::new(func.body());
         let three = ops::constant(&context, 3, i32).build();
         let three_r = three.result();
-        fb.insert(three);
+        func.body().append_op(three);
         let s = ops::shli(&context, a, three_r, i32).build();
         let sr = s.result();
-        fb.insert(s);
-        fb.insert(ops::r#return(&context, sr).build());
+        func.body().append_op(s);
+        func.body().append_op(ops::r#return(&context, sr).build());
 
-        let mut mb = IRBuilder::new(module.body());
-        mb.insert(func);
-        mb.insert(ops::module_end(&context).build());
+        module.body().append_op(func);
+        module.body().append_op(ops::module_end(&context).build());
 
         let mut pm = PassManager::new();
         pm.nest::<FuncOp>().add_pass(create_isel_pass(&context));
@@ -1857,15 +1849,14 @@ mod tests {
 
         let func = ops::func(&context, "demo", i32, Some(region.id())).build();
 
-        let mut fb = IRBuilder::new(func.body());
         let five = ops::constant(&context, 5, i32).build();
         let five_r = five.result();
-        fb.insert(five);
-        fb.insert(ops::r#return(&context, five_r).build());
+        func.body().append_op(five);
+        func.body()
+            .append_op(ops::r#return(&context, five_r).build());
 
-        let mut mb = IRBuilder::new(module.body());
-        mb.insert(func);
-        mb.insert(ops::module_end(&context).build());
+        module.body().append_op(func);
+        module.body().append_op(ops::module_end(&context).build());
 
         let mut pm = PassManager::new();
         pm.nest::<FuncOp>().add_pass(create_isel_pass(&context));
@@ -1942,15 +1933,14 @@ mod tests {
         let fbody = func.body();
         let args = fbody.arguments();
         let (a, b) = (args[0].id(), args[1].id());
-        let mut fb = IRBuilder::new(func.body());
         let add = ops::addi(&context, a, b, i32).build();
         let add_r = add.result();
-        fb.insert(add);
-        fb.insert(ops::r#return(&context, add_r).build());
+        func.body().append_op(add);
+        func.body()
+            .append_op(ops::r#return(&context, add_r).build());
 
-        let mut mb = IRBuilder::new(module.body());
-        mb.insert(func);
-        mb.insert(ops::module_end(&context).build());
+        module.body().append_op(func);
+        module.body().append_op(ops::module_end(&context).build());
 
         let mut pm = PassManager::new();
         pm.nest::<FuncOp>().add_pass(create_isel_pass(&context));
@@ -2004,24 +1994,22 @@ mod tests {
         let (a, b, c) = (args[0].id(), args[1].id(), args[2].id());
 
         // t1 = a + b ; t2 = t1 - c ; t3 = t2 & a ; t4 = t3 | b ; return t4
-        let mut fb = IRBuilder::new(func.body());
         let t1 = ops::addi(&context, a, b, i32).build();
         let t1r = t1.result();
-        fb.insert(t1);
+        func.body().append_op(t1);
         let t2 = ops::subi(&context, t1r, c, i32).build();
         let t2r = t2.result();
-        fb.insert(t2);
+        func.body().append_op(t2);
         let t3 = ops::andi(&context, t2r, a, i32).build();
         let t3r = t3.result();
-        fb.insert(t3);
+        func.body().append_op(t3);
         let t4 = ops::ori(&context, t3r, b, i32).build();
         let t4r = t4.result();
-        fb.insert(t4);
-        fb.insert(ops::r#return(&context, t4r).build());
+        func.body().append_op(t4);
+        func.body().append_op(ops::r#return(&context, t4r).build());
 
-        let mut mb = IRBuilder::new(module.body());
-        mb.insert(func);
-        mb.insert(ops::module_end(&context).build());
+        module.body().append_op(func);
+        module.body().append_op(ops::module_end(&context).build());
 
         let mut pm = PassManager::new();
         pm.nest::<FuncOp>().add_pass(create_isel_pass(&context));
@@ -2070,7 +2058,6 @@ mod tests {
         let args = fbody.arguments();
         let (a, b) = (args[0].id(), args[1].id());
 
-        let mut fb = IRBuilder::new(func.body());
         let call = tir::builtin::CallOpBuilder::new(&context)
             .args(vec![a, b])
             .attr(
@@ -2080,12 +2067,12 @@ mod tests {
             .result_type(i32)
             .build();
         let call_r = call.result();
-        fb.insert(call);
-        fb.insert(ops::r#return(&context, call_r).build());
+        func.body().append_op(call);
+        func.body()
+            .append_op(ops::r#return(&context, call_r).build());
 
-        let mut mb = IRBuilder::new(module.body());
-        mb.insert(func);
-        mb.insert(ops::module_end(&context).build());
+        module.body().append_op(func);
+        module.body().append_op(ops::module_end(&context).build());
 
         let mut pm = PassManager::new();
         pm.nest::<FuncOp>().add_pass(create_isel_pass(&context));
@@ -2131,7 +2118,6 @@ mod tests {
         let func = ops::func(&context, "caller", i32, Some(region.id())).build();
         let a = func.body().arguments()[0].id();
 
-        let mut fb = IRBuilder::new(func.body());
         let call = tir::builtin::CallOpBuilder::new(&context)
             .args(vec![a])
             .attr(
@@ -2141,12 +2127,12 @@ mod tests {
             .result_type(i32)
             .build();
         let call_r = call.result();
-        fb.insert(call);
-        fb.insert(ops::r#return(&context, call_r).build());
+        func.body().append_op(call);
+        func.body()
+            .append_op(ops::r#return(&context, call_r).build());
 
-        let mut mb = IRBuilder::new(module.body());
-        mb.insert(func);
-        mb.insert(ops::module_end(&context).build());
+        module.body().append_op(func);
+        module.body().append_op(ops::module_end(&context).build());
 
         let mut pm = build_pipeline(&target, &context, StopAfter::Finalize);
         pm.run(&context, context.get_op(module.id()))
@@ -2217,19 +2203,18 @@ mod tests {
         let args = fbody.arguments();
         let (callee, x) = (args[0].id(), args[1].id());
 
-        let mut fb = IRBuilder::new(func.body());
         let call = tir::builtin::IndirectCallOpBuilder::new(&context)
             .callee(callee)
             .args(vec![x])
             .result_type(i32)
             .build();
         let call_r = call.result();
-        fb.insert(call);
-        fb.insert(ops::r#return(&context, call_r).build());
+        func.body().append_op(call);
+        func.body()
+            .append_op(ops::r#return(&context, call_r).build());
 
-        let mut mb = IRBuilder::new(module.body());
-        mb.insert(func);
-        mb.insert(ops::module_end(&context).build());
+        module.body().append_op(func);
+        module.body().append_op(ops::module_end(&context).build());
 
         let mut pm = build_pipeline(&target, &context, StopAfter::Finalize);
         pm.run(&context, context.get_op(module.id()))
@@ -2356,11 +2341,11 @@ mod tests {
             .register_info()
             .class("GPR")
             .unwrap();
-        let mut bb = IRBuilder::new(context.get_block(block.id()));
+        let bb = context.get_block(block.id());
         let mut producers = Vec::new();
         for _ in 0..8 {
             let v = context.create_value(i32, None).id().number();
-            bb.insert(
+            bb.append_op(
                 AddWordOpBuilder::new(&context)
                     .attr("rd", virt(v, gpr))
                     .attr("rs1", virt(a, gpr))
@@ -2372,7 +2357,7 @@ mod tests {
         let mut acc = producers[0];
         for &p in &producers[1..] {
             let s = context.create_value(i32, None).id().number();
-            bb.insert(
+            bb.append_op(
                 AddWordOpBuilder::new(&context)
                     .attr("rd", virt(s, gpr))
                     .attr("rs1", virt(acc, gpr))
@@ -2381,12 +2366,12 @@ mod tests {
             );
             acc = s;
         }
-        bb.insert(
+        bb.append_op(
             VirtualReturnOpBuilder::new(&context)
                 .value(tir::ValueId::from_number(acc))
                 .build(),
         );
-        bb.insert(tir::backend::SymbolEndOpBuilder::new(&context).build());
+        bb.append_op(tir::backend::SymbolEndOpBuilder::new(&context).build());
 
         let symbol = tir::backend::SymbolOpBuilder::new(&context)
             .body(region.id())
@@ -2395,9 +2380,8 @@ mod tests {
                 tir::attributes::AttributeValue::Str("demo".to_string()),
             )
             .build();
-        let mut mb = IRBuilder::new(module.body());
-        mb.insert(symbol);
-        mb.insert(ops::module_end(&context).build());
+        module.body().append_op(symbol);
+        module.body().append_op(ops::module_end(&context).build());
 
         let mut pm = PassManager::new();
         for pass in tir::backend::prealloc::regalloc_stage_for(
@@ -2527,11 +2511,11 @@ mod tests {
         let block = context.create_block(vec![a_val]);
         region.add_block(block.id());
 
-        let mut bb = IRBuilder::new(context.get_block(block.id()));
+        let bb = context.get_block(block.id());
         let mut producers = Vec::new();
         for _ in 0..6 {
             let v = context.create_value(f32_ty, None).id().number();
-            bb.insert(
+            bb.append_op(
                 FAddSOpBuilder::new(&context)
                     .attr("fd", virt(v, fpr32))
                     .attr("fs1", virt(a, fpr32))
@@ -2543,7 +2527,7 @@ mod tests {
         let mut acc = producers[0];
         for &p in &producers[1..] {
             let s = context.create_value(f32_ty, None).id().number();
-            bb.insert(
+            bb.append_op(
                 FAddSOpBuilder::new(&context)
                     .attr("fd", virt(s, fpr32))
                     .attr("fs1", virt(acc, fpr32))
@@ -2552,12 +2536,12 @@ mod tests {
             );
             acc = s;
         }
-        bb.insert(
+        bb.append_op(
             VirtualReturnOpBuilder::new(&context)
                 .value(tir::ValueId::from_number(acc))
                 .build(),
         );
-        bb.insert(tir::backend::SymbolEndOpBuilder::new(&context).build());
+        bb.append_op(tir::backend::SymbolEndOpBuilder::new(&context).build());
 
         let symbol = tir::backend::SymbolOpBuilder::new(&context)
             .body(region.id())
@@ -2566,9 +2550,8 @@ mod tests {
                 tir::attributes::AttributeValue::Str("demo".to_string()),
             )
             .build();
-        let mut mb = IRBuilder::new(module.body());
-        mb.insert(symbol);
-        mb.insert(ops::module_end(&context).build());
+        module.body().append_op(symbol);
+        module.body().append_op(ops::module_end(&context).build());
 
         let mut pm = PassManager::new();
         for pass in tir::backend::prealloc::regalloc_stage_for(

@@ -1688,8 +1688,8 @@ mod tests {
     }
     use std::collections::BTreeSet;
     use std::sync::Arc;
+    use tir::Block;
     use tir::builtin::{IntegerType, ops};
-    use tir::{Block, IRBuilder};
 
     fn three_reg_info() -> RegisterInfo {
         RegisterInfo {
@@ -1873,9 +1873,8 @@ mod tests {
     }
 
     fn addi(context: &Context, block: &Arc<Block>, a: ValueId, b: ValueId, ty: tir::TypeId) -> u32 {
-        let mut builder = IRBuilder::new(block.clone());
-        builder
-            .insert(ops::addi(context, a, b, ty).build())
+        block
+            .append_op(ops::addi(context, a, b, ty).build())
             .result()
             .number()
     }

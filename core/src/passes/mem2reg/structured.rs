@@ -158,8 +158,9 @@ impl Promoter<'_> {
         let context = self.context;
         let is_loop = op.clone().as_interface::<dyn LoopLike>().is_some();
         let init = is_loop.then(|| self.reaching(incoming));
-        let scope =
-            init.and_then(|_| loop_scope(context, *op.regions.last().expect("a loop has a body")));
+        let scope = is_loop
+            .then(|| loop_scope(context, *op.regions.last().expect("a loop has a body")))
+            .flatten();
         self.scopes.extend(scope);
 
         let ty = self.ty;
@@ -286,8 +287,8 @@ fn gates_carry_values(
             continue;
         }
 
-        // The gate is recognized through its interface, but growing a port has to
-        // rebuild it, which only the concrete `scf` builders can do.
+        // The gate is recognized through its interface, but the walk only knows
+        // `scf`'s exit edges.
         let is_conditional =
             op.clone().as_interface::<dyn Conditional>().is_some() && op.is::<scf::IfOp>();
         let is_loop = op.clone().as_interface::<dyn LoopLike>().is_some()

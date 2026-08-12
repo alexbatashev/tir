@@ -369,7 +369,7 @@ mod tests {
     use std::sync::Arc;
     use tir::backend::regalloc::RegClassInfo;
     use tir::builtin::{IntegerType, ops};
-    use tir::{Block, IRBuilder, Operation, TypeId, ValueId};
+    use tir::{Block, Operation, TypeId, ValueId};
 
     tir::helpers::operation! {
         PhysDefOp {
@@ -586,9 +586,8 @@ mod tests {
     // its two operands read as uses — enough for liveness, which resolves builtin
     // SSA ops positionally.
     fn addi(context: &Context, block: &Arc<Block>, a: ValueId, b: ValueId, ty: TypeId) -> ValueId {
-        let mut builder = IRBuilder::new(block.clone());
-        builder
-            .insert(ops::addi(context, a, b, ty).build())
+        block
+            .append_op(ops::addi(context, a, b, ty).build())
             .result()
     }
 

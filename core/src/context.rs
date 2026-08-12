@@ -480,8 +480,11 @@ impl Context {
     /// The green core keeps no use lists, so the uses are found by walking the
     /// scope a use of `old` can sit in (see [`Context::use_scope`]); the
     /// [`DefUse`](crate::analysis::DefUse) analysis is the cached index passes
-    /// query. Register-attribute uses are intentionally left untouched: they are
-    /// not SSA operands and belong to machine IR.
+    /// query. The edit applies to the tree: a use in a block an edit has taken
+    /// out of it is not rewritten, which is what
+    /// [`StagedRegion::replace_value`] exists for. Register-attribute uses are
+    /// intentionally left untouched: they are not SSA operands and belong to
+    /// machine IR.
     pub fn replace_value_uses(&self, old: ValueId, new: ValueId) {
         if old == new {
             return;
@@ -1791,15 +1794,13 @@ mod tests {
 
     #[test]
     fn parent_block_tracks_membership() {
-        use crate::IRBuilder;
         let context = Context::with_default_dialects();
         let i32 = builtin::IntegerType::new(&context, 32);
         let a = context.create_value(i32, None);
         let b = context.create_value(i32, None);
 
         let block = context.create_block(vec![]);
-        let mut builder = IRBuilder::new(block.clone());
-        let add = builder.insert(builtin::ops::addi(&context, a.id(), b.id(), i32).build());
+        let add = block.append_op(builtin::ops::addi(&context, a.id(), b.id(), i32).build());
 
         // Inserting into a block records the parent, reachable from just the op.
         assert_eq!(context.parent_block(add.id()), Some(block.id()));

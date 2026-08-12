@@ -37,7 +37,7 @@ impl Terminator for ModuleEndOp {}
 #[cfg(test)]
 mod tests {
     use crate::{
-        Context, IRBuilder, IRFormatter, Operation,
+        Context, IRFormatter, Operation,
         builtin::{ModuleOp, ops},
         parse::ir::parse_ir,
     };
@@ -74,8 +74,7 @@ mod tests {
         let context = Context::with_default_dialects();
         let m = ops::module(&context, None).build();
 
-        let mut builder = IRBuilder::new(m.body());
-        builder.insert(ops::module_end(&context).build());
+        m.body().append_op(ops::module_end(&context).build());
 
         assert_eq!(m.regions().len(), 1);
         assert_eq!(m.body().iter(context.clone()).len(), 1);

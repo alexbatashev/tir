@@ -417,7 +417,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        Block, Context, IRBuilder, Operand, Operation, RegionId,
+        Block, Context, Operand, Operation, RegionId,
         builtin::{IntegerType, UnitType, ops},
     };
 
@@ -432,7 +432,7 @@ mod tests {
         let region = context.create_region();
         let block = context.create_block(vec![]);
         region.add_block(block.id());
-        IRBuilder::new(block).insert(crate::scf::ops::r#yield(context, vec![]).build());
+        block.append_op(crate::scf::ops::r#yield(context, vec![]).build());
         region.id()
     }
 
@@ -443,7 +443,7 @@ mod tests {
     }
 
     fn terminate(block: &Arc<Block>, op: impl Operation) {
-        IRBuilder::new(block.clone()).insert(op);
+        block.append_op(op);
     }
 
     #[test]
@@ -558,9 +558,8 @@ mod tests {
         )
         .build();
 
-        let mut builder = IRBuilder::new(entry.clone());
-        builder.insert(if_op);
-        builder.insert(ops::r#return(&context, Operand::none()).build());
+        entry.append_op(if_op);
+        entry.append_op(ops::r#return(&context, Operand::none()).build());
 
         let dt = DominatorTree::new(&context, func_with_region(&context, region.id()));
 

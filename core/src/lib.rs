@@ -8,7 +8,6 @@ pub mod analysis;
 pub mod attributes;
 pub mod backend;
 mod block;
-mod builder;
 mod clone;
 mod context;
 mod diagnostics;
@@ -43,7 +42,6 @@ pub mod parse;
 
 pub use analysis::{Analysis, AnalysisManager};
 pub use block::{Block, BlockId};
-pub use builder::{IRBuilder, InsertionPoint};
 pub use context::{Context, ContextIterator, ContextRef, GetFromContext, StagedRegion};
 pub use diagnostics::{print_error_range, print_parse_error};
 pub use dialect::{Dialect, OperationParser};

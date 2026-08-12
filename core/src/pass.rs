@@ -665,7 +665,7 @@ impl Default for PassManager {
 #[cfg(test)]
 mod tests {
     use crate::{
-        Context, IRBuilder, Operation,
+        Context, Operation,
         builtin::{AddIOp, FuncOp, IntegerType, ops},
     };
 
@@ -777,7 +777,6 @@ mod tests {
         let func = ops::func(&context, "demo", i32, Some(region.id())).build();
         let body = func.body();
 
-        let mut builder = IRBuilder::new(body.clone());
         let add = ops::addi(
             &context,
             body.arguments()[0].id(),
@@ -786,8 +785,8 @@ mod tests {
         )
         .build();
         let add_result = add.result();
-        builder.insert(add);
-        builder.insert(ops::r#return(&context, add_result).build());
+        body.append_op(add);
+        body.append_op(ops::r#return(&context, add_result).build());
 
         let mut pm = PassManager::new();
         pm.verify_ir(true);
@@ -827,9 +826,8 @@ mod tests {
         let i32 = IntegerType::new(&context, 32);
         let value = context.create_value(i32, None);
         let block = context.create_block(vec![]);
-        let mut builder = IRBuilder::new(block.clone());
-        let head = builder.insert(ops::addi(&context, value.id(), value.id(), i32).build());
-        let tail = builder.insert(ops::subi(&context, value.id(), value.id(), i32).build());
+        let head = block.append_op(ops::addi(&context, value.id(), value.id(), i32).build());
+        let tail = block.append_op(ops::subi(&context, value.id(), value.id(), i32).build());
         let mut rewriter = super::Rewriter::new(context.clone());
 
         let split = rewriter.split_block(block.id(), 1);
@@ -846,10 +844,12 @@ mod tests {
         let value = context.create_value(i32, None);
         let destination = context.create_block(vec![]);
         let source = context.create_block(vec![]);
-        let head = IRBuilder::new(destination.clone())
-            .insert(ops::addi(&context, value.id(), value.id(), i32).build());
-        let moved = IRBuilder::new(source.clone())
-            .insert(ops::subi(&context, value.id(), value.id(), i32).build());
+        let head = destination
+            .clone()
+            .append_op(ops::addi(&context, value.id(), value.id(), i32).build());
+        let moved = source
+            .clone()
+            .append_op(ops::subi(&context, value.id(), value.id(), i32).build());
         let mut rewriter = super::Rewriter::new(context.clone());
 
         rewriter.splice_block(source.id(), destination.id());
@@ -870,9 +870,8 @@ mod tests {
         let argument = context.create_value(i32, None);
         let block = context.create_block(vec![argument.clone()]);
         region.add_block(block.id());
-        let mut builder = IRBuilder::new(block);
-        let add = builder.insert(ops::addi(context, argument.id(), argument.id(), i32).build());
-        builder.insert(ops::r#return(context, add.result()).build());
+        let add = block.append_op(ops::addi(context, argument.id(), argument.id(), i32).build());
+        block.append_op(ops::r#return(context, add.result()).build());
         ops::func(context, "demo", i32, Some(region.id())).build()
     }
 
@@ -907,9 +906,10 @@ mod tests {
         let target = context.create_block(vec![]);
         region.add_block(entry.id());
         region.add_block(target.id());
-        IRBuilder::new(entry).insert(ops::br(&context, vec![], target.id()).build());
-        IRBuilder::new(target.clone())
-            .insert(ops::r#return(&context, crate::Operand::none()).build());
+        entry.append_op(ops::br(&context, vec![], target.id()).build());
+        target
+            .clone()
+            .append_op(ops::r#return(&context, crate::Operand::none()).build());
         let mut rewriter = super::Rewriter::new(context.clone());
 
         let clone = rewriter.clone_region(region.id());
@@ -1043,7 +1043,7 @@ mod tests {
         let func_body = func.body();
         let func_id = func.id();
 
-        let mut func_builder = IRBuilder::new(func_body.clone());
+        let func_builder = func_body.clone();
         let add = ops::addi(
             &context,
             func_body.arguments()[0].id(),
@@ -1053,11 +1053,10 @@ mod tests {
         .build();
         let add_result = add.result();
         let add_id = add.id();
-        func_builder.insert(add);
-        func_builder.insert(ops::r#return(&context, add_result).build());
+        func_builder.append_op(add);
+        func_builder.append_op(ops::r#return(&context, add_result).build());
 
-        let mut module_builder = IRBuilder::new(module.body());
-        module_builder.insert(func);
+        module.body().append_op(func);
 
         let mut pm = PassManager::new();
         pm.nest::<FuncOp>().add_pass(AddToSubPass);
@@ -1103,7 +1102,6 @@ mod tests {
         let func = ops::func(&context, "demo", i32, Some(region.id())).build();
         let body = func.body();
 
-        let mut b = IRBuilder::new(body.clone());
         let neg = ops::subi(
             &context,
             body.arguments()[0].id(),
@@ -1113,7 +1111,7 @@ mod tests {
         .build();
         let neg_id = neg.id();
         let neg_ref = super::OperationRef::new(context.get_op(neg_id), Some(body.clone()), None);
-        b.insert(neg);
+        body.append_op(neg);
         let argument = body.arguments()[0].id().number();
         assert!(crate::analysis::DefUse::new(&context, func.id()).is_used(argument));
 

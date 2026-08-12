@@ -549,7 +549,7 @@ fn gamma_inputs(guard: &dyn Conditional, index: usize) -> Option<(ValueId, Value
 mod tests {
     use super::*;
     use crate::{
-        Context, IRBuilder, Operand, Operation, RegionId, TypeId,
+        Context, Operand, Operation, RegionId, TypeId,
         builtin::{IntegerType, UnitType, ops},
     };
 
@@ -582,23 +582,24 @@ mod tests {
             region.add_block(block.id());
         }
 
-        IRBuilder::new(entry.clone())
-            .insert(ops::cond_br(&context, cond_id, vec![], vec![], t.id(), f.id()).build());
+        entry
+            .clone()
+            .append_op(ops::cond_br(&context, cond_id, vec![], vec![], t.id(), f.id()).build());
 
         let c_true = ops::constant(&context, 1, i32).build();
         let true_val = c_true.result();
-        let mut tb = IRBuilder::new(t.clone());
-        tb.insert(c_true);
-        tb.insert(ops::br(&context, vec![true_val], merge.id()).build());
+        let tb = t.clone();
+        tb.append_op(c_true);
+        tb.append_op(ops::br(&context, vec![true_val], merge.id()).build());
 
         let c_false = ops::constant(&context, 0, i32).build();
         let false_val = c_false.result();
-        let mut fb = IRBuilder::new(f.clone());
-        fb.insert(c_false);
-        fb.insert(ops::br(&context, vec![false_val], merge.id()).build());
+        f.append_op(c_false);
+        f.append_op(ops::br(&context, vec![false_val], merge.id()).build());
 
-        IRBuilder::new(merge.clone())
-            .insert(ops::r#return(&context, Operand::from(merge_arg_id)).build());
+        merge
+            .clone()
+            .append_op(ops::r#return(&context, Operand::from(merge_arg_id)).build());
 
         let gs = GSA::new(&context, func_with_region(&context, region.id()));
 
@@ -649,24 +650,24 @@ mod tests {
         let init = ops::constant(&context, 0, i32).build();
         let init_val = init.result();
         let init_op = init.id();
-        let mut eb = IRBuilder::new(entry.clone());
-        eb.insert(init);
-        eb.insert(ops::br(&context, vec![init_val], header.id()).build());
+        entry.append_op(init);
+        entry.append_op(ops::br(&context, vec![init_val], header.id()).build());
 
-        IRBuilder::new(header.clone())
-            .insert(ops::cond_br(&context, cond_id, vec![], vec![], body.id(), exit.id()).build());
+        header.append_op(
+            ops::cond_br(&context, cond_id, vec![], vec![], body.id(), exit.id()).build(),
+        );
 
         let step = ops::constant(&context, 1, i32).build();
         let step_val = step.result();
         let next = ops::addi(&context, iv_id, step_val, i32).build();
         let next_val = next.result();
         let next_op = next.id();
-        let mut bb = IRBuilder::new(body.clone());
-        bb.insert(step);
-        bb.insert(next);
-        bb.insert(ops::br(&context, vec![next_val], header.id()).build());
+        body.append_op(step);
+        body.append_op(next);
+        body.append_op(ops::br(&context, vec![next_val], header.id()).build());
 
-        IRBuilder::new(exit.clone()).insert(ops::r#return(&context, Operand::from(iv_id)).build());
+        exit.clone()
+            .append_op(ops::r#return(&context, Operand::from(iv_id)).build());
 
         let gs = GSA::new(&context, func_with_region(&context, region.id()));
 
@@ -708,13 +709,13 @@ mod tests {
 
         let init = ops::constant(&context, 0, i32).build();
         let init_val = init.result();
-        let mut eb = IRBuilder::new(entry.clone());
-        eb.insert(init);
-        eb.insert(ops::br(&context, vec![init_val], header.id()).build());
+        entry.append_op(init);
+        entry.append_op(ops::br(&context, vec![init_val], header.id()).build());
 
-        IRBuilder::new(header.clone())
-            .insert(ops::cond_br(&context, cond_id, vec![], vec![], body.id(), exit.id()).build());
-        IRBuilder::new(body.clone()).insert(
+        header.append_op(
+            ops::cond_br(&context, cond_id, vec![], vec![], body.id(), exit.id()).build(),
+        );
+        body.append_op(
             ops::cond_br(
                 &context,
                 cond_id,
@@ -728,17 +729,17 @@ mod tests {
 
         let one = ops::constant(&context, 1, i32).build();
         let one_val = one.result();
-        let mut ab = IRBuilder::new(latch_a.clone());
-        ab.insert(one);
-        ab.insert(ops::br(&context, vec![one_val], header.id()).build());
+        let ab = latch_a.clone();
+        ab.append_op(one);
+        ab.append_op(ops::br(&context, vec![one_val], header.id()).build());
 
         let two = ops::constant(&context, 2, i32).build();
         let two_val = two.result();
-        let mut bb = IRBuilder::new(latch_b.clone());
-        bb.insert(two);
-        bb.insert(ops::br(&context, vec![two_val], header.id()).build());
+        latch_b.append_op(two);
+        latch_b.append_op(ops::br(&context, vec![two_val], header.id()).build());
 
-        IRBuilder::new(exit.clone()).insert(ops::r#return(&context, Operand::from(iv_id)).build());
+        exit.clone()
+            .append_op(ops::r#return(&context, Operand::from(iv_id)).build());
 
         let gs = GSA::new(&context, func_with_region(&context, region.id()));
 
@@ -761,8 +762,9 @@ mod tests {
         let region = context.create_region();
         let entry = context.create_block(vec![arg]);
         region.add_block(entry.id());
-        IRBuilder::new(entry.clone())
-            .insert(ops::r#return(&context, Operand::from(arg_id)).build());
+        entry
+            .clone()
+            .append_op(ops::r#return(&context, Operand::from(arg_id)).build());
 
         let gs = GSA::new(&context, func_with_region(&context, region.id()));
 
@@ -780,8 +782,9 @@ mod tests {
         let region = context.create_region();
         let entry = context.create_block(vec![arg]);
         region.add_block(entry.id());
-        IRBuilder::new(entry.clone())
-            .insert(ops::r#return(&context, Operand::from(arg_id)).build());
+        entry
+            .clone()
+            .append_op(ops::r#return(&context, Operand::from(arg_id)).build());
         let func = func_with_region(&context, region.id());
 
         let am = AnalysisManager::new();
@@ -796,9 +799,9 @@ mod tests {
         let region = context.create_region();
         let block = context.create_block(vec![]);
         region.add_block(block.id());
-        let mut b = IRBuilder::new(block);
-        b.insert(def);
-        b.insert(crate::scf::ops::r#yield(context, vec![value]).build());
+        let b = block;
+        b.append_op(def);
+        b.append_op(crate::scf::ops::r#yield(context, vec![value]).build());
         region.id()
     }
 
@@ -833,9 +836,8 @@ mod tests {
         )
         .build();
         let if_result = if_op.result();
-        let mut eb = IRBuilder::new(entry.clone());
-        eb.insert(if_op);
-        eb.insert(ops::r#return(&context, Operand::from(if_result)).build());
+        entry.append_op(if_op);
+        entry.append_op(ops::r#return(&context, Operand::from(if_result)).build());
 
         let gs = GSA::new(&context, func_with_region(&context, region.id()));
 
@@ -866,10 +868,10 @@ mod tests {
         let region = context.create_region();
         let block = context.create_block(vec![]);
         region.add_block(block.id());
-        let mut b = IRBuilder::new(block);
-        b.insert(first);
-        b.insert(second);
-        b.insert(crate::scf::ops::r#yield(context, yielded).build());
+        let b = block;
+        b.append_op(first);
+        b.append_op(second);
+        b.append_op(crate::scf::ops::r#yield(context, yielded).build());
         (region.id(), defs)
     }
 
@@ -897,9 +899,8 @@ mod tests {
         )
         .build();
         let results = context.get_op(if_op.id()).results.clone();
-        let mut eb = IRBuilder::new(entry.clone());
-        eb.insert(if_op);
-        eb.insert(ops::r#return(&context, Operand::from(results[0])).build());
+        entry.append_op(if_op);
+        entry.append_op(ops::r#return(&context, Operand::from(results[0])).build());
 
         let gs = GSA::new(&context, func_with_region(&context, region.id()));
 
@@ -934,10 +935,9 @@ mod tests {
         let next = ops::addi(context, acc_id, step_val, i32).build();
         let next_val = next.result();
         let next_op = next.id();
-        let mut bb = IRBuilder::new(block);
-        bb.insert(step);
-        bb.insert(next);
-        bb.insert(crate::scf::ops::r#yield(context, vec![next_val]).build());
+        block.append_op(step);
+        block.append_op(next);
+        block.append_op(crate::scf::ops::r#yield(context, vec![next_val]).build());
         (region.id(), acc_id, next_op)
     }
 
@@ -990,10 +990,9 @@ mod tests {
         )
         .build();
         let for_result = for_op.result();
-        let mut eb = IRBuilder::new(entry.clone());
-        eb.insert(init);
-        eb.insert(for_op);
-        eb.insert(ops::r#return(&context, Operand::from(for_result)).build());
+        entry.append_op(init);
+        entry.append_op(for_op);
+        entry.append_op(ops::r#return(&context, Operand::from(for_result)).build());
 
         let gs = GSA::new(&context, func_with_region(&context, region.id()));
         assert_mu(&gs, for_result, acc_id, init_op, latch_op);
@@ -1019,14 +1018,13 @@ mod tests {
         body_region.add_block(body_block.id());
         let one = ops::constant(&context, 1, i32).build();
         let one_val = one.result();
-        let mut bb = IRBuilder::new(body_block);
-        bb.insert(one);
+        body_block.append_op(one);
         let latch_ops: Vec<OpId> = acc_ids
             .iter()
             .map(|&acc| {
                 let next = ops::addi(&context, acc, one_val, i32).build();
                 let id = next.id();
-                bb.insert(next);
+                body_block.append_op(next);
                 id
             })
             .collect();
@@ -1034,7 +1032,7 @@ mod tests {
             .iter()
             .map(|&op| context.get_op(op).results[0])
             .collect();
-        bb.insert(crate::scf::ops::r#yield(&context, latched).build());
+        body_block.append_op(crate::scf::ops::r#yield(&context, latched).build());
 
         let inits: Vec<_> = [0, 10]
             .iter()
@@ -1058,12 +1056,11 @@ mod tests {
         )
         .build();
         let results = context.get_op(for_op.id()).results.clone();
-        let mut eb = IRBuilder::new(entry.clone());
         for init in inits {
-            eb.insert(init);
+            entry.append_op(init);
         }
-        eb.insert(for_op);
-        eb.insert(ops::r#return(&context, Operand::from(results[0])).build());
+        entry.append_op(for_op);
+        entry.append_op(ops::r#return(&context, Operand::from(results[0])).build());
 
         let gs = GSA::new(&context, func_with_region(&context, region.id()));
 
@@ -1091,8 +1088,8 @@ mod tests {
         let condition_region = context.create_region();
         let condition_block = context.create_block(vec![before.clone()]);
         condition_region.add_block(condition_block.id());
-        IRBuilder::new(condition_block)
-            .insert(crate::scf::ops::condition(&context, cond.id(), vec![before.id()]).build());
+        condition_block
+            .append_op(crate::scf::ops::condition(&context, cond.id(), vec![before.id()]).build());
 
         let init = ops::constant(&context, 0, i32).build();
         let init_val = init.result();
@@ -1111,10 +1108,9 @@ mod tests {
         )
         .build();
         let while_result = while_op.result();
-        let mut eb = IRBuilder::new(entry.clone());
-        eb.insert(init);
-        eb.insert(while_op);
-        eb.insert(ops::r#return(&context, Operand::from(while_result)).build());
+        entry.append_op(init);
+        entry.append_op(while_op);
+        entry.append_op(ops::r#return(&context, Operand::from(while_result)).build());
 
         let gs = GSA::new(&context, func_with_region(&context, region.id()));
         assert_mu(&gs, while_result, acc_id, init_op, latch_op);
@@ -1148,18 +1144,16 @@ mod tests {
         let leave = context.create_region();
         let leave_block = context.create_block(vec![]);
         leave.add_block(leave_block.id());
-        IRBuilder::new(leave_block)
-            .insert(crate::scf::ops::r#break(&context, scope_id, vec![next_val]).build());
+        leave_block.append_op(crate::scf::ops::r#break(&context, scope_id, vec![next_val]).build());
         let stay = context.create_region();
         let stay_block = context.create_block(vec![]);
         stay.add_block(stay_block.id());
-        IRBuilder::new(stay_block).insert(crate::scf::ops::r#yield(&context, vec![]).build());
+        stay_block.append_op(crate::scf::ops::r#yield(&context, vec![]).build());
 
-        let mut bb = IRBuilder::new(body_block);
-        bb.insert(one);
-        bb.insert(next);
-        bb.insert(decision);
-        bb.insert(
+        body_block.append_op(one);
+        body_block.append_op(next);
+        body_block.append_op(decision);
+        body_block.append_op(
             crate::scf::ops::r#if(
                 &context,
                 decision_val,
@@ -1169,7 +1163,7 @@ mod tests {
             )
             .build(),
         );
-        bb.insert(crate::scf::ops::r#yield(&context, vec![next_val]).build());
+        body_block.append_op(crate::scf::ops::r#yield(&context, vec![next_val]).build());
 
         let init = ops::constant(&context, 0, i32).build();
         let init_val = init.result();
@@ -1187,10 +1181,9 @@ mod tests {
         )
         .build();
         let for_result = for_op.result();
-        let mut eb = IRBuilder::new(entry);
-        eb.insert(init);
-        eb.insert(for_op);
-        eb.insert(ops::r#return(&context, Operand::from(for_result)).build());
+        entry.append_op(init);
+        entry.append_op(for_op);
+        entry.append_op(ops::r#return(&context, Operand::from(for_result)).build());
 
         let gs = GSA::new(&context, func_with_region(&context, region.id()));
         assert!(!matches!(

@@ -137,7 +137,7 @@ fn is_pure_value(instance: &Arc<OpInstance>) -> bool {
 #[cfg(test)]
 mod tests {
     use crate::{
-        Context, IRBuilder, Operation, PassManager,
+        Context, Operation, PassManager,
         builtin::{IntegerType, ops},
     };
 
@@ -155,19 +155,19 @@ mod tests {
         region.add_block(block.id());
         let func = ops::func(&context, "f", i32, Some(region.id())).build();
 
-        let mut b = IRBuilder::new(block);
+        let b = block;
         // A dead chain: the constant feeds only the add, which feeds nothing.
-        let c = b.insert(ops::constant(&context, 3, i32).build());
-        let dead = b.insert(ops::addi(&context, arg_id, c.result(), i32).build());
+        let c = b.append_op(ops::constant(&context, 3, i32).build());
+        let dead = b.append_op(ops::addi(&context, arg_id, c.result(), i32).build());
         // An effectful op with an unread result must survive.
-        let call = b.insert(
+        let call = b.append_op(
             crate::builtin::CallOpBuilder::new(&context)
                 .args(vec![arg_id])
                 .attr("callee", crate::attributes::AttributeValue::Str("g".into()))
                 .result_type(i32)
                 .build(),
         );
-        b.insert(ops::r#return(&context, arg_id).build());
+        b.append_op(ops::r#return(&context, arg_id).build());
 
         let mut pm = PassManager::new();
         pm.add_pass(DeadCodeEliminationPass::new());

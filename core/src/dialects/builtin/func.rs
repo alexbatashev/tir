@@ -285,7 +285,7 @@ impl Terminator for ReturnOp {}
 #[cfg(test)]
 mod tests {
     use crate::{
-        Context, IRBuilder, IRFormatter, Operation,
+        Context, IRFormatter, Operation,
         builtin::{FuncOp, IntegerType, ops},
         parse::ir::parse_ir,
     };
@@ -314,8 +314,8 @@ mod tests {
         .build();
 
         // Insert return op into body
-        let mut builder = IRBuilder::new(func.body());
-        builder.insert(ops::r#return(&context, param0_id).build());
+        func.body()
+            .append_op(ops::r#return(&context, param0_id).build());
 
         assert_eq!(func.regions().len(), 1);
         assert_eq!(func.body().arguments().len(), 2);

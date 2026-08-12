@@ -1245,14 +1245,13 @@ fn verify_single_block_region_has_terminator(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{IRBuilder, Operation, builtin::ops as builtin_ops};
+    use crate::{Operation, builtin::ops as builtin_ops};
 
     fn terminated_region(context: &Context) -> tir::RegionId {
         let region = context.create_region();
         let block = context.create_block(vec![]);
         region.add_block(block.id());
-        let mut builder = IRBuilder::new(block);
-        builder.insert(ops::r#yield(context, vec![]).build());
+        block.append_op(ops::r#yield(context, vec![]).build());
         region.id()
     }
 
@@ -1283,9 +1282,9 @@ mod tests {
         )
         .build();
 
-        let mut builder = IRBuilder::new(func.body());
-        builder.insert(if_op);
-        builder.insert(builtin_ops::r#return(&context, tir::Operand::none()).build());
+        func.body().append_op(if_op);
+        func.body()
+            .append_op(builtin_ops::r#return(&context, tir::Operand::none()).build());
 
         assert!(func.verify(&context).is_ok());
     }

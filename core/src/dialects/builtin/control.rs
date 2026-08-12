@@ -309,7 +309,7 @@ fn expect_token(
 #[cfg(test)]
 mod tests {
     use crate::{
-        Context, IRBuilder, IRFormatter, Operation, Terminator,
+        Context, IRFormatter, Operation, Terminator,
         builtin::{IntegerType, UnitType, ops},
         parse::ir::parse_ir,
     };
@@ -464,8 +464,8 @@ mod tests {
 
         let func = ops::func(&context, "jump", UnitType::new(&context), Some(region.id())).build();
 
-        let mut builder = IRBuilder::new(func.body());
-        builder.insert(ops::br(&context, vec![], target.id()).build());
+        func.body()
+            .append_op(ops::br(&context, vec![], target.id()).build());
 
         assert!(func.verify(&context).is_ok());
     }

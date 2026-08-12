@@ -1551,7 +1551,7 @@ fn emit_instructions<'a>(
                 instruction_parsers_impls.push(quote! {
                     fn #parse_fn_ident<'src>(
                         context: &tir::Context,
-                        builder: &mut tir::IRBuilder,
+                        builder: &mut tir::backend::AsmCursor,
                         parser: &mut tir::parse::tokens::Parser<'src, tir::backend::Token<'src>>,
                     ) -> Result<(), ()> {
                         asm_desc::parse_and_insert(

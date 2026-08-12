@@ -1650,7 +1650,7 @@ mod isa {
         use super::*;
         use tir::backend::lower::OpLoweringPass;
         use tir::builtin::{ModuleEndOpBuilder, ModuleOpBuilder};
-        use tir::{IRBuilder, IRFormatter, PassManager};
+        use tir::{IRFormatter, PassManager};
 
         /// Rewrite a `mov_load` whose base is the physical register `base_index`
         /// and return the printed IR of the (single) resulting op.
@@ -1658,14 +1658,14 @@ mod isa {
             let context = tir::Context::with_default_dialects();
             context.register_dialect::<X86_64Dialect>();
             let module = ModuleOpBuilder::new(&context).build();
-            let mut b = IRBuilder::new(module.body());
-            b.insert(
+            let b = module.body();
+            b.append_op(
                 MovLoadOpBuilder::new(&context)
                     .attr("dst", phys(RegClass::GPR.id(), 0))
                     .attr("base", phys(RegClass::GPR.id(), base_index))
                     .build(),
             );
-            b.insert(ModuleEndOpBuilder::new(&context).build());
+            b.append_op(ModuleEndOpBuilder::new(&context).build());
 
             let mut pm = PassManager::new();
             pm.add_pass(OpLoweringPass::new(
@@ -1707,9 +1707,9 @@ mod isa {
                 let context = tir::Context::with_default_dialects();
                 context.register_dialect::<X86_64Dialect>();
                 let module = ModuleOpBuilder::new(&context).build();
-                let mut b = IRBuilder::new(module.body());
-                b.insert($build(&context));
-                b.insert(ModuleEndOpBuilder::new(&context).build());
+                let b = module.body();
+                b.append_op($build(&context));
+                b.append_op(ModuleEndOpBuilder::new(&context).build());
                 let mut pm = PassManager::new();
                 pm.add_pass(OpLoweringPass::new("c", vec![canonicalize_encodings]));
                 pm.run(&context, context.get_op(module.id()))

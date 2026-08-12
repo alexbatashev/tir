@@ -253,7 +253,7 @@ impl Analysis for DefUse {
 mod tests {
     use super::*;
     use crate::{
-        IRBuilder, Operation,
+        Operation,
         builtin::{IntegerType, UnitType, ops},
     };
 
@@ -269,11 +269,11 @@ mod tests {
         region.add_block(block.id());
         let func = ops::func(&context, "f", UnitType::new(&context), Some(region.id())).build();
 
-        let mut b = IRBuilder::new(block);
-        let dead = b.insert(ops::constant(&context, 7, i32).build());
-        let sum = b.insert(ops::addi(&context, arg_id, arg_id, i32).build());
+        let b = block;
+        let dead = b.append_op(ops::constant(&context, 7, i32).build());
+        let sum = b.append_op(ops::addi(&context, arg_id, arg_id, i32).build());
         let sum_val = sum.result();
-        let ret = b.insert(ops::r#return(&context, sum_val).build());
+        let ret = b.append_op(ops::r#return(&context, sum_val).build());
 
         let am = AnalysisManager::new();
         let du = am.get::<DefUse>(&context, func.id());

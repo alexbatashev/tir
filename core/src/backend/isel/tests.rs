@@ -1,5 +1,5 @@
 use tir::{
-    Context, IRBuilder, IRFormatter, Operation, PassManager, TypeId,
+    Context, IRFormatter, Operation, PassManager, TypeId,
     analysis::GSA,
     builtin::{FloatType, FuncOp, IntegerType, ops},
     graph::{MetaMutDag, MutDag, OperandConstraint},
@@ -111,18 +111,17 @@ fn pbqp_selector_consumes_internal_nodes_of_selected_pattern() {
     region.add_block(block.id());
 
     let func = ops::func(&context, "demo", i32_ty, Some(region.id())).build();
-    let mut fb = IRBuilder::new(func.body());
     let mul = ops::muli(&context, x_id, y_id, i32_ty).build();
     let mul_result = mul.result();
-    fb.insert(mul);
+    func.body().append_op(mul);
     let add = ops::addi(&context, mul_result, z_id, i32_ty).build();
     let add_result = add.result();
-    fb.insert(add);
-    fb.insert(ops::r#return(&context, add_result).build());
+    func.body().append_op(add);
+    func.body()
+        .append_op(ops::r#return(&context, add_result).build());
 
-    let mut mb = IRBuilder::new(module.body());
-    mb.insert(func);
-    mb.insert(ops::module_end(&context).build());
+    module.body().append_op(func);
+    module.body().append_op(ops::module_end(&context).build());
 
     let rules = vec![
         Rule::new("add-mul", add_mul_pattern(), LATENCY_COST_SCALE, emit_add),
@@ -182,15 +181,14 @@ fn shifted_register_view_rule_does_not_select_for_offset_zero_values() {
         region.add_block(block.id());
 
         let func = ops::func(&context, "demo", i32_ty, Some(region.id())).build();
-        let mut fb = IRBuilder::new(func.body());
         let add = ops::addi(&context, x_id, y_id, i32_ty).build();
         let add_result = add.result();
-        fb.insert(add);
-        fb.insert(ops::r#return(&context, add_result).build());
+        func.body().append_op(add);
+        func.body()
+            .append_op(ops::r#return(&context, add_result).build());
 
-        let mut mb = IRBuilder::new(module.body());
-        mb.insert(func);
-        mb.insert(ops::module_end(&context).build());
+        module.body().append_op(func);
+        module.body().append_op(ops::module_end(&context).build());
 
         let capability = RegisterCapability::integer(32);
         let operand = RegisterRequirement::low_bits(capability).at_view_offset(operand_offset);
@@ -264,15 +262,14 @@ fn rule_validation_rejects_missing_atomic_materializer() {
     // the e-graph cover is infeasible, so selection fails naming the kind.
     let _ = z_id;
     let func = ops::func(&context, "demo", i32_ty, Some(region.id())).build();
-    let mut fb = IRBuilder::new(func.body());
     let mul = ops::muli(&context, x_id, y_id, i32_ty).build();
     let mul_result = mul.result();
-    fb.insert(mul);
-    fb.insert(ops::r#return(&context, mul_result).build());
+    func.body().append_op(mul);
+    func.body()
+        .append_op(ops::r#return(&context, mul_result).build());
 
-    let mut mb = IRBuilder::new(module.body());
-    mb.insert(func);
-    mb.insert(ops::module_end(&context).build());
+    module.body().append_op(func);
+    module.body().append_op(ops::module_end(&context).build());
 
     let rules = vec![Rule::new(
         "add",
@@ -364,21 +361,20 @@ fn pbqp_selector_duplicates_shared_pure_internal_nodes() {
     region.add_block(block.id());
 
     let func = ops::func(&context, "demo", i32_ty, Some(region.id())).build();
-    let mut fb = IRBuilder::new(func.body());
     let mul = ops::muli(&context, x_id, y_id, i32_ty).build();
     let mul_result = mul.result();
-    fb.insert(mul);
+    func.body().append_op(mul);
     let add0 = ops::addi(&context, mul_result, z_id, i32_ty).build();
     let add0_result = add0.result();
-    fb.insert(add0);
+    func.body().append_op(add0);
     let add1 = ops::addi(&context, mul_result, add0_result, i32_ty).build();
     let add1_result = add1.result();
-    fb.insert(add1);
-    fb.insert(ops::r#return(&context, add1_result).build());
+    func.body().append_op(add1);
+    func.body()
+        .append_op(ops::r#return(&context, add1_result).build());
 
-    let mut mb = IRBuilder::new(module.body());
-    mb.insert(func);
-    mb.insert(ops::module_end(&context).build());
+    module.body().append_op(func);
+    module.body().append_op(ops::module_end(&context).build());
 
     let rules = vec![
         Rule::new("add-mul", add_mul_pattern(), LATENCY_COST_SCALE, emit_add),
@@ -432,17 +428,16 @@ fn unused_consumer_does_not_create_demand() {
     region.add_block(block.id());
 
     let func = ops::func(&context, "demo", i32_ty, Some(region.id())).build();
-    let mut fb = IRBuilder::new(func.body());
     let mul = ops::muli(&context, x_id, y_id, i32_ty).build();
     let mul_result = mul.result();
-    fb.insert(mul);
+    func.body().append_op(mul);
     let add = ops::addi(&context, mul_result, z_id, i32_ty).build();
-    fb.insert(add);
-    fb.insert(ops::r#return(&context, mul_result).build());
+    func.body().append_op(add);
+    func.body()
+        .append_op(ops::r#return(&context, mul_result).build());
 
-    let mut mb = IRBuilder::new(module.body());
-    mb.insert(func);
-    mb.insert(ops::module_end(&context).build());
+    module.body().append_op(func);
+    module.body().append_op(ops::module_end(&context).build());
 
     let rules = vec![
         Rule::new("add-mul", add_mul_pattern(), LATENCY_COST_SCALE, emit_add),
@@ -525,18 +520,17 @@ fn cost_model_override_changes_selection() {
     region.add_block(block.id());
 
     let func = ops::func(&context, "demo", i32_ty, Some(region.id())).build();
-    let mut fb = IRBuilder::new(func.body());
     let mul = ops::muli(&context, x_id, y_id, i32_ty).build();
     let mul_result = mul.result();
-    fb.insert(mul);
+    func.body().append_op(mul);
     let add = ops::addi(&context, mul_result, z_id, i32_ty).build();
     let add_result = add.result();
-    fb.insert(add);
-    fb.insert(ops::r#return(&context, add_result).build());
+    func.body().append_op(add);
+    func.body()
+        .append_op(ops::r#return(&context, add_result).build());
 
-    let mut mb = IRBuilder::new(module.body());
-    mb.insert(func);
-    mb.insert(ops::module_end(&context).build());
+    module.body().append_op(func);
+    module.body().append_op(ops::module_end(&context).build());
 
     let rules = vec![
         Rule::new("add-mul", add_mul_pattern(), LATENCY_COST_SCALE, emit_add),
@@ -589,21 +583,20 @@ fn composite_rule_falls_back_to_atomic_cover() {
     region.add_block(block.id());
 
     let func = ops::func(&context, "demo", i32_ty, Some(region.id())).build();
-    let mut fb = IRBuilder::new(func.body());
     let add0 = ops::addi(&context, a_id, b_id, i32_ty).build();
     let add0_result = add0.result();
-    fb.insert(add0);
+    func.body().append_op(add0);
     let mul = ops::muli(&context, add0_result, c_id, i32_ty).build();
     let mul_result = mul.result();
-    fb.insert(mul);
+    func.body().append_op(mul);
     let add1 = ops::addi(&context, mul_result, d_id, i32_ty).build();
     let add1_result = add1.result();
-    fb.insert(add1);
-    fb.insert(ops::r#return(&context, add1_result).build());
+    func.body().append_op(add1);
+    func.body()
+        .append_op(ops::r#return(&context, add1_result).build());
 
-    let mut mb = IRBuilder::new(module.body());
-    mb.insert(func);
-    mb.insert(ops::module_end(&context).build());
+    module.body().append_op(func);
+    module.body().append_op(ops::module_end(&context).build());
 
     // `add-mul-add` requires a `Mul(Add(_,_),_)` subpattern that no rule
     // provides; the pass synthesizes it. Selection must remain valid and, with
@@ -687,17 +680,16 @@ fn unused_typed_operation_is_not_selected() {
     region.add_block(block.id());
 
     let func = ops::func(&context, "demo", i64_ty, Some(region.id())).build();
-    let mut fb = IRBuilder::new(func.body());
     let add32 = ops::addi(&context, a32, b32, i32_ty).build();
-    fb.insert(add32);
+    func.body().append_op(add32);
     let add64 = ops::addi(&context, a64, b64, i64_ty).build();
     let add64_result = add64.result();
-    fb.insert(add64);
-    fb.insert(ops::r#return(&context, add64_result).build());
+    func.body().append_op(add64);
+    func.body()
+        .append_op(ops::r#return(&context, add64_result).build());
 
-    let mut mb = IRBuilder::new(module.body());
-    mb.insert(func);
-    mb.insert(ops::module_end(&context).build());
+    module.body().append_op(func);
+    module.body().append_op(ops::module_end(&context).build());
 
     let rules = vec![
         Rule::new(
@@ -751,18 +743,17 @@ fn run_inner_typed_fusion(inner_width: Option<u32>) -> Vec<&'static str> {
     region.add_block(block.id());
 
     let func = ops::func(&context, "demo", i32_ty, Some(region.id())).build();
-    let mut fb = IRBuilder::new(func.body());
     let add0 = ops::addi(&context, a_id, b_id, i32_ty).build();
     let add0_result = add0.result();
-    fb.insert(add0);
+    func.body().append_op(add0);
     let add1 = ops::addi(&context, add0_result, c_id, i32_ty).build();
     let add1_result = add1.result();
-    fb.insert(add1);
-    fb.insert(ops::r#return(&context, add1_result).build());
+    func.body().append_op(add1);
+    func.body()
+        .append_op(ops::r#return(&context, add1_result).build());
 
-    let mut mb = IRBuilder::new(module.body());
-    mb.insert(func);
-    mb.insert(ops::module_end(&context).build());
+    module.body().append_op(func);
+    module.body().append_op(ops::module_end(&context).build());
 
     // Fused pattern Add(Add(s0, s1), s2); optionally constrain the inner Add.
     let mut pattern = SemGraph::new();
@@ -912,15 +903,14 @@ fn introduced_integer_materializer_uses_its_class_type_under_float_bitcast() {
     region.add_block(block.id());
     let func = ops::func(&context, "demo", f32_ty, Some(region.id())).build();
 
-    let mut fb = IRBuilder::new(func.body());
     let value = ops::constantf(&context, 0.0, f32_ty).build();
     let result = value.result();
-    fb.insert(value);
-    fb.insert(ops::r#return(&context, result).build());
+    func.body().append_op(value);
+    func.body()
+        .append_op(ops::r#return(&context, result).build());
 
-    let mut mb = IRBuilder::new(module.body());
-    mb.insert(func);
-    mb.insert(ops::module_end(&context).build());
+    module.body().append_op(func);
+    module.body().append_op(ops::module_end(&context).build());
 
     let rules = vec![
         Rule::new(
@@ -949,21 +939,20 @@ fn immediate_rule_materializes_an_unannotated_constant_register_operand() {
     region.add_block(block.id());
     let func = ops::func(&context, "demo", i64_ty, Some(region.id())).build();
 
-    let mut fb = IRBuilder::new(func.body());
     let lhs = ops::constant(&context, 5, i64_ty).build();
     let lhs_result = lhs.result();
-    fb.insert(lhs);
+    func.body().append_op(lhs);
     let rhs = ops::constant(&context, 7, i64_ty).build();
     let rhs_result = rhs.result();
-    fb.insert(rhs);
+    func.body().append_op(rhs);
     let add = ops::addi(&context, lhs_result, rhs_result, i64_ty).build();
     let add_result = add.result();
-    fb.insert(add);
-    fb.insert(ops::r#return(&context, add_result).build());
+    func.body().append_op(add);
+    func.body()
+        .append_op(ops::r#return(&context, add_result).build());
 
-    let mut mb = IRBuilder::new(module.body());
-    mb.insert(func);
-    mb.insert(ops::module_end(&context).build());
+    module.body().append_op(func);
+    module.body().append_op(ops::module_end(&context).build());
 
     let rules = vec![
         Rule::new(
@@ -1015,18 +1004,17 @@ fn run_immediate_range(constant: i64) -> Vec<&'static str> {
     region.add_block(block.id());
 
     let func = ops::func(&context, "demo", i64_ty, Some(region.id())).build();
-    let mut fb = IRBuilder::new(func.body());
     let c = ops::constant(&context, constant, i64_ty).build();
     let c_result = c.result();
-    fb.insert(c);
+    func.body().append_op(c);
     let add = ops::addi(&context, a_id, c_result, i64_ty).build();
     let add_result = add.result();
-    fb.insert(add);
-    fb.insert(ops::r#return(&context, add_result).build());
+    func.body().append_op(add);
+    func.body()
+        .append_op(ops::r#return(&context, add_result).build());
 
-    let mut mb = IRBuilder::new(module.body());
-    mb.insert(func);
-    mb.insert(ops::module_end(&context).build());
+    module.body().append_op(func);
+    module.body().append_op(ops::module_end(&context).build());
 
     let rules = vec![
         Rule::new(
@@ -1258,18 +1246,17 @@ fn select_sign_extension(slli_rule: Rule) -> Vec<&'static str> {
     region.add_block(block.id());
 
     let func = ops::func(&context, "square", i64_ty, Some(region.id())).build();
-    let mut fb = IRBuilder::new(func.body());
     let add = ops::addi(&context, a_id, b_id, i16_ty).build();
     let add_result = add.result();
-    fb.insert(add);
+    func.body().append_op(add);
     let ext = ops::extsi(&context, add_result, i64_ty).build();
     let ext_result = ext.result();
-    fb.insert(ext);
-    fb.insert(ops::r#return(&context, ext_result).build());
+    func.body().append_op(ext);
+    func.body()
+        .append_op(ops::r#return(&context, ext_result).build());
 
-    let mut mb = IRBuilder::new(module.body());
-    mb.insert(func);
-    mb.insert(ops::module_end(&context).build());
+    module.body().append_op(func);
+    module.body().append_op(ops::module_end(&context).build());
 
     let rules = vec![
         Rule::new(
@@ -1386,7 +1373,7 @@ fn builder_seeds_gamma_block_argument_as_if() {
     }
     let func = ops::func(&context, "gamma", i32, Some(region.id())).build();
 
-    IRBuilder::new(entry).insert(
+    entry.append_op(
         ops::cond_br(
             &context,
             cond_id,
@@ -1397,9 +1384,9 @@ fn builder_seeds_gamma_block_argument_as_if() {
         )
         .build(),
     );
-    IRBuilder::new(then_block).insert(ops::br(&context, vec![x_id], join.id()).build());
-    IRBuilder::new(else_block).insert(ops::br(&context, vec![y_id], join.id()).build());
-    IRBuilder::new(join).insert(ops::r#return(&context, merged_id).build());
+    then_block.append_op(ops::br(&context, vec![x_id], join.id()).build());
+    else_block.append_op(ops::br(&context, vec![y_id], join.id()).build());
+    join.append_op(ops::r#return(&context, merged_id).build());
 
     let gsa = GSA::new(&context, func.id());
     let value_to_def = HashMap::new();
@@ -1447,22 +1434,23 @@ fn builder_seeds_mu_block_argument_as_recursive_theta() {
     let init = ops::constant(&context, 0, i32).build();
     let init_value = init.result();
     let init_op = init.id();
-    let mut entry_builder = IRBuilder::new(entry);
-    entry_builder.insert(init);
-    entry_builder.insert(ops::br(&context, vec![init_value], header.id()).build());
-    IRBuilder::new(header.clone())
-        .insert(ops::cond_br(&context, cond_id, vec![], vec![], body.id(), exit.id()).build());
+    let entry_builder = entry;
+    entry_builder.append_op(init);
+    entry_builder.append_op(ops::br(&context, vec![init_value], header.id()).build());
+    header
+        .clone()
+        .append_op(ops::cond_br(&context, cond_id, vec![], vec![], body.id(), exit.id()).build());
     let one = ops::constant(&context, 1, i32).build();
     let one_value = one.result();
     let one_op = one.id();
     let next = ops::addi(&context, carried_id, one_value, i32).build();
     let next_value = next.result();
     let next_op = next.id();
-    let mut body_builder = IRBuilder::new(body);
-    body_builder.insert(one);
-    body_builder.insert(next);
-    body_builder.insert(ops::br(&context, vec![next_value], header.id()).build());
-    IRBuilder::new(exit).insert(ops::r#return(&context, carried_id).build());
+    let body_builder = body;
+    body_builder.append_op(one);
+    body_builder.append_op(next);
+    body_builder.append_op(ops::br(&context, vec![next_value], header.id()).build());
+    exit.append_op(ops::r#return(&context, carried_id).build());
 
     let gsa = GSA::new(&context, func.id());
     let value_to_def = HashMap::from([
@@ -1555,7 +1543,7 @@ fn gamma_selection_names(select_cost: u32, trapping_else: bool) -> Vec<&'static 
     }
     let func = ops::func(&context, "gamma_select", i32, Some(region.id())).build();
 
-    IRBuilder::new(entry).insert(
+    entry.append_op(
         ops::cond_br(
             &context,
             cond_id,
@@ -1566,25 +1554,24 @@ fn gamma_selection_names(select_cost: u32, trapping_else: bool) -> Vec<&'static 
         )
         .build(),
     );
-    IRBuilder::new(then_block).insert(ops::br(&context, vec![x_id], join.id()).build());
-    let mut else_builder = IRBuilder::new(else_block);
+    then_block.append_op(ops::br(&context, vec![x_id], join.id()).build());
+    let else_builder = else_block;
     let else_value = if trapping_else {
         let div = ops::divsi(&context, y_id, z_id, i32).build();
         let result = div.result();
-        else_builder.insert(div);
+        else_builder.append_op(div);
         result
     } else {
         y_id
     };
-    else_builder.insert(ops::br(&context, vec![else_value], join.id()).build());
+    else_builder.append_op(ops::br(&context, vec![else_value], join.id()).build());
     let add = ops::addi(&context, merged_id, z_id, i32).build();
     let result = add.result();
-    let mut join_builder = IRBuilder::new(join.clone());
-    join_builder.insert(add);
-    join_builder.insert(ops::r#return(&context, result).build());
-    let mut module_builder = IRBuilder::new(module.body());
-    module_builder.insert(func);
-    module_builder.insert(ops::module_end(&context).build());
+    let join_builder = join.clone();
+    join_builder.append_op(add);
+    join_builder.append_op(ops::r#return(&context, result).build());
+    module.body().append_op(func);
+    module.body().append_op(ops::module_end(&context).build());
 
     let select_rule = Rule::new(
         "select-marker",
@@ -1734,16 +1721,20 @@ fn memory_ops_select_via_interfaces() {
     region.add_block(block.id());
 
     let func = ops::func(&context, "demo", i32_ty, Some(region.id())).build();
-    let mut fb = IRBuilder::new(func.body());
     let slot_ty = tir::ptr::PtrType::typed(&context, i32_ty);
-    let slot = fb.insert(tir::ptr::ops::alloca(&context, 4u64, 4u64, slot_ty).build());
-    fb.insert(tir::ptr::ops::store(&context, param_id, slot.result()).build());
-    let loaded = fb.insert(tir::ptr::ops::load(&context, slot.result(), i32_ty).build());
-    fb.insert(ops::r#return(&context, loaded.result()).build());
+    let slot = func
+        .body()
+        .append_op(tir::ptr::ops::alloca(&context, 4u64, 4u64, slot_ty).build());
+    func.body()
+        .append_op(tir::ptr::ops::store(&context, param_id, slot.result()).build());
+    let loaded = func
+        .body()
+        .append_op(tir::ptr::ops::load(&context, slot.result(), i32_ty).build());
+    func.body()
+        .append_op(ops::r#return(&context, loaded.result()).build());
 
-    let mut mb = IRBuilder::new(module.body());
-    mb.insert(func);
-    mb.insert(ops::module_end(&context).build());
+    module.body().append_op(func);
+    module.body().append_op(ops::module_end(&context).build());
 
     let rules = vec![
         Rule::new("load", load_pattern(), LATENCY_COST_SCALE, emit_load_marker),
@@ -1793,20 +1784,19 @@ fn merged_value_classes_resolve_to_earliest_def() {
     region.add_block(block.id());
 
     let func = ops::func(&context, "demo", i32_ty, Some(region.id())).build();
-    let mut fb = IRBuilder::new(func.body());
     let mul = ops::muli(&context, x_id, y_id, i32_ty).build();
-    fb.insert(mul);
+    func.body().append_op(mul);
     let add = ops::addi(&context, x_id, y_id, i32_ty).build();
     let add_result = add.result();
-    fb.insert(add);
+    func.body().append_op(add);
     let sub = ops::subi(&context, add_result, z_id, i32_ty).build();
     let sub_result = sub.result();
-    fb.insert(sub);
-    fb.insert(ops::r#return(&context, sub_result).build());
+    func.body().append_op(sub);
+    func.body()
+        .append_op(ops::r#return(&context, sub_result).build());
 
-    let mut mb = IRBuilder::new(module.body());
-    mb.insert(func);
-    mb.insert(ops::module_end(&context).build());
+    module.body().append_op(func);
+    module.body().append_op(ops::module_end(&context).build());
 
     // A test-only "proof" that x*y == x+y: union the Mul class with the Add
     // class, exactly the shape a discovered algebraic bridge produces.
@@ -1968,10 +1958,9 @@ fn forced_constant_materialization_does_not_override_branch_rule_cost() {
     }
     let func = ops::func(&context, "demo", i64_ty, Some(region.id())).build();
 
-    let mut eb = IRBuilder::new(entry.clone());
     let seven = ops::constant(&context, 7, i64_ty).build();
     let seven_result = seven.result();
-    eb.insert(seven);
+    entry.append_op(seven);
     let cmp = tir::builtin::CmpIOpBuilder::new(&context)
         .lhs(input_id)
         .rhs(seven_result)
@@ -1979,8 +1968,8 @@ fn forced_constant_materialization_does_not_override_branch_rule_cost() {
         .result_type(IntegerType::new(&context, 1))
         .build();
     let condition = cmp.result();
-    eb.insert(cmp);
-    eb.insert(
+    entry.append_op(cmp);
+    entry.append_op(
         ops::cond_br(
             &context,
             condition,
@@ -1991,14 +1980,12 @@ fn forced_constant_materialization_does_not_override_branch_rule_cost() {
         )
         .build(),
     );
-    let mut tb = IRBuilder::new(true_block.clone());
-    tb.insert(ops::r#return(&context, seven_result).build());
-    let mut fb = IRBuilder::new(false_block.clone());
-    fb.insert(ops::r#return(&context, input_id).build());
+    let tb = true_block.clone();
+    tb.append_op(ops::r#return(&context, seven_result).build());
+    false_block.append_op(ops::r#return(&context, input_id).build());
 
-    let mut mb = IRBuilder::new(module.body());
-    mb.insert(func);
-    mb.insert(ops::module_end(&context).build());
+    module.body().append_op(func);
+    module.body().append_op(ops::module_end(&context).build());
 
     let rules = vec![
         Rule::new(
@@ -2065,7 +2052,7 @@ struct BranchBlock {
 /// `cond_br cond, ^t, ^f`, where `body` returns the condition value.
 fn guarded_block(
     arg_tys: &[u32],
-    body: impl Fn(&Context, &mut IRBuilder, &[tir::ValueId]) -> tir::ValueId,
+    body: impl Fn(&Context, &tir::Block, &[tir::ValueId]) -> tir::ValueId,
 ) -> BranchBlock {
     guarded_block_with_rules(arg_tys, vec![branch_rule()], body)
 }
@@ -2073,7 +2060,7 @@ fn guarded_block(
 fn guarded_block_with_rules(
     arg_tys: &[u32],
     rules: Vec<Rule>,
-    body: impl Fn(&Context, &mut IRBuilder, &[tir::ValueId]) -> tir::ValueId,
+    body: impl Fn(&Context, &tir::Block, &[tir::ValueId]) -> tir::ValueId,
 ) -> BranchBlock {
     let context = Context::with_default_dialects();
     let module = ops::module(&context, None).build();
@@ -2096,13 +2083,12 @@ fn guarded_block_with_rules(
         Some(region.id()),
     )
     .build();
-    let mut fb = IRBuilder::new(func.body());
-    let cond = body(&context, &mut fb, &arg_ids);
-    fb.insert(ops::cond_br(&context, cond, vec![], vec![], t.id(), f.id()).build());
+    let fb = func.body();
+    let cond = body(&context, &fb, &arg_ids);
+    fb.append_op(ops::cond_br(&context, cond, vec![], vec![], t.id(), f.id()).build());
 
-    let mut mb = IRBuilder::new(module.body());
-    mb.insert(func);
-    mb.insert(ops::module_end(&context).build());
+    module.body().append_op(func);
+    module.body().append_op(ops::module_end(&context).build());
 
     let mut pm = PassManager::new();
     pm.nest::<FuncOp>()
@@ -2143,7 +2129,7 @@ fn guard_fuses_comparison_and_consumes_compare() {
             .result_type(IntegerType::new(context, 1))
             .build();
         let result = cmp.result();
-        fb.insert(cmp);
+        fb.append_op(cmp);
         result
     });
 
@@ -2200,7 +2186,7 @@ fn flag_branch_rule_emits_prelude_before_branch() {
             .result_type(IntegerType::new(context, 1))
             .build();
         let result = cmp.result();
-        fb.insert(cmp);
+        fb.append_op(cmp);
         result
     });
 
@@ -2248,7 +2234,7 @@ fn register_constrained_branch_does_not_read_an_unmaterialized_constant() {
     let b = guarded_block_with_rules(&[64], rules, |context, fb, args| {
         let seven = ops::constant(context, 7, IntegerType::new(context, 64)).build();
         let seven_result = seven.result();
-        fb.insert(seven);
+        fb.append_op(seven);
         let cmp = tir::builtin::CmpIOpBuilder::new(context)
             .lhs(args[0])
             .rhs(seven_result)
@@ -2256,7 +2242,7 @@ fn register_constrained_branch_does_not_read_an_unmaterialized_constant() {
             .result_type(IntegerType::new(context, 1))
             .build();
         let result = cmp.result();
-        fb.insert(cmp);
+        fb.append_op(cmp);
         result
     });
 
@@ -2364,7 +2350,7 @@ fn zero_comparison_guard_selects_zero_compare_branch() {
             let i64 = IntegerType::new(context, 64);
             let zero = ops::constant(context, 0, i64).build();
             let zero_value = zero.result();
-            builder.insert(zero);
+            builder.append_op(zero);
             let comparison = tir::builtin::CmpIOpBuilder::new(context)
                 .lhs(args[0])
                 .rhs(zero_value)
@@ -2372,7 +2358,7 @@ fn zero_comparison_guard_selects_zero_compare_branch() {
                 .result_type(IntegerType::new(context, 1))
                 .build();
             let result = comparison.result();
-            builder.insert(comparison);
+            builder.append_op(comparison);
             result
         },
     );
@@ -2400,7 +2386,6 @@ fn escaping_compare_materializes_and_fuses() {
     let f = context.create_block(vec![]);
 
     let func = ops::func(&context, "demo", i64_ty, Some(region.id())).build();
-    let mut fb = IRBuilder::new(func.body());
     let cmp = tir::builtin::CmpIOpBuilder::new(&context)
         .lhs(x_id)
         .rhs(y_id)
@@ -2408,13 +2393,14 @@ fn escaping_compare_materializes_and_fuses() {
         .result_type(i1)
         .build();
     let cond = cmp.result();
-    fb.insert(cmp);
-    fb.insert(ops::addi(&context, cond, cond, i1).build());
-    fb.insert(ops::cond_br(&context, cond, vec![], vec![], t.id(), f.id()).build());
+    func.body().append_op(cmp);
+    func.body()
+        .append_op(ops::addi(&context, cond, cond, i1).build());
+    func.body()
+        .append_op(ops::cond_br(&context, cond, vec![], vec![], t.id(), f.id()).build());
 
-    let mut mb = IRBuilder::new(module.body());
-    mb.insert(func);
-    mb.insert(ops::module_end(&context).build());
+    module.body().append_op(func);
+    module.body().append_op(ops::module_end(&context).build());
 
     let rules = vec![
         branch_rule(),
@@ -2449,7 +2435,7 @@ fn escaping_compare_materializes_and_fuses() {
 /// matching width fuses as usual.
 #[test]
 fn width_constraint_gates_comparison_fusion() {
-    let build_cmp = |context: &Context, fb: &mut IRBuilder, args: &[tir::ValueId]| {
+    let build_cmp = |context: &Context, fb: &tir::Block, args: &[tir::ValueId]| {
         let cmp = tir::builtin::CmpIOpBuilder::new(context)
             .lhs(args[0])
             .rhs(args[1])
@@ -2457,7 +2443,7 @@ fn width_constraint_gates_comparison_fusion() {
             .result_type(IntegerType::new(context, 1))
             .build();
         let result = cmp.result();
-        fb.insert(cmp);
+        fb.append_op(cmp);
         result
     };
 
@@ -2481,13 +2467,12 @@ fn width_constraint_gates_comparison_fusion() {
             Some(region.id()),
         )
         .build();
-        let mut fb = IRBuilder::new(func.body());
-        let cond = build_cmp(&context, &mut fb, &arg_ids);
-        fb.insert(ops::cond_br(&context, cond, vec![], vec![], t.id(), f.id()).build());
+        let fb = func.body();
+        let cond = build_cmp(&context, &fb, &arg_ids);
+        fb.append_op(ops::cond_br(&context, cond, vec![], vec![], t.id(), f.id()).build());
 
-        let mut mb = IRBuilder::new(module.body());
-        mb.insert(func);
-        mb.insert(ops::module_end(&context).build());
+        module.body().append_op(func);
+        module.body().append_op(ops::module_end(&context).build());
 
         let requirement = RegisterRequirement::whole(RegisterCapability::integer(rule_width));
         let rules =
@@ -2544,7 +2529,6 @@ fn run_dominated_compare(
 
     let func = ops::func(&context, "demo", i64_ty, Some(region.id())).build();
 
-    let mut eb = IRBuilder::new(entry.clone());
     let entry_cmp = tir::builtin::CmpIOpBuilder::new(&context)
         .lhs(a_id)
         .rhs(b_id)
@@ -2552,15 +2536,14 @@ fn run_dominated_compare(
         .result_type(i1)
         .build();
     let entry_cond = entry_cmp.result();
-    eb.insert(entry_cmp);
+    entry.append_op(entry_cmp);
     let (t_dest, f_dest) = if body_on_true {
         (body.id(), other.id())
     } else {
         (other.id(), body.id())
     };
-    eb.insert(ops::cond_br(&context, entry_cond, vec![], vec![], t_dest, f_dest).build());
+    entry.append_op(ops::cond_br(&context, entry_cond, vec![], vec![], t_dest, f_dest).build());
 
-    let mut bb = IRBuilder::new(body.clone());
     let (lhs, rhs) = if body_swapped {
         (b_id, a_id)
     } else {
@@ -2573,12 +2556,11 @@ fn run_dominated_compare(
         .result_type(i1)
         .build();
     let body_cond = body_cmp.result();
-    bb.insert(body_cmp);
-    bb.insert(ops::cond_br(&context, body_cond, vec![], vec![], u.id(), v.id()).build());
+    body.append_op(body_cmp);
+    body.append_op(ops::cond_br(&context, body_cond, vec![], vec![], u.id(), v.id()).build());
 
-    let mut mb = IRBuilder::new(module.body());
-    mb.insert(func);
-    mb.insert(ops::module_end(&context).build());
+    module.body().append_op(func);
+    module.body().append_op(ops::module_end(&context).build());
 
     let rules = vec![
         branch_rule(),
@@ -2683,12 +2665,11 @@ fn guard_edge_arguments_are_split() {
     let f = context.create_block(vec![]);
 
     let func = ops::func(&context, "demo", i64_ty, Some(region.id())).build();
-    let mut fb = IRBuilder::new(func.body());
-    fb.insert(ops::cond_br(&context, c_id, vec![x_id], vec![], t.id(), f.id()).build());
+    func.body()
+        .append_op(ops::cond_br(&context, c_id, vec![x_id], vec![], t.id(), f.id()).build());
 
-    let mut mb = IRBuilder::new(module.body());
-    mb.insert(func);
-    mb.insert(ops::module_end(&context).build());
+    module.body().append_op(func);
+    module.body().append_op(ops::module_end(&context).build());
 
     let mut pm = PassManager::new();
     pm.nest::<FuncOp>().add_pass(
@@ -2717,15 +2698,14 @@ fn equal_cost_tie_breaks_to_more_specific_rule() {
     region.add_block(block.id());
 
     let func = ops::func(&context, "demo", i32_ty, Some(region.id())).build();
-    let mut fb = IRBuilder::new(func.body());
     let add = ops::addi(&context, a_id, b_id, i32_ty).build();
     let add_result = add.result();
-    fb.insert(add);
-    fb.insert(ops::r#return(&context, add_result).build());
+    func.body().append_op(add);
+    func.body()
+        .append_op(ops::r#return(&context, add_result).build());
 
-    let mut mb = IRBuilder::new(module.body());
-    mb.insert(func);
-    mb.insert(ops::module_end(&context).build());
+    module.body().append_op(func);
+    module.body().append_op(ops::module_end(&context).build());
 
     // Same opcode, same cost; only the type constraint differs. The typed rule
     // (subi marker) must be selected.
@@ -2797,23 +2777,22 @@ fn fact_inherited_two_levels_folds_grandchild_compare() {
 
     let func = ops::func(&context, "demo", i64_ty, Some(region.id())).build();
 
-    let mut eb = IRBuilder::new(entry.clone());
     let ecmp = slt(&context, a_id, b_id);
     let econd = ecmp.result();
-    eb.insert(ecmp);
-    eb.insert(ops::cond_br(&context, econd, vec![], vec![], mid.id(), other.id()).build());
+    entry.append_op(ecmp);
+    entry.append_op(ops::cond_br(&context, econd, vec![], vec![], mid.id(), other.id()).build());
 
-    IRBuilder::new(mid.clone()).insert(ops::br(&context, vec![], gc.id()).build());
+    mid.clone()
+        .append_op(ops::br(&context, vec![], gc.id()).build());
 
-    let mut gb = IRBuilder::new(gc.clone());
+    let gb = gc.clone();
     let gcmp = slt(&context, a_id, b_id);
     let gcond = gcmp.result();
-    gb.insert(gcmp);
-    gb.insert(ops::cond_br(&context, gcond, vec![], vec![], u.id(), v.id()).build());
+    gb.append_op(gcmp);
+    gb.append_op(ops::cond_br(&context, gcond, vec![], vec![], u.id(), v.id()).build());
 
-    let mut mb = IRBuilder::new(module.body());
-    mb.insert(func);
-    mb.insert(ops::module_end(&context).build());
+    module.body().append_op(func);
+    module.body().append_op(ops::module_end(&context).build());
 
     let mut pm = PassManager::new();
     pm.nest::<FuncOp>().add_pass(
@@ -2852,23 +2831,22 @@ fn non_dominated_join_block_does_not_fold() {
 
     let func = ops::func(&context, "demo", i64_ty, Some(region.id())).build();
 
-    let mut eb = IRBuilder::new(entry.clone());
     let ecmp = slt(&context, a_id, b_id);
     let econd = ecmp.result();
-    eb.insert(ecmp);
-    eb.insert(ops::cond_br(&context, econd, vec![], vec![], t.id(), f.id()).build());
-    IRBuilder::new(t.clone()).insert(ops::br(&context, vec![], m.id()).build());
-    IRBuilder::new(f.clone()).insert(ops::br(&context, vec![], m.id()).build());
+    entry.append_op(ecmp);
+    entry.append_op(ops::cond_br(&context, econd, vec![], vec![], t.id(), f.id()).build());
+    t.clone()
+        .append_op(ops::br(&context, vec![], m.id()).build());
+    f.clone()
+        .append_op(ops::br(&context, vec![], m.id()).build());
 
-    let mut bb = IRBuilder::new(m.clone());
     let mcmp = slt(&context, a_id, b_id);
     let mcond = mcmp.result();
-    bb.insert(mcmp);
-    bb.insert(ops::cond_br(&context, mcond, vec![], vec![], u.id(), v.id()).build());
+    m.append_op(mcmp);
+    m.append_op(ops::cond_br(&context, mcond, vec![], vec![], u.id(), v.id()).build());
 
-    let mut mb = IRBuilder::new(module.body());
-    mb.insert(func);
-    mb.insert(ops::module_end(&context).build());
+    module.body().append_op(func);
+    module.body().append_op(ops::module_end(&context).build());
 
     let mut pm = PassManager::new();
     pm.nest::<FuncOp>().add_pass(
@@ -2917,10 +2895,9 @@ fn eq_guard_folds_value_to_immediate() {
 
     let func = ops::func(&context, "demo", i64_ty, Some(region.id())).build();
 
-    let mut eb = IRBuilder::new(entry.clone());
     let k = ops::constant(&context, 7, i64_ty).build();
     let k_res = k.result();
-    eb.insert(k);
+    entry.append_op(k);
     let ecmp = tir::builtin::CmpIOpBuilder::new(&context)
         .lhs(a_id)
         .rhs(k_res)
@@ -2928,18 +2905,16 @@ fn eq_guard_folds_value_to_immediate() {
         .result_type(i1)
         .build();
     let econd = ecmp.result();
-    eb.insert(ecmp);
-    eb.insert(ops::cond_br(&context, econd, vec![], vec![], bb1.id(), bb2.id()).build());
+    entry.append_op(ecmp);
+    entry.append_op(ops::cond_br(&context, econd, vec![], vec![], bb1.id(), bb2.id()).build());
 
-    let mut bb = IRBuilder::new(bb1.clone());
     let add = ops::addi(&context, p_id, a_id, i64_ty).build();
     let add_res = add.result();
-    bb.insert(add);
-    bb.insert(ops::r#return(&context, add_res).build());
+    bb1.append_op(add);
+    bb1.append_op(ops::r#return(&context, add_res).build());
 
-    let mut mb = IRBuilder::new(module.body());
-    mb.insert(func);
-    mb.insert(ops::module_end(&context).build());
+    module.body().append_op(func);
+    module.body().append_op(ops::module_end(&context).build());
 
     // No branch rule for `eq`: the guard takes the nonzero fallback, which needs
     // the compare materialized (eq-materializer). The immediate add rule folds the
@@ -3007,28 +2982,25 @@ fn refuses_cross_block_binding_to_non_escaping_value() {
     let func = ops::func(&context, "demo", i64_ty, Some(region.id())).build();
 
     // %d = a - b is used only within the entry block, so it never escapes.
-    let mut eb = IRBuilder::new(entry.clone());
     let d = ops::subi(&context, a_id, b_id, i64_ty).build();
     let d_res = d.result();
-    eb.insert(d);
+    entry.append_op(d);
     let g = ops::subi(&context, d_res, m_id, i64_ty).build();
-    eb.insert(g);
-    eb.insert(ops::br(&context, vec![], bb1.id()).build());
+    entry.append_op(g);
+    entry.append_op(ops::br(&context, vec![], bb1.id()).build());
 
     // %e = a - b recomputes the same expression (CSE-merged with %d); the add
     // consumes it, resolving its operand under the binding rule.
-    let mut bb = IRBuilder::new(bb1.clone());
     let e = ops::subi(&context, a_id, b_id, i64_ty).build();
     let e_res = e.result();
-    bb.insert(e);
+    bb1.append_op(e);
     let r = ops::addi(&context, e_res, m_id, i64_ty).build();
     let r_res = r.result();
-    bb.insert(r);
-    bb.insert(ops::r#return(&context, r_res).build());
+    bb1.append_op(r);
+    bb1.append_op(ops::r#return(&context, r_res).build());
 
-    let mut mb = IRBuilder::new(module.body());
-    mb.insert(func);
-    mb.insert(ops::module_end(&context).build());
+    module.body().append_op(func);
+    module.body().append_op(ops::module_end(&context).build());
 
     let rules = vec![
         Rule::new(
@@ -3092,10 +3064,9 @@ fn eq_fact_binds_through_bindable_member() {
     let func = ops::func(&context, "demo", i64_ty, Some(region.id())).build();
 
     // %d = a - k is used only by the guard compare, so it never escapes entry.
-    let mut eb = IRBuilder::new(entry.clone());
     let d = ops::subi(&context, a_id, k_id, i64_ty).build();
     let d_res = d.result();
-    eb.insert(d);
+    entry.append_op(d);
     let cmp = tir::builtin::CmpIOpBuilder::new(&context)
         .lhs(b_id)
         .rhs(d_res)
@@ -3103,20 +3074,18 @@ fn eq_fact_binds_through_bindable_member() {
         .result_type(i1)
         .build();
     let cond = cmp.result();
-    eb.insert(cmp);
-    eb.insert(ops::cond_br(&context, cond, vec![], vec![], body.id(), other.id()).build());
+    entry.append_op(cmp);
+    entry.append_op(ops::cond_br(&context, cond, vec![], vec![], body.id(), other.id()).build());
 
     // Dominated by `b == d`: their classes are one. The add reads `b`, which must
     // bind though the survivor is `d` (the non-escaping dominator def).
-    let mut bb = IRBuilder::new(body.clone());
     let r = ops::addi(&context, b_id, k_id, i64_ty).build();
     let r_res = r.result();
-    bb.insert(r);
-    bb.insert(ops::r#return(&context, r_res).build());
+    body.append_op(r);
+    body.append_op(ops::r#return(&context, r_res).build());
 
-    let mut mb = IRBuilder::new(module.body());
-    mb.insert(func);
-    mb.insert(ops::module_end(&context).build());
+    module.body().append_op(func);
+    module.body().append_op(ops::module_end(&context).build());
 
     let rules = vec![
         Rule::new(
@@ -3184,10 +3153,9 @@ fn branch_reads_register_of_constant_merged_operand() {
 
     let func = ops::func(&context, "demo", i64_ty, Some(region.id())).build();
 
-    let mut eb = IRBuilder::new(entry.clone());
     let c = ops::constant(&context, 5, i64_ty).build();
     let c_res = c.result();
-    eb.insert(c);
+    entry.append_op(c);
     let ecmp = tir::builtin::CmpIOpBuilder::new(&context)
         .lhs(x_id)
         .rhs(c_res)
@@ -3195,12 +3163,11 @@ fn branch_reads_register_of_constant_merged_operand() {
         .result_type(i1)
         .build();
     let econd = ecmp.result();
-    eb.insert(ecmp);
-    eb.insert(ops::cond_br(&context, econd, vec![], vec![], body.id(), other.id()).build());
+    entry.append_op(ecmp);
+    entry.append_op(ops::cond_br(&context, econd, vec![], vec![], body.id(), other.id()).build());
 
     // Dominated by `x == 5`: x's class carries the constant AND the register x.
     // The Lt branch rule reads the register form.
-    let mut bb = IRBuilder::new(body.clone());
     let lt = tir::builtin::CmpIOpBuilder::new(&context)
         .lhs(x_id)
         .rhs(y_id)
@@ -3208,12 +3175,11 @@ fn branch_reads_register_of_constant_merged_operand() {
         .result_type(i1)
         .build();
     let ltc = lt.result();
-    bb.insert(lt);
-    bb.insert(ops::cond_br(&context, ltc, vec![], vec![], u.id(), v.id()).build());
+    body.append_op(lt);
+    body.append_op(ops::cond_br(&context, ltc, vec![], vec![], u.id(), v.id()).build());
 
-    let mut mb = IRBuilder::new(module.body());
-    mb.insert(func);
-    mb.insert(ops::module_end(&context).build());
+    module.body().append_op(func);
+    module.body().append_op(ops::module_end(&context).build());
 
     let rules = vec![
         branch_rule(),

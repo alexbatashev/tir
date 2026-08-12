@@ -6,7 +6,7 @@ use tir::builtin::{
     FloatType, FuncOp, IntegerType, ModuleOp as BuiltinModuleOp, UnitType, ops as bops,
 };
 use tir::vector::VectorType;
-use tir::{BlockId, Context, IRBuilder, Operation, TypeId, ValueId};
+use tir::{Block, BlockId, Context, Operation, TypeId, ValueId};
 
 use super::*;
 
@@ -521,10 +521,10 @@ impl<'a> Reader<'a> {
             .attr("memory_model", AttributeValue::Str(self.memory_model()?))
             .body(region.id())
             .build();
-        let mut body = IRBuilder::new(block);
+        let body = block;
         for inst in self.instructions.clone() {
             if inst.opcode == 17 {
-                body.insert(
+                body.append_op(
                     CapabilityOpBuilder::new(self.context)
                         .attr(
                             "name",
@@ -534,13 +534,13 @@ impl<'a> Reader<'a> {
                 );
             }
         }
-        self.read_globals(&mut body)?;
-        self.read_entries(&mut body)?;
-        self.read_functions(&mut body)?;
-        body.insert(ModuleEndOpBuilder::new(self.context).build());
-        let mut root_body = IRBuilder::new(root.body());
-        root_body.insert(module);
-        root_body.insert(bops::module_end(self.context).build());
+        self.read_globals(&body)?;
+        self.read_entries(&body)?;
+        self.read_functions(&body)?;
+        body.append_op(ModuleEndOpBuilder::new(self.context).build());
+        let root_body = root.body();
+        root_body.append_op(module);
+        root_body.append_op(bops::module_end(self.context).build());
         Ok(root)
     }
 
@@ -605,7 +605,7 @@ impl<'a> Reader<'a> {
         Ok(())
     }
 
-    fn read_globals(&mut self, body: &mut IRBuilder) -> Result<()> {
+    fn read_globals(&mut self, body: &Block) -> Result<()> {
         for inst in self
             .instructions
             .clone()
@@ -629,12 +629,12 @@ impl<'a> Reader<'a> {
                 .result_type(ty)
                 .build();
             self.values.insert(id, op.result());
-            body.insert(op);
+            body.append_op(op);
         }
         Ok(())
     }
 
-    fn read_entries(&self, body: &mut IRBuilder) -> Result<()> {
+    fn read_entries(&self, body: &Block) -> Result<()> {
         for inst in &self.instructions {
             if inst.opcode == 15 {
                 let (name, used) = decode_string_with_len(&inst.operands[2..])?;
@@ -649,7 +649,7 @@ impl<'a> Reader<'a> {
                         )
                     })
                     .collect();
-                body.insert(
+                body.append_op(
                     EntryPointOpBuilder::new(self.context)
                         .attr(
                             "execution_model",
@@ -665,7 +665,7 @@ impl<'a> Reader<'a> {
                     .get(&inst.operands[0])
                     .cloned()
                     .unwrap_or_else(|| format!("function_{}", inst.operands[0]));
-                body.insert(
+                body.append_op(
                     ExecutionModeOpBuilder::new(self.context)
                         .attr("function", AttributeValue::Str(function))
                         .attr(
@@ -688,7 +688,7 @@ impl<'a> Reader<'a> {
         Ok(())
     }
 
-    fn read_functions(&mut self, body: &mut IRBuilder) -> Result<()> {
+    fn read_functions(&mut self, body: &Block) -> Result<()> {
         let mut index = 0;
         while index < self.instructions.len() {
             if self.instructions[index].opcode != 54 {
@@ -700,7 +700,7 @@ impl<'a> Reader<'a> {
                 index += 1;
             }
             let chunk = self.instructions[start..=index].to_vec();
-            body.insert(self.read_function(&chunk)?);
+            body.append_op(self.read_function(&chunk)?);
             index += 1;
         }
         Ok(())

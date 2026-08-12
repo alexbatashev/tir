@@ -8,8 +8,8 @@ use tir::builtin::{
 };
 use tir::ptr::{PtrType, ops as p};
 use tir::{
-    Block, BlockId, Context, IRBuilder, Operation, OperationRef, Pass, PassError, PassTarget,
-    RegionId, Rewriter, ValueId, scf,
+    Block, BlockId, Context, Operation, OperationRef, Pass, PassError, PassTarget, RegionId,
+    Rewriter, ValueId, scf,
 };
 
 use crate::cir;
@@ -759,11 +759,10 @@ impl LowerCirControlFlowPass {
                 block.append(*op_id);
             }
         }
-        let mut builder = IRBuilder::new(block);
         if leaves_loop {
-            builder.insert(scf::ops::r#break(context, scope, vec![]).build());
+            block.append_op(scf::ops::r#break(context, scope, vec![]).build());
         } else {
-            builder.insert(scf::ops::r#yield(context, vec![]).build());
+            block.append_op(scf::ops::r#yield(context, vec![]).build());
         }
         Ok(region.id())
     }
@@ -810,7 +809,7 @@ impl LowerCirControlFlowPass {
             }
         }
         if leaves_loop {
-            IRBuilder::new(block).insert(scf::ops::r#break(context, scope, vec![]).build());
+            block.append_op(scf::ops::r#break(context, scope, vec![]).build());
             return Ok(region.id());
         }
         let condition = context.get_block(condition.id());
@@ -821,17 +820,16 @@ impl LowerCirControlFlowPass {
         let repeat = context.create_region();
         let repeat_block = context.create_block(vec![]);
         repeat.add_block(repeat_block.id());
-        IRBuilder::new(repeat_block).insert(scf::ops::r#yield(context, vec![]).build());
+        repeat_block.append_op(scf::ops::r#yield(context, vec![]).build());
         let exit = context.create_region();
         let exit_block = context.create_block(vec![]);
         exit.add_block(exit_block.id());
-        IRBuilder::new(exit_block).insert(scf::ops::r#break(context, scope, vec![]).build());
+        exit_block.append_op(scf::ops::r#break(context, scope, vec![]).build());
 
-        let mut builder = IRBuilder::new(block);
-        builder.insert(
+        block.append_op(
             scf::ops::r#if(context, value, vec![], Some(repeat.id()), Some(exit.id())).build(),
         );
-        builder.insert(scf::ops::r#yield(context, vec![]).build());
+        block.append_op(scf::ops::r#yield(context, vec![]).build());
         Ok(region.id())
     }
 
@@ -859,9 +857,8 @@ impl LowerCirControlFlowPass {
             condition.add_block(condition_block.id());
             let always = b::constant(context, 1, IntegerType::new(context, 1)).build();
             let always_value = always.result();
-            let mut builder = IRBuilder::new(condition_block);
-            builder.insert(always);
-            builder.insert(scf::ops::condition(context, always_value, vec![]).build());
+            condition_block.append_op(always);
+            condition_block.append_op(scf::ops::condition(context, always_value, vec![]).build());
             let body = Self::structured_do_body(context, rewriter, op.regions[0], op.regions[1])?;
             Box::new(
                 scf::ops::r#while(context, vec![], vec![], Some(condition.id()), Some(body))
@@ -915,7 +912,7 @@ impl LowerCirControlFlowPass {
                 std::slice::from_ref(&continuation),
             );
             Self::erase_control_op(rewriter, &block, op)?;
-            IRBuilder::new(block).insert(b::br(context, vec![], condition[0].id()).build());
+            block.append_op(b::br(context, vec![], condition[0].id()).build());
             Self::rewrite_condition(
                 context,
                 rewriter,
@@ -946,7 +943,7 @@ impl LowerCirControlFlowPass {
                 std::slice::from_ref(&continuation),
             );
             Self::erase_control_op(rewriter, &block, op)?;
-            IRBuilder::new(block).insert(b::br(context, vec![], condition[0].id()).build());
+            block.append_op(b::br(context, vec![], condition[0].id()).build());
             Self::rewrite_condition(
                 context,
                 rewriter,
@@ -976,7 +973,7 @@ impl LowerCirControlFlowPass {
                 std::slice::from_ref(&continuation),
             );
             Self::erase_control_op(rewriter, &block, op)?;
-            IRBuilder::new(block).insert(b::br(context, vec![], body[0].id()).build());
+            block.append_op(b::br(context, vec![], body[0].id()).build());
             Self::rewrite_region_exits(context, rewriter, &body, condition[0].id(), loop_targets)?;
             Self::rewrite_condition(
                 context,
@@ -998,7 +995,7 @@ impl LowerCirControlFlowPass {
             );
             let condition = op.operands[0];
             Self::erase_control_op(rewriter, &block, op)?;
-            IRBuilder::new(block).insert(
+            block.append_op(
                 b::cond_br(
                     context,
                     condition,

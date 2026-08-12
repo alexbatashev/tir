@@ -386,7 +386,7 @@ fn has_result_address(op: &impl Operation) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Context, IRBuilder, builtin::IntegerType};
+    use crate::{Context, builtin::IntegerType};
 
     // Call roundtrip coverage (direct, void, indirect) lives in the FileCheck
     // suite at core/checks/IRRoundtrip/call.tir.
@@ -444,7 +444,6 @@ mod tests {
 
         let func = crate::builtin::ops::func(&context, "caller", i32_ty, Some(region.id())).build();
         let func_id = crate::Operation::id(&func);
-        let mut builder = IRBuilder::new(func.body());
         let call = super::CallOpBuilder::new(&context)
             .args(vec![a_id])
             .attr(
@@ -454,8 +453,9 @@ mod tests {
             .result_type(i32_ty)
             .build();
         let result = call.result();
-        builder.insert(call);
-        builder.insert(crate::builtin::ops::r#return(&context, result).build());
+        func.body().append_op(call);
+        func.body()
+            .append_op(crate::builtin::ops::r#return(&context, result).build());
 
         let def_use = crate::analysis::DefUse::new(&context, func_id);
         assert!(def_use.is_used(a_id.number()));

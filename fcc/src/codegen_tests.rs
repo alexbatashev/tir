@@ -87,8 +87,7 @@ mod tests {
         // it. C rejects this, so the conflict is built directly.
         let context = fcc_context();
         let module = tir::builtin::ops::module(&context, None).build();
-        let mut builder = tir::IRBuilder::new(module.body());
-        builder.insert(
+        module.body().append_op(
             crate::cir::ZeroGlobalOpBuilder::new(&context)
                 .attr("sym_name", AttributeValue::Str("x".to_string()))
                 .attr("size", AttributeValue::UInt(4))
@@ -104,10 +103,12 @@ mod tests {
             Some(region.id()),
         )
         .build();
-        tir::IRBuilder::new(func.body())
-            .insert(tir::builtin::ops::r#return(&context, tir::Operand::none()).build());
-        builder.insert(func);
-        builder.insert(tir::builtin::ops::module_end(&context).build());
+        func.body()
+            .append_op(tir::builtin::ops::r#return(&context, tir::Operand::none()).build());
+        module.body().append_op(func);
+        module
+            .body()
+            .append_op(tir::builtin::ops::module_end(&context).build());
 
         tir::verify_op_tree(&context, tir::Operation::id(&module))
             .expect_err("a data symbol and a function cannot share a name");

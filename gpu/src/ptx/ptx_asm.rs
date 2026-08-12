@@ -18,7 +18,7 @@ use tir::attributes::{AttributeValue, NamedAttribute, RegisterAttr};
 use tir::backend::asm_syntax::{AsmSyntaxPart, InstrSyntax};
 use tir::backend::{SectionOp, SymbolEndOp, SymbolOp};
 use tir::builtin::{ModuleEndOpBuilder, ModuleOp, ModuleOpBuilder};
-use tir::{Context, IRBuilder, OpId, OpInstance, Operation};
+use tir::{Context, OpId, OpInstance, Operation};
 
 use super::{LabelOp, LabelOpBuilder};
 
@@ -578,13 +578,14 @@ pub fn parse(context: &Context, text: &str) -> Result<ModuleOp, String> {
     let index = syntax_index();
 
     let module = ModuleOpBuilder::new(context).build();
-    let mut mb = IRBuilder::new(module.body());
-    let section = mb.insert(
+    let section = module.body().append_op(
         tir::backend::SectionOpBuilder::new(context)
             .attr("ptx_preamble", AttributeValue::Str(preamble))
             .build(),
     );
-    mb.insert(ModuleEndOpBuilder::new(context).build());
+    module
+        .body()
+        .append_op(ModuleEndOpBuilder::new(context).build());
 
     let section_body = section.body();
     for kernel in kernels {

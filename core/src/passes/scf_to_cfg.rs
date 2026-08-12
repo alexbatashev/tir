@@ -5,8 +5,7 @@ use crate::analysis::AnalysisManager;
 use crate::builtin::{FuncOp, IntegerType, ReturnOp, TokenType, ops as b};
 use crate::scf;
 use crate::{
-    Block, Context, IRBuilder, OperationRef, Pass, PassError, PassTarget, RegionId, Rewriter,
-    Value, ValueId,
+    Block, Context, OperationRef, Pass, PassError, PassTarget, RegionId, Rewriter, Value, ValueId,
 };
 
 #[derive(Clone, Copy)]
@@ -166,7 +165,7 @@ impl ScfToCfgPass {
         }
 
         Self::erase(rewriter, &block, op)?;
-        IRBuilder::new(block).insert(b::br(context, inits, condition.id()).build());
+        block.append_op(b::br(context, inits, condition.id()).build());
         let terminator = context.get_op(*condition.op_ids().last().unwrap());
         if !terminator.is::<scf::ConditionOp>() {
             return Err(PassError::InvalidRuleSet(
@@ -247,10 +246,9 @@ impl ScfToCfgPass {
         }
 
         Self::erase(rewriter, &block, op)?;
-        let mut entry_builder = IRBuilder::new(block);
-        let mut to_index = |value| {
-            entry_builder
-                .insert(b::bitcast(context, value, index_type).build())
+        let to_index = |value| {
+            block
+                .append_op(b::bitcast(context, value, index_type).build())
                 .result()
         };
         let lower = to_index(lower);
@@ -258,16 +256,15 @@ impl ScfToCfgPass {
         let step = to_index(step);
         let mut entry_args = vec![lower];
         entry_args.extend(inits);
-        entry_builder.insert(b::br(context, entry_args, header.id()).build());
+        block.append_op(b::br(context, entry_args, header.id()).build());
 
         let induction = header.arguments()[0].id();
         let carried = header.arguments()[1..]
             .iter()
             .map(Value::id)
             .collect::<Vec<_>>();
-        let mut header_builder = IRBuilder::new(header.clone());
-        let comparison = header_builder
-            .insert(
+        let comparison = header
+            .append_op(
                 b::CmpIOpBuilder::new(context)
                     .lhs(induction)
                     .rhs(upper)
@@ -276,7 +273,7 @@ impl ScfToCfgPass {
                     .build(),
             )
             .result();
-        header_builder.insert(
+        header.append_op(
             b::cond_br(
                 context,
                 comparison,
@@ -289,13 +286,12 @@ impl ScfToCfgPass {
         );
         Self::replace_terminator_with_branch(context, rewriter, &body, latch.id(), loop_targets)?;
 
-        let mut latch_builder = IRBuilder::new(latch.clone());
-        let next = latch_builder
-            .insert(b::addi(context, induction, step, index_type).build())
+        let next = latch
+            .append_op(b::addi(context, induction, step, index_type).build())
             .result();
         let mut backedge = vec![next];
         backedge.extend(latch.arguments().iter().map(Value::id));
-        latch_builder.insert(b::br(context, backedge, header.id()).build());
+        latch.append_op(b::br(context, backedge, header.id()).build());
         Ok(())
     }
 
@@ -319,7 +315,7 @@ impl ScfToCfgPass {
         Self::redirect_results(context, &results, &continuation);
 
         Self::erase(rewriter, &block, op)?;
-        IRBuilder::new(block).insert(
+        block.append_op(
             b::cond_br(
                 context,
                 condition,
@@ -396,12 +392,11 @@ impl ScfToCfgPass {
             } else {
                 context.create_block(vec![])
             };
-            let mut builder = IRBuilder::new(current);
-            let expected = builder
-                .insert(b::constant(context, *case, predicate_type).build())
+            let expected = current
+                .append_op(b::constant(context, *case, predicate_type).build())
                 .result();
-            let matches = builder
-                .insert(
+            let matches = current
+                .append_op(
                     b::CmpIOpBuilder::new(context)
                         .lhs(predicate)
                         .rhs(expected)
@@ -410,8 +405,9 @@ impl ScfToCfgPass {
                         .build(),
                 )
                 .result();
-            builder
-                .insert(b::cond_br(context, matches, vec![], vec![], arm.id(), next.id()).build());
+            current.append_op(
+                b::cond_br(context, matches, vec![], vec![], arm.id(), next.id()).build(),
+            );
             region.add_block(arm.id());
             if !last {
                 region.add_block(next.id());
@@ -419,7 +415,7 @@ impl ScfToCfgPass {
             current = next;
         }
         if cases.is_empty() {
-            IRBuilder::new(current).insert(b::br(context, vec![], default_block.id()).build());
+            current.append_op(b::br(context, vec![], default_block.id()).build());
         }
         region.add_block(default_block.id());
         region.add_block(continuation.id());

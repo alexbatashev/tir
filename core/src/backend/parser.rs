@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use tir::attributes::AttributeValue;
 use tir::{
-    Block, BlockId, IRBuilder, Operation, Region,
+    Block, BlockId, Operation, Region,
     builtin::{ModuleEndOpBuilder, ModuleOp, ModuleOpBuilder},
     parse::tokens::Parser,
 };
@@ -14,7 +14,28 @@ use crate::backend::{
 };
 
 pub type AsmInstructionParser =
-    for<'src> fn(&tir::Context, &mut IRBuilder, &mut Parser<'src, Token<'src>>) -> Result<(), ()>;
+    for<'src> fn(&tir::Context, &mut AsmCursor, &mut Parser<'src, Token<'src>>) -> Result<(), ()>;
+
+/// Where the assembly parser writes: a block and the position the next operation
+/// takes in it. A symbol body already holds its terminator when parsing starts,
+/// so its instructions land ahead of everything the block holds rather than at
+/// its end.
+pub struct AsmCursor {
+    block: Arc<Block>,
+    position: usize,
+}
+
+impl AsmCursor {
+    pub fn at_start(block: Arc<Block>) -> Self {
+        Self { block, position: 0 }
+    }
+
+    pub fn insert<T: Operation>(&mut self, op: T) -> T {
+        self.block.insert(self.position, op.id());
+        self.position += 1;
+        op
+    }
+}
 
 pub struct AsmParser {
     /// Candidate parsers per mnemonic. A single mnemonic (e.g. AArch64 `add`)
@@ -49,11 +70,11 @@ impl AsmParser {
 
         let mut parser = Parser::new(&tokens);
 
-        let mut builder = IRBuilder::new(module.body());
-        let section_op = builder.insert(SectionOpBuilder::new(context).build());
-        builder.insert(ModuleEndOpBuilder::new(context).build());
+        let module_body = module.body();
+        let section_op = module_body.append_op(SectionOpBuilder::new(context).build());
+        module_body.append_op(ModuleEndOpBuilder::new(context).build());
         let section_body = section_op.body();
-        builder.set_insertion_point_to_start(section_body.clone());
+        let mut builder = AsmCursor::at_start(section_body.clone());
 
         // Local labels seen so far, mapped to the block they name. After parsing
         // we rewrite branch immediates that reference one of these.
@@ -73,7 +94,7 @@ impl AsmParser {
                     let name = parser.bump();
                     match name {
                         Some(Token::Ident(name)) => {
-                            builder.set_insertion_point_to_start(section_body.clone());
+                            builder = AsmCursor::at_start(section_body.clone());
                             let global_op = builder.insert(
                                 SymbolOpBuilder::new(context)
                                     .attr(
@@ -82,9 +103,9 @@ impl AsmParser {
                                     )
                                     .build(),
                             );
-                            builder.set_insertion_point_to_start(global_op.body());
+                            builder = AsmCursor::at_start(global_op.body());
                             builder.insert(SymbolEndOpBuilder::new(context).build());
-                            builder.set_insertion_point_to_start(global_op.body());
+                            builder = AsmCursor::at_start(global_op.body());
 
                             cur_region = global_op.regions().next();
                             cur_entry = Some(global_op.body());
@@ -113,7 +134,7 @@ impl AsmParser {
                             region.add_block(block.id());
                             block.set_attr("name", AttributeValue::Str(name.clone()));
                             labels.insert(name, block.id());
-                            builder.set_insertion_point_to_start(block.clone());
+                            builder = AsmCursor::at_start(block.clone());
                             at_entry = false;
                             block_has_content = false;
                         }

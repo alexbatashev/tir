@@ -80,7 +80,7 @@ pub(crate) fn merge_into(base: &mut AttributeDict, overlay: AttributeDict) {
 mod tests {
     use super::*;
     use crate::builtin::{UnitType, ops};
-    use crate::{Context, IRBuilder, Operation};
+    use crate::{Context, Operation};
 
     fn dict(entries: impl IntoIterator<Item = (&'static str, AttributeValue)>) -> AttributeValue {
         AttributeValue::Dict(
@@ -105,8 +105,7 @@ mod tests {
         let module = ops::module(&context, None)
             .attr("data_layout", dict([("endianness", "little".into())]))
             .build();
-        let mut builder = IRBuilder::new(module.body());
-        let nested = builder.insert(ops::module_end(&context).build());
+        let nested = module.body().append_op(ops::module_end(&context).build());
 
         let resolved = scoped_dict(&context, nested.id(), "data_layout").expect("module scope");
 
@@ -131,8 +130,7 @@ mod tests {
                 ]),
             )
             .build();
-        let mut builder = IRBuilder::new(module.body());
-        let func = builder.insert(
+        let func = module.body().append_op(
             ops::func(&context, "f", UnitType::new(&context), None)
                 .attr(
                     "data_layout",
@@ -161,8 +159,7 @@ mod tests {
                 dict([("features", vec!["m".into(), "a".into()].into())]),
             )
             .build();
-        let mut builder = IRBuilder::new(module.body());
-        let nested = builder.insert(
+        let nested = module.body().append_op(
             ops::module_end(&context)
                 .attr("target_env", dict([("features", vec!["c".into()].into())]))
                 .build(),

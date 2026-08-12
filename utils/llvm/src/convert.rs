@@ -8,30 +8,26 @@ use std::sync::Arc;
 
 use tir::builtin::{self, IntegerType, UnitType, ops as bops};
 use tir::ptr::{PtrType, ops as pops};
-use tir::{Block, Context, IRBuilder, Operand, TypeId, ValueId};
+use tir::{Block, Context, Operand, TypeId, ValueId};
 
 use crate::ast::{self, BinOp, CastOp, Inst, Type};
 use crate::error::Error;
 
 pub fn import(context: &Context, module: &ast::Module) -> Result<builtin::ModuleOp, Error> {
     let m = bops::module(context, None).build();
-    let mut builder = IRBuilder::new(m.body());
+    let builder = m.body();
     for func in &module.functions {
-        builder.insert(lower_function(context, func)?);
+        builder.append_op(lower_function(context, func)?);
     }
-    declare_external_callees(context, &m, &mut builder);
-    builder.insert(bops::module_end(context).build());
+    declare_external_callees(context, &m, &builder);
+    builder.append_op(bops::module_end(context).build());
     Ok(m)
 }
 
 /// LLVM `declare` lines carry no body and are not parsed, so a call to a
 /// function this module does not define is reconstructed as a declaration from
 /// the call site's types.
-fn declare_external_callees(
-    context: &Context,
-    module: &builtin::ModuleOp,
-    builder: &mut IRBuilder,
-) {
+fn declare_external_callees(context: &Context, module: &builtin::ModuleOp, body: &Block) {
     let table = tir::SymbolTable::build(context, tir::Operation::id(module));
     let mut declarations = Vec::new();
     for op in module.body().iter(context.clone()) {
@@ -59,7 +55,7 @@ fn declare_external_callees(
         }
     }
     for (name, args, ret) in declarations {
-        builder.insert(builtin::declare_op(context, &name, ret, &args));
+        body.append_op(builtin::declare_op(context, &name, ret, &args));
     }
 }
 
@@ -105,9 +101,9 @@ fn lower_function(context: &Context, func: &ast::Function) -> Result<builtin::Fu
     let op = bops::func(context, func.name.as_str(), ret_ty, Some(region.id())).build();
 
     for (block, created) in func.blocks.iter().zip(blocks.iter()) {
-        let mut builder = IRBuilder::new(created.clone());
+        let builder = created.clone();
         for inst in &block.insts {
-            lower_inst(context, inst, &mut builder, &mut values, &by_label)?;
+            lower_inst(context, inst, &builder, &mut values, &by_label)?;
         }
     }
 
@@ -117,7 +113,7 @@ fn lower_function(context: &Context, func: &ast::Function) -> Result<builtin::Fu
 fn lower_inst(
     context: &Context,
     inst: &Inst,
-    builder: &mut IRBuilder,
+    body: &Block,
     values: &mut HashMap<String, ValueId>,
     by_label: &HashMap<String, Arc<Block>>,
 ) -> Result<(), Error> {
@@ -132,7 +128,7 @@ fn lower_inst(
                 ast::Operand::ConstInt(v) => {
                     let c = bops::constant(context, *v, lower_type(context, $ty)).build();
                     let id = c.result();
-                    builder.insert(c);
+                    body.append_op(c);
                     id
                 }
             }
@@ -154,7 +150,7 @@ fn lower_inst(
                 ($f:path) => {{
                     let o = $f(context, l, r, t).build();
                     let id = o.result();
-                    builder.insert(o);
+                    body.append_op(o);
                     id
                 }};
             }
@@ -183,7 +179,7 @@ fn lower_inst(
             let i1 = IntegerType::new(context, 1);
             let o = bops::cmpi(context, l, r, pred.as_str(), i1).build();
             values.insert(result.clone(), o.result());
-            builder.insert(o);
+            body.append_op(o);
         }
         Inst::Cast {
             result,
@@ -198,19 +194,19 @@ fn lower_inst(
                 CastOp::SExt => {
                     let o = bops::extsi(context, input, to_ty).build();
                     let id = o.result();
-                    builder.insert(o);
+                    body.append_op(o);
                     id
                 }
                 CastOp::ZExt => {
                     let o = bops::extui(context, input, to_ty).build();
                     let id = o.result();
-                    builder.insert(o);
+                    body.append_op(o);
                     id
                 }
                 CastOp::Trunc => {
                     let o = bops::trunci(context, input, to_ty).build();
                     let id = o.result();
-                    builder.insert(o);
+                    body.append_op(o);
                     id
                 }
             };
@@ -225,25 +221,25 @@ fn lower_inst(
             };
             let o = pops::alloca(context, bytes, bytes, ptr_ty).build();
             values.insert(result.clone(), o.result());
-            builder.insert(o);
+            body.append_op(o);
         }
         Inst::Load { result, ty, ptr } => {
             let p = val!(ptr, &Type::Ptr(None));
             let o = pops::load(context, p, lower_type(context, ty)).build();
             values.insert(result.clone(), o.result());
-            builder.insert(o);
+            body.append_op(o);
         }
         Inst::Store { ty, value, ptr } => {
             let v = val!(value, ty);
             let p = val!(ptr, &Type::Ptr(None));
-            builder.insert(pops::store(context, v, p).build());
+            body.append_op(pops::store(context, v, p).build());
         }
         Inst::Br { dest } => {
             let target = by_label
                 .get(dest)
                 .ok_or_else(|| Error::UndefinedBlock(dest.clone()))?
                 .id();
-            builder.insert(bops::br(context, vec![], target).build());
+            body.append_op(bops::br(context, vec![], target).build());
         }
         Inst::CondBr {
             cond,
@@ -259,15 +255,15 @@ fn lower_inst(
                 .get(if_false)
                 .ok_or_else(|| Error::UndefinedBlock(if_false.clone()))?
                 .id();
-            builder.insert(bops::cond_br(context, c, vec![], vec![], t, f).build());
+            body.append_op(bops::cond_br(context, c, vec![], vec![], t, f).build());
         }
         Inst::Ret { value } => match value {
             None => {
-                builder.insert(bops::r#return(context, Operand::none()).build());
+                body.append_op(bops::r#return(context, Operand::none()).build());
             }
             Some((ty, op)) => {
                 let v = val!(op, ty);
-                builder.insert(bops::r#return(context, v).build());
+                body.append_op(bops::r#return(context, v).build());
             }
         },
         Inst::Call {
@@ -285,7 +281,7 @@ fn lower_inst(
             if let Some(name) = result {
                 values.insert(name.clone(), o.result());
             }
-            builder.insert(o);
+            body.append_op(o);
         }
         Inst::Unsupported(opcode) => {
             return Err(Error::Unsupported(opcode.clone()));

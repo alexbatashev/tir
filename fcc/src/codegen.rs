@@ -13,7 +13,7 @@ use tir::backend::abi::{Overflow, ValueKind, type_kind};
 use tir::builtin::{FloatType, IntegerType, ModuleOp, TokenType, TupleType, UnitType, ops as b};
 use tir::graph::{Dag, NodeId};
 use tir::ptr::{PtrType, ops as p};
-use tir::{Context, IRBuilder, Operand, Operation, TypeId, ValueId};
+use tir::{Context, Operand, Operation, TypeId, ValueId};
 
 use crate::ast::*;
 use crate::cir::{self, StructType, VarArgsType};
@@ -112,7 +112,7 @@ struct FnCodegen<'a> {
     context: &'a Context,
     typed: &'a TypedAst,
     ast: &'a Ast,
-    builder: IRBuilder,
+    builder: std::sync::Arc<tir::Block>,
     locals: HashMap<EntityId, Slot>,
     globals: &'a HashMap<EntityId, Global>,
     signatures: &'a HashMap<EntityId, Signature>,
@@ -316,7 +316,6 @@ impl Signature {
 pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnostic> {
     let ast = typed.ast();
     let module = b::module(context, None).build();
-    let mut module_builder = IRBuilder::new(module.body());
 
     let root = ast.root().ok_or_else(EmptyTranslationUnit::new)?;
     let mut items = Vec::new();
@@ -397,7 +396,7 @@ pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnost
                 ]))
             })
             .collect();
-        module_builder.insert(
+        module.body().append_op(
             cir::DefineStructOpBuilder::new(context)
                 .attr("sym_name", AttributeValue::Str(record.name.clone()))
                 .attr("fields", AttributeValue::Array(fields))
@@ -408,7 +407,7 @@ pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnost
     }
 
     for (value, name) in &global_strings {
-        module_builder.insert(
+        module.body().append_op(
             cir::GlobalStringOpBuilder::new(context)
                 .attr("sym_name", AttributeValue::Str(name.clone()))
                 .attr("value", AttributeValue::Str(value.clone()))
@@ -430,7 +429,7 @@ pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnost
                     continue;
                 }
                 let sig = signatures.get(&entity).unwrap();
-                module_builder.insert(b::declare_op(
+                module.body().append_op(b::declare_op(
                     context,
                     name,
                     sig.ret.ty,
@@ -439,7 +438,7 @@ pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnost
             }
             AstKind::Function => {
                 let func_op = lower_function(context, typed, item, &signatures, &globals)?;
-                module_builder.insert(func_op);
+                module.body().append_op(func_op);
             }
             AstKind::Global => {
                 let AstLeaf::Global { is_extern, .. } = ast.get_leaf_data(item).unwrap() else {
@@ -456,7 +455,7 @@ pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnost
                         && !defined_globals.contains(&entity)
                         && declared_globals.insert(entity)
                     {
-                        module_builder.insert(
+                        module.body().append_op(
                             b::DeclareOpBuilder::new(context)
                                 .attr("sym_name", AttributeValue::Str(global.name.clone()))
                                 .build(),
@@ -466,7 +465,7 @@ pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnost
                     // A tentative definition reserves storage only when no
                     // other declaration of the object defines it.
                     if !is_extern && reserved_globals.insert(entity) {
-                        module_builder.insert(
+                        module.body().append_op(
                             cir::ZeroGlobalOpBuilder::new(context)
                                 .attr("sym_name", AttributeValue::Str(global.name.clone()))
                                 .attr("size", AttributeValue::UInt(size))
@@ -489,7 +488,7 @@ pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnost
                         "non-constant global initializer".to_string(),
                     ));
                 };
-                module_builder.insert(
+                module.body().append_op(
                     cir::GlobalOpBuilder::new(context)
                         .attr("sym_name", AttributeValue::Str(global.name.clone()))
                         .attr(
@@ -537,7 +536,7 @@ pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnost
             _ => unreachable!("top-level item was checked before emission"),
         }
     }
-    module_builder.insert(b::module_end(context).build());
+    module.body().append_op(b::module_end(context).build());
     Ok(module)
 }
 
@@ -1365,7 +1364,7 @@ fn lower_function(
         context,
         typed,
         ast,
-        builder: IRBuilder::new(func_op.body()),
+        builder: func_op.body(),
         locals: HashMap::new(),
         globals,
         signatures,
@@ -1392,7 +1391,7 @@ impl FnCodegen<'_> {
         let ptr_ty = PtrType::opaque(self.context);
         let op = self
             .builder
-            .insert(p::alloca(self.context, size, align, ptr_ty).build());
+            .append_op(p::alloca(self.context, size, align, ptr_ty).build());
         Slot {
             ptr: op.result(),
             elem,
@@ -1410,7 +1409,7 @@ impl FnCodegen<'_> {
                 let target = lower_type(self.context, self.typed, target);
                 LoweredExpr::Value(
                     self.builder
-                        .insert(p::null(self.context, target).build())
+                        .append_op(p::null(self.context, target).build())
                         .result(),
                 )
             } else if matches!(self.typed.types().kind(source), TypeKind::Array(_, _))
@@ -1437,11 +1436,11 @@ impl FnCodegen<'_> {
             let target_ty = lower_type(self.context, self.typed, target);
             return if self.typed.integer_is_signed(source) == Some(true) {
                 self.builder
-                    .insert(b::sitofp(self.context, value, target_ty).build())
+                    .append_op(b::sitofp(self.context, value, target_ty).build())
                     .result()
             } else {
                 self.builder
-                    .insert(b::uitofp(self.context, value, target_ty).build())
+                    .append_op(b::uitofp(self.context, value, target_ty).build())
                     .result()
             };
         }
@@ -1451,7 +1450,7 @@ impl FnCodegen<'_> {
             let target_ty = lower_type(self.context, self.typed, target);
             return if self.typed.integer_is_signed(target) == Some(true) {
                 self.builder
-                    .insert(b::fptosi(self.context, value, target_ty).build())
+                    .append_op(b::fptosi(self.context, value, target_ty).build())
                     .result()
             } else if target_width < 64 {
                 // Every value an unsigned type narrower than 64 bits can hold is
@@ -1460,14 +1459,14 @@ impl FnCodegen<'_> {
                 let wide = IntegerType::new(self.context, 64);
                 let converted = self
                     .builder
-                    .insert(b::fptosi(self.context, value, wide).build())
+                    .append_op(b::fptosi(self.context, value, wide).build())
                     .result();
                 self.builder
-                    .insert(b::trunci(self.context, converted, target_ty).build())
+                    .append_op(b::trunci(self.context, converted, target_ty).build())
                     .result()
             } else {
                 self.builder
-                    .insert(b::fptoui(self.context, value, target_ty).build())
+                    .append_op(b::fptoui(self.context, value, target_ty).build())
                     .result()
             };
         }
@@ -1479,16 +1478,16 @@ impl FnCodegen<'_> {
             let address = if source_width < address_width {
                 if self.typed.integer_is_signed(source).unwrap() {
                     self.builder
-                        .insert(b::extsi(self.context, value, address_ty).build())
+                        .append_op(b::extsi(self.context, value, address_ty).build())
                         .result()
                 } else {
                     self.builder
-                        .insert(b::extui(self.context, value, address_ty).build())
+                        .append_op(b::extui(self.context, value, address_ty).build())
                         .result()
                 }
             } else if source_width > address_width {
                 self.builder
-                    .insert(b::trunci(self.context, value, address_ty).build())
+                    .append_op(b::trunci(self.context, value, address_ty).build())
                     .result()
             } else {
                 value
@@ -1504,11 +1503,11 @@ impl FnCodegen<'_> {
             return match target_width.cmp(&address_width) {
                 std::cmp::Ordering::Less => self
                     .builder
-                    .insert(b::trunci(self.context, address, target_ty).build())
+                    .append_op(b::trunci(self.context, address, target_ty).build())
                     .result(),
                 std::cmp::Ordering::Greater => self
                     .builder
-                    .insert(b::extui(self.context, address, target_ty).build())
+                    .append_op(b::extui(self.context, address, target_ty).build())
                     .result(),
                 std::cmp::Ordering::Equal => address,
             };
@@ -1523,16 +1522,16 @@ impl FnCodegen<'_> {
         if source_width < target_width {
             if self.typed.integer_is_signed(source).unwrap() {
                 self.builder
-                    .insert(b::extsi(self.context, value, target_ty).build())
+                    .append_op(b::extsi(self.context, value, target_ty).build())
                     .result()
             } else {
                 self.builder
-                    .insert(b::extui(self.context, value, target_ty).build())
+                    .append_op(b::extui(self.context, value, target_ty).build())
                     .result()
             }
         } else if source_width > target_width {
             self.builder
-                .insert(b::trunci(self.context, value, target_ty).build())
+                .append_op(b::trunci(self.context, value, target_ty).build())
                 .result()
         } else {
             value
@@ -1550,64 +1549,64 @@ impl FnCodegen<'_> {
         match kind {
             AstKind::Add | AstKind::AddAssign => self
                 .builder
-                .insert(b::addi(self.context, lhs, rhs, ty).build())
+                .append_op(b::addi(self.context, lhs, rhs, ty).build())
                 .result(),
             AstKind::Sub | AstKind::SubAssign => self
                 .builder
-                .insert(b::subi(self.context, lhs, rhs, ty).build())
+                .append_op(b::subi(self.context, lhs, rhs, ty).build())
                 .result(),
             AstKind::Mul | AstKind::MulAssign => self
                 .builder
-                .insert(b::muli(self.context, lhs, rhs, ty).build())
+                .append_op(b::muli(self.context, lhs, rhs, ty).build())
                 .result(),
             AstKind::Div | AstKind::DivAssign
                 if self.typed.integer_is_signed(source_ty).unwrap() =>
             {
                 self.builder
-                    .insert(b::divsi(self.context, lhs, rhs, ty).build())
+                    .append_op(b::divsi(self.context, lhs, rhs, ty).build())
                     .result()
             }
             AstKind::Div | AstKind::DivAssign => self
                 .builder
-                .insert(b::divui(self.context, lhs, rhs, ty).build())
+                .append_op(b::divui(self.context, lhs, rhs, ty).build())
                 .result(),
             AstKind::Mod | AstKind::ModAssign
                 if self.typed.integer_is_signed(source_ty).unwrap() =>
             {
                 self.builder
-                    .insert(b::remsi(self.context, lhs, rhs, ty).build())
+                    .append_op(b::remsi(self.context, lhs, rhs, ty).build())
                     .result()
             }
             AstKind::Mod | AstKind::ModAssign => self
                 .builder
-                .insert(b::remui(self.context, lhs, rhs, ty).build())
+                .append_op(b::remui(self.context, lhs, rhs, ty).build())
                 .result(),
             AstKind::BitAnd | AstKind::AndAssign => self
                 .builder
-                .insert(b::andi(self.context, lhs, rhs, ty).build())
+                .append_op(b::andi(self.context, lhs, rhs, ty).build())
                 .result(),
             AstKind::BitXor | AstKind::XorAssign => self
                 .builder
-                .insert(b::xori(self.context, lhs, rhs, ty).build())
+                .append_op(b::xori(self.context, lhs, rhs, ty).build())
                 .result(),
             AstKind::BitOr | AstKind::OrAssign => self
                 .builder
-                .insert(b::ori(self.context, lhs, rhs, ty).build())
+                .append_op(b::ori(self.context, lhs, rhs, ty).build())
                 .result(),
             AstKind::Shl | AstKind::ShlAssign => self
                 .builder
-                .insert(b::shli(self.context, lhs, rhs, ty).build())
+                .append_op(b::shli(self.context, lhs, rhs, ty).build())
                 .result(),
             AstKind::Shr | AstKind::ShrAssign
                 if self.typed.integer_is_signed(source_ty).unwrap() =>
             {
                 self.builder
-                    .insert(b::shrsi(self.context, lhs, rhs, ty).build())
+                    .append_op(b::shrsi(self.context, lhs, rhs, ty).build())
                     .result()
             }
             AstKind::Shr | AstKind::ShrAssign => self
                 .builder
-                .insert(b::shrui(self.context, lhs, rhs, ty).build())
+                .append_op(b::shrui(self.context, lhs, rhs, ty).build())
                 .result(),
             _ => unreachable!(),
         }
@@ -1635,7 +1634,7 @@ impl FnCodegen<'_> {
             _ => unreachable!(),
         };
         self.builder
-            .insert(
+            .append_op(
                 b::CmpIOpBuilder::new(self.context)
                     .lhs(lhs)
                     .rhs(rhs)
@@ -1652,7 +1651,7 @@ impl FnCodegen<'_> {
         let address_ty = IntegerType::new(self.context, self.typed.target().pointer_width());
         let null = self.null_pointer();
         self.builder
-            .insert(p::ptrdiff(self.context, pointer, null, address_ty).build())
+            .append_op(p::ptrdiff(self.context, pointer, null, address_ty).build())
             .result()
     }
 
@@ -1660,13 +1659,15 @@ impl FnCodegen<'_> {
     fn address_as_pointer(&mut self, address: ValueId) -> ValueId {
         let null = self.null_pointer();
         self.builder
-            .insert(p::ptradd(self.context, null, address, PtrType::opaque(self.context)).build())
+            .append_op(
+                p::ptradd(self.context, null, address, PtrType::opaque(self.context)).build(),
+            )
             .result()
     }
 
     fn null_pointer(&mut self) -> ValueId {
         self.builder
-            .insert(p::null(self.context, PtrType::opaque(self.context)).build())
+            .append_op(p::null(self.context, PtrType::opaque(self.context)).build())
             .result()
     }
 
@@ -1674,7 +1675,7 @@ impl FnCodegen<'_> {
     /// two of them maps onto the unsigned predicates alone.
     fn lower_pointer_compare(&mut self, predicate: &str, lhs: ValueId, rhs: ValueId) -> ValueId {
         self.builder
-            .insert(
+            .append_op(
                 p::CmpOpBuilder::new(self.context)
                     .lhs(lhs)
                     .rhs(rhs)
@@ -1698,7 +1699,7 @@ impl FnCodegen<'_> {
             _ => unreachable!(),
         };
         self.builder
-            .insert(
+            .append_op(
                 b::CmpFOpBuilder::new(self.context)
                     .lhs(lhs)
                     .rhs(rhs)
@@ -1714,19 +1715,19 @@ impl FnCodegen<'_> {
         match kind {
             AstKind::Add | AstKind::AddAssign => self
                 .builder
-                .insert(b::addf(self.context, lhs, rhs, ty).build())
+                .append_op(b::addf(self.context, lhs, rhs, ty).build())
                 .result(),
             AstKind::Sub | AstKind::SubAssign => self
                 .builder
-                .insert(b::subf(self.context, lhs, rhs, ty).build())
+                .append_op(b::subf(self.context, lhs, rhs, ty).build())
                 .result(),
             AstKind::Mul | AstKind::MulAssign => self
                 .builder
-                .insert(b::mulf(self.context, lhs, rhs, ty).build())
+                .append_op(b::mulf(self.context, lhs, rhs, ty).build())
                 .result(),
             AstKind::Div | AstKind::DivAssign => self
                 .builder
-                .insert(b::divf(self.context, lhs, rhs, ty).build())
+                .append_op(b::divf(self.context, lhs, rhs, ty).build())
                 .result(),
             _ => unreachable!(),
         }
@@ -1749,16 +1750,16 @@ impl FnCodegen<'_> {
         let index = if index_width < pointer_width {
             if self.typed.integer_is_signed(index_ty).unwrap() {
                 self.builder
-                    .insert(b::extsi(self.context, index, offset_ty).build())
+                    .append_op(b::extsi(self.context, index, offset_ty).build())
                     .result()
             } else {
                 self.builder
-                    .insert(b::extui(self.context, index, offset_ty).build())
+                    .append_op(b::extui(self.context, index, offset_ty).build())
                     .result()
             }
         } else if index_width > pointer_width {
             self.builder
-                .insert(b::trunci(self.context, index, offset_ty).build())
+                .append_op(b::trunci(self.context, index, offset_ty).build())
                 .result()
         } else {
             index
@@ -1766,25 +1767,25 @@ impl FnCodegen<'_> {
         let size = source_type_layout(self.typed, *pointee).0;
         let scale = self
             .builder
-            .insert(b::constant(self.context, size as i64, offset_ty).build())
+            .append_op(b::constant(self.context, size as i64, offset_ty).build())
             .result();
         let offset = self
             .builder
-            .insert(b::muli(self.context, index, scale, offset_ty).build())
+            .append_op(b::muli(self.context, index, scale, offset_ty).build())
             .result();
         let offset = if subtract {
             let zero = self
                 .builder
-                .insert(b::constant(self.context, 0, offset_ty).build())
+                .append_op(b::constant(self.context, 0, offset_ty).build())
                 .result();
             self.builder
-                .insert(b::subi(self.context, zero, offset, offset_ty).build())
+                .append_op(b::subi(self.context, zero, offset, offset_ty).build())
                 .result()
         } else {
             offset
         };
         self.builder
-            .insert(
+            .append_op(
                 p::ptradd(
                     self.context,
                     base,
@@ -1809,7 +1810,7 @@ impl FnCodegen<'_> {
         let result_ty = lower_type(self.context, self.typed, result_ty);
         let bytes = self
             .builder
-            .insert(p::ptrdiff(self.context, lhs, rhs, result_ty).build())
+            .append_op(p::ptrdiff(self.context, lhs, rhs, result_ty).build())
             .result();
         let size = source_type_layout(self.typed, *pointee).0;
         if size == 1 {
@@ -1817,10 +1818,10 @@ impl FnCodegen<'_> {
         }
         let divisor = self
             .builder
-            .insert(b::constant(self.context, size as i64, result_ty).build())
+            .append_op(b::constant(self.context, size as i64, result_ty).build())
             .result();
         self.builder
-            .insert(b::divsi(self.context, bytes, divisor, result_ty).build())
+            .append_op(b::divsi(self.context, bytes, divisor, result_ty).build())
             .result()
     }
 
@@ -1831,10 +1832,10 @@ impl FnCodegen<'_> {
         let offset_ty = IntegerType::new(self.context, self.typed.target().pointer_width());
         let offset = self
             .builder
-            .insert(b::constant(self.context, offset as i64, offset_ty).build())
+            .append_op(b::constant(self.context, offset as i64, offset_ty).build())
             .result();
         self.builder
-            .insert(p::ptradd(self.context, base, offset, PtrType::opaque(self.context)).build())
+            .append_op(p::ptradd(self.context, base, offset, PtrType::opaque(self.context)).build())
             .result()
     }
 
@@ -1857,7 +1858,7 @@ impl FnCodegen<'_> {
         }
         let value = self.lower_expr(initializer)?;
         self.builder
-            .insert(p::store(self.context, value, address).build());
+            .append_op(p::store(self.context, value, address).build());
         Ok(())
     }
 
@@ -1980,11 +1981,11 @@ impl FnCodegen<'_> {
         let value = match self.typed.types().kind(target) {
             TypeKind::Double => self
                 .builder
-                .insert(b::constantf(self.context, 0.0, ir_type).build())
+                .append_op(b::constantf(self.context, 0.0, ir_type).build())
                 .result(),
             TypeKind::Integer(_) | TypeKind::Enum(_) => self
                 .builder
-                .insert(b::constant(self.context, 0, ir_type).build())
+                .append_op(b::constant(self.context, 0, ir_type).build())
                 .result(),
             _ => {
                 return Err(unsupported(
@@ -1995,7 +1996,7 @@ impl FnCodegen<'_> {
             }
         };
         self.builder
-            .insert(p::store(self.context, value, address).build());
+            .append_op(p::store(self.context, value, address).build());
         Ok(())
     }
 
@@ -2049,7 +2050,7 @@ impl FnCodegen<'_> {
                     .enumerate()
                     .map(|(index, piece)| {
                         self.builder
-                            .insert(
+                            .append_op(
                                 b::TupleGetOpBuilder::new(self.context)
                                     .tuple(tuple)
                                     .attr("index", AttributeValue::UInt(index as u64))
@@ -2067,7 +2068,7 @@ impl FnCodegen<'_> {
             for (piece, value) in abi_param.pieces.iter().zip(values) {
                 let address = self.offset_address(slot.ptr, piece.offset);
                 self.builder
-                    .insert(p::store(self.context, value, address).build());
+                    .append_op(p::store(self.context, value, address).build());
             }
             self.locals.insert(node_entity(self.typed, param), slot);
         }
@@ -2095,11 +2096,11 @@ impl FnCodegen<'_> {
         if self.return_flag.is_some() {
             let operand = self.structured_return_operand(result, returns_void);
             self.builder
-                .insert(b::r#return(self.context, operand).build());
+                .append_op(b::r#return(self.context, operand).build());
             self.terminated = true;
         } else if returns_void && !self.terminated {
             self.builder
-                .insert(b::r#return(self.context, Operand::none()).build());
+                .append_op(b::r#return(self.context, Operand::none()).build());
             self.terminated = true;
         }
 
@@ -2539,7 +2540,7 @@ impl FnCodegen<'_> {
             condition
         } else {
             self.builder
-                .insert(b::constant(self.context, 1, IntegerType::new(self.context, 1)).build())
+                .append_op(b::constant(self.context, 1, IntegerType::new(self.context, 1)).build())
                 .result()
         };
         let flags = [
@@ -2631,11 +2632,11 @@ impl FnCodegen<'_> {
             }
             let condition = condition.expect("a dispatch loop has a re-entered label");
             cg.builder
-                .insert(cir::ops::condition(cg.context, condition).build());
+                .append_op(cir::ops::condition(cg.context, condition).build());
             Ok(())
         })?;
 
-        self.builder.insert(
+        self.builder.append_op(
             cir::ops::r#do(
                 self.context,
                 Some(body_region.id()),
@@ -2663,14 +2664,14 @@ impl FnCodegen<'_> {
         let slot = self.jump.unwrap();
         let value = self
             .builder
-            .insert(p::load(self.context, slot.ptr, slot.elem).build())
+            .append_op(p::load(self.context, slot.ptr, slot.elem).build())
             .result();
         let expected = self
             .builder
-            .insert(b::constant(self.context, label, slot.elem).build())
+            .append_op(b::constant(self.context, label, slot.elem).build())
             .result();
         self.builder
-            .insert(
+            .append_op(
                 b::CmpIOpBuilder::new(self.context)
                     .lhs(value)
                     .rhs(expected)
@@ -2689,15 +2690,15 @@ impl FnCodegen<'_> {
         let i32_ty = IntegerType::new(self.context, 32);
         let left = self
             .builder
-            .insert(b::extui(self.context, left, i32_ty).build())
+            .append_op(b::extui(self.context, left, i32_ty).build())
             .result();
         let right = self
             .builder
-            .insert(b::extui(self.context, right, i32_ty).build())
+            .append_op(b::extui(self.context, right, i32_ty).build())
             .result();
         let both = self
             .builder
-            .insert(b::andi(self.context, left, right, i32_ty).build())
+            .append_op(b::andi(self.context, left, right, i32_ty).build())
             .result();
         self.truth_value(both)
     }
@@ -2706,15 +2707,15 @@ impl FnCodegen<'_> {
         let i32_ty = IntegerType::new(self.context, 32);
         let left = self
             .builder
-            .insert(b::extui(self.context, left, i32_ty).build())
+            .append_op(b::extui(self.context, left, i32_ty).build())
             .result();
         let right = self
             .builder
-            .insert(b::extui(self.context, right, i32_ty).build())
+            .append_op(b::extui(self.context, right, i32_ty).build())
             .result();
         let either = self
             .builder
-            .insert(b::ori(self.context, left, right, i32_ty).build())
+            .append_op(b::ori(self.context, left, right, i32_ty).build())
             .result();
         self.truth_value(either)
     }
@@ -2731,7 +2732,7 @@ impl FnCodegen<'_> {
             |_| Ok(()),
             |cg| {
                 cg.builder
-                    .insert(cir::ops::r#break(cg.context, scope).build());
+                    .append_op(cir::ops::r#break(cg.context, scope).build());
                 Ok(())
             },
         )
@@ -2763,10 +2764,10 @@ impl FnCodegen<'_> {
         let flag = self.alloca(i32_ty, 4, 4);
         let zero = self
             .builder
-            .insert(b::constant(self.context, 0, i32_ty).build())
+            .append_op(b::constant(self.context, 0, i32_ty).build())
             .result();
         self.builder
-            .insert(p::store(self.context, zero, flag.ptr).build());
+            .append_op(p::store(self.context, zero, flag.ptr).build());
         self.return_flag = Some(flag);
         if returns_void || self.return_abi.indirect {
             return;
@@ -2800,7 +2801,7 @@ impl FnCodegen<'_> {
         }
         Operand::from(
             self.builder
-                .insert(p::load(self.context, slot.ptr, slot.elem).build())
+                .append_op(p::load(self.context, slot.ptr, slot.elem).build())
                 .result(),
         )
     }
@@ -2836,7 +2837,7 @@ impl FnCodegen<'_> {
                     |cg| {
                         if let Tail::ExitLoop(scope) = tail {
                             cg.builder
-                                .insert(cir::ops::r#break(cg.context, scope).build());
+                                .append_op(cir::ops::r#break(cg.context, scope).build());
                         }
                         Ok(())
                     },
@@ -2880,7 +2881,7 @@ impl FnCodegen<'_> {
         if self.ast.get_node(condition).kind == AstKind::Empty {
             return Ok(self
                 .builder
-                .insert(b::constant(self.context, 1, IntegerType::new(self.context, 1)).build())
+                .append_op(b::constant(self.context, 1, IntegerType::new(self.context, 1)).build())
                 .result());
         }
         self.lower_condition(condition)
@@ -2923,25 +2924,25 @@ impl FnCodegen<'_> {
                 let value = cg.lower_for_condition(condition)?;
                 let value = cg
                     .builder
-                    .insert(b::extui(cg.context, value, held.elem).build())
+                    .append_op(b::extui(cg.context, value, held.elem).build())
                     .result();
                 cg.builder
-                    .insert(p::store(cg.context, value, held.ptr).build());
+                    .append_op(p::store(cg.context, value, held.ptr).build());
                 Ok(())
             },
             |cg| {
                 let zero = cg
                     .builder
-                    .insert(b::constant(cg.context, 0, held.elem).build())
+                    .append_op(b::constant(cg.context, 0, held.elem).build())
                     .result();
                 cg.builder
-                    .insert(p::store(cg.context, zero, held.ptr).build());
+                    .append_op(p::store(cg.context, zero, held.ptr).build());
                 Ok(())
             },
         )?;
         let value = self
             .builder
-            .insert(p::load(self.context, held.ptr, held.elem).build())
+            .append_op(p::load(self.context, held.ptr, held.elem).build())
             .result();
         let mut value = self.truth_value(value);
         for &label in entry {
@@ -2990,7 +2991,7 @@ impl FnCodegen<'_> {
             cg.ensure_cir_yield(else_block);
             Ok(())
         })?;
-        self.builder.insert(
+        self.builder.append_op(
             cir::ops::r#if(
                 self.context,
                 condition,
@@ -3015,7 +3016,7 @@ impl FnCodegen<'_> {
     fn flag_is_clear(&mut self, flag: Slot) -> ValueId {
         let value = self
             .builder
-            .insert(p::load(self.context, flag.ptr, flag.elem).build())
+            .append_op(p::load(self.context, flag.ptr, flag.elem).build())
             .result();
         self.compare_against_zero(value, "eq")
     }
@@ -3023,10 +3024,10 @@ impl FnCodegen<'_> {
     fn store_flag(&mut self, flag: Slot, value: i64) {
         let value = self
             .builder
-            .insert(b::constant(self.context, value, flag.elem).build())
+            .append_op(b::constant(self.context, value, flag.elem).build())
             .result();
         self.builder
-            .insert(p::store(self.context, value, flag.ptr).build());
+            .append_op(p::store(self.context, value, flag.ptr).build());
     }
 
     fn lower_stmt(&mut self, stmt: NodeId) -> Result<(), Diagnostic> {
@@ -3062,7 +3063,7 @@ impl FnCodegen<'_> {
                     } else {
                         let value = self.lower_expr(init)?;
                         self.builder
-                            .insert(p::store(self.context, value, slot.ptr).build());
+                            .append_op(p::store(self.context, value, slot.ptr).build());
                     }
                 }
                 self.locals.insert(entity, slot);
@@ -3080,7 +3081,7 @@ impl FnCodegen<'_> {
                 } else {
                     let v = self.lower_expr(value)?;
                     self.builder
-                        .insert(p::store(self.context, v, slot.ptr).build());
+                        .append_op(p::store(self.context, v, slot.ptr).build());
                 }
                 Ok(())
             }
@@ -3101,7 +3102,7 @@ impl FnCodegen<'_> {
                     None => Operand::none(),
                 };
                 self.builder
-                    .insert(b::r#return(self.context, operand).build());
+                    .append_op(b::r#return(self.context, operand).build());
                 self.terminated = true;
                 Ok(())
             }
@@ -3135,7 +3136,7 @@ impl FnCodegen<'_> {
                         None => cg.lower_condition(condition)?,
                     };
                     cg.builder
-                        .insert(cir::ops::condition(cg.context, value).build());
+                        .append_op(cir::ops::condition(cg.context, value).build());
                     Ok(())
                 })?;
 
@@ -3154,7 +3155,7 @@ impl FnCodegen<'_> {
                 self.loop_scopes.pop();
                 self.continue_flag = outer_continue_flag;
 
-                self.builder.insert(
+                self.builder.append_op(
                     cir::ops::r#while(
                         self.context,
                         Some(condition_region.id()),
@@ -3197,11 +3198,11 @@ impl FnCodegen<'_> {
                 self.in_block(condition_block, |cg| {
                     let value = cg.lower_condition(condition)?;
                     cg.builder
-                        .insert(cir::ops::condition(cg.context, value).build());
+                        .append_op(cir::ops::condition(cg.context, value).build());
                     Ok(())
                 })?;
 
-                self.builder.insert(
+                self.builder.append_op(
                     cir::ops::r#do(
                         self.context,
                         Some(body_region.id()),
@@ -3250,7 +3251,7 @@ impl FnCodegen<'_> {
                         None => cg.lower_for_condition(*condition)?,
                     };
                     cg.builder
-                        .insert(cir::ops::condition(cg.context, value).build());
+                        .append_op(cir::ops::condition(cg.context, value).build());
                     Ok(())
                 })?;
 
@@ -3296,7 +3297,7 @@ impl FnCodegen<'_> {
                     Ok(())
                 })?;
 
-                self.builder.insert(
+                self.builder.append_op(
                     cir::ops::r#for(
                         self.context,
                         Some(condition_region.id()),
@@ -3344,7 +3345,7 @@ impl FnCodegen<'_> {
                     Ok(())
                 })?;
 
-                self.builder.insert(
+                self.builder.append_op(
                     cir::ops::r#if(
                         self.context,
                         condition,
@@ -3366,15 +3367,15 @@ impl FnCodegen<'_> {
                 match *self.break_scopes.last().unwrap() {
                     BreakScope::Loop(scope) => {
                         self.builder
-                            .insert(cir::ops::r#break(self.context, scope).build());
+                            .append_op(cir::ops::r#break(self.context, scope).build());
                     }
                     BreakScope::Switch(done) => {
                         let one = self
                             .builder
-                            .insert(b::constant(self.context, 1, done.elem).build())
+                            .append_op(b::constant(self.context, 1, done.elem).build())
                             .result();
                         self.builder
-                            .insert(p::store(self.context, one, done.ptr).build());
+                            .append_op(p::store(self.context, one, done.ptr).build());
                     }
                 }
                 self.terminated = true;
@@ -3386,7 +3387,7 @@ impl FnCodegen<'_> {
                     None => {
                         let scope = *self.loop_scopes.last().unwrap();
                         self.builder
-                            .insert(cir::ops::r#continue(self.context, scope).build());
+                            .append_op(cir::ops::r#continue(self.context, scope).build());
                     }
                 }
                 self.terminated = true;
@@ -3415,12 +3416,12 @@ impl FnCodegen<'_> {
         let done = self.alloca(i32_ty, 4, 4);
         let zero = self
             .builder
-            .insert(b::constant(self.context, 0, i32_ty).build())
+            .append_op(b::constant(self.context, 0, i32_ty).build())
             .result();
         self.builder
-            .insert(p::store(self.context, zero, active.ptr).build());
+            .append_op(p::store(self.context, zero, active.ptr).build());
         self.builder
-            .insert(p::store(self.context, zero, done.ptr).build());
+            .append_op(p::store(self.context, zero, done.ptr).build());
 
         let mut items = Vec::new();
         self.flatten_switch_items(body, &mut items)?;
@@ -3432,11 +3433,11 @@ impl FnCodegen<'_> {
             };
             let case_value = self
                 .builder
-                .insert(b::constant(self.context, *case_value, value_ty).build())
+                .append_op(b::constant(self.context, *case_value, value_ty).build())
                 .result();
             let condition = self
                 .builder
-                .insert(
+                .append_op(
                     b::CmpIOpBuilder::new(self.context)
                         .lhs(value)
                         .rhs(case_value)
@@ -3447,17 +3448,17 @@ impl FnCodegen<'_> {
                 .result();
             let condition_value = self
                 .builder
-                .insert(b::extui(self.context, condition, i32_ty).build())
+                .append_op(b::extui(self.context, condition, i32_ty).build())
                 .result();
             any_match = self
                 .builder
-                .insert(b::ori(self.context, any_match, condition_value, i32_ty).build())
+                .append_op(b::ori(self.context, any_match, condition_value, i32_ty).build())
                 .result();
             case_conditions.insert(index, condition);
         }
         let default_condition = self
             .builder
-            .insert(
+            .append_op(
                 b::CmpIOpBuilder::new(self.context)
                     .lhs(any_match)
                     .rhs(zero)
@@ -3483,10 +3484,10 @@ impl FnCodegen<'_> {
                     SwitchItem::Case(_) | SwitchItem::Default => {
                         let one = cg
                             .builder
-                            .insert(b::constant(cg.context, 1, i32_ty).build())
+                            .append_op(b::constant(cg.context, 1, i32_ty).build())
                             .result();
                         cg.builder
-                            .insert(p::store(cg.context, one, active.ptr).build());
+                            .append_op(p::store(cg.context, one, active.ptr).build());
                     }
                     SwitchItem::Statement(statement) => cg.lower_stmt(statement)?,
                 }
@@ -3501,7 +3502,7 @@ impl FnCodegen<'_> {
                 cg.ensure_cir_yield(else_block);
                 Ok(())
             })?;
-            self.builder.insert(
+            self.builder.append_op(
                 cir::ops::r#if(
                     self.context,
                     condition,
@@ -3557,21 +3558,21 @@ impl FnCodegen<'_> {
     ) -> ValueId {
         let active = self
             .builder
-            .insert(p::load(self.context, active.ptr, active.elem).build())
+            .append_op(p::load(self.context, active.ptr, active.elem).build())
             .result();
         let active = self.truth_value(active);
         let selected = if let Some(activation) = activation {
             let active = self
                 .builder
-                .insert(b::extui(self.context, active, i32_ty).build())
+                .append_op(b::extui(self.context, active, i32_ty).build())
                 .result();
             let activation = self
                 .builder
-                .insert(b::extui(self.context, activation, i32_ty).build())
+                .append_op(b::extui(self.context, activation, i32_ty).build())
                 .result();
             let selected = self
                 .builder
-                .insert(b::ori(self.context, active, activation, i32_ty).build())
+                .append_op(b::ori(self.context, active, activation, i32_ty).build())
                 .result();
             self.truth_value(selected)
         } else {
@@ -3579,15 +3580,15 @@ impl FnCodegen<'_> {
         };
         let done = self
             .builder
-            .insert(p::load(self.context, done.ptr, done.elem).build())
+            .append_op(p::load(self.context, done.ptr, done.elem).build())
             .result();
         let zero = self
             .builder
-            .insert(b::constant(self.context, 0, i32_ty).build())
+            .append_op(b::constant(self.context, 0, i32_ty).build())
             .result();
         let not_done = self
             .builder
-            .insert(
+            .append_op(
                 b::CmpIOpBuilder::new(self.context)
                     .lhs(done)
                     .rhs(zero)
@@ -3598,15 +3599,15 @@ impl FnCodegen<'_> {
             .result();
         let selected = self
             .builder
-            .insert(b::extui(self.context, selected, i32_ty).build())
+            .append_op(b::extui(self.context, selected, i32_ty).build())
             .result();
         let not_done = self
             .builder
-            .insert(b::extui(self.context, not_done, i32_ty).build())
+            .append_op(b::extui(self.context, not_done, i32_ty).build())
             .result();
         let condition = self
             .builder
-            .insert(b::andi(self.context, selected, not_done, i32_ty).build())
+            .append_op(b::andi(self.context, selected, not_done, i32_ty).build())
             .result();
         // A `return`, a `continue` or a `goto` inside a case leaves the switch,
         // so no later item — not even one reached by fallthrough — may run.
@@ -3618,11 +3619,11 @@ impl FnCodegen<'_> {
             let clear = self.flag_is_clear(flag);
             let clear = self
                 .builder
-                .insert(b::extui(self.context, clear, i32_ty).build())
+                .append_op(b::extui(self.context, clear, i32_ty).build())
                 .result();
             condition = self
                 .builder
-                .insert(b::andi(self.context, condition, clear, i32_ty).build())
+                .append_op(b::andi(self.context, condition, clear, i32_ty).build())
                 .result();
         }
         self.truth_value(condition)
@@ -3633,7 +3634,7 @@ impl FnCodegen<'_> {
         block: std::sync::Arc<tir::Block>,
         lower: impl FnOnce(&mut Self) -> Result<T, Diagnostic>,
     ) -> Result<T, Diagnostic> {
-        let outer = std::mem::replace(&mut self.builder, IRBuilder::new(block));
+        let outer = std::mem::replace(&mut self.builder, block);
         let outer_terminated = std::mem::replace(&mut self.terminated, false);
         let result = lower(self);
         self.builder = outer;
@@ -3650,7 +3651,8 @@ impl FnCodegen<'_> {
                 .is_some()
         });
         if !terminated {
-            self.builder.insert(cir::ops::r#yield(self.context).build());
+            self.builder
+                .append_op(cir::ops::r#yield(self.context).build());
         }
     }
 
@@ -3672,7 +3674,7 @@ impl FnCodegen<'_> {
             return value;
         }
         self.builder
-            .insert(b::extui(self.context, value, target).build())
+            .append_op(b::extui(self.context, value, target).build())
             .result()
     }
 
@@ -3691,7 +3693,7 @@ impl FnCodegen<'_> {
             let i32_ty = IntegerType::new(self.context, 32);
             (
                 self.builder
-                    .insert(b::extui(self.context, value, i32_ty).build())
+                    .append_op(b::extui(self.context, value, i32_ty).build())
                     .result(),
                 i32_ty,
             )
@@ -3710,10 +3712,10 @@ impl FnCodegen<'_> {
         }
         let zero = self
             .builder
-            .insert(b::constant(self.context, 0, ty).build())
+            .append_op(b::constant(self.context, 0, ty).build())
             .result();
         self.builder
-            .insert(
+            .append_op(
                 b::CmpIOpBuilder::new(self.context)
                     .lhs(value)
                     .rhs(zero)
@@ -3729,7 +3731,7 @@ impl FnCodegen<'_> {
             LoweredExpr::Value(value) => value,
             LoweredExpr::Address { ptr, elem } => self
                 .builder
-                .insert(p::load(self.context, ptr, elem).build())
+                .append_op(p::load(self.context, ptr, elem).build())
                 .result(),
         }
     }
@@ -3751,7 +3753,7 @@ impl FnCodegen<'_> {
             let (size, _) = source_type_layout(self.typed, node_type(self.typed, node));
             let size = self
                 .builder
-                .insert(
+                .append_op(
                     b::constant(
                         self.context,
                         size as i64,
@@ -3761,11 +3763,11 @@ impl FnCodegen<'_> {
                 )
                 .result();
             self.builder
-                .insert(p::memcpy(self.context, destination, source, size).build());
+                .append_op(p::memcpy(self.context, destination, source, size).build());
             return Ok(());
         }
         self.builder
-            .insert(cir::ops::copy_struct(self.context, destination, source, record).build());
+            .append_op(cir::ops::copy_struct(self.context, destination, source, record).build());
         Ok(())
     }
 
@@ -3787,11 +3789,13 @@ impl FnCodegen<'_> {
             let (size, align) = source_type_layout(self.typed, source_ty);
             let destination = self
                 .builder
-                .insert(p::alloca(self.context, size, align, PtrType::opaque(self.context)).build())
+                .append_op(
+                    p::alloca(self.context, size, align, PtrType::opaque(self.context)).build(),
+                )
                 .result();
             let size = self
                 .builder
-                .insert(
+                .append_op(
                     b::constant(
                         self.context,
                         size as i64,
@@ -3801,7 +3805,7 @@ impl FnCodegen<'_> {
                 )
                 .result();
             self.builder
-                .insert(p::memcpy(self.context, destination, source, size).build());
+                .append_op(p::memcpy(self.context, destination, source, size).build());
             return Ok(vec![destination]);
         }
         if matches!(
@@ -3826,7 +3830,7 @@ impl FnCodegen<'_> {
                 .map(|piece| {
                     let address = self.offset_address(ptr, piece.offset);
                     self.builder
-                        .insert(p::load(self.context, address, piece.ty).build())
+                        .append_op(p::load(self.context, address, piece.ty).build())
                         .result()
                 })
                 .collect::<Vec<_>>();
@@ -3837,7 +3841,7 @@ impl FnCodegen<'_> {
                 );
                 return Ok(vec![
                     self.builder
-                        .insert(
+                        .append_op(
                             b::MakeTupleOpBuilder::new(self.context)
                                 .elements(values)
                                 .result_type(ty)
@@ -3867,7 +3871,7 @@ impl FnCodegen<'_> {
 
         let destination = self
             .builder
-            .insert(
+            .append_op(
                 p::alloca(
                     self.context,
                     abi_size,
@@ -3881,21 +3885,21 @@ impl FnCodegen<'_> {
             let zero = match type_kind(self.context, piece.ty) {
                 ValueKind::Float => self
                     .builder
-                    .insert(b::constantf(self.context, 0.0, piece.ty).build())
+                    .append_op(b::constantf(self.context, 0.0, piece.ty).build())
                     .result(),
                 ValueKind::Int => self
                     .builder
-                    .insert(b::constant(self.context, 0, piece.ty).build())
+                    .append_op(b::constant(self.context, 0, piece.ty).build())
                     .result(),
                 ValueKind::Vector => unreachable!("ABI padding uses scalar carriers"),
             };
             let address = self.offset_address(destination, piece.offset);
             self.builder
-                .insert(p::store(self.context, zero, address).build());
+                .append_op(p::store(self.context, zero, address).build());
         }
         let size = self
             .builder
-            .insert(
+            .append_op(
                 b::constant(
                     self.context,
                     size as i64,
@@ -3905,7 +3909,7 @@ impl FnCodegen<'_> {
             )
             .result();
         self.builder
-            .insert(p::memcpy(self.context, destination, source, size).build());
+            .append_op(p::memcpy(self.context, destination, source, size).build());
         destination
     }
 
@@ -3933,7 +3937,7 @@ impl FnCodegen<'_> {
             .map(|piece| {
                 let address = self.offset_address(ptr, piece.offset);
                 self.builder
-                    .insert(p::load(self.context, address, piece.ty).build())
+                    .append_op(p::load(self.context, address, piece.ty).build())
                     .result()
             })
             .collect::<Vec<_>>();
@@ -3941,7 +3945,7 @@ impl FnCodegen<'_> {
             return *value;
         }
         self.builder
-            .insert(
+            .append_op(
                 b::MakeTupleOpBuilder::new(self.context)
                     .elements(values)
                     .result_type(self.return_abi.ty)
@@ -3968,7 +3972,7 @@ impl FnCodegen<'_> {
                 let (size, _) = source_type_layout(self.typed, node_type(self.typed, node));
                 let size = self
                     .builder
-                    .insert(
+                    .append_op(
                         b::constant(
                             self.context,
                             size as i64,
@@ -3978,23 +3982,23 @@ impl FnCodegen<'_> {
                     )
                     .result();
                 self.builder
-                    .insert(p::memcpy(self.context, slot.ptr, source, size).build());
+                    .append_op(p::memcpy(self.context, slot.ptr, source, size).build());
             }
             Some(node) => {
                 let slot = self.return_slot.unwrap();
                 let value = self.lower_expr(node)?;
                 self.builder
-                    .insert(p::store(self.context, value, slot.ptr).build());
+                    .append_op(p::store(self.context, value, slot.ptr).build());
             }
             None => {}
         }
         let flag = self.return_flag.unwrap();
         let one = self
             .builder
-            .insert(b::constant(self.context, 1, flag.elem).build())
+            .append_op(b::constant(self.context, 1, flag.elem).build())
             .result();
         self.builder
-            .insert(p::store(self.context, one, flag.ptr).build());
+            .append_op(p::store(self.context, one, flag.ptr).build());
         Ok(())
     }
 
@@ -4006,7 +4010,7 @@ impl FnCodegen<'_> {
         let (size, _) = source_type_layout(self.typed, node_type(self.typed, node));
         let size = self
             .builder
-            .insert(
+            .append_op(
                 b::constant(
                     self.context,
                     size as i64,
@@ -4015,7 +4019,7 @@ impl FnCodegen<'_> {
                 .build(),
             )
             .result();
-        self.builder.insert(
+        self.builder.append_op(
             p::memcpy(
                 self.context,
                 self.indirect_return
@@ -4053,7 +4057,7 @@ impl FnCodegen<'_> {
             let ty = lower_type(self.context, self.typed, node_type(self.typed, node));
             let expression = LoweredExpr::Value(
                 self.builder
-                    .insert(b::constant(self.context, value, ty).build())
+                    .append_op(b::constant(self.context, value, ty).build())
                     .result(),
             );
             let expression = self.apply_conversions(node, expression);
@@ -4080,7 +4084,7 @@ impl FnCodegen<'_> {
                     let ty = lower_type(self.context, self.typed, node_type(self.typed, node));
                     LoweredExpr::Value(
                         self.builder
-                            .insert(b::constant(self.context, n.value.to_i64(), ty).build())
+                            .append_op(b::constant(self.context, n.value.to_i64(), ty).build())
                             .result(),
                     )
                 }
@@ -4090,7 +4094,7 @@ impl FnCodegen<'_> {
                     };
                     LoweredExpr::Value(
                         self.builder
-                            .insert(
+                            .append_op(
                                 b::constantf(self.context, n.value, FloatType::f64(self.context))
                                     .build(),
                             )
@@ -4111,7 +4115,7 @@ impl FnCodegen<'_> {
                     let ty = lower_type(self.context, self.typed, node_type(self.typed, node));
                     LoweredExpr::Value(
                         self.builder
-                            .insert(b::constant(self.context, value, ty).build())
+                            .append_op(b::constant(self.context, value, ty).build())
                             .result(),
                     )
                 }
@@ -4120,7 +4124,7 @@ impl FnCodegen<'_> {
                     let ty = lower_type(self.context, self.typed, node_type(self.typed, node));
                     LoweredExpr::Value(
                         self.builder
-                            .insert(b::constant(self.context, value, ty).build())
+                            .append_op(b::constant(self.context, value, ty).build())
                             .result(),
                     )
                 }
@@ -4131,7 +4135,7 @@ impl FnCodegen<'_> {
                     let ptr_ty = PtrType::opaque(self.context);
                     LoweredExpr::Value(
                         self.builder
-                            .insert(cir::string_op(self.context, value, ptr_ty))
+                            .append_op(cir::string_op(self.context, value, ptr_ty))
                             .result(),
                     )
                 }
@@ -4143,7 +4147,7 @@ impl FnCodegen<'_> {
                         let ty = lower_type(self.context, self.typed, node_type(self.typed, node));
                         LoweredExpr::Value(
                             self.builder
-                                .insert(b::constant(self.context, value, ty).build())
+                                .append_op(b::constant(self.context, value, ty).build())
                                 .result(),
                         )
                     } else if ast
@@ -4157,7 +4161,7 @@ impl FnCodegen<'_> {
                         );
                         LoweredExpr::Value(
                             self.builder
-                                .insert(b::addr_of_op(self.context, name, ptr_ty))
+                                .append_op(b::addr_of_op(self.context, name, ptr_ty))
                                 .result(),
                         )
                     } else {
@@ -4173,7 +4177,7 @@ impl FnCodegen<'_> {
                             LoweredExpr::Address {
                                 ptr: self
                                     .builder
-                                    .insert(b::addr_of_op(self.context, &global.name, ptr_ty))
+                                    .append_op(b::addr_of_op(self.context, &global.name, ptr_ty))
                                     .result(),
                                 elem: global.elem,
                             }
@@ -4211,7 +4215,7 @@ impl FnCodegen<'_> {
                         }
                         _ => unreachable!("member base has a record type"),
                     };
-                    let member = self.builder.insert(
+                    let member = self.builder.append_op(
                         cir::ops::get_member(
                             self.context,
                             base_ptr,
@@ -4251,7 +4255,11 @@ impl FnCodegen<'_> {
                                     let ptr_ty = PtrType::opaque(self.context);
                                     let address = self
                                         .builder
-                                        .insert(b::addr_of_op(self.context, &global.name, ptr_ty))
+                                        .append_op(b::addr_of_op(
+                                            self.context,
+                                            &global.name,
+                                            ptr_ty,
+                                        ))
                                         .result();
                                     self.materialize(LoweredExpr::Address {
                                         ptr: address,
@@ -4318,7 +4326,7 @@ impl FnCodegen<'_> {
                             if argument_alignments.iter().any(|&alignment| alignment > 1) {
                                 call = call.argument_alignments(&argument_alignments);
                             }
-                            self.builder.insert(call.build());
+                            self.builder.append_op(call.build());
                         } else {
                             let mut call = b::CallOpBuilder::new(self.context)
                                 .args(args)
@@ -4333,7 +4341,7 @@ impl FnCodegen<'_> {
                             if argument_alignments.iter().any(|&alignment| alignment > 1) {
                                 call = call.argument_alignments(&argument_alignments);
                             }
-                            self.builder.insert(call.build());
+                            self.builder.append_op(call.build());
                         }
                         LoweredExpr::Address {
                             ptr: slot.ptr,
@@ -4348,7 +4356,7 @@ impl FnCodegen<'_> {
                             if argument_alignments.iter().any(|&alignment| alignment > 1) {
                                 call = call.argument_alignments(&argument_alignments);
                             }
-                            self.builder.insert(call.build()).result()
+                            self.builder.append_op(call.build()).result()
                         } else {
                             let mut call = b::CallOpBuilder::new(self.context)
                                 .args(args)
@@ -4362,7 +4370,7 @@ impl FnCodegen<'_> {
                             if argument_alignments.iter().any(|&alignment| alignment > 1) {
                                 call = call.argument_alignments(&argument_alignments);
                             }
-                            self.builder.insert(call.build()).result()
+                            self.builder.append_op(call.build()).result()
                         };
                         if let Some(pieces) = sig.ret.aggregate.as_deref() {
                             let (size, align) = source_type_layout(self.typed, source_ty);
@@ -4374,7 +4382,7 @@ impl FnCodegen<'_> {
                                     result
                                 } else {
                                     self.builder
-                                        .insert(
+                                        .append_op(
                                             b::TupleGetOpBuilder::new(self.context)
                                                 .tuple(result)
                                                 .attr("index", AttributeValue::UInt(index as u64))
@@ -4385,7 +4393,7 @@ impl FnCodegen<'_> {
                                 };
                                 let address = self.offset_address(slot.ptr, piece.offset);
                                 self.builder
-                                    .insert(p::store(self.context, value, address).build());
+                                    .append_op(p::store(self.context, value, address).build());
                             }
                             LoweredExpr::Address {
                                 ptr: slot.ptr,
@@ -4465,25 +4473,25 @@ impl FnCodegen<'_> {
                         AstKind::Neg => {
                             let zero = self
                                 .builder
-                                .insert(b::constant(self.context, 0, result_ty).build())
+                                .append_op(b::constant(self.context, 0, result_ty).build())
                                 .result();
                             self.builder
-                                .insert(b::subi(self.context, zero, operand, result_ty).build())
+                                .append_op(b::subi(self.context, zero, operand, result_ty).build())
                                 .result()
                         }
                         AstKind::BitNot => {
                             let ones = self
                                 .builder
-                                .insert(b::constant(self.context, -1, result_ty).build())
+                                .append_op(b::constant(self.context, -1, result_ty).build())
                                 .result();
                             self.builder
-                                .insert(b::xori(self.context, operand, ones, result_ty).build())
+                                .append_op(b::xori(self.context, operand, ones, result_ty).build())
                                 .result()
                         }
                         AstKind::Not => {
                             let comparison = self.compare_against_zero(operand, "eq");
                             self.builder
-                                .insert(b::extui(self.context, comparison, result_ty).build())
+                                .append_op(b::extui(self.context, comparison, result_ty).build())
                                 .result()
                         }
                         _ => unreachable!(),
@@ -4527,7 +4535,7 @@ impl FnCodegen<'_> {
                     };
                     let old = self
                         .builder
-                        .insert(p::load(self.context, ptr, elem).build())
+                        .append_op(p::load(self.context, ptr, elem).build())
                         .result();
                     let operand_ty = node_type(self.typed, child);
                     let increment = matches!(kind, AstKind::PreInc | AstKind::PostInc);
@@ -4538,7 +4546,7 @@ impl FnCodegen<'_> {
                             let size = source_type_layout(self.typed, *pointee).0 as i64;
                             let offset = self
                                 .builder
-                                .insert(
+                                .append_op(
                                     b::constant(
                                         self.context,
                                         if increment { size } else { -size },
@@ -4548,25 +4556,25 @@ impl FnCodegen<'_> {
                                 )
                                 .result();
                             self.builder
-                                .insert(p::ptradd(self.context, old, offset, elem).build())
+                                .append_op(p::ptradd(self.context, old, offset, elem).build())
                                 .result()
                         } else {
                             let one = self
                                 .builder
-                                .insert(b::constant(self.context, 1, elem).build())
+                                .append_op(b::constant(self.context, 1, elem).build())
                                 .result();
                             if increment {
                                 self.builder
-                                    .insert(b::addi(self.context, old, one, elem).build())
+                                    .append_op(b::addi(self.context, old, one, elem).build())
                                     .result()
                             } else {
                                 self.builder
-                                    .insert(b::subi(self.context, old, one, elem).build())
+                                    .append_op(b::subi(self.context, old, one, elem).build())
                                     .result()
                             }
                         };
                     self.builder
-                        .insert(p::store(self.context, new, ptr).build());
+                        .append_op(p::store(self.context, new, ptr).build());
                     LoweredExpr::Value(if matches!(kind, AstKind::PostInc | AstKind::PostDec) {
                         old
                     } else {
@@ -4621,7 +4629,7 @@ impl FnCodegen<'_> {
                     {
                         let target = lower_type(self.context, self.typed, target);
                         self.builder
-                            .insert(p::null(self.context, target).build())
+                            .append_op(p::null(self.context, target).build())
                             .result()
                     } else {
                         self.convert_scalar(value, source, target)
@@ -4651,7 +4659,7 @@ impl FnCodegen<'_> {
                     let rhs = self.materialize(self.values[&rhs_node]);
                     let lhs = self
                         .builder
-                        .insert(p::load(self.context, ptr, elem).build())
+                        .append_op(p::load(self.context, ptr, elem).build())
                         .result();
                     let source_ty = node_type(self.typed, lhs_node);
                     let value = if let TypeKind::Pointer(_) = self.typed.types().kind(source_ty) {
@@ -4672,7 +4680,7 @@ impl FnCodegen<'_> {
                         self.convert_scalar(result, operand_ty, source_ty)
                     };
                     self.builder
-                        .insert(p::store(self.context, value, ptr).build());
+                        .append_op(p::store(self.context, value, ptr).build());
                     LoweredExpr::Value(value)
                 }
                 AstKind::AssignExpr => {
@@ -4697,7 +4705,7 @@ impl FnCodegen<'_> {
                                 "non-addressable struct source".to_string(),
                             ));
                         };
-                        self.builder.insert(
+                        self.builder.append_op(
                             cir::ops::copy_struct(
                                 self.context,
                                 ptr,
@@ -4710,7 +4718,7 @@ impl FnCodegen<'_> {
                     } else {
                         let value = self.materialize(rhs);
                         self.builder
-                            .insert(p::store(self.context, value, ptr).build());
+                            .append_op(p::store(self.context, value, ptr).build());
                         LoweredExpr::Value(value)
                     }
                 }
@@ -4771,7 +4779,7 @@ impl FnCodegen<'_> {
             )
         })?;
 
-        self.builder.insert(
+        self.builder.append_op(
             cir::ops::r#if(
                 self.context,
                 condition,
@@ -4782,7 +4790,7 @@ impl FnCodegen<'_> {
         );
         let expression = LoweredExpr::Value(
             self.builder
-                .insert(p::load(self.context, result.ptr, result.elem).build())
+                .append_op(p::load(self.context, result.ptr, result.elem).build())
                 .result(),
         );
         self.values.insert(node, expression);
@@ -4803,15 +4811,15 @@ impl FnCodegen<'_> {
             let rhs = self.materialize(rhs);
             let rhs = self.truth_value(rhs);
             self.builder
-                .insert(b::extui(self.context, rhs, result_ty).build())
+                .append_op(b::extui(self.context, rhs, result_ty).build())
                 .result()
         } else {
             self.builder
-                .insert(b::constant(self.context, constant, result_ty).build())
+                .append_op(b::constant(self.context, constant, result_ty).build())
                 .result()
         };
         self.builder
-            .insert(p::store(self.context, value, result.ptr).build());
+            .append_op(p::store(self.context, value, result.ptr).build());
         self.ensure_cir_yield(block);
         Ok(())
     }
@@ -4843,7 +4851,7 @@ impl FnCodegen<'_> {
             cg.lower_conditional_arm(else_node, result, else_block)
         })?;
 
-        self.builder.insert(
+        self.builder.append_op(
             cir::ops::r#if(
                 self.context,
                 condition,
@@ -4854,7 +4862,7 @@ impl FnCodegen<'_> {
         );
         let expression = LoweredExpr::Value(
             self.builder
-                .insert(p::load(self.context, result.ptr, result.elem).build())
+                .append_op(p::load(self.context, result.ptr, result.elem).build())
                 .result(),
         );
         self.values.insert(node, expression);
@@ -4870,7 +4878,7 @@ impl FnCodegen<'_> {
         let value = self.lower_expr_node(node)?;
         let value = self.materialize(value);
         self.builder
-            .insert(p::store(self.context, value, result.ptr).build());
+            .append_op(p::store(self.context, value, result.ptr).build());
         self.ensure_cir_yield(block);
         Ok(())
     }
@@ -4958,7 +4966,6 @@ pub fn lower_data(context: &Context, module: &ModuleOp) -> Result<(), tir::PassE
         let section = SectionOpBuilder::new(context)
             .attr("name", AttributeValue::Str(".data".to_string()))
             .build();
-        let mut section_builder = IRBuilder::new(section.body());
         for (name, bytes, mut relocations, align) in globals {
             let symbol = SymbolOpBuilder::new(context)
                 .attr("name", AttributeValue::Str(name))
@@ -4966,19 +4973,18 @@ pub fn lower_data(context: &Context, module: &ModuleOp) -> Result<(), tir::PassE
                 .attr("kind", AttributeValue::Str("object".to_string()))
                 .attr("align", AttributeValue::UInt(align))
                 .build();
-            let mut symbol_builder = IRBuilder::new(symbol.body());
             relocations.sort_by_key(|relocation| relocation.0);
             let mut cursor = 0;
             for (offset, target, addend, width) in relocations {
                 for &byte in &bytes[cursor..offset as usize] {
-                    symbol_builder.insert(
+                    symbol.body().append_op(
                         LiteralOpBuilder::new(context)
                             .attr("kind", AttributeValue::Str("byte".to_string()))
                             .attr("value", AttributeValue::Int(i64::from(byte)))
                             .build(),
                     );
                 }
-                symbol_builder.insert(
+                symbol.body().append_op(
                     DataRelocOpBuilder::new(context)
                         .attr("symbol", AttributeValue::Str(target))
                         .attr("width", AttributeValue::UInt(width))
@@ -4988,17 +4994,21 @@ pub fn lower_data(context: &Context, module: &ModuleOp) -> Result<(), tir::PassE
                 cursor = (offset + width) as usize;
             }
             for &byte in &bytes[cursor..] {
-                symbol_builder.insert(
+                symbol.body().append_op(
                     LiteralOpBuilder::new(context)
                         .attr("kind", AttributeValue::Str("byte".to_string()))
                         .attr("value", AttributeValue::Int(i64::from(byte)))
                         .build(),
                 );
             }
-            symbol_builder.insert(SymbolEndOpBuilder::new(context).build());
-            section_builder.insert(symbol);
+            symbol
+                .body()
+                .append_op(SymbolEndOpBuilder::new(context).build());
+            section.body().append_op(symbol);
         }
-        section_builder.insert(SectionEndOpBuilder::new(context).build());
+        section
+            .body()
+            .append_op(SectionEndOpBuilder::new(context).build());
         let end = context.get_block(module_body.id()).len().saturating_sub(1);
         module_body.insert(end, section.id());
     }
@@ -5007,7 +5017,6 @@ pub fn lower_data(context: &Context, module: &ModuleOp) -> Result<(), tir::PassE
         let section = SectionOpBuilder::new(context)
             .attr("name", AttributeValue::Str(".bss".to_string()))
             .build();
-        let mut section_builder = IRBuilder::new(section.body());
         for (name, size, align) in zero_globals {
             let symbol = SymbolOpBuilder::new(context)
                 .attr("name", AttributeValue::Str(name))
@@ -5015,17 +5024,20 @@ pub fn lower_data(context: &Context, module: &ModuleOp) -> Result<(), tir::PassE
                 .attr("kind", AttributeValue::Str("object".to_string()))
                 .attr("align", AttributeValue::UInt(align))
                 .build();
-            let mut symbol_builder = IRBuilder::new(symbol.body());
-            symbol_builder.insert(
+            symbol.body().append_op(
                 LiteralOpBuilder::new(context)
                     .attr("kind", AttributeValue::Str("space".to_string()))
                     .attr("value", AttributeValue::Int(size as i64))
                     .build(),
             );
-            symbol_builder.insert(SymbolEndOpBuilder::new(context).build());
-            section_builder.insert(symbol);
+            symbol
+                .body()
+                .append_op(SymbolEndOpBuilder::new(context).build());
+            section.body().append_op(symbol);
         }
-        section_builder.insert(SectionEndOpBuilder::new(context).build());
+        section
+            .body()
+            .append_op(SectionEndOpBuilder::new(context).build());
         let end = context.get_block(module_body.id()).len().saturating_sub(1);
         module_body.insert(end, section.id());
     }
@@ -5037,24 +5049,26 @@ pub fn lower_data(context: &Context, module: &ModuleOp) -> Result<(), tir::PassE
     let section = SectionOpBuilder::new(context)
         .attr("name", AttributeValue::Str(".rodata".to_string()))
         .build();
-    let mut section_builder = IRBuilder::new(section.body());
     for (label, value) in strings {
         let symbol = SymbolOpBuilder::new(context)
             .attr("name", AttributeValue::Str(label))
             .attr("binding", AttributeValue::Str("local".to_string()))
             .attr("kind", AttributeValue::Str("object".to_string()))
             .build();
-        let mut symbol_builder = IRBuilder::new(symbol.body());
-        symbol_builder.insert(
+        symbol.body().append_op(
             LiteralOpBuilder::new(context)
                 .attr("kind", AttributeValue::Str("asciz".to_string()))
                 .attr("value", AttributeValue::Str(value))
                 .build(),
         );
-        symbol_builder.insert(SymbolEndOpBuilder::new(context).build());
-        section_builder.insert(symbol);
+        symbol
+            .body()
+            .append_op(SymbolEndOpBuilder::new(context).build());
+        section.body().append_op(symbol);
     }
-    section_builder.insert(SectionEndOpBuilder::new(context).build());
+    section
+        .body()
+        .append_op(SectionEndOpBuilder::new(context).build());
 
     // Splice the section in ahead of the module terminator.
     let end = context.get_block(module_body.id()).len().saturating_sub(1);

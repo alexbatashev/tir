@@ -30,7 +30,7 @@ pub use linkme;
 
 pub use lexer::Token;
 pub use lexer::lex;
-pub use parser::{AsmInstructionParser, AsmParser};
+pub use parser::{AsmCursor, AsmInstructionParser, AsmParser};
 pub use printer::{AsmInstructionPrinter, AsmPrintError, AsmPrinter};
 use tir::attributes::{AttributeValue, RegisterAttr};
 use tir::sem::{AtomicRmwOp, MemOrdering};
