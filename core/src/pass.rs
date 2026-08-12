@@ -273,11 +273,23 @@ pub trait Pass: Send {
 
 pub struct Rewriter {
     context: Context,
+    /// Set while a machine-emitting pass runs. Such a pass replaces a source op
+    /// with machine ops that declare no SSA results and instead claim the
+    /// original result's def-site through a Def-role register attribute, so the
+    /// erased op's result values must outlive it.
+    results_claimed: bool,
 }
 
 impl Rewriter {
     pub fn new(context: Context) -> Self {
-        Self { context }
+        Self {
+            context,
+            results_claimed: false,
+        }
+    }
+
+    pub(crate) fn set_results_claimed(&mut self, claimed: bool) {
+        self.results_claimed = claimed;
     }
 
     pub fn context(&self) -> &Context {
@@ -358,13 +370,14 @@ impl Rewriter {
             // destination convention) — so they skip this entirely and the original
             // values stay live.
             let new_results = self.context.get_op(new_op.id()).results.clone();
-            if new_results.len() == target.op.results.len() {
+            let results_forwarded = new_results.len() == target.op.results.len();
+            if results_forwarded {
                 for (old, new) in target.op.results.iter().zip(new_results.iter()) {
                     self.context.replace_value_uses(*old, *new);
                 }
             }
-            // Drop the old op from the arena so it doesn't linger as a phantom.
-            self.context.remove_operation(target.op.id);
+            // Drop the old op and what it owns so nothing lingers as a phantom.
+            self.remove(target.op.id, results_forwarded);
             Ok(())
         } else {
             Err(PassError::RewriteFailed(target.op.id))
@@ -377,10 +390,20 @@ impl Rewriter {
             .as_ref()
             .ok_or(PassError::MissingBlock(target.name().as_str()))?;
         if block.remove_op(target.op.id) {
-            self.context.remove_operation(target.op.id);
+            self.remove(target.op.id, true);
             Ok(())
         } else {
             Err(PassError::RewriteFailed(target.op.id))
+        }
+    }
+
+    /// Erase `op` and the entities it owns. Its result values go with it unless
+    /// they were forwarded to a replacement or are claimed by machine ops.
+    fn remove(&self, op: OpId, results_dead: bool) {
+        if results_dead && !self.results_claimed {
+            self.context.remove_operation(op);
+        } else {
+            self.context.remove_operation_keeping_results(op);
         }
     }
 
@@ -584,6 +607,7 @@ impl PassManager {
         match entry {
             PassNode::Pass(pass) => {
                 let scope = crate::memstats::pass_scope(pass.name());
+                rewriter.set_results_claimed(pass.emits_machine_ir());
                 let version_before = context.op_version(root.op.id);
                 PassManager::walk_ops(context, root, &mut |op_ref| {
                     if pass.target().matches(op_ref.op()) {
@@ -631,6 +655,11 @@ impl PassManager {
     {
         f(root.clone())?;
         for region_id in &root.op.regions {
+            // The visit may have erased `root`, reclaiming the regions it owned;
+            // a region the replacement took over is still live and still walked.
+            if !context.has_region(*region_id) {
+                continue;
+            }
             let region = context.get_region(*region_id);
             for block in region.iter(context.clone()) {
                 let op_ids = block.op_ids();

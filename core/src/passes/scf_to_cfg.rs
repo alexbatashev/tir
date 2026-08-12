@@ -69,12 +69,16 @@ impl ScfToCfgPass {
         }
     }
 
+    /// Take a structured op's body out of its region. Leaving the region is part
+    /// of the move: erasing the op reclaims the blocks its regions still hold.
     fn move_body(context: &Context, region: RegionId) -> Arc<Block> {
-        context
+        let body = context
             .get_region(region)
             .iter(context.clone())
             .next()
-            .unwrap()
+            .unwrap();
+        context.get_region(region).remove_block(body.id());
+        body
     }
 
     /// The loop body, ready to become a block of the function: the token its
@@ -89,7 +93,6 @@ impl ScfToCfgPass {
             .iter()
             .position(|argument| argument.ty() == token)
             .map(|index| context.remove_block_argument(body.id(), index).id());
-        context.get_region(region).remove_block(body.id());
         (context.get_block(body.id()), scope)
     }
 

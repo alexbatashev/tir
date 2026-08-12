@@ -97,6 +97,23 @@ fn slab_put<T>(slab: &mut Vec<Option<T>>, idx: usize, val: T) {
     slab[idx] = Some(val);
 }
 
+/// Give a slab slot's contents back. The slot itself is kept empty forever; see
+/// [`Context::free`].
+fn clear_slot<T>(slab: &mut [Option<T>], idx: usize) {
+    if let Some(slot) = slab.get_mut(idx) {
+        *slot = None;
+    }
+}
+
+/// Entities an erase reclaims, gathered before the context lock is taken.
+#[derive(Default)]
+struct Owned {
+    ops: Vec<OpId>,
+    values: Vec<ValueId>,
+    blocks: Vec<BlockId>,
+    regions: Vec<RegionId>,
+}
+
 struct ContextInstance {
     // Arenas are slabs indexed by the dense, monotonic id counters below; see `slab_get`.
     operations: Vec<Option<Arc<OpInstance>>>,
@@ -416,16 +433,25 @@ impl Context {
         dirty
     }
 
-    /// Remove an op from the operation arena. Called by `Rewriter::erase_op`/
-    /// `replace_op` once the op has left its block, so the arena tracks the *live*
-    /// IR rather than accumulating detached ops (which otherwise show up as phantom
-    /// references to any whole-program scan). Existing `Arc<OpInstance>` handles
-    /// (e.g. inside an `OperationRef`) keep the instance alive after removal.
+    /// Erase an op and everything it owns: its result values, its regions, their
+    /// blocks and block arguments, and every op nested in them. Called by
+    /// `Rewriter::erase_op`/`replace_op` once the op has left its block, so the
+    /// arenas track the *live* IR rather than accumulating erased entities.
+    /// Existing `Arc` handles (e.g. inside an `OperationRef`) keep the entities
+    /// they point at alive for as long as they are held.
     pub(crate) fn remove_operation(&self, id: OpId) {
-        let mut inner = self.0.write();
-        if let Some(slot) = inner.operations.get_mut(id.index()) {
-            *slot = None;
-        }
+        self.free(self.owned_entities(vec![id]));
+    }
+
+    /// [`Context::remove_operation`] for a replacement that hands the erased op's
+    /// result values to the new op: machine ops declare no SSA results and claim
+    /// the original result's def-site through a register attribute, so those
+    /// values outlive the op that defined them.
+    pub(crate) fn remove_operation_keeping_results(&self, id: OpId) {
+        let mut owned = self.owned_entities(vec![id]);
+        let results = self.get_op(id).results.clone();
+        owned.values.retain(|value| !results.contains(value));
+        self.free(owned);
     }
 
     /// Replace a single operation's SSA operand at `index`. Used by register
@@ -617,9 +643,8 @@ impl Context {
         let mut inner = self.0.write();
         let entry = slab_get_mut(&mut inner.blocks, block.index()).expect("live block");
         let argument = Arc::make_mut(entry).arguments_mut().remove(index);
-        if let Some(slot) = inner.value_block.get_mut(argument.id().index()) {
-            *slot = None;
-        }
+        clear_slot(&mut inner.value_block, argument.id().index());
+        clear_slot(&mut inner.values, argument.id().index());
         inner.edit_block(block);
         argument
     }
@@ -760,25 +785,105 @@ impl Context {
         (ops, visited_blocks)
     }
 
-    /// Take the subtree under `blocks` out of the live IR: clear the parent links
-    /// a walk would follow and remove the ops from the arena. Bumps no version —
-    /// the caller reports the edit.
+    /// Take the subtree under `blocks` out of the live IR and give its storage
+    /// back. Bumps no version — the caller reports the edit.
     fn detach_subtree(&self, blocks: &[BlockId]) {
-        let (ops, blocks) = self.subtree(blocks);
+        self.free(self.collect_owned(Vec::new(), blocks.to_vec()));
+    }
+
+    /// Everything `ops` own: the ops themselves, their result values, their
+    /// regions, and those regions' blocks, block arguments and nested ops.
+    fn owned_entities(&self, ops: Vec<OpId>) -> Owned {
+        self.collect_owned(ops, Vec::new())
+    }
+
+    /// Walks ops and blocks alternately. Collected without the context lock held,
+    /// so no region lock is ever taken under it.
+    ///
+    /// A nested entity is reclaimed only while its parent link still points at the
+    /// entity being erased: a rewrite that lifts a block out of a region it is
+    /// destroying (`scf_to_cfg` moves loop bodies into the function region) leaves
+    /// the block listed in the dying region, and that stale listing must not free
+    /// live IR.
+    fn collect_owned(&self, mut ops: Vec<OpId>, mut blocks: Vec<BlockId>) -> Owned {
+        let mut owned = Owned::default();
+        loop {
+            while let Some(op) = ops.pop() {
+                let Some(instance) = self.find_op(op) else {
+                    continue;
+                };
+                owned.ops.push(op);
+                owned.values.extend(instance.results.iter().copied());
+                for region in &instance.regions {
+                    let Some(handle) = self.find_region(*region) else {
+                        continue;
+                    };
+                    if handle.parent_op() != Some(op) {
+                        continue;
+                    }
+                    owned.regions.push(*region);
+                    let held = handle
+                        .block_ids()
+                        .into_iter()
+                        .filter(|block| self.parent_region(*block) == Some(*region));
+                    blocks.extend(held);
+                }
+            }
+            let Some(block) = blocks.pop() else {
+                return owned;
+            };
+            let Some(block) = self.find_block(block) else {
+                continue;
+            };
+            owned.blocks.push(block.id());
+            owned
+                .values
+                .extend(block.arguments().iter().map(|argument| argument.id()));
+            ops.extend(
+                block
+                    .op_ids()
+                    .into_iter()
+                    .filter(|op| self.parent_block(*op) == Some(block.id())),
+            );
+        }
+    }
+
+    /// Drop the storage of entities that have left the IR, and the reverse-index
+    /// entries that pointed into it.
+    ///
+    /// Slots are emptied, never handed to another entity: ids come from monotonic
+    /// per-context counters and are never reused, so a stale id can only read as
+    /// "gone", never as some later entity. The empty slot costs one word until the
+    /// context dies; the entity behind it is freed here.
+    fn free(&self, owned: Owned) {
         let mut inner = self.0.write();
-        for op in ops {
-            if let Some(slot) = inner.op_parent.get_mut(op.index()) {
-                *slot = None;
-            }
-            if let Some(slot) = inner.operations.get_mut(op.index()) {
-                *slot = None;
-            }
+        for op in owned.ops {
+            clear_slot(&mut inner.operations, op.index());
+            clear_slot(&mut inner.op_parent, op.index());
         }
-        for block in blocks {
-            if let Some(slot) = inner.block_parent.get_mut(block.index()) {
-                *slot = None;
-            }
+        for value in owned.values {
+            clear_slot(&mut inner.values, value.index());
+            clear_slot(&mut inner.value_block, value.index());
         }
+        for block in owned.blocks {
+            clear_slot(&mut inner.blocks, block.index());
+            clear_slot(&mut inner.block_parent, block.index());
+        }
+        for region in owned.regions {
+            clear_slot(&mut inner.regions, region.index());
+        }
+    }
+
+    fn find_op(&self, id: OpId) -> Option<Arc<OpInstance>> {
+        slab_get(&self.0.read().operations, id.index()).cloned()
+    }
+
+    fn find_block(&self, id: BlockId) -> Option<Arc<Block>> {
+        slab_get(&self.0.read().blocks, id.index()).cloned()
+    }
+
+    fn find_region(&self, id: RegionId) -> Option<Arc<Region>> {
+        slab_get(&self.0.read().regions, id.index()).cloned()
     }
 
     /// Insert `op` into `block` at `index`, recording the new parent.
