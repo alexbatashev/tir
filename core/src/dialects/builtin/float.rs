@@ -329,7 +329,7 @@ impl CmpFOp {
         >,
     ) -> Option<tir::graph::NodeId> {
         let predicate = match self.0.attr("predicate")? {
-            tir::attributes::AttributeValue::Str(value) => value.as_str(),
+            tir::attributes::AttributeValue::Str(value) => &**value,
             _ => return None,
         };
         cmpf_semantics(g, predicate)
@@ -340,7 +340,7 @@ impl CmpFOpBuilder {
     pub fn predicate(self, predicate: &str) -> Self {
         self.attr(
             "predicate",
-            tir::attributes::AttributeValue::Str(predicate.to_string()),
+            tir::attributes::AttributeValue::Str(predicate.to_string().into()),
         )
     }
 }

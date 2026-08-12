@@ -296,7 +296,7 @@ impl CmpOp {
 
 impl CmpOpBuilder {
     pub fn predicate(self, pred: &str) -> Self {
-        self.attr("predicate", AttributeValue::Str(pred.to_string()))
+        self.attr("predicate", AttributeValue::Str(pred.to_string().into()))
     }
 }
 
@@ -317,7 +317,7 @@ impl tir::Verifiable for CmpOp {
 
 fn predicate(op: &impl Operation) -> Option<&str> {
     match op.attr("predicate")? {
-        AttributeValue::Str(value) => Some(value.as_str()),
+        AttributeValue::Str(value) => Some(value),
         _ => None,
     }
 }

@@ -445,7 +445,8 @@ impl SwitchOpBuilder {
                 values
                     .into_iter()
                     .map(tir::attributes::AttributeValue::Int)
-                    .collect(),
+                    .collect::<Vec<_>>()
+                    .into(),
             ),
         )
     }

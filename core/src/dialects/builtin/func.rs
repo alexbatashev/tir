@@ -29,7 +29,7 @@ impl FuncOpBuilder {
     pub fn sym_name(self, name: &str) -> Self {
         self.attr(
             "sym_name",
-            tir::attributes::AttributeValue::Str(name.to_string()),
+            tir::attributes::AttributeValue::Str(name.to_string().into()),
         )
     }
 
@@ -52,7 +52,8 @@ impl FuncOpBuilder {
                     .iter()
                     .copied()
                     .map(tir::attributes::AttributeValue::UInt)
-                    .collect(),
+                    .collect::<Vec<_>>()
+                    .into(),
             ),
         )
     }
@@ -109,7 +110,7 @@ impl FuncOp {
 
         // Print symbol name
         let sym_name = match self.attr("sym_name") {
-            Some(tir::attributes::AttributeValue::Str(s)) => s.clone(),
+            Some(tir::attributes::AttributeValue::Str(s)) => s.to_string(),
             Some(_) => panic!("sym_name must be a string"),
             None => "unknown".to_string(),
         };
@@ -225,7 +226,7 @@ impl FuncOp {
         if is_private {
             builder = builder.attr(
                 "sym_visibility",
-                tir::attributes::AttributeValue::Str("private".to_string()),
+                tir::attributes::AttributeValue::Str("private".to_string().into()),
             );
         }
 

@@ -89,7 +89,7 @@ mod tests {
         let module = tir::builtin::ops::module(&context, None).build();
         module.body().append_op(
             crate::cir::ZeroGlobalOpBuilder::new(&context)
-                .attr("sym_name", AttributeValue::Str("x".to_string()))
+                .attr("sym_name", AttributeValue::Str("x".to_string().into()))
                 .attr("size", AttributeValue::UInt(4))
                 .attr("align", AttributeValue::UInt(4))
                 .build(),

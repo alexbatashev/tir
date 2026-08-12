@@ -409,12 +409,13 @@ impl CallLowering {
                 .iter()
                 .copied()
                 .map(physical_reg)
-                .collect(),
+                .collect::<Vec<_>>()
+                .into(),
         );
         let call: Box<dyn Operation> = match callee {
             Callee::Direct(name) => Box::new(
                 super::VirtualCallOpBuilder::new(context)
-                    .attr("callee", AttributeValue::Str(name))
+                    .attr("callee", AttributeValue::Str(name.into()))
                     .outgoing_stack_size(u64::from(outgoing_size))
                     .attr("clobbers", clobbers)
                     .build(),

@@ -40,7 +40,7 @@ pub fn scoped_dict(context: &Context, op: OpId, key: &str) -> Option<AttributeDi
 
 fn own_dict(context: &Context, op: OpId, key: &str) -> Option<AttributeDict> {
     match context.get_op(op).attr(key) {
-        Some(AttributeValue::Dict(entries)) => Some(entries.clone()),
+        Some(AttributeValue::Dict(entries)) => Some((**entries).clone()),
         _ => None,
     }
 }
@@ -62,7 +62,7 @@ pub(crate) fn merge_into(base: &mut AttributeDict, overlay: AttributeDict) {
     for (key, value) in overlay {
         match (base.get_mut(&key), value) {
             (Some(AttributeValue::Dict(nested)), AttributeValue::Dict(inner)) => {
-                merge_into(nested, inner)
+                merge_into(nested, *inner)
             }
             (_, value) => {
                 base.insert(key, value);
@@ -78,12 +78,12 @@ mod tests {
     use crate::{Context, Operation};
 
     fn dict(entries: impl IntoIterator<Item = (&'static str, AttributeValue)>) -> AttributeValue {
-        AttributeValue::Dict(
+        AttributeValue::Dict(Box::new(
             entries
                 .into_iter()
                 .map(|(name, value)| (name.to_string(), value))
                 .collect(),
-        )
+        ))
     }
 
     #[test]

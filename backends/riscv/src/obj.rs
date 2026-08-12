@@ -159,13 +159,13 @@ pub(crate) fn lower_addr_of(
 
     let lui = crate::LoadUpperImmOpBuilder::new(context)
         .attr("rd", dest.clone())
-        .attr("imm", AttributeValue::Str(sym.clone()))
+        .attr("imm", AttributeValue::Str(sym.clone().into()))
         .build();
     rewriter.insert_op_before(op, &lui)?;
     let addi = crate::AddImmOpBuilder::new(context)
         .attr("rd", dest.clone())
         .attr("rs1", dest)
-        .attr("imm", AttributeValue::Str(sym))
+        .attr("imm", AttributeValue::Str(sym.into()))
         .build();
     rewriter.replace_op(op, &addi)?;
     Ok(true)
@@ -220,7 +220,7 @@ pub(crate) fn finalize_virtual_ops(
                 "rd",
                 phys(&crate::default_abi().ra.expect("RISC-V ABI must define ra")),
             )
-            .attr("imm", AttributeValue::Str(callee))
+            .attr("imm", AttributeValue::Str(callee.into()))
             .build();
         rewriter.replace_op(op, &jal)?;
         return Ok(true);
@@ -247,7 +247,7 @@ pub(crate) fn finalize_virtual_ops(
 
 fn string_attr(op: &dyn tir::Operation, name: &str) -> Result<String, tir::PassError> {
     match op.attr(name) {
-        Some(AttributeValue::Str(s)) => Some(s.clone()),
+        Some(AttributeValue::Str(s)) => Some(s.to_string()),
         _ => None,
     }
     .ok_or_else(|| tir::PassError::InvalidRuleSet(format!("call is missing its '{name}'")))

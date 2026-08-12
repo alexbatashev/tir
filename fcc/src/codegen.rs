@@ -386,19 +386,22 @@ pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnost
             .fields
             .iter()
             .map(|field| {
-                AttributeValue::Dict(BTreeMap::from([
-                    ("name".to_string(), AttributeValue::Str(field.name.clone())),
+                AttributeValue::Dict(Box::new(BTreeMap::from([
+                    (
+                        "name".to_string(),
+                        AttributeValue::Str(field.name.clone().into()),
+                    ),
                     (
                         "type".to_string(),
                         AttributeValue::Type(lower_type(context, typed, field.ty)),
                     ),
                     ("offset".to_string(), AttributeValue::UInt(field.offset)),
-                ]))
+                ])))
             })
             .collect();
         module.body().append_op(
             cir::DefineStructOpBuilder::new(context)
-                .attr("sym_name", AttributeValue::Str(record.name.clone()))
+                .attr("sym_name", AttributeValue::Str(record.name.clone().into()))
                 .attr("fields", AttributeValue::Array(fields))
                 .attr("size", AttributeValue::UInt(record.size))
                 .attr("align", AttributeValue::UInt(record.align))
@@ -409,8 +412,8 @@ pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnost
     for (value, name) in &global_strings {
         module.body().append_op(
             cir::GlobalStringOpBuilder::new(context)
-                .attr("sym_name", AttributeValue::Str(name.clone()))
-                .attr("value", AttributeValue::Str(value.clone()))
+                .attr("sym_name", AttributeValue::Str(name.clone().into()))
+                .attr("value", AttributeValue::Str(value.clone().into()))
                 .build(),
         );
     }
@@ -457,7 +460,7 @@ pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnost
                     {
                         module.body().append_op(
                             b::DeclareOpBuilder::new(context)
-                                .attr("sym_name", AttributeValue::Str(global.name.clone()))
+                                .attr("sym_name", AttributeValue::Str(global.name.clone().into()))
                                 .build(),
                         );
                         continue;
@@ -467,7 +470,7 @@ pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnost
                     if !is_extern && reserved_globals.insert(entity) {
                         module.body().append_op(
                             cir::ZeroGlobalOpBuilder::new(context)
-                                .attr("sym_name", AttributeValue::Str(global.name.clone()))
+                                .attr("sym_name", AttributeValue::Str(global.name.clone().into()))
                                 .attr("size", AttributeValue::UInt(size))
                                 .attr("align", AttributeValue::UInt(align))
                                 .build(),
@@ -490,14 +493,15 @@ pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnost
                 };
                 module.body().append_op(
                     cir::GlobalOpBuilder::new(context)
-                        .attr("sym_name", AttributeValue::Str(global.name.clone()))
+                        .attr("sym_name", AttributeValue::Str(global.name.clone().into()))
                         .attr(
                             "bytes",
                             AttributeValue::Array(
                                 data.bytes
                                     .into_iter()
                                     .map(|byte| AttributeValue::UInt(u64::from(byte)))
-                                    .collect(),
+                                    .collect::<Vec<_>>()
+                                    .into(),
                             ),
                         )
                         .attr(
@@ -506,14 +510,14 @@ pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnost
                                 data.relocations
                                     .into_iter()
                                     .map(|relocation| {
-                                        AttributeValue::Dict(BTreeMap::from([
+                                        AttributeValue::Dict(Box::new(BTreeMap::from([
                                             (
                                                 "offset".to_string(),
                                                 AttributeValue::UInt(relocation.offset),
                                             ),
                                             (
                                                 "symbol".to_string(),
-                                                AttributeValue::Str(relocation.symbol),
+                                                AttributeValue::Str(relocation.symbol.into()),
                                             ),
                                             (
                                                 "addend".to_string(),
@@ -523,9 +527,10 @@ pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnost
                                                 "width".to_string(),
                                                 AttributeValue::UInt(relocation.width),
                                             ),
-                                        ]))
+                                        ])))
                                     })
-                                    .collect(),
+                                    .collect::<Vec<_>>()
+                                    .into(),
                             ),
                         )
                         .attr("align", AttributeValue::UInt(align))
@@ -4333,7 +4338,7 @@ impl FnCodegen<'_> {
                                 .attr(
                                     "callee",
                                     AttributeValue::Str(
-                                        name.clone().expect("direct call has a symbol name"),
+                                        name.clone().expect("direct call has a symbol name").into(),
                                     ),
                                 )
                                 .result_address()
@@ -4363,7 +4368,7 @@ impl FnCodegen<'_> {
                                 .attr(
                                     "callee",
                                     AttributeValue::Str(
-                                        name.clone().expect("direct call has a symbol name"),
+                                        name.clone().expect("direct call has a symbol name").into(),
                                     ),
                                 )
                                 .result_type(sig.ret.ty);
@@ -4938,7 +4943,7 @@ pub fn lower_data(context: &Context, module: &ModuleOp) -> Result<(), tir::PassE
                 let value = string
                     .attr("value")
                     .and_then(|value| match value {
-                        AttributeValue::Str(s) => Some(s.clone()),
+                        AttributeValue::Str(s) => Some(s.to_string()),
                         _ => None,
                     })
                     .expect("cir.string must carry a value");
@@ -4962,13 +4967,13 @@ pub fn lower_data(context: &Context, module: &ModuleOp) -> Result<(), tir::PassE
 
     if !globals.is_empty() {
         let section = SectionOpBuilder::new(context)
-            .attr("name", AttributeValue::Str(".data".to_string()))
+            .attr("name", AttributeValue::Str(".data".to_string().into()))
             .build();
         for (name, bytes, mut relocations, align) in globals {
             let symbol = SymbolOpBuilder::new(context)
-                .attr("name", AttributeValue::Str(name))
-                .attr("binding", AttributeValue::Str("global".to_string()))
-                .attr("kind", AttributeValue::Str("object".to_string()))
+                .attr("name", AttributeValue::Str(name.into()))
+                .attr("binding", AttributeValue::Str("global".to_string().into()))
+                .attr("kind", AttributeValue::Str("object".to_string().into()))
                 .attr("align", AttributeValue::UInt(align))
                 .build();
             relocations.sort_by_key(|relocation| relocation.0);
@@ -4977,14 +4982,14 @@ pub fn lower_data(context: &Context, module: &ModuleOp) -> Result<(), tir::PassE
                 for &byte in &bytes[cursor..offset as usize] {
                     symbol.body().append_op(
                         LiteralOpBuilder::new(context)
-                            .attr("kind", AttributeValue::Str("byte".to_string()))
+                            .attr("kind", AttributeValue::Str("byte".to_string().into()))
                             .attr("value", AttributeValue::Int(i64::from(byte)))
                             .build(),
                     );
                 }
                 symbol.body().append_op(
                     DataRelocOpBuilder::new(context)
-                        .attr("symbol", AttributeValue::Str(target))
+                        .attr("symbol", AttributeValue::Str(target.into()))
                         .attr("width", AttributeValue::UInt(width))
                         .attr("addend", AttributeValue::Int(addend))
                         .build(),
@@ -4994,7 +4999,7 @@ pub fn lower_data(context: &Context, module: &ModuleOp) -> Result<(), tir::PassE
             for &byte in &bytes[cursor..] {
                 symbol.body().append_op(
                     LiteralOpBuilder::new(context)
-                        .attr("kind", AttributeValue::Str("byte".to_string()))
+                        .attr("kind", AttributeValue::Str("byte".to_string().into()))
                         .attr("value", AttributeValue::Int(i64::from(byte)))
                         .build(),
                 );
@@ -5013,18 +5018,18 @@ pub fn lower_data(context: &Context, module: &ModuleOp) -> Result<(), tir::PassE
 
     if !zero_globals.is_empty() {
         let section = SectionOpBuilder::new(context)
-            .attr("name", AttributeValue::Str(".bss".to_string()))
+            .attr("name", AttributeValue::Str(".bss".to_string().into()))
             .build();
         for (name, size, align) in zero_globals {
             let symbol = SymbolOpBuilder::new(context)
-                .attr("name", AttributeValue::Str(name))
-                .attr("binding", AttributeValue::Str("global".to_string()))
-                .attr("kind", AttributeValue::Str("object".to_string()))
+                .attr("name", AttributeValue::Str(name.into()))
+                .attr("binding", AttributeValue::Str("global".to_string().into()))
+                .attr("kind", AttributeValue::Str("object".to_string().into()))
                 .attr("align", AttributeValue::UInt(align))
                 .build();
             symbol.body().append_op(
                 LiteralOpBuilder::new(context)
-                    .attr("kind", AttributeValue::Str("space".to_string()))
+                    .attr("kind", AttributeValue::Str("space".to_string().into()))
                     .attr("value", AttributeValue::Int(size as i64))
                     .build(),
             );
@@ -5045,18 +5050,18 @@ pub fn lower_data(context: &Context, module: &ModuleOp) -> Result<(), tir::PassE
     }
 
     let section = SectionOpBuilder::new(context)
-        .attr("name", AttributeValue::Str(".rodata".to_string()))
+        .attr("name", AttributeValue::Str(".rodata".to_string().into()))
         .build();
     for (label, value) in strings {
         let symbol = SymbolOpBuilder::new(context)
-            .attr("name", AttributeValue::Str(label))
-            .attr("binding", AttributeValue::Str("local".to_string()))
-            .attr("kind", AttributeValue::Str("object".to_string()))
+            .attr("name", AttributeValue::Str(label.into()))
+            .attr("binding", AttributeValue::Str("local".to_string().into()))
+            .attr("kind", AttributeValue::Str("object".to_string().into()))
             .build();
         symbol.body().append_op(
             LiteralOpBuilder::new(context)
-                .attr("kind", AttributeValue::Str("asciz".to_string()))
-                .attr("value", AttributeValue::Str(value))
+                .attr("kind", AttributeValue::Str("asciz".to_string().into()))
+                .attr("value", AttributeValue::Str(value.into()))
                 .build(),
         );
         symbol

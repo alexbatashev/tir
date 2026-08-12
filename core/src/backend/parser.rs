@@ -99,7 +99,9 @@ impl AsmParser {
                                 SymbolOpBuilder::new(context)
                                     .attr(
                                         "name",
-                                        tir::attributes::AttributeValue::Str((*name).to_string()),
+                                        tir::attributes::AttributeValue::Str(
+                                            (*name).to_string().into(),
+                                        ),
                                     )
                                     .build(),
                             );
@@ -132,7 +134,7 @@ impl AsmParser {
                         } else {
                             let block = context.create_block(vec![]);
                             region.add_block(block.id());
-                            block.set_attr("name", AttributeValue::Str(name.clone()));
+                            block.set_attr("name", AttributeValue::Str(name.clone().into()));
                             labels.insert(name, block.id());
                             builder = AsmCursor::at_start(block.clone());
                             at_entry = false;
@@ -159,7 +161,9 @@ impl AsmParser {
                                 LiteralOpBuilder::new(context)
                                     .attr(
                                         "kind",
-                                        tir::attributes::AttributeValue::Str(kind.to_string()),
+                                        tir::attributes::AttributeValue::Str(
+                                            kind.to_string().into(),
+                                        ),
                                     )
                                     .attr("value", tir::attributes::AttributeValue::Int(value))
                                     .build(),
@@ -174,11 +178,15 @@ impl AsmParser {
                                 LiteralOpBuilder::new(context)
                                     .attr(
                                         "kind",
-                                        tir::attributes::AttributeValue::Str(kind.to_string()),
+                                        tir::attributes::AttributeValue::Str(
+                                            kind.to_string().into(),
+                                        ),
                                     )
                                     .attr(
                                         "value",
-                                        tir::attributes::AttributeValue::Str((*value).to_string()),
+                                        tir::attributes::AttributeValue::Str(
+                                            (*value).to_string().into(),
+                                        ),
                                     )
                                     .build(),
                             );
@@ -254,7 +262,7 @@ fn resolve_labels(context: &tir::Context, block: &Arc<Block>, labels: &HashMap<S
                     continue;
                 }
                 if let AttributeValue::Str(symbol) = &attr.value
-                    && let Some(target) = labels.get(symbol)
+                    && let Some(target) = labels.get(&**symbol)
                 {
                     attr.value = AttributeValue::Block(*target);
                     changed = true;

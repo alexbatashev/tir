@@ -7,14 +7,14 @@ use crate::{BlockId, Context, TypeId};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AttributeValue {
-    Str(String),
+    Str(Box<str>),
     Int(i64),
     UInt(u64),
     F32(f32),
     F64(f64),
     Bool(bool),
-    Array(Vec<AttributeValue>),
-    Dict(BTreeMap<String, AttributeValue>),
+    Array(Box<[AttributeValue]>),
+    Dict(Box<BTreeMap<String, AttributeValue>>),
     Register(RegisterAttr),
     Type(TypeId),
     /// A reference to a basic block, used by terminators to name their successors
@@ -140,7 +140,7 @@ impl AttributeValue {
 
     pub fn as_str(&self) -> Option<&str> {
         match self {
-            AttributeValue::Str(value) => Some(value.as_str()),
+            AttributeValue::Str(value) => Some(value),
             _ => None,
         }
     }
@@ -216,13 +216,13 @@ impl AttributeValue {
 
 impl From<String> for AttributeValue {
     fn from(value: String) -> Self {
-        AttributeValue::Str(value)
+        AttributeValue::Str(value.into())
     }
 }
 
 impl From<&str> for AttributeValue {
     fn from(value: &str) -> Self {
-        AttributeValue::Str(value.to_string())
+        AttributeValue::Str(value.into())
     }
 }
 
@@ -294,13 +294,13 @@ impl From<bool> for AttributeValue {
 
 impl From<Vec<AttributeValue>> for AttributeValue {
     fn from(value: Vec<AttributeValue>) -> Self {
-        AttributeValue::Array(value)
+        AttributeValue::Array(value.into())
     }
 }
 
 impl From<BTreeMap<String, AttributeValue>> for AttributeValue {
     fn from(value: BTreeMap<String, AttributeValue>) -> Self {
-        AttributeValue::Dict(value)
+        AttributeValue::Dict(Box::new(value))
     }
 }
 
@@ -321,3 +321,8 @@ impl From<BlockId> for AttributeValue {
         AttributeValue::Block(value)
     }
 }
+
+/// An attribute value sits inline in every op that carries it, so its size is a
+/// per-op cost paid across the whole program. The payloads that do not fit the
+/// budget are the rare ones, and they are boxed.
+const _: () = assert!(std::mem::size_of::<AttributeValue>() <= 24);

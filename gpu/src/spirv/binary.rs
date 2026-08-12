@@ -141,7 +141,7 @@ impl<'a> Writer<'a> {
             operands.push(
                 *self
                     .symbol_ids
-                    .get(&name)
+                    .get(&*name)
                     .ok_or_else(|| format!("unknown interface @{name}"))?,
             );
         }
@@ -513,12 +513,18 @@ impl<'a> Reader<'a> {
         let block = self.context.create_block(vec![]);
         region.add_block(block.id());
         let module = ModuleOpBuilder::new(self.context)
-            .attr("version", AttributeValue::Str(version_string(self.version)))
+            .attr(
+                "version",
+                AttributeValue::Str(version_string(self.version).into()),
+            )
             .attr(
                 "addressing_model",
-                AttributeValue::Str(self.addressing_model()?),
+                AttributeValue::Str(self.addressing_model()?.into()),
             )
-            .attr("memory_model", AttributeValue::Str(self.memory_model()?))
+            .attr(
+                "memory_model",
+                AttributeValue::Str(self.memory_model()?.into()),
+            )
             .body(region.id())
             .build();
         let body = block;
@@ -623,9 +629,9 @@ impl<'a> Reader<'a> {
             let storage = storage_class(o[2])?;
             let decorations = self.ir_decorations(id)?;
             let op = GlobalVariableOpBuilder::new(self.context)
-                .attr("sym_name", AttributeValue::Str(name))
+                .attr("sym_name", AttributeValue::Str(name.into()))
                 .attr("storage_class", AttributeValue::Str(storage.name().into()))
-                .attr("decorations", AttributeValue::Dict(decorations))
+                .attr("decorations", AttributeValue::Dict(Box::new(decorations)))
                 .result_type(ty)
                 .build();
             self.values.insert(id, op.result());
@@ -638,14 +644,15 @@ impl<'a> Reader<'a> {
         for inst in &self.instructions {
             if inst.opcode == 15 {
                 let (name, used) = decode_string_with_len(&inst.operands[2..])?;
-                let interfaces = inst.operands[2 + used..]
+                let interfaces: Vec<AttributeValue> = inst.operands[2 + used..]
                     .iter()
                     .map(|id| {
                         AttributeValue::Str(
                             self.names
                                 .get(id)
                                 .cloned()
-                                .unwrap_or_else(|| format!("global_{id}")),
+                                .unwrap_or_else(|| format!("global_{id}"))
+                                .into(),
                         )
                     })
                     .collect();
@@ -655,8 +662,8 @@ impl<'a> Reader<'a> {
                             "execution_model",
                             AttributeValue::Str(execution_model_name(inst.operands[0])?.into()),
                         )
-                        .attr("function", AttributeValue::Str(name))
-                        .attr("interfaces", AttributeValue::Array(interfaces))
+                        .attr("function", AttributeValue::Str(name.into()))
+                        .attr("interfaces", AttributeValue::Array(interfaces.into()))
                         .build(),
                 );
             } else if inst.opcode == 16 {
@@ -667,7 +674,7 @@ impl<'a> Reader<'a> {
                     .unwrap_or_else(|| format!("function_{}", inst.operands[0]));
                 body.append_op(
                     ExecutionModeOpBuilder::new(self.context)
-                        .attr("function", AttributeValue::Str(function))
+                        .attr("function", AttributeValue::Str(function.into()))
                         .attr(
                             "mode",
                             AttributeValue::Str(execution_mode_name(inst.operands[1])?.into()),
@@ -678,7 +685,8 @@ impl<'a> Reader<'a> {
                                 inst.operands[2..]
                                     .iter()
                                     .map(|v| AttributeValue::UInt((*v).into()))
-                                    .collect(),
+                                    .collect::<Vec<_>>()
+                                    .into(),
                             ),
                         )
                         .build(),
@@ -813,7 +821,8 @@ impl<'a> Reader<'a> {
                                 o[3..]
                                     .iter()
                                     .map(|v| AttributeValue::UInt((*v).into()))
-                                    .collect(),
+                                    .collect::<Vec<_>>()
+                                    .into(),
                             ),
                         )
                         .composite(self.value_ref(o[2])?)
@@ -1043,7 +1052,7 @@ fn attr_value<'a>(op: &'a dyn Operation, name: &str) -> Result<&'a AttributeValu
 }
 fn attr_str(op: &dyn Operation, name: &str) -> Result<String> {
     match attr_value(op, name)? {
-        AttributeValue::Str(v) => Ok(v.clone()),
+        AttributeValue::Str(v) => Ok(v.to_string()),
         _ => Err(format!("attribute {name} must be a string")),
     }
 }
@@ -1055,13 +1064,13 @@ fn attr_type(op: &dyn Operation, name: &str) -> Result<TypeId> {
 }
 fn attr_array(op: &dyn Operation, name: &str) -> Result<Vec<AttributeValue>> {
     match attr_value(op, name)? {
-        AttributeValue::Array(v) => Ok(v.clone()),
+        AttributeValue::Array(v) => Ok(v.to_vec()),
         _ => Err(format!("attribute {name} must be an array")),
     }
 }
 fn attr_dict(op: &dyn Operation, name: &str) -> Result<BTreeMap<String, AttributeValue>> {
     match attr_value(op, name)? {
-        AttributeValue::Dict(v) => Ok(v.clone()),
+        AttributeValue::Dict(v) => Ok((**v).clone()),
         _ => Err(format!("attribute {name} must be a dictionary")),
     }
 }

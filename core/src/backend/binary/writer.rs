@@ -430,7 +430,7 @@ fn int_attr(op: &tir::OpInstance, name: &str) -> Option<i64> {
 
 fn string_attr<'a>(op: &'a tir::OpInstance, name: &str) -> Option<&'a str> {
     match op.attr(name)? {
-        AttributeValue::Str(value) => Some(value.as_str()),
+        AttributeValue::Str(value) => Some(value),
         _ => None,
     }
 }

@@ -779,7 +779,7 @@ mod tests {
         let context = Context::with_default_dialects();
         let (a, arg_a) = int_vreg(&context);
         let (b, arg_b) = int_vreg(&context);
-        let group = AttributeValue::Array(vec![arg_a, arg_b]);
+        let group = AttributeValue::Array(vec![arg_a, arg_b].into());
 
         let plan = plan(&context, test_abi(&[0, 1]), vec![group], None);
         assert_eq!(plan.pins, vec![(a, (r_id(), 0)), (b, (r_id(), 1))]);
@@ -793,7 +793,7 @@ mod tests {
         let (d0, arg_d0) = int_vreg(&context);
         let (d1, arg_d1) = int_vreg(&context);
         let (d2, arg_d2) = int_vreg(&context);
-        let triple = AttributeValue::Array(vec![arg_d0, arg_d1, arg_d2]);
+        let triple = AttributeValue::Array(vec![arg_d0, arg_d1, arg_d2].into());
 
         // Two registers, a three-member group: every member goes to the stack,
         // and the default Exhaust policy burns the register sequence so the
@@ -818,7 +818,7 @@ mod tests {
         let (b, arg_b) = int_vreg(&context);
         let (c, arg_c) = int_vreg(&context);
         let (d, arg_d) = int_vreg(&context);
-        let group = AttributeValue::Array(vec![arg_a, arg_b, arg_c]);
+        let group = AttributeValue::Array(vec![arg_a, arg_b, arg_c].into());
 
         let mut abi = *test_abi(&[0, 1]);
         abi.argument_group_policy = Some(ArgumentGroupPolicy {
@@ -841,13 +841,13 @@ mod tests {
         let (a, arg_a) = int_vreg(&context);
         let (b, arg_b) = int_vreg(&context);
         let (c, arg_c) = int_vreg(&context);
-        let group = AttributeValue::Dict(BTreeMap::from([
+        let group = AttributeValue::Dict(Box::new(BTreeMap::from([
             (
                 "members".to_string(),
-                AttributeValue::Array(vec![arg_b, arg_c]),
+                AttributeValue::Array(vec![arg_b, arg_c].into()),
             ),
             ("alignment".to_string(), AttributeValue::UInt(16)),
-        ]));
+        ])));
 
         let mut abi = *test_abi(&[0, 1, 2, 3]);
         abi.argument_group_alignment = Some(ArgumentGroupAlignment {

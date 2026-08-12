@@ -1295,7 +1295,7 @@ mod tests {
             .body(region.id())
             .attr(
                 "name",
-                tir::attributes::AttributeValue::Str("demo".to_string()),
+                tir::attributes::AttributeValue::Str("demo".to_string().into()),
             )
             .build();
         module.body().append_op(symbol);
@@ -1820,7 +1820,7 @@ mod tests {
         let patchers = crate::get_instruction_patchers();
 
         let bl = BranchLinkOpBuilder::new(&context)
-            .attr("imm", AttributeValue::Str("foo".to_string()))
+            .attr("imm", AttributeValue::Str("foo".to_string().into()))
             .build();
         let enc = encoders["bl"](&context.get_op(bl.id())).unwrap();
         assert_eq!(enc.bytes, 0x94000000u32.to_le_bytes());
@@ -1865,7 +1865,7 @@ mod tests {
             .args(vec![a, b])
             .attr(
                 "callee",
-                tir::attributes::AttributeValue::Str("foo".to_string()),
+                tir::attributes::AttributeValue::Str("foo".to_string().into()),
             )
             .result_type(i64)
             .build();
@@ -1937,7 +1937,7 @@ mod tests {
             .args(vec![a])
             .attr(
                 "callee",
-                tir::attributes::AttributeValue::Str("foo".to_string()),
+                tir::attributes::AttributeValue::Str("foo".to_string().into()),
             )
             .result_type(i64)
             .build();
@@ -1992,7 +1992,7 @@ mod tests {
             .expect("the call must finalize to bl");
         // bl targets the callee symbol (a link-time fixup).
         assert!(
-            matches!(bl.attr("imm"), Some(tir::attributes::AttributeValue::Str(s)) if s == "foo")
+            matches!(bl.attr("imm"), Some(tir::attributes::AttributeValue::Str(s)) if &**s == "foo")
         );
 
         body_blocks_have_no_virtual(&context, region.id());

@@ -69,7 +69,7 @@ impl ProgramImage {
                 };
 
                 let symbol_name = match symbol.attr("name") {
-                    Some(AttributeValue::Str(name)) => name.clone(),
+                    Some(AttributeValue::Str(name)) => name.to_string(),
                     _ => return Err(Error::MissingSymbolName),
                 };
                 symbols.insert(symbol_name, cur_pc);

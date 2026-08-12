@@ -219,7 +219,7 @@ fn emit_instruction_encoder(
                     tir::attributes::AttributeValue::Str(s) => {
                         fixups.push(tir::backend::binary::InstFixup {
                             operand: #name_lit,
-                            target: tir::backend::binary::FixupTarget::Symbol(s.clone()),
+                            target: tir::backend::binary::FixupTarget::Symbol(s.to_string()),
                         });
                     }
                     tir::attributes::AttributeValue::Block(b) => {

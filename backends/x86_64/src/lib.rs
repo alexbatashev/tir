@@ -171,7 +171,7 @@ mod isa {
         };
         let lea = LeaRipOpBuilder::new(context)
             .attr("dst", virt(addr_of.result().number(), RegClass::GPR.id()))
-            .attr("imm", AttributeValue::Str(addr_of.sym_name()))
+            .attr("imm", AttributeValue::Str(addr_of.sym_name().into()))
             .build();
         rewriter.replace_op(op, &lea)?;
         Ok(true)

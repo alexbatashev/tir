@@ -66,7 +66,7 @@ impl DataLayout {
         let Some(AttributeValue::Dict(default)) = default else {
             return Self::for_op(context, op);
         };
-        let mut entries = default.clone();
+        let mut entries = (**default).clone();
         if let Some(declared) = scoped_dict(context, op, DATA_LAYOUT) {
             crate::scoped_attr::merge_into(&mut entries, declared);
         }
@@ -78,7 +78,7 @@ impl DataLayout {
     pub fn from_value(value: &AttributeValue) -> Option<Self> {
         match value {
             AttributeValue::Dict(entries) => Some(Self {
-                entries: entries.clone(),
+                entries: (**entries).clone(),
             }),
             _ => None,
         }
@@ -86,8 +86,8 @@ impl DataLayout {
 
     pub fn endianness(&self) -> Option<Endianness> {
         match self.entries.get("endianness")? {
-            AttributeValue::Str(value) if value == "little" => Some(Endianness::Little),
-            AttributeValue::Str(value) if value == "big" => Some(Endianness::Big),
+            AttributeValue::Str(value) if &**value == "little" => Some(Endianness::Little),
+            AttributeValue::Str(value) if &**value == "big" => Some(Endianness::Big),
             _ => None,
         }
     }
@@ -175,19 +175,25 @@ pub fn data_layout_spec(
             ("size".to_string(), AttributeValue::UInt(u64::from(*size))),
             ("abi".to_string(), AttributeValue::UInt(u64::from(*abi))),
         ];
-        (name.to_string(), AttributeValue::Dict(entry.into()))
+        (
+            name.to_string(),
+            AttributeValue::Dict(Box::new(entry.into())),
+        )
     });
-    AttributeValue::Dict(
+    AttributeValue::Dict(Box::new(
         [
             ("endianness".to_string(), AttributeValue::from(order)),
             (
                 "stack_alignment".to_string(),
                 AttributeValue::UInt(u64::from(stack_alignment)),
             ),
-            ("types".to_string(), AttributeValue::Dict(types.collect())),
+            (
+                "types".to_string(),
+                AttributeValue::Dict(Box::new(types.collect())),
+            ),
         ]
         .into(),
-    )
+    ))
 }
 
 /// Checks the shape of a [`DATA_LAYOUT`] spec. Entries outside the predefined
@@ -197,10 +203,10 @@ pub(crate) fn verify_spec(value: &AttributeValue) -> Result<(), crate::Error> {
         return Err(invalid_spec("data_layout must be a dictionary"));
     };
 
-    for (key, value) in entries {
+    for (key, value) in entries.iter() {
         match key.as_str() {
             "endianness" => match value {
-                AttributeValue::Str(order) if order == "little" || order == "big" => {}
+                AttributeValue::Str(order) if &**order == "little" || &**order == "big" => {}
                 _ => {
                     return Err(invalid_spec(
                         "data_layout 'endianness' must be \"little\" or \"big\"",
@@ -224,13 +230,13 @@ fn verify_types(value: &AttributeValue) -> Result<(), crate::Error> {
         return Err(invalid_spec("data_layout 'types' must be a dictionary"));
     };
 
-    for (name, entry) in types {
+    for (name, entry) in types.iter() {
         let AttributeValue::Dict(fields) = entry else {
             return Err(invalid_spec(format!(
                 "data_layout type entry '{name}' must be a dictionary"
             )));
         };
-        for (field, value) in fields {
+        for (field, value) in fields.iter() {
             if !TYPE_FIELDS.contains(&field.as_str()) {
                 return Err(invalid_spec(format!(
                     "unknown data_layout field '{field}' in type entry '{name}' (expected {})",
@@ -457,11 +463,11 @@ mod tests {
 
     #[test]
     fn a_target_default_needs_no_enclosing_scope() {
-        let spec = AttributeValue::Dict(
+        let spec = AttributeValue::Dict(Box::new(
             [("stack_alignment".to_string(), AttributeValue::UInt(64))]
                 .into_iter()
                 .collect(),
-        );
+        ));
 
         let layout = DataLayout::from_value(&spec).expect("spec is a dict");
 

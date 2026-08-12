@@ -116,14 +116,15 @@ fn remap_attribute(value: &AttributeValue, mapping: &Mapping) -> AttributeValue 
             items
                 .iter()
                 .map(|item| remap_attribute(item, mapping))
-                .collect(),
+                .collect::<Vec<_>>()
+                .into(),
         ),
-        AttributeValue::Dict(entries) => AttributeValue::Dict(
+        AttributeValue::Dict(entries) => AttributeValue::Dict(Box::new(
             entries
                 .iter()
                 .map(|(name, item)| (name.clone(), remap_attribute(item, mapping)))
                 .collect(),
-        ),
+        )),
         other => other.clone(),
     }
 }

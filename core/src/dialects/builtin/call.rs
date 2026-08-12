@@ -100,7 +100,7 @@ impl CallOp {
 
         let mut builder = CallOpBuilder::new(context)
             .args(args)
-            .attr("callee", AttributeValue::Str(callee))
+            .attr("callee", AttributeValue::Str(callee.into()))
             .result_type(ret_type);
         if result_address {
             builder = builder.result_address();
@@ -125,7 +125,8 @@ impl CallOpBuilder {
                     .iter()
                     .copied()
                     .map(AttributeValue::UInt)
-                    .collect(),
+                    .collect::<Vec<_>>()
+                    .into(),
             ),
         )
     }
@@ -224,7 +225,8 @@ impl IndirectCallOpBuilder {
                     .iter()
                     .copied()
                     .map(AttributeValue::UInt)
-                    .collect(),
+                    .collect::<Vec<_>>()
+                    .into(),
             ),
         )
     }
@@ -369,7 +371,7 @@ fn parse_ret_type(
 
 fn callee_attr(op: &impl Operation) -> String {
     match op.attr("callee") {
-        Some(AttributeValue::Str(s)) => s.clone(),
+        Some(AttributeValue::Str(s)) => s.to_string(),
         _ => panic!("call must carry a 'callee' symbol name"),
     }
 }

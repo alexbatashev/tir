@@ -209,7 +209,7 @@ pub fn enclosing_symbol_table(context: &Context, op: OpId) -> Option<OpId> {
 
 pub fn symbol_name_of(op: &impl Operation) -> String {
     match op.attr("sym_name") {
-        Some(AttributeValue::Str(name)) => name.clone(),
+        Some(AttributeValue::Str(name)) => name.to_string(),
         _ => panic!("symbol must carry sym_name"),
     }
 }
@@ -218,7 +218,7 @@ pub fn symbol_name_of(op: &impl Operation) -> String {
 pub fn visibility_of(op: &impl Operation) -> Visibility {
     let private = matches!(
         op.attr("sym_visibility"),
-        Some(AttributeValue::Str(value)) if value == "private"
+        Some(AttributeValue::Str(value)) if &**value == "private"
     );
     if private {
         Visibility::Private

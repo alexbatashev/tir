@@ -158,7 +158,7 @@ impl GlobalOp {
                             let AttributeValue::UInt(width) = fields.get("width").unwrap() else {
                                 unreachable!("cir.global relocation has a width")
                             };
-                            (*offset, symbol.clone(), *addend, *width)
+                            (*offset, symbol.to_string(), *addend, *width)
                         })
                         .collect(),
                 ),
@@ -197,7 +197,7 @@ impl ZeroGlobalOp {
 
 fn string_attribute(operation: &impl Operation, name: &str) -> String {
     match operation.attr(name) {
-        Some(AttributeValue::Str(value)) => value.clone(),
+        Some(AttributeValue::Str(value)) => value.to_string(),
         _ => panic!("{name} must be a string attribute"),
     }
 }
@@ -743,7 +743,7 @@ operation! {
 
 pub fn string_op(context: &Context, value: &str, result_type: TypeId) -> StringOp {
     StringOpBuilder::new(context)
-        .attr("value", AttributeValue::Str(value.to_string()))
+        .attr("value", AttributeValue::Str(value.to_string().into()))
         .result_type(result_type)
         .build()
 }

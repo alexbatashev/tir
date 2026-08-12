@@ -490,7 +490,7 @@ fn match_syntax(
                         pos += 1;
                         text
                     };
-                    attrs.push(context.named_attribute(name, AttributeValue::Str(text)));
+                    attrs.push(context.named_attribute(name, AttributeValue::Str(text.into())));
                 }
             },
         }
@@ -555,7 +555,7 @@ fn parse_instruction(
     for syntax in candidates {
         if let Some(mut attrs) = match_syntax(context, syntax, rest) {
             if let Some((p, neg)) = &pred {
-                attrs.push(context.named_attribute("pred", AttributeValue::Str(p.clone())));
+                attrs.push(context.named_attribute("pred", AttributeValue::Str(p.clone().into())));
                 attrs.push(context.named_attribute("pred_not", AttributeValue::Bool(*neg)));
             }
             return Ok((syntax.op_name, attrs));
@@ -585,7 +585,7 @@ pub fn parse(context: &Context, text: &str) -> Result<ModuleOp, String> {
     let module = ModuleOpBuilder::new(context).build();
     let section = module.body().append_op(
         tir::backend::SectionOpBuilder::new(context)
-            .attr("ptx_preamble", AttributeValue::Str(preamble))
+            .attr("ptx_preamble", AttributeValue::Str(preamble.into()))
             .build(),
     );
     module
@@ -595,16 +595,16 @@ pub fn parse(context: &Context, text: &str) -> Result<ModuleOp, String> {
     let section_body = section.body();
     for kernel in kernels {
         let symbol = tir::backend::SymbolOpBuilder::new(context)
-            .attr("name", AttributeValue::Str(kernel.name))
-            .attr("ptx_header", AttributeValue::Str(kernel.header))
-            .attr("ptx_regs", AttributeValue::Str(kernel.regs))
+            .attr("name", AttributeValue::Str(kernel.name.into()))
+            .attr("ptx_header", AttributeValue::Str(kernel.header.into()))
+            .attr("ptx_regs", AttributeValue::Str(kernel.regs.into()))
             .build();
         section_body.append(symbol.id());
         let body = symbol.body();
         for item in body_items(&kernel.body) {
             let id = match item {
                 BodyItem::Label(name) => LabelOpBuilder::new(context)
-                    .attr("name", AttributeValue::Str(name))
+                    .attr("name", AttributeValue::Str(name.into()))
                     .build()
                     .id(),
                 BodyItem::Instruction(line) => {
@@ -626,7 +626,7 @@ pub fn parse(context: &Context, text: &str) -> Result<ModuleOp, String> {
 
 fn attr_str(op: &OpInstance, name: &str) -> Option<String> {
     match op.attr(name)? {
-        AttributeValue::Str(s) => Some(s.clone()),
+        AttributeValue::Str(s) => Some(s.to_string()),
         _ => None,
     }
 }
@@ -644,7 +644,7 @@ fn render_operand(op: &OpInstance, name: &str) -> Result<String, String> {
             format!("{}{}", class.name().to_lowercase(), index)
         }
         AttributeValue::Register(RegisterAttr::Virtual { id, .. }) => format!("%virt{id}"),
-        AttributeValue::Str(s) => s.clone(),
+        AttributeValue::Str(s) => s.to_string(),
         AttributeValue::Int(i) => i.to_string(),
         other => format!("{other:?}"),
     })

@@ -567,8 +567,9 @@ mod tests {
         let x = g.add(konst(32, 0));
         let context = crate::Context::with_default_dialects();
         let cmpi = |pred: &str, args: Vec<Id>| {
-            let attrs =
-                vec![context.named_attribute("predicate", AttributeValue::Str(pred.to_string()))];
+            let attrs = vec![
+                context.named_attribute("predicate", AttributeValue::Str(pred.to_string().into())),
+            ];
             op("cmpi", ty(1), attrs, args)
         };
         let slt = g.add(cmpi("slt", vec![x]));

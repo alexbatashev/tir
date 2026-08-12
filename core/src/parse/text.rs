@@ -120,7 +120,7 @@ impl<'src> Parser<'src> {
             });
         }
         if let Some(value) = self.parse_string() {
-            return Ok(Some(AttributeValue::Str(value.to_string())));
+            return Ok(Some(AttributeValue::Str(value.to_string().into())));
         }
         if self.parse_token("[") {
             let mut values = Vec::new();
@@ -138,7 +138,7 @@ impl<'src> Parser<'src> {
                     }
                 }
             }
-            return Ok(Some(AttributeValue::Array(values)));
+            return Ok(Some(AttributeValue::Array(values.into())));
         }
         if self.parse_token("{") {
             let mut values = std::collections::BTreeMap::new();
@@ -165,7 +165,7 @@ impl<'src> Parser<'src> {
                     }
                 }
             }
-            return Ok(Some(AttributeValue::Dict(values)));
+            return Ok(Some(AttributeValue::Dict(Box::new(values))));
         }
         if let Some(ty) = self.parse_type(context)? {
             return Ok(Some(AttributeValue::Type(ty)));

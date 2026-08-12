@@ -78,7 +78,7 @@ impl tir::Verifiable for DeclareOp {
 impl DeclareOp {
     pub fn sym_name(&self) -> String {
         match self.attr("sym_name") {
-            Some(AttributeValue::Str(name)) => name.clone(),
+            Some(AttributeValue::Str(name)) => name.to_string(),
             _ => panic!("declare must carry sym_name"),
         }
     }
@@ -139,9 +139,12 @@ impl DeclareOp {
             .ok_or_else(|| (parser.span(), Error::ExpectedSymbolName))?
             .to_string();
         let mut builder =
-            DeclareOpBuilder::new(context).attr("sym_name", AttributeValue::Str(sym_name));
+            DeclareOpBuilder::new(context).attr("sym_name", AttributeValue::Str(sym_name.into()));
         if is_private {
-            builder = builder.attr("sym_visibility", AttributeValue::Str("private".to_string()));
+            builder = builder.attr(
+                "sym_visibility",
+                AttributeValue::Str("private".to_string().into()),
+            );
         }
         if !parser.parse_token("(") {
             return Ok(Box::new(builder.build()));
@@ -203,7 +206,7 @@ impl tir::Verifiable for AddressOfOp {
 impl AddressOfOp {
     pub fn sym_name(&self) -> String {
         match self.attr("sym_name") {
-            Some(AttributeValue::Str(name)) => name.clone(),
+            Some(AttributeValue::Str(name)) => name.to_string(),
             _ => panic!("addr_of must carry sym_name"),
         }
     }
@@ -211,18 +214,25 @@ impl AddressOfOp {
 
 pub fn addr_of_op(context: &Context, name: &str, result_type: TypeId) -> AddressOfOp {
     AddressOfOpBuilder::new(context)
-        .attr("sym_name", AttributeValue::Str(name.to_string()))
+        .attr("sym_name", AttributeValue::Str(name.to_string().into()))
         .result_type(result_type)
         .build()
 }
 
 pub fn arg_types_attr(types: &[TypeId]) -> AttributeValue {
-    AttributeValue::Array(types.iter().copied().map(AttributeValue::Type).collect())
+    AttributeValue::Array(
+        types
+            .iter()
+            .copied()
+            .map(AttributeValue::Type)
+            .collect::<Vec<_>>()
+            .into(),
+    )
 }
 
 pub fn declare_op(context: &Context, name: &str, ret: TypeId, args: &[TypeId]) -> DeclareOp {
     DeclareOpBuilder::new(context)
-        .attr("sym_name", AttributeValue::Str(name.to_string()))
+        .attr("sym_name", AttributeValue::Str(name.to_string().into()))
         .attr("ret_type", AttributeValue::Type(ret))
         .attr("arg_types", arg_types_attr(args))
         .build()
@@ -240,7 +250,10 @@ mod tests {
     fn declare_carrying_a_return_type_without_arguments_is_rejected() {
         let context = Context::with_default_dialects();
         let declaration = DeclareOpBuilder::new(&context)
-            .attr("sym_name", AttributeValue::Str("counter".to_string()))
+            .attr(
+                "sym_name",
+                AttributeValue::Str("counter".to_string().into()),
+            )
             .attr(
                 "ret_type",
                 AttributeValue::Type(IntegerType::new(&context, 32)),

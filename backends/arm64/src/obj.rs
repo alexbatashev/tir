@@ -82,7 +82,7 @@ pub(crate) fn lower_addr_of(
             "rd",
             virt(addr_of.result().number(), crate::RegClass::GPR.id()),
         )
-        .attr("imm", AttributeValue::Str(addr_of.sym_name()))
+        .attr("imm", AttributeValue::Str(addr_of.sym_name().into()))
         .build();
     rewriter.replace_op(op, &adr)?;
     Ok(true)
@@ -130,7 +130,7 @@ pub(crate) fn finalize_virtual_ops(
     if let Some(call) = op.as_op::<VirtualCallOp>() {
         let callee = string_attr(&call, "callee")?;
         let bl = BranchLinkOpBuilder::new(context)
-            .attr("imm", AttributeValue::Str(callee))
+            .attr("imm", AttributeValue::Str(callee.into()))
             .build();
         rewriter.replace_op(op, &bl)?;
         return Ok(true);
@@ -152,7 +152,7 @@ pub(crate) fn finalize_virtual_ops(
 
 fn string_attr(op: &dyn tir::Operation, name: &str) -> Result<String, tir::PassError> {
     match op.attr(name) {
-        Some(AttributeValue::Str(s)) => Some(s.clone()),
+        Some(AttributeValue::Str(s)) => Some(s.to_string()),
         _ => None,
     }
     .ok_or_else(|| tir::PassError::InvalidRuleSet(format!("call is missing its '{name}'")))

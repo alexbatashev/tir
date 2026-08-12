@@ -193,7 +193,7 @@ fn parse_immediate<'src>(
             }
             let symbol = (*name).to_string();
             let _ = parser.bump();
-            return Ok(AttributeValue::Str(symbol));
+            return Ok(AttributeValue::Str(symbol.into()));
         }
         _ => return Err(()),
     };

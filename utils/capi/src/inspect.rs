@@ -463,7 +463,7 @@ pub unsafe extern "C" fn tir_op_attribute_string(
 ) -> *mut c_char {
     with_context(ctx, std::ptr::null_mut(), |ctx| {
         match attr_value(ctx, op, i) {
-            Some(AttributeValue::Str(s)) => into_cstring(s),
+            Some(AttributeValue::Str(s)) => into_cstring(s.to_string()),
             Some(_) => {
                 set_error("attribute is not a string");
                 std::ptr::null_mut()

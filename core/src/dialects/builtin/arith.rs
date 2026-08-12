@@ -338,7 +338,7 @@ impl CmpIOp {
         use tir::sem::SymKind;
 
         let predicate = match self.0.attr("predicate")? {
-            tir::attributes::AttributeValue::Str(s) => s.as_str(),
+            tir::attributes::AttributeValue::Str(s) => &**s,
             _ => return None,
         };
         let (kind, swap) = match predicate {
@@ -376,7 +376,7 @@ impl CmpIOpBuilder {
     pub fn predicate(self, pred: &str) -> Self {
         self.attr(
             "predicate",
-            tir::attributes::AttributeValue::Str(pred.to_string()),
+            tir::attributes::AttributeValue::Str(pred.to_string().into()),
         )
     }
 }

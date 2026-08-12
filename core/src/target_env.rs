@@ -37,7 +37,7 @@ impl TargetEnv {
     pub fn from_value(value: &AttributeValue) -> Option<Self> {
         match value {
             AttributeValue::Dict(entries) => Some(Self {
-                entries: entries.clone(),
+                entries: (**entries).clone(),
             }),
             _ => None,
         }
@@ -74,15 +74,15 @@ impl TargetEnv {
 pub fn target_env_spec(arch: &str, features: &[String]) -> AttributeValue {
     let features = features
         .iter()
-        .map(|feature| AttributeValue::Str(feature.clone()))
+        .map(|feature| AttributeValue::Str(feature.clone().into()))
         .collect();
-    AttributeValue::Dict(
+    AttributeValue::Dict(Box::new(
         [
             ("arch".to_string(), AttributeValue::from(arch)),
             ("features".to_string(), AttributeValue::Array(features)),
         ]
         .into(),
-    )
+    ))
 }
 
 /// Checks the shape of a [`TARGET_ENV`] spec. Entries outside the predefined
@@ -92,7 +92,7 @@ pub(crate) fn verify_spec(value: &AttributeValue) -> Result<(), crate::Error> {
         return Err(invalid_spec("target_env must be a dictionary"));
     };
 
-    for (key, value) in entries {
+    for (key, value) in entries.iter() {
         match key.as_str() {
             "arch" | "cpu" if string(Some(value)).is_none() => {
                 return Err(invalid_spec(format!("target_env '{key}' must be a string")));
@@ -187,11 +187,14 @@ mod tests {
 
     #[test]
     fn a_target_description_needs_no_enclosing_scope() {
-        let spec = AttributeValue::Dict(
-            [("arch".to_string(), AttributeValue::Str("arm64".to_string()))]
-                .into_iter()
-                .collect(),
-        );
+        let spec = AttributeValue::Dict(Box::new(
+            [(
+                "arch".to_string(),
+                AttributeValue::Str("arm64".to_string().into()),
+            )]
+            .into_iter()
+            .collect(),
+        ));
 
         let env = TargetEnv::from_value(&spec).expect("spec is a dict");
 

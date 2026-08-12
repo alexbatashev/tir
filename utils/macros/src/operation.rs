@@ -232,8 +232,8 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
                     operand_segment_sizes
                         .iter()
                         .map(|n| tir::attributes::AttributeValue::UInt(*n))
-                        .collect(),
-                ),
+                        .collect::<Vec<_>>()
+                .into()),
             ));
         }
     } else {

@@ -68,7 +68,7 @@ impl LowerCirStructsPass {
 
     fn string_attribute(operation: &impl Operation, name: &str) -> String {
         match operation.attr(name) {
-            Some(AttributeValue::Str(value)) => value.clone(),
+            Some(AttributeValue::Str(value)) => value.to_string(),
             _ => panic!("{name} must be a string attribute"),
         }
     }

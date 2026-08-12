@@ -259,7 +259,7 @@ impl<'src> TextParser<'src> {
             }
 
             let value = if let Some(s) = self.parse_string() {
-                AttributeValue::Str(s.to_string())
+                AttributeValue::Str(s.to_string().into())
             } else if let Some(f) = self.parse_float() {
                 AttributeValue::F64(f)
             } else if let Some(n) = self.parse_number() {

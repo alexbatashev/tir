@@ -105,7 +105,7 @@ impl Pass for LowerMemoryIntrinsicsPass {
                 .expect("operation was collected as ptr.memcpy");
             let call = b::CallOpBuilder::new(context)
                 .args(copy.operands().to_vec())
-                .attr("callee", AttributeValue::Str("memcpy".to_string()))
+                .attr("callee", AttributeValue::Str("memcpy".to_string().into()))
                 .result_type(pointer)
                 .build();
             rewriter.replace_op(&operation, &call)?;
@@ -122,7 +122,7 @@ impl Pass for LowerMemoryIntrinsicsPass {
                     extended.result(),
                     set.operands()[2],
                 ])
-                .attr("callee", AttributeValue::Str("memset".to_string()))
+                .attr("callee", AttributeValue::Str("memset".to_string().into()))
                 .result_type(pointer)
                 .build();
             rewriter.replace_op(&operation, &call)?;

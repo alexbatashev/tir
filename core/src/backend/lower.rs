@@ -29,7 +29,7 @@ pub fn lower_function_and_return(
             body.append_op(super::SymbolEndOpBuilder::new(context).build());
         }
         let name = match context.get_op(func.id()).attr("sym_name") {
-            Some(AttributeValue::Str(name)) => name.clone(),
+            Some(AttributeValue::Str(name)) => name.to_string(),
             _ => "unknown".to_string(),
         };
         let def_use = tir::analysis::DefUse::new(context, func.id());
@@ -110,23 +110,25 @@ pub fn lower_function_and_return(
                 })
                 .collect::<Result<Vec<_>, PassError>>()?;
             if alignment == 1 {
-                arguments.push(AttributeValue::Array(group));
+                arguments.push(AttributeValue::Array(group.into()));
             } else {
-                arguments.push(AttributeValue::Dict(std::collections::BTreeMap::from([
-                    ("alignment".to_string(), AttributeValue::UInt(alignment)),
-                    ("members".to_string(), AttributeValue::Array(group)),
-                ])));
+                arguments.push(AttributeValue::Dict(Box::new(
+                    std::collections::BTreeMap::from([
+                        ("alignment".to_string(), AttributeValue::UInt(alignment)),
+                        ("members".to_string(), AttributeValue::Array(group.into())),
+                    ]),
+                )));
             }
         }
         let mut symbol = super::SymbolOpBuilder::new(context)
             .body(op.op().regions[0])
-            .attr("name", AttributeValue::Str(name))
-            .attr("arg_regs", AttributeValue::Array(arguments));
+            .attr("name", AttributeValue::Str(name.into()))
+            .attr("arg_regs", AttributeValue::Array(arguments.into()));
         if let Some(result_address) = result_address {
             symbol = symbol.attr("result_address", result_address);
         }
         if func.symbol_visibility() == tir::Visibility::Private {
-            symbol = symbol.attr("binding", AttributeValue::Str("local".to_string()));
+            symbol = symbol.attr("binding", AttributeValue::Str("local".to_string().into()));
         }
         let symbol = symbol.build();
         rewriter.replace_op(op, &symbol)?;
