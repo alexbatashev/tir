@@ -22,7 +22,6 @@ mod operand;
 mod operation;
 mod pass;
 pub mod passes;
-pub mod pbqp;
 mod print;
 mod region;
 pub mod region_format;

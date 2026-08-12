@@ -8,6 +8,7 @@ tir-macros.workspace = true
 tir-graph.workspace = true
 tir-symbolic.workspace = true
 tir-adt.workspace = true
+tir-pbqp.workspace = true
 linkme.workspace = true
 logos.workspace = true
 parking_lot = "0.12.3"
@@ -27,8 +28,4 @@ harness = false
 
 [[bench]]
 name = "lexer"
-harness = false
-
-[[bench]]
-name = "pbqp"
 harness = false

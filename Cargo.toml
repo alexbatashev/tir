@@ -27,6 +27,7 @@ members = [
     "tools",
     "gpu",
     "utils/pdl",
+    "utils/pbqp",
 ]
 
 [workspace.dependencies]
@@ -42,6 +43,7 @@ tir-macros = { path = "utils/macros" }
 tir-lit = { path = "utils/lit" }
 tir-llvm = { path = "utils/llvm" }
 tir-jit = { path = "utils/jit" }
+tir-pbqp = { path = "utils/pbqp" }
 
 # Per-target crates
 tir-riscv = { path = "backends/riscv" }

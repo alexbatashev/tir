@@ -1,3 +1,6 @@
+//! A generic PBQP (Partitioned Boolean Quadratic Problem) cost-model solver:
+//! exact degree ≤ 2 reductions with backtracking search at higher degrees.
+
 use std::collections::{BTreeSet, VecDeque};
 
 pub const INF_COST: u64 = u64::MAX / 4;
@@ -204,7 +207,6 @@ impl EdgeStore {
 pub struct PbqpProblem {
     node_costs: Vec<Vec<u64>>,
     edges: EdgeStore,
-    coherence_sets: Vec<Vec<PbqpAlternative>>,
 }
 
 impl PbqpProblem {
@@ -212,7 +214,6 @@ impl PbqpProblem {
         Self {
             node_costs: Vec::new(),
             edges: EdgeStore::default(),
-            coherence_sets: Vec::new(),
         }
     }
 
@@ -235,12 +236,6 @@ impl PbqpProblem {
             None => {
                 self.edges.insert(a, b, matrix);
             }
-        }
-    }
-
-    pub fn add_coherence_set(&mut self, alternatives: Vec<PbqpAlternative>) {
-        if alternatives.len() > 1 {
-            self.coherence_sets.push(alternatives);
         }
     }
 
@@ -318,123 +313,8 @@ struct Checkpoint {
     reductions_len: usize,
 }
 
-/// The decision made at a degree ≥ 3 node, where exact reductions no longer
-/// apply: which alternatives to force, in which order. The solver tries them in
-/// order and backtracks out of any choice that proves globally infeasible, so a
-/// heuristic trades search time and solution quality but never correctness —
-/// infeasibility is reported only after every finite alternative failed.
-pub trait RnHeuristic {
-    /// The alternatives of [`RnView::node`] to try, most preferred first.
-    /// Choices outside the node's finite alternatives are ignored; an empty
-    /// result (or one with no finite choice) fails the node.
-    fn order(&mut self, view: &RnView) -> Vec<usize>;
-}
-
-/// A read-only view of the solver state at an RN decision point, for
-/// [`RnHeuristic`] implementations. Costs are the reduced instance's: node
-/// costs folded from exact reductions so far, edge costs between active nodes.
-pub struct RnView<'a> {
-    solver: &'a Solver,
-    node: usize,
-}
-
-impl RnView<'_> {
-    /// The node being decided.
-    pub fn node(&self) -> PbqpNodeId {
-        PbqpNodeId::from_index(self.node)
-    }
-
-    /// The node's not-yet-impossible alternatives with their current costs.
-    pub fn finite_alternatives(&self) -> impl Iterator<Item = (usize, u64)> + '_ {
-        self.solver.problem.node_costs[self.node]
-            .iter()
-            .enumerate()
-            .filter(|(_, cost)| **cost < INF_COST)
-            .map(|(alternative, &cost)| (alternative, cost))
-    }
-
-    /// The active neighbors of the decided node.
-    pub fn neighbors(&self) -> Vec<PbqpNodeId> {
-        self.solver
-            .problem
-            .edges
-            .neighbors(self.node)
-            .iter()
-            .map(|adjacent| PbqpNodeId::from_index(adjacent.neighbor as usize))
-            .collect()
-    }
-
-    /// The number of alternatives `node` has (including impossible ones).
-    pub fn alternative_count(&self, node: PbqpNodeId) -> usize {
-        self.solver.problem.node_costs[node.index()].len()
-    }
-
-    /// The current cost of one alternative of one node.
-    pub fn node_cost(&self, node: PbqpNodeId, alternative: usize) -> u64 {
-        self.solver.problem.node_costs[node.index()][alternative]
-    }
-
-    /// The cost the edge between `lhs` and `rhs` charges for choosing
-    /// `lhs_alternative` and `rhs_alternative`.
-    pub fn edge_cost(
-        &self,
-        lhs: PbqpNodeId,
-        lhs_alternative: usize,
-        rhs: PbqpNodeId,
-        rhs_alternative: usize,
-    ) -> u64 {
-        self.solver
-            .edge_cost(lhs.index(), lhs_alternative, rhs.index(), rhs_alternative)
-    }
-}
-
-/// The default RN heuristic: alternatives ordered by local cost (own cost plus
-/// the best achievable neighbor cost over each incident edge).
-pub struct LocalCostOrder;
-
-impl RnHeuristic for LocalCostOrder {
-    fn order(&mut self, view: &RnView) -> Vec<usize> {
-        let neighbors = view.neighbors();
-        let mut alternatives: Vec<(usize, u64)> = view
-            .finite_alternatives()
-            .map(|(alternative, base)| {
-                let edge_costs = neighbors.iter().copied().fold(0, |acc, neighbor| {
-                    let best = (0..view.alternative_count(neighbor))
-                        .filter(|&neighbor_alt| view.node_cost(neighbor, neighbor_alt) < INF_COST)
-                        .map(|neighbor_alt| {
-                            add_cost(
-                                view.node_cost(neighbor, neighbor_alt),
-                                view.edge_cost(view.node(), alternative, neighbor, neighbor_alt),
-                            )
-                        })
-                        .min()
-                        .unwrap_or(INF_COST);
-                    add_cost(acc, best)
-                });
-                (alternative, add_cost(base, edge_costs))
-            })
-            .collect();
-        alternatives.sort_by_key(|(alternative, cost)| (*cost, *alternative));
-        alternatives
-            .into_iter()
-            .map(|(alternative, _)| alternative)
-            .collect()
-    }
-}
-
 pub fn solve(problem: &PbqpProblem) -> Result<PbqpSolution, PbqpSolveError> {
-    solve_with(problem, &mut LocalCostOrder)
-}
-
-/// Solve `problem`, delegating RN decisions (degree ≥ 3 nodes) to `heuristic`.
-/// This is the extension point for experimenting with alternative orderings —
-/// e.g. a learned model scoring alternatives — without touching the exact
-/// reductions or the backtracking correctness net.
-pub fn solve_with(
-    problem: &PbqpProblem,
-    heuristic: &mut dyn RnHeuristic,
-) -> Result<PbqpSolution, PbqpSolveError> {
-    Solver::new(problem.clone()).solve(problem, heuristic)
+    Solver::new(problem.clone()).solve(problem)
 }
 
 struct Solver {
@@ -444,7 +324,6 @@ struct Solver {
     reductions: Vec<Reduction>,
     reducible: BTreeSet<usize>,
     finite_alternatives: Vec<usize>,
-    coherence_groups_by_alternative: Vec<Vec<Vec<usize>>>,
     infeasible: BTreeSet<usize>,
     recording_undo: bool,
     undo: Vec<Undo>,
@@ -467,22 +346,6 @@ impl Solver {
             .enumerate()
             .filter_map(|(node, &finite)| (finite == 0).then_some(node))
             .collect();
-        let mut coherence_groups_by_alternative: Vec<Vec<Vec<usize>>> = problem
-            .node_costs
-            .iter()
-            .map(|costs| vec![Vec::new(); costs.len()])
-            .collect();
-        for (group_index, group) in problem.coherence_sets.iter().enumerate() {
-            for alternative in group {
-                let node = alternative.node.index();
-                if let Some(groups) = coherence_groups_by_alternative
-                    .get_mut(node)
-                    .and_then(|alternatives| alternatives.get_mut(alternative.alternative))
-                {
-                    groups.push(group_index);
-                }
-            }
-        }
         Self {
             problem,
             active,
@@ -490,37 +353,28 @@ impl Solver {
             reductions: Vec::new(),
             reducible,
             finite_alternatives,
-            coherence_groups_by_alternative,
             infeasible,
             recording_undo: false,
             undo: Vec::new(),
         }
     }
 
-    fn solve(
-        mut self,
-        original: &PbqpProblem,
-        heuristic: &mut dyn RnHeuristic,
-    ) -> Result<PbqpSolution, PbqpSolveError> {
+    fn solve(mut self, original: &PbqpProblem) -> Result<PbqpSolution, PbqpSolveError> {
         self.validate()?;
 
-        // Normalize costs and propagate impossible alternatives once, up front. This
-        // is where INF node costs (pre-coloring) and coherence-set fragments get
-        // pruned. Re-running the global propagation after every reduction is
-        // quadratic in the accumulated INF entries and dominated solve time at
-        // register-allocation scale; the per-node reductions below already respect
-        // INF through saturating cost arithmetic, so a single pass suffices.
+        // Normalize costs and propagate impossible alternatives once, up front.
+        // This is where INF node costs (pre-coloring) get pruned. Re-running the
+        // global propagation after every reduction is quadratic in the
+        // accumulated INF entries and dominated solve time at register-allocation
+        // scale; the per-node reductions below already respect INF through
+        // saturating cost arithmetic, so a single pass suffices.
         self.normalize_and_propagate()?;
         self.undo.clear();
 
-        self.solve_prepared(original, heuristic)
+        self.solve_prepared(original)
     }
 
-    fn solve_prepared(
-        &mut self,
-        original: &PbqpProblem,
-        heuristic: &mut dyn RnHeuristic,
-    ) -> Result<PbqpSolution, PbqpSolveError> {
+    fn solve_prepared(&mut self, original: &PbqpProblem) -> Result<PbqpSolution, PbqpSolveError> {
         while self.active_count > 0 {
             let node = self
                 .next_active_node()
@@ -529,7 +383,7 @@ impl Solver {
                 0 => self.reduce_fixed(node)?,
                 1 => self.reduce_r1(node)?,
                 2 => self.reduce_r2(node)?,
-                _ => return self.solve_rn(node, original, heuristic),
+                _ => return self.solve_rn(node, original),
             }
         }
 
@@ -547,19 +401,6 @@ impl Solver {
                 return Err(PbqpSolveError::InvalidProblem(format!(
                     "node {node} has no alternatives"
                 )));
-            }
-        }
-
-        for alternatives in &self.problem.coherence_sets {
-            for alternative in alternatives {
-                let node = alternative.node.index();
-                if node >= self.problem.node_costs.len()
-                    || alternative.alternative >= self.problem.node_costs[node].len()
-                {
-                    return Err(PbqpSolveError::InvalidProblem(
-                        "coherence set references an unknown alternative".to_string(),
-                    ));
-                }
             }
         }
 
@@ -652,18 +493,6 @@ impl Solver {
 
         while let Some(impossible) = queue.pop_front() {
             let node = impossible.node.index();
-            let group_indices =
-                self.coherence_groups_by_alternative[node][impossible.alternative].clone();
-            for group_index in group_indices {
-                let coherent_members = self.problem.coherence_sets[group_index].clone();
-                for member in coherent_members {
-                    if self.mark_impossible(member) {
-                        queue.push_back(member);
-                        changed = true;
-                    }
-                }
-            }
-
             for adjacent in self.neighbors(node) {
                 let neighbor = adjacent.neighbor as usize;
                 for alternative in 0..self.problem.node_costs[neighbor].len() {
@@ -875,25 +704,17 @@ impl Solver {
         self.propagate_new_infinities(impossible)
     }
 
+    /// Decide a degree ≥ 3 node, where exact reductions no longer apply: force
+    /// its alternatives in [`Self::rn_order`] and backtrack out of any choice
+    /// that proves globally infeasible, so the ordering trades search time and
+    /// solution quality but never correctness — infeasibility is reported only
+    /// after every finite alternative failed.
     fn solve_rn(
         &mut self,
         node: usize,
         original: &PbqpProblem,
-        heuristic: &mut dyn RnHeuristic,
     ) -> Result<PbqpSolution, PbqpSolveError> {
-        let alternatives = {
-            let view = RnView { solver: self, node };
-            heuristic.order(&view)
-        };
-        // A heuristic may name impossible or out-of-range alternatives; only
-        // finite ones are actionable.
-        let alternatives: Vec<usize> = alternatives
-            .into_iter()
-            .filter(|&alternative| {
-                alternative < self.problem.node_costs[node].len()
-                    && self.problem.node_costs[node][alternative] < INF_COST
-            })
-            .collect();
+        let alternatives = self.rn_order(node);
         self.recording_undo = true;
         let checkpoint = self.checkpoint();
         for alternative in alternatives {
@@ -901,7 +722,7 @@ impl Solver {
             if let Err(PbqpSolveError::Infeasible { .. }) = self.reduce_rn(node, alternative) {
                 continue;
             }
-            match self.solve_prepared(original, heuristic) {
+            match self.solve_prepared(original) {
                 Ok(solution) => return Ok(solution),
                 Err(PbqpSolveError::Infeasible { .. }) => {}
                 Err(error) => return Err(error),
@@ -911,6 +732,41 @@ impl Solver {
         Err(PbqpSolveError::Infeasible {
             node: PbqpNodeId::from_index(node),
         })
+    }
+
+    /// The node's still-possible alternatives, ordered by local cost: own cost
+    /// plus the best achievable neighbor cost over each incident edge.
+    fn rn_order(&self, node: usize) -> Vec<usize> {
+        let neighbors = self.neighbors(node);
+        let mut alternatives: Vec<(usize, u64)> = self.problem.node_costs[node]
+            .iter()
+            .enumerate()
+            .filter(|(_, cost)| **cost < INF_COST)
+            .map(|(alternative, &base)| {
+                let edge_costs = neighbors.iter().fold(0, |acc, adjacent| {
+                    let neighbor = adjacent.neighbor as usize;
+                    let best = (0..self.problem.node_costs[neighbor].len())
+                        .filter(|&neighbor_alt| {
+                            self.problem.node_costs[neighbor][neighbor_alt] < INF_COST
+                        })
+                        .map(|neighbor_alt| {
+                            add_cost(
+                                self.problem.node_costs[neighbor][neighbor_alt],
+                                self.edge_cost_at(adjacent.edge, node, alternative, neighbor_alt),
+                            )
+                        })
+                        .min()
+                        .unwrap_or(INF_COST);
+                    add_cost(acc, best)
+                });
+                (alternative, add_cost(base, edge_costs))
+            })
+            .collect();
+        alternatives.sort_by_key(|(alternative, cost)| (*cost, *alternative));
+        alternatives
+            .into_iter()
+            .map(|(alternative, _)| alternative)
+            .collect()
     }
 
     fn reduce_rn(&mut self, node: usize, alternative: usize) -> Result<(), PbqpSolveError> {
@@ -944,13 +800,6 @@ impl Solver {
             .ok_or(PbqpSolveError::Infeasible {
                 node: PbqpNodeId::from_index(node),
             })
-    }
-
-    fn edge_cost(&self, lhs: usize, lhs_alt: usize, rhs: usize, rhs_alt: usize) -> u64 {
-        self.problem
-            .edges
-            .find(lhs, rhs)
-            .map_or(0, |edge| self.edge_cost_at(edge, lhs, lhs_alt, rhs_alt))
     }
 
     /// The cost `edge` charges, read from the endpoint `node`'s side. Every
@@ -1325,10 +1174,7 @@ fn evaluate_solution(problem: &PbqpProblem, choices: &[usize]) -> Result<u64, Pb
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        INF_COST, PbqpAlternative, PbqpMatrix, PbqpNodeId, PbqpProblem, RnHeuristic, solve,
-        solve_with,
-    };
+    use super::{INF_COST, PbqpMatrix, PbqpProblem, solve};
 
     #[test]
     fn r1_selects_cheapest_compatible_alternatives() {
@@ -1372,27 +1218,6 @@ mod tests {
         let solution = solve(&problem).expect("PBQP should be solvable");
         assert_eq!(solution.choices[0], 1);
         assert_eq!(solution.total_cost, 2);
-    }
-
-    #[test]
-    fn coherence_set_propagates_impossible_pattern_fragments() {
-        let mut problem = PbqpProblem::new();
-        let root = problem.add_node(vec![INF_COST, 0]);
-        let child = problem.add_node(vec![5, 0]);
-        problem.add_coherence_set(vec![
-            PbqpAlternative {
-                node: root,
-                alternative: 0,
-            },
-            PbqpAlternative {
-                node: child,
-                alternative: 1,
-            },
-        ]);
-
-        let solution = solve(&problem).expect("PBQP should be solvable");
-        assert_eq!(solution.choices, vec![1, 0]);
-        assert_eq!(solution.total_cost, 5);
     }
 
     #[test]
@@ -1446,35 +1271,6 @@ mod tests {
         let solution = solve(&problem).expect("PBQP should try the feasible Rn alternative");
         assert_eq!(solution.choices[center.index()], 1);
         assert_eq!(solution.total_cost, 1);
-    }
-
-    #[test]
-    fn rn_propagates_branch_infinities_through_coherence_sets() {
-        let mut problem = PbqpProblem::new();
-        let center = problem.add_node(vec![0, 1]);
-        let a = problem.add_node(vec![0, 0]);
-        let b = problem.add_node(vec![0, INF_COST]);
-        let c = problem.add_node(vec![0, 0]);
-        let same_choice = PbqpMatrix::new(2, 2, vec![0, INF_COST, INF_COST, 0]);
-        let penalty = PbqpMatrix::new(2, 2, vec![0, 0, 0, 1]);
-
-        problem.add_edge(center, a, same_choice);
-        for (lhs, rhs) in [(center, b), (center, c), (a, b), (a, c), (b, c)] {
-            problem.add_edge(lhs, rhs, penalty.clone());
-        }
-        problem.add_coherence_set(vec![
-            PbqpAlternative {
-                node: a,
-                alternative: 1,
-            },
-            PbqpAlternative {
-                node: b,
-                alternative: 0,
-            },
-        ]);
-
-        let solution = solve(&problem).expect("PBQP should try the coherent Rn alternative");
-        assert_eq!(solution.choices[center.index()], 1);
     }
 
     #[test]
@@ -1537,87 +1333,5 @@ mod tests {
         let solution = solve(&problem).expect("PBQP should be solvable");
         assert_eq!(solution.choices, vec![0, 1]);
         assert_eq!(solution.total_cost, 1);
-    }
-
-    struct ReverseOrder;
-    impl RnHeuristic for ReverseOrder {
-        fn order(&mut self, view: &super::RnView) -> Vec<usize> {
-            let mut alternatives: Vec<usize> =
-                view.finite_alternatives().map(|(alt, _)| alt).collect();
-            alternatives.reverse();
-            alternatives
-        }
-    }
-
-    #[test]
-    fn custom_heuristic_supplies_the_rn_order() {
-        let mut problem = PbqpProblem::new();
-        let center = problem.add_node(vec![0, 1]);
-        let left = problem.add_node(vec![0, 0]);
-        let right = problem.add_node(vec![0, 0]);
-        let third = problem.add_node(vec![0, 0]);
-        let same_choice = PbqpMatrix::new(2, 2, vec![0, INF_COST, INF_COST, 0]);
-        problem.add_edge(center, left, same_choice.clone());
-        problem.add_edge(center, right, same_choice.clone());
-        problem.add_edge(center, third, same_choice);
-        problem.add_edge(left, right, PbqpMatrix::new(2, 2, vec![INF_COST, 0, 0, 0]));
-
-        // Trying the expensive alternative first still solves: the solver
-        // backtracks out of it and follows the heuristic's next choice.
-        let solution = solve_with(&problem, &mut ReverseOrder).expect("PBQP should be solvable");
-        assert_eq!(solution.choices[center.index()], 1);
-        assert_eq!(solution.total_cost, 1);
-    }
-
-    /// A 4-clique of two-alternative nodes: every node has degree 3, so no
-    /// exact reduction applies and the solver must make an RN decision on
-    /// `center`.
-    fn rn_clique(center_costs: Vec<u64>) -> (PbqpProblem, PbqpNodeId) {
-        let mut problem = PbqpProblem::new();
-        let center = problem.add_node(center_costs);
-        let same_choice = PbqpMatrix::new(2, 2, vec![0, INF_COST, INF_COST, 0]);
-        let mut others = Vec::new();
-        for _ in 0..3 {
-            let node = problem.add_node(vec![0, 0]);
-            problem.add_edge(center, node, same_choice.clone());
-            for &earlier in &others {
-                problem.add_edge(earlier, node, same_choice.clone());
-            }
-            others.push(node);
-        }
-        (problem, center)
-    }
-
-    struct FirstAlternative;
-    impl RnHeuristic for FirstAlternative {
-        fn order(&mut self, _: &super::RnView) -> Vec<usize> {
-            vec![0]
-        }
-    }
-
-    #[test]
-    fn heuristic_choice_controls_the_solution() {
-        // Two feasible RN alternatives at different costs; a heuristic that
-        // prefers the expensive one gets it — the ordering is the decision.
-        let (problem, center) = rn_clique(vec![5, 1]);
-
-        let solution =
-            solve_with(&problem, &mut FirstAlternative).expect("PBQP should be solvable");
-        assert_eq!(solution.choices[center.index()], 0);
-        assert_eq!(solution.total_cost, 5);
-    }
-
-    struct EmptyOrder;
-    impl RnHeuristic for EmptyOrder {
-        fn order(&mut self, _: &super::RnView) -> Vec<usize> {
-            Vec::new()
-        }
-    }
-
-    #[test]
-    fn heuristic_returning_no_alternative_is_infeasible() {
-        let (problem, _) = rn_clique(vec![0, 1]);
-
-        assert!(solve_with(&problem, &mut EmptyOrder).is_err());
     }
 }

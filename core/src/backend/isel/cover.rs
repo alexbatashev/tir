@@ -5,12 +5,12 @@ use std::collections::{HashMap, HashSet};
 
 use tir::{
     ValueId,
-    pbqp::{self, INF_COST, PbqpMatrix, PbqpProblem},
     sem::{
         SymKind,
         egraph::{SemEGraph, class_int_binding},
     },
 };
+use tir_pbqp::{self as pbqp, INF_COST, PbqpMatrix, PbqpProblem};
 use tir_symbolic::egraph::Id;
 
 use super::RuleMatch;

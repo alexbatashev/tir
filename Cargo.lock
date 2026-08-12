@@ -2075,6 +2075,7 @@ dependencies = [
  "tir-graph",
  "tir-lit",
  "tir-macros",
+ "tir-pbqp",
  "tir-pdl",
  "tir-symbolic",
 ]
@@ -2194,6 +2195,13 @@ dependencies = [
  "quote",
  "syn",
  "tir-symbolic",
+]
+
+[[package]]
+name = "tir-pbqp"
+version = "0.1.0"
+dependencies = [
+ "criterion",
 ]
 
 [[package]]
