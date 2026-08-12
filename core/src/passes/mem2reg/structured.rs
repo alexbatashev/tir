@@ -14,7 +14,7 @@ use crate::{
     OperationRef, PassError, PromotableAllocation, RegionId, Rewriter, TypeId, ValueId, scf,
 };
 
-use super::{collect_slots, values_agree_on_type};
+use crate::analysis::slots::{collect_slots, values_agree_on_type};
 
 pub(super) fn run(
     context: &Context,

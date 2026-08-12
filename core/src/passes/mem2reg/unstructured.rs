@@ -8,7 +8,9 @@ use crate::analysis::DominatorTree;
 use crate::graph::{Dag, NodeId};
 use crate::{BlockId, Context, OpId, OperationRef, PassError, Rewriter};
 
-use super::{SlotState, collect_slots, load_result, store_value, values_agree_on_type};
+use crate::analysis::slots::{
+    SlotState, collect_slots, load_result, store_value, values_agree_on_type,
+};
 
 pub(super) fn run(
     context: &Context,

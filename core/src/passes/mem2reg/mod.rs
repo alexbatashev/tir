@@ -1,9 +1,6 @@
-use std::collections::BTreeMap;
-
 use crate::analysis::DominatorTree;
 use crate::{
-    AnalysisManager, Context, MemoryRead, MemoryWrite, OpId, OperationRef, Pass, PassError,
-    PassTarget, PromotableAllocation, Rewriter, ValueId, builtin::FuncOp,
+    AnalysisManager, Context, OperationRef, Pass, PassError, PassTarget, Rewriter, builtin::FuncOp,
 };
 
 mod structured;
@@ -11,17 +8,6 @@ mod unstructured;
 
 #[derive(Default)]
 pub struct Mem2RegPass;
-
-/// What we know about one allocated stack slot across the whole function.
-#[derive(Default)]
-struct SlotState {
-    alloca: Option<OpId>,
-    stores: Vec<OpId>,
-    loads: Vec<OpId>,
-    /// The slot's pointer is used somewhere other than a load/store, so its
-    /// contents may be observed indirectly and it cannot be promoted.
-    escapes: bool,
-}
 
 impl Mem2RegPass {
     pub fn new() -> Self {
@@ -69,103 +55,6 @@ impl Pass for Mem2RegPass {
         // blocks — so block-level dominance survives.
         Ok(())
     }
-}
-
-/// Classify every load/store/escape against the slots opened by `alloca`s.
-fn collect_slots(context: &Context, op_ids: &[OpId]) -> BTreeMap<ValueId, SlotState> {
-    let mut slots: BTreeMap<ValueId, SlotState> = BTreeMap::new();
-
-    for &op_id in op_ids {
-        if let Some(alloca) = context
-            .get_op(op_id)
-            .as_interface::<dyn PromotableAllocation>()
-        {
-            slots.entry(alloca.promoted_location()).or_default().alloca = Some(op_id);
-        }
-    }
-
-    for &op_id in op_ids {
-        let instance = context.get_op(op_id);
-        if instance
-            .clone()
-            .as_interface::<dyn PromotableAllocation>()
-            .is_some()
-        {
-            continue;
-        }
-
-        let read_location = instance
-            .clone()
-            .as_interface::<dyn MemoryRead>()
-            .map(|read| read.read_location());
-        if let Some(location) = read_location
-            && let Some(slot) = slots.get_mut(&location)
-        {
-            slot.loads.push(op_id);
-        }
-
-        let write = instance.clone().as_interface::<dyn MemoryWrite>();
-        let write_location = write.as_ref().map(|write| write.write_location());
-        if let Some(location) = write_location
-            && let Some(slot) = slots.get_mut(&location)
-        {
-            slot.stores.push(op_id);
-        }
-        if let Some(value) = write.map(|write| write.written_value())
-            && let Some(slot) = slots.get_mut(&value)
-        {
-            slot.escapes = true;
-        }
-
-        for operand in &instance.operands {
-            if Some(*operand) == read_location || Some(*operand) == write_location {
-                continue;
-            }
-            if let Some(slot) = slots.get_mut(operand) {
-                slot.escapes = true;
-            }
-        }
-    }
-
-    slots
-}
-
-/// Whether the slot's loads and stores all name one type. Promotion reconstructs
-/// a single SSA value per slot and substitutes it for the loads, so a slot whose
-/// values disagree on type — a frontend spelling one pointer both opaque and
-/// typed, say — has no type to give that value and stays in memory.
-fn values_agree_on_type(context: &Context, state: &SlotState) -> bool {
-    let mut types = state
-        .loads
-        .iter()
-        .map(|&load| load_result(context, load))
-        .chain(
-            state
-                .stores
-                .iter()
-                .map(|&store| store_value(context, store)),
-        )
-        .map(|value| context.get_value(value).ty());
-    let Some(ty) = types.next() else {
-        return true;
-    };
-    types.all(|other| other == ty)
-}
-
-fn store_value(context: &Context, store: OpId) -> ValueId {
-    context
-        .get_op(store)
-        .as_interface::<dyn MemoryWrite>()
-        .expect("store op implements MemoryWrite")
-        .written_value()
-}
-
-fn load_result(context: &Context, load: OpId) -> ValueId {
-    context
-        .get_op(load)
-        .as_interface::<dyn MemoryRead>()
-        .expect("load op implements MemoryRead")
-        .read_value()
 }
 
 #[cfg(test)]
