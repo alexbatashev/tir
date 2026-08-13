@@ -1,26 +1,7 @@
 use crate::OpId;
 use crate::TypeId;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ValueId(u32);
-
-impl ValueId {
-    pub(crate) fn new(id: u32) -> Self {
-        Self(id)
-    }
-
-    pub fn number(&self) -> u32 {
-        self.0
-    }
-
-    pub fn from_number(n: u32) -> Self {
-        Self(n)
-    }
-
-    pub(crate) fn index(self) -> usize {
-        self.0 as usize
-    }
-}
+pub use tir_symbolic::sem::ValueId;
 
 #[derive(Debug, Clone)]
 pub struct Value {

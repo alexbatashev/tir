@@ -5,28 +5,27 @@
 //! to sequences that the target *does* have. Rather than writing those lemmas by
 //! hand, we propose a candidate shape and confirm it against an
 //! [`EquivalenceOracle`]: [`FuzzOracle`] evaluates both sides on many inputs with
-//! the reference interpreter ([`super::execute`]), [`SmtOracle`] proves the
-//! equivalence unsatisfiable-to-refute with [`tir_symbolic`]'s QF_BV pipeline.
+//! the reference interpreter ([`crate::lang::execute`]), [`SmtOracle`] proves the
+//! equivalence unsatisfiable-to-refute with this crate's QF_BV pipeline.
 //! Confirmed shapes become e-graph rewrites at the call site.
 
 use std::collections::HashMap;
 
 use tir_adt::APInt;
-use tir_symbolic::bitblast::{SolveOutcome, blast, blast_with_types};
-use tir_symbolic::lang::{SemType, Width, infer_types, infer_widths};
+use tir_graph::{Dag, GenericDag, MutDag, NodeId};
 
-use crate::ValueId;
-use crate::graph::{Dag, GenericDag, MutDag, NodeId};
-use crate::sem::{SemGraph, SymKind, SymPayload, Value, execute};
+use super::{SemGraph, ValueId};
+use crate::bitblast::{SolveOutcome, blast, blast_with_types};
+use crate::lang::{SemType, SymKind, SymPayload, Value, Width, execute, infer_types, infer_widths};
 
 /// Decides whether two single-output expression graphs (over the same symbols)
 /// compute the same value for every input of the given symbol widths.
-pub trait EquivalenceOracle {
-    fn equivalent(&self, lhs: &SemGraph, rhs: &SemGraph, symbol_widths: &[u32]) -> bool;
+pub trait EquivalenceOracle<A = ()> {
+    fn equivalent(&self, lhs: &SemGraph<A>, rhs: &SemGraph<A>, symbol_widths: &[u32]) -> bool;
 
     /// Decides whether `rhs` is defined and equal to `lhs` whenever `lhs` is
     /// defined. Total operations reduce this obligation to equivalence.
-    fn refines(&self, lhs: &SemGraph, rhs: &SemGraph, symbol_widths: &[u32]) -> bool {
+    fn refines(&self, lhs: &SemGraph<A>, rhs: &SemGraph<A>, symbol_widths: &[u32]) -> bool {
         self.equivalent(lhs, rhs, symbol_widths)
     }
 }
@@ -46,8 +45,8 @@ impl Default for FuzzOracle {
     }
 }
 
-impl EquivalenceOracle for FuzzOracle {
-    fn equivalent(&self, lhs: &SemGraph, rhs: &SemGraph, symbol_widths: &[u32]) -> bool {
+impl<A> EquivalenceOracle<A> for FuzzOracle {
+    fn equivalent(&self, lhs: &SemGraph<A>, rhs: &SemGraph<A>, symbol_widths: &[u32]) -> bool {
         let value_sets: Vec<Vec<APInt>> = symbol_widths
             .iter()
             .map(|&w| sample_values(w, self.samples_per_symbol))
@@ -80,22 +79,22 @@ pub struct SmtOracle;
 
 type OracleGraph = GenericDag<SymKind, SymPayload<ValueId>>;
 
-impl EquivalenceOracle for SmtOracle {
-    fn equivalent(&self, lhs: &SemGraph, rhs: &SemGraph, symbol_widths: &[u32]) -> bool {
+impl<A> EquivalenceOracle<A> for SmtOracle {
+    fn equivalent(&self, lhs: &SemGraph<A>, rhs: &SemGraph<A>, symbol_widths: &[u32]) -> bool {
         self.prove(lhs, rhs, symbol_widths, false)
     }
 
-    fn refines(&self, lhs: &SemGraph, rhs: &SemGraph, symbol_widths: &[u32]) -> bool {
+    fn refines(&self, lhs: &SemGraph<A>, rhs: &SemGraph<A>, symbol_widths: &[u32]) -> bool {
         self.prove(lhs, rhs, symbol_widths, true)
     }
 }
 
 impl SmtOracle {
     /// Prove equivalence while preserving the semantic domains of shared symbols.
-    pub fn equivalent_typed(
+    pub fn equivalent_typed<A>(
         &self,
-        lhs: &SemGraph,
-        rhs: &SemGraph,
+        lhs: &SemGraph<A>,
+        rhs: &SemGraph<A>,
         symbol_types: &[SemType],
     ) -> bool {
         let Some((g, l, r)) = disequality(lhs, rhs) else {
@@ -116,10 +115,10 @@ impl SmtOracle {
             )
     }
 
-    fn prove(
+    fn prove<A>(
         &self,
-        lhs: &SemGraph,
-        rhs: &SemGraph,
+        lhs: &SemGraph<A>,
+        rhs: &SemGraph<A>,
         symbol_widths: &[u32],
         defined_refinement: bool,
     ) -> bool {
@@ -145,7 +144,7 @@ impl SmtOracle {
 
 /// The `lhs != rhs` graph both sides share, with the copied roots. `None` if
 /// either side is empty.
-fn disequality(lhs: &SemGraph, rhs: &SemGraph) -> Option<(OracleGraph, NodeId, NodeId)> {
+fn disequality<A>(lhs: &SemGraph<A>, rhs: &SemGraph<A>) -> Option<(OracleGraph, NodeId, NodeId)> {
     let (lhs_root, rhs_root) = (lhs.root()?, rhs.root()?);
     let mut g = OracleGraph::new();
     let mut symbols = HashMap::new();
@@ -176,8 +175,8 @@ fn semantic_width(ty: SemType) -> Option<u32> {
 /// `symbols` across *both* sides of the equivalence — the bit-blaster allocates
 /// fresh literals per node, so a symbol duplicated per side would leave the two
 /// occurrences unconstrained against each other.
-fn copy_reachable(
-    src: &SemGraph,
+fn copy_reachable<A>(
+    src: &SemGraph<A>,
     node: NodeId,
     dst: &mut OracleGraph,
     symbols: &mut HashMap<u32, NodeId>,
@@ -241,7 +240,7 @@ fn values_bit_eq(a: &Value, b: &Value) -> bool {
 
 /// Boundary values (0, 1, all-ones, sign bit, alternating patterns) plus a small
 /// deterministic LCG spread, all masked to `width` bits.
-pub(crate) fn sample_values(width: u32, extra: usize) -> Vec<APInt> {
+fn sample_values(width: u32, extra: usize) -> Vec<APInt> {
     let mask = if width >= 64 {
         u64::MAX
     } else {
@@ -272,19 +271,22 @@ pub(crate) fn sample_values(width: u32, extra: usize) -> Vec<APInt> {
         .collect()
 }
 
-pub(crate) fn sym(g: &mut SemGraph, id: u32) -> NodeId {
+/// A symbol leaf for `id`.
+pub fn sym<A>(g: &mut SemGraph<A>, id: u32) -> NodeId {
     let node = g.add_node(SymKind::Symbol);
     g.set_leaf_data(node, SymPayload::SymbolId(id));
     node
 }
 
-pub(crate) fn con(g: &mut SemGraph, value: u64, width: u32) -> NodeId {
+/// A `width`-bit constant leaf.
+pub fn con<A>(g: &mut SemGraph<A>, value: u64, width: u32) -> NodeId {
     let node = g.add_node(SymKind::Constant);
     g.set_leaf_data(node, SymPayload::Int(APInt::new(width, value)));
     node
 }
 
-pub(crate) fn op(g: &mut SemGraph, kind: SymKind, children: &[NodeId]) -> NodeId {
+/// An interior node of `kind` over `children`.
+pub fn op<A>(g: &mut SemGraph<A>, kind: SymKind, children: &[NodeId]) -> NodeId {
     let node = g.add_node(kind);
     for &child in children {
         g.add_edge(node, child);
@@ -318,8 +320,7 @@ fn shift_pair(shr_kind: SymKind, k: u32, w: u32) -> SemGraph {
 
 /// Representative `(source_width, register_width)` pairs width-parameterized
 /// identities are sampled at, spanning several source widths per register width.
-pub(crate) const EXT_WIDTH_SAMPLES: &[(u32, u32)] =
-    &[(8, 32), (16, 32), (8, 64), (16, 64), (32, 64)];
+const EXT_WIDTH_SAMPLES: &[(u32, u32)] = &[(8, 32), (16, 32), (8, 64), (16, 64), (32, 64)];
 
 /// Confirm that extending the low `n` bits of a register (`ext_kind` ∈ {`SExt`,
 /// `ZExt`}) equals `shr_kind(shl(x, w - n), w - n)` for every sampled width pair.
@@ -416,7 +417,7 @@ mod tests {
     #[test]
     fn smt_oracle_shares_symbols_across_sides() {
         // `x ^ x == 0` holds only if both sides constrain the same `x`.
-        let mut lhs = SemGraph::new();
+        let mut lhs = SemGraph::<()>::new();
         let x = sym(&mut lhs, 0);
         op(&mut lhs, SymKind::Xor, &[x, x]);
         let mut rhs = SemGraph::new();
@@ -427,7 +428,7 @@ mod tests {
     #[test]
     fn smt_oracle_finds_counterexamples_over_two_symbols() {
         // `x + y != x - y` whenever `2*y != 0`.
-        let mut lhs = SemGraph::new();
+        let mut lhs = SemGraph::<()>::new();
         let x = sym(&mut lhs, 0);
         let y = sym(&mut lhs, 1);
         op(&mut lhs, SymKind::Add, &[x, y]);

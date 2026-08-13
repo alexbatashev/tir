@@ -249,76 +249,7 @@ operation! {
     }
 }
 
-/// Build the target-independent semantic graph for a `cmpf` predicate.
-///
-/// Backend flag composition uses the same graph so its proved reader rules
-/// match the builtin operation exactly.
-pub fn cmpf_semantics(
-    g: &mut impl tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
-    predicate: &str,
-) -> Option<tir::graph::NodeId> {
-    use tir::sem::SymKind;
-
-    let lhs = symbol(g, 0);
-    let rhs = symbol(g, 1);
-    Some(match predicate {
-        "oeq" => ordered_equal(g, lhs, rhs),
-        "une" => {
-            let equal = ordered_equal(g, lhs, rhs);
-            let one = g.add_node(SymKind::Constant);
-            g.set_leaf_data(one, tir::sem::SymPayload::Int(tir_adt::APInt::new(1, 1)));
-            binary(g, SymKind::Xor, equal, one)
-        }
-        "olt" => binary(g, SymKind::Lt, lhs, rhs),
-        "ogt" => binary(g, SymKind::Lt, rhs, lhs),
-        "oge" => binary(g, SymKind::Ge, lhs, rhs),
-        "ole" => binary(g, SymKind::Ge, rhs, lhs),
-        _ => return None,
-    })
-}
-
-/// The semantic-graph builder `cmpf_semantics` writes into.
-trait SemBuilder:
-    tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>
-{
-}
-
-impl<T> SemBuilder for T where
-    T: tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>
-{
-}
-
-/// Ordered equality without an atomic float `eq`: both `>=` directions hold,
-/// which is false whenever either operand is NaN.
-fn ordered_equal(
-    g: &mut impl SemBuilder,
-    lhs: tir::graph::NodeId,
-    rhs: tir::graph::NodeId,
-) -> tir::graph::NodeId {
-    use tir::sem::SymKind;
-
-    let left_ge = binary(g, SymKind::Ge, lhs, rhs);
-    let right_ge = binary(g, SymKind::Ge, rhs, lhs);
-    binary(g, SymKind::And, left_ge, right_ge)
-}
-
-fn symbol(g: &mut impl SemBuilder, index: u32) -> tir::graph::NodeId {
-    let leaf = g.add_node(tir::sem::SymKind::Symbol);
-    g.set_leaf_data(leaf, tir::sem::SymPayload::SymbolId(index));
-    leaf
-}
-
-fn binary(
-    g: &mut impl SemBuilder,
-    kind: tir::sem::SymKind,
-    lhs: tir::graph::NodeId,
-    rhs: tir::graph::NodeId,
-) -> tir::graph::NodeId {
-    let node = g.add_node(kind);
-    g.add_edge(node, lhs);
-    g.add_edge(node, rhs);
-    node
-}
+pub use tir_symbolic::sem::cmpf_semantics;
 
 impl CmpFOp {
     fn cmp_expr(

@@ -531,7 +531,7 @@ impl Context {
     pub fn create_value(&self, ty: TypeId, defining_op: Option<OpId>) -> Value {
         let mut inner = self.0.write();
 
-        let value_id = ValueId::new(
+        let value_id = ValueId::from_number(
             inner
                 .last_value_id
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
