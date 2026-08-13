@@ -11,6 +11,7 @@
 //! two loops that happen to spell one init and one latch alike are not the same
 //! carried value.
 
+mod state;
 #[cfg(test)]
 mod tests;
 
@@ -39,6 +40,8 @@ pub struct View {
     /// The reader edge pool: the reading term, and the next edge of its class.
     reader_term: Vec<u32>,
     reader_next: Vec<u32>,
+    /// The states and values the region hands out, which no law may drop.
+    exported: Vec<TermId>,
     node_limit: usize,
     hasher: FxBuildHasher,
 }
@@ -58,6 +61,7 @@ impl View {
             reader_tail: Vec::new(),
             reader_term: Vec::new(),
             reader_next: Vec::new(),
+            exported: Vec::new(),
             node_limit,
             hasher: FxBuildHasher::default(),
         };
@@ -146,9 +150,23 @@ impl View {
         readers
     }
 
+    /// Mark a term the region hands out: no law may drop what it names.
+    pub fn export(&mut self, term: TermId) {
+        self.exported.push(term);
+    }
+
+    pub(super) fn is_exported(&self, class: TermId) -> bool {
+        let class = self.find(class);
+        self.exported.iter().any(|&term| self.find(term) == class)
+    }
+
     /// Saturate to a fixpoint, or to the node limit.
     pub fn saturate(&mut self) {
-        while self.congruence() && self.graph.len() < self.node_limit {}
+        while self.graph.len() < self.node_limit {
+            if !(self.congruence() | self.state_laws()) {
+                return;
+            }
+        }
     }
 
     /// The classes and their members, one line each: two saturations of one

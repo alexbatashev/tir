@@ -119,3 +119,132 @@ fn a_loop_carried_cycle_saturates() {
 
     assert_eq!(view.classes().len(), view.graph().len());
 }
+
+const STORE_THEN_LOAD: &str = "module {
+  func @f(%0: !i32) -> !i32 {
+    %1 = entry_state : !state
+    %2 = ptr.alloca {size = 4, align = 4} : !ptr.p<!i32> state(-> %3)
+    ptr.store %0, %2 state(%3 -> %4)
+    %5 = ptr.load %2 : !i32 state(%4 -> %6)
+    return %5 state(%1)
+  }
+  module_end
+}";
+
+#[test]
+fn a_load_reads_the_value_the_store_before_it_wrote() {
+    let (_, mut view) = view_of(STORE_THEN_LOAD);
+
+    view.saturate();
+
+    assert_eq!(
+        view.dump(),
+        "c0: t0 t8
+c1: t1
+c2: t2
+c3: t3
+c4: t4
+c5: t5
+c6: t6
+c7: t7
+c9: t9
+"
+    );
+}
+
+#[test]
+fn a_load_of_another_address_reads_nothing_from_the_store() {
+    let (_, mut view) = view_of(
+        "module {
+  func @f(%0: !i32, %1: !ptr.p<!i32>, %2: !ptr.p<!i32>) -> !i32 {
+    %3 = entry_state : !state
+    ptr.store %0, %1 state(%3 -> %4)
+    %5 = ptr.load %2 : !i32 state(%4 -> %6)
+    return %5 state(%6)
+  }
+  module_end
+}",
+    );
+
+    view.saturate();
+
+    assert_eq!(view.classes().len(), view.graph().len());
+}
+
+#[test]
+fn a_narrower_load_reads_nothing_from_the_store() {
+    let (_, mut view) = view_of(
+        "module {
+  func @f(%0: !i32, %1: !ptr.p<!i32>) -> !i16 {
+    %2 = entry_state : !state
+    ptr.store %0, %1 state(%2 -> %3)
+    %4 = ptr.load %1 : !i16 state(%3 -> %5)
+    return %4 state(%5)
+  }
+  module_end
+}",
+    );
+
+    view.saturate();
+
+    assert_eq!(view.classes().len(), view.graph().len());
+}
+
+const STORE_THEN_STORE: &str = "module {
+  func @f(%0: !i32, %1: !i32, %2: !ptr.p<!i32>) -> !i32 {
+    %3 = entry_state : !state
+    ptr.store %0, %2 state(%3 -> %4)
+    ptr.store %1, %2 state(%4 -> %5)
+    return %0 state(%5)
+  }
+  module_end
+}";
+
+#[test]
+fn a_store_the_next_one_overwrites_leaves_the_state_it_was_handed() {
+    let (_, mut view) = view_of(STORE_THEN_STORE);
+
+    view.saturate();
+
+    assert_eq!(
+        view.dump(),
+        "c0: t0
+c1: t1
+c2: t2
+c3: t3 t6
+c4: t4
+c5: t5
+c7: t7
+"
+    );
+}
+
+#[test]
+fn a_store_whose_state_the_region_exports_stays() {
+    let (_, mut view) = view_of(STORE_THEN_STORE);
+    view.export(view.graph().term_at(6));
+
+    view.saturate();
+
+    assert_eq!(view.classes().len(), view.graph().len());
+}
+
+#[test]
+fn a_store_another_access_still_reads_stays() {
+    let (_, mut view) = view_of(
+        "module {
+  func @f(%0: !i32, %1: !i32, %2: !ptr.p<!i32>) -> !i32 {
+    %3 = entry_state : !state
+    ptr.store %0, %2 state(%3 -> %4)
+    ptr.store %1, %2 state(%4 -> %5)
+    %6 = ptr.load %2 : !i32 state(%4 -> %7)
+    return %6 state(%5)
+  }
+  module_end
+}",
+    );
+
+    view.saturate();
+
+    assert_eq!(view.find(view.graph().term_at(6)), view.graph().term_at(6));
+}
