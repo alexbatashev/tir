@@ -28,6 +28,7 @@ pub(crate) mod axioms;
 pub(crate) mod egraph;
 pub mod node;
 pub(crate) mod rewrites;
+pub mod seed;
 pub(crate) mod theory;
 pub use egraph::SemEGraph;
 pub use node::{IrOp, Kind, MergeKind, Prov, SemNode, SemPayload, template_node};
