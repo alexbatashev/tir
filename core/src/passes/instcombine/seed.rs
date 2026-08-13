@@ -11,13 +11,14 @@ use std::sync::Arc;
 
 use tir_symbolic::egraph::{EGraph, Id};
 
+use crate::analysis::scopes::{loop_scope, nested_exit_scopes};
 use crate::analysis::slots::{collect_slots, values_agree_on_type};
 use crate::builtin::StateType;
 use crate::sem::egraph::{minimal_unsigned_apint, type_width};
 use crate::sem::{Prov, SemNode as Node, SymKind};
 use crate::{
-    BlockId, Commutative, Conditional, ConstantLike, Context, MemoryRead, MemoryWrite, OpId,
-    OpInstance, RegionId, TypeId, ValueId,
+    BlockId, Commutative, Conditional, ConstantLike, Context, EntryGuard, GuardedLoop, LoopLike,
+    MemoryRead, MemoryWrite, OpId, OpInstance, RegionId, TokenScope, TypeId, ValueId,
 };
 
 /// The operands a store term names: the location, the value it writes, and the
@@ -140,10 +141,16 @@ impl Seeder<'_> {
                 self.seed_gamma(&instance, conditional.as_ref());
                 return;
             }
-            // A loop carries no reasoning yet: its ports and results anchor, but
-            // its body is read like any other region.
-            for region in instance.regions.clone() {
-                self.seed_region(region);
+            match self.theta_loop(&instance) {
+                Some(loop_like) => self.seed_theta(&instance, loop_like.as_ref()),
+                // A loop the vocabulary cannot spell carries no reasoning: its
+                // ports and results anchor, but its body is read like any other
+                // region.
+                None => {
+                    for region in instance.regions.clone() {
+                        self.seed_region(region);
+                    }
+                }
             }
         } else if let (Some(constant), [result]) = (
             instance.clone().as_interface::<dyn ConstantLike>(),
@@ -218,6 +225,102 @@ impl Seeder<'_> {
             let id = self.class_of(input);
             self.value_class.insert(argument, id);
         }
+    }
+
+    /// The loop reading of `instance`, when every exit of it passes through the
+    /// test: a `break` or `continue` leaves with a state of its own, which the θ
+    /// over the body's does not describe.
+    fn theta_loop(&self, instance: &Arc<OpInstance>) -> Option<Box<dyn LoopLike>> {
+        let scope = instance.clone().as_interface::<dyn TokenScope>()?;
+        let exits = nested_exit_scopes(self.context, instance);
+        scope
+            .token_scope_regions()
+            .iter()
+            .all(|&region| {
+                loop_scope(self.context, region).is_none_or(|token| !exits.contains(&token))
+            })
+            .then(|| instance.clone().as_interface::<dyn LoopLike>())?
+    }
+
+    /// θ: a loop's state-typed carried port is the θ over the state the loop was
+    /// entered with and the one its body leaves. The port's argument anchors
+    /// first, so the regions can be read on it, and the θ joins that class after
+    /// — the latch is a term over the argument itself. The loop's result is the
+    /// state its last iteration published.
+    ///
+    /// Only state ports: a value the loop carries is one the term graph already
+    /// reads as an argument, and nothing yet asks it what the loop does to it.
+    fn seed_theta(&mut self, instance: &Arc<OpInstance>, loop_like: &dyn LoopLike) {
+        let carried = loop_like.carried_args();
+        let ports: Vec<usize> = carried
+            .iter()
+            .enumerate()
+            .filter(|&(_, &argument)| self.context.get_value(argument).ty() == self.state_ty)
+            .map(|(index, _)| index)
+            .collect();
+        let tested = self.tested_values(instance, carried.len());
+        let heads = match &tested {
+            Some((_, arguments, _)) => arguments.clone(),
+            None => carried.clone(),
+        };
+        for &port in &ports {
+            self.anchor(heads[port]);
+        }
+        // The body reads what the test forwards into it, so the test's region is
+        // read first and its forwarded values name the body's arguments.
+        if let Some((region, _, forwarded)) = tested.clone() {
+            self.seed_region(region);
+            for &port in &ports {
+                let id = self.class_of(forwarded[port]);
+                self.value_class.insert(carried[port], id);
+            }
+        }
+        for region in instance.regions.clone() {
+            self.seed_region(region);
+        }
+        let (inits, latched, finals) = (loop_like.inits(), loop_like.latched(), loop_like.finals());
+        for &port in &ports {
+            let init = self.class_of(inits[port]);
+            let latch = self.class_of(latched[port]);
+            let theta = self.eg.add(Node::theta(finals[port], init, latch));
+            let head = self.class_of(heads[port]);
+            self.eg.union(theta, head);
+            let published = match &tested {
+                Some((_, _, forwarded)) => self.class_of(forwarded[port]),
+                None => head,
+            };
+            self.value_class.insert(finals[port], published);
+        }
+        self.eg.rebuild();
+    }
+
+    /// The region a loop evaluates before each iteration, the arguments it reads
+    /// the carried values as, and the values it forwards into the body — its
+    /// terminator's trailing operands, one per port. `None` for a loop that
+    /// tests nothing it carries.
+    fn tested_values(
+        &self,
+        instance: &Arc<OpInstance>,
+        ports: usize,
+    ) -> Option<(RegionId, Vec<ValueId>, Vec<ValueId>)> {
+        let guard = instance.clone().as_interface::<dyn GuardedLoop>()?;
+        let EntryGuard::Region {
+            region, arguments, ..
+        } = guard.entry_guard()
+        else {
+            return None;
+        };
+        if arguments.len() != ports {
+            return None;
+        }
+        let block = self
+            .context
+            .get_region(region)
+            .iter(self.context.clone())
+            .next()?;
+        let operands = &self.context.get_op(*block.op_ids().last()?).operands;
+        let first = operands.len().checked_sub(ports)?;
+        Some((region, arguments, operands[first..].to_vec()))
     }
 
     /// Record the states `instance` observes as exported. The term graph models a

@@ -54,6 +54,10 @@ pub fn builtin_ruleset(context: &Context, seeded: &Seeded) -> Ruleset {
         state::distribute_load_over_gamma(context.clone(), seeded.promotable_addresses.clone()),
         None,
     );
+    ruleset.push(
+        state::distribute_load_over_theta(context.clone(), seeded.promotable_addresses.clone()),
+        None,
+    );
     ruleset
 }
 

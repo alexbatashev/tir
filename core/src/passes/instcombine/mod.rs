@@ -26,7 +26,7 @@ use crate::analysis::{DominatingEdgeFacts, DominatorTree};
 use crate::graph::Dag;
 use crate::{
     AnalysisManager, BlockId, Conditional, ConstantLike, Context, MemoryRead, OpId, OpInstance,
-    OperationRef, Pass, PassError, PassTarget, RegionId, Rewriter, TypeId, ValueId,
+    OperationRef, Pass, PassError, PassTarget, RegionId, Rewriter, TokenScope, TypeId, ValueId,
     builtin::{FuncOp, ops},
     utils::APInt,
 };
@@ -75,11 +75,13 @@ impl Pass for InstCombinePass {
             context,
             eg: seeded.eg,
             value_class: seeded.value_class,
-            arg_block: seeded.arg_block,
+            arg_block: RefCell::new(seeded.arg_block),
             dom: analyses.get::<DominatorTree>(context, root),
             edge_facts: analyses.get::<DominatingEdgeFacts>(context, root),
             ruleset,
             gamma_ports: RefCell::new(HashMap::new()),
+            theta_ports: RefCell::new(HashMap::new()),
+            port_bindings: RefCell::new(Vec::new()),
         };
         let body = context.get_op(root).regions[0];
         driver.process_region(body, rewriter)?;
@@ -95,13 +97,27 @@ struct Driver<'a> {
     context: &'a Context,
     eg: EGraph<Node>,
     value_class: HashMap<ValueId, Id>,
-    arg_block: HashMap<ValueId, BlockId>,
+    /// The block each block argument belongs to. A commit growing a carried port
+    /// adds arguments of its own, which the dominance check has to locate too.
+    arg_block: RefCell<HashMap<ValueId, BlockId>>,
     dom: Rc<DominatorTree>,
     edge_facts: Rc<DominatingEdgeFacts>,
     ruleset: Ruleset,
     /// The value port already grown on a gate for a pair of arm classes, so every
     /// read the gate answers takes the one port.
     gamma_ports: RefCell<HashMap<(OpId, Id, Id), ValueId>>,
+    /// The same for a loop, over the classes it carries from and to.
+    theta_ports: RefCell<HashMap<(OpId, Id, Id), ThetaPort>>,
+    /// The θ classes standing for a port argument while that port's latch is
+    /// being built: inside the body the carry *is* the argument.
+    port_bindings: RefCell<Vec<(Id, ValueId)>>,
+}
+
+/// A carried port a θ commit grew: the argument each of the loop's regions reads
+/// the carried value as, and the result the loop leaves it in.
+struct ThetaPort {
+    arguments: Vec<(RegionId, ValueId)>,
+    result: ValueId,
 }
 
 impl Driver<'_> {
@@ -331,7 +347,7 @@ impl Driver<'_> {
     fn def_block(&self, value: ValueId) -> Option<BlockId> {
         match self.context.get_value(value).defining_op() {
             Some(op) => self.context.get_op(op).parent_block(),
-            None => self.arg_block.get(&value).copied(),
+            None => self.arg_block.borrow().get(&value).copied(),
         }
     }
 
@@ -399,7 +415,10 @@ impl Driver<'_> {
         if let Some(&value) = memo.get(&class) {
             return Ok(Some(value));
         }
-        let Some(node) = extraction.node(class) else {
+        if let Some(value) = self.bound_port(class) {
+            return Ok(Some(value));
+        }
+        let Some(node) = self.chosen(extraction, class) else {
             return Ok(None);
         };
         // Provenance decides how a term becomes IR again: a gate stands for its
@@ -412,6 +431,14 @@ impl Driver<'_> {
             (Some(SymKind::If), Prov::Op(gate)) => {
                 let Some(value) =
                     self.commit_gamma_port(extraction, gate, node, expected_ty, rewriter)?
+                else {
+                    return Ok(None);
+                };
+                value
+            }
+            (Some(SymKind::Theta), Prov::Op(_)) => {
+                let Some(value) =
+                    self.commit_theta_port(extraction, class, node, expected_ty, target, rewriter)?
                 else {
                     return Ok(None);
                 };
@@ -489,12 +516,7 @@ impl Driver<'_> {
             let Some(terminator) = self.terminator(region) else {
                 return Ok(None);
             };
-            let block = self
-                .context
-                .get_op(terminator)
-                .parent_block()
-                .map(|id| self.context.get_block(id));
-            let target = OperationRef::new(self.context.get_op(terminator), block, None);
+            let target = self.at(terminator);
             let mut memo = HashMap::new();
             let Some(value) =
                 self.materialize(extraction, class, ty, &target, rewriter, &mut memo)?
@@ -514,6 +536,150 @@ impl Driver<'_> {
         });
         self.gamma_ports.borrow_mut().insert(key, result);
         Ok(Some(result))
+    }
+
+    /// The term to rebuild `class` from: the cheapest form the cost model found,
+    /// unless a law answered the class with a θ.
+    ///
+    /// A θ's latch is a term over the port itself, so its cost is a fixpoint over
+    /// the very class being extracted and no bottom-up model can prefer it,
+    /// however cheap the port is. In the IR that self-reference is a block
+    /// argument and costs nothing, so a θ a law introduced is the answer.
+    fn chosen<'a>(&'a self, extraction: &'a Extraction<Node>, class: Id) -> Option<&'a Node> {
+        self.eg
+            .nodes(class)
+            .iter()
+            .find(|node| node.sym() == Some(SymKind::Theta) && matches!(node.prov, Prov::Op(_)))
+            .or_else(|| extraction.node(class))
+    }
+
+    /// The port argument a θ class stands for, while that port's latch is built.
+    fn bound_port(&self, class: Id) -> Option<ValueId> {
+        self.port_bindings
+            .borrow()
+            .iter()
+            .rev()
+            .find(|&&(bound, _)| bound == class)
+            .map(|&(_, value)| value)
+    }
+
+    /// Carry a law-introduced θ's value on a port of `loop_op`'s own.
+    ///
+    /// The port starts at what the class the loop was entered with materializes
+    /// to ahead of the loop; every region of the loop reads it as one more
+    /// argument, which a region that only tests the carried values forwards on;
+    /// and the body yields what the latch class materializes to at its
+    /// terminator, under a binding resolving the θ itself to that argument —
+    /// inside the body the carry *is* the argument. What the port is worth at
+    /// `target` is then the argument of the region holding it, or the loop's
+    /// result outside them all.
+    fn commit_theta_port(
+        &self,
+        extraction: &Extraction<Node>,
+        class: Id,
+        node: &Node,
+        ty: TypeId,
+        target: &OperationRef,
+        rewriter: &mut Rewriter,
+    ) -> Result<Option<ValueId>, PassError> {
+        let (Prov::Op(loop_op), &[init_class, latch_class]) = (node.prov, &node.children[..])
+        else {
+            return Ok(None);
+        };
+        let key = (loop_op, self.eg.find(init_class), self.eg.find(latch_class));
+        if let Some(port) = self.theta_ports.borrow().get(&key) {
+            return Ok(Some(self.port_value(port, target)));
+        }
+        if !self.context.has_operation(loop_op) {
+            return Ok(None);
+        }
+        let instance = self.context.get_op(loop_op);
+        let Some(scope) = instance.clone().as_interface::<dyn TokenScope>() else {
+            return Ok(None);
+        };
+        let body = scope.token_scope_regions();
+        let at_loop = self.at(loop_op);
+        let mut memo = HashMap::new();
+        let Some(init) =
+            self.materialize(extraction, init_class, ty, &at_loop, rewriter, &mut memo)?
+        else {
+            return Ok(None);
+        };
+        if !self.dominates_op(init, loop_op) {
+            return Ok(None);
+        }
+        let mut arguments = Vec::new();
+        let mut latched = true;
+        let mut failure = None;
+        let result = self
+            .context
+            .grow_port(loop_op, ty, Some(init), |region, incoming| {
+                let incoming = incoming?;
+                arguments.push((region, incoming));
+                if let Some(entry) = self.context.get_region(region).block_ids().first() {
+                    self.arg_block.borrow_mut().insert(incoming, *entry);
+                }
+                if !body.contains(&region) {
+                    return Some(incoming);
+                }
+                let terminator = self.terminator(region)?;
+                let at_yield = self.at(terminator);
+                self.port_bindings.borrow_mut().push((class, incoming));
+                let latch = self.materialize(
+                    extraction,
+                    latch_class,
+                    ty,
+                    &at_yield,
+                    rewriter,
+                    &mut HashMap::new(),
+                );
+                self.port_bindings.borrow_mut().pop();
+                match latch {
+                    Ok(Some(value)) if self.dominates_op(value, terminator) => Some(value),
+                    // The port is already half grown and no edit can be taken back,
+                    // so it carries its own value on: an unread port, and the reads
+                    // it would have answered stay as they were.
+                    other => {
+                        failure = other.err();
+                        latched = false;
+                        Some(incoming)
+                    }
+                }
+            });
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        if !latched {
+            return Ok(None);
+        }
+        let port = ThetaPort { arguments, result };
+        let value = self.port_value(&port, target);
+        self.theta_ports.borrow_mut().insert(key, port);
+        Ok(Some(value))
+    }
+
+    /// What `port` is worth where `target` sits: the argument of the loop region
+    /// holding it, or the loop's result outside every one of them.
+    fn port_value(&self, port: &ThetaPort, target: &OperationRef) -> ValueId {
+        let mut block = self.context.get_op(target.op().id).parent_block();
+        while let Some(current) = block {
+            let Some(region) = self.context.parent_region(current) else {
+                break;
+            };
+            if let Some(&(_, argument)) = port
+                .arguments
+                .iter()
+                .find(|&&(holding, _)| holding == region)
+            {
+                return argument;
+            }
+            block = self
+                .context
+                .get_region(region)
+                .parent_op()
+                .and_then(|op| self.context.get_op(op).parent_block());
+        }
+        port.result
     }
 
     /// A read a law distributed into an arm that stored nothing: with no value
@@ -608,6 +774,13 @@ impl Driver<'_> {
                     .get(operand)
                     .is_some_and(|&named| self.eg.find(named) == class)
             })
+    }
+
+    /// A cursor at `op`, for a rewrite to build in front of.
+    fn at(&self, op: OpId) -> OperationRef {
+        let instance = self.context.get_op(op);
+        let block = instance.parent_block().map(|id| self.context.get_block(id));
+        OperationRef::new(instance, block, None)
     }
 
     /// The terminator of `region`, when it is the single-block region a port can

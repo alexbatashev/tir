@@ -1,0 +1,31 @@
+// RUN: tir opt --pass thread-state --pass instcombine --pass erase-state --verify %s | filecheck %s
+
+// The state a loop carries is the θ over the state it starts with and the one
+// its body leaves, so a load of it is the θ of the two loads: what the slot
+// held on entry, and what the body wrote. The loop grows the port carrying that
+// value, the body's read becomes the carried argument and the read after the
+// loop its result, and the slot leaves memory.
+
+module {
+  func @count(%0: !index, %1: !index, %2: !index, %3: !i32) -> !i32 {
+    %4 = ptr.alloca {size = 4, align = 4} : !ptr.p<!i32>
+    ptr.store %3, %4
+    scf.for %0, %1, %2 {
+      %5 = ptr.load %4 : !i32
+      %6 = addi %5, %5 : !i32
+      ptr.store %6, %4
+      scf.yield
+    }
+    %7 = ptr.load %4 : !i32
+    return %7
+  }
+  module_end
+}
+
+// CHECK-LABEL: func @count
+// CHECK-NOT: ptr.
+// CHECK: %[[RESULT:[0-9]+]] = scf.for %0, %1, %2 iter_args(%[[CARRIED:[0-9]+]] = %3) -> !i32 {
+// CHECK-NEXT: %[[NEXT:[0-9]+]] = addi %[[CARRIED]], %[[CARRIED]] : !i32
+// CHECK-NEXT: scf.yield %[[NEXT]]
+// CHECK-NEXT: }
+// CHECK-NEXT: return %[[RESULT]]

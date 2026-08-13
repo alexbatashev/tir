@@ -26,7 +26,7 @@ use tir_symbolic::egraph::{EGraph, ENode, Id, Pattern, Rewrite, Rhs, Var};
 
 use super::rules::{Rule, Sym, class_value_type, operand};
 use crate::sem::{Prov, SemNode as Node, SymKind};
-use crate::{Conditional, Context, OpId, TypeId};
+use crate::{Conditional, Context, LoopLike, OpId, TypeId};
 
 /// `Load(address, bytes, metadata, state)`.
 const LOAD_ARITY: usize = 4;
@@ -114,6 +114,66 @@ pub(crate) fn distribute_load_over_gamma(context: Context, promotable: Vec<Id>) 
             eg.union(root, gamma);
         },
     )
+}
+
+/// θ-distribution: a load of the state a loop carries is the loop's carry of the
+/// loads of what it started with and what its body left. Like γ-distribution it
+/// only restates which state the read observes, and it fires under the same
+/// reading of the address.
+pub(crate) fn distribute_load_over_theta(context: Context, promotable: Vec<Id>) -> Rule {
+    access_law(
+        "theta-load",
+        SymKind::LoadMemory,
+        LOAD_ARITY,
+        move |eg, read, root| {
+            if !promotable
+                .iter()
+                .any(|&class| eg.find(class) == read[ADDRESS])
+            {
+                return;
+            }
+            let Some((ty, load)) = read_form(&context, eg, root, read) else {
+                return;
+            };
+            let Some((loop_op, carried)) = state_theta(&context, eg, read[LOAD_STATE]) else {
+                return;
+            };
+            let carried = carried.map(|state| {
+                let mut operands = read.to_vec();
+                operands[LOAD_STATE] = state;
+                eg.add(Node::introduced_at(SymKind::LoadMemory, load, operands).typed(ty))
+            });
+            let theta = eg.add(Node::introduced_at(
+                SymKind::Theta,
+                loop_op,
+                carried.to_vec(),
+            ));
+            eg.union(root, theta);
+        },
+    )
+}
+
+/// The carry `state` is: the loop publishing it, and the states it was entered
+/// with and its body leaves.
+fn state_theta(context: &Context, eg: &EGraph<Node>, state: Id) -> Option<(OpId, [Id; 2])> {
+    eg.nodes(state).iter().find_map(|node| {
+        if node.sym() != Some(SymKind::Theta) {
+            return None;
+        }
+        let [init, latch] = node.children[..] else {
+            return None;
+        };
+        let (init, latch) = (eg.find(init), eg.find(latch));
+        // A loop leaving the state it was entered with carries nothing to read.
+        if init == state || latch == state {
+            return None;
+        }
+        let loop_op = live_op(context, node)?;
+        context
+            .get_op(loop_op)
+            .as_interface::<dyn LoopLike>()
+            .map(|_| (loop_op, [init, latch]))
+    })
 }
 
 /// The gate `state` is the choice of: the two-armed conditional publishing it,
