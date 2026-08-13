@@ -15,6 +15,7 @@ pub(crate) mod rules;
 mod seed;
 mod state;
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use tir_symbolic::egraph::{EGraph, Extraction, Id};
@@ -24,14 +25,14 @@ use std::rc::Rc;
 use crate::analysis::{DominatingEdgeFacts, DominatorTree};
 use crate::graph::Dag;
 use crate::{
-    AnalysisManager, BlockId, Conditional, ConstantLike, Context, MemoryRead, OpId, OperationRef,
-    Pass, PassError, PassTarget, RegionId, Rewriter, TypeId, ValueId,
+    AnalysisManager, BlockId, Conditional, ConstantLike, Context, MemoryRead, OpId, OpInstance,
+    OperationRef, Pass, PassError, PassTarget, RegionId, Rewriter, TypeId, ValueId,
     builtin::{FuncOp, ops},
     utils::APInt,
 };
 
 use crate::sem::node::cost;
-use crate::sem::{Prov, SemNode as Node};
+use crate::sem::{Prov, SemNode as Node, SymKind};
 use rules::{Ruleset, builtin_ruleset};
 
 const ITER_LIMIT: usize = 30;
@@ -78,6 +79,7 @@ impl Pass for InstCombinePass {
             dom: analyses.get::<DominatorTree>(context, root),
             edge_facts: analyses.get::<DominatingEdgeFacts>(context, root),
             ruleset,
+            gamma_ports: RefCell::new(HashMap::new()),
         };
         let body = context.get_op(root).regions[0];
         driver.process_region(body, rewriter)?;
@@ -97,6 +99,9 @@ struct Driver<'a> {
     dom: Rc<DominatorTree>,
     edge_facts: Rc<DominatingEdgeFacts>,
     ruleset: Ruleset,
+    /// The value port already grown on a gate for a pair of arm classes, so every
+    /// read the gate answers takes the one port.
+    gamma_ports: RefCell<HashMap<(OpId, Id, Id), ValueId>>,
 }
 
 impl Driver<'_> {
@@ -233,7 +238,11 @@ impl Driver<'_> {
         let block = instance.parent_block().map(|b| self.context.get_block(b));
         let target = OperationRef::new(instance.clone(), block, None);
         let mut memo = HashMap::new();
-        let new_value = self.materialize(extraction, class, ty, &target, rewriter, &mut memo)?;
+        let Some(new_value) =
+            self.materialize(extraction, class, ty, &target, rewriter, &mut memo)?
+        else {
+            return Ok(());
+        };
         // The replacement must dominate the use it takes over. Operand reuse and
         // freshly built ops satisfy this by construction; a cross-block CSE or a gate
         // collapsing to an arm may not, so check before committing.
@@ -268,6 +277,25 @@ impl Driver<'_> {
             // A block argument precedes every op in its block.
             (None, _) => true,
             (Some(_), None) => false,
+        }
+    }
+
+    /// Whether the def of `value` dominates the operation `op` — what a value an
+    /// arm yields must do for the terminator that yields it.
+    fn dominates_op(&self, value: ValueId, op: OpId) -> bool {
+        let (Some(vb), Some(ob)) = (
+            self.def_block(value),
+            self.context.get_op(op).parent_block(),
+        ) else {
+            return false;
+        };
+        if vb != ob {
+            return self.dom.dominates(vb, ob) && self.reaches_into(value, vb, ob);
+        }
+        match self.context.get_value(value).defining_op() {
+            Some(def) => self.context.get_block(vb).is_before(def, op),
+            // A block argument precedes every op in its block.
+            None => true,
         }
     }
 
@@ -354,6 +382,10 @@ impl Driver<'_> {
 
     /// Rebuild the value of `class`'s cheapest node: an existing value is reused, a
     /// constant or rule-introduced op is built before `target`. Memoized per class.
+    ///
+    /// `None` where the term the extraction chose has no value at `target` — a
+    /// class no cost model could spell, a gate whose arms do not answer. The
+    /// rewrite is then skipped and the operation it would have replaced stays.
     fn materialize(
         &self,
         extraction: &Extraction<Node>,
@@ -362,38 +394,230 @@ impl Driver<'_> {
         target: &OperationRef,
         rewriter: &mut Rewriter,
         memo: &mut HashMap<Id, ValueId>,
-    ) -> Result<ValueId, PassError> {
+    ) -> Result<Option<ValueId>, PassError> {
         let class = self.eg.find(class);
         if let Some(&value) = memo.get(&class) {
-            return Ok(value);
+            return Ok(Some(value));
         }
-        let node = extraction.node(class).expect("extracted class has a node");
+        let Some(node) = extraction.node(class) else {
+            return Ok(None);
+        };
         // Provenance decides how a term becomes IR again: a gate stands for its
         // block-argument value, a seeded op or constant for the op that already
         // computes it, a rule-introduced op for its emitter, and a constant no op
-        // holds is built here.
-        let value = match node.prov {
-            Prov::Value(value) => value,
-            Prov::Op(op) => self.context.get_op(op).results[0],
-            Prov::Introduced(idx) => {
+        // holds is built here. A law-introduced gate or access names the operation
+        // that rebuilds it: the gate grows a port, the access is copied.
+        let value = match (node.sym(), node.prov) {
+            (_, Prov::Value(value)) => value,
+            (Some(SymKind::If), Prov::Op(gate)) => {
+                let Some(value) =
+                    self.commit_gamma_port(extraction, gate, node, expected_ty, rewriter)?
+                else {
+                    return Ok(None);
+                };
+                value
+            }
+            (Some(SymKind::LoadMemory), Prov::Op(load)) => {
+                let Some(value) = self.reread(extraction, load, node, target, rewriter)? else {
+                    return Ok(None);
+                };
+                value
+            }
+            (_, Prov::Op(op)) => self.context.get_op(op).results[0],
+            (_, Prov::Introduced(idx)) => {
                 let ty = node.ty.expect("an op node carries its result type");
                 let mut operands = Vec::with_capacity(node.children.len());
                 for &arg in &node.children {
-                    operands.push(self.materialize(extraction, arg, ty, target, rewriter, memo)?);
+                    let Some(operand) =
+                        self.materialize(extraction, arg, ty, target, rewriter, memo)?
+                    else {
+                        return Ok(None);
+                    };
+                    operands.push(operand);
                 }
                 let emit = self.ruleset.emits[idx]
                     .as_ref()
                     .expect("an introduced op supplies an emit");
                 emit(self.context, &operands, ty, target, rewriter)?
             }
-            Prov::None => {
-                let literal = node.int().expect("an unprovenanced node is a constant");
+            (_, Prov::None) => {
+                let Some(literal) = node.int() else {
+                    return Ok(None);
+                };
                 let op = ops::constant(self.context, literal.to_i64(), expected_ty).build();
                 rewriter.insert_op_before(target, &op)?;
                 op.result()
             }
         };
         memo.insert(class, value);
-        Ok(value)
+        Ok(Some(value))
+    }
+
+    /// Carry a law-introduced gate's value out of `gate` on a port of its own.
+    ///
+    /// Each arm yields the value of the class the gate chose there, materialized
+    /// at that arm's terminator, so the port is wired the one way
+    /// [`Context::grow_port`] keeps results, arguments and yields consistent. An
+    /// arm that cannot answer — no value in scope there — leaves the gate as it
+    /// was. One port per gate and pair of arm classes, however many reads it
+    /// answers.
+    fn commit_gamma_port(
+        &self,
+        extraction: &Extraction<Node>,
+        gate: OpId,
+        node: &Node,
+        ty: TypeId,
+        rewriter: &mut Rewriter,
+    ) -> Result<Option<ValueId>, PassError> {
+        let [_, taken, not_taken] = node.children[..] else {
+            return Ok(None);
+        };
+        let key = (gate, self.eg.find(taken), self.eg.find(not_taken));
+        if let Some(&value) = self.gamma_ports.borrow().get(&key) {
+            return Ok(Some(value));
+        }
+        if !self.context.has_operation(gate) {
+            return Ok(None);
+        }
+        let instance = self.context.get_op(gate);
+        let Some(conditional) = instance.clone().as_interface::<dyn Conditional>() else {
+            return Ok(None);
+        };
+        let mut yielded: Vec<(RegionId, ValueId)> = Vec::new();
+        for (region, _, when_true) in conditional.guarded_regions() {
+            let class = if when_true { taken } else { not_taken };
+            let Some(terminator) = self.terminator(region) else {
+                return Ok(None);
+            };
+            let block = self
+                .context
+                .get_op(terminator)
+                .parent_block()
+                .map(|id| self.context.get_block(id));
+            let target = OperationRef::new(self.context.get_op(terminator), block, None);
+            let mut memo = HashMap::new();
+            let Some(value) =
+                self.materialize(extraction, class, ty, &target, rewriter, &mut memo)?
+            else {
+                return Ok(None);
+            };
+            if !self.dominates_op(value, terminator) {
+                return Ok(None);
+            }
+            yielded.push((region, value));
+        }
+        let result = self.context.grow_port(gate, ty, None, |region, _| {
+            yielded
+                .iter()
+                .find(|&&(carried, _)| carried == region)
+                .map(|&(_, value)| value)
+        });
+        self.gamma_ports.borrow_mut().insert(key, result);
+        Ok(Some(result))
+    }
+
+    /// A read a law distributed into an arm that stored nothing: with no value
+    /// defined there and no operation naming an indeterminate one, the read
+    /// itself is the value — a copy of the load being distributed, on the state
+    /// that reaches the arm.
+    fn reread(
+        &self,
+        extraction: &Extraction<Node>,
+        load: OpId,
+        node: &Node,
+        target: &OperationRef,
+        rewriter: &mut Rewriter,
+    ) -> Result<Option<ValueId>, PassError> {
+        if !self.context.has_operation(load) {
+            return Ok(None);
+        }
+        let template = self.context.get_op(load);
+        let Some(read) = template.clone().as_interface::<dyn MemoryRead>() else {
+            return Ok(None);
+        };
+        let Some(observed) = read.state_operand() else {
+            return Ok(None);
+        };
+        // The copy splices into the linear chain just before `target`, so the
+        // state it reads is the one `target` consumes for that chain, and what
+        // the copy publishes takes its place. Naming the chain's class elsewhere
+        // would read a state this point does not hold.
+        let Some(state) = self.consumed_state(target, node.children[state::LOAD_STATE]) else {
+            return Ok(None);
+        };
+        let mut memo = HashMap::new();
+        let location = read.read_location();
+        let address_ty = self.context.get_value(location).ty();
+        let Some(address) = self.materialize(
+            extraction,
+            node.children[state::ADDRESS],
+            address_ty,
+            target,
+            rewriter,
+            &mut memo,
+        )?
+        else {
+            return Ok(None);
+        };
+        let results: Vec<ValueId> = template
+            .results
+            .iter()
+            .map(|&result| {
+                self.context
+                    .create_value(self.context.get_value(result).ty(), None)
+                    .id()
+            })
+            .collect();
+        if let Some(published) = read.state_result()
+            && let Some(index) = template.results.iter().position(|&r| r == published)
+        {
+            self.context.replace_value_uses(state, results[index]);
+        }
+        let operands = template
+            .operands
+            .iter()
+            .map(|&operand| match operand {
+                _ if operand == location => address,
+                _ if operand == observed => state,
+                _ => operand,
+            })
+            .collect();
+        let copy = self.context.add_operation(OpInstance::new_dynamic(
+            (template.dialect().as_str(), template.name().as_str()),
+            self.context.as_context_ref(),
+            operands,
+            results.clone(),
+            vec![],
+            template.attributes.clone(),
+        ));
+        rewriter.insert_op_before(target, copy.as_dyn_op().as_ref())?;
+        Ok(Some(results[0]))
+    }
+
+    /// The operand of `target` naming the chain `class` is: the state reaching
+    /// the point just before it.
+    fn consumed_state(&self, target: &OperationRef, class: Id) -> Option<ValueId> {
+        let class = self.eg.find(class);
+        self.context
+            .get_op(target.op().id)
+            .operands
+            .iter()
+            .copied()
+            .find(|operand| {
+                self.value_class
+                    .get(operand)
+                    .is_some_and(|&named| self.eg.find(named) == class)
+            })
+    }
+
+    /// The terminator of `region`, when it is the single-block region a port can
+    /// be grown on.
+    fn terminator(&self, region: RegionId) -> Option<OpId> {
+        let mut blocks = self.context.get_region(region).iter(self.context.clone());
+        let block = blocks.next()?;
+        if blocks.next().is_some() {
+            return None;
+        }
+        block.op_ids().last().copied()
     }
 }

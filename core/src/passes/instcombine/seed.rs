@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use tir_symbolic::egraph::{EGraph, Id};
 
+use crate::analysis::slots::{collect_slots, values_agree_on_type};
 use crate::builtin::StateType;
 use crate::sem::egraph::{minimal_unsigned_apint, type_width};
 use crate::sem::{Prov, SemNode as Node, SymKind};
@@ -24,13 +25,14 @@ use crate::{
 const STORE_OPERANDS: usize = 3;
 
 /// The seeded e-graph plus the driver's maps: each value's class, each block
-/// argument's block, and the state classes something outside the term graph
-/// observes.
+/// argument's block, the state classes something outside the term graph
+/// observes, and the addresses a law may reason about as a value.
 pub struct Seeded {
     pub eg: EGraph<Node>,
     pub value_class: HashMap<ValueId, Id>,
     pub arg_block: HashMap<ValueId, BlockId>,
     pub exported_states: Vec<Id>,
+    pub promotable_addresses: Vec<Id>,
 }
 
 /// Build the e-graph for the regions of `root`.
@@ -43,15 +45,18 @@ pub fn seed(context: &Context, root: OpId) -> Seeded {
         seeded: HashSet::new(),
         state_ty: StateType::new(context),
         exported_states: Vec::new(),
+        ops: Vec::new(),
     };
     for region in context.get_op(root).regions.clone() {
         seeder.seed_region(region);
     }
+    let promotable_addresses = seeder.promotable_addresses();
     Seeded {
         eg: seeder.eg,
         value_class: seeder.value_class,
         arg_block: seeder.arg_block,
         exported_states: seeder.exported_states,
+        promotable_addresses,
     }
 }
 
@@ -63,6 +68,7 @@ struct Seeder<'a> {
     seeded: HashSet<OpId>,
     state_ty: TypeId,
     exported_states: Vec<Id>,
+    ops: Vec<OpId>,
 }
 
 impl Seeder<'_> {
@@ -78,9 +84,24 @@ impl Seeder<'_> {
                 self.class_of(argument.id());
             }
             for op in block.op_ids() {
+                self.ops.push(op);
                 self.seed_op(op);
             }
         }
+    }
+
+    /// The classes of the addresses a slot-level law may treat as a value: an
+    /// allocation whose pointer never leaves the load/store locations, and whose
+    /// accesses agree on one type, so a value reconstructed for it has one
+    /// spelling. The reading is the one every memory transform asks for.
+    fn promotable_addresses(&self) -> Vec<Id> {
+        collect_slots(self.context, &self.ops)
+            .iter()
+            .filter(|(_, slot)| {
+                slot.alloca.is_some() && !slot.escapes && values_agree_on_type(self.context, slot)
+            })
+            .filter_map(|(address, _)| self.value_class.get(address).copied())
+            .collect()
     }
 
     /// The class of `value`: the one already seeded for it, the one its defining

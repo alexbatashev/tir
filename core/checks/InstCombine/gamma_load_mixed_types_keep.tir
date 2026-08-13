@@ -1,0 +1,29 @@
+// RUN: tir opt --pass thread-state --pass instcombine --pass erase-state --verify %s | filecheck %s
+
+// The arms store values of different types into one slot, so the slot has no
+// single type a reconstructed value could be spelled in: a port grown for it
+// would give the arms disagreeing yields, and the read of the arm that stored
+// the other type would answer with bits it never wrote. The address is not one
+// the law may distribute a read of, and the slot stays in memory.
+
+module {
+  func @mixed(%0: !i1, %1: !i32, %2: !f32) -> !i32 {
+    %3 = ptr.alloca {size = 4, align = 4} : !ptr.p
+    scf.if %0 {
+      ptr.store %1, %3
+      scf.yield
+    } else {
+      ptr.store %2, %3
+      scf.yield
+    }
+    %4 = ptr.load %3 : !i32
+    return %4
+  }
+  module_end
+}
+
+// CHECK-LABEL: func @mixed
+// CHECK: ptr.alloca
+// CHECK: scf.if %0 {
+// CHECK: %[[RESULT:[0-9]+]] = ptr.load
+// CHECK: return %[[RESULT]]

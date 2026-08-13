@@ -26,16 +26,16 @@ use tir_symbolic::egraph::{EGraph, ENode, Id, Pattern, Rewrite, Rhs, Var};
 
 use super::rules::{Rule, Sym, class_value_type, operand};
 use crate::sem::{SemNode as Node, SymKind};
-use crate::{Context, TypeId};
+use crate::{Conditional, Context, OpId, TypeId};
 
 /// `Load(address, bytes, metadata, state)`.
 const LOAD_ARITY: usize = 4;
-const LOAD_STATE: usize = 3;
+pub(super) const LOAD_STATE: usize = 3;
 /// `Store(address, bytes, value, address_space, state)`.
 const STORE_ARITY: usize = 5;
 const STORE_VALUE: usize = 2;
 const STORE_STATE: usize = 4;
-const ADDRESS: usize = 0;
+pub(super) const ADDRESS: usize = 0;
 const BYTES: usize = 1;
 
 /// S1: a load whose state a matching store left reads that store's value.
@@ -76,6 +76,92 @@ pub(crate) fn eliminate_dead_store(exported: Vec<Id>) -> Rule {
             eg.union(state, before);
         },
     )
+}
+
+/// γ-distribution: a load of the state a gate chose is the gate's choice between
+/// the loads of what each arm left. The law only restates which state the read
+/// observes, so it is as definitional as S1 — but only where the address names a
+/// slot the graph sees every access of, since a value reconstructed for an
+/// address the term graph cannot follow would answer for memory it never read.
+pub(crate) fn distribute_load_over_gamma(context: Context, promotable: Vec<Id>) -> Rule {
+    access_law(
+        "gamma-load",
+        SymKind::LoadMemory,
+        LOAD_ARITY,
+        move |eg, read, root| {
+            if !promotable
+                .iter()
+                .any(|&class| eg.find(class) == read[ADDRESS])
+            {
+                return;
+            }
+            let Some((ty, load)) = read_form(&context, eg, root, read) else {
+                return;
+            };
+            let Some((gate, decision, arms)) = state_gamma(&context, eg, read[LOAD_STATE]) else {
+                return;
+            };
+            let arms = arms.map(|state| {
+                let mut operands = read.to_vec();
+                operands[LOAD_STATE] = state;
+                eg.add(Node::introduced_at(SymKind::LoadMemory, load, operands).typed(ty))
+            });
+            let gamma = eg.add(Node::introduced_at(
+                SymKind::If,
+                gate,
+                vec![decision, arms[0], arms[1]],
+            ));
+            eg.union(root, gamma);
+        },
+    )
+}
+
+/// The gate `state` is the choice of: the two-armed conditional publishing it,
+/// its decision, and the states its taken and not-taken arms leave.
+fn state_gamma(context: &Context, eg: &EGraph<Node>, state: Id) -> Option<(OpId, Id, [Id; 2])> {
+    eg.nodes(state).iter().find_map(|node| {
+        if node.sym() != Some(SymKind::If) {
+            return None;
+        }
+        let [decision, taken, not_taken] = node.children[..] else {
+            return None;
+        };
+        let (taken, not_taken) = (eg.find(taken), eg.find(not_taken));
+        if taken == state || not_taken == state {
+            return None;
+        }
+        let gate = live_op(context, node)?;
+        let conditional = context.get_op(gate).as_interface::<dyn Conditional>()?;
+        (conditional.guarded_regions().len() == 2).then_some((
+            gate,
+            eg.find(decision),
+            [taken, not_taken],
+        ))
+    })
+}
+
+/// The type and the operation of the load standing for `read` in `class`.
+fn read_form(
+    context: &Context,
+    eg: &EGraph<Node>,
+    class: Id,
+    read: &[Id],
+) -> Option<(TypeId, OpId)> {
+    eg.nodes(class)
+        .iter()
+        .find(|node| node.sym() == Some(SymKind::LoadMemory) && canonical(eg, node) == read)
+        .and_then(|node| Some((node.ty?, live_op(context, node)?)))
+}
+
+/// The operation `node` stands for, if it is still in the tree: a term the graph
+/// keeps outlives the rewrite that erased what it was read from.
+fn live_op(context: &Context, node: &Node) -> Option<OpId> {
+    let value = node.value()?;
+    if !context.has_value(value) {
+        return None;
+    }
+    let op = context.get_value(value).defining_op()?;
+    context.has_operation(op).then_some(op)
 }
 
 /// A law over every access of `kind`, handed the canonical classes of the term's
