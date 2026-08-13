@@ -173,6 +173,52 @@ done:
     return total;
 }
 
+/* A `goto` into a `switch` body lands in a case without asking the
+   controlling expression, and falls through from there. */
+int dispatch(int n, int enter) {
+    int total = 0;
+    if (enter) {
+        goto inside;
+    }
+    switch (n) {
+    case 0:
+        total = total + 1;
+    case 1:
+        total = total + 10;
+    inside:
+        total = total + 100;
+        break;
+    default:
+        total = total + 1000;
+    }
+    return total;
+}
+
+/* A `switch` inside a loop, whose arms leave through every exit C has: a
+   `goto` past the rest of the iteration, a `continue`, a `break` out of the
+   switch and fallthrough. */
+int mix(int n) {
+    int total = 0;
+    int i;
+    for (i = 0; i < n; i = i + 1) {
+        switch (i & 3) {
+        case 0:
+            goto skip;
+        case 1:
+            continue;
+        case 2:
+            total = total + 5;
+            break;
+        default:
+            total = total + 1;
+        }
+        total = total + 100;
+    skip:
+        total = total + 1000;
+    }
+    return total;
+}
+
 /* A `goto` inside a loop that stays in the loop, next to `continue`. */
 int retry(int n) {
     int i;
@@ -243,6 +289,13 @@ int main(void) {
     printf("%d\n", classify(0));
     printf("%d\n", classify(1));
     printf("%d\n", classify(7));
+    printf("%d\n", dispatch(0, 0));
+    printf("%d\n", dispatch(1, 0));
+    printf("%d\n", dispatch(2, 0));
+    printf("%d\n", dispatch(0, 1));
+    printf("%d\n", dispatch(5, 1));
+    printf("%d\n", mix(4));
+    printf("%d\n", mix(9));
     printf("%d\n", retry(6));
     printf("%d\n", mesh(5));
     printf("%d\n", mesh(30));

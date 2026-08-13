@@ -74,7 +74,24 @@ pub(super) fn lower_to_ir(
         d.eprint();
         std::process::exit(1);
     });
+    restructure(context, &module);
     describe_target(context, &module, machine.as_ref())
+}
+
+/// Raise the functions codegen emitted as a flat graph of blocks — the ones
+/// holding a `goto` — back to structured control flow. A function emitted
+/// structurally is one block, which the pass leaves alone.
+fn restructure(context: &tir::Context, module: &tir::builtin::ModuleOp) {
+    use tir::Operation;
+
+    let mut pm = tir::PassManager::new();
+    pm.nest::<tir::builtin::FuncOp>()
+        .add_pass(tir::passes::RestructurePass::new());
+    pm.run(context, context.get_op(module.id()))
+        .unwrap_or_else(|e| {
+            eprintln!("fcc: error: restructuring failed: {e}");
+            std::process::exit(1);
+        });
 }
 
 /// Record the target's data layout and hardware description on the module, so

@@ -5,6 +5,10 @@
 //! local lives in a stack slot produced by `ptr.alloca`, reads become
 //! `ptr.load` and writes become `ptr.store`. Arithmetic uses the `builtin`
 //! integer ops; C-only literals and variadic markers use the local `cir` dialect.
+//!
+//! Control flow is emitted structured — `cir` loops and conditionals — except in
+//! a function holding a label, which becomes a flat graph of blocks and branches
+//! for the `restructure` pass to raise.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -66,42 +70,6 @@ enum SwitchItem {
     Statement(NodeId),
 }
 
-/// A statement sequence once its labels are exposed: nested compound statements
-/// that hold a label are spliced into the sequence that encloses them, so every
-/// label a `goto` may target starts a segment of the sequence it belongs to.
-#[derive(Clone, Copy)]
-enum Item {
-    Label(i64),
-    Stmt(NodeId),
-}
-
-/// Where a statement sequence sits: whether it starts with no jump pending,
-/// whether one can still be pending after it, and whether it runs again from
-/// the top.
-#[derive(Clone, Copy)]
-struct Placement {
-    entered_clear: bool,
-    guard_last: bool,
-    repeats: bool,
-}
-
-/// What the statements lowered so far can have done, and so what the ones that
-/// follow must guard against.
-#[derive(Clone, Copy)]
-struct Ran {
-    returned: bool,
-    continued: bool,
-}
-
-/// The statements a sequence runs from one point control can resume at to the
-/// next. A segment resumes at a label of the sequence, or at a statement that
-/// holds a label a `goto` enters it for.
-struct Segment {
-    label: Option<i64>,
-    entry: Vec<i64>,
-    statements: Vec<NodeId>,
-}
-
 #[derive(Clone, Copy)]
 enum LoweredExpr {
     Value(ValueId),
@@ -131,15 +99,18 @@ struct FnCodegen<'a> {
     /// way to the next iteration, and both trail the body once structured.
     /// `continue` raises the flag and the rest of the body is skipped instead.
     continue_flag: Option<Slot>,
-    /// Set for functions that contain a label. `goto L` records L's identifier
-    /// here instead of branching; the statements between the `goto` and the
-    /// label are guarded against a pending jump, and the label clears it. Zero
-    /// means no jump is pending.
-    jump: Option<Slot>,
-    /// Identifier of every label in the function, in source order.
-    labels: HashMap<String, i64>,
-    /// How many times each label is named by a `goto` in this function.
-    jump_targets: HashMap<i64, usize>,
+    /// The function body's region, which a flat lowering appends blocks to.
+    body_region: tir::RegionId,
+    /// Set for functions that contain a label, which are lowered as a flat
+    /// graph of blocks and branches and raised back to structured control flow
+    /// by the `restructure` pass. Every `return` leaves through this block.
+    exit_block: Option<std::sync::Arc<tir::Block>>,
+    /// The block each label names, created the first time it is mentioned.
+    label_blocks: HashMap<String, std::sync::Arc<tir::Block>>,
+    /// Where a `break` and a `continue` leave the innermost construct that owns
+    /// them, while lowering flat.
+    break_blocks: Vec<std::sync::Arc<tir::Block>>,
+    continue_blocks: Vec<std::sync::Arc<tir::Block>>,
     /// Lowered values in the expression subtree currently being emitted. The AST
     /// is a DAG, so shared children reuse their first lowering.
     values: HashMap<NodeId, LoweredExpr>,
@@ -1381,9 +1352,11 @@ fn lower_function(
         return_flag: None,
         return_slot: None,
         continue_flag: None,
-        jump: None,
-        labels: HashMap::new(),
-        jump_targets: HashMap::new(),
+        body_region: region.id(),
+        exit_block: None,
+        label_blocks: HashMap::new(),
+        break_blocks: Vec::new(),
+        continue_blocks: Vec::new(),
         values: HashMap::new(),
     };
     cg.lower_body(func, &param_ids[parameter_start..], &signature.params)?;
@@ -2087,19 +2060,16 @@ impl FnCodegen<'_> {
         let returns_void = matches!(self.typed.types().kind(result), TypeKind::Void);
 
         let statements = ast.children(func).skip(params.len()).collect::<Vec<_>>();
-        self.collect_labels(&statements);
-        let items = self.expand_items(&statements);
-        if !self.labels.is_empty() {
-            self.check_jumps(&statements)?;
-            self.open_jump_slot(&statements);
+        if statements.iter().any(|&s| self.contains_label(s)) {
+            return self.lower_flat_body(&statements, result, returns_void);
         }
-        if self.needs_return_flag(&items) {
+        if self.needs_return_flag(&statements) {
             self.open_return_slots(result, returns_void);
         }
-        self.lower_items(&items, Tail::Fallthrough, true, false)?;
+        self.lower_statements(&statements, Tail::Fallthrough)?;
 
         if self.return_flag.is_some() {
-            let operand = self.structured_return_operand(result, returns_void);
+            let operand = self.return_operand(result, returns_void);
             self.builder
                 .append_op(b::r#return(self.context, operand).build());
             self.terminated = true;
@@ -2114,276 +2084,50 @@ impl FnCodegen<'_> {
 
     /// A function needs the flag whenever a `return` can be reached with
     /// statements still to run: those returns cannot be block terminators
-    /// without introducing unstructured control flow. A dispatch loop is such a
-    /// context on its own, because a `goto` can run its statements again.
-    fn needs_return_flag(&self, items: &[Item]) -> bool {
-        let statements = self.statements_of(items);
+    /// without introducing unstructured control flow.
+    fn needs_return_flag(&self, statements: &[NodeId]) -> bool {
         let Some((last, rest)) = statements.split_last() else {
             return false;
         };
-        if self.dispatch_start(&self.segments(items)).is_some()
-            && statements.iter().any(|&s| self.contains_return(s))
-        {
-            return true;
-        }
         rest.iter().any(|&s| self.contains_return(s))
             || (self.ast.get_node(*last).kind != AstKind::Return && self.contains_return(*last))
     }
 
-    fn collect_labels(&mut self, statements: &[NodeId]) {
-        for &statement in statements {
-            self.collect_labels_in(statement);
-        }
-        let ast = self.ast;
-        let mut pending = statements.to_vec();
-        while let Some(statement) = pending.pop() {
-            if ast.get_node(statement).kind == AstKind::Goto {
-                let target = self.label_id(statement);
-                *self.jump_targets.entry(target).or_default() += 1;
-            }
-            pending.extend(ast.children(statement));
-        }
-    }
-
-    fn collect_labels_in(&mut self, statement: NodeId) {
-        let ast = self.ast;
-        if ast.get_node(statement).kind == AstKind::Label
-            && let Some(AstLeaf::Label(name)) = ast.get_leaf_data(statement)
-        {
-            let id = self.labels.len() as i64 + 1;
-            self.labels.insert(name.clone(), id);
-        }
-        for child in ast.children(statement) {
-            self.collect_labels_in(child);
-        }
-    }
-
-    fn label_id(&self, statement: NodeId) -> i64 {
-        let Some(AstLeaf::Label(name)) = self.ast.get_leaf_data(statement) else {
-            unreachable!("label and goto nodes carry a label payload");
-        };
-        self.labels[name]
-    }
-
-    fn statements_of(&self, items: &[Item]) -> Vec<NodeId> {
-        items
-            .iter()
-            .filter_map(|item| match item {
-                Item::Stmt(statement) => Some(*statement),
-                Item::Label(_) => None,
-            })
-            .collect()
-    }
-
-    fn expand_items(&self, statements: &[NodeId]) -> Vec<Item> {
-        let mut items = Vec::new();
-        for &statement in statements {
-            self.expand_item(statement, &mut items);
-        }
-        items
-    }
-
-    fn expand_item(&self, statement: NodeId, items: &mut Vec<Item>) {
-        match self.ast.get_node(statement).kind {
-            AstKind::Label => {
-                items.push(Item::Label(self.label_id(statement)));
-                self.expand_item(self.ast.children(statement).next().unwrap(), items);
-            }
-            AstKind::Block if self.contains_label(statement) => {
-                for child in self.ast.children(statement) {
-                    self.expand_item(child, items);
-                }
-            }
-            _ => items.push(Item::Stmt(statement)),
-        }
-    }
-
-    /// The statements a loop or a branch runs, as a sequence of its own: a
-    /// compound statement contributes its statements, anything else itself.
-    fn body_items(&self, body: NodeId) -> Vec<Item> {
-        if self.ast.get_node(body).kind == AstKind::Block {
-            self.expand_items(&self.ast.children(body).collect::<Vec<_>>())
-        } else {
-            self.expand_items(&[body])
-        }
-    }
-
-    fn segments(&self, items: &[Item]) -> Vec<Segment> {
-        let mut segments = vec![Segment {
-            label: None,
-            entry: Vec::new(),
-            statements: Vec::new(),
-        }];
-        for item in items {
-            match *item {
-                Item::Label(label) => segments.push(Segment {
-                    label: Some(label),
-                    entry: Vec::new(),
-                    statements: Vec::new(),
-                }),
-                Item::Stmt(statement) => {
-                    let entry = self.entry_labels(statement);
-                    if !entry.is_empty() {
-                        segments.push(Segment {
-                            label: None,
-                            entry,
-                            statements: Vec::new(),
-                        });
-                    }
-                    segments.last_mut().unwrap().statements.push(statement)
-                }
-            }
-        }
-        segments
-    }
-
-    /// The labels inside `statement` that a `goto` outside it names: control
-    /// enters the statement at one of them rather than at its start.
-    fn entry_labels(&self, statement: NodeId) -> Vec<i64> {
-        let ast = self.ast;
-        let mut defined = Vec::new();
-        let mut named = HashMap::new();
-        let mut pending = vec![statement];
-        while let Some(node) = pending.pop() {
-            match ast.get_node(node).kind {
-                AstKind::Label => defined.push(self.label_id(node)),
-                AstKind::Goto => *named.entry(self.label_id(node)).or_insert(0usize) += 1,
-                _ => {}
-            }
-            pending.extend(ast.children(node));
-        }
-        defined.retain(|label| {
-            self.jump_targets.get(label).copied().unwrap_or(0)
-                > named.get(label).copied().unwrap_or(0)
-        });
-        defined.sort_unstable();
-        defined
-    }
-
-    /// The first segment a `goto` can re-enter from that segment or a later
-    /// one. Everything from there to the end of the sequence runs inside a
-    /// dispatch loop, which is the only way a jump can move backwards.
-    fn dispatch_start(&self, segments: &[Segment]) -> Option<usize> {
-        (0..segments.len()).find(|&index| self.is_re_entered(segments, index))
-    }
-
-    fn is_re_entered(&self, segments: &[Segment], index: usize) -> bool {
-        let resumed = Self::resumed_labels(&segments[index]);
-        if resumed.is_empty() {
-            return false;
-        }
-        segments[index..]
-            .iter()
-            .flat_map(|segment| segment.statements.iter())
-            .any(|&statement| {
-                self.jumps(statement)
-                    .iter()
-                    .any(|target| resumed.contains(target))
-            })
-    }
-
-    fn resumed_labels(segment: &Segment) -> Vec<i64> {
-        segment
-            .label
-            .into_iter()
-            .chain(segment.entry.iter().copied())
-            .collect()
-    }
-
-    /// The labels a `goto` inside `statement` leaves it for: the ones it does
-    /// not define itself and so cannot resolve on its own.
-    fn jumps(&self, statement: NodeId) -> HashSet<i64> {
-        let ast = self.ast;
-        let mut targets = HashSet::new();
-        let mut defined = HashSet::new();
-        let mut pending = vec![statement];
-        while let Some(node) = pending.pop() {
-            match ast.get_node(node).kind {
-                AstKind::Goto => {
-                    targets.insert(self.label_id(node));
-                }
-                AstKind::Label => {
-                    defined.insert(self.label_id(node));
-                }
-                _ => {}
-            }
-            pending.extend(ast.children(node));
-        }
-        targets.retain(|target| !defined.contains(target));
-        targets
-    }
-
-    fn escapes(&self, statement: NodeId) -> bool {
-        !self.jumps(statement).is_empty()
-    }
-
-    /// Whether a jump can still be pending when the sequence ends, which is
-    /// what makes the enclosing statement guard what follows it.
-    fn sequence_escapes(&self, segments: &[Segment]) -> bool {
-        let labels = segments
-            .iter()
-            .flat_map(Self::resumed_labels)
-            .collect::<HashSet<_>>();
-        segments
-            .iter()
-            .flat_map(|segment| segment.statements.iter())
-            .any(|&statement| {
-                self.jumps(statement)
-                    .iter()
-                    .any(|target| !labels.contains(target))
-            })
-    }
-
-    /// A `switch` body is flattened into guarded items rather than lowered as a
-    /// statement sequence, so a label inside one starts no segment and nothing
-    /// can resume there.
-    fn check_jumps(&self, statements: &[NodeId]) -> Result<(), Diagnostic> {
-        let ast = self.ast;
-        for &statement in statements {
-            if ast.get_node(statement).kind == AstKind::Switch {
-                let body = ast.children(statement).nth(1).unwrap();
-                self.check_switch_labels(body)?;
-            }
-            self.check_jumps(&ast.children(statement).collect::<Vec<_>>())?;
-        }
-        Ok(())
-    }
-
-    fn check_switch_labels(&self, statement: NodeId) -> Result<(), Diagnostic> {
-        let ast = self.ast;
-        match ast.get_node(statement).kind {
-            AstKind::Block => {
-                for child in ast.children(statement) {
-                    self.check_switch_labels(child)?;
-                }
-                Ok(())
-            }
-            AstKind::Case => self.check_switch_labels(ast.children(statement).nth(1).unwrap()),
-            AstKind::Default => self.check_switch_labels(ast.children(statement).next().unwrap()),
-            AstKind::Label => {
-                if self.jump_targets.contains_key(&self.label_id(statement)) {
-                    return Err(unsupported(
-                        ast,
-                        statement,
-                        "goto to a label inside a switch body".to_string(),
-                    ));
-                }
-                self.check_switch_labels(ast.children(statement).next().unwrap())
-            }
-            _ => Ok(()),
-        }
-    }
-
-    /// A `goto` becomes a guarded assignment, so a local can be declared in one
-    /// guarded region and read from a sibling one. Their storage is opened at
-    /// function entry, which dominates the whole body.
-    fn open_jump_slot(&mut self, statements: &[NodeId]) {
+    /// Lower a function holding a label as a flat graph of blocks and branches:
+    /// a `goto` is an edge like any other, and the `restructure` pass raises the
+    /// whole body back to structured control flow. Every `return` stores its
+    /// value and leaves through the one exit block.
+    fn lower_flat_body(
+        &mut self,
+        statements: &[NodeId],
+        result: QualType,
+        returns_void: bool,
+    ) -> Result<(), Diagnostic> {
+        // A label can be jumped over the declaration it precedes, so every slot
+        // is opened in the entry block, which dominates the whole body.
         for &statement in statements {
             self.hoist_declarations(statement);
         }
-        let slot = self.alloca(IntegerType::new(self.context, 32), 4, 4);
-        self.store_flag(slot, 0);
-        self.jump = Some(slot);
+        if !returns_void {
+            self.open_return_value_slot(result);
+        }
+        let exit = self.context.create_block(vec![]);
+        self.exit_block = Some(exit.clone());
+
+        for &statement in statements {
+            self.lower_flat_stmt(statement)?;
+        }
+        self.leave_block(&exit);
+
+        self.context
+            .get_region(self.body_region)
+            .add_block(exit.id());
+        self.enter_block(exit);
+        let operand = self.return_operand(result, returns_void);
+        self.builder
+            .append_op(b::r#return(self.context, operand).build());
+        self.terminated = true;
+        Ok(())
     }
 
     fn hoist_declarations(&mut self, statement: NodeId) {
@@ -2410,337 +2154,302 @@ impl FnCodegen<'_> {
         self.alloca(elem, size, align)
     }
 
-    /// Lower a statement sequence that holds labels: the statements between two
-    /// labels form a segment, a `goto` records the label it names and the
-    /// segments it skips are guarded against it. A label a `goto` reaches from
-    /// its own segment or a later one is re-entered, which needs the dispatch
-    /// loop the remaining segments run in.
-    fn lower_items(
+    /// A fresh block of the function body, appended after the ones emitted so
+    /// far.
+    fn new_block(&mut self) -> std::sync::Arc<tir::Block> {
+        let block = self.context.create_block(vec![]);
+        self.context
+            .get_region(self.body_region)
+            .add_block(block.id());
+        block
+    }
+
+    /// Continue emitting into `block`, which the branch that reaches it has
+    /// already been emitted for.
+    fn enter_block(&mut self, block: std::sync::Arc<tir::Block>) {
+        self.builder = block;
+        self.terminated = false;
+    }
+
+    /// End the current block by falling through to `block`, unless it already
+    /// left through a branch of its own.
+    fn leave_block(&mut self, block: &std::sync::Arc<tir::Block>) {
+        if self.terminated {
+            return;
+        }
+        self.builder
+            .append_op(b::br(self.context, vec![], block.id()).build());
+        self.terminated = true;
+    }
+
+    fn branch_on(
         &mut self,
-        items: &[Item],
-        tail: Tail,
-        entered_clear: bool,
-        repeats: bool,
-    ) -> Result<(), Diagnostic> {
-        if self.jump.is_none() {
-            return self.lower_statements(&self.statements_of(items), tail);
-        }
-        let segments = self.segments(items);
-        if segments.len() == 1 && entered_clear {
-            return self.lower_statements(&segments[0].statements, tail);
-        }
-        let escapes = self.sequence_escapes(&segments);
-        let mut ran = Ran {
-            returned: false,
-            continued: false,
-        };
-        let placement = Placement {
-            entered_clear,
-            guard_last: escapes,
-            repeats,
-        };
-        let Some(dispatch) = self.dispatch_range(&segments) else {
-            return self.lower_segments(&segments, tail, placement, &mut ran);
-        };
-        self.lower_segments(
-            &segments[..dispatch.start],
-            tail,
-            Placement {
-                guard_last: true,
-                ..placement
-            },
-            &mut ran,
-        )?;
-        self.lower_dispatch(&segments[dispatch.clone()], tail, &mut ran)?;
-        self.lower_segments(
-            &segments[dispatch.end..],
-            tail,
-            Placement {
-                entered_clear: false,
-                ..placement
-            },
-            &mut ran,
-        )
-    }
-
-    /// The segments a dispatch loop spans: from the first label a `goto`
-    /// re-enters to the last. What follows runs at most once, so it stays
-    /// outside the loop and is reached by leaving it.
-    fn dispatch_range(&self, segments: &[Segment]) -> Option<std::ops::Range<usize>> {
-        let start = (0..segments.len()).find(|&index| self.is_re_entered(segments, index))?;
-        let mut end = start;
-        for index in start..segments.len() {
-            let resumed = segments[start..=index]
-                .iter()
-                .flat_map(Self::resumed_labels)
-                .collect::<HashSet<_>>();
-            let jumps_back = segments[index].statements.iter().any(|&statement| {
-                self.jumps(statement)
-                    .iter()
-                    .any(|target| resumed.contains(target))
-            });
-            if jumps_back {
-                end = index;
-            }
-        }
-        Some(start..end + 1)
-    }
-
-    /// Lower the segments of one sequence, guarding each against the jumps that
-    /// skip it and against a `return` or a `continue` that already ran.
-    fn lower_segments(
-        &mut self,
-        segments: &[Segment],
-        tail: Tail,
-        placement: Placement,
-        ran: &mut Ran,
-    ) -> Result<(), Diagnostic> {
-        let Some(last) = segments.len().checked_sub(1) else {
-            return Ok(());
-        };
-        for (index, segment) in segments.iter().enumerate() {
-            let observed = index < last || placement.guard_last;
-            if let Some(label) = segment.label
-                && (observed || placement.repeats)
-            {
-                self.clear_jump(label)?;
-            }
-            let statements = segment.statements.clone();
-            if statements.is_empty() {
-                continue;
-            }
-            let skippable = if index == 0 && placement.entered_clear {
-                segments.len() > 1 && self.may_terminate(&statements)
-            } else {
-                observed
-            };
-            if skippable || ran.returned || ran.continued {
-                let condition = self.resumes_here(skippable, &segment.entry, *ran);
-                self.lower_guard(
-                    condition,
-                    |cg| cg.lower_statements(&statements, tail),
-                    |_| Ok(()),
-                )?;
-            } else {
-                self.lower_statements(&statements, tail)?;
-            }
-            ran.returned |=
-                self.return_flag.is_some() && statements.iter().any(|&s| self.contains_return(s));
-            ran.continued |= self.continue_flag.is_some()
-                && statements.iter().any(|&s| self.contains_continue(s));
-        }
-        Ok(())
-    }
-
-    /// Whether control resumes at a segment: no jump is pending, or the one
-    /// that is names a label the segment holds. A `return` or a `continue` that
-    /// already ran leaves nothing to resume.
-    fn resumes_here(&mut self, skippable: bool, entry: &[i64], ran: Ran) -> ValueId {
-        let mut condition = if skippable {
-            let mut condition = self.flag_is_clear(self.jump.unwrap());
-            for &label in entry {
-                let test = self.jump_is(label);
-                condition = self.either(condition, test);
-            }
-            condition
-        } else {
-            self.builder
-                .append_op(b::constant(self.context, 1, IntegerType::new(self.context, 1)).build())
-                .result()
-        };
-        let flags = [
-            ran.returned.then_some(self.return_flag).flatten(),
-            ran.continued.then_some(self.continue_flag).flatten(),
-        ];
-        for flag in flags.into_iter().flatten() {
-            let clear = self.flag_is_clear(flag);
-            condition = self.both(condition, clear);
-        }
-        condition
-    }
-
-    /// Whether a statement of the segment ends the block it is lowered into, in
-    /// which case the segment needs a region of its own to leave room for the
-    /// segments that follow it.
-    fn may_terminate(&self, statements: &[NodeId]) -> bool {
-        statements.iter().any(|&statement| {
-            let ast = self.ast;
-            match ast.get_node(statement).kind {
-                AstKind::Break | AstKind::Continue => true,
-                AstKind::Return => self.return_flag.is_none(),
-                AstKind::Block | AstKind::Label => {
-                    self.may_terminate(&ast.children(statement).collect::<Vec<_>>())
-                }
-                _ => false,
-            }
-        })
-    }
-
-    fn lower_dispatch(
-        &mut self,
-        segments: &[Segment],
-        tail: Tail,
-        ran: &mut Ran,
-    ) -> Result<(), Diagnostic> {
-        let re_entered = (0..segments.len())
-            .filter(|&index| self.is_re_entered(segments, index))
-            .flat_map(|index| Self::resumed_labels(&segments[index]))
-            .collect::<Vec<_>>();
-        // The loop only ever resumes at a re-entered label, so when the first
-        // segment holds the only one, arriving at the top of the loop is
-        // arriving there: the jump is spent rather than tested.
-        let spent = re_entered.len() == 1 && segments[0].label == Some(re_entered[0]);
-        let mut segments = segments
-            .iter()
-            .map(|segment| Segment {
-                label: segment.label,
-                entry: segment.entry.clone(),
-                statements: segment.statements.clone(),
-            })
-            .collect::<Vec<_>>();
-        if spent {
-            segments[0].label = None;
-        }
-
-        let scope = self
-            .context
-            .create_value(TokenType::new(self.context), None);
-        let body_region = self.context.create_region();
-        let body_block = self.context.create_block(vec![scope]);
-        body_region.add_block(body_block.id());
-        let mut body_ran = *ran;
-        self.in_block(body_block.clone(), |cg| {
-            if spent {
-                cg.store_flag(cg.jump.unwrap(), 0);
-            }
-            let placement = Placement {
-                entered_clear: spent,
-                guard_last: true,
-                repeats: true,
-            };
-            cg.lower_segments(&segments, tail, placement, &mut body_ran)?;
-            cg.ensure_cir_yield(body_block);
-            Ok(())
-        })?;
-        *ran = body_ran;
-        let condition_region = self.context.create_region();
-        let condition_block = self.context.create_block(vec![]);
-        condition_region.add_block(condition_block.id());
-        self.in_block(condition_block, |cg| {
-            let mut condition = None;
-            for label in re_entered {
-                let test = cg.jump_is(label);
-                condition = Some(match condition {
-                    None => test,
-                    Some(previous) => cg.either(previous, test),
-                });
-            }
-            let condition = condition.expect("a dispatch loop has a re-entered label");
-            cg.builder
-                .append_op(cir::ops::condition(cg.context, condition).build());
-            Ok(())
-        })?;
-
+        condition: ValueId,
+        if_true: &std::sync::Arc<tir::Block>,
+        if_false: &std::sync::Arc<tir::Block>,
+    ) {
         self.builder.append_op(
-            cir::ops::r#do(
+            b::cond_br(
                 self.context,
-                Some(body_region.id()),
-                Some(condition_region.id()),
+                condition,
+                vec![],
+                vec![],
+                if_true.id(),
+                if_false.id(),
             )
             .build(),
         );
+        self.terminated = true;
+    }
+
+    /// The block a label names, shared by the label itself and every `goto`
+    /// that reaches it, whichever comes first in the source.
+    fn label_block(&mut self, statement: NodeId) -> std::sync::Arc<tir::Block> {
+        let Some(AstLeaf::Label(name)) = self.ast.get_leaf_data(statement) else {
+            unreachable!("label and goto nodes carry a label payload");
+        };
+        if let Some(block) = self.label_blocks.get(name) {
+            return block.clone();
+        }
+        let name = name.clone();
+        let block = self.new_block();
+        self.label_blocks.insert(name, block.clone());
+        block
+    }
+
+    /// Lower one statement of a function that holds a label. Control flow
+    /// becomes branches between blocks; everything else lowers exactly as it
+    /// does in a structured function.
+    fn lower_flat_stmt(&mut self, stmt: NodeId) -> Result<(), Diagnostic> {
+        let ast = self.ast;
+        if self.terminated {
+            // What follows a branch is unreachable, but it may still hold a
+            // label control arrives at, so it is lowered into a block of its own.
+            let unreachable = self.new_block();
+            self.enter_block(unreachable);
+        }
+        match ast.get_node(stmt).kind {
+            AstKind::Block | AstKind::DeclGroup => {
+                for child in ast.children(stmt).collect::<Vec<_>>() {
+                    self.lower_flat_stmt(child)?;
+                }
+                Ok(())
+            }
+            AstKind::Label => {
+                let block = self.label_block(stmt);
+                self.leave_block(&block);
+                self.enter_block(block);
+                self.lower_flat_stmt(ast.children(stmt).next().unwrap())
+            }
+            AstKind::Goto => {
+                let block = self.label_block(stmt);
+                self.leave_block(&block);
+                Ok(())
+            }
+            AstKind::Return => {
+                self.store_return_value(ast.children(stmt).next())?;
+                let exit = self.exit_block.clone().unwrap();
+                self.leave_block(&exit);
+                Ok(())
+            }
+            AstKind::Break => {
+                let target = self.break_blocks.last().unwrap().clone();
+                self.leave_block(&target);
+                Ok(())
+            }
+            AstKind::Continue => {
+                let target = self.continue_blocks.last().unwrap().clone();
+                self.leave_block(&target);
+                Ok(())
+            }
+            AstKind::If => {
+                let mut children = ast.children(stmt);
+                let condition = children.next().unwrap();
+                let then_stmt = children.next().unwrap();
+                let else_stmt = children.next();
+                let condition = self.lower_condition(condition)?;
+                let then_block = self.new_block();
+                let else_block = self.new_block();
+                let join = self.new_block();
+                self.branch_on(condition, &then_block, &else_block);
+
+                self.enter_block(then_block);
+                self.lower_flat_stmt(then_stmt)?;
+                self.leave_block(&join);
+
+                self.enter_block(else_block);
+                if let Some(else_stmt) = else_stmt {
+                    self.lower_flat_stmt(else_stmt)?;
+                }
+                self.leave_block(&join);
+
+                self.enter_block(join);
+                Ok(())
+            }
+            AstKind::While => {
+                let mut children = ast.children(stmt);
+                let condition = children.next().unwrap();
+                let body = children.next().unwrap();
+                let header = self.new_block();
+                let body_block = self.new_block();
+                let exit = self.new_block();
+                self.leave_block(&header);
+
+                self.enter_block(header.clone());
+                let value = self.lower_condition(condition)?;
+                self.branch_on(value, &body_block, &exit);
+
+                self.enter_block(body_block);
+                self.lower_flat_loop_body(body, &exit, &header)?;
+                self.leave_block(&header);
+
+                self.enter_block(exit);
+                Ok(())
+            }
+            AstKind::DoWhile => {
+                let mut children = ast.children(stmt);
+                let body = children.next().unwrap();
+                let condition = children.next().unwrap();
+                let body_block = self.new_block();
+                let latch = self.new_block();
+                let exit = self.new_block();
+                self.leave_block(&body_block);
+
+                self.enter_block(body_block.clone());
+                self.lower_flat_loop_body(body, &exit, &latch)?;
+                self.leave_block(&latch);
+
+                self.enter_block(latch);
+                let value = self.lower_condition(condition)?;
+                self.branch_on(value, &body_block, &exit);
+
+                self.enter_block(exit);
+                Ok(())
+            }
+            AstKind::For => {
+                let children = ast.children(stmt).collect::<Vec<_>>();
+                let [init, condition, step, body] = children.as_slice() else {
+                    unreachable!("for statement has four children");
+                };
+                if ast.get_node(*init).kind != AstKind::Empty {
+                    self.lower_flat_stmt(*init)?;
+                }
+                let header = self.new_block();
+                let body_block = self.new_block();
+                let step_block = self.new_block();
+                let exit = self.new_block();
+                self.leave_block(&header);
+
+                self.enter_block(header.clone());
+                let value = self.lower_for_condition(*condition)?;
+                self.branch_on(value, &body_block, &exit);
+
+                self.enter_block(body_block);
+                self.lower_flat_loop_body(*body, &exit, &step_block)?;
+                self.leave_block(&step_block);
+
+                self.enter_block(step_block);
+                self.lower_for_step(*step)?;
+                self.leave_block(&header);
+
+                self.enter_block(exit);
+                Ok(())
+            }
+            AstKind::Switch => self.lower_flat_switch(stmt),
+            _ => self.lower_structured_stmt(stmt),
+        }
+    }
+
+    fn lower_flat_loop_body(
+        &mut self,
+        body: NodeId,
+        exit: &std::sync::Arc<tir::Block>,
+        next: &std::sync::Arc<tir::Block>,
+    ) -> Result<(), Diagnostic> {
+        self.break_blocks.push(exit.clone());
+        self.continue_blocks.push(next.clone());
+        let lowered = self.lower_flat_stmt(body);
+        self.continue_blocks.pop();
+        self.break_blocks.pop();
+        lowered
+    }
+
+    /// Lower a `switch` as the comparison chain it is: the controlling value is
+    /// tested against each case in turn, the arms fall through to one another in
+    /// source order, and an unmatched value reaches the default arm or leaves.
+    fn lower_flat_switch(&mut self, stmt: NodeId) -> Result<(), Diagnostic> {
+        let mut children = self.ast.children(stmt);
+        let value = self.lower_expr(children.next().unwrap())?;
+        let value_ty = self.context.get_value(value).ty();
+        let body = children.next().unwrap();
+        let mut items = Vec::new();
+        self.flatten_switch_items(body, &mut items)?;
+
+        let exit = self.new_block();
+        let arms = items
+            .iter()
+            .map(|item| match item {
+                SwitchItem::Statement(_) => None,
+                _ => Some(self.new_block()),
+            })
+            .collect::<Vec<_>>();
+        let default = items.iter().zip(&arms).find_map(|(item, arm)| match item {
+            SwitchItem::Default => arm.clone(),
+            _ => None,
+        });
+
+        for (item, arm) in items.iter().zip(&arms) {
+            let (SwitchItem::Case(case), Some(arm)) = (item, arm) else {
+                continue;
+            };
+            let case = self
+                .builder
+                .append_op(b::constant(self.context, *case, value_ty).build())
+                .result();
+            let matches = self
+                .builder
+                .append_op(
+                    b::CmpIOpBuilder::new(self.context)
+                        .lhs(value)
+                        .rhs(case)
+                        .predicate("eq")
+                        .result_type(IntegerType::new(self.context, 1))
+                        .build(),
+                )
+                .result();
+            let next = self.new_block();
+            self.branch_on(matches, arm, &next);
+            self.enter_block(next);
+        }
+        self.leave_block(default.as_ref().unwrap_or(&exit));
+
+        self.break_blocks.push(exit.clone());
+        let lowered = self.lower_switch_arms(&items, &arms);
+        self.break_blocks.pop();
+        lowered?;
+        self.leave_block(&exit);
+        self.enter_block(exit);
         Ok(())
     }
 
-    fn clear_jump(&mut self, label: i64) -> Result<(), Diagnostic> {
-        let slot = self.jump.unwrap();
-        let condition = self.jump_is(label);
-        self.lower_guard(
-            condition,
-            |cg| {
-                cg.store_flag(slot, 0);
-                Ok(())
-            },
-            |_| Ok(()),
-        )
-    }
-
-    fn jump_is(&mut self, label: i64) -> ValueId {
-        let slot = self.jump.unwrap();
-        let value = self
-            .builder
-            .append_op(p::load(self.context, slot.ptr, slot.elem).build())
-            .result();
-        let expected = self
-            .builder
-            .append_op(b::constant(self.context, label, slot.elem).build())
-            .result();
-        self.builder
-            .append_op(
-                b::CmpIOpBuilder::new(self.context)
-                    .lhs(value)
-                    .rhs(expected)
-                    .predicate("eq")
-                    .result_type(IntegerType::new(self.context, 1))
-                    .build(),
-            )
-            .result()
-    }
-
-    fn no_pending_jump(&mut self) -> ValueId {
-        self.flag_is_clear(self.jump.unwrap())
-    }
-
-    fn both(&mut self, left: ValueId, right: ValueId) -> ValueId {
-        let i32_ty = IntegerType::new(self.context, 32);
-        let left = self
-            .builder
-            .append_op(b::extui(self.context, left, i32_ty).build())
-            .result();
-        let right = self
-            .builder
-            .append_op(b::extui(self.context, right, i32_ty).build())
-            .result();
-        let both = self
-            .builder
-            .append_op(b::andi(self.context, left, right, i32_ty).build())
-            .result();
-        self.truth_value(both)
-    }
-
-    fn either(&mut self, left: ValueId, right: ValueId) -> ValueId {
-        let i32_ty = IntegerType::new(self.context, 32);
-        let left = self
-            .builder
-            .append_op(b::extui(self.context, left, i32_ty).build())
-            .result();
-        let right = self
-            .builder
-            .append_op(b::extui(self.context, right, i32_ty).build())
-            .result();
-        let either = self
-            .builder
-            .append_op(b::ori(self.context, left, right, i32_ty).build())
-            .result();
-        self.truth_value(either)
-    }
-
-    /// A `goto` out of a loop leaves it, so the loop must not run its step, its
-    /// condition or another iteration once the jump is pending.
-    fn break_on_pending_jump(&mut self, body: NodeId, scope: ValueId) -> Result<(), Diagnostic> {
-        if self.jump.is_none() || self.terminated || !self.escapes(body) {
-            return Ok(());
+    /// Lower the arms of a `switch` in source order, each one falling through to
+    /// the next as C requires of an arm that does not `break`.
+    fn lower_switch_arms(
+        &mut self,
+        items: &[SwitchItem],
+        arms: &[Option<std::sync::Arc<tir::Block>>],
+    ) -> Result<(), Diagnostic> {
+        for (item, arm) in items.iter().zip(arms) {
+            match (item, arm) {
+                (SwitchItem::Statement(statement), _) => self.lower_flat_stmt(*statement)?,
+                (_, Some(arm)) => {
+                    self.leave_block(arm);
+                    self.enter_block(arm.clone());
+                }
+                (_, None) => unreachable!("a case or default arm has a block"),
+            }
         }
-        let condition = self.no_pending_jump();
-        self.lower_guard(
-            condition,
-            |_| Ok(()),
-            |cg| {
-                cg.builder
-                    .append_op(cir::ops::r#break(cg.context, scope).build());
-                Ok(())
-            },
-        )
+        Ok(())
     }
 
     fn contains_return(&self, statement: NodeId) -> bool {
@@ -2774,7 +2483,17 @@ impl FnCodegen<'_> {
         self.builder
             .append_op(p::store(self.context, zero, flag.ptr).build());
         self.return_flag = Some(flag);
-        if returns_void || self.return_abi.indirect {
+        if returns_void {
+            return;
+        }
+        self.open_return_value_slot(result);
+    }
+
+    /// The slot a `return` leaves its value in, for a function whose returns are
+    /// not block terminators. An indirect result is written through the pointer
+    /// the caller passed instead.
+    fn open_return_value_slot(&mut self, result: QualType) {
+        if self.return_abi.indirect {
             return;
         }
         let elem = lower_type(self.context, self.typed, result);
@@ -2789,7 +2508,7 @@ impl FnCodegen<'_> {
         self.return_slot = Some(self.alloca(elem, size, align));
     }
 
-    fn structured_return_operand(&mut self, result: QualType, returns_void: bool) -> Operand {
+    fn return_operand(&mut self, result: QualType, returns_void: bool) -> Operand {
         if returns_void {
             return Operand::none();
         }
@@ -2824,8 +2543,7 @@ impl FnCodegen<'_> {
             // needs no guard.
             let returns = self.return_flag.is_some() && self.contains_return(statement);
             let continues = self.continue_flag.is_some() && self.contains_continue(statement);
-            let jumps = self.jump.is_some() && self.escapes(statement);
-            if self.terminated || !(returns || continues || jumps) {
+            if self.terminated || !(returns || continues) {
                 continue;
             }
             let rest = &statements[index + 1..];
@@ -2848,13 +2566,6 @@ impl FnCodegen<'_> {
                     },
                 )
             };
-            let guarded = |cg: &mut Self| {
-                if !jumps {
-                    return guarded(cg);
-                }
-                let condition = cg.no_pending_jump();
-                cg.lower_guard(condition, guarded, |_| Ok(()))
-            };
             if continues {
                 self.lower_if_not_continued(guarded)?;
             } else {
@@ -2873,13 +2584,20 @@ impl FnCodegen<'_> {
     }
 
     fn lower_loop_body(&mut self, body: NodeId, scope: ValueId) -> Result<(), Diagnostic> {
-        if self.return_flag.is_none() && self.jump.is_none() {
+        if self.return_flag.is_none() {
             return self.lower_stmt(body);
         }
-        let items = self.body_items(body);
-        let entered_clear = self.entry_labels(body).is_empty();
-        self.lower_items(&items, Tail::ExitLoop(scope), entered_clear, !entered_clear)?;
-        self.break_on_pending_jump(body, scope)
+        self.lower_statements(&self.body_statements(body), Tail::ExitLoop(scope))
+    }
+
+    /// The statements a loop or a branch runs, as a sequence of its own: a
+    /// compound statement contributes its statements, anything else itself.
+    fn body_statements(&self, body: NodeId) -> Vec<NodeId> {
+        if self.ast.get_node(body).kind == AstKind::Block {
+            self.ast.children(body).collect()
+        } else {
+            vec![body]
+        }
     }
 
     fn lower_for_condition(&mut self, condition: NodeId) -> Result<ValueId, Diagnostic> {
@@ -2903,26 +2621,14 @@ impl FnCodegen<'_> {
         Ok(())
     }
 
-    /// The condition that decides whether a body runs, held across the guards
-    /// that must not evaluate it: once the function has returned it stops the
-    /// loop, and a `goto` into the body enters it without asking the condition
-    /// at all.
+    /// The condition that decides whether a body runs, held across the guard
+    /// that must not evaluate it: once the function has returned the loop stops.
     fn lower_running_condition(
         &mut self,
         condition: NodeId,
         held: Slot,
-        returned: bool,
-        entry: &[i64],
     ) -> Result<ValueId, Diagnostic> {
-        let guard = match (returned, entry.is_empty()) {
-            (true, true) => self.has_not_returned(),
-            (true, false) => {
-                let returned = self.has_not_returned();
-                let clear = self.no_pending_jump();
-                self.both(returned, clear)
-            }
-            _ => self.no_pending_jump(),
-        };
+        let guard = self.has_not_returned();
         self.lower_guard(
             guard,
             |cg| {
@@ -2949,12 +2655,7 @@ impl FnCodegen<'_> {
             .builder
             .append_op(p::load(self.context, held.ptr, held.elem).build())
             .result();
-        let mut value = self.truth_value(value);
-        for &label in entry {
-            let test = self.jump_is(label);
-            value = self.either(value, test);
-        }
-        Ok(value)
+        Ok(self.truth_value(value))
     }
 
     fn lower_if_not_returned(
@@ -3036,6 +2737,13 @@ impl FnCodegen<'_> {
     }
 
     fn lower_stmt(&mut self, stmt: NodeId) -> Result<(), Diagnostic> {
+        if self.exit_block.is_some() {
+            return self.lower_flat_stmt(stmt);
+        }
+        self.lower_structured_stmt(stmt)
+    }
+
+    fn lower_structured_stmt(&mut self, stmt: NodeId) -> Result<(), Diagnostic> {
         let ast = self.ast;
         if self.terminated {
             return Ok(());
@@ -3117,10 +2825,7 @@ impl FnCodegen<'_> {
                 }
                 Ok(())
             }
-            AstKind::Block => {
-                let items = self.body_items(stmt);
-                self.lower_items(&items, Tail::Fallthrough, true, false)
-            }
+            AstKind::Block => self.lower_statements(&self.body_statements(stmt), Tail::Fallthrough),
             AstKind::While => {
                 let mut children = ast.children(stmt);
                 let condition = children.next().unwrap();
@@ -3128,18 +2833,12 @@ impl FnCodegen<'_> {
                 let scope = self
                     .context
                     .create_value(TokenType::new(self.context), None);
-                let entry = self.entry_labels(body);
-                let held = (!entry.is_empty())
-                    .then(|| self.alloca(IntegerType::new(self.context, 32), 4, 4));
 
                 let condition_region = self.context.create_region();
                 let condition_block = self.context.create_block(vec![]);
                 condition_region.add_block(condition_block.id());
                 self.in_block(condition_block, |cg| {
-                    let value = match held {
-                        Some(held) => cg.lower_running_condition(condition, held, false, &entry)?,
-                        None => cg.lower_condition(condition)?,
-                    };
+                    let value = cg.lower_condition(condition)?;
                     cg.builder
                         .append_op(cir::ops::condition(cg.context, value).build());
                     Ok(())
@@ -3222,16 +2921,8 @@ impl FnCodegen<'_> {
                 let [init, condition, step, body] = children.as_slice() else {
                     unreachable!("for statement has four children");
                 };
-                let entry = self.entry_labels(*body);
                 if ast.get_node(*init).kind != AstKind::Empty {
-                    let init = *init;
-                    if entry.is_empty() {
-                        self.lower_stmt(init)?;
-                    } else {
-                        // A `goto` into the body enters the loop already running.
-                        let condition = self.no_pending_jump();
-                        self.lower_guard(condition, |cg| cg.lower_stmt(init), |_| Ok(()))?;
-                    }
+                    self.lower_stmt(*init)?;
                 }
                 let scope = self
                     .context
@@ -3241,8 +2932,7 @@ impl FnCodegen<'_> {
                 // to the loop body once structured, and C runs it on the way
                 // out of an iteration that a `break` does not take.
                 let returns = self.return_flag.is_some() && self.contains_return(*body);
-                let held = (returns || !entry.is_empty())
-                    .then(|| self.alloca(IntegerType::new(self.context, 32), 4, 4));
+                let held = returns.then(|| self.alloca(IntegerType::new(self.context, 32), 4, 4));
                 let continue_flag = self.loop_continue_flag(*body);
 
                 let condition_region = self.context.create_region();
@@ -3250,9 +2940,7 @@ impl FnCodegen<'_> {
                 condition_region.add_block(condition_block.id());
                 self.in_block(condition_block, |cg| {
                     let value = match held {
-                        Some(held) => {
-                            cg.lower_running_condition(*condition, held, returns, &entry)?
-                        }
+                        Some(held) => cg.lower_running_condition(*condition, held)?,
                         None => cg.lower_for_condition(*condition)?,
                     };
                     cg.builder
@@ -3271,14 +2959,7 @@ impl FnCodegen<'_> {
                         cg.store_flag(flag, 0);
                     }
                     if returns {
-                        let items = cg.body_items(*body);
-                        cg.lower_items(
-                            &items,
-                            Tail::Fallthrough,
-                            entry.is_empty(),
-                            !entry.is_empty(),
-                        )?;
-                        cg.break_on_pending_jump(*body, scope.id())?;
+                        cg.lower_statements(&cg.body_statements(*body), Tail::Fallthrough)?;
                     } else {
                         cg.lower_loop_body(*body, scope.id())?;
                     }
@@ -3319,20 +3000,13 @@ impl FnCodegen<'_> {
                 let condition = children.next().unwrap();
                 let then_stmt = children.next().unwrap();
                 let else_stmt = children.next();
-                let entry = self.entry_labels(then_stmt);
-                let condition = if entry.is_empty() {
-                    self.lower_condition(condition)?
-                } else {
-                    let held = self.alloca(IntegerType::new(self.context, 32), 4, 4);
-                    self.lower_running_condition(condition, held, false, &entry)?
-                };
+                let condition = self.lower_condition(condition)?;
 
                 let then_region = self.context.create_region();
                 let then_block = self.context.create_block(vec![]);
                 then_region.add_block(then_block.id());
                 self.in_block(then_block.clone(), |cg| {
-                    let items = cg.body_items(then_stmt);
-                    cg.lower_items(&items, Tail::Fallthrough, entry.is_empty(), false)?;
+                    cg.lower_statements(&cg.body_statements(then_stmt), Tail::Fallthrough)?;
                     cg.ensure_cir_yield(then_block);
                     Ok(())
                 })?;
@@ -3342,9 +3016,7 @@ impl FnCodegen<'_> {
                 else_region.add_block(else_block.id());
                 self.in_block(else_block.clone(), |cg| {
                     if let Some(else_stmt) = else_stmt {
-                        let items = cg.body_items(else_stmt);
-                        let entered_clear = cg.entry_labels(else_stmt).is_empty();
-                        cg.lower_items(&items, Tail::Fallthrough, entered_clear, false)?;
+                        cg.lower_statements(&cg.body_statements(else_stmt), Tail::Fallthrough)?;
                     }
                     cg.ensure_cir_yield(else_block);
                     Ok(())
@@ -3361,13 +3033,6 @@ impl FnCodegen<'_> {
                 );
                 Ok(())
             }
-            AstKind::Goto => {
-                let slot = self.jump.expect("a function with a goto has a jump slot");
-                let label = self.label_id(stmt);
-                self.store_flag(slot, label);
-                Ok(())
-            }
-            AstKind::Label => self.lower_stmt(ast.children(stmt).next().unwrap()),
             AstKind::Break => {
                 match *self.break_scopes.last().unwrap() {
                     BreakScope::Loop(scope) => {
@@ -3415,7 +3080,6 @@ impl FnCodegen<'_> {
         let value = self.lower_expr(children.next().unwrap())?;
         let body = children.next().unwrap();
         let value_ty = self.context.get_value(value).ty();
-        let jump = self.jump.filter(|_| self.escapes(body));
         let i32_ty = IntegerType::new(self.context, 32);
         let active = self.alloca(i32_ty, 4, 4);
         let done = self.alloca(i32_ty, 4, 4);
@@ -3480,7 +3144,7 @@ impl FnCodegen<'_> {
                 SwitchItem::Default => Some(default_condition),
                 SwitchItem::Statement(_) => None,
             };
-            let condition = self.switch_item_condition(active, done, jump, activation, i32_ty);
+            let condition = self.switch_item_condition(active, done, activation, i32_ty);
             let then_region = self.context.create_region();
             let then_block = self.context.create_block(vec![]);
             then_region.add_block(then_block.id());
@@ -3557,7 +3221,6 @@ impl FnCodegen<'_> {
         &mut self,
         active: Slot,
         done: Slot,
-        jump: Option<Slot>,
         activation: Option<ValueId>,
         i32_ty: TypeId,
     ) -> ValueId {
@@ -3614,10 +3277,10 @@ impl FnCodegen<'_> {
             .builder
             .append_op(b::andi(self.context, selected, not_done, i32_ty).build())
             .result();
-        // A `return`, a `continue` or a `goto` inside a case leaves the switch,
-        // so no later item — not even one reached by fallthrough — may run.
+        // A `return` or a `continue` inside a case leaves the switch, so no later
+        // item — not even one reached by fallthrough — may run.
         let mut condition = condition;
-        for flag in [self.return_flag, self.continue_flag, jump] {
+        for flag in [self.return_flag, self.continue_flag] {
             let Some(flag) = flag else {
                 continue;
             };
@@ -3962,6 +3625,20 @@ impl FnCodegen<'_> {
     /// Record a `return` in the function's return slots; the single `return`
     /// terminator is emitted once, at the end of the function.
     fn lower_structured_return(&mut self, value: Option<NodeId>) -> Result<(), Diagnostic> {
+        self.store_return_value(value)?;
+        let flag = self.return_flag.unwrap();
+        let one = self
+            .builder
+            .append_op(b::constant(self.context, 1, flag.elem).build())
+            .result();
+        self.builder
+            .append_op(p::store(self.context, one, flag.ptr).build());
+        Ok(())
+    }
+
+    /// Write what a `return` returns to the slot the function's one exit reads
+    /// it back from.
+    fn store_return_value(&mut self, value: Option<NodeId>) -> Result<(), Diagnostic> {
         match value {
             Some(node) if self.return_abi.indirect => self.lower_indirect_return(node)?,
             Some(node) if self.return_abi.aggregate.is_some() => {
@@ -3997,13 +3674,6 @@ impl FnCodegen<'_> {
             }
             None => {}
         }
-        let flag = self.return_flag.unwrap();
-        let one = self
-            .builder
-            .append_op(b::constant(self.context, 1, flag.elem).build())
-            .result();
-        self.builder
-            .append_op(p::store(self.context, one, flag.ptr).build());
         Ok(())
     }
 

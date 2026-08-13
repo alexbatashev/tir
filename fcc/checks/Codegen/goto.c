@@ -1,12 +1,10 @@
-// RUN: fcc compile --stage ir -o - %S/../Inputs/codegen_goto.c | filecheck %s
+// RUN: fcc compile --stage ir -o - %S/../Inputs/codegen_goto.c | filecheck --implicit-check-not=br %s
 
-// A `goto` records the label it names in the pending-jump slot; the label a
-// `goto` reaches from a later statement puts the rest of the sequence in a
-// dispatch loop that resumes there. Nothing branches.
+// A function holding a label is emitted as a flat graph of blocks, which the
+// `restructure` pass raises back to structured control flow before the IR is
+// handed on: the backward `goto` becomes a loop, and nothing branches.
 
 // CHECK: func @sum_to
-// CHECK: cir.do
-// CHECK: cir.condition
+// CHECK: scf.while
+// CHECK: scf.condition
 // CHECK: return
-// CHECK-NOT: cir.goto
-// CHECK-NOT: cir.label
