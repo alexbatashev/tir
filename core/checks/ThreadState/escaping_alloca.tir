@@ -1,0 +1,25 @@
+// RUN: tir opt --pass thread-state --verify %s | filecheck %s
+
+// The slot's address reaches a call, so its contents may be observed from
+// anywhere: it opens no chain of its own and its accesses join the conservative
+// chain rooted at the entry state.
+
+module {
+  declare @sink(!ptr.p<!i32>) -> !unit
+  func @f(%0: !i32) -> !i32 {
+    %1 = ptr.alloca {size = 4, align = 4} : !ptr.p<!i32>
+    ptr.store %0, %1
+    call @sink(%1 : !ptr.p<!i32>)
+    %2 = ptr.load %1 : !i32
+    return %2
+  }
+  module_end
+}
+
+// CHECK-LABEL: func @f
+// CHECK-NEXT: %[[ENTRY:[0-9]+]] = entry_state : !state
+// CHECK-NEXT: %{{[0-9]+}} = ptr.alloca {size = 4, align = 4} : !ptr.p<!i32>
+// CHECK-NEXT: ptr.store %0, %{{[0-9]+}} state(%[[ENTRY]] -> %[[S1:[0-9]+]])
+// CHECK-NEXT: call @sink(%{{[0-9]+}} : !ptr.p<!i32>) state(%[[S1]] -> %[[S2:[0-9]+]])
+// CHECK-NEXT: %{{[0-9]+}} = ptr.load %{{[0-9]+}} : !i32 state(%[[S2]] -> %[[S3:[0-9]+]])
+// CHECK-NEXT: return %{{[0-9]+}} state(%[[S3]])

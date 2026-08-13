@@ -8,6 +8,7 @@ pub mod mem2reg;
 pub mod restructure;
 pub mod scf_to_cfg;
 pub mod symbol_uniqueness;
+pub mod thread_state;
 
 pub use dce::DeadCodeEliminationPass;
 pub use instcombine::InstCombinePass;
@@ -16,3 +17,4 @@ pub use mem2reg::Mem2RegPass;
 pub use restructure::RestructurePass;
 pub use scf_to_cfg::ScfToCfgPass;
 pub use symbol_uniqueness::CheckUniqueSymbolsPass;
+pub use thread_state::ThreadStatePass;

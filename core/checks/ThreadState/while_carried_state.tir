@@ -1,0 +1,38 @@
+// RUN: tir opt --pass thread-state --verify %s | filecheck %s
+
+// An `scf.while` carries state through both of its regions: the condition region
+// forwards the state it was entered with to the body, the body threads its
+// accesses and yields the state it leaves, and the loop result is the state seen
+// once the condition fails.
+
+module {
+  func @g(%0: !i1, %1: !i32) -> !i32 {
+    %2 = ptr.alloca {size = 4, align = 4} : !ptr.p<!i32>
+    ptr.store %1, %2
+    scf.while {
+      scf.condition %0
+    } do {
+      %3 = ptr.load %2 : !i32
+      ptr.store %3, %2
+      scf.yield
+    }
+    %4 = ptr.load %2 : !i32
+    return %4
+  }
+  module_end
+}
+
+// CHECK-LABEL: func @g
+// CHECK-NEXT: %[[ENTRY:[0-9]+]] = entry_state : !state
+// CHECK-NEXT: %{{[0-9]+}} = ptr.alloca {size = 4, align = 4} : !ptr.p<!i32> state(-> %[[A:[0-9]+]])
+// CHECK-NEXT: ptr.store %1, %{{[0-9]+}} state(%[[A]] -> %[[A1:[0-9]+]])
+// CHECK-NEXT: %[[FINAL:[0-9]+]] = scf.while iter_args(%[[COND:[0-9]+]] = %[[A1]]) -> !state {
+// CHECK-NEXT: scf.condition %0, %[[COND]]
+// CHECK-NEXT: }
+// CHECK-NEXT: do(%[[BODY:[0-9]+]]) {
+// CHECK-NEXT: %{{[0-9]+}} = ptr.load %{{[0-9]+}} : !i32 state(%[[BODY]] -> %[[B:[0-9]+]])
+// CHECK-NEXT: ptr.store %{{[0-9]+}}, %{{[0-9]+}} state(%[[B]] -> %[[C:[0-9]+]])
+// CHECK-NEXT: scf.yield %[[C]]
+// CHECK-NEXT: }
+// CHECK-NEXT: %{{[0-9]+}} = ptr.load %{{[0-9]+}} : !i32 state(%[[FINAL]] -> %{{[0-9]+}})
+// CHECK-NEXT: return %{{[0-9]+}} state(%[[ENTRY]])

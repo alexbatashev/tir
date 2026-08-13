@@ -1,0 +1,17 @@
+// RUN: tir opt --pass thread-state --verify %s | filecheck %s
+
+// A function that touches no memory has no memory order to describe, so it gets
+// no entry state and no ports.
+
+module {
+  func @pure(%0: !i32) -> !i32 {
+    %1 = addi %0, %0 : !i32
+    return %1
+  }
+  module_end
+}
+
+// CHECK-LABEL: func @pure
+// CHECK-NOT: entry_state
+// CHECK-NOT: state(
+// CHECK: return %1

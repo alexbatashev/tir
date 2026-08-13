@@ -364,7 +364,7 @@ operation! {
             result: "AnyConstraint",
         },
         interfaces: [MemoryRead],
-        state: "in",
+        state: "in_out",
     }
 }
 
@@ -470,6 +470,10 @@ impl MemoryRead for LoadOp {
 
     fn state_operand(&self) -> Option<tir::ValueId> {
         LoadOp::state_operand(self)
+    }
+
+    fn state_result(&self) -> Option<tir::ValueId> {
+        LoadOp::state_result(self)
     }
 }
 

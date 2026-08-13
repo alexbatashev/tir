@@ -366,6 +366,13 @@ pub trait MemoryRead {
     fn state_operand(&self) -> Option<ValueId> {
         None
     }
+    /// The memory state the read leaves behind, absent until state has been
+    /// threaded. A read leaves memory as it found it, but still names the state
+    /// after it: a later write must be ordered after the read that observes the
+    /// value it overwrites.
+    fn state_result(&self) -> Option<ValueId> {
+        None
+    }
 
     fn verify_interface(
         &self,
