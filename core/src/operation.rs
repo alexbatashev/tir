@@ -236,24 +236,24 @@ fn verify_state_linearity(context: &Context, op_id: OpId) -> Result<(), Error> {
     Ok(())
 }
 
-/// Checks that an op wires memory state through its state port: a `!state` value is
-/// accepted only as the trailing operand or result, and only once.
+/// Checks that an op wires memory state through ports read off its end: the
+/// `!state` values it takes are its trailing ones.
+///
+/// An op that accesses memory has one, since it observes one memory, and its own
+/// arity rules say so. A gate or a loop accesses nothing and instead carries the
+/// chains that cross it, one port each, so the count is what crosses rather than
+/// one.
 fn verify_state_ports(context: &Context, instance: &Arc<OpInstance>) -> Result<(), Error> {
     let state = crate::builtin::StateType::new(context);
     let ports = |values: &[crate::ValueId], kind: &str| {
-        let count = values
-            .iter()
-            .filter(|id| context.has_value(**id) && context.get_value(**id).ty() == state)
-            .count();
-        if count == 0 {
+        let is_state =
+            |id: &crate::ValueId| context.has_value(*id) && context.get_value(*id).ty() == state;
+        let Some(first) = values.iter().position(is_state) else {
             return Ok(());
-        }
-        let last_is_state = values
-            .last()
-            .is_some_and(|id| context.has_value(*id) && context.get_value(*id).ty() == state);
-        if count > 1 || !last_is_state {
+        };
+        if !values[first..].iter().all(is_state) {
             return Err(Error::VerificationError(format!(
-                "an operation takes at most one !state {kind}, and it must be the last one"
+                "an operation's !state {kind}s must be its trailing ones"
             )));
         }
         Ok(())
