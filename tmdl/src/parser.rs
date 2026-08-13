@@ -2461,14 +2461,14 @@ mod tests {
     #[test]
     fn functional_pipeline_lowers_and_executes() {
         use std::collections::HashMap;
-        use tir::sem::SemGraph;
         use tir_adt::{APInt, RawBits};
         use tir_symbolic::lang::{Value, execute};
+        use tir_symbolic::sem::SemGraph;
 
         // split a 32-bit raw value into four bytes and horizontally sum them:
         // bytes [1, 2, 3, 4] -> 10.
         let parsed = parse_inline("reduce(split(rs1, 4), |acc, x| acc + x)");
-        let mut graph = SemGraph::new();
+        let mut graph = SemGraph::<()>::new();
         let lowering = parsed
             .lower_to_sema(&mut graph, &HashMap::new(), &HashMap::new())
             .expect("functional pipeline lowers");

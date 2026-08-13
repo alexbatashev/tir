@@ -294,7 +294,7 @@ fn fixed_write_slot_name(reg_name: &str) -> String {
 /// children in order. Used to fold `a == a` (the composed guard after the
 /// definer's write substitutes for its read) to a constant true.
 fn subgraphs_equal(
-    graph: &tir::sem::SemGraph,
+    graph: &tir_symbolic::sem::SemGraph,
     a: tir_graph::NodeId,
     b: tir_graph::NodeId,
 ) -> bool {
@@ -334,7 +334,7 @@ fn guard_folds_to_true(
     register_index_map: &HashMap<(String, String), u32>,
 ) -> bool {
     use tir_graph::Dag;
-    let mut graph = tir::sem::SemGraph::new();
+    let mut graph = tir_symbolic::sem::SemGraph::new();
     let params = HashMap::new();
     let Some((roots, lowering)) = ast::Expr::lower_all_to_sema_with_isa(
         &[reader.cond, definer.write_rhs],
@@ -357,7 +357,7 @@ fn guard_folds_to_true(
 
     // Rebuild the condition, replacing the written register's read (its symbol
     // leaf) with the definer's write subgraph.
-    let mut composed = tir::sem::SemGraph::new();
+    let mut composed = tir_symbolic::sem::SemGraph::new();
     let mut memo = HashMap::new();
     let composed_root = substitute_symbol_with_subgraph(
         &mut composed,
@@ -381,8 +381,8 @@ fn guard_folds_to_true(
 /// Copy `node`'s subgraph from `src` into `dst`, replacing every `Symbol` leaf
 /// carrying `symbol` with a copy of `src`'s `replacement` subgraph.
 fn substitute_symbol_with_subgraph(
-    dst: &mut tir::sem::SemGraph,
-    src: &tir::sem::SemGraph,
+    dst: &mut tir_symbolic::sem::SemGraph,
+    src: &tir_symbolic::sem::SemGraph,
     node: tir_graph::NodeId,
     symbol: u32,
     replacement: tir_graph::NodeId,
@@ -441,7 +441,7 @@ fn emit_one_division_rule(
     let result_is_dividend = result_reg == dividend_reg;
 
     // Lower the result value into the selection pattern.
-    let mut pattern = tir::sem::SemGraph::new();
+    let mut pattern = tir_symbolic::sem::SemGraph::<()>::new();
     let params = HashMap::new();
     let Some(lowering) = result_rhs.lower_to_sema_with_isa(
         &mut pattern,

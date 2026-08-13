@@ -166,7 +166,7 @@ fn emit_flag_branch_rules(
                 continue;
             };
 
-            let mut spliced = tir::sem::SemGraph::new();
+            let mut spliced = tir_symbolic::sem::SemGraph::new();
             let substitute: HashMap<u32, tir_graph::NodeId> = b_sem
                 .flag_symbols
                 .iter()
@@ -289,8 +289,8 @@ fn emit_flag_branch_rules(
 /// to its mapped id. Unlike `copy_subgraph_remap_symbols` the mapping is fixed
 /// (not fresh-per-symbol), so two operand symbols can be aliased onto one.
 fn copy_subgraph_alias(
-    dst: &mut tir::sem::SemGraph,
-    src: &tir::sem::SemGraph,
+    dst: &mut tir_symbolic::sem::SemGraph,
+    src: &tir_symbolic::sem::SemGraph,
     node: tir_graph::NodeId,
     map: &HashMap<u32, u32>,
     memo: &mut HashMap<usize, tir_graph::NodeId>,
@@ -326,13 +326,13 @@ fn copy_subgraph_alias(
 fn zero_vs_candidate(
     kind: tir_symbolic::lang::SymKind,
     width: u32,
-) -> (tir::sem::SemGraph, tir_graph::NodeId) {
+) -> (tir_symbolic::sem::SemGraph, tir_graph::NodeId) {
     use tir_graph::MutDag;
-    let mut g = tir::sem::SemGraph::new();
+    let mut g = tir_symbolic::sem::SemGraph::new();
     let s = g.add_node(tir_symbolic::lang::SymKind::Symbol);
     g.set_leaf_data(s, tir_symbolic::lang::SymPayload::SymbolId(0));
     let z = g.add_node(tir_symbolic::lang::SymKind::Constant);
-    g.set_leaf_data(z, tir::sem::int_payload(width, 0, false));
+    g.set_leaf_data(z, tir_symbolic::sem::int_payload(width, 0, false));
     let root = g.add_node(kind);
     g.add_edge(root, s);
     g.add_edge(root, z);
@@ -342,10 +342,10 @@ fn zero_vs_candidate(
 /// The `Eq`/`Ne`-vs-zero comparison the composed aliased condition is provably
 /// equivalent to, proven at the operand's architectural width.
 fn zero_equivalent(
-    composed: &tir::sem::SemGraph,
+    composed: &tir_symbolic::sem::SemGraph,
     symbol_widths: &[u32],
 ) -> Option<tir_symbolic::lang::SymKind> {
-    use tir::sem::{EquivalenceOracle, FuzzOracle, SmtOracle};
+    use tir_symbolic::sem::{EquivalenceOracle, FuzzOracle, SmtOracle};
     use tir_symbolic::lang::SymKind;
     let fuzz = FuzzOracle::default();
     for kind in [SymKind::Ne, SymKind::Eq] {
@@ -365,13 +365,13 @@ fn zero_equivalent(
 fn zero_branch_pattern(
     kind: tir_symbolic::lang::SymKind,
     width_symbol: u32,
-) -> (tir::sem::SemGraph, tir_graph::NodeId) {
+) -> (tir_symbolic::sem::SemGraph, tir_graph::NodeId) {
     use tir_graph::MutDag;
-    let mut g = tir::sem::SemGraph::new();
+    let mut g = tir_symbolic::sem::SemGraph::new();
     let s = g.add_node(tir_symbolic::lang::SymKind::Symbol);
     g.set_leaf_data(s, tir_symbolic::lang::SymPayload::SymbolId(0));
     let zero = g.add_node(tir_symbolic::lang::SymKind::Constant);
-    g.set_leaf_data(zero, tir::sem::int_payload(1, 0, false));
+    g.set_leaf_data(zero, tir_symbolic::sem::int_payload(1, 0, false));
     let wsym = g.add_node(tir_symbolic::lang::SymKind::Symbol);
     g.set_leaf_data(wsym, tir_symbolic::lang::SymPayload::SymbolId(width_symbol));
     let zext = g.add_node(tir_symbolic::lang::SymKind::ZExt);
@@ -460,7 +460,7 @@ fn emit_aliased_zero_branch_rules(
             };
 
             let map = HashMap::from([(sym_a, 0u32), (sym_b, 0u32)]);
-            let mut aliased_graph = tir::sem::SemGraph::new();
+            let mut aliased_graph = tir_symbolic::sem::SemGraph::new();
             let mut alias_memo: HashMap<usize, tir_graph::NodeId> = HashMap::new();
             let aliased_roots: HashMap<u32, tir_graph::NodeId> = d_sem
                 .flag_roots
@@ -479,7 +479,7 @@ fn emit_aliased_zero_branch_rules(
                 })
                 .collect();
 
-            let mut spliced = tir::sem::SemGraph::new();
+            let mut spliced = tir_symbolic::sem::SemGraph::new();
             let substitute: HashMap<u32, tir_graph::NodeId> = b_sem
                 .flag_symbols
                 .iter()
@@ -729,7 +729,7 @@ fn emit_flag_reader_rules(
                 continue;
             };
 
-            let mut spliced = tir::sem::SemGraph::new();
+            let mut spliced = tir_symbolic::sem::SemGraph::new();
             let substitute: HashMap<u32, tir_graph::NodeId> = r_sem
                 .flag_symbols
                 .iter()
@@ -755,7 +755,7 @@ fn emit_flag_reader_rules(
             // The value pattern is `if <canonical comparison> { <then> } else
             // { <else> }`, reusing the reader's value arms. Their symbols
             // renumber above the two comparison-operand symbols.
-            let mut pattern = tir::sem::SemGraph::new();
+            let mut pattern = tir_symbolic::sem::SemGraph::new();
             let cmp = copy_subgraph(
                 &mut pattern,
                 &candidate,

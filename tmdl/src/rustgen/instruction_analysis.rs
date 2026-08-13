@@ -7,7 +7,7 @@ fn analyze_instruction_semantics(
     register_index_map: &HashMap<(String, String), u32>,
 ) -> Option<InstructionSemantics> {
     let rhs = resolve_behavior_rhs(behavior, operands, defined_register_operands)?;
-    let mut pattern = tir::sem::SemGraph::new();
+    let mut pattern = tir_symbolic::sem::SemGraph::new();
     let lowering = rhs.lower_to_sema_with_isa(
         &mut pattern,
         numeric_params,
@@ -47,7 +47,7 @@ fn analyze_guarded_semantics(
     numeric_params: &HashMap<String, i64>,
     isa_param_values: &HashMap<String, i64>,
     register_index_map: &HashMap<(String, String), u32>,
-) -> Option<(tir::sem::SemGraph, tir_graph::NodeId)> {
+) -> Option<(tir_symbolic::sem::SemGraph, tir_graph::NodeId)> {
     use tir_graph::MutDag;
     let (cond, then_value, else_value) = guarded_assignment_shape(behavior, dst)?;
     // Resolve `self.XLEN` and friends to their concrete per-ISA width (the value
@@ -58,7 +58,7 @@ fn analyze_guarded_semantics(
     for (name, value) in isa_param_values {
         concrete_params.entry(name.clone()).or_insert(*value);
     }
-    let mut graph = tir::sem::SemGraph::new();
+    let mut graph = tir_symbolic::sem::SemGraph::new();
     let (roots, _) = ast::Expr::lower_all_to_sema_with_isa(
         &[else_value, cond, then_value],
         &mut graph,
@@ -231,7 +231,7 @@ fn collect_referenced_idents(expr: &ast::Expr, operands: &HashSet<&str>, out: &m
 fn value_zero_form_operands(
     canon_pattern: &impl tir_graph::Dag<
         Node = tir_symbolic::lang::SymKind,
-        Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+        Leaf = tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>,
     >,
     canon_root: tir_graph::NodeId,
     ops: &[(String, Type)],
@@ -305,7 +305,7 @@ fn value_zero_form_operands(
 /// reads a fixed bit range regardless of the bound value's width, and a
 /// memory read yields fresh bits unrelated to its address operands.
 fn width_sensitive_symbols(
-    dag: &impl tir_graph::Dag<Node = tir_symbolic::lang::SymKind, Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>>,
+    dag: &impl tir_graph::Dag<Node = tir_symbolic::lang::SymKind, Leaf = tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>>,
     node_widths: &[Option<u32>],
 ) -> HashSet<u32> {
     use tir_symbolic::lang::SymKind as K;
@@ -338,7 +338,7 @@ fn width_sensitive_symbols(
 /// (memory reads) — symbols below them are not width-sensitive through this
 /// path (see [`width_sensitive_symbols`]).
 fn collect_symbols(
-    dag: &impl tir_graph::Dag<Node = tir_symbolic::lang::SymKind, Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>>,
+    dag: &impl tir_graph::Dag<Node = tir_symbolic::lang::SymKind, Leaf = tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>>,
     node: tir_graph::NodeId,
     out: &mut HashSet<u32>,
 ) {
@@ -470,7 +470,7 @@ fn emit_result_register_call(
 /// `extract(imm, hi, 0)` wrapper (a shift-amount mask) narrows the usable bits.
 /// Selection uses these to refuse constants the field cannot represent.
 fn immediate_operand_ranges(
-    dag: &impl tir_graph::Dag<Node = tir_symbolic::lang::SymKind, Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>>,
+    dag: &impl tir_graph::Dag<Node = tir_symbolic::lang::SymKind, Leaf = tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>>,
     ops: &[(String, Type)],
     variable_symbols: &HashMap<String, u32>,
 ) -> Vec<(u32, u32, bool)> {

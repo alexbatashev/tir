@@ -1013,7 +1013,7 @@ fn build_smt_encoding<'a>(
 // ---------------------------------------------------------------------------
 
 /// Sort of an emitted SMT expression. Mirrors the width/signedness tracking of
-/// the sem-expr interpreter (`tir::sem::exec`), which evaluates behaviors
+/// the sem-expr interpreter (`tir_symbolic::lang::execute`), which evaluates behaviors
 /// over `APInt`s of varying width: every value is a bitvector of the
 /// interpreter's width, except comparisons which stay `Bool` until they cross
 /// back into arithmetic.
@@ -1380,7 +1380,7 @@ impl SmtSymbolResolver<'_> {
 fn eval_const_subtree(
     graph: &impl Dag<
         Node = tir_symbolic::lang::SymKind,
-        Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+        Leaf = tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>,
     >,
     node: NodeId,
 ) -> Option<(u64, u32)> {
@@ -1443,7 +1443,7 @@ fn amo_combine(op: u8, old: &str, val: &str) -> Option<String> {
 fn emit_sem_expr(
     graph: &impl Dag<
         Node = tir_symbolic::lang::SymKind,
-        Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+        Leaf = tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>,
     >,
     node: NodeId,
     resolver: &SmtSymbolResolver<'_>,
@@ -1700,7 +1700,7 @@ enum AtomicOp {
 fn atomic_of_node(
     graph: &impl Dag<
         Node = tir_symbolic::lang::SymKind,
-        Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+        Leaf = tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>,
     >,
     node: NodeId,
 ) -> Option<AtomicOp> {
@@ -1739,7 +1739,7 @@ fn is_atomic_kind(kind: tir_symbolic::lang::SymKind) -> bool {
 fn find_atomic(
     graph: &impl Dag<
         Node = tir_symbolic::lang::SymKind,
-        Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+        Leaf = tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>,
     >,
     node: NodeId,
 ) -> Option<AtomicOp> {

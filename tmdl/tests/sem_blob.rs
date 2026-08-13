@@ -4,7 +4,8 @@
 
 use std::{fs, process};
 
-use tir::sem::{SCALAR_OPS, SemOp, SemPayloadDesc, SymKind, decode_sem_ops};
+use tir_symbolic::lang::{SCALAR_OPS, SymKind};
+use tir_symbolic::sem::{SemOp, SemPayloadDesc, decode_sem_ops};
 use tmdl::{Action, Compiler, OutputKind};
 
 /// The generated Rust, the kind table it passes to the decoder, and every

@@ -4,7 +4,7 @@ fn emit_as_sem_expr_impl(
     numeric_params: &HashMap<String, i64>,
     isa_param_values: &HashMap<String, i64>,
 ) -> Option<proc_macro2::TokenStream> {
-    let mut dag = tir::sem::SemGraph::new();
+    let mut dag = tir_symbolic::sem::SemGraph::<()>::new();
     let lowering = rhs.lower_to_sema(&mut dag, numeric_params, isa_param_values)?;
     // The AsSemExpr impl carries no type annotations (the program-graph builder
     // infers them), so pass no widths.
@@ -299,7 +299,7 @@ fn emit_binding_value_eval(
 }
 
 fn emit_lowered_value_eval(
-    dag: &impl tir_graph::Dag<Node = tir_symbolic::lang::SymKind, Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>>,
+    dag: &impl tir_graph::Dag<Node = tir_symbolic::lang::SymKind, Leaf = tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>>,
     root: tir_graph::NodeId,
     mnemonic_lit: &proc_macro2::Literal,
 ) -> Option<proc_macro2::TokenStream> {
@@ -575,7 +575,7 @@ fn emit_cond_branch_rule(
     encoding_bytes: u64,
     inst_features: &proc_macro2::TokenStream,
     ops: &[(String, Type)],
-    pattern: &tir::sem::SemGraph,
+    pattern: &tir_symbolic::sem::SemGraph,
     root: tir_graph::NodeId,
     variable_symbols: &HashMap<String, u32>,
     target_operand: &str,
@@ -732,12 +732,12 @@ fn emit_cond_branch_rule(
 /// `zext(0b0, W)` zero shape. `width_symbol` is the fresh wildcard the extension
 /// width binds to — matched but never read by the emitter.
 fn branch_pattern_with_zero(
-    pattern: &tir::sem::SemGraph,
+    pattern: &tir_symbolic::sem::SemGraph,
     root: tir_graph::NodeId,
     reg_symbol: u32,
     width_symbol: u32,
-) -> (tir::sem::SemGraph, tir_graph::NodeId) {
-    let mut out = tir::sem::SemGraph::new();
+) -> (tir_symbolic::sem::SemGraph, tir_graph::NodeId) {
+    let mut out = tir_symbolic::sem::SemGraph::new();
     let mut memo: HashMap<usize, tir_graph::NodeId> = HashMap::new();
     let new_root =
         clone_pattern_with_zero(pattern, root, reg_symbol, width_symbol, &mut out, &mut memo);
@@ -745,11 +745,11 @@ fn branch_pattern_with_zero(
 }
 
 fn clone_pattern_with_zero(
-    pattern: &tir::sem::SemGraph,
+    pattern: &tir_symbolic::sem::SemGraph,
     node: tir_graph::NodeId,
     reg_symbol: u32,
     width_symbol: u32,
-    out: &mut tir::sem::SemGraph,
+    out: &mut tir_symbolic::sem::SemGraph,
     memo: &mut HashMap<usize, tir_graph::NodeId>,
 ) -> tir_graph::NodeId {
     use tir_graph::{Dag, MutDag};
@@ -763,7 +763,7 @@ fn clone_pattern_with_zero(
         )
     {
         let zero = out.add_node(tir_symbolic::lang::SymKind::Constant);
-        out.set_leaf_data(zero, tir::sem::int_payload(1, 0, false));
+        out.set_leaf_data(zero, tir_symbolic::sem::int_payload(1, 0, false));
         let width = out.add_node(tir_symbolic::lang::SymKind::Symbol);
         out.set_leaf_data(width, tir_symbolic::lang::SymPayload::SymbolId(width_symbol));
         let zext = out.add_node(tir_symbolic::lang::SymKind::ZExt);
@@ -793,18 +793,18 @@ fn clone_pattern_with_zero(
 }
 
 fn emit_dag_as_code(
-    dag: &impl tir_graph::Dag<Node = tir_symbolic::lang::SymKind, Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>>,
+    dag: &impl tir_graph::Dag<Node = tir_symbolic::lang::SymKind, Leaf = tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>>,
     root: tir_graph::NodeId,
     widths: &[Option<u32>],
 ) -> proc_macro2::TokenStream {
-    let mut ops: Vec<tir::sem::SemOp> = Vec::new();
+    let mut ops: Vec<tir_symbolic::sem::SemOp> = Vec::new();
     let mut node_indices: HashMap<usize, u32> = HashMap::new();
     let mut has_typed_node = false;
     for (counter, node_id) in dag.postorder(root).enumerate() {
-        ops.push(tir::sem::SemOp::Node(*dag.get_node(node_id)));
+        ops.push(tir_symbolic::sem::SemOp::Node(*dag.get_node(node_id)));
 
         if let Some(data) = dag.get_leaf_data(node_id) {
-            ops.push(tir::sem::SemOp::Payload(payload_desc(data)));
+            ops.push(tir_symbolic::sem::SemOp::Payload(payload_desc(data)));
         }
 
         if !matches!(
@@ -821,13 +821,13 @@ fn emit_dag_as_code(
         ) && dag.get_leaf_data(node_id).is_none()
             && let Some(Some(width)) = widths.get(node_id.index()).copied()
         {
-            ops.push(tir::sem::SemOp::Typed(width));
+            ops.push(tir_symbolic::sem::SemOp::Typed(width));
             has_typed_node = true;
         }
 
         let children: Vec<tir_graph::NodeId> = dag.children(node_id).collect();
         for child_id in children {
-            ops.push(tir::sem::SemOp::Edge(
+            ops.push(tir_symbolic::sem::SemOp::Edge(
                 counter as u32,
                 node_indices[&child_id.index()],
             ));
@@ -854,8 +854,8 @@ fn emit_dag_as_code(
     }
 }
 
-fn payload_desc(payload: &tir_symbolic::lang::SymPayload<tir::ValueId>) -> tir::sem::SemPayloadDesc {
-    use tir::sem::SemPayloadDesc;
+fn payload_desc(payload: &tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>) -> tir_symbolic::sem::SemPayloadDesc {
+    use tir_symbolic::sem::SemPayloadDesc;
     use tir_symbolic::lang::SymPayload;
     match payload {
         SymPayload::SymbolId(id) => SemPayloadDesc::SymbolId(*id),

@@ -126,7 +126,7 @@ fn emit_register_parsers_and_printers(
 }
 
 /// Emit a `register_info()` constructor returning the target-independent
-/// [`tir::backend::regalloc::RegisterInfo`] the allocator consumes: per class, the
+/// `tir::backend::regalloc::RegisterInfo` the allocator consumes: per class, the
 /// The `RegClassId` expression for a statically-known register class, referencing
 /// the generated per-dialect `RegClass` enum emitted alongside `register_info()`.
 fn reg_class_id(class_name: &str) -> proc_macro2::TokenStream {

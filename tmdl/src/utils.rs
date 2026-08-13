@@ -91,7 +91,7 @@ impl<'a, K: Eq + Hash, V: PartialEq> IntoIterator for &'a mut StableHashMap<K, V
 /// values). `None` when the expression does not converge to a constant —
 /// e.g. it references an unknown parameter or a register.
 pub fn eval_bits_width(expr: &ast::Expr, params: &HashMap<String, i64>) -> Option<u16> {
-    let mut graph = tir::sem::SemGraph::new();
+    let mut graph = tir_symbolic::sem::SemGraph::<()>::new();
     let lowering = expr.lower_to_sema(&mut graph, params, &HashMap::new())?;
     if !lowering.variable_symbols.is_empty() || !lowering.register_symbols.is_empty() {
         return None;

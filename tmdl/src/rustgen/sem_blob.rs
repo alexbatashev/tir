@@ -14,22 +14,22 @@ use std::cell::RefCell;
 pub const SEM_BLOB_FILE: &str = "tmdl_sem.bin";
 
 thread_local! {
-    static SEM_BLOB: RefCell<tir::sem::SemBlobBuilder> =
-        RefCell::new(tir::sem::SemBlobBuilder::new());
+    static SEM_BLOB: RefCell<tir_symbolic::sem::SemBlobBuilder> =
+        RefCell::new(tir_symbolic::sem::SemBlobBuilder::new());
 }
 
 fn begin_sem_blob() {
-    SEM_BLOB.with_borrow_mut(|blob| *blob = tir::sem::SemBlobBuilder::new());
+    SEM_BLOB.with_borrow_mut(|blob| *blob = tir_symbolic::sem::SemBlobBuilder::new());
 }
 
 /// The blob and the [`tir_symbolic::lang::SymKind`] table its node codes index.
 fn finish_sem_blob() -> (Vec<u8>, Vec<tir_symbolic::lang::SymKind>) {
     SEM_BLOB.with_borrow_mut(|blob| {
-        std::mem::replace(blob, tir::sem::SemBlobBuilder::new()).finish()
+        std::mem::replace(blob, tir_symbolic::sem::SemBlobBuilder::new()).finish()
     })
 }
 
 /// Serializes one sem program; returns its offset in the blob.
-fn intern_sem_ops(ops: &[tir::sem::SemOp]) -> u32 {
+fn intern_sem_ops(ops: &[tir_symbolic::sem::SemOp]) -> u32 {
     SEM_BLOB.with_borrow_mut(|blob| blob.intern(ops))
 }

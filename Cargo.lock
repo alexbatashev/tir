@@ -2304,7 +2304,6 @@ dependencies = [
  "serde_json",
  "syn",
  "thiserror 2.0.18",
- "tir",
  "tir-adt",
  "tir-graph",
  "tir-lit",

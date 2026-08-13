@@ -3,7 +3,7 @@
 // ---------------------------------------------------------------------------
 
 struct InstructionSemantics {
-    pattern: tir::sem::SemGraph,
+    pattern: tir_symbolic::sem::SemGraph,
     root: tir_graph::NodeId,
     variable_symbols: HashMap<String, u32>,
     fixed_register_by_class: HashMap<String, Option<u16>>,
@@ -15,14 +15,14 @@ struct InstructionSemantics {
     /// behavior assigns the result under a statement-level `if`/`else`, e.g. riscv
     /// `div`. The selection pattern is the guard-relaxed else arm; this lets pass
     /// construction prove the relaxation sound. `None` for unguarded behaviors.
-    guarded_semantics: Option<(tir::sem::SemGraph, tir_graph::NodeId)>,
+    guarded_semantics: Option<(tir_symbolic::sem::SemGraph, tir_graph::NodeId)>,
 }
 
 /// The selectable semantics of a conditional-branch instruction: the branch
 /// condition as a pattern, plus the operand carrying the taken target.
 struct BranchSemantics {
     /// The condition expression (`rs1 == rs2`, …) as a pattern graph.
-    pattern: tir::sem::SemGraph,
+    pattern: tir_symbolic::sem::SemGraph,
     root: tir_graph::NodeId,
     variable_symbols: HashMap<String, u32>,
     /// The immediate operand encoding the taken target (`imm`), and the fresh
@@ -105,7 +105,7 @@ fn analyze_branch_semantics(
     if behavior_references_pc(cond, pc_classes) {
         return None;
     }
-    let mut pattern = tir::sem::SemGraph::new();
+    let mut pattern = tir_symbolic::sem::SemGraph::new();
     let lowering = cond.lower_to_sema_with_isa(
         &mut pattern,
         numeric_params,
@@ -137,7 +137,7 @@ fn analyze_branch_semantics(
 /// into `graph` through one shared symbol table.
 struct FlagDefinerSemantics {
     class: String,
-    graph: tir::sem::SemGraph,
+    graph: tir_symbolic::sem::SemGraph,
     flag_roots: HashMap<u32, tir_graph::NodeId>,
     variable_symbols: HashMap<String, u32>,
 }
@@ -146,7 +146,7 @@ struct FlagDefinerSemantics {
 /// reads only status-flag registers of one class.
 struct FlagBranchSemantics {
     class: String,
-    graph: tir::sem::SemGraph,
+    graph: tir_symbolic::sem::SemGraph,
     root: tir_graph::NodeId,
     /// Guard symbol id -> the flag register index it reads.
     flag_symbols: HashMap<u32, u32>,
@@ -159,7 +159,7 @@ struct FlagBranchSemantics {
 /// `emit_flag_reader_rules`).
 struct FlagReaderSemantics {
     class: String,
-    graph: tir::sem::SemGraph,
+    graph: tir_symbolic::sem::SemGraph,
     /// The `if`'s condition, then, and else subgraphs.
     cond_root: tir_graph::NodeId,
     then_root: tir_graph::NodeId,
@@ -252,7 +252,7 @@ fn analyze_flag_definer_semantics(
 
     let mut params = numeric_params.clone();
     params.extend(isa_param_values.iter().map(|(k, v)| (k.clone(), *v)));
-    let mut graph = tir::sem::SemGraph::new();
+    let mut graph = tir_symbolic::sem::SemGraph::new();
     let exprs: Vec<&ast::Expr> = flag_exprs.iter().map(|(_, expr)| *expr).collect();
     let (roots, lowering) = ast::Expr::lower_all_to_sema_with_isa(
         &exprs,
@@ -316,7 +316,7 @@ fn analyze_flag_branch_semantics(
 
     let mut params = numeric_params.clone();
     params.extend(isa_param_values.iter().map(|(k, v)| (k.clone(), *v)));
-    let mut graph = tir::sem::SemGraph::new();
+    let mut graph = tir_symbolic::sem::SemGraph::new();
     let lowering =
         cond.lower_to_sema_with_isa(&mut graph, &params, isa_param_values, register_index_map)?;
     if !lowering.variable_symbols.is_empty() || lowering.register_symbols.is_empty() {
@@ -396,7 +396,7 @@ fn analyze_flag_reader_semantics(
         return None;
     }
 
-    let mut graph = tir::sem::SemGraph::new();
+    let mut graph = tir_symbolic::sem::SemGraph::new();
     let lowering = assign.value.lower_to_sema_with_isa(
         &mut graph,
         numeric_params,
@@ -456,8 +456,8 @@ fn analyze_flag_reader_semantics(
 /// Copy `node`'s subgraph from `src` into `dst`, preserving payloads. Children
 /// are copied first, keeping `dst` in post order.
 fn copy_subgraph(
-    dst: &mut tir::sem::SemGraph,
-    src: &tir::sem::SemGraph,
+    dst: &mut tir_symbolic::sem::SemGraph,
+    src: &tir_symbolic::sem::SemGraph,
     node: tir_graph::NodeId,
     memo: &mut HashMap<usize, tir_graph::NodeId>,
 ) -> tir_graph::NodeId {
@@ -486,8 +486,8 @@ fn copy_subgraph(
 /// width var) above the two comparison-operand symbols they are spliced beside,
 /// so the two symbol spaces do not collide.
 fn copy_subgraph_remap_symbols(
-    dst: &mut tir::sem::SemGraph,
-    src: &tir::sem::SemGraph,
+    dst: &mut tir_symbolic::sem::SemGraph,
+    src: &tir_symbolic::sem::SemGraph,
     node: tir_graph::NodeId,
     memo: &mut HashMap<usize, tir_graph::NodeId>,
     remap: &mut HashMap<u32, u32>,
@@ -530,8 +530,8 @@ fn copy_subgraph_remap_symbols(
 /// while an `XLEN`-symbol arm (arm64 `cset`) already generalizes — the value is a
 /// boolean 0/1, the register width is not part of what selects it.
 fn copy_reader_arm(
-    dst: &mut tir::sem::SemGraph,
-    src: &tir::sem::SemGraph,
+    dst: &mut tir_symbolic::sem::SemGraph,
+    src: &tir_symbolic::sem::SemGraph,
     arm_root: tir_graph::NodeId,
     remap: &mut HashMap<u32, u32>,
     next: &mut u32,
@@ -566,11 +566,11 @@ fn copy_reader_arm(
 /// that flag. The definer's operand symbols survive verbatim, so the composed
 /// condition is a function of the definer's encoded operands alone.
 fn compose_guard_with_definer(
-    dst: &mut tir::sem::SemGraph,
-    guard: &tir::sem::SemGraph,
+    dst: &mut tir_symbolic::sem::SemGraph,
+    guard: &tir_symbolic::sem::SemGraph,
     node: tir_graph::NodeId,
     substitute: &HashMap<u32, tir_graph::NodeId>,
-    definer: &tir::sem::SemGraph,
+    definer: &tir_symbolic::sem::SemGraph,
     guard_memo: &mut HashMap<usize, tir_graph::NodeId>,
     definer_memo: &mut HashMap<usize, tir_graph::NodeId>,
 ) -> tir_graph::NodeId {
@@ -641,14 +641,14 @@ fn foldable_kind(kind: &tir_symbolic::lang::SymKind) -> bool {
 /// the SMT oracle's bit-blaster needs them as literal extract bounds and
 /// extension widths, so they are evaluated here with the reference interpreter.
 fn fold_constant_subtrees(
-    src: &tir::sem::SemGraph,
+    src: &tir_symbolic::sem::SemGraph,
     root: tir_graph::NodeId,
-) -> (tir::sem::SemGraph, tir_graph::NodeId) {
+) -> (tir_symbolic::sem::SemGraph, tir_graph::NodeId) {
     use tir_graph::{Dag, MutDag};
 
     // Whether every leaf under `node` is a constant and every operator foldable.
     fn all_constant(
-        src: &tir::sem::SemGraph,
+        src: &tir_symbolic::sem::SemGraph,
         node: tir_graph::NodeId,
         memo: &mut HashMap<usize, bool>,
     ) -> bool {
@@ -672,8 +672,8 @@ fn fold_constant_subtrees(
     }
 
     fn walk(
-        dst: &mut tir::sem::SemGraph,
-        src: &tir::sem::SemGraph,
+        dst: &mut tir_symbolic::sem::SemGraph,
+        src: &tir_symbolic::sem::SemGraph,
         node: tir_graph::NodeId,
         const_memo: &mut HashMap<usize, bool>,
         copy_memo: &mut HashMap<usize, tir_graph::NodeId>,
@@ -682,7 +682,7 @@ fn fold_constant_subtrees(
             return copied;
         }
         let copied = if src.get_leaf_data(node).is_none() && all_constant(src, node, const_memo) {
-            let mut sub = tir::sem::SemGraph::new();
+            let mut sub = tir_symbolic::sem::SemGraph::new();
             copy_subgraph(&mut sub, src, node, &mut HashMap::new());
             let tir_symbolic::lang::Value::Int(value) = tir_symbolic::lang::execute(&sub, &[]) else {
                 // Not evaluable after all: copy verbatim.
@@ -710,7 +710,7 @@ fn fold_constant_subtrees(
         copied
     }
 
-    let mut dst = tir::sem::SemGraph::new();
+    let mut dst = tir_symbolic::sem::SemGraph::new();
     let folded_root = walk(
         &mut dst,
         src,
@@ -726,9 +726,9 @@ fn fold_constant_subtrees(
 fn comparison_candidate(
     kind: tir_symbolic::lang::SymKind,
     swap: bool,
-) -> (tir::sem::SemGraph, tir_graph::NodeId) {
+) -> (tir_symbolic::sem::SemGraph, tir_graph::NodeId) {
     use tir_graph::MutDag;
-    let mut g = tir::sem::SemGraph::new();
+    let mut g = tir_symbolic::sem::SemGraph::new();
     let a = g.add_node(tir_symbolic::lang::SymKind::Symbol);
     g.set_leaf_data(a, tir_symbolic::lang::SymPayload::SymbolId(0));
     let b = g.add_node(tir_symbolic::lang::SymKind::Symbol);
@@ -742,9 +742,9 @@ fn comparison_candidate(
 
 /// The `cmpf` graph for an equality predicate: floating equality is compound,
 /// so it has no single-kind candidate.
-fn floating_equality_candidate(predicate: &str) -> (tir::sem::SemGraph, tir_graph::NodeId) {
-    let mut g = tir::sem::SemGraph::new();
-    let root = tir::builtin::cmpf_semantics(&mut g, predicate)
+fn floating_equality_candidate(predicate: &str) -> (tir_symbolic::sem::SemGraph, tir_graph::NodeId) {
+    let mut g = tir_symbolic::sem::SemGraph::new();
+    let root = tir_symbolic::sem::cmpf_semantics(&mut g, predicate)
         .expect("the builtin floating comparison predicate must be valid");
     (g, root)
 }
@@ -756,10 +756,10 @@ fn floating_equality_candidate(predicate: &str) -> (tir::sem::SemGraph, tir_grap
 /// retained, and use the compound `cmpf` graphs for equality. A wrong flag
 /// formula derives no rule instead of a miscompiling one.
 fn find_equivalent_comparison(
-    composed: &tir::sem::SemGraph,
+    composed: &tir_symbolic::sem::SemGraph,
     symbols: &ComparisonSymbols,
-) -> Option<(tir::sem::SemGraph, tir_graph::NodeId)> {
-    use tir::sem::{EquivalenceOracle, FuzzOracle, SmtOracle};
+) -> Option<(tir_symbolic::sem::SemGraph, tir_graph::NodeId)> {
+    use tir_symbolic::sem::{EquivalenceOracle, FuzzOracle, SmtOracle};
     use tir_symbolic::lang::SymKind;
     const EQUALITY: &[(SymKind, bool)] = &[(SymKind::Eq, false), (SymKind::Ne, false)];
     const ORDERED: &[(SymKind, bool)] = &[

@@ -3,9 +3,9 @@
 
 use std::collections::HashMap;
 
-use tir::ValueId;
 use tir_graph::{Dag, GenericDag, MutDag, NodeId};
 use tir_symbolic::lang::{SymKind, SymPayload};
+use tir_symbolic::sem::ValueId;
 
 use crate::ast;
 

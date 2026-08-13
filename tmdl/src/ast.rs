@@ -336,7 +336,7 @@ pub struct Frontend {
 }
 
 /// How a pipeline stage handles data hazards. Mirrors
-/// [`tir::backend::sched::Protection`].
+/// `tir::backend::sched::Protection`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Protection {
     Protected,
@@ -408,7 +408,7 @@ pub struct MachineOverride {
 }
 
 /// A forwarding/bypass path between two of a machine's resources, with the
-/// producer→consumer latency it grants. Mirrors [`tir::backend::sched::Forward`].
+/// producer→consumer latency it grants. Mirrors `tir::backend::sched::Forward`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Forward {
     pub from: String,
@@ -817,7 +817,7 @@ struct SemaExprLoweringCtx<
     'a,
     G: tir_graph::MutDag<
             Node = tir_symbolic::lang::SymKind,
-            Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+            Leaf = tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>,
         >,
 > {
     graph: &'a mut G,
@@ -851,7 +851,7 @@ impl<
     'a,
     G: tir_graph::MutDag<
             Node = tir_symbolic::lang::SymKind,
-            Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+            Leaf = tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>,
         >,
 > SemaExprLoweringCtx<'a, G>
 {
@@ -908,7 +908,7 @@ impl<
     fn add_leaf(
         &mut self,
         kind: tir_symbolic::lang::SymKind,
-        data: tir_symbolic::lang::SymPayload<tir::ValueId>,
+        data: tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>,
     ) -> tir_graph::NodeId {
         let node = self.graph.add_node(kind);
         self.graph.set_leaf_data(node, data);
@@ -1111,7 +1111,7 @@ impl Expr {
     fn lower_with_ctx<
         G: tir_graph::MutDag<
                 Node = tir_symbolic::lang::SymKind,
-                Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+                Leaf = tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>,
             >,
     >(
         &self,
@@ -1157,7 +1157,7 @@ impl Expr {
         &self,
         g: &mut impl tir_graph::MutDag<
             Node = tir_symbolic::lang::SymKind,
-            Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+            Leaf = tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>,
         >,
     ) -> tir_graph::NodeId {
         self.as_sema_expr_with_params(g, &HashMap::new())
@@ -1167,7 +1167,7 @@ impl Expr {
         &self,
         g: &mut impl tir_graph::MutDag<
             Node = tir_symbolic::lang::SymKind,
-            Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+            Leaf = tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>,
         >,
         params: &HashMap<String, i64>,
     ) -> tir_graph::NodeId {
@@ -1182,7 +1182,7 @@ impl Expr {
         &self,
         g: &mut impl tir_graph::MutDag<
             Node = tir_symbolic::lang::SymKind,
-            Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+            Leaf = tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>,
         >,
         params: &HashMap<String, i64>,
         isa_consts: &HashMap<String, i64>,
@@ -1209,7 +1209,7 @@ impl Expr {
         &self,
         g: &mut impl tir_graph::MutDag<
             Node = tir_symbolic::lang::SymKind,
-            Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+            Leaf = tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>,
         >,
         params: &HashMap<String, i64>,
         isa_consts: &HashMap<String, i64>,
@@ -1238,7 +1238,7 @@ impl Expr {
         exprs: &[&Expr],
         g: &mut impl tir_graph::MutDag<
             Node = tir_symbolic::lang::SymKind,
-            Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+            Leaf = tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>,
         >,
         params: &HashMap<String, i64>,
         isa_consts: &HashMap<String, i64>,
@@ -1275,7 +1275,7 @@ impl Expr {
         &self,
         g: &mut impl tir_graph::MutDag<
             Node = tir_symbolic::lang::SymKind,
-            Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+            Leaf = tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>,
         >,
         params: &HashMap<String, i64>,
         register_indices: &HashMap<(String, String), u32>,
@@ -1299,7 +1299,7 @@ impl Assign {
     fn as_sema_expr<
         G: tir_graph::MutDag<
                 Node = tir_symbolic::lang::SymKind,
-                Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+                Leaf = tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>,
             >,
     >(
         &self,
@@ -1313,7 +1313,7 @@ impl Let {
     fn as_sema_expr<
         G: tir_graph::MutDag<
                 Node = tir_symbolic::lang::SymKind,
-                Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+                Leaf = tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>,
             >,
     >(
         &self,
@@ -1331,7 +1331,7 @@ impl Lit {
     fn as_sema_expr<
         G: tir_graph::MutDag<
                 Node = tir_symbolic::lang::SymKind,
-                Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+                Leaf = tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>,
             >,
     >(
         &self,
@@ -1358,7 +1358,7 @@ impl Ident {
     fn as_sema_expr<
         G: tir_graph::MutDag<
                 Node = tir_symbolic::lang::SymKind,
-                Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+                Leaf = tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>,
             >,
     >(
         &self,
@@ -1401,7 +1401,7 @@ impl Path {
     fn as_sema_expr<
         G: tir_graph::MutDag<
                 Node = tir_symbolic::lang::SymKind,
-                Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+                Leaf = tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>,
             >,
     >(
         &self,
@@ -1455,7 +1455,7 @@ impl Field {
     fn as_sema_expr<
         G: tir_graph::MutDag<
                 Node = tir_symbolic::lang::SymKind,
-                Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+                Leaf = tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>,
             >,
     >(
         &self,
@@ -1492,7 +1492,7 @@ impl Binary {
     fn as_sema_expr<
         G: tir_graph::MutDag<
                 Node = tir_symbolic::lang::SymKind,
-                Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+                Leaf = tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>,
             >,
     >(
         &self,
@@ -1533,7 +1533,7 @@ impl Unary {
     fn as_sema_expr<
         G: tir_graph::MutDag<
                 Node = tir_symbolic::lang::SymKind,
-                Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+                Leaf = tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>,
             >,
     >(
         &self,
@@ -1573,7 +1573,7 @@ impl If {
     fn as_sema_expr<
         G: tir_graph::MutDag<
                 Node = tir_symbolic::lang::SymKind,
-                Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+                Leaf = tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>,
             >,
     >(
         &self,
@@ -1595,7 +1595,7 @@ impl Block {
     fn as_sema_expr<
         G: tir_graph::MutDag<
                 Node = tir_symbolic::lang::SymKind,
-                Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+                Leaf = tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>,
             >,
     >(
         &self,
@@ -1616,7 +1616,7 @@ impl Slice {
     fn as_sema_expr<
         G: tir_graph::MutDag<
                 Node = tir_symbolic::lang::SymKind,
-                Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+                Leaf = tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>,
             >,
     >(
         &self,
@@ -1633,7 +1633,7 @@ impl IndexAccess {
     fn as_sema_expr<
         G: tir_graph::MutDag<
                 Node = tir_symbolic::lang::SymKind,
-                Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+                Leaf = tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>,
             >,
     >(
         &self,
@@ -1702,7 +1702,7 @@ fn pack_ordering_meta<G>(
 where
     G: tir_graph::MutDag<
             Node = tir_symbolic::lang::SymKind,
-            Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+            Leaf = tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>,
         >,
 {
     let Some(ordering) = ordering else {
@@ -1738,7 +1738,7 @@ impl Call {
     fn as_sema_expr<
         G: tir_graph::MutDag<
                 Node = tir_symbolic::lang::SymKind,
-                Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+                Leaf = tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>,
             >,
     >(
         &self,
