@@ -777,7 +777,11 @@ impl Context {
 
         for &region in &instance.regions {
             let entry = self.get_region(region).block_ids()[0];
-            let incoming = init.map(|_| self.append_block_argument(entry, ty).id());
+            let incoming = init.map(|_| {
+                let argument = self.append_block_argument(entry, ty).id();
+                self.place_argument(entry, ty);
+                argument
+            });
             if let Some(latched) = latch(region, incoming) {
                 let terminator = *self
                     .get_block(entry)
@@ -785,12 +789,73 @@ impl Context {
                     .last()
                     .expect("a region is terminated");
                 self.append_operand(terminator, latched);
+                self.place_operand(terminator, ty);
             }
         }
         if let Some(init) = init {
             self.append_operand(op, init);
+            self.place_operand(op, ty);
         }
-        self.append_result(op, ty)
+        let result = self.append_result(op, ty);
+        self.place_result(op, ty);
+        result
+    }
+
+    /// Where the port of type `ty` just appended to `values` belongs: ahead of
+    /// the trailing `!state` ports, which are read off the end. `None` when it is
+    /// already there — a state port joins them, and an op no chain crosses has
+    /// none for it to precede.
+    fn port_index(&self, values: &[ValueId], ty: TypeId) -> Option<usize> {
+        let state = crate::builtin::StateType::new(self);
+        if ty == state {
+            return None;
+        }
+        values
+            .iter()
+            .position(|&value| self.has_value(value) && self.get_value(value).ty() == state)
+    }
+
+    /// Move the port just appended to `op`'s results into the place it belongs.
+    fn place_result(&self, op: OpId, ty: TypeId) {
+        let Some(index) = self.port_index(&self.get_op(op).results, ty) else {
+            return;
+        };
+        let mut inner = self.0.write();
+        if let Some(instance) = slab_get_mut(&mut inner.operations, op.index()) {
+            Arc::make_mut(instance).results[index..].rotate_right(1);
+            inner.edit_op(op);
+        }
+    }
+
+    /// The same for the operand just appended. Rotating within the trailing
+    /// variadic group leaves the segment sizes describing it unchanged.
+    fn place_operand(&self, op: OpId, ty: TypeId) {
+        let Some(index) = self.port_index(&self.get_op(op).operands, ty) else {
+            return;
+        };
+        let mut inner = self.0.write();
+        if let Some(instance) = slab_get_mut(&mut inner.operations, op.index()) {
+            Arc::make_mut(instance).operands[index..].rotate_right(1);
+            inner.edit_op(op);
+        }
+    }
+
+    /// The same for the entry argument just appended to `block`.
+    fn place_argument(&self, block: BlockId, ty: TypeId) {
+        let arguments: Vec<ValueId> = self
+            .get_block(block)
+            .arguments()
+            .iter()
+            .map(|argument| argument.id())
+            .collect();
+        let Some(index) = self.port_index(&arguments, ty) else {
+            return;
+        };
+        let mut inner = self.0.write();
+        if let Some(entry) = slab_get_mut(&mut inner.blocks, block.index()) {
+            Arc::make_mut(entry).arguments_mut()[index..].rotate_right(1);
+            inner.edit_block(block);
+        }
     }
 
     /// Give `op` one more result of type `ty`.
