@@ -14,7 +14,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    BlockId, Context, OpId, Operation, Terminator,
+    BlockId, Context, OpId, Terminator,
     analysis::{Analysis, AnalysisManager},
     graph::{Dag, MutDag, NodeId, PostOrderDag},
 };
@@ -158,27 +158,6 @@ impl DominatorTree {
                 Some(&parent) => current = parent,
                 None => return false,
             }
-        }
-    }
-
-    pub fn op_dominates<O1: Operation, O2: Operation>(
-        &self,
-        ctx: &Context,
-        a: &O1,
-        b: &O2,
-    ) -> bool {
-        let a_block = a.parent_block();
-        let b_block = b.parent_block();
-
-        if let (Some(a_block), Some(b_block)) = (a_block, b_block) {
-            if a_block == b_block {
-                let block = ctx.get_block(a_block);
-                block.is_before(a.id(), b.id())
-            } else {
-                self.dominates(a_block, b_block)
-            }
-        } else {
-            false
         }
     }
 }
