@@ -128,9 +128,10 @@ impl Seeder<'_> {
             instance.clone().as_interface::<dyn ConstantLike>(),
             &instance.results[..],
         ) {
+            let ty = self.context.get_value(*result).ty();
             let id = self
                 .eg
-                .add(Node::constant(constant.constant_value(), Prov::Op(op)));
+                .add(Node::constant(constant.constant_value(), Prov::Op(op)).typed(ty));
             self.value_class.insert(*result, id);
             return;
         } else if self.seed_memory(&instance) {

@@ -79,7 +79,7 @@ fn class_int_width(context: &Context, eg: &EGraph<Node>, class: Id) -> Option<u3
 
 pub(crate) fn class_value_type(context: &Context, eg: &EGraph<Node>, class: Id) -> Option<TypeId> {
     eg.nodes(eg.find(class)).iter().find_map(|node| {
-        node.op_type()
+        node.ty
             .or_else(|| node.value().map(|value| context.get_value(value).ty()))
     })
 }
@@ -145,17 +145,17 @@ fn const_fold(context: Context, template: &Node) -> Rule {
         "const-fold",
         lhs,
         Rhs::Apply(Box::new(move |eg, _substitution, root| {
-            if let Some(value) = fold_class(&context, eg, eg.find(root)) {
-                let folded = eg.add(konst(value));
+            if let Some((value, ty)) = fold_class(&context, eg, eg.find(root)) {
+                let folded = eg.add(konst(value).typed(ty));
                 eg.union(root, folded);
             }
         })),
     )
 }
 
-fn fold_class(context: &Context, eg: &EGraph<Node>, class: Id) -> Option<APInt> {
+fn fold_class(context: &Context, eg: &EGraph<Node>, class: Id) -> Option<(APInt, TypeId)> {
     eg.nodes(class).iter().find_map(|node| {
-        let (Prov::Op(op), true) = (node.prov, node.op_type().is_some()) else {
+        let (Prov::Op(op), Some(ty)) = (node.prov, node.op_type()) else {
             return None;
         };
         let args = &node.children;
@@ -177,7 +177,7 @@ fn fold_class(context: &Context, eg: &EGraph<Node>, class: Id) -> Option<APInt> 
             .as_interface::<dyn ConstantFold>()?
             .fold(&operands)
         {
-            Some(Value::Int(value)) => Some(value),
+            Some(Value::Int(value)) => Some((value, ty)),
             _ => None,
         }
     })
