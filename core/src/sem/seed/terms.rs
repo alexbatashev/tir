@@ -16,6 +16,10 @@ impl TermId {
     pub fn index(self) -> usize {
         self.0 as usize
     }
+
+    pub(crate) fn from_index(index: u32) -> Self {
+        Self(index)
+    }
 }
 
 /// What a term denotes. Operators carry the shared semantic vocabulary; the
@@ -118,8 +122,14 @@ impl SeedGraph {
         }
     }
 
+    /// The term at an arena index.
+    pub fn term_at(&self, index: usize) -> TermId {
+        assert!(index < self.len(), "the arena holds the term");
+        TermId(index as u32)
+    }
+
     /// Hash-cons a term: an equal one already in the arena is reused.
-    pub(super) fn intern(
+    pub(crate) fn intern(
         &mut self,
         kind: TermKind,
         payload: TermPayload,

@@ -30,6 +30,7 @@ pub mod node;
 pub(crate) mod rewrites;
 pub mod seed;
 pub(crate) mod theory;
+pub mod view;
 pub use egraph::SemEGraph;
 pub use node::{IrOp, Kind, MergeKind, Prov, SemNode, SemPayload, template_node};
 pub use rewrites::{IselRewrite, SaturationLimits};
