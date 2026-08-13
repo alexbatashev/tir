@@ -815,7 +815,15 @@ impl LowerCirControlFlowPass {
         exit_block.append_op(scf::ops::r#break(context, scope, vec![]).build());
 
         block.append_op(
-            scf::ops::r#if(context, value, vec![], Some(repeat.id()), Some(exit.id())).build(),
+            scf::ops::r#if(
+                context,
+                value,
+                vec![],
+                vec![],
+                Some(repeat.id()),
+                Some(exit.id()),
+            )
+            .build(),
         );
         block.append_op(scf::ops::r#yield(context, vec![]).build());
         Ok(region.id())
@@ -859,6 +867,7 @@ impl LowerCirControlFlowPass {
                 scf::ops::r#if(
                     context,
                     op.operands[0],
+                    vec![],
                     vec![],
                     Some(then_body),
                     Some(else_body),

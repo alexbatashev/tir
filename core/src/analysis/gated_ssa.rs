@@ -830,6 +830,7 @@ mod tests {
         let if_op = crate::scf::ops::r#if(
             &context,
             cond_id,
+            vec![],
             vec![i32],
             Some(then_region),
             Some(else_region),
@@ -893,6 +894,7 @@ mod tests {
         let if_op = crate::scf::ops::r#if(
             &context,
             cond_id,
+            vec![],
             vec![i32, i32],
             Some(then_region),
             Some(else_region),
@@ -1157,6 +1159,7 @@ mod tests {
             crate::scf::ops::r#if(
                 &context,
                 decision_val,
+                vec![],
                 vec![],
                 Some(leave.id()),
                 Some(stay.id()),

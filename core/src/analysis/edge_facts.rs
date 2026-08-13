@@ -366,7 +366,8 @@ mod tests {
         let then_entry = then_block.id();
 
         let if_op =
-            crate::scf::ops::r#if(&context, c, vec![], Some(then_region.id()), None).build();
+            crate::scf::ops::r#if(&context, c, vec![], vec![], Some(then_region.id()), None)
+                .build();
         entry.append_op(if_op);
         entry.append_op(ops::r#return(&context, Operand::none()).build());
 

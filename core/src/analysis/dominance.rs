@@ -553,6 +553,7 @@ mod tests {
             &context,
             cond_id,
             vec![],
+            vec![],
             Some(then_region),
             Some(else_region),
         )

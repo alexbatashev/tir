@@ -1372,6 +1372,7 @@ mod staging_tests {
             context,
             cond.id(),
             vec![],
+            vec![],
             Some(then_region.id()),
             Some(else_region.id()),
         )
@@ -1674,6 +1675,7 @@ mod port_tests {
         let conditional = scf::ops::r#if(
             &context,
             condition.result(),
+            vec![],
             vec![],
             Some(arms[0]),
             Some(arms[1]),
@@ -2058,6 +2060,7 @@ mod tests {
             crate::scf::ops::r#if(
                 &context,
                 cond.id(),
+                vec![],
                 vec![],
                 Some(then_region.id()),
                 Some(else_region.id()),

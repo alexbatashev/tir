@@ -341,6 +341,7 @@ operation! {
         verifier: "true",
         operands: O {
             condition: "crate::Integer<1>",
+            inputs: "*AnyConstraint",
         },
         results: R {
             results: "*AnyConstraint",
@@ -390,13 +391,21 @@ impl tir::Verifiable for IfOp {
             .map(|&r| context.get_value(r).ty())
             .collect::<Vec<_>>();
         verify_region_yield(context, self.then_body(), &result_types, "scf.if then body")?;
-        verify_region_yield(context, self.else_body(), &result_types, "scf.if else body")
+        verify_region_yield(context, self.else_body(), &result_types, "scf.if else body")?;
+
+        verify_arm_arguments(context, self.then_body(), self.inputs(), "scf.if then body")?;
+        verify_arm_arguments(context, self.else_body(), self.inputs(), "scf.if else body")
     }
 }
 
 impl IfOp {
     fn condition(&self) -> ValueId {
         self.operands()[0]
+    }
+
+    /// The values the gate forwards to every arm as its entry arguments.
+    fn inputs(&self) -> &[ValueId] {
+        &self.operands()[1..]
     }
 
     fn custom_print(&self, fmt: &mut tir::IRFormatter) -> Result<(), std::fmt::Error> {
@@ -406,9 +415,12 @@ impl IfOp {
             fmt.write(" = ")?;
         }
         fmt.write(format!("scf.if %{}", self.condition().number()))?;
+        print_gamma_inputs(fmt, self.inputs())?;
         print_result_types(fmt, &context, &self.0.results)?;
+        print_arm_arguments(fmt, self.then_body())?;
         tir::region_format::print_op_region(fmt, &context, self, 0)?;
         fmt.write(" else")?;
+        print_arm_arguments(fmt, self.else_body())?;
         tir::region_format::print_op_region(fmt, &context, self, 1)
     }
 
@@ -417,14 +429,16 @@ impl IfOp {
         context: &Context,
     ) -> Result<Box<dyn Operation>, (tir::parse::Span, Error)> {
         let condition = parse_value_id(parser)?;
+        let inputs = parse_gamma_inputs(parser)?;
         let result_types = parse_result_types(parser, context)?;
-        let then_body = parser.parse_region(context)?.id();
+        let then_body = parse_arm(parser, context, &inputs)?;
         expect_token(parser, "else")?;
-        let else_body = parser.parse_region(context)?.id();
+        let else_body = parse_arm(parser, context, &inputs)?;
 
         Ok(Box::new(
             IfOpBuilder::new(context)
                 .condition(condition)
+                .inputs(inputs)
                 .then_body(then_body)
                 .else_body(else_body)
                 .result_types(result_types)
@@ -447,6 +461,7 @@ operation! {
         verifier: "true",
         operands: O {
             predicate: "crate::builtin::IntegerType",
+            inputs: "*AnyConstraint",
         },
         attributes: A {
             cases: "Array",
@@ -541,7 +556,8 @@ impl tir::Verifiable for SwitchOp {
                 .next()
                 .ok_or_else(|| Error::VerificationError(format!("{label} must contain a block")))?;
             verify_single_block_region_has_terminator(context, block.clone(), &label)?;
-            verify_region_yield(context, block, &result_types, &label)?;
+            verify_region_yield(context, block.clone(), &result_types, &label)?;
+            verify_arm_arguments(context, block, self.inputs(), &label)?;
         }
         Ok(())
     }
@@ -550,6 +566,11 @@ impl tir::Verifiable for SwitchOp {
 impl SwitchOp {
     fn predicate(&self) -> ValueId {
         self.operands()[0]
+    }
+
+    /// The values the gate forwards to every arm as its entry arguments.
+    fn inputs(&self) -> &[ValueId] {
+        &self.operands()[1..]
     }
 
     /// The case value selecting each non-default arm, in arm order.
@@ -575,13 +596,18 @@ impl SwitchOp {
             fmt.write(" = ")?;
         }
         fmt.write(format!("scf.switch %{}", self.predicate().number()))?;
+        print_gamma_inputs(fmt, self.inputs())?;
         print_result_types(fmt, &context, &self.0.results)?;
+        let arms = self.arms().to_vec();
         for (index, case) in self.cases().iter().enumerate() {
             fmt.write(format!(" case {case}"))?;
+            print_arm_arguments(fmt, arm_block(&context, arms[index]))?;
             tir::region_format::print_op_region(fmt, &context, self, index)?;
         }
         fmt.write(" default")?;
-        tir::region_format::print_op_region(fmt, &context, self, self.0.regions.len() - 1)
+        let default = arms.len() - 1;
+        print_arm_arguments(fmt, arm_block(&context, arms[default]))?;
+        tir::region_format::print_op_region(fmt, &context, self, default)
     }
 
     fn custom_parse(
@@ -589,6 +615,7 @@ impl SwitchOp {
         context: &Context,
     ) -> Result<Box<dyn Operation>, (tir::parse::Span, Error)> {
         let predicate = parse_value_id(parser)?;
+        let inputs = parse_gamma_inputs(parser)?;
         let result_types = parse_result_types(parser, context)?;
         let mut cases = vec![];
         let mut arms = vec![];
@@ -597,14 +624,15 @@ impl SwitchOp {
                 .parse_number()
                 .ok_or_else(|| (parser.span(), Error::ExpectedToken("case value")))?;
             cases.push(case);
-            arms.push(parser.parse_region(context)?.id());
+            arms.push(parse_arm(parser, context, &inputs)?);
         }
         expect_token(parser, "default")?;
-        arms.push(parser.parse_region(context)?.id());
+        arms.push(parse_arm(parser, context, &inputs)?);
 
         Ok(Box::new(
             SwitchOpBuilder::new(context)
                 .predicate(predicate)
+                .inputs(inputs)
                 .cases(cases)
                 .arms(arms)
                 .result_types(result_types)
@@ -893,6 +921,112 @@ fn parse_scope(
     let scope = context.create_value(TokenType::new(context), None);
     parser.define_value(&name, scope.id());
     Ok(Some(scope))
+}
+
+/// Print a γ's `args(%a, %b)` clause: the values every arm receives as its entry
+/// arguments. A gate that forwards nothing prints no clause.
+fn print_gamma_inputs(
+    fmt: &mut tir::IRFormatter,
+    inputs: &[ValueId],
+) -> Result<(), std::fmt::Error> {
+    if inputs.is_empty() {
+        return Ok(());
+    }
+    fmt.write(" args(")?;
+    print_value_list(fmt, inputs)?;
+    fmt.write(")")
+}
+
+/// Print the `(%a, %b)` binding an arm puts before its body: the names that arm
+/// gives the forwarded inputs.
+fn print_arm_arguments(
+    fmt: &mut tir::IRFormatter,
+    arm: Arc<tir::Block>,
+) -> Result<(), std::fmt::Error> {
+    let arguments = arm.arguments();
+    if arguments.is_empty() {
+        return Ok(());
+    }
+    fmt.write(" (")?;
+    print_value_list(fmt, &arguments.iter().map(Value::id).collect::<Vec<_>>())?;
+    fmt.write(")")
+}
+
+/// The single block of a γ arm.
+fn arm_block(context: &Context, arm: tir::RegionId) -> Arc<tir::Block> {
+    context.get_block(context.get_region(arm).block_ids()[0])
+}
+
+/// Parse an optional `args(%a, %b)` clause.
+fn parse_gamma_inputs(
+    parser: &mut tir::parse::text::Parser,
+) -> Result<Vec<ValueId>, (tir::parse::Span, Error)> {
+    if !parser.parse_token("args") {
+        return Ok(vec![]);
+    }
+    expect_token(parser, "(")?;
+    let mut inputs = vec![parse_value_id(parser)?];
+    while parser.parse_token(",") {
+        inputs.push(parse_value_id(parser)?);
+    }
+    expect_token(parser, ")")?;
+    Ok(inputs)
+}
+
+/// Parse a γ arm, seeding its entry block with one argument per forwarded input,
+/// bound to the name the arm gives it.
+fn parse_arm(
+    parser: &mut tir::parse::text::Parser,
+    context: &Context,
+    inputs: &[ValueId],
+) -> Result<tir::RegionId, (tir::parse::Span, Error)> {
+    if inputs.is_empty() {
+        return Ok(parser.parse_region(context)?.id());
+    }
+    expect_token(parser, "(")?;
+    let mut arguments = vec![];
+    for &input in inputs {
+        if !arguments.is_empty() {
+            expect_token(parser, ",")?;
+        }
+        let name = parser
+            .parse_value_ref()
+            .ok_or_else(|| (parser.span(), Error::ExpectedValueRef))?
+            .to_string();
+        let argument = context.create_value(context.get_value(input).ty(), None);
+        parser.define_value(&name, argument.id());
+        arguments.push(argument);
+    }
+    expect_token(parser, ")")?;
+    Ok(parser
+        .parse_region_with_entry_args(context, arguments)?
+        .id())
+}
+
+/// Verify a γ arm's entry signature: it takes one argument per forwarded input,
+/// matching in type, so every arm reads the same values under names of its own.
+fn verify_arm_arguments(
+    context: &Context,
+    arm: Arc<tir::Block>,
+    inputs: &[ValueId],
+    label: &str,
+) -> Result<(), Error> {
+    let arguments = arm.arguments();
+    if arguments.len() != inputs.len() {
+        return Err(Error::VerificationError(format!(
+            "{label} must take {} arguments, but takes {}",
+            inputs.len(),
+            arguments.len()
+        )));
+    }
+    for (index, (argument, &input)) in arguments.iter().zip(inputs).enumerate() {
+        if argument.ty() != context.get_value(input).ty() {
+            return Err(Error::VerificationError(format!(
+                "{label} argument {index} type must match the type of input {index}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Parse an optional `iter_args(%acc = %init, ...) -> <ty>, <ty>` clause, creating one
@@ -1303,6 +1437,7 @@ mod tests {
             &context,
             condition.id(),
             vec![],
+            vec![],
             Some(terminated_region(&context)),
             Some(terminated_region(&context)),
         )
@@ -1390,6 +1525,38 @@ mod tests {
                 condition: decision,
             }
         );
+    }
+
+    #[test]
+    fn an_arm_takes_one_argument_per_forwarded_input() {
+        let context = Context::with_default_dialects();
+        let condition = context.create_value(IntegerType::new(&context, 1), None);
+        let input = context.create_value(IntegerType::new(&context, 32), None);
+        let region = context.create_region();
+        let block = context.create_block(vec![condition.clone(), input.clone()]);
+        region.add_block(block.id());
+        let func = builtin_ops::func(
+            &context,
+            "gate",
+            crate::builtin::UnitType::new(&context),
+            Some(region.id()),
+        )
+        .build();
+
+        // The arms take no arguments, so neither names the forwarded input.
+        let if_op = IfOpBuilder::new(&context)
+            .condition(condition.id())
+            .inputs(vec![input.id()])
+            .then_body(terminated_region(&context))
+            .else_body(terminated_region(&context))
+            .result_types(vec![])
+            .build();
+
+        func.body().append_op(if_op);
+        func.body()
+            .append_op(builtin_ops::r#return(&context, tir::Operand::none()).build());
+
+        assert!(tir::verify_op_tree(&context, func.id()).is_err());
     }
 
     #[test]

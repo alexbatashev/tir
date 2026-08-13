@@ -619,7 +619,8 @@ mod tests {
 
         // An op in a nested block marked strict does not.
         let cond = context.create_value(crate::builtin::IntegerType::new(&context, 1), None);
-        let if_op = crate::dialects::scf::r#if(&context, cond.id(), vec![], None, None).build();
+        let if_op =
+            crate::dialects::scf::r#if(&context, cond.id(), vec![], vec![], None, None).build();
         let strict_add = ops::addf(&context, a.id(), b.id(), f32_ty).build();
         let then_block = if_op.then_body();
         then_block.insert(0, strict_add.id());
