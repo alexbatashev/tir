@@ -7,12 +7,12 @@
 
 use std::sync::Arc;
 
-use crate::builtin::TokenType;
 use crate::{
     Block, Conditional, Context, LoopLike, MemoryRead, MemoryWrite, OpId, OpInstance, OperationRef,
     PassError, PromotableAllocation, RegionId, Rewriter, TypeId, ValueId, scf,
 };
 
+use crate::analysis::scopes::{exits_scope, exits_scopes, loop_scope};
 use crate::analysis::slots::{collect_slots, load_result, values_agree_on_type};
 
 pub(super) fn run(
@@ -232,28 +232,6 @@ fn yields_port(context: &Context, region: RegionId) -> bool {
     let block = single_block(context, region).expect("checked by `supported`");
     let terminator = context.get_op(*block.op_ids().last().expect("regions are terminated"));
     !terminator.is::<scf::BreakOp>() && !terminator.is::<scf::ContinueOp>()
-}
-
-/// The loop body's token scope: the value its `scf.break`/`scf.continue` name.
-fn loop_scope(context: &Context, body: RegionId) -> Option<ValueId> {
-    let token = TokenType::new(context);
-    single_block(context, body)?
-        .arguments()
-        .iter()
-        .find(|argument| argument.ty() == token)
-        .map(|argument| argument.id())
-}
-
-/// Whether `op` leaves one of the loops whose port is being grown.
-fn exits_scope(op: &Arc<OpInstance>, scopes: &[ValueId]) -> bool {
-    (op.is::<scf::BreakOp>() || op.is::<scf::ContinueOp>()) && scopes.contains(&op.operands[0])
-}
-
-/// Whether anything inside `op`'s regions leaves one of those loops.
-fn exits_scopes(context: &Context, op: &Arc<OpInstance>, scopes: &[ValueId]) -> bool {
-    nested_ops(context, op)
-        .iter()
-        .any(|&op_id| exits_scope(&context.get_op(op_id), scopes))
 }
 
 /// Whether the slot can be promoted through every structured operation that

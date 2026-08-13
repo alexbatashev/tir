@@ -1,0 +1,41 @@
+// RUN: tir opt --pass thread-state --verify %s | filecheck %s
+
+// One loop left through both a `continue` and a `break`: the chain reaches the
+// port on all three edges out of the body, each along the state its own path left.
+
+module {
+  func @spin(%0: !i1, %1: !i32) -> !i32 {
+    %2 = ptr.alloca {size = 4, align = 4} : !ptr.p<!i32>
+    ptr.store %1, %2
+    scf.while {
+      scf.condition %0
+    } do scope(%3) {
+      %4 = ptr.load %2 : !i32
+      scf.if %0 {
+        scf.continue %3
+      } else {
+        scf.yield
+      }
+      ptr.store %4, %2
+      scf.if %0 {
+        scf.break %3
+      } else {
+        scf.yield
+      }
+      scf.yield
+    }
+    %5 = ptr.load %2 : !i32
+    return %5
+  }
+  module_end
+}
+
+// CHECK-LABEL: func @spin
+// CHECK: do scope(%[[SCOPE:[0-9]+]])(%[[BODY:[0-9]+]]) {
+// CHECK-NEXT: %{{[0-9]+}} = ptr.load %{{[0-9]+}} : !i32 state(%[[BODY]] -> %[[A:[0-9]+]])
+// CHECK-NEXT: %[[FIRST:[0-9]+]] = scf.if %0 args(%[[A]]) -> !state (%[[T:[0-9]+]]) {
+// CHECK-NEXT: scf.continue %[[SCOPE]], %[[T]]
+// CHECK: ptr.store %{{[0-9]+}}, %{{[0-9]+}} state(%[[FIRST]] -> %[[B:[0-9]+]])
+// CHECK-NEXT: %[[SECOND:[0-9]+]] = scf.if %0 args(%[[B]]) -> !state (%[[U:[0-9]+]]) {
+// CHECK-NEXT: scf.break %[[SCOPE]], %[[U]]
+// CHECK: scf.yield %[[SECOND]]

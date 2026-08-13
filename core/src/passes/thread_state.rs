@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::analysis::AnalysisManager;
+use crate::analysis::scopes::{exit_scope, loop_scope, nested_exit_scopes};
 use crate::analysis::slots::collect_slots;
 use crate::builtin::{CallOp, EntryStateOpBuilder, FuncOp, IndirectCallOp, ReturnOp, StateType};
 use crate::ptr::MemcpyOp;
@@ -85,6 +86,7 @@ impl Pass for ThreadStatePass {
             state,
             tracked,
             chains: BTreeMap::from([(Chain::Conservative, root.result())]),
+            scopes: Vec::new(),
         }
         .walk(&entry_block);
 
@@ -119,6 +121,9 @@ struct Threader<'a> {
     tracked: BTreeSet<ValueId>,
     /// The state each chain has reached at the point being walked.
     chains: BTreeMap<Chain, ValueId>,
+    /// The token scopes of the loops whose ports are being grown, innermost last,
+    /// each with the chains its exits carry, in port order.
+    scopes: Vec<(ValueId, Vec<Chain>)>,
 }
 
 impl Threader<'_> {
@@ -144,7 +149,19 @@ impl Threader<'_> {
                 // An escaping slot is observable from anywhere, so it opens no
                 // chain of its own: its accesses join the conservative one.
                 Some(Effect::Open(_)) => {}
-                None if subtree_touches_memory(self.context, &op) => self.thread_regions(&op),
+                // An exit leaves the loop through its carried ports, so it takes
+                // the state each chain reached along that edge with it.
+                None if self.exit_chains(&op).is_some() => {
+                    for &chain in self.exit_chains(&op).expect("an exit of a walked loop") {
+                        let leaving = self.chain(chain);
+                        self.context.append_operand(op_id, leaving);
+                    }
+                }
+                None if subtree_touches_memory(self.context, &op)
+                    || !self.nested_exit_chains(&op).is_empty() =>
+                {
+                    self.thread_regions(&op)
+                }
                 None => {}
             }
         }
@@ -161,11 +178,15 @@ impl Threader<'_> {
     /// and the result is whichever copy the arm that ran left behind.
     fn thread_regions(&mut self, op: &Arc<OpInstance>) {
         let context = self.context;
+        // A chain an exit inside carries out has to cross this op as a port too:
+        // the exit takes the state its own copy reached, not the one the code
+        // after the op observes.
+        let exiting = self.nested_exit_chains(op);
         let carried = self
             .chains
             .keys()
             .copied()
-            .filter(|&chain| self.touches_chain(op, chain))
+            .filter(|&chain| self.touches_chain(op, chain) || exiting.contains(&chain))
             .collect::<Vec<_>>();
 
         let entries = op
@@ -184,6 +205,14 @@ impl Threader<'_> {
             })
             .collect::<Vec<_>>();
 
+        let scope = loop_scope(
+            context,
+            *op.regions.last().expect("a region to carry state"),
+        );
+        if let Some(scope) = scope {
+            self.scopes.push((scope, carried.clone()));
+        }
+
         for (entry, arguments) in entries.iter().zip(&arguments) {
             let outer = std::mem::replace(
                 &mut self.chains,
@@ -200,10 +229,18 @@ impl Threader<'_> {
                 .collect::<Vec<_>>();
             self.chains = outer;
 
-            let terminator = *entry.op_ids().last().expect("a region is terminated");
-            for value in leaving {
-                context.append_operand(terminator, value);
+            // A region that leaves through an exit fed the ports along that edge.
+            let terminator =
+                context.get_op(*entry.op_ids().last().expect("a region is terminated"));
+            if self.exit_chains(&terminator).is_none() {
+                for value in leaving {
+                    context.append_operand(terminator.id, value);
+                }
             }
+        }
+
+        if scope.is_some() {
+            self.scopes.pop();
         }
 
         for &chain in &carried {
@@ -229,6 +266,24 @@ impl Threader<'_> {
                     Some(Effect::Access(accessed)) if accessed == chain
                 )
             })
+    }
+
+    /// The chains `op` carries out of a loop being walked, if it is such an exit.
+    fn exit_chains(&self, op: &Arc<OpInstance>) -> Option<&[Chain]> {
+        let scope = exit_scope(op)?;
+        self.scopes
+            .iter()
+            .find(|(token, _)| *token == scope)
+            .map(|(_, chains)| chains.as_slice())
+    }
+
+    /// Every chain an exit inside `op`'s regions carries out.
+    fn nested_exit_chains(&self, op: &Arc<OpInstance>) -> BTreeSet<Chain> {
+        nested_exit_scopes(self.context, op)
+            .into_iter()
+            .filter_map(|scope| self.scopes.iter().find(|(token, _)| *token == scope))
+            .flat_map(|(_, chains)| chains.iter().copied())
+            .collect()
     }
 
     fn chain(&self, chain: Chain) -> ValueId {
@@ -275,14 +330,16 @@ fn touches_memory(op: &Arc<OpInstance>) -> bool {
 
 /// Whether every operation touching memory sits where a chain can reach it: a
 /// chain crosses a region boundary as a port, which `scf`'s loops and gates have.
-/// An op whose regions touch no memory is transparent and needs nothing.
-///
-/// A loop with an early exit is not threadable: its `break`/`continue` would have
-/// to carry the chain out along an edge of its own.
+/// An op whose regions neither touch memory nor are left through an exit is
+/// transparent and needs nothing; one that is left through an exit has to be
+/// walked to feed that edge, so it is held to the same shape.
 fn threadable(context: &Context, block: &Arc<Block>) -> bool {
     block.op_ids().iter().all(|&op_id| {
         let op = context.get_op(op_id);
-        if op.regions.is_empty() || !subtree_touches_memory(context, &op) {
+        if op.regions.is_empty()
+            || !(subtree_touches_memory(context, &op)
+                || !nested_exit_scopes(context, &op).is_empty())
+        {
             return true;
         }
         if !carries_state(&op) {
@@ -293,10 +350,7 @@ fn threadable(context: &Context, block: &Arc<Block>) -> bool {
             let [entry] = blocks[..] else {
                 return false;
             };
-            !region_ops(context, region)
-                .iter()
-                .any(|&nested| exits_early(&context.get_op(nested)))
-                && threadable(context, &context.get_block(entry))
+            threadable(context, &context.get_block(entry))
         })
     })
 }
@@ -307,10 +361,6 @@ fn carries_state(op: &Arc<OpInstance>) -> bool {
         || op.is::<scf::WhileOp>()
         || op.is::<scf::IfOp>()
         || op.is::<scf::SwitchOp>()
-}
-
-fn exits_early(op: &Arc<OpInstance>) -> bool {
-    op.is::<scf::BreakOp>() || op.is::<scf::ContinueOp>()
 }
 
 fn subtree_touches_memory(context: &Context, op: &Arc<OpInstance>) -> bool {

@@ -2,6 +2,7 @@ pub mod defuse;
 mod dominance;
 mod edge_facts;
 mod manager;
+pub mod scopes;
 pub mod slots;
 
 pub use defuse::{DefUse, OpRegs, RegRef, execution_regs, op_regs};
