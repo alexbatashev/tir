@@ -6,6 +6,7 @@
 //! that carries none is left alone.
 
 use crate::analysis::AnalysisManager;
+use crate::analysis::slots::collect_slots;
 use crate::builtin::{EntryStateOp, FuncOp, StateType};
 use crate::{
     BlockId, Context, OpId, OperationRef, Pass, PassError, PassTarget, RegionId, Rewriter, TypeId,
@@ -71,8 +72,37 @@ impl Pass for EraseStatePass {
             let block = context.get_block(block);
             rewriter.erase_op(&OperationRef::new(context.get_op(op_id), Some(block), None))?;
         }
-        Ok(())
+
+        sweep_dead_slots(context, rewriter, &blocks)
     }
+}
+
+/// Erase the slots nothing reads. A slot whose address never leaves the function
+/// is a memory of its own, so with no read left there is nothing to observe what
+/// its stores left behind and they die with the allocation.
+///
+/// Erasing state is what makes the sweep possible: while the chain is threaded,
+/// the stores define the states their successors observe.
+fn sweep_dead_slots(
+    context: &Context,
+    rewriter: &mut Rewriter,
+    blocks: &[BlockId],
+) -> Result<(), PassError> {
+    let ops = blocks
+        .iter()
+        .flat_map(|&block| context.get_block(block).op_ids())
+        .collect::<Vec<_>>();
+    for slot in collect_slots(context, &ops).into_values() {
+        let Some(alloca) = slot.alloca else { continue };
+        if slot.escapes || !slot.loads.is_empty() {
+            continue;
+        }
+        for op_id in slot.stores.into_iter().chain([alloca]) {
+            let block = context.parent_block(op_id).map(|id| context.get_block(id));
+            rewriter.erase_op(&OperationRef::new(context.get_op(op_id), block, None))?;
+        }
+    }
+    Ok(())
 }
 
 fn drop_trailing_state_operands(context: &Context, op: OpId, state: TypeId) {

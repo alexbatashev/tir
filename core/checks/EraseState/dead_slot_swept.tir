@@ -1,0 +1,17 @@
+// RUN: tir opt --pass erase-state --verify %s | filecheck %s
+
+// Nothing outside the function can observe a slot whose address never leaves it,
+// so one that is never read is dead: its stores go with its allocation.
+
+module {
+  func @f(%0: !i32) {
+    %1 = ptr.alloca {size = 4, align = 4} : !ptr.p<!i32>
+    ptr.store %0, %1
+    return
+  }
+  module_end
+}
+
+// CHECK-LABEL: func @f
+// CHECK-NOT: ptr.
+// CHECK: return
