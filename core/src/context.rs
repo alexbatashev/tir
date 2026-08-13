@@ -718,6 +718,41 @@ impl Context {
         inner.edit_op(op);
     }
 
+    /// Drop `op`'s last operand, keeping the segment sizes that describe the
+    /// grouping in step. The inverse of [`Context::append_operand`].
+    pub fn pop_operand(&self, op: OpId) {
+        let mut inner = self.0.write();
+        let segment_sizes = inner.names.intern("operand_segment_sizes");
+        let Some(instance) = slab_get_mut(&mut inner.operations, op.index()) else {
+            return;
+        };
+        let instance = Arc::make_mut(instance);
+        instance.operands.pop();
+        if let Some(attribute) = instance
+            .attributes
+            .iter_mut()
+            .find(|attribute| attribute.name == segment_sizes)
+            && let crate::attributes::AttributeValue::Array(sizes) = &mut attribute.value
+            && let Some(crate::attributes::AttributeValue::UInt(last)) = sizes.last_mut()
+        {
+            *last -= 1;
+        }
+        inner.edit_op(op);
+    }
+
+    /// Drop `op`'s last result. Nothing may read it: it stops being a definition
+    /// with the edit. The inverse of the result [`Context::grow_port`] adds.
+    pub fn pop_result(&self, op: OpId) {
+        let mut inner = self.0.write();
+        let Some(instance) = slab_get_mut(&mut inner.operations, op.index()) else {
+            return;
+        };
+        if let Some(result) = Arc::make_mut(instance).results.pop() {
+            clear_slot(&mut inner.values, result.index());
+        }
+        inner.edit_op(op);
+    }
+
     /// Grow `op` by one carried port of type `ty`.
     ///
     /// A port that carries a value in — a loop's — takes `init` as one more
