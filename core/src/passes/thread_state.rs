@@ -144,17 +144,22 @@ impl Threader<'_> {
                 // An escaping slot is observable from anywhere, so it opens no
                 // chain of its own: its accesses join the conservative one.
                 Some(Effect::Open(_)) => {}
-                None if subtree_touches_memory(self.context, &op) => self.thread_loop(&op),
+                None if subtree_touches_memory(self.context, &op) => self.thread_regions(&op),
                 None => {}
             }
         }
     }
 
-    /// Carry every chain the loop body touches across the loop as a port of its
-    /// own: the state entering the loop is the init, each region threads its
-    /// carried argument and carries the state it leaves out through its
-    /// terminator, and the loop result is the state that reaches the code after.
-    fn thread_loop(&mut self, op: &Arc<OpInstance>) {
+    /// Carry every chain the op's regions touch across it as a port of its own:
+    /// the state entering the op is the incoming operand, each region threads the
+    /// argument it receives and carries the state it leaves out through its
+    /// terminator, and the op's result is the state that reaches the code after.
+    ///
+    /// A loop carries the port across its iterations and a γ across its arms, but
+    /// the edits are the same: what differs is only that a γ's arms are
+    /// alternatives, so each threads its own copy of the state entering the gate
+    /// and the result is whichever copy the arm that ran left behind.
+    fn thread_regions(&mut self, op: &Arc<OpInstance>) {
         let context = self.context;
         let carried = self
             .chains
@@ -206,8 +211,8 @@ impl Threader<'_> {
             context.append_operand(op.id, init);
         }
         for &chain in &carried {
-            // The ports the loop already carries are wired up; all that is left is
-            // the result naming the state the loop leaves behind.
+            // The ports the op already carries are wired up; all that is left is
+            // the result naming the state it leaves behind.
             let result = context.grow_port(op.id, self.state, None, |_, _| None);
             self.chains.insert(chain, result);
         }
@@ -269,20 +274,18 @@ fn touches_memory(op: &Arc<OpInstance>) -> bool {
 }
 
 /// Whether every operation touching memory sits where a chain can reach it: a
-/// chain crosses a region boundary as a carried port, which only `scf`'s loops
-/// have. A gate whose regions touch no memory is transparent and needs nothing.
+/// chain crosses a region boundary as a port, which `scf`'s loops and gates have.
+/// An op whose regions touch no memory is transparent and needs nothing.
 ///
-/// A conditional is not threadable yet: its arms take no arguments, so both would
-/// have to name the state entering the gate, and state is linear. Neither is a
-/// loop with an early exit, whose `break`/`continue` would have to carry the
-/// chain out along an edge of its own.
+/// A loop with an early exit is not threadable: its `break`/`continue` would have
+/// to carry the chain out along an edge of its own.
 fn threadable(context: &Context, block: &Arc<Block>) -> bool {
     block.op_ids().iter().all(|&op_id| {
         let op = context.get_op(op_id);
         if op.regions.is_empty() || !subtree_touches_memory(context, &op) {
             return true;
         }
-        if !op.is::<scf::ForOp>() && !op.is::<scf::WhileOp>() {
+        if !carries_state(&op) {
             return false;
         }
         op.regions.iter().all(|&region| {
@@ -296,6 +299,14 @@ fn threadable(context: &Context, block: &Arc<Block>) -> bool {
                 && threadable(context, &context.get_block(entry))
         })
     })
+}
+
+/// Whether `op` can carry a chain across its regions as a port.
+fn carries_state(op: &Arc<OpInstance>) -> bool {
+    op.is::<scf::ForOp>()
+        || op.is::<scf::WhileOp>()
+        || op.is::<scf::IfOp>()
+        || op.is::<scf::SwitchOp>()
 }
 
 fn exits_early(op: &Arc<OpInstance>) -> bool {
