@@ -91,12 +91,15 @@ impl Jit {
         let module_op = context.get_op(module.id());
 
         // Promote memory to SSA so alloca/load/store IR reaches selectable form,
-        // mirroring the frontend pipeline.
+        // mirroring the frontend pipeline. Memory state describes the structured
+        // mid-end only, so it is threaded and erased again before codegen.
         let mut pm = PassManager::new();
-        pm.nest::<FuncOp>()
-            .add_pass(tir::passes::Mem2RegPass::new());
+        let function_pipeline = pm.nest::<FuncOp>();
+        function_pipeline.add_pass(tir::passes::Mem2RegPass::new());
+        function_pipeline.add_pass(tir::passes::ThreadStatePass::new());
+        function_pipeline.add_pass(tir::passes::EraseStatePass::new());
         pm.run(context, module_op.clone())
-            .map_err(|e| JitError::Pipeline(format!("mem2reg: {e}")))?;
+            .map_err(|e| JitError::Pipeline(format!("mid-end: {e}")))?;
 
         let mut pm = build_pipeline(target.as_ref(), context, StopAfter::Finalize);
         pm.run(context, module_op)

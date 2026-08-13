@@ -178,7 +178,11 @@ pub(super) fn emit_machine_code(
     let function_pipeline = pm.nest::<tir::builtin::FuncOp>();
     function_pipeline.add_pass(crate::passes::LowerCirControlFlowPass::new());
     function_pipeline.add_pass(tir::passes::Mem2RegPass::new());
+    function_pipeline.add_pass(tir::passes::ThreadStatePass::new());
     function_pipeline.add_pass(tir::passes::InstCombinePass::new());
+    // Memory state describes the structured mid-end only; codegen takes the
+    // implicit order back.
+    function_pipeline.add_pass(tir::passes::EraseStatePass::new());
     function_pipeline.add_pass(tir::passes::ScfToCfgPass::new());
     let module_op = context.get_op(module.id());
     pm.run(&context, module_op.clone()).unwrap_or_else(|e| {
