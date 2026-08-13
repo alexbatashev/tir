@@ -1,18 +1,22 @@
-//! Seeds the e-graph from gated SSA: each [`GateNode`] maps to a [`Node`] of the
-//! shared vocabulary — an op to its IR identity, a constant to its literal, a
-//! gate to the semantic projection it is. The only cycle, a μ gate's latch
-//! back-edge, is broken with a placeholder.
+//! Seeds the e-graph by reading a function's regions. Gates come off the ops'
+//! own interfaces, never from control-flow analysis: a [`Conditional`] result is
+//! the γ over the values its arms yield, and an arm's entry arguments are the
+//! inputs forwarded into it. A memory access is the `LoadMemory`/`StoreMemory`
+//! term over the state it reads, so the chain is an ordinary edge. Everything
+//! else the vocabulary cannot spell — a loop's carried port and results, a
+//! multi-result or effectful op — anchors as an input leaf.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use tir_symbolic::egraph::{EGraph, Id};
 
-use crate::analysis::{GSA, GateNode};
-use crate::graph::{Dag, NodeId};
-use crate::{BlockId, Commutative, ConstantLike, Context, OpId, OpInstance, ValueId};
-
-use crate::sem::{Prov, SemNode as Node};
+use crate::sem::egraph::{minimal_unsigned_apint, type_width};
+use crate::sem::{Prov, SemNode as Node, SymKind};
+use crate::{
+    BlockId, Commutative, Conditional, ConstantLike, Context, MemoryRead, MemoryWrite, OpId,
+    OpInstance, RegionId, ValueId,
+};
 
 /// The seeded e-graph plus the driver's maps: each value's class, and each block argument's block.
 pub struct Seeded {
@@ -21,130 +25,250 @@ pub struct Seeded {
     pub arg_block: HashMap<ValueId, BlockId>,
 }
 
-/// Build the e-graph for the value graph rooted at `root`.
-pub fn seed(context: &Context, root: OpId, gsa: &GSA) -> Seeded {
+/// Build the e-graph for the regions of `root`.
+pub fn seed(context: &Context, root: OpId) -> Seeded {
     let mut seeder = Seeder {
         context,
-        gsa,
         eg: EGraph::new(),
-        id_of: HashMap::new(),
+        value_class: HashMap::new(),
+        arg_block: HashMap::new(),
+        seeded: HashSet::new(),
     };
-    for i in 0..gsa.len() {
-        seeder.seed(NodeId::from_index(i));
+    for region in context.get_op(root).regions.clone() {
+        seeder.seed_region(region);
     }
-
-    // The class of each value and the block of each block argument, in one IR walk.
-    let mut value_class = HashMap::new();
-    let mut arg_block = HashMap::new();
-    let mut stack = context.get_op(root).regions.clone();
-    while let Some(region) = stack.pop() {
-        for block in context.get_region(region).iter(context.clone()) {
-            for arg in block.arguments() {
-                arg_block.insert(arg.id(), block.id());
-                seeder.record(&mut value_class, arg.id());
-            }
-            for op_id in block.op_ids() {
-                let instance = context.get_op(op_id);
-                stack.extend(instance.regions.iter().copied());
-                for &result in &instance.results {
-                    seeder.record(&mut value_class, result);
-                }
-            }
-        }
-    }
-
     Seeded {
         eg: seeder.eg,
-        value_class,
-        arg_block,
+        value_class: seeder.value_class,
+        arg_block: seeder.arg_block,
     }
 }
 
 struct Seeder<'a> {
     context: &'a Context,
-    gsa: &'a GSA,
     eg: EGraph<Node>,
-    id_of: HashMap<NodeId, Id>,
+    value_class: HashMap<ValueId, Id>,
+    arg_block: HashMap<ValueId, BlockId>,
+    seeded: HashSet<OpId>,
 }
 
 impl Seeder<'_> {
-    /// Translate `n` to its e-class, memoized.
-    fn seed(&mut self, n: NodeId) -> Id {
-        if let Some(&id) = self.id_of.get(&n) {
+    fn seed_region(&mut self, region: RegionId) {
+        let blocks: Vec<_> = self
+            .context
+            .get_region(region)
+            .iter(self.context.clone())
+            .collect();
+        for block in blocks {
+            for argument in block.arguments() {
+                self.arg_block.insert(argument.id(), block.id());
+                self.class_of(argument.id());
+            }
+            for op in block.op_ids() {
+                self.seed_op(op);
+            }
+        }
+    }
+
+    /// The class of `value`: the one already seeded for it, the one its defining
+    /// op seeds, or an anchor leaf.
+    fn class_of(&mut self, value: ValueId) -> Id {
+        if let Some(&id) = self.value_class.get(&value) {
             return id;
         }
-        let gate = *self.gsa.gate(n);
-        let id = match gate {
-            GateNode::Op(op) => self.seed_op(n, op),
-            GateNode::Mu { .. } => return self.seed_mu(n, gate),
-            GateNode::Input(_)
-            | GateNode::Gamma { .. }
-            | GateNode::Eta { .. }
-            | GateNode::Phi { .. } => {
-                let args = self.kids(n);
-                self.eg.add(Node::gate(gate, args))
-            }
-        };
-        self.id_of.insert(n, id);
+        if let Some(op) = self.context.get_value(value).defining_op() {
+            self.seed_op(op);
+        }
+        self.anchor(value)
+    }
+
+    /// The leaf standing for `value`, unless something already seeded a class for it.
+    fn anchor(&mut self, value: ValueId) -> Id {
+        if let Some(&id) = self.value_class.get(&value) {
+            return id;
+        }
+        let id = self.eg.add(Node::input(value));
+        self.value_class.insert(value, id);
         id
     }
 
-    fn seed_op(&mut self, n: NodeId, op: OpId) -> Id {
+    /// Seed every result of `op`. Memoized: an operand whose definition the walk
+    /// has not reached yet pulls it in, and the memo breaks any cycle it meets.
+    fn seed_op(&mut self, op: OpId) {
+        if !self.seeded.insert(op) {
+            return;
+        }
         let instance = self.context.get_op(op);
 
-        if let Some(constant) = instance.clone().as_interface::<dyn ConstantLike>() {
-            return self
+        if !instance.regions.is_empty() {
+            if let Some(conditional) = instance.clone().as_interface::<dyn Conditional>() {
+                self.seed_gamma(&instance, conditional.as_ref());
+                return;
+            }
+            // A loop carries no reasoning yet: its ports and results anchor, but
+            // its body is read like any other region.
+            for region in instance.regions.clone() {
+                self.seed_region(region);
+            }
+        } else if let (Some(constant), [result]) = (
+            instance.clone().as_interface::<dyn ConstantLike>(),
+            &instance.results[..],
+        ) {
+            let id = self
                 .eg
                 .add(Node::constant(constant.constant_value(), Prov::Op(op)));
-        }
-
-        if is_pure_value(&instance) {
-            let ty = self.context.get_value(instance.results[0]).ty();
-            let mut args = self.kids(n);
+            self.value_class.insert(*result, id);
+            return;
+        } else if self.seed_memory(&instance) {
+            return;
+        } else if is_pure_value(&instance) {
+            let value = instance.results[0];
+            let ty = self.context.get_value(value).ty();
             let commutative = instance.has_interface::<dyn Commutative>();
+            let mut args: Vec<Id> = instance
+                .operands
+                .clone()
+                .iter()
+                .map(|&operand| self.class_of(operand))
+                .collect();
             if commutative {
                 args.sort_by_key(|id| id.index());
             }
-            return self.eg.add(Node::seeded(&instance, ty, commutative, args));
+            let id = self.eg.add(Node::seeded(&instance, ty, commutative, args));
+            self.value_class.insert(value, id);
+            return;
         }
 
-        // A multi-result or effectful op is an opaque input leaf for the result this node stands for.
-        let value = instance
-            .results
-            .iter()
-            .copied()
-            .find(|&r| self.gsa.node_of(r) == Some(n))
-            .expect("an op node is one of its op's results");
-        self.eg.add(Node::input(value))
+        for result in instance.results.clone() {
+            self.anchor(result);
+        }
     }
 
-    /// μ gate: pre-register a placeholder so the latch back-edge resolves to it instead of recursing, then add the real μ and merge.
-    fn seed_mu(&mut self, n: NodeId, gate: GateNode) -> Id {
-        let value = match gate {
-            GateNode::Mu { value } => value,
-            _ => unreachable!("only a mu gate seeds a placeholder"),
+    /// γ: each arm's entry arguments bind to the inputs forwarded into it, and
+    /// result `index` is the choice between the arms' `index`-th yielded values.
+    fn seed_gamma(&mut self, instance: &Arc<OpInstance>, conditional: &dyn Conditional) {
+        let decision = self.class_of(conditional.decision());
+        for region in instance.regions.clone() {
+            self.bind_arm_arguments(instance, region);
+            self.seed_region(region);
+        }
+        for (index, &result) in instance.results.clone().iter().enumerate() {
+            let Some((taken, not_taken)) = arm_yields(conditional, index) else {
+                self.anchor(result);
+                continue;
+            };
+            let args = vec![decision, self.class_of(taken), self.class_of(not_taken)];
+            let id = self.eg.add(Node::gamma(result, args));
+            self.value_class.insert(result, id);
+        }
+    }
+
+    /// An arm's entry arguments are the inputs the gate forwards into it: the
+    /// operation's trailing operands, one per argument.
+    fn bind_arm_arguments(&mut self, instance: &Arc<OpInstance>, region: RegionId) {
+        let Some(block) = self
+            .context
+            .get_region(region)
+            .iter(self.context.clone())
+            .next()
+        else {
+            return;
         };
-        let placeholder = self.eg.add(Node::input(value));
-        self.id_of.insert(n, placeholder);
-        let args = self.kids(n);
-        let mu = self.eg.add(Node::gate(gate, args));
-        self.eg.union(placeholder, mu);
-        self.eg.rebuild();
-        placeholder
-    }
-
-    /// The e-classes of `n`'s children, in edge order; collected first to release the gsa borrow before recursing.
-    fn kids(&mut self, n: NodeId) -> Vec<Id> {
-        let children: Vec<NodeId> = self.gsa.children(n).collect();
-        children.into_iter().map(|c| self.seed(c)).collect()
-    }
-
-    /// Record `value`'s class, if it is modeled.
-    fn record(&self, value_class: &mut HashMap<ValueId, Id>, value: ValueId) {
-        if let Some(node) = self.gsa.node_of(value) {
-            value_class.insert(value, self.id_of[&node]);
+        let arguments: Vec<ValueId> = block.arguments().iter().map(|a| a.id()).collect();
+        let first = instance.operands.len().saturating_sub(arguments.len());
+        for (&argument, &input) in arguments.iter().zip(&instance.operands[first..]) {
+            let id = self.class_of(input);
+            self.value_class.insert(argument, id);
         }
     }
+
+    /// Seed a memory access over the state it reads, if it is one that names a state.
+    fn seed_memory(&mut self, instance: &Arc<OpInstance>) -> bool {
+        if let Some(read) = instance.clone().as_interface::<dyn MemoryRead>() {
+            return self.seed_read(read.as_ref());
+        }
+        if let Some(write) = instance.clone().as_interface::<dyn MemoryWrite>() {
+            return self.seed_write(write.as_ref());
+        }
+        false
+    }
+
+    /// A read leaves memory as it found it, so the state it publishes is the one
+    /// it read: both name the same class, and two reads of one address in one
+    /// state are one term.
+    fn seed_read(&mut self, read: &dyn MemoryRead) -> bool {
+        let value = read.read_value();
+        let ty = self.context.get_value(value).ty();
+        let (Some(bits), Some(state)) = (type_width(self.context, ty), read.state_operand()) else {
+            return false;
+        };
+        let address = self.class_of(read.read_location());
+        let bytes = self.int(bits / 8);
+        let metadata = self.int(0);
+        let state = self.class_of(state);
+        let id = self.eg.add(
+            Node::access(
+                SymKind::LoadMemory,
+                value,
+                vec![address, bytes, metadata, state],
+            )
+            .typed(ty),
+        );
+        self.value_class.insert(value, id);
+        if let Some(published) = read.state_result() {
+            self.value_class.insert(published, state);
+        }
+        true
+    }
+
+    /// A write's term *is* the state the accesses after it read.
+    fn seed_write(&mut self, write: &dyn MemoryWrite) -> bool {
+        let written = write.written_value();
+        let ty = self.context.get_value(written).ty();
+        let (Some(bits), Some(state), Some(published)) = (
+            type_width(self.context, ty),
+            write.state_operand(),
+            write.state_result(),
+        ) else {
+            return false;
+        };
+        let address = self.class_of(write.write_location());
+        let bytes = self.int(bits / 8);
+        let value = self.class_of(written);
+        let address_space = self.int(0);
+        let state = self.class_of(state);
+        let id = self.eg.add(Node::access(
+            SymKind::StoreMemory,
+            published,
+            vec![address, bytes, value, address_space, state],
+        ));
+        self.value_class.insert(published, id);
+        true
+    }
+
+    /// A byte count or metadata literal, spelled the one way the vocabulary shares.
+    fn int(&mut self, value: u32) -> Id {
+        self.eg.add(Node::constant(
+            minimal_unsigned_apint(u64::from(value)),
+            Prov::None,
+        ))
+    }
+}
+
+/// The values a two-armed boolean [`Conditional`]'s true and false arms yield at
+/// `index`. `None` for any other shape — a switch, or a result no arm yields.
+fn arm_yields(conditional: &dyn Conditional, index: usize) -> Option<(ValueId, ValueId)> {
+    let mut taken = None;
+    let mut not_taken = None;
+    for (region, _, when_true) in conditional.guarded_regions() {
+        let yielded = conditional.region_yields(region).get(index).copied()?;
+        if when_true {
+            taken = Some(yielded);
+        } else {
+            not_taken = Some(yielded);
+        }
+    }
+    Some((taken?, not_taken?))
 }
 
 /// A pure value op the e-graph may reason about: one result, no regions, and a declared semantic expression.

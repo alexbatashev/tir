@@ -17,7 +17,6 @@ use std::sync::Arc;
 use tir_adt::{APInt, FxHasher};
 use tir_symbolic::egraph::{ENode, Id};
 
-use crate::analysis::GateNode;
 use crate::attributes::{AttributeValue, NamedAttribute};
 use crate::sem::{SymKind, SymPayload};
 use crate::{OpCost, OpId, OpInstance, Operation, TypeId, ValueId};
@@ -196,6 +195,13 @@ impl SemNode {
         Self::projection(Kind::Sym(SymKind::Theta), value, vec![init, latch])
     }
 
+    /// A memory access standing for `value` — the value a read yields, or the
+    /// state a write publishes — over the vocabulary's operands and the state
+    /// it reads.
+    pub fn access(kind: SymKind, value: ValueId, args: Vec<Id>) -> Self {
+        Self::projection(Kind::Sym(kind), value, args)
+    }
+
     fn projection(kind: Kind, value: ValueId, args: Vec<Id>) -> Self {
         Self {
             kind,
@@ -204,21 +210,6 @@ impl SemNode {
             children: args,
             prov: Prov::Value(value),
         }
-    }
-
-    /// The gated-SSA gate `gate` over `args`. A γ is the value-level `If`, a μ the
-    /// per-value `Theta` projection; the value each stands for is provenance, not
-    /// identity, so two gates over the same classes are the same term.
-    pub fn gate(gate: GateNode, args: Vec<Id>) -> Self {
-        let (kind, value) = match gate {
-            GateNode::Input(value) => return Self::input(value),
-            GateNode::Gamma { value, .. } => (Kind::Sym(SymKind::If), value),
-            GateNode::Mu { value } => (Kind::Sym(SymKind::Theta), value),
-            GateNode::Eta { value } => (Kind::Merge(MergeKind::Eta), value),
-            GateNode::Phi { value } => (Kind::Merge(MergeKind::Phi), value),
-            GateNode::Op(_) => unreachable!("an operation is a Kind::Ir node, never a gate"),
-        };
-        Self::projection(kind, value, args)
     }
 
     /// A seeded IR op: identity/`ty`/attrs from `instance`, `cost` from its

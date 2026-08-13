@@ -1,7 +1,7 @@
-//! InstCombine: an equality-saturation peephole. It seeds the function's value graph
-//! ([`crate::analysis::GSA`], which already encodes phis as γ/μ/Φ gates so the pass
-//! needs no CFG walk) into a [`tir_symbolic`] e-graph of real IR values, saturates,
-//! extracts the cheapest form per value by [`crate::OpCost`], and rewrites what
+//! InstCombine: an equality-saturation peephole. It seeds the function's regions
+//! ([`seed`], which reads gates off the ops' own interfaces) into a
+//! [`tir_symbolic`] e-graph of real IR values, saturates, extracts the cheapest
+//! form per value by [`crate::OpCost`], and rewrites what
 //! improved. Flow-sensitive facts ride the e-graph's scoped assumptions: a
 //! structured region pushes its guard's condition around its body, and unstructured
 //! `cond_br` facts ([`crate::analysis::DominatingEdgeFacts`]) are asserted in
@@ -20,7 +20,7 @@ use tir_symbolic::egraph::{EGraph, Extraction, Id};
 
 use std::rc::Rc;
 
-use crate::analysis::{DominatingEdgeFacts, DominatorTree, GSA};
+use crate::analysis::{DominatingEdgeFacts, DominatorTree};
 use crate::graph::Dag;
 use crate::{
     AnalysisManager, BlockId, Conditional, ConstantLike, Context, OpId, OperationRef, Pass,
@@ -67,7 +67,7 @@ impl Pass for InstCombinePass {
             return Ok(());
         }
         let root = op.op().id;
-        let seeded = seed::seed(context, root, &analyses.get::<GSA>(context, root));
+        let seeded = seed::seed(context, root);
         let ruleset = builtin_ruleset(context, &seeded.eg);
         let mut driver = Driver {
             context,
