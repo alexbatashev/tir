@@ -1,0 +1,17 @@
+// RUN: tir opt --pass instcombine %s | filecheck %s
+
+// A memset of an unknown size may write nothing at all, so a load of its first
+// byte cannot take the byte it was handed.
+
+module {
+  func @f(%0: !ptr.p, %1: !i8, %2: !i64) -> !i8 {
+    %3 = entry_state : !state
+    ptr.memset %0, %1, %2 state(%3 -> %4)
+    %5 = ptr.load %0 : !i8 state(%4)
+    return %5
+  }
+  module_end
+}
+
+// CHECK-LABEL: func @f
+// CHECK: ptr.load

@@ -1,0 +1,18 @@
+// RUN: tir opt --pass instcombine %s | filecheck %s
+
+// The call publishes a state of its own, so the load no longer reads the one the
+// store left and cannot take its value.
+
+module {
+  func @f(%0: !ptr.p<!i32>, %1: !i32) -> !i32 {
+    %2 = entry_state : !state
+    ptr.store %1, %0 state(%2 -> %3)
+    call @g() state(%3 -> %4)
+    %5 = ptr.load %0 : !i32 state(%4)
+    return %5
+  }
+  module_end
+}
+
+// CHECK-LABEL: func @f
+// CHECK: ptr.load

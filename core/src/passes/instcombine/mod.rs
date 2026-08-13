@@ -13,6 +13,7 @@
 
 pub(crate) mod rules;
 mod seed;
+mod state;
 
 use std::collections::{HashMap, HashSet};
 
@@ -68,7 +69,7 @@ impl Pass for InstCombinePass {
         }
         let root = op.op().id;
         let seeded = seed::seed(context, root);
-        let ruleset = builtin_ruleset(context, &seeded.eg);
+        let ruleset = builtin_ruleset(context, &seeded);
         let mut driver = Driver {
             context,
             eg: seeded.eg,

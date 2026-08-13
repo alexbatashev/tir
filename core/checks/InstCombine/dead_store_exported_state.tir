@@ -1,0 +1,27 @@
+// RUN: tir opt --pass instcombine %s | filecheck %s
+
+// Both arms enter the gate on one state and write one value to one address, so
+// their stores are one term. The then arm overwrites it, but the else arm yields
+// it out of the gate, so the state is observed and neither store dies.
+
+module {
+  func @f(%0: !i1, %1: !ptr.p<!i32>, %2: !i32, %3: !i32) {
+    %4 = entry_state : !state
+    %5 = scf.if %0 args(%4) -> !state (%6) {
+      ptr.store %2, %1 state(%6 -> %7)
+      ptr.store %3, %1 state(%7 -> %8)
+      scf.yield %8
+    } else (%9) {
+      ptr.store %2, %1 state(%9 -> %10)
+      scf.yield %10
+    }
+    return state(%5)
+  }
+  module_end
+}
+
+// CHECK-LABEL: func @f
+// CHECK: ptr.store %2,
+// CHECK: ptr.store %3,
+// CHECK: else
+// CHECK: ptr.store %2,

@@ -270,15 +270,21 @@ impl SemNode {
         )
     }
 
-    /// LHS template matching any γ gate over `args`.
-    pub fn gamma_pattern(args: Vec<Id>) -> Self {
+    /// LHS template matching any node of the semantic operator `kind` over `args`,
+    /// at any type.
+    pub fn sym_pattern(kind: SymKind, args: Vec<Id>) -> Self {
         Self {
-            kind: Kind::Sym(SymKind::If),
+            kind: Kind::Sym(kind),
             payload: None,
             ty: None,
             children: args,
             prov: Prov::None,
         }
+    }
+
+    /// LHS template matching any γ gate over `args`.
+    pub fn gamma_pattern(args: Vec<Id>) -> Self {
+        Self::sym_pattern(SymKind::If, args)
     }
 
     fn ir(op: IrOp, ty: Option<TypeId>, args: Vec<Id>, prov: Prov) -> Self {

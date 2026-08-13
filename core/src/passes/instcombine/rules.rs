@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 use tir_symbolic::egraph::{EGraph, ENode, Id, Pattern, Rewrite, Rhs, Substitution, Var};
 
+use super::seed::Seeded;
+use super::state;
 use crate::utils::APInt;
 use crate::{
     ConstantFold, Context, OperationRef, PassError, Rewriter, TypeId, ValueId,
@@ -37,15 +39,21 @@ impl Ruleset {
     }
 }
 
-pub fn builtin_ruleset(context: &Context, eg: &EGraph<Node>) -> Ruleset {
+pub fn builtin_ruleset(context: &Context, seeded: &Seeded) -> Ruleset {
+    let eg = &seeded.eg;
     let mut ruleset = generated_ruleset(context);
     for template in fold_templates(eg) {
         ruleset.push(const_fold(context.clone(), &template), None);
     }
+    ruleset.push(state::forward_load(context.clone()), None);
+    ruleset.push(
+        state::eliminate_dead_store(seeded.exported_states.clone()),
+        None,
+    );
     ruleset
 }
 
-fn operand(substitution: &Substitution<Sym>, index: u32) -> Id {
+pub(crate) fn operand(substitution: &Substitution<Sym>, index: u32) -> Id {
     substitution
         .get(&Var::Symbol(index))
         .expect("bound operand")
@@ -69,7 +77,7 @@ fn class_int_width(context: &Context, eg: &EGraph<Node>, class: Id) -> Option<u3
     })
 }
 
-fn class_value_type(context: &Context, eg: &EGraph<Node>, class: Id) -> Option<TypeId> {
+pub(crate) fn class_value_type(context: &Context, eg: &EGraph<Node>, class: Id) -> Option<TypeId> {
     eg.nodes(eg.find(class)).iter().find_map(|node| {
         node.op_type()
             .or_else(|| node.value().map(|value| context.get_value(value).ty()))

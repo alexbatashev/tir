@@ -11,18 +11,26 @@ use std::sync::Arc;
 
 use tir_symbolic::egraph::{EGraph, Id};
 
+use crate::builtin::StateType;
 use crate::sem::egraph::{minimal_unsigned_apint, type_width};
 use crate::sem::{Prov, SemNode as Node, SymKind};
 use crate::{
     BlockId, Commutative, Conditional, ConstantLike, Context, MemoryRead, MemoryWrite, OpId,
-    OpInstance, RegionId, ValueId,
+    OpInstance, RegionId, TypeId, ValueId,
 };
 
-/// The seeded e-graph plus the driver's maps: each value's class, and each block argument's block.
+/// The operands a store term names: the location, the value it writes, and the
+/// state it observes.
+const STORE_OPERANDS: usize = 3;
+
+/// The seeded e-graph plus the driver's maps: each value's class, each block
+/// argument's block, and the state classes something outside the term graph
+/// observes.
 pub struct Seeded {
     pub eg: EGraph<Node>,
     pub value_class: HashMap<ValueId, Id>,
     pub arg_block: HashMap<ValueId, BlockId>,
+    pub exported_states: Vec<Id>,
 }
 
 /// Build the e-graph for the regions of `root`.
@@ -33,6 +41,8 @@ pub fn seed(context: &Context, root: OpId) -> Seeded {
         value_class: HashMap::new(),
         arg_block: HashMap::new(),
         seeded: HashSet::new(),
+        state_ty: StateType::new(context),
+        exported_states: Vec::new(),
     };
     for region in context.get_op(root).regions.clone() {
         seeder.seed_region(region);
@@ -41,6 +51,7 @@ pub fn seed(context: &Context, root: OpId) -> Seeded {
         eg: seeder.eg,
         value_class: seeder.value_class,
         arg_block: seeder.arg_block,
+        exported_states: seeder.exported_states,
     }
 }
 
@@ -50,6 +61,8 @@ struct Seeder<'a> {
     value_class: HashMap<ValueId, Id>,
     arg_block: HashMap<ValueId, BlockId>,
     seeded: HashSet<OpId>,
+    state_ty: TypeId,
+    exported_states: Vec<Id>,
 }
 
 impl Seeder<'_> {
@@ -101,6 +114,7 @@ impl Seeder<'_> {
         let instance = self.context.get_op(op);
 
         if !instance.regions.is_empty() {
+            self.export_states(&instance);
             if let Some(conditional) = instance.clone().as_interface::<dyn Conditional>() {
                 self.seed_gamma(&instance, conditional.as_ref());
                 return;
@@ -137,6 +151,8 @@ impl Seeder<'_> {
             let id = self.eg.add(Node::seeded(&instance, ty, commutative, args));
             self.value_class.insert(value, id);
             return;
+        } else {
+            self.export_states(&instance);
         }
 
         for result in instance.results.clone() {
@@ -182,13 +198,26 @@ impl Seeder<'_> {
         }
     }
 
+    /// Record the states `instance` observes as exported. The term graph models a
+    /// state only through the accesses on it, so a state any other operation takes
+    /// — returned, yielded out of a region, handed to a call — is observed by
+    /// something the graph cannot see, and no law may drop the write that left it.
+    fn export_states(&mut self, instance: &Arc<OpInstance>) {
+        for operand in instance.operands.clone() {
+            if self.context.get_value(operand).ty() == self.state_ty {
+                let id = self.class_of(operand);
+                self.exported_states.push(id);
+            }
+        }
+    }
+
     /// Seed a memory access over the state it reads, if it is one that names a state.
     fn seed_memory(&mut self, instance: &Arc<OpInstance>) -> bool {
         if let Some(read) = instance.clone().as_interface::<dyn MemoryRead>() {
             return self.seed_read(read.as_ref());
         }
         if let Some(write) = instance.clone().as_interface::<dyn MemoryWrite>() {
-            return self.seed_write(write.as_ref());
+            return self.seed_write(instance, write.as_ref());
         }
         false
     }
@@ -221,8 +250,14 @@ impl Seeder<'_> {
         true
     }
 
-    /// A write's term *is* the state the accesses after it read.
-    fn seed_write(&mut self, write: &dyn MemoryWrite) -> bool {
+    /// A write's term *is* the state the accesses after it read. The term names
+    /// the location, the value and the state, so a write carrying any other
+    /// operand — a size, say — covers an extent the term cannot spell and is no
+    /// store term at all.
+    fn seed_write(&mut self, instance: &Arc<OpInstance>, write: &dyn MemoryWrite) -> bool {
+        if instance.operands.len() != STORE_OPERANDS {
+            return false;
+        }
         let written = write.written_value();
         let ty = self.context.get_value(written).ty();
         let (Some(bits), Some(state), Some(published)) = (

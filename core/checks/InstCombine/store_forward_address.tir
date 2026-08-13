@@ -1,0 +1,17 @@
+// RUN: tir opt --pass instcombine %s | filecheck %s
+
+// The store and the load name different addresses, so the load keeps reading
+// memory.
+
+module {
+  func @f(%0: !ptr.p<!i32>, %1: !ptr.p<!i32>, %2: !i32) -> !i32 {
+    %3 = entry_state : !state
+    ptr.store %2, %0 state(%3 -> %4)
+    %5 = ptr.load %1 : !i32 state(%4)
+    return %5
+  }
+  module_end
+}
+
+// CHECK-LABEL: func @f
+// CHECK: ptr.load

@@ -1,0 +1,19 @@
+// RUN: tir opt --pass instcombine %s | filecheck %s
+
+// The call observes the state the first store published, so the second store
+// does not overwrite it unobserved.
+
+module {
+  func @f(%0: !ptr.p<!i32>, %1: !i32, %2: !i32) {
+    %3 = entry_state : !state
+    ptr.store %1, %0 state(%3 -> %4)
+    call @g() state(%4 -> %5)
+    ptr.store %2, %0 state(%5 -> %6)
+    return state(%6)
+  }
+  module_end
+}
+
+// CHECK-LABEL: func @f
+// CHECK: ptr.store %1,
+// CHECK: ptr.store %2,
