@@ -24,8 +24,8 @@ use std::rc::Rc;
 use crate::analysis::{DominatingEdgeFacts, DominatorTree};
 use crate::graph::Dag;
 use crate::{
-    AnalysisManager, BlockId, Conditional, ConstantLike, Context, OpId, OperationRef, Pass,
-    PassError, PassTarget, RegionId, Rewriter, TypeId, ValueId,
+    AnalysisManager, BlockId, Conditional, ConstantLike, Context, MemoryRead, OpId, OperationRef,
+    Pass, PassError, PassTarget, RegionId, Rewriter, TypeId, ValueId,
     builtin::{FuncOp, ops},
     utils::APInt,
 };
@@ -203,16 +203,29 @@ impl Driver<'_> {
             return Ok(());
         }
         let instance = self.context.get_op(op_id);
-        // A constant materializes to itself; nothing else is a single-result candidate.
-        if instance.results.len() != 1
-            || instance
-                .clone()
-                .as_interface::<dyn ConstantLike>()
-                .is_some()
+        // A constant materializes to itself.
+        if instance
+            .clone()
+            .as_interface::<dyn ConstantLike>()
+            .is_some()
         {
             return Ok(());
         }
-        let value = instance.results[0];
+        // A read leaves memory as it found it, so the state it publishes is the
+        // state it read: its uses reroute to that operand and the read goes with
+        // its value. Nothing else multi-result names one value to replace.
+        let state_edge = instance
+            .clone()
+            .as_interface::<dyn MemoryRead>()
+            .and_then(|read| match (read.state_operand(), read.state_result()) {
+                (Some(operand), Some(result)) => Some((read.read_value(), operand, result)),
+                _ => None,
+            });
+        let value = match (state_edge, &instance.results[..]) {
+            (Some((value, ..)), _) => value,
+            (None, &[value]) => value,
+            _ => return Ok(()),
+        };
         let Some(&class) = self.value_class.get(&value) else {
             return Ok(());
         };
@@ -226,6 +239,9 @@ impl Driver<'_> {
         // collapsing to an arm may not, so check before committing.
         if new_value != value && self.dominates(new_value, value) {
             self.context.replace_value_uses(value, new_value);
+            if let Some((_, operand, result)) = state_edge {
+                self.context.replace_value_uses(result, operand);
+            }
             // Only erase a pure value op; an op with regions may have side effects
             // whose result merely became unused (left for DCE).
             if instance.regions.is_empty() {
