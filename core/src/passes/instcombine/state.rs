@@ -25,7 +25,7 @@
 use tir_symbolic::egraph::{EGraph, ENode, Id, Pattern, Rewrite, Rhs, Var};
 
 use super::rules::{Rule, Sym, class_value_type, operand};
-use crate::sem::{SemNode as Node, SymKind};
+use crate::sem::{Prov, SemNode as Node, SymKind};
 use crate::{Conditional, Context, OpId, TypeId};
 
 /// `Load(address, bytes, metadata, state)`.
@@ -153,14 +153,21 @@ fn read_form(
         .and_then(|node| Some((node.ty?, live_op(context, node)?)))
 }
 
-/// The operation `node` stands for, if it is still in the tree: a term the graph
-/// keeps outlives the rewrite that erased what it was read from.
+/// The operation `node` stands for, if it is still in the tree: the one defining
+/// the value a seeded term was read from, or the one a law named to rebuild an
+/// introduced term. A term the graph keeps outlives the rewrite that erased
+/// either.
 fn live_op(context: &Context, node: &Node) -> Option<OpId> {
-    let value = node.value()?;
-    if !context.has_value(value) {
-        return None;
-    }
-    let op = context.get_value(value).defining_op()?;
+    let op = match node.prov {
+        Prov::Value(value) => {
+            if !context.has_value(value) {
+                return None;
+            }
+            context.get_value(value).defining_op()?
+        }
+        Prov::Op(op) => op,
+        _ => return None,
+    };
     context.has_operation(op).then_some(op)
 }
 
