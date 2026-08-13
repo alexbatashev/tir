@@ -5,6 +5,7 @@ mod declare;
 mod float;
 mod func;
 mod module;
+mod state;
 mod tuple;
 
 use std::any::Any;
@@ -23,6 +24,7 @@ pub use declare::*;
 pub use float::*;
 pub use func::*;
 pub use module::*;
+pub use state::*;
 pub use tuple::*;
 
 pub mod ops {
@@ -33,6 +35,7 @@ pub mod ops {
     pub use super::float::*;
     pub use super::func::*;
     pub use super::module::*;
+    pub use super::state::*;
     pub use super::tuple::*;
 }
 
@@ -161,9 +164,10 @@ dialect! {
             MakeTupleOp,
             TupleGetOp,
             DeclareOp,
+            EntryStateOp,
             AddressOfOp,
         ],
-        types: [IntegerType, FloatType, IndexType, UnitType, TokenType, TupleType],
+        types: [IntegerType, FloatType, IndexType, UnitType, TokenType, TupleType, StateType],
     }
 }
 

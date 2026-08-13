@@ -17,9 +17,23 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         custom_format,
         sem,
         custom_verifier,
+        state,
     } = parse_macro_input!(item as Operation);
 
     let builder_name = format_ident!("{}Builder", struct_name.to_string());
+    // A state port is an optional trailing `!state` operand and/or result: memory
+    // order is an explicit def-use edge, but only once a threading pass has run,
+    // so the ports are absent in un-threaded IR.
+    let declared_operands = operands.clone();
+    let mut operands = operands;
+    if state.input {
+        operands.push(ValueSpec {
+            name: "state".to_string(),
+            ty: "?tir::builtin::StateType".to_string(),
+            variadic: false,
+        });
+    }
+    let state_accessors = make_state_accessors(&state);
     let has_results = !results.is_empty();
     // A `?`-prefixed result type makes the single result optional: the op may be built
     // with or without it. Used by structured control flow, whose value is absent when
@@ -33,12 +47,19 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         "a variadic result must be the only declared result"
     );
     let op_fn_name = op_fn_ident(&name);
-    let operand_names: Vec<String> = operands.iter().map(|o| o.name.clone()).collect();
+    let operand_names: Vec<String> = declared_operands.iter().map(|o| o.name.clone()).collect();
 
     let printer = if custom_format {
         make_custom_printer()
     } else {
-        make_generic_printer(&dialect, &name, &operand_names, &regions, has_results)
+        make_generic_printer(
+            &dialect,
+            &name,
+            &operand_names,
+            &regions,
+            has_results,
+            &state,
+        )
     };
 
     let mut region_fills = vec![];
@@ -119,6 +140,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
             &operand_names,
             &attributes,
             has_results,
+            &state,
         )
     };
 
@@ -133,8 +155,22 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
 
     let has_variadic = operands.iter().any(|o| o.variadic);
 
-    for operand in &operands {
+    for (index, operand) in operands.iter().enumerate() {
         let field = format_ident!("{}", operand.name);
+        // The state port is set on the builder, never through the free function, so
+        // adding it to an op leaves every existing construction site untouched.
+        let is_state = state.input && index + 1 == operands.len();
+        if is_state {
+            operand_fields.push(quote! { #field: Option<tir::ValueId> });
+            operand_defaults.push(quote! { #field: None });
+            operand_builders.push(quote! {
+                pub fn #field(mut self, v: tir::ValueId) -> Self {
+                    self.#field = Some(v);
+                    self
+                }
+            });
+            continue;
+        }
         if operand.variadic {
             operand_fields.push(quote! {
                 #field: Vec<tir::ValueId>
@@ -238,6 +274,13 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         }
     } else {
         quote! {}
+    };
+
+    // The number of results that carry a value, i.e. all but a trailing state port.
+    let value_results_len = if state.output {
+        quote! { (self.0.results.len() - self.state_result().is_some() as usize) }
+    } else {
+        quote! { self.0.results.len() }
     };
 
     // Result support
@@ -474,6 +517,29 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         })
         .collect();
 
+    let (state_builder_field, state_builder_default, state_builder_method, state_result_build) =
+        if state.output {
+            (
+                quote! { state_result: bool, },
+                quote! { state_result: false, },
+                quote! {
+                    pub fn state_result(mut self) -> Self {
+                        self.state_result = true;
+                        self
+                    }
+                },
+                quote! {
+                    let mut result_vec = result_vec;
+                    if self.state_result {
+                        let ty = tir::builtin::StateType::new(&self.context);
+                        result_vec.push(self.context.create_value(ty, None).id());
+                    }
+                },
+            )
+        } else {
+            (quote! {}, quote! {}, quote! {}, quote! {})
+        };
+
     let result_builder_field = if !has_results {
         quote! {}
     } else if result_variadic {
@@ -589,23 +655,23 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         quote! {}
     } else if result_optional {
         quote! {
-            if self.0.results.len() > result_specs.len() {
+            if #value_results_len > result_specs.len() {
                 return Err(tir::Error::VerificationError(format!(
                     "{} expects at most {} results, got {}",
                     <Self as tir::Operation>::name(),
                     result_specs.len(),
-                    self.0.results.len()
+                    #value_results_len
                 )));
             }
         }
     } else {
         quote! {
-            if self.0.results.len() != result_specs.len() {
+            if #value_results_len != result_specs.len() {
                 return Err(tir::Error::VerificationError(format!(
                     "{} expects {} results, got {}",
                     <Self as tir::Operation>::name(),
                     result_specs.len(),
-                    self.0.results.len()
+                    #value_results_len
                 )));
             }
         }
@@ -838,7 +904,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
 
                 #result_count_check
 
-                for result_index in 0..self.0.results.len() {
+                for result_index in 0..#value_results_len {
                     // A variadic result declares one spec covering every result value.
                     let idx = #result_spec_index;
                     let (result_name, _type_spec) = result_specs[idx];
@@ -942,11 +1008,13 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
             #(#region_fields,)*
             #(#operand_fields,)*
             #result_builder_field
+            #state_builder_field
         }
 
         impl #struct_name {
             #region_accessors
             #result_accessor
+            #state_accessors
         }
 
         impl tir::Operation for #struct_name {
@@ -1023,12 +1091,14 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
                     #(#region_defaults,)*
                     #(#operand_defaults,)*
                     #result_builder_default
+                    #state_builder_default
                 }
             }
 
             #(#region_builders)*
             #(#operand_builders)*
             #result_builder_method
+            #state_builder_method
 
             pub fn attr(mut self, name: &str, value: tir::attributes::AttributeValue) -> Self {
                 let attribute = self.context.named_attribute(name, value);
@@ -1054,6 +1124,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
                 #(#operand_collect)*
 
                 #result_build
+                #state_result_build
 
                 #attributes_binding
                 #segment_sizes_attr
@@ -1104,6 +1175,69 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
     .into()
 }
 
+/// The optional `!state` ports an op declares with `state: "in" | "out" | "in_out"`.
+#[derive(Clone, Copy, Default)]
+struct StatePorts {
+    input: bool,
+    output: bool,
+}
+
+impl StatePorts {
+    fn parse(spec: &str) -> Self {
+        match spec {
+            "in" => Self {
+                input: true,
+                output: false,
+            },
+            "out" => Self {
+                input: false,
+                output: true,
+            },
+            "in_out" => Self {
+                input: true,
+                output: true,
+            },
+            other => panic!("state must be one of \"in\", \"out\", \"in_out\", got '{other}'"),
+        }
+    }
+}
+
+fn make_state_accessors(state: &StatePorts) -> proc_macro2::TokenStream {
+    let operand = if state.input {
+        quote! {
+            /// The memory state this op observes, once a threading pass has set it.
+            pub fn state_operand(&self) -> Option<tir::ValueId> {
+                let context = self.0.context.upgrade();
+                let state = tir::builtin::StateType::new(&context);
+                self.0
+                    .operands
+                    .last()
+                    .copied()
+                    .filter(|id| context.has_value(*id) && context.get_value(*id).ty() == state)
+            }
+        }
+    } else {
+        quote! {}
+    };
+    let result = if state.output {
+        quote! {
+            /// The memory state this op leaves behind, once a threading pass has set it.
+            pub fn state_result(&self) -> Option<tir::ValueId> {
+                let context = self.0.context.upgrade();
+                let state = tir::builtin::StateType::new(&context);
+                self.0
+                    .results
+                    .last()
+                    .copied()
+                    .filter(|id| context.has_value(*id) && context.get_value(*id).ty() == state)
+            }
+        }
+    } else {
+        quote! {}
+    };
+    quote! { #operand #result }
+}
+
 struct Operation {
     struct_name: Ident,
     name: String,
@@ -1116,6 +1250,7 @@ struct Operation {
     custom_format: bool,
     sem: Option<Sem>,
     custom_verifier: bool,
+    state: StatePorts,
 }
 
 /// A parsed `sem = "..."` declaration: the raw s-expression source plus the
@@ -1285,6 +1420,17 @@ impl Parse for Operation {
             })
             .unwrap_or(false);
 
+        let state = struct_
+            .fields
+            .iter()
+            .find_map(|f| match &f.member {
+                Member::Named(ident) if ident == "state" => {
+                    Some(StatePorts::parse(&expr_as_string(&f.expr)))
+                }
+                _ => None,
+            })
+            .unwrap_or_default();
+
         let sem = struct_.fields.iter().find_map(|f| match &f.member {
             Member::Named(ident) if ident == "sem" => parse_sem(&f.expr),
             _ => None,
@@ -1302,6 +1448,7 @@ impl Parse for Operation {
             custom_format,
             sem,
             custom_verifier,
+            state,
         })
     }
 }
@@ -1516,6 +1663,7 @@ fn make_generic_printer(
     operands: &[String],
     regions: &[Region],
     has_results: bool,
+    state: &StatePorts,
 ) -> proc_macro2::TokenStream {
     let op_name = if dialect == "builtin" {
         name.to_string()
@@ -1533,17 +1681,42 @@ fn make_generic_printer(
         quote! {}
     };
 
+    let printed_operands = if state.input {
+        quote! { &self.0.operands[..self.0.operands.len() - self.state_operand().is_some() as usize] }
+    } else {
+        quote! { &self.0.operands[..] }
+    };
+
     let operand_printer = if !operands.is_empty() {
         quote! {
-            if !self.0.operands.is_empty() {
+            let printed_operands = #printed_operands;
+            if !printed_operands.is_empty() {
                 fmt.write(" ")?;
                 let mut first = true;
-                for op_id in &self.0.operands {
+                for op_id in printed_operands {
                     if !first { fmt.write(", ")?; }
                     first = false;
                     fmt.write(format!("%{}", op_id.number()))?;
                 }
             }
+        }
+    } else {
+        quote! {}
+    };
+
+    let printed_state_operand = if state.input {
+        quote! { self.state_operand() }
+    } else {
+        quote! { None }
+    };
+    let printed_state_result = if state.output {
+        quote! { self.state_result() }
+    } else {
+        quote! { None }
+    };
+    let state_printer = if state.input || state.output {
+        quote! {
+            tir::builtin::print_state_clause(fmt, #printed_state_operand, #printed_state_result)?;
         }
     } else {
         quote! {}
@@ -1591,6 +1764,8 @@ fn make_generic_printer(
 
             #result_suffix
 
+            #state_printer
+
             if self.regions().len() == 0 {
                 fmt.write("\n")?;
             }
@@ -1618,7 +1793,45 @@ fn make_parser(
     operands: &[String],
     attributes: &[AttrSpec],
     has_results: bool,
+    state: &StatePorts,
 ) -> proc_macro2::TokenStream {
+    let state_operand_setter = if state.input {
+        quote! {
+            if let Some(state) = state_clause.operand {
+                builder = builder.state(state);
+            }
+        }
+    } else {
+        quote! {}
+    };
+    let state_result_setter = if state.output {
+        quote! {
+            if state_clause.result_name.is_some() {
+                builder = builder.state_result();
+            }
+        }
+    } else {
+        quote! {}
+    };
+    let state_clause_parser = if state.input || state.output {
+        quote! {
+            let state_clause = tir::builtin::parse_state_clause(parser)?;
+            #state_operand_setter
+            #state_result_setter
+        }
+    } else {
+        quote! {}
+    };
+    let state_result_binding = if state.output {
+        quote! {
+            if let (Some(name), Some(id)) = (state_clause.result_name.as_deref(), op.state_result()) {
+                parser.define_value(name, id);
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     let attr_spec_literals: Vec<_> = attributes
         .iter()
         .map(|attr| {
@@ -1733,13 +1946,17 @@ fn make_parser(
 
            #result_parser
 
+           #state_clause_parser
+
            #region_parsers
 
             for a in parsed_attrs { builder = builder.attr_sym(a.name, a.value); }
 
-            Ok(Box::new(builder
+            let op = builder
                 #region_builders
-                .build()))
+                .build();
+            #state_result_binding
+            Ok(Box::new(op))
         }
     }
 }

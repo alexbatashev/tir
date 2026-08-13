@@ -362,6 +362,10 @@ pub trait MemoryRead {
     fn read_location(&self) -> ValueId;
     /// The SSA value produced by the read.
     fn read_value(&self) -> ValueId;
+    /// The memory state the read observes, absent until state has been threaded.
+    fn state_operand(&self) -> Option<ValueId> {
+        None
+    }
 
     fn verify_interface(
         &self,
@@ -378,6 +382,14 @@ pub trait MemoryWrite {
     fn write_location(&self) -> ValueId;
     /// The SSA value stored into the memory location.
     fn written_value(&self) -> ValueId;
+    /// The memory state the write observes, absent until state has been threaded.
+    fn state_operand(&self) -> Option<ValueId> {
+        None
+    }
+    /// The memory state the write produces, absent until state has been threaded.
+    fn state_result(&self) -> Option<ValueId> {
+        None
+    }
 
     fn verify_interface(
         &self,

@@ -1,0 +1,10 @@
+// RUN: not tir opt --verify %s
+
+module {
+  func @bad(%0: !ptr.p) {
+    %1 = entry_state : !state
+    %2 = indirect_call %0(%1, %0 : !state, !ptr.p) -> !i32
+    return
+  }
+  module_end
+}

@@ -202,6 +202,67 @@ pub trait Operation: 'static + Send + Sync + Any + Verifiable + OpDefVerifiable 
 }
 
 pub fn verify_op_tree(context: &Context, op_id: OpId) -> Result<(), Error> {
+    verify_op_tree_ops(context, op_id)?;
+    verify_state_linearity(context, op_id)
+}
+
+/// Checks that memory state stays a linear chain: a `!state` value names the memory
+/// at one point in the program, so consuming it twice would describe two futures for
+/// the same memory. Loop-carried state crosses a region boundary as a carried
+/// argument, which is a fresh value, so a single walk of the whole tree suffices.
+fn verify_state_linearity(context: &Context, op_id: OpId) -> Result<(), Error> {
+    let state = crate::builtin::StateType::new(context);
+    let mut consumed = std::collections::HashSet::new();
+    let mut worklist = vec![op_id];
+    while let Some(op_id) = worklist.pop() {
+        let instance = context.get_op(op_id);
+        for operand in &instance.operands {
+            if !context.has_value(*operand) || context.get_value(*operand).ty() != state {
+                continue;
+            }
+            if !consumed.insert(*operand) {
+                return Err(Error::VerificationError(format!(
+                    "state value %{} is used more than once",
+                    operand.number()
+                )));
+            }
+        }
+        for region_id in instance.regions.iter().rev() {
+            for block in context.get_region(*region_id).iter(context.clone()) {
+                worklist.extend(block.op_ids().iter().rev());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Checks that an op wires memory state through its state port: a `!state` value is
+/// accepted only as the trailing operand or result, and only once.
+fn verify_state_ports(context: &Context, instance: &Arc<OpInstance>) -> Result<(), Error> {
+    let state = crate::builtin::StateType::new(context);
+    let ports = |values: &[crate::ValueId], kind: &str| {
+        let count = values
+            .iter()
+            .filter(|id| context.has_value(**id) && context.get_value(**id).ty() == state)
+            .count();
+        if count == 0 {
+            return Ok(());
+        }
+        let last_is_state = values
+            .last()
+            .is_some_and(|id| context.has_value(*id) && context.get_value(*id).ty() == state);
+        if count > 1 || !last_is_state {
+            return Err(Error::VerificationError(format!(
+                "an operation takes at most one !state {kind}, and it must be the last one"
+            )));
+        }
+        Ok(())
+    };
+    ports(&instance.operands, "operand")?;
+    ports(&instance.results, "result")
+}
+
+fn verify_op_tree_ops(context: &Context, op_id: OpId) -> Result<(), Error> {
     if !context.has_operation(op_id) {
         return Err(Error::VerificationError(format!(
             "operation {op_id:?} does not exist"
@@ -211,13 +272,14 @@ pub fn verify_op_tree(context: &Context, op_id: OpId) -> Result<(), Error> {
     let instance = context.get_op(op_id);
     verify_token_region_arguments(context, &instance)?;
     verify_scoped_metadata(&instance)?;
+    verify_state_ports(context, &instance)?;
     instance.clone().as_dyn_op().verify(context)?;
 
     for region_id in instance.regions.clone() {
         let region = context.get_region(region_id);
         for block in region.iter(context.clone()) {
             for child in block.op_ids() {
-                verify_op_tree(context, child)?;
+                verify_op_tree_ops(context, child)?;
             }
         }
     }

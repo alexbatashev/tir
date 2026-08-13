@@ -164,6 +164,7 @@ operation! {
             result: "crate::ptr::PtrType",
         },
         interfaces: [PromotableAllocation],
+        state: "out",
     }
 }
 
@@ -363,6 +364,7 @@ operation! {
             result: "AnyConstraint",
         },
         interfaces: [MemoryRead],
+        state: "in",
     }
 }
 
@@ -375,6 +377,7 @@ operation! {
             ptr: "crate::ptr::PtrType",
         },
         interfaces: [MemoryWrite],
+        state: "in_out",
     }
 }
 
@@ -388,6 +391,7 @@ operation! {
             source: "crate::ptr::PtrType",
             size: "crate::builtin::IntegerType",
         },
+        state: "in_out",
     }
 }
 
@@ -421,6 +425,7 @@ operation! {
             size: "crate::builtin::IntegerType",
         },
         interfaces: [MemoryWrite],
+        state: "in_out",
     }
 }
 
@@ -462,6 +467,10 @@ impl MemoryRead for LoadOp {
     fn read_value(&self) -> tir::ValueId {
         self.result()
     }
+
+    fn state_operand(&self) -> Option<tir::ValueId> {
+        LoadOp::state_operand(self)
+    }
 }
 
 impl MemoryWrite for StoreOp {
@@ -472,6 +481,14 @@ impl MemoryWrite for StoreOp {
     fn written_value(&self) -> tir::ValueId {
         self.operands()[0]
     }
+
+    fn state_operand(&self) -> Option<tir::ValueId> {
+        StoreOp::state_operand(self)
+    }
+
+    fn state_result(&self) -> Option<tir::ValueId> {
+        StoreOp::state_result(self)
+    }
 }
 
 impl MemoryWrite for MemsetOp {
@@ -481,6 +498,14 @@ impl MemoryWrite for MemsetOp {
 
     fn written_value(&self) -> tir::ValueId {
         self.operands()[1]
+    }
+
+    fn state_operand(&self) -> Option<tir::ValueId> {
+        MemsetOp::state_operand(self)
+    }
+
+    fn state_result(&self) -> Option<tir::ValueId> {
+        MemsetOp::state_result(self)
     }
 }
 
@@ -550,4 +575,60 @@ mod tests {
 
     // The alloca/store/load roundtrip inside a function is covered by the
     // FileCheck suite at core/checks/IRRoundtrip/ptr-alloca-store-load.tir.
+
+    #[test]
+    fn memory_interfaces_expose_the_state_chain() {
+        let context = Context::with_default_dialects();
+        let i32_ty = IntegerType::new(&context, 32);
+        let ptr_ty = PtrType::typed(&context, i32_ty);
+        let value = context.create_value(i32_ty, None);
+        let value_id = value.id();
+        let _block = context.create_block(vec![value]);
+
+        let allocation = AllocaOpBuilder::new(&context)
+            .size(4)
+            .align(4)
+            .result_type(ptr_ty)
+            .state_result()
+            .build();
+        let entry_state = allocation.state_result().unwrap();
+
+        let store = StoreOpBuilder::new(&context)
+            .value(value_id)
+            .ptr(allocation.result())
+            .state(entry_state)
+            .state_result()
+            .build();
+        let load = LoadOpBuilder::new(&context)
+            .ptr(allocation.result())
+            .result_type(i32_ty)
+            .state(store.state_result().unwrap())
+            .build();
+
+        let write: &dyn MemoryWrite = &store;
+        assert_eq!(write.state_operand(), Some(entry_state));
+        assert_eq!(write.state_result(), store.state_result());
+
+        let read: &dyn MemoryRead = &load;
+        assert_eq!(read.state_operand(), store.state_result());
+    }
+
+    #[test]
+    fn state_ports_are_absent_until_threaded() {
+        let context = Context::with_default_dialects();
+        let i32_ty = IntegerType::new(&context, 32);
+        let ptr_ty = PtrType::typed(&context, i32_ty);
+        let allocation = AllocaOpBuilder::new(&context)
+            .size(4)
+            .align(4)
+            .result_type(ptr_ty)
+            .build();
+        let load = LoadOpBuilder::new(&context)
+            .ptr(allocation.result())
+            .result_type(i32_ty)
+            .build();
+
+        assert_eq!(allocation.state_result(), None);
+        assert_eq!(load.state_operand(), None);
+    }
 }

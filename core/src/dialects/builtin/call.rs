@@ -20,6 +20,7 @@ operation! {
         results: R {
             result: "Any",
         },
+        state: "in_out",
     }
 }
 
@@ -59,7 +60,7 @@ impl CallOp {
     }
 
     pub fn args(&self) -> Vec<ValueId> {
-        self.operands().to_vec()
+        self.operands()[..self.operands().len() - self.state_operand().is_some() as usize].to_vec()
     }
 
     pub fn has_result_address(&self) -> bool {
@@ -81,6 +82,8 @@ impl CallOp {
             &self.args(),
             self.has_result_address(),
             &self.argument_alignments(),
+            self.state_operand(),
+            self.state_result(),
         )
     }
 
@@ -98,17 +101,27 @@ impl CallOp {
         let result_address = parser.parse_token("result_address");
         let argument_alignments = super::parse_argument_alignments(parser, context)?;
 
+        let state = super::parse_state_clause(parser)?;
+
         let mut builder = CallOpBuilder::new(context)
             .args(args)
             .attr("callee", AttributeValue::Str(callee.into()))
             .result_type(ret_type);
+        if let Some(operand) = state.operand {
+            builder = builder.state(operand);
+        }
+        if state.result_name.is_some() {
+            builder = builder.state_result();
+        }
         if result_address {
             builder = builder.result_address();
         }
         if let Some(argument_alignments) = argument_alignments {
             builder = builder.attr("argument_alignments", argument_alignments);
         }
-        Ok(Box::new(builder.build()))
+        let op = builder.build();
+        bind_state_result(parser, &state, op.state_result());
+        Ok(Box::new(op))
     }
 }
 
@@ -145,6 +158,7 @@ operation! {
         results: R {
             result: "Any",
         },
+        state: "in_out",
     }
 }
 
@@ -154,7 +168,7 @@ impl IndirectCallOp {
     }
 
     pub fn args(&self) -> Vec<ValueId> {
-        self.operands()[1..].to_vec()
+        self.operands()[1..self.operands().len() - self.state_operand().is_some() as usize].to_vec()
     }
 
     pub fn has_result_address(&self) -> bool {
@@ -176,6 +190,8 @@ impl IndirectCallOp {
             &self.args(),
             self.has_result_address(),
             &self.argument_alignments(),
+            self.state_operand(),
+            self.state_result(),
         )
     }
 
@@ -198,17 +214,27 @@ impl IndirectCallOp {
         let result_address = parser.parse_token("result_address");
         let argument_alignments = super::parse_argument_alignments(parser, context)?;
 
+        let state = super::parse_state_clause(parser)?;
+
         let mut builder = IndirectCallOpBuilder::new(context)
             .callee(callee)
             .args(args)
             .result_type(ret_type);
+        if let Some(operand) = state.operand {
+            builder = builder.state(operand);
+        }
+        if state.result_name.is_some() {
+            builder = builder.state_result();
+        }
         if result_address {
             builder = builder.result_address();
         }
         if let Some(argument_alignments) = argument_alignments {
             builder = builder.attr("argument_alignments", argument_alignments);
         }
-        Ok(Box::new(builder.build()))
+        let op = builder.build();
+        bind_state_result(parser, &state, op.state_result());
+        Ok(Box::new(op))
     }
 }
 
@@ -267,6 +293,7 @@ fn verify_call_metadata(
 
 /// Print a call as `%r = <header>(%a, %b : t1, t2) -> ret`, omitting the result
 /// binding and arrow for unit-returning calls.
+#[allow(clippy::too_many_arguments)]
 fn print_call(
     context: &Context,
     fmt: &mut tir::IRFormatter,
@@ -275,6 +302,8 @@ fn print_call(
     args: &[ValueId],
     result_address: bool,
     argument_alignments: &[u64],
+    state_operand: Option<ValueId>,
+    state_result: Option<ValueId>,
 ) -> Result<(), std::fmt::Error> {
     let ret_type = context.get_value(result).ty();
     let is_unit = ret_type == UnitType::new(context);
@@ -310,6 +339,7 @@ fn print_call(
         fmt.write(" result_address")?;
     }
     super::print_argument_alignments(fmt, argument_alignments)?;
+    super::print_state_clause(fmt, state_operand, state_result)?;
     fmt.write("\n")
 }
 
@@ -366,6 +396,17 @@ fn parse_ret_type(
             .ok_or_else(|| (parser.span(), Error::ExpectedType))
     } else {
         Ok(UnitType::new(context))
+    }
+}
+
+/// Bind the name a parsed `state(... -> %n)` clause gave the state the op produces.
+fn bind_state_result(
+    parser: &mut tir::parse::text::Parser,
+    state: &super::StateClause,
+    result: Option<ValueId>,
+) {
+    if let (Some(name), Some(result)) = (state.result_name.as_deref(), result) {
+        parser.define_value(name, result);
     }
 }
 
