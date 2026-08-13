@@ -167,7 +167,7 @@ fn emit_flag_branch_rules(
             };
 
             let mut spliced = tir::sem::SemGraph::new();
-            let substitute: HashMap<u32, tir::graph::NodeId> = b_sem
+            let substitute: HashMap<u32, tir_graph::NodeId> = b_sem
                 .flag_symbols
                 .iter()
                 .map(|(symbol, index)| (*symbol, d_sem.flag_roots[index]))
@@ -190,12 +190,12 @@ fn emit_flag_branch_rules(
             };
 
             let immediate_symbols = definer_immediate_symbols(d, d_sem);
-            let (canon_pattern, canon_root, forced_widths) = tir::sem::canonicalize_for_selection(
+            let (canon_pattern, canon_root, forced_widths) = tir_symbolic::lang::canonicalize_for_selection(
                 &candidate,
                 candidate_root,
                 &immediate_symbols,
             );
-            let mut pattern_widths = tir::sem::infer_widths(&canon_pattern, |_| None);
+            let mut pattern_widths = tir_symbolic::lang::infer_widths(&canon_pattern, |_| None);
             for (index, forced) in forced_widths.iter().enumerate() {
                 if forced.is_some() {
                     pattern_widths[index] = *forced;
@@ -291,24 +291,24 @@ fn emit_flag_branch_rules(
 fn copy_subgraph_alias(
     dst: &mut tir::sem::SemGraph,
     src: &tir::sem::SemGraph,
-    node: tir::graph::NodeId,
+    node: tir_graph::NodeId,
     map: &HashMap<u32, u32>,
-    memo: &mut HashMap<usize, tir::graph::NodeId>,
-) -> tir::graph::NodeId {
-    use tir::graph::{Dag, MutDag};
+    memo: &mut HashMap<usize, tir_graph::NodeId>,
+) -> tir_graph::NodeId {
+    use tir_graph::{Dag, MutDag};
     if let Some(&copied) = memo.get(&node.index()) {
         return copied;
     }
-    let children: Vec<tir::graph::NodeId> = src.children(node).collect();
-    let copied_children: Vec<tir::graph::NodeId> = children
+    let children: Vec<tir_graph::NodeId> = src.children(node).collect();
+    let copied_children: Vec<tir_graph::NodeId> = children
         .into_iter()
         .map(|child| copy_subgraph_alias(dst, src, child, map, memo))
         .collect();
     let copied = dst.add_node(*src.get_node(node));
     if let Some(data) = src.get_leaf_data(node) {
         let data = match data {
-            tir::sem::SymPayload::SymbolId(id) if map.contains_key(id) => {
-                tir::sem::SymPayload::SymbolId(map[id])
+            tir_symbolic::lang::SymPayload::SymbolId(id) if map.contains_key(id) => {
+                tir_symbolic::lang::SymPayload::SymbolId(map[id])
             }
             other => other.clone(),
         };
@@ -324,14 +324,14 @@ fn copy_subgraph_alias(
 /// A single-symbol comparison against a literal zero (`Ne(s0, 0)`/`Eq(s0, 0)`),
 /// the SMT candidate an aliased flag definer's condition proves against.
 fn zero_vs_candidate(
-    kind: tir::sem::SymKind,
+    kind: tir_symbolic::lang::SymKind,
     width: u32,
-) -> (tir::sem::SemGraph, tir::graph::NodeId) {
-    use tir::graph::MutDag;
+) -> (tir::sem::SemGraph, tir_graph::NodeId) {
+    use tir_graph::MutDag;
     let mut g = tir::sem::SemGraph::new();
-    let s = g.add_node(tir::sem::SymKind::Symbol);
-    g.set_leaf_data(s, tir::sem::SymPayload::SymbolId(0));
-    let z = g.add_node(tir::sem::SymKind::Constant);
+    let s = g.add_node(tir_symbolic::lang::SymKind::Symbol);
+    g.set_leaf_data(s, tir_symbolic::lang::SymPayload::SymbolId(0));
+    let z = g.add_node(tir_symbolic::lang::SymKind::Constant);
     g.set_leaf_data(z, tir::sem::int_payload(width, 0, false));
     let root = g.add_node(kind);
     g.add_edge(root, s);
@@ -344,8 +344,9 @@ fn zero_vs_candidate(
 fn zero_equivalent(
     composed: &tir::sem::SemGraph,
     symbol_widths: &[u32],
-) -> Option<tir::sem::SymKind> {
-    use tir::sem::{EquivalenceOracle, FuzzOracle, SmtOracle, SymKind};
+) -> Option<tir_symbolic::lang::SymKind> {
+    use tir::sem::{EquivalenceOracle, FuzzOracle, SmtOracle};
+    use tir_symbolic::lang::SymKind;
     let fuzz = FuzzOracle::default();
     for kind in [SymKind::Ne, SymKind::Eq] {
         let (candidate, _) = zero_vs_candidate(kind, symbol_widths[0]);
@@ -362,18 +363,18 @@ fn zero_equivalent(
 /// bridge injects: `Ne(s0, zext(0, Wsym))` / `Eq(s0, zext(0, Wsym))`, so the
 /// derived `test c, c` + `jne`/`je` rule covers a bare boolean guard.
 fn zero_branch_pattern(
-    kind: tir::sem::SymKind,
+    kind: tir_symbolic::lang::SymKind,
     width_symbol: u32,
-) -> (tir::sem::SemGraph, tir::graph::NodeId) {
-    use tir::graph::MutDag;
+) -> (tir::sem::SemGraph, tir_graph::NodeId) {
+    use tir_graph::MutDag;
     let mut g = tir::sem::SemGraph::new();
-    let s = g.add_node(tir::sem::SymKind::Symbol);
-    g.set_leaf_data(s, tir::sem::SymPayload::SymbolId(0));
-    let zero = g.add_node(tir::sem::SymKind::Constant);
+    let s = g.add_node(tir_symbolic::lang::SymKind::Symbol);
+    g.set_leaf_data(s, tir_symbolic::lang::SymPayload::SymbolId(0));
+    let zero = g.add_node(tir_symbolic::lang::SymKind::Constant);
     g.set_leaf_data(zero, tir::sem::int_payload(1, 0, false));
-    let wsym = g.add_node(tir::sem::SymKind::Symbol);
-    g.set_leaf_data(wsym, tir::sem::SymPayload::SymbolId(width_symbol));
-    let zext = g.add_node(tir::sem::SymKind::ZExt);
+    let wsym = g.add_node(tir_symbolic::lang::SymKind::Symbol);
+    g.set_leaf_data(wsym, tir_symbolic::lang::SymPayload::SymbolId(width_symbol));
+    let zext = g.add_node(tir_symbolic::lang::SymKind::ZExt);
     g.add_edge(zext, zero);
     g.add_edge(zext, wsym);
     let root = g.add_node(kind);
@@ -460,8 +461,8 @@ fn emit_aliased_zero_branch_rules(
 
             let map = HashMap::from([(sym_a, 0u32), (sym_b, 0u32)]);
             let mut aliased_graph = tir::sem::SemGraph::new();
-            let mut alias_memo: HashMap<usize, tir::graph::NodeId> = HashMap::new();
-            let aliased_roots: HashMap<u32, tir::graph::NodeId> = d_sem
+            let mut alias_memo: HashMap<usize, tir_graph::NodeId> = HashMap::new();
+            let aliased_roots: HashMap<u32, tir_graph::NodeId> = d_sem
                 .flag_roots
                 .iter()
                 .map(|(&index, &root)| {
@@ -479,7 +480,7 @@ fn emit_aliased_zero_branch_rules(
                 .collect();
 
             let mut spliced = tir::sem::SemGraph::new();
-            let substitute: HashMap<u32, tir::graph::NodeId> = b_sem
+            let substitute: HashMap<u32, tir_graph::NodeId> = b_sem
                 .flag_symbols
                 .iter()
                 .map(|(symbol, index)| (*symbol, aliased_roots[index]))
@@ -503,8 +504,8 @@ fn emit_aliased_zero_branch_rules(
             let (pattern, root) = zero_branch_pattern(kind, width_symbol);
             let no_immediates: HashSet<u32> = HashSet::new();
             let (canon_pattern, canon_root, forced_widths) =
-                tir::sem::canonicalize_for_selection(&pattern, root, &no_immediates);
-            let mut pattern_widths = tir::sem::infer_widths(&canon_pattern, |_| None);
+                tir_symbolic::lang::canonicalize_for_selection(&pattern, root, &no_immediates);
+            let mut pattern_widths = tir_symbolic::lang::infer_widths(&canon_pattern, |_| None);
             for (index, forced) in forced_widths.iter().enumerate() {
                 if forced.is_some() {
                     pattern_widths[index] = *forced;
@@ -702,7 +703,7 @@ fn emit_flag_reader_rules(
         .filter(|class| class.has_polymorphic_registers())
         .map(|class| class.name.clone())
         .collect();
-    use tir::graph::MutDag;
+    use tir_graph::MutDag;
     let isa_closure = isa_requires_closure(files);
     for (r, r_sem) in readers {
         for (d, d_sem) in definers {
@@ -729,7 +730,7 @@ fn emit_flag_reader_rules(
             };
 
             let mut spliced = tir::sem::SemGraph::new();
-            let substitute: HashMap<u32, tir::graph::NodeId> = r_sem
+            let substitute: HashMap<u32, tir_graph::NodeId> = r_sem
                 .flag_symbols
                 .iter()
                 .map(|(symbol, index)| (*symbol, d_sem.flag_roots[index]))
@@ -787,7 +788,7 @@ fn emit_flag_reader_rules(
                         .map(|remapped| (name.clone(), remapped))
                 })
                 .collect();
-            let if_root = pattern.add_node(tir::sem::SymKind::If);
+            let if_root = pattern.add_node(tir_symbolic::lang::SymKind::If);
             pattern.add_edge(if_root, cmp);
             pattern.add_edge(if_root, then_);
             pattern.add_edge(if_root, else_);
@@ -799,8 +800,8 @@ fn emit_flag_reader_rules(
                     .flatten()
             }));
             let (canon_pattern, canon_root, forced_widths) =
-                tir::sem::canonicalize_for_selection(&pattern, if_root, &immediate_symbols);
-            let mut pattern_widths = tir::sem::infer_widths(&canon_pattern, |_| None);
+                tir_symbolic::lang::canonicalize_for_selection(&pattern, if_root, &immediate_symbols);
+            let mut pattern_widths = tir_symbolic::lang::infer_widths(&canon_pattern, |_| None);
             for (index, forced) in forced_widths.iter().enumerate() {
                 if forced.is_some() {
                     pattern_widths[index] = *forced;

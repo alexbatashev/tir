@@ -2461,8 +2461,9 @@ mod tests {
     #[test]
     fn functional_pipeline_lowers_and_executes() {
         use std::collections::HashMap;
-        use tir::sem::{SemGraph, Value, execute};
+        use tir::sem::SemGraph;
         use tir_adt::{APInt, RawBits};
+        use tir_symbolic::lang::{Value, execute};
 
         // split a 32-bit raw value into four bytes and horizontally sum them:
         // bytes [1, 2, 3, 4] -> 10.

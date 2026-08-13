@@ -11,7 +11,7 @@ use crate::utils::{
     resolve_isa_param_values, resolve_operand_widths, resolve_operands_for_instruction,
     resolve_params_for_instruction,
 };
-use tir::graph::{Dag, NodeId};
+use tir_graph::{Dag, NodeId};
 
 #[derive(serde::Serialize)]
 pub(crate) struct SmtMetadata {
@@ -1378,10 +1378,13 @@ impl SmtSymbolResolver<'_> {
 /// width rules. Width expressions like `log2Ceil(self.XLEN) - 1` reach the
 /// emitter unfolded, so structural `Constant` matching is not enough.
 fn eval_const_subtree(
-    graph: &impl Dag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
+    graph: &impl Dag<
+        Node = tir_symbolic::lang::SymKind,
+        Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+    >,
     node: NodeId,
 ) -> Option<(u64, u32)> {
-    use tir::sem::{SymKind, SymPayload};
+    use tir_symbolic::lang::{SymKind, SymPayload};
 
     let child = |idx: usize| eval_const_subtree(graph, graph.children(node).nth(idx)?);
     let arith = |f: fn(u64, u64) -> u64| -> Option<(u64, u32)> {
@@ -1438,11 +1441,14 @@ fn amo_combine(op: u8, old: &str, val: &str) -> Option<String> {
 }
 
 fn emit_sem_expr(
-    graph: &impl Dag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
+    graph: &impl Dag<
+        Node = tir_symbolic::lang::SymKind,
+        Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+    >,
     node: NodeId,
     resolver: &SmtSymbolResolver<'_>,
 ) -> Option<SmtVal> {
-    use tir::sem::{SymKind, SymPayload};
+    use tir_symbolic::lang::{SymKind, SymPayload};
 
     let child_node = |idx: usize| graph.children(node).nth(idx);
     let child = |idx: usize| emit_sem_expr(graph, child_node(idx)?, resolver);
@@ -1491,20 +1497,20 @@ fn emit_sem_expr(
         ))
     };
 
-    if let Some(op) = tir::sem::scalar_op(*graph.get_node(node)) {
+    if let Some(op) = tir_symbolic::lang::scalar_op(*graph.get_node(node)) {
         return match op.smt {
-            tir::sem::SmtTemplate::Binary(name) => arith(name),
-            tir::sem::SmtTemplate::Compare(name) => cmp(name),
-            tir::sem::SmtTemplate::Shift(name) => match op.kind {
-                tir::sem::SymKind::ShiftRightArithmetic => shift(name, |_| true),
-                tir::sem::SymKind::ShiftRightLogic => shift(name, |_| false),
+            tir_symbolic::lang::SmtTemplate::Binary(name) => arith(name),
+            tir_symbolic::lang::SmtTemplate::Compare(name) => cmp(name),
+            tir_symbolic::lang::SmtTemplate::Shift(name) => match op.kind {
+                tir_symbolic::lang::SymKind::ShiftRightArithmetic => shift(name, |_| true),
+                tir_symbolic::lang::SymKind::ShiftRightLogic => shift(name, |_| false),
                 _ => shift(name, |signed| signed),
             },
-            tir::sem::SmtTemplate::Unary(name) => {
+            tir_symbolic::lang::SmtTemplate::Unary(name) => {
                 let (value, width, signed) = child(0)?.as_bv();
                 Some(SmtVal::bv(format!("({name} {value})"), width, signed))
             }
-            tir::sem::SmtTemplate::Concat => {
+            tir_symbolic::lang::SmtTemplate::Concat => {
                 let (high, high_width, _) = child(0)?.as_bv();
                 let (low, low_width, _) = child(1)?.as_bv();
                 Some(SmtVal::bv(
@@ -1692,21 +1698,24 @@ enum AtomicOp {
 }
 
 fn atomic_of_node(
-    graph: &impl Dag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
+    graph: &impl Dag<
+        Node = tir_symbolic::lang::SymKind,
+        Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+    >,
     node: NodeId,
 ) -> Option<AtomicOp> {
     let children = graph.children(node).collect::<Vec<_>>();
     let constant = |index: usize| eval_const_subtree(graph, *children.get(index)?).map(|v| v.0);
     match graph.get_node(node) {
-        tir::sem::SymKind::LoadReserved => Some(AtomicOp::LoadReserved {
+        tir_symbolic::lang::SymKind::LoadReserved => Some(AtomicOp::LoadReserved {
             addr: *children.first()?,
         }),
-        tir::sem::SymKind::StoreConditional => Some(AtomicOp::StoreConditional {
+        tir_symbolic::lang::SymKind::StoreConditional => Some(AtomicOp::StoreConditional {
             addr: *children.first()?,
             bytes: constant(1)?,
             value: *children.get(2)?,
         }),
-        tir::sem::SymKind::AtomicRmw => Some(AtomicOp::AtomicRmw {
+        tir_symbolic::lang::SymKind::AtomicRmw => Some(AtomicOp::AtomicRmw {
             op: constant(0)? as u8,
             addr: *children.get(1)?,
             bytes: constant(2)?,
@@ -1716,19 +1725,22 @@ fn atomic_of_node(
     }
 }
 
-fn is_atomic_kind(kind: tir::sem::SymKind) -> bool {
+fn is_atomic_kind(kind: tir_symbolic::lang::SymKind) -> bool {
     matches!(
         kind,
-        tir::sem::SymKind::LoadReserved
-            | tir::sem::SymKind::StoreConditional
-            | tir::sem::SymKind::AtomicRmw
+        tir_symbolic::lang::SymKind::LoadReserved
+            | tir_symbolic::lang::SymKind::StoreConditional
+            | tir_symbolic::lang::SymKind::AtomicRmw
     )
 }
 
 /// The atomic call within `e`, descending through pure wrappers
 /// (`sext`/`zext`/`extract`/`if`/...) as sema permits.
 fn find_atomic(
-    graph: &impl Dag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
+    graph: &impl Dag<
+        Node = tir_symbolic::lang::SymKind,
+        Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+    >,
     node: NodeId,
 ) -> Option<AtomicOp> {
     if let Some(op) = atomic_of_node(graph, node) {
@@ -1958,20 +1970,20 @@ impl sem_expr_state::BehaviorEmitter for BehaviorEmitter<'_> {
 
     fn value_effect(
         &self,
-        kind: tir::sem::SymKind,
+        kind: tir_symbolic::lang::SymKind,
         value: NodeId,
         st_name: &String,
     ) -> Option<String> {
-        if kind == tir::sem::SymKind::StateFence {
+        if kind == tir_symbolic::lang::SymKind::StateFence {
             return Some(st_name.clone());
         }
-        if kind == tir::sem::SymKind::StateStoreConditional {
+        if kind == tir_symbolic::lang::SymKind::StateStoreConditional {
             let (values, root) = self.behavior.value_graph(value)?;
             return self.atomic_effect(&atomic_of_node(&values, root)?, st_name);
         }
-        if kind == tir::sem::SymKind::StateStore {
+        if kind == tir_symbolic::lang::SymKind::StateStore {
             let (values, root) = self.behavior.value_graph(value)?;
-            if *values.get_node(root) == tir::sem::SymKind::AtomicRmw {
+            if *values.get_node(root) == tir_symbolic::lang::SymKind::AtomicRmw {
                 return self.atomic_effect(&atomic_of_node(&values, root)?, st_name);
             }
         }
@@ -2207,14 +2219,14 @@ impl sem_expr_state::BehaviorEmitter for FlatBehaviorEmitter<'_> {
 
     fn value_effect(
         &self,
-        kind: tir::sem::SymKind,
+        kind: tir_symbolic::lang::SymKind,
         value: NodeId,
         state: &FlatState,
     ) -> Option<FlatState> {
-        if kind == tir::sem::SymKind::StateFence {
+        if kind == tir_symbolic::lang::SymKind::StateFence {
             return Some(state.clone());
         }
-        if kind == tir::sem::SymKind::StateStoreConditional {
+        if kind == tir_symbolic::lang::SymKind::StateStoreConditional {
             return None;
         }
         let children = self
@@ -2395,11 +2407,11 @@ fn graph_memory_operations(behavior: &sem_expr_state::BehaviorGraph) -> Option<V
     for node in nodes {
         let children = behavior.graph.children(node).collect::<Vec<_>>();
         let (kind, address, bytes, reservation) = match behavior.graph.get_node(node) {
-            tir::sem::SymKind::LoadMemory => (MemOpKind::Load, 0, 1, false),
-            tir::sem::SymKind::LoadReserved => (MemOpKind::Load, 0, 1, true),
-            tir::sem::SymKind::StoreMemory => (MemOpKind::Store, 0, 1, false),
-            tir::sem::SymKind::StoreConditional => (MemOpKind::Store, 0, 1, true),
-            tir::sem::SymKind::AtomicRmw => (MemOpKind::Store, 1, 2, true),
+            tir_symbolic::lang::SymKind::LoadMemory => (MemOpKind::Load, 0, 1, false),
+            tir_symbolic::lang::SymKind::LoadReserved => (MemOpKind::Load, 0, 1, true),
+            tir_symbolic::lang::SymKind::StoreMemory => (MemOpKind::Store, 0, 1, false),
+            tir_symbolic::lang::SymKind::StoreConditional => (MemOpKind::Store, 0, 1, true),
+            tir_symbolic::lang::SymKind::AtomicRmw => (MemOpKind::Store, 1, 2, true),
             _ => continue,
         };
         operations.push(GraphMemOp {
@@ -2423,12 +2435,12 @@ fn effect_memory_operations(
     for node in behavior.graph.preorder(effect) {
         let children: Vec<_> = behavior.graph.children(node).collect();
         let roots: Vec<NodeId> = match behavior.graph.get_node(node) {
-            tir::sem::SymKind::StateAssign
-            | tir::sem::SymKind::StateStore
-            | tir::sem::SymKind::StateStoreConditional
-            | tir::sem::SymKind::StateFence
-            | tir::sem::SymKind::StateIf => children.into_iter().take(1).collect(),
-            tir::sem::SymKind::StateTrap => match behavior.effect_payload(node) {
+            tir_symbolic::lang::SymKind::StateAssign
+            | tir_symbolic::lang::SymKind::StateStore
+            | tir_symbolic::lang::SymKind::StateStoreConditional
+            | tir_symbolic::lang::SymKind::StateFence
+            | tir_symbolic::lang::SymKind::StateIf => children.into_iter().take(1).collect(),
+            tir_symbolic::lang::SymKind::StateTrap => match behavior.effect_payload(node) {
                 Some(sem_expr_state::EffectPayload::Trap { argument_count, .. }) => {
                     children.into_iter().take(*argument_count).collect()
                 }
@@ -2444,11 +2456,11 @@ fn effect_memory_operations(
     for node in value_nodes {
         let children = behavior.graph.children(node).collect::<Vec<_>>();
         let (kind, address, bytes, reservation) = match behavior.graph.get_node(node) {
-            tir::sem::SymKind::LoadMemory => (MemOpKind::Load, 0, 1, false),
-            tir::sem::SymKind::LoadReserved => (MemOpKind::Load, 0, 1, true),
-            tir::sem::SymKind::StoreMemory => (MemOpKind::Store, 0, 1, false),
-            tir::sem::SymKind::StoreConditional => (MemOpKind::Store, 0, 1, true),
-            tir::sem::SymKind::AtomicRmw => (MemOpKind::Store, 1, 2, true),
+            tir_symbolic::lang::SymKind::LoadMemory => (MemOpKind::Load, 0, 1, false),
+            tir_symbolic::lang::SymKind::LoadReserved => (MemOpKind::Load, 0, 1, true),
+            tir_symbolic::lang::SymKind::StoreMemory => (MemOpKind::Store, 0, 1, false),
+            tir_symbolic::lang::SymKind::StoreConditional => (MemOpKind::Store, 0, 1, true),
+            tir_symbolic::lang::SymKind::AtomicRmw => (MemOpKind::Store, 1, 2, true),
             _ => continue,
         };
         operations.push(GraphMemOp {
@@ -2572,7 +2584,7 @@ fn build_smt_behavior<'a>(
                         behavior_graph.graph.preorder(*root).any(|node| {
                             matches!(
                                 behavior_graph.graph.get_leaf_data(node),
-                                Some(sem_expr_state::BehaviorPayload::Value(tir::sem::SymPayload::SymbolId(id))) if *id == **symbol
+                                Some(sem_expr_state::BehaviorPayload::Value(tir_symbolic::lang::SymPayload::SymbolId(id))) if *id == **symbol
                             )
                         })
                     })

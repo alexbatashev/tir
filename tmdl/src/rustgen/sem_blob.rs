@@ -22,8 +22,8 @@ fn begin_sem_blob() {
     SEM_BLOB.with_borrow_mut(|blob| *blob = tir::sem::SemBlobBuilder::new());
 }
 
-/// The blob and the [`tir::sem::SymKind`] table its node codes index.
-fn finish_sem_blob() -> (Vec<u8>, Vec<tir::sem::SymKind>) {
+/// The blob and the [`tir_symbolic::lang::SymKind`] table its node codes index.
+fn finish_sem_blob() -> (Vec<u8>, Vec<tir_symbolic::lang::SymKind>) {
     SEM_BLOB.with_borrow_mut(|blob| {
         std::mem::replace(blob, tir::sem::SemBlobBuilder::new()).finish()
     })

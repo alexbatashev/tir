@@ -28,8 +28,8 @@ use crate::utils::{
     parse_literal_value, resolve_isa_param_values, resolve_operand_widths,
     resolve_operands_for_instruction, resolve_params_for_instruction,
 };
-use tir::graph::{Dag, NodeId};
-use tir::sem::{SymKind as ExprKind, SymPayload as ExprPayload};
+use tir_graph::{Dag, NodeId};
+use tir_symbolic::lang::{SymKind as ExprKind, SymPayload as ExprPayload};
 
 type ExprPostGraph = sem_expr_state::ValueGraph;
 
@@ -527,7 +527,7 @@ impl sem_expr_state::BehaviorEmitter for Checker<'_> {
 
     fn value_effect(
         &self,
-        _kind: tir::sem::SymKind,
+        _kind: tir_symbolic::lang::SymKind,
         _value: NodeId,
         _state: &PostState,
     ) -> Option<PostState> {

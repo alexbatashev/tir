@@ -722,12 +722,12 @@ fn emit_instructions<'a>(
                 .filter(|(_, op_ty)| matches!(op_ty, Type::Bits(_) | Type::Integer))
                 .filter_map(|(op_name, _)| semantics.variable_symbols.get(op_name).copied())
                 .collect();
-            let (canon_pattern, canon_root, forced_widths) = tir::sem::canonicalize_for_selection(
+            let (canon_pattern, canon_root, forced_widths) = tir_symbolic::lang::canonicalize_for_selection(
                 &semantics.pattern,
                 semantics.root,
                 &immediate_symbols,
             );
-            let mut pattern_widths = tir::sem::infer_widths(&canon_pattern, |_| None);
+            let mut pattern_widths = tir_symbolic::lang::infer_widths(&canon_pattern, |_| None);
             for (index, forced) in forced_widths.iter().enumerate() {
                 if forced.is_some() {
                     pattern_widths[index] = *forced;
@@ -746,7 +746,7 @@ fn emit_instructions<'a>(
                     _ => None,
                 });
             if pattern_widths[canon_root.index()].is_none()
-                && scalar_root_kind(tir::graph::Dag::get_node(&canon_pattern, canon_root))
+                && scalar_root_kind(tir_graph::Dag::get_node(&canon_pattern, canon_root))
                 && let Some(dst_class) = dst_class
                 && let Some(width) = literal_register_class_width(files, dst_class)
             {
@@ -759,7 +759,7 @@ fn emit_instructions<'a>(
             let guarded_fn_ident = format_ident!("isel_guarded_{}", inst.name.to_lowercase());
             let (guarded_emitter, guarded_semantics_call) = match &semantics.guarded_semantics {
                 Some((guarded, guarded_root)) => {
-                    let guarded_widths = tir::sem::infer_widths(guarded, |_| None);
+                    let guarded_widths = tir_symbolic::lang::infer_widths(guarded, |_| None);
                     let guarded_expr = emit_dag_as_code(guarded, *guarded_root, &guarded_widths);
                     (
                         quote! {
@@ -775,8 +775,8 @@ fn emit_instructions<'a>(
                 None => (quote! {}, quote! {}),
             };
             let float_constant_materializer_call =
-                if *tir::graph::Dag::get_node(&canon_pattern, canon_root)
-                    == tir::sem::SymKind::Bitcast
+                if *tir_graph::Dag::get_node(&canon_pattern, canon_root)
+                    == tir_symbolic::lang::SymKind::Bitcast
                     && let Some(dst_class) = dst_class
                     && float_classes.contains(dst_class)
                     && let Some(width) = literal_register_class_width(files, dst_class)
@@ -1108,14 +1108,14 @@ fn emit_instructions<'a>(
             // lowered as `zext(0b0, W)` — the shape the arm64 cbz/cbnz path and the
             // bare-i1 bridge produce, so all three unify in the program e-graph.
             let (root_kind, root_children) = {
-                use tir::graph::Dag;
+                use tir_graph::Dag;
                 (
                     *branch.pattern.get_node(branch.root),
                     branch.pattern.children(branch.root).collect::<Vec<_>>(),
                 )
             };
             let root_is_comparison = {
-                use tir::sem::SymKind::*;
+                use tir_symbolic::lang::SymKind::*;
                 matches!(
                     root_kind,
                     Eq | Ne | Lt | Le | Gt | Ge | ULt | ULe | UGt | UGe
@@ -1127,12 +1127,12 @@ fn emit_instructions<'a>(
             let operand_slots: Option<Vec<(String, String, u32)>> = (root_is_comparison
                 && root_children.len() == 2)
                 .then(|| {
-                    use tir::graph::Dag;
+                    use tir_graph::Dag;
                     root_children
                         .iter()
                         .map(|&child| {
                             let symbol = match branch.pattern.get_leaf_data(child) {
-                                Some(tir::sem::SymPayload::SymbolId(s)) => *s,
+                                Some(tir_symbolic::lang::SymPayload::SymbolId(s)) => *s,
                                 _ => return None,
                             };
                             let (name, class) = ops.iter().find_map(|(name, ty)| {
@@ -1150,7 +1150,7 @@ fn emit_instructions<'a>(
                 // Equality and inequality are commutative. Prefer the form with
                 // the zero register in the second operand, which is the
                 // conventional spelling for RISC-V zero comparisons.
-                let slots = if matches!(root_kind, tir::sem::SymKind::Eq | tir::sem::SymKind::Ne) {
+                let slots = if matches!(root_kind, tir_symbolic::lang::SymKind::Eq | tir_symbolic::lang::SymKind::Ne) {
                     slots.into_iter().rev().collect::<Vec<_>>()
                 } else {
                     slots

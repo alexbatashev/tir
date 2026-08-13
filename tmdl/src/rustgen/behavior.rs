@@ -200,14 +200,14 @@ struct RustBehaviorCtx<'a> {
 
 fn emit_behavior_effect(
     behavior: &sem_expr_state::BehaviorGraph,
-    effect: tir::graph::NodeId,
+    effect: tir_graph::NodeId,
     ctx: &RustBehaviorCtx<'_>,
 ) -> Option<proc_macro2::TokenStream> {
-    use tir::graph::Dag as _;
+    use tir_graph::Dag as _;
 
     let children: Vec<_> = behavior.graph.children(effect).collect();
     match behavior.graph.get_node(effect) {
-        tir::sem::SymKind::StateAssign => match behavior.effect_payload(effect)? {
+        tir_symbolic::lang::SymKind::StateAssign => match behavior.effect_payload(effect)? {
             sem_expr_state::EffectPayload::Assign { destination } => {
                 let eval = emit_behavior_value_eval(behavior, *children.first()?, ctx.mnemonic)?;
                 let write = emit_graph_destination_write(destination, ctx.ops, ctx.mnemonic)?;
@@ -228,13 +228,13 @@ fn emit_behavior_effect(
             }
             _ => None,
         },
-        tir::sem::SymKind::StateStore
-        | tir::sem::SymKind::StateStoreConditional
-        | tir::sem::SymKind::StateFence => {
+        tir_symbolic::lang::SymKind::StateStore
+        | tir_symbolic::lang::SymKind::StateStoreConditional
+        | tir_symbolic::lang::SymKind::StateFence => {
             let eval = emit_behavior_value_eval(behavior, *children.first()?, ctx.mnemonic)?;
             Some(quote! {{ #eval let _ = value; }})
         }
-        tir::sem::SymKind::StateTrap => {
+        tir_symbolic::lang::SymKind::StateTrap => {
             let sem_expr_state::EffectPayload::Trap { argument_count, .. } =
                 behavior.effect_payload(effect)?
             else {
@@ -246,15 +246,15 @@ fn emit_behavior_effect(
         }
         // The simulator executes the no-trap path. Handler state is modeled by
         // the SMT printer, while machine exception handling owns trap entry.
-        tir::sem::SymKind::StateTry => emit_behavior_effect(behavior, *children.first()?, ctx),
-        tir::sem::SymKind::StateBlock => {
+        tir_symbolic::lang::SymKind::StateTry => emit_behavior_effect(behavior, *children.first()?, ctx),
+        tir_symbolic::lang::SymKind::StateBlock => {
             let mut steps = Vec::new();
             for effect in children {
                 steps.push(emit_behavior_effect(behavior, effect, ctx)?);
             }
             Some(quote! { #(#steps)* })
         }
-        tir::sem::SymKind::StateIf => {
+        tir_symbolic::lang::SymKind::StateIf => {
             let cond_eval = emit_behavior_value_eval(behavior, *children.first()?, ctx.mnemonic)?;
             let then_body = emit_behavior_effect(behavior, *children.get(1)?, ctx)?;
             // Omit the `else` arm for a guard with no else clause (e.g. a
@@ -275,14 +275,14 @@ fn emit_behavior_effect(
                 }
             })
         }
-        tir::sem::SymKind::StateHandler => None,
+        tir_symbolic::lang::SymKind::StateHandler => None,
         _ => None,
     }
 }
 
 fn emit_behavior_value_eval(
     behavior: &sem_expr_state::BehaviorGraph,
-    root: tir::graph::NodeId,
+    root: tir_graph::NodeId,
     mnemonic_lit: &proc_macro2::Literal,
 ) -> Option<proc_macro2::TokenStream> {
     let (values, root) = behavior.bound_value_graph(root)?;
@@ -291,7 +291,7 @@ fn emit_behavior_value_eval(
 
 fn emit_binding_value_eval(
     behavior: &sem_expr_state::BehaviorGraph,
-    root: tir::graph::NodeId,
+    root: tir_graph::NodeId,
     mnemonic_lit: &proc_macro2::Literal,
 ) -> Option<proc_macro2::TokenStream> {
     let (values, root) = behavior.binding_value_graph(root)?;
@@ -299,8 +299,8 @@ fn emit_binding_value_eval(
 }
 
 fn emit_lowered_value_eval(
-    dag: &impl tir::graph::Dag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
-    root: tir::graph::NodeId,
+    dag: &impl tir_graph::Dag<Node = tir_symbolic::lang::SymKind, Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>>,
+    root: tir_graph::NodeId,
     mnemonic_lit: &proc_macro2::Literal,
 ) -> Option<proc_macro2::TokenStream> {
     // Build the semantic graph inline (no type annotations, so no `_context`).
@@ -576,7 +576,7 @@ fn emit_cond_branch_rule(
     inst_features: &proc_macro2::TokenStream,
     ops: &[(String, Type)],
     pattern: &tir::sem::SemGraph,
-    root: tir::graph::NodeId,
+    root: tir_graph::NodeId,
     variable_symbols: &HashMap<String, u32>,
     target_operand: &str,
     target_symbol: u32,
@@ -668,8 +668,8 @@ fn emit_cond_branch_rule(
         .filter_map(|(op_name, _)| variable_symbols.get(op_name).copied())
         .collect();
     let (canon_pattern, canon_root, forced_widths) =
-        tir::sem::canonicalize_for_selection(pattern, root, &immediate_symbols);
-    let mut pattern_widths = tir::sem::infer_widths(&canon_pattern, |_| None);
+        tir_symbolic::lang::canonicalize_for_selection(pattern, root, &immediate_symbols);
+    let mut pattern_widths = tir_symbolic::lang::infer_widths(&canon_pattern, |_| None);
     for (index, forced) in forced_widths.iter().enumerate() {
         if forced.is_some() {
             pattern_widths[index] = *forced;
@@ -733,12 +733,12 @@ fn emit_cond_branch_rule(
 /// width binds to — matched but never read by the emitter.
 fn branch_pattern_with_zero(
     pattern: &tir::sem::SemGraph,
-    root: tir::graph::NodeId,
+    root: tir_graph::NodeId,
     reg_symbol: u32,
     width_symbol: u32,
-) -> (tir::sem::SemGraph, tir::graph::NodeId) {
+) -> (tir::sem::SemGraph, tir_graph::NodeId) {
     let mut out = tir::sem::SemGraph::new();
-    let mut memo: HashMap<usize, tir::graph::NodeId> = HashMap::new();
+    let mut memo: HashMap<usize, tir_graph::NodeId> = HashMap::new();
     let new_root =
         clone_pattern_with_zero(pattern, root, reg_symbol, width_symbol, &mut out, &mut memo);
     (out, new_root)
@@ -746,27 +746,27 @@ fn branch_pattern_with_zero(
 
 fn clone_pattern_with_zero(
     pattern: &tir::sem::SemGraph,
-    node: tir::graph::NodeId,
+    node: tir_graph::NodeId,
     reg_symbol: u32,
     width_symbol: u32,
     out: &mut tir::sem::SemGraph,
-    memo: &mut HashMap<usize, tir::graph::NodeId>,
-) -> tir::graph::NodeId {
-    use tir::graph::{Dag, MutDag};
+    memo: &mut HashMap<usize, tir_graph::NodeId>,
+) -> tir_graph::NodeId {
+    use tir_graph::{Dag, MutDag};
     if let Some(&existing) = memo.get(&node.index()) {
         return existing;
     }
-    if *pattern.get_node(node) == tir::sem::SymKind::Symbol
+    if *pattern.get_node(node) == tir_symbolic::lang::SymKind::Symbol
         && matches!(
             pattern.get_leaf_data(node),
-            Some(tir::sem::SymPayload::SymbolId(s)) if *s == reg_symbol
+            Some(tir_symbolic::lang::SymPayload::SymbolId(s)) if *s == reg_symbol
         )
     {
-        let zero = out.add_node(tir::sem::SymKind::Constant);
+        let zero = out.add_node(tir_symbolic::lang::SymKind::Constant);
         out.set_leaf_data(zero, tir::sem::int_payload(1, 0, false));
-        let width = out.add_node(tir::sem::SymKind::Symbol);
-        out.set_leaf_data(width, tir::sem::SymPayload::SymbolId(width_symbol));
-        let zext = out.add_node(tir::sem::SymKind::ZExt);
+        let width = out.add_node(tir_symbolic::lang::SymKind::Symbol);
+        out.set_leaf_data(width, tir_symbolic::lang::SymPayload::SymbolId(width_symbol));
+        let zext = out.add_node(tir_symbolic::lang::SymKind::ZExt);
         out.add_edge(zext, zero);
         out.add_edge(zext, width);
         memo.insert(node.index(), zext);
@@ -775,7 +775,7 @@ fn clone_pattern_with_zero(
     // Children first: the store keeps strict post-order (a child's index must
     // precede its parent's).
     let kind = *pattern.get_node(node);
-    let new_children: Vec<tir::graph::NodeId> = pattern
+    let new_children: Vec<tir_graph::NodeId> = pattern
         .children(node)
         .collect::<Vec<_>>()
         .into_iter()
@@ -793,8 +793,8 @@ fn clone_pattern_with_zero(
 }
 
 fn emit_dag_as_code(
-    dag: &impl tir::graph::Dag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
-    root: tir::graph::NodeId,
+    dag: &impl tir_graph::Dag<Node = tir_symbolic::lang::SymKind, Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>>,
+    root: tir_graph::NodeId,
     widths: &[Option<u32>],
 ) -> proc_macro2::TokenStream {
     let mut ops: Vec<tir::sem::SemOp> = Vec::new();
@@ -809,15 +809,15 @@ fn emit_dag_as_code(
 
         if !matches!(
             dag.get_node(node_id),
-            tir::sem::SymKind::FAdd
-                | tir::sem::SymKind::FSub
-                | tir::sem::SymKind::FMul
-                | tir::sem::SymKind::FDiv
-                | tir::sem::SymKind::SIToFP
-                | tir::sem::SymKind::UIToFP
-                | tir::sem::SymKind::Bitcast
-                | tir::sem::SymKind::LoadMemory
-                | tir::sem::SymKind::LoadReserved
+            tir_symbolic::lang::SymKind::FAdd
+                | tir_symbolic::lang::SymKind::FSub
+                | tir_symbolic::lang::SymKind::FMul
+                | tir_symbolic::lang::SymKind::FDiv
+                | tir_symbolic::lang::SymKind::SIToFP
+                | tir_symbolic::lang::SymKind::UIToFP
+                | tir_symbolic::lang::SymKind::Bitcast
+                | tir_symbolic::lang::SymKind::LoadMemory
+                | tir_symbolic::lang::SymKind::LoadReserved
         ) && dag.get_leaf_data(node_id).is_none()
             && let Some(Some(width)) = widths.get(node_id.index()).copied()
         {
@@ -825,7 +825,7 @@ fn emit_dag_as_code(
             has_typed_node = true;
         }
 
-        let children: Vec<tir::graph::NodeId> = dag.children(node_id).collect();
+        let children: Vec<tir_graph::NodeId> = dag.children(node_id).collect();
         for child_id in children {
             ops.push(tir::sem::SemOp::Edge(
                 counter as u32,
@@ -854,8 +854,9 @@ fn emit_dag_as_code(
     }
 }
 
-fn payload_desc(payload: &tir::sem::SymPayload<tir::ValueId>) -> tir::sem::SemPayloadDesc {
-    use tir::sem::{SemPayloadDesc, SymPayload};
+fn payload_desc(payload: &tir_symbolic::lang::SymPayload<tir::ValueId>) -> tir::sem::SemPayloadDesc {
+    use tir::sem::SemPayloadDesc;
+    use tir_symbolic::lang::SymPayload;
     match payload {
         SymPayload::SymbolId(id) => SemPayloadDesc::SymbolId(*id),
         SymPayload::Value(value) => SemPayloadDesc::Value(value.number()),
@@ -872,8 +873,8 @@ fn payload_desc(payload: &tir::sem::SymPayload<tir::ValueId>) -> tir::sem::SemPa
     }
 }
 
-fn emit_expr_kind_ts(kind: &tir::sem::SymKind) -> proc_macro2::TokenStream {
-    let variant = tir::sem::scalar_op(*kind).map_or_else(
+fn emit_expr_kind_ts(kind: &tir_symbolic::lang::SymKind) -> proc_macro2::TokenStream {
+    let variant = tir_symbolic::lang::scalar_op(*kind).map_or_else(
         || format_ident!("{kind:?}"),
         |op| format_ident!("{}", op.rust),
     );

@@ -96,11 +96,11 @@ pub fn eval_bits_width(expr: &ast::Expr, params: &HashMap<String, i64>) -> Optio
     if !lowering.variable_symbols.is_empty() || !lowering.register_symbols.is_empty() {
         return None;
     }
-    match tir::sem::execute(&graph, &[]) {
-        tir::sem::Value::Int(v) => u16::try_from(v.to_u64()).ok(),
-        tir::sem::Value::Float(_) | tir::sem::Value::Iterator(_) | tir::sem::Value::RawBits(_) => {
-            None
-        }
+    match tir_symbolic::lang::execute(&graph, &[]) {
+        tir_symbolic::lang::Value::Int(v) => u16::try_from(v.to_u64()).ok(),
+        tir_symbolic::lang::Value::Float(_)
+        | tir_symbolic::lang::Value::Iterator(_)
+        | tir_symbolic::lang::Value::RawBits(_) => None,
     }
 }
 

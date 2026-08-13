@@ -295,10 +295,10 @@ fn fixed_write_slot_name(reg_name: &str) -> String {
 /// definer's write substitutes for its read) to a constant true.
 fn subgraphs_equal(
     graph: &tir::sem::SemGraph,
-    a: tir::graph::NodeId,
-    b: tir::graph::NodeId,
+    a: tir_graph::NodeId,
+    b: tir_graph::NodeId,
 ) -> bool {
-    use tir::graph::Dag;
+    use tir_graph::Dag;
     if a == b {
         return true;
     }
@@ -333,7 +333,7 @@ fn guard_folds_to_true(
     written_index: u16,
     register_index_map: &HashMap<(String, String), u32>,
 ) -> bool {
-    use tir::graph::Dag;
+    use tir_graph::Dag;
     let mut graph = tir::sem::SemGraph::new();
     let params = HashMap::new();
     let Some((roots, lowering)) = ast::Expr::lower_all_to_sema_with_isa(
@@ -368,7 +368,7 @@ fn guard_folds_to_true(
         &mut memo,
     );
 
-    if *composed.get_node(composed_root) != tir::sem::SymKind::Eq {
+    if *composed.get_node(composed_root) != tir_symbolic::lang::SymKind::Eq {
         return false;
     }
     let children: Vec<_> = composed.children(composed_root).collect();
@@ -383,25 +383,25 @@ fn guard_folds_to_true(
 fn substitute_symbol_with_subgraph(
     dst: &mut tir::sem::SemGraph,
     src: &tir::sem::SemGraph,
-    node: tir::graph::NodeId,
+    node: tir_graph::NodeId,
     symbol: u32,
-    replacement: tir::graph::NodeId,
-    memo: &mut HashMap<usize, tir::graph::NodeId>,
-) -> tir::graph::NodeId {
-    use tir::graph::{Dag, MutDag};
+    replacement: tir_graph::NodeId,
+    memo: &mut HashMap<usize, tir_graph::NodeId>,
+) -> tir_graph::NodeId {
+    use tir_graph::{Dag, MutDag};
     if let Some(&copied) = memo.get(&node.index()) {
         return copied;
     }
-    if *src.get_node(node) == tir::sem::SymKind::Symbol
-        && let Some(tir::sem::SymPayload::SymbolId(id)) = src.get_leaf_data(node)
+    if *src.get_node(node) == tir_symbolic::lang::SymKind::Symbol
+        && let Some(tir_symbolic::lang::SymPayload::SymbolId(id)) = src.get_leaf_data(node)
         && *id == symbol
     {
         let copied = copy_subgraph(dst, src, replacement, &mut HashMap::new());
         memo.insert(node.index(), copied);
         return copied;
     }
-    let children: Vec<tir::graph::NodeId> = src.children(node).collect();
-    let copied_children: Vec<tir::graph::NodeId> = children
+    let children: Vec<tir_graph::NodeId> = src.children(node).collect();
+    let copied_children: Vec<tir_graph::NodeId> = children
         .into_iter()
         .map(|child| substitute_symbol_with_subgraph(dst, src, child, symbol, replacement, memo))
         .collect();
@@ -469,8 +469,8 @@ fn emit_one_division_rule(
 
     let immediate_symbols = HashSet::new();
     let (canon_pattern, canon_root, forced_widths) =
-        tir::sem::canonicalize_for_selection(&pattern, lowering.root, &immediate_symbols);
-    let mut pattern_widths = tir::sem::infer_widths(&canon_pattern, |_| None);
+        tir_symbolic::lang::canonicalize_for_selection(&pattern, lowering.root, &immediate_symbols);
+    let mut pattern_widths = tir_symbolic::lang::infer_widths(&canon_pattern, |_| None);
     for (index, forced) in forced_widths.iter().enumerate() {
         if forced.is_some() {
             pattern_widths[index] = *forced;

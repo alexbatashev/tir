@@ -799,7 +799,7 @@ pub enum Expr {
 }
 
 pub struct SemaLowering {
-    pub root: tir::graph::NodeId,
+    pub root: tir_graph::NodeId,
     pub variable_symbols: HashMap<String, u32>,
     pub register_symbols: HashMap<(String, u32), u32>,
     /// Operand name -> symbol id for `regnum(op)`: a symbol bound to the
@@ -810,12 +810,15 @@ pub struct SemaLowering {
     /// Node -> symbol id for each `let` binding. Targets that evaluate
     /// statements independently read the binding through this symbol instead of
     /// re-evaluating the bound term.
-    pub let_symbols: HashMap<tir::graph::NodeId, u32>,
+    pub let_symbols: HashMap<tir_graph::NodeId, u32>,
 }
 
 struct SemaExprLoweringCtx<
     'a,
-    G: tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
+    G: tir_graph::MutDag<
+            Node = tir_symbolic::lang::SymKind,
+            Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+        >,
 > {
     graph: &'a mut G,
     params: &'a HashMap<String, i64>,
@@ -835,8 +838,8 @@ struct SemaExprLoweringCtx<
     regnum_symbols: HashMap<String, u32>,
     /// `let` bindings in scope: the bound name maps to the node lowered for its
     /// right-hand side, so every use shares that single term.
-    let_bindings: HashMap<String, tir::graph::NodeId>,
-    let_symbols: HashMap<tir::graph::NodeId, u32>,
+    let_bindings: HashMap<String, tir_graph::NodeId>,
+    let_symbols: HashMap<tir_graph::NodeId, u32>,
     had_error: bool,
     /// Stack of `map`/`reduce` lambda parameter names, innermost last. An `Ident`
     /// matching a parameter of the innermost lambda lowers to an `Arg` node whose
@@ -844,8 +847,13 @@ struct SemaExprLoweringCtx<
     lambda_params: Vec<Vec<String>>,
 }
 
-impl<'a, G: tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>>
-    SemaExprLoweringCtx<'a, G>
+impl<
+    'a,
+    G: tir_graph::MutDag<
+            Node = tir_symbolic::lang::SymKind,
+            Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+        >,
+> SemaExprLoweringCtx<'a, G>
 {
     fn new(graph: &'a mut G, params: &'a HashMap<String, i64>) -> Self {
         Self {
@@ -887,9 +895,9 @@ impl<'a, G: tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPay
 
     fn add_node(
         &mut self,
-        kind: tir::sem::SymKind,
-        children: &[tir::graph::NodeId],
-    ) -> tir::graph::NodeId {
+        kind: tir_symbolic::lang::SymKind,
+        children: &[tir_graph::NodeId],
+    ) -> tir_graph::NodeId {
         let node = self.graph.add_node(kind);
         for &child in children {
             self.graph.add_edge(node, child);
@@ -899,18 +907,18 @@ impl<'a, G: tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPay
 
     fn add_leaf(
         &mut self,
-        kind: tir::sem::SymKind,
-        data: tir::sem::SymPayload<tir::ValueId>,
-    ) -> tir::graph::NodeId {
+        kind: tir_symbolic::lang::SymKind,
+        data: tir_symbolic::lang::SymPayload<tir::ValueId>,
+    ) -> tir_graph::NodeId {
         let node = self.graph.add_node(kind);
         self.graph.set_leaf_data(node, data);
         node
     }
 
-    fn add_int_const(&mut self, value: tir_adt::APInt) -> tir::graph::NodeId {
+    fn add_int_const(&mut self, value: tir_adt::APInt) -> tir_graph::NodeId {
         self.add_leaf(
-            tir::sem::SymKind::Constant,
-            tir::sem::SymPayload::Int(value),
+            tir_symbolic::lang::SymKind::Constant,
+            tir_symbolic::lang::SymPayload::Int(value),
         )
     }
 
@@ -918,7 +926,7 @@ impl<'a, G: tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPay
     /// (`self.XLEN / 8`) is folded to the concrete byte count of this ISA
     /// instantiation instead of staying symbolic like other `self.PARAM` uses:
     /// a selection pattern can only match a concrete access size.
-    fn lower_memory_size(&mut self, expr: &Expr) -> tir::graph::NodeId {
+    fn lower_memory_size(&mut self, expr: &Expr) -> tir_graph::NodeId {
         let folded = const_eval_params(expr, self.params, &self.isa_consts);
         match folded {
             Some(bytes) if bytes > 0 => {
@@ -929,7 +937,7 @@ impl<'a, G: tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPay
         }
     }
 
-    fn add_bool_const(&mut self, value: bool) -> tir::graph::NodeId {
+    fn add_bool_const(&mut self, value: bool) -> tir_graph::NodeId {
         self.add_int_const(tir_adt::APInt::new(1, value as u64))
     }
 
@@ -970,7 +978,7 @@ impl<'a, G: tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPay
     /// Lower a `map`/`reduce` lambda's body, binding its parameters so that
     /// references to them become `Arg` nodes. Non-lambda arguments are an error
     /// (caught by the type checker); lowering them directly keeps the graph valid.
-    fn lower_lambda_body(&mut self, arg: &Expr) -> tir::graph::NodeId {
+    fn lower_lambda_body(&mut self, arg: &Expr) -> tir_graph::NodeId {
         let Expr::Lambda(lambda) = arg else {
             self.had_error = true;
             return arg.lower_with_ctx(self);
@@ -983,16 +991,16 @@ impl<'a, G: tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPay
 
     fn build_extract(
         &mut self,
-        input_node: tir::graph::NodeId,
-        high_node: tir::graph::NodeId,
-        low_node: tir::graph::NodeId,
-    ) -> tir::graph::NodeId {
+        input_node: tir_graph::NodeId,
+        high_node: tir_graph::NodeId,
+        low_node: tir_graph::NodeId,
+    ) -> tir_graph::NodeId {
         // A single canonical `Extract` node rather than a shift/and/mask tree, so
         // instruction selection can match truncation/bit-slicing structurally
         // (e.g. addw = sext(extract(rs1+rs2, 31, 0), XLEN)) instead of pattern-
         // matching a fragile arithmetic expansion.
         self.add_node(
-            tir::sem::SymKind::Extract,
+            tir_symbolic::lang::SymKind::Extract,
             &[input_node, high_node, low_node],
         )
     }
@@ -1101,11 +1109,14 @@ impl From<If> for Expr {
 
 impl Expr {
     fn lower_with_ctx<
-        G: tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
+        G: tir_graph::MutDag<
+                Node = tir_symbolic::lang::SymKind,
+                Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+            >,
     >(
         &self,
         ctx: &mut SemaExprLoweringCtx<'_, G>,
-    ) -> tir::graph::NodeId {
+    ) -> tir_graph::NodeId {
         // Inside a `map`/`reduce` lambda, a reference to one of its parameters
         // lowers to an `Arg` leaf carrying the parameter's position.
         if let Expr::Ident(id) = self
@@ -1113,8 +1124,8 @@ impl Expr {
             && let Some(idx) = params.iter().position(|p| p == &id.name)
         {
             return ctx.add_leaf(
-                tir::sem::SymKind::Arg,
-                tir::sem::SymPayload::Int(tir_adt::APInt::new(32, idx as u64)),
+                tir_symbolic::lang::SymKind::Arg,
+                tir_symbolic::lang::SymPayload::Int(tir_adt::APInt::new(32, idx as u64)),
             );
         }
         match self {
@@ -1144,22 +1155,22 @@ impl Expr {
 
     pub fn as_sema_expr(
         &self,
-        g: &mut impl tir::graph::MutDag<
-            Node = tir::sem::SymKind,
-            Leaf = tir::sem::SymPayload<tir::ValueId>,
+        g: &mut impl tir_graph::MutDag<
+            Node = tir_symbolic::lang::SymKind,
+            Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
         >,
-    ) -> tir::graph::NodeId {
+    ) -> tir_graph::NodeId {
         self.as_sema_expr_with_params(g, &HashMap::new())
     }
 
     pub(crate) fn as_sema_expr_with_params(
         &self,
-        g: &mut impl tir::graph::MutDag<
-            Node = tir::sem::SymKind,
-            Leaf = tir::sem::SymPayload<tir::ValueId>,
+        g: &mut impl tir_graph::MutDag<
+            Node = tir_symbolic::lang::SymKind,
+            Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
         >,
         params: &HashMap<String, i64>,
-    ) -> tir::graph::NodeId {
+    ) -> tir_graph::NodeId {
         let mut ctx = SemaExprLoweringCtx::new(g, params);
         self.lower_with_ctx(&mut ctx)
     }
@@ -1169,9 +1180,9 @@ impl Expr {
     /// contains operations that cannot be represented.
     pub fn lower_to_sema(
         &self,
-        g: &mut impl tir::graph::MutDag<
-            Node = tir::sem::SymKind,
-            Leaf = tir::sem::SymPayload<tir::ValueId>,
+        g: &mut impl tir_graph::MutDag<
+            Node = tir_symbolic::lang::SymKind,
+            Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
         >,
         params: &HashMap<String, i64>,
         isa_consts: &HashMap<String, i64>,
@@ -1196,9 +1207,9 @@ impl Expr {
     /// concrete width that instruction selection can match.
     pub fn lower_to_sema_with_isa(
         &self,
-        g: &mut impl tir::graph::MutDag<
-            Node = tir::sem::SymKind,
-            Leaf = tir::sem::SymPayload<tir::ValueId>,
+        g: &mut impl tir_graph::MutDag<
+            Node = tir_symbolic::lang::SymKind,
+            Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
         >,
         params: &HashMap<String, i64>,
         isa_consts: &HashMap<String, i64>,
@@ -1225,14 +1236,14 @@ impl Expr {
     /// same `rn`/`rm`). Returns each expression's root in order.
     pub fn lower_all_to_sema_with_isa(
         exprs: &[&Expr],
-        g: &mut impl tir::graph::MutDag<
-            Node = tir::sem::SymKind,
-            Leaf = tir::sem::SymPayload<tir::ValueId>,
+        g: &mut impl tir_graph::MutDag<
+            Node = tir_symbolic::lang::SymKind,
+            Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
         >,
         params: &HashMap<String, i64>,
         isa_consts: &HashMap<String, i64>,
         register_indices: &HashMap<(String, String), u32>,
-    ) -> Option<(Vec<tir::graph::NodeId>, SemaLowering)> {
+    ) -> Option<(Vec<tir_graph::NodeId>, SemaLowering)> {
         let mut ctx = SemaExprLoweringCtx::new_with_registers(g, params, register_indices);
         ctx.isa_consts = isa_consts.clone();
         let roots: Vec<_> = exprs
@@ -1262,9 +1273,9 @@ impl Expr {
     /// stable register slot instead of failing to lower.
     pub fn lower_to_sema_with_registers(
         &self,
-        g: &mut impl tir::graph::MutDag<
-            Node = tir::sem::SymKind,
-            Leaf = tir::sem::SymPayload<tir::ValueId>,
+        g: &mut impl tir_graph::MutDag<
+            Node = tir_symbolic::lang::SymKind,
+            Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
         >,
         params: &HashMap<String, i64>,
         register_indices: &HashMap<(String, String), u32>,
@@ -1286,22 +1297,28 @@ impl Expr {
 
 impl Assign {
     fn as_sema_expr<
-        G: tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
+        G: tir_graph::MutDag<
+                Node = tir_symbolic::lang::SymKind,
+                Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+            >,
     >(
         &self,
         ctx: &mut SemaExprLoweringCtx<'_, G>,
-    ) -> tir::graph::NodeId {
+    ) -> tir_graph::NodeId {
         self.value.lower_with_ctx(ctx)
     }
 }
 
 impl Let {
     fn as_sema_expr<
-        G: tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
+        G: tir_graph::MutDag<
+                Node = tir_symbolic::lang::SymKind,
+                Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+            >,
     >(
         &self,
         ctx: &mut SemaExprLoweringCtx<'_, G>,
-    ) -> tir::graph::NodeId {
+    ) -> tir_graph::NodeId {
         let node = self.value.lower_with_ctx(ctx);
         let symbol = ctx.alloc_variable_symbol();
         ctx.let_symbols.insert(node, symbol);
@@ -1312,11 +1329,14 @@ impl Let {
 
 impl Lit {
     fn as_sema_expr<
-        G: tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
+        G: tir_graph::MutDag<
+                Node = tir_symbolic::lang::SymKind,
+                Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+            >,
     >(
         &self,
         ctx: &mut SemaExprLoweringCtx<'_, G>,
-    ) -> tir::graph::NodeId {
+    ) -> tir_graph::NodeId {
         match self {
             Lit::Int(lit_int) => {
                 let value = lit_int.parse_u64();
@@ -1336,11 +1356,14 @@ impl Lit {
 
 impl Ident {
     fn as_sema_expr<
-        G: tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
+        G: tir_graph::MutDag<
+                Node = tir_symbolic::lang::SymKind,
+                Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+            >,
     >(
         &self,
         ctx: &mut SemaExprLoweringCtx<'_, G>,
-    ) -> tir::graph::NodeId {
+    ) -> tir_graph::NodeId {
         if let Some(&node) = ctx.let_bindings.get(&self.name) {
             return node;
         }
@@ -1367,8 +1390,8 @@ impl Ident {
         } else {
             let id = ctx.get_or_create_variable_symbol(self.name.clone());
             ctx.add_leaf(
-                tir::sem::SymKind::Symbol,
-                tir::sem::SymPayload::SymbolId(id),
+                tir_symbolic::lang::SymKind::Symbol,
+                tir_symbolic::lang::SymPayload::SymbolId(id),
             )
         }
     }
@@ -1376,11 +1399,14 @@ impl Ident {
 
 impl Path {
     fn as_sema_expr<
-        G: tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
+        G: tir_graph::MutDag<
+                Node = tir_symbolic::lang::SymKind,
+                Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+            >,
     >(
         &self,
         ctx: &mut SemaExprLoweringCtx<'_, G>,
-    ) -> tir::graph::NodeId {
+    ) -> tir_graph::NodeId {
         if self.remainder.len() != 1 {
             ctx.had_error = true;
             return ctx.add_int_const(tir_adt::APInt::new(64, 0));
@@ -1419,19 +1445,22 @@ impl Path {
 
         let symbol_id = ctx.get_or_create_register_symbol(self.base.clone(), number);
         ctx.add_leaf(
-            tir::sem::SymKind::Symbol,
-            tir::sem::SymPayload::SymbolId(symbol_id),
+            tir_symbolic::lang::SymKind::Symbol,
+            tir_symbolic::lang::SymPayload::SymbolId(symbol_id),
         )
     }
 }
 
 impl Field {
     fn as_sema_expr<
-        G: tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
+        G: tir_graph::MutDag<
+                Node = tir_symbolic::lang::SymKind,
+                Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+            >,
     >(
         &self,
         ctx: &mut SemaExprLoweringCtx<'_, G>,
-    ) -> tir::graph::NodeId {
+    ) -> tir_graph::NodeId {
         if let Expr::Ident(base_ident) = &*self.base {
             if base_ident.name == "self" {
                 return Ident::new(self.member.clone(), self.span).as_sema_expr(ctx);
@@ -1450,8 +1479,8 @@ impl Field {
             let symbol_id =
                 ctx.get_or_create_register_symbol(base_ident.name.clone(), register_number);
             ctx.add_leaf(
-                tir::sem::SymKind::Symbol,
-                tir::sem::SymPayload::SymbolId(symbol_id),
+                tir_symbolic::lang::SymKind::Symbol,
+                tir_symbolic::lang::SymPayload::SymbolId(symbol_id),
             )
         } else {
             panic!("register field access requires base to be an identifier")
@@ -1461,15 +1490,18 @@ impl Field {
 
 impl Binary {
     fn as_sema_expr<
-        G: tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
+        G: tir_graph::MutDag<
+                Node = tir_symbolic::lang::SymKind,
+                Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+            >,
     >(
         &self,
         ctx: &mut SemaExprLoweringCtx<'_, G>,
-    ) -> tir::graph::NodeId {
+    ) -> tir_graph::NodeId {
         let lhs = self.lhs.lower_with_ctx(ctx);
         let rhs = self.rhs.lower_with_ctx(ctx);
 
-        use tir::sem::SymKind as K;
+        use tir_symbolic::lang::SymKind as K;
 
         match self.op {
             BinOp::Add => ctx.add_node(K::Add, &[lhs, rhs]),
@@ -1499,12 +1531,15 @@ impl Binary {
 
 impl Unary {
     fn as_sema_expr<
-        G: tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
+        G: tir_graph::MutDag<
+                Node = tir_symbolic::lang::SymKind,
+                Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+            >,
     >(
         &self,
         ctx: &mut SemaExprLoweringCtx<'_, G>,
-    ) -> tir::graph::NodeId {
-        use tir::sem::SymKind as K;
+    ) -> tir_graph::NodeId {
+        use tir_symbolic::lang::SymKind as K;
 
         match self.op {
             UnOp::BitwiseNot => {
@@ -1536,11 +1571,14 @@ impl Unary {
 
 impl If {
     fn as_sema_expr<
-        G: tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
+        G: tir_graph::MutDag<
+                Node = tir_symbolic::lang::SymKind,
+                Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+            >,
     >(
         &self,
         ctx: &mut SemaExprLoweringCtx<'_, G>,
-    ) -> tir::graph::NodeId {
+    ) -> tir_graph::NodeId {
         let cond = self.cond.lower_with_ctx(ctx);
         let then_ = self.then.lower_with_ctx(ctx);
         let else_ = if let Some(else_expr) = &self.else_ {
@@ -1549,17 +1587,20 @@ impl If {
             ctx.add_bool_const(false)
         };
 
-        ctx.add_node(tir::sem::SymKind::If, &[cond, then_, else_])
+        ctx.add_node(tir_symbolic::lang::SymKind::If, &[cond, then_, else_])
     }
 }
 
 impl Block {
     fn as_sema_expr<
-        G: tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
+        G: tir_graph::MutDag<
+                Node = tir_symbolic::lang::SymKind,
+                Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+            >,
     >(
         &self,
         ctx: &mut SemaExprLoweringCtx<'_, G>,
-    ) -> tir::graph::NodeId {
+    ) -> tir_graph::NodeId {
         if self.stmts.is_empty() {
             ctx.add_bool_const(false)
         } else {
@@ -1573,11 +1614,14 @@ impl Block {
 
 impl Slice {
     fn as_sema_expr<
-        G: tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
+        G: tir_graph::MutDag<
+                Node = tir_symbolic::lang::SymKind,
+                Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+            >,
     >(
         &self,
         ctx: &mut SemaExprLoweringCtx<'_, G>,
-    ) -> tir::graph::NodeId {
+    ) -> tir_graph::NodeId {
         let input = self.base.lower_with_ctx(ctx);
         let high = Lit::Int(LitInt::new(self.end.to_string(), self.span)).as_sema_expr(ctx);
         let low = Lit::Int(LitInt::new(self.start.to_string(), self.span)).as_sema_expr(ctx);
@@ -1587,11 +1631,14 @@ impl Slice {
 
 impl IndexAccess {
     fn as_sema_expr<
-        G: tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
+        G: tir_graph::MutDag<
+                Node = tir_symbolic::lang::SymKind,
+                Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+            >,
     >(
         &self,
         ctx: &mut SemaExprLoweringCtx<'_, G>,
-    ) -> tir::graph::NodeId {
+    ) -> tir_graph::NodeId {
         let input = self.base.lower_with_ctx(ctx);
         let idx = Lit::Int(LitInt::new(self.index.to_string(), self.span)).as_sema_expr(ctx);
         ctx.build_extract(input, idx, idx)
@@ -1651,9 +1698,12 @@ fn pack_ordering_meta<G>(
     ctx: &mut SemaExprLoweringCtx<'_, G>,
     base_meta: Option<&Expr>,
     ordering: Option<&Expr>,
-) -> tir::graph::NodeId
+) -> tir_graph::NodeId
 where
-    G: tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
+    G: tir_graph::MutDag<
+            Node = tir_symbolic::lang::SymKind,
+            Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+        >,
 {
     let Some(ordering) = ordering else {
         return match base_meta {
@@ -1681,16 +1731,19 @@ where
         }
         None => ctx.add_int_const(tir_adt::APInt::new(1, 0)),
     };
-    ctx.add_node(tir::sem::SymKind::Concat, &[ord_node, bit0_node])
+    ctx.add_node(tir_symbolic::lang::SymKind::Concat, &[ord_node, bit0_node])
 }
 
 impl Call {
     fn as_sema_expr<
-        G: tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
+        G: tir_graph::MutDag<
+                Node = tir_symbolic::lang::SymKind,
+                Leaf = tir_symbolic::lang::SymPayload<tir::ValueId>,
+            >,
     >(
         &self,
         ctx: &mut SemaExprLoweringCtx<'_, G>,
-    ) -> tir::graph::NodeId {
+    ) -> tir_graph::NodeId {
         let Expr::BuiltinFunction(builtin) = &*self.callee else {
             panic!("only builtin functions are supported");
         };
@@ -1701,7 +1754,7 @@ impl Call {
                 let input = self.arguments[0].lower_with_ctx(ctx);
                 let min = self.arguments[1].lower_with_ctx(ctx);
                 let max = self.arguments[2].lower_with_ctx(ctx);
-                ctx.add_node(tir::sem::SymKind::Clamp, &[input, min, max])
+                ctx.add_node(tir_symbolic::lang::SymKind::Clamp, &[input, min, max])
             }
             BuiltinFunction::Extract => {
                 assert!(self.arguments.len() == 3, "extract requires 3 arguments");
@@ -1713,12 +1766,12 @@ impl Call {
             BuiltinFunction::Bitcast => {
                 assert!(self.arguments.len() == 1, "bitcast requires 1 argument");
                 let input = self.arguments[0].lower_with_ctx(ctx);
-                ctx.add_node(tir::sem::SymKind::Bitcast, &[input])
+                ctx.add_node(tir_symbolic::lang::SymKind::Bitcast, &[input])
             }
             BuiltinFunction::Log2Ceil => {
                 assert!(self.arguments.len() == 1, "log2Ceil requires 1 argument");
                 let input = self.arguments[0].lower_with_ctx(ctx);
-                ctx.add_node(tir::sem::SymKind::Log2Ceil, &[input])
+                ctx.add_node(tir_symbolic::lang::SymKind::Log2Ceil, &[input])
             }
             BuiltinFunction::Regnum => {
                 // The argument names a register operand; the result is a symbol
@@ -1731,21 +1784,21 @@ impl Call {
                 };
                 let sym = ctx.get_or_create_regnum_symbol(id.name.clone());
                 ctx.add_leaf(
-                    tir::sem::SymKind::Symbol,
-                    tir::sem::SymPayload::SymbolId(sym),
+                    tir_symbolic::lang::SymKind::Symbol,
+                    tir_symbolic::lang::SymPayload::SymbolId(sym),
                 )
             }
             BuiltinFunction::SExt => {
                 assert!(self.arguments.len() == 2, "sext requires 2 arguments");
                 let input = self.arguments[0].lower_with_ctx(ctx);
                 let width = self.arguments[1].lower_with_ctx(ctx);
-                ctx.add_node(tir::sem::SymKind::SExt, &[input, width])
+                ctx.add_node(tir_symbolic::lang::SymKind::SExt, &[input, width])
             }
             BuiltinFunction::ZExt => {
                 assert!(self.arguments.len() == 2, "zext requires 2 arguments");
                 let input = self.arguments[0].lower_with_ctx(ctx);
                 let width = self.arguments[1].lower_with_ctx(ctx);
-                ctx.add_node(tir::sem::SymKind::ZExt, &[input, width])
+                ctx.add_node(tir_symbolic::lang::SymKind::ZExt, &[input, width])
             }
             BuiltinFunction::Load => {
                 assert!(
@@ -1756,7 +1809,10 @@ impl Call {
                 let bytes = ctx.lower_memory_size(&self.arguments[1]);
                 let metadata =
                     pack_ordering_meta(ctx, Some(&self.arguments[2]), self.arguments.get(3));
-                ctx.add_node(tir::sem::SymKind::LoadMemory, &[address, bytes, metadata])
+                ctx.add_node(
+                    tir_symbolic::lang::SymKind::LoadMemory,
+                    &[address, bytes, metadata],
+                )
             }
             BuiltinFunction::Store => {
                 assert!(
@@ -1768,7 +1824,7 @@ impl Call {
                 let value = self.arguments[2].lower_with_ctx(ctx);
                 let address_space = pack_ordering_meta(ctx, None, self.arguments.get(3));
                 ctx.add_node(
-                    tir::sem::SymKind::StoreMemory,
+                    tir_symbolic::lang::SymKind::StoreMemory,
                     &[address, bytes, value, address_space],
                 )
             }
@@ -1780,7 +1836,10 @@ impl Call {
                 let address = self.arguments[0].lower_with_ctx(ctx);
                 let bytes = self.arguments[1].lower_with_ctx(ctx);
                 let ordering = self.arguments[2].lower_with_ctx(ctx);
-                ctx.add_node(tir::sem::SymKind::LoadReserved, &[address, bytes, ordering])
+                ctx.add_node(
+                    tir_symbolic::lang::SymKind::LoadReserved,
+                    &[address, bytes, ordering],
+                )
             }
             BuiltinFunction::StoreConditional => {
                 assert!(
@@ -1792,7 +1851,7 @@ impl Call {
                 let value = self.arguments[2].lower_with_ctx(ctx);
                 let ordering = self.arguments[3].lower_with_ctx(ctx);
                 ctx.add_node(
-                    tir::sem::SymKind::StoreConditional,
+                    tir_symbolic::lang::SymKind::StoreConditional,
                     &[address, bytes, value, ordering],
                 )
             }
@@ -1815,7 +1874,7 @@ impl Call {
                 let value = self.arguments[3].lower_with_ctx(ctx);
                 let ordering = self.arguments[4].lower_with_ctx(ctx);
                 ctx.add_node(
-                    tir::sem::SymKind::AtomicRmw,
+                    tir_symbolic::lang::SymKind::AtomicRmw,
                     &[op, address, bytes, value, ordering],
                 )
             }
@@ -1824,13 +1883,13 @@ impl Call {
                 let pred = self.arguments[0].lower_with_ctx(ctx);
                 let succ = self.arguments[1].lower_with_ctx(ctx);
                 let kind = ctx.add_int_const(tir_adt::APInt::new(1, 0));
-                ctx.add_node(tir::sem::SymKind::Fence, &[pred, succ, kind])
+                ctx.add_node(tir_symbolic::lang::SymKind::Fence, &[pred, succ, kind])
             }
             BuiltinFunction::FenceI => {
                 assert!(self.arguments.is_empty(), "fence_i requires 0 arguments");
                 let zero = ctx.add_int_const(tir_adt::APInt::new(1, 0));
                 let kind = ctx.add_int_const(tir_adt::APInt::new(1, 1));
-                ctx.add_node(tir::sem::SymKind::Fence, &[zero, zero, kind])
+                ctx.add_node(tir_symbolic::lang::SymKind::Fence, &[zero, zero, kind])
             }
             // trap has no semantic-expression form; codegen intercepts trap
             // calls before lowering, so reaching here means the behavior used
@@ -1853,12 +1912,12 @@ impl Call {
                     .iter()
                     .map(|arg| arg.lower_with_ctx(ctx))
                     .collect();
-                ctx.add_node(tir::sem::SymKind::Split, &children)
+                ctx.add_node(tir_symbolic::lang::SymKind::Split, &children)
             }
             BuiltinFunction::Concat => {
                 assert!(self.arguments.len() == 1, "concat requires 1 argument");
                 let iter = self.arguments[0].lower_with_ctx(ctx);
-                ctx.add_node(tir::sem::SymKind::IterConcat, &[iter])
+                ctx.add_node(tir_symbolic::lang::SymKind::IterConcat, &[iter])
             }
             BuiltinFunction::Zip => {
                 assert!(
@@ -1870,25 +1929,25 @@ impl Call {
                     .iter()
                     .map(|arg| arg.lower_with_ctx(ctx))
                     .collect();
-                ctx.add_node(tir::sem::SymKind::Zip, &children)
+                ctx.add_node(tir_symbolic::lang::SymKind::Zip, &children)
             }
             BuiltinFunction::Iota => {
                 assert!(self.arguments.len() == 2, "iota requires 2 arguments");
                 let count = self.arguments[0].lower_with_ctx(ctx);
                 let width = self.arguments[1].lower_with_ctx(ctx);
-                ctx.add_node(tir::sem::SymKind::Iota, &[count, width])
+                ctx.add_node(tir_symbolic::lang::SymKind::Iota, &[count, width])
             }
             BuiltinFunction::Map => {
                 assert!(self.arguments.len() == 2, "map requires 2 arguments");
                 let iter = self.arguments[0].lower_with_ctx(ctx);
                 let body = ctx.lower_lambda_body(&self.arguments[1]);
-                ctx.add_node(tir::sem::SymKind::Map, &[iter, body])
+                ctx.add_node(tir_symbolic::lang::SymKind::Map, &[iter, body])
             }
             BuiltinFunction::Reduce => {
                 assert!(self.arguments.len() == 2, "reduce requires 2 arguments");
                 let iter = self.arguments[0].lower_with_ctx(ctx);
                 let body = ctx.lower_lambda_body(&self.arguments[1]);
-                ctx.add_node(tir::sem::SymKind::Reduce, &[iter, body])
+                ctx.add_node(tir_symbolic::lang::SymKind::Reduce, &[iter, body])
             }
             BuiltinFunction::FAdd
             | BuiltinFunction::FSub
@@ -1897,12 +1956,12 @@ impl Call {
             | BuiltinFunction::FMin
             | BuiltinFunction::FMax => {
                 let kind = match builtin {
-                    BuiltinFunction::FAdd => tir::sem::SymKind::FAdd,
-                    BuiltinFunction::FSub => tir::sem::SymKind::FSub,
-                    BuiltinFunction::FMul => tir::sem::SymKind::FMul,
-                    BuiltinFunction::FDiv => tir::sem::SymKind::FDiv,
-                    BuiltinFunction::FMin => tir::sem::SymKind::FMin,
-                    _ => tir::sem::SymKind::FMax,
+                    BuiltinFunction::FAdd => tir_symbolic::lang::SymKind::FAdd,
+                    BuiltinFunction::FSub => tir_symbolic::lang::SymKind::FSub,
+                    BuiltinFunction::FMul => tir_symbolic::lang::SymKind::FMul,
+                    BuiltinFunction::FDiv => tir_symbolic::lang::SymKind::FDiv,
+                    BuiltinFunction::FMin => tir_symbolic::lang::SymKind::FMin,
+                    _ => tir_symbolic::lang::SymKind::FMax,
                 };
                 assert!(
                     self.arguments.len() == 2,
@@ -1915,52 +1974,61 @@ impl Call {
             BuiltinFunction::AsFloat => {
                 assert!(self.arguments.len() == 1, "asfloat requires 1 argument");
                 let input = self.arguments[0].lower_with_ctx(ctx);
-                ctx.add_node(tir::sem::SymKind::AsFloat, &[input])
+                ctx.add_node(tir_symbolic::lang::SymKind::AsFloat, &[input])
             }
             BuiltinFunction::FCvt => {
                 assert!(self.arguments.len() == 3, "fcvt requires 3 arguments");
                 let input = self.arguments[0].lower_with_ctx(ctx);
                 let exponent = self.arguments[1].lower_with_ctx(ctx);
                 let mantissa = self.arguments[2].lower_with_ctx(ctx);
-                ctx.add_node(tir::sem::SymKind::FCvt, &[input, exponent, mantissa])
+                ctx.add_node(
+                    tir_symbolic::lang::SymKind::FCvt,
+                    &[input, exponent, mantissa],
+                )
             }
             BuiltinFunction::Fma => {
                 assert!(self.arguments.len() == 3, "fma requires 3 arguments");
                 let a = self.arguments[0].lower_with_ctx(ctx);
                 let b = self.arguments[1].lower_with_ctx(ctx);
                 let c = self.arguments[2].lower_with_ctx(ctx);
-                ctx.add_node(tir::sem::SymKind::Fma, &[a, b, c])
+                ctx.add_node(tir_symbolic::lang::SymKind::Fma, &[a, b, c])
             }
             BuiltinFunction::Sqrt => {
                 assert!(self.arguments.len() == 1, "sqrt requires 1 argument");
                 let input = self.arguments[0].lower_with_ctx(ctx);
-                ctx.add_node(tir::sem::SymKind::Sqrt, &[input])
+                ctx.add_node(tir_symbolic::lang::SymKind::Sqrt, &[input])
             }
             BuiltinFunction::SIToFP => {
                 assert!(self.arguments.len() == 3, "sitofp requires 3 arguments");
                 let input = self.arguments[0].lower_with_ctx(ctx);
                 let exponent = self.arguments[1].lower_with_ctx(ctx);
                 let mantissa = self.arguments[2].lower_with_ctx(ctx);
-                ctx.add_node(tir::sem::SymKind::SIToFP, &[input, exponent, mantissa])
+                ctx.add_node(
+                    tir_symbolic::lang::SymKind::SIToFP,
+                    &[input, exponent, mantissa],
+                )
             }
             BuiltinFunction::UIToFP => {
                 assert!(self.arguments.len() == 3, "uitofp requires 3 arguments");
                 let input = self.arguments[0].lower_with_ctx(ctx);
                 let exponent = self.arguments[1].lower_with_ctx(ctx);
                 let mantissa = self.arguments[2].lower_with_ctx(ctx);
-                ctx.add_node(tir::sem::SymKind::UIToFP, &[input, exponent, mantissa])
+                ctx.add_node(
+                    tir_symbolic::lang::SymKind::UIToFP,
+                    &[input, exponent, mantissa],
+                )
             }
             BuiltinFunction::FPToSI => {
                 assert!(self.arguments.len() == 2, "fptosi requires 2 arguments");
                 let input = self.arguments[0].lower_with_ctx(ctx);
                 let width = self.arguments[1].lower_with_ctx(ctx);
-                ctx.add_node(tir::sem::SymKind::FPToSI, &[input, width])
+                ctx.add_node(tir_symbolic::lang::SymKind::FPToSI, &[input, width])
             }
             BuiltinFunction::FPToUI => {
                 assert!(self.arguments.len() == 2, "fptoui requires 2 arguments");
                 let input = self.arguments[0].lower_with_ctx(ctx);
                 let width = self.arguments[1].lower_with_ctx(ctx);
-                ctx.add_node(tir::sem::SymKind::FPToUI, &[input, width])
+                ctx.add_node(tir_symbolic::lang::SymKind::FPToUI, &[input, width])
             }
             // `todo()` marks unmodeled semantics; rustgen suppresses selection-rule
             // and `execute()` lowering for such behaviors, so this is never reached.
