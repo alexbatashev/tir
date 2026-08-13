@@ -4,8 +4,7 @@
 //! what the target rules, the axioms and the value gates (`If` for γ, `Theta`
 //! for the per-value projection of a θ) are written in. [`Kind::Ir`] is the
 //! identity of an IR operation the semantic vocabulary does not name, which is
-//! what a peephole over live IR rewrites. [`Kind::Merge`] is the remainder: the
-//! two gated-SSA merges no value-level semantics covers.
+//! what a peephole over live IR rewrites.
 //!
 //! A label identifies a term — operator, payload and result type, over the
 //! canonical children. [`SemNode::prov`] rides alongside as write-back
@@ -20,15 +19,6 @@ use tir_symbolic::egraph::{ENode, Id};
 use crate::attributes::{AttributeValue, NamedAttribute};
 use crate::sem::{SymKind, SymPayload};
 use crate::{OpCost, OpId, OpInstance, Operation, TypeId, ValueId};
-
-/// A gated-SSA merge the semantic vocabulary does not name: a loop exit (η) or
-/// an irreducible join (Φ). Opaque to every ruleset — congruent only with a
-/// merge of the same kind over the same classes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum MergeKind {
-    Eta,
-    Phi,
-}
 
 /// An IR operation's identity: `(dialect, name, attributes)`. `commutative` and
 /// `cost` describe the operator but do not identify it.
@@ -54,7 +44,6 @@ impl Eq for IrOp {}
 pub enum Kind {
     Sym(SymKind),
     Ir(IrOp),
-    Merge(MergeKind),
 }
 
 impl Kind {
@@ -85,10 +74,6 @@ impl Kind {
                 op.dialect.hash(h);
                 op.name.hash(h);
                 hash_attrs(&op.attrs, h);
-            }
-            Kind::Merge(merge) => {
-                2u8.hash(h);
-                merge.hash(h);
             }
         }
     }
@@ -374,7 +359,7 @@ pub fn cost(node: &SemNode) -> u64 {
     match &node.kind {
         Kind::Ir(op) => op.cost as u64,
         Kind::Sym(SymKind::Constant) => 0,
-        Kind::Sym(_) | Kind::Merge(_) => GATE_COST,
+        Kind::Sym(_) => GATE_COST,
     }
 }
 
@@ -441,7 +426,6 @@ impl ENode for SemNode {
         match &self.kind {
             Kind::Sym(kind) => kind.is_commutative(),
             Kind::Ir(op) => op.commutative,
-            Kind::Merge(_) => false,
         }
     }
 

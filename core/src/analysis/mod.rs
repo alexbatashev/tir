@@ -1,12 +1,10 @@
 pub mod defuse;
 mod dominance;
 mod edge_facts;
-mod gated_ssa;
 mod manager;
 pub mod slots;
 
 pub use defuse::{DefUse, OpRegs, RegRef, execution_regs, op_regs};
 pub use dominance::*;
 pub use edge_facts::*;
-pub use gated_ssa::*;
 pub use manager::*;

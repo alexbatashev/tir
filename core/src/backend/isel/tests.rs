@@ -1,6 +1,5 @@
 use tir::{
     Context, IRFormatter, Operation, PassManager, TypeId,
-    analysis::GSA,
     builtin::{FloatType, FuncOp, IntegerType, ops},
     graph::{MetaMutDag, MutDag, OperandConstraint},
     sem::{FloatFormat, SemGraph, SemType, SymKind, SymPayload},
@@ -1337,18 +1336,20 @@ fn opaque_leaves_are_distinct() {
     let context = Context::with_default_dialects();
     let i32 = IntegerType::new(&context, 32);
     let region = context.create_region();
-    let func = ops::func(&context, "empty", i32, Some(region.id())).build();
-    let gsa = GSA::new(&context, func.id());
+    ops::func(&context, "empty", i32, Some(region.id())).build();
     let value_to_def = HashMap::new();
     let mut egraph = SemEGraph::new();
-    let mut builder = SemDagBuilder::new(&context, &value_to_def, &gsa, &mut egraph, None);
+    let mut builder = SemDagBuilder::new(&context, &value_to_def, &mut egraph, None);
     let a = builder.add_opaque();
     let b = builder.add_opaque();
     assert_ne!(egraph.find(a), egraph.find(b));
 }
 
+/// A block argument is an anchor: the merge it names is control flow the
+/// mid-end already optimized, so isel lowers it to an input leaf and leaves the
+/// incoming edges to carry the value.
 #[test]
-fn builder_seeds_gamma_block_argument_as_if() {
+fn builder_anchors_join_block_argument() {
     use super::builder::SemDagBuilder;
     use std::collections::HashMap;
 
@@ -1371,7 +1372,7 @@ fn builder_seeds_gamma_block_argument_as_if() {
     for block in [&entry, &then_block, &else_block, &join] {
         region.add_block(block.id());
     }
-    let func = ops::func(&context, "gamma", i32, Some(region.id())).build();
+    ops::func(&context, "gamma", i32, Some(region.id())).build();
 
     entry.append_op(
         ops::cond_br(
@@ -1388,253 +1389,21 @@ fn builder_seeds_gamma_block_argument_as_if() {
     else_block.append_op(ops::br(&context, vec![y_id], join.id()).build());
     join.append_op(ops::r#return(&context, merged_id).build());
 
-    let gsa = GSA::new(&context, func.id());
     let value_to_def = HashMap::new();
     let mut egraph = SemEGraph::new();
-    let mut builder = SemDagBuilder::new(&context, &value_to_def, &gsa, &mut egraph, None);
+    let mut builder = SemDagBuilder::new(&context, &value_to_def, &mut egraph, None);
     let class = builder.build_from_value(merged_id);
-    let cond_class = builder.build_from_value(cond_id);
-    let x_class = builder.build_from_value(x_id);
-    let y_class = builder.build_from_value(y_id);
     drop(builder);
-    let gamma = egraph
-        .nodes(class)
-        .iter()
-        .find(|node| node.kind == SymKind::If)
-        .expect("gamma block argument must seed an if node");
 
-    assert_eq!(gamma.children.len(), 3);
-    assert_eq!(egraph.find(gamma.children[0]), egraph.find(cond_class));
-    assert_eq!(egraph.find(gamma.children[1]), egraph.find(x_class));
-    assert_eq!(egraph.find(gamma.children[2]), egraph.find(y_class));
-}
-
-#[test]
-fn builder_seeds_mu_block_argument_as_recursive_theta() {
-    use super::builder::SemDagBuilder;
-    use std::collections::HashMap;
-
-    let context = Context::with_default_dialects();
-    let i1 = IntegerType::new(&context, 1);
-    let i32 = IntegerType::new(&context, 32);
-    let cond = context.create_value(i1, None);
-    let cond_id = cond.id();
-    let entry = context.create_block(vec![cond]);
-    let carried = context.create_value(i32, None);
-    let carried_id = carried.id();
-    let header = context.create_block(vec![carried]);
-    let body = context.create_block(vec![]);
-    let exit = context.create_block(vec![]);
-    let region = context.create_region();
-    for block in [&entry, &header, &body, &exit] {
-        region.add_block(block.id());
-    }
-    let func = ops::func(&context, "theta", i32, Some(region.id())).build();
-
-    let init = ops::constant(&context, 0, i32).build();
-    let init_value = init.result();
-    let init_op = init.id();
-    let entry_builder = entry;
-    entry_builder.append_op(init);
-    entry_builder.append_op(ops::br(&context, vec![init_value], header.id()).build());
-    header
-        .clone()
-        .append_op(ops::cond_br(&context, cond_id, vec![], vec![], body.id(), exit.id()).build());
-    let one = ops::constant(&context, 1, i32).build();
-    let one_value = one.result();
-    let one_op = one.id();
-    let next = ops::addi(&context, carried_id, one_value, i32).build();
-    let next_value = next.result();
-    let next_op = next.id();
-    let body_builder = body;
-    body_builder.append_op(one);
-    body_builder.append_op(next);
-    body_builder.append_op(ops::br(&context, vec![next_value], header.id()).build());
-    exit.append_op(ops::r#return(&context, carried_id).build());
-
-    let gsa = GSA::new(&context, func.id());
-    let value_to_def = HashMap::from([
-        (init_value, init_op),
-        (one_value, one_op),
-        (next_value, next_op),
-    ]);
-    let mut egraph = SemEGraph::new();
-    let class = {
-        let mut builder = SemDagBuilder::new(&context, &value_to_def, &gsa, &mut egraph, None);
-        builder.build_from_value(carried_id)
-    };
-    egraph.rebuild();
-    let class = egraph.find(class);
-    let theta = egraph
-        .nodes(class)
-        .iter()
-        .find(|node| node.kind == SymKind::Theta)
-        .expect("mu block argument must seed a theta node");
-
-    assert_eq!(theta.children.len(), 2);
-    let latch = egraph.find(theta.children[1]);
-    assert!(egraph.nodes(latch).iter().any(|node| {
-        node.kind == SymKind::Add
-            && node
-                .children
-                .iter()
-                .any(|child| egraph.find(*child) == class)
+    let nodes = egraph.nodes(class);
+    assert!(nodes.iter().all(|node| node.kind != SymKind::If));
+    assert!(nodes.iter().any(|node| {
+        node.kind == SymKind::Symbol
+            && matches!(
+                node.payload,
+                Some(tir::sem::SemPayload::Expr(SymPayload::Value(value))) if value == merged_id
+            )
     }));
-}
-
-fn if_pattern() -> SemGraph {
-    let mut graph = SemGraph::new();
-    let condition = symbol(&mut graph, 0);
-    let then_value = symbol(&mut graph, 1);
-    let else_value = symbol(&mut graph, 2);
-    ternary(&mut graph, SymKind::If, condition, then_value, else_value);
-    graph
-}
-
-fn emit_select_marker(
-    context: &Context,
-    req: &EmitRequest,
-    m: &RuleMatch,
-) -> Result<Box<dyn Operation>, tir::PassError> {
-    let lhs = m
-        .value_binding(1)
-        .ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
-    let rhs = m
-        .value_binding(2)
-        .ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
-    let result_ty = req.result_ty.expect("typed gate result");
-    Ok(Box::new(ops::muli(context, lhs, rhs, result_ty).build()))
-}
-
-fn emit_div(
-    context: &Context,
-    req: &EmitRequest,
-    _m: &RuleMatch,
-) -> Result<Box<dyn Operation>, tir::PassError> {
-    let op = req.op.expect("backed by an op");
-    let result_ty = req.result_ty.expect("typed result");
-    Ok(Box::new(
-        ops::divsi(context, op.op().operands[0], op.op().operands[1], result_ty).build(),
-    ))
-}
-
-fn gamma_selection_names(select_cost: u32, trapping_else: bool) -> Vec<&'static str> {
-    let context = Context::with_default_dialects();
-    let module = ops::module(&context, None).build();
-    let i1 = IntegerType::new(&context, 1);
-    let i32 = IntegerType::new(&context, 32);
-    let cond = context.create_value(i1, None);
-    let x = context.create_value(i32, None);
-    let y = context.create_value(i32, None);
-    let z = context.create_value(i32, None);
-    let cond_id = cond.id();
-    let x_id = x.id();
-    let y_id = y.id();
-    let z_id = z.id();
-    let entry = context.create_block(vec![cond, x, y, z]);
-    let then_block = context.create_block(vec![]);
-    let else_block = context.create_block(vec![]);
-    let merged = context.create_value(i32, None);
-    let merged_id = merged.id();
-    let join = context.create_block(vec![merged]);
-    let region = context.create_region();
-    for block in [&entry, &then_block, &else_block, &join] {
-        region.add_block(block.id());
-    }
-    let func = ops::func(&context, "gamma_select", i32, Some(region.id())).build();
-
-    entry.append_op(
-        ops::cond_br(
-            &context,
-            cond_id,
-            vec![],
-            vec![],
-            then_block.id(),
-            else_block.id(),
-        )
-        .build(),
-    );
-    then_block.append_op(ops::br(&context, vec![x_id], join.id()).build());
-    let else_builder = else_block;
-    let else_value = if trapping_else {
-        let div = ops::divsi(&context, y_id, z_id, i32).build();
-        let result = div.result();
-        else_builder.append_op(div);
-        result
-    } else {
-        y_id
-    };
-    else_builder.append_op(ops::br(&context, vec![else_value], join.id()).build());
-    let add = ops::addi(&context, merged_id, z_id, i32).build();
-    let result = add.result();
-    let join_builder = join.clone();
-    join_builder.append_op(add);
-    join_builder.append_op(ops::r#return(&context, result).build());
-    module.body().append_op(func);
-    module.body().append_op(ops::module_end(&context).build());
-
-    let select_rule = Rule::new(
-        "select-marker",
-        if_pattern(),
-        select_cost,
-        emit_select_marker,
-    )
-    .with_operand_constraints(vec![
-        (0, OperandConstraint::Register),
-        (1, OperandConstraint::Register),
-        (2, OperandConstraint::Register),
-    ]);
-    let mut pass_manager = PassManager::new();
-    pass_manager.nest::<FuncOp>().add_pass(
-        InstructionSelectPass::new(vec![
-            select_rule,
-            Rule::new(
-                "add",
-                atomic_pattern(SymKind::Add),
-                LATENCY_COST_SCALE,
-                emit_add,
-            ),
-            Rule::new(
-                "div",
-                atomic_pattern(SymKind::Div),
-                LATENCY_COST_SCALE,
-                emit_div,
-            ),
-        ])
-        .with_branch_emitters(branch_emitters()),
-    );
-    pass_manager
-        .run(&context, context.get_op(module.id()))
-        .expect("gamma selection must succeed");
-
-    block_op_list(&context, join.id())
-        .iter()
-        .map(|op| op.name().as_str())
-        .collect()
-}
-
-#[test]
-fn cheaper_value_rule_covers_gamma() {
-    assert_eq!(
-        gamma_selection_names(LATENCY_COST_SCALE, false),
-        vec!["muli", "addi", "return"]
-    );
-}
-
-#[test]
-fn expensive_value_rule_leaves_gamma_reified() {
-    assert_eq!(
-        gamma_selection_names(10 * LATENCY_COST_SCALE, false),
-        vec!["addi", "return"]
-    );
-}
-
-#[test]
-fn trapping_gamma_arm_disables_value_rule() {
-    assert_eq!(
-        gamma_selection_names(LATENCY_COST_SCALE, true),
-        vec!["addi", "return"]
-    );
 }
 
 /// A multi-operand pattern node (LoadMemory/StoreMemory shapes).

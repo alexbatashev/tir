@@ -1,8 +1,8 @@
 // RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s
 
-// A pure gamma may select through cmov when its two-instruction cmp+cmov rule
-// is cheaper than preserving the edge assignments. A trapping arm must retain
-// the CFG path and cannot gain a cmov value rule.
+// A join block argument is an anchor: whatever the arms compute, the CFG path
+// is retained and the incoming edges carry the value into the join, which reads
+// it as its block argument. Selection forms no value rule over the merge.
 
 module {
   func @pure(%c: !i64, %d: !i64, %a: !i64, %b: !i64, %z: !i64) -> !i64 {
@@ -33,8 +33,11 @@ module {
 }
 
 // CHECK:      asm.symbol {name = "pure"
-// CHECK:      ^bb3(
-// CHECK:      x86_64.cmovl
+// CHECK-NOT:  x86_64.cmov
+// CHECK:      asm.vbr %{{[0-9]+}} ^bb3
+// CHECK:      asm.vbr %{{[0-9]+}} ^bb3
+// CHECK:      ^bb3(%{{[0-9]+}}: !i64):
+// CHECK-NEXT: x86_64.add {dst = %virt{{[0-9]+}}:GPR, dst_tied = %virt{{[0-9]+}}:GPR, src = %virt{{[0-9]+}}:GPR}
 
 // CHECK:      asm.symbol {name = "trapping"
 // CHECK-NOT:  x86_64.cmov

@@ -4,7 +4,6 @@ use std::collections::HashMap;
 
 use tir::{
     Context, MemoryRead, MemoryWrite, OpId, OpInstance, TypeId, ValueId,
-    analysis::{GSA, GateNode},
     attributes::AttributeValue,
     builtin::{FloatType, IntegerType},
     graph::{Dag, MetaDag, NodeId},
@@ -26,7 +25,6 @@ use super::node::class_is_pure;
 pub(crate) struct SemDagBuilder<'a> {
     context: &'a Context,
     value_to_def: &'a HashMap<ValueId, OpId>,
-    gsa: &'a GSA,
     egraph: &'a mut SemEGraph,
     pointer_width: Option<u32>,
     /// The e-class built for each already-lowered IR value (operand sharing / CSE).
@@ -42,14 +40,12 @@ impl<'a> SemDagBuilder<'a> {
     pub(crate) fn new(
         context: &'a Context,
         value_to_def: &'a HashMap<ValueId, OpId>,
-        gsa: &'a GSA,
         egraph: &'a mut SemEGraph,
         pointer_width: Option<u32>,
     ) -> Self {
         Self {
             context,
             value_to_def,
-            gsa,
             egraph,
             pointer_width,
             value_to_class: HashMap::new(),
@@ -300,31 +296,7 @@ impl<'a> SemDagBuilder<'a> {
         }
 
         let value_ty = Some(self.context.get_value(value).ty());
-        let gsa = self.gsa;
-        let gate = gsa
-            .node_of(value)
-            .and_then(|node| Some((*gsa.gate(node), gsa.inputs_of(value)?)));
-        let class = if let Some((GateNode::Gamma { .. }, inputs)) = gate {
-            let children = inputs
-                .iter()
-                .map(|&input| self.build_from_value(input))
-                .collect();
-            self.add_op(SymKind::If, children, value_ty)
-        } else if let Some((GateNode::Mu { .. }, inputs)) = gate {
-            let placeholder = self.add_input_value(value, value_ty);
-            self.value_to_class.insert(value, placeholder);
-            let children = inputs
-                .iter()
-                .map(|&input| self.build_from_value(input))
-                .collect();
-            let theta = self.add_op(SymKind::Theta, children, value_ty);
-            self.egraph.union(placeholder, theta)
-        } else if let Some((GateNode::Eta { .. }, _)) = gate {
-            // The value leaving a loop equals the carried value on the final iteration
-            // only, so it must not select as the Theta it gates. Opaque until selection
-            // models η.
-            self.add_input_value(value, value_ty)
-        } else if let Some(def_op_id) = self.value_to_def.get(&value).copied() {
+        let class = if let Some(def_op_id) = self.value_to_def.get(&value).copied() {
             let def = self.context.get_op(def_op_id);
             if def.is::<crate::builtin::ConstantOp>() {
                 self.constant_class(&def, value, value_ty)

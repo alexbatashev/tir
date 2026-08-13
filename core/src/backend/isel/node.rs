@@ -83,7 +83,6 @@ pub(crate) fn class_is_pure(egraph: &SemEGraph, class: Id) -> bool {
     egraph.nodes(class).iter().all(|n| match &n.kind {
         tir::sem::Kind::Sym(kind) => kind_is_pure(*kind),
         tir::sem::Kind::Ir(_) => true,
-        tir::sem::Kind::Merge(_) => false,
     })
 }
 

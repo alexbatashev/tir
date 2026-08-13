@@ -22,7 +22,7 @@ use std::collections::{HashMap, HashSet};
 use tir::{
     AnalysisManager, Block, BlockId, BranchGuard, BranchTerminator, Context, OpId, Operation,
     OperationRef, Pass, PassError, PassTarget, Rewriter, Terminator, TypeId, ValueId,
-    analysis::{DefUse, DominatingEdgeFacts, DominatorTree, GSA, GateNode},
+    analysis::{DefUse, DominatingEdgeFacts, DominatorTree},
     graph::{Dag, MutDag, NodeId, OperandConstraint},
     sem::{
         EquivalenceOracle, SemGraph, SmtOracle, SymKind, SymPayload, canonicalize_for_selection,
@@ -43,7 +43,7 @@ use cover::{
     PbqpIselMatch, build_eclass_cover, completeness_error, prune_dominated_matches,
 };
 use emit::{BlockPlan, GuardBranch, ScheduledEmit, TerminatorPlan, resolve_match, schedule_tiles};
-use node::{is_low_extract_view, kind_is_pure, low_extract_source};
+use node::{is_low_extract_view, low_extract_source};
 use pattern::{CompiledIselPattern, compile_isel_pattern};
 use tir::sem::axioms::{self, verify_axioms};
 use tir::sem::rewrites::{self, discover_rewrites};
@@ -501,11 +501,8 @@ struct FunctionSelection {
     /// Classes selected at their defining block because a surviving reader needs
     /// their register value.
     demand: HashSet<(Id, BlockId)>,
-    /// Control-flow edges retained when gate values are reified.
+    /// The control-flow edges of each block, with the assignments they carry.
     control: HashMap<BlockId, Vec<ControlReification>>,
-    /// Canonical classes seeded from reducible γ/μ gates. An algebraic `If`
-    /// introduced by an axiom is not control flow and must not gain reification.
-    reifiable_gates: HashSet<Id>,
     /// Each dominating-edge condition prepared against the base graph: the
     /// condition's class and, when its definer is a comparison, the comparison
     /// class with its kind and operand classes. Keyed by the condition value; the
@@ -549,11 +546,6 @@ impl FunctionSelection {
     fn is_shared(&self, class: Id) -> bool {
         self.base_members(class)
             .any(|m| self.shared_classes.contains(&m))
-    }
-
-    fn is_reifiable_gate(&self, class: Id) -> bool {
-        self.base_members(class)
-            .any(|member| self.reifiable_gates.contains(&member))
     }
 
     fn demanded_at(&self, class: Id, block: BlockId, overlay: &HashSet<Id>) -> bool {
@@ -1167,10 +1159,9 @@ impl InstructionSelectPass {
         }
         let dom = analyses.get::<DominatorTree>(context, root);
         let facts = analyses.get::<DominatingEdgeFacts>(context, root);
-        let gsa = analyses.get::<GSA>(context, root);
         let def_use = analyses.get::<DefUse>(context, root);
 
-        let mut fs = self.build_function_selection(context, op, &facts, &gsa, &def_use);
+        let mut fs = self.build_function_selection(context, op, &facts, &def_use);
         // A fact-free block sees exactly the base graph, so every value pattern's
         // e-match is block-independent: search once here and reuse for all such
         // blocks (fact-bearing blocks re-search under their scope).
@@ -1289,7 +1280,6 @@ impl InstructionSelectPass {
         context: &Context,
         op: &OperationRef,
         facts: &DominatingEdgeFacts,
-        gsa: &GSA,
         def_use: &DefUse,
     ) -> FunctionSelection {
         // Function-wide value/op layout: with a single `value_to_def` a cross-block
@@ -1333,7 +1323,7 @@ impl InstructionSelectPass {
         let mut constant_candidates: Vec<(OpId, Id)> = Vec::new();
         let value_to_class = {
             let mut builder =
-                SemDagBuilder::new(context, &value_to_def, gsa, &mut egraph, pointer_width);
+                SemDagBuilder::new(context, &value_to_def, &mut egraph, pointer_width);
             for &block_id in &block_ids {
                 // Blocks are lowered in region order, which is not an
                 // execution order: what ran before a block is a join the
@@ -1611,14 +1601,6 @@ impl InstructionSelectPass {
                 guard.class = egraph.find(guard.class);
             }
         }
-        let reifiable_gates = value_to_class
-            .iter()
-            .filter_map(|(&value, &class)| {
-                let node = gsa.node_of(value)?;
-                matches!(gsa.gate(node), GateNode::Gamma { .. } | GateNode::Mu { .. })
-                    .then(|| egraph.find(class))
-            })
-            .collect();
         FunctionSelection {
             egraph,
             pointer_width,
@@ -1632,7 +1614,6 @@ impl InstructionSelectPass {
             shared_classes,
             demand,
             control,
-            reifiable_gates,
             prepared,
         }
     }
@@ -2010,9 +1991,6 @@ impl InstructionSelectPass {
             })
             .collect();
         let available = |class| {
-            if fs.is_reifiable_gate(class) {
-                return false;
-            }
             // A low-extract view owns no register of its own: it re-views its
             // source's. So it is available exactly when that source is — either
             // already in a register, or extracted here (the source's tile
@@ -2029,11 +2007,7 @@ impl InstructionSelectPass {
                 source_available || demanded.contains(&source)
             }
         };
-        if let Some(message) =
-            completeness_error(&fs.egraph, &demanded, &matches, &available, &|class| {
-                fs.is_reifiable_gate(class)
-            })
-        {
+        if let Some(message) = completeness_error(&fs.egraph, &demanded, &matches, &available) {
             return Err(message);
         }
 
@@ -2043,7 +2017,6 @@ impl InstructionSelectPass {
             &cover::ClassPolicies {
                 demanded: &|class| demanded.contains(&fs.egraph.find(class)),
                 available: &available,
-                reifiable_gate: &|class| fs.is_reifiable_gate(class),
             },
             &matches,
         )
@@ -2057,16 +2030,9 @@ impl InstructionSelectPass {
         })?;
 
         let mut root_match: HashMap<Id, usize> = HashMap::new();
-        let mut reified = HashSet::new();
         for (node, choice) in cover.choices.iter().enumerate() {
-            match choice {
-                PbqpIselAlternative::Tile { match_id } => {
-                    root_match.insert(cover.classes[node], *match_id);
-                }
-                PbqpIselAlternative::Reify => {
-                    reified.insert(cover.classes[node]);
-                }
-                PbqpIselAlternative::NotDemanded => {}
+            if let PbqpIselAlternative::Tile { match_id } = choice {
+                root_match.insert(cover.classes[node], *match_id);
             }
         }
         let required_available: HashSet<Id> = root_match
@@ -2074,7 +2040,7 @@ impl InstructionSelectPass {
             .flat_map(|match_id| &matches[*match_id].bindings.pattern_nodes)
             .filter(|binding| binding.is_boundary && binding.demand == BoundaryDemand::Register)
             .map(|binding| fs.egraph.find(binding.class))
-            .filter(|class| !root_match.contains_key(class) && !reified.contains(class))
+            .filter(|class| !root_match.contains_key(class))
             .collect();
         let mut positions: HashMap<Id, usize> = block_op_by_root
             .iter()
@@ -2187,7 +2153,7 @@ impl InstructionSelectPass {
         // a value the scope's facts merged in) schedules no tile, but its
         // block-local values must still resolve to the available register.
         for &class in &demanded {
-            if destinations.contains_key(&class) || reified.contains(&class) {
+            if destinations.contains_key(&class) {
                 continue;
             }
             if let Some(destination) = fs
@@ -2236,7 +2202,7 @@ impl InstructionSelectPass {
             .filter(|op| {
                 fs.op_root.get(op).is_none_or(|class| {
                     let class = fs.egraph.find(*class);
-                    !reified.contains(&class) && !required_available.contains(&class)
+                    !required_available.contains(&class)
                 })
             })
             .collect();
@@ -2453,11 +2419,6 @@ impl InstructionSelectPass {
                 if compiled.is_copy() && fs.has_values(m.binding(pattern_root)) {
                     continue;
                 }
-                if fs.is_reifiable_gate(root)
-                    && !gate_match_is_speculatable(compiled, m, &fs.egraph)
-                {
-                    continue;
-                }
                 let block_op = block_op_by_root.get(&root).copied();
                 let is_guard_class = guard_classes.contains(&root);
                 // A match roots an instruction only if it produces a value B
@@ -2619,79 +2580,6 @@ impl InstructionSelectPass {
         prune_dominated_matches(&self.compiled_patterns, &mut matches);
         matches
     }
-}
-
-/// Whether selecting `matched` as a value instruction is sound for a gate class:
-/// the instruction computes both arms unconditionally, so every node it covers —
-/// in the pattern and in the classes its arms bind — must be speculatable. A
-/// pattern not rooted at an `If` selects no gate arm, so it is unconstrained.
-fn gate_match_is_speculatable(
-    pattern: &CompiledIselPattern,
-    matched: &EMatch<u32>,
-    egraph: &SemEGraph,
-) -> bool {
-    let PatternNode::Node(root) = pattern.pattern.node(pattern.pattern.root()) else {
-        return true;
-    };
-    if root.kind != SymKind::If {
-        return true;
-    }
-    root.children
-        .iter()
-        .all(|&child| gate_pattern_is_speculatable(pattern, child))
-        && root.children[1..].iter().all(|&arm| {
-            gate_class_is_speculatable(egraph, matched.binding(arm), &mut HashSet::new())
-        })
-}
-
-fn gate_pattern_is_speculatable(pattern: &CompiledIselPattern, node: Id) -> bool {
-    match pattern.pattern.node(node) {
-        PatternNode::Var(_) => true,
-        PatternNode::Node(node) => {
-            node.sym().is_some_and(gate_kind_is_speculatable)
-                && node
-                    .children
-                    .iter()
-                    .all(|&child| gate_pattern_is_speculatable(pattern, child))
-        }
-    }
-}
-
-fn gate_class_is_speculatable(egraph: &SemEGraph, class: Id, visited: &mut HashSet<Id>) -> bool {
-    let class = egraph.find(class);
-    if !visited.insert(class) {
-        return true;
-    }
-    egraph.nodes(class).iter().all(|node| {
-        node.sym().is_some_and(gate_kind_is_speculatable)
-            && node
-                .children
-                .iter()
-                .all(|&child| gate_class_is_speculatable(egraph, child, visited))
-    })
-}
-
-/// Whether the kind may be evaluated on a path that does not need its value.
-fn gate_kind_is_speculatable(kind: SymKind) -> bool {
-    kind_is_pure(kind)
-        && !matches!(
-            kind,
-            // Division may trap, and a Theta has no value outside its loop.
-            SymKind::Div
-                | SymKind::UDiv
-                | SymKind::SRem
-                | SymKind::URem
-                | SymKind::Theta
-                | SymKind::StateAssign
-                | SymKind::StateStore
-                | SymKind::StateStoreConditional
-                | SymKind::StateFence
-                | SymKind::StateTrap
-                | SymKind::StateBlock
-                | SymKind::StateIf
-                | SymKind::StateTry
-                | SymKind::StateHandler
-        )
 }
 
 /// Op order then control-guard order, first occurrence kept: the seeds feed

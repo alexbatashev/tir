@@ -21,7 +21,6 @@ use super::pattern::CompiledIselPattern;
 /// estimate of the edge assignments the existing terminators already perform,
 /// tuned in latency units so a cheaper `If`-rooted value rule wins where the
 /// target has one.
-const REIFY_COST: u64 = 3 * super::LATENCY_COST_SCALE as u64;
 
 #[derive(Clone, Debug)]
 pub(crate) struct CaptureBindings {
@@ -103,13 +102,7 @@ pub(crate) struct FullMatchBindings {
 #[derive(Clone, Debug)]
 pub(crate) enum PbqpIselAlternative {
     NotDemanded,
-    /// Preserve a gated SSA value as control-flow edge assignments. Terminator
-    /// emission already performs those assignments; this alternative accounts
-    /// for their cost against an `If`/`Theta`-rooted value rule.
-    Reify,
-    Tile {
-        match_id: usize,
-    },
+    Tile { match_id: usize },
 }
 
 #[derive(Clone, Debug)]
@@ -135,7 +128,6 @@ pub(crate) struct ClassCover {
 pub(crate) struct ClassPolicies<'a> {
     pub(crate) demanded: &'a dyn Fn(Id) -> bool,
     pub(crate) available: &'a dyn Fn(Id) -> bool,
-    pub(crate) reifiable_gate: &'a dyn Fn(Id) -> bool,
 }
 
 pub(crate) fn build_eclass_cover(
@@ -152,9 +144,6 @@ pub(crate) fn build_eclass_cover(
     for (i, &c) in classes.iter().enumerate() {
         if !(policies.demanded)(c) || (policies.available)(c) {
             alternatives_by_node[i].push(PbqpIselAlternative::NotDemanded);
-        }
-        if (policies.reifiable_gate)(c) {
-            alternatives_by_node[i].push(PbqpIselAlternative::Reify);
         }
     }
 
@@ -184,7 +173,6 @@ pub(crate) fn build_eclass_cover(
             .iter()
             .map(|alternative| match alternative {
                 PbqpIselAlternative::Tile { match_id } => matches[*match_id].cost,
-                PbqpIselAlternative::Reify => REIFY_COST,
                 PbqpIselAlternative::NotDemanded => 0,
             })
             .collect();
@@ -430,7 +418,6 @@ pub(crate) fn completeness_error(
     demanded: &HashSet<Id>,
     matches: &[PbqpIselMatch],
     available: &dyn Fn(Id) -> bool,
-    reifiable: &dyn Fn(Id) -> bool,
 ) -> Option<String> {
     let rooted: HashSet<Id> = matches
         .iter()
@@ -440,11 +427,7 @@ pub(crate) fn completeness_error(
     let mut missing: Vec<SymKind> = Vec::new();
     for &class in demanded {
         let class = egraph.find(class);
-        if rooted.contains(&class)
-            || available(class)
-            || reifiable(class)
-            || is_low_extract_view(egraph, class)
-        {
+        if rooted.contains(&class) || available(class) || is_low_extract_view(egraph, class) {
             continue;
         }
         let nodes = egraph.nodes(class);
@@ -473,11 +456,11 @@ pub(crate) fn completeness_error(
 }
 /// Where the value an alternative produces sits in its storage element: a tile's
 /// destination class carries the rule's view offset, while an already-available
-/// value or a reified gate lives in an ordinary offset-0 register.
+/// value lives in an ordinary offset-0 register.
 fn produced_view_offset(alternative: &PbqpIselAlternative, matches: &[PbqpIselMatch]) -> u32 {
     match alternative {
         PbqpIselAlternative::Tile { match_id } => matches[*match_id].result_view_offset,
-        PbqpIselAlternative::Reify | PbqpIselAlternative::NotDemanded => 0,
+        PbqpIselAlternative::NotDemanded => 0,
     }
 }
 
@@ -523,7 +506,7 @@ pub(crate) fn alternatives_compatible(
             return false;
         }
         match child_alt {
-            PbqpIselAlternative::Tile { .. } | PbqpIselAlternative::Reify => true,
+            PbqpIselAlternative::Tile { .. } => true,
             PbqpIselAlternative::NotDemanded => available(child),
         }
     } else if immediate {
