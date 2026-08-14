@@ -311,11 +311,21 @@ impl Seeder<'_> {
             let Some(states) = self.carried_states(&edges, slot, ports.len()) else {
                 continue;
             };
-            let mut args = vec![init];
-            args.extend(states.iter().map(|&state| self.class_of(state)));
-            let theta = self.eg.add(Node::theta(finals[port], args));
             let head = self.class_of(heads[port]);
-            self.eg.union(theta, head);
+            let carried: Vec<Id> = states.iter().map(|&state| self.class_of(state)).collect();
+            // A port every edge carries unchanged has the state the loop was
+            // entered with for its fixpoint: θ(init, arg…) is init.
+            if carried
+                .iter()
+                .all(|&edge| self.eg.find(edge) == self.eg.find(head))
+            {
+                self.eg.union(head, init);
+            } else {
+                let mut args = vec![init];
+                args.extend(carried);
+                let theta = self.eg.add(Node::theta(finals[port], args));
+                self.eg.union(theta, head);
+            }
             let published = match &tested {
                 Some((_, _, forwarded)) => self.class_of(forwarded[port]),
                 None => head,
