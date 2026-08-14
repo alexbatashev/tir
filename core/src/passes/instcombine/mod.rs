@@ -22,6 +22,7 @@ use tir_symbolic::egraph::{EGraph, Extraction, Id};
 
 use std::rc::Rc;
 
+use crate::analysis::scopes::port_edges;
 use crate::analysis::{DominatingEdgeFacts, DominatorTree};
 use crate::graph::Dag;
 use crate::{
@@ -106,8 +107,8 @@ struct Driver<'a> {
     /// The value port already grown on a gate for a pair of arm classes, so every
     /// read the gate answers takes the one port.
     gamma_ports: RefCell<HashMap<(OpId, Id, Id), ValueId>>,
-    /// The same for a loop, over the classes it carries from and to.
-    theta_ports: RefCell<HashMap<(OpId, Id, Id), ThetaPort>>,
+    /// The same for a loop, over the classes its port is fed from.
+    theta_ports: RefCell<HashMap<(OpId, Vec<Id>), ThetaPort>>,
     /// The θ classes standing for a port argument while that port's latch is
     /// being built: inside the body the carry *is* the argument.
     port_bindings: RefCell<Vec<(Id, ValueId)>>,
@@ -577,11 +578,12 @@ impl Driver<'_> {
     /// The port starts at what the class the loop was entered with materializes
     /// to ahead of the loop; every region of the loop reads it as one more
     /// argument, which a region that only tests the carried values forwards on;
-    /// and the body yields what the latch class materializes to at its
-    /// terminator, under a binding resolving the θ itself to that argument —
-    /// inside the body the carry *is* the argument. What the port is worth at
-    /// `target` is then the argument of the region holding it, or the loop's
-    /// result outside them all.
+    /// and every edge back into the port — the body's latch, and each
+    /// `break`/`continue` leaving its scope — carries what its own class
+    /// materializes to right there, under a binding resolving the θ itself to
+    /// that argument: inside the body the carry *is* the argument. What the port
+    /// is worth at `target` is then the argument of the region holding it, or the
+    /// loop's result outside them all.
     fn commit_theta_port(
         &self,
         extraction: &Extraction<Node>,
@@ -591,11 +593,14 @@ impl Driver<'_> {
         target: &OperationRef,
         rewriter: &mut Rewriter,
     ) -> Result<Option<ValueId>, PassError> {
-        let (Prov::Op(loop_op), &[init_class, latch_class]) = (node.prov, &node.children[..])
+        let (Prov::Op(loop_op), [init_class, edge_classes @ ..]) = (node.prov, &node.children[..])
         else {
             return Ok(None);
         };
-        let key = (loop_op, self.eg.find(init_class), self.eg.find(latch_class));
+        let key = (
+            loop_op,
+            node.children.iter().map(|&id| self.eg.find(id)).collect(),
+        );
         if let Some(port) = self.theta_ports.borrow().get(&key) {
             return Ok(Some(self.port_value(port, target)));
         }
@@ -607,10 +612,17 @@ impl Driver<'_> {
             return Ok(None);
         };
         let body = scope.token_scope_regions();
+        let Some(&body_region) = body.first() else {
+            return Ok(None);
+        };
+        let edges = port_edges(self.context, body_region);
+        if edges.len() != edge_classes.len() {
+            return Ok(None);
+        }
         let at_loop = self.at(loop_op);
         let mut memo = HashMap::new();
         let Some(init) =
-            self.materialize(extraction, init_class, ty, &at_loop, rewriter, &mut memo)?
+            self.materialize(extraction, *init_class, ty, &at_loop, rewriter, &mut memo)?
         else {
             return Ok(None);
         };
@@ -618,8 +630,7 @@ impl Driver<'_> {
             return Ok(None);
         }
         let mut arguments = Vec::new();
-        let mut latched = true;
-        let mut failure = None;
+        let mut carried = init;
         let result = self
             .context
             .grow_port(loop_op, ty, Some(init), |region, incoming| {
@@ -628,43 +639,70 @@ impl Driver<'_> {
                 if let Some(entry) = self.context.get_region(region).block_ids().first() {
                     self.arg_block.borrow_mut().insert(incoming, *entry);
                 }
-                if !body.contains(&region) {
-                    return Some(incoming);
+                // The body's edges are fed one by one below — a `break` inside it
+                // is one of them, and its terminator may be another. Every other
+                // region, a loop's test, forwards the carry on.
+                if body.contains(&region) {
+                    carried = incoming;
+                    return None;
                 }
-                let terminator = self.terminator(region)?;
-                let at_yield = self.at(terminator);
-                self.port_bindings.borrow_mut().push((class, incoming));
-                let latch = self.materialize(
-                    extraction,
-                    latch_class,
-                    ty,
-                    &at_yield,
-                    rewriter,
-                    &mut HashMap::new(),
-                );
-                self.port_bindings.borrow_mut().pop();
-                match latch {
-                    Ok(Some(value)) if self.dominates_op(value, terminator) => Some(value),
-                    // The port is already half grown and no edit can be taken back,
-                    // so it carries its own value on: an unread port, and the reads
-                    // it would have answered stay as they were.
-                    other => {
-                        failure = other.err();
-                        latched = false;
-                        Some(incoming)
-                    }
-                }
+                Some(incoming)
             });
+        let fed = edges.into_iter().zip(edge_classes.iter().copied());
+        let (carried_all, failure) =
+            self.feed_edges(extraction, class, fed.collect(), ty, carried, rewriter);
         if let Some(error) = failure {
             return Err(error);
         }
-        if !latched {
+        if !carried_all {
             return Ok(None);
         }
         let port = ThetaPort { arguments, result };
         let value = self.port_value(&port, target);
         self.theta_ports.borrow_mut().insert(key, port);
         Ok(Some(value))
+    }
+
+    /// Carry the port's value on each of a loop's edges, each with the class the θ
+    /// names it by. Every edge must be fed — the loop carries the port whether or
+    /// not the value can be spelled there — so an edge whose class does not
+    /// materialize carries the port's own argument on and the whole port is
+    /// reported unfed: no edit can be taken back, but an unread port answers no
+    /// reads.
+    fn feed_edges(
+        &self,
+        extraction: &Extraction<Node>,
+        class: Id,
+        edges: Vec<(OpId, Id)>,
+        ty: TypeId,
+        carried: ValueId,
+        rewriter: &mut Rewriter,
+    ) -> (bool, Option<PassError>) {
+        let mut fed = true;
+        let mut failure = None;
+        for (edge, edge_class) in edges {
+            let at_edge = self.at(edge);
+            self.port_bindings.borrow_mut().push((class, carried));
+            let value = self.materialize(
+                extraction,
+                edge_class,
+                ty,
+                &at_edge,
+                rewriter,
+                &mut HashMap::new(),
+            );
+            self.port_bindings.borrow_mut().pop();
+            let value = match value {
+                Ok(Some(value)) if self.dominates_op(value, edge) => value,
+                other => {
+                    failure = failure.or(other.err());
+                    fed = false;
+                    carried
+                }
+            };
+            self.context.append_port_operand(edge, value);
+        }
+        (fed, failure)
     }
 
     /// What `port` is worth where `target` sits: the argument of the loop region

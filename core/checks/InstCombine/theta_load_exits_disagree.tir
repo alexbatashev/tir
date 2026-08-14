@@ -1,0 +1,38 @@
+// RUN: tir opt --pass thread-state --pass instcombine --pass erase-state --verify %s | filecheck %s
+
+// The break leaves on a state the loop's latch does not name: the slot holds 1
+// where the body breaks and 0 where it comes round again, so the value the loop
+// leaves is neither the one it carries at the head nor a constant. Each exit
+// carries the value reaching it and the port merges them.
+
+module {
+  func @escape(%0: !i1, %1: !i1) -> !i32 {
+    %2 = ptr.alloca {size = 4, align = 4} : !ptr.p<!i32>
+    %3 = constant {value = 0} : !i32
+    %4 = constant {value = 1} : !i32
+    ptr.store %3, %2
+    scf.while {
+      scf.condition %0
+    } do scope(%5) {
+      ptr.store %4, %2
+      scf.if %1 {
+        scf.break %5
+      } else {
+        scf.yield
+      }
+      ptr.store %3, %2
+      scf.yield
+    }
+    %6 = ptr.load %2 : !i32
+    return %6
+  }
+  module_end
+}
+
+// CHECK-LABEL: func @escape
+// CHECK-NOT: ptr.
+// CHECK: %[[RESULT:[0-9]+]] = scf.while iter_args(%{{[0-9]+}} = %3) -> !i32 {
+// CHECK: do scope(%[[SCOPE:[0-9]+]])(%{{[0-9]+}}) {
+// CHECK: scf.break %[[SCOPE]], %4
+// CHECK: scf.yield %3
+// CHECK: return %[[RESULT]]

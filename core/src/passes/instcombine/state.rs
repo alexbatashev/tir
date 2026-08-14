@@ -138,41 +138,42 @@ pub(crate) fn distribute_load_over_theta(context: Context, promotable: Vec<Id>) 
             let Some((loop_op, carried)) = state_theta(&context, eg, read[LOAD_STATE]) else {
                 return;
             };
-            let carried = carried.map(|state| {
-                let mut operands = read.to_vec();
-                operands[LOAD_STATE] = state;
-                eg.add(Node::introduced_at(SymKind::LoadMemory, load, operands).typed(ty))
-            });
-            let theta = eg.add(Node::introduced_at(
-                SymKind::Theta,
-                loop_op,
-                carried.to_vec(),
-            ));
+            let carried: Vec<Id> = carried
+                .iter()
+                .map(|&state| {
+                    let mut operands = read.to_vec();
+                    operands[LOAD_STATE] = state;
+                    eg.add(Node::introduced_at(SymKind::LoadMemory, load, operands).typed(ty))
+                })
+                .collect();
+            let theta = eg.add(Node::introduced_at(SymKind::Theta, loop_op, carried));
             eg.union(root, theta);
         },
     )
 }
 
-/// The carry `state` is: the loop publishing it, and the states it was entered
-/// with and its body leaves.
-fn state_theta(context: &Context, eg: &EGraph<Node>, state: Id) -> Option<(OpId, [Id; 2])> {
+/// The carry `state` is: the loop publishing it, the state it was entered with,
+/// and the one each edge back into the port carries.
+fn state_theta(context: &Context, eg: &EGraph<Node>, state: Id) -> Option<(OpId, Vec<Id>)> {
     eg.nodes(state).iter().find_map(|node| {
         if node.sym() != Some(SymKind::Theta) {
             return None;
         }
-        let [init, latch] = node.children[..] else {
+        let [init, edges @ ..] = &node.children[..] else {
             return None;
         };
-        let (init, latch) = (eg.find(init), eg.find(latch));
-        // A loop leaving the state it was entered with carries nothing to read.
-        if init == state || latch == state {
+        let init = eg.find(*init);
+        let edges: Vec<Id> = edges.iter().map(|&edge| eg.find(edge)).collect();
+        // A loop entered on the state it carries, or leaving every edge on it,
+        // carries nothing to read.
+        if init == state || edges.is_empty() || edges.iter().all(|&edge| edge == state) {
             return None;
         }
         let loop_op = live_op(context, node)?;
         context
             .get_op(loop_op)
             .as_interface::<dyn LoopLike>()
-            .map(|_| (loop_op, [init, latch]))
+            .map(|_| (loop_op, std::iter::once(init).chain(edges).collect()))
     })
 }
 

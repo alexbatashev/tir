@@ -175,9 +175,11 @@ impl SemNode {
         Self::projection(Kind::Sym(SymKind::If), value, args)
     }
 
-    /// The per-value θ projection standing for `value`: `Theta(init, latch)`.
-    pub fn theta(value: ValueId, init: Id, latch: Id) -> Self {
-        Self::projection(Kind::Sym(SymKind::Theta), value, vec![init, latch])
+    /// The per-value θ projection standing for `value`: `Theta(init, edges…)`,
+    /// the value a port is entered with and the one each edge back into it — a
+    /// latch, a `continue`, a `break` — carries.
+    pub fn theta(value: ValueId, args: Vec<Id>) -> Self {
+        Self::projection(Kind::Sym(SymKind::Theta), value, args)
     }
 
     /// A memory access standing for `value` — the value a read yields, or the

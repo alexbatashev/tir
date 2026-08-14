@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use tir_symbolic::egraph::{EGraph, Id};
 
-use crate::analysis::scopes::{loop_scope, nested_exit_scopes};
+use crate::analysis::scopes::{carried_operands, port_edges, region_exit};
 use crate::analysis::slots::{collect_slots, values_agree_on_type};
 use crate::builtin::StateType;
 use crate::sem::egraph::{minimal_unsigned_apint, type_width};
@@ -144,7 +144,7 @@ impl Seeder<'_> {
                 self.seed_gamma(&instance, conditional.as_ref());
                 return;
             }
-            match self.theta_loop(&instance) {
+            match instance.clone().as_interface::<dyn LoopLike>() {
                 Some(loop_like) => self.seed_theta(&instance, loop_like.as_ref()),
                 // A loop the vocabulary cannot spell carries no reasoning: its
                 // ports and results anchor, but its body is read like any other
@@ -194,20 +194,47 @@ impl Seeder<'_> {
 
     /// γ: each arm's entry arguments bind to the inputs forwarded into it, and
     /// result `index` is the choice between the arms' `index`-th yielded values.
+    ///
+    /// An arm leaving the enclosing loop never reaches what follows the gate, so
+    /// what it would have yielded is never read: a gate one arm leaves through
+    /// publishes what the arm that stays yields, and one every arm leaves through
+    /// publishes nothing the graph can name.
     fn seed_gamma(&mut self, instance: &Arc<OpInstance>, conditional: &dyn Conditional) {
         let decision = self.class_of(conditional.decision());
         for region in instance.regions.clone() {
             self.bind_arm_arguments(instance, region);
             self.seed_region(region);
         }
+        let arms: Vec<(RegionId, bool)> = conditional
+            .guarded_regions()
+            .into_iter()
+            .filter(|&(region, ..)| region_exit(self.context, region).is_none())
+            .map(|(region, _, when_true)| (region, when_true))
+            .collect();
         for (index, &result) in instance.results.clone().iter().enumerate() {
-            let Some((taken, not_taken)) = arm_yields(conditional, index) else {
-                self.anchor(result);
-                continue;
-            };
-            let args = vec![decision, self.class_of(taken), self.class_of(not_taken)];
-            let id = self.eg.add(Node::gamma(result, args));
-            self.value_class.insert(result, id);
+            let yields: Option<Vec<ValueId>> = arms
+                .iter()
+                .map(|&(region, _)| conditional.region_yields(region).get(index).copied())
+                .collect();
+            match yields.as_deref() {
+                Some(&[value]) => {
+                    let id = self.class_of(value);
+                    self.value_class.insert(result, id);
+                }
+                Some(&[first, second]) => {
+                    let (taken, not_taken) = if arms[0].1 {
+                        (first, second)
+                    } else {
+                        (second, first)
+                    };
+                    let args = vec![decision, self.class_of(taken), self.class_of(not_taken)];
+                    let id = self.eg.add(Node::gamma(result, args));
+                    self.value_class.insert(result, id);
+                }
+                _ => {
+                    self.anchor(result);
+                }
+            }
         }
     }
 
@@ -230,26 +257,12 @@ impl Seeder<'_> {
         }
     }
 
-    /// The loop reading of `instance`, when every exit of it passes through the
-    /// test: a `break` or `continue` leaves with a state of its own, which the θ
-    /// over the body's does not describe.
-    fn theta_loop(&self, instance: &Arc<OpInstance>) -> Option<Box<dyn LoopLike>> {
-        let scope = instance.clone().as_interface::<dyn TokenScope>()?;
-        let exits = nested_exit_scopes(self.context, instance);
-        scope
-            .token_scope_regions()
-            .iter()
-            .all(|&region| {
-                loop_scope(self.context, region).is_none_or(|token| !exits.contains(&token))
-            })
-            .then(|| instance.clone().as_interface::<dyn LoopLike>())?
-    }
-
     /// θ: a loop's state-typed carried port is the θ over the state the loop was
-    /// entered with and the one its body leaves. The port's argument anchors
-    /// first, so the regions can be read on it, and the θ joins that class after
-    /// — the latch is a term over the argument itself. The loop's result is the
-    /// state its last iteration published.
+    /// entered with and the one each edge back into the port carries — the body's
+    /// latch, and every `break`/`continue` leaving its scope. The port's argument
+    /// anchors first, so the regions can be read on it, and the θ joins that class
+    /// after — an edge is a term over the argument itself. The loop's result is
+    /// the port read where the loop was left.
     ///
     /// Only state ports: a value the loop carries is one the term graph already
     /// reads as an argument, and nothing yet asks it what the loop does to it.
@@ -281,11 +294,26 @@ impl Seeder<'_> {
         for region in instance.regions.clone() {
             self.seed_region(region);
         }
-        let (inits, latched, finals) = (loop_like.inits(), loop_like.latched(), loop_like.finals());
-        for &port in &ports {
+        let (inits, finals) = (loop_like.inits(), loop_like.finals());
+        let edges: Vec<Arc<OpInstance>> = instance
+            .clone()
+            .as_interface::<dyn TokenScope>()
+            .into_iter()
+            .flat_map(|scope| scope.token_scope_regions())
+            .flat_map(|body| port_edges(self.context, body))
+            .map(|edge| self.context.get_op(edge))
+            .collect();
+        if edges.is_empty() {
+            return;
+        }
+        for (slot, &port) in ports.iter().enumerate() {
             let init = self.class_of(inits[port]);
-            let latch = self.class_of(latched[port]);
-            let theta = self.eg.add(Node::theta(finals[port], init, latch));
+            let Some(states) = self.carried_states(&edges, slot, ports.len()) else {
+                continue;
+            };
+            let mut args = vec![init];
+            args.extend(states.iter().map(|&state| self.class_of(state)));
+            let theta = self.eg.add(Node::theta(finals[port], args));
             let head = self.class_of(heads[port]);
             self.eg.union(theta, head);
             let published = match &tested {
@@ -295,6 +323,25 @@ impl Seeder<'_> {
             self.value_class.insert(finals[port], published);
         }
         self.eg.rebuild();
+    }
+
+    /// The state each edge carries into the `slot`-th of a loop's `states` state
+    /// ports: the ports are the trailing values an edge carries, in the loop's own
+    /// order. `None` where an edge carries too few to name them.
+    fn carried_states(
+        &self,
+        edges: &[Arc<OpInstance>],
+        slot: usize,
+        states: usize,
+    ) -> Option<Vec<ValueId>> {
+        edges
+            .iter()
+            .map(|edge| {
+                let carried = carried_operands(edge);
+                let first = carried.len().checked_sub(states)?;
+                carried.get(first + slot).copied()
+            })
+            .collect()
     }
 
     /// The region a loop evaluates before each iteration, the arguments it reads
@@ -428,22 +475,6 @@ impl Seeder<'_> {
             Prov::None,
         ))
     }
-}
-
-/// The values a two-armed boolean [`Conditional`]'s true and false arms yield at
-/// `index`. `None` for any other shape — a switch, or a result no arm yields.
-fn arm_yields(conditional: &dyn Conditional, index: usize) -> Option<(ValueId, ValueId)> {
-    let mut taken = None;
-    let mut not_taken = None;
-    for (region, _, when_true) in conditional.guarded_regions() {
-        let yielded = conditional.region_yields(region).get(index).copied()?;
-        if when_true {
-            taken = Some(yielded);
-        } else {
-            not_taken = Some(yielded);
-        }
-    }
-    Some((taken?, not_taken?))
 }
 
 /// A pure value op the e-graph may reason about: one result, no regions, and a declared semantic expression.

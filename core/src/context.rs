@@ -801,6 +801,15 @@ impl Context {
         result
     }
 
+    /// Carry one more port on `op`, an edge [`Context::grow_port`] does not reach:
+    /// an `scf.break`/`scf.continue` feeds the port it leaves through, so it takes
+    /// the value where a port belongs among its operands.
+    pub fn append_port_operand(&self, op: OpId, value: ValueId) {
+        let ty = self.get_value(value).ty();
+        self.append_operand(op, value);
+        self.place_operand(op, ty);
+    }
+
     /// Where the port of type `ty` just appended to `values` belongs: ahead of
     /// the trailing `!state` ports, which are read off the end. `None` when it is
     /// already there — a state port joins them, and an op no chain crosses has
