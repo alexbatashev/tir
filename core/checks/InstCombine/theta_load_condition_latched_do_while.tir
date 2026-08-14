@@ -1,0 +1,35 @@
+// RUN: tir opt --pass thread-state --pass instcombine --pass erase-state --verify %s | filecheck %s
+
+// The tail-controlled shape of the same geometry: the update is unconditional in
+// the test region, so the class the loop is left holding names an ordinary
+// operation there rather than a gate. Nothing outside the loop can spell it, and
+// the read after the loop takes the port's result.
+
+module {
+  func @twice(%0: !i1, %1: !i32) -> !i32 {
+    %2 = ptr.alloca {size = 4, align = 4} : !ptr.p<!i32>
+    ptr.store %1, %2
+    %3 = scf.while {
+      %4 = ptr.load %2 : !i32
+      %5 = addi %4, %4 : !i32
+      ptr.store %5, %2
+      scf.condition %0
+    } do {
+      scf.yield
+    }
+    %6 = ptr.load %2 : !i32
+    return %6
+  }
+  module_end
+}
+
+// CHECK-LABEL: func @twice
+// CHECK-NOT: ptr.
+// CHECK: %[[RESULT:[0-9]+]] = scf.while iter_args(%[[HEAD:[0-9]+]] = %1) -> !i32 {
+// CHECK-NEXT: %[[NEXT:[0-9]+]] = addi %[[HEAD]], %[[HEAD]] : !i32
+// CHECK-NEXT: scf.condition %0, %[[NEXT]]
+// CHECK-NEXT: }
+// CHECK-NEXT: do(%[[BODY:[0-9]+]]) {
+// CHECK-NEXT: scf.yield %[[BODY]]
+// CHECK-NEXT: }
+// CHECK-NEXT: return %[[RESULT]]

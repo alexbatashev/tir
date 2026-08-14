@@ -1,0 +1,49 @@
+// RUN: tir opt --pass thread-state --pass instcombine --pass erase-state --verify %s | filecheck %s
+
+// Two slots the test region updates, one reading the other. The second port is
+// asked for from inside the arm, where the arm's own assumption makes the whole
+// gate equal to what it yields there — a form that answers nowhere else — so the
+// port takes the gate's own value instead, and both slots leave memory.
+
+module {
+  func @sum_to(%0: !i1) -> !i32 {
+    %1 = ptr.alloca {size = 4, align = 4} : !ptr.p<!i32>
+    %2 = ptr.alloca {size = 4, align = 4} : !ptr.p<!i32>
+    %3 = constant {value = 0} : !i32
+    ptr.store %3, %1
+    ptr.store %3, %2
+    %4 = scf.while {
+      %5 = scf.if %0 -> !i1 {
+        %6 = ptr.load %1 : !i32
+        %7 = ptr.load %2 : !i32
+        %8 = addi %6, %7 : !i32
+        ptr.store %8, %1
+        %9 = constant {value = 1} : !i32
+        %10 = addi %7, %9 : !i32
+        ptr.store %10, %2
+        %11 = constant {value = 1} : !i1
+        scf.yield %11
+      } else {
+        %12 = constant {value = 0} : !i1
+        scf.yield %12
+      }
+      scf.condition %5
+    } do {
+      scf.yield
+    }
+    %13 = ptr.load %1 : !i32
+    return %13
+  }
+  module_end
+}
+
+// CHECK-LABEL: func @sum_to
+// CHECK-NOT: ptr.
+// CHECK: %[[SUM:[0-9]+]], %{{[0-9]+}} = scf.while iter_args(%[[HS:[0-9]+]] = %3, %[[HC:[0-9]+]] = %3) -> !i32, !i32 {
+// CHECK: %{{[0-9]+}}, %[[LS:[0-9]+]], %[[LC:[0-9]+]] = scf.if %0 -> !i1, !i32, !i32 {
+// CHECK-NEXT: %[[NEXT:[0-9]+]] = addi %[[HS]], %[[HC]] : !i32
+// CHECK: %[[STEP:[0-9]+]] = addi %[[HC]], %{{[0-9]+}} : !i32
+// CHECK: scf.yield %{{[0-9]+}}, %[[NEXT]], %[[STEP]]
+// CHECK: scf.yield %{{[0-9]+}}, %[[HS]], %[[HC]]
+// CHECK: scf.condition %{{[0-9]+}}, %[[LS]], %[[LC]]
+// CHECK: return %[[SUM]]

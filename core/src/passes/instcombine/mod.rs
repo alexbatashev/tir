@@ -18,16 +18,19 @@ mod state;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
-use tir_symbolic::egraph::{EGraph, Extraction, Id};
+use tir_symbolic::egraph::{EGraph, ENode, Extraction, Id};
 
 use std::rc::Rc;
 
 use crate::analysis::scopes::port_edges;
 use crate::analysis::{DominatingEdgeFacts, DominatorTree};
 use crate::graph::Dag;
+use std::sync::Arc;
+
 use crate::{
-    AnalysisManager, BlockId, Conditional, ConstantLike, Context, MemoryRead, OpId, OpInstance,
-    OperationRef, Pass, PassError, PassTarget, RegionId, Rewriter, TokenScope, TypeId, ValueId,
+    AnalysisManager, BlockId, Conditional, ConstantLike, Context, EntryGuard, GuardedLoop,
+    MemoryRead, OpId, OpInstance, OperationRef, Pass, PassError, PassTarget, RegionId, Rewriter,
+    TokenScope, TypeId, ValueId,
     builtin::{FuncOp, StateType, ops},
     utils::APInt,
 };
@@ -81,8 +84,9 @@ impl Pass for InstCombinePass {
             edge_facts: analyses.get::<DominatingEdgeFacts>(context, root),
             ruleset,
             gamma_ports: RefCell::new(HashMap::new()),
-            theta_ports: RefCell::new(HashMap::new()),
+            theta_ports: RefCell::new(Vec::new()),
             port_bindings: RefCell::new(Vec::new()),
+            growing: RefCell::new(Vec::new()),
         };
         let body = context.get_op(root).regions[0];
         driver.process_region(body, rewriter)?;
@@ -107,18 +111,30 @@ struct Driver<'a> {
     /// The value port already grown on a gate for a pair of arm classes, so every
     /// read the gate answers takes the one port.
     gamma_ports: RefCell<HashMap<(OpId, Id, Id), ValueId>>,
-    /// The same for a loop, over the classes its port is fed from.
-    theta_ports: RefCell<HashMap<(OpId, Vec<Id>), ThetaPort>>,
+    /// The same for a loop, over the classes its port is fed from. A list, not a
+    /// map: a read outside the loop asks for the class the port is left holding,
+    /// which is not the key, so every port is scanned in the order they were grown.
+    /// A port under construction is listed without one: growing it may ask for a
+    /// value it carries itself, and a port answers nothing until it is fed.
+    theta_ports: RefCell<Vec<(ThetaKey, Option<ThetaPort>)>>,
     /// The θ classes standing for a port argument while that port's latch is
     /// being built: inside the body the carry *is* the argument.
     port_bindings: RefCell<Vec<(Id, ValueId)>>,
+    /// The gates whose ports are being grown, innermost last.
+    growing: RefCell<Vec<OpId>>,
 }
 
+/// The loop a θ port belongs to and the classes its edges are fed from.
+type ThetaKey = (OpId, Vec<Id>);
+
 /// A carried port a θ commit grew: the argument each of the loop's regions reads
-/// the carried value as, and the result the loop leaves it in.
+/// the carried value as, and the result the loop leaves it in — each with the
+/// class it stands for there. A port holds one class per place, and not the same
+/// one everywhere: a loop that latches in its test is entered on the head and
+/// left with the latch.
 struct ThetaPort {
-    arguments: Vec<(RegionId, ValueId)>,
-    result: ValueId,
+    arguments: Vec<(RegionId, Id, ValueId)>,
+    result: (Id, ValueId),
 }
 
 impl Driver<'_> {
@@ -425,7 +441,7 @@ impl Driver<'_> {
         if let Some(&value) = memo.get(&class) {
             return Ok(Some(value));
         }
-        if let Some(value) = self.bound_port(class) {
+        if let Some(value) = self.bound_port(class, target) {
             return Ok(Some(value));
         }
         let Some(node) = self.chosen(extraction, class) else {
@@ -438,16 +454,24 @@ impl Driver<'_> {
         // that rebuilds it: the gate grows a port, the access is copied.
         let value = match (node.sym(), node.prov) {
             (_, Prov::Value(value)) => {
-                let Some(value) = self.spelled_at(value, class, expected_ty, target, rewriter)?
+                let Some(value) =
+                    self.spelled_at(extraction, value, class, expected_ty, target, rewriter)?
                 else {
                     return Ok(None);
                 };
                 value
             }
             (Some(SymKind::If), Prov::Op(gate)) => {
-                let Some(value) =
-                    self.commit_gamma_port(extraction, gate, node, expected_ty, rewriter)?
-                else {
+                // A gate inside a loop the reader has left answers through the
+                // loop, not through a port of its own.
+                let value =
+                    match self.latched_result(extraction, class, expected_ty, target, rewriter)? {
+                        Some(value) => Some(value),
+                        None => {
+                            self.commit_gamma_port(extraction, gate, node, expected_ty, rewriter)?
+                        }
+                    };
+                let Some(value) = value else {
                     return Ok(None);
                 };
                 value
@@ -468,7 +492,8 @@ impl Driver<'_> {
             }
             (_, Prov::Op(op)) => {
                 let named = self.context.get_op(op).results[0];
-                let Some(value) = self.spelled_at(named, class, expected_ty, target, rewriter)?
+                let Some(value) =
+                    self.spelled_at(extraction, named, class, expected_ty, target, rewriter)?
                 else {
                     return Ok(None);
                 };
@@ -507,10 +532,13 @@ impl Driver<'_> {
     /// values holding it are spread over the tree: the form a bottom-up extraction
     /// picked may sit in a sibling region — an arm of the very gate a port is being
     /// grown on, say — and name nothing here. Where it does not reach, another form
-    /// of the class that does answers, and failing that a literal, which is spelled
-    /// anywhere.
+    /// of the class that does answers; failing that a port carrying the class out
+    /// of the region it is computed in; failing that the value being rewritten
+    /// itself, which answers for the class but changes nothing; and failing that
+    /// a literal, which is spelled anywhere.
     fn spelled_at(
         &self,
+        extraction: &Extraction<Node>,
         named: ValueId,
         class: Id,
         ty: TypeId,
@@ -520,13 +548,21 @@ impl Driver<'_> {
         if self.reaches(named, target) {
             return Ok(Some(named));
         }
-        let reaching = self
+        let own = self.context.get_op(target.op().id).results.clone();
+        let reaching: Vec<ValueId> = self
             .eg
             .nodes(class)
             .iter()
             .filter_map(|node| self.named_value(node))
-            .find(|&value| self.reaches(value, target));
-        if let Some(value) = reaching {
+            .filter(|&value| self.reaches(value, target))
+            .collect();
+        if let Some(&value) = reaching.iter().find(|value| !own.contains(value)) {
+            return Ok(Some(value));
+        }
+        if let Some(value) = self.carried_out(extraction, class, ty, target, rewriter)? {
+            return Ok(Some(value));
+        }
+        if let Some(&value) = reaching.first() {
             return Ok(Some(value));
         }
         let Some(literal) = self.eg.nodes(class).iter().find_map(Node::int) else {
@@ -535,6 +571,109 @@ impl Driver<'_> {
         let op = ops::constant(self.context, literal.to_i64(), ty).build();
         rewriter.insert_op_before(target, &op)?;
         Ok(Some(op.result()))
+    }
+
+    /// The class carried out of the region it is computed in, on a port.
+    ///
+    /// Which port a class needs is a matter of where it is being read: an arm's
+    /// own value stands for the whole gate under the arm's assumption and answers
+    /// for it nowhere else, and a loop that latches in its test leaves a class no
+    /// θ of its own names. Both are grown at the read that asks — and neither
+    /// answers a read it holds: a port carries a value out of a region, so asking
+    /// it for one inside that region asks it to carry what it is being fed.
+    fn carried_out(
+        &self,
+        extraction: &Extraction<Node>,
+        class: Id,
+        ty: TypeId,
+        target: &OperationRef,
+        rewriter: &mut Rewriter,
+    ) -> Result<Option<ValueId>, PassError> {
+        let gate = self
+            .eg
+            .nodes(class)
+            .iter()
+            .find_map(|node| match (node.sym(), node.prov) {
+                (Some(SymKind::If), Prov::Op(gate)) if self.answers(gate, target) => {
+                    Some((gate, node))
+                }
+                _ => None,
+            });
+        if let Some((gate, node)) = gate
+            && let Some(value) = self.commit_gamma_port(extraction, gate, node, ty, rewriter)?
+            && self.reaches(value, target)
+        {
+            return Ok(Some(value));
+        }
+        self.latched_result(extraction, class, ty, target, rewriter)
+    }
+
+    /// The loop result a class the loop is left holding takes outside it.
+    ///
+    /// A loop that latches in its test leaves what the test forwarded, and that
+    /// class names no θ of its own — the θ carrying it names it as an edge. So a
+    /// class that answers nowhere the reader sits asks the loops carrying it, and
+    /// one the reader is not inside answers with its result. Committing the port
+    /// is what makes the class spellable at all, so it happens at the read.
+    fn latched_result(
+        &self,
+        extraction: &Extraction<Node>,
+        class: Id,
+        ty: TypeId,
+        target: &OperationRef,
+        rewriter: &mut Rewriter,
+    ) -> Result<Option<ValueId>, PassError> {
+        let class = self.eg.find(class);
+        let key = Node::sym_pattern(SymKind::Theta, Vec::new()).op_key();
+        for holder in self.eg.classes_with_op(key) {
+            for node in self.eg.nodes(holder) {
+                let (Some(SymKind::Theta), Prov::Op(loop_op)) = (node.sym(), node.prov) else {
+                    continue;
+                };
+                let latches = node
+                    .children
+                    .get(1..)
+                    .is_some_and(|edges| edges.iter().any(|&edge| self.eg.find(edge) == class));
+                if !latches || self.encloses(loop_op, target) {
+                    continue;
+                }
+                self.commit_theta_port(extraction, holder, node, ty, target, rewriter)?;
+                if let Some(value) = self.bound_port(class, target) {
+                    return Ok(Some(value));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Whether a port on `op` could carry a value out to where `target` sits: not
+    /// one being grown — it would be asked to carry what it is being fed — and not
+    /// one `target` sits inside, where its result is out of scope anyway.
+    fn answers(&self, op: OpId, target: &OperationRef) -> bool {
+        !self.growing.borrow().contains(&op) && !self.encloses(op, target)
+    }
+
+    /// Whether `target` sits inside one of `op`'s regions.
+    fn encloses(&self, op: OpId, target: &OperationRef) -> bool {
+        if !self.context.has_operation(op) {
+            return false;
+        }
+        let regions = self.context.get_op(op).regions.clone();
+        let mut block = self.context.get_op(target.op().id).parent_block();
+        while let Some(current) = block {
+            let Some(region) = self.context.parent_region(current) else {
+                return false;
+            };
+            if regions.contains(&region) {
+                return true;
+            }
+            block = self
+                .context
+                .get_region(region)
+                .parent_op()
+                .and_then(|holder| self.context.get_op(holder).parent_block());
+        }
+        false
     }
 
     /// The value a node names outright, building nothing.
@@ -567,6 +706,20 @@ impl Driver<'_> {
     /// was. One port per gate and pair of arm classes, however many reads it
     /// answers.
     fn commit_gamma_port(
+        &self,
+        extraction: &Extraction<Node>,
+        gate: OpId,
+        node: &Node,
+        ty: TypeId,
+        rewriter: &mut Rewriter,
+    ) -> Result<Option<ValueId>, PassError> {
+        self.growing.borrow_mut().push(gate);
+        let grown = self.grow_gamma_port(extraction, gate, node, ty, rewriter);
+        self.growing.borrow_mut().pop();
+        grown
+    }
+
+    fn grow_gamma_port(
         &self,
         extraction: &Extraction<Node>,
         gate: OpId,
@@ -631,14 +784,25 @@ impl Driver<'_> {
             .or_else(|| extraction.node(class))
     }
 
-    /// The port argument a θ class stands for, while that port's latch is built.
-    fn bound_port(&self, class: Id) -> Option<ValueId> {
-        self.port_bindings
+    /// The value a port already carries `class` on where `target` sits: the one
+    /// bound while a port's own edges are being fed, or one a committed port
+    /// answers with.
+    fn bound_port(&self, class: Id, target: &OperationRef) -> Option<ValueId> {
+        let class = self.eg.find(class);
+        let bound = self
+            .port_bindings
             .borrow()
             .iter()
             .rev()
-            .find(|&&(bound, _)| bound == class)
-            .map(|&(_, value)| value)
+            .find(|&&(bound, _)| self.eg.find(bound) == class)
+            .map(|&(_, value)| value);
+        bound.or_else(|| {
+            self.theta_ports
+                .borrow()
+                .iter()
+                .filter_map(|(_, port)| port.as_ref())
+                .find_map(|port| self.port_value(port, class, target))
+        })
     }
 
     /// Carry a law-introduced θ's value on a port of `loop_op`'s own.
@@ -665,16 +829,22 @@ impl Driver<'_> {
         else {
             return Ok(None);
         };
-        let key = (
+        let key: ThetaKey = (
             loop_op,
             node.children.iter().map(|&id| self.eg.find(id)).collect(),
         );
-        if let Some(port) = self.theta_ports.borrow().get(&key) {
-            return Ok(Some(self.port_value(port, target)));
+        if self
+            .theta_ports
+            .borrow()
+            .iter()
+            .any(|(known, _)| *known == key)
+        {
+            return Ok(self.bound_port(class, target));
         }
         if !self.context.has_operation(loop_op) {
             return Ok(None);
         }
+        self.theta_ports.borrow_mut().push((key.clone(), None));
         let instance = self.context.get_op(loop_op);
         let Some(scope) = instance.clone().as_interface::<dyn TokenScope>() else {
             return Ok(None);
@@ -687,6 +857,18 @@ impl Driver<'_> {
         if edges.len() != edge_classes.len() {
             return Ok(None);
         }
+        // A loop whose body computes nothing latches in its test: what the test
+        // forwards is what the next iteration is entered on, and what the loop is
+        // left with. Restructuring leaves every `goto`/`while` loop in that shape.
+        let test = match (self.tests_the_latch(&instance, body_region), edge_classes) {
+            (Some(region), [_]) => self.terminator(region).map(|edge| (region, edge)),
+            _ => None,
+        };
+        let head = self.eg.find(class);
+        let carried_class = match test {
+            Some(_) => self.eg.find(edge_classes[0]),
+            None => head,
+        };
         let at_loop = self.at(loop_op);
         let mut memo = HashMap::new();
         let Some(init) =
@@ -698,20 +880,26 @@ impl Driver<'_> {
             return Ok(None);
         }
         let mut arguments = Vec::new();
-        let mut carried = init;
+        let (mut carried, mut tested) = (init, init);
         let result = self
             .context
             .grow_port(loop_op, ty, Some(init), |region, incoming| {
                 let incoming = incoming?;
-                arguments.push((region, incoming));
                 if let Some(entry) = self.context.get_region(region).block_ids().first() {
                     self.arg_block.borrow_mut().insert(incoming, *entry);
                 }
                 // The body's edges are fed one by one below — a `break` inside it
                 // is one of them, and its terminator may be another. Every other
-                // region, a loop's test, forwards the carry on.
+                // region, a loop's test, forwards the carry on, unless the loop
+                // latches there: that operand is spelled below like an edge.
                 if body.contains(&region) {
                     carried = incoming;
+                    arguments.push((region, carried_class, incoming));
+                    return None;
+                }
+                arguments.push((region, head, incoming));
+                if test.is_some_and(|(latching, _)| latching == region) {
+                    tested = incoming;
                     return None;
                 }
                 Some(incoming)
@@ -721,6 +909,13 @@ impl Driver<'_> {
         // its edges first. Places taken now follow the order the loop carries the
         // ports; places taken as values become known would follow the order they
         // were spelled in, which crosses the ports of a loop that swaps two slots.
+        let reserved_test = test.map(|(_, edge)| {
+            (
+                edge,
+                carried_class,
+                self.context.append_port_operand(edge, tested),
+            )
+        });
         let reserved: Vec<(OpId, Id, usize)> = edges
             .into_iter()
             .zip(edge_classes.iter().copied())
@@ -729,22 +924,45 @@ impl Driver<'_> {
                 (edge, edge_class, index)
             })
             .collect();
-        let (carried_all, failure) =
-            self.feed_edges(extraction, class, reserved, ty, carried, rewriter);
+        // The test is fed on the head — it runs before the body — and the body's
+        // edges on what the test forwarded them.
+        let (tested_all, failure) = self.feed_edges(
+            extraction,
+            reserved_test.into_iter().collect(),
+            ty,
+            (head, tested),
+            rewriter,
+        );
         if let Some(error) = failure {
             return Err(error);
         }
-        if !carried_all {
+        let (carried_all, failure) =
+            self.feed_edges(extraction, reserved, ty, (carried_class, carried), rewriter);
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        if !(tested_all && carried_all) {
             return Ok(None);
         }
-        let port = ThetaPort { arguments, result };
-        let value = self.port_value(&port, target);
-        self.theta_ports.borrow_mut().insert(key, port);
-        Ok(Some(value))
+        let port = ThetaPort {
+            arguments,
+            result: (carried_class, result),
+        };
+        let value = self.port_value(&port, class, target);
+        if let Some((_, place)) = self
+            .theta_ports
+            .borrow_mut()
+            .iter_mut()
+            .find(|(known, _)| *known == key)
+        {
+            *place = Some(port);
+        }
+        Ok(value)
     }
 
     /// Carry the port's value on each of a loop's edges, each with the class the θ
-    /// names it by and the place reserved for it there. Every edge must be fed —
+    /// names it by and the place reserved for it there, under the `bound` reading
+    /// of what the port is worth where they are taken. Every edge must be fed —
     /// the loop carries the port whether or not the value can be spelled there — so
     /// an edge whose class does not materialize keeps the port's own argument, which
     /// is what its place was reserved with, and the whole port is reported unfed: no
@@ -752,17 +970,16 @@ impl Driver<'_> {
     fn feed_edges(
         &self,
         extraction: &Extraction<Node>,
-        class: Id,
         edges: Vec<(OpId, Id, usize)>,
         ty: TypeId,
-        carried: ValueId,
+        bound: (Id, ValueId),
         rewriter: &mut Rewriter,
     ) -> (bool, Option<PassError>) {
         let mut fed = true;
         let mut failure = None;
         for (edge, edge_class, index) in edges {
             let at_edge = self.at(edge);
-            self.port_bindings.borrow_mut().push((class, carried));
+            self.port_bindings.borrow_mut().push(bound);
             let value = self.materialize(
                 extraction,
                 edge_class,
@@ -785,20 +1002,26 @@ impl Driver<'_> {
         (fed, failure)
     }
 
-    /// What `port` is worth where `target` sits: the argument of the loop region
-    /// holding it, or the loop's result outside every one of them.
-    fn port_value(&self, port: &ThetaPort, target: &OperationRef) -> ValueId {
+    /// What `port` is worth for `class` where `target` sits: the argument of the
+    /// innermost loop region holding it, or the loop's result outside every one of
+    /// them. `None` where the port holds another class there — the value it does
+    /// carry answers for a different point of the loop.
+    fn port_value(&self, port: &ThetaPort, class: Id, target: &OperationRef) -> Option<ValueId> {
+        let class = self.eg.find(class);
         let mut block = self.context.get_op(target.op().id).parent_block();
         while let Some(current) = block {
             let Some(region) = self.context.parent_region(current) else {
                 break;
             };
-            if let Some(&(_, argument)) = port
+            let mut held = port
                 .arguments
                 .iter()
-                .find(|&&(holding, _)| holding == region)
-            {
-                return argument;
+                .filter(|&&(holding, ..)| holding == region)
+                .peekable();
+            if held.peek().is_some() {
+                return held
+                    .find(|&&(_, carried, _)| self.eg.find(carried) == class)
+                    .map(|&(.., value)| value);
             }
             block = self
                 .context
@@ -806,7 +1029,7 @@ impl Driver<'_> {
                 .parent_op()
                 .and_then(|op| self.context.get_op(op).parent_block());
         }
-        port.result
+        (self.eg.find(port.result.0) == class).then_some(port.result.1)
     }
 
     /// A read a law distributed into an arm that stored nothing: with no value
@@ -908,6 +1131,27 @@ impl Driver<'_> {
         let instance = self.context.get_op(op);
         let block = instance.parent_block().map(|id| self.context.get_block(id));
         OperationRef::new(instance, block, None)
+    }
+
+    /// The region a loop tests before each iteration, when its body computes
+    /// nothing at all: everything such a loop does happens before the test's
+    /// terminator, so the value the test forwards is the latch itself and the
+    /// body hands it straight back. Restructuring leaves `goto`/`while` loops in
+    /// that shape.
+    fn tests_the_latch(&self, instance: &Arc<OpInstance>, body: RegionId) -> Option<RegionId> {
+        let EntryGuard::Region { region, .. } = instance
+            .clone()
+            .as_interface::<dyn GuardedLoop>()?
+            .entry_guard()
+        else {
+            return None;
+        };
+        let block = self
+            .context
+            .get_region(body)
+            .iter(self.context.clone())
+            .next()?;
+        (block.op_ids().len() == 1).then_some(region)
     }
 
     /// The terminator of `region`, when it is the single-block region a port can
