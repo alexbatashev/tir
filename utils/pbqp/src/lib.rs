@@ -2,7 +2,6 @@
 //! exact degree ≤ 2 reductions with backtracking search at higher degrees.
 
 use std::collections::{BTreeSet, VecDeque};
-use std::hash::{DefaultHasher, Hash, Hasher};
 
 pub const INF_COST: u64 = u64::MAX / 4;
 
@@ -145,10 +144,19 @@ impl MatrixInterner {
     }
 }
 
+/// FNV-1a over the cost words. A cost matrix is hashed on every intern, so this
+/// stays a multiply per word; equal hashes are settled by comparing the
+/// matrices, and the ids do not depend on the hash at all.
 fn hash_matrix(matrix: &PbqpMatrix) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    matrix.hash(&mut hasher);
-    hasher.finish()
+    const PRIME: u64 = 0x100000001b3;
+    let mut hash = 0xcbf29ce484222325;
+    for word in [matrix.rows as u64, matrix.cols as u64]
+        .iter()
+        .chain(&matrix.costs)
+    {
+        hash = (hash ^ word).wrapping_mul(PRIME);
+    }
+    hash ^ (hash >> 32)
 }
 
 /// One stored edge, oriented so that `lhs < rhs` and the matrix's rows index
@@ -564,24 +572,29 @@ impl<'a> Solver<'a> {
             // Copy-on-write: the stored matrix is shared with every edge whose
             // costs are equal, so normalization works on a copy and re-interns.
             let mut matrix = self.matrix(edge.matrix).clone();
+            let mut written = false;
             changed |= normalize_axis(
                 &mut matrix,
                 &mut self.node_costs[lhs],
                 &mut self.finite_alternatives[lhs],
                 Axis::Rows,
+                &mut written,
             );
             changed |= normalize_axis(
                 &mut matrix,
                 &mut self.node_costs[rhs],
                 &mut self.finite_alternatives[rhs],
                 Axis::Cols,
+                &mut written,
             );
 
             if matrix.is_zero() {
                 zero_edges.push((lhs, rhs));
             }
-            let id = self.intern(matrix);
-            self.edges.set_matrix(slot as u32, id);
+            if written {
+                let id = self.intern(matrix);
+                self.edges.set_matrix(slot as u32, id);
+            }
         }
 
         for (lhs, rhs) in zero_edges {
@@ -1192,12 +1205,15 @@ enum Axis {
 
 /// Subtract each line's minimum from the matrix and charge it to the owning
 /// node's alternative instead — the standard PBQP normalization, which is what
-/// makes an all-zero edge removable.
+/// makes an all-zero edge removable. Answers whether it charged an alternative;
+/// `written` says whether the matrix itself moved, which is the narrower
+/// question of whether the edge needs a fresh interned matrix.
 fn normalize_axis(
     matrix: &mut PbqpMatrix,
     costs: &mut [u64],
     finite_alternatives: &mut usize,
     axis: Axis,
+    written: &mut bool,
 ) -> bool {
     let (lines, span) = match axis {
         Axis::Rows => (matrix.rows(), matrix.cols()),
@@ -1213,7 +1229,10 @@ fn normalize_axis(
         if *cost >= INF_COST {
             for offset in 0..span {
                 let (row, col) = cell(line, offset);
-                matrix.set(row, col, INF_COST);
+                if matrix.get(row, col) < INF_COST {
+                    matrix.set(row, col, INF_COST);
+                    *written = true;
+                }
             }
             continue;
         }
@@ -1237,6 +1256,7 @@ fn normalize_axis(
                     matrix.set(row, col, current - min);
                 }
             }
+            *written = true;
             changed = true;
         }
     }
