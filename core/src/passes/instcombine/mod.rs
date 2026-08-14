@@ -87,6 +87,7 @@ impl Pass for InstCombinePass {
             theta_ports: RefCell::new(Vec::new()),
             port_bindings: RefCell::new(Vec::new()),
             growing: RefCell::new(Vec::new()),
+            rereads: RefCell::new(HashMap::new()),
         };
         let body = context.get_op(root).regions[0];
         driver.process_region(body, rewriter)?;
@@ -122,6 +123,9 @@ struct Driver<'a> {
     port_bindings: RefCell<Vec<(Id, ValueId)>>,
     /// The gates whose ports are being grown, innermost last.
     growing: RefCell<Vec<OpId>>,
+    /// The copy already spliced in for a read class, so every arm a law
+    /// distributed that read into takes the one copy.
+    rereads: RefCell<HashMap<Id, ValueId>>,
 }
 
 /// The loop a θ port belongs to and the classes its edges are fed from.
@@ -485,7 +489,8 @@ impl Driver<'_> {
                 value
             }
             (Some(SymKind::LoadMemory), Prov::Op(load)) => {
-                let Some(value) = self.reread(extraction, load, node, target, rewriter)? else {
+                let Some(value) = self.reread(extraction, class, load, node, target, rewriter)?
+                else {
                     return Ok(None);
                 };
                 value
@@ -1035,10 +1040,17 @@ impl Driver<'_> {
     /// A read a law distributed into an arm that stored nothing: with no value
     /// defined there and no operation naming an indeterminate one, the read
     /// itself is the value — a copy of the load being distributed, on the state
-    /// that reaches the arm.
+    /// the law says it observes.
+    ///
+    /// The copy splices into the linear chain where that state is *published*,
+    /// and what it publishes takes the state's place. Reading it at the consumer
+    /// instead would answer the same value — a class is one state however far
+    /// along the chain it is named — but would leave every write between the two
+    /// points with a reader, and a slot nothing wrote would keep its stores.
     fn reread(
         &self,
         extraction: &Extraction<Node>,
+        class: Id,
         load: OpId,
         node: &Node,
         target: &OperationRef,
@@ -1047,6 +1059,11 @@ impl Driver<'_> {
         if !self.context.has_operation(load) {
             return Ok(None);
         }
+        if let Some(&value) = self.rereads.borrow().get(&self.eg.find(class))
+            && self.reaches(value, target)
+        {
+            return Ok(Some(value));
+        }
         let template = self.context.get_op(load);
         let Some(read) = template.clone().as_interface::<dyn MemoryRead>() else {
             return Ok(None);
@@ -1054,11 +1071,8 @@ impl Driver<'_> {
         let Some(observed) = read.state_operand() else {
             return Ok(None);
         };
-        // The copy splices into the linear chain just before `target`, so the
-        // state it reads is the one `target` consumes for that chain, and what
-        // the copy publishes takes its place. Naming the chain's class elsewhere
-        // would read a state this point does not hold.
-        let Some(state) = self.consumed_state(target, node.children[state::LOAD_STATE]) else {
+        let Some((state, cursor)) = self.published_state(node.children[state::LOAD_STATE], target)
+        else {
             return Ok(None);
         };
         let mut memo = HashMap::new();
@@ -1068,7 +1082,7 @@ impl Driver<'_> {
             extraction,
             node.children[state::ADDRESS],
             address_ty,
-            target,
+            &cursor,
             rewriter,
             &mut memo,
         )?
@@ -1106,24 +1120,39 @@ impl Driver<'_> {
             vec![],
             template.attributes.clone(),
         ));
-        rewriter.insert_op_before(target, copy.as_dyn_op().as_ref())?;
+        rewriter.insert_op_before(&cursor, copy.as_dyn_op().as_ref())?;
+        self.rereads
+            .borrow_mut()
+            .insert(self.eg.find(class), results[0]);
         Ok(Some(results[0]))
     }
 
-    /// The operand of `target` naming the chain `class` is: the state reaching
-    /// the point just before it.
-    fn consumed_state(&self, target: &OperationRef, class: Id) -> Option<ValueId> {
-        let class = self.eg.find(class);
-        self.context
-            .get_op(target.op().id)
-            .operands
-            .iter()
-            .copied()
-            .find(|operand| {
-                self.value_class
-                    .get(operand)
-                    .is_some_and(|&named| self.eg.find(named) == class)
-            })
+    /// The value publishing `class` and a cursor just after it — where the chain
+    /// took that state on. `None` where nothing the class names is in scope at
+    /// `target`; the earliest publication wins, so a copy built there observes
+    /// as little as the class allows.
+    fn published_state(&self, class: Id, target: &OperationRef) -> Option<(ValueId, OperationRef)> {
+        let mut published: Option<ValueId> = None;
+        for node in self.eg.nodes(class) {
+            let Some(value) = self.named_value(node) else {
+                continue;
+            };
+            if !self.dominates_op(value, target.op().id) {
+                continue;
+            }
+            if published.is_none_or(|held| self.dominates(value, held)) {
+                published = Some(value);
+            }
+        }
+        let value = published?;
+        let block = self.def_block(value)?;
+        let ops = self.context.get_block(block).op_ids();
+        let index = match self.context.get_value(value).defining_op() {
+            Some(defining) => ops.iter().position(|&op| op == defining)? + 1,
+            // A block argument is published before every operation in its block.
+            None => 0,
+        };
+        Some((value, self.at(*ops.get(index)?)))
     }
 
     /// A cursor at `op`, for a rewrite to build in front of.
