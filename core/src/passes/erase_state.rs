@@ -5,8 +5,8 @@
 //! the IR started from. State exists only between the two passes, so a function
 //! that carries none is left alone.
 
-use crate::analysis::AnalysisManager;
-use crate::analysis::slots::collect_slots;
+use crate::analysis::slots::{collect_slots, load_result};
+use crate::analysis::{AnalysisManager, DefUse};
 use crate::builtin::{EntryStateOp, FuncOp, StateType};
 use crate::{
     BlockId, Context, OpId, OperationRef, Pass, PassError, PassTarget, RegionId, Rewriter, TypeId,
@@ -73,31 +73,44 @@ impl Pass for EraseStatePass {
             rewriter.erase_op(&OperationRef::new(context.get_op(op_id), Some(block), None))?;
         }
 
-        sweep_dead_slots(context, rewriter, &blocks)
+        sweep_dead_slots(context, rewriter, op.op().id, &blocks)
     }
 }
 
 /// Erase the slots nothing reads. A slot whose address never leaves the function
 /// is a memory of its own, so with no read left there is nothing to observe what
-/// its stores left behind and they die with the allocation.
+/// its stores left behind and they die with the allocation. A load whose value
+/// nothing takes is no read either — forwarding answers a load by its value and
+/// leaves the operation standing — so it goes the same way.
 ///
 /// Erasing state is what makes the sweep possible: while the chain is threaded,
-/// the stores define the states their successors observe.
+/// the stores define the states their successors observe, and a load defines a
+/// state of its own however unread its value is.
 fn sweep_dead_slots(
     context: &Context,
     rewriter: &mut Rewriter,
+    func: OpId,
     blocks: &[BlockId],
 ) -> Result<(), PassError> {
     let ops = blocks
         .iter()
         .flat_map(|&block| context.get_block(block).op_ids())
         .collect::<Vec<_>>();
+    let mut uses: Option<DefUse> = None;
     for slot in collect_slots(context, &ops).into_values() {
         let Some(alloca) = slot.alloca else { continue };
-        if slot.escapes || !slot.loads.is_empty() {
+        if slot.escapes {
             continue;
         }
-        for op_id in slot.stores.into_iter().chain([alloca]) {
+        let index = uses.get_or_insert_with(|| DefUse::new(context, func));
+        if slot
+            .loads
+            .iter()
+            .any(|&load| index.is_used(load_result(context, load).number()))
+        {
+            continue;
+        }
+        for op_id in slot.loads.into_iter().chain(slot.stores).chain([alloca]) {
             let block = context.parent_block(op_id).map(|id| context.get_block(id));
             rewriter.erase_op(&OperationRef::new(context.get_op(op_id), block, None))?;
         }
