@@ -1,0 +1,27 @@
+// RUN: tir opt --pass thread-state --pass instcombine --pass erase-state --verify %s | filecheck %s
+
+// The read is inside a gate's arm, on the state the store before the gate left:
+// entering a region does not rename the state it was handed, so forwarding
+// answers the read where it stands. No port has to grow — nothing outside the
+// arm asks for the value — and the slot is left unread, so the sweep takes it.
+
+module {
+  func @forward(%0: !i1, %1: !i32) -> !i32 {
+    %2 = ptr.alloca {size = 4, align = 4} : !ptr.p<!i32>
+    ptr.store %1, %2
+    scf.if %0 {
+      %3 = ptr.load %2 : !i32
+      %4 = addi %3, %3 : !i32
+      scf.yield
+    } else {
+      scf.yield
+    }
+    return %1
+  }
+  module_end
+}
+
+// CHECK-LABEL: func @forward
+// CHECK-NOT: ptr.
+// CHECK: scf.if %0 {
+// CHECK-NEXT: addi %1, %1
