@@ -3,7 +3,9 @@
 // The break leaves on a state the loop's latch does not name: the slot holds 1
 // where the body breaks and 0 where it comes round again, so the value the loop
 // leaves is neither the one it carries at the head nor a constant. Each exit
-// carries the value reaching it and the port merges them.
+// carries the value reaching it and the port merges them — spelled with the
+// constants before the loop, which are loop-invariant, rather than rebuilt on
+// every iteration.
 
 module {
   func @escape(%0: !i1, %1: !i1) -> !i32 {

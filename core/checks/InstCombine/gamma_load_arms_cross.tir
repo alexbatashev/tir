@@ -37,8 +37,9 @@ module {
 
 // CHECK-LABEL: func @cross
 // CHECK-NOT: ptr.
-// CHECK: %[[ZERO:[0-9]+]] = constant {value = 0} : !i32
 // CHECK: %[[LEFT:[0-9]+]], %[[RIGHT:[0-9]+]] = scf.if %0 -> !i32, !i32 {
-// CHECK: scf.yield %{{[0-9]+}}, %[[ZERO]]
-// CHECK: scf.yield %[[ZERO]], %{{[0-9]+}}
+// CHECK: %[[THEN_ZERO:[0-9]+]] = constant {value = 0} : !i32
+// CHECK: scf.yield %{{[0-9]+}}, %[[THEN_ZERO]]
+// CHECK: %[[ELSE_ZERO:[0-9]+]] = constant {value = 0} : !i32
+// CHECK: scf.yield %[[ELSE_ZERO]], %{{[0-9]+}}
 // CHECK: addi %[[LEFT]], %[[RIGHT]]

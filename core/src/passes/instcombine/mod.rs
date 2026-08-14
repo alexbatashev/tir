@@ -29,8 +29,8 @@ use std::sync::Arc;
 
 use crate::{
     AnalysisManager, BlockId, Conditional, ConstantLike, Context, EntryGuard, GuardedLoop,
-    MemoryRead, OpId, OpInstance, OperationRef, Pass, PassError, PassTarget, RegionId, Rewriter,
-    TokenScope, TypeId, ValueId,
+    LoopLike, MemoryRead, OpId, OpInstance, OperationRef, Pass, PassError, PassTarget, RegionId,
+    Rewriter, TokenScope, TypeId, ValueId,
     builtin::{FuncOp, StateType, ops},
     utils::APInt,
 };
@@ -457,14 +457,6 @@ impl Driver<'_> {
         // holds is built here. A law-introduced gate or access names the operation
         // that rebuilds it: the gate grows a port, the access is copied.
         let value = match (node.sym(), node.prov) {
-            (_, Prov::Value(value)) => {
-                let Some(value) =
-                    self.spelled_at(extraction, value, class, expected_ty, target, rewriter)?
-                else {
-                    return Ok(None);
-                };
-                value
-            }
             (Some(SymKind::If), Prov::Op(gate)) => {
                 // A gate inside a loop the reader has left answers through the
                 // loop, not through a port of its own.
@@ -495,8 +487,8 @@ impl Driver<'_> {
                 };
                 value
             }
-            (_, Prov::Op(op)) => {
-                let named = self.context.get_op(op).results[0];
+            (_, Prov::Value(_) | Prov::Op(_)) => {
+                let named = self.named_value(node);
                 let Some(value) =
                     self.spelled_at(extraction, named, class, expected_ty, target, rewriter)?
                 else {
@@ -533,35 +525,58 @@ impl Driver<'_> {
         Ok(Some(value))
     }
 
-    /// The value `named` takes where `target` sits. A class is one term, but the
+    /// The value the class takes where `target` sits, `named` being the form the
+    /// extraction chose where it still names one. A class is one term, but the
     /// values holding it are spread over the tree: the form a bottom-up extraction
     /// picked may sit in a sibling region — an arm of the very gate a port is being
-    /// grown on, say — and name nothing here. Where it does not reach, another form
-    /// of the class that does answers; failing that a port carrying the class out
-    /// of the region it is computed in; failing that the value being rewritten
-    /// itself, which answers for the class but changes nothing; and failing that
-    /// a literal, which is spelled anywhere.
+    /// grown on, say — and name nothing here.
+    ///
+    /// What a spelling costs where it is read is the number of regions it crosses:
+    /// a form defined in the reader's own region crosses none, one from an
+    /// enclosing region stays live across every region in between, and a literal —
+    /// built at the reader — crosses none either. So the nearest form of the class
+    /// that reaches answers, and where the nearest is an outer one a literal the
+    /// class carries answers in its place — unless a loop separates the two, where
+    /// the outer form is loop-invariant and the literal would be rebuilt every
+    /// iteration. Failing every form: a port carrying the
+    /// class out of the region it is computed in; failing that the value being
+    /// rewritten itself, which answers for the class but changes nothing; and
+    /// failing that the literal, which is spelled anywhere.
     fn spelled_at(
         &self,
         extraction: &Extraction<Node>,
-        named: ValueId,
+        named: Option<ValueId>,
         class: Id,
         ty: TypeId,
         target: &OperationRef,
         rewriter: &mut Rewriter,
     ) -> Result<Option<ValueId>, PassError> {
-        if self.reaches(named, target) {
-            return Ok(Some(named));
-        }
         let own = self.context.get_op(target.op().id).results.clone();
-        let reaching: Vec<ValueId> = self
-            .eg
-            .nodes(class)
+        // The extraction's own choice leads, so it answers where nothing is nearer.
+        let mut reaching: Vec<ValueId> = Vec::new();
+        if let Some(named) = named.filter(|&named| self.reaches(named, target)) {
+            reaching.push(named);
+        }
+        reaching.extend(
+            self.eg
+                .nodes(class)
+                .iter()
+                .filter_map(|node| self.named_value(node))
+                .filter(|&value| Some(value) != named && self.reaches(value, target)),
+        );
+        let nearest = reaching
             .iter()
-            .filter_map(|node| self.named_value(node))
-            .filter(|&value| self.reaches(value, target))
-            .collect();
-        if let Some(&value) = reaching.iter().find(|value| !own.contains(value)) {
+            .copied()
+            .filter(|value| !own.contains(value))
+            .min_by_key(|&value| self.regions_out(value, target));
+        if let Some(value) = nearest {
+            if self.regions_out(value, target) == 0 || self.crosses_loop(value, target) {
+                return Ok(Some(value));
+            }
+            // An outer form drags a live range through every region in between.
+            if let Some(literal) = self.literal_at(class, ty, target, rewriter)? {
+                return Ok(Some(literal));
+            }
             return Ok(Some(value));
         }
         if let Some(value) = self.carried_out(extraction, class, ty, target, rewriter)? {
@@ -570,12 +585,86 @@ impl Driver<'_> {
         if let Some(&value) = reaching.first() {
             return Ok(Some(value));
         }
+        self.literal_at(class, ty, target, rewriter)
+    }
+
+    /// The literal `class` carries, built where `target` sits.
+    fn literal_at(
+        &self,
+        class: Id,
+        ty: TypeId,
+        target: &OperationRef,
+        rewriter: &mut Rewriter,
+    ) -> Result<Option<ValueId>, PassError> {
         let Some(literal) = self.eg.nodes(class).iter().find_map(Node::int) else {
             return Ok(None);
         };
         let op = ops::constant(self.context, literal.to_i64(), ty).build();
         rewriter.insert_op_before(target, &op)?;
         Ok(Some(op.result()))
+    }
+
+    /// How many regions out of `target`'s own `value` is defined — 0 where both
+    /// sit in the same region, one per enclosing region otherwise.
+    fn regions_out(&self, value: ValueId, target: &OperationRef) -> usize {
+        let here = self
+            .context
+            .get_op(target.op().id)
+            .parent_block()
+            .map(|block| self.region_depth(block));
+        let there = self.def_block(value).map(|block| self.region_depth(block));
+        match (here, there) {
+            (Some(here), Some(there)) => here.saturating_sub(there),
+            _ => usize::MAX,
+        }
+    }
+
+    /// Whether a loop separates where `value` is defined from where `target`
+    /// reads it. A gate's arm runs at most as often as the gate, so a literal
+    /// built there replaces a live range with an instruction that is not paid
+    /// more often; inside a loop it is paid every iteration, where a value from
+    /// outside is loop-invariant and sits in a register.
+    fn crosses_loop(&self, value: ValueId, target: &OperationRef) -> bool {
+        let Some(defined_in) = self.def_block(value).map(|block| self.region_depth(block)) else {
+            return true;
+        };
+        let mut block = self.context.get_op(target.op().id).parent_block();
+        while let Some(current) = block.filter(|&block| self.region_depth(block) > defined_in) {
+            let Some(holder) = self
+                .context
+                .parent_region(current)
+                .and_then(|region| self.context.get_region(region).parent_op())
+            else {
+                return false;
+            };
+            if self
+                .context
+                .get_op(holder)
+                .as_interface::<dyn LoopLike>()
+                .is_some()
+            {
+                return true;
+            }
+            block = self.context.get_op(holder).parent_block();
+        }
+        false
+    }
+
+    fn region_depth(&self, block: BlockId) -> usize {
+        let mut depth = 0;
+        let mut current = Some(block);
+        while let Some(block) = current {
+            let Some(region) = self.context.parent_region(block) else {
+                break;
+            };
+            depth += 1;
+            current = self
+                .context
+                .get_region(region)
+                .parent_op()
+                .and_then(|holder| self.context.get_op(holder).parent_block());
+        }
+        depth
     }
 
     /// The class carried out of the region it is computed in, on a port.
