@@ -9,7 +9,8 @@ use crate::analysis::slots::{collect_slots, load_result};
 use crate::analysis::{AnalysisManager, DefUse};
 use crate::builtin::{EntryStateOp, FuncOp, StateType};
 use crate::{
-    BlockId, Context, OpId, OperationRef, Pass, PassError, PassTarget, RegionId, Rewriter, TypeId,
+    BlockId, Context, MemoryRead, OpId, OperationRef, Pass, PassError, PassTarget, RegionId,
+    Rewriter, TypeId,
 };
 
 #[derive(Default)]
@@ -47,6 +48,8 @@ impl Pass for EraseStatePass {
         };
         let state = StateType::new(context);
         let blocks = blocks_under(context, body);
+        // Read off the threaded chain, before it is dropped.
+        let unobserved = unobserved_stores(context, &blocks);
 
         // The states an op consumes go first, so nothing reads a definition by the
         // time the definition is dropped.
@@ -73,7 +76,59 @@ impl Pass for EraseStatePass {
             rewriter.erase_op(&OperationRef::new(context.get_op(op_id), Some(block), None))?;
         }
 
+        for store in unobserved {
+            let block = context.parent_block(store).map(|id| context.get_block(id));
+            rewriter.erase_op(&OperationRef::new(context.get_op(store), block, None))?;
+        }
+
         sweep_dead_slots(context, rewriter, op.op().id, &blocks)
+    }
+}
+
+/// The stores no read of their slot can observe. A slot whose address never
+/// leaves the function is a memory of its own, so a write nothing reads back is
+/// a write nobody can tell happened — the same reasoning the sweep below makes
+/// about a slot with no read at all, taken one read at a time.
+///
+/// A read observes what was written when the chain it takes reaches the
+/// allocation through anything but reads: a read leaves memory as it found it,
+/// so one whose state came straight from the allocation, however many reads
+/// apart, is reading what was never written. Anything else the chain names — a
+/// write, a call, a port — is taken as an observation.
+fn unobserved_stores(context: &Context, blocks: &[BlockId]) -> Vec<OpId> {
+    let ops = blocks
+        .iter()
+        .flat_map(|&block| context.get_block(block).op_ids())
+        .collect::<Vec<_>>();
+    collect_slots(context, &ops)
+        .into_values()
+        .filter(|slot| !slot.escapes)
+        .filter_map(|slot| {
+            let alloca = slot.alloca?;
+            slot.loads
+                .iter()
+                .all(|&load| reads_the_untouched_slot(context, load, alloca))
+                .then_some(slot.stores)
+        })
+        .flatten()
+        .collect()
+}
+
+/// Whether the state `load` reads comes from `alloca` through reads alone.
+fn reads_the_untouched_slot(context: &Context, load: OpId, alloca: OpId) -> bool {
+    let mut op = load;
+    loop {
+        let state = context
+            .get_op(op)
+            .as_interface::<dyn MemoryRead>()
+            .and_then(|read| read.state_operand());
+        let Some(defining) = state.and_then(|state| context.get_value(state).defining_op()) else {
+            return false;
+        };
+        if defining == alloca {
+            return true;
+        }
+        op = defining;
     }
 }
 
