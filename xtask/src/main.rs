@@ -1,3 +1,4 @@
+mod fcc_corpus;
 mod fcc_torture;
 pub mod utils;
 mod verify_smt;
@@ -30,12 +31,32 @@ fn main() -> anyhow::Result<()> {
             let bless = env::args().skip(2).any(|arg| arg == "--bless");
             fcc_torture::run(&sh, &project_root(), bless)?;
         }
+        Some("fcc-corpus") => {
+            fcc_corpus::run(&sh, &project_root(), fcc_corpus_mode(env::args().skip(2))?)?;
+        }
         Some("capi-smoke") => capi_smoke(&sh)?,
         Some("python-smoke") => python_smoke(&sh)?,
         Some("haskell-smoke") => haskell_smoke(&sh)?,
         _ => print_help(),
     }
     Ok(())
+}
+
+fn fcc_corpus_mode(mut args: impl Iterator<Item = String>) -> anyhow::Result<fcc_corpus::Mode> {
+    let Some(flag) = args.next() else {
+        return Ok(fcc_corpus::Mode::Report);
+    };
+    let mut directory = || {
+        args.next()
+            .map(PathBuf::from)
+            .ok_or_else(|| anyhow::anyhow!("{flag} needs a directory"))
+    };
+    match flag.as_str() {
+        "--baseline" => Ok(fcc_corpus::Mode::Baseline(directory()?)),
+        "--diff" => Ok(fcc_corpus::Mode::Diff(directory()?)),
+        "--determinism" => Ok(fcc_corpus::Mode::Determinism),
+        other => anyhow::bail!("unknown fcc-corpus flag: {other}"),
+    }
 }
 
 fn build(sh: &Shell) -> anyhow::Result<()> {
@@ -271,6 +292,9 @@ verify <isa> [--shard k/N]
 isa-test-suite   run differential ISA tests against a golden oracle (riscv/Spike)
 fcc-torture [--bless]
                  run the pinned GCC C torture corpus through the fcc parser
+fcc-corpus [--baseline <dir> | --diff <dir> | --determinism]
+                 compile the fcc .c corpus to x86_64 asm and capture, diff or
+                 double-compile it
 capi-smoke       check the C ABI header is current and run the C smoke test
 python-smoke     build the C ABI and run the Python test suite
 haskell-smoke    build the C ABI and run the Haskell bindings smoke test (needs ghc)
