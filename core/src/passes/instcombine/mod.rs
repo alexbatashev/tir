@@ -437,7 +437,13 @@ impl Driver<'_> {
         // holds is built here. A law-introduced gate or access names the operation
         // that rebuilds it: the gate grows a port, the access is copied.
         let value = match (node.sym(), node.prov) {
-            (_, Prov::Value(value)) => value,
+            (_, Prov::Value(value)) => {
+                let Some(value) = self.spelled_at(value, class, expected_ty, target, rewriter)?
+                else {
+                    return Ok(None);
+                };
+                value
+            }
             (Some(SymKind::If), Prov::Op(gate)) => {
                 let Some(value) =
                     self.commit_gamma_port(extraction, gate, node, expected_ty, rewriter)?
@@ -460,7 +466,14 @@ impl Driver<'_> {
                 };
                 value
             }
-            (_, Prov::Op(op)) => self.context.get_op(op).results[0],
+            (_, Prov::Op(op)) => {
+                let named = self.context.get_op(op).results[0];
+                let Some(value) = self.spelled_at(named, class, expected_ty, target, rewriter)?
+                else {
+                    return Ok(None);
+                };
+                value
+            }
             (_, Prov::Introduced(idx)) => {
                 let ty = node.ty.expect("an op node carries its result type");
                 let mut operands = Vec::with_capacity(node.children.len());
@@ -488,6 +501,61 @@ impl Driver<'_> {
         };
         memo.insert(class, value);
         Ok(Some(value))
+    }
+
+    /// The value `named` takes where `target` sits. A class is one term, but the
+    /// values holding it are spread over the tree: the form a bottom-up extraction
+    /// picked may sit in a sibling region — an arm of the very gate a port is being
+    /// grown on, say — and name nothing here. Where it does not reach, another form
+    /// of the class that does answers, and failing that a literal, which is spelled
+    /// anywhere.
+    fn spelled_at(
+        &self,
+        named: ValueId,
+        class: Id,
+        ty: TypeId,
+        target: &OperationRef,
+        rewriter: &mut Rewriter,
+    ) -> Result<Option<ValueId>, PassError> {
+        if self.reaches(named, target) {
+            return Ok(Some(named));
+        }
+        let reaching = self
+            .eg
+            .nodes(class)
+            .iter()
+            .filter_map(|node| self.named_value(node))
+            .find(|&value| self.reaches(value, target));
+        if let Some(value) = reaching {
+            return Ok(Some(value));
+        }
+        let Some(literal) = self.eg.nodes(class).iter().find_map(Node::int) else {
+            return Ok(None);
+        };
+        let op = ops::constant(self.context, literal.to_i64(), ty).build();
+        rewriter.insert_op_before(target, &op)?;
+        Ok(Some(op.result()))
+    }
+
+    /// The value a node names outright, building nothing.
+    fn named_value(&self, node: &Node) -> Option<ValueId> {
+        match (node.sym(), node.prov) {
+            (_, Prov::Value(value)) => self.context.has_value(value).then_some(value),
+            (Some(SymKind::If | SymKind::Theta | SymKind::LoadMemory), Prov::Op(_)) => None,
+            (_, Prov::Op(op)) => self
+                .context
+                .has_operation(op)
+                .then(|| self.context.get_op(op).results.first().copied())
+                .flatten(),
+            _ => None,
+        }
+    }
+
+    /// Whether `value` is in scope where `target` sits — the operation being
+    /// rewritten names its own value, which is what a rewrite replaces.
+    fn reaches(&self, value: ValueId, target: &OperationRef) -> bool {
+        let op = target.op().id;
+        self.context.get_value(value).defining_op() == Some(op) || self.dominates_op(value, op)
     }
 
     /// Carry a law-introduced gate's value out of `gate` on a port of its own.
