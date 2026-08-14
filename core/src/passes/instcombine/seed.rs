@@ -45,6 +45,8 @@ pub fn seed(context: &Context, root: OpId) -> Seeded {
         arg_block: HashMap::new(),
         seeded: HashSet::new(),
         state_ty: StateType::new(context),
+        pointer_width: crate::DataLayout::for_op(context, root)
+            .and_then(|layout| layout.pointer_size()),
         exported_states: Vec::new(),
         ops: Vec::new(),
     };
@@ -68,6 +70,7 @@ struct Seeder<'a> {
     arg_block: HashMap<ValueId, BlockId>,
     seeded: HashSet<OpId>,
     state_ty: TypeId,
+    pointer_width: Option<u32>,
     exported_states: Vec<Id>,
     ops: Vec<OpId>,
 }
@@ -353,7 +356,7 @@ impl Seeder<'_> {
     fn seed_read(&mut self, read: &dyn MemoryRead) -> bool {
         let value = read.read_value();
         let ty = self.context.get_value(value).ty();
-        let (Some(bits), Some(state)) = (type_width(self.context, ty), read.state_operand()) else {
+        let (Some(bits), Some(state)) = (self.access_width(ty), read.state_operand()) else {
             return false;
         };
         let address = self.class_of(read.read_location());
@@ -386,7 +389,7 @@ impl Seeder<'_> {
         let written = write.written_value();
         let ty = self.context.get_value(written).ty();
         let (Some(bits), Some(state), Some(published)) = (
-            type_width(self.context, ty),
+            self.access_width(ty),
             write.state_operand(),
             write.state_result(),
         ) else {
@@ -404,6 +407,18 @@ impl Seeder<'_> {
         ));
         self.value_class.insert(published, id);
         true
+    }
+
+    /// The extent an access of `ty` covers, in bits. A pointer's width is a data
+    /// layout fact, so where no layout is in scope the access covers an extent
+    /// the term cannot spell and stays unseeded.
+    fn access_width(&self, ty: TypeId) -> Option<u32> {
+        type_width(self.context, ty).or_else(|| {
+            let data = self.context.get_type_data(ty);
+            (data.as_ref() as &dyn std::any::Any)
+                .downcast_ref::<crate::ptr::PtrType>()
+                .and(self.pointer_width)
+        })
     }
 
     /// A byte count or metadata literal, spelled the one way the vocabulary shares.
