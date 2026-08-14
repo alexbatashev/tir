@@ -91,13 +91,17 @@ impl Jit {
         let module_op = context.get_op(module.id());
 
         // Promote memory to SSA so alloca/load/store IR reaches selectable form,
-        // mirroring the frontend pipeline. Memory state describes the structured
-        // mid-end only, so it is threaded and erased again before codegen.
+        // mirroring the frontend pipeline: promotion reads structured control
+        // flow, so bodies are raised first and lowered back before codegen.
+        // Memory state describes the structured mid-end only, so it is threaded
+        // and erased again.
         let mut pm = PassManager::new();
         let function_pipeline = pm.nest::<FuncOp>();
-        function_pipeline.add_pass(tir::passes::Mem2RegPass::new());
+        function_pipeline.add_pass(tir::passes::RestructurePass::new());
         function_pipeline.add_pass(tir::passes::ThreadStatePass::new());
+        function_pipeline.add_pass(tir::passes::InstCombinePass::new());
         function_pipeline.add_pass(tir::passes::EraseStatePass::new());
+        function_pipeline.add_pass(tir::passes::ScfToCfgPass::new());
         pm.run(context, module_op.clone())
             .map_err(|e| JitError::Pipeline(format!("mid-end: {e}")))?;
 

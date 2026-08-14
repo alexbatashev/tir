@@ -238,6 +238,44 @@ fn loop_carried_block_argument() {
 }
 
 #[test]
+fn loop_accumulator_in_a_slot() {
+    // The accumulator lives in memory and is mutated every iteration, so the
+    // result pins what the mid-end does to a slot a loop carries.
+    let ir = r#"
+        module {
+          func @sum(%limit: !i64) -> !i64 {
+            %acc = ptr.alloca {size = 8, align = 8} : !ptr.p<!i64>
+            %zero = constant {value = 0} : !i64
+            ptr.store %zero, %acc
+            br ^bb1(%zero : !i64)
+          ^bb1(%iv: !i64):
+            %keep_going = cmpi %iv, %limit {predicate = "slt"} : !i1
+            cond_br %keep_going, ^bb2, ^bb3
+          ^bb2:
+            %current = ptr.load %acc : !i64
+            %grown = addi %current, %iv : !i64
+            ptr.store %grown, %acc
+            %one = constant {value = 1} : !i64
+            %next = addi %iv, %one : !i64
+            br ^bb1(%next : !i64)
+          ^bb3:
+            %total = ptr.load %acc : !i64
+            return %total
+          }
+          module_end
+        }
+    "#;
+
+    let jit = Jit::host().expect("host target");
+    let module = jit.compile(ir).expect("compile");
+    let sum: extern "C" fn(i64) -> i64 = unsafe { module.get("sum") }.expect("sum symbol");
+    // sum(n) = 0 + 1 + ... + (n - 1)
+    assert_eq!(sum(0), 0);
+    assert_eq!(sum(5), 10);
+    assert_eq!(sum(23), 253);
+}
+
+#[test]
 fn conditional_edge_arguments() {
     // The arms' forwarded values ride the conditional branch's own edges. The
     // true edge is split into a trampoline block during selection; the false
