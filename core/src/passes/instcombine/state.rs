@@ -101,16 +101,15 @@ pub(crate) fn distribute_load_over_gamma(context: Context, promotable: Vec<Id>) 
             let Some((gate, decision, arms)) = state_gamma(&context, eg, read[LOAD_STATE]) else {
                 return;
             };
-            let arms = arms.map(|state| {
+            let mut children = vec![decision];
+            for state in arms {
                 let mut operands = read.to_vec();
                 operands[LOAD_STATE] = state;
-                eg.add(Node::introduced_at(SymKind::LoadMemory, load, operands).typed(ty))
-            });
-            let gamma = eg.add(Node::introduced_at(
-                SymKind::If,
-                gate,
-                vec![decision, arms[0], arms[1]],
-            ));
+                children.push(
+                    eg.add(Node::introduced_at(SymKind::LoadMemory, load, operands).typed(ty)),
+                );
+            }
+            let gamma = eg.add(Node::introduced_at(SymKind::If, gate, children));
             eg.union(root, gamma);
         },
     )
@@ -177,27 +176,25 @@ fn state_theta(context: &Context, eg: &EGraph<Node>, state: Id) -> Option<(OpId,
     })
 }
 
-/// The gate `state` is the choice of: the two-armed conditional publishing it,
-/// its decision, and the states its taken and not-taken arms leave.
-fn state_gamma(context: &Context, eg: &EGraph<Node>, state: Id) -> Option<(OpId, Id, [Id; 2])> {
+/// The gate `state` is the choice of: the conditional publishing it, its
+/// decision, and the state each of its arms leaves — one per arm in the order
+/// [`Conditional::case_values`] reports, which the commit reads back the same
+/// way. A two-armed gate is the case `N == 2`.
+fn state_gamma(context: &Context, eg: &EGraph<Node>, state: Id) -> Option<(OpId, Id, Vec<Id>)> {
     eg.nodes(state).iter().find_map(|node| {
         if node.sym() != Some(SymKind::If) {
             return None;
         }
-        let [decision, taken, not_taken] = node.children[..] else {
+        let [decision, arms @ ..] = &node.children[..] else {
             return None;
         };
-        let (taken, not_taken) = (eg.find(taken), eg.find(not_taken));
-        if taken == state || not_taken == state {
+        let arms: Vec<Id> = arms.iter().map(|&arm| eg.find(arm)).collect();
+        if arms.len() < 2 || arms.contains(&state) {
             return None;
         }
         let gate = live_op(context, node)?;
         let conditional = context.get_op(gate).as_interface::<dyn Conditional>()?;
-        (conditional.guarded_regions().len() == 2).then_some((
-            gate,
-            eg.find(decision),
-            [taken, not_taken],
-        ))
+        (conditional.case_values().len() == arms.len()).then_some((gate, eg.find(*decision), arms))
     })
 }
 

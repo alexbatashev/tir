@@ -1,0 +1,54 @@
+// RUN: tir opt --pass thread-state --pass instcombine --pass erase-state --verify %s | filecheck %s
+
+// The laws compose over an n-ary gate too: the state the loop carries is a θ
+// whose latch is the switch the body ends on, so the read distributes over the θ
+// and then over every arm — the two that write forward their store, the default
+// one yields the carry, which inside the body is the port argument.
+
+module {
+  func @dispatch(%0: !i1, %1: !i32, %2: !i32) -> !i32 {
+    %3 = ptr.alloca {size = 4, align = 4} : !ptr.p<!i32>
+    ptr.store %2, %3
+    scf.while {
+      scf.condition %0
+    } do {
+      %4 = ptr.load %3 : !i32
+      scf.switch %1 case 1 {
+        %5 = addi %4, %4 : !i32
+        ptr.store %5, %3
+        scf.yield
+      }
+      case 2 {
+        ptr.store %2, %3
+        scf.yield
+      }
+      default {
+        scf.yield
+      }
+      scf.yield
+    }
+    %6 = ptr.load %3 : !i32
+    return %6
+  }
+  module_end
+}
+
+// CHECK-LABEL: func @dispatch
+// CHECK-NOT: ptr.
+// CHECK: %[[RESULT:[0-9]+]] = scf.while iter_args(%[[COND:[0-9]+]] = %2) -> !i32 {
+// CHECK-NEXT: scf.condition %0, %[[COND]]
+// CHECK-NEXT: }
+// CHECK-NEXT: do(%[[BODY:[0-9]+]]) {
+// CHECK-NEXT: %[[GATE:[0-9]+]] = scf.switch %1 -> !i32 case 1 {
+// CHECK-NEXT: %[[NEXT:[0-9]+]] = addi %[[BODY]], %[[BODY]] : !i32
+// CHECK-NEXT: scf.yield %[[NEXT]]
+// CHECK-NEXT: }
+// CHECK-NEXT: case 2 {
+// CHECK-NEXT: scf.yield %2
+// CHECK-NEXT: }
+// CHECK-NEXT: default {
+// CHECK-NEXT: scf.yield %[[BODY]]
+// CHECK-NEXT: }
+// CHECK-NEXT: scf.yield %[[GATE]]
+// CHECK-NEXT: }
+// CHECK-NEXT: return %[[RESULT]]

@@ -205,29 +205,30 @@ impl Seeder<'_> {
             self.bind_arm_arguments(instance, region);
             self.seed_region(region);
         }
-        let arms: Vec<(RegionId, bool)> = conditional
-            .guarded_regions()
-            .into_iter()
-            .filter(|&(region, ..)| region_exit(self.context, region).is_none())
-            .map(|(region, _, when_true)| (region, when_true))
+        let cases = conditional.case_values();
+        let arms: Vec<RegionId> = cases
+            .iter()
+            .map(|&(region, _)| region)
+            .filter(|&region| region_exit(self.context, region).is_none())
             .collect();
         for (index, &result) in instance.results.clone().iter().enumerate() {
             let yields: Option<Vec<ValueId>> = arms
                 .iter()
-                .map(|&(region, _)| conditional.region_yields(region).get(index).copied())
+                .map(|&region| conditional.region_yields(region).get(index).copied())
                 .collect();
             match yields.as_deref() {
                 Some(&[value]) => {
                     let id = self.class_of(value);
                     self.value_class.insert(result, id);
                 }
-                Some(&[first, second]) => {
-                    let (taken, not_taken) = if arms[0].1 {
-                        (first, second)
-                    } else {
-                        (second, first)
-                    };
-                    let args = vec![decision, self.class_of(taken), self.class_of(not_taken)];
+                // Every arm answers, so the γ is the choice between them, one
+                // child per arm in the order the cases are reported — the order
+                // the commit maps back onto the regions.
+                Some(values) if values.len() == cases.len() => {
+                    let mut args = vec![decision];
+                    for &value in values {
+                        args.push(self.class_of(value));
+                    }
                     let id = self.eg.add(Node::gamma(result, args));
                     self.value_class.insert(result, id);
                 }

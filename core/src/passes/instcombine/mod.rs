@@ -109,9 +109,9 @@ struct Driver<'a> {
     dom: Rc<DominatorTree>,
     edge_facts: Rc<DominatingEdgeFacts>,
     ruleset: Ruleset,
-    /// The value port already grown on a gate for a pair of arm classes, so every
+    /// The value port already grown on a gate for its arms' classes, so every
     /// read the gate answers takes the one port.
-    gamma_ports: RefCell<HashMap<(OpId, Id, Id), ValueId>>,
+    gamma_ports: RefCell<HashMap<(OpId, Vec<Id>), ValueId>>,
     /// The same for a loop, over the classes its port is fed from. A list, not a
     /// map: a read outside the loop asks for the class the port is left holding,
     /// which is not the key, so every port is scanned in the order they were grown.
@@ -732,12 +732,13 @@ impl Driver<'_> {
         ty: TypeId,
         rewriter: &mut Rewriter,
     ) -> Result<Option<ValueId>, PassError> {
-        let [_, taken, not_taken] = node.children[..] else {
+        let [_, arms @ ..] = &node.children[..] else {
             return Ok(None);
         };
-        let key = (gate, self.eg.find(taken), self.eg.find(not_taken));
-        if let Some(&value) = self.gamma_ports.borrow().get(&key) {
-            return Ok(Some(value));
+        let arms: Vec<Id> = arms.iter().map(|&arm| self.eg.find(arm)).collect();
+        let key = (gate, arms.clone());
+        if let Some(value) = self.gamma_ports.borrow().get(&key) {
+            return Ok(Some(*value));
         }
         if !self.context.has_operation(gate) {
             return Ok(None);
@@ -746,9 +747,12 @@ impl Driver<'_> {
         let Some(conditional) = instance.clone().as_interface::<dyn Conditional>() else {
             return Ok(None);
         };
+        let cases = conditional.case_values();
+        if cases.len() != arms.len() {
+            return Ok(None);
+        }
         let mut yielded: Vec<(RegionId, ValueId)> = Vec::new();
-        for (region, _, when_true) in conditional.guarded_regions() {
-            let class = if when_true { taken } else { not_taken };
+        for (&(region, _), &class) in cases.iter().zip(&arms) {
             let Some(terminator) = self.terminator(region) else {
                 return Ok(None);
             };
