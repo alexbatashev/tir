@@ -27,7 +27,7 @@ use crate::graph::Dag;
 use crate::{
     AnalysisManager, BlockId, Conditional, ConstantLike, Context, MemoryRead, OpId, OpInstance,
     OperationRef, Pass, PassError, PassTarget, RegionId, Rewriter, TokenScope, TypeId, ValueId,
-    builtin::{FuncOp, ops},
+    builtin::{FuncOp, StateType, ops},
     utils::APInt,
 };
 
@@ -259,6 +259,15 @@ impl Driver<'_> {
         else {
             return Ok(());
         };
+        // A state chain is linear, so handing this op's readers another state is
+        // only sound when the op is erased and the state it consumed is the very
+        // one handed on — its use then moves rather than doubles. A gate keeping
+        // its regions, or a chain named anywhere else, would be consumed twice.
+        if ty == StateType::new(self.context)
+            && !(instance.regions.is_empty() && instance.operands.contains(&new_value))
+        {
+            return Ok(());
+        }
         // The replacement must dominate the use it takes over. Operand reuse and
         // freshly built ops satisfy this by construction; a cross-block CSE or a gate
         // collapsing to an arm may not, so check before committing.
