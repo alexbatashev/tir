@@ -803,11 +803,13 @@ impl Context {
 
     /// Carry one more port on `op`, an edge [`Context::grow_port`] does not reach:
     /// an `scf.break`/`scf.continue` feeds the port it leaves through, so it takes
-    /// the value where a port belongs among its operands.
-    pub fn append_port_operand(&self, op: OpId, value: ValueId) {
+    /// the value where a port belongs among its operands. Answers the index the
+    /// value took, which is the port's own: what belongs to a port stays where the
+    /// port was placed, however much later the value it carries is known.
+    pub fn append_port_operand(&self, op: OpId, value: ValueId) -> usize {
         let ty = self.get_value(value).ty();
         self.append_operand(op, value);
-        self.place_operand(op, ty);
+        self.place_operand(op, ty)
     }
 
     /// Where the port of type `ty` just appended to `values` belongs: ahead of
@@ -836,17 +838,21 @@ impl Context {
         }
     }
 
-    /// The same for the operand just appended. Rotating within the trailing
-    /// variadic group leaves the segment sizes describing it unchanged.
-    fn place_operand(&self, op: OpId, ty: TypeId) {
-        let Some(index) = self.port_index(&self.get_op(op).operands, ty) else {
-            return;
+    /// The same for the operand just appended, answering where it ended up.
+    /// Rotating within the trailing variadic group leaves the segment sizes
+    /// describing it unchanged.
+    fn place_operand(&self, op: OpId, ty: TypeId) -> usize {
+        let operands = &self.get_op(op).operands;
+        let last = operands.len() - 1;
+        let Some(index) = self.port_index(operands, ty) else {
+            return last;
         };
         let mut inner = self.0.write();
         if let Some(instance) = slab_get_mut(&mut inner.operations, op.index()) {
             Arc::make_mut(instance).operands[index..].rotate_right(1);
             inner.edit_op(op);
         }
+        index
     }
 
     /// The same for the entry argument just appended to `block`.

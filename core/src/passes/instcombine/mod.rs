@@ -648,9 +648,21 @@ impl Driver<'_> {
                 }
                 Some(incoming)
             });
-        let fed = edges.into_iter().zip(edge_classes.iter().copied());
+        // Reserve each edge's operand before any value is spelled: feeding one edge
+        // may ask for a value another port carries, growing that port and feeding
+        // its edges first. Places taken now follow the order the loop carries the
+        // ports; places taken as values become known would follow the order they
+        // were spelled in, which crosses the ports of a loop that swaps two slots.
+        let reserved: Vec<(OpId, Id, usize)> = edges
+            .into_iter()
+            .zip(edge_classes.iter().copied())
+            .map(|(edge, edge_class)| {
+                let index = self.context.append_port_operand(edge, carried);
+                (edge, edge_class, index)
+            })
+            .collect();
         let (carried_all, failure) =
-            self.feed_edges(extraction, class, fed.collect(), ty, carried, rewriter);
+            self.feed_edges(extraction, class, reserved, ty, carried, rewriter);
         if let Some(error) = failure {
             return Err(error);
         }
@@ -664,23 +676,23 @@ impl Driver<'_> {
     }
 
     /// Carry the port's value on each of a loop's edges, each with the class the θ
-    /// names it by. Every edge must be fed — the loop carries the port whether or
-    /// not the value can be spelled there — so an edge whose class does not
-    /// materialize carries the port's own argument on and the whole port is
-    /// reported unfed: no edit can be taken back, but an unread port answers no
-    /// reads.
+    /// names it by and the place reserved for it there. Every edge must be fed —
+    /// the loop carries the port whether or not the value can be spelled there — so
+    /// an edge whose class does not materialize keeps the port's own argument, which
+    /// is what its place was reserved with, and the whole port is reported unfed: no
+    /// edit can be taken back, but an unread port answers no reads.
     fn feed_edges(
         &self,
         extraction: &Extraction<Node>,
         class: Id,
-        edges: Vec<(OpId, Id)>,
+        edges: Vec<(OpId, Id, usize)>,
         ty: TypeId,
         carried: ValueId,
         rewriter: &mut Rewriter,
     ) -> (bool, Option<PassError>) {
         let mut fed = true;
         let mut failure = None;
-        for (edge, edge_class) in edges {
+        for (edge, edge_class, index) in edges {
             let at_edge = self.at(edge);
             self.port_bindings.borrow_mut().push((class, carried));
             let value = self.materialize(
@@ -692,15 +704,15 @@ impl Driver<'_> {
                 &mut HashMap::new(),
             );
             self.port_bindings.borrow_mut().pop();
-            let value = match value {
-                Ok(Some(value)) if self.dominates_op(value, edge) => value,
+            match value {
+                Ok(Some(value)) if self.dominates_op(value, edge) => {
+                    self.context.set_op_operand(edge, index, value);
+                }
                 other => {
                     failure = failure.or(other.err());
                     fed = false;
-                    carried
                 }
-            };
-            self.context.append_port_operand(edge, value);
+            }
         }
         (fed, failure)
     }
