@@ -1,9 +1,9 @@
 // RUN: tir opt --pass thread-state --pass instcombine --pass erase-state --verify %s | filecheck %s
 
-// The mirror of Mem2Reg/uniform_pointer_promote: a slot holding a pointer
-// promotes like any other, since the data layout gives the pointer the width the
-// access terms need. The gate grows the port carrying what each arm stored, and
-// the port is spelled at the pointer type the accesses agree on.
+// A slot holding a pointer promotes like any other, since the data layout gives
+// the pointer the width the access terms need. The gate grows the port carrying
+// what each arm stored, and the port is spelled at the pointer type the accesses
+// agree on.
 
 #data_layout = {types = {p = {abi = 64, size = 64}}}
 

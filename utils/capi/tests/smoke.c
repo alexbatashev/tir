@@ -1,4 +1,4 @@
-/* C smoke test for the TIR C ABI: parse -> run mem2reg -> print.
+/* C smoke test for the TIR C ABI: parse -> promote slots -> print.
  * Build/run via `xtask capi-smoke` (links against the cdylib). */
 #include <stdio.h>
 #include <string.h>
@@ -30,7 +30,8 @@ int main(void) {
         return 1;
     }
 
-    TirPassManager *pm = tir_pipeline_parse("builtin.func(mem2reg)");
+    TirPassManager *pm =
+        tir_pipeline_parse("builtin.func(thread-state,instcombine,erase-state)");
     if (!pm) {
         fprintf(stderr, "pipeline parse failed: %s\n", tir_last_error());
         return 1;
@@ -47,7 +48,7 @@ int main(void) {
         return 1;
     }
     if (strstr(rendered, "ptr.alloca") != NULL) {
-        fprintf(stderr, "mem2reg did not remove allocas:\n%s\n", rendered);
+        fprintf(stderr, "promotion did not remove allocas:\n%s\n", rendered);
         tir_string_free(rendered);
         return 1;
     }

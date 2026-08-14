@@ -342,7 +342,7 @@ pub trait SameOperandType {
 
 /// Identifies an operation that creates a memory location eligible for local SSA
 /// promotion. Implementations describe the location generically rather than tying
-/// mem2reg to a concrete pointer dialect.
+/// the promoting transforms to a concrete pointer dialect.
 pub trait PromotableAllocation {
     /// The SSA value that names the promotable memory location.
     fn promoted_location(&self) -> ValueId;

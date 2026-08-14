@@ -52,7 +52,7 @@ macro_rules! register_pass {
 /// The grammar is a comma-separated list of elements, where each element is
 /// either a registered pass name or an op-nesting `op(inner-pipeline)`. The op
 /// name may be dialect-qualified (`builtin.func`) or bare (`func`). Example:
-/// `builtin.func(mem2reg)` runs `mem2reg` nested inside every function.
+/// `builtin.func(instcombine)` runs `instcombine` nested inside every function.
 pub fn parse_pipeline(spec: &str) -> Result<PassManager, String> {
     let mut parser = PipelineParser {
         bytes: spec.as_bytes(),
@@ -1162,10 +1162,10 @@ mod tests {
     fn pipeline_parses_bare_and_nested() {
         use super::{PassNode, parse_pipeline};
 
-        let pm = parse_pipeline("mem2reg").expect("bare pass should parse");
+        let pm = parse_pipeline("instcombine").expect("bare pass should parse");
         assert!(matches!(pm.passes.as_slice(), [PassNode::Pass(_)]));
 
-        let pm = parse_pipeline(" builtin.func( mem2reg ) ").expect("nested should parse");
+        let pm = parse_pipeline(" builtin.func( instcombine ) ").expect("nested should parse");
         match pm.passes.as_slice() {
             [PassNode::Nested { op_name, manager }] => {
                 assert_eq!(op_name, "builtin.func");
@@ -1178,8 +1178,8 @@ mod tests {
     #[test]
     fn pipeline_reports_errors() {
         assert!(super::parse_pipeline("definitely-not-a-pass").is_err());
-        assert!(super::parse_pipeline("builtin.func(mem2reg").is_err());
-        assert!(super::parse_pipeline("mem2reg)").is_err());
+        assert!(super::parse_pipeline("builtin.func(instcombine").is_err());
+        assert!(super::parse_pipeline("instcombine)").is_err());
     }
 
     #[test]

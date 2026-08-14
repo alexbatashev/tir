@@ -26,7 +26,7 @@ class TirTest(unittest.TestCase):
         with tir.Context() as ctx:
             module = ctx.parse_module(MODULE)
             self.assertIn("ptr.alloca", module.to_string())
-            ctx.run_pipeline(module, "builtin.func(mem2reg)")
+            ctx.run_pipeline(module, "builtin.func(thread-state,instcombine,erase-state)")
             after = module.to_string()
             self.assertNotIn("ptr.alloca", after)
 

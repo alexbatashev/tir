@@ -13,7 +13,7 @@ cargo run -p xtask -- haskell-smoke      # needs ghc on PATH
 ```
 
 That builds `libtir_capi`, then compiles and runs `test/Main.hs` linked against
-it (the smoke test parses a module, runs `mem2reg`, and checks the output).
+it (the smoke test parses a module, runs `instcombine`, and checks the output).
 
 To use the module directly:
 
@@ -30,6 +30,6 @@ import Tir
 
 main = withContext $ \ctx -> do
   m <- parseModule ctx "module { func @f() { return } module_end }"
-  runPipeline ctx m "builtin.func(mem2reg)"
+  runPipeline ctx m "builtin.func(instcombine)"
   putStrLn =<< opToString ctx m
 ```

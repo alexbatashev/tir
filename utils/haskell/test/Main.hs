@@ -1,4 +1,4 @@
--- | Smoke test for the Haskell bindings: parse -> run mem2reg -> print, and
+-- | Smoke test for the Haskell bindings: parse -> promote slots -> print, and
 -- check the schema is reachable. Linked against libtir_capi.
 module Main (main) where
 
@@ -39,10 +39,10 @@ main = withContext $ \ctx -> do
   before <- opToString ctx m
   check "parses allocas" ("ptr.alloca" `isInfixOf` before)
 
-  runPipeline ctx m "builtin.func(mem2reg)"
+  runPipeline ctx m "builtin.func(thread-state,instcombine,erase-state)"
   after <- opToString ctx m
-  check "mem2reg removes allocas" (not ("ptr.alloca" `isInfixOf` after))
-  check "mem2reg promotes operands" ("muli %0, %1" `isInfixOf` after)
+  check "promotion removes allocas" (not ("ptr.alloca" `isInfixOf` after))
+  check "promotion promotes operands" ("muli %0, %1" `isInfixOf` after)
 
   schema <- schemaJson
   check "schema covers builtin.addi" ("\"name\":\"addi\"" `isInfixOf` schema)

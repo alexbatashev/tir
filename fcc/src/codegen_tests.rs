@@ -232,7 +232,9 @@ int main(void) { printf("hello"); return 0; }"#,
         let mut passes = tir::PassManager::new();
         let function_pipeline = passes.nest::<tir::builtin::FuncOp>();
         function_pipeline.add_pass(crate::passes::LowerCirControlFlowPass::new());
-        function_pipeline.add_pass(tir::passes::Mem2RegPass::new());
+        function_pipeline.add_pass(tir::passes::ThreadStatePass::new());
+        function_pipeline.add_pass(tir::passes::InstCombinePass::new());
+        function_pipeline.add_pass(tir::passes::EraseStatePass::new());
         passes
             .run(&context, context.get_op(tir::Operation::id(&module)))
             .expect("lower CIR control flow");

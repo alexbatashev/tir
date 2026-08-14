@@ -20,7 +20,7 @@ use fcc::sema::{TypedAst, analyze};
 use tir::backend::TargetMachine;
 use tir::backend::pipeline::{StopAfter, build_pipeline};
 use tir::builtin::FuncOp;
-use tir::passes::{InstCombinePass, Mem2RegPass, ScfToCfgPass};
+use tir::passes::{EraseStatePass, InstCombinePass, ScfToCfgPass, ThreadStatePass};
 use tir::{Context, Operation, PassManager};
 
 const GCC_20011219_1: &str = r#"
@@ -131,7 +131,7 @@ fn lower_before_instcombine(ast: &TypedAst) -> (Context, tir::builtin::ModuleOp)
     pm.add_pass(LowerCirStructsPass::new());
     let function_pipeline = pm.nest::<FuncOp>();
     function_pipeline.add_pass(LowerCirControlFlowPass::new());
-    function_pipeline.add_pass(Mem2RegPass::new());
+    function_pipeline.add_pass(ThreadStatePass::new());
     pm.run(&context, context.get_op(module.id())).unwrap();
     (context, module)
 }
@@ -145,6 +145,7 @@ fn lower_before_isel(ast: &TypedAst) -> (Context, tir::builtin::ModuleOp, Box<dy
     let mut pm = PassManager::new();
     let function_pipeline = pm.nest::<FuncOp>();
     function_pipeline.add_pass(InstCombinePass::new());
+    function_pipeline.add_pass(EraseStatePass::new());
     function_pipeline.add_pass(ScfToCfgPass::new());
     pm.run(&context, context.get_op(module.id())).unwrap();
     fcc::codegen::lower_data(&context, &module).unwrap();
@@ -179,14 +180,14 @@ fn bench_codegen_expr_heavy(c: &mut Criterion) {
     group.finish();
 }
 
-/// Run mem2reg over the decl-heavy unit. fcc lowers locals to alloca/load/store,
-/// so promotion is replace-uses heavy; `iter_batched` rebuilds fresh IR per run so
-/// only the pass is timed.
-fn bench_mem2reg(c: &mut Criterion) {
+/// Run the promotion path over the decl-heavy unit. fcc lowers locals to
+/// alloca/load/store, so promotion is replace-uses heavy; `iter_batched` rebuilds
+/// fresh IR per run so only the passes are timed.
+fn bench_promote(c: &mut Criterion) {
     let src = gen_source(50, 40);
     let ast = parse_src(&src);
 
-    let mut group = c.benchmark_group("fcc/mem2reg");
+    let mut group = c.benchmark_group("fcc/promote");
     group.bench_function("promote", |b| {
         b.iter_batched(
             || {
@@ -195,7 +196,9 @@ fn bench_mem2reg(c: &mut Criterion) {
                 (ctx, module)
             },
             |(ctx, module)| {
-                let mut pm = tir::parse_pipeline("builtin.func(mem2reg)").unwrap();
+                let mut pm =
+                    tir::parse_pipeline("builtin.func(thread-state,instcombine,erase-state)")
+                        .unwrap();
                 pm.run(&ctx, ctx.get_op(module.id())).unwrap();
             },
             BatchSize::SmallInput,
@@ -263,7 +266,7 @@ criterion_group!(
     benches,
     bench_codegen,
     bench_codegen_expr_heavy,
-    bench_mem2reg,
+    bench_promote,
     bench_pipeline,
     bench_gcc_20011219_1
 );

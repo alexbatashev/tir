@@ -1,7 +1,7 @@
 //! Lowers the C [`crate::ast`] to TIR using the `builtin` and `ptr` dialects.
 //!
 //! The lowering is intentionally memory-based (the unoptimised, "no memory
-//! SSA" shape a C frontend emits before any mem2reg pass): every parameter and
+//! SSA" shape a C frontend emits before any promotion pass): every parameter and
 //! local lives in a stack slot produced by `ptr.alloca`, reads become
 //! `ptr.load` and writes become `ptr.store`. Arithmetic uses the `builtin`
 //! integer ops; C-only literals and variadic markers use the local `cir` dialect.

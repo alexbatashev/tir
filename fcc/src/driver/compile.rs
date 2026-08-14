@@ -128,7 +128,7 @@ pub(super) fn fcc_context() -> tir::Context {
     context
 }
 
-/// Run the backend pipeline (mem2reg, instruction selection, register
+/// Run the backend pipeline (promotion, instruction selection, register
 /// allocation, finalization) and render assembly or an ELF object.
 pub(super) fn emit_machine_code(
     opts: &DriverOptions,
@@ -177,7 +177,6 @@ pub(super) fn emit_machine_code(
     pm.add_pass(crate::passes::LowerCirStructsPass::new());
     let function_pipeline = pm.nest::<tir::builtin::FuncOp>();
     function_pipeline.add_pass(crate::passes::LowerCirControlFlowPass::new());
-    function_pipeline.add_pass(tir::passes::Mem2RegPass::new());
     function_pipeline.add_pass(tir::passes::ThreadStatePass::new());
     function_pipeline.add_pass(tir::passes::InstCombinePass::new());
     // Memory state describes the structured mid-end only; codegen takes the

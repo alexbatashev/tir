@@ -62,10 +62,10 @@ fn parse_run_pipeline_print_roundtrip() {
     let before = render(ctx, module);
     assert!(
         before.contains("ptr.alloca"),
-        "expected allocas before mem2reg:\n{before}"
+        "expected allocas before promotion:\n{before}"
     );
 
-    let spec = CString::new("builtin.func(mem2reg)").unwrap();
+    let spec = CString::new("builtin.func(thread-state,instcombine,erase-state)").unwrap();
     let pm = unsafe { tir_pipeline_parse(spec.as_ptr()) };
     assert!(!pm.is_null(), "pipeline parse failed: {}", last_error());
     assert!(
@@ -78,7 +78,7 @@ fn parse_run_pipeline_print_roundtrip() {
     let after = render(ctx, module);
     assert!(
         !after.contains("ptr.alloca"),
-        "mem2reg should remove allocas:\n{after}"
+        "promotion should remove allocas:\n{after}"
     );
     assert!(
         after.contains("muli %0, %1"),

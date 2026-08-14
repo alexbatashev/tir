@@ -27,18 +27,6 @@ pub fn exit_scope(op: &Arc<OpInstance>) -> Option<ValueId> {
     (op.is::<scf::BreakOp>() || op.is::<scf::ContinueOp>()).then(|| op.operands[0])
 }
 
-/// Whether `op` leaves one of the loops being walked.
-pub fn exits_scope(op: &Arc<OpInstance>, scopes: &[ValueId]) -> bool {
-    exit_scope(op).is_some_and(|scope| scopes.contains(&scope))
-}
-
-/// Whether anything inside `op`'s regions leaves one of those loops.
-pub fn exits_scopes(context: &Context, op: &Arc<OpInstance>, scopes: &[ValueId]) -> bool {
-    nested_exit_scopes(context, op)
-        .iter()
-        .any(|scope| scopes.contains(scope))
-}
-
 /// The scope `region`'s terminator leaves through, if it ends in an exit at all.
 pub fn region_exit(context: &Context, region: RegionId) -> Option<ValueId> {
     let block = context.get_region(region).iter(context.clone()).next()?;

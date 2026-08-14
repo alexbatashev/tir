@@ -104,8 +104,12 @@ fn passes_do_not_leak_entities() {
             "lower-cir-control-flow",
             Box::new(fcc::passes::LowerCirControlFlowPass::new()) as Box<dyn tir::Pass>,
         ),
-        ("mem2reg", Box::new(tir::passes::Mem2RegPass::new())),
+        (
+            "thread-state",
+            Box::new(tir::passes::ThreadStatePass::new()),
+        ),
         ("instcombine", Box::new(tir::passes::InstCombinePass::new())),
+        ("erase-state", Box::new(tir::passes::EraseStatePass::new())),
         ("scf-to-cfg", Box::new(tir::passes::ScfToCfgPass::new())),
     ] {
         let mut pm = PassManager::new();
