@@ -18,7 +18,6 @@ pub(crate) struct BlockPlan {
     pub(crate) schedule: Vec<ScheduledEmit>,
     pub(crate) erase_ops: Vec<OpId>,
     pub(crate) value_remaps: Vec<(ValueId, ValueId)>,
-    pub(crate) terminators: Vec<TerminatorPlan>,
     /// What this block leaves a destruction to read: the branch each test selected
     /// into, and the register a counter's advance landed in.
     pub(crate) aux: Vec<(OpId, AuxSlot, AuxEmit)>,
@@ -46,23 +45,9 @@ pub(crate) struct ScheduledEmit {
     pub(crate) result_ty: Option<TypeId>,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) enum TerminatorPlan {
-    Guard {
-        op: OpId,
-        branch: GuardBranch,
-        true_dest: BlockId,
-        true_args: Vec<ValueId>,
-        false_dest: BlockId,
-        false_args: Vec<ValueId>,
-    },
-    Jump {
-        op: OpId,
-        dest: BlockId,
-        args: Vec<ValueId>,
-    },
-}
-
+/// How a destruction's branch tests its condition: fused into a selected
+/// conditional-branch instruction, or the target's branch-if-nonzero over the
+/// materialized condition.
 #[derive(Clone, Debug)]
 pub(crate) enum GuardBranch {
     Fused { rule_index: usize, m: RuleMatch },

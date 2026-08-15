@@ -39,7 +39,7 @@ flowchart TB
         ir["every block's IR"] -->|"1 - build (one SemDagBuilder)"| eg["shared SemEGraph\n(cross-block CSE)"]
         eg -->|"2 - saturate once\non the base graph"| sat["base-saturated e-graph"]
         subgraph per_block["for each block B"]
-            facts["DominatingEdgeFacts(B)"] -->|"3 - push scope\n+ scoped saturate"| scoped["B's assumed graph"]
+            facts["region entry fact (B)"] -->|"3 - push scope\n+ scoped saturate"| scoped["B's assumed graph"]
             sat --> scoped
             rules["rules"] -->|compile_isel_pattern| pats["CompiledIselPattern"]
             scoped -->|"4 - ematch + prune,\nlegality restricted to B\n(collect_block_matches)"| matches["PbqpIselMatch list"]
@@ -55,8 +55,8 @@ The pass runs per function. Visiting the function op triggers `solve_function`,
 which builds one `FunctionSelection` — every block lowered into a single shared,
 base-saturated e-graph — and solves **every block up front**, each inside its own
 assumption scope (`solve_block`). Solving before any commit is required: a
-dominating-edge fact reads a guard condition's *defining op*, which a dominator's
-commit would replace. Plans are stored in `plans` keyed by `BlockId`; the first op
+region's entry fact reads its condition's *defining op*, which an enclosing
+block's commit would replace. Plans are stored in `plans` keyed by `BlockId`; the first op
 the pass later visits in a block triggers `commit_block_solution` (`emitted_blocks`
 guards against re-emitting), so building and solving each happen once.
 
@@ -135,9 +135,9 @@ the block whose plan must materialize it:
   registers by value: the counter has to be the value the back edge writes before
   any instruction reading it is emitted.
 
-Each of these is resolved exactly as a guarded terminator's condition is: fused
-into a conditional-branch rule where one matches, and otherwise demanded as a
-register for the target's branch-if-nonzero. A use of a test by the structured
+Each of these is resolved through the branch rules (see [Conditional
+branches](#conditional-branches)): fused into a conditional-branch rule where one
+matches, and otherwise demanded as a register for the target's branch-if-nonzero. A use of a test by the structured
 operation itself does not additionally force it into a register — the branch
 recomputes it.
 
@@ -323,9 +323,8 @@ saturation (which may merge classes). All live on `FunctionSelection`.
 | `externally_bound: Set<ValueId>` | a value with at least one original use **outside its def block** — guaranteed materialized in a register, so a dominated block may bind it |
 | `shared_classes: Set<Id>` | a value used as an operand by **>1 consumer** (counted function-wide); a memory effect here can never be internalized into a larger match (a pure value still can — duplication) |
 | `must_materialize: Set<Id>` | an op-root class whose value some consumer can never internalize: **(a)** a use in a different block (exactly `externally_bound`), or **(b)** a same-block use no match reaches that is not a guarded terminator; it is never offered a consuming alternative |
-| `control: BlockId → Vec<ControlReification>` | the guarded and unconditional CFG edges that preserve unselected γ/θ values, including forwarded block arguments |
 | `reifiable_gates: Set<Id>` | canonical classes seeded from GSA γ/μ nodes; these may preserve the existing control-flow edge assignments instead of selecting a value instruction |
-| `prepared: ValueId → ConditionExpr` | each condition a scope may assert — a dominating edge's, or a region's under structured input — prepared against the base graph (its class, and its defining comparison when there is one) |
+| `prepared: ValueId → ConditionExpr` | each condition a scope may assert — a region's entry condition — prepared against the base graph (its class, and its defining comparison when there is one) |
 | `region_facts: BlockId → (ValueId, bool)` | the assumption a region's entry block is entered under, read off the region-carrying op's interfaces (structured input only) |
 
 Because scoped assumptions merge classes, a per-block query through the *scoped*
@@ -695,7 +694,7 @@ its consumer (an `IntroducedEmit`).
 struct BlockPlan {
     op_decisions: HashMap<OpId, BlockDecision>,   // Emit{rule,match} | Consume
     introduced: Vec<IntroducedEmit>,              // operand-first order
-    terminators: Vec<TerminatorPlan>,             // guard / jump lowerings
+    aux: Vec<(OpId, AuxSlot, AuxEmit)>,           // what a destruction reads
 }
 ```
 
@@ -730,9 +729,9 @@ incomplete rule set is rejected instead of silently dropping an op.
 
 1. Insert each `IntroducedEmit` before its anchor (operand-first). Its
    `EmitRequest` carries only the fresh destination value (`op: None`).
-2. Lower the `terminators` (guards / jumps) first, ahead of the op loop: a
-   fused conditional branch reads its operands as *values*, so the condition's
-   defining op — possibly erased as `Dead` below — must lose its last use first.
+2. Record each `aux` entry (a destruction's branch or counter value) against the
+   region-carrying operation, remapping it onto what this block emitted; the
+   destruction reads it once every block has committed.
 3. For each original op, in **reverse block order** (consumers before defs, so
    a def's `replace_op` use-remapping sees every already-emitted consumer):
    `replace_op` (Emit) or `erase_op` (Consume).
@@ -742,9 +741,10 @@ incomplete rule set is rejected instead of silently dropping an op.
 
 ## Conditional branches
 
-Terminators select through the same rule machinery when the target installs
-`BranchEmitters` (`with_branch_emitters`): an `uncond` emitter (e.g. `vbr`,
-finalized to `jal x0` post-RA) and a `cond_nonzero` **safety fallback** returning
+A destruction's branches select through the same rule machinery, using the
+emitters the target installs (`BranchEmitters`, `with_branch_emitters`): an
+`uncond` emitter (e.g. `vbr`, finalized to `jal x0` post-RA) and a
+`cond_nonzero` **safety fallback** returning
 the instruction(s) that branch on a nonzero register (one op on targets with a
 zero register — `bne cond, x0`; a flag-setting test plus the branch on flag
 targets — `test cond, cond` + `jne`, `cmp cond, xzr` + `b.ne`). Every target now
@@ -761,10 +761,10 @@ any instruction whose behavior is a guarded PC write:
 ```
 
 The pattern is the *branch condition*; the taken target is bound at emit time
-as a Block attribute (`RuleMatch::block_binding`). Each guarded terminator
-(`BranchGuard`, e.g. `cond_br`) has its condition lowered into the shared e-graph
-when the function is built. At solve time the branch rules are e-matched once for
-the whole block and indexed by condition class (`guard_branch_hits`); each guard
+as a Block attribute (`RuleMatch::block_binding`). Every test a destruction will
+branch on is lowered into the shared e-graph when the function is built
+(`build_region_control`, above). At solve time the branch rules are e-matched once
+for the whole block and indexed by condition class (`guard_branch_hits`); each test
 then looks up its own hits and `best_guard_branch` picks the cheapest match rooted
 at its condition class whose operands all resolve at B (tie → most specific):
 
@@ -776,13 +776,13 @@ at its condition class whose operands all resolve at B (tie → most specific):
   `Dead`, so a multi-use compare is still materialized (`slt`) *and* fused.
 - **Fallback**: no branch rule matches — the condition is forced materialized
   and `cond_nonzero` emits the branch. A bare i1 condition (block/function
-  argument, no comparison) normally does not reach here: the guard seed below
-  hands it a derived zero-compare branch, so the fallback is reserved for
-  conditions no derived rule covers.
+  argument, no comparison) reaches here: it carries no comparison term for a
+  derived zero-compare rule to match, so the fallback masks bit 0 and branches
+  on it.
 
-Either way the terminator is replaced by the branch (inserted ahead of it)
-plus `uncond` to the false successor; a plain `br` lowers through `uncond`
-directly. `cmpi` participates via its predicate-dependent semantic expression
+Either way destruction emits the branch plus `uncond` to the not-taken
+successor, and an edge carrying arguments the branch cannot rides a trampoline
+(`destruct::trampoline`). `cmpi` participates via its predicate-dependent semantic expression
 (canonicalized so only `Eq/Ne/Lt/Ge/ULt/UGe` appear — `sgt`/`sle`/… swap
 operands), and a proved width-1 identity
 `c == If(c, 1, 0)` (any 1-bit `c`) bridges a bare comparison class to the
@@ -807,11 +807,11 @@ match. The symmetric non-commutative forms are explicit axioms. They run once
 after ordinary saturation, so this matching form cannot expand the boolean
 theory's fixpoint.
 
-A lone i1 leaf has no comparison term for an axiom to match. For guard classes
-only, `seed_bare_condition_terms` adds the true identity
-`c = Ne(c, zext(0b0, 1))` after saturation. Keeping this narrowly structural
-seed avoids a self-referential global boolean rewrite while comparison guards
-remain entirely axiom-driven.
+A lone i1 leaf has no comparison term for an axiom to match, and no global
+identity supplies one: a self-referential boolean rewrite interacts
+pathologically with the `*-via-if` saturation rules. So a bare i1 test takes the
+`cond_nonzero` fallback, which masks bit 0, while comparison tests remain
+entirely axiom-driven.
 
 TMDL derives the rules these unify with. On a register class carrying a
 **hardwired-zero** register (the `hardwired_zero` trait — RISC-V `x0`), every
@@ -858,9 +858,9 @@ derives *no* rule instead of a miscompiling one. The proved comparison becomes
 the rule's pattern; emission produces **two real instructions** — the rule's
 `prelude_emit` builds the flag definer (binding the compared operands), then
 `emit_fn` builds the branch (binding the taken target) — inserted adjacently
-ahead of the terminator. Everything else (the `Dead` alternative consuming the
-compare, boundary-forced materialization, dominating-edge assumptions) is the
-same machinery as the fused single-instruction path.
+ahead of the branch it defines the flags for. Everything else (the `Dead`
+alternative consuming the compare, boundary-forced materialization, region
+assumptions) is the same machinery as the fused single-instruction path.
 
 Comparison proof is semantic-type aware. Integer flag definers use the ordinary
 bit-vector oracle. A definer whose operands belong to a TMDL `float` register
@@ -941,21 +941,24 @@ where the demanded configuration changes). Demand attributes are to that pass
 what virtual registers are to allocation: a recorded obligation, concretized
 later.
 
-## Dominating-edge assumptions (scoped shared graph)
+## Region assumptions (scoped shared graph)
 
-A guarded CFG edge `u → v` carries the fact `condition == holds`. When `v` is a
-non-entry block entered through **exactly that one edge**, "the edge dominates"
-collapses to "`v` dominates", so the fact holds throughout `v` *and every block `v`
-dominates* (the standard dominated-equality argument). The `DominatingEdgeFacts`
-analysis (`core/src/analysis/edge_facts.rs`) computes these: `own_fact(block)` is
-the fact `block` contributes, and `facts(block)` gathers the own facts of every
-dominator up the `idom` chain, **outermost first**. It generalizes isel's former
-single-edge, single-block rule to the whole dominator subtree.
+A region-carrying operation states what its regions run under, and it states it on
+its own interfaces (`region_entry_facts`): a `Conditional`'s guarded arm runs on
+its decision holding (`guarded_regions`), and a loop tested by a region runs its
+body on the condition that region yields (`GuardedLoop::entry_guard`). The
+condition of a tested loop is spelled over the ports' per-iteration heads, so it
+holds on **every** iteration and not merely the first. A region a structured
+operation says nothing about (a switch case, a loop's own test) carries no fact.
+
+The dominator tree is region-aware — a block flows into each region its operations
+carry — so a region's entry block is an ordinary node of the tree whose subtree is
+exactly that region, and the fact holds throughout that subtree.
 
 Because every block solves against the *one shared* graph, a block's facts are
 asserted in an **assumption scope** (`push_context`) private to its solve. The
-scope may hold **several** facts (one per dominating guarded edge); `assert_fact`
-applies each, reading the condition's `prepared` `ConditionExpr`:
+scope may hold **several** facts (one per enclosing region); `assert_fact` applies
+each, reading the condition's `prepared` `ConditionExpr`:
 
 - the condition class ≡ its known truth value (0/1),
 - the defining comparison ≡ the same truth, its *complement* comparison
@@ -966,36 +969,18 @@ applies each, reading the condition's `prepared` `ConditionExpr`:
 After asserting, the block `rebuild`s and **saturates inside the scope**, so the
 rewrites propagate the facts. Consequences then fall out of the ordinary
 machinery: a re-computed identical (or complement, or operand-swapped-under-`eq`)
-compare's class now holds a constant, so its guard folds to an unconditional
-`Jump` and the compare op is Consumed; a value consumer folds the known immediate
+compare's class now holds a constant, so the compare op is Consumed and its test
+needs no branch; a value consumer folds the known immediate
 (`RuleMatch` records *both* the int and register binding when a class carries
 both). The scope is popped once the block's plan is stored, leaving the shared
 graph assumption-free for the next block.
-
-### Where the fact comes from under structured input
-
-A region-carrying operation states the same thing about its regions that a guarded
-edge states about its successor, and it states it on its own interfaces
-(`region_entry_facts`): a `Conditional`'s guarded arm runs on its decision holding
-(`guarded_regions`), and a loop tested by a region runs its body on the condition
-that region yields (`GuardedLoop::entry_guard`). The condition of a tested loop is
-spelled over the ports' per-iteration heads, so it holds on **every** iteration and
-not merely the first.
-
-Both readings feed one scope. The dominator tree is region-aware — a block flows
-into each region its operations carry — so a region's entry block is an ordinary
-node of the tree whose subtree is exactly that region, and the walk pushes the
-region's fact there just as it pushes an edge fact for a guarded successor. A
-region a structured operation says nothing about (a switch case, a loop's own test)
-carries no fact. Facts from the *edges* are unreachable under structured input (the
-gates are ops, not terminators), so the two sources never contend.
 
 A scoped assumption may merge a class over several base keys. Because the side
 tables are keyed by base representatives, every per-block query aggregates over
 `base_members` (the scope's partition members of the scoped-canonical class, §1),
 so a query through the scoped representative still sees each base key it covers.
 This is the shared function-level graph the earlier per-block design anticipated —
-now realized, solving one block under its edge facts while the base graph stays
+now realized, solving one block under its region facts while the base graph stays
 untouched.
 
 ## Binding resolution
@@ -1092,7 +1077,6 @@ and the Def-role register attribute claims their def-site.
 | `CompiledIselPattern` | a rule's pattern compiled for e-matching, with per-node metadata + specificity |
 | `PbqpIselMatch` | one e-match hit: root class, bindings, cost |
 | `FunctionSelection` | the function's shared e-graph + multi-valued side tables + every block's plan |
-| `DominatingEdgeFacts` / `EdgeFact` | guarded-edge facts inherited down the dominator tree |
 | `BlockPlan` / `IntroducedEmit` | the emission plan and its synthesized instructions |
 | `EmissionBuilder` | turns a cover into per-op `RuleMatch`es, materializing introduced classes |
 | `EmitRequest` | what an emitter writes into: backing op (if any) + destination values |

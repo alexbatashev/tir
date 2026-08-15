@@ -1,9 +1,10 @@
 // RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s
 
 // A low-bit truncation re-views its source's register, so it owns no register
-// of its own. Under `^bb2`'s dominating-edge fact the returned constant 0 is
-// proven equal to that view's class, but the view's source is neither in a
-// register at `^bb2` nor extracted there — so the constant must still be
+// of its own. Under the fact the arm restructuring builds `^bb2` into is entered
+// with, the returned constant 0 is proven equal to that view's class, but the
+// view's source is neither in a register there nor extracted there — so the
+// constant must still be
 // materialized. Treating a view as unconditionally available left the class
 // with no instruction and the return reading an undefined value.
 

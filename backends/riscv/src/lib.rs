@@ -1222,7 +1222,7 @@ mod tests {
     use tir::backend::AsmDialect;
     use tir::{
         Context, IRFormatter, Operation, PassManager,
-        builtin::{FuncOp, IntegerType, UnitType, ops},
+        builtin::{FuncOp, IntegerType, ops},
     };
 
     use crate::{RegClass, RiscvDialect, create_isel_pass, create_regalloc_stage};
@@ -1327,95 +1327,6 @@ mod tests {
             .into_iter()
             .map(|id| context.get_op(id).name().as_str())
             .collect()
-    }
-
-    #[test]
-    fn builtin_br_lowers_to_virtual() {
-        let context = Context::with_default_dialects();
-        context.register_dialect::<AsmDialect>();
-        context.register_dialect::<RiscvDialect>();
-
-        let module = ops::module(&context, None).build();
-        let region = context.create_region();
-        let entry = context.create_block(vec![]);
-        region.add_block(entry.id());
-        let target = context.create_block(vec![]);
-
-        let func = ops::func(&context, "demo", UnitType::new(&context), Some(region.id())).build();
-        func.body()
-            .append_op(ops::br(&context, vec![], target.id()).build());
-
-        module.body().append_op(func);
-        module.body().append_op(ops::module_end(&context).build());
-
-        let mut pm = PassManager::new();
-        pm.nest::<FuncOp>().add_pass(create_isel_pass(&context));
-        pm.run(&context, context.get_op(module.id()))
-            .expect("isel should lower the branch");
-
-        assert_eq!(
-            body_op_names(&context, region.id()),
-            vec!["vbr", "symbol_end"]
-        );
-    }
-
-    #[test]
-    fn builtin_cond_br_lowers_to_virtual() {
-        let context = Context::with_default_dialects();
-        context.register_dialect::<AsmDialect>();
-        context.register_dialect::<RiscvDialect>();
-
-        let i1 = IntegerType::new(&context, 1);
-        let i32 = IntegerType::new(&context, 32);
-        let module = ops::module(&context, None).build();
-
-        let cond = context.create_value(i1, None);
-        let x = context.create_value(i32, None);
-        let region = context.create_region();
-        let block = context.create_block(vec![cond, x]);
-        region.add_block(block.id());
-
-        let func = ops::func(&context, "demo", UnitType::new(&context), Some(region.id())).build();
-        let fbody = func.body();
-        let args = fbody.arguments();
-        let (cond_id, x_id) = (args[0].id(), args[1].id());
-
-        let t = context.create_block(vec![]);
-        let f_arg = context.create_value(i32, None);
-        let f = context.create_block(vec![f_arg]);
-
-        let add = ops::addi(&context, x_id, x_id, i32).build();
-        let sum = add.result();
-        func.body().append_op(add);
-        // A bare i1 condition (a block argument): no branch rule can fuse it,
-        // so selection falls back to `andi` the defined bit out + `bne … x0, t`
-        // plus the deferred `vbr f`. The add result rides the false edge, so it
-        // is demanded and selects.
-        func.body()
-            .append_op(ops::cond_br(&context, cond_id, vec![], vec![sum], t.id(), f.id()).build());
-
-        module.body().append_op(func);
-        module.body().append_op(ops::module_end(&context).build());
-
-        let mut pm = PassManager::new();
-        pm.nest::<FuncOp>().add_pass(create_isel_pass(&context));
-        pm.run(&context, context.get_op(module.id()))
-            .expect("isel should lower the conditional branch");
-
-        // The data op selects (addw), the conditional branch lowers to the
-        // fallback machine branch + virtual fallthrough, and no builtin control
-        // flow remains.
-        assert_eq!(
-            body_op_names(&context, region.id()),
-            vec!["addw", "andi", "bne", "vbr", "symbol_end"]
-        );
-        let mut buf = String::new();
-        let mut fmt = IRFormatter::new(&mut buf);
-        module.print(&mut fmt).expect("print lowered module");
-        assert!(
-            !buf.contains("builtin"),
-            "no builtin ops should remain:\n{buf}"
-        );
     }
 
     #[test]

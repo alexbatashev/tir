@@ -753,7 +753,7 @@ mod tests {
     use tir::backend::AsmDialect;
     use tir::{
         Context, IRFormatter, Operation, PassManager,
-        builtin::{FuncOp, IntegerType, UnitType, ops},
+        builtin::{FuncOp, IntegerType, ops},
     };
 
     use crate::{Arm64Dialect, RegClass, create_isel_pass, create_regalloc_stage};
@@ -838,127 +838,6 @@ mod tests {
                 .map(|index| (RegClass::VPR.id(), index))
                 .collect::<Vec<_>>()
         );
-    }
-
-    #[test]
-    fn arm64_builtin_cond_br_lowers_through_branch_emitters() {
-        let context = Context::with_default_dialects();
-        context.register_dialect::<AsmDialect>();
-        context.register_dialect::<Arm64Dialect>();
-
-        let i1 = IntegerType::new(&context, 1);
-        let i64 = IntegerType::new(&context, 64);
-        let module = ops::module(&context, None).build();
-
-        let cond = context.create_value(i1, None);
-        let x = context.create_value(i64, None);
-        let region = context.create_region();
-        let block = context.create_block(vec![cond, x]);
-        region.add_block(block.id());
-
-        let func = ops::func(&context, "demo", UnitType::new(&context), Some(region.id())).build();
-        let fbody = func.body();
-        let args = fbody.arguments();
-        let (cond_id, x_id) = (args[0].id(), args[1].id());
-
-        let t = context.create_block(vec![]);
-        let f_arg = context.create_value(i64, None);
-        let f = context.create_block(vec![f_arg]);
-
-        let add = ops::addi(&context, x_id, x_id, i64).build();
-        let sum = add.result();
-        func.body().append_op(add);
-        // A bare i1 condition (a block argument) defines only bit 0 of its
-        // register, so it lowers through the masking fallback: `and #1` plus
-        // `cbnz`, then the deferred `vbr f`. The add result rides the false
-        // edge, so it is demanded and selects.
-        func.body()
-            .append_op(ops::cond_br(&context, cond_id, vec![], vec![sum], t.id(), f.id()).build());
-
-        module.body().append_op(func);
-        module.body().append_op(ops::module_end(&context).build());
-
-        let mut pm = PassManager::new();
-        pm.nest::<FuncOp>().add_pass(create_isel_pass(&context));
-        pm.run(&context, context.get_op(module.id()))
-            .expect("isel should lower the conditional branch");
-
-        let body: Vec<_> = context
-            .get_region(region.id())
-            .iter(context.clone())
-            .next()
-            .unwrap()
-            .op_ids()
-            .into_iter()
-            .map(|id| context.get_op(id).name().as_str())
-            .collect();
-        assert_eq!(body, vec!["add", "and_imm", "cbnz", "vbr", "symbol_end"]);
-
-        let mut buf = String::new();
-        let mut fmt = IRFormatter::new(&mut buf);
-        module.print(&mut fmt).expect("print lowered module");
-        assert!(
-            !buf.contains("builtin"),
-            "no builtin ops should remain:\n{buf}"
-        );
-    }
-
-    #[test]
-    fn arm64_cmpi_cond_br_fuses_into_cmp_and_bcond() {
-        let context = Context::with_default_dialects();
-        context.register_dialect::<AsmDialect>();
-        context.register_dialect::<Arm64Dialect>();
-
-        let i64 = IntegerType::new(&context, 64);
-        let i1 = IntegerType::new(&context, 1);
-        let module = ops::module(&context, None).build();
-
-        let a = context.create_value(i64, None);
-        let b = context.create_value(i64, None);
-        let region = context.create_region();
-        let block = context.create_block(vec![a, b]);
-        region.add_block(block.id());
-
-        let func = ops::func(&context, "demo", UnitType::new(&context), Some(region.id())).build();
-        let fbody = func.body();
-        let args = fbody.arguments();
-        let (a_id, b_id) = (args[0].id(), args[1].id());
-
-        let t = context.create_block(vec![]);
-        let f = context.create_block(vec![]);
-
-        let cmp = tir::builtin::CmpIOpBuilder::new(&context)
-            .lhs(a_id)
-            .rhs(b_id)
-            .predicate("slt")
-            .result_type(i1)
-            .build();
-        let cmp_r = cmp.result();
-        func.body().append_op(cmp);
-        func.body()
-            .append_op(ops::cond_br(&context, cmp_r, vec![], vec![], t.id(), f.id()).build());
-
-        module.body().append_op(func);
-        module.body().append_op(ops::module_end(&context).build());
-
-        let mut pm = PassManager::new();
-        pm.nest::<FuncOp>().add_pass(create_isel_pass(&context));
-        pm.run(&context, context.get_op(module.id()))
-            .expect("isel should select the flag-mediated branch pair");
-
-        // The signed compare-and-branch selects through the TMDL-derived
-        // `cmp+b.lt` rule: the definer sets PSTATE, `b.lt` reads it, and the
-        // `cmpi` op is consumed.
-        let body: Vec<_> = context
-            .get_region(region.id())
-            .iter(context.clone())
-            .next()
-            .unwrap()
-            .op_ids()
-            .into_iter()
-            .map(|id| context.get_op(id).name().as_str())
-            .collect();
-        assert_eq!(body, vec!["cmp", "b.lt", "vbr", "symbol_end"]);
     }
 
     fn phys_of(
