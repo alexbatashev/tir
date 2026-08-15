@@ -165,6 +165,17 @@ is unconditional, and a block only that edge reaches where it is not
 a block's cover ranges over that block's own roots, so an effectful or trapping arm
 is never speculated.
 
+**Destruction emits clean control flow — there is no cleanup pass behind it.** A
+region's block is given the edge its terminator stood for by `Destructor::seal`,
+and a block that edge leaves with nothing else in it is *not a block*: it is
+reported as the `Forward` its predecessors take instead, so an edge into it is an
+edge to where it goes, with the arguments that edge carries substituted for its
+parameters. An arm that computes nothing therefore costs no block, and where every
+arm forwards to the same place with the same values there is nothing left to
+decide — the gate emits neither a test nor a trampoline, only the jump. This is
+the reason `passes/cfg_cleanup` has no counterpart on the structured path: the
+shapes it folds are shapes destruction never mints.
+
 The flag is deleted when the backend contract flips to structured input; until
 then the CFG path above is the default and is unchanged.
 

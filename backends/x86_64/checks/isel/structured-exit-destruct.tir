@@ -2,8 +2,9 @@
 
 // An exit leaving a loop's scope becomes an edge to the target that scope names,
 // from wherever it sits — here from inside a gate nested in the body. The `break`
-// carries its value straight to the loop's continuation; the arm that stays falls
-// through to the body's own back edge.
+// carries its value straight to the loop's continuation; the arm that stays
+// computes nothing, so it is not a block and the untaken edge goes straight to
+// the body's own back edge.
 
 module {
   func @find(%n: !i64, %limit: !i64) -> !i64 {
@@ -36,7 +37,7 @@ module {
 // CHECK: x86_64.je {imm = ^[[BREAK:bb[0-9]+]]}
 // CHECK: ^[[EXIT]](%{{[0-9]+}}: !i64):
 // CHECK-NEXT: asm.vret
+// CHECK: asm.vbr %{{[0-9]+}} ^[[TEST]]
 // CHECK: ^[[BREAK]]:
 // CHECK-NEXT: asm.vbr %{{[0-9]+}} ^[[EXIT]]
-// CHECK: asm.vbr %{{[0-9]+}} ^[[TEST]]
 // CHECK-NOT: scf.

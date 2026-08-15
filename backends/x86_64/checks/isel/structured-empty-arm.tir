@@ -1,0 +1,26 @@
+// RUN: env TIR_ISEL_REGIONS=1 tir mc --march=x86_64 --stage=isel %s | filecheck %s
+
+// An arm that computes nothing is not a block. What such an arm yields rides the
+// edge the gate's test already carries, so the only block destruction mints for
+// it is the trampoline the taken edge needs to perform its assignment on.
+
+module {
+  func @pick(%c: !i1, %a: !i64, %b: !i64) -> !i64 {
+    %r = scf.if %c args(%a, %b) -> !i64 (%p, %q) {
+      scf.yield %p
+    } else (%u, %v) {
+      scf.yield %v
+    }
+    return %r
+  }
+  module_end
+}
+
+// CHECK: x86_64.test_imm32
+// CHECK-NEXT: x86_64.jne {imm = ^[[TAKEN:bb[0-9]+]]}
+// CHECK-NEXT: asm.vbr %{{[0-9]+}} ^[[JOIN:bb[0-9]+]]
+// CHECK-NEXT: asm.symbol_end
+// CHECK-NEXT: ^[[JOIN]](%[[R:[0-9]+]]: !i64):
+// CHECK-NEXT: asm.vret %[[R]]
+// CHECK-NEXT: ^[[TAKEN]]:
+// CHECK-NEXT: asm.vbr %{{[0-9]+}} ^[[JOIN]]

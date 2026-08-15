@@ -52,6 +52,32 @@ struct LoopTargets {
     continue_dest: BlockId,
 }
 
+/// The edge a region block that computes nothing stands for. Such a block is
+/// never added to the function: an edge into it is an edge to where it goes,
+/// with the arguments that edge carries taking the place of its parameters.
+struct Forward {
+    dest: BlockId,
+    args: Vec<ValueId>,
+    parameters: Vec<ValueId>,
+}
+
+impl Forward {
+    fn resolve(&self, incoming: &[ValueId]) -> (BlockId, Vec<ValueId>) {
+        let substitution: HashMap<ValueId, ValueId> = self
+            .parameters
+            .iter()
+            .copied()
+            .zip(incoming.iter().copied())
+            .collect();
+        let args = self
+            .args
+            .iter()
+            .map(|value| substitution.get(value).copied().unwrap_or(*value))
+            .collect();
+        (self.dest, args)
+    }
+}
+
 pub(crate) struct Destructor<'a> {
     context: &'a Context,
     emitters: &'a BranchEmitters,
@@ -159,41 +185,41 @@ impl<'a> Destructor<'a> {
         // Every arm reads the same inputs — the operation's trailing operands.
         let inputs = self.entry_arguments(op, &arms[default].0);
         let continuation = self.split_after(rewriter, &block, op);
+        let mut edges = Vec::new();
         for (arm, _) in &arms {
-            self.add_block(arm.id());
+            edges.push(self.seal_into(rewriter, arm, continuation.id(), &inputs)?);
         }
         self.add_block(continuation.id());
         self.erase(rewriter, &block, op)?;
 
-        let mut current = block;
         let tests: Vec<usize> = (0..arms.len()).filter(|index| *index != default).collect();
-        for (position, &index) in tests.iter().enumerate() {
+        let Some((&last, leading)) = tests.split_last() else {
+            let (dest, args) = &edges[default];
+            self.jump(&block, *dest, args);
+            return Ok(());
+        };
+        // Each case but the last is tested in a block of its own, the one before
+        // it falling through to it; the last falls through to the arm no case names.
+        let mut current = block;
+        for &index in leading {
+            let next = self.context.create_block(vec![]);
+            self.add_block(next.id());
+            let (taken, taken_args) = &edges[index];
             let test = self.aux(op, AuxSlot::Test(index))?;
-            let last = position + 1 == tests.len();
-            let next = if last {
-                arms[default].0.clone()
-            } else {
-                let next = self.context.create_block(vec![]);
-                self.add_block(next.id());
-                next
-            };
-            self.branch(
-                &current,
-                test,
-                arms[index].0.id(),
-                &inputs,
-                next.id(),
-                &inputs,
-            )?;
+            self.branch(&current, test, *taken, taken_args, next.id(), &inputs)?;
             current = next;
         }
-        if tests.is_empty() {
-            self.jump(&current, arms[default].0.id(), &inputs);
-        }
-        for (arm, _) in &arms {
-            self.exit(rewriter, arm, continuation.id())?;
-        }
-        Ok(())
+        let (taken, taken_args) = &edges[last];
+        let (fallthrough, fallthrough_args) = &edges[default];
+        let test = self.aux(op, AuxSlot::Test(last))?;
+        self.branch(
+            &current,
+            test,
+            *taken,
+            taken_args,
+            *fallthrough,
+            fallthrough_args,
+        )
     }
 
     /// A loop tested before each iteration becomes its test region followed by its
@@ -215,8 +241,6 @@ impl<'a> Destructor<'a> {
         let inits = self.mapped(&op.operands);
         let continuation = self.split_after(rewriter, &block, op);
         self.add_block(test.id());
-        self.add_block(body.id());
-        self.add_block(continuation.id());
         if let Some(scope) = scope {
             self.targets.insert(
                 scope,
@@ -226,24 +250,25 @@ impl<'a> Destructor<'a> {
                 },
             );
         }
-        self.erase(rewriter, &block, op)?;
-        self.jump(&block, test.id(), &inits);
-
         let terminator = self.terminator(&test)?;
         let ports = body.arguments().len();
         let forwarded = self.mapped(&terminator.operands[terminator.operands.len() - ports..]);
+        let (taken_dest, taken_args) = self.seal_into(rewriter, &body, test.id(), &forwarded)?;
+        self.add_block(continuation.id());
+        self.erase(rewriter, &block, op)?;
+        self.jump(&block, test.id(), &inits);
+
         let taken = self.aux(op, AuxSlot::Test(0))?;
         let branch_block = test.clone();
         rewriter.erase_op(&OperationRef::new(terminator, Some(test), None))?;
         self.branch(
             &branch_block,
             taken,
-            body.id(),
-            &forwarded,
+            taken_dest,
+            &taken_args,
             continuation.id(),
             &forwarded,
-        )?;
-        self.exit(rewriter, &body, branch_block.id())
+        )
     }
 
     /// A counted loop is destructed rotated: the zero-trip guard branches into the
@@ -325,15 +350,20 @@ impl<'a> Destructor<'a> {
         )
     }
 
-    /// Replace a region block's own terminator by the edge it stands for: a yield
-    /// falls through to `fallthrough`, an exit goes to the target its scope names.
-    /// A block that leaves the function keeps its terminator.
-    fn exit(
+    /// Give a region block the edge its own terminator stood for: a yield falls
+    /// through to `fallthrough`, an exit goes to the target its scope names. A
+    /// block that leaves the function keeps its terminator.
+    ///
+    /// A block left with nothing but that edge is not a block at all, and is
+    /// reported as the [`Forward`] its predecessors take instead — the join, the
+    /// trampoline and the header a jump-only block would otherwise sit in front
+    /// of are exactly the blocks destruction must not mint.
+    fn seal(
         &self,
         rewriter: &mut Rewriter,
         block: &Arc<Block>,
         fallthrough: BlockId,
-    ) -> Result<(), PassError> {
+    ) -> Result<Option<Forward>, PassError> {
         let block = self.context.get_block(block.id());
         let terminator = self.terminator(&block)?;
         let (dest, args) = match region_exit_kind(&terminator) {
@@ -349,14 +379,39 @@ impl<'a> Destructor<'a> {
                 };
                 (dest, terminator.operands[1..].to_vec())
             }
-            None => return Ok(()),
+            None => return Ok(None),
         };
         let args = self.mapped(&args);
+        let terminator = OperationRef::new(terminator, Some(block.clone()), None);
+        if block.op_ids().len() == 1 {
+            rewriter.erase_op(&terminator)?;
+            return Ok(Some(Forward {
+                dest,
+                args,
+                parameters: block.arguments().iter().map(|value| value.id()).collect(),
+            }));
+        }
         let jump = (self.emitters.uncond)(self.context, dest, &args);
-        rewriter.replace_op(
-            &OperationRef::new(terminator, Some(block), None),
-            jump.as_ref(),
-        )
+        rewriter.replace_op(&terminator, jump.as_ref())?;
+        Ok(None)
+    }
+
+    /// Seal a region block and give the function the block, where one is left.
+    /// Returns where an edge carrying `incoming` into it really goes.
+    fn seal_into(
+        &self,
+        rewriter: &mut Rewriter,
+        block: &Arc<Block>,
+        fallthrough: BlockId,
+        incoming: &[ValueId],
+    ) -> Result<(BlockId, Vec<ValueId>), PassError> {
+        match self.seal(rewriter, block, fallthrough)? {
+            Some(forward) => Ok(forward.resolve(incoming)),
+            None => {
+                self.add_block(block.id());
+                Ok((block.id(), incoming.to_vec()))
+            }
+        }
     }
 
     /// Whether `body` holds an exit of `kind` leaving `scope`.
@@ -379,6 +434,13 @@ impl<'a> Destructor<'a> {
         fallthrough: BlockId,
         fallthrough_args: &[ValueId],
     ) -> Result<(), PassError> {
+        // Both arms of a gate can lead to the same place with the same values —
+        // arms that compute nothing sealing onto the gate's own join, say. There
+        // is nothing to decide, so no test and no trampoline are emitted.
+        if taken == fallthrough && taken_args == fallthrough_args {
+            self.jump(block, fallthrough, fallthrough_args);
+            return Ok(());
+        }
         let target = if taken_args.is_empty() {
             taken
         } else {
