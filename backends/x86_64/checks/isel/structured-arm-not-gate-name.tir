@@ -1,0 +1,37 @@
+// RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s
+
+// The inner gate's arms both yield zero, so its result is a name adopted from
+// the zero class — and the enclosing arm yields zero too, joining the same
+// class. That name is published by the gate's own join, which the arms feeding
+// it run before: an arm must be spelled the zero it can read, never the join
+// parameter the gate publishes, or the edge into the join carries the join's
+// own parameter.
+
+module {
+  func @f(%0: !i64, %1: !i64) -> !i64 {
+    %2 = addi %0, %1 : !i64
+    %z = constant {value = 0} : !i64
+    %c = cmpi %z, %2 {predicate = "sgt"} : !i1
+    %r = scf.if %c -> !i64 {
+      %zi = constant {value = 0} : !i64
+      %t = constant {value = 1} : !i1
+      %zo = constant {value = 0} : !i64
+      %g = scf.if %t -> !i64 {
+        scf.yield %zi
+      }
+       else {
+        scf.yield %z
+      }
+      scf.yield %zo
+    }
+     else {
+      scf.yield %2
+    }
+    %p = muli %r, %2 : !i64
+    return %p
+  }
+  module_end
+}
+
+// CHECK: ^bb3([[JOIN:%[0-9]+]]: !i64):
+// CHECK-NOT: asm.vbr [[JOIN]]

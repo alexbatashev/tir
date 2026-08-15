@@ -498,6 +498,10 @@ struct FunctionSelection {
     /// incoming edges, so it holds the argument only in blocks that block
     /// dominates. Entry inputs are absent (available everywhere).
     arg_block: HashMap<ValueId, BlockId>,
+    /// The earliest region-carrying operation of a value's own block under whose
+    /// regions the value is read. What a region reads has to have run before the
+    /// region does, so a spelling bound for the value's class must precede it.
+    region_use: HashMap<ValueId, OpId>,
     /// E-classes used as an operand by more than one consumer (function-wide). A
     /// memory effect in such a class cannot be internalized into a match.
     shared_classes: HashSet<Id>,
@@ -641,6 +645,20 @@ impl FunctionSelection {
                 && self.has_run_at(context, dom, def, def_block, block)
                 && self.placed_at(class, def_block)
         })
+    }
+
+    /// The point in `block` a spelling of `class` must reach: the earliest
+    /// operation whose regions read a value the class holds here. A definition
+    /// placed after that operation spells the class only for what follows the
+    /// region, never for the region itself — the arms of a gate cannot read the
+    /// name the gate publishes.
+    fn region_ask(&self, block: BlockId, class: Id) -> Option<OpId> {
+        self.base_members(class)
+            .filter_map(|member| self.class_values.get(&member))
+            .flatten()
+            .filter(|value| self.value_block.get(value) == Some(&Some(block)))
+            .filter_map(|value| self.region_use.get(value).copied())
+            .min_by_key(|op| self.op_position[op])
     }
 
     /// Whether a definition of `def` in `def_block` has run wherever `block` runs.
@@ -1478,6 +1496,36 @@ impl InstructionSelectPass {
                 }
             }
         }
+        // Where a value is read from inside a region hanging off its own block:
+        // the operation carrying that region. The read happens before that
+        // operation finishes, so what spells the value has to precede it.
+        let mut region_use: HashMap<ValueId, OpId> = HashMap::new();
+        for &block_id in &function_blocks(context, op, true) {
+            for op_id in context.get_block(block_id).op_ids() {
+                for operand in &context.get_op(op_id).operands {
+                    let Some(def_block) = value_to_def
+                        .get(operand)
+                        .map(|def| op_block[def])
+                        .or_else(|| arg_block.get(operand).copied())
+                    else {
+                        continue;
+                    };
+                    if def_block == block_id {
+                        continue;
+                    }
+                    let Some(carrier) = enclosing_carrier(context, block_id, def_block) else {
+                        continue;
+                    };
+                    let earlier = region_use
+                        .get(operand)
+                        .is_none_or(|held| op_position[&carrier] < op_position[held]);
+                    if earlier {
+                        region_use.insert(*operand, carrier);
+                    }
+                }
+            }
+        }
+
         let mut shared_classes = HashSet::new();
         for (&op, &root) in &roots_by_op {
             if context
@@ -1553,6 +1601,7 @@ impl InstructionSelectPass {
             value_to_def,
             value_block,
             arg_block,
+            region_use,
             shared_classes,
             demand,
             prepared,
@@ -1994,13 +2043,17 @@ impl InstructionSelectPass {
         }
         // A demanded class satisfied by availability (a dominating placement, or
         // a value the scope's facts merged in) schedules no tile, but its
-        // block-local values must still resolve to the available register.
+        // block-local values must still resolve to the available register. The
+        // register is asked for where the values are read — before the region
+        // reading them, where one does, so a name published by that very region
+        // cannot be the answer.
         for &class in &demanded {
             if destinations.contains_key(&class) {
                 continue;
             }
+            let ask = fs.region_ask(block_id, class).unwrap_or(consumer);
             if let Some(destination) = fs
-                .resolve_binding(dom, context, class, block_id, consumer, false)
+                .resolve_binding(dom, context, class, block_id, ask, false)
                 .value
             {
                 remap_class_values(class, destination);
@@ -2469,6 +2522,21 @@ fn function_blocks(context: &Context, op: &OperationRef, nested: bool) -> Vec<Bl
     let mut blocks = Vec::new();
     walk(context, &op.op().regions, nested, &mut blocks);
     blocks
+}
+
+/// The operation of `def_block` whose regions hold `from`, following the chain of
+/// regions out of it. `None` when `from` is not nested inside `def_block`.
+fn enclosing_carrier(context: &Context, from: BlockId, def_block: BlockId) -> Option<OpId> {
+    let mut current = from;
+    loop {
+        let region = context.parent_region(current)?;
+        let carrier = context.get_region(region).parent_op()?;
+        let parent = context.parent_block(carrier)?;
+        if parent == def_block {
+            return Some(carrier);
+        }
+        current = parent;
+    }
 }
 
 /// Op order then destruction-auxiliary order, first occurrence kept: the seeds

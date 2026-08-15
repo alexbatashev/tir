@@ -321,6 +321,7 @@ saturation (which may merge classes). All live on `FunctionSelection`.
 | `value_to_def: ValueId → OpId` | the op defining each value (function-wide) |
 | `value_block: ValueId → Option<BlockId>` | a value's def block, or `None` for a block argument / entry input |
 | `externally_bound: Set<ValueId>` | a value with at least one original use **outside its def block** — guaranteed materialized in a register, so a dominated block may bind it |
+| `region_use: ValueId → OpId` | the earliest region-carrying op of a value's own block under whose regions the value is read — what the region reads has to have run before the region does |
 | `shared_classes: Set<Id>` | a value used as an operand by **>1 consumer** (counted function-wide); a memory effect here can never be internalized into a larger match (a pure value still can — duplication) |
 | `must_materialize: Set<Id>` | an op-root class whose value some consumer can never internalize: **(a)** a use in a different block (exactly `externally_bound`), or **(b)** a same-block use no match reaches that is not a guarded terminator; it is never offered a consuming alternative |
 | `reifiable_gates: Set<Id>` | canonical classes seeded from GSA γ/μ nodes; these may preserve the existing control-flow edge assignments instead of selecting a value instruction |
@@ -1029,6 +1030,14 @@ both of which the rule applies on top of it:
   block a region holds records its arguments, so an arm's entry argument and a
   loop port are scoped like any other argument. Without this they resolve as
   entry inputs — available everywhere, including in a sibling arm.
+- **A value read inside a region is asked for before that region.** Remapping a
+  block's own values of an available class onto the register holding it resolves
+  at the earliest carrier under which one of them is read (`region_ask`, off
+  `region_use`), not at the block's terminator. A name the region itself
+  publishes — a gate's result, which destruction adopts as its join's parameter —
+  reaches only what follows the gate; asked for at the terminator it would spell
+  a constant an arm yields, and the edge out of that arm would carry the join's
+  own parameter.
 
 **Future work (out of scope):** rebinding a cross-block register read to a
 non-escaping dominating value would require **plan-to-plan requirement

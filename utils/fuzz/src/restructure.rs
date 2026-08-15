@@ -6,11 +6,9 @@
 //! says, and still terminate: a backward edge is only taken while the fuel each
 //! block spends is left.
 //!
-//! Setting `TIR_FUZZ_RESTRUCTURE_JIT` additionally compiles both forms — the
-//! original CFG and the restructured program — and runs them. That comparison
-//! is off by default because the backend still miscompiles some of these
-//! graphs — the baseline compile of the original CFG included — while the
-//! evaluation above, which is the semantic gate, holds on the same inputs.
+//! Both forms — the original CFG and the restructured program — are also
+//! compiled and run, so the generated graphs gate the backend as well as the
+//! pass: what a host-compiled function returns must be what the graph computes.
 
 use std::sync::Arc;
 
@@ -53,9 +51,7 @@ pub fn check(data: &[u8]) {
         );
     }
 
-    if std::env::var_os("TIR_FUZZ_RESTRUCTURE_JIT").is_some() {
-        compare_execution(&program.pruned(), &source, &render(&context, &module));
-    }
+    compare_execution(&program.pruned(), &source, &render(&context, &module));
 }
 
 fn restructure(context: &Context, module: &ModuleOp) -> Result<(), tir::PassError> {
