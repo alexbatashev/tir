@@ -462,7 +462,7 @@ impl IfOp {
 // An n-ary γ: the arm whose case value equals the integer predicate runs, and the last
 // arm — the default — runs when none does. The default arm is mandatory rather than
 // optional so the op is total: every predicate value selects exactly one arm, which is
-// what a value-producing switch needs to define its results and what `scf_to_cfg` needs
+// what a value-producing switch needs to define its results and what destruction needs
 // as the last destination of its comparison chain. A C `switch` without a `default:`
 // label lowers to an empty default arm.
 operation! {

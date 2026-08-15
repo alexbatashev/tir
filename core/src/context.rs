@@ -988,7 +988,7 @@ impl Context {
     ///
     /// A nested entity is reclaimed only while its parent link still points at the
     /// entity being erased: a rewrite that lifts a block out of a region it is
-    /// destroying (`scf_to_cfg` moves loop bodies into the function region) leaves
+    /// destroying (destruction moves loop bodies into the function region) leaves
     /// the block listed in the dying region, and that stale listing must not free
     /// live IR.
     fn collect_owned(&self, mut ops: Vec<OpId>, mut blocks: Vec<BlockId>) -> Owned {

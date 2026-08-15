@@ -178,8 +178,8 @@ edge to where it goes, with the arguments that edge carries substituted for its
 parameters. An arm that computes nothing therefore costs no block, and where every
 arm forwards to the same place with the same values there is nothing left to
 decide — the gate emits neither a test nor a trampoline, only the jump. This is
-the reason `passes/cfg_cleanup` has no counterpart on the structured path: the
-shapes it folds are shapes destruction never mints.
+the reason the structured path carries no CFG-cleanup pass: the shapes such a
+pass folds are shapes destruction never mints.
 
 ### What a node is
 

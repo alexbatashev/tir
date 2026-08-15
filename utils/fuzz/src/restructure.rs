@@ -7,11 +7,10 @@
 //! block spends is left.
 //!
 //! Setting `TIR_FUZZ_RESTRUCTURE_JIT` additionally compiles both forms — the
-//! original CFG and the restructured program lowered back to a CFG — and runs
-//! them. That comparison is off by default because the backend miscompiles some
-//! of the CFGs `scf-to-cfg` produces, which restructuring is not the cause of:
-//! the evaluation above is the semantic gate, and it holds for the same inputs
-//! the compiled comparison disagrees on.
+//! original CFG and the restructured program — and runs them. That comparison
+//! is off by default because the backend still miscompiles some of these
+//! graphs — the baseline compile of the original CFG included — while the
+//! evaluation above, which is the semantic gate, holds on the same inputs.
 
 use std::sync::Arc;
 
@@ -85,18 +84,6 @@ fn render(context: &Context, module: &ModuleOp) -> String {
     rendered
 }
 
-/// Lower the structured program back to a CFG, which is the form the backend
-/// takes until destruction moves into emission.
-fn lower_to_cfg(context: &Context, module: &ModuleOp) {
-    let mut passes = PassManager::new();
-    passes
-        .nest::<FuncOp>()
-        .add_pass(tir::passes::ScfToCfgPass::new());
-    passes
-        .run(context, context.get_op(module.id()))
-        .expect("scf-to-cfg");
-}
-
 /// Build the program twice — the pipeline consumes the module it compiles —
 /// and check that restructuring left what it computes alone. The program is
 /// pruned first: the backend does not take a CFG with unreachable blocks, which
@@ -120,8 +107,6 @@ fn compare_execution(program: &Program, before: &str, after: &str) {
     let context = jit.context().expect("host context");
     let module = program.build(&context);
     restructure(&context, &module).expect("restructure");
-    lower_to_cfg(&context, &module);
-    let lowered = render(&context, &module);
     let restructured = jit
         .compile_module(&context, &module)
         .unwrap_or_else(|error| panic!("restructured program does not compile: {error}\n{after}"));
@@ -140,7 +125,7 @@ fn compare_execution(program: &Program, before: &str, after: &str) {
         assert_eq!(
             restructured(left, right),
             expected,
-            "restructuring changed what f({left}, {right}) computes\n{before}\n{after}\n{lowered}"
+            "restructuring changed what f({left}, {right}) computes\n{before}\n{after}"
         );
     }
 }
