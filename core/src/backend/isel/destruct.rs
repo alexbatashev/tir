@@ -163,7 +163,6 @@ impl<'a> Destructor<'a> {
             self.add_block(arm.id());
         }
         self.add_block(continuation.id());
-        redirect_results(self.context, &op.results, &continuation);
         self.erase(rewriter, &block, op)?;
 
         let mut current = block;
@@ -218,7 +217,6 @@ impl<'a> Destructor<'a> {
         self.add_block(test.id());
         self.add_block(body.id());
         self.add_block(continuation.id());
-        redirect_results(self.context, &op.results, &continuation);
         if let Some(scope) = scope {
             self.targets.insert(
                 scope,
@@ -283,7 +281,6 @@ impl<'a> Destructor<'a> {
         let continuation = self.split_after(rewriter, &block, op);
         self.add_block(body.id());
         self.add_block(continuation.id());
-        redirect_results(self.context, &op.results, &continuation);
         if let Some(scope) = scope {
             // Only `break` can reach this: a `continue` was declined above,
             // because the advance sits in the body and has no block to jump to.
@@ -501,8 +498,10 @@ impl<'a> Destructor<'a> {
         Some((self.context.get_block(body.id()), scope))
     }
 
-    /// Split `block` after `op`, the continuation reading what the operation
-    /// produced as its parameters.
+    /// Split `block` after `op`, the continuation adopting what the operation
+    /// produced as its parameters. Adopted, not renamed: a register attribute is
+    /// not an operand, so a rename would leave the tiles already emitted for the
+    /// readers naming a value nothing defines any more.
     fn split_after(
         &self,
         rewriter: &mut Rewriter,
@@ -513,8 +512,7 @@ impl<'a> Destructor<'a> {
         let position = block.op_ids().iter().position(|id| *id == op.id).unwrap();
         let continuation = rewriter.split_block(block.id(), position + 1);
         for &result in &op.results {
-            let ty = self.context.get_value(result).ty();
-            rewriter.append_block_argument(continuation.id(), ty);
+            self.context.adopt_block_argument(continuation.id(), result);
         }
         self.context.get_block(continuation.id())
     }
@@ -530,14 +528,5 @@ impl<'a> Destructor<'a> {
             Some(self.context.get_block(block.id())),
             None,
         ))
-    }
-}
-
-/// Retarget what a structured operation produced onto the continuation's
-/// parameters, once the continuation is part of the region.
-fn redirect_results(context: &Context, results: &[ValueId], continuation: &Arc<Block>) {
-    let arguments = context.get_block(continuation.id()).arguments().to_vec();
-    for (&result, argument) in results.iter().zip(arguments) {
-        context.replace_value_uses(result, argument.id());
     }
 }

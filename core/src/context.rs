@@ -684,6 +684,29 @@ impl Context {
         value
     }
 
+    /// Make `value` an entry argument of `block`, in place of the definition it
+    /// had.
+    ///
+    /// Nothing is renamed, which is the point: the value keeps its identity, so
+    /// every reader goes on naming it — including the register attributes machine
+    /// IR carries, which are not operands and which no rename reaches. The
+    /// definition it leaves must be going away, so what an operation produced
+    /// becomes the parameter of the block continuing it.
+    pub fn adopt_block_argument(&self, block: BlockId, value: ValueId) {
+        let mut inner = self.0.write();
+        let Some(ty) = slab_get(&inner.values, value.index()).map(|value| value.ty()) else {
+            return;
+        };
+        let adopted = Value::new(value, ty, None);
+        let Some(entry) = slab_get_mut(&mut inner.blocks, block.index()) else {
+            return;
+        };
+        Arc::make_mut(entry).arguments_mut().push(adopted.clone());
+        slab_put(&mut inner.values, value.index(), Arc::new(adopted));
+        slab_put(&mut inner.value_block, value.index(), block);
+        inner.edit_block(block);
+    }
+
     /// Drop `block`'s `index`-th argument and return it. Nothing may read the
     /// argument: it stops being a definition with the edit.
     pub fn remove_block_argument(&self, block: BlockId, index: usize) -> Value {
@@ -1947,6 +1970,29 @@ mod tests {
         assert_eq!(block.arguments().len(), 1);
         assert_eq!(block.arguments()[0].id(), second.id());
         assert!(!context.is_block_argument(first.id()));
+    }
+
+    #[test]
+    fn adopting_a_value_makes_the_block_define_it() {
+        let context = Context::with_default_dialects();
+        let (module, func, body) = module_with_function(&context);
+        let i32 = builtin::IntegerType::new(&context, 32);
+        let input = context.create_value(i32, None);
+        let produced = builtin::ops::addi(&context, input.id(), input.id(), i32).build();
+        let result = context.get_op(produced.id()).results[0];
+        let reader = builtin::ops::addi(&context, result, result, i32).build();
+        body.append(reader.id());
+
+        assert_bumps_spine(&context, module, func, || {
+            context.adopt_block_argument(body.id(), result);
+        });
+
+        let block = context.get_block(body.id());
+        assert_eq!(block.arguments().len(), 1);
+        assert_eq!(block.arguments()[0].id(), result);
+        assert!(context.is_block_argument(result));
+        assert_eq!(context.get_value(result).defining_op(), None);
+        assert_eq!(context.get_op(reader.id()).operands, vec![result; 2]);
     }
 
     #[test]

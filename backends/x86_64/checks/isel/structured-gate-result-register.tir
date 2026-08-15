@@ -1,0 +1,25 @@
+// RUN: env TIR_ISEL_REGIONS=1 tir mc --march=x86_64 --stage=isel %s | filecheck %s
+
+// What a gate produced is read through a register, not only through `asm.vret`.
+// Destruction publishes the result as the join's parameter, so the register the
+// tile after the gate names is the one the arms leave their value in.
+
+module {
+  func @gate_result(%c: !i1, %a: !i64, %b: !i64) -> !i64 {
+    %r = scf.if %c args(%a, %b) -> !i64 (%p, %q) {
+      %x = addi %p, %q : !i64
+      scf.yield %x
+    } else (%u, %v) {
+      %y = subi %u, %v : !i64
+      scf.yield %y
+    }
+    %z = muli %a, %b : !i64
+    %w = addi %r, %z : !i64
+    return %w
+  }
+  module_end
+}
+
+// CHECK: ^{{bb[0-9]+}}(%[[R:[0-9]+]]: !i64):
+// CHECK-NEXT: x86_64.imul {dst = %virt[[PROD:[0-9]+]]:GPR
+// CHECK-NEXT: x86_64.add {dst = %{{virt[0-9]+}}:GPR, dst_tied = %virt[[R]]:GPR, src = %virt[[PROD]]:GPR}

@@ -154,6 +154,11 @@ through, and the trampolines are new blocks.
   reads the loop op's type — the bounds come off `CountedLoop`;
 - an exit becomes an edge to the target its scope names, from wherever it sits.
 
+What a structured operation produced is **adopted** as the continuation's parameter
+(`Context::adopt_block_argument`) rather than renamed onto a fresh one: by the time
+destruction runs the readers are tiles, and a tile names its inputs through register
+attributes, which are not operands and which no rename reaches.
+
 An assignment an edge carries rides the branch's own operand slot where the edge
 is unconditional, and a block only that edge reaches where it is not
 (`destruct::trampoline`). Nothing an arm computes is ever placed above the branch:
