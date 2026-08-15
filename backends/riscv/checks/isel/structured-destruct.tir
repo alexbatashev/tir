@@ -1,0 +1,33 @@
+// RUN: env TIR_ISEL_REGIONS=1 tir mc --march=riscv64 --stage=isel %s | filecheck %s
+
+// Destruction is target-independent: the arms become blocks, what each yields
+// rides the edge, and the gate's test goes through the target's own branch —
+// here the zero-register compare a RISC-V branch is.
+
+module {
+  func @pick(%c: !i1, %a: !i64, %b: !i64) -> !i64 {
+    %r = scf.if %c -> !i64 {
+      %x = addi %a, %b : !i64
+      scf.yield %x
+    } else {
+      %y = subi %a, %b : !i64
+      scf.yield %y
+    }
+    return %r
+  }
+  module_end
+}
+
+// CHECK-NOT: scf.
+// CHECK: riscv.andi {rd = %virt{{[0-9]+}}:GPR, rs1 = %virt0:GPR, imm = 1}
+// CHECK-NEXT: riscv.bne {rs1 = %virt{{[0-9]+}}:GPR, rs2 = x0, imm = ^[[THEN:bb[0-9]+]]}
+// CHECK-NEXT: asm.vbr ^[[ELSE:bb[0-9]+]]
+// CHECK: ^[[THEN]]:
+// CHECK-NEXT: riscv.add
+// CHECK-NEXT: asm.vbr %{{[0-9]+}} ^[[JOIN:bb[0-9]+]]
+// CHECK: ^[[ELSE]]:
+// CHECK-NEXT: riscv.sub
+// CHECK-NEXT: asm.vbr %{{[0-9]+}} ^[[JOIN]]
+// CHECK: ^[[JOIN]](%{{[0-9]+}}: !i64):
+// CHECK-NEXT: asm.vret
+// CHECK-NOT: scf.

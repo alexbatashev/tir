@@ -1,0 +1,42 @@
+// RUN: env TIR_ISEL_REGIONS=1 tir mc --march=x86_64 --stage=isel %s | filecheck %s
+
+// An exit leaving a loop's scope becomes an edge to the target that scope names,
+// from wherever it sits — here from inside a gate nested in the body. The `break`
+// carries its value straight to the loop's continuation; the arm that stays falls
+// through to the body's own back edge.
+
+module {
+  func @find(%n: !i64, %limit: !i64) -> !i64 {
+    %r = scf.while iter_args(%i = %n) -> !i64 {
+      %z = constant {value = 0} : !i64
+      %c = cmpi %i, %z {predicate = "sgt"} : !i1
+      scf.condition %c, %i
+    } do scope(%tok)(%ci) {
+      %one = constant {value = 1} : !i64
+      %ni = subi %ci, %one : !i64
+      %hit = cmpi %ni, %limit {predicate = "eq"} : !i1
+      scf.if %hit {
+        scf.break %tok, %ni
+      } else {
+        scf.yield
+      }
+      scf.yield %ni
+    }
+    return %r
+  }
+  module_end
+}
+
+// CHECK-NOT: scf.
+// CHECK: asm.vbr %0 ^[[TEST:bb[0-9]+]]
+// CHECK: ^[[TEST]](%{{[0-9]+}}: !i64):
+// CHECK: asm.vbr %{{[0-9]+}} ^[[EXIT:bb[0-9]+]]
+// The body: the nested gate's taken arm breaks, the other falls through.
+// CHECK: ^[[BODY:bb[0-9]+]](%{{[0-9]+}}: !i64):
+// CHECK: x86_64.je {imm = ^[[BREAK:bb[0-9]+]]}
+// CHECK: ^[[EXIT]](%{{[0-9]+}}: !i64):
+// CHECK-NEXT: asm.vret
+// CHECK: ^[[BREAK]]:
+// CHECK-NEXT: asm.vbr %{{[0-9]+}} ^[[EXIT]]
+// CHECK: asm.vbr %{{[0-9]+}} ^[[TEST]]
+// CHECK-NOT: scf.

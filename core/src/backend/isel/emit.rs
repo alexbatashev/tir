@@ -8,6 +8,7 @@ use tir_symbolic::egraph::Id;
 
 use super::{
     FunctionSelection, RuleMatch,
+    builder::AuxSlot,
     cover::{BoundaryDemand, PbqpIselMatch},
     node::class_is_pure,
 };
@@ -18,6 +19,16 @@ pub(crate) struct BlockPlan {
     pub(crate) erase_ops: Vec<OpId>,
     pub(crate) value_remaps: Vec<(ValueId, ValueId)>,
     pub(crate) terminators: Vec<TerminatorPlan>,
+    /// What this block leaves a destruction to read: the branch each test selected
+    /// into, and the register a counter's advance landed in.
+    pub(crate) aux: Vec<(OpId, AuxSlot, AuxEmit)>,
+}
+
+/// What a destruction emits for one of a region-carrying operation's values.
+#[derive(Clone, Debug)]
+pub(crate) enum AuxEmit {
+    Branch(GuardBranch),
+    Value(ValueId),
 }
 
 #[derive(Clone, Debug)]

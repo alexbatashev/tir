@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use crate::builtin::{IntegerType, TokenType};
 use crate::{
-    Conditional, Context, Error, GuardedLoop, LoopLike, Operation, Terminator, TokenScope, TypeId,
-    ValueId, dialect, operation,
+    Conditional, Context, CountedLoop, Error, GuardedLoop, LoopLike, Operation, Terminator,
+    TokenScope, TypeId, ValueId, dialect, operation,
 };
 
 use crate as tir;
@@ -55,7 +55,19 @@ operation! {
                 single_block: true,
             }
         },
-        interfaces: [LoopLike, GuardedLoop, TokenScope],
+        interfaces: [LoopLike, GuardedLoop, CountedLoop, TokenScope],
+    }
+}
+
+impl tir::CountedLoop for ForOp {
+    fn lower_bound(&self) -> ValueId {
+        self.operands()[0]
+    }
+    fn upper_bound(&self) -> ValueId {
+        self.operands()[1]
+    }
+    fn step(&self) -> ValueId {
+        self.operands()[2]
     }
 }
 

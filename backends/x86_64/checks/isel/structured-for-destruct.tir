@@ -1,0 +1,42 @@
+// RUN: env TIR_ISEL_REGIONS=1 tir mc --march=x86_64 --stage=isel %s | filecheck %s
+
+// A counted loop destructs rotated, off the `CountedLoop` interface alone: its
+// zero-trip guard `lb < ub` branches into the body, and the body advances the
+// counter and tests it again on its own back edge. The counter is not a value of
+// the IR — it is minted as the body's trailing argument, which is why the entry
+// edge carries the lower bound and the back edge the advanced counter.
+
+#data_layout = {types = {p = {abi = 64, size = 64}}}
+
+module {data_layout = #data_layout} {
+  func @count(%lb: !index, %ub: !index, %st: !index, %init: !i64) -> !i64 {
+    %c = constant {value = 5} : !i64
+    %r = scf.for %lb, %ub, %st iter_args(%acc = %init) -> !i64 {
+      %n = addi %acc, %c : !i64
+      scf.yield %n
+    }
+    return %r
+  }
+  module_end
+}
+
+// CHECK-NOT: scf.
+// The zero-trip guard, before the loop, fused into its branch.
+// CHECK: x86_64.cmp {dst = %virt0:GPR, src = %virt1:GPR}
+// CHECK-NEXT: x86_64.jl {imm = ^[[ENTER:bb[0-9]+]]}
+// CHECK-NEXT: asm.vbr %{{[0-9]+}} ^[[EXIT:bb[0-9]+]]
+// The body carries the accumulator and the counter.
+// CHECK: ^[[BODY:bb[0-9]+]](%{{[0-9]+}}: !i64, %[[IV:[0-9]+]]: !i64):
+// CHECK-NEXT: x86_64.add_imm8s {dst = %virt{{[0-9]+}}:GPR, dst_tied = %virt{{[0-9]+}}:GPR, imm = 5}
+// The counter advances by the step and is tested against the same bound.
+// CHECK-NEXT: x86_64.add {dst = %virt[[NEXT:[0-9]+]]:GPR, dst_tied = %virt[[IV]]:GPR, src = %virt2:GPR}
+// CHECK-NEXT: x86_64.cmp {dst = %virt[[NEXT]]:GPR, src = %virt1:GPR}
+// CHECK: x86_64.jne {imm = ^[[LATCH:bb[0-9]+]]}
+// CHECK-NEXT: asm.vbr %{{[0-9]+}} ^[[EXIT]]
+// CHECK: ^[[EXIT]](%{{[0-9]+}}: !i64):
+// CHECK-NEXT: asm.vret
+// CHECK: ^[[ENTER]]:
+// CHECK-NEXT: asm.vbr %{{[0-9]+}}, %{{[0-9]+}} ^[[BODY]]
+// CHECK: ^[[LATCH]]:
+// CHECK-NEXT: asm.vbr %{{[0-9]+}}, %{{[0-9]+}} ^[[BODY]]
+// CHECK-NOT: scf.

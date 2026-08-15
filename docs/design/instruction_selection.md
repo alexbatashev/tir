@@ -106,11 +106,59 @@ instruction as an immediate. The gates come off the ops' own interfaces:
 - a `LoopLike`'s carried port is `Theta(init, edge…)` over what each edge back
   into the port carries — the body's latch and every `break`/`continue` leaving
   its scope, in `analysis::scopes::port_edges` order — unioned with the port
-  argument. A loop whose quad does not line the ports up (`scf.for`, whose body
-  carries an induction variable no init names) anchors instead;
+  argument. A loop whose quad does not line the ports up anchors instead;
 - an `scf.while`'s forwarding (body argument ↔ condition operand ↔ result) is read
   through `GuardedLoop::entry_guard` plus the test terminator's trailing operands,
   not through a dialect accessor.
+
+#### What a destruction needs, and where it comes from
+
+A gate names its cases by attribute and a counted loop's counter is not a value of
+the IR at all, so neither is spelled by an operation the cover could reach. The
+seeder builds those terms itself (`build_region_control`) and records each against
+the block whose plan must materialize it:
+
+- a `Conditional`'s case `k` is `decision == k`; a one-bit decision selecting case
+  1 *is* that test and stands for itself, so the target's branch rules see the
+  condition they were written against;
+- a `GuardedLoop` tested by a region contributes that region's condition, held by
+  the test block;
+- a `CountedLoop` contributes its zero-trip guard `lb < ub`, held by the block the
+  loop sits in, and — in its body — the counter's advance `counter + step` and the
+  back-edge test `counter + step < ub`. The counter is minted as the body's
+  trailing block argument, because a machine instruction names its operands'
+  registers by value: the counter has to be the value the back edge writes before
+  any instruction reading it is emitted.
+
+Each of these is resolved exactly as a guarded terminator's condition is: fused
+into a conditional-branch rule where one matches, and otherwise demanded as a
+register for the target's branch-if-nonzero. A use of a test by the structured
+operation itself does not additionally force it into a register — the branch
+recomputes it.
+
+#### Destruction (`isel/destruct.rs`)
+
+Emission owns the destruction, and it runs after every block of the function has
+committed. A region's block *becomes* a block of the function — moved there whole,
+so every instruction emission put in it keeps its place — and what the region
+yields rides the edge leaving it. Only the joins, the chain a multi-case gate tests
+through, and the trampolines are new blocks.
+
+- a gate becomes the chain its cases describe, each case branching to its arm and
+  the last falling through to the arm no case names. Every arm exits to the
+  continuation, which reads what the gate produced as parameters;
+- a loop tested before each iteration becomes its test region followed by its body;
+  the test's own terminator is the branch;
+- a counted loop is destructed **rotated**: the zero-trip guard branches into the
+  body, which advances the counter and tests it again on its own back edge. Nothing
+  reads the loop op's type — the bounds come off `CountedLoop`;
+- an exit becomes an edge to the target its scope names, from wherever it sits.
+
+An assignment an edge carries rides the branch's own operand slot where the edge
+is unconditional, and a block only that edge reaches where it is not
+(`destruct::trampoline`). Nothing an arm computes is ever placed above the branch:
+a block's cover ranges over that block's own roots, so an effectful or trapping arm
+is never speculated.
 
 The flag is deleted when the backend contract flips to structured input; until
 then the CFG path above is the default and is unchanged.

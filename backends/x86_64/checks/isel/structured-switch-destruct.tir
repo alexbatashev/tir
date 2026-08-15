@@ -1,0 +1,47 @@
+// RUN: env TIR_ISEL_REGIONS=1 tir mc --march=x86_64 --stage=isel %s | filecheck %s
+
+// A gate with case values destructs into the chain its cases describe: each case
+// tests the decision and branches to its arm, the last falling through to the arm
+// no case names. The tests are terms the seeder built from the case attributes —
+// no operation of the IR spells them — so the cover selects them like any other.
+
+module {
+  func @select(%p: !i32) -> !i32 {
+    %r = scf.switch %p -> !i32 case 1 {
+      %a = constant {value = 10} : !i32
+      scf.yield %a
+    }
+    case 2 {
+      %b = constant {value = 20} : !i32
+      scf.yield %b
+    }
+    default {
+      %d = constant {value = 30} : !i32
+      scf.yield %d
+    }
+    return %r
+  }
+  module_end
+}
+
+// CHECK-NOT: scf.
+// Each case tests in its own block: nothing computes a case it never reaches.
+// CHECK: x86_64.cmp_imm8s32_norex {dst = %virt0:GPR32low, imm = 1}
+// CHECK-NEXT: x86_64.je_legacy {imm = ^[[ONE:bb[0-9]+]]}
+// CHECK-NEXT: asm.vbr ^[[CHAIN:bb[0-9]+]]
+// CHECK: ^[[ONE]]:
+// CHECK-NEXT: x86_64.mov_imm32_norex {dst = %virt{{[0-9]+}}:GPR32low, imm = 10}
+// CHECK-NEXT: asm.vbr %{{[0-9]+}} ^[[JOIN:bb[0-9]+]]
+// CHECK: ^[[TWO:bb[0-9]+]]:
+// CHECK-NEXT: x86_64.mov_imm32_norex {dst = %virt{{[0-9]+}}:GPR32low, imm = 20}
+// CHECK-NEXT: asm.vbr %{{[0-9]+}} ^[[JOIN]]
+// CHECK: ^[[DEFAULT:bb[0-9]+]]:
+// CHECK-NEXT: x86_64.mov_imm32_norex {dst = %virt{{[0-9]+}}:GPR32low, imm = 30}
+// CHECK-NEXT: asm.vbr %{{[0-9]+}} ^[[JOIN]]
+// CHECK: ^[[JOIN]](%{{[0-9]+}}: !i32):
+// CHECK-NEXT: asm.vret
+// CHECK: ^[[CHAIN]]:
+// CHECK-NEXT: x86_64.cmp_imm8s32_norex {dst = %virt0:GPR32low, imm = 2}
+// CHECK-NEXT: x86_64.je_legacy {imm = ^[[TWO]]}
+// CHECK-NEXT: asm.vbr ^[[DEFAULT]]
+// CHECK-NOT: scf.

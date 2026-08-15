@@ -33,6 +33,31 @@ pub fn region_exit(context: &Context, region: RegionId) -> Option<ValueId> {
     exit_scope(&context.get_op(*block.op_ids().last()?))
 }
 
+/// What a structured region's terminator does with control.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RegionExit {
+    /// Falls out of the region, carrying its operands to whatever follows it.
+    Yield,
+    /// Leaves the loop naming its scope.
+    Break,
+    /// Starts the next iteration of the loop naming its scope.
+    Continue,
+}
+
+/// How `op` leaves the region it terminates, or `None` where it does not leave one
+/// — a `return`, or a terminator emission has already lowered.
+pub fn region_exit_kind(op: &Arc<OpInstance>) -> Option<RegionExit> {
+    if op.is::<scf::BreakOp>() {
+        Some(RegionExit::Break)
+    } else if op.is::<scf::ContinueOp>() {
+        Some(RegionExit::Continue)
+    } else if op.is::<scf::YieldOp>() {
+        Some(RegionExit::Yield)
+    } else {
+        None
+    }
+}
+
 /// Every edge feeding a loop's carried ports from inside `body`: the exits leaving
 /// its scope, in the order the body tree holds them, and the body's own terminator
 /// when it is not one of them. What a transform growing a port has to carry a value

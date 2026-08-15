@@ -1,0 +1,33 @@
+// RUN: env TIR_ISEL_REGIONS=1 tir mc --march=x86_64 --stage=isel %s | filecheck %s
+
+// Negative: an arm that touches memory is not speculated. Destruction places what
+// an arm computes on that arm, never above the branch, so the load and the store
+// run only where the gate reached them — the assignment rides the edge, the gate
+// stays control flow.
+
+#data_layout = {types = {p = {abi = 64, size = 64}}}
+
+module {data_layout = #data_layout} {
+  func @maybe_store(%c: !i1, %p: !ptr.p<!i64>, %v: !i64) {
+    scf.if %c {
+      %l = ptr.load %p : !i64
+      %s = addi %l, %v : !i64
+      ptr.store %s, %p
+      scf.yield
+    } else {
+      scf.yield
+    }
+    return
+  }
+  module_end
+}
+
+// Nothing of the arm precedes the branch.
+// CHECK-NOT: x86_64.mov_load
+// CHECK-NOT: x86_64.mov_store
+// CHECK: x86_64.test_imm32 {dst = %virt0:GPR32, imm = 1}
+// CHECK-NEXT: x86_64.jne {imm = ^[[THEN:bb[0-9]+]]}
+// CHECK: ^[[THEN]]:
+// CHECK-NEXT: x86_64.mov_load
+// CHECK-NEXT: x86_64.add
+// CHECK-NEXT: x86_64.mov_store

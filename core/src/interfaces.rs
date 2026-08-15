@@ -294,6 +294,35 @@ pub trait GuardedLoop {
     }
 }
 
+/// A [`GuardedLoop`] whose iterations are counted: a counter starts at
+/// [`CountedLoop::lower_bound`], gains [`CountedLoop::step`] once per iteration, and the
+/// loop runs while the counter is below [`CountedLoop::upper_bound`] under the ordering
+/// of the [`EntryGuard::Less`] the loop also publishes. Together the two interfaces state
+/// the whole recurrence, so a consumer can destruct or reason about the counter — build
+/// an affine view, unroll, rotate — without knowing the concrete loop op.
+///
+/// The counter itself is deliberately not an accessor: it is not a value of the IR. A
+/// counted loop's body carries only what it was given (`scf.for`'s `iter_args`), and the
+/// counter comes into existence when a consumer builds the recurrence these three
+/// operands describe. Naming a `ValueId` for it would oblige every implementor to
+/// materialize one, which is the thing [`EntryGuard`] exists to avoid.
+pub trait CountedLoop {
+    /// The counter's value on the first iteration.
+    fn lower_bound(&self) -> ValueId;
+    /// The bound the counter is compared against before each iteration.
+    fn upper_bound(&self) -> ValueId;
+    /// What the counter gains each iteration.
+    fn step(&self) -> ValueId;
+
+    fn verify_interface(
+        &self,
+        _this: &dyn Operation,
+        _context: &Context,
+    ) -> Result<(), crate::Error> {
+        Ok(())
+    }
+}
+
 /// A [`BranchTerminator`] whose successor edges run under a known boolean fact — e.g.
 /// `cond_br %c` enters its true successor when `%c` is 1 and its false successor when
 /// `%c` is 0. The CFG analog of [`Conditional`], letting a flow-sensitive analysis

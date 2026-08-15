@@ -11,6 +11,7 @@
 
 mod builder;
 mod cover;
+mod destruct;
 mod emit;
 mod node;
 mod pattern;
@@ -37,12 +38,14 @@ use tir_symbolic::egraph::{ENode, Id, PatternNode, Var};
 pub use tir::sem::{IselRewrite, SaturationLimits, SemEGraph, SemNode, SemPayload};
 pub use tir_symbolic::egraph::EMatch;
 
-use builder::SemDagBuilder;
+use builder::{AuxSlot, SemDagBuilder};
 use cover::{
     BoundaryDemand, CaptureBindings, FullMatchBindings, PatternNodeBinding, PbqpIselAlternative,
     PbqpIselMatch, build_eclass_cover, completeness_error, prune_dominated_matches,
 };
-use emit::{BlockPlan, GuardBranch, ScheduledEmit, TerminatorPlan, resolve_match, schedule_tiles};
+use emit::{
+    AuxEmit, BlockPlan, GuardBranch, ScheduledEmit, TerminatorPlan, resolve_match, schedule_tiles,
+};
 use node::{is_low_extract_view, low_extract_source};
 use pattern::{CompiledIselPattern, compile_isel_pattern};
 use tir::sem::axioms::{self, verify_axioms};
@@ -508,6 +511,8 @@ struct FunctionSelection {
     /// class with its kind and operand classes. Keyed by the condition value; the
     /// per-block truth (`holds`) is applied when the scope asserts it.
     prepared: HashMap<ValueId, ConditionExpr>,
+    /// What each block must materialize for a destruction to branch on it.
+    region_aux: HashMap<BlockId, Vec<(OpId, AuxSlot, Id)>>,
 }
 
 /// A boundary class resolved to concrete operands for a consumer: the proven
@@ -546,6 +551,16 @@ impl FunctionSelection {
     fn is_shared(&self, class: Id) -> bool {
         self.base_members(class)
             .any(|m| self.shared_classes.contains(&m))
+    }
+
+    /// The classes `block` must materialize for a destruction to read them, in the
+    /// order the seeder recorded.
+    fn aux_classes(&self, block: BlockId) -> impl Iterator<Item = Id> + '_ {
+        self.region_aux
+            .get(&block)
+            .into_iter()
+            .flatten()
+            .map(|&(.., class)| self.egraph.find(class))
     }
 
     fn demanded_at(&self, class: Id, block: BlockId, overlay: &HashSet<Id>) -> bool {
@@ -804,6 +819,9 @@ pub struct InstructionSelectPass {
     plans: HashMap<BlockId, Result<BlockPlan, String>>,
     emitted_blocks: HashSet<BlockId>,
     emitted_values: HashMap<ValueId, ValueId>,
+    /// Where each region-carrying operation's destruction reads its tests and its
+    /// counter, filled as the blocks holding them commit.
+    region_values: HashMap<(OpId, AuxSlot), AuxEmit>,
     /// Function roots already solved, so a re-visit does not rebuild the graph.
     solved: HashSet<OpId>,
 }
@@ -1084,6 +1102,7 @@ impl InstructionSelectPass {
             plans: HashMap::new(),
             emitted_blocks: HashSet::new(),
             emitted_values: HashMap::new(),
+            region_values: HashMap::new(),
             solved: HashSet::new(),
         }
     }
@@ -1152,10 +1171,15 @@ impl InstructionSelectPass {
     /// when the pass first visits the function op — a dominating-edge fact reads a
     /// guard condition's *defining op*, which a dominator's commit would replace
     /// by the time the dominated block solves.
-    fn solve_function(&mut self, context: &Context, op: &OperationRef, analyses: &AnalysisManager) {
+    fn solve_function(
+        &mut self,
+        context: &Context,
+        op: &OperationRef,
+        analyses: &AnalysisManager,
+    ) -> bool {
         let root = op.op().id;
         if !self.solved.insert(root) {
-            return;
+            return false;
         }
         let dom = analyses.get::<DominatorTree>(context, root);
         let facts = analyses.get::<DominatingEdgeFacts>(context, root);
@@ -1203,6 +1227,7 @@ impl InstructionSelectPass {
                 }
             }
         }
+        regions
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1328,6 +1353,7 @@ impl InstructionSelectPass {
         let mut egraph = SemEGraph::new();
         let mut control: HashMap<BlockId, Vec<ControlReification>> = HashMap::new();
         let mut prepared: HashMap<ValueId, ConditionExpr> = HashMap::new();
+        let mut region_control = builder::RegionControl::default();
         let (value_to_class, mut roots_by_op, mut constant_candidates) = {
             let mut builder =
                 SemDagBuilder::new(context, &value_to_def, &mut egraph, pointer_width);
@@ -1336,6 +1362,20 @@ impl InstructionSelectPass {
                 &self.float_constant_materializer_widths,
                 regions,
             );
+
+            // The structured operations' own control: the tests a destruction
+            // branches on and the counter recurrences it advances, seeded before
+            // saturation so the cover selects them like any other class.
+            if regions {
+                for &block_id in &function_blocks(context, op, true) {
+                    for op_id in context.get_block(block_id).op_ids() {
+                        let inner = context.get_op(op_id);
+                        if !inner.regions.is_empty() {
+                            builder.build_region_control(&inner, block_id, &mut region_control);
+                        }
+                    }
+                }
+            }
 
             // With branch emitters installed, terminators select here too: a
             // guarded two-way terminator's condition is lowered so branch rules can
@@ -1531,6 +1571,11 @@ impl InstructionSelectPass {
                 if roots_by_op.contains_key(user) || guard_condition_ops.contains(user) {
                     return false;
                 }
+                // A destruction's branch recomputes the test it reads, exactly as
+                // a guarded terminator does.
+                if region_control.test_conditions.contains(&(*user, result)) {
+                    return false;
+                }
                 // A guard's condition is recomputed by branch selection, but an
                 // edge argument the same terminator forwards needs the register.
                 match guard_by_op.get(user) {
@@ -1587,6 +1632,11 @@ impl InstructionSelectPass {
                 guard.class = egraph.find(guard.class);
             }
         }
+        for aux in region_control.aux.values_mut() {
+            for (.., class) in aux.iter_mut() {
+                *class = egraph.find(*class);
+            }
+        }
         FunctionSelection {
             egraph,
             pointer_width,
@@ -1601,6 +1651,7 @@ impl InstructionSelectPass {
             demand,
             control,
             prepared,
+            region_aux: region_control.aux,
         }
     }
 
@@ -1634,26 +1685,35 @@ impl InstructionSelectPass {
         self.solve_block_inner(context, block, fs, dom, &match_roots, cached)
     }
 
-    /// Create a trampoline block forwarding `args` to `dest` through the target's
-    /// unconditional-branch emitter, appended to the branching block's region.
-    /// Returns the trampoline's id, which a conditional branch targets in place
-    /// of `dest`. The solver has already run over the (unchanged) block set, so
-    /// the new block is never visited for selection.
-    fn emit_edge_trampoline(
-        &self,
+    /// Commit every block of the function and then destruct what carries regions:
+    /// the whole function is emitted from its own visit, because a region's blocks
+    /// become blocks of the function and neither the walk nor a per-block commit
+    /// can own that.
+    fn commit_function(
+        &mut self,
         context: &Context,
-        source: BlockId,
-        dest: BlockId,
-        args: &[ValueId],
-        emitters: &BranchEmitters,
-    ) -> BlockId {
-        let trampoline = context.create_block(vec![]);
-        let vbr = (emitters.uncond)(context, dest, args);
-        trampoline.append(vbr.id());
-        if let Some(region) = context.parent_region(source) {
-            context.get_region(region).add_block(trampoline.id());
+        op: &OperationRef,
+        rewriter: &mut Rewriter,
+    ) -> Result<(), PassError> {
+        for block_id in function_blocks(context, op, true) {
+            let block = context.get_block(block_id);
+            self.commit_block_solution(context, &block, rewriter)?;
         }
-        trampoline.id()
+        let Some(emitters) = self.branch_emitters.as_ref() else {
+            return Ok(());
+        };
+        let Some(&region) = op.op().regions.first() else {
+            return Ok(());
+        };
+        destruct::Destructor::new(
+            context,
+            emitters,
+            &self.emitted_values,
+            &self.region_values,
+            &self.rules,
+            region,
+        )
+        .run(rewriter)
     }
 
     fn commit_block_solution(
@@ -1729,6 +1789,25 @@ impl InstructionSelectPass {
             }
         }
 
+        for (op, slot, emit) in &mut plan.aux {
+            match emit {
+                AuxEmit::Branch(GuardBranch::Fused { m, .. }) => {
+                    m.remap_values(&self.emitted_values)
+                }
+                AuxEmit::Branch(GuardBranch::Nonzero { condition }) => {
+                    if let Some(replacement) = self.emitted_values.get(condition) {
+                        *condition = *replacement;
+                    }
+                }
+                AuxEmit::Value(value) => {
+                    if let Some(replacement) = self.emitted_values.get(value) {
+                        *value = *replacement;
+                    }
+                }
+            }
+            self.region_values.insert((*op, *slot), emit.clone());
+        }
+
         for terminator in &mut plan.terminators {
             match terminator {
                 TerminatorPlan::Guard {
@@ -1779,9 +1858,9 @@ impl InstructionSelectPass {
                         let true_target = if true_args.is_empty() {
                             *true_dest
                         } else {
-                            self.emit_edge_trampoline(
+                            destruct::trampoline(
                                 context,
-                                block.id(),
+                                context.parent_region(block.id()),
                                 *true_dest,
                                 true_args,
                                 emitters,
@@ -1880,6 +1959,7 @@ impl InstructionSelectPass {
             .iter()
             .filter_map(ControlReification::guard)
             .map(|guard| fs.egraph.find(guard.class))
+            .chain(fs.aux_classes(block_id))
             .collect();
 
         let matches = self.collect_block_matches(
@@ -1903,7 +1983,36 @@ impl InstructionSelectPass {
         // Resolve each guarded terminator: fuse its condition into a branch-rule
         // instruction when one matches, else fall back to the target's
         // branch-if-nonzero (which needs the condition materialized).
+        // A destruction branches on its tests exactly as a terminator does: fuse
+        // each into a branch rule where one matches, and otherwise demand its
+        // register for the target's branch-if-nonzero. A counter's advance is a
+        // value, not a branch, and is always demanded.
         let mut mm_overlay: HashSet<Id> = HashSet::new();
+        let mut aux_branches: Vec<(OpId, AuxSlot, Option<GuardBranch>)> = Vec::new();
+        for &(op, slot, class) in fs.region_aux.get(&block_id).into_iter().flatten() {
+            let class = fs.egraph.find(class);
+            let fused = (slot != AuxSlot::Advance)
+                .then(|| {
+                    let candidates = guard_branch_hits
+                        .get(&class)
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]);
+                    self.best_guard_branch(context, fs, dom, (block_id, op, block_id), candidates)
+                })
+                .flatten();
+            match fused {
+                Some((rule_index, m, boundary_classes)) => {
+                    for boundary in boundary_classes {
+                        mm_overlay.insert(fs.chase_low_extract(boundary));
+                    }
+                    aux_branches.push((op, slot, Some(GuardBranch::Fused { rule_index, m })));
+                }
+                None => {
+                    mm_overlay.insert(fs.chase_low_extract(class));
+                    aux_branches.push((op, slot, None));
+                }
+            }
+        }
         let mut terminators = Vec::new();
         for edge in control {
             let guard = match edge {
@@ -1937,8 +2046,8 @@ impl InstructionSelectPass {
                 .get(&class)
                 .map(Vec::as_slice)
                 .unwrap_or(&[]);
-            let branch = match self.best_guard_branch(context, fs, dom, block_id, guard, candidates)
-            {
+            let at = (block_id, guard.op, guard.true_dest);
+            let branch = match self.best_guard_branch(context, fs, dom, at, candidates) {
                 Some((rule_index, m, boundary_classes)) => {
                     // A low-extract boundary re-views its source's register, so
                     // the demand lands on the chased source class.
@@ -2067,6 +2176,18 @@ impl InstructionSelectPass {
                 break;
             }
         }
+        // A destruction's values are read by a branch that replaces something: the
+        // structured operation itself, where this block holds it (its zero-trip
+        // guard runs before it), or else this block's own terminator.
+        for &(op, _, class) in fs.region_aux.get(&block_id).into_iter().flatten() {
+            let position = op_ids
+                .iter()
+                .position(|candidate| *candidate == op)
+                .unwrap_or(op_ids.len() - 1);
+            positions
+                .entry(fs.chase_low_extract(fs.egraph.find(class)))
+                .or_insert(position);
+        }
         let tiles = schedule_tiles(&fs.egraph, &matches, &root_match, &positions)
             .ok_or_else(|| format!("cyclic instruction schedule for {block_id:?}"))?;
 
@@ -2193,11 +2314,40 @@ impl InstructionSelectPass {
             })
             .collect();
 
+        let aux_class: HashMap<(OpId, AuxSlot), Id> = fs
+            .region_aux
+            .get(&block_id)
+            .into_iter()
+            .flatten()
+            .map(|&(op, slot, class)| ((op, slot), fs.chase_low_extract(fs.egraph.find(class))))
+            .collect();
+        let aux = aux_branches
+            .into_iter()
+            .filter_map(|(op, slot, fused)| {
+                let branch = match fused {
+                    Some(fused) => AuxEmit::Branch(fused),
+                    None => {
+                        let class = *aux_class.get(&(op, slot))?;
+                        let value = destinations.get(&class).copied().or_else(|| {
+                            fs.resolve_binding(dom, context, class, block_id, consumer, true)
+                                .value
+                        })?;
+                        match slot {
+                            AuxSlot::Advance => AuxEmit::Value(value),
+                            _ => AuxEmit::Branch(GuardBranch::Nonzero { condition: value }),
+                        }
+                    }
+                };
+                Some((op, slot, branch))
+            })
+            .collect();
+
         Ok(BlockPlan {
             schedule,
             erase_ops,
             value_remaps,
             terminators,
+            aux,
         })
     }
 
@@ -2235,16 +2385,21 @@ impl InstructionSelectPass {
     /// The best conditional-branch rule among a guard's condition-class hits: the
     /// rule, the operand bindings (taken target bound as a block), and the
     /// boundary classes the branch reads as registers. `None` when none matches or
-    /// an operand is unresolvable at `block`.
+    /// an operand is unresolvable at the branching block.
+    ///
+    /// `at` is where the branch goes: the block holding it, the operation it
+    /// replaces (whose position the operands resolve against), and the block the
+    /// taken edge reaches. A destruction that has not minted its blocks yet binds
+    /// any block and rebinds the target when it emits.
     fn best_guard_branch(
         &self,
         context: &Context,
         fs: &FunctionSelection,
         dom: &DominatorTree,
-        block: BlockId,
-        guard: &BlockGuard,
+        at: (BlockId, OpId, BlockId),
         candidates: &[(usize, EMatch<u32>)],
     ) -> Option<(usize, RuleMatch, Vec<Id>)> {
+        let (block, consumer, taken) = at;
         let mut best: Option<(u64, usize, usize, RuleMatch, Vec<Id>)> = None;
         let mut register_symbols_by_pattern: HashMap<usize, HashSet<u32>> = HashMap::new();
         for (pattern_index, m) in candidates {
@@ -2283,9 +2438,9 @@ impl InstructionSelectPass {
                 // tile only when none exists — then the overlay demand forces
                 // that tile (the class cannot be available, so NotDemanded is
                 // never offered) and the bound value is defined.
-                let mut binding = fs.resolve_binding(dom, context, *class, block, guard.op, false);
+                let mut binding = fs.resolve_binding(dom, context, *class, block, consumer, false);
                 if binding.value.is_none() {
-                    binding = fs.resolve_binding(dom, context, *class, block, guard.op, true);
+                    binding = fs.resolve_binding(dom, context, *class, block, consumer, true);
                 }
                 match binding.int {
                     Some(v) => {
@@ -2328,7 +2483,7 @@ impl InstructionSelectPass {
             };
             if better {
                 let rule_match = RuleMatch::new(int_bindings, value_bindings)
-                    .with_block_binding(target_symbol, guard.true_dest);
+                    .with_block_binding(target_symbol, taken);
                 best = Some((
                     cost,
                     specificity,
@@ -2604,7 +2759,8 @@ fn block_root_seeds(block: &Block, fs: &FunctionSelection) -> Vec<Id> {
                 .flatten()
                 .filter_map(ControlReification::guard)
                 .map(|guard| guard.class),
-        );
+        )
+        .chain(fs.aux_classes(block.id()));
     for root in candidates {
         if seen.insert(root) {
             roots.push(root);
@@ -2782,7 +2938,9 @@ impl Pass for InstructionSelectPass {
             if let Some(lowering) = &mut self.call_lowering {
                 lowering.prepare_function(context, op, rewriter)?;
             }
-            self.solve_function(context, op, analyses);
+            if self.solve_function(context, op, analyses) {
+                self.commit_function(context, op, rewriter)?;
+            }
         }
 
         for lowering in &self.op_lowerings {

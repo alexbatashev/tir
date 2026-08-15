@@ -1,0 +1,35 @@
+// RUN: env TIR_ISEL_REGIONS=1 tir mc --march=x86_64 --stage=isel %s | filecheck %s
+
+// Emission destructs the gate: the arms become blocks of the function, the test
+// the gate branches on was selected with the block holding it, and what each arm
+// yields rides the edge into the continuation, which reads it as a parameter.
+// Nothing structured survives. The default path selects a graph per region and
+// never destructs, which is why this file has no unflagged RUN line.
+
+module {
+  func @pick(%c: !i1, %a: !i64, %b: !i64) -> !i64 {
+    %r = scf.if %c -> !i64 {
+      %x = addi %a, %b : !i64
+      scf.yield %x
+    } else {
+      %y = subi %a, %b : !i64
+      scf.yield %y
+    }
+    return %r
+  }
+  module_end
+}
+
+// CHECK-NOT: scf.
+// CHECK: x86_64.test_imm32 {dst = %virt0:GPR32, imm = 1}
+// CHECK-NEXT: x86_64.jne {imm = ^[[THEN:bb[0-9]+]]}
+// CHECK-NEXT: asm.vbr ^[[ELSE:bb[0-9]+]]
+// CHECK: ^[[THEN]]:
+// CHECK-NEXT: x86_64.add
+// CHECK-NEXT: asm.vbr %{{[0-9]+}} ^[[JOIN:bb[0-9]+]]
+// CHECK: ^[[ELSE]]:
+// CHECK-NEXT: x86_64.sub
+// CHECK-NEXT: asm.vbr %{{[0-9]+}} ^[[JOIN]]
+// CHECK: ^[[JOIN]](%{{[0-9]+}}: !i64):
+// CHECK-NEXT: asm.vret
+// CHECK-NOT: scf.

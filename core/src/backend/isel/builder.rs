@@ -4,8 +4,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use tir::{
-    BlockId, Conditional, Context, EntryGuard, GuardedLoop, LoopLike, MemoryRead, MemoryWrite,
-    OpId, OpInstance, RegionId, TokenScope, TypeId, ValueId,
+    BlockId, Conditional, Context, CountedLoop, EntryGuard, GuardedLoop, LoopLike, MemoryRead,
+    MemoryWrite, OpId, OpInstance, RegionId, TokenScope, TypeId, ValueId,
     attributes::AttributeValue,
     builtin::{FloatType, IntegerType},
     graph::{Dag, MetaDag, NodeId},
@@ -35,6 +35,38 @@ pub(crate) fn regions_enabled() -> bool {
 pub(crate) struct Seeds {
     pub(crate) roots_by_op: HashMap<OpId, Id>,
     pub(crate) constant_candidates: Vec<(OpId, Id)>,
+}
+
+/// Which value of a region-carrying operation's destruction a class stands for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum AuxSlot {
+    /// The test selecting case `k` of a [`Conditional`], or a loop's
+    /// per-iteration condition (`k == 0`).
+    Test(usize),
+    /// A counted loop's zero-trip guard, held by the block the loop sits in.
+    Entry,
+    /// A counted loop's counter after one step, held by its body.
+    Advance,
+    /// A counted loop's back-edge test, held by its body.
+    Latch,
+}
+
+/// The values a destruction branches on and advances, which no operation spells:
+/// a gate names its cases by attribute, and a counted loop's counter exists only
+/// once the loop is destructed. The seeder builds the terms so the cover selects
+/// them like any other, keyed by the block whose plan must materialize them.
+#[derive(Default)]
+pub(crate) struct RegionControl {
+    pub(crate) aux: HashMap<BlockId, Vec<(OpId, AuxSlot, Id)>>,
+    /// Each (consumer, condition) pair a destruction's branch recomputes, so the
+    /// consumer's use of it does not also force the condition into a register.
+    pub(crate) test_conditions: HashSet<(OpId, ValueId)>,
+}
+
+impl RegionControl {
+    fn record(&mut self, block: BlockId, op: OpId, slot: AuxSlot, class: Id) {
+        self.aux.entry(block).or_default().push((op, slot, class));
+    }
 }
 
 /// Builds a block's semantic expressions straight into the e-graph: every lowered
@@ -368,6 +400,140 @@ impl<'a> SemDagBuilder<'a> {
         let operands = &self.context.get_op(*block.op_ids().last()?).operands;
         let first = operands.len().checked_sub(ports)?;
         Some((region, arguments, operands[first..].to_vec()))
+    }
+
+    /// Build what destructing `op` will branch on and advance, recording each class
+    /// against the block whose cover must materialize it. Everything here comes off
+    /// the operation's interfaces: a [`Conditional`]'s case tests, a [`GuardedLoop`]'s
+    /// per-iteration condition, and a [`CountedLoop`]'s counter recurrence.
+    pub(crate) fn build_region_control(
+        &mut self,
+        op: &Arc<OpInstance>,
+        block: BlockId,
+        control: &mut RegionControl,
+    ) {
+        if let Some(conditional) = op.clone().as_interface::<dyn Conditional>() {
+            control
+                .test_conditions
+                .insert((op.id, conditional.decision()));
+            self.build_case_tests(op, block, conditional.as_ref(), control);
+            return;
+        }
+        if let Some(guard) = op.clone().as_interface::<dyn GuardedLoop>() {
+            match guard.entry_guard() {
+                EntryGuard::Region {
+                    region, condition, ..
+                } => {
+                    // The condition is spelled in the test region, so that is the
+                    // block whose branch reads it.
+                    let Some(test) = self
+                        .context
+                        .get_region(region)
+                        .iter(self.context.clone())
+                        .next()
+                    else {
+                        return;
+                    };
+                    let class = self.build_from_value(condition);
+                    if let Some(&terminator) = test.op_ids().last() {
+                        control.test_conditions.insert((terminator, condition));
+                    }
+                    control.record(test.id(), op.id, AuxSlot::Test(0), class);
+                }
+                EntryGuard::Less { lhs, rhs, .. } => {
+                    self.build_counter(op, block, lhs, rhs, control)
+                }
+                EntryGuard::AlwaysTaken => {}
+            }
+        }
+    }
+
+    /// A gate's arms are entered on `decision == case`. A one-bit decision selecting
+    /// case 1 *is* that test, so it stands for itself and the target's branch rules
+    /// see the condition they were written against.
+    fn build_case_tests(
+        &mut self,
+        op: &Arc<OpInstance>,
+        block: BlockId,
+        conditional: &dyn Conditional,
+        control: &mut RegionControl,
+    ) {
+        let decision = conditional.decision();
+        let ty = self.context.get_value(decision).ty();
+        let width = type_width(self.context, ty);
+        let class = self.build_from_value(decision);
+        let boolean = IntegerType::new(self.context, 1);
+        for (index, (_, case)) in conditional.case_values().into_iter().enumerate() {
+            let Some(case) = case else { continue };
+            let test = if width == Some(1) && case == 1 {
+                class
+            } else {
+                let Some(width) = width else { continue };
+                let expected = self.add_int(APInt::new(width, case as u64), Some(ty));
+                self.add_op(SymKind::Eq, vec![class, expected], Some(boolean))
+            };
+            control.record(block, op.id, AuxSlot::Test(index), test);
+        }
+    }
+
+    /// A counted loop's counter is not a value of the IR, so its recurrence is minted
+    /// here: a leaf standing for the counter, the step applied to it, and the two
+    /// comparisons a rotated destruction tests — `lb < ub` before the loop, and the
+    /// advanced counter against the same bound on the back edge.
+    fn build_counter(
+        &mut self,
+        op: &Arc<OpInstance>,
+        block: BlockId,
+        lower: ValueId,
+        upper: ValueId,
+        control: &mut RegionControl,
+    ) {
+        let Some(counted) = op.clone().as_interface::<dyn CountedLoop>() else {
+            return;
+        };
+        let Some(body) = op.regions.first().and_then(|&region| {
+            self.context
+                .get_region(region)
+                .iter(self.context.clone())
+                .next()
+        }) else {
+            return;
+        };
+        // The counter leaves the abstract index type behind: what it counts through
+        // is ordinary integer arithmetic, at the width the layout gives an index.
+        let Some(ty) = crate::DataLayout::for_op(self.context, op.id)
+            .and_then(|layout| layout.index_width())
+            .map(|width| IntegerType::new(self.context, width))
+        else {
+            return;
+        };
+        let boolean = IntegerType::new(self.context, 1);
+        let lower_class = self.reinterpret(lower, ty);
+        let upper_class = self.reinterpret(upper, ty);
+        let entry = self.add_op(SymKind::Lt, vec![lower_class, upper_class], Some(boolean));
+        control.record(block, op.id, AuxSlot::Entry, entry);
+
+        // The counter is minted as the body's trailing argument, not as a loose
+        // value: a machine instruction names its operands' registers by value, so
+        // the counter has to be the value the back edge writes before any
+        // instruction reading it is emitted.
+        let counter = self.context.append_block_argument(body.id(), ty).id();
+        let counter_class = self.add_input_value(counter, Some(ty));
+        self.value_to_class.insert(counter, counter_class);
+        let step = self.reinterpret(counted.step(), ty);
+        let advance = self.add_op(SymKind::Add, vec![counter_class, step], Some(ty));
+        let latch = self.add_op(SymKind::Lt, vec![advance, upper_class], Some(boolean));
+        control.record(body.id(), op.id, AuxSlot::Advance, advance);
+        control.record(body.id(), op.id, AuxSlot::Latch, latch);
+    }
+
+    /// Read `value` at `ty`: the same register seen at a concrete width, joined to
+    /// the class the value's own type gives it. What the abstract index type a
+    /// counted loop's bounds carry means once the counting is ordinary arithmetic.
+    fn reinterpret(&mut self, value: ValueId, ty: TypeId) -> Id {
+        let own = self.build_from_value(value);
+        let viewed = self.add_input_value(value, Some(ty));
+        self.egraph.union(own, viewed)
     }
 
     /// The chain the next memory access reads. An unknown chain is an opaque
