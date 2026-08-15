@@ -1,4 +1,4 @@
-// RUN: env TIR_ISEL_REGIONS=1 tir mc --march=x86_64 --stage=isel %s | filecheck %s
+// RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s
 
 // A loop tested before each iteration destructs into its test region followed by
 // its body: the test's own terminator becomes the branch, carrying what it

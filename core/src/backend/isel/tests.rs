@@ -1442,7 +1442,7 @@ fn seed_regions(context: &Context, src: &str) -> SeededFunction {
     }
     let mut egraph = SemEGraph::new();
     let mut builder = SemDagBuilder::new(context, &value_to_def, &mut egraph, None);
-    builder.build_blocks(&blocks, &HashSet::new(), true);
+    builder.build_blocks(&blocks, &HashSet::new());
     let value_to_class = builder.value_to_class.clone();
     drop(builder);
     (egraph, value_to_class, func)

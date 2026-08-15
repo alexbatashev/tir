@@ -20,7 +20,7 @@ use fcc::sema::{TypedAst, analyze};
 use tir::backend::TargetMachine;
 use tir::backend::pipeline::{StopAfter, build_pipeline};
 use tir::builtin::FuncOp;
-use tir::passes::{EraseStatePass, InstCombinePass, ScfToCfgPass, ThreadStatePass};
+use tir::passes::{EraseStatePass, InstCombinePass, ThreadStatePass};
 use tir::{Context, Operation, PassManager};
 
 const GCC_20011219_1: &str = r#"
@@ -146,7 +146,6 @@ fn lower_before_isel(ast: &TypedAst) -> (Context, tir::builtin::ModuleOp, Box<dy
     let function_pipeline = pm.nest::<FuncOp>();
     function_pipeline.add_pass(InstCombinePass::new());
     function_pipeline.add_pass(EraseStatePass::new());
-    function_pipeline.add_pass(ScfToCfgPass::new());
     pm.run(&context, context.get_op(module.id())).unwrap();
     fcc::codegen::lower_data(&context, &module).unwrap();
     (context, module, target)

@@ -1,4 +1,4 @@
-// RUN: env TIR_ISEL_REGIONS=1 tir mc --march=x86_64 --stage=isel %s | filecheck %s
+// RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s
 
 // Negative: an arm that touches memory is not speculated. Destruction places what
 // an arm computes on that arm, never above the branch, so the load and the store

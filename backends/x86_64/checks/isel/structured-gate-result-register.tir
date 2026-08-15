@@ -1,4 +1,4 @@
-// RUN: env TIR_ISEL_REGIONS=1 tir mc --march=x86_64 --stage=isel %s | filecheck %s
+// RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s
 
 // What a gate produced is read through a register, not only through `asm.vret`.
 // Destruction publishes the result as the join's parameter, so the register the

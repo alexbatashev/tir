@@ -16,7 +16,7 @@ module {
     return %4
   }
   // CHECK: asm.symbol {name = "slt_branch"
-  // CHECK: arm64.cmp {rn = %virt0:GPR, rm = %virt1:GPR}
+  // CHECK: arm64.cmp {rn = %virt23:GPR, rm = %virt24:GPR}
   // CHECK-NEXT: arm64.b.lt {imm = ^bb1}
   // CHECK-NEXT: asm.vbr ^bb2
 
@@ -32,7 +32,7 @@ module {
   }
   // a <= b canonicalizes to b >= a: cmp with swapped operands, then b.ge.
   // CHECK: asm.symbol {name = "sle_branch"
-  // CHECK: arm64.cmp {rn = %virt6:GPR, rm = %virt5:GPR}
+  // CHECK: arm64.cmp {rn = %virt27:GPR, rm = %virt26:GPR}
   // CHECK-NEXT: arm64.b.ge {imm = ^bb1}
 
   func @ult_branch(%0: !i64, %1: !i64) -> !i64 {

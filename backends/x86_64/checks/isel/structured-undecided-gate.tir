@@ -1,4 +1,4 @@
-// RUN: env TIR_ISEL_REGIONS=1 tir mc --march=x86_64 --stage=isel %s | filecheck %s
+// RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s
 
 // Where every arm of a gate computes nothing, sealing sends both of its edges to
 // the gate's own join carrying the same values. Nothing is left to decide, so the

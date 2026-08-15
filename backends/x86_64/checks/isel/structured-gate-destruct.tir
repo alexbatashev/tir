@@ -1,10 +1,9 @@
-// RUN: env TIR_ISEL_REGIONS=1 tir mc --march=x86_64 --stage=isel %s | filecheck %s
+// RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s
 
 // Emission destructs the gate: the arms become blocks of the function, the test
 // the gate branches on was selected with the block holding it, and what each arm
 // yields rides the edge into the continuation, which reads it as a parameter.
-// Nothing structured survives. The default path selects a graph per region and
-// never destructs, which is why this file has no unflagged RUN line.
+// Nothing structured survives.
 
 module {
   func @pick(%c: !i1, %a: !i64, %b: !i64) -> !i64 {

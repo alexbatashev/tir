@@ -22,13 +22,6 @@ use crate::analysis::scopes::{carried_operands, port_edges, region_exit};
 
 use super::node::class_is_pure;
 
-/// Whether the seeder reads a region-carrying operation's regions instead of
-/// leaving it to seed a graph of its own. Bring-up flag for the structured-input
-/// path: the CFG path is the default until the contract flips.
-pub(crate) fn regions_enabled() -> bool {
-    std::env::var_os("TIR_ISEL_REGIONS").is_some()
-}
-
 /// What a walk records for the cover: the class each operation is rooted at, and
 /// the float constants a target materializer could build.
 #[derive(Default)]
@@ -105,13 +98,11 @@ impl<'a> SemDagBuilder<'a> {
         }
     }
 
-    /// Lower `blocks` into the graph — and, under the region path, every region
-    /// their operations carry.
+    /// Lower `blocks` into the graph, and every region their operations carry.
     pub(crate) fn build_blocks(
         &mut self,
         blocks: &[BlockId],
         float_widths: &HashSet<u32>,
-        regions: bool,
     ) -> Seeds {
         let mut seeds = Seeds::default();
         for &block in blocks {
@@ -119,21 +110,15 @@ impl<'a> SemDagBuilder<'a> {
             // order: what ran before a block is a join the straight-line chain
             // does not model, so each block reads a fresh unknown state.
             self.break_state();
-            self.build_block(block, float_widths, regions, &mut seeds);
+            self.build_block(block, float_widths, &mut seeds);
         }
         seeds
     }
 
-    fn build_block(
-        &mut self,
-        block: BlockId,
-        float_widths: &HashSet<u32>,
-        regions: bool,
-        seeds: &mut Seeds,
-    ) {
+    fn build_block(&mut self, block: BlockId, float_widths: &HashSet<u32>, seeds: &mut Seeds) {
         for op_id in self.context.get_block(block).op_ids() {
             let op = self.context.get_op(op_id);
-            if regions && !op.regions.is_empty() {
+            if !op.regions.is_empty() {
                 self.build_region_op(&op, float_widths, seeds);
             } else {
                 self.build_plain_op(op_id, &op, float_widths, seeds);
@@ -150,7 +135,7 @@ impl<'a> SemDagBuilder<'a> {
             .collect();
         for block in blocks {
             self.break_state();
-            self.build_block(block, float_widths, true, seeds);
+            self.build_block(block, float_widths, seeds);
         }
     }
 

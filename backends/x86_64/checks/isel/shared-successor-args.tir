@@ -15,6 +15,6 @@ module {
 }
 
 // CHECK: x86_64.jne {imm = ^[[TAKEN:bb[0-9]+]]}
-// CHECK-NEXT: asm.vbr %2 ^[[JOIN:bb[0-9]+]]
+// CHECK-NEXT: asm.vbr %6 ^[[JOIN:bb[0-9]+]]
 // CHECK: ^[[TAKEN]]:
-// CHECK-NEXT: asm.vbr %1 ^[[JOIN]]
+// CHECK-NEXT: asm.vbr %5 ^[[JOIN]]

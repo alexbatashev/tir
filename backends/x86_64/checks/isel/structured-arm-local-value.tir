@@ -1,4 +1,4 @@
-// RUN: env TIR_ISEL_REGIONS=1 tir mc --march=x86_64 --stage=isel %s | filecheck %s
+// RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s
 
 // An arm-local value does not escape its arm. The product the arm computes and
 // the one computed after the gate are the same term, so they share an e-class,

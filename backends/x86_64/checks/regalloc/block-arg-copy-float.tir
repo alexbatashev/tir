@@ -9,18 +9,18 @@
 // allocator with a register-class conflict.
 
 module {
-  func @fwd(%0: !i1, %1: !f64) -> !f64 {
-    cond_br %0, ^bb1(%1 : !f64), ^bb1(%1 : !f64)
-  ^bb1(%2: !f64):
-    return %2
+  func @fwd(%0: !i1, %1: !f64, %2: !f64) -> !f64 {
+    cond_br %0, ^bb1(%1 : !f64), ^bb1(%2 : !f64)
+  ^bb1(%3: !f64):
+    return %3
   }
   module_end
 }
 
 // CHECK: asm.symbol
 // CHECK-NOT: x86_64.mov {
-// CHECK:      x86_64.movsd {dst = [[P:xmm[0-9]+]], src = xmm0}
-// CHECK:      ^bb1(%{{[0-9]+}}: !f64):
-// CHECK-NEXT: x86_64.movsd {dst = xmm0, src = [[P]]}
-// CHECK:      ^bb2:
+// CHECK:      ^[[JOIN:bb[0-9]+]](%{{[0-9]+}}: !f64):
+// CHECK-NEXT: x86_64.movsd {dst = xmm0, src = [[P:xmm[0-9]+]]}
+// CHECK:      ^bb{{[0-9]+}}:
 // CHECK-NEXT: x86_64.movsd {dst = [[P]], src = xmm0}
+// CHECK-NEXT: asm.vbr ^[[JOIN]]

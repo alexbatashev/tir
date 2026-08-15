@@ -16,7 +16,7 @@ module {
     return %4
   }
   // CHECK: asm.symbol {name = "slt_branch"
-  // CHECK: x86_64.cmp {dst = %virt0:GPR, src = %virt1:GPR}
+  // CHECK: x86_64.cmp {dst = %virt29:GPR, src = %virt30:GPR}
   // CHECK-NEXT: x86_64.jl {imm = ^bb1}
   // CHECK-NEXT: asm.vbr ^bb2
 
@@ -32,7 +32,7 @@ module {
   }
   // a <= b canonicalizes to b >= a: cmp with swapped operands, then jge.
   // CHECK: asm.symbol {name = "sle_branch"
-  // CHECK: x86_64.cmp {dst = %virt6:GPR, src = %virt5:GPR}
+  // CHECK: x86_64.cmp {dst = %virt33:GPR, src = %virt32:GPR}
   // CHECK-NEXT: x86_64.jge {imm = ^bb1}
 
   func @ult_branch(%0: !i64, %1: !i64) -> !i64 {
@@ -98,7 +98,7 @@ module {
   // reading a register that nothing in this block defines.
   // CHECK: asm.symbol {name = "constant_operand_branch"
   // CHECK: x86_64.cmp_imm8s {dst = %virt{{[0-9]+}}:GPR, imm = 0}
-  // CHECK-NEXT: x86_64.jge {imm = ^bb1}
+  // CHECK-NEXT: x86_64.jge {imm = ^bb{{[0-9]+}}}
 
   module_end
 }

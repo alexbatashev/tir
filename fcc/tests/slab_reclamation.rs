@@ -110,7 +110,6 @@ fn passes_do_not_leak_entities() {
         ),
         ("instcombine", Box::new(tir::passes::InstCombinePass::new())),
         ("erase-state", Box::new(tir::passes::EraseStatePass::new())),
-        ("scf-to-cfg", Box::new(tir::passes::ScfToCfgPass::new())),
     ] {
         let mut pm = PassManager::new();
         pm.nest::<tir::builtin::FuncOp>().add_boxed_pass(pass);

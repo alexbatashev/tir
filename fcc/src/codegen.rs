@@ -4559,6 +4559,20 @@ impl FnCodegen<'_> {
     }
 }
 
+/// Every block `regions` holds, in pre-order, nested regions included.
+fn body_blocks(context: &Context, regions: &[tir::RegionId]) -> Vec<tir::BlockId> {
+    let mut blocks = Vec::new();
+    for &region in regions {
+        for block in context.get_region(region).iter(context.clone()) {
+            blocks.push(block.id());
+            for op_id in block.op_ids() {
+                blocks.extend(body_blocks(context, &context.get_op(op_id).regions));
+            }
+        }
+    }
+    blocks
+}
+
 /// Lower frontend data definitions immediately ahead of the machine backend.
 /// String uses become addresses into `.rodata`; scalar globals become symbols
 /// in `.data`.
@@ -4603,8 +4617,10 @@ pub fn lower_data(context: &Context, module: &ModuleOp) -> Result<(), tir::PassE
         if op.clone().as_op::<tir::builtin::FuncOp>().is_none() {
             continue;
         }
-        let region = context.get_region(op.regions[0]);
-        for block in region.iter(context.clone()) {
+        // A string use sits wherever the body puts it, including inside the
+        // structured regions the backend takes.
+        for block_id in body_blocks(context, &op.regions) {
+            let block = context.get_block(block_id);
             for op_id in block.op_ids() {
                 let op = context.get_op(op_id);
                 let Some(string) = op.clone().as_op::<cir::StringOp>() else {

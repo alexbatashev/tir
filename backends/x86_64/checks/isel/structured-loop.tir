@@ -1,4 +1,4 @@
-// RUN: env TIR_ISEL_REGIONS=1 tir mc --march=x86_64 --stage=isel %s | filecheck %s
+// RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s
 
 // A loop's body is read in the function's own e-graph too, so a constant defined
 // before the loop folds into the body's instruction. The default path selects a

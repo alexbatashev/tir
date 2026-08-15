@@ -22,9 +22,9 @@ module {
 }
 
 // CHECK:      asm.symbol {name = "count"
-// CHECK:      asm.vbr %{{[0-9]+}} ^bb1
-// CHECK:      ^bb1(%{{[0-9]+}}: !i64):
+// CHECK:      asm.vbr %{{[0-9]+}} ^[[HDR:bb[0-9]+]]
+// CHECK:      ^[[HDR]](%{{[0-9]+}}: !i64):
 // CHECK:      riscv.blt
-// CHECK:      ^bb2:
-// CHECK:      riscv.addi
-// CHECK-NEXT: asm.vbr %{{[0-9]+}} ^bb1
+// The back edge carries the latch value into the header parameter.
+// CHECK:      asm.vbr %{{[0-9]+}} ^[[HDR]]
+// CHECK:      riscv.addi {rd = %virt{{[0-9]+}}:GPR, rs1 = %virt{{[0-9]+}}:GPR, imm = 1}

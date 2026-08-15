@@ -20,7 +20,7 @@ module {
   }
   // CHECK: asm.symbol {name = "eq_zero_branch"
   // CHECK-NOT: arm64.cset
-  // CHECK: arm64.cbz {rt = %virt0:GPR, imm = ^bb1}
+  // CHECK: arm64.cbz {rt = %virt20:GPR, imm = ^bb1}
 
   func @ne_zero_branch(%0: !i64) -> !i64 {
     %1 = constant {value = 0} : !i64
@@ -35,7 +35,7 @@ module {
   }
   // CHECK: asm.symbol {name = "ne_zero_branch"
   // CHECK-NOT: arm64.cset
-  // CHECK: arm64.cbnz {rt = %virt5:GPR, imm = ^bb1}
+  // CHECK: arm64.cbnz {rt = %virt22:GPR, imm = ^bb1}
 
   // A non-zero constant has no `cbz`/`cbnz` form, so it fuses through the
   // immediate flag definer instead: `cmp Xn, #imm` (imm12) + `b.<cc>`.

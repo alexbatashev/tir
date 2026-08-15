@@ -13,7 +13,9 @@ use tir::{
 
 use crate::backend::TargetMachine;
 use crate::backend::lower::OpLoweringPass;
-use crate::passes::{CheckUniqueSymbolsPass, DeadCodeEliminationPass, LowerMemoryIntrinsicsPass};
+use crate::passes::{
+    CheckUniqueSymbolsPass, DeadCodeEliminationPass, LowerMemoryIntrinsicsPass, RestructurePass,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopAfter {
@@ -102,7 +104,12 @@ pub fn build_pipeline(
     pm.add_pass(CheckUniqueSymbolsPass::new());
     pm.add_pass(LowerMemoryIntrinsicsPass::new());
     pm.add_pass(TargetIntegerLegalizer::new(target));
-    pm.nest::<FuncOp>().add_pass(target.isel_pass(context));
+    let function_pipeline = pm.nest::<FuncOp>();
+    // Selection takes structured regions: a function that still holds a raw CFG
+    // (a `.tir` input, or JIT text) is raised here. One that is already a single
+    // structured block is left alone.
+    function_pipeline.add_pass(RestructurePass::new());
+    function_pipeline.add_pass(target.isel_pass(context));
     // Remove pure instructions left dead by selection (e.g. a value recomputed in
     // a consumer's block by cross-block fusion). Runs while results are still
     // virtual registers, so it must precede register allocation.

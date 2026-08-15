@@ -1,4 +1,4 @@
-// RUN: env TIR_ISEL_REGIONS=1 tir mc --march=x86_64 --stage=isel %s | filecheck %s
+// RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s
 
 // An arm that computes nothing is not a block. What such an arm yields rides the
 // edge the gate's test already carries, so the only block destruction mints for

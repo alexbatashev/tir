@@ -595,6 +595,16 @@ impl FunctionSelection {
         })
     }
 
+    /// Whether `block` holds an operation selection must emit for `class` — a
+    /// definition of the class, as opposed to a name adopted from it.
+    fn defined_in(&self, context: &Context, class: Id, block: BlockId) -> bool {
+        self.any_class_value(class, |value| {
+            self.value_to_def.get(value).is_some_and(|def| {
+                self.op_root.contains_key(def) && context.parent_block(*def) == Some(block)
+            })
+        })
+    }
+
     fn available_at(
         &self,
         context: &Context,
@@ -618,6 +628,17 @@ impl FunctionSelection {
             };
             if !self.op_root.contains_key(&def) {
                 if op.is::<crate::builtin::ConstantOp>() || op.is::<crate::builtin::ConstantFOp>() {
+                    return false;
+                }
+                // A region-carrying operation's result is a name adopted from the
+                // class when its arms all publish the same one. The class holds
+                // that name only once the region has run, which is after this
+                // block's own definition of it — so the definition still has to
+                // be selected, and the adopted name witnesses nothing.
+                if def_block == block
+                    && !op.regions.is_empty()
+                    && self.defined_in(context, class, block)
+                {
                     return false;
                 }
                 return def_block == block || self.has_run_at(context, dom, def, def_block, block);
@@ -1258,8 +1279,7 @@ impl InstructionSelectPass {
         // from the dominator tree and therefore carry no dominating-edge facts.
         // A region's blocks are absent for the same reason — the tree orders the
         // function's own blocks, and nothing yet orders sibling arms.
-        let regions = builder::regions_enabled();
-        for block_id in function_blocks(context, op, regions) {
+        for block_id in function_blocks(context, op, true) {
             let block = context.get_block(block_id);
             if block.is_empty() || visited.contains(&block_id) {
                 continue;
@@ -1269,16 +1289,14 @@ impl InstructionSelectPass {
         }
         // The regions were solved here, so the operations carrying them must not
         // solve graphs of their own when the walk reaches them.
-        if regions {
-            for block_id in function_blocks(context, op, true) {
-                for op_id in context.get_block(block_id).op_ids() {
-                    if !context.get_op(op_id).regions.is_empty() {
-                        self.solved.insert(op_id);
-                    }
+        for block_id in function_blocks(context, op, true) {
+            for op_id in context.get_block(block_id).op_ids() {
+                if !context.get_op(op_id).regions.is_empty() {
+                    self.solved.insert(op_id);
                 }
             }
         }
-        regions
+        true
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1382,9 +1400,8 @@ impl InstructionSelectPass {
         let mut value_to_def = HashMap::new();
         let mut op_block = HashMap::new();
         let mut op_position = HashMap::new();
-        let regions = builder::regions_enabled();
         let block_ids = function_blocks(context, op, false);
-        for &block_id in &function_blocks(context, op, regions) {
+        for &block_id in &function_blocks(context, op, true) {
             for (position, op_id) in context.get_block(block_id).op_ids().into_iter().enumerate() {
                 op_block.insert(op_id, block_id);
                 op_position.insert(op_id, position);
@@ -1415,38 +1432,31 @@ impl InstructionSelectPass {
         let (value_to_class, mut roots_by_op, mut constant_candidates) = {
             let mut builder =
                 SemDagBuilder::new(context, &value_to_def, &mut egraph, pointer_width);
-            let seeds = builder.build_blocks(
-                &block_ids,
-                &self.float_constant_materializer_widths,
-                regions,
-            );
+            let seeds = builder.build_blocks(&block_ids, &self.float_constant_materializer_widths);
 
             // The structured operations' own control: the tests a destruction
             // branches on and the counter recurrences it advances, seeded before
             // saturation so the cover selects them like any other class.
-            if regions {
-                for &block_id in &function_blocks(context, op, true) {
-                    for op_id in context.get_block(block_id).op_ids() {
-                        let inner = context.get_op(op_id);
-                        if inner.regions.is_empty() {
+            for &block_id in &function_blocks(context, op, true) {
+                for op_id in context.get_block(block_id).op_ids() {
+                    let inner = context.get_op(op_id);
+                    if inner.regions.is_empty() {
+                        continue;
+                    }
+                    builder.build_region_control(&inner, block_id, &mut region_control);
+                    for (region, condition, holds) in region_entry_facts(&inner) {
+                        let Some(entry) = context.get_region(region).iter(context.clone()).next()
+                        else {
                             continue;
-                        }
-                        builder.build_region_control(&inner, block_id, &mut region_control);
-                        for (region, condition, holds) in region_entry_facts(&inner) {
-                            let Some(entry) =
-                                context.get_region(region).iter(context.clone()).next()
-                            else {
-                                continue;
-                            };
-                            region_facts.insert(entry.id(), (condition, holds));
-                            if let std::collections::hash_map::Entry::Vacant(slot) =
-                                prepared.entry(condition)
-                            {
-                                slot.insert(ConditionExpr {
-                                    condition: builder.build_from_value(condition),
-                                    compare: builder.build_defining_compare(condition),
-                                });
-                            }
+                        };
+                        region_facts.insert(entry.id(), (condition, holds));
+                        if let std::collections::hash_map::Entry::Vacant(slot) =
+                            prepared.entry(condition)
+                        {
+                            slot.insert(ConditionExpr {
+                                condition: builder.build_from_value(condition),
+                                compare: builder.build_defining_compare(condition),
+                            });
                         }
                     }
                 }
@@ -1611,7 +1621,7 @@ impl InstructionSelectPass {
         // and a use inside a region is a use.
         let mut arg_block: HashMap<ValueId, BlockId> = HashMap::new();
         let mut operand_uses: HashMap<ValueId, usize> = HashMap::new();
-        for &block_id in &function_blocks(context, op, regions) {
+        for &block_id in &function_blocks(context, op, true) {
             for argument in context.get_block(block_id).arguments() {
                 arg_block.insert(argument.id(), block_id);
             }

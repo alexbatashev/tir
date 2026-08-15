@@ -1,4 +1,4 @@
-// RUN: env TIR_ISEL_REGIONS=1 tir mc --march=x86_64 --stage=isel %s | filecheck %s
+// RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s
 
 // A counted loop destructs rotated, off the `CountedLoop` interface alone: its
 // zero-trip guard `lb < ub` branches into the body, and the body advances the

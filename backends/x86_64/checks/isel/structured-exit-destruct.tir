@@ -1,4 +1,4 @@
-// RUN: env TIR_ISEL_REGIONS=1 tir mc --march=x86_64 --stage=isel %s | filecheck %s
+// RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s
 
 // An exit leaving a loop's scope becomes an edge to the target that scope names,
 // from wherever it sits — here from inside a gate nested in the body. The `break`

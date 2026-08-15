@@ -18,7 +18,7 @@ module {
   // The compare fuses into blt; no slt is materialized.
   // CHECK: asm.symbol {name = "slt_branch"
   // CHECK-NOT: riscv.slt
-  // CHECK: riscv.blt {rs1 = %virt0:GPR, rs2 = %virt1:GPR, imm = ^bb1}
+  // CHECK: riscv.blt {rs1 = %virt42:GPR, rs2 = %virt43:GPR, imm = ^bb1}
   // CHECK-NEXT: asm.vbr ^bb2
 
   func @sle_branch(%0: !i64, %1: !i64) -> !i64 {
@@ -33,7 +33,7 @@ module {
   }
   // a <= b canonicalizes to b >= a, selecting bge with swapped operands.
   // CHECK: asm.symbol {name = "sle_branch"
-  // CHECK: riscv.bge {rs1 = %virt6:GPR, rs2 = %virt5:GPR, imm = ^bb1}
+  // CHECK: riscv.bge {rs1 = %virt46:GPR, rs2 = %virt45:GPR, imm = ^bb1}
   // CHECK-NEXT: asm.vbr ^bb2
 
   func @ult_branch(%0: !i64, %1: !i64) -> !i64 {
@@ -47,7 +47,7 @@ module {
     return %4
   }
   // CHECK: asm.symbol {name = "ult_branch"
-  // CHECK: riscv.bltu {rs1 = %virt10:GPR, rs2 = %virt11:GPR, imm = ^bb1}
+  // CHECK: riscv.bltu {rs1 = %virt48:GPR, rs2 = %virt49:GPR, imm = ^bb1}
 
   func @eq_branch(%0: !i64, %1: !i64) -> !i64 {
     %2 = cmpi %0, %1 {predicate = "eq"} : !i1
@@ -60,7 +60,7 @@ module {
     return %4
   }
   // CHECK: asm.symbol {name = "eq_branch"
-  // CHECK: riscv.beq {rs1 = %virt15:GPR, rs2 = %virt16:GPR, imm = ^bb1}
+  // CHECK: riscv.beq {rs1 = %virt51:GPR, rs2 = %virt52:GPR, imm = ^bb1}
 
   func @materialized(%0: !i64, %1: !i64) -> !i1 {
     %2 = cmpi %0, %1 {predicate = "slt"} : !i1
@@ -68,13 +68,14 @@ module {
   ^bb1:
     return %2
   ^bb2:
-    return %2
+    %3 = cmpi %1, %0 {predicate = "slt"} : !i1
+    return %3
   }
   // The compare value escapes to other blocks, so it is materialized (slt via
   // the boolean-materialization bridge) *and* still fused into the branch.
   // CHECK: asm.symbol {name = "materialized"
-  // CHECK: riscv.slt {rd = %virt22:GPR, rs1 = %virt20:GPR, rs2 = %virt21:GPR}
-  // CHECK: riscv.blt {rs1 = %virt20:GPR, rs2 = %virt21:GPR, imm = ^bb1}
+  // CHECK: riscv.slt {rd = %virt22:GPR, rs1 = %virt54:GPR, rs2 = %virt55:GPR}
+  // CHECK: riscv.blt {rs1 = %virt54:GPR, rs2 = %virt55:GPR, imm = ^bb{{[0-9]+}}}
 
   func @fallback(%0: !i1) -> !i64 {
     cond_br %0, ^bb1, ^bb2
@@ -89,7 +90,7 @@ module {
   // defines the low bit of its register, so the branch must read that bit
   // alone: `andi` the bit out, then compare that against the hardwired zero.
   // CHECK: asm.symbol {name = "fallback"
-  // CHECK: riscv.andi {rd = %virt{{[0-9]+}}:GPR, rs1 = %virt23:GPR, imm = 1}
+  // CHECK: riscv.andi {rd = %virt{{[0-9]+}}:GPR, rs1 = %virt57:GPR, imm = 1}
   // CHECK-NEXT: riscv.bne {rs1 = %virt{{[0-9]+}}:GPR, rs2 = x0, imm = ^bb1}
   // CHECK-NEXT: asm.vbr ^bb2
 
@@ -108,7 +109,7 @@ module {
   // hardwired zero register instead of materializing the constant. No `li` of 0.
   // CHECK: asm.symbol {name = "eq_zero"
   // CHECK-NOT: riscv.slt
-  // CHECK: riscv.beq {rs1 = %virt26:GPR, rs2 = x0, imm = ^bb1}
+  // CHECK: riscv.beq {rs1 = %virt60:GPR, rs2 = x0, imm = ^bb1}
   // CHECK-NEXT: asm.vbr ^bb2
 
   func @ne_zero(%0: !i64) -> !i64 {
@@ -123,7 +124,7 @@ module {
     return %4
   }
   // CHECK: asm.symbol {name = "ne_zero"
-  // CHECK: riscv.bne {rs1 = %virt31:GPR, rs2 = x0, imm = ^bb1}
+  // CHECK: riscv.bne {rs1 = %virt62:GPR, rs2 = x0, imm = ^bb1}
 
   func @sgt_zero(%0: !i64) -> !i64 {
     %1 = constant {value = 0} : !i64
@@ -139,7 +140,7 @@ module {
   // `%x > 0` canonicalizes to `0 < %x`, selecting the other zero-form slot:
   // `blt x0, %x` (zero wired into rs1).
   // CHECK: asm.symbol {name = "sgt_zero"
-  // CHECK: riscv.blt {rs1 = x0, rs2 = %virt36:GPR, imm = ^bb1}
+  // CHECK: riscv.blt {rs1 = x0, rs2 = %virt64:GPR, imm = ^bb1}
 
   module_end
 }

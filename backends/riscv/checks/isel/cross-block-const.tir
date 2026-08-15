@@ -26,7 +26,7 @@ module {
 
 // CHECK-LABEL: asm.symbol {name = "addc"
 // CHECK-NOT: constant
-// CHECK: riscv.addiw {rd = %virt2:GPR, rs1 = %virt0:GPR, imm = 5}
+// CHECK: riscv.addiw {rd = %virt2:GPR, rs1 = %virt6:GPR, imm = 5}
 // CHECK-LABEL: asm.symbol {name = "add_wide"
 // CHECK-NOT: constant
 // CHECK: riscv.slliw

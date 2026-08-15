@@ -1,4 +1,4 @@
-// RUN: env TIR_ISEL_REGIONS=1 tir mc --march=x86_64 --stage=isel %s | filecheck %s
+// RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s
 
 // A gate with case values destructs into the chain its cases describe: each case
 // tests the decision and branches to its arm, the last falling through to the arm

@@ -1,12 +1,12 @@
 // RUN: tir mc --march=x86_64 --stage=regalloc %s | filecheck %s
 
-// The true edge carrying values is forwarded through a single trampoline block
-// the conditional branch targets; the false edge's values ride the fallthrough
-// branch directly. Register allocation then lowers each forwarded value to a copy.
+// The two edges into the join carry different values: one rides the fallthrough
+// branch directly, the other is forwarded through the block the conditional
+// branch targets. Register allocation lowers each forwarded value to a copy.
 
 module {
-  func @f(%0:!i64, %1:!i1) -> !i64 {
-    cond_br %1, ^bb1(%0 : !i64), ^bb2(%0 : !i64)
+  func @f(%0:!i64, %1:!i64, %c:!i1) -> !i64 {
+    cond_br %c, ^bb1(%0 : !i64), ^bb2(%1 : !i64)
   ^bb1(%a: !i64):
     return %a
   ^bb2(%b: !i64):
@@ -15,10 +15,10 @@ module {
   module_end
 }
 
-// CHECK:      x86_64.test
-// CHECK-NEXT: x86_64.jne {imm = ^[[TRAMP:bb[0-9]+]]}
+// CHECK:      x86_64.mov {dst = rax, src = rsi}
+// CHECK-NEXT: x86_64.test
+// CHECK-NEXT: x86_64.jne {imm = ^[[TAKEN:bb[0-9]+]]}
+// CHECK-NEXT: asm.vbr ^[[JOIN:bb[0-9]+]]
+// CHECK:      ^[[TAKEN]]:
 // CHECK-NEXT: x86_64.mov {dst = rax, src = rdi}
-// CHECK-NEXT: asm.vbr ^bb2
-// CHECK:      ^[[TRAMP]]:
-// CHECK-NEXT: x86_64.mov {dst = rax, src = rdi}
-// CHECK-NEXT: asm.vbr ^bb1
+// CHECK-NEXT: asm.vbr ^[[JOIN]]

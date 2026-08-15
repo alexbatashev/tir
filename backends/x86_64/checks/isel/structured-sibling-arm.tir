@@ -1,4 +1,4 @@
-// RUN: env TIR_ISEL_REGIONS=1 tir mc --march=x86_64 --stage=isel %s | filecheck %s
+// RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s
 
 // An arm may not read a sibling arm's value. Both arms are entered with the same
 // outer sum, but each names it as an argument of its own block, and a block

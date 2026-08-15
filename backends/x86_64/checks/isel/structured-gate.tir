@@ -1,11 +1,8 @@
-// RUN: env TIR_ISEL_REGIONS=1 tir mc --march=x86_64 --stage=isel %s | filecheck %s
-// RUN: tir mc --march=x86_64 --stage=isel %s | filecheck --check-prefix=CFG %s
+// RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s
 
 // Reading a gate's regions puts their operations in the function's own e-graph,
 // so a constant defined before the gate is the same class inside an arm and folds
-// into the arm's instruction as an immediate. Without the region path each
-// region-carrying op seeds a graph of its own and the constant reaches the arms
-// only as an already-materialized register.
+// into the arm's instruction as an immediate.
 
 module {
   func @choose(%0: !i1, %1: !i64) -> !i64 {
@@ -25,7 +22,3 @@ module {
 // CHECK: asm.symbol {name = "choose"
 // CHECK: x86_64.add_imm8s {dst = %virt{{[0-9]+}}:GPR, dst_tied = %virt1:GPR, imm = 7}
 // CHECK: x86_64.add_imm8s {dst = %virt{{[0-9]+}}:GPR, dst_tied = %virt1:GPR, imm = -7}
-
-// CFG: x86_64.mov_imm {dst = %virt2:GPR, imm = 7}
-// CFG: x86_64.add {dst = %virt{{[0-9]+}}:GPR, dst_tied = %virt1:GPR, src = %virt2:GPR}
-// CFG: x86_64.sub {dst = %virt{{[0-9]+}}:GPR, dst_tied = %virt1:GPR, src = %virt2:GPR}

@@ -1,6 +1,6 @@
 // RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s
 
-// ^bb7 and ^bb8 merge equal values, so they share an e-class, but neither block
+// The two joins merge equal values, so they share an e-class, but neither block
 // dominates the other: a consumer must read its own block's argument register,
 // which is the only one its path wrote.
 
@@ -39,7 +39,7 @@ module {
   module_end
 }
 
-// CHECK:      ^bb7(%[[G1:[0-9]+]]: !i64):
+// CHECK:      ^bb6(%[[G1:[0-9]+]]: !i64):
 // CHECK-NEXT: x86_64.sub {dst = %{{[a-z0-9]+}}:GPR, dst_tied = %virt[[G1]]:GPR
-// CHECK:      ^bb8(%[[G2:[0-9]+]]: !i64):
+// CHECK:      ^bb9(%[[G2:[0-9]+]]: !i64):
 // CHECK-NEXT: x86_64.sub {dst = %{{[a-z0-9]+}}:GPR, dst_tied = %virt[[G2]]:GPR

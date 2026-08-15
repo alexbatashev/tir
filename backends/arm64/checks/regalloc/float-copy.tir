@@ -1,19 +1,21 @@
 // RUN: tir mc --march=arm64 --stage=regalloc %s | filecheck %s --check-prefix=COPY
 // RUN: tir mc --march=arm64 --filetype=obj-ascii %s | filecheck %s --check-prefix=ENC
 
-// The forwarded value stays live past the edge, so its copy into the block
-// parameter cannot be coalesced away and has to be a real f64 move.
+// The value one edge forwards stays live past the join, so its copy into the
+// block parameter cannot be coalesced away and has to be a real f64 move.
 
 module {
-  func @forward(%0: !f64) -> !f64 {
-    br ^bb1(%0 : !f64)
-    ^bb1(%1: !f64):
-    %2 = addf %1, %0 : !f64
-    return %2
+  func @forward(%c: !i1, %0: !f64, %1: !f64) -> !f64 {
+    cond_br %c, ^bb1(%0 : !f64), ^bb2
+    ^bb2:
+    br ^bb1(%1 : !f64)
+    ^bb1(%2: !f64):
+    %3 = addf %2, %0 : !f64
+    return %3
   }
   module_end
 }
 
 // COPY: arm64.fmov_reg64
 // ENC: forward:
-// ENC-NEXT: [0x01, 0x40, 0x60, 0x1E]
+// ENC: [0x01, 0x40, 0x60, 0x1E]

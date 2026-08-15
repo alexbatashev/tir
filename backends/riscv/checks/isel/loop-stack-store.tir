@@ -24,8 +24,10 @@ module {
   module_end
 }
 
+// The slot is stored before the loop, reloaded by the test, and the body reloads
+// it, steps it and stores it back. Layout puts the exit's own reload between.
 // CHECK: riscv.sw
 // CHECK: riscv.lw
 // CHECK: riscv.lw
-// CHECK: riscv.sw
 // CHECK: riscv.lw
+// CHECK: riscv.sw

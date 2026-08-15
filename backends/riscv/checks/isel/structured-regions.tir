@@ -1,4 +1,4 @@
-// RUN: env TIR_ISEL_REGIONS=1 tir mc --march=rv64id --stage=isel %s | filecheck %s
+// RUN: tir mc --march=rv64id --stage=isel %s | filecheck %s
 
 // Reading a gate's and a loop's regions puts their operations in the function's
 // own e-graph, so a constant defined outside is the same class inside and folds

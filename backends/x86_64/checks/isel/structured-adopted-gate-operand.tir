@@ -1,0 +1,26 @@
+// RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s
+
+// A gate whose arms both yield the same value publishes that value's own class:
+// the gate's result is a name adopted from it, not a second definition of it. A
+// use standing *before* the gate must still read the register the block's own
+// definition writes, so the load is selected here rather than treated as already
+// available because the gate names it later.
+
+module {
+  func @adopt(%p: !ptr.p, %c: !i1) -> !i32 {
+    %v = ptr.load %p : !i8
+    %z = extui %v : !i32
+    %g = scf.if %c -> !i8 {
+      scf.yield %v
+    } else {
+      scf.yield %v
+    }
+    %w = extui %g : !i32
+    %s = addi %z, %w : !i32
+    return %s
+  }
+  module_end
+}
+
+// CHECK: x86_64.movzx8_load
+// CHECK-NOT: scf.

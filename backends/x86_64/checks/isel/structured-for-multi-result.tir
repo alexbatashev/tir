@@ -1,0 +1,30 @@
+// RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s
+
+// Every carried port of a counted loop is threaded on its own: the body reads one
+// argument per port plus the minted counter, the back edge carries each advanced
+// port, and the continuation reads them all as parameters.
+
+#data_layout = {types = {p = {abi = 64, size = 64}}}
+
+module {data_layout = #data_layout} {
+  func @two(%lb: !index, %ub: !index, %st: !index, %a: !i64, %b: !i64) -> !i64 {
+    %r0, %r1 = scf.for %lb, %ub, %st iter_args(%x = %a, %y = %b) -> !i64, !i64 {
+      %nx = addi %x, %y : !i64
+      %ny = subi %y, %x : !i64
+      scf.yield %nx, %ny
+    }
+    %s = addi %r0, %r1 : !i64
+    return %s
+  }
+  module_end
+}
+
+// CHECK-NOT: scf.
+// The body reads one argument per port, plus the minted counter.
+// CHECK: ^[[BODY:bb[0-9]+]](%{{[0-9]+}}: !i64, %{{[0-9]+}}: !i64, %{{[0-9]+}}: !i64):
+// Both ports leave on the exit edge, and the continuation reads them both.
+// CHECK: asm.vbr %{{[0-9]+}}, %{{[0-9]+}} ^[[JOIN:bb[0-9]+]]
+// CHECK: ^[[JOIN]](%{{[0-9]+}}: !i64, %{{[0-9]+}}: !i64):
+// The back edge carries both advanced ports and the advanced counter.
+// CHECK: asm.vbr %{{[0-9]+}}, %{{[0-9]+}}, %{{[0-9]+}} ^[[BODY]]
+// CHECK-NOT: scf.

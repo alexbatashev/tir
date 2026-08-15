@@ -1,0 +1,23 @@
+// RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s
+
+// A switch with no case arms always runs its default arm: there is no case to
+// test, so the chain destruction mints is empty and nothing decides anything.
+
+module {
+  func @only_default(%p: !i32) -> !i32 {
+    %r = scf.switch %p -> !i32 default {
+      %d = addi %p, %p : !i32
+      scf.yield %d
+    }
+    return %r
+  }
+  module_end
+}
+
+// CHECK-NOT: scf.
+// Nothing tests the decision: the entry jumps straight into the only arm.
+// CHECK-NOT: cmp
+// CHECK: asm.vbr ^[[ARM:bb[0-9]+]]
+// CHECK: ^[[ARM]]:
+// CHECK-NEXT: x86_64.add32_norex
+// CHECK-NOT: scf.

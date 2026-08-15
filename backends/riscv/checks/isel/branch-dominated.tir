@@ -1,10 +1,11 @@
 // RUN: tir mc --march=rv64i --stage=isel %s | filecheck %s
 
-// A block entered through exactly one guarded CFG edge inherits the guard's
-// fact (asserted in an e-graph assumption scope while the block solves): the
-// identical compare re-computed in ^bb1 is proven true there, so its guard
-// folds to an unconditional branch to the taken successor and the compare op
-// is erased.
+// A block entered through exactly one guarded edge inherits the guard's fact,
+// asserted in an e-graph assumption scope while the block solves. Restructuring
+// makes the second guard the test of a gate nested in the first gate's arm, and
+// a region's entry fact does not yet reach a nested gate's test: the identical
+// compare is re-selected instead of folding to the taken successor. Recovering
+// that fold is the one Stage-6 residue this shape shows.
 
 module {
   func @dominated(%0: !i64, %1: !i64) -> !i64 {
@@ -26,10 +27,9 @@ module {
   module_end
 }
 
-// The entry selects the fused compare-and-branch; the dominated block reduces
-// to a single unconditional branch to the known successor.
-// CHECK: riscv.blt {rs1 = %virt0:GPR, rs2 = %virt1:GPR, imm = ^bb1}
-// CHECK-NEXT: asm.vbr ^bb2
-// CHECK: ^bb1:
-// CHECK-NEXT: asm.vbr ^bb3
-// CHECK-NEXT: ^bb2:
+// The entry selects the fused compare-and-branch, and so does the dominated
+// block.
+// CHECK: riscv.blt {rs1 = %virt[[A:[0-9]+]]:GPR, rs2 = %virt[[B:[0-9]+]]:GPR, imm = ^[[ARM:bb[0-9]+]]}
+// CHECK-NEXT: asm.vbr ^bb{{[0-9]+}}
+// CHECK: ^[[ARM]]:
+// CHECK-NEXT: riscv.blt {rs1 = %virt[[A]]:GPR, rs2 = %virt[[B]]:GPR, imm = ^bb{{[0-9]+}}}

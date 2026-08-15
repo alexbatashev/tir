@@ -89,9 +89,14 @@ finite-expression evaluator; selection may preserve it as CFG edge assignments,
 and theory axioms over it are discharged by induction over the iterations (see
 [Saturation with proved rewrites](#2-saturation-with-proved-rewrites)).
 
-### Structured input (bring-up flag `TIR_ISEL_REGIONS`)
+### Structured input
 
-With the flag set the builder reads a region-carrying operation's regions into the
+**The backend takes structured regions.** A function still holding a raw CFG (a
+`.tir` input, JIT text) is raised by `RestructurePass`, which the backend pipeline
+runs ahead of selection; a function already structured is left alone. There is no
+`scf`→CFG lowering ahead of the backend, and destruction lives inside emission.
+
+The builder reads a region-carrying operation's regions into the
 same graph instead of leaving it to seed a graph of its own, and the pass solves
 the nested blocks from the function's visit. A region's operations then share the
 function's classes, so a constant defined before a gate folds into an arm's
@@ -175,9 +180,6 @@ arm forwards to the same place with the same values there is nothing left to
 decide — the gate emits neither a test nor a trampoline, only the jump. This is
 the reason `passes/cfg_cleanup` has no counterpart on the structured path: the
 shapes it folds are shapes destruction never mints.
-
-The flag is deleted when the backend contract flips to structured input; until
-then the CFG path above is the default and is unchanged.
 
 ### What a node is
 
@@ -986,8 +988,7 @@ node of the tree whose subtree is exactly that region, and the walk pushes the
 region's fact there just as it pushes an edge fact for a guarded successor. A
 region a structured operation says nothing about (a switch case, a loop's own test)
 carries no fact. Facts from the *edges* are unreachable under structured input (the
-gates are ops, not terminators) and facts from the *regions* are only collected
-behind `TIR_ISEL_REGIONS`, so the two sources never contend.
+gates are ops, not terminators), so the two sources never contend.
 
 A scoped assumption may merge a class over several base keys. Because the side
 tables are keyed by base representatives, every per-block query aggregates over

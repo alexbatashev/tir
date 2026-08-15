@@ -1,4 +1,4 @@
-// RUN: env TIR_ISEL_REGIONS=1 tir mc --march=x86_64 --stage=isel %s | filecheck %s
+// RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s
 
 // A tested loop's body is covered under the condition its test yields. That
 // condition is spelled over the ports' per-iteration heads, so it holds on every

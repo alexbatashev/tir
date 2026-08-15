@@ -18,7 +18,7 @@ module {data_layout = #data_layout} {
     return %4
   }
   // CHECK: asm.symbol {name = "below"
-  // CHECK: arm64.cmp {rn = %virt0:GPR, rm = %virt1:GPR}
+  // CHECK: arm64.cmp {rn = %virt10:GPR, rm = %virt11:GPR}
   // CHECK-NEXT: arm64.b.lo {imm = ^bb1}
 
   func @is_null(%0: !ptr.p) -> !i64 {

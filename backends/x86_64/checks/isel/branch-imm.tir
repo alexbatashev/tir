@@ -18,7 +18,7 @@ module {
     return %4
   }
   // CHECK: asm.symbol {name = "slt_imm"
-  // CHECK: x86_64.cmp_imm8s {dst = %virt0:GPR, imm = 5}
+  // CHECK: x86_64.cmp_imm8s {dst = %virt30:GPR, imm = 5}
   // CHECK-NEXT: x86_64.jl {imm = ^bb1}
   // CHECK-NEXT: asm.vbr ^bb2
 
