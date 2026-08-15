@@ -6,9 +6,9 @@ use super::seed::Seeded;
 use super::state;
 use crate::utils::APInt;
 use crate::{
-    ConstantFold, Context, OperationRef, PassError, Rewriter, TypeId, ValueId,
+    Conditional, ConstantFold, Context, OperationRef, PassError, Rewriter, TypeId, ValueId,
     builtin::{IntegerType, ops},
-    sem::{Prov, SemNode as Node, Value},
+    sem::{Prov, SemNode as Node, SymKind, Value},
 };
 
 pub(crate) type Sym = u32;
@@ -44,6 +44,9 @@ pub fn builtin_ruleset(context: &Context, seeded: &Seeded) -> Ruleset {
     let mut ruleset = generated_ruleset(context);
     for template in fold_templates(eg) {
         ruleset.push(const_fold(context.clone(), &template), None);
+    }
+    for arity in gamma_arities(eg) {
+        ruleset.push(decided_gamma(context.clone(), arity), None);
     }
     ruleset.push(state::forward_load(context.clone()), None);
     ruleset.push(
@@ -189,6 +192,86 @@ fn fold_class(context: &Context, eg: &EGraph<Node>, class: Id) -> Option<(APInt,
             _ => None,
         }
     })
+}
+
+/// The γ arities the seeded graph holds, so a decided gate is searched at the
+/// widths it actually occurs at. Only a gate the seeding built is ever decided and
+/// rewrites introduce no new arity, so the seeded graph fixes the set.
+fn gamma_arities(eg: &EGraph<Node>) -> Vec<usize> {
+    let mut arities: Vec<usize> = Vec::new();
+    for class in eg.classes() {
+        for node in class.nodes() {
+            if node.sym() == Some(SymKind::If) && !arities.contains(&node.children().len()) {
+                arities.push(node.children().len());
+            }
+        }
+    }
+    arities
+}
+
+/// A gate whose decision is a known constant publishes what the arm that constant
+/// selects yields: the arm whose *case value* the decision equals, or the default
+/// when none does. Reading the decision as a boolean holds only for a two-armed
+/// `if`, whose case values are exactly `1` and the default; a switch names its own,
+/// and `case 0` is its first arm rather than the one no case matched.
+fn decided_gamma(context: Context, arity: usize) -> Rule {
+    let mut lhs = Pattern::new();
+    let args: Vec<Id> = (0..arity)
+        .map(|index| lhs.var(Var::Symbol(index as Sym)))
+        .collect();
+    lhs.add(Node::gamma_pattern(args));
+    Rewrite::new(
+        "gamma-decided",
+        lhs,
+        Rhs::Apply(Box::new(move |eg, _substitution, root| {
+            let arm = decided_arm(&context, eg, eg.find(root));
+            if let Some(arm) = arm {
+                eg.union(root, arm);
+            }
+        })),
+    )
+}
+
+fn decided_arm(context: &Context, eg: &EGraph<Node>, class: Id) -> Option<Id> {
+    eg.nodes(class).iter().find_map(|node| {
+        let [decision, arms @ ..] = &node.children[..] else {
+            return None;
+        };
+        if node.sym() != Some(SymKind::If) {
+            return None;
+        }
+        const_value(eg, *decision)?;
+        let cases = gate_cases(context, node)?;
+        if cases.len() != arms.len() {
+            return None;
+        }
+        let index = cases
+            .iter()
+            .position(|case| case.is_some_and(|case| class_is_literal(eg, *decision, case)))
+            .or_else(|| cases.iter().position(Option::is_none))?;
+        Some(arms[index])
+    })
+}
+
+/// The case value selecting each arm of the gate `node` stands for, in arm order.
+fn gate_cases(context: &Context, node: &Node) -> Option<Vec<Option<i64>>> {
+    let gate = match node.prov {
+        Prov::Op(gate) => gate,
+        Prov::Value(value) => context.get_value(value).defining_op()?,
+        Prov::None | Prov::Introduced(_) => return None,
+    };
+    if !context.has_operation(gate) {
+        return None;
+    }
+    Some(
+        context
+            .get_op(gate)
+            .as_interface::<dyn Conditional>()?
+            .case_values()
+            .into_iter()
+            .map(|(_, case)| case)
+            .collect(),
+    )
 }
 
 fn produces_integer(context: &Context, op: crate::OpId) -> bool {

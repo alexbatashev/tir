@@ -21,8 +21,6 @@ fn compiles_instcombine_rules() {
             "mul-zero",
             "mul-pow2-to-shl",
             "sub-self",
-            "gamma-true",
-            "gamma-false",
             "gamma-same",
         ]
     );
