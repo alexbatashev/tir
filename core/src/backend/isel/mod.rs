@@ -19,10 +19,12 @@ mod pattern;
 mod tests;
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use tir::{
-    AnalysisManager, Block, BlockId, BranchGuard, BranchTerminator, Context, OpId, Operation,
-    OperationRef, Pass, PassError, PassTarget, RegionId, Rewriter, Terminator, TypeId, ValueId,
+    AnalysisManager, Block, BlockId, BranchGuard, BranchTerminator, Conditional, Context,
+    EntryGuard, GuardedLoop, OpId, OpInstance, Operation, OperationRef, Pass, PassError,
+    PassTarget, RegionId, Rewriter, Terminator, TypeId, ValueId,
     analysis::{DefUse, DominatingEdgeFacts, DominatorTree},
     graph::{Dag, MutDag, NodeId, OperandConstraint},
     sem::{
@@ -511,6 +513,11 @@ struct FunctionSelection {
     /// class with its kind and operand classes. Keyed by the condition value; the
     /// per-block truth (`holds`) is applied when the scope asserts it.
     prepared: HashMap<ValueId, ConditionExpr>,
+    /// The assumption a region's entry block is entered under, read off the
+    /// region-carrying operation's own interfaces (see [`region_entry_facts`]).
+    /// Structured input states through its regions what a CFG states through its
+    /// dominating edges, so both feed one scope.
+    region_facts: HashMap<BlockId, (ValueId, bool)>,
     /// What each block must materialize for a destruction to branch on it.
     region_aux: HashMap<BlockId, Vec<(OpId, AuxSlot, Id)>>,
 }
@@ -1291,11 +1298,17 @@ impl InstructionSelectPass {
         };
         visited.insert(block_id);
 
-        let own_fact = facts.own_fact(block_id);
-        if let Some(fact) = own_fact {
+        // A block is covered under whatever its entry proves: the dominating edge
+        // that reaches it, or — for a region's entry block — the assumption the
+        // region-carrying operation enters that region under.
+        let own_fact = facts
+            .own_fact(block_id)
+            .map(|fact| (fact.condition, fact.holds))
+            .or_else(|| fs.region_facts.get(&block_id).copied());
+        if let Some((condition, holds)) = own_fact {
             fs.egraph.push_context();
-            if let Some(expr) = fs.prepared.get(&fact.condition) {
-                assert_fact(context, &mut fs.egraph, expr, fact.holds);
+            if let Some(expr) = fs.prepared.get(&condition) {
+                assert_fact(context, &mut fs.egraph, expr, holds);
             }
             fs.egraph.rebuild();
         }
@@ -1397,6 +1410,7 @@ impl InstructionSelectPass {
         let mut egraph = SemEGraph::new();
         let mut control: HashMap<BlockId, Vec<ControlReification>> = HashMap::new();
         let mut prepared: HashMap<ValueId, ConditionExpr> = HashMap::new();
+        let mut region_facts: HashMap<BlockId, (ValueId, bool)> = HashMap::new();
         let mut region_control = builder::RegionControl::default();
         let (value_to_class, mut roots_by_op, mut constant_candidates) = {
             let mut builder =
@@ -1414,8 +1428,25 @@ impl InstructionSelectPass {
                 for &block_id in &function_blocks(context, op, true) {
                     for op_id in context.get_block(block_id).op_ids() {
                         let inner = context.get_op(op_id);
-                        if !inner.regions.is_empty() {
-                            builder.build_region_control(&inner, block_id, &mut region_control);
+                        if inner.regions.is_empty() {
+                            continue;
+                        }
+                        builder.build_region_control(&inner, block_id, &mut region_control);
+                        for (region, condition, holds) in region_entry_facts(&inner) {
+                            let Some(entry) =
+                                context.get_region(region).iter(context.clone()).next()
+                            else {
+                                continue;
+                            };
+                            region_facts.insert(entry.id(), (condition, holds));
+                            if let std::collections::hash_map::Entry::Vacant(slot) =
+                                prepared.entry(condition)
+                            {
+                                slot.insert(ConditionExpr {
+                                    condition: builder.build_from_value(condition),
+                                    compare: builder.build_defining_compare(condition),
+                                });
+                            }
                         }
                     }
                 }
@@ -1698,6 +1729,7 @@ impl InstructionSelectPass {
             demand,
             control,
             prepared,
+            region_facts,
             region_aux: region_control.aux,
         }
     }
@@ -2839,10 +2871,38 @@ fn value_match_allowed(
     node::class_is_pure(&fs.egraph, class) || (fs.is_op_root(class) && !fs.is_shared(class))
 }
 
-/// Assert one dominating-edge fact in the current scope: the condition (and its
-/// defining comparison, when there is one) equals its known truth value, the
-/// complement comparison equals the opposite, and an `eq`/`ne` guard makes its
-/// operands congruent.
+/// The assumption each of `op`'s regions runs under, read off the operation's own
+/// interfaces: a [`Conditional`]'s guarded arm runs on its decision holding, and a
+/// tested loop's body runs on the condition its test region yields — which holds on
+/// every iteration, since the condition is spelled over the ports' per-iteration
+/// heads. Regions a structured operation states nothing about (a switch case, a
+/// loop's own test) carry no fact.
+fn region_entry_facts(op: &Arc<OpInstance>) -> Vec<(RegionId, ValueId, bool)> {
+    if let Some(conditional) = op.clone().as_interface::<dyn Conditional>() {
+        return conditional.guarded_regions();
+    }
+    let Some(guard) = op.clone().as_interface::<dyn GuardedLoop>() else {
+        return Vec::new();
+    };
+    let EntryGuard::Region {
+        region: test,
+        condition,
+        ..
+    } = guard.entry_guard()
+    else {
+        return Vec::new();
+    };
+    op.regions
+        .iter()
+        .filter(|&&region| region != test)
+        .map(|&region| (region, condition, true))
+        .collect()
+}
+
+/// Assert one entry fact in the current scope: the condition (and its defining
+/// comparison, when there is one) equals its known truth value, the complement
+/// comparison equals the opposite, and an `eq`/`ne` guard makes its operands
+/// congruent.
 fn assert_fact(context: &Context, egraph: &mut SemEGraph, expr: &ConditionExpr, holds: bool) {
     let truth = |egraph: &mut SemEGraph, holds: bool| {
         egraph.add(template_node(

@@ -312,7 +312,8 @@ saturation (which may merge classes). All live on `FunctionSelection`.
 | `must_materialize: Set<Id>` | an op-root class whose value some consumer can never internalize: **(a)** a use in a different block (exactly `externally_bound`), or **(b)** a same-block use no match reaches that is not a guarded terminator; it is never offered a consuming alternative |
 | `control: BlockId → Vec<ControlReification>` | the guarded and unconditional CFG edges that preserve unselected γ/θ values, including forwarded block arguments |
 | `reifiable_gates: Set<Id>` | canonical classes seeded from GSA γ/μ nodes; these may preserve the existing control-flow edge assignments instead of selecting a value instruction |
-| `prepared: ValueId → ConditionExpr` | each dominating-edge condition prepared against the base graph (its class, and its defining comparison when there is one), so a block's scope can assert it |
+| `prepared: ValueId → ConditionExpr` | each condition a scope may assert — a dominating edge's, or a region's under structured input — prepared against the base graph (its class, and its defining comparison when there is one) |
+| `region_facts: BlockId → (ValueId, bool)` | the assumption a region's entry block is entered under, read off the region-carrying op's interfaces (structured input only) |
 
 Because scoped assumptions merge classes, a per-block query through the *scoped*
 representative must reach every base key it covers. `FunctionSelection::base_members`
@@ -957,6 +958,25 @@ compare's class now holds a constant, so its guard folds to an unconditional
 (`RuleMatch` records *both* the int and register binding when a class carries
 both). The scope is popped once the block's plan is stored, leaving the shared
 graph assumption-free for the next block.
+
+### Where the fact comes from under structured input
+
+A region-carrying operation states the same thing about its regions that a guarded
+edge states about its successor, and it states it on its own interfaces
+(`region_entry_facts`): a `Conditional`'s guarded arm runs on its decision holding
+(`guarded_regions`), and a loop tested by a region runs its body on the condition
+that region yields (`GuardedLoop::entry_guard`). The condition of a tested loop is
+spelled over the ports' per-iteration heads, so it holds on **every** iteration and
+not merely the first.
+
+Both readings feed one scope. The dominator tree is region-aware — a block flows
+into each region its operations carry — so a region's entry block is an ordinary
+node of the tree whose subtree is exactly that region, and the walk pushes the
+region's fact there just as it pushes an edge fact for a guarded successor. A
+region a structured operation says nothing about (a switch case, a loop's own test)
+carries no fact. Facts from the *edges* are unreachable under structured input (the
+gates are ops, not terminators) and facts from the *regions* are only collected
+behind `TIR_ISEL_REGIONS`, so the two sources never contend.
 
 A scoped assumption may merge a class over several base keys. Because the side
 tables are keyed by base representatives, every per-block query aggregates over
