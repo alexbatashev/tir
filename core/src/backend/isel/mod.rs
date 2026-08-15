@@ -597,7 +597,13 @@ impl FunctionSelection {
     ) -> bool {
         self.any_class_value(class, |value| {
             let Some(&def) = self.value_to_def.get(value) else {
-                return true;
+                // An argument is written by the edges entering its own block, so
+                // it holds the class only where that block has run — never in a
+                // block it does not dominate, and never in a sibling arm.
+                return self
+                    .arg_block
+                    .get(value)
+                    .is_none_or(|&owner| dom.dominates(owner, block));
             };
             let op = context.get_op(def);
             let Some(def_block) = context.parent_block(def) else {
@@ -607,12 +613,50 @@ impl FunctionSelection {
                 if op.is::<crate::builtin::ConstantOp>() || op.is::<crate::builtin::ConstantFOp>() {
                     return false;
                 }
-                return def_block == block || dom.dominates(def_block, block);
+                return def_block == block || self.has_run_at(context, dom, def, def_block, block);
             }
             def_block != block
-                && dom.dominates(def_block, block)
+                && self.has_run_at(context, dom, def, def_block, block)
                 && self.placed_at(class, def_block)
         })
+    }
+
+    /// Whether a definition of `def` in `def_block` has run wherever `block` runs.
+    /// Dominance orders the blocks, but a block holding a region-carrying
+    /// operation is only partly ordered against that region: what follows the
+    /// operation runs after the region does, so a definition is visible inside
+    /// only when it precedes the operation the region hangs from.
+    fn has_run_at(
+        &self,
+        context: &Context,
+        dom: &DominatorTree,
+        def: OpId,
+        def_block: BlockId,
+        block: BlockId,
+    ) -> bool {
+        if !dom.dominates(def_block, block) {
+            return false;
+        }
+        let mut current = block;
+        while current != def_block {
+            let Some(region) = context.parent_region(current) else {
+                return true;
+            };
+            let Some(carrier) = context.get_region(region).parent_op() else {
+                return true;
+            };
+            let Some(parent) = context.parent_block(carrier) else {
+                return true;
+            };
+            if parent == def_block {
+                return context.get_block(def_block).is_before(def, carrier);
+            }
+            if dom.node_of(parent).is_none() {
+                return true;
+            }
+            current = parent;
+        }
+        true
     }
 
     /// Resolve `class` to operands for consumer op `consumer` in `block`: the
@@ -696,13 +740,13 @@ impl FunctionSelection {
                         (0, self.op_position[&def], v.number())
                     }
                     Some(def_block) => {
-                        if !dom.dominates(def_block, block) {
+                        let def = self.value_to_def[&v];
+                        if !self.has_run_at(context, dom, def, def_block, block) {
                             continue;
                         }
                         // A def the extraction places dominates by construction;
                         // an op selection never touches (an alloca, a call)
                         // survives with its original value.
-                        let def = self.value_to_def[&v];
                         let survives = !self.op_root.contains_key(&def)
                             && !context.get_op(def).is::<crate::builtin::ConstantOp>()
                             && !context.get_op(def).is::<crate::builtin::ConstantFOp>();
@@ -1531,9 +1575,12 @@ impl InstructionSelectPass {
         }
 
         // A value used as an operand by more than one consumer must stay a register.
+        // Every block a region holds counts here too: its arguments are written by
+        // the edges entering it, so they hold their value only where it has run,
+        // and a use inside a region is a use.
         let mut arg_block: HashMap<ValueId, BlockId> = HashMap::new();
         let mut operand_uses: HashMap<ValueId, usize> = HashMap::new();
-        for &block_id in &block_ids {
+        for &block_id in &function_blocks(context, op, regions) {
             for argument in context.get_block(block_id).arguments() {
                 arg_block.insert(argument.id(), block_id);
             }

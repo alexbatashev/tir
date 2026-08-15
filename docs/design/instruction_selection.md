@@ -988,6 +988,26 @@ class with candidate values but none legal — its only register candidate is a
 cross-block **non-escaping** value — is *unresolvable*; a match with such a
 boundary is discarded.
 
+### Region scoping of the rule
+
+`DominatorTree` already spans regions (MLIR's "Extending Dominance to MLIR
+Regions": a block holding a region-carrying operation flows into each region's
+entry block), so dominance is the region rule, not a CFG-only one — two sibling
+arms dominate each other in neither direction, and `dom_distance` counts region
+nesting as ordinary dominator steps. Two things dominance alone does not say,
+both of which the rule applies on top of it:
+
+- **A block is only partly ordered against a region it holds.** Its own
+  operations *after* the carrier do not run before the region does, so a
+  definition is visible inside only when it precedes the carrier (`has_run_at`,
+  applied transitively up the region chain). Without this the term an arm shares
+  with a computation placed after the gate binds that computation's register and
+  reads it before it is written.
+- **A block argument holds its class only where its own block has run.** Every
+  block a region holds records its arguments, so an arm's entry argument and a
+  loop port are scoped like any other argument. Without this they resolve as
+  entry inputs — available everywhere, including in a sibling arm.
+
 **Future work (out of scope):** rebinding a cross-block register read to a
 non-escaping dominating value would require **plan-to-plan requirement
 propagation** — a consumer's plan telling the defining block's plan to materialize

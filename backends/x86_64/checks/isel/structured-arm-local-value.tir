@@ -1,0 +1,29 @@
+// RUN: env TIR_ISEL_REGIONS=1 tir mc --march=x86_64 --stage=isel %s | filecheck %s
+
+// An arm-local value does not escape its arm. The product the arm computes and
+// the one computed after the gate are the same term, so they share an e-class,
+// but the arm's register holds it only where the arm has run: what follows the
+// gate computes it again instead of reading the arm's.
+
+module {
+  func @no_escape(%c: !i1, %a: !i64, %b: !i64) -> !i64 {
+    %r = scf.if %c args(%a, %b) -> !i64 (%p, %q) {
+      %x = muli %p, %q : !i64
+      %y = addi %x, %p : !i64
+      scf.yield %y
+    } else (%u, %v) {
+      scf.yield %u
+    }
+    %z = muli %a, %b : !i64
+    return %z
+  }
+  module_end
+}
+
+// CHECK: ^[[THEN:bb[0-9]+]](%{{[0-9]+}}: !i64, %{{[0-9]+}}: !i64):
+// CHECK-NEXT: x86_64.imul {dst = %virt[[ARM:[0-9]+]]:GPR
+// CHECK-NEXT: x86_64.add
+// CHECK: ^{{bb[0-9]+}}(%{{[0-9]+}}: !i64):
+// CHECK-NEXT: x86_64.imul {dst = %{{virt[0-9]+}}:GPR, dst_tied = %{{virt[0-9]+}}:GPR, src = %{{virt[0-9]+}}:GPR}
+// CHECK-NEXT: asm.vret
+// CHECK-NOT: %virt[[ARM]]:GPR
