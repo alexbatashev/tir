@@ -664,8 +664,11 @@ impl Pass for RegisterAllocationPass {
         }
 
         let precolor = self.lower_fixed_registers(context, rewriter, op, &blocks)?;
-        let abi_copies = collect_abi_copies(context, &blocks)?;
-        let affinities: Vec<_> = abi_copies.iter().map(|copy| (copy.src, copy.dst)).collect();
+        let coalescable_copies = collect_coalescable_copies(context, &blocks)?;
+        let affinities: Vec<_> = coalescable_copies
+            .iter()
+            .map(|copy| (copy.src, copy.dst))
+            .collect();
 
         let (outgoing_size, has_calls) = outgoing_stack_layout(context, &blocks)?;
         let mut frame = FramePlan::new(self.abi);
@@ -720,7 +723,7 @@ impl Pass for RegisterAllocationPass {
             }
         };
 
-        for copy in &abi_copies {
+        for copy in &coalescable_copies {
             if !context.has_operation(copy.op) {
                 continue;
             }
@@ -733,7 +736,7 @@ impl Pass for RegisterAllocationPass {
             if erasable {
                 rewriter.erase_op(&op_ref_in(context, copy.block, copy.op))?;
             } else {
-                strip_attr(context, copy.op, prealloc::ABI_COPY_ATTR);
+                strip_attr(context, copy.op, prealloc::COALESCABLE_COPY_ATTR);
             }
         }
         // Preserve the callee-saved registers the allocation used for this
@@ -1316,7 +1319,8 @@ pub(crate) fn op_ref_in(context: &Context, block_id: BlockId, op_id: OpId) -> Op
 /// affinity and erases the copy when both land in one register.
 fn mark_coalescable(context: &Context, op_id: OpId) {
     let mut attributes = context.get_op(op_id).attributes.clone();
-    attributes.push(context.named_attribute(prealloc::ABI_COPY_ATTR, AttributeValue::Bool(true)));
+    attributes
+        .push(context.named_attribute(prealloc::COALESCABLE_COPY_ATTR, AttributeValue::Bool(true)));
     context.set_op_attributes(op_id, attributes);
 }
 
@@ -1366,31 +1370,34 @@ fn callee_saved_slots(
         .collect()
 }
 
-struct AbiCopy {
+struct CoalescableCopy {
     block: BlockId,
     op: OpId,
     src: u32,
     dst: u32,
 }
 
-/// The copies the ABI precolor pass marked with [`prealloc::ABI_COPY_ATTR`]:
+/// The copies marked with [`prealloc::COALESCABLE_COPY_ATTR`]:
 /// their endpoint registers seed the coalescing affinity, and after allocation
 /// a copy whose endpoints landed in one register is erased. Endpoints are
 /// recorded before the spill loop so a copy whose registers were renamed by
 /// spill splitting is never erased (its inserted reload/store still needs it).
-fn collect_abi_copies(context: &Context, blocks: &[BlockId]) -> Result<Vec<AbiCopy>, PassError> {
+fn collect_coalescable_copies(
+    context: &Context,
+    blocks: &[BlockId],
+) -> Result<Vec<CoalescableCopy>, PassError> {
     let mut copies = Vec::new();
     for &block_id in blocks {
         for op_id in context.get_block(block_id).op_ids() {
-            if !has_attr(context, op_id, prealloc::ABI_COPY_ATTR) {
+            if !has_attr(context, op_id, prealloc::COALESCABLE_COPY_ATTR) {
                 continue;
             }
             let (src, dst) = copy_endpoints(context, op_id).ok_or_else(|| {
                 PassError::InvalidRuleSet(format!(
-                    "ABI copy {op_id:?} does not move one virtual register to another"
+                    "coalescable copy {op_id:?} does not move one virtual register to another"
                 ))
             })?;
-            copies.push(AbiCopy {
+            copies.push(CoalescableCopy {
                 block: block_id,
                 op: op_id,
                 src,

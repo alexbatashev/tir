@@ -3,7 +3,8 @@
 
 // The SSE2 arithmetic ops are two-address like the integer ALU: selection ties
 // dst to its first source and register allocation lowers the tie to a `movsd`
-// copy ahead of the op. Values are colored out of the XMM file.
+// copy ahead of the op. Values are colored out of the XMM file. Here %0 dies at
+// the add, so the tie's ends coalesce and the copy is gone.
 
 module {
   func @add(%0: !f64, %1: !f64) -> !f64 {
@@ -16,6 +17,5 @@ module {
 // ISEL:      x86_64.addsd_norex {dst = %virt2:XMMlow, dst_tied = %virt0:XMMlow, src = %virt1:XMMlow}
 // ISEL-NEXT: asm.vret
 
-// CHECK:      x86_64.movsd {dst = [[D:xmm[0-9]+]], src = xmm{{[0-9]+}}}
-// CHECK-NEXT: x86_64.addsd_norex {dst = [[D]], src = xmm{{[0-9]+}}}
+// CHECK:      x86_64.addsd_norex {dst = xmm0, src = xmm1}
 // CHECK-NEXT: asm.vret

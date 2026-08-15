@@ -39,7 +39,9 @@ pub fn regalloc_stage_for(
 /// `dst = dst + src`): the op defines `%r` but must read `%x` through the same
 /// register. Insert `copy %r <- %x` ahead of the op and drop the marker
 /// attribute, leaving a plain read-modify-write of `%r` that liveness and
-/// coloring already model.
+/// coloring already model. The copy carries [`COALESCABLE_COPY_ATTR`]: the tie
+/// is a request for one register at both ends, so allocation reads it as an
+/// affinity and erases the copy where it is granted.
 pub struct TiedOperandLoweringPass {
     target: Box<dyn TargetRegAlloc>,
 }
@@ -101,7 +103,14 @@ impl Pass for TiedOperandLoweringPass {
                 let op_ref = op_ref_in(context, block_id, op_id);
                 for (_, dst, src, class) in &ties {
                     let copy = self.target.emit_copy(context, *class, *dst, *src);
+                    let copy_id = copy.id();
                     rewriter.insert_op_before(&op_ref, copy.as_ref())?;
+                    mark_op(
+                        context,
+                        copy_id,
+                        COALESCABLE_COPY_ATTR,
+                        AttributeValue::Bool(true),
+                    );
                 }
                 let mut attrs = op.attributes.clone();
                 attrs.retain(|a| !ties.iter().any(|(name, ..)| a.name == *name));
@@ -121,7 +130,7 @@ impl Pass for TiedOperandLoweringPass {
 /// parameter defined in every predecessor. The copies of one edge form a
 /// parallel copy (all sources read before any destination is written), so they
 /// are sequentialized with a fresh temporary per cycle (e.g. a loop edge that
-/// swaps two parameters). Each copy carries [`ABI_COPY_ATTR`]: parameter and
+/// swaps two parameters). Each copy carries [`COALESCABLE_COPY_ATTR`]: parameter and
 /// forwarded value want one register, and a copy whose ends coalesce is a
 /// self-move. Sequentialization stays correct because only a copy the allocator
 /// gave one register at both ends is erased, and a value still needed as a
@@ -215,7 +224,12 @@ impl Pass for BlockArgLoweringPass {
                     let copy = self.target.emit_copy(context, class, dst, src);
                     let copy_id = copy.id();
                     rewriter.insert_op_before(&op_ref, copy.as_ref())?;
-                    mark_op(context, copy_id, ABI_COPY_ATTR, AttributeValue::Bool(true));
+                    mark_op(
+                        context,
+                        copy_id,
+                        COALESCABLE_COPY_ATTR,
+                        AttributeValue::Bool(true),
+                    );
                 }
                 context.set_op_operands(op_id, Vec::new());
             }
@@ -224,12 +238,12 @@ impl Pass for BlockArgLoweringPass {
     }
 }
 
-/// Marks a copy whose two ends want the same register — an ABI boundary or a
-/// block-argument edge here, a fixed-register instruction operand in
-/// [`crate::backend::regalloc`]. Register
-/// allocation reads the endpoints as a coalescing affinity, erases the copy when
-/// both land in one register, and strips the mark.
-pub(crate) const ABI_COPY_ATTR: &str = "abi_copy";
+/// Marks a copy whose two ends want the same register — a two-address tie, an
+/// ABI boundary or a block-argument edge here, a fixed-register instruction
+/// operand in [`crate::backend::regalloc`]. Register allocation reads the
+/// endpoints as a coalescing affinity, erases the copy when both land in one
+/// register, and strips the mark.
+pub(crate) const COALESCABLE_COPY_ATTR: &str = "coalescable_copy";
 
 /// Marks the placeholder load of an incoming stack argument and carries its
 /// stack slot index. Register allocation patches the real offset in once the
@@ -239,7 +253,7 @@ pub(crate) const ABI_STACK_INDEX_ATTR: &str = "abi_stack_index";
 /// Compute calling-convention pre-coloring at function entry and returns,
 /// recording every constraint in the IR itself: register arguments pin their
 /// `arg_regs` entry as [`RegisterAttr::FixedDef`], returns define their pinned
-/// outgoing register through a copy marked [`ABI_COPY_ATTR`], and stack
+/// outgoing register through a copy marked [`COALESCABLE_COPY_ATTR`], and stack
 /// arguments get a placeholder load marked [`ABI_STACK_INDEX_ATTR`]. Register
 /// arguments are also copied from their pinned entry value into a free body
 /// vreg: an ABI register is a point constraint at the function boundary, so it
@@ -321,7 +335,12 @@ impl Pass for AbiPrecolorPass {
                 let copy = self.target.emit_copy(context, pin.0, body, incoming);
                 let copy_id = copy.id();
                 rewriter.insert_op_before(&entry()?, copy.as_ref())?;
-                mark_op(context, copy_id, ABI_COPY_ATTR, AttributeValue::Bool(true));
+                mark_op(
+                    context,
+                    copy_id,
+                    COALESCABLE_COPY_ATTR,
+                    AttributeValue::Bool(true),
+                );
                 if let Some(previous) = arg_pins.insert(incoming, pin)
                     && previous != pin
                 {
@@ -399,7 +418,9 @@ impl Pass for AbiPrecolorPass {
                             });
                         }
                     }
-                    attrs.push(context.named_attribute(ABI_COPY_ATTR, AttributeValue::Bool(true)));
+                    attrs.push(
+                        context.named_attribute(COALESCABLE_COPY_ATTR, AttributeValue::Bool(true)),
+                    );
                     context.set_op_attributes(copy_id, attrs);
                 }
             }

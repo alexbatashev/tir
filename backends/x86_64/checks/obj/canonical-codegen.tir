@@ -17,13 +17,14 @@ module {
   module_end
 }
 
+// Both `and`s are two-address and both ties coalesce onto rax, so what reaches
+// the encoder is the argument's own copy out of its incoming register — a
+// whole-value move, hence 64-bit and REX-carrying.
 // CHECK: lowregs:
-// mov eax, edi (norex): 89 f8
-// CHECK-NEXT: [0x89, 0xF8]
+// mov rax, rdi: 48 89 f8
+// CHECK-NEXT: [0x48, 0x89, 0xF8]
 // and eax, esi (norex): 21 f0
 // CHECK-NEXT: [0x21, 0xF0]
-// mov eax, eax (norex): 89 c0
-// CHECK-NEXT: [0x89, 0xC0]
 // and eax, 42 (imm8 norex): 83 e0 2a
 // CHECK-NEXT: [0x83, 0xE0, 0x2A]
 // CHECK-NEXT: [0xC3]
