@@ -1406,6 +1406,111 @@ fn builder_anchors_join_block_argument() {
     }));
 }
 
+type SeededFunction = (
+    SemEGraph,
+    std::collections::HashMap<tir::ValueId, tir_symbolic::egraph::Id>,
+    tir::OpId,
+);
+
+/// Seed the single function of `src` under the region path: the graph, the class
+/// each value was seeded with, and the function op.
+fn seed_regions(context: &Context, src: &str) -> SeededFunction {
+    use super::builder::SemDagBuilder;
+    use std::collections::{HashMap, HashSet};
+
+    let module =
+        crate::parse::ir::parse_ir::<tir::builtin::ModuleOp>(context, src).expect("parse module");
+    let module_region = context.get_op(module.id()).regions[0];
+    let func = context
+        .get_region(module_region)
+        .iter(context.clone())
+        .next()
+        .and_then(|block| block.op_ids().first().copied())
+        .expect("a function in the module");
+    let blocks: Vec<tir::BlockId> = context
+        .get_region(context.get_op(func).regions[0])
+        .iter(context.clone())
+        .map(|block| block.id())
+        .collect();
+    let mut value_to_def = HashMap::new();
+    for &block in &blocks {
+        for op_id in context.get_block(block).op_ids() {
+            for &result in &context.get_op(op_id).results {
+                value_to_def.insert(result, op_id);
+            }
+        }
+    }
+    let mut egraph = SemEGraph::new();
+    let mut builder = SemDagBuilder::new(context, &value_to_def, &mut egraph, None);
+    builder.build_blocks(&blocks, &HashSet::new(), true);
+    let value_to_class = builder.value_to_class.clone();
+    drop(builder);
+    (egraph, value_to_class, func)
+}
+
+/// The operations of a region's single block.
+fn region_ops(context: &Context, region: tir::RegionId) -> Vec<std::sync::Arc<tir::OpInstance>> {
+    context
+        .get_region(region)
+        .iter(context.clone())
+        .next()
+        .expect("a block in the region")
+        .op_ids()
+        .into_iter()
+        .map(|op| context.get_op(op))
+        .collect()
+}
+
+/// A loop's carried port is the θ over what the loop was entered with and what
+/// each edge back into the port carries — the term a region-scoped cover reads;
+/// the port's own argument stays in the class so it can still be read as the
+/// register the loop leaves it in.
+#[test]
+fn builder_seeds_a_loop_port_as_a_theta_over_its_edges() {
+    let context = Context::with_default_dialects();
+    let (egraph, value_to_class, func) = seed_regions(
+        &context,
+        "module {
+  func @accumulate(%0: !i1, %1: !i64) -> !i64 {
+    %2 = scf.while iter_args(%3 = %1) -> !i64 {
+      scf.condition %0, %3
+    } do scope(%4)(%5) {
+      %6 = addi %5, %5 : !i64
+      scf.yield %6
+    }
+    return %2
+  }
+  module_end
+}",
+    );
+
+    let loop_op = region_ops(&context, context.get_op(func).regions[0])[0].clone();
+    let condition = region_ops(&context, loop_op.regions[0]).pop().unwrap();
+    let latch = region_ops(&context, loop_op.regions[1]).pop().unwrap();
+    let class_of = |value| egraph.find(value_to_class[&value]);
+    let head = class_of(condition.operands[1]);
+
+    let theta = egraph
+        .nodes(head)
+        .iter()
+        .find(|node| node.kind == SymKind::Theta)
+        .expect("the tested port is a theta")
+        .clone();
+    assert_eq!(theta.children.len(), 2);
+    assert_eq!(
+        egraph.find(theta.children[0]),
+        class_of(loop_op.operands[0])
+    );
+    assert_eq!(egraph.find(theta.children[1]), class_of(latch.operands[0]));
+    // The port is still readable as the register the loop leaves it in.
+    assert!(
+        egraph
+            .nodes(head)
+            .iter()
+            .any(|node| node.kind == SymKind::Symbol)
+    );
+}
+
 /// A multi-operand pattern node (LoadMemory/StoreMemory shapes).
 fn nary(g: &mut SemGraph, kind: SymKind, children: &[tir::graph::NodeId]) -> tir::graph::NodeId {
     let node = g.add_node(kind);

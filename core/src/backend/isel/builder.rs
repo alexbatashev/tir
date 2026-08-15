@@ -1,14 +1,16 @@
-//! Lowering of a block's IR operations into the semantic e-graph.
+//! Lowering of a function's IR operations into the semantic e-graph.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use tir::{
-    Context, MemoryRead, MemoryWrite, OpId, OpInstance, TypeId, ValueId,
+    BlockId, Conditional, Context, EntryGuard, GuardedLoop, LoopLike, MemoryRead, MemoryWrite,
+    OpId, OpInstance, RegionId, TokenScope, TypeId, ValueId,
     attributes::AttributeValue,
     builtin::{FloatType, IntegerType},
     graph::{Dag, MetaDag, NodeId},
     sem::{
-        SemGraph, SemPayload, SemType, SymKind, SymPayload,
+        SemGraph, SemNode, SemPayload, SemType, SymKind, SymPayload,
         egraph::{SemEGraph, ir_type, minimal_unsigned_apint, semantic_type, type_width},
         infer_types, template_node,
     },
@@ -16,7 +18,24 @@ use tir::{
 use tir_adt::APInt;
 use tir_symbolic::egraph::Id;
 
+use crate::analysis::scopes::{carried_operands, port_edges, region_exit};
+
 use super::node::class_is_pure;
+
+/// Whether the seeder reads a region-carrying operation's regions instead of
+/// leaving it to seed a graph of its own. Bring-up flag for the structured-input
+/// path: the CFG path is the default until the contract flips.
+pub(crate) fn regions_enabled() -> bool {
+    std::env::var_os("TIR_ISEL_REGIONS").is_some()
+}
+
+/// What a walk records for the cover: the class each operation is rooted at, and
+/// the float constants a target materializer could build.
+#[derive(Default)]
+pub(crate) struct Seeds {
+    pub(crate) roots_by_op: HashMap<OpId, Id>,
+    pub(crate) constant_candidates: Vec<(OpId, Id)>,
+}
 
 /// Builds a block's semantic expressions straight into the e-graph: every lowered
 /// node is hash-consed by [`SemEGraph::add`], so the e-graph *is* the interned DAG
@@ -52,6 +71,303 @@ impl<'a> SemDagBuilder<'a> {
             opaque_serial: 0,
             state: None,
         }
+    }
+
+    /// Lower `blocks` into the graph — and, under the region path, every region
+    /// their operations carry.
+    pub(crate) fn build_blocks(
+        &mut self,
+        blocks: &[BlockId],
+        float_widths: &HashSet<u32>,
+        regions: bool,
+    ) -> Seeds {
+        let mut seeds = Seeds::default();
+        for &block in blocks {
+            // Blocks are lowered in region order, which is not an execution
+            // order: what ran before a block is a join the straight-line chain
+            // does not model, so each block reads a fresh unknown state.
+            self.break_state();
+            self.build_block(block, float_widths, regions, &mut seeds);
+        }
+        seeds
+    }
+
+    fn build_block(
+        &mut self,
+        block: BlockId,
+        float_widths: &HashSet<u32>,
+        regions: bool,
+        seeds: &mut Seeds,
+    ) {
+        for op_id in self.context.get_block(block).op_ids() {
+            let op = self.context.get_op(op_id);
+            if regions && !op.regions.is_empty() {
+                self.build_region_op(&op, float_widths, seeds);
+            } else {
+                self.build_plain_op(op_id, &op, float_widths, seeds);
+            }
+        }
+    }
+
+    fn build_region(&mut self, region: RegionId, float_widths: &HashSet<u32>, seeds: &mut Seeds) {
+        let blocks: Vec<BlockId> = self
+            .context
+            .get_region(region)
+            .iter(self.context.clone())
+            .map(|block| block.id())
+            .collect();
+        for block in blocks {
+            self.break_state();
+            self.build_block(block, float_widths, true, seeds);
+        }
+    }
+
+    /// Lower one region-free operation, recording the class it is rooted at. A
+    /// standalone constant has no semantic root of its own, so it is rooted at the
+    /// class its value builds; a float one only where the target declares a
+    /// materializer for its width.
+    fn build_plain_op(
+        &mut self,
+        op_id: OpId,
+        op: &Arc<OpInstance>,
+        float_widths: &HashSet<u32>,
+        seeds: &mut Seeds,
+    ) {
+        if let Some(root) = self.build_for_op(op).or_else(|| {
+            op.is::<crate::builtin::ConstantOp>()
+                .then(|| self.build_from_value(op.results[0]))
+        }) {
+            seeds.roots_by_op.insert(op_id, root);
+        } else if op.is::<crate::builtin::ConstantFOp>()
+            && let Some(&result) = op.results.first()
+            && self
+                .float_width(result)
+                .is_some_and(|width| float_widths.contains(&width))
+        {
+            let class = self.build_from_value(result);
+            seeds.constant_candidates.push((op_id, class));
+        }
+    }
+
+    fn float_width(&self, value: ValueId) -> Option<u32> {
+        let ty = self.context.get_value(value).ty();
+        let data = self.context.get_type_data(ty);
+        (data.as_ref() as &dyn std::any::Any)
+            .downcast_ref::<FloatType>()
+            .map(FloatType::bit_width)
+    }
+
+    /// A region-carrying operation is read through its own interfaces: its regions
+    /// join this graph, and what it publishes is the γ over what its arms yield or
+    /// the θ over what its edges carry. Its regions may have written anything the
+    /// straight-line chain cannot spell, so the chain breaks across it.
+    fn build_region_op(
+        &mut self,
+        op: &Arc<OpInstance>,
+        float_widths: &HashSet<u32>,
+        seeds: &mut Seeds,
+    ) {
+        if let Some(conditional) = op.clone().as_interface::<dyn Conditional>() {
+            for region in op.regions.clone() {
+                self.bind_region_arguments(op, region);
+                self.build_region(region, float_widths, seeds);
+            }
+            self.break_state();
+            self.seed_gamma(op, conditional.as_ref());
+            return;
+        }
+        if let Some(loop_like) = op.clone().as_interface::<dyn LoopLike>() {
+            self.seed_theta(op, loop_like.as_ref(), float_widths, seeds);
+            return;
+        }
+        for region in op.regions.clone() {
+            self.build_region(region, float_widths, seeds);
+        }
+        self.break_state();
+    }
+
+    /// γ: what a gate publishes is the choice between what its arms yield, one
+    /// child per case in the order the interface reports them — the order a
+    /// destruction maps back onto the regions.
+    ///
+    /// An arm leaving the enclosing loop never reaches what follows the gate, so a
+    /// gate one arm leaves through publishes what the arm that stays yields, and
+    /// one every arm leaves through publishes nothing the graph can name.
+    fn seed_gamma(&mut self, op: &Arc<OpInstance>, conditional: &dyn Conditional) {
+        let decision = self.build_from_value(conditional.decision());
+        let cases = conditional.case_values();
+        let arms: Vec<RegionId> = cases
+            .iter()
+            .map(|&(region, _)| region)
+            .filter(|&region| region_exit(self.context, region).is_none())
+            .collect();
+        for (index, &result) in op.results.clone().iter().enumerate() {
+            let yields: Option<Vec<ValueId>> = arms
+                .iter()
+                .map(|&region| conditional.region_yields(region).get(index).copied())
+                .collect();
+            let class = match yields.as_deref() {
+                Some(&[value]) => self.build_from_value(value),
+                Some(values) if values.len() == cases.len() => {
+                    let mut args = vec![decision];
+                    for &value in values {
+                        args.push(self.build_from_value(value));
+                    }
+                    let ty = self.context.get_value(result).ty();
+                    let gamma = self.egraph.add(SemNode::gamma(result, args).typed(ty));
+                    // The gate's own value joins the choice: the cover may read the
+                    // gate as the register its regions leave it in, whatever it can
+                    // do with the arms' terms.
+                    let anchor = self.add_input_value(result, Some(ty));
+                    self.egraph.union(gamma, anchor)
+                }
+                _ => continue,
+            };
+            self.value_to_class.insert(result, class);
+        }
+    }
+
+    /// An arm's entry arguments are the inputs the gate forwards into it: the
+    /// operation's trailing operands, one per argument.
+    fn bind_region_arguments(&mut self, op: &Arc<OpInstance>, region: RegionId) {
+        let Some(block) = self
+            .context
+            .get_region(region)
+            .iter(self.context.clone())
+            .next()
+        else {
+            return;
+        };
+        let arguments: Vec<ValueId> = block.arguments().iter().map(|a| a.id()).collect();
+        let first = op.operands.len().saturating_sub(arguments.len());
+        for (&argument, &input) in arguments.iter().zip(&op.operands[first..]) {
+            let class = self.build_from_value(input);
+            self.value_to_class.insert(argument, class);
+        }
+    }
+
+    /// θ: what a loop carries in a port is the value it was entered with and the
+    /// one each edge back into the port carries — the body's latch, and every
+    /// `break`/`continue` leaving its scope, in the one order `port_edges` reports.
+    /// The port's argument anchors first, so the regions can be read on it, and the
+    /// θ joins that class after: an edge is a term over the argument itself.
+    ///
+    /// A loop whose quad does not line the ports up — `scf.for`, whose body carries
+    /// an induction variable no init names — anchors instead.
+    fn seed_theta(
+        &mut self,
+        op: &Arc<OpInstance>,
+        loop_like: &dyn LoopLike,
+        float_widths: &HashSet<u32>,
+        seeds: &mut Seeds,
+    ) {
+        let carried = loop_like.carried_args();
+        let inits = loop_like.inits();
+        let tested = self.tested_values(op, carried.len());
+        let heads = match &tested {
+            Some((_, arguments, _)) => arguments.clone(),
+            None => carried.clone(),
+        };
+        for &head in &heads {
+            self.build_from_value(head);
+        }
+        // The body reads what the test forwards into it, so the test's region is
+        // read first and its forwarded values name the body's arguments.
+        if let Some((region, _, forwarded)) = tested.clone() {
+            self.build_region(region, float_widths, seeds);
+            for (&argument, &value) in carried.iter().zip(&forwarded) {
+                let class = self.build_from_value(value);
+                self.value_to_class.insert(argument, class);
+            }
+        }
+        for region in op.regions.clone() {
+            if tested
+                .as_ref()
+                .is_some_and(|(tested, ..)| *tested == region)
+            {
+                continue;
+            }
+            self.build_region(region, float_widths, seeds);
+        }
+        self.break_state();
+
+        let edges: Vec<Arc<OpInstance>> = op
+            .clone()
+            .as_interface::<dyn TokenScope>()
+            .into_iter()
+            .flat_map(|scope| scope.token_scope_regions())
+            .flat_map(|body| port_edges(self.context, body))
+            .map(|edge| self.context.get_op(edge))
+            .collect();
+        if edges.is_empty() || inits.len() != heads.len() {
+            return;
+        }
+        for port in 0..heads.len() {
+            let Some(latched) = self.latched_values(&edges, port, carried.len()) else {
+                continue;
+            };
+            let init = self.build_from_value(inits[port]);
+            let mut args = vec![init];
+            for value in latched {
+                let class = self.build_from_value(value);
+                args.push(class);
+            }
+            let head = self.build_from_value(heads[port]);
+            let theta = self.egraph.add(SemNode::theta(heads[port], args));
+            self.egraph.union(theta, head);
+        }
+        self.egraph.rebuild();
+    }
+
+    /// The value each edge carries into the `port`-th of a loop's `ports` carried
+    /// ports. `None` where an edge carries too few to name it.
+    fn latched_values(
+        &self,
+        edges: &[Arc<OpInstance>],
+        port: usize,
+        ports: usize,
+    ) -> Option<Vec<ValueId>> {
+        edges
+            .iter()
+            .map(|edge| {
+                let carried = carried_operands(edge);
+                (carried.len() == ports).then(|| carried[port])
+            })
+            .collect()
+    }
+
+    /// The region a loop evaluates before each iteration, the arguments it reads
+    /// the carried values as, and the values it forwards into the body — its
+    /// terminator's trailing operands, one per port. `None` for a loop that tests
+    /// nothing it carries.
+    ///
+    /// Read through the interfaces rather than through an `scf.while` accessor: the
+    /// mapping body argument ↔ condition operand ↔ result is what `GuardedLoop`
+    /// and the terminator already say between them, and an accessor would be a
+    /// second source of truth for it.
+    fn tested_values(
+        &self,
+        op: &Arc<OpInstance>,
+        ports: usize,
+    ) -> Option<(RegionId, Vec<ValueId>, Vec<ValueId>)> {
+        let guard = op.clone().as_interface::<dyn GuardedLoop>()?;
+        let EntryGuard::Region {
+            region, arguments, ..
+        } = guard.entry_guard()
+        else {
+            return None;
+        };
+        if arguments.len() != ports {
+            return None;
+        }
+        let block = self
+            .context
+            .get_region(region)
+            .iter(self.context.clone())
+            .next()?;
+        let operands = &self.context.get_op(*block.op_ids().last()?).operands;
+        let first = operands.len().checked_sub(ports)?;
+        Some((region, arguments, operands[first..].to_vec()))
     }
 
     /// The chain the next memory access reads. An unknown chain is an opaque

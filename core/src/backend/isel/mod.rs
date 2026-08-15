@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 
 use tir::{
     AnalysisManager, Block, BlockId, BranchGuard, BranchTerminator, Context, OpId, Operation,
-    OperationRef, Pass, PassError, PassTarget, Rewriter, Terminator, TypeId, ValueId,
+    OperationRef, Pass, PassError, PassTarget, RegionId, Rewriter, Terminator, TypeId, ValueId,
     analysis::{DefUse, DominatingEdgeFacts, DominatorTree},
     graph::{Dag, MutDag, NodeId, OperandConstraint},
     sem::{
@@ -1181,14 +1181,26 @@ impl InstructionSelectPass {
         }
         // Preserve the old behavior for unreachable blocks, which are absent
         // from the dominator tree and therefore carry no dominating-edge facts.
-        for region_id in &op.op().regions {
-            let region = context.get_region(*region_id);
-            for block in region.iter(context.clone()) {
-                if block.is_empty() || visited.contains(&block.id()) {
-                    continue;
+        // A region's blocks are absent for the same reason — the tree orders the
+        // function's own blocks, and nothing yet orders sibling arms.
+        let regions = builder::regions_enabled();
+        for block_id in function_blocks(context, op, regions) {
+            let block = context.get_block(block_id);
+            if block.is_empty() || visited.contains(&block_id) {
+                continue;
+            }
+            let plan = self.solve_block(context, &block, &mut fs, &dom, false, &base_matches);
+            self.plans.insert(block_id, plan);
+        }
+        // The regions were solved here, so the operations carrying them must not
+        // solve graphs of their own when the walk reaches them.
+        if regions {
+            for block_id in function_blocks(context, op, true) {
+                for op_id in context.get_block(block_id).op_ids() {
+                    if !context.get_op(op_id).regions.is_empty() {
+                        self.solved.insert(op_id);
+                    }
                 }
-                let plan = self.solve_block(context, &block, &mut fs, &dom, false, &base_matches);
-                self.plans.insert(block.id(), plan);
             }
         }
     }
@@ -1288,17 +1300,14 @@ impl InstructionSelectPass {
         let mut value_to_def = HashMap::new();
         let mut op_block = HashMap::new();
         let mut op_position = HashMap::new();
-        let mut block_ids = Vec::new();
-        for region_id in &op.op().regions {
-            let region = context.get_region(*region_id);
-            for block in region.iter(context.clone()) {
-                block_ids.push(block.id());
-                for (position, op_id) in block.op_ids().into_iter().enumerate() {
-                    op_block.insert(op_id, block.id());
-                    op_position.insert(op_id, position);
-                    for result in &context.get_op(op_id).results {
-                        value_to_def.insert(*result, op_id);
-                    }
+        let regions = builder::regions_enabled();
+        let block_ids = function_blocks(context, op, false);
+        for &block_id in &function_blocks(context, op, regions) {
+            for (position, op_id) in context.get_block(block_id).op_ids().into_iter().enumerate() {
+                op_block.insert(op_id, block_id);
+                op_position.insert(op_id, position);
+                for result in &context.get_op(op_id).results {
+                    value_to_def.insert(*result, op_id);
                 }
             }
         }
@@ -1317,43 +1326,16 @@ impl InstructionSelectPass {
         // memoization unifies classes across blocks (cross-block CSE). Class ids
         // are resolved through `find` afterwards because saturation may merge them.
         let mut egraph = SemEGraph::new();
-        let mut roots_by_op: HashMap<OpId, Id> = HashMap::new();
         let mut control: HashMap<BlockId, Vec<ControlReification>> = HashMap::new();
         let mut prepared: HashMap<ValueId, ConditionExpr> = HashMap::new();
-        let mut constant_candidates: Vec<(OpId, Id)> = Vec::new();
-        let value_to_class = {
+        let (value_to_class, mut roots_by_op, mut constant_candidates) = {
             let mut builder =
                 SemDagBuilder::new(context, &value_to_def, &mut egraph, pointer_width);
-            for &block_id in &block_ids {
-                // Blocks are lowered in region order, which is not an
-                // execution order: what ran before a block is a join the
-                // straight-line chain does not model, so each block reads a
-                // fresh unknown state.
-                builder.break_state();
-                for op_id in context.get_block(block_id).op_ids() {
-                    let op = context.get_op(op_id);
-                    if let Some(root) = builder.build_for_op(&op).or_else(|| {
-                        op.is::<crate::builtin::ConstantOp>()
-                            .then(|| builder.build_from_value(op.results[0]))
-                    }) {
-                        roots_by_op.insert(op_id, root);
-                    } else if (op.is::<crate::builtin::ConstantFOp>()
-                        && op.results.first().is_some_and(|result| {
-                            let ty = context.get_value(*result).ty();
-                            let data = context.get_type_data(ty);
-                            (data.as_ref() as &dyn std::any::Any)
-                                .downcast_ref::<tir::builtin::FloatType>()
-                                .is_some_and(|ty| {
-                                    self.float_constant_materializer_widths
-                                        .contains(&ty.bit_width())
-                                })
-                        }))
-                        && let Some(&result) = op.results.first()
-                    {
-                        constant_candidates.push((op_id, builder.build_from_value(result)));
-                    }
-                }
-            }
+            let seeds = builder.build_blocks(
+                &block_ids,
+                &self.float_constant_materializer_widths,
+                regions,
+            );
 
             // With branch emitters installed, terminators select here too: a
             // guarded two-way terminator's condition is lowered so branch rules can
@@ -1445,7 +1427,11 @@ impl InstructionSelectPass {
                 }
             }
 
-            builder.value_to_class
+            (
+                builder.value_to_class,
+                seeds.roots_by_op,
+                seeds.constant_candidates,
+            )
         };
 
         // Standalone constants have no semantic root. When the target patterns
@@ -2580,6 +2566,26 @@ impl InstructionSelectPass {
         prune_dominated_matches(&self.compiled_patterns, &mut matches);
         matches
     }
+}
+
+/// The function's own blocks in region order and, under the region path, every
+/// block its operations nest — the structural order the walk reads them in.
+fn function_blocks(context: &Context, op: &OperationRef, nested: bool) -> Vec<BlockId> {
+    fn walk(context: &Context, regions: &[RegionId], nested: bool, out: &mut Vec<BlockId>) {
+        for &region_id in regions {
+            for block in context.get_region(region_id).iter(context.clone()) {
+                out.push(block.id());
+                if nested {
+                    for op_id in block.op_ids() {
+                        walk(context, &context.get_op(op_id).regions, true, out);
+                    }
+                }
+            }
+        }
+    }
+    let mut blocks = Vec::new();
+    walk(context, &op.op().regions, nested, &mut blocks);
+    blocks
 }
 
 /// Op order then control-guard order, first occurrence kept: the seeds feed

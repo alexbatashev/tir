@@ -89,6 +89,32 @@ finite-expression evaluator; selection may preserve it as CFG edge assignments,
 and theory axioms over it are discharged by induction over the iterations (see
 [Saturation with proved rewrites](#2-saturation-with-proved-rewrites)).
 
+### Structured input (bring-up flag `TIR_ISEL_REGIONS`)
+
+With the flag set the builder reads a region-carrying operation's regions into the
+same graph instead of leaving it to seed a graph of its own, and the pass solves
+the nested blocks from the function's visit. A region's operations then share the
+function's classes, so a constant defined before a gate folds into an arm's
+instruction as an immediate. The gates come off the ops' own interfaces:
+
+- a `Conditional`'s result is the flat n-ary `If(decision, arm…)` over what its
+  arms yield (`case_values` order, so a destruction maps the children back onto
+  the regions), unioned with the gate's own value so the cover may still read it
+  as the register its regions leave it in. An arm leaving the enclosing loop never
+  reaches what follows the gate, so a gate one arm leaves through publishes what
+  the arm that stays yields;
+- a `LoopLike`'s carried port is `Theta(init, edge…)` over what each edge back
+  into the port carries — the body's latch and every `break`/`continue` leaving
+  its scope, in `analysis::scopes::port_edges` order — unioned with the port
+  argument. A loop whose quad does not line the ports up (`scf.for`, whose body
+  carries an induction variable no init names) anchors instead;
+- an `scf.while`'s forwarding (body argument ↔ condition operand ↔ result) is read
+  through `GuardedLoop::entry_guard` plus the test terminator's trailing operands,
+  not through a dialect accessor.
+
+The flag is deleted when the backend contract flips to structured input; until
+then the CFG path above is the default and is unchanged.
+
 ### What a node is
 
 An e-node is a **label** plus its **operand e-classes**. The label is a
