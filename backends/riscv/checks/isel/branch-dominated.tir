@@ -3,9 +3,8 @@
 // A block entered through exactly one guarded edge inherits the guard's fact,
 // asserted in an e-graph assumption scope while the block solves. Restructuring
 // makes the second guard the test of a gate nested in the first gate's arm, and
-// a region's entry fact does not yet reach a nested gate's test: the identical
-// compare is re-selected instead of folding to the taken successor. Recovering
-// that fold is the one Stage-6 residue this shape shows.
+// the arm's fact decides that test: no compare and no branch are emitted, the
+// destruction jumps straight to the arm the decision picks.
 
 module {
   func @dominated(%0: !i64, %1: !i64) -> !i64 {
@@ -27,9 +26,10 @@ module {
   module_end
 }
 
-// The entry selects the fused compare-and-branch, and so does the dominated
-// block.
-// CHECK: riscv.blt {rs1 = %virt[[A:[0-9]+]]:GPR, rs2 = %virt[[B:[0-9]+]]:GPR, imm = ^[[ARM:bb[0-9]+]]}
+// The entry selects the fused compare-and-branch; the dominated block tests
+// nothing.
+// CHECK: riscv.blt {rs1 = %virt{{[0-9]+}}:GPR, rs2 = %virt{{[0-9]+}}:GPR, imm = ^[[ARM:bb[0-9]+]]}
 // CHECK-NEXT: asm.vbr ^bb{{[0-9]+}}
 // CHECK: ^[[ARM]]:
-// CHECK-NEXT: riscv.blt {rs1 = %virt[[A]]:GPR, rs2 = %virt[[B]]:GPR, imm = ^bb{{[0-9]+}}}
+// CHECK-NEXT: asm.vbr ^bb{{[0-9]+}}
+// CHECK-NOT: riscv.blt

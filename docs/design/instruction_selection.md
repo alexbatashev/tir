@@ -769,6 +769,12 @@ for the whole block and indexed by condition class (`guard_branch_hits`); each t
 then looks up its own hits and `best_guard_branch` picks the cheapest match rooted
 at its condition class whose operands all resolve at B (tie → most specific):
 
+- **Decided**: the condition class already holds a constant — the block's
+  assumption scope merged a re-tested condition with its truth (a nested gate's
+  test under an enclosing region's entry fact), or the test was written constant.
+  No branch rule is consulted and nothing joins `mm_overlay`, so the condition is
+  not materialized; destruction emits the single edge the decision picks
+  (`AuxEmit::Decided`).
 - **Fused**: the branch instruction recomputes the condition from its operand
   registers (the match's boundary classes join the block's materialization
   overlay `mm_overlay`). The
@@ -971,7 +977,8 @@ After asserting, the block `rebuild`s and **saturates inside the scope**, so the
 rewrites propagate the facts. Consequences then fall out of the ordinary
 machinery: a re-computed identical (or complement, or operand-swapped-under-`eq`)
 compare's class now holds a constant, so the compare op is Consumed and its test
-needs no branch; a value consumer folds the known immediate
+is *decided* (above) rather than branched on; a value consumer folds the known
+immediate
 (`RuleMatch` records *both* the int and register binding when a class carries
 both). The scope is popped once the block's plan is stored, leaving the shared
 graph assumption-free for the next block.

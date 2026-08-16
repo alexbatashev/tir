@@ -1759,6 +1759,7 @@ impl InstructionSelectPass {
                         *value = *replacement;
                     }
                 }
+                AuxEmit::Decided(_) => {}
             }
             self.region_values.insert((*op, *slot), emit.clone());
         }
@@ -1833,9 +1834,19 @@ impl InstructionSelectPass {
         // branch-if-nonzero (which needs the condition materialized). A counter's
         // advance is a value, not a branch, and is always demanded.
         let mut mm_overlay: HashSet<Id> = HashSet::new();
-        let mut aux_branches: Vec<(OpId, AuxSlot, Option<GuardBranch>)> = Vec::new();
+        let mut aux_branches: Vec<(OpId, AuxSlot, Option<AuxEmit>)> = Vec::new();
         for &(op, slot, class) in fs.region_aux.get(&block_id).into_iter().flatten() {
             let class = fs.egraph.find(class);
+            // The scope this block solves under may already decide the test — an
+            // enclosing region's entry fact merges a re-tested condition with its
+            // truth. Then no branch is selected and nothing is demanded: the
+            // destruction takes the edge the decision picks.
+            if slot != AuxSlot::Advance
+                && let Some(known) = class_int_binding(&fs.egraph, class)
+            {
+                aux_branches.push((op, slot, Some(AuxEmit::Decided(!known.is_zero()))));
+                continue;
+            }
             let fused = (slot != AuxSlot::Advance)
                 .then(|| {
                     let candidates = guard_branch_hits
@@ -1850,7 +1861,11 @@ impl InstructionSelectPass {
                     for boundary in boundary_classes {
                         mm_overlay.insert(fs.chase_low_extract(boundary));
                     }
-                    aux_branches.push((op, slot, Some(GuardBranch::Fused { rule_index, m })));
+                    aux_branches.push((
+                        op,
+                        slot,
+                        Some(AuxEmit::Branch(GuardBranch::Fused { rule_index, m })),
+                    ));
                 }
                 None => {
                     mm_overlay.insert(fs.chase_low_extract(class));
@@ -2105,9 +2120,9 @@ impl InstructionSelectPass {
             .collect();
         let aux = aux_branches
             .into_iter()
-            .filter_map(|(op, slot, fused)| {
-                let branch = match fused {
-                    Some(fused) => AuxEmit::Branch(fused),
+            .filter_map(|(op, slot, selected)| {
+                let branch = match selected {
+                    Some(emit) => emit,
                     None => {
                         let class = *aux_class.get(&(op, slot))?;
                         let value = destinations.get(&class).copied().or_else(|| {

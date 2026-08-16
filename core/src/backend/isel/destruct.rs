@@ -441,6 +441,16 @@ impl<'a> Destructor<'a> {
             self.jump(block, fallthrough, fallthrough_args);
             return Ok(());
         }
+        // A test the block's assumptions decided leaves one reachable edge.
+        if let AuxEmit::Decided(holds) = test {
+            let (dest, args) = if *holds {
+                (taken, taken_args)
+            } else {
+                (fallthrough, fallthrough_args)
+            };
+            self.jump(block, dest, args);
+            return Ok(());
+        }
         let target = if taken_args.is_empty() {
             taken
         } else {
@@ -501,7 +511,9 @@ impl<'a> Destructor<'a> {
     fn aux_value(&self, op: &Arc<OpInstance>, slot: AuxSlot) -> Result<ValueId, PassError> {
         match self.aux(op, slot)? {
             AuxEmit::Value(value) => Ok(*value),
-            AuxEmit::Branch(_) => Err(Self::decline(op, "a counter advance is not a branch")),
+            AuxEmit::Branch(_) | AuxEmit::Decided(_) => {
+                Err(Self::decline(op, "a counter advance is not a branch"))
+            }
         }
     }
 

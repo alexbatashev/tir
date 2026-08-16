@@ -28,6 +28,9 @@ pub(crate) struct BlockPlan {
 pub(crate) enum AuxEmit {
     Branch(GuardBranch),
     Value(ValueId),
+    /// A test the block's assumptions already decided: the edge it picks is
+    /// taken unconditionally, and nothing is computed or branched on.
+    Decided(bool),
 }
 
 #[derive(Clone, Debug)]
