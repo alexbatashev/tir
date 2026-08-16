@@ -444,6 +444,31 @@ fn matches_op_name(op: &OpInstance, spec: &str) -> bool {
     }
 }
 
+/// `root` as it stands now: an operation handle is a snapshot, and a pipeline
+/// holds its root across passes that edit it. An erased root is looked up by
+/// position, because [`Rewriter::replace_op`] keeps the replacement at the
+/// erased op's index — that is where selection leaves the machine symbol it
+/// made out of a function.
+fn refreshed(context: &Context, root: &OperationRef) -> Option<OperationRef> {
+    if context.has_operation(root.op.id) {
+        return Some(OperationRef::new(
+            context.get_op(root.op.id),
+            root.block.clone(),
+            root.position,
+        ));
+    }
+    let block = root.block.as_ref()?.id();
+    let position = root.position?;
+    if !context.has_block(block) {
+        return None;
+    }
+    let block = context.get_block(block);
+    let id = *block.op_ids().get(position)?;
+    context
+        .has_operation(id)
+        .then(|| OperationRef::new(context.get_op(id), Some(block), Some(position)))
+}
+
 /// Whether `op`'s tree has entered the machine layer — it holds a target
 /// instruction, or one of the `asm` dialect's containers and pseudos. A machine
 /// instruction declares no SSA results; it claims its destination through a
@@ -573,15 +598,19 @@ impl PassManager {
         };
         let result = self.run_on_op_ref(context, root, &AnalysisManager::new());
         crate::memstats::summary();
-        result
+        result.map(|_| ())
     }
 
+    /// Run the pipeline over the subtree rooted at `root` and return the root as
+    /// it stands afterwards: a pass may replace the root in place — selection
+    /// turns a function into a machine symbol — and both the remaining passes
+    /// and the caller follow the replacement.
     pub fn run_on_op_ref(
         &mut self,
         context: &Context,
-        root: OperationRef,
+        mut root: OperationRef,
         analyses: &AnalysisManager,
-    ) -> Result<(), PassError> {
+    ) -> Result<OperationRef, PassError> {
         let mut rewriter = Rewriter::new(context.clone());
         for entry in &mut self.passes {
             Self::run_entry(
@@ -592,8 +621,11 @@ impl PassManager {
                 &mut rewriter,
                 analyses,
             )?;
+            if let Some(current) = refreshed(context, &root) {
+                root = current;
+            }
         }
-        Ok(())
+        Ok(root)
     }
 
     fn run_entry(

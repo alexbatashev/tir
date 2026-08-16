@@ -137,7 +137,8 @@ pub(super) fn emit_machine_code(
     emit_assembly: bool,
 ) -> Vec<u8> {
     use tir::Operation;
-    use tir::backend::pipeline::{StopAfter, build_pipeline};
+    use tir::backend::binary::ObjectEmission;
+    use tir::backend::pipeline::lower_and_emit;
 
     let Some(march) = opts.march.as_deref() else {
         eprintln!("fcc: error: --march is required for the asm and obj stages");
@@ -182,31 +183,31 @@ pub(super) fn emit_machine_code(
     // Memory state describes the structured mid-end only; codegen takes the
     // implicit order back.
     function_pipeline.add_pass(tir::passes::EraseStatePass::new());
-    let module_op = context.get_op(module.id());
-    pm.run(&context, module_op.clone()).unwrap_or_else(|e| {
-        eprintln!("fcc: error: control-flow lowering failed: {e}");
-        std::process::exit(1);
-    });
+    pm.run(&context, context.get_op(module.id()))
+        .unwrap_or_else(|e| {
+            eprintln!("fcc: error: control-flow lowering failed: {e}");
+            std::process::exit(1);
+        });
 
     crate::codegen::lower_data(&context, &module).unwrap_or_else(|e| {
         eprintln!("fcc: error: data lowering failed: {e}");
         std::process::exit(1);
     });
 
-    let mut pm = build_pipeline(target.as_ref(), &context, StopAfter::Finalize);
-    pm.run(&context, module_op).unwrap_or_else(|e| {
-        eprintln!("fcc: error: backend pipeline failed: {e}");
+    let die = |e: String| -> ! {
+        eprintln!("fcc: error: {e}");
         std::process::exit(1);
-    });
+    };
 
     if emit_assembly {
-        let rendered = target
-            .asm_printer(&context)
-            .print_module(&context, &module)
-            .unwrap_or_else(|e| {
-                eprintln!("fcc: error: failed to print assembly: {e}");
-                std::process::exit(1);
-            });
+        let printer = target.asm_printer(&context);
+        let mut rendered = String::new();
+        lower_and_emit(target.as_ref(), &context, &module, |context, op| {
+            printer
+                .print_op(context, op, &mut rendered)
+                .map_err(|e| format!("failed to print assembly: {e}"))
+        })
+        .unwrap_or_else(|e| die(e));
         return rendered.into_bytes();
     }
 
@@ -215,12 +216,17 @@ pub(super) fn emit_machine_code(
         eprintln!("fcc: error: target '{march}' does not support object emission");
         std::process::exit(1);
     };
-    let object = writer
-        .write_module(&context, &module, &format)
-        .unwrap_or_else(|e| {
-            eprintln!("fcc: error: failed to emit object: {e}");
-            std::process::exit(1);
-        });
+    let mut emission = ObjectEmission::default();
+    lower_and_emit(target.as_ref(), &context, &module, |context, op| {
+        writer
+            .write_op(context, op, &mut emission, &format)
+            .map_err(|e| format!("failed to emit object: {e}"))
+    })
+    .unwrap_or_else(|e| die(e));
+    let object = writer.finish(emission, &format).unwrap_or_else(|e| {
+        eprintln!("fcc: error: failed to emit object: {e}");
+        std::process::exit(1);
+    });
     tir::backend::binary::write_elf(&object, &format)
 }
 

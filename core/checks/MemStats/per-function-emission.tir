@@ -1,0 +1,25 @@
+// The backend lowers and emits one function at a time and gives its machine IR
+// back to the arenas once the bytes exist, so the operations alive while a
+// function is compiled are its own, not the whole module's. Either of these two
+// functions on its own reports `ops_live=7` at the end of the pipeline; both of
+// them together used to report 12, and now report 7 again once the first one's
+// machine IR is gone.
+
+// RUN: env TIR_MEM_STATS=1 tir mc --march=riscv64 --filetype=asm %s 2>&1 | filecheck %s
+
+module {
+  func @f(%0: !i32) -> !i32 {
+    %1 = addi %0, %0 : !i32
+    %2 = addi %1, %0 : !i32
+    return %2
+  }
+  func @g(%0: !i32) -> !i32 {
+    %1 = addi %0, %0 : !i32
+    %2 = addi %1, %0 : !i32
+    return %2
+  }
+  module_end
+}
+
+// CHECK: context after=finalize-lowering {{.*}} ops_live={{[0-9]+}}
+// CHECK: context after=finalize-lowering {{.*}} ops_live=7

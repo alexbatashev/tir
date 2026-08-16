@@ -4,8 +4,8 @@ use std::io::Write;
 use std::{error::Error, ffi::OsString};
 
 use clap::{Args, ValueEnum};
-use tir::backend::binary::{render_ascii, write_elf};
-use tir::backend::pipeline::{StopAfter, build_pipeline};
+use tir::backend::binary::{ObjectEmission, render_ascii, write_elf};
+use tir::backend::pipeline::{StopAfter, build_pipeline, lower_and_emit};
 use tir::{Context, IRFormatter, Operation};
 
 use crate::common::{InputKind, parse_module, parse_tir, read_input, resolve_kind};
@@ -109,12 +109,6 @@ pub fn run(args: ToolArgs) -> Result<(), Box<dyn Error>> {
         (None, Some(_)) => StopAfter::Finalize,
     };
 
-    if needs_lowering {
-        let mut pm = build_pipeline(target.as_ref(), &context, stop_after);
-        pm.run(&context, context.get_op(module.id()))
-            .map_err(|e| format!("pass pipeline failed: {e}"))?;
-    }
-
     // Without --filetype the legacy behavior is kept: assembly when the input
     // was already assembly, the IR after the requested stage otherwise.
     let filetype = match args.filetype {
@@ -123,7 +117,35 @@ pub fn run(args: ToolArgs) -> Result<(), Box<dyn Error>> {
         None => None,
     };
 
+    // Emitting bytes means each function can be lowered, emitted and dropped on
+    // its own. A stage that stops short prints the machine IR, and a target that
+    // renders assembly text for the whole module at once (PTX) has nowhere to
+    // put one symbol, so both keep the module-wide pipeline.
+    let per_symbol = needs_lowering
+        && stop_after == StopAfter::Finalize
+        && match filetype {
+            Some(FileType::Asm) => target.print_asm_text(&context, &module).is_none(),
+            Some(_) => true,
+            None => false,
+        };
+
+    if needs_lowering && !per_symbol {
+        let mut pm = build_pipeline(target.as_ref(), &context, stop_after);
+        pm.run(&context, context.get_op(module.id()))
+            .map_err(|e| format!("pass pipeline failed: {e}"))?;
+    }
+
     let output = match filetype {
+        Some(FileType::Asm) if per_symbol => {
+            let printer = target.asm_printer(&context);
+            let mut rendered = String::new();
+            lower_and_emit(target.as_ref(), &context, &module, |context, op| {
+                printer
+                    .print_op(context, op, &mut rendered)
+                    .map_err(|e| format!("failed to print assembly: {e}"))
+            })?;
+            rendered.into_bytes()
+        }
         Some(FileType::Asm) => match target.print_asm_text(&context, &module) {
             Some(result) => result
                 .map_err(|e| format!("failed to print assembly: {e}"))?
@@ -147,9 +169,21 @@ pub fn run(args: ToolArgs) -> Result<(), Box<dyn Error>> {
                     target.name()
                 )
             })?;
-            let obj = writer
-                .write_module(&context, &module, &fmt)
-                .map_err(|e| format!("failed to emit object: {e}"))?;
+            let obj = if per_symbol {
+                let mut emission = ObjectEmission::default();
+                lower_and_emit(target.as_ref(), &context, &module, |context, op| {
+                    writer
+                        .write_op(context, op, &mut emission, &fmt)
+                        .map_err(|e| format!("failed to emit object: {e}"))
+                })?;
+                writer
+                    .finish(emission, &fmt)
+                    .map_err(|e| format!("failed to emit object: {e}"))?
+            } else {
+                writer
+                    .write_module(&context, &module, &fmt)
+                    .map_err(|e| format!("failed to emit object: {e}"))?
+            };
             match filetype {
                 Some(FileType::Obj) => write_elf(&obj, &fmt),
                 _ => render_ascii(&obj).into_bytes(),

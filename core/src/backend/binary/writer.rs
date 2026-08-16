@@ -83,7 +83,12 @@ pub struct BinaryWriter {
     patchers: HashMap<String, InstructionPatcher>,
 }
 
-struct WalkState {
+/// Object emission in progress. A driver that emits the module symbol by
+/// symbol threads one of these through [`BinaryWriter::write_op`] and closes it
+/// with [`BinaryWriter::finish`]; cross-symbol references are relocations, so
+/// only [`BinaryWriter::finish`] needs the whole module to have been walked.
+#[derive(Default)]
+pub struct ObjectEmission {
     obj: ObjectFile,
     current_section: Option<usize>,
     block_starts: HashMap<BlockId, u64>,
@@ -104,14 +109,17 @@ impl BinaryWriter {
         module: &ModuleOp,
         fmt: &ObjectFormatInfo,
     ) -> Result<ObjectFile, BinaryEmitError> {
-        let mut state = WalkState {
-            obj: ObjectFile::default(),
-            current_section: None,
-            block_starts: HashMap::new(),
-            fixups: Vec::new(),
-        };
-
+        let mut state = ObjectEmission::default();
         self.walk_block(context, module.body(), &mut state, fmt)?;
+        self.finish(state, fmt)
+    }
+
+    /// Resolve the fixups left by [`BinaryWriter::write_op`] and yield the object.
+    pub fn finish(
+        &self,
+        mut state: ObjectEmission,
+        fmt: &ObjectFormatInfo,
+    ) -> Result<ObjectFile, BinaryEmitError> {
         self.resolve_fixups(&mut state, fmt)?;
         Ok(state.obj)
     }
@@ -120,56 +128,67 @@ impl BinaryWriter {
         &self,
         context: &Context,
         block: Arc<tir::Block>,
-        state: &mut WalkState,
+        state: &mut ObjectEmission,
         fmt: &ObjectFormatInfo,
     ) -> Result<(), BinaryEmitError> {
         for op_id in block.op_ids() {
-            let op = context.get_op(op_id);
-            if op.is::<ModuleEndOp>()
-                || op.is::<SectionEndOp>()
-                || op.is::<SymbolEndOp>()
-                || op.is::<BlockEndOp>()
-                // External declarations contribute nothing to the object; their
-                // symbols materialize as undefined entries via relocations.
-                || op.is::<DeclareOp>()
-            {
-                continue;
-            }
-
-            if let Some(section) = op.clone().as_op::<SectionOp>() {
-                let name = string_attr(&op, "name").unwrap_or(".text");
-                let enclosing = state.current_section;
-                state.current_section = Some(ensure_section(&mut state.obj, name));
-                self.walk_block(context, section.body(), state, fmt)?;
-                state.current_section = enclosing;
-                continue;
-            }
-
-            if op.clone().as_op::<SymbolOp>().is_some() {
-                self.walk_symbol(context, &op, state, fmt)?;
-                continue;
-            }
-
-            if op.clone().as_op::<LiteralOp>().is_some() {
-                emit_literal(&op, state)?;
-                continue;
-            }
-
-            if op.clone().as_op::<DataRelocOp>().is_some() {
-                emit_data_reloc(&op, state, fmt)?;
-                continue;
-            }
-
-            self.encode_op(&op, state)?;
+            self.write_op(context, &context.get_op(op_id), state, fmt)?;
         }
         Ok(())
+    }
+
+    /// Encode one operation of a module body into `state`. A driver emitting the
+    /// module symbol by symbol calls this directly.
+    pub fn write_op(
+        &self,
+        context: &Context,
+        op: &Arc<tir::OpInstance>,
+        state: &mut ObjectEmission,
+        fmt: &ObjectFormatInfo,
+    ) -> Result<(), BinaryEmitError> {
+        if op.is::<ModuleEndOp>()
+            || op.is::<SectionEndOp>()
+            || op.is::<SymbolEndOp>()
+            || op.is::<BlockEndOp>()
+            // External declarations contribute nothing to the object; their
+            // symbols materialize as undefined entries via relocations.
+            || op.is::<DeclareOp>()
+        {
+            return Ok(());
+        }
+
+        if let Some(section) = op.clone().as_op::<SectionOp>() {
+            let name = string_attr(op, "name").unwrap_or(".text");
+            let enclosing = state.current_section;
+            state.current_section = Some(ensure_section(&mut state.obj, name));
+            self.walk_block(context, section.body(), state, fmt)?;
+            state.current_section = enclosing;
+            return Ok(());
+        }
+
+        if op.clone().as_op::<SymbolOp>().is_some() {
+            self.walk_symbol(context, op, state, fmt)?;
+            return Ok(());
+        }
+
+        if op.clone().as_op::<LiteralOp>().is_some() {
+            emit_literal(op, state)?;
+            return Ok(());
+        }
+
+        if op.clone().as_op::<DataRelocOp>().is_some() {
+            emit_data_reloc(op, state, fmt)?;
+            return Ok(());
+        }
+
+        self.encode_op(op, state)
     }
 
     fn walk_symbol(
         &self,
         context: &Context,
         op: &Arc<tir::OpInstance>,
-        state: &mut WalkState,
+        state: &mut ObjectEmission,
         fmt: &ObjectFormatInfo,
     ) -> Result<(), BinaryEmitError> {
         let name = string_attr(op, "name")
@@ -218,7 +237,7 @@ impl BinaryWriter {
     fn encode_op(
         &self,
         op: &Arc<tir::OpInstance>,
-        state: &mut WalkState,
+        state: &mut ObjectEmission,
     ) -> Result<(), BinaryEmitError> {
         let Some(encoder) = self.encoders.get(op.name().as_str()) else {
             if op
@@ -262,7 +281,7 @@ impl BinaryWriter {
 
     fn resolve_fixups(
         &self,
-        state: &mut WalkState,
+        state: &mut ObjectEmission,
         fmt: &ObjectFormatInfo,
     ) -> Result<(), BinaryEmitError> {
         for fixup in &state.fixups {
@@ -320,7 +339,10 @@ impl BinaryWriter {
 
 /// Append a data directive's bytes to the current section. String directives
 /// emit their raw bytes; numeric directives emit little-endian values.
-fn emit_literal(op: &Arc<tir::OpInstance>, state: &mut WalkState) -> Result<(), BinaryEmitError> {
+fn emit_literal(
+    op: &Arc<tir::OpInstance>,
+    state: &mut ObjectEmission,
+) -> Result<(), BinaryEmitError> {
     let unsupported = || BinaryEmitError::UnsupportedOp {
         op: LiteralOp::name().to_string(),
     };
@@ -368,7 +390,7 @@ fn emit_literal(op: &Arc<tir::OpInstance>, state: &mut WalkState) -> Result<(), 
 
 fn emit_data_reloc(
     op: &Arc<tir::OpInstance>,
-    state: &mut WalkState,
+    state: &mut ObjectEmission,
     fmt: &ObjectFormatInfo,
 ) -> Result<(), BinaryEmitError> {
     let unsupported = || BinaryEmitError::UnsupportedOp {

@@ -5,10 +5,13 @@
 //! the allocator must color, while `vret`/`vbr` are finalized *after* it
 //! because the allocator consumes their typed operands.
 
+use std::sync::Arc;
+
+use tir::Operation as _;
 use tir::{
     AnalysisManager, Context, IntegerArithmetic, OperationRef, Pass, PassError, PassManager,
     PassTarget, Rewriter,
-    builtin::{FuncOp, IntegerType},
+    builtin::{FuncOp, IntegerType, ModuleOp},
 };
 
 use crate::backend::TargetMachine;
@@ -93,16 +96,36 @@ impl Pass for TargetIntegerLegalizer {
 }
 
 /// Build the lowering pipeline for `target`: instruction selection, pre-RA
-/// lowerings, register allocation, and post-RA finalization.
+/// lowerings, register allocation, and post-RA finalization. Rooted at a module,
+/// it lowers every function in it.
 pub fn build_pipeline(
     target: &dyn TargetMachine,
     context: &Context,
     stop: StopAfter,
 ) -> PassManager {
+    let mut pm = module_prologue();
+    add_function_passes(&mut pm, target, context, stop);
+    pm
+}
+
+/// The passes that must see the whole module: they run once, ahead of any
+/// function's lowering.
+fn module_prologue() -> PassManager {
     let mut pm = PassManager::new();
     // Object symbols are unique by name, so overloads must already be mangled.
     pm.add_pass(CheckUniqueSymbolsPass::new());
     pm.add_pass(LowerMemoryIntrinsicsPass::new());
+    pm
+}
+
+/// Everything in [`build_pipeline`] that only ever looks at one function, so it
+/// can be rooted at a single one.
+fn add_function_passes(
+    pm: &mut PassManager,
+    target: &dyn TargetMachine,
+    context: &Context,
+    stop: StopAfter,
+) {
     pm.add_pass(TargetIntegerLegalizer::new(target));
     let function_pipeline = pm.nest::<FuncOp>();
     // Selection takes structured regions: a function that still holds a raw CFG
@@ -115,7 +138,7 @@ pub fn build_pipeline(
     // virtual registers, so it must precede register allocation.
     pm.add_pass(DeadCodeEliminationPass::new());
     if stop == StopAfter::ISel {
-        return pm;
+        return;
     }
 
     let pre_ra = target.pre_ra_lowerings();
@@ -129,12 +152,60 @@ pub fn build_pipeline(
         pm.add_boxed_pass(pass);
     }
     if stop == StopAfter::RegAlloc {
-        return pm;
+        return;
     }
 
     let finalize = target.finalize_lowerings();
     if !finalize.is_empty() {
         pm.add_pass(OpLoweringPass::new("finalize-lowering", finalize));
     }
-    pm
+}
+
+/// Lower `module` to machine code and hand it to `emit` one symbol at a time.
+///
+/// Each function is run through the whole backend on its own, emitted, and then
+/// erased, so the machine IR alive at any moment is one function's rather than
+/// the whole module's. Everything else in the module body — data sections,
+/// external declarations — is handed to `emit` where it stands.
+pub fn lower_and_emit(
+    target: &dyn TargetMachine,
+    context: &Context,
+    module: &ModuleOp,
+    mut emit: impl FnMut(&Context, &Arc<tir::OpInstance>) -> Result<(), String>,
+) -> Result<(), String> {
+    let failed = |error: PassError| format!("backend pipeline failed: {error}");
+    let body = module.body().id();
+    module_prologue()
+        .run_on_op_ref(
+            context,
+            OperationRef::new(context.get_op(module.id()), None, None),
+            &AnalysisManager::new(),
+        )
+        .map_err(failed)?;
+
+    let mut pipeline = PassManager::new();
+    add_function_passes(&mut pipeline, target, context, StopAfter::Finalize);
+    let mut rewriter = Rewriter::new(context.clone());
+    let mut index = 0;
+    while let Some(&op_id) = context.get_block(body).op_ids().get(index) {
+        let block = context.get_block(body);
+        let op = context.get_op(op_id);
+        if !op.is::<FuncOp>() {
+            emit(context, &op)?;
+            index += 1;
+            continue;
+        }
+        // A fresh cache per function: an analysis of a function that has been
+        // emitted describes IR that no longer exists.
+        let root = OperationRef::new(op, Some(block), Some(index));
+        let symbol = pipeline
+            .run_on_op_ref(context, root, &AnalysisManager::new())
+            .map_err(failed)?;
+        emit(context, symbol.op())?;
+        // The bytes exist, so the machine IR behind them goes back to the arenas
+        // and the next function is lowered in the space it left.
+        rewriter.erase_op(&symbol).map_err(failed)?;
+    }
+    tir::memstats::summary();
+    Ok(())
 }

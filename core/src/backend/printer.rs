@@ -84,141 +84,150 @@ impl AsmPrinter {
         out: &mut String,
     ) -> Result<(), AsmPrintError> {
         for op_id in block.op_ids() {
-            let op = context.get_op(op_id);
-            if op.is::<ModuleEndOp>()
-                || op.is::<SectionEndOp>()
-                || op.is::<SymbolEndOp>()
-                || op.is::<BlockEndOp>()
-                // External declarations produce no assembly; references resolve
-                // at link time.
-                || op.is::<DeclareOp>()
-            {
-                continue;
-            }
+            self.print_op(context, &context.get_op(op_id), out)?;
+        }
+        Ok(())
+    }
 
-            if let Some(section) = op.clone().as_op::<SectionOp>() {
-                let name = string_attr(&op, "name").unwrap_or(".text");
-                if name == ".text" {
-                    out.push_str(".text\n");
-                } else {
-                    out.push_str(".section ");
-                    out.push_str(name);
-                    out.push('\n');
-                }
-                self.print_block(context, section.body(), out)?;
-                continue;
-            }
+    /// Print one operation of a module body. A driver emitting the module symbol
+    /// by symbol calls this directly; [`AsmPrinter::print_module`] loops over it.
+    pub fn print_op(
+        &self,
+        context: &Context,
+        op: &Arc<OpInstance>,
+        out: &mut String,
+    ) -> Result<(), AsmPrintError> {
+        if op.is::<ModuleEndOp>()
+            || op.is::<SectionEndOp>()
+            || op.is::<SymbolEndOp>()
+            || op.is::<BlockEndOp>()
+            // External declarations produce no assembly; references resolve
+            // at link time.
+            || op.is::<DeclareOp>()
+        {
+            return Ok(());
+        }
 
-            if op.clone().as_op::<SymbolOp>().is_some() {
-                let name = string_attr(&op, "name").ok_or(AsmPrintError::MissingSymbolName)?;
-                if string_attr(&op, "binding") != Some("local") {
-                    out.push_str(".global ");
-                    out.push_str(name);
-                    out.push('\n');
-                }
-                if let Some(align) = int_attr(&op, "align")
-                    && align > 1
-                {
-                    out.push_str("\t.balign ");
-                    out.push_str(&align.to_string());
-                    out.push('\n');
-                }
+        if let Some(section) = op.clone().as_op::<SectionOp>() {
+            let name = string_attr(op, "name").unwrap_or(".text");
+            if name == ".text" {
+                out.push_str(".text\n");
+            } else {
+                out.push_str(".section ");
                 out.push_str(name);
-                out.push_str(":\n");
-                // The symbol label above names the entry block, so only non-entry
-                // blocks emit their own label (branch targets must be defined).
-                let region = context.get_region(op.regions[0]);
-                for (index, block) in region.iter(context.clone()).enumerate() {
-                    if index > 0 {
-                        match block.attr("name") {
-                            Some(AttributeValue::Str(label)) => out.push_str(&label),
-                            _ => {
-                                out.push_str(".L");
-                                out.push_str(&block.id().number().to_string());
-                            }
-                        }
-                        out.push_str(":\n");
-                    }
-                    self.print_block(context, block, out)?;
-                }
-                continue;
-            }
-
-            if op.clone().as_op::<LiteralOp>().is_some() {
-                let kind = string_attr(&op, "kind").ok_or(AsmPrintError::UnsupportedOp {
-                    op: LiteralOp::name(),
-                })?;
-                out.push_str("\t.");
-                out.push_str(kind);
-                match kind {
-                    "byte" | "half" | "word" | "dword" | "space" => {
-                        let value = int_attr(&op, "value").ok_or(AsmPrintError::UnsupportedOp {
-                            op: LiteralOp::name(),
-                        })?;
-                        out.push(' ');
-                        out.push_str(&value.to_string());
-                        out.push('\n');
-                    }
-                    _ => {
-                        let value =
-                            string_attr(&op, "value").ok_or(AsmPrintError::UnsupportedOp {
-                                op: LiteralOp::name(),
-                            })?;
-                        out.push_str(" \"");
-                        out.push_str(&escape_asm_string(value));
-                        out.push_str("\"\n");
-                    }
-                }
-                continue;
-            }
-
-            if op.clone().as_op::<DataRelocOp>().is_some() {
-                let unsupported = || AsmPrintError::UnsupportedOp {
-                    op: DataRelocOp::name(),
-                };
-                let symbol = string_attr(&op, "symbol").ok_or_else(unsupported)?;
-                let directive = match int_attr(&op, "width") {
-                    Some(4) => "word",
-                    Some(8) => "quad",
-                    _ => return Err(unsupported()),
-                };
-                let addend = int_attr(&op, "addend").ok_or_else(unsupported)?;
-                out.push_str("\t.");
-                out.push_str(directive);
-                out.push(' ');
-                out.push_str(symbol);
-                if addend > 0 {
-                    out.push('+');
-                    out.push_str(&addend.to_string());
-                } else if addend < 0 {
-                    out.push_str(&addend.to_string());
-                }
                 out.push('\n');
-                continue;
             }
+            self.print_block(context, section.body(), out)?;
+            return Ok(());
+        }
 
-            if let Some(text) = self.print_instruction(context, &op)? {
-                out.push('\t');
-                out.push_str(&text);
+        if op.clone().as_op::<SymbolOp>().is_some() {
+            let name = string_attr(op, "name").ok_or(AsmPrintError::MissingSymbolName)?;
+            if string_attr(op, "binding") != Some("local") {
+                out.push_str(".global ");
+                out.push_str(name);
                 out.push('\n');
-                continue;
             }
-
-            if op
-                .clone()
-                .as_interface::<dyn MachineInstruction>()
-                .is_some()
+            if let Some(align) = int_attr(op, "align")
+                && align > 1
             {
-                return Err(AsmPrintError::MissingInstructionPrinter {
-                    op: op.name().as_str(),
-                });
+                out.push_str("\t.balign ");
+                out.push_str(&align.to_string());
+                out.push('\n');
             }
+            out.push_str(name);
+            out.push_str(":\n");
+            // The symbol label above names the entry block, so only non-entry
+            // blocks emit their own label (branch targets must be defined).
+            let region = context.get_region(op.regions[0]);
+            for (index, block) in region.iter(context.clone()).enumerate() {
+                if index > 0 {
+                    match block.attr("name") {
+                        Some(AttributeValue::Str(label)) => out.push_str(&label),
+                        _ => {
+                            out.push_str(".L");
+                            out.push_str(&block.id().number().to_string());
+                        }
+                    }
+                    out.push_str(":\n");
+                }
+                self.print_block(context, block, out)?;
+            }
+            return Ok(());
+        }
 
-            return Err(AsmPrintError::UnsupportedOp {
+        if op.clone().as_op::<LiteralOp>().is_some() {
+            let kind = string_attr(op, "kind").ok_or(AsmPrintError::UnsupportedOp {
+                op: LiteralOp::name(),
+            })?;
+            out.push_str("\t.");
+            out.push_str(kind);
+            match kind {
+                "byte" | "half" | "word" | "dword" | "space" => {
+                    let value = int_attr(op, "value").ok_or(AsmPrintError::UnsupportedOp {
+                        op: LiteralOp::name(),
+                    })?;
+                    out.push(' ');
+                    out.push_str(&value.to_string());
+                    out.push('\n');
+                }
+                _ => {
+                    let value = string_attr(op, "value").ok_or(AsmPrintError::UnsupportedOp {
+                        op: LiteralOp::name(),
+                    })?;
+                    out.push_str(" \"");
+                    out.push_str(&escape_asm_string(value));
+                    out.push_str("\"\n");
+                }
+            }
+            return Ok(());
+        }
+
+        if op.clone().as_op::<DataRelocOp>().is_some() {
+            let unsupported = || AsmPrintError::UnsupportedOp {
+                op: DataRelocOp::name(),
+            };
+            let symbol = string_attr(op, "symbol").ok_or_else(unsupported)?;
+            let directive = match int_attr(op, "width") {
+                Some(4) => "word",
+                Some(8) => "quad",
+                _ => return Err(unsupported()),
+            };
+            let addend = int_attr(op, "addend").ok_or_else(unsupported)?;
+            out.push_str("\t.");
+            out.push_str(directive);
+            out.push(' ');
+            out.push_str(symbol);
+            if addend > 0 {
+                out.push('+');
+                out.push_str(&addend.to_string());
+            } else if addend < 0 {
+                out.push_str(&addend.to_string());
+            }
+            out.push('\n');
+            return Ok(());
+        }
+
+        if let Some(text) = self.print_instruction(context, op)? {
+            out.push('\t');
+            out.push_str(&text);
+            out.push('\n');
+            return Ok(());
+        }
+
+        if op
+            .clone()
+            .as_interface::<dyn MachineInstruction>()
+            .is_some()
+        {
+            return Err(AsmPrintError::MissingInstructionPrinter {
                 op: op.name().as_str(),
             });
         }
-        Ok(())
+
+        Err(AsmPrintError::UnsupportedOp {
+            op: op.name().as_str(),
+        })
     }
 }
 
