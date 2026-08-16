@@ -314,58 +314,7 @@ fn emit_lowered_value_eval(
                 #dag_expr;
             }
             let __syms = __tmdl_entry_syms.clone();
-            struct __TmdlMachineMemory<'a>(&'a mut dyn tir::backend::MachineContext);
-            impl tir::sem::Memory for __TmdlMachineMemory<'_> {
-                type Error = tir::backend::SimTrap;
-
-                fn read_memory(&mut self, address: u64, size: usize) -> Result<u64, Self::Error> {
-                    self.0.read_memory(address, size)
-                }
-
-                fn write_memory(
-                    &mut self,
-                    address: u64,
-                    size: usize,
-                    value: u64,
-                ) -> Result<(), Self::Error> {
-                    self.0.write_memory(address, size, value)
-                }
-
-                fn load_reserved(
-                    &mut self,
-                    address: u64,
-                    size: usize,
-                    ord: tir::sem::MemOrdering,
-                ) -> Result<u64, Self::Error> {
-                    self.0.load_reserved(address, size, ord)
-                }
-
-                fn store_conditional(
-                    &mut self,
-                    address: u64,
-                    size: usize,
-                    value: u64,
-                    ord: tir::sem::MemOrdering,
-                ) -> Result<bool, Self::Error> {
-                    self.0.store_conditional(address, size, value, ord)
-                }
-
-                fn atomic_rmw(
-                    &mut self,
-                    op: tir::sem::AtomicRmwOp,
-                    address: u64,
-                    size: usize,
-                    value: u64,
-                    ord: tir::sem::MemOrdering,
-                ) -> Result<u64, Self::Error> {
-                    self.0.atomic_rmw(op, address, size, value, ord)
-                }
-
-                fn fence(&mut self, pred: u32, succ: u32, kind: u32) -> Result<(), Self::Error> {
-                    self.0.fence(pred, succ, kind)
-                }
-            }
-            let mut __memory = __TmdlMachineMemory(machine);
+            let mut __memory = tir::backend::MachineMemory(machine);
             match tir::sem::execute_with_memory(&__g, &__syms, &mut __memory)? {
                 tir::sem::Value::Int(i) => tir::backend::RegisterValue::Int(i),
                 // A float result (e.g. `fadd`) and a lane concatenation (a vector

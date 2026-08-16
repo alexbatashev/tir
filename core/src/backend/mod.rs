@@ -196,6 +196,58 @@ pub trait MachineContext {
     }
 }
 
+/// Adapts a [`MachineContext`] to [`tir::sem::Memory`] for instruction behavior
+/// evaluation. A single shared type: the target is already a `dyn`, so a
+/// per-instruction adapter would only duplicate the whole interpreter through
+/// monomorphization.
+pub struct MachineMemory<'a>(pub &'a mut dyn MachineContext);
+
+impl tir::sem::Memory for MachineMemory<'_> {
+    type Error = SimTrap;
+
+    fn read_memory(&mut self, address: u64, size: usize) -> Result<u64, Self::Error> {
+        self.0.read_memory(address, size)
+    }
+
+    fn write_memory(&mut self, address: u64, size: usize, value: u64) -> Result<(), Self::Error> {
+        self.0.write_memory(address, size, value)
+    }
+
+    fn load_reserved(
+        &mut self,
+        address: u64,
+        size: usize,
+        ord: MemOrdering,
+    ) -> Result<u64, Self::Error> {
+        self.0.load_reserved(address, size, ord)
+    }
+
+    fn store_conditional(
+        &mut self,
+        address: u64,
+        size: usize,
+        value: u64,
+        ord: MemOrdering,
+    ) -> Result<bool, Self::Error> {
+        self.0.store_conditional(address, size, value, ord)
+    }
+
+    fn atomic_rmw(
+        &mut self,
+        op: AtomicRmwOp,
+        address: u64,
+        size: usize,
+        value: u64,
+        ord: MemOrdering,
+    ) -> Result<u64, Self::Error> {
+        self.0.atomic_rmw(op, address, size, value, ord)
+    }
+
+    fn fence(&mut self, pred: u32, succ: u32, kind: u32) -> Result<(), Self::Error> {
+        self.0.fence(pred, succ, kind)
+    }
+}
+
 /// A hardware performance counter a target maps onto one of its registers
 /// (e.g. the RISC-V `cycle`/`time`/`instret` CSRs). The `High` variants
 /// deliver the upper 32 bits of the 64-bit counter, for targets that split
@@ -342,4 +394,75 @@ pub fn emit_uncond_branch(
             .attr("dest", AttributeValue::Block(dest))
             .build(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tir::sem::Memory;
+
+    struct StubMachine {
+        memory: std::collections::HashMap<u64, u8>,
+        fences: u32,
+    }
+
+    impl StubMachine {
+        fn read(&self, address: u64, size: usize) -> u64 {
+            let mut word = 0u64;
+            for i in 0..size {
+                word |= u64::from(*self.memory.get(&(address + i as u64)).unwrap_or(&0)) << (i * 8);
+            }
+            word
+        }
+    }
+
+    impl MachineContext for StubMachine {
+        fn read_register(&self, _class: &str, _index: u16) -> Result<APInt, SimTrap> {
+            unimplemented!()
+        }
+        fn write_register(
+            &mut self,
+            _class: &str,
+            _index: u16,
+            _value: APInt,
+        ) -> Result<(), SimTrap> {
+            unimplemented!()
+        }
+        fn read_memory(&self, address: u64, size: usize) -> Result<u64, SimTrap> {
+            Ok(self.read(address, size))
+        }
+        fn write_memory(&mut self, address: u64, size: usize, value: u64) -> Result<(), SimTrap> {
+            for i in 0..size {
+                self.memory
+                    .insert(address + i as u64, (value >> (i * 8)) as u8);
+            }
+            Ok(())
+        }
+        fn fence(&mut self, _pred: u32, _succ: u32, _kind: u32) -> Result<(), SimTrap> {
+            self.fences += 1;
+            Ok(())
+        }
+        fn read_pc(&self) -> u64 {
+            0
+        }
+        fn write_pc(&mut self, _value: u64) {}
+    }
+
+    #[test]
+    fn machine_memory_forwards_to_machine_context() {
+        let mut machine = StubMachine {
+            memory: std::collections::HashMap::new(),
+            fences: 0,
+        };
+
+        {
+            let mut memory = MachineMemory(&mut machine);
+            memory.write_memory(0x100, 4, 0xdeadbeef).unwrap();
+            assert_eq!(memory.read_memory(0x100, 4).unwrap(), 0xdeadbeef);
+            memory.fence(0b11, 0b11, 0).unwrap();
+        }
+
+        assert_eq!(machine.read(0x100, 4), 0xdeadbeef);
+        assert_eq!(machine.fences, 1);
+    }
 }
