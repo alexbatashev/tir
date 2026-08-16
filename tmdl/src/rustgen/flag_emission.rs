@@ -7,8 +7,9 @@ fn emit_flag_rules<'a>(
     register_index_map: &HashMap<(String, String), u32>,
     pc_classes: &HashSet<String>,
     flag_classes: &HashSet<String>,
+    dialect: &str,
     isel_rule_emitters: &mut Vec<proc_macro2::TokenStream>,
-    isel_rule_inits: &mut Vec<proc_macro2::TokenStream>,
+    rule_spec_idents: &mut Vec<proc_macro2::Ident>,
 ) -> Result<(), TMDLError> {
     if flag_classes.is_empty() {
         return Ok(());
@@ -30,6 +31,11 @@ fn emit_flag_rules<'a>(
         else {
             continue;
         };
+        let op_name = resolved_params
+            .get("OPNAME")
+            .and_then(|(_, value)| value.as_ref())
+            .and_then(resolve_string)
+            .unwrap_or_else(|| mnemonic.clone());
         let isa_param_values = resolve_isa_param_values(inst, item_cache);
         let ops = resolve_operand_widths(
             resolve_operands_for_instruction(inst, item_cache),
@@ -47,6 +53,7 @@ fn emit_flag_rules<'a>(
         let info = FlagInst {
             inst,
             ops,
+            op_name,
             mnemonic,
             encoding_bytes: encoding_width_bytes(inst, item_cache),
             isa_param_values,
@@ -90,23 +97,26 @@ fn emit_flag_rules<'a>(
         &definers,
         &branches,
         &mut emitted_preludes,
+        dialect,
         isel_rule_emitters,
-        isel_rule_inits,
+        rule_spec_idents,
     );
     emit_flag_reader_rules(
         files,
         &definers,
         &readers,
         &mut emitted_preludes,
+        dialect,
         isel_rule_emitters,
-        isel_rule_inits,
+        rule_spec_idents,
     );
     emit_aliased_zero_branch_rules(
         files,
         &definers,
         &branches,
+        dialect,
         isel_rule_emitters,
-        isel_rule_inits,
+        rule_spec_idents,
     );
     Ok(())
 }
@@ -121,8 +131,9 @@ fn emit_flag_branch_rules(
     definers: &[(FlagInst<'_>, FlagDefinerSemantics)],
     branches: &[(FlagInst<'_>, FlagBranchSemantics)],
     emitted_preludes: &mut HashSet<String>,
+    dialect: &str,
     isel_rule_emitters: &mut Vec<proc_macro2::TokenStream>,
-    isel_rule_inits: &mut Vec<proc_macro2::TokenStream>,
+    rule_spec_idents: &mut Vec<proc_macro2::Ident>,
 ) {
     let float_classes: HashSet<String> = files
         .iter()
@@ -201,16 +212,20 @@ fn emit_flag_branch_rules(
                     pattern_widths[index] = *forced;
                 }
             }
-            let pattern_expr =
-                emit_dag_as_code(&canon_pattern, canon_root, &pattern_widths);
-            let operand_register_call = emit_operand_register_call(
+            let (offset, typed) = intern_dag(&canon_pattern, canon_root, &pattern_widths);
+            let pattern_spec = SpecPattern {
+                offset,
+                typed,
+                float_width: None,
+            };
+            let operand_register_specs = operand_register_specs_for_ops(
                 &d.ops,
                 &d_sem.variable_symbols,
                 &width_sensitive_symbols(&canon_pattern, &pattern_widths),
                 &float_classes,
                 &polymorphic_classes,
             );
-            let operand_imm_range_call = emit_operand_imm_range_call(&immediate_operand_ranges(
+            let imm_range_entries = imm_range_spec_entries(&immediate_operand_ranges(
                 &d_sem.graph,
                 &d.ops,
                 &d_sem.variable_symbols,
@@ -223,64 +238,52 @@ fn emit_flag_branch_rules(
                 .map_or(0, |max| max + 1);
             let d_lower = d.inst.name.to_lowercase();
             let b_lower = b.inst.name.to_lowercase();
-            let pattern_fn_ident = format_ident!("isel_pattern_{}_via_{}", b_lower, d_lower);
-            let emit_fn_ident = format_ident!("emit_isel_{}_via_{}", b_lower, d_lower);
-            let rule_name_lit =
-                proc_macro2::Literal::string(&format!("{}+{}", d.mnemonic, b.mnemonic));
+            let rule_key = format!("{}_via_{}", b_lower, d_lower);
+            let rule_name = format!("{}+{}", d.mnemonic, b.mnemonic);
             let target_symbol_lit = proc_macro2::Literal::u32_unsuffixed(target_symbol);
-            let b_builder_ident = format_ident!("{}OpBuilder", &b.inst.name);
-            let target_name_lit = proc_macro2::Literal::string(&b_sem.target_operand);
+            let b_op_ty_ident = format_ident!("{}Op", &b.inst.name);
 
-            let (prelude_fn_ident, operand_constraint_entries) =
-                emit_flag_definer_prelude(d, d_sem, emitted_preludes, isel_rule_emitters);
+            let (prelude_ts, prelude_shim, operand_constraint_entries) =
+                emit_flag_definer_prelude(d, d_sem, emitted_preludes, dialect);
+            isel_rule_emitters.push(prelude_ts);
 
-            let d_cost = isel_rule_cost(&d.mnemonic, d.encoding_bytes);
-            let b_cost = isel_rule_cost(&b.mnemonic, b.encoding_bytes);
-
+            let emit_attrs = [emit_attr_block(&b_sem.target_operand, target_symbol)];
+            let declared: Vec<String> = b.ops.iter().map(|(name, _)| name.clone()).collect();
+            let (emitter_ts, emit_shim) = emit_emitter_spec(
+                &rule_key,
+                dialect,
+                &b.op_name,
+                &b_op_ty_ident,
+                &emit_attrs,
+                &declared,
+            );
+            let (rule_ts, rule_ident) = emit_rule_spec(
+                &rule_key,
+                &rule_name,
+                &shared_isas,
+                &pattern_spec,
+                &[
+                    (&d.mnemonic, d.encoding_bytes as u32),
+                    (&b.mnemonic, b.encoding_bytes as u32),
+                ],
+                quote! {
+                    tir::backend::isel::RuleKind::CondBranch {
+                        target_symbol: #target_symbol_lit,
+                    }
+                },
+                Some(&prelude_shim),
+                &emit_shim,
+                &operand_constraint_entries,
+                &operand_register_specs,
+                None,
+                &imm_range_entries,
+                None,
+            );
             isel_rule_emitters.push(quote! {
-                fn #pattern_fn_ident(_context: &tir::Context) -> tir::sem::SemGraph {
-                    let mut g = tir::sem::SemGraph::new();
-                    #pattern_expr;
-                    g
-                }
-
-                fn #emit_fn_ident(
-                    context: &tir::Context,
-                    req: &tir::backend::isel::EmitRequest,
-                    m: &tir::backend::isel::RuleMatch,
-                ) -> Result<Box<dyn tir::Operation>, tir::PassError> {
-                    let mut builder = #b_builder_ident::new(context);
-                    let dest = m
-                        .block_binding(#target_symbol_lit)
-                        .ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
-                    builder = builder.attr(
-                        #target_name_lit,
-                        tir::attributes::AttributeValue::Block(dest),
-                    );
-                    Ok(Box::new(builder.build()))
-                }
+                #emitter_ts
+                #rule_ts
             });
-
-            let pair_features = feature_slice(&shared_isas);
-            isel_rule_inits.push(quote! {
-                if features_enabled(features, #pair_features) {
-                    rules.push(
-                        tir::backend::isel::Rule::new(
-                            #rule_name_lit,
-                            #pattern_fn_ident(context),
-                            (#d_cost) + (#b_cost),
-                            #emit_fn_ident,
-                        )
-                        .with_kind(tir::backend::isel::RuleKind::CondBranch {
-                            target_symbol: #target_symbol_lit,
-                        })
-                        .with_prelude_emitter(#prelude_fn_ident)
-                        .with_operand_constraints(vec![#(#operand_constraint_entries),*])
-                        #operand_register_call
-                        #operand_imm_range_call,
-                    );
-                }
-            });
+            rule_spec_idents.push(rule_ident);
         }
     }
 }
@@ -394,8 +397,9 @@ fn emit_aliased_zero_branch_rules(
     files: &[ast::File],
     definers: &[(FlagInst<'_>, FlagDefinerSemantics)],
     branches: &[(FlagInst<'_>, FlagBranchSemantics)],
+    dialect: &str,
     isel_rule_emitters: &mut Vec<proc_macro2::TokenStream>,
-    isel_rule_inits: &mut Vec<proc_macro2::TokenStream>,
+    rule_spec_idents: &mut Vec<proc_macro2::Ident>,
 ) {
     let float_classes: HashSet<String> = files
         .iter()
@@ -511,108 +515,89 @@ fn emit_aliased_zero_branch_rules(
                     pattern_widths[index] = *forced;
                 }
             }
-            let pattern_expr =
-                emit_dag_as_code(&canon_pattern, canon_root, &pattern_widths);
+            let (offset, typed) = intern_dag(&canon_pattern, canon_root, &pattern_widths);
+            let pattern_spec = SpecPattern {
+                offset,
+                typed,
+                float_width: None,
+            };
 
-            let prelude_fn_ident = format_ident!(
-                "emit_isel_flag_definer_{}_aliased",
-                d.inst.name.to_lowercase()
-            );
-            let d_builder_ident = format_ident!("{}OpBuilder", &d.inst.name);
+            let prelude_key = format!("flag_definer_{}_aliased", d.inst.name.to_lowercase());
+            let d_op_ty_ident = format_ident!("{}Op", &d.inst.name);
             let class_id = reg_class_id(class_a);
-            let name_a_lit = proc_macro2::Literal::string(name_a);
-            let name_b_lit = proc_macro2::Literal::string(name_b);
+            // Both operands read the same bound value (the aliased pair).
+            let prelude_attrs = [
+                emit_attr_value(name_a, 0, &class_id),
+                emit_attr_value(name_b, 0, &class_id),
+            ];
+            let d_declared: Vec<String> = d.ops.iter().map(|(name, _)| name.clone()).collect();
+            let (prelude_ts, prelude_shim) = emit_emitter_spec(
+                &prelude_key,
+                dialect,
+                &d.op_name,
+                &d_op_ty_ident,
+                &prelude_attrs,
+                &d_declared,
+            );
             if emitted_preludes.insert(d.inst.name.clone()) {
-                isel_rule_emitters.push(quote! {
-                    fn #prelude_fn_ident(
-                        context: &tir::Context,
-                        req: &tir::backend::isel::EmitRequest,
-                        m: &tir::backend::isel::RuleMatch,
-                    ) -> Result<Box<dyn tir::Operation>, tir::PassError> {
-                        let src = m
-                            .value_binding(0)
-                            .ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
-                        let reg = tir::attributes::AttributeValue::Register(
-                            tir::attributes::RegisterAttr::Virtual {
-                                id: src.number(),
-                                class: Some(#class_id),
-                            },
-                        );
-                        let builder = #d_builder_ident::new(context)
-                            .attr(#name_a_lit, reg.clone())
-                            .attr(#name_b_lit, reg);
-                        Ok(Box::new(builder.build()))
-                    }
-                });
+                isel_rule_emitters.push(prelude_ts);
             }
 
             let target_symbol = 2u32;
             let target_symbol_lit = proc_macro2::Literal::u32_unsuffixed(target_symbol);
-            let b_builder_ident = format_ident!("{}OpBuilder", &b.inst.name);
-            let target_name_lit = proc_macro2::Literal::string(&b_sem.target_operand);
+            let b_op_ty_ident = format_ident!("{}Op", &b.inst.name);
             let b_lower = b.inst.name.to_lowercase();
             let d_lower = d.inst.name.to_lowercase();
-            let pattern_fn_ident =
-                format_ident!("isel_pattern_{}_via_{}_selfzero", b_lower, d_lower);
-            let emit_fn_ident = format_ident!("emit_isel_{}_via_{}_selfzero", b_lower, d_lower);
-            let rule_name_lit =
-                proc_macro2::Literal::string(&format!("{}+{}(self-zero)", d.mnemonic, b.mnemonic));
-            let d_cost = isel_rule_cost(&d.mnemonic, d.encoding_bytes);
-            let b_cost = isel_rule_cost(&b.mnemonic, b.encoding_bytes);
-            let pair_features = feature_slice(&shared_isas);
+            let rule_key = format!("{}_via_{}_selfzero", b_lower, d_lower);
+            let rule_name = format!("{}+{}(self-zero)", d.mnemonic, b.mnemonic);
             // The definer compares the aliased operand against zero, so it reads
             // every bit of the register: a narrower value must not bind.
-            let operand_register_call = emit_operand_registers(
+            let operand_register_specs = operand_register_specs(
                 &[(0, class_a.clone())],
                 &HashSet::from([0]),
                 &float_classes,
                 &polymorphic_classes,
             );
 
+            let emit_attrs = [emit_attr_block(&b_sem.target_operand, target_symbol)];
+            let declared: Vec<String> = b.ops.iter().map(|(name, _)| name.clone()).collect();
+            let (emitter_ts, emit_shim) = emit_emitter_spec(
+                &rule_key,
+                dialect,
+                &b.op_name,
+                &b_op_ty_ident,
+                &emit_attrs,
+                &declared,
+            );
+            let constraints =
+                [constraint_entry(0, quote! { tir::graph::OperandConstraint::Register })];
+            let (rule_ts, rule_ident) = emit_rule_spec(
+                &rule_key,
+                &rule_name,
+                &shared_isas,
+                &pattern_spec,
+                &[
+                    (&d.mnemonic, d.encoding_bytes as u32),
+                    (&b.mnemonic, b.encoding_bytes as u32),
+                ],
+                quote! {
+                    tir::backend::isel::RuleKind::CondBranch {
+                        target_symbol: #target_symbol_lit,
+                    }
+                },
+                Some(&prelude_shim),
+                &emit_shim,
+                &constraints,
+                &operand_register_specs,
+                None,
+                &[],
+                None,
+            );
             isel_rule_emitters.push(quote! {
-                fn #pattern_fn_ident(_context: &tir::Context) -> tir::sem::SemGraph {
-                    let mut g = tir::sem::SemGraph::new();
-                    #pattern_expr;
-                    g
-                }
-
-                fn #emit_fn_ident(
-                    context: &tir::Context,
-                    req: &tir::backend::isel::EmitRequest,
-                    m: &tir::backend::isel::RuleMatch,
-                ) -> Result<Box<dyn tir::Operation>, tir::PassError> {
-                    let mut builder = #b_builder_ident::new(context);
-                    let dest = m
-                        .block_binding(#target_symbol_lit)
-                        .ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
-                    builder = builder.attr(
-                        #target_name_lit,
-                        tir::attributes::AttributeValue::Block(dest),
-                    );
-                    Ok(Box::new(builder.build()))
-                }
+                #emitter_ts
+                #rule_ts
             });
-
-            isel_rule_inits.push(quote! {
-                if features_enabled(features, #pair_features) {
-                    rules.push(
-                        tir::backend::isel::Rule::new(
-                            #rule_name_lit,
-                            #pattern_fn_ident(context),
-                            (#d_cost) + (#b_cost),
-                            #emit_fn_ident,
-                        )
-                        .with_kind(tir::backend::isel::RuleKind::CondBranch {
-                            target_symbol: #target_symbol_lit,
-                        })
-                        .with_prelude_emitter(#prelude_fn_ident)
-                        .with_operand_constraints(vec![
-                            (0, tir::graph::OperandConstraint::Register)
-                        ])
-                        #operand_register_call,
-                    );
-                }
-            });
+            rule_spec_idents.push(rule_ident);
         }
     }
 }
@@ -688,8 +673,9 @@ fn emit_flag_reader_rules(
     definers: &[(FlagInst<'_>, FlagDefinerSemantics)],
     readers: &[(FlagInst<'_>, FlagReaderSemantics)],
     emitted_preludes: &mut HashSet<String>,
+    dialect: &str,
     isel_rule_emitters: &mut Vec<proc_macro2::TokenStream>,
-    isel_rule_inits: &mut Vec<proc_macro2::TokenStream>,
+    rule_spec_idents: &mut Vec<proc_macro2::Ident>,
 ) {
     let float_classes: HashSet<String> = files
         .iter()
@@ -807,8 +793,12 @@ fn emit_flag_reader_rules(
                     pattern_widths[index] = *forced;
                 }
             }
-            let pattern_expr =
-                emit_dag_as_code(&canon_pattern, canon_root, &pattern_widths);
+            let (offset, typed) = intern_dag(&canon_pattern, canon_root, &pattern_widths);
+            let pattern_spec = SpecPattern {
+                offset,
+                typed,
+                float_width: None,
+            };
             let sensitive_symbols = width_sensitive_symbols(&canon_pattern, &pattern_widths);
             // The rule reads registers from both composed instructions: the
             // definer's operands and the reader's arm operands.
@@ -830,7 +820,7 @@ fn emit_flag_reader_rules(
                 .collect();
             register_operands.sort();
             register_operands.dedup();
-            let operand_register_call = emit_operand_registers(
+            let operand_register_specs = operand_register_specs(
                 &register_operands,
                 &sensitive_symbols,
                 &float_classes,
@@ -848,7 +838,7 @@ fn emit_flag_reader_rules(
                             .map(|symbol| (symbol, width, signed))
                     }),
             );
-            let operand_imm_range_call = emit_operand_imm_range_call(&immediate_ranges);
+            let imm_range_entries = imm_range_spec_entries(&immediate_ranges);
 
             let Some((_, dest_class)) = r
                 .ops
@@ -862,59 +852,34 @@ fn emit_flag_reader_rules(
                 continue;
             };
             let dest_class_id = reg_class_id(&dest_class);
-            let dest_name_lit = proc_macro2::Literal::string(&r_sem.dest_operand);
-            let result_register_call = emit_result_register_call(
-                Some(&dest_class),
-                &float_classes,
-                &polymorphic_classes,
-            );
+            let result_spec = result_register_spec(&dest_class, &float_classes, &polymorphic_classes);
             let mut reader_constraint_entries = Vec::new();
-            let mut reader_attr_steps = Vec::new();
+            let mut reader_attrs: Vec<proc_macro2::TokenStream> = Vec::new();
             for (name, ty) in &r.ops {
                 let Some(&symbol) = reader_symbols.get(name) else {
                     continue;
                 };
-                let symbol_lit = proc_macro2::Literal::u32_unsuffixed(symbol);
-                let name_lit = proc_macro2::Literal::string(name);
                 match ty {
                     Type::Struct(class) => {
-                        reader_constraint_entries.push(quote! {
-                            (#symbol_lit, tir::graph::OperandConstraint::Register)
-                        });
-                        let class_id = reg_class_id(class);
+                        reader_constraint_entries.push(constraint_entry(
+                            symbol,
+                            quote! { tir::graph::OperandConstraint::Register },
+                        ));
                         // A two-address reader reads its own destination; that
                         // operand becomes the tie attribute rather than a source.
                         let attr_name = if name == &r_sem.dest_operand {
-                            proc_macro2::Literal::string(&format!("{name}_tied"))
+                            format!("{name}_tied")
                         } else {
-                            name_lit
+                            name.clone()
                         };
-                        reader_attr_steps.push(quote! {
-                            let source = m.value_binding(#symbol_lit)
-                                .ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
-                            builder = builder.attr(
-                                #attr_name,
-                                tir::attributes::AttributeValue::Register(
-                                    tir::attributes::RegisterAttr::Virtual {
-                                        id: source.number(),
-                                        class: Some(#class_id),
-                                    },
-                                ),
-                            );
-                        });
+                        reader_attrs.push(emit_attr_value(&attr_name, symbol, &reg_class_id(class)));
                     }
                     Type::Bits(_) | Type::Integer => {
-                        reader_constraint_entries.push(quote! {
-                            (#symbol_lit, tir::graph::OperandConstraint::Immediate)
-                        });
-                        reader_attr_steps.push(quote! {
-                            let value = m.int_binding(#symbol_lit)
-                                .ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
-                            builder = builder.attr(
-                                #name_lit,
-                                tir::attributes::AttributeValue::Int(value),
-                            );
-                        });
+                        reader_constraint_entries.push(constraint_entry(
+                            symbol,
+                            quote! { tir::graph::OperandConstraint::Immediate },
+                        ));
+                        reader_attrs.push(emit_attr_int(name, symbol));
                     }
                     _ => {}
                 }
@@ -922,70 +887,49 @@ fn emit_flag_reader_rules(
 
             let r_lower = r.inst.name.to_lowercase();
             let d_lower = d.inst.name.to_lowercase();
-            let pattern_fn_ident = format_ident!("isel_pattern_{}_via_{}", r_lower, d_lower);
-            let emit_fn_ident = format_ident!("emit_isel_{}_via_{}", r_lower, d_lower);
-            let rule_name_lit =
-                proc_macro2::Literal::string(&format!("{}+{}", d.mnemonic, r.mnemonic));
-            let r_builder_ident = format_ident!("{}OpBuilder", &r.inst.name);
+            let rule_key = format!("{}_via_{}", r_lower, d_lower);
+            let rule_name = format!("{}+{}", d.mnemonic, r.mnemonic);
+            let r_op_ty_ident = format_ident!("{}Op", &r.inst.name);
 
-            let (prelude_fn_ident, mut operand_constraint_entries) =
-                emit_flag_definer_prelude(d, d_sem, emitted_preludes, isel_rule_emitters);
+            let (prelude_ts, prelude_shim, mut operand_constraint_entries) =
+                emit_flag_definer_prelude(d, d_sem, emitted_preludes, dialect);
+            isel_rule_emitters.push(prelude_ts);
             operand_constraint_entries.extend(reader_constraint_entries);
 
-            let d_cost = isel_rule_cost(&d.mnemonic, d.encoding_bytes);
-            let r_cost = isel_rule_cost(&r.mnemonic, r.encoding_bytes);
-
+            let mut emit_attrs = vec![emit_attr_result(&r_sem.dest_operand, 0, &dest_class_id)];
+            emit_attrs.extend(reader_attrs);
+            let declared: Vec<String> = r.ops.iter().map(|(name, _)| name.clone()).collect();
+            let (emitter_ts, emit_shim) = emit_emitter_spec(
+                &rule_key,
+                dialect,
+                &r.op_name,
+                &r_op_ty_ident,
+                &emit_attrs,
+                &declared,
+            );
+            let (rule_ts, rule_ident) = emit_rule_spec(
+                &rule_key,
+                &rule_name,
+                &shared_isas,
+                &pattern_spec,
+                &[
+                    (&d.mnemonic, d.encoding_bytes as u32),
+                    (&r.mnemonic, r.encoding_bytes as u32),
+                ],
+                quote! { tir::backend::isel::RuleKind::Value },
+                Some(&prelude_shim),
+                &emit_shim,
+                &operand_constraint_entries,
+                &operand_register_specs,
+                Some(result_spec),
+                &imm_range_entries,
+                None,
+            );
             isel_rule_emitters.push(quote! {
-                fn #pattern_fn_ident(_context: &tir::Context) -> tir::sem::SemGraph {
-                    let mut g = tir::sem::SemGraph::new();
-                    #pattern_expr;
-                    g
-                }
-
-                fn #emit_fn_ident(
-                    context: &tir::Context,
-                    req: &tir::backend::isel::EmitRequest,
-                    m: &tir::backend::isel::RuleMatch,
-                ) -> Result<Box<dyn tir::Operation>, tir::PassError> {
-                    let _ = m;
-                    let mut builder = #r_builder_ident::new(context);
-                    let dst = req
-                        .results
-                        .first()
-                        .ok_or(tir::PassError::RewriteFailed(req.op_id()))?
-                        .number();
-                    builder = builder.attr(
-                        #dest_name_lit,
-                        tir::attributes::AttributeValue::Register(
-                            tir::attributes::RegisterAttr::Virtual {
-                                id: dst,
-                                class: Some(#dest_class_id),
-                            },
-                        ),
-                    );
-                    #(#reader_attr_steps)*
-                    Ok(Box::new(builder.build()))
-                }
+                #emitter_ts
+                #rule_ts
             });
-
-            let pair_features = feature_slice(&shared_isas);
-            isel_rule_inits.push(quote! {
-                if features_enabled(features, #pair_features) {
-                    rules.push(
-                        tir::backend::isel::Rule::new(
-                            #rule_name_lit,
-                            #pattern_fn_ident(context),
-                            (#d_cost) + (#r_cost),
-                            #emit_fn_ident,
-                        )
-                        .with_prelude_emitter(#prelude_fn_ident)
-                        .with_operand_constraints(vec![#(#operand_constraint_entries),*])
-                        #operand_register_call
-                        #result_register_call
-                        #operand_imm_range_call,
-                    );
-                }
-            });
+            rule_spec_idents.push(rule_ident);
         }
     }
 }

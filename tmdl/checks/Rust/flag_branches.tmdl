@@ -164,9 +164,9 @@ instruction SelectEq for [FlagIsa] {
     }
 }
 
-// The shared flag-definer emitter binds the compare's register operands.
-// CHECK: fn emit_isel_flag_definer_cmp(
-// CHECK: let src = m.value_binding(0)
+// The shared flag-definer emitter spec binds the compare's register operands.
+// CHECK: static EMIT_FLAG_DEFINER_CMP
+// CHECK: symbol: 0,
 // CHECK: "rn",
 
 // zf == 1 composes to Eq over the definer's operands, sf != of to the signed
@@ -174,17 +174,17 @@ instruction SelectEq for [FlagIsa] {
 // and a flag-reading select to an If — the composed patterns live in the sem
 // blob (tmdl/tests/sem_blob.rs). The overflow guard alone derives nothing: no
 // canonical comparison is equivalent to it.
-// CHECK: fn isel_pattern_brancheq_via_cmp(
-// CHECK: fn isel_pattern_branchlt_via_cmp(
-// CHECK-NOT: branchoverflow_via_cmp
+// CHECK: static RULE_BRANCHEQ_VIA_CMP
+// CHECK: static RULE_BRANCHLT_VIA_CMP
+// CHECK-NOT: BRANCHOVERFLOW_VIA_CMP
+
+// Both branch rules are conditional branches emitting the definer first.
+// CHECK: RuleKind::CondBranch
+// CHECK: prelude_emit: Some(emit_isel_flag_definer_cmp)
+// CHECK-NOT: BRANCHOVERFLOW_VIA_CMP
 
 // The select rule retains both value arms and the destination tie.
-// CHECK: fn isel_pattern_selecteq_via_cmp(
-// CHECK: fn emit_isel_selecteq_via_cmp(
+// CHECK: static EMIT_SELECTEQ_VIA_CMP
 // CHECK: "dst_tied",
 // CHECK: "src",
-
-// Both rules are conditional branches emitting the definer first.
-// CHECK: RuleKind::CondBranch
-// CHECK: .with_prelude_emitter(emit_isel_flag_definer_cmp)
-// CHECK-NOT: branchoverflow_via_cmp
+// CHECK: static RULE_SELECTEQ_VIA_CMP

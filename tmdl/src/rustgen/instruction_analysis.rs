@@ -359,111 +359,6 @@ fn collect_symbols(
     }
 }
 
-/// Emit each register operand's storage domain and whether its instruction
-/// consumes the full architectural width.
-fn emit_operand_register_call(
-    ops: &[(String, Type)],
-    variable_symbols: &HashMap<String, u32>,
-    sensitive_symbols: &HashSet<u32>,
-    float_classes: &HashSet<String>,
-    polymorphic_classes: &HashSet<String>,
-) -> proc_macro2::TokenStream {
-    let operands: Vec<(u32, String)> = ops
-        .iter()
-        .filter_map(|(op_name, op_ty)| {
-            let Type::Struct(class_name) = op_ty else {
-                return None;
-            };
-            Some((*variable_symbols.get(op_name)?, class_name.clone()))
-        })
-        .collect();
-    emit_operand_registers(
-        &operands,
-        sensitive_symbols,
-        float_classes,
-        polymorphic_classes,
-    )
-}
-
-/// The `with_operand_registers` call for already-resolved `(symbol, register
-/// class)` pairs, so a composed rule may draw operands from several
-/// instructions.
-fn emit_operand_registers(
-    operands: &[(u32, String)],
-    sensitive_symbols: &HashSet<u32>,
-    float_classes: &HashSet<String>,
-    polymorphic_classes: &HashSet<String>,
-) -> proc_macro2::TokenStream {
-    let register_steps: Vec<proc_macro2::TokenStream> = operands
-        .iter()
-        .map(|(symbol, class_name)| {
-            let symbol = *symbol;
-            let class_lit = proc_macro2::Literal::string(class_name);
-            let symbol_lit = proc_macro2::Literal::u32_unsuffixed(symbol);
-            let capability = if polymorphic_classes.contains(class_name) {
-                quote! { tir::backend::isel::RegisterCapability::any(*width) }
-            } else if float_classes.contains(class_name) {
-                quote! { tir::backend::isel::RegisterCapability::float(*width) }
-            } else {
-                quote! { tir::backend::isel::RegisterCapability::integer(*width) }
-            };
-            let requirement = if sensitive_symbols.contains(&symbol) {
-                quote! { tir::backend::isel::RegisterRequirement::whole(#capability) }
-            } else {
-                quote! { tir::backend::isel::RegisterRequirement::low_bits(#capability) }
-            };
-            let requirement = quote! {
-                #requirement.at_view_offset(register_view_offset(#class_lit))
-            };
-            quote! {
-                if let Some((_, width)) =
-                    __register_widths.iter().find(|(class, _)| *class == #class_lit)
-                {
-                    __operand_registers.push((#symbol_lit, #requirement));
-                }
-            }
-        })
-        .collect();
-
-    if register_steps.is_empty() {
-        return quote! {};
-    }
-    quote! {
-        .with_operand_registers({
-            let mut __operand_registers = Vec::new();
-            #(#register_steps)*
-            __operand_registers
-        })
-    }
-}
-
-fn emit_result_register_call(
-    class_name: Option<&str>,
-    float_classes: &HashSet<String>,
-    polymorphic_classes: &HashSet<String>,
-) -> proc_macro2::TokenStream {
-    let Some(class_name) = class_name else {
-        return quote! {};
-    };
-    let class_lit = proc_macro2::Literal::string(class_name);
-    let capability = if polymorphic_classes.contains(class_name) {
-        quote! { tir::backend::isel::RegisterCapability::any(*width) }
-    } else if float_classes.contains(class_name) {
-        quote! { tir::backend::isel::RegisterCapability::float(*width) }
-    } else {
-        quote! { tir::backend::isel::RegisterCapability::integer(*width) }
-    };
-    quote! {
-        .with_optional_result_register(
-            __register_widths
-                .iter()
-                .find(|(class, _)| *class == #class_lit)
-                .map(|(_, width)| tir::backend::isel::RegisterRequirement::low_bits(#capability)
-                    .at_view_offset(register_view_offset(#class_lit)))
-        )
-    }
-}
-
 /// The encoding range of each immediate operand: the field's bit width from the
 /// operand type, signedness from how the behavior consumes the symbol —
 /// `sext(imm, _)` sign-extends, everything else is unsigned — and an
@@ -521,25 +416,6 @@ fn immediate_operand_ranges(
         out.push((symbol, width, signed));
     }
     out
-}
-
-/// Emit the `.with_operand_imm_ranges` builder call for the immediate operands'
-/// encoding ranges.
-fn emit_operand_imm_range_call(ranges: &[(u32, u32, bool)]) -> proc_macro2::TokenStream {
-    if ranges.is_empty() {
-        return quote! {};
-    }
-    let entries: Vec<proc_macro2::TokenStream> = ranges
-        .iter()
-        .map(|(symbol, width, signed)| {
-            let symbol_lit = proc_macro2::Literal::u32_unsuffixed(*symbol);
-            let width_lit = proc_macro2::Literal::u32_unsuffixed(*width);
-            quote! {
-                (#symbol_lit, tir::backend::isel::ImmRange { width: #width_lit, signed: #signed })
-            }
-        })
-        .collect();
-    quote! { .with_operand_imm_ranges(vec![#(#entries),*]) }
 }
 
 /// The literal architectural width of a register class, when its `WIDTH` param

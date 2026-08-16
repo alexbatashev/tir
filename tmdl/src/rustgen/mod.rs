@@ -307,3 +307,4 @@ include!("instruction_analysis.rs");
 include!("assembly.rs");
 include!("behavior.rs");
 include!("encoding.rs");
+include!("isel_spec.rs");

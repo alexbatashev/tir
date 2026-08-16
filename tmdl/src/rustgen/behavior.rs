@@ -473,10 +473,12 @@ fn emit_graph_destination_write(
 #[allow(clippy::too_many_arguments)]
 fn emit_cond_branch_rule(
     rule_name: &str,
-    builder_ident: &proc_macro2::Ident,
+    dialect: &str,
+    op_name: &str,
+    op_ty_ident: &proc_macro2::Ident,
     mnemonic_name: &str,
     encoding_bytes: u64,
-    inst_features: &proc_macro2::TokenStream,
+    for_isas: &[String],
     ops: &[(String, Type)],
     pattern: &tir_symbolic::sem::SemGraph,
     root: tir_graph::NodeId,
@@ -486,80 +488,35 @@ fn emit_cond_branch_rule(
     zero_slots: &HashMap<String, (String, u16)>,
     float_classes: &HashSet<String>,
     polymorphic_classes: &HashSet<String>,
-) -> (proc_macro2::TokenStream, proc_macro2::TokenStream) {
-    let emit_fn_ident = format_ident!("emit_isel_{}", rule_name);
-    let pattern_fn_ident = format_ident!("isel_pattern_{}", rule_name);
-    let rule_name_lit = proc_macro2::Literal::string(rule_name);
-    let target_symbol_lit = proc_macro2::Literal::u32_unsuffixed(target_symbol);
-
+) -> (proc_macro2::TokenStream, proc_macro2::Ident) {
     let mut operand_constraint_entries: Vec<proc_macro2::TokenStream> = Vec::new();
-    let mut emit_attr_steps: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut emit_attrs: Vec<proc_macro2::TokenStream> = Vec::new();
     for (op_name, op_ty) in ops {
-        let op_name_lit = proc_macro2::Literal::string(op_name);
         if op_name == target_operand {
-            emit_attr_steps.push(quote! {
-                let dest = m
-                    .block_binding(#target_symbol_lit)
-                    .ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
-                builder = builder.attr(
-                    #op_name_lit,
-                    tir::attributes::AttributeValue::Block(dest),
-                );
-            });
+            emit_attrs.push(emit_attr_block(op_name, target_symbol));
             continue;
         }
         if let Some((class_name, index)) = zero_slots.get(op_name) {
-            let class_id = reg_class_id(class_name);
-            let index_lit = proc_macro2::Literal::u16_unsuffixed(*index);
-            emit_attr_steps.push(quote! {
-                builder = builder.attr(
-                    #op_name_lit,
-                    tir::attributes::AttributeValue::Register(
-                        tir::attributes::RegisterAttr::Physical {
-                            class: #class_id,
-                            index: #index_lit,
-                        },
-                    ),
-                );
-            });
+            emit_attrs.push(emit_attr_physical(op_name, &reg_class_id(class_name), *index));
             continue;
         }
         let Some(&symbol) = variable_symbols.get(op_name) else {
             continue;
         };
-        let symbol_lit = proc_macro2::Literal::u32_unsuffixed(symbol);
         match op_ty {
             Type::Struct(class_name) => {
-                let class_id = reg_class_id(class_name);
-                operand_constraint_entries
-                    .push(quote! { (#symbol_lit, tir::graph::OperandConstraint::Register) });
-                emit_attr_steps.push(quote! {
-                    let src = m
-                        .value_binding(#symbol_lit)
-                        .ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
-                    builder = builder.attr(
-                        #op_name_lit,
-                        tir::attributes::AttributeValue::Register(
-                            tir::attributes::RegisterAttr::Virtual {
-                                id: src.number(),
-                                class: Some(#class_id),
-                            },
-                        ),
-                    );
-                });
+                operand_constraint_entries.push(constraint_entry(
+                    symbol,
+                    quote! { tir::graph::OperandConstraint::Register },
+                ));
+                emit_attrs.push(emit_attr_value(op_name, symbol, &reg_class_id(class_name)));
             }
             Type::Integer | Type::Bits(_) => {
-                operand_constraint_entries
-                    .push(quote! { (#symbol_lit, tir::graph::OperandConstraint::Immediate) });
-                emit_attr_steps.push(quote! {
-                    let v = m
-                        .int_binding(#symbol_lit)
-                        .ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
-                    builder = builder.attr(
-                        #op_name_lit,
-                        tir::attributes::AttributeValue::Int(v),
-                    );
-                });
+                operand_constraint_entries.push(constraint_entry(
+                    symbol,
+                    quote! { tir::graph::OperandConstraint::Immediate },
+                ));
+                emit_attrs.push(emit_attr_int(op_name, symbol));
             }
             _ => {}
         }
@@ -578,57 +535,52 @@ fn emit_cond_branch_rule(
             pattern_widths[index] = *forced;
         }
     }
-    let pattern_expr = emit_dag_as_code(&canon_pattern, canon_root, &pattern_widths);
-    let operand_register_call = emit_operand_register_call(
+    let (offset, typed) = intern_dag(&canon_pattern, canon_root, &pattern_widths);
+    let pattern_spec = SpecPattern {
+        offset,
+        typed,
+        float_width: None,
+    };
+    let operand_register_specs = operand_register_specs_for_ops(
         ops,
         variable_symbols,
         &width_sensitive_symbols(&canon_pattern, &pattern_widths),
         float_classes,
         polymorphic_classes,
     );
-    let operand_imm_range_call =
-        emit_operand_imm_range_call(&immediate_operand_ranges(pattern, ops, variable_symbols));
-    let rule_cost = isel_rule_cost(mnemonic_name, encoding_bytes);
+    let imm_range_entries =
+        imm_range_spec_entries(&immediate_operand_ranges(pattern, ops, variable_symbols));
 
-    let emitter = quote! {
-        fn #pattern_fn_ident(_context: &tir::Context) -> tir::sem::SemGraph {
-            let mut g = tir::sem::SemGraph::new();
-            #pattern_expr;
-            g
-        }
-
-        fn #emit_fn_ident(
-            context: &tir::Context,
-            req: &tir::backend::isel::EmitRequest,
-            m: &tir::backend::isel::RuleMatch,
-        ) -> Result<Box<dyn tir::Operation>, tir::PassError> {
-            let _ = (req, m);
-            let mut builder = #builder_ident::new(context);
-            #(#emit_attr_steps)*
-            Ok(Box::new(builder.build()))
-        }
-    };
-
-    let init = quote! {
-        if features_enabled(features, #inst_features) {
-            rules.push(
-                tir::backend::isel::Rule::new(
-                    #rule_name_lit,
-                    #pattern_fn_ident(context),
-                    #rule_cost,
-                    #emit_fn_ident,
-                )
-                .with_kind(tir::backend::isel::RuleKind::CondBranch {
-                    target_symbol: #target_symbol_lit,
-                })
-                .with_operand_constraints(vec![#(#operand_constraint_entries),*])
-                #operand_register_call
-                #operand_imm_range_call
-                ,
-            );
-        }
-    };
-    (emitter, init)
+    let declared: Vec<String> = ops.iter().map(|(name, _)| name.clone()).collect();
+    let (emitter_ts, emit_shim) =
+        emit_emitter_spec(rule_name, dialect, op_name, op_ty_ident, &emit_attrs, &declared);
+    let target_symbol_lit = proc_macro2::Literal::u32_unsuffixed(target_symbol);
+    let (rule_ts, rule_ident) = emit_rule_spec(
+        rule_name,
+        rule_name,
+        for_isas,
+        &pattern_spec,
+        &[(mnemonic_name, encoding_bytes as u32)],
+        quote! {
+            tir::backend::isel::RuleKind::CondBranch {
+                target_symbol: #target_symbol_lit,
+            }
+        },
+        None,
+        &emit_shim,
+        &operand_constraint_entries,
+        &operand_register_specs,
+        None,
+        &imm_range_entries,
+        None,
+    );
+    (
+        quote! {
+            #emitter_ts
+            #rule_ts
+        },
+        rule_ident,
+    )
 }
 
 /// Clone `pattern` with the register-operand symbol `reg_symbol` replaced by the

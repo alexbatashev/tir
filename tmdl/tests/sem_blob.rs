@@ -29,6 +29,19 @@ impl Generated {
             &self.kinds,
         ))
     }
+
+    /// The pattern program of the rule spec at `marker` (e.g. a
+    /// `static RULE_*` name).
+    fn rule_program(&self, marker: &str) -> String {
+        let (_, rest) = self.rust.split_once(marker).unwrap();
+        let (_, rest) = rest.split_once("offset: ").unwrap();
+        let (offset, _) = rest.split_once(',').unwrap();
+        render(&decode_sem_ops(
+            &self.blob,
+            offset.trim().parse().unwrap(),
+            &self.kinds,
+        ))
+    }
 }
 
 fn generate(input: &str, dialect: &str) -> Generated {
@@ -217,17 +230,17 @@ fn flag_reading_rules_compose_the_comparison_they_prove() {
 
     assert!(
         generated
-            .program_after("fn isel_pattern_brancheq_via_cmp(")
+            .rule_program("static RULE_BRANCHEQ_VIA_CMP")
             .contains("Eq")
     );
     assert!(
         generated
-            .program_after("fn isel_pattern_branchlt_via_cmp(")
+            .rule_program("static RULE_BRANCHLT_VIA_CMP")
             .contains("Lt")
     );
     assert!(
         generated
-            .program_after("fn isel_pattern_selecteq_via_cmp(")
+            .rule_program("static RULE_SELECTEQ_VIA_CMP")
             .contains("If")
     );
 }

@@ -15,6 +15,7 @@ mod destruct;
 mod emit;
 mod node;
 mod pattern;
+mod rules;
 #[cfg(test)]
 mod tests;
 
@@ -37,6 +38,10 @@ use tir::{
 use tir_adt::APInt;
 use tir_symbolic::egraph::{ENode, Id, PatternNode, Var};
 
+pub use rules::{
+    CapabilityKind, EmitAttr, EmitSpec, PatternRef, RegOperandSpec, ResultRegSpec, RuleSpec,
+    build_rules, emit_with,
+};
 pub use tir::sem::{IselRewrite, SaturationLimits, SemEGraph, SemNode, SemPayload};
 pub use tir_symbolic::egraph::EMatch;
 

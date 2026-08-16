@@ -5,6 +5,6 @@
 
 // RUN: tmdlc --action=emit-rust --dialect=test --output=- %S/../Inputs/fixed-write-rules.tmdl | filecheck %s
 
-// CHECK: isel_pattern_loadfixedbase
-// CHECK-NOT: isel_pattern_poplike
-// CHECK-NOT: isel_pattern_pushlike
+// CHECK: static RULE_LOADFIXEDBASE
+// CHECK-NOT: static RULE_POPLIKE
+// CHECK-NOT: static RULE_PUSHLIKE

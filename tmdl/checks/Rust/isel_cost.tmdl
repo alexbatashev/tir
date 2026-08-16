@@ -5,5 +5,4 @@
 // RUN: tmdlc --action=emit-rust --dialect=test --output=- %S/../Inputs/simple.tmdl | filecheck %s
 
 // `add` is a 32-bit encoding, so its rule pays 4 bytes on top of the latency.
-// CHECK: instruction_cost("add") * tir::backend::isel::LATENCY_COST_SCALE
-// CHECK-NEXT: + 4u32
+// CHECK: cost_terms: &[("add", 4)]

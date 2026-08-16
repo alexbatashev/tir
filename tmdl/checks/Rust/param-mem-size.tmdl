@@ -15,8 +15,7 @@
 
 // CHECK: impl tir::sem::AsSemExpr for LoadWordOp
 
-// CHECK: fn isel_pattern_loadword
-// CHECK: isel_pattern_loadword(context)
+// CHECK: static RULE_LOADWORD
 
 // The dynamically sized load is still kept out of instruction selection.
-// CHECK-NOT: isel_pattern_loaddyn
+// CHECK-NOT: static RULE_LOADDYN

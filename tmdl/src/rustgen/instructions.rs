@@ -48,7 +48,7 @@ fn emit_instructions<'a>(
     // function body per instruction.
     let mut instruction_descs: Vec<proc_macro2::TokenStream> = vec![];
     let mut isel_rule_emitters: Vec<proc_macro2::TokenStream> = vec![];
-    let mut isel_rule_inits: Vec<proc_macro2::TokenStream> = vec![];
+    let mut rule_spec_idents: Vec<proc_macro2::Ident> = vec![];
     let mut machine_instruction_impls: Vec<proc_macro2::TokenStream> = vec![];
     let mut instruction_custom_format_impls: Vec<proc_macro2::TokenStream> = vec![];
     let mut as_sem_expr_impls: Vec<proc_macro2::TokenStream> = vec![];
@@ -553,9 +553,7 @@ fn emit_instructions<'a>(
         });
 
         if let Some(semantics) = &semantics {
-            let emit_fn_ident = format_ident!("emit_isel_{}", inst.name.to_lowercase());
-            let pattern_fn_ident = format_ident!("isel_pattern_{}", inst.name.to_lowercase());
-            let rule_name_lit = proc_macro2::Literal::string(&inst.name.to_lowercase());
+            let rule_key = inst.name.to_lowercase();
 
             // Per-operand constraints: registers must bind to non-constant values,
             // immediates to constants. Keyed by the operand's pattern symbol id.
@@ -564,7 +562,6 @@ fn emit_instructions<'a>(
                 let Some(&symbol) = semantics.variable_symbols.get(op_name) else {
                     continue;
                 };
-                let symbol_lit = proc_macro2::Literal::u32_unsuffixed(symbol);
                 let constraint = match op_ty {
                     Type::Struct(_) => quote! { tir::graph::OperandConstraint::Register },
                     Type::Bits(_) | Type::Integer => {
@@ -572,7 +569,7 @@ fn emit_instructions<'a>(
                     }
                     _ => continue,
                 };
-                operand_constraint_entries.push(quote! { (#symbol_lit, #constraint) });
+                operand_constraint_entries.push(constraint_entry(symbol, constraint));
             }
             // A data register the behavior reads by path (e.g. the x86 shift count
             // in `GPR::rcx`, whose class is also a value-operand class) reads that
@@ -602,17 +599,17 @@ fn emit_instructions<'a>(
                     })
                 });
                 if is_implicit && let Some(value_class) = value_class {
-                    let symbol_lit = proc_macro2::Literal::u32_unsuffixed(*symbol);
-                    operand_constraint_entries
-                        .push(quote! { (#symbol_lit, tir::graph::OperandConstraint::Register) });
+                    operand_constraint_entries.push(constraint_entry(
+                        *symbol,
+                        quote! { tir::graph::OperandConstraint::Register },
+                    ));
                     let index = u16::try_from(*index).expect("register indices fit u16");
                     fixed_value_reads.insert(*symbol, ((*value_class).to_string(), index));
                 }
             }
 
-            let mut emit_attr_steps = Vec::new();
+            let mut emit_attrs: Vec<proc_macro2::TokenStream> = Vec::new();
             for (op_name, op_ty) in &ops {
-                let op_name_lit = proc_macro2::Literal::string(op_name);
                 match op_ty {
                     Type::Struct(class_name) => {
                         let class_id = reg_class_id(class_name);
@@ -620,91 +617,30 @@ fn emit_instructions<'a>(
                             .iter()
                             .position(|name| name == op_name)
                         {
-                            let def_pos_lit = proc_macro2::Literal::usize_unsuffixed(def_pos);
-                            let result_accessor = if def_pos == 0 {
-                                quote! { .first() }
-                            } else {
-                                quote! { .get(#def_pos_lit) }
-                            };
-                            emit_attr_steps.push(quote! {
-                                let dst = req
-                                    .results
-                                    #result_accessor
-                                    .ok_or(tir::PassError::RewriteFailed(req.op_id()))?
-                                    .number();
-                                builder = builder.attr(
-                                    #op_name_lit,
-                                    tir::attributes::AttributeValue::Register(
-                                        tir::attributes::RegisterAttr::Virtual {
-                                            id: dst,
-                                            class: Some(#class_id),
-                                        },
-                                    ),
-                                );
-                            });
+                            emit_attrs.push(emit_attr_result(op_name, def_pos, &class_id));
                             // A two-address destination also reads a pattern operand:
                             // record the bound value in a `_tied` attribute so register
                             // allocation can lower the tie to a copy.
                             if read_register_operands.contains(op_name)
                                 && let Some(sym) = semantics.variable_symbols.get(op_name)
                             {
-                                let tied_name_lit =
-                                    proc_macro2::Literal::string(&format!("{op_name}_tied"));
-                                let sym_lit = proc_macro2::Literal::u32_unsuffixed(*sym);
-                                emit_attr_steps.push(quote! {
-                                    let tied = m.value_binding(#sym_lit).ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
-                                    builder = builder.attr(
-                                        #tied_name_lit,
-                                        tir::attributes::AttributeValue::Register(
-                                            tir::attributes::RegisterAttr::Virtual {
-                                                id: tied.number(),
-                                                class: Some(#class_id),
-                                            },
-                                        ),
-                                    );
-                                });
+                                emit_attrs.push(emit_attr_value(
+                                    &format!("{op_name}_tied"),
+                                    *sym,
+                                    &class_id,
+                                ));
                             }
                         } else if let Some(sym) = semantics.variable_symbols.get(op_name) {
-                            let sym_lit = proc_macro2::Literal::u32_unsuffixed(*sym);
-                            emit_attr_steps.push(quote! {
-                                let src = m.value_binding(#sym_lit).ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
-                                builder = builder.attr(
-                                    #op_name_lit,
-                                    tir::attributes::AttributeValue::Register(
-                                        tir::attributes::RegisterAttr::Virtual {
-                                            id: src.number(),
-                                            class: Some(#class_id),
-                                        },
-                                    ),
-                                );
-                            });
+                            emit_attrs.push(emit_attr_value(op_name, *sym, &class_id));
                         } else if let Some(Some(reg_idx)) =
                             semantics.fixed_register_by_class.get(class_name)
                         {
-                            let idx_lit = proc_macro2::Literal::u16_unsuffixed(*reg_idx);
-                            emit_attr_steps.push(quote! {
-                                builder = builder.attr(
-                                    #op_name_lit,
-                                    tir::attributes::AttributeValue::Register(
-                                        tir::attributes::RegisterAttr::Physical {
-                                            class: #class_id,
-                                            index: #idx_lit,
-                                        },
-                                    ),
-                                );
-                            });
+                            emit_attrs.push(emit_attr_physical(op_name, &class_id, *reg_idx));
                         }
                     }
                     Type::Integer | Type::Bits(_) => {
                         if let Some(sym) = semantics.variable_symbols.get(op_name) {
-                            let sym_lit = proc_macro2::Literal::u32_unsuffixed(*sym);
-                            emit_attr_steps.push(quote! {
-                                let v = m.int_binding(#sym_lit).ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
-                                builder = builder.attr(
-                                    #op_name_lit,
-                                    tir::attributes::AttributeValue::Int(v),
-                                );
-                            });
+                            emit_attrs.push(emit_attr_int(op_name, *sym));
                         }
                     }
                     Type::String => {}
@@ -752,151 +688,93 @@ fn emit_instructions<'a>(
             {
                 pattern_widths[canon_root.index()] = Some(width);
             }
-            let pattern_expr = emit_dag_as_code(&canon_pattern, canon_root, &pattern_widths);
-            let mut pattern_body = quote! { #pattern_expr; };
+            let (pattern_offset, pattern_typed) =
+                intern_dag(&canon_pattern, canon_root, &pattern_widths);
+            let mut pattern_spec = SpecPattern {
+                offset: pattern_offset,
+                typed: pattern_typed,
+                float_width: None,
+            };
             // The destination's full guarded semantics, emitted alongside the
             // relaxed pattern so pass construction proves the guard drop sound.
-            let guarded_fn_ident = format_ident!("isel_guarded_{}", inst.name.to_lowercase());
-            let (guarded_emitter, guarded_semantics_call) = match &semantics.guarded_semantics {
-                Some((guarded, guarded_root)) => {
-                    let guarded_widths = tir_symbolic::lang::infer_widths(guarded, |_| None);
-                    let guarded_expr = emit_dag_as_code(guarded, *guarded_root, &guarded_widths);
-                    (
-                        quote! {
-                            fn #guarded_fn_ident(_context: &tir::Context) -> tir::sem::SemGraph {
-                                let mut g = tir::sem::SemGraph::new();
-                                #guarded_expr;
-                                g
-                            }
-                        },
-                        quote! { .with_guarded_semantics(#guarded_fn_ident(context)) },
-                    )
+            let guarded_spec =
+                semantics
+                    .guarded_semantics
+                    .as_ref()
+                    .map(|(guarded, guarded_root)| {
+                        let guarded_widths = tir_symbolic::lang::infer_widths(guarded, |_| None);
+                        let (offset, typed) = intern_dag(guarded, *guarded_root, &guarded_widths);
+                        SpecPattern {
+                            offset,
+                            typed,
+                            float_width: None,
+                        }
+                    });
+            if *tir_graph::Dag::get_node(&canon_pattern, canon_root)
+                == tir_symbolic::lang::SymKind::Bitcast
+                && let Some(dst_class) = dst_class
+                && float_classes.contains(dst_class)
+                && let Some(width) = literal_register_class_width(files, dst_class)
+            {
+                if !matches!(width, 32 | 64) {
+                    unreachable!("unsupported scalar float register width {width}");
                 }
-                None => (quote! {}, quote! {}),
-            };
-            let float_constant_materializer_call =
-                if *tir_graph::Dag::get_node(&canon_pattern, canon_root)
-                    == tir_symbolic::lang::SymKind::Bitcast
-                    && let Some(dst_class) = dst_class
-                    && float_classes.contains(dst_class)
-                    && let Some(width) = literal_register_class_width(files, dst_class)
-                {
-                    let result_ty = match width {
-                        32 => quote! { tir::builtin::FloatType::f32(_context) },
-                        64 => quote! { tir::builtin::FloatType::f64(_context) },
-                        _ => unreachable!("unsupported scalar float register width {width}"),
-                    };
-                    pattern_body = quote! {
-                        use tir::graph::MetaMutDag as _;
-                        let __sem_root = #pattern_expr;
-                        g.set_actual_type(__sem_root, #result_ty);
-                    };
-                    let width = proc_macro2::Literal::u32_unsuffixed(width);
-                    quote! { .with_float_constant_materializer(#width) }
-                } else {
-                    quote! {}
-                };
-            let operand_register_call = emit_operand_register_call(
+                pattern_spec.float_width = Some(width);
+            }
+            let operand_register_specs = operand_register_specs_for_ops(
                 &ops,
                 &semantics.variable_symbols,
                 &width_sensitive_symbols(&canon_pattern, &pattern_widths),
                 &float_classes,
                 &polymorphic_classes,
             );
-            let result_register_call =
-                emit_result_register_call(dst_class, &float_classes, &polymorphic_classes);
-            let operand_imm_range_call = emit_operand_imm_range_call(&immediate_operand_ranges(
+            let result_register_spec =
+                dst_class.map(|c| result_register_spec(c, &float_classes, &polymorphic_classes));
+            let imm_range_entries = imm_range_spec_entries(&immediate_operand_ranges(
                 &semantics.pattern,
                 &ops,
                 &semantics.variable_symbols,
             ));
-            let rule_cost = isel_rule_cost(mnemonic_name, width_bytes);
-
             // Registers read by path are dependencies outside the encoded operands.
             // Value-register reads carry a fixed-use constraint; configuration
             // reads remain demands for a target pass such as `vsetvli` insertion.
             for (name, sym) in &implicit_reads {
-                let name_lit = proc_macro2::Literal::string(name);
-                let sym_lit = proc_macro2::Literal::u32_unsuffixed(*sym);
                 if let Some((class, index)) = fixed_value_reads.get(sym) {
-                    let class_id = reg_class_id(class);
-                    let index_lit = proc_macro2::Literal::u16_unsuffixed(*index);
-                    emit_attr_steps.push(quote! {
-                        let src = m.value_binding(#sym_lit)
-                            .ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
-                        builder = builder.attr(
-                            #name_lit,
-                            tir::attributes::AttributeValue::Register(
-                                tir::attributes::RegisterAttr::FixedUse {
-                                    id: src.number(),
-                                    class: #class_id,
-                                    index: #index_lit,
-                                },
-                            ),
-                        );
-                    });
+                    emit_attrs.push(emit_attr_fixed_use(name, *sym, &reg_class_id(class), *index));
                     continue;
                 }
-                emit_attr_steps.push(quote! {
-                    if let Some(v) = m.int_binding(#sym_lit) {
-                        builder = builder.attr(#name_lit, tir::attributes::AttributeValue::Int(v));
-                    } else {
-                        let src = m.value_binding(#sym_lit)
-                            .ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
-                        builder = builder.attr(
-                            #name_lit,
-                            tir::attributes::AttributeValue::Register(
-                                tir::attributes::RegisterAttr::Virtual {
-                                    id: src.number(),
-                                    class: None,
-                                },
-                            ),
-                        );
-                    }
-                });
+                emit_attrs.push(emit_attr_int_or_value(name, *sym));
             }
 
+            let declared: Vec<String> = ops.iter().map(|(name, _)| name.clone()).collect();
+            let (emitter_ts, emit_shim) = emit_emitter_spec(
+                &rule_key,
+                dialect,
+                op_name,
+                &name_ident,
+                &emit_attrs,
+                &declared,
+            );
+            let (rule_ts, rule_spec_ident) = emit_rule_spec(
+                &rule_key,
+                &rule_key,
+                &inst.for_isas,
+                &pattern_spec,
+                &[(mnemonic_name, width_bytes as u32)],
+                quote! { tir::backend::isel::RuleKind::Value },
+                None,
+                &emit_shim,
+                &operand_constraint_entries,
+                &operand_register_specs,
+                result_register_spec.clone(),
+                &imm_range_entries,
+                guarded_spec.as_ref(),
+            );
             isel_rule_emitters.push(quote! {
-                fn #pattern_fn_ident(_context: &tir::Context) -> tir::sem::SemGraph {
-                    let mut g = tir::sem::SemGraph::new();
-                    #pattern_body
-                    g
-                }
-
-                #guarded_emitter
-
-                fn #emit_fn_ident(
-                    context: &tir::Context,
-                    req: &tir::backend::isel::EmitRequest,
-                    m: &tir::backend::isel::RuleMatch,
-                ) -> Result<Box<dyn tir::Operation>, tir::PassError> {
-                    let _ = (req, m);
-                    let mut builder = #builder_ident::new(context);
-                    #(#emit_attr_steps)*
-                    Ok(Box::new(builder.build()))
-                }
+                #emitter_ts
+                #rule_ts
             });
-
-            let inst_features = feature_slice(&inst.for_isas);
-            isel_rule_inits.push(quote! {
-                if features_enabled(features, #inst_features) {
-                    rules.push(
-                        tir::backend::isel::Rule::new(
-                            #rule_name_lit,
-                            #pattern_fn_ident(context),
-                            #rule_cost,
-                            #emit_fn_ident,
-                        )
-                        .with_operand_constraints(vec![#(#operand_constraint_entries),*])
-                        #operand_register_call
-                        #result_register_call
-                        #float_constant_materializer_call
-                        #operand_imm_range_call
-                        #guarded_semantics_call
-                        ,
-                    );
-                }
-            });
+            rule_spec_idents.push(rule_spec_ident);
 
             // Zero-form constant materializer: when the canonical pattern is
             // `reg + imm` and the source register's class has a hardwired-zero
@@ -927,12 +805,7 @@ fn emit_instructions<'a>(
                 _ => None,
             };
             if let Some((zero_reg_name, zero_reg_class, imm_sym)) = zero_form {
-                let zero_pattern_fn_ident =
-                    format_ident!("isel_pattern_{}_zero", inst.name.to_lowercase());
-                let zero_emit_fn_ident =
-                    format_ident!("emit_isel_{}_zero", inst.name.to_lowercase());
-                let zero_rule_name_lit =
-                    proc_macro2::Literal::string(&format!("{}_zero", inst.name.to_lowercase()));
+                let zero_rule_key = format!("{}_zero", inst.name.to_lowercase());
                 let width_sym = semantics
                     .variable_symbols
                     .values()
@@ -941,125 +814,97 @@ fn emit_instructions<'a>(
                     .max()
                     .unwrap_or(0)
                     + 1;
-                let width_sym_lit = proc_macro2::Literal::u32_unsuffixed(width_sym);
-                let imm_sym_lit = proc_macro2::Literal::u32_unsuffixed(imm_sym);
-                let (zero_meta_use, root_ty_stmt) = pattern_widths[canon_root.index()]
-                    .map(|width| {
-                        let width_lit = proc_macro2::Literal::u32_unsuffixed(width);
-                        (
-                            quote! { use tir::graph::MetaMutDag as _; },
-                            quote! {
-                                g.set_actual_type(
-                                    __root,
-                                    tir::builtin::IntegerType::new(_context, #width_lit),
-                                );
-                            },
-                        )
-                    })
-                    .unwrap_or_default();
+
+                // The zero pattern, built here and interned into the sem blob:
+                // `zext(0b0, W) + imm`, typed at the canonical root width.
+                let (zero_pattern_offset, zero_pattern_typed) = {
+                    use tir_graph::{Dag as _, MutDag};
+                    let mut g = tir_symbolic::sem::SemGraph::<()>::new();
+                    let zero = g.add_node(tir_symbolic::lang::SymKind::Constant);
+                    g.set_leaf_data(zero, tir_symbolic::sem::int_payload(1, 0, false));
+                    let width = g.add_node(tir_symbolic::lang::SymKind::Symbol);
+                    g.set_leaf_data(
+                        width,
+                        tir_symbolic::lang::SymPayload::SymbolId(width_sym),
+                    );
+                    let zext = g.add_node(tir_symbolic::lang::SymKind::ZExt);
+                    g.add_edge(zext, zero);
+                    g.add_edge(zext, width);
+                    let imm = g.add_node(tir_symbolic::lang::SymKind::Symbol);
+                    g.set_leaf_data(imm, tir_symbolic::lang::SymPayload::SymbolId(imm_sym));
+                    let root = g.add_node(tir_symbolic::lang::SymKind::Add);
+                    g.add_edge(root, zext);
+                    g.add_edge(root, imm);
+                    let zero_widths: Vec<Option<u32>> = (0..g.len())
+                        .map(|index| {
+                            if index == root.index() {
+                                pattern_widths[canon_root.index()]
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    intern_dag(&g, root, &zero_widths)
+                };
 
                 let rd_name = defined_register_operands
                     .first()
                     .expect("zero-form requires a defined register operand");
-                let rd_name_lit = proc_macro2::Literal::string(rd_name);
                 let rd_class_id = reg_class_id(dst_class.expect("defined operand has a class"));
-                let zero_reg_name_lit = proc_macro2::Literal::string(&zero_reg_name);
                 let zero_class_id = reg_class_id(&zero_reg_class);
-                let zero_index_lit =
-                    proc_macro2::Literal::u16_unsuffixed(hardwired_zero_index[&zero_reg_class]);
+                let zero_index = hardwired_zero_index[&zero_reg_class];
                 let imm_name = ops
                     .iter()
                     .find(|(name, _)| semantics.variable_symbols.get(name) == Some(&imm_sym))
                     .map(|(name, _)| name.clone())
                     .expect("immediate operand has a name");
-                let imm_name_lit = proc_macro2::Literal::string(&imm_name);
-                let zero_imm_range_call = emit_operand_imm_range_call(
+                let zero_imm_range_entries = imm_range_spec_entries(
                     &immediate_operand_ranges(&semantics.pattern, &ops, &semantics.variable_symbols)
                         .into_iter()
                         .filter(|(symbol, _, _)| *symbol == imm_sym)
                         .collect::<Vec<_>>(),
                 );
 
+                let zero_emit_attrs = vec![
+                    emit_attr_result(rd_name, 0, &rd_class_id),
+                    emit_attr_physical(&zero_reg_name, &zero_class_id, zero_index),
+                    emit_attr_int(&imm_name, imm_sym),
+                ];
+                let (zero_emitter_ts, zero_emit_shim) = emit_emitter_spec(
+                    &zero_rule_key,
+                    dialect,
+                    op_name,
+                    &name_ident,
+                    &zero_emit_attrs,
+                    &declared,
+                );
+                let zero_pattern_spec = SpecPattern {
+                    offset: zero_pattern_offset,
+                    typed: zero_pattern_typed,
+                    float_width: None,
+                };
+                let zero_constraints =
+                    [constraint_entry(imm_sym, quote! { tir::graph::OperandConstraint::Immediate })];
+                let (zero_rule_ts, zero_rule_ident) = emit_rule_spec(
+                    &zero_rule_key,
+                    &zero_rule_key,
+                    &inst.for_isas,
+                    &zero_pattern_spec,
+                    &[(mnemonic_name, width_bytes as u32)],
+                    quote! { tir::backend::isel::RuleKind::Value },
+                    None,
+                    &zero_emit_shim,
+                    &zero_constraints,
+                    &[],
+                    result_register_spec.clone(),
+                    &zero_imm_range_entries,
+                    None,
+                );
                 isel_rule_emitters.push(quote! {
-                    fn #zero_pattern_fn_ident(_context: &tir::Context) -> tir::sem::SemGraph {
-                        #zero_meta_use
-                        use tir::graph::MutDag;
-                        let mut g = tir::sem::SemGraph::new();
-                        let __zero = g.add_node(tir::sem::SymKind::Constant);
-                        g.set_leaf_data(__zero, tir::sem::int_payload(1, 0, false));
-                        let __width = g.add_node(tir::sem::SymKind::Symbol);
-                        g.set_leaf_data(__width, tir::sem::SymPayload::SymbolId(#width_sym_lit));
-                        let __zext = g.add_node(tir::sem::SymKind::ZExt);
-                        g.add_edge(__zext, __zero);
-                        g.add_edge(__zext, __width);
-                        let __imm = g.add_node(tir::sem::SymKind::Symbol);
-                        g.set_leaf_data(__imm, tir::sem::SymPayload::SymbolId(#imm_sym_lit));
-                        let __root = g.add_node(tir::sem::SymKind::Add);
-                        g.add_edge(__root, __zext);
-                        g.add_edge(__root, __imm);
-                        #root_ty_stmt
-                        g
-                    }
-
-                    fn #zero_emit_fn_ident(
-                        context: &tir::Context,
-                        req: &tir::backend::isel::EmitRequest,
-                        m: &tir::backend::isel::RuleMatch,
-                    ) -> Result<Box<dyn tir::Operation>, tir::PassError> {
-                        let mut builder = #builder_ident::new(context);
-                        let dst = req
-                            .results
-                            .first()
-                            .ok_or(tir::PassError::RewriteFailed(req.op_id()))?
-                            .number();
-                        builder = builder.attr(
-                            #rd_name_lit,
-                            tir::attributes::AttributeValue::Register(
-                                tir::attributes::RegisterAttr::Virtual {
-                                    id: dst,
-                                    class: Some(#rd_class_id),
-                                },
-                            ),
-                        );
-                        builder = builder.attr(
-                            #zero_reg_name_lit,
-                            tir::attributes::AttributeValue::Register(
-                                tir::attributes::RegisterAttr::Physical {
-                                    class: #zero_class_id,
-                                    index: #zero_index_lit,
-                                },
-                            ),
-                        );
-                        let v = m
-                            .int_binding(#imm_sym_lit)
-                            .ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
-                        builder = builder.attr(
-                            #imm_name_lit,
-                            tir::attributes::AttributeValue::Int(v),
-                        );
-                        Ok(Box::new(builder.build()))
-                    }
+                    #zero_emitter_ts
+                    #zero_rule_ts
                 });
-
-                isel_rule_inits.push(quote! {
-                    if features_enabled(features, #inst_features) {
-                        rules.push(
-                            tir::backend::isel::Rule::new(
-                                #zero_rule_name_lit,
-                                #zero_pattern_fn_ident(context),
-                                #rule_cost,
-                                #zero_emit_fn_ident,
-                            )
-                            .with_operand_constraints(vec![(
-                                #imm_sym_lit,
-                                tir::graph::OperandConstraint::Immediate,
-                            )])
-                            #result_register_call
-                            #zero_imm_range_call
-                            ,
-                        );
-                    }
-                });
+                rule_spec_idents.push(zero_rule_ident);
             }
         }
 
@@ -1078,14 +923,15 @@ fn emit_instructions<'a>(
                 &pc_classes,
             )
         {
-            let inst_features = feature_slice(&inst.for_isas);
             let no_zero_slots = HashMap::new();
-            let (emitter, init) = emit_cond_branch_rule(
+            let (emitter, rule_ident) = emit_cond_branch_rule(
                 &inst.name.to_lowercase(),
-                &builder_ident,
+                dialect,
+                op_name,
+                &name_ident,
                 mnemonic_name,
                 width_bytes,
-                &inst_features,
+                &inst.for_isas,
                 &ops,
                 &branch.pattern,
                 branch.root,
@@ -1097,7 +943,7 @@ fn emit_instructions<'a>(
                 &polymorphic_classes,
             );
             isel_rule_emitters.push(emitter);
-            isel_rule_inits.push(init);
+            rule_spec_idents.push(rule_ident);
 
             // Zero-form variants: when the branch condition is a two-register
             // comparison whose operands belong to a class with a hardwired-zero
@@ -1155,7 +1001,7 @@ fn emit_instructions<'a>(
                 } else {
                     slots
                 };
-                for (slot_index, (op_name, class_name, reg_symbol)) in slots.iter().enumerate() {
+                for (slot_index, (slot_op_name, class_name, reg_symbol)) in slots.iter().enumerate() {
                     let width_symbol = branch.target_symbol + 1;
                     let (zero_pattern, zero_root) = branch_pattern_with_zero(
                         &branch.pattern,
@@ -1164,19 +1010,21 @@ fn emit_instructions<'a>(
                         width_symbol,
                     );
                     let mut zero_variable_symbols = branch.variable_symbols.clone();
-                    zero_variable_symbols.remove(op_name);
+                    zero_variable_symbols.remove(slot_op_name);
                     let mut zero_slots = HashMap::new();
                     zero_slots.insert(
-                        op_name.clone(),
+                        slot_op_name.clone(),
                         (class_name.clone(), hardwired_zero_index[class_name]),
                     );
                     let rule_name = format!("{}_zero{}", inst.name.to_lowercase(), slot_index);
-                    let (emitter, init) = emit_cond_branch_rule(
+                    let (emitter, rule_ident) = emit_cond_branch_rule(
                         &rule_name,
-                        &builder_ident,
+                        dialect,
+                        op_name,
+                        &name_ident,
                         mnemonic_name,
                         width_bytes,
-                        &inst_features,
+                        &inst.for_isas,
                         &ops,
                         &zero_pattern,
                         zero_root,
@@ -1188,7 +1036,7 @@ fn emit_instructions<'a>(
                         &polymorphic_classes,
                     );
                     isel_rule_emitters.push(emitter);
-                    isel_rule_inits.push(init);
+                    rule_spec_idents.push(rule_ident);
                 }
             }
         }
@@ -1667,16 +1515,18 @@ fn emit_instructions<'a>(
             &register_index_map,
             &pc_classes,
             &flag_classes,
+            dialect,
             &mut isel_rule_emitters,
-            &mut isel_rule_inits,
+            &mut rule_spec_idents,
         )?;
         emit_fixed_register_rules(
             files,
             item_cache,
             &register_index_map,
             &register_name_map,
+            dialect,
             &mut isel_rule_emitters,
-            &mut isel_rule_inits,
+            &mut rule_spec_idents,
         )?;
     }
 
@@ -1877,33 +1727,6 @@ fn emit_instructions<'a>(
         }
     };
 
-    // The rule initializers run in batches of helper functions: unoptimized
-    // builds give every inline `Rule` constructor its own stack slots, and
-    // thousands of them in one body overflow the default thread stack.
-    let isel_rule_chunk_fns: Vec<proc_macro2::TokenStream> = isel_rule_inits
-        .chunks(64)
-        .enumerate()
-        .map(|(index, chunk)| {
-            let ident = quote::format_ident!("isel_rules_chunk_{index}");
-            quote! {
-                fn #ident(
-                    context: &tir::Context,
-                    features: &[Feature],
-                    __register_widths: &[(&'static str, u32)],
-                    rules: &mut Vec<tir::backend::isel::Rule>,
-                ) {
-                    let _ = (&context, &features, &__register_widths, &rules);
-                    #(#chunk)*
-                }
-            }
-        })
-        .collect();
-    let isel_rule_chunk_calls: Vec<proc_macro2::TokenStream> = (0..isel_rule_chunk_fns.len())
-        .map(|index| {
-            let ident = quote::format_ident!("isel_rules_chunk_{index}");
-            quote! { #ident(context, features, &__register_widths, &mut rules); }
-        })
-        .collect();
 
     Ok(quote! {
         #(#instruction_defs)*
@@ -1934,19 +1757,23 @@ fn emit_instructions<'a>(
 
         #(#isel_rule_emitters)*
 
-        #(#isel_rule_chunk_fns)*
+        static RULE_SPECS: &[&tir::backend::isel::RuleSpec] = &[#(&#rule_spec_idents),*];
 
         /// Instruction-selection rules for the instructions available under `features`.
         #public_visibility fn get_isel_rules(context: &tir::Context, features: &[Feature]) -> Vec<tir::backend::isel::Rule> {
-            let _ = (&context, &features);
             // Width-sensitive operands are constrained to their register class's
             // architectural width under the enabled features (e.g. XLEN).
-            let __register_widths = register_widths(features);
-            let _ = &__register_widths;
-            #[allow(unused_mut)]
-            let mut rules = Vec::new();
-            #(#isel_rule_chunk_calls)*
-            rules
+            let register_widths = register_widths(features);
+            let feature_ids: Vec<u16> = features.iter().map(|f| *f as u16).collect();
+            tir::backend::isel::build_rules(
+                context,
+                &feature_ids,
+                SEM_KINDS,
+                SEM_BLOB,
+                &register_widths,
+                instruction_cost,
+                RULE_SPECS,
+            )
         }
     })
 }

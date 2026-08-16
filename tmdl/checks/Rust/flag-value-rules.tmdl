@@ -9,5 +9,5 @@
 // CHECK: "cmppreserve",
 // CHECK: tir::backend::exec::SymSource::FixedRegister("FLAGS", 0)
 
-// CHECK: fn isel_pattern_rotlike(
-// CHECK: fn isel_pattern_brancheq_via_cmp(
+// CHECK: static RULE_ROTLIKE
+// CHECK: static RULE_BRANCHEQ_VIA_CMP

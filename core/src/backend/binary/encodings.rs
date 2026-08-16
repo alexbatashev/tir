@@ -202,7 +202,7 @@ pub fn decode_with(context: &Context, word: u32, spec: &DecodeSpec) -> Option<Op
     for declared in spec.attrs {
         if !attributes
             .iter()
-            .any(|a| a.name == context.sym(declared).unwrap())
+            .any(|a| Some(a.name) == context.sym(declared))
         {
             panic!("Missing required attribute: {declared}");
         }

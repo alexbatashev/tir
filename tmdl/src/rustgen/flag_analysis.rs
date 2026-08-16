@@ -900,83 +900,69 @@ fn definer_immediate_symbols(d: &FlagInst<'_>, d_sem: &FlagDefinerSemantics) -> 
 struct FlagInst<'a> {
     inst: &'a ast::Instruction,
     ops: Vec<(String, Type)>,
+    /// The op's registered name (`OPNAME`, falling back to `MNEMONIC`).
+    op_name: String,
     mnemonic: String,
     encoding_bytes: u64,
     isa_param_values: HashMap<String, i64>,
 }
 
-/// Emit an flag-definer prelude function (materializing the flag-setting
-/// instruction ahead of its consumer) once per definer, and return its ident
-/// plus the definer's operand register constraints. Shared by branch and reader
-/// pair emission, deduping through `emitted_preludes`.
+/// Build an flag-definer prelude spec (materializing the flag-setting
+/// instruction ahead of its consumer) once per definer, and return its tokens,
+/// shim ident, and the definer's operand register constraints. Shared by branch
+/// and reader pair emission, deduping through `emitted_preludes`.
 fn emit_flag_definer_prelude(
     d: &FlagInst<'_>,
     d_sem: &FlagDefinerSemantics,
     emitted_preludes: &mut HashSet<String>,
-    isel_rule_emitters: &mut Vec<proc_macro2::TokenStream>,
-) -> (proc_macro2::Ident, Vec<proc_macro2::TokenStream>) {
-    let prelude_fn_ident = format_ident!("emit_isel_flag_definer_{}", d.inst.name.to_lowercase());
-    let d_builder_ident = format_ident!("{}OpBuilder", &d.inst.name);
+    dialect: &str,
+) -> (
+    proc_macro2::TokenStream,
+    proc_macro2::Ident,
+    Vec<proc_macro2::TokenStream>,
+) {
+    let prelude_key = format!("flag_definer_{}", d.inst.name.to_lowercase());
+    let d_op_ty_ident = format_ident!("{}Op", &d.inst.name);
 
     let mut operand_constraint_entries: Vec<proc_macro2::TokenStream> = Vec::new();
-    let mut prelude_attr_steps: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut prelude_attrs: Vec<proc_macro2::TokenStream> = Vec::new();
     for (op_name, op_ty) in &d.ops {
         let Some(&symbol) = d_sem.variable_symbols.get(op_name) else {
             continue;
         };
-        let op_name_lit = proc_macro2::Literal::string(op_name);
-        let symbol_lit = proc_macro2::Literal::u32_unsuffixed(symbol);
         match op_ty {
             Type::Struct(class_name) => {
-                let class_id = reg_class_id(class_name);
-                operand_constraint_entries
-                    .push(quote! { (#symbol_lit, tir::graph::OperandConstraint::Register) });
-                prelude_attr_steps.push(quote! {
-                    let src = m
-                        .value_binding(#symbol_lit)
-                        .ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
-                    builder = builder.attr(
-                        #op_name_lit,
-                        tir::attributes::AttributeValue::Register(
-                            tir::attributes::RegisterAttr::Virtual {
-                                id: src.number(),
-                                class: Some(#class_id),
-                            },
-                        ),
-                    );
-                });
+                operand_constraint_entries.push(constraint_entry(
+                    symbol,
+                    quote! { tir::graph::OperandConstraint::Register },
+                ));
+                prelude_attrs.push(emit_attr_value(op_name, symbol, &reg_class_id(class_name)));
             }
             Type::Bits(_) | Type::Integer => {
-                operand_constraint_entries
-                    .push(quote! { (#symbol_lit, tir::graph::OperandConstraint::Immediate) });
-                prelude_attr_steps.push(quote! {
-                    let v = m
-                        .int_binding(#symbol_lit)
-                        .ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
-                    builder = builder.attr(
-                        #op_name_lit,
-                        tir::attributes::AttributeValue::Int(v),
-                    );
-                });
+                operand_constraint_entries.push(constraint_entry(
+                    symbol,
+                    quote! { tir::graph::OperandConstraint::Immediate },
+                ));
+                prelude_attrs.push(emit_attr_int(op_name, symbol));
             }
             _ => continue,
         }
     }
 
-    if emitted_preludes.insert(d.inst.name.clone()) {
-        isel_rule_emitters.push(quote! {
-            fn #prelude_fn_ident(
-                context: &tir::Context,
-                req: &tir::backend::isel::EmitRequest,
-                m: &tir::backend::isel::RuleMatch,
-            ) -> Result<Box<dyn tir::Operation>, tir::PassError> {
-                let _ = (req, m);
-                let mut builder = #d_builder_ident::new(context);
-                #(#prelude_attr_steps)*
-                Ok(Box::new(builder.build()))
-            }
-        });
-    }
+    let declared: Vec<String> = d.ops.iter().map(|(name, _)| name.clone()).collect();
+    let (emitter_ts, prelude_shim) = emit_emitter_spec(
+        &prelude_key,
+        dialect,
+        &d.op_name,
+        &d_op_ty_ident,
+        &prelude_attrs,
+        &declared,
+    );
+    let emitter_ts = if emitted_preludes.insert(d.inst.name.clone()) {
+        emitter_ts
+    } else {
+        quote! {}
+    };
 
-    (prelude_fn_ident, operand_constraint_entries)
+    (emitter_ts, prelude_shim, operand_constraint_entries)
 }

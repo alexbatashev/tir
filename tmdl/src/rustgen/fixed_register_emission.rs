@@ -18,7 +18,11 @@ type FixedReg = (String, u16);
 /// function of other fixed-register reads and constants, taking no operands.
 struct Definer<'a> {
     inst: &'a ast::Instruction,
+    /// The op's registered name (`OPNAME`, falling back to `MNEMONIC`).
+    op_name: String,
     mnemonic: String,
+    /// Declared attribute names (operand names), for builder parity.
+    op_attrs: Vec<String>,
     encoding_bytes: u64,
     written: FixedReg,
     /// The right-hand side of the single fixed-register write.
@@ -30,6 +34,8 @@ struct Definer<'a> {
 /// instruction (`idiv`), case-split so a definer folds the guard.
 struct Reader<'a> {
     inst: &'a ast::Instruction,
+    /// The op's registered name (`OPNAME`, falling back to `MNEMONIC`).
+    op_name: String,
     mnemonic: String,
     encoding_bytes: u64,
     ops: Vec<(String, Type)>,
@@ -46,8 +52,9 @@ fn emit_fixed_register_rules<'a>(
     item_cache: &HashMap<&'a str, &'a ast::Item>,
     register_index_map: &HashMap<(String, String), u32>,
     register_name_map: &HashMap<(String, u32), String>,
+    dialect: &str,
     isel_rule_emitters: &mut Vec<proc_macro2::TokenStream>,
-    isel_rule_inits: &mut Vec<proc_macro2::TokenStream>,
+    rule_spec_idents: &mut Vec<proc_macro2::Ident>,
 ) -> Result<(), TMDLError> {
     let float_classes: HashSet<String> = files
         .iter()
@@ -75,7 +82,11 @@ fn emit_fixed_register_rules<'a>(
         else {
             continue;
         };
-        let _ = resolved_params;
+        let op_name = resolved_params
+            .get("OPNAME")
+            .and_then(|(_, value)| value.as_ref())
+            .and_then(resolve_string)
+            .unwrap_or_else(|| mnemonic.clone());
         let isa_param_values = resolve_isa_param_values(inst, item_cache);
         let ops = resolve_operand_widths(
             resolve_operands_for_instruction(inst, item_cache),
@@ -83,12 +94,18 @@ fn emit_fixed_register_rules<'a>(
         );
 
         let encoding_bytes = encoding_width_bytes(inst, item_cache);
-        if let Some(definer) =
-            classify_definer(inst, &mnemonic, encoding_bytes, &ops, register_index_map)
-        {
+        if let Some(definer) = classify_definer(
+            inst,
+            &op_name,
+            &mnemonic,
+            encoding_bytes,
+            &ops,
+            register_index_map,
+        ) {
             definers.push(definer);
         } else if let Some(reader) = classify_reader(
             inst,
+            &op_name,
             &mnemonic,
             encoding_bytes,
             &ops,
@@ -107,8 +124,9 @@ fn emit_fixed_register_rules<'a>(
             register_name_map,
             &float_classes,
             &polymorphic_classes,
+            dialect,
             isel_rule_emitters,
-            isel_rule_inits,
+            rule_spec_idents,
         );
     }
     Ok(())
@@ -128,8 +146,9 @@ fn emit_division_rules(
     register_name_map: &HashMap<(String, u32), String>,
     float_classes: &HashSet<String>,
     polymorphic_classes: &HashSet<String>,
+    dialect: &str,
     isel_rule_emitters: &mut Vec<proc_macro2::TokenStream>,
-    isel_rule_inits: &mut Vec<proc_macro2::TokenStream>,
+    rule_spec_idents: &mut Vec<proc_macro2::Ident>,
 ) {
     // The quotient is the then-arm write whose value is a bare division; its
     // register is the dividend/quotient register (`rax`). The sibling (`rdx`) is
@@ -168,8 +187,9 @@ fn emit_division_rules(
         register_name_map,
         float_classes,
         polymorphic_classes,
+        dialect,
         isel_rule_emitters,
-        isel_rule_inits,
+        rule_spec_idents,
     );
 
     // The remainder is the then-arm write to the sibling register (`rdx`); its
@@ -186,8 +206,9 @@ fn emit_division_rules(
             register_name_map,
             float_classes,
             polymorphic_classes,
+            dialect,
             isel_rule_emitters,
-            isel_rule_inits,
+            rule_spec_idents,
         );
     }
 }
@@ -433,8 +454,9 @@ fn emit_one_division_rule(
     register_name_map: &HashMap<(String, u32), String>,
     float_classes: &HashSet<String>,
     polymorphic_classes: &HashSet<String>,
+    dialect: &str,
     isel_rule_emitters: &mut Vec<proc_macro2::TokenStream>,
-    isel_rule_inits: &mut Vec<proc_macro2::TokenStream>,
+    rule_spec_idents: &mut Vec<proc_macro2::Ident>,
 ) {
     let sibling_reg = &definer.written;
     let (dividend_class, dividend_index) = dividend_reg.clone();
@@ -476,7 +498,12 @@ fn emit_one_division_rule(
             pattern_widths[index] = *forced;
         }
     }
-    let pattern_expr = emit_dag_as_code(&canon_pattern, canon_root, &pattern_widths);
+    let (pattern_offset, pattern_typed) = intern_dag(&canon_pattern, canon_root, &pattern_widths);
+    let pattern_spec = SpecPattern {
+        offset: pattern_offset,
+        typed: pattern_typed,
+        float_width: None,
+    };
 
     // Both operands of a division are width-sensitive: their full width reaches
     // the result.
@@ -491,7 +518,7 @@ fn emit_one_division_rule(
     ]
     .into_iter()
     .collect();
-    let operand_register_call = emit_operand_register_call(
+    let operand_register_specs = operand_register_specs_for_ops(
         &synthetic_ops,
         &synthetic_varsyms,
         &sensitive,
@@ -510,63 +537,20 @@ fn emit_one_division_rule(
 
     let class_id = reg_class_id(&dividend_class);
     let sibling_class_id = reg_class_id(&sibling_reg.0);
-    let dividend_index_lit = proc_macro2::Literal::u16_unsuffixed(dividend_index);
-    let sibling_index_lit = proc_macro2::Literal::u16_unsuffixed(sibling_reg.1);
-    let lhs_symbol_lit = proc_macro2::Literal::u32_unsuffixed(lhs_symbol);
-    let divisor_symbol_lit = proc_macro2::Literal::u32_unsuffixed(divisor_symbol);
-    let divisor_name_lit = proc_macro2::Literal::string(divisor_name);
+    let sibling_index = sibling_reg.1;
     let divisor_class_id = reg_class_id(divisor_class);
-    let dividend_use_slot = proc_macro2::Literal::string(&fixed_read_slot_name(&dividend_name));
-    let dividend_def_slot = proc_macro2::Literal::string(&fixed_write_slot_name(&dividend_name));
-    let sibling_use_slot = proc_macro2::Literal::string(&fixed_read_slot_name(&sibling_name));
-    let sibling_def_slot = proc_macro2::Literal::string(&fixed_write_slot_name(&sibling_name));
+    let dividend_use_slot = fixed_read_slot_name(&dividend_name);
+    let dividend_def_slot = fixed_write_slot_name(&dividend_name);
+    let sibling_use_slot = fixed_read_slot_name(&sibling_name);
+    let sibling_def_slot = fixed_write_slot_name(&sibling_name);
 
-    // Whichever register holds this rule's result is defined as the result
-    // virtual (`FixedDef`); the other written register is clobbered (`Physical`).
-    let fixed_def = |class_id: &proc_macro2::TokenStream, index: &proc_macro2::Literal| {
-        quote! {
-            tir::attributes::RegisterAttr::FixedDef {
-                id: result,
-                class: #class_id,
-                index: #index,
-            }
-        }
-    };
-    let clobber = |class_id: &proc_macro2::TokenStream, index: &proc_macro2::Literal| {
-        quote! {
-            tir::attributes::RegisterAttr::Physical {
-                class: #class_id,
-                index: #index,
-            }
-        }
-    };
-    let (dividend_def_attr, sibling_def_attr) = if result_is_dividend {
-        (
-            fixed_def(&class_id, &dividend_index_lit),
-            clobber(&sibling_class_id, &sibling_index_lit),
-        )
-    } else {
-        (
-            clobber(&class_id, &dividend_index_lit),
-            fixed_def(&sibling_class_id, &sibling_index_lit),
-        )
-    };
-
-    let reader_builder = format_ident!("{}OpBuilder", &reader.inst.name);
-    let definer_builder = format_ident!("{}OpBuilder", &definer.inst.name);
+    let reader_op_ty = format_ident!("{}Op", &reader.inst.name);
+    let definer_op_ty = format_ident!("{}Op", &definer.inst.name);
     let reader_lower = reader.inst.name.to_lowercase();
     let definer_lower = definer.inst.name.to_lowercase();
-    let pattern_fn_ident =
-        format_ident!("isel_pattern_{}_{}_via_{}", reader_lower, kind, definer_lower);
-    let emit_fn_ident = format_ident!("emit_isel_{}_{}_via_{}", reader_lower, kind, definer_lower);
-    let prelude_fn_ident =
-        format_ident!("emit_isel_prelude_{}_{}_via_{}", definer_lower, kind, reader_lower);
-    let rule_name_lit = proc_macro2::Literal::string(&format!(
-        "{}+{} {}",
-        definer.mnemonic, reader.mnemonic, kind
-    ));
-    let reader_cost = isel_rule_cost(&reader.mnemonic, reader.encoding_bytes);
-    let definer_cost = isel_rule_cost(&definer.mnemonic, definer.encoding_bytes);
+    let rule_key = format!("{}_{}_via_{}", reader_lower, kind, definer_lower);
+    let prelude_key = format!("prelude_{}_{}_via_{}", definer_lower, kind, reader_lower);
+    let rule_name = format!("{}+{} {}", definer.mnemonic, reader.mnemonic, kind);
 
     let shared_isas: Vec<String> = reader
         .inst
@@ -575,122 +559,77 @@ fn emit_one_division_rule(
         .filter(|isa| definer.inst.for_isas.contains(isa))
         .cloned()
         .collect();
-    let pair_features = feature_slice(&shared_isas);
 
+    // Whichever register holds this rule's result is defined as the result
+    // virtual (`FixedDef`); the other written register is clobbered (`Physical`).
+    let dividend_def_attr = if result_is_dividend {
+        emit_attr_result_fixed_def(&dividend_def_slot, 0, &class_id, dividend_index)
+    } else {
+        emit_attr_physical(&dividend_def_slot, &class_id, dividend_index)
+    };
+    let sibling_def_attr = if result_is_dividend {
+        emit_attr_physical(&sibling_def_slot, &sibling_class_id, sibling_index)
+    } else {
+        emit_attr_result_fixed_def(&sibling_def_slot, 0, &sibling_class_id, sibling_index)
+    };
+
+    let prelude_attrs = [
+        emit_attr_fixed_use(&dividend_use_slot, lhs_symbol, &class_id, dividend_index),
+        emit_attr_physical(&sibling_def_slot, &sibling_class_id, sibling_index),
+    ];
+    let (prelude_ts, prelude_shim) = emit_emitter_spec(
+        &prelude_key,
+        dialect,
+        &definer.op_name,
+        &definer_op_ty,
+        &prelude_attrs,
+        &definer.op_attrs,
+    );
+
+    let emit_attrs = [
+        emit_attr_value(divisor_name, divisor_symbol, &divisor_class_id),
+        emit_attr_fixed_use(&dividend_use_slot, lhs_symbol, &class_id, dividend_index),
+        dividend_def_attr,
+        emit_attr_physical(&sibling_use_slot, &sibling_class_id, sibling_index),
+        sibling_def_attr,
+    ];
+    let reader_declared: Vec<String> = reader.ops.iter().map(|(name, _)| name.clone()).collect();
+    let (emitter_ts, emit_shim) = emit_emitter_spec(
+        &rule_key,
+        dialect,
+        &reader.op_name,
+        &reader_op_ty,
+        &emit_attrs,
+        &reader_declared,
+    );
+    let constraints = [
+        constraint_entry(lhs_symbol, quote! { tir::graph::OperandConstraint::Register }),
+        constraint_entry(divisor_symbol, quote! { tir::graph::OperandConstraint::Register }),
+    ];
+    let (rule_ts, rule_ident) = emit_rule_spec(
+        &rule_key,
+        &rule_name,
+        &shared_isas,
+        &pattern_spec,
+        &[
+            (&definer.mnemonic, definer.encoding_bytes as u32),
+            (&reader.mnemonic, reader.encoding_bytes as u32),
+        ],
+        quote! { tir::backend::isel::RuleKind::Value },
+        Some(&prelude_shim),
+        &emit_shim,
+        &constraints,
+        &operand_register_specs,
+        None,
+        &[],
+        None,
+    );
     isel_rule_emitters.push(quote! {
-        fn #pattern_fn_ident(_context: &tir::Context) -> tir::sem::SemGraph {
-            let mut g = tir::sem::SemGraph::new();
-            #pattern_expr;
-            g
-        }
-
-        fn #prelude_fn_ident(
-            context: &tir::Context,
-            req: &tir::backend::isel::EmitRequest,
-            m: &tir::backend::isel::RuleMatch,
-        ) -> Result<Box<dyn tir::Operation>, tir::PassError> {
-            let _ = req;
-            let lhs = m
-                .value_binding(#lhs_symbol_lit)
-                .ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
-            let builder = #definer_builder::new(context)
-                .attr(
-                    #dividend_use_slot,
-                    tir::attributes::AttributeValue::Register(
-                        tir::attributes::RegisterAttr::FixedUse {
-                            id: lhs.number(),
-                            class: #class_id,
-                            index: #dividend_index_lit,
-                        },
-                    ),
-                )
-                .attr(
-                    #sibling_def_slot,
-                    tir::attributes::AttributeValue::Register(
-                        tir::attributes::RegisterAttr::Physical {
-                            class: #sibling_class_id,
-                            index: #sibling_index_lit,
-                        },
-                    ),
-                );
-            Ok(Box::new(builder.build()))
-        }
-
-        fn #emit_fn_ident(
-            context: &tir::Context,
-            req: &tir::backend::isel::EmitRequest,
-            m: &tir::backend::isel::RuleMatch,
-        ) -> Result<Box<dyn tir::Operation>, tir::PassError> {
-            let lhs = m
-                .value_binding(#lhs_symbol_lit)
-                .ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
-            let divisor = m
-                .value_binding(#divisor_symbol_lit)
-                .ok_or(tir::PassError::RewriteFailed(req.op_id()))?;
-            let result = req
-                .results
-                .first()
-                .ok_or(tir::PassError::RewriteFailed(req.op_id()))?
-                .number();
-            let builder = #reader_builder::new(context)
-                .attr(
-                    #divisor_name_lit,
-                    tir::attributes::AttributeValue::Register(
-                        tir::attributes::RegisterAttr::Virtual {
-                            id: divisor.number(),
-                            class: Some(#divisor_class_id),
-                        },
-                    ),
-                )
-                .attr(
-                    #dividend_use_slot,
-                    tir::attributes::AttributeValue::Register(
-                        tir::attributes::RegisterAttr::FixedUse {
-                            id: lhs.number(),
-                            class: #class_id,
-                            index: #dividend_index_lit,
-                        },
-                    ),
-                )
-                .attr(
-                    #dividend_def_slot,
-                    tir::attributes::AttributeValue::Register(#dividend_def_attr),
-                )
-                .attr(
-                    #sibling_use_slot,
-                    tir::attributes::AttributeValue::Register(
-                        tir::attributes::RegisterAttr::Physical {
-                            class: #sibling_class_id,
-                            index: #sibling_index_lit,
-                        },
-                    ),
-                )
-                .attr(
-                    #sibling_def_slot,
-                    tir::attributes::AttributeValue::Register(#sibling_def_attr),
-                );
-            Ok(Box::new(builder.build()))
-        }
+        #prelude_ts
+        #emitter_ts
+        #rule_ts
     });
-
-    isel_rule_inits.push(quote! {
-        if features_enabled(features, #pair_features) {
-            rules.push(
-                tir::backend::isel::Rule::new(
-                    #rule_name_lit,
-                    #pattern_fn_ident(context),
-                    (#definer_cost) + (#reader_cost),
-                    #emit_fn_ident,
-                )
-                .with_prelude_emitter(#prelude_fn_ident)
-                .with_operand_constraints(vec![
-                    (#lhs_symbol_lit, tir::graph::OperandConstraint::Register),
-                    (#divisor_symbol_lit, tir::graph::OperandConstraint::Register),
-                ])
-                #operand_register_call,
-            );
-        }
-    });
+    rule_spec_idents.push(rule_ident);
 }
 
 /// Pair each definer with every reader that reads the register the definer
@@ -813,6 +752,7 @@ fn resolve_fixed_reg(
 /// function of fixed-register reads and constants).
 fn classify_definer<'a>(
     inst: &'a ast::Instruction,
+    op_name: &str,
     mnemonic: &str,
     encoding_bytes: u64,
     ops: &[(String, Type)],
@@ -835,7 +775,9 @@ fn classify_definer<'a>(
     }
     Some(Definer {
         inst,
+        op_name: op_name.to_string(),
         mnemonic: mnemonic.to_string(),
+        op_attrs: ops.iter().map(|(name, _)| name.clone()).collect(),
         encoding_bytes,
         written,
         write_rhs: rhs,
@@ -846,6 +788,7 @@ fn classify_definer<'a>(
 /// reads at least one fixed register, and it has at least one register operand.
 fn classify_reader<'a>(
     inst: &'a ast::Instruction,
+    op_name: &str,
     mnemonic: &str,
     encoding_bytes: u64,
     ops: &[(String, Type)],
@@ -882,6 +825,7 @@ fn classify_reader<'a>(
 
     Some(Reader {
         inst,
+        op_name: op_name.to_string(),
         mnemonic: mnemonic.to_string(),
         encoding_bytes,
         ops: ops.to_vec(),
