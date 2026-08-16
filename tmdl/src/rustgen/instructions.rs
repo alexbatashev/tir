@@ -1304,10 +1304,10 @@ fn emit_instructions<'a>(
             (false, false) => quote! {},
         };
 
-        // A no-op behavior (e.g. c.nop) or an unmodeled (`todo()`) one whose
-        // `execute()` only traps never touches the machine context.
-        let behavior_is_empty = matches!(&inst.behavior, ast::Expr::Block(b) if b.stmts.is_empty());
-        let machine_param = if (behavior_is_empty || uses_todo) && branch_value.is_none() {
+        // An unmodeled (`todo()`) behavior whose `execute()` only traps never
+        // touches the machine context; every other body binds its entry symbols
+        // through `exec::init_syms`, which takes the machine.
+        let machine_param = if uses_todo && branch_value.is_none() {
             quote! { _machine }
         } else {
             quote! { machine }
@@ -1644,15 +1644,17 @@ fn emit_instructions<'a>(
             }
         }
 
-        if let Some((decoder, decode_fn_ident, fixed_mask)) = emit_instruction_decoder(
+        if let Some((decoder, decode_spec_ident, fixed_mask)) = emit_instruction_decoder(
             inst,
             &encoding_arms,
             &ops_map,
             &resolved_params,
             width_bytes,
+            dialect,
+            op_name,
         ) {
             instruction_decoder_impls.push(decoder);
-            instruction_decoder_dispatch.push((fixed_mask, decode_fn_ident));
+            instruction_decoder_dispatch.push((fixed_mask, decode_spec_ident));
         }
     }
 
@@ -1683,15 +1685,9 @@ fn emit_instructions<'a>(
     // should claim the word. `sort_by_key` is stable, preserving declaration
     // order among equally-specific encodings.
     instruction_decoder_dispatch.sort_by_key(|d| std::cmp::Reverse(d.0.count_ones()));
-    let instruction_decoder_dispatch: Vec<proc_macro2::TokenStream> = instruction_decoder_dispatch
+    let decode_spec_idents: Vec<proc_macro2::Ident> = instruction_decoder_dispatch
         .into_iter()
-        .map(|(_, ident)| {
-            quote! {
-                if let Some(id) = #ident(context, word) {
-                    return Some(id);
-                }
-            }
-        })
+        .map(|(_, ident)| ident)
         .collect();
 
     // Order same-mnemonic asm parser candidates most-constrained-first so the
@@ -1930,9 +1926,10 @@ fn emit_instructions<'a>(
         /// bits); each matches on its fixed opcode bits and reconstructs its
         /// operands from the word.
         #public_visibility fn decode_instruction(context: &tir::Context, word: u32) -> Option<tir::OpId> {
-            let _ = (&context, word);
-            #(#instruction_decoder_dispatch)*
-            None
+            static DECODE_SPECS: &[&tir::backend::binary::DecodeSpec] = &[#(&#decode_spec_idents),*];
+            DECODE_SPECS
+                .iter()
+                .find_map(|spec| tir::backend::binary::decode_with(context, word, spec))
         }
 
         #(#isel_rule_emitters)*

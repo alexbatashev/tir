@@ -17,9 +17,27 @@ fn encoding_mask(width: u16) -> u128 {
     }
 }
 
+fn emit_field_runs(fields: &[IntField]) -> proc_macro2::TokenStream {
+    let runs = fields.iter().map(|f| {
+        let op_lo = proc_macro2::Literal::u16_unsuffixed(f.op_lo);
+        let word_lo = proc_macro2::Literal::u16_unsuffixed(f.word_lo);
+        let width = proc_macro2::Literal::u16_unsuffixed(f.width);
+        quote! {
+            tir::backend::binary::FieldRun {
+                op_lo: #op_lo,
+                word_lo: #word_lo,
+                width: #width,
+            }
+        }
+    });
+    quote! { &[#(#runs),*] }
+}
+
 /// Compile an instruction's encoding arms into an `encode_*_inst` function
 /// (and, when the encoding has exactly one immediate operand of known width,
-/// a `patch_*_inst` function that re-scatters a resolved fixup value).
+/// a `patch_*_inst` function that re-scatters a resolved fixup value). Both
+/// are thin shims over the spec interpreters in `tir::backend::binary`; the
+/// instruction-specific part is a static data table.
 /// Returns `None` when the instruction has no encoding.
 fn emit_instruction_encoder(
     inst: &ast::Instruction,
@@ -143,128 +161,65 @@ fn emit_instruction_encoder(
         }
     }
 
-    let scatter = |fields: &[IntField]| -> Vec<proc_macro2::TokenStream> {
-        fields
-            .iter()
-            .map(|f| {
-                let mask = proc_macro2::Literal::u128_suffixed(encoding_mask(f.width));
-                let bits = if f.op_lo > 0 {
-                    let op_lo = proc_macro2::Literal::u32_suffixed(f.op_lo as u32);
-                    quote! { (value >> #op_lo) & #mask }
-                } else {
-                    quote! { value & #mask }
-                };
-                if f.word_lo > 0 {
-                    let word_lo = proc_macro2::Literal::u32_suffixed(f.word_lo as u32);
-                    quote! { word |= (#bits) << #word_lo; }
-                } else {
-                    quote! { word |= #bits; }
-                }
-            })
-            .collect()
-    };
-
-    let mut steps: Vec<proc_macro2::TokenStream> = Vec::new();
+    // Register operand: encode the allocated physical index; reject anything
+    // that did not get one. Immediate operand: fit-check when the field is
+    // narrower than 64 bits (immediates written in assembly may be spelled
+    // signed or unsigned), then scatter. Symbol names and branch-target blocks
+    // are not representable at encode time: their bits stay zero and they are
+    // recorded as fixups instead.
+    let mut spec_fields: Vec<proc_macro2::TokenStream> = Vec::new();
     for (name, fields) in &reg_fields {
         let name_lit = proc_macro2::Literal::string(name);
-        let ors = scatter(fields);
-        steps.push(quote! {
-            {
-                let value = match op.attr(#name_lit)? {
-                    tir::attributes::AttributeValue::Register(
-                        tir::attributes::RegisterAttr::Physical { index, .. },
-                    ) => *index as u128,
-                    _ => return None,
-                };
-                #(#ors)*
+        let runs = emit_field_runs(fields);
+        spec_fields.push(quote! {
+            tir::backend::binary::EncodeField {
+                attr: #name_lit,
+                int_range: None,
+                runs: #runs,
+                register: true,
             }
         });
     }
-
     for (name, fields) in &int_fields {
         let name_lit = proc_macro2::Literal::string(name);
-        let ors = scatter(fields);
-        // Immediates written in assembly may be spelled signed or unsigned
-        // (`-1` vs `0xFFF`), so accept either fit within the declared width.
-        let (int_check, uint_check) = match ops_map.get(name.as_str()) {
-            // Any attribute value fits a full-width field, and the shifts
-            // below would overflow at 64 bits.
-            Some(Type::Bits(n)) if *n >= 64 => (quote! {}, quote! {}),
-            Some(Type::Bits(n)) => {
+        let runs = emit_field_runs(fields);
+        let int_range = match ops_map.get(name.as_str()) {
+            // Any attribute value fits a full-width field, and the range
+            // literals would overflow at 64 bits.
+            Some(Type::Bits(n)) if *n < 64 => {
                 let min = proc_macro2::Literal::i64_suffixed(-(1i64 << (n - 1)));
                 let max = proc_macro2::Literal::i64_suffixed(1i64 << n);
                 let umax = proc_macro2::Literal::u64_suffixed(1u64 << n);
-                (
-                    quote! { if !(#min..#max).contains(&v) { return None; } },
-                    quote! { if v >= #umax { return None; } },
-                )
+                quote! { Some((#min, #max, #umax)) }
             }
-            _ => (quote! {}, quote! {}),
+            _ => quote! { None },
         };
-        steps.push(quote! {
-            {
-                match op.attr(#name_lit)? {
-                    tir::attributes::AttributeValue::Int(v) => {
-                        let v = *v;
-                        #int_check
-                        let value = v as u128;
-                        #(#ors)*
-                    }
-                    tir::attributes::AttributeValue::UInt(v) => {
-                        let v = *v;
-                        #uint_check
-                        let value = v as u128;
-                        #(#ors)*
-                    }
-                    tir::attributes::AttributeValue::Str(s) => {
-                        fixups.push(tir::backend::binary::InstFixup {
-                            operand: #name_lit,
-                            target: tir::backend::binary::FixupTarget::Symbol(s.to_string()),
-                        });
-                    }
-                    tir::attributes::AttributeValue::Block(b) => {
-                        fixups.push(tir::backend::binary::InstFixup {
-                            operand: #name_lit,
-                            target: tir::backend::binary::FixupTarget::Block(*b),
-                        });
-                    }
-                    _ => return None,
-                }
+        spec_fields.push(quote! {
+            tir::backend::binary::EncodeField {
+                attr: #name_lit,
+                int_range: #int_range,
+                runs: #runs,
+                register: false,
             }
         });
     }
 
     let encode_fn_ident = format_ident!("encode_{}_inst", inst.name.to_lowercase());
+    let encode_spec_ident = format_ident!("ENCODE_{}", inst.name.to_uppercase());
     let const_word_lit = proc_macro2::Literal::u128_suffixed(const_word);
     let wb_lit = proc_macro2::Literal::usize_unsuffixed(width_bytes as usize);
-    let word_decl = if reg_fields.is_empty() && int_fields.is_empty() {
-        quote! { let word: u128 = #const_word_lit; }
-    } else {
-        quote! { let mut word: u128 = #const_word_lit; }
-    };
-    let fixups_decl = if int_fields.is_empty() {
-        quote! { let fixups: Vec<tir::backend::binary::InstFixup> = Vec::new(); }
-    } else {
-        quote! { let mut fixups: Vec<tir::backend::binary::InstFixup> = Vec::new(); }
-    };
-    // Operand-less instructions (e.g. ecall) encode to a constant word and never
-    // consult the op's attributes.
-    let op_param = if reg_fields.is_empty() && int_fields.is_empty() {
-        quote! { _op }
-    } else {
-        quote! { op }
-    };
     let encoder = quote! {
+        static #encode_spec_ident: tir::backend::binary::EncodeSpec =
+            tir::backend::binary::EncodeSpec {
+                const_word: #const_word_lit,
+                width_bytes: #wb_lit,
+                fields: &[#(#spec_fields),*],
+            };
+
         fn #encode_fn_ident(
-            #op_param: &tir::OpInstance,
+            op: &tir::OpInstance,
         ) -> Option<tir::backend::binary::EncodedInst> {
-            #word_decl
-            #fixups_decl
-            #(#steps)*
-            Some(tir::backend::binary::EncodedInst {
-                bytes: word.to_le_bytes()[..#wb_lit].to_vec(),
-                fixups,
-            })
+            tir::backend::binary::encode_with(op, &#encode_spec_ident)
         }
     };
 
@@ -275,45 +230,36 @@ fn emit_instruction_encoder(
         && let Some(Type::Bits(n)) = ops_map.get(name.as_str())
     {
         let patch_fn_ident = format_ident!("patch_{}_inst", inst.name.to_lowercase());
-        // A full-width field admits any i64 (and the shifts would overflow).
-        let range_check = if *n < 64 {
+        let patch_spec_ident = format_ident!("PATCH_{}", inst.name.to_uppercase());
+        // A full-width field admits any i64 (and the literals would overflow).
+        let range = if *n < 64 {
             let min = proc_macro2::Literal::i64_suffixed(-(1i64 << (n - 1)));
             let max = proc_macro2::Literal::i64_suffixed(1i64 << (n - 1));
-            quote! {
-                if !(#min..#max).contains(&value) {
-                    return None;
-                }
-            }
+            quote! { Some((#min, #max)) }
         } else {
-            quote! {}
+            quote! { None }
         };
         let lowest_bit = fields.iter().map(|f| f.op_lo).min().unwrap_or(0);
         // Operand bits below the lowest encoded bit are silently dropped by the
         // scatter (e.g. bit 0 of RISC-V branch offsets); a value with any of
         // them set cannot be represented.
-        let dropped_check = if lowest_bit > 0 {
-            let dropped_mask = proc_macro2::Literal::u128_suffixed(encoding_mask(lowest_bit));
-            quote! { if (value as u128) & #dropped_mask != 0 { return None; } }
+        let dropped_mask = proc_macro2::Literal::u128_suffixed(if lowest_bit > 0 {
+            encoding_mask(lowest_bit)
         } else {
-            quote! {}
-        };
-        let ors = scatter(fields);
+            0
+        });
+        let runs = emit_field_runs(fields);
         Some(quote! {
+            static #patch_spec_ident: tir::backend::binary::PatchSpec =
+                tir::backend::binary::PatchSpec {
+                    range: #range,
+                    dropped_mask: #dropped_mask,
+                    width_bytes: #wb_lit,
+                    runs: #runs,
+                };
+
             fn #patch_fn_ident(bytes: &mut [u8], value: i64) -> Option<()> {
-                #range_check
-                #dropped_check
-                if bytes.len() < #wb_lit {
-                    return None;
-                }
-                let mut word: u128 = 0;
-                for (i, b) in bytes.iter().enumerate().take(#wb_lit) {
-                    word |= (*b as u128) << (8 * i);
-                }
-                let value = value as u128;
-                #(#ors)*
-                let out = word.to_le_bytes();
-                bytes[..#wb_lit].copy_from_slice(&out[..#wb_lit]);
-                Some(())
+                tir::backend::binary::patch_with(bytes, value, &#patch_spec_ident)
             }
         })
     } else {
@@ -323,11 +269,11 @@ fn emit_instruction_encoder(
     Ok(Some((encoder, patcher)))
 }
 
-/// Compile an instruction's encoding arms into a `decode_*_inst` function — the
-/// inverse of [`emit_instruction_encoder`]. Given a 32-bit little-endian
-/// instruction word it matches the fixed opcode bits, reconstructs each operand
-/// from its (possibly split) bit-fields, builds the corresponding op in the
-/// `Context`, and returns its id.
+/// Compile an instruction's encoding arms into a `DECODE_*` spec — the inverse
+/// of [`emit_instruction_encoder`]. Given a 32-bit little-endian instruction
+/// word the shared interpreter matches the fixed opcode bits, reconstructs
+/// each operand from its (possibly split) bit-fields, builds the corresponding
+/// op in the `Context`, and returns its id.
 ///
 /// Best-effort: returns `None` (no decoder emitted) for instructions without an
 /// encoding, not exactly 32 bits wide, or using an encoding form this generator
@@ -338,6 +284,8 @@ fn emit_instruction_decoder(
     ops_map: &HashMap<String, Type>,
     resolved_params: &HashMap<String, (Type, Option<ast::Expr>)>,
     width_bytes: u64,
+    dialect: &str,
+    op_name: &str,
 ) -> Option<(proc_macro2::TokenStream, proc_macro2::Ident, u128)> {
     if encoding_arms.is_empty() || width_bytes != 4 {
         return None;
@@ -436,79 +384,59 @@ fn emit_instruction_decoder(
         }
     }
 
-    // Reassemble one operand from its pieces: for each (word_lo, op_lo, width)
-    // run, place word bits `[word_lo, word_lo+width)` at operand bits `op_lo`.
-    let gather = |fields: &[IntField]| -> proc_macro2::TokenStream {
-        let pieces: Vec<proc_macro2::TokenStream> = fields
-            .iter()
-            .map(|f| {
-                let mask = proc_macro2::Literal::u64_suffixed(encoding_mask(f.width) as u64);
-                let extract = if f.word_lo > 0 {
-                    let word_lo = proc_macro2::Literal::u32_suffixed(f.word_lo as u32);
-                    quote! { (word >> #word_lo) as u64 & #mask }
-                } else {
-                    quote! { word as u64 & #mask }
-                };
-                if f.op_lo > 0 {
-                    let op_lo = proc_macro2::Literal::u32_suffixed(f.op_lo as u32);
-                    quote! { value |= (#extract) << #op_lo; }
-                } else {
-                    quote! { value |= #extract; }
-                }
-            })
-            .collect();
-        quote! {{ let mut value: u64 = 0; #(#pieces)* value }}
-    };
-
-    let mut attr_steps: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut spec_fields: Vec<proc_macro2::TokenStream> = Vec::new();
     for (name, fields) in &reg_fields {
         let class = match ops_map.get(name) {
             Some(Type::Struct(c)) => c,
             _ => return None,
         };
         let name_lit = proc_macro2::Literal::string(name);
-        let class_id = reg_class_id(class);
-        let g = gather(fields);
-        attr_steps.push(quote! {
-            .attr(
-                #name_lit,
-                tir::attributes::AttributeValue::Register(
-                    tir::attributes::RegisterAttr::Physical {
-                        class: #class_id,
-                        index: (#g) as u16,
-                    },
-                ),
-            )
+        let class_ident = format_ident!("{}", class);
+        let runs = emit_field_runs(fields);
+        spec_fields.push(quote! {
+            tir::backend::binary::DecodeField {
+                attr: #name_lit,
+                kind: tir::backend::binary::DecodeFieldKind::Register(RegClass::#class_ident.id()),
+                runs: #runs,
+            }
         });
     }
     for (name, fields) in &int_fields {
         let name_lit = proc_macro2::Literal::string(name);
-        let g = gather(fields);
-        attr_steps.push(quote! {
-            .attr(#name_lit, tir::attributes::AttributeValue::Int((#g) as i64))
+        let runs = emit_field_runs(fields);
+        spec_fields.push(quote! {
+            tir::backend::binary::DecodeField {
+                attr: #name_lit,
+                kind: tir::backend::binary::DecodeFieldKind::Int,
+                runs: #runs,
+            }
         });
     }
 
-    let decode_fn_ident = format_ident!("decode_{}_inst", inst.name.to_lowercase());
-    let builder_ident = format_ident!("{}OpBuilder", &inst.name);
+    let spec_ident = format_ident!("DECODE_{}", inst.name.to_uppercase());
+    let dialect_lit = proc_macro2::Literal::string(dialect);
+    let op_name_lit = proc_macro2::Literal::string(op_name);
+    // Sorted so generated code is stable across runs; the interpreter only
+    // needs the set.
+    let mut attr_names: Vec<&String> = ops_map.keys().collect();
+    attr_names.sort();
+    let attr_lits: Vec<proc_macro2::Literal> = attr_names
+        .iter()
+        .map(|n| proc_macro2::Literal::string(n))
+        .collect();
     let const_word_lit = proc_macro2::Literal::u32_suffixed(const_word as u32);
-    // An operand-less instruction fixes every bit, making the mask an identity.
-    let guard = if fixed_mask as u32 == u32::MAX {
-        quote! { if word != #const_word_lit { return None; } }
-    } else {
-        let fixed_mask_lit = proc_macro2::Literal::u32_suffixed(fixed_mask as u32);
-        quote! { if word & #fixed_mask_lit != #const_word_lit { return None; } }
+    let fixed_mask_lit = proc_macro2::Literal::u32_suffixed(fixed_mask as u32);
+
+    let spec = quote! {
+        static #spec_ident: tir::backend::binary::DecodeSpec =
+            tir::backend::binary::DecodeSpec {
+                op: (#dialect_lit, #op_name_lit),
+                fixed_mask: #fixed_mask_lit,
+                const_word: #const_word_lit,
+                fields: &[#(#spec_fields),*],
+                attrs: &[#(#attr_lits),*],
+            };
     };
 
-    let decoder = quote! {
-        fn #decode_fn_ident(context: &tir::Context, word: u32) -> Option<tir::OpId> {
-            #guard
-            let op = #builder_ident::new(context)
-                #(#attr_steps)*
-                .build();
-            Some(op.id())
-        }
-    };
-
-    Some((decoder, decode_fn_ident, fixed_mask))
+    Some((spec, spec_ident, fixed_mask))
 }

@@ -6,20 +6,20 @@
 // RUN: tmdlc --action=emit-rust --dialect=test --output=- %S/../Inputs/lets.tmdl | filecheck %s
 
 // CHECK: impl tir::backend::MachineInstruction for AddDoubleOp
-// CHECK: __tmdl_entry_syms[2] = match value
-// CHECK: write_register_value
+// CHECK: tir::backend::exec::bind_sym(&mut __tmdl_entry_syms, 2, value);
+// CHECK: writeback_attr
 
 // CHECK: impl tir::backend::MachineInstruction for AmoAddWLetOp
-// CHECK: __tmdl_entry_syms[2] = match value
-// CHECK: write_register_value
+// CHECK: tir::backend::exec::bind_sym(&mut __tmdl_entry_syms, 2, value);
+// CHECK: writeback_attr
 
 // CHECK: impl tir::backend::MachineInstruction for LoadTwiceOp
-// CHECK: __tmdl_entry_syms[1] = match value
-// CHECK: write_register_value
+// CHECK: tir::backend::exec::bind_sym(&mut __tmdl_entry_syms, 1, value);
+// CHECK: writeback_attr
 
 // CHECK: impl tir::backend::MachineInstruction for AmoAddDBareOp
-// CHECK: __tmdl_entry_syms[2] = match value
-// CHECK: write_register_value
+// CHECK: tir::backend::exec::bind_sym(&mut __tmdl_entry_syms, 2, value);
+// CHECK: writeback_attr
 
 // Selection patterns see through a binding: the op semantics is the underlying
 // expression over the operands, not an opaque binding symbol.

@@ -5,6 +5,7 @@ pub mod asm_desc;
 pub mod asm_syntax;
 pub mod binary;
 pub mod call_lowering;
+pub mod exec;
 pub mod isel;
 mod lexer;
 pub mod liveness;

@@ -159,7 +159,6 @@ fn emit_behavior_exec(
         &behavior.regnum_symbols,
         ctx.ops,
         ctx.isa_param_values,
-        ctx.mnemonic,
         ctx.reg_kinds,
     );
     let max_sym_id = behavior
@@ -177,15 +176,17 @@ fn emit_behavior_exec(
         quote! { mut }
     };
     let body = emit_behavior_effect(&behavior, behavior.root, ctx)?;
+    let mnemonic_lit = ctx.mnemonic;
     Some(quote! {
         {
-            let #mutability __tmdl_entry_syms: Vec<tir::sem::Value> = {
-                let mut __syms: Vec<Option<tir::sem::Value>> = vec![None; #sym_count_lit];
-                #(#sym_inits)*
-                __syms.into_iter()
-                    .map(|value| value.unwrap_or_else(|| tir::sem::int_value(64, 0)))
-                    .collect()
-            };
+            let #mutability __tmdl_entry_syms: Vec<tir::sem::Value> =
+                tir::backend::exec::init_syms(
+                    &self.0,
+                    machine,
+                    #mnemonic_lit,
+                    #sym_count_lit,
+                    &[#(#sym_inits),*],
+                )?;
             #body
         }
     })
@@ -220,10 +221,7 @@ fn emit_behavior_effect(
                 let sym_lit = proc_macro2::Literal::usize_unsuffixed(*symbol as usize);
                 Some(quote! {{
                     #eval
-                    __tmdl_entry_syms[#sym_lit] = match value {
-                        tir::backend::RegisterValue::Int(i) => tir::sem::value_from_register(i),
-                        tir::backend::RegisterValue::Bits(b) => tir::sem::value_from_raw_bits(b),
-                    };
+                    tir::backend::exec::bind_sym(&mut __tmdl_entry_syms, #sym_lit, value);
                 }})
             }
             _ => None,
@@ -303,49 +301,34 @@ fn emit_lowered_value_eval(
     root: tir_graph::NodeId,
     mnemonic_lit: &proc_macro2::Literal,
 ) -> Option<proc_macro2::TokenStream> {
-    // Build the semantic graph inline (no type annotations, so no `_context`).
-    let dag_expr = emit_dag_as_code(dag, root, &[]);
+    // Behavior value terms carry no type annotations, so no typed nodes.
+    let (offset, has_typed_node) = intern_dag(dag, root, &[]);
+    assert!(!has_typed_node);
+    let offset_lit = proc_macro2::Literal::u32_unsuffixed(offset);
 
     Some(quote! {
-        let value = {
-            let mut __g = tir::sem::SemGraph::new();
-            {
-                let g = &mut __g;
-                #dag_expr;
-            }
-            let __syms = __tmdl_entry_syms.clone();
-            let mut __memory = tir::backend::MachineMemory(machine);
-            match tir::sem::execute_with_memory(&__g, &__syms, &mut __memory)? {
-                tir::sem::Value::Int(i) => tir::backend::RegisterValue::Int(i),
-                // A float result (e.g. `fadd`) and a lane concatenation (a vector
-                // destination) are written back as raw bytes; the destination
-                // register's storage keeps the bit pattern.
-                tir::sem::Value::Float(f) => {
-                    tir::backend::RegisterValue::Bits(tir::utils::RawBits::from_apfloat(&f))
-                }
-                tir::sem::Value::RawBits(b) => tir::backend::RegisterValue::Bits(b),
-                tir::sem::Value::Iterator(_) => {
-                    return Err(tir::backend::SimTrap::InvalidInstruction {
-                        op: #mnemonic_lit,
-                        reason: "instruction semantic expression did not evaluate to a register value".to_string(),
-                    });
-                }
-            }
-        };
+        let value = tir::backend::exec::eval(
+            SEM_KINDS,
+            SEM_BLOB,
+            #offset_lit,
+            &__tmdl_entry_syms,
+            machine,
+            #mnemonic_lit,
+        )?;
     })
 }
 
-/// Emit the steps that fill `__syms` for a lowered behavior: register operands and
-/// fixed/status registers are read from the machine; integer operands and ISA
-/// parameters are bound to constants. Returns the highest symbol id (to size the
-/// table) and the steps.
+/// Emit the [`tir::backend::exec::SymSource`] table entries binding an
+/// instruction's entry symbols: register operands and fixed/status registers
+/// are read from the machine; integer operands and ISA parameters are bound to
+/// constants. Returns the highest symbol id (to size the table) and the entries.
+#[allow(clippy::too_many_arguments)]
 fn emit_sym_inits(
     variable_symbols: &HashMap<String, u32>,
     register_symbols: &HashMap<(String, u32), u32>,
     regnum_symbols: &HashMap<String, u32>,
     ops: &[(String, Type)],
     isa_param_values: &HashMap<String, i64>,
-    mnemonic_lit: &proc_macro2::Literal,
     reg_kinds: &HashMap<String, (bool, u32)>,
 ) -> (usize, Vec<proc_macro2::TokenStream>) {
     let max_sym_id = [
@@ -358,7 +341,7 @@ fn emit_sym_inits(
     .max()
     .unwrap_or(0) as usize;
 
-    let mut steps: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut entries: Vec<proc_macro2::TokenStream> = Vec::new();
     for (name, &sym_id) in variable_symbols {
         let sym_lit = proc_macro2::Literal::usize_unsuffixed(sym_id as usize);
         let name_lit = proc_macro2::Literal::string(name);
@@ -374,47 +357,22 @@ fn emit_sym_inits(
                     // those bits via the node's float type, so a float value is
                     // never forced whole through the wrong representation, and a
                     // bit move (`fmov Xd,Dn`) reads the pattern directly.
-                    let read = if width > 64 {
-                        quote! {
-                            tir::sem::value_from_raw_bits(machine.read_register_bits(class.name(), index)?)
-                        }
+                    let variant = if width > 64 {
+                        format_ident!("WideRegisterAttr")
                     } else {
-                        quote! {
-                            tir::sem::value_from_register(machine.read_register(class.name(), index)?)
-                        }
+                        format_ident!("RegisterAttr")
                     };
-                    steps.push(quote! {
-                        {
-                            let (class, index) = tir::backend::register_attr(self, #name_lit)
-                                .ok_or(tir::backend::SimTrap::MissingAttribute {
-                                    op: #mnemonic_lit,
-                                    attribute: #name_lit,
-                                })?;
-                            __syms[#sym_lit] = Some(#read);
-                        }
+                    entries.push(quote! {
+                        (#sym_lit, tir::backend::exec::SymSource::#variant(#name_lit))
                     });
                 }
-                Type::Integer => steps.push(quote! {
-                    {
-                        let value = tir::backend::int_attr(self, #name_lit)
-                            .ok_or(tir::backend::SimTrap::MissingAttribute {
-                                op: #mnemonic_lit,
-                                attribute: #name_lit,
-                            })?;
-                        __syms[#sym_lit] = Some(tir::sem::int_value_signed(64, value));
-                    }
+                Type::Integer => entries.push(quote! {
+                    (#sym_lit, tir::backend::exec::SymSource::IntAttr(#name_lit, 64))
                 }),
                 Type::Bits(width) => {
                     let width_lit = proc_macro2::Literal::u32_unsuffixed(*width as u32);
-                    steps.push(quote! {
-                        {
-                            let value = tir::backend::int_attr(self, #name_lit)
-                                .ok_or(tir::backend::SimTrap::MissingAttribute {
-                                    op: #mnemonic_lit,
-                                    attribute: #name_lit,
-                                })?;
-                            __syms[#sym_lit] = Some(tir::sem::int_value_signed(#width_lit, value));
-                        }
+                    entries.push(quote! {
+                        (#sym_lit, tir::backend::exec::SymSource::IntAttr(#name_lit, #width_lit))
                     });
                 }
                 _ => {}
@@ -424,8 +382,8 @@ fn emit_sym_inits(
             // selected feature set, falling back to the widest TMDL value for
             // contexts that don't configure ISA params.
             let value_lit = proc_macro2::Literal::i64_unsuffixed(value);
-            steps.push(quote! {
-                __syms[#sym_lit] = Some(tir::sem::int_value_signed(64, machine.isa_param(#name_lit).unwrap_or(#value_lit)));
+            entries.push(quote! {
+                (#sym_lit, tir::backend::exec::SymSource::IsaParam(#name_lit, #value_lit))
             });
         }
     }
@@ -433,8 +391,8 @@ fn emit_sym_inits(
         let sym_lit = proc_macro2::Literal::usize_unsuffixed(sym_id as usize);
         let class_lit = proc_macro2::Literal::string(class);
         let number_lit = proc_macro2::Literal::u16_unsuffixed(*number as u16);
-        steps.push(quote! {
-            __syms[#sym_lit] = Some(tir::sem::value_from_register(machine.read_register(#class_lit, #number_lit)?));
+        entries.push(quote! {
+            (#sym_lit, tir::backend::exec::SymSource::FixedRegister(#class_lit, #number_lit))
         });
     }
 
@@ -444,19 +402,12 @@ fn emit_sym_inits(
     for (name, &sym_id) in regnum_symbols {
         let sym_lit = proc_macro2::Literal::usize_unsuffixed(sym_id as usize);
         let name_lit = proc_macro2::Literal::string(name);
-        steps.push(quote! {
-            {
-                let (_, index) = tir::backend::register_attr(self, #name_lit)
-                    .ok_or(tir::backend::SimTrap::MissingAttribute {
-                        op: #mnemonic_lit,
-                        attribute: #name_lit,
-                    })?;
-                __syms[#sym_lit] = Some(tir::sem::int_value(64, index as u64));
-            }
+        entries.push(quote! {
+            (#sym_lit, tir::backend::exec::SymSource::RegAttrIndex(#name_lit))
         });
     }
 
-    (max_sym_id, steps)
+    (max_sym_id, entries)
 }
 
 fn emit_graph_destination_write(
@@ -474,9 +425,13 @@ fn emit_graph_destination_write(
         let class_lit = proc_macro2::Literal::string(class);
         let index_lit = proc_macro2::Literal::u16_unsuffixed(*index as u16);
         return Some(quote! {
-            if !register_has_trait_hardwired_zero(#class_lit, #index_lit) {
-                machine.write_register_value(#class_lit, #index_lit, value)?;
-            }
+            tir::backend::exec::writeback_fixed(
+                machine,
+                #class_lit,
+                #index_lit,
+                value,
+                register_has_trait_hardwired_zero,
+            )?;
         });
     }
 
@@ -490,15 +445,14 @@ fn emit_graph_destination_write(
     if let Some((_, Type::Struct(_))) = ops.iter().find(|(n, _)| n == name) {
         let name_lit = proc_macro2::Literal::string(name);
         return Some(quote! {
-            let (dst_class, dst_idx) = tir::backend::register_attr(self, #name_lit).ok_or(
-                tir::backend::SimTrap::MissingAttribute {
-                    op: #mnemonic_lit,
-                    attribute: #name_lit,
-                },
+            tir::backend::exec::writeback_attr(
+                &self.0,
+                machine,
+                #mnemonic_lit,
+                #name_lit,
+                value,
+                register_has_trait_hardwired_zero,
             )?;
-            if !register_has_trait_hardwired_zero(dst_class.name(), dst_idx) {
-                machine.write_register_value(dst_class.name(), dst_idx, value)?;
-            }
         });
     }
 
@@ -741,11 +695,13 @@ fn clone_pattern_with_zero(
     new_node
 }
 
-fn emit_dag_as_code(
+/// Serializes `dag` into the sem blob, returning its offset and whether any
+/// node carries a type annotation (requiring the typed loader at use site).
+fn intern_dag(
     dag: &impl tir_graph::Dag<Node = tir_symbolic::lang::SymKind, Leaf = tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>>,
     root: tir_graph::NodeId,
     widths: &[Option<u32>],
-) -> proc_macro2::TokenStream {
+) -> (u32, bool) {
     let mut ops: Vec<tir_symbolic::sem::SemOp> = Vec::new();
     let mut node_indices: HashMap<usize, u32> = HashMap::new();
     let mut has_typed_node = false;
@@ -785,7 +741,16 @@ fn emit_dag_as_code(
         node_indices.insert(node_id.index(), counter as u32);
     }
 
-    let offset_lit = proc_macro2::Literal::u32_unsuffixed(intern_sem_ops(&ops));
+    (intern_sem_ops(&ops), has_typed_node)
+}
+
+fn emit_dag_as_code(
+    dag: &impl tir_graph::Dag<Node = tir_symbolic::lang::SymKind, Leaf = tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>>,
+    root: tir_graph::NodeId,
+    widths: &[Option<u32>],
+) -> proc_macro2::TokenStream {
+    let (offset, has_typed_node) = intern_dag(dag, root, widths);
+    let offset_lit = proc_macro2::Literal::u32_unsuffixed(offset);
     if has_typed_node {
         quote! {
             {

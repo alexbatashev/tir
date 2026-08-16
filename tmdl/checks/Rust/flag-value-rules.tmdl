@@ -6,8 +6,8 @@
 // RUN: tmdlc --action=emit-rust --dialect=test --output=- %S/../Inputs/flag-value-rules.tmdl | filecheck %s
 
 // The conditionally-preserving definer executes its flag read.
-// CHECK: op: "cmppreserve",
-// CHECK: machine.read_register("FLAGS", 0)
+// CHECK: "cmppreserve",
+// CHECK: tir::backend::exec::SymSource::FixedRegister("FLAGS", 0)
 
 // CHECK: fn isel_pattern_rotlike(
 // CHECK: fn isel_pattern_brancheq_via_cmp(

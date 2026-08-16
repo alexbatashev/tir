@@ -9,12 +9,17 @@
 mod ascii;
 mod elf;
 mod elf_read;
+mod encodings;
 mod format;
 mod writer;
 
 pub use ascii::render_ascii;
 pub use elf::{EM_AARCH64, EM_RISCV, EM_X86_64, write_elf};
 pub use elf_read::{ElfFile, ElfReadError, ElfRela, ElfSection, ElfSymbol, parse_elf, reloc_name};
+pub use encodings::{
+    DecodeField, DecodeFieldKind, DecodeSpec, EncodeField, EncodeSpec, FieldRun, PatchSpec,
+    decode_with, encode_with, patch_with,
+};
 pub use format::{ElfClass, ObjectFormatInfo, RelocKind};
 pub use writer::{BinaryEmitError, BinaryWriter, ObjectEmission};
 

@@ -34,6 +34,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         });
     }
     let state_accessors = make_state_accessors(&state);
+    let state_output = state.output;
     let has_results = !results.is_empty();
     // A `?`-prefixed result type makes the single result optional: the op may be built
     // with or without it. Used by structured control flow, whose value is absent when
@@ -274,13 +275,6 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         }
     } else {
         quote! {}
-    };
-
-    // The number of results that carry a value, i.e. all but a trailing state port.
-    let value_results_len = if state.output {
-        quote! { (self.0.results.len() - self.state_result().is_some() as usize) }
-    } else {
-        quote! { self.0.results.len() }
     };
 
     // Result support
@@ -645,38 +639,6 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         })
         .collect();
 
-    let result_spec_index = if result_variadic {
-        quote! { 0usize }
-    } else {
-        quote! { result_index }
-    };
-
-    let result_count_check = if result_variadic {
-        quote! {}
-    } else if result_optional {
-        quote! {
-            if #value_results_len > result_specs.len() {
-                return Err(tir::Error::VerificationError(format!(
-                    "{} expects at most {} results, got {}",
-                    <Self as tir::Operation>::name(),
-                    result_specs.len(),
-                    #value_results_len
-                )));
-            }
-        }
-    } else {
-        quote! {
-            if #value_results_len != result_specs.len() {
-                return Err(tir::Error::VerificationError(format!(
-                    "{} expects {} results, got {}",
-                    <Self as tir::Operation>::name(),
-                    result_specs.len(),
-                    #value_results_len
-                )));
-            }
-        }
-    };
-
     let result_build = if !has_results {
         quote! {
             let result_vec: Vec<tir::ValueId> = vec![];
@@ -710,135 +672,6 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         quote! {}
     } else {
         quote! { impl tir::Verifiable for #struct_name {} }
-    };
-
-    // Per-operand value checks (existence, defining-op/block-arg, type constraint),
-    // shared by the fixed-arity and variadic validation loops. Expects `value_id`,
-    // `operand_name`, and `idx` in scope.
-    let operand_value_checks = quote! {
-        if !context.has_value(value_id) {
-            return Err(tir::Error::VerificationError(format!(
-                "{} operand '{}' references unknown value %{id}",
-                <Self as tir::Operation>::name(),
-                operand_name,
-                id = value_id.number()
-            )));
-        }
-
-        let value = context.get_value(value_id);
-        match value.defining_op() {
-            Some(def_op) => {
-                if !context.has_operation(def_op) {
-                    return Err(tir::Error::VerificationError(format!(
-                        "{} operand '{}' value %{id} references missing defining op",
-                        <Self as tir::Operation>::name(),
-                        operand_name,
-                        id = value_id.number()
-                    )));
-                }
-            }
-            None => {
-                if !context.is_block_argument(value_id) {
-                    return Err(tir::Error::VerificationError(format!(
-                        "{} operand '{}' value %{id} has no defining op and is not a block argument",
-                        <Self as tir::Operation>::name(),
-                        operand_name,
-                        id = value_id.number()
-                    )));
-                }
-            }
-        }
-
-        let actual_ty = value.ty();
-        let actual_ty_data = context.get_type_data(actual_ty);
-        if !operand_constraint_checkers[idx](actual_ty_data.as_ref()) {
-            return Err(tir::Error::VerificationError(format!(
-                "{} operand '{}' expected constraint {}, got {}",
-                <Self as tir::Operation>::name(),
-                operand_name,
-                operand_constraint_names[idx],
-                context.type_to_string(actual_ty)
-            )));
-        }
-    };
-
-    let operand_validation = if has_variadic {
-        quote! {
-            // Variadic ops recover their operand grouping from the segment sizes
-            // recorded at build time, then validate each declared operand's segment.
-            let segment_sizes: Vec<usize> = match self.0.attr("operand_segment_sizes") {
-                Some(tir::attributes::AttributeValue::Array(items)) => items
-                    .iter()
-                    .map(|v| match v {
-                        tir::attributes::AttributeValue::UInt(n) => *n as usize,
-                        _ => 0usize,
-                    })
-                    .collect(),
-                _ => {
-                    return Err(tir::Error::VerificationError(format!(
-                        "{} missing operand_segment_sizes attribute",
-                        <Self as tir::Operation>::name()
-                    )));
-                }
-            };
-
-            if segment_sizes.len() != operand_specs.len() {
-                return Err(tir::Error::VerificationError(format!(
-                    "{} expects {} operand segments, got {}",
-                    <Self as tir::Operation>::name(),
-                    operand_specs.len(),
-                    segment_sizes.len()
-                )));
-            }
-
-            let total: usize = segment_sizes.iter().sum();
-            if total != operands.len() {
-                return Err(tir::Error::VerificationError(format!(
-                    "{} operand segment sizes sum to {}, but it has {} operands",
-                    <Self as tir::Operation>::name(),
-                    total,
-                    operands.len()
-                )));
-            }
-
-            let mut __cursor = 0usize;
-            for (idx, (operand_name, _type_spec)) in operand_specs.iter().enumerate() {
-                let __count = segment_sizes[idx];
-                for __k in 0..__count {
-                    let value_id = operands[__cursor + __k];
-                    #operand_value_checks
-                }
-                __cursor += __count;
-            }
-        }
-    } else {
-        quote! {
-            if operands.len() > operand_specs.len() {
-                return Err(tir::Error::VerificationError(format!(
-                    "{} expects at most {} operands, got {}",
-                    <Self as tir::Operation>::name(),
-                    operand_specs.len(),
-                    operands.len()
-                )));
-            }
-
-            for (idx, (operand_name, type_spec)) in operand_specs.iter().enumerate() {
-                let is_optional = type_spec.starts_with('?');
-
-                let Some(value_id) = operands.get(idx).copied() else {
-                    if is_optional {
-                        continue;
-                    }
-                    return Err(tir::Error::VerificationError(format!(
-                        "{} missing required operand '{}'",
-                        <Self as tir::Operation>::name(),
-                        operand_name
-                    )));
-                };
-
-                #operand_value_checks
-            }
-        }
     };
 
     let operand_schema_entries = operands.iter().map(|o| {
@@ -885,115 +718,30 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
 
         impl tir::OpDefVerifiable for #struct_name {
             fn verify_operands(&self, context: &tir::Context) -> Result<(), tir::Error> {
-                let operand_specs: &[(&str, &str)] = &[#(#operand_spec_literals),*];
-                let result_specs: &[(&str, &str)] = &[#(#result_spec_literals),*];
-                let operand_constraint_names: &[&str] = &[#(#operand_constraint_name_literals),*];
-                let result_constraint_names: &[&str] = &[#(#result_constraint_name_literals),*];
                 fn __satisfies_constraint<C: tir::TypeConstraint + 'static>(ty: &dyn tir::Type) -> bool {
                     C::satisfies(ty)
                 }
-                let operand_constraint_checkers: &[fn(&dyn tir::Type) -> bool] = &[
-                    #(__satisfies_constraint::<#operand_constraint_checkers>),*
-                ];
-                let result_constraint_checkers: &[fn(&dyn tir::Type) -> bool] = &[
-                    #(__satisfies_constraint::<#result_constraint_checkers>),*
-                ];
-                let operands = <Self as tir::Operation>::operands(self);
-
-                #operand_validation
-
-                #result_count_check
-
-                for result_index in 0..#value_results_len {
-                    // A variadic result declares one spec covering every result value.
-                    let idx = #result_spec_index;
-                    let (result_name, _type_spec) = result_specs[idx];
-                    let value_id = self.0.results[result_index];
-                    if !context.has_value(value_id) {
-                        return Err(tir::Error::VerificationError(format!(
-                            "{} result '{}' references unknown value %{id}",
-                            <Self as tir::Operation>::name(),
-                            result_name,
-                            id = value_id.number()
-                        )));
-                    }
-
-                    let value = context.get_value(value_id);
-                    match value.defining_op() {
-                        Some(def_op) => {
-                            if !context.has_operation(def_op) {
-                                return Err(tir::Error::VerificationError(format!(
-                                    "{} result '{}' value %{id} references missing defining op",
-                                    <Self as tir::Operation>::name(),
-                                    result_name,
-                                    id = value_id.number()
-                                )));
-                            }
-                        }
-                        None => {
-                            return Err(tir::Error::VerificationError(format!(
-                                "{} result '{}' value %{id} has no defining op",
-                                <Self as tir::Operation>::name(),
-                                result_name,
-                                id = value_id.number()
-                            )));
-                        }
-                    }
-
-                    let actual_ty = value.ty();
-                    let actual_ty_data = context.get_type_data(actual_ty);
-                    if !result_constraint_checkers[idx](actual_ty_data.as_ref()) {
-                        return Err(tir::Error::VerificationError(format!(
-                            "{} result '{}' expected constraint {}, got {}",
-                            <Self as tir::Operation>::name(),
-                            result_name,
-                            result_constraint_names[idx],
-                            context.type_to_string(actual_ty)
-                        )));
-                    }
-                }
-
-                Ok(())
+                static SPEC: tir::OpDefSpec = tir::OpDefSpec {
+                    operands: &[#(#operand_spec_literals),*],
+                    results: &[#(#result_spec_literals),*],
+                    operand_constraint_names: &[#(#operand_constraint_name_literals),*],
+                    result_constraint_names: &[#(#result_constraint_name_literals),*],
+                    operand_constraint_checkers: &[#(__satisfies_constraint::<#operand_constraint_checkers>),*],
+                    result_constraint_checkers: &[#(__satisfies_constraint::<#result_constraint_checkers>),*],
+                    variadic_operands: #has_variadic,
+                    variadic_result: #result_variadic,
+                    optional_result: #result_optional,
+                    state_output: #state_output,
+                };
+                tir::verify_opdef_operands(context, &self.0, <Self as tir::Operation>::name(), &SPEC)
             }
             fn verify_attributes(&self, context: &tir::Context) -> Result<(), tir::Error> {
-                let attr_specs: &[(&str, &str)] = &[#(#attr_spec_literals),*];
-
-                for (attr_name, attr_type) in attr_specs {
-                    let Some(value) = self.0.attr(attr_name) else {
-                        return Err(tir::Error::VerificationError(format!(
-                            "{} missing required attribute '{}'",
-                            <Self as tir::Operation>::name(),
-                            attr_name
-                        )));
-                    };
-
-                    let matches = match *attr_type {
-                        "any" => true,
-                        "Str" => matches!(value, tir::attributes::AttributeValue::Str(_)),
-                        "Int" => matches!(value, tir::attributes::AttributeValue::Int(_)),
-                        "UInt" => matches!(value, tir::attributes::AttributeValue::UInt(_)),
-                        "F32" => matches!(value, tir::attributes::AttributeValue::F32(_)),
-                        "F64" => matches!(value, tir::attributes::AttributeValue::F64(_)),
-                        "Bool" => matches!(value, tir::attributes::AttributeValue::Bool(_)),
-                        "Array" => matches!(value, tir::attributes::AttributeValue::Array(_)),
-                        "Dict" => matches!(value, tir::attributes::AttributeValue::Dict(_)),
-                        "Register" => matches!(value, tir::attributes::AttributeValue::Register(_)),
-                        "Type" => matches!(value, tir::attributes::AttributeValue::Type(_)),
-                        "Block" => matches!(value, tir::attributes::AttributeValue::Block(_)),
-                        _ => false,
-                    };
-
-                    if !matches {
-                        return Err(tir::Error::VerificationError(format!(
-                            "{} attribute '{}' expected type '{}'",
-                            <Self as tir::Operation>::name(),
-                            attr_name,
-                            attr_type
-                        )));
-                    }
-                }
-
-                Ok(())
+                tir::verify_opdef_attributes(
+                    context,
+                    &self.0,
+                    <Self as tir::Operation>::name(),
+                    &[#(#attr_spec_literals),*],
+                )
             }
 
             fn verify_interfaces(&self, context: &tir::Context) -> Result<(), tir::Error> {
@@ -1036,6 +784,10 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
                 self.0.id
             }
 
+            fn op_instance(&self) -> &std::sync::Arc<tir::OpInstance> {
+                &self.0
+            }
+
             fn from_op_instance(instance: std::sync::Arc<tir::OpInstance>) -> Self {
                 assert_eq!(instance.name(), tir::OperationName::of::<Self>());
                 #struct_name(instance)
@@ -1054,29 +806,8 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
 
             #parser
 
-            fn regions(&self) -> tir::ContextIterator<tir::RegionId> {
-                let context = self.0.context.upgrade();
-                tir::ContextIterator::new(context, self.0.regions.clone())
-            }
-
-            fn operands(&self) -> &[tir::ValueId] {
-                &self.0.operands
-            }
-
-            fn attributes(&self) -> &[tir::attributes::NamedAttribute] {
-                &self.0.attributes
-            }
-
-            fn attr(&self, name: &str) -> Option<&tir::attributes::AttributeValue> {
-                self.0.attr(name)
-            }
-
             fn operand_names(&self) -> &'static [&'static str] {
                 &[#(#operand_name_literals),*]
-            }
-
-            fn parent_block(&self) -> Option<tir::BlockId> {
-                self.0.parent_block()
             }
 
             #semantic_expr_method

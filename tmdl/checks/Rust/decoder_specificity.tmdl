@@ -76,5 +76,5 @@ instruction OpSpecific for [DecIsa] {
 // OpSpecific fixes more opcode bits, so the dispatcher tries it before the
 // more-general OpGeneral even though OpGeneral is declared first.
 // CHECK: fn decode_instruction(
-// CHECK: if let Some(id) = decode_opspecific_inst(context, word)
-// CHECK: if let Some(id) = decode_opgeneral_inst(context, word)
+// CHECK: &DECODE_OPSPECIFIC,
+// CHECK: &DECODE_OPGENERAL,
