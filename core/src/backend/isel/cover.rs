@@ -17,11 +17,6 @@ use super::RuleMatch;
 use super::node::{class_is_pure, class_value_binding, is_low_extract_view};
 use super::pattern::CompiledIselPattern;
 
-/// The cost charged for keeping a gate as control flow. A conservative fixed
-/// estimate of the edge assignments the existing terminators already perform,
-/// tuned in latency units so a cheaper `If`-rooted value rule wins where the
-/// target has one.
-
 #[derive(Clone, Debug)]
 pub(crate) struct CaptureBindings {
     pub(crate) entries: Vec<(u32, Id)>,
