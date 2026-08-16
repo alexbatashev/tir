@@ -5,8 +5,8 @@ into target instructions. It is **e-graph + PBQP**: the whole function is lowere
 into one shared semantic e-graph, saturated with proved algebraic identities, and
 tiled against the target's instruction patterns; each block is then covered
 *separately* — the cheapest legal cover found by solving a Partitioned Boolean
-Quadratic Problem (PBQP) — inside an assumption scope carrying the facts of the
-guarded CFG edges that dominate it.
+Quadratic Problem (PBQP) — inside an assumption scope carrying the entry facts of
+the regions that enclose it.
 
 Nothing in the pass hardcodes a semantics, cost, or rule. A target supplies a list
 of `Rule`s (a semantic pattern + an emitter) and an optional cost model; the pass
@@ -20,13 +20,14 @@ does the rest.
 | `sem/node.rs` | the `SemNode` label and `SemPayload` — the vocabulary |
 | `sem/egraph.rs` | `SemEGraph` and the vocabulary's e-class readings (`class_int_binding`, widths, IR↔semantic types) |
 | `isel/node.rs` | what selection reads beyond that: low-bit register views, `class_value_binding`, `class_register_type` |
-| `isel/builder.rs` | `SemDagBuilder`: the function's IR ops → one shared semantic e-graph, including memory effects |
+| `isel/builder.rs` | `SemDagBuilder`: the function's IR ops → one shared semantic e-graph, including memory effects and the structured operations' own control (`build_region_control`) |
 | `isel/pattern.rs` | `compile_isel_pattern`: rule semantics → `tir_symbolic::egraph::Pattern`s + per-node metadata |
 | `sem/axioms.rs` | s-expression axioms and their compilation into proved rewrites |
 | `defs/isel.sexp` | checked target-independent semantic invariants |
 | `sem/rewrites.rs` | theory-family selection and saturation driver |
 | `isel/cover.rs` | PBQP construction, match dominance pruning, completeness check |
-| `isel/emit.rs` | `BlockPlan` and `EmissionBuilder`: cover → per-op decisions |
+| `isel/emit.rs` | `BlockPlan`: cover → an ordered tile schedule (`schedule_tiles`) with its operands resolved (`resolve_match`) |
+| `isel/destruct.rs` | `Destructor`: the structured regions become machine blocks, at emission |
 
 ## Pipeline
 
@@ -45,20 +46,26 @@ flowchart TB
             scoped -->|"4 - ematch + prune,\nlegality restricted to B\n(collect_block_matches)"| matches["PbqpIselMatch list"]
             pats --> matches
             matches -->|"5 - build_eclass_cover + pbqp::solve\n(B's class closure)"| cover["ClassCover"]
-            cover -->|"6 - solve_block_inner\n(EmissionBuilder)"| plan["BlockPlan"]
+            cover -->|"6 - solve_block_inner\n(schedule_tiles + resolve_match)"| plan["BlockPlan"]
         end
     end
-    plan -->|"7 - commit_block_solution\n(on the first op visit in B)"| out["rewriter: insert / replace / erase ops"]
+    plan -->|"7 - commit_function\n(every block, then destruct)"| out["rewriter: insert tiles / remap values / erase ops / build the CFG"]
 ```
 
 The pass runs per function. Visiting the function op triggers `solve_function`,
 which builds one `FunctionSelection` — every block lowered into a single shared,
-base-saturated e-graph — and solves **every block up front**, each inside its own
-assumption scope (`solve_block`). Solving before any commit is required: a
-region's entry fact reads its condition's *defining op*, which an enclosing
-block's commit would replace. Plans are stored in `plans` keyed by `BlockId`; the first op
-the pass later visits in a block triggers `commit_block_solution` (`emitted_blocks`
-guards against re-emitting), so building and solving each happen once.
+base-saturated e-graph — and solves **every block up front**, walking the
+dominator tree so each block sees the facts of the regions enclosing it
+(`solve_dominator_subtree`, `solve_block`). Solving before any commit is required:
+a region's entry fact reads its condition's *defining op*, which an enclosing
+block's commit would replace. Plans are stored in `plans` keyed by `BlockId`;
+`commit_function` then commits every block (`commit_block_solution`, guarded
+against re-entry by `emitted_blocks`) and runs the destruction over the function's
+region, so building, solving, and emitting each happen once.
+
+The driver (`lower_and_emit`) runs the whole pipeline on **one function at a
+time** and erases its machine IR as soon as the symbol is emitted, so the machine
+IR alive at any moment is one function's rather than the module's.
 
 ## 1. Building the semantic e-graph
 
@@ -71,22 +78,16 @@ builder instance lowers every block, so its per-value memoization
 
 A cross-block operand needs no special handling: the builder's `value_to_def` is
 function-wide, so an operand defined in another block expands to its defining
-expression like any local one. Entry inputs and irreducible block arguments stay
-opaque `Input` leaves (always available in a register). Reducible block arguments
-use the function's gated-SSA analysis:
-
-- a γ merge becomes `If(condition, true_value, false_value)`;
-- a μ loop-carried value becomes `Theta(init, latch)`. The builder first
-  memoizes an opaque placeholder, builds the latch through that placeholder, and
-  unions it with the `Theta` class to form the recursive e-graph cycle;
-- an irreducible `Phi` retains the opaque-leaf behavior;
-- an `Eta` (a value leaving a structured loop) is an opaque input leaf: the
-  post-loop value equals the carried μ value only on the final iteration, so it
-  must not join the `Theta` class. Selecting through loop exits is future work.
+expression like any local one. Entry inputs and unfed block arguments stay
+`Symbol` leaves (always available in a register). A block argument a structured
+operation *feeds* is bound to what feeds it, off that operation's own interfaces
+(see [Structured input](#structured-input)): an arm's entry arguments to the
+gate's trailing operands (`bind_region_arguments`), and a loop's ports to the
+`Theta` over the edges back into them.
 
 `Theta` is a value-sequence gate, distinct from effect-side `StateIf`. It has no
-finite-expression evaluator; selection may preserve it as CFG edge assignments,
-and theory axioms over it are discharged by induction over the iterations (see
+finite-expression evaluator; theory axioms over it are discharged by induction
+over the iterations (see
 [Saturation with proved rewrites](#2-saturation-with-proved-rewrites)).
 
 ### Structured input
@@ -241,13 +242,12 @@ the accesses after it read that. The chain never orders anything — the emissio
 schedule is the block's own op order (`schedule_tiles` serializes the effect
 tiles by position), and a state edge only names identity.
 
-The chains both paths thread are conservative, because neither substrate has the
-control flow: a fresh unknown chain (an opaque leaf) starts every block and
-follows every operation whose effect the lowering cannot spell — a call, an
-`alloca`, anything with no declared semantics or with effectful ones. Inside such
-a straight-line run the lowering order *is* the execution order, so a read
-reaches the writes that happened on it and nothing else. The view path spells the
-same thing as one region argument of state per run (`isel/seed.rs`).
+The chains are conservative, because the graph does not carry the control flow: a
+fresh unknown chain (an opaque leaf) starts every block and follows every
+operation whose effect the lowering cannot spell — a call, an `alloca`, anything
+with no declared semantics or with effectful ones. Inside such a straight-line run
+the lowering order *is* the execution order, so a read reaches the writes that
+happened on it and nothing else.
 
 Rules say nothing about state: a TMDL memory pattern is arity 3/4, and
 `compile_isel_pattern` appends the state operand to every memory node it compiles
@@ -261,19 +261,14 @@ compatibility rule that forces an internalized effect to stay untiled. Every
 access on a chain names it, and two reads of one state are not two effects.
 
 The address is wrapped as `addr + 0` so the targets' base+offset addressing
-patterns match a bare pointer. On the operation-lowered path the wrapper is
-unioned with the bare address class only when that class is pure: an effectful
-address (a loaded pointer) keeps its effect node as the sole materialization of
-its class and reads the wrapper as its own class instead. The view path records
-the equality whatever the address computes — the wrapper names the class it reads,
-so a tile rooted there would have to register-read itself, which selection already
-refuses. The
-interfaces are the only trigger; there is no op-name
-matching. Pointer-valued memory effects use the address width the `data_layout`
-in scope declares, falling back to the target's own description (see
-[target_description.md](target_description.md)), so their byte width remains
-target-defined without embedding an ISA or ABI choice in the core builder; the
-view resolves the same fact off the probe the region's λ carries.
+patterns match a bare pointer. The wrapper is unioned with the bare address class
+only when that class is pure: an effectful address (a loaded pointer) keeps its
+effect node as the sole materialization of its class and reads the wrapper as its
+own class instead (`zero_offset_address`). The interfaces are the only trigger;
+there is no op-name matching. Pointer-valued memory effects use the address width
+the `data_layout` in scope declares, falling back to the target's own description
+(see [target_description.md](target_description.md)), so their byte width remains
+target-defined without embedding an ISA or ABI choice in the core builder.
 `class_is_pure` also
 treats the atomic and synchronization kinds
 (`LoadReserved`, `StoreConditional`, `AtomicRmw`, `Fence`) as impure, so like
@@ -320,20 +315,19 @@ saturation (which may merge classes). All live on `FunctionSelection`.
 | `op_position: OpId → usize` | an op's index within its own block (orders same-block candidates) |
 | `value_to_def: ValueId → OpId` | the op defining each value (function-wide) |
 | `value_block: ValueId → Option<BlockId>` | a value's def block, or `None` for a block argument / entry input |
-| `externally_bound: Set<ValueId>` | a value with at least one original use **outside its def block** — guaranteed materialized in a register, so a dominated block may bind it |
+| `arg_block: ValueId → BlockId` | the block each block argument belongs to; its register is written by the incoming edges, so it holds the argument only where that block has run |
 | `region_use: ValueId → OpId` | the earliest region-carrying op of a value's own block under whose regions the value is read — what the region reads has to have run before the region does |
 | `shared_classes: Set<Id>` | a value used as an operand by **>1 consumer** (counted function-wide); a memory effect here can never be internalized into a larger match (a pure value still can — duplication) |
-| `must_materialize: Set<Id>` | an op-root class whose value some consumer can never internalize: **(a)** a use in a different block (exactly `externally_bound`), or **(b)** a same-block use no match reaches that is not a guarded terminator; it is never offered a consuming alternative |
-| `reifiable_gates: Set<Id>` | canonical classes seeded from GSA γ/μ nodes; these may preserve the existing control-flow edge assignments instead of selecting a value instruction |
+| `demand: Set<(Id, BlockId)>` | a class its defining block must leave in a register: some user is an operation selection does not cover (a call, a return — but not a test a destruction's branch recomputes), or a user in another block that cannot re-fold it as an immediate |
 | `prepared: ValueId → ConditionExpr` | each condition a scope may assert — a region's entry condition — prepared against the base graph (its class, and its defining comparison when there is one) |
-| `region_facts: BlockId → (ValueId, bool)` | the assumption a region's entry block is entered under, read off the region-carrying op's interfaces (structured input only) |
+| `region_facts: BlockId → (ValueId, bool)` | the assumption a region's entry block is entered under, read off the region-carrying op's interfaces |
+| `region_aux: BlockId → Vec<(OpId, AuxSlot, Id)>` | what a block must leave a destruction to read: each test a branch selects on and the counter advance a back edge writes (see [What a destruction needs](#what-a-destruction-needs-and-where-it-comes-from)) |
 
 Because scoped assumptions merge classes, a per-block query through the *scoped*
 representative must reach every base key it covers. `FunctionSelection::base_members`
 returns the base ids a scoped-canonical class covers (the scope's partition members,
 or the class itself when no scope is open); every table lookup (`is_op_root`,
-`is_shared`, `has_values`, `requires_materialization`, register binding) aggregates
-over them.
+`is_shared`, `has_values`, `placed_at`, register binding) aggregates over them.
 
 ## 2. Saturation with proved rewrites
 
@@ -459,19 +453,19 @@ type-constrained nodes — the tie-breaker (see below).
 (via the `tir_symbolic::egraph` search engine — the same matcher instcombine uses
 — with operand constraints and match legality supplied as a legality callback),
 then **restricts every hit to the solving block B**: a match survives only if its
-root is a value B computes (an op of B, a guard condition of B, or a
-rewrite-introduced intermediate reached from B), its non-pure interior classes are
-backed by ops **in B** and unshared, and every boundary operand is *resolvable at
-B* (the binding rule below). A hit outside this closure belongs to another block's
-solve. It produces a `PbqpIselMatch` per surviving hit:
+root is a value B computes (an op of B, a class a destruction reads there, or a
+rewrite-introduced intermediate reached from B) and its non-pure interior classes
+are backed by ops **in B** and unshared. A hit outside this closure belongs to
+another block's solve. It produces a `PbqpIselMatch` per surviving hit:
 
 ```rust
 struct PbqpIselMatch {
     pattern_index, rule_index,
-    root: EClassId,           // class this match would compute
-    pattern_root: NodeId,
+    root: Id,                     // class this match would compute
+    pattern_root: Id,
     bindings: FullMatchBindings,  // pattern_node → class, + symbol → class captures
     cost: u64,                    // the cost model's node cost, unmodified
+    result_view_offset: u32,      // where the rule writes its storage element
 }
 ```
 
@@ -481,15 +475,16 @@ of matches (each fused instruction recomputes it); a shared *memory effect* (§1
 is allowed as a match root or boundary, but never as an interior node a larger
 match would erase.
 
-An explicit register boundary may e-match a constant. After matching, consumer
-positions propagate from each original op root through the formal dependency
-graph, giving rewrite-introduced matches the real op before which their operands
-must exist. A match survives only when each register capture either resolves to
-an SSA value at that consumer or has an introduced producer. The PBQP cover then
-requires the producer Root: an introduced materializer is emitted before the
-consumer, while an op-backed Root is accepted only when its value already
-resolves before that consumer. This applies to every register operand rather
-than special-casing stores.
+Two structural refusals apply to every hit. A match may not **register-read its
+own root class**: identity members put `add(x, 0)` inside `x`'s class, so an
+add-immediate rule could root on `x` while binding `x` — a zero-progress tile,
+and an extraction that never terminates. And a rule writing a **shifted register
+view** (x86 `ah`) may only cover a rewrite-introduced class: the virtual register
+a match defines for an IR value leaves selection's control, and copies, spills and
+ABI pinning treat a file's registers as interchangeable, which only holds within
+one bit offset. Each register boundary likewise binds the class its operand's
+register belongs to — a low-bit truncation reads its source's register, so the
+binding chases through it (`chase_low_extract`).
 
 The function-wide legality (boundary constraints, pure-or-op-root interiors) does
 not depend on the assumption scope, so a **fact-free** block sees exactly the base
@@ -602,49 +597,56 @@ still wins on cost alone — and specificity never distorts the PBQP objective.
 ## 4. The PBQP cover
 
 `build_eclass_cover` maps the tiling problem onto PBQP over a **supplied class
-list** — B's op-root and guard-condition classes closed under the surviving
+list** — B's op-root classes and the classes a destruction reads there, closed under the surviving
 matches' bindings (`closure_classes`), so rewrite-introduced intermediates reached
 from B are covered but nothing from another block is. **One PBQP node per class in
 that closure**, each offering a set of **alternatives**:
 
 ```
    PbqpIselAlternative
-   ├─ External                       leaf, or a value materialized in a register
-   ├─ Reify                          preserve a γ/θ as existing CFG edge assignments
-   ├─ Root { match_id }              this class is the instruction's result   ← cost lives here
-   ├─ Internal { match_id, p_node }  this class is an interior node of that match (cost 0)
-   └─ Dead                           value not needed in a register: its only consumer is a
-                                     fused conditional branch (cost 0; never satisfies a
-                                     boundary's materialization requirement)
+   ├─ NotDemanded          nothing is emitted here: the class is not demanded in B,
+   │                       or it is already available in a register (cost 0)
+   └─ Tile { match_id }    this class is that match's instruction result  ← cost lives here
 ```
 
-Only the **Root** alternative carries the match's cost; interior nodes are free
-(the paper's convention). **Reify** carries a conservative fixed cost so a
-cheaper `If`-rooted value rule may win. It is offered only to classes seeded
-from actual GSA gates, never to algebraic `If` nodes introduced by saturation.
-A rewrite-introduced class also retains an inactive **External** alternative;
-if a selected match needs it as a register boundary, compatibility rejects that
-alternative and forces its **Root**, while classes reachable only through
-unchosen matches remain inactive.
-A match's root and its *memory-effect* internals are
-held together by a **coherence set**; pure internals are exempt — the
-instruction recomputes them (duplication), so the match stays selectable even
-when the class is claimed by another match or materialized in its own right.
-Classes in `must_materialize` are never offered Internal alternatives at all.
+There is no interior alternative: an instruction's interior classes are not
+covered, they are *recomputed inside it*. What decides whether a class needs an
+instruction of its own is therefore a pair of per-block policies
+(`cover::ClassPolicies`), not a table of decisions:
 
-Edges connect each match's **root class to every class the match binds**, so
-the match's requirements don't depend on the choices of intermediate pattern
-nodes. A state operand binds no requirement — it names the chain the access
-reads — so it draws no edge and pulls no chain class into the closure. The compatibility matrix sets `INF_COST` for incoherent pairs and asks
-`alternatives_compatible` (via `child_requirement`):
+- **demanded** — the class is one B's plan must leave in a register: `demand`
+  says its defining block is B (a cross-block or unselected user, §1), a
+  destruction's branch needs it here (the `mm_overlay` of
+  [Conditional branches](#conditional-branches)), or it is an effectful root of B,
+  which must be performed whatever reads it;
+- **available** — some IR value of the class already sits in a register wherever B
+  runs (`available_at`): an argument of a block that has run, a def selection does
+  not touch, or a def its own block was itself asked to place (`placed_at`). A
+  low-bit view owns no register: it is available exactly when the class it re-views
+  is.
+
+A demanded, unavailable class must take a `Tile`; every other class may take
+`NotDemanded`. A class whose alternative list comes out empty makes the cover
+infeasible.
+
+Edges connect each match's **root class to every class the match binds**, so the
+match's requirements don't depend on the choices of intermediate pattern nodes,
+plus every pair of matches whose *effect footprints* overlap. A state operand
+binds no requirement — it names the chain the access reads — so it draws no edge,
+pulls no chain class into the closure, and stays out of the footprint: every
+access on a chain names it, and two reads of one state are not two effects. The
+compatibility matrix sets `INF_COST` where `alternatives_compatible` refuses the
+pair or two tiles perform the same effect:
 
 ```
-   parent Root/Internal expects a class its match binds to be …
-   ├─ Materialized   (bound under a Boundary)  → child must be Root or External
-   ├─ SameMatch      (a memory-effect interior node) → child must be exactly
-   │                                                    that Internal{match,node}
-   └─ nothing        (a pure interior node) → any choice; the instruction
-                                              recomputes the value (duplication)
+   a parent Tile expects a class its match binds to be …
+   ├─ register-demanded → the child must be a Tile, or already available —
+   │                      and at exactly the view offset the operand reads
+   ├─ immediate-demanded → the child's class must hold a constant
+   ├─ an owned effect (a non-pure interior node) → the child must be NotDemanded,
+   │                      since the parent instruction performs it
+   └─ nothing (a pure interior node) → any choice; the instruction recomputes
+                                       the value (duplication)
 ```
 
 `pbqp::solve` reduces degree-zero, degree-one, and degree-two nodes exactly.
@@ -654,16 +656,9 @@ each neighbor; compatibility alone is insufficient because it would ignore
 introduced materializer instructions. If that locally preferred branch makes
 the remaining problem infeasible, the solver tries the other alternatives in
 the same cost order. Reconstruction produces a `ClassCover` (one chosen
-alternative per class). If every assignment violates a boundary or coherence
+alternative per class). If every assignment violates a boundary or effect
 requirement, selection reports an infeasible cover; it never falls back to an
 empty plan that leaves the original operations unselected.
-
-An `If`-rooted value rule is offered only when both its structural pattern and
-the matched γ arm classes are speculatable. Division, remainder, memory,
-atomics, fences, state effects, and nested `Theta` make it ineligible. Choosing
-`Reify` requires no additional value instruction: the existing terminator
-emission performs the edge assignments. Choosing a value rule emits the
-selected instruction at the gate's use site.
 
 ### Worked example: `square` lowering
 
@@ -672,73 +667,84 @@ selected instruction at the gate's use site.
 ```
   build + saturate                        cover                       emit
   ─────────────────                       ─────                       ────
-  Add(a,b) : i16   ◄── ops_by_root         Root: add        ─────────► addi
+  Add(a,b) : i16   ◄── ops_by_root         Tile: add        ─────────► addi
        │                                                                │
-  SExt(·, 64): i64 ◄── ops_by_root         class also holds            (interior
-       │  saturate adds ▼                 srai(slli(·,48),48)          slli has
-  ShiftRightArith( ShiftLeft(·,48), 48)   Root: srai                   NO op →
-              ▲ introduced (no op)        Root: slli (introduced) ───► introduced
-                                                                        emit before
-                                                                        srai)
+  SExt(·, 64): i64 ◄── ops_by_root         class also holds            (the slli
+       │  saturate adds ▼                 srai(slli(·,48),48)          class has
+  ShiftRightArith( ShiftLeft(·,48), 48)   Tile: srai                   NO op →
+              ▲ introduced (no op)        Tile: slli (introduced) ───► fresh value,
+                                                                        scheduled
+                                                                        before srai)
                                           ──────────────────────────► addi, slli, srai
 ```
 
-The `slli` e-class came from saturation and backs no original IR op, so the
-`EmissionBuilder` materializes it as a fresh-valued instruction inserted *before*
-its consumer (an `IntroducedEmit`).
+The `slli` e-class came from saturation and backs no original IR op, so its tile
+gets a fresh destination value and the schedule places it ahead of the consumer
+that register-binds it.
 
 ## 5. Planning emission
 
-`solve_block_inner` reads the cover into a `BlockPlan`:
+`solve_block_inner` reads the cover into a `BlockPlan`. The plan is not a decision
+per op — the block's *instructions* are the chosen tiles, and every op the graph
+covered goes away:
 
 ```rust
 struct BlockPlan {
-    op_decisions: HashMap<OpId, BlockDecision>,   // Emit{rule,match} | Consume
-    introduced: Vec<IntroducedEmit>,              // operand-first order
-    aux: Vec<(OpId, AuxSlot, AuxEmit)>,           // what a destruction reads
+    schedule: Vec<ScheduledEmit>,             // the tiles, in emission order
+    erase_ops: Vec<OpId>,                     // every op the cover replaced
+    value_remaps: Vec<(ValueId, ValueId)>,    // an erased value → the register holding it
+    aux: Vec<(OpId, AuxSlot, AuxEmit)>,       // what a destruction reads
 }
 ```
 
-- A class chosen **Root** and backed by an op → `Emit` that op with the rule.
-- A class chosen **Internal** and backed by an op → `Consume` (erased; folded into
-  its parent instruction).
-- A class chosen **Reify** → preserve the existing branch-edge assignment; emit
-  no value instruction for the gate itself.
-- A **Root** class with no backing op → an `IntroducedEmit` (the saturation `slli`).
-- A constant class backed only by a later op, but required by an earlier consumer,
-  also becomes an `IntroducedEmit`; the later op is consumed.
-- A low-bit `Extract` of an existing value → `ForwardOperand`. If its source is
-  rewrite-introduced, a width-matched identity-copy rule roots the view and
-  forces the introduced producer into the cover.
+- Each chosen `Tile` becomes a `ScheduledEmit`: the rule, the resolved match, the
+  op backing it (`None` for a rewrite-introduced tile, which mints a fresh
+  destination value), and the **anchor** op to insert before.
+- `schedule_tiles` orders them: a tile follows the tiles defining the registers it
+  reads, effect tiles keep the block's own op order, and ties break on the source
+  op's position. A pure tile is pulled up to its earliest consumer, so a constant
+  merged into an earlier class is still defined before it is read.
+- Every op the cover ranged over is erased. A value it defined is remapped onto
+  the register that now holds it — its tile's destination, or, where the class was
+  satisfied by availability, the value that already held it (asked for at
+  `region_ask`, so an arm never reads the name its own gate publishes).
+- An op whose match another chosen tile needs *available* survives instead of
+  being erased.
 
-`EmissionBuilder::resolve_match` turns a chosen match into a concrete
-`RuleMatch` — the symbol→operand bindings the emitter reads. Each capture resolves
-to an introduced operand's fresh value if the cover materialized one, else through
-the shared resolver (`resolve_binding`) to a constant immediate and/or a register
-value legal at B (see [Binding resolution](#binding-resolution)); a class carrying
-both records both.
+`resolve_match` turns a chosen match into a concrete `RuleMatch` — the
+symbol→operand bindings the emitter reads. Each capture resolves to a same-block
+tile's destination where one defines it, else through the shared resolver
+(`resolve_binding`) to a constant immediate and/or a register value legal at B
+(see [Binding resolution](#binding-resolution)); a class carrying both records
+both.
 
-`completeness_error` runs **before** solving and checks only **B's** op-root
-classes: each non-terminal one must be a Root or interior of *some* match (or an
-exempt fused-branch condition), else selection fails naming the unsupported
-`SymKind` ("missing atomic materializer rule for semantic kind …"). This is how an
-incomplete rule set is rejected instead of silently dropping an op.
+`completeness_error` runs **before** solving over the block's demanded classes:
+each must be rooted by *some* match, already available, or a low-bit view of a
+class that is, else selection fails naming the unsupported `SymKind` ("missing
+atomic materializer rule for semantic kind …"). This is how an incomplete rule set
+is rejected instead of silently dropping an op.
 
 ## 6. Committing
 
-`commit_block_solution` applies the plan through the `Rewriter`:
+`commit_function` commits every block of the function, then destructs — the
+regions become blocks of the function, and neither the pass walk nor a per-block
+commit can own that. `commit_block_solution` applies one plan through the
+`Rewriter`:
 
-1. Insert each `IntroducedEmit` before its anchor (operand-first). Its
-   `EmitRequest` carries only the fresh destination value (`op: None`).
-2. Record each `aux` entry (a destruction's branch or counter value) against the
-   region-carrying operation, remapping it onto what this block emitted; the
-   destruction reads it once every block has committed.
-3. For each original op, in **reverse block order** (consumers before defs, so
-   a def's `replace_op` use-remapping sees every already-emitted consumer):
-   `replace_op` (Emit) or `erase_op` (Consume).
-4. Drop `constant` ops left dead — an immediate folded into an instruction
-   attribute detaches the constant's only use, so the maintained def-use chain
-   reports zero uses and it is erased.
+1. Emit each `ScheduledEmit` in order, before its anchor (the terminator when it
+   has none). A rule carrying a `prelude_emit` (a flag definer) emits that
+   adjacently ahead of it. What an earlier tile emitted is remapped into the match
+   first, and each tile's destination values are recorded in `emitted_values`.
+2. Apply the plan's `value_remaps`, so every use of an erased value reads the
+   register now holding it.
+3. Record each `aux` entry (a destruction's branch, counter value, or decided
+   test) against the region-carrying operation, remapped onto what this block
+   emitted; the destruction reads it once every block has committed.
+4. Erase the covered ops, in reverse block order.
+
+A pure instruction left dead by cross-block fusion — a value a consumer's block
+recomputed for itself — is dropped by the `DeadCodeEliminationPass` the pipeline
+runs next, while results are still virtual registers.
 
 ## Conditional branches
 
@@ -776,11 +782,10 @@ at its condition class whose operands all resolve at B (tie → most specific):
   not materialized; destruction emits the single edge the decision picks
   (`AuxEmit::Decided`).
 - **Fused**: the branch instruction recomputes the condition from its operand
-  registers (the match's boundary classes join the block's materialization
-  overlay `mm_overlay`). The
-  condition class gets a `Dead` alternative — if nothing else needs the value,
-  the compare op is Consumed; a boundary edge from any chosen match forbids
-  `Dead`, so a multi-use compare is still materialized (`slt`) *and* fused.
+  registers, so those boundary classes — not the condition — join the block's
+  demand overlay `mm_overlay`. The condition class is then demanded only if
+  something else needs it: nothing does, and its compare op is erased with no tile;
+  another consumer does, and the compare is materialized (`slt`) *and* fused.
 - **Fallback**: no branch rule matches — the condition is forced materialized
   and `cond_nonzero` emits the branch. A bare i1 condition (block/function
   argument, no comparison) reaches here: it carries no comparison term for a
@@ -903,7 +908,7 @@ substitute into the reader's condition, and when the composite SMT-proves equal
 to one canonical comparison the pair registers an `If`-rooted **value** rule
 whose prelude emits the definer (`cmp`) ahead of the reader. Boolean readers
 reuse their constant arms; select readers retain their encoded register arms
-and two-address destination tie, so a GSA γ can match `cmp` + `cmov`/`csel`. The
+and two-address destination tie, so a gate's `If` can match `cmp` + `cmov`/`csel`. The
 value-commit path honours `prelude_emit` for value rules (`isel/mod.rs`),
 inserting the definer before the reader. For boolean readers, the pattern is the
 width-polymorphic `slt`-style `If` the bool-materialize bridge already matches —
@@ -976,12 +981,12 @@ each, reading the condition's `prepared` `ConditionExpr`:
 After asserting, the block `rebuild`s and **saturates inside the scope**, so the
 rewrites propagate the facts. Consequences then fall out of the ordinary
 machinery: a re-computed identical (or complement, or operand-swapped-under-`eq`)
-compare's class now holds a constant, so the compare op is Consumed and its test
-is *decided* (above) rather than branched on; a value consumer folds the known
-immediate
+compare's class now holds a constant, so the compare op is erased with no tile and
+its test is *decided* (above) rather than branched on; a value consumer folds the
+known immediate
 (`RuleMatch` records *both* the int and register binding when a class carries
-both). The scope is popped once the block's plan is stored, leaving the shared
-graph assumption-free for the next block.
+both). The scope is popped once the subtree it covers is solved, leaving the
+shared graph assumption-free for the rest of the function.
 
 A scoped assumption may merge a class over several base keys. Because the side
 tables are keyed by base representatives, every per-block query aggregates over
@@ -995,28 +1000,30 @@ untouched.
 
 Because matches now come from a function-wide graph, resolving a boundary class to
 an operand for a consumer op `C` in block `B` is the **one cross-block correctness
-rule**. One resolver (`resolve_binding`) backs boundary filtering (§3), guard
-selection, and emission (§5), so a match accepted at collect time always resolves
-at emit time. For a class:
+rule**. One resolver (`resolve_binding`) backs guard selection and emission (§5),
+and the cover's availability policy (§4) asks the same questions of the same
+tables, so a class the cover accepted as available resolves at emit time. For a
+class (chasing low-bit truncations to the class that owns the register):
 
 1. an integer constant in the class → an **immediate**; when the selected
-   instruction demands a register, the cover additionally selects a constant
-   materializer and emission binds the materialized value;
-2. otherwise a register value `V` from the class's candidates, choosing the first
+   instruction demands a register instead, the cover selects a constant
+   materializer and emission binds the tile's destination;
+2. and/or a register value `V` from the class's candidates, choosing the first
    legal under, in preference order:
-   - a same-block def **preceding** `C` (`is_before`), earliest first, then
+   - a same-block def **preceding** `C` (`is_before`), earliest first — an
+     op-rooted def only for the caller that is about to demand the class here (a
+     fused branch's operands), since otherwise its tile is what defines it, then
    - an **entry input**, or a **block argument of a block that dominates `B`**
      (always in a register, but written by that block's incoming edges — two
      mutually exclusive blocks may carry equal arguments while only one of them
      ran), then
-   - a def in a **strict dominator** of `B` that the original IR already used
-     across blocks — i.e. `V ∈ externally_bound`, so it is guaranteed
-     materialized (closest dominator first, via `dom_distance`).
+   - a def in a **dominator** of `B` that has run wherever `B` runs and whose own
+     block was asked to place it (`placed_at`), or that selection never touched at
+     all — closest dominator first, via `dom_distance`.
 
 A class may resolve to both (an assumption merged it with its truth constant). A
-class with candidate values but none legal — its only register candidate is a
-cross-block **non-escaping** value — is *unresolvable*; a match with such a
-boundary is discarded.
+class with candidate values but none legal is *unresolvable*, and the cover treats
+it as unavailable: the block tiles it itself.
 
 ### Region scoping of the rule
 
@@ -1046,16 +1053,10 @@ both of which the rule applies on top of it:
   a constant an arm yields, and the edge out of that arm would carry the join's
   own parameter.
 
-**Future work (out of scope):** rebinding a cross-block register read to a
-non-escaping dominating value would require **plan-to-plan requirement
-propagation** — a consumer's plan telling the defining block's plan to materialize
-a value the original IR never forced into a register. Deferred; today such a value
-is simply left standalone.
-
 ## Cost model
 
 A target may install an `IselCostModel` (`with_cost_model`); its single hook,
-`node_cost(context, op, rule, match)`, prices the Root alternative of an
+`node_cost(context, op, rule, match)`, prices the `Tile` alternative of an
 op-backed match. The default is the rule's TMDL-derived `base_cost`: the sum of
 the modeled costs of the target instructions the rule emits. A rule's symbolic
 graph size never contributes to instruction cost. The same base cost prices a
@@ -1078,10 +1079,11 @@ struct EmitRequest<'a> {
 
 By convention an emitter writes its destination *into the original result
 `ValueId`* (TMDL-generated emitters store it as the destination register
-attribute), so consumers and later passes keep referencing the same values.
-`replace_op` only rewrites SSA uses when the old and new ops declare the same
-number of results; machine ops declare none, so the original values stay live
-and the Def-role register attribute claims their def-site.
+attribute), so consumers and later passes keep referencing the same values. A
+machine op declares no SSA results, so the original values stay live and the
+Def-role register attribute claims their def-site; where a covered value is not
+the tile's destination, the plan's `value_remaps` point its readers at the
+register that is.
 
 ## Key types at a glance
 
@@ -1093,7 +1095,8 @@ and the Def-role register attribute claims their def-site.
 | `CompiledIselPattern` | a rule's pattern compiled for e-matching, with per-node metadata + specificity |
 | `PbqpIselMatch` | one e-match hit: root class, bindings, cost |
 | `FunctionSelection` | the function's shared e-graph + multi-valued side tables + every block's plan |
-| `BlockPlan` / `IntroducedEmit` | the emission plan and its synthesized instructions |
-| `EmissionBuilder` | turns a cover into per-op `RuleMatch`es, materializing introduced classes |
+| `BlockPlan` / `ScheduledEmit` | the emission plan: the ordered tiles, the ops they replace, and the value remaps |
+| `AuxEmit` | what a block leaves a destruction to read: a fused branch, a materialized value, or a decided test |
+| `Destructor` | turns the structured regions into machine blocks once every block has committed |
 | `EmitRequest` | what an emitter writes into: backing op (if any) + destination values |
 | `IselCostModel` | target hook for match cost (`node_cost`) |

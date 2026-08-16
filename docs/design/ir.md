@@ -467,8 +467,8 @@ TMDL-generated target ruleset, choose a cover with PBQP (`tir-pbqp` — a
 generic node/edge/matrix cost solver with no IR dependency; regalloc and
 selection build their own matrices on their side of the crate boundary),
 emit machine ops per region, and destruct structured control to machine CFG
-during emission (guard reification where speculation is illegal; guarded
-edge-argument placement follows the established placement rule). State edges
+during emission (nothing an arm computes is speculated above its branch;
+guarded edge-argument placement follows the established placement rule). State edges
 are consumed for memory-op identity during selection and erased in emission.
 
 **Scheduling.** Within a machine block, program order is a *derived*
