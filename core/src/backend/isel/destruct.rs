@@ -172,29 +172,38 @@ impl<'a> Destructor<'a> {
         conditional: &dyn Conditional,
     ) -> Result<(), PassError> {
         let cases = conditional.case_values();
-        let mut arms = Vec::new();
-        for &(region, case) in &cases {
-            let arm = self
-                .move_body(region)
-                .ok_or_else(|| Self::decline(op, "an arm has no block"))?;
-            arms.push((arm, case));
-        }
-        let Some(default) = arms.iter().position(|(_, case)| case.is_none()) else {
+        let Some(default) = cases.iter().position(|(_, case)| case.is_none()) else {
             return Err(Self::decline(op, "no arm runs when no case matches"));
         };
+        let (tests, default_reached) = self.live_chain(op, cases.len(), default)?;
+        // An arm no edge can reach is left in the operation's own region, so
+        // erasing the operation takes it — and everything nested in it — away.
+        let mut arms: Vec<Option<Arc<Block>>> = vec![None; cases.len()];
+        for index in tests
+            .iter()
+            .copied()
+            .chain(default_reached.then_some(default))
+        {
+            arms[index] = Some(
+                self.move_body(cases[index].0)
+                    .ok_or_else(|| Self::decline(op, "an arm has no block"))?,
+            );
+        }
         // Every arm reads the same inputs — the operation's trailing operands.
-        let inputs = self.entry_arguments(op, &arms[default].0);
+        let inputs = self.entry_arguments(op, arms.iter().flatten().next().unwrap());
         let continuation = self.split_after(rewriter, &block, op);
-        let mut edges = Vec::new();
-        for (arm, _) in &arms {
-            edges.push(self.seal_into(rewriter, arm, continuation.id(), &inputs)?);
+        let mut edges: Vec<Option<(BlockId, Vec<ValueId>)>> = Vec::new();
+        for arm in &arms {
+            edges.push(match arm {
+                Some(arm) => Some(self.seal_into(rewriter, arm, continuation.id(), &inputs)?),
+                None => None,
+            });
         }
         self.add_block(continuation.id());
         self.erase(rewriter, &block, op)?;
 
-        let tests: Vec<usize> = (0..arms.len()).filter(|index| *index != default).collect();
         let Some((&last, leading)) = tests.split_last() else {
-            let (dest, args) = &edges[default];
+            let (dest, args) = edges[default].as_ref().unwrap();
             self.jump(&block, *dest, args);
             return Ok(());
         };
@@ -204,13 +213,17 @@ impl<'a> Destructor<'a> {
         for &index in leading {
             let next = self.context.create_block(vec![]);
             self.add_block(next.id());
-            let (taken, taken_args) = &edges[index];
+            let (taken, taken_args) = edges[index].as_ref().unwrap();
             let test = self.aux(op, AuxSlot::Test(index))?;
             self.branch(&current, test, *taken, taken_args, next.id(), &inputs)?;
             current = next;
         }
-        let (taken, taken_args) = &edges[last];
-        let (fallthrough, fallthrough_args) = &edges[default];
+        let (taken, taken_args) = edges[last].as_ref().unwrap();
+        let Some((fallthrough, fallthrough_args)) = edges[default].as_ref() else {
+            // The last test holds, so the arm no case names is not reached.
+            self.jump(&current, *taken, taken_args);
+            return Ok(());
+        };
         let test = self.aux(op, AuxSlot::Test(last))?;
         self.branch(
             &current,
@@ -220,6 +233,29 @@ impl<'a> Destructor<'a> {
             *fallthrough,
             fallthrough_args,
         )
+    }
+
+    /// The cases a gate still tests, and whether the arm no case names is
+    /// reached. A test the arm's own scope decided either takes its case — no
+    /// later case and no default can run — or excludes it from the chain.
+    fn live_chain(
+        &self,
+        op: &Arc<OpInstance>,
+        arms: usize,
+        default: usize,
+    ) -> Result<(Vec<usize>, bool), PassError> {
+        let mut chain = Vec::new();
+        for index in (0..arms).filter(|index| *index != default) {
+            match self.aux(op, AuxSlot::Test(index))? {
+                AuxEmit::Decided(false) => {}
+                AuxEmit::Decided(true) => {
+                    chain.push(index);
+                    return Ok((chain, false));
+                }
+                _ => chain.push(index),
+            }
+        }
+        Ok((chain, true))
     }
 
     /// A loop tested before each iteration becomes its test region followed by its

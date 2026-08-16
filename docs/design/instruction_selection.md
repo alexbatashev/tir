@@ -178,9 +178,13 @@ reported as the `Forward` its predecessors take instead, so an edge into it is a
 edge to where it goes, with the arguments that edge carries substituted for its
 parameters. An arm that computes nothing therefore costs no block, and where every
 arm forwards to the same place with the same values there is nothing left to
-decide — the gate emits neither a test nor a trampoline, only the jump. This is
-the reason the structured path carries no CFG-cleanup pass: the shapes such a
-pass folds are shapes destruction never mints.
+decide — the gate emits neither a test nor a trampoline, only the jump. A test
+the block's own scope *decided* goes further: the arm it excludes is reachable by
+no edge, so it is never moved out of the operation's region and is erased with the
+gate, taking whatever is nested in it. A decided last case leaves the arm no case
+names unreached, and then the chain ends in that jump. This is the reason the
+structured path carries no CFG-cleanup pass: the shapes such a pass folds are
+shapes destruction never mints.
 
 ### What a node is
 
