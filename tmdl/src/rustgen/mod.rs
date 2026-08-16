@@ -145,6 +145,12 @@ pub fn generate_rust_modules<'a>(
         static SEM_BLOB: &[u8] = include_bytes!(#SEM_BLOB_FILE);
         #[allow(dead_code)]
         static SEM_KINDS: &[tir::sem::SymKind] = &[#(#sem_kind_entries),*];
+        #[allow(dead_code)]
+        static EXEC_ENV: tir::backend::exec::ExecEnv = tir::backend::exec::ExecEnv {
+            kinds: SEM_KINDS,
+            blob: SEM_BLOB,
+            is_hardwired_zero: register_has_trait_hardwired_zero,
+        };
     };
 
     let final_rust = quote! {

@@ -161,3 +161,134 @@ pub fn bind_sym(syms: &mut [tir::sem::Value], index: usize, value: RegisterValue
         RegisterValue::Bits(b) => tir::sem::value_from_raw_bits(b),
     };
 }
+
+/// The sem programs and target facts every instruction of one target shares.
+pub struct ExecEnv {
+    pub kinds: &'static [tir::sem::SymKind],
+    pub blob: &'static [u8],
+    pub is_hardwired_zero: fn(&str, u16) -> bool,
+}
+
+/// Where an evaluated value lands.
+pub enum Dest {
+    Pc,
+    /// The register named by the attribute.
+    Reg(&'static str),
+    /// A fixed architectural register, by class name and index.
+    Fixed(&'static str, u16),
+    /// No state effect: a `let`-free local assignment, a store, a fence. The
+    /// term is still evaluated, because evaluating it is the memory operation.
+    Discard,
+}
+
+/// One statement of an instruction's behavior. Value terms are blob offsets.
+pub enum Effect {
+    Assign {
+        offset: u32,
+        dest: Dest,
+    },
+    Bind {
+        offset: u32,
+        sym: usize,
+    },
+    Trap {
+        offset: u32,
+    },
+    If {
+        cond: u32,
+        then: &'static [Effect],
+        els: &'static [Effect],
+    },
+}
+
+/// What executing an instruction does.
+pub enum Program {
+    Effects {
+        sym_count: usize,
+        sources: &'static [(usize, SymSource)],
+        effects: &'static [Effect],
+    },
+    /// The behavior has no executable form; executing traps with this reason.
+    Unsupported(&'static str),
+}
+
+/// Everything [`crate::backend::MachineInstruction`] reports about one opcode.
+pub struct InstSpec {
+    pub mnemonic: &'static str,
+    pub scheduling_key: &'static str,
+    pub width_bytes: u8,
+    pub control_flow: crate::backend::ControlFlow,
+    pub env: &'static ExecEnv,
+    pub program: Program,
+}
+
+/// Executes one instruction against `machine`, driven by its static spec.
+pub fn run(
+    instance: &crate::OpInstance,
+    spec: &InstSpec,
+    machine: &mut dyn MachineContext,
+) -> Result<(), SimTrap> {
+    match &spec.program {
+        Program::Unsupported(reason) => Err(SimTrap::InvalidInstruction {
+            op: spec.mnemonic,
+            reason: reason.to_string(),
+        }),
+        Program::Effects {
+            sym_count,
+            sources,
+            effects,
+        } => {
+            let mut syms = init_syms(instance, machine, spec.mnemonic, *sym_count, sources)?;
+            run_effects(instance, spec, machine, &mut syms, effects)
+        }
+    }
+}
+
+fn run_effects(
+    instance: &crate::OpInstance,
+    spec: &InstSpec,
+    machine: &mut dyn MachineContext,
+    syms: &mut [tir::sem::Value],
+    effects: &[Effect],
+) -> Result<(), SimTrap> {
+    let env = spec.env;
+    let evaluate = |offset: u32, syms: &[tir::sem::Value], machine: &mut dyn MachineContext| {
+        eval(env.kinds, env.blob, offset, syms, machine, spec.mnemonic)
+    };
+    for effect in effects {
+        match effect {
+            Effect::Assign { offset, dest } => {
+                let value = evaluate(*offset, syms, machine)?;
+                match dest {
+                    Dest::Pc => machine.write_pc(value.to_u64()),
+                    Dest::Reg(name) => writeback_attr(
+                        instance,
+                        machine,
+                        spec.mnemonic,
+                        name,
+                        value,
+                        env.is_hardwired_zero,
+                    )?,
+                    Dest::Fixed(class, index) => {
+                        writeback_fixed(machine, class, *index, value, env.is_hardwired_zero)?
+                    }
+                    Dest::Discard => {}
+                }
+            }
+            Effect::Bind { offset, sym } => {
+                let value = evaluate(*offset, syms, machine)?;
+                bind_sym(syms, *sym, value);
+            }
+            Effect::Trap { offset } => {
+                let value = evaluate(*offset, syms, machine)?;
+                machine.raise_exception(value.to_u64())?;
+            }
+            Effect::If { cond, then, els } => {
+                let value = evaluate(*cond, syms, machine)?;
+                let taken = if value.to_u64() != 0 { then } else { els };
+                run_effects(instance, spec, machine, syms, taken)?;
+            }
+        }
+    }
+    Ok(())
+}

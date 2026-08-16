@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tir::attributes::{AttributeValue, RegisterAttr};
 use tir::graph::OperandConstraint;
 use tir::sem::{ExtendSemBytes, ExtendSemBytesTyped, SymKind};
-use tir::{Context, Operation, OpInstance, PassError};
+use tir::{Context, OpInstance, Operation, PassError};
 
 use crate::backend::isel::{
     EmitRequest, ImmRange, RegisterCapability, RegisterRequirement, Rule, RuleEmitFn, RuleKind,
@@ -87,14 +87,8 @@ pub fn emit_with(
     for entry in spec.attrs {
         let fail = || PassError::RewriteFailed(req.op_id());
         let value = match *entry {
-            EmitAttr::Result {
-                result, class, ..
-            } => {
-                let id = req
-                    .results
-                    .get(result as usize)
-                    .ok_or_else(fail)?
-                    .number();
+            EmitAttr::Result { result, class, .. } => {
+                let id = req.results.get(result as usize).ok_or_else(fail)?.number();
                 AttributeValue::Register(RegisterAttr::Virtual {
                     id,
                     class: Some(class),
@@ -106,16 +100,10 @@ pub fn emit_with(
                 index,
                 ..
             } => {
-                let id = req
-                    .results
-                    .get(result as usize)
-                    .ok_or_else(fail)?
-                    .number();
+                let id = req.results.get(result as usize).ok_or_else(fail)?.number();
                 AttributeValue::Register(RegisterAttr::FixedDef { id, class, index })
             }
-            EmitAttr::Value {
-                symbol, class, ..
-            } => {
+            EmitAttr::Value { symbol, class, .. } => {
                 let src = m.value_binding(symbol).ok_or_else(fail)?;
                 AttributeValue::Register(RegisterAttr::Virtual {
                     id: src.number(),
@@ -392,30 +380,30 @@ mod tests {
         let context = Context::with_default_dialects();
         static ATTRS: &[EmitAttr] = &[
             EmitAttr::Result {
-                    attr: "rd",
-                    result: 0,
-                    class: r(),
-                },
-                EmitAttr::Value {
-                    attr: "rs1",
-                    symbol: 0,
-                    class: r(),
-                },
-                EmitAttr::FixedUse {
-                    attr: "rs2",
-                    symbol: 1,
-                    class: r(),
-                    index: 3,
-                },
-                EmitAttr::Physical {
-                    attr: "rs3",
-                    class: r(),
-                    index: 0,
-                },
-                EmitAttr::Int {
-                    attr: "value",
-                    symbol: 2,
-                },
+                attr: "rd",
+                result: 0,
+                class: r(),
+            },
+            EmitAttr::Value {
+                attr: "rs1",
+                symbol: 0,
+                class: r(),
+            },
+            EmitAttr::FixedUse {
+                attr: "rs2",
+                symbol: 1,
+                class: r(),
+                index: 3,
+            },
+            EmitAttr::Physical {
+                attr: "rs3",
+                class: r(),
+                index: 0,
+            },
+            EmitAttr::Int {
+                attr: "value",
+                symbol: 2,
+            },
         ];
         let spec = spec(ATTRS, &["rd", "rs1", "rs2", "rs3", "value"]);
         let results = [ValueId::from_number(42)];
@@ -532,12 +520,6 @@ mod tests {
     }
 
     fn rule_spec(offset: u32, features: &'static [u16]) -> RuleSpec {
-        static EMIT: EmitSpec = EmitSpec {
-            op: ("builtin", "constant"),
-            wrap,
-            attrs: &[],
-            declared: &[],
-        };
         RuleSpec {
             name: "inst",
             features,
@@ -572,7 +554,10 @@ mod tests {
         assert_eq!(rules.len(), 2);
         let rules = build_rules(&context, &[9], &kinds, &blob, &[], cost, specs);
         assert_eq!(rules.len(), 1);
-        assert_eq!(rules[0].base_cost, 3 * crate::backend::isel::LATENCY_COST_SCALE + 4);
+        assert_eq!(
+            rules[0].base_cost,
+            3 * crate::backend::isel::LATENCY_COST_SCALE + 4
+        );
     }
 
     #[test]
@@ -601,15 +586,7 @@ mod tests {
             class: RegClassId::new(&WIDE),
             capability: CapabilityKind::Any,
         });
-        let rules = build_rules(
-            &context,
-            &[],
-            &kinds,
-            &blob,
-            &[("R", 32)],
-            |_| 0,
-            &[&spec],
-        );
+        let rules = build_rules(&context, &[], &kinds, &blob, &[("R", 32)], |_| 0, &[&spec]);
         assert_eq!(rules.len(), 1);
         // `W` has no width under the enabled features: the result register
         // requirement drops out, the known-class operand keeps its width.

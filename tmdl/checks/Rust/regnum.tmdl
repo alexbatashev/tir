@@ -76,4 +76,4 @@ instruction TCsrSet for [RegIsa] {
 // condition itself lives in the sem blob (tmdl/tests/sem_blob.rs).
 
 // The CSR write is emitted under the guard.
-// CHECK: if value.to_u64() != 0 {
+// CHECK: tir::backend::exec::Effect::If

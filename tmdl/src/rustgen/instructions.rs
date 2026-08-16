@@ -1068,10 +1068,14 @@ fn emit_instructions<'a>(
         let behavior_ctx = RustBehaviorCtx {
             ops: &ops,
             isa_param_values: &isa_param_values,
-            mnemonic: &mnemonic_lit,
             reg_kinds: &reg_kinds,
         };
-        let execute_body = if let Some(branch_val) = branch_value.as_ref() {
+        let unsupported_lowering = quote! {
+            tir::backend::exec::Program::Unsupported(
+                "failed to convert behavior to executable expression",
+            )
+        };
+        let program = if let Some(branch_val) = branch_value.as_ref() {
             // Conditional control transfer: `synthesize_branch_value` folds the
             // condition into one value (taken target or fall-through) written to PC
             // every cycle.
@@ -1087,101 +1091,57 @@ fn emit_instructions<'a>(
                 value: Box::new(branch_val.clone()),
                 span: branch_if.span,
             });
-            match emit_behavior_exec(
+            emit_behavior_exec(
                 &normalized,
                 trap_handler,
                 &numeric_params,
                 &register_index_map,
                 &behavior_ctx,
-            ) {
-                Some(body) => quote! {
-                    #body
-                    Ok(())
-                },
-                None => quote! {
-                    let _ = machine;
-                    Err(tir::backend::SimTrap::InvalidInstruction {
-                        op: #mnemonic_lit,
-                        reason: "failed to convert behavior to executable expression".to_string(),
-                    })
-                },
-            }
+            )
+            .unwrap_or(unsupported_lowering)
         } else if uses_todo {
             quote! {
-                Err(tir::backend::SimTrap::InvalidInstruction {
-                    op: #mnemonic_lit,
-                    reason: "instruction semantics are not modeled (todo)".to_string(),
-                })
+                tir::backend::exec::Program::Unsupported(
+                    "instruction semantics are not modeled (todo)",
+                )
             }
         } else {
-            match emit_behavior_exec(
+            emit_behavior_exec(
                 &inst.behavior,
                 trap_handler,
                 &numeric_params,
                 &register_index_map,
                 &behavior_ctx,
-            ) {
-                Some(body) => quote! {
-                    #body
-                    Ok(())
-                },
-                None => quote! {
-                    let _ = machine;
-                    Err(tir::backend::SimTrap::InvalidInstruction {
-                        op: #mnemonic_lit,
-                        reason: "failed to convert behavior to executable expression".to_string(),
-                    })
-                },
-            }
+            )
+            .unwrap_or(unsupported_lowering)
         };
 
         // Control-flow kind, derived from the behavior's `PC::pc` writes: every
         // path writes PC → unconditional transfer; some paths → conditional
-        // branch. The trait default covers sequential instructions.
-        let control_flow_method = match (uncond_pc, cond_pc) {
-            (true, _) => quote! {
-                fn control_flow(&self) -> tir::backend::ControlFlow {
-                    tir::backend::ControlFlow::Unconditional
-                }
-            },
-            (false, true) => quote! {
-                fn control_flow(&self) -> tir::backend::ControlFlow {
-                    tir::backend::ControlFlow::Conditional
-                }
-            },
-            (false, false) => quote! {},
+        // branch.
+        let control_flow = match (uncond_pc, cond_pc) {
+            (true, _) => quote! { tir::backend::ControlFlow::Unconditional },
+            (false, true) => quote! { tir::backend::ControlFlow::Conditional },
+            (false, false) => quote! { tir::backend::ControlFlow::None },
         };
 
-        // An unmodeled (`todo()`) behavior whose `execute()` only traps never
-        // touches the machine context; every other body binds its entry symbols
-        // through `exec::init_syms`, which takes the machine.
-        let machine_param = if uses_todo && branch_value.is_none() {
-            quote! { _machine }
-        } else {
-            quote! { machine }
-        };
         machine_instruction_impls.push(quote! {
             impl tir::backend::MachineInstruction for #name_ident {
-                fn mnemonic(&self) -> &'static str {
-                    #mnemonic_lit
+                fn instance(&self) -> &tir::OpInstance {
+                    &self.0
                 }
 
-                fn scheduling_key(&self) -> &'static str {
-                    #op_name_lit
+                fn spec(&self) -> &'static tir::backend::exec::InstSpec {
+                    static SPEC: tir::backend::exec::InstSpec = tir::backend::exec::InstSpec {
+                        mnemonic: #mnemonic_lit,
+                        scheduling_key: #op_name_lit,
+                        width_bytes: #width_bytes_lit,
+                        control_flow: #control_flow,
+                        env: &EXEC_ENV,
+                        program: #program,
+                    };
+                    &SPEC
                 }
-
-                fn width_bytes(&self) -> u8 {
-                    #width_bytes_lit
-                }
-
-                fn execute(
-                    &self,
-                    #machine_param: &mut dyn tir::backend::MachineContext,
-                ) -> Result<(), tir::backend::SimTrap> {
-                    #execute_body
-                }
-
-                #control_flow_method
             }
         });
 

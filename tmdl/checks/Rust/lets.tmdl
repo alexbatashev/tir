@@ -6,20 +6,24 @@
 // RUN: tmdlc --action=emit-rust --dialect=test --output=- %S/../Inputs/lets.tmdl | filecheck %s
 
 // CHECK: impl tir::backend::MachineInstruction for AddDoubleOp
-// CHECK: tir::backend::exec::bind_sym(&mut __tmdl_entry_syms, 2, value);
-// CHECK: writeback_attr
+// CHECK: tir::backend::exec::Effect::Bind
+// CHECK: sym: 2
+// CHECK: tir::backend::exec::Dest::Reg(
 
 // CHECK: impl tir::backend::MachineInstruction for AmoAddWLetOp
-// CHECK: tir::backend::exec::bind_sym(&mut __tmdl_entry_syms, 2, value);
-// CHECK: writeback_attr
+// CHECK: tir::backend::exec::Effect::Bind
+// CHECK: sym: 2
+// CHECK: tir::backend::exec::Dest::Reg(
 
 // CHECK: impl tir::backend::MachineInstruction for LoadTwiceOp
-// CHECK: tir::backend::exec::bind_sym(&mut __tmdl_entry_syms, 1, value);
-// CHECK: writeback_attr
+// CHECK: tir::backend::exec::Effect::Bind
+// CHECK: sym: 1
+// CHECK: tir::backend::exec::Dest::Reg(
 
 // CHECK: impl tir::backend::MachineInstruction for AmoAddDBareOp
-// CHECK: tir::backend::exec::bind_sym(&mut __tmdl_entry_syms, 2, value);
-// CHECK: writeback_attr
+// CHECK: tir::backend::exec::Effect::Bind
+// CHECK: sym: 2
+// CHECK: tir::backend::exec::Dest::Reg(
 
 // Selection patterns see through a binding: the op semantics is the underlying
 // expression over the operands, not an opaque binding symbol.

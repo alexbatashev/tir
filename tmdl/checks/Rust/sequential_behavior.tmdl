@@ -5,7 +5,8 @@
 // RUN: tmdlc --action=emit-rust --dialect=test --output=- %S/../Inputs/smtlib.tmdl | filecheck %s
 
 // CHECK-LABEL: impl tir::backend::MachineInstruction for TStoreWritebackOp
-// CHECK: let __tmdl_entry_syms
-// CHECK: tir::backend::exec::eval(
-// CHECK: tir::backend::exec::writeback_attr(
-// CHECK: tir::backend::exec::eval(
+// CHECK: sources: &[
+// CHECK: effects: &[
+// CHECK: tir::backend::exec::Dest::Reg("rs1")
+// CHECK: tir::backend::exec::Dest::Discard
+// CHECK: tir::backend::exec::Dest::Discard

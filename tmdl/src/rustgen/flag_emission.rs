@@ -1,6 +1,7 @@
 /// Derive the flag-mediated selection rules for an ISA (x86 EFLAGS, AArch64
 /// PSTATE): flag definers compose with flag-guarded branches into conditional
 /// branch rules and with flag-reading instructions into `If`-rooted value rules.
+#[allow(clippy::too_many_arguments)]
 fn emit_flag_rules<'a>(
     files: &'a [ast::File],
     item_cache: &HashMap<&'a str, &'a ast::Item>,

@@ -168,26 +168,12 @@ fn emit_behavior_exec(
         .max()
         .map_or(max_sym_id, |id| max_sym_id.max(id as usize));
     let sym_count_lit = proc_macro2::Literal::usize_unsuffixed(max_sym_id + 1);
-    // `let` statements write their value back into the symbol table, so the
-    // table is only mutable when the behavior binds something.
-    let mutability = if behavior.let_symbols.is_empty() {
-        quote! {}
-    } else {
-        quote! { mut }
-    };
-    let body = emit_behavior_effect(&behavior, behavior.root, ctx)?;
-    let mnemonic_lit = ctx.mnemonic;
+    let effects = emit_behavior_effect(&behavior, behavior.root, ctx)?;
     Some(quote! {
-        {
-            let #mutability __tmdl_entry_syms: Vec<tir::sem::Value> =
-                tir::backend::exec::init_syms(
-                    &self.0,
-                    machine,
-                    #mnemonic_lit,
-                    #sym_count_lit,
-                    &[#(#sym_inits),*],
-                )?;
-            #body
+        tir::backend::exec::Program::Effects {
+            sym_count: #sym_count_lit,
+            sources: &[#(#sym_inits),*],
+            effects: &[#(#effects),*],
         }
     })
 }
@@ -195,7 +181,6 @@ fn emit_behavior_exec(
 struct RustBehaviorCtx<'a> {
     ops: &'a [(String, Type)],
     isa_param_values: &'a HashMap<String, i64>,
-    mnemonic: &'a proc_macro2::Literal,
     reg_kinds: &'a HashMap<String, (bool, u32)>,
 }
 
@@ -203,34 +188,40 @@ fn emit_behavior_effect(
     behavior: &sem_expr_state::BehaviorGraph,
     effect: tir_graph::NodeId,
     ctx: &RustBehaviorCtx<'_>,
-) -> Option<proc_macro2::TokenStream> {
+) -> Option<Vec<proc_macro2::TokenStream>> {
     use tir_graph::Dag as _;
 
     let children: Vec<_> = behavior.graph.children(effect).collect();
     match behavior.graph.get_node(effect) {
         tir_symbolic::lang::SymKind::StateAssign => match behavior.effect_payload(effect)? {
             sem_expr_state::EffectPayload::Assign { destination } => {
-                let eval = emit_behavior_value_eval(behavior, *children.first()?, ctx.mnemonic)?;
-                let write = emit_graph_destination_write(destination, ctx.ops, ctx.mnemonic)?;
-                Some(quote! {{ #eval #write }})
+                let offset = emit_behavior_value_offset(behavior, *children.first()?)?;
+                let dest = emit_graph_destination(destination, ctx.ops)?;
+                Some(vec![quote! {
+                    tir::backend::exec::Effect::Assign { offset: #offset, dest: #dest }
+                }])
             }
             // The bound term is evaluated here, once, and parked in the symbol
             // table; later statements read the symbol instead of re-evaluating.
             sem_expr_state::EffectPayload::Bind { symbol, .. } => {
-                let eval = emit_binding_value_eval(behavior, *children.first()?, ctx.mnemonic)?;
+                let offset = emit_binding_value_offset(behavior, *children.first()?)?;
                 let sym_lit = proc_macro2::Literal::usize_unsuffixed(*symbol as usize);
-                Some(quote! {{
-                    #eval
-                    tir::backend::exec::bind_sym(&mut __tmdl_entry_syms, #sym_lit, value);
-                }})
+                Some(vec![quote! {
+                    tir::backend::exec::Effect::Bind { offset: #offset, sym: #sym_lit }
+                }])
             }
             _ => None,
         },
         tir_symbolic::lang::SymKind::StateStore
         | tir_symbolic::lang::SymKind::StateStoreConditional
         | tir_symbolic::lang::SymKind::StateFence => {
-            let eval = emit_behavior_value_eval(behavior, *children.first()?, ctx.mnemonic)?;
-            Some(quote! {{ #eval let _ = value; }})
+            let offset = emit_behavior_value_offset(behavior, *children.first()?)?;
+            Some(vec![quote! {
+                tir::backend::exec::Effect::Assign {
+                    offset: #offset,
+                    dest: tir::backend::exec::Dest::Discard,
+                }
+            }])
         }
         tir_symbolic::lang::SymKind::StateTrap => {
             let sem_expr_state::EffectPayload::Trap { argument_count, .. } =
@@ -239,8 +230,10 @@ fn emit_behavior_effect(
                 return None;
             };
             let cause = *children.get((0..*argument_count).next()?)?;
-            let eval = emit_behavior_value_eval(behavior, cause, ctx.mnemonic)?;
-            Some(quote! { #eval machine.raise_exception(value.to_u64())?; })
+            let offset = emit_behavior_value_offset(behavior, cause)?;
+            Some(vec![quote! {
+                tir::backend::exec::Effect::Trap { offset: #offset }
+            }])
         }
         // The simulator executes the no-trap path. Handler state is modeled by
         // the SMT printer, while machine exception handling owns trap entry.
@@ -248,74 +241,54 @@ fn emit_behavior_effect(
         tir_symbolic::lang::SymKind::StateBlock => {
             let mut steps = Vec::new();
             for effect in children {
-                steps.push(emit_behavior_effect(behavior, effect, ctx)?);
+                steps.extend(emit_behavior_effect(behavior, effect, ctx)?);
             }
-            Some(quote! { #(#steps)* })
+            Some(steps)
         }
         tir_symbolic::lang::SymKind::StateIf => {
-            let cond_eval = emit_behavior_value_eval(behavior, *children.first()?, ctx.mnemonic)?;
+            let cond = emit_behavior_value_offset(behavior, *children.first()?)?;
             let then_body = emit_behavior_effect(behavior, *children.get(1)?, ctx)?;
-            // Omit the `else` arm for a guard with no else clause (e.g. a
-            // guarded CSR write), so codegen emits no empty `else {}`.
-            let else_arm = match children.get(2) {
-                Some(else_effect) => {
-                    let else_body = emit_behavior_effect(behavior, *else_effect, ctx)?;
-                    quote! { else { #else_body } }
-                }
-                None => quote! {},
+            let else_body = match children.get(2) {
+                Some(else_effect) => emit_behavior_effect(behavior, *else_effect, ctx)?,
+                None => Vec::new(),
             };
-            Some(quote! {
-                {
-                    #cond_eval
-                    if value.to_u64() != 0 {
-                        #then_body
-                    } #else_arm
+            Some(vec![quote! {
+                tir::backend::exec::Effect::If {
+                    cond: #cond,
+                    then: &[#(#then_body),*],
+                    els: &[#(#else_body),*],
                 }
-            })
+            }])
         }
         tir_symbolic::lang::SymKind::StateHandler => None,
         _ => None,
     }
 }
 
-fn emit_behavior_value_eval(
+fn emit_behavior_value_offset(
     behavior: &sem_expr_state::BehaviorGraph,
     root: tir_graph::NodeId,
-    mnemonic_lit: &proc_macro2::Literal,
-) -> Option<proc_macro2::TokenStream> {
+) -> Option<proc_macro2::Literal> {
     let (values, root) = behavior.bound_value_graph(root)?;
-    emit_lowered_value_eval(&values, root, mnemonic_lit)
+    Some(lowered_value_offset(&values, root))
 }
 
-fn emit_binding_value_eval(
+fn emit_binding_value_offset(
     behavior: &sem_expr_state::BehaviorGraph,
     root: tir_graph::NodeId,
-    mnemonic_lit: &proc_macro2::Literal,
-) -> Option<proc_macro2::TokenStream> {
+) -> Option<proc_macro2::Literal> {
     let (values, root) = behavior.binding_value_graph(root)?;
-    emit_lowered_value_eval(&values, root, mnemonic_lit)
+    Some(lowered_value_offset(&values, root))
 }
 
-fn emit_lowered_value_eval(
+fn lowered_value_offset(
     dag: &impl tir_graph::Dag<Node = tir_symbolic::lang::SymKind, Leaf = tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>>,
     root: tir_graph::NodeId,
-    mnemonic_lit: &proc_macro2::Literal,
-) -> Option<proc_macro2::TokenStream> {
+) -> proc_macro2::Literal {
     // Behavior value terms carry no type annotations, so no typed nodes.
     let (offset, has_typed_node) = intern_dag(dag, root, &[]);
     assert!(!has_typed_node);
-    let offset_lit = proc_macro2::Literal::u32_unsuffixed(offset);
-
-    Some(quote! {
-        let value = tir::backend::exec::eval(
-            SEM_KINDS,
-            SEM_BLOB,
-            #offset_lit,
-            &__tmdl_entry_syms,
-            machine,
-            #mnemonic_lit,
-        )?;
-    })
+    proc_macro2::Literal::u32_unsuffixed(offset)
 }
 
 /// Emit the [`tir::backend::exec::SymSource`] table entries binding an
@@ -410,29 +383,20 @@ fn emit_sym_inits(
     (max_sym_id, entries)
 }
 
-fn emit_graph_destination_write(
+fn emit_graph_destination(
     dest: &sem_expr_state::Destination,
     ops: &[(String, Type)],
-    mnemonic_lit: &proc_macro2::Literal,
 ) -> Option<proc_macro2::TokenStream> {
     use sem_expr_state::Destination;
 
     if matches!(dest, Destination::Path { base, members } if base == "PC" && members == &["pc"]) {
-        return Some(quote! { machine.write_pc(value.to_u64()); });
+        return Some(quote! { tir::backend::exec::Dest::Pc });
     }
 
     if let Destination::FixedRegister { class, index, .. } = dest {
         let class_lit = proc_macro2::Literal::string(class);
         let index_lit = proc_macro2::Literal::u16_unsuffixed(*index as u16);
-        return Some(quote! {
-            tir::backend::exec::writeback_fixed(
-                machine,
-                #class_lit,
-                #index_lit,
-                value,
-                register_has_trait_hardwired_zero,
-            )?;
-        });
+        return Some(quote! { tir::backend::exec::Dest::Fixed(#class_lit, #index_lit) });
     }
 
     let name = match dest {
@@ -444,22 +408,13 @@ fn emit_graph_destination_write(
     };
     if let Some((_, Type::Struct(_))) = ops.iter().find(|(n, _)| n == name) {
         let name_lit = proc_macro2::Literal::string(name);
-        return Some(quote! {
-            tir::backend::exec::writeback_attr(
-                &self.0,
-                machine,
-                #mnemonic_lit,
-                #name_lit,
-                value,
-                register_has_trait_hardwired_zero,
-            )?;
-        });
+        return Some(quote! { tir::backend::exec::Dest::Reg(#name_lit) });
     }
 
     // A local binding: sequencing substituted the bound value into every later
     // read, so the assignment statement itself carries no state effect.
     if matches!(dest, Destination::Ident(_)) {
-        return Some(quote! { let _ = value; });
+        return Some(quote! { tir::backend::exec::Dest::Discard });
     }
 
     None

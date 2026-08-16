@@ -284,14 +284,22 @@ pub trait MachineInstruction {
     ) -> Result<(), tir::Error> {
         Ok(())
     }
-    fn mnemonic(&self) -> &'static str;
-    fn scheduling_key(&self) -> &'static str {
-        self.mnemonic()
+    fn spec(&self) -> &'static exec::InstSpec;
+    fn instance(&self) -> &tir::OpInstance;
+    fn mnemonic(&self) -> &'static str {
+        self.spec().mnemonic
     }
-    fn width_bytes(&self) -> u8;
-    fn execute(&self, machine: &mut dyn MachineContext) -> Result<(), SimTrap>;
+    fn scheduling_key(&self) -> &'static str {
+        self.spec().scheduling_key
+    }
+    fn width_bytes(&self) -> u8 {
+        self.spec().width_bytes
+    }
+    fn execute(&self, machine: &mut dyn MachineContext) -> Result<(), SimTrap> {
+        exec::run(self.instance(), self.spec(), machine)
+    }
     fn control_flow(&self) -> ControlFlow {
-        ControlFlow::None
+        self.spec().control_flow
     }
 }
 

@@ -388,16 +388,18 @@ pub trait OpDefVerifiable {
 /// the `operation!` macro. The verification engine lives in core so a generated
 /// op carries only this table instead of an inlined copy of the engine.
 pub struct OpDefSpec {
-    pub operands: &'static [(&'static str, &'static str)],
-    pub results: &'static [(&'static str, &'static str)],
-    pub operand_constraint_names: &'static [&'static str],
-    pub result_constraint_names: &'static [&'static str],
-    pub operand_constraint_checkers: &'static [fn(&dyn crate::Type) -> bool],
-    pub result_constraint_checkers: &'static [fn(&dyn crate::Type) -> bool],
-    pub variadic_operands: bool,
-    pub variadic_result: bool,
-    pub optional_result: bool,
+    pub schema: &'static crate::OpSchema,
+    pub operand_checkers: &'static [fn(&dyn crate::Type) -> bool],
+    pub result_checkers: &'static [fn(&dyn crate::Type) -> bool],
     pub state_output: bool,
+}
+
+/// The constraint a field's declared type names, with the optional (`?`) and
+/// variadic (`*`) markers stripped: what verification errors report.
+fn constraint_name(ty: &str) -> &str {
+    ty.strip_prefix('?')
+        .or_else(|| ty.strip_prefix('*'))
+        .unwrap_or(ty)
 }
 
 fn verify_def_value(
@@ -460,8 +462,10 @@ pub fn verify_opdef_operands(
     spec: &OpDefSpec,
 ) -> Result<(), crate::Error> {
     let operands = &instance.operands;
+    let operand_fields = spec.schema.operands;
+    let result_fields = spec.schema.results;
 
-    if spec.variadic_operands {
+    if operand_fields.iter().any(|field| field.variadic) {
         // Variadic ops recover their operand grouping from the segment sizes
         // recorded at build time, then validate each declared operand's segment.
         let segment_sizes: Vec<usize> = match instance.attr("operand_segment_sizes") {
@@ -479,10 +483,10 @@ pub fn verify_opdef_operands(
             }
         };
 
-        if segment_sizes.len() != spec.operands.len() {
+        if segment_sizes.len() != operand_fields.len() {
             return Err(crate::Error::VerificationError(format!(
                 "{op_name} expects {} operand segments, got {}",
-                spec.operands.len(),
+                operand_fields.len(),
                 segment_sizes.len()
             )));
         }
@@ -496,38 +500,37 @@ pub fn verify_opdef_operands(
         }
 
         let mut cursor = 0usize;
-        for (idx, (operand_name, _)) in spec.operands.iter().enumerate() {
+        for (idx, field) in operand_fields.iter().enumerate() {
             for k in 0..segment_sizes[idx] {
                 verify_def_value(
                     context,
                     op_name,
                     "operand",
-                    operand_name,
+                    field.name,
                     operands[cursor + k],
-                    spec.operand_constraint_checkers[idx],
-                    spec.operand_constraint_names[idx],
+                    spec.operand_checkers[idx],
+                    constraint_name(field.ty),
                 )?;
             }
             cursor += segment_sizes[idx];
         }
     } else {
-        if operands.len() > spec.operands.len() {
+        if operands.len() > operand_fields.len() {
             return Err(crate::Error::VerificationError(format!(
                 "{op_name} expects at most {} operands, got {}",
-                spec.operands.len(),
+                operand_fields.len(),
                 operands.len()
             )));
         }
 
-        for (idx, (operand_name, type_spec)) in spec.operands.iter().enumerate() {
-            let is_optional = type_spec.starts_with('?');
-
+        for (idx, field) in operand_fields.iter().enumerate() {
             let Some(value_id) = operands.get(idx).copied() else {
-                if is_optional {
+                if field.ty.starts_with('?') {
                     continue;
                 }
                 return Err(crate::Error::VerificationError(format!(
-                    "{op_name} missing required operand '{operand_name}'"
+                    "{op_name} missing required operand '{name}'",
+                    name = field.name
                 )));
             };
 
@@ -535,10 +538,10 @@ pub fn verify_opdef_operands(
                 context,
                 op_name,
                 "operand",
-                operand_name,
+                field.name,
                 value_id,
-                spec.operand_constraint_checkers[idx],
-                spec.operand_constraint_names[idx],
+                spec.operand_checkers[idx],
+                constraint_name(field.ty),
             )?;
         }
     }
@@ -555,39 +558,36 @@ pub fn verify_opdef_operands(
         instance.results.len()
     };
 
-    if spec.variadic_result {
+    let variadic_result = result_fields.iter().any(|field| field.variadic);
+    if variadic_result {
         // A variadic result declares one spec covering every result value.
-    } else if spec.optional_result {
-        if value_results_len > spec.results.len() {
+    } else if result_fields.iter().any(|field| field.ty.starts_with('?')) {
+        if value_results_len > result_fields.len() {
             return Err(crate::Error::VerificationError(format!(
                 "{op_name} expects at most {} results, got {}",
-                spec.results.len(),
+                result_fields.len(),
                 value_results_len
             )));
         }
-    } else if value_results_len != spec.results.len() {
+    } else if value_results_len != result_fields.len() {
         return Err(crate::Error::VerificationError(format!(
             "{op_name} expects {} results, got {}",
-            spec.results.len(),
+            result_fields.len(),
             value_results_len
         )));
     }
 
     for result_index in 0..value_results_len {
-        let idx = if spec.variadic_result {
-            0
-        } else {
-            result_index
-        };
-        let (result_name, _) = spec.results[idx];
+        let idx = if variadic_result { 0 } else { result_index };
+        let field = &result_fields[idx];
         verify_def_value(
             context,
             op_name,
             "result",
-            result_name,
+            field.name,
             instance.results[result_index],
-            spec.result_constraint_checkers[idx],
-            spec.result_constraint_names[idx],
+            spec.result_checkers[idx],
+            constraint_name(field.ty),
         )?;
     }
 
@@ -613,15 +613,16 @@ fn attr_type_matches(attr_type: &str, value: &crate::attributes::AttributeValue)
     }
 }
 
-/// [`OpDefVerifiable::verify_attributes`] engine, driven by `(name, type)` specs.
+/// [`OpDefVerifiable::verify_attributes`] engine, driven by the op's schema.
 pub fn verify_opdef_attributes(
     context: &Context,
     instance: &OpInstance,
     op_name: &str,
-    attr_specs: &[(&str, &str)],
+    attr_specs: &[crate::AttrSchema],
 ) -> Result<(), crate::Error> {
     let _ = context;
-    for (attr_name, attr_type) in attr_specs {
+    for spec in attr_specs {
+        let (attr_name, attr_type) = (spec.name, spec.ty);
         let Some(value) = instance.attr(attr_name) else {
             return Err(crate::Error::VerificationError(format!(
                 "{op_name} missing required attribute '{attr_name}'"

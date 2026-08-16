@@ -296,55 +296,16 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         })
         .collect();
 
-    let operand_spec_literals: Vec<_> = operands
-        .iter()
-        .map(|operand| {
-            let name = proc_macro2::Literal::string(&operand.name);
-            let ty = proc_macro2::Literal::string(&operand.ty);
-            quote! { (#name, #ty) }
-        })
-        .collect();
-
-    let result_spec_literals: Vec<_> = results
-        .iter()
-        .map(|result| {
-            let name = proc_macro2::Literal::string(&result.name);
-            let ty = proc_macro2::Literal::string(&result.ty);
-            quote! { (#name, #ty) }
-        })
-        .collect();
-
-    let operand_constraint_name_literals: Vec<_> = operands
-        .iter()
-        .map(|operand| normalize_constraint_name(&operand.ty))
-        .map(|name| proc_macro2::Literal::string(&name))
-        .collect();
-
     let operand_constraint_checkers: Vec<_> = operands
         .iter()
         .map(|operand| normalize_constraint_name(&operand.ty))
         .map(|name| parse_constraint_tokens(&name))
         .collect();
 
-    let result_constraint_name_literals: Vec<_> = results
-        .iter()
-        .map(|result| normalize_constraint_name(&result.ty))
-        .map(|name| proc_macro2::Literal::string(&name))
-        .collect();
-
     let result_constraint_checkers: Vec<_> = results
         .iter()
         .map(|result| normalize_constraint_name(&result.ty))
         .map(|name| parse_constraint_tokens(&name))
-        .collect();
-
-    let attr_spec_literals: Vec<_> = attributes
-        .iter()
-        .map(|attr| {
-            let name = proc_macro2::Literal::string(&attr.name);
-            let ty = proc_macro2::Literal::string(&attr.ty);
-            quote! { (#name, #ty) }
-        })
         .collect();
 
     // An op that declares `sem` can be folded over constant operands by evaluating
@@ -690,18 +651,18 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         .iter()
         .map(|p| p.segments.last().unwrap().ident.to_string());
 
+    let schema_ident = format_ident!("__TIR_OP_SCHEMA_{}", struct_name);
     let schema_registration = quote! {
-        const _: () = {
-            #[tir::linkme::distributed_slice(tir::OP_SCHEMAS)]
-            #[linkme(crate = tir::linkme)]
-            static __TIR_OP_SCHEMA: tir::OpSchema = tir::OpSchema {
-                dialect: #dialect,
-                name: #name,
-                operands: &[#(#operand_schema_entries),*],
-                results: &[#(#result_schema_entries),*],
-                attributes: &[#(#attr_schema_entries),*],
-                interfaces: &[#(#interface_schema_entries),*],
-            };
+        #[allow(non_upper_case_globals)]
+        #[tir::linkme::distributed_slice(tir::OP_SCHEMAS)]
+        #[linkme(crate = tir::linkme)]
+        static #schema_ident: tir::OpSchema = tir::OpSchema {
+            dialect: #dialect,
+            name: #name,
+            operands: &[#(#operand_schema_entries),*],
+            results: &[#(#result_schema_entries),*],
+            attributes: &[#(#attr_schema_entries),*],
+            interfaces: &[#(#interface_schema_entries),*],
         };
     };
 
@@ -722,15 +683,9 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
                     C::satisfies(ty)
                 }
                 static SPEC: tir::OpDefSpec = tir::OpDefSpec {
-                    operands: &[#(#operand_spec_literals),*],
-                    results: &[#(#result_spec_literals),*],
-                    operand_constraint_names: &[#(#operand_constraint_name_literals),*],
-                    result_constraint_names: &[#(#result_constraint_name_literals),*],
-                    operand_constraint_checkers: &[#(__satisfies_constraint::<#operand_constraint_checkers>),*],
-                    result_constraint_checkers: &[#(__satisfies_constraint::<#result_constraint_checkers>),*],
-                    variadic_operands: #has_variadic,
-                    variadic_result: #result_variadic,
-                    optional_result: #result_optional,
+                    schema: &#schema_ident,
+                    operand_checkers: &[#(__satisfies_constraint::<#operand_constraint_checkers>),*],
+                    result_checkers: &[#(__satisfies_constraint::<#result_constraint_checkers>),*],
                     state_output: #state_output,
                 };
                 tir::verify_opdef_operands(context, &self.0, <Self as tir::Operation>::name(), &SPEC)
@@ -740,7 +695,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
                     context,
                     &self.0,
                     <Self as tir::Operation>::name(),
-                    &[#(#attr_spec_literals),*],
+                    #schema_ident.attributes,
                 )
             }
 
