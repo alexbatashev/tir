@@ -51,6 +51,17 @@ use pattern::{CompiledIselPattern, compile_isel_pattern};
 use tir::sem::axioms::{self, verify_axioms};
 use tir::sem::rewrites::{self, discover_rewrites};
 
+/// A conditional-branch rule chosen for a destruction's test: the rule, its
+/// operand bindings (the taken target bound as a block), the boundary classes the
+/// branch reads as registers, and the operand symbols whose register the cover has
+/// yet to mint.
+struct FusedGuard {
+    rule_index: usize,
+    m: RuleMatch,
+    boundaries: Vec<Id>,
+    deferred: Vec<(u32, Id)>,
+}
+
 #[derive(Debug, Clone)]
 pub struct RuleMatch {
     int_bindings: Vec<(u32, APInt)>,
@@ -76,6 +87,11 @@ impl RuleMatch {
     pub(crate) fn with_block_binding(mut self, symbol: u32, block: BlockId) -> Self {
         self.block_bindings.push((symbol, block));
         self
+    }
+
+    pub(crate) fn bind_value(&mut self, symbol: u32, value: ValueId) {
+        self.value_bindings.push((symbol, value));
+        self.value_bindings.sort_by_key(|(sym, _)| *sym);
     }
 
     pub(crate) fn rebind_block(&mut self, symbol: u32, block: BlockId) {
@@ -1832,9 +1848,21 @@ impl InstructionSelectPass {
         // A destruction branches on its tests: fuse each into a branch rule where
         // one matches, and otherwise demand its register for the target's
         // branch-if-nonzero (which needs the condition materialized). A counter's
-        // advance is a value, not a branch, and is always demanded.
+        // advance is a value, not a branch, and is always demanded — so it names
+        // no value of the IR (the seeder mints it) and yet this block is bound to
+        // materialize it. A branch may therefore read the register its tile
+        // defines, bound once the cover has chosen that tile.
+        let deferred_classes: HashSet<Id> = fs
+            .region_aux
+            .get(&block_id)
+            .into_iter()
+            .flatten()
+            .filter(|(_, slot, _)| *slot == AuxSlot::Advance)
+            .map(|&(.., class)| fs.egraph.find(class))
+            .collect();
         let mut mm_overlay: HashSet<Id> = HashSet::new();
         let mut aux_branches: Vec<(OpId, AuxSlot, Option<AuxEmit>)> = Vec::new();
+        let mut aux_deferred: HashMap<(OpId, AuxSlot), Vec<(u32, Id)>> = HashMap::new();
         for &(op, slot, class) in fs.region_aux.get(&block_id).into_iter().flatten() {
             let class = fs.egraph.find(class);
             // The scope this block solves under may already decide the test — an
@@ -1853,18 +1881,31 @@ impl InstructionSelectPass {
                         .get(&class)
                         .map(Vec::as_slice)
                         .unwrap_or(&[]);
-                    self.best_guard_branch(context, fs, dom, (block_id, op, block_id), candidates)
+                    self.best_guard_branch(
+                        context,
+                        fs,
+                        dom,
+                        (block_id, op, block_id),
+                        candidates,
+                        &deferred_classes,
+                    )
                 })
                 .flatten();
             match fused {
-                Some((rule_index, m, boundary_classes)) => {
-                    for boundary in boundary_classes {
+                Some(guard) => {
+                    for boundary in guard.boundaries {
                         mm_overlay.insert(fs.chase_low_extract(boundary));
+                    }
+                    if !guard.deferred.is_empty() {
+                        aux_deferred.insert((op, slot), guard.deferred);
                     }
                     aux_branches.push((
                         op,
                         slot,
-                        Some(AuxEmit::Branch(GuardBranch::Fused { rule_index, m })),
+                        Some(AuxEmit::Branch(GuardBranch::Fused {
+                            rule_index: guard.rule_index,
+                            m: guard.m,
+                        })),
                     ));
                 }
                 None => {
@@ -2118,17 +2159,29 @@ impl InstructionSelectPass {
             .flatten()
             .map(|&(op, slot, class)| ((op, slot), fs.chase_low_extract(fs.egraph.find(class))))
             .collect();
+        let resolve_class = |class: Id| {
+            destinations.get(&class).copied().or_else(|| {
+                fs.resolve_binding(dom, context, class, block_id, consumer, true)
+                    .value
+            })
+        };
         let aux = aux_branches
             .into_iter()
             .filter_map(|(op, slot, selected)| {
                 let branch = match selected {
+                    Some(AuxEmit::Branch(GuardBranch::Fused { rule_index, mut m }))
+                        if aux_deferred.contains_key(&(op, slot)) =>
+                    {
+                        // The tiles are chosen now, so a class the branch reads but
+                        // this block only mints has its register.
+                        for &(symbol, class) in &aux_deferred[&(op, slot)] {
+                            m.bind_value(symbol, resolve_class(fs.chase_low_extract(class))?);
+                        }
+                        AuxEmit::Branch(GuardBranch::Fused { rule_index, m })
+                    }
                     Some(emit) => emit,
                     None => {
-                        let class = *aux_class.get(&(op, slot))?;
-                        let value = destinations.get(&class).copied().or_else(|| {
-                            fs.resolve_binding(dom, context, class, block_id, consumer, true)
-                                .value
-                        })?;
+                        let value = resolve_class(*aux_class.get(&(op, slot))?)?;
                         match slot {
                             AuxSlot::Advance => AuxEmit::Value(value),
                             _ => AuxEmit::Branch(GuardBranch::Nonzero { condition: value }),
@@ -2178,15 +2231,17 @@ impl InstructionSelectPass {
         hits
     }
 
-    /// The best conditional-branch rule among a guard's condition-class hits: the
-    /// rule, the operand bindings (taken target bound as a block), and the
-    /// boundary classes the branch reads as registers. `None` when none matches or
-    /// an operand is unresolvable at the branching block.
+    /// The best conditional-branch rule among a guard's condition-class hits.
+    /// `None` when none matches or an operand is unresolvable at the branching
+    /// block.
     ///
     /// `at` is where the branch goes: the block holding it, the operation it
     /// replaces (whose position the operands resolve against), and the block the
     /// taken edge reaches. A destruction that has not minted its blocks yet binds
-    /// any block and rebinds the target when it emits.
+    /// any block and rebinds the target when it emits. `deferred_classes` are the
+    /// classes this block materializes for the destruction itself, which resolve
+    /// only once the cover has minted their tiles.
+    #[allow(clippy::too_many_arguments)]
     fn best_guard_branch(
         &self,
         context: &Context,
@@ -2194,9 +2249,10 @@ impl InstructionSelectPass {
         dom: &DominatorTree,
         at: (BlockId, OpId, BlockId),
         candidates: &[(usize, EMatch<u32>)],
-    ) -> Option<(usize, RuleMatch, Vec<Id>)> {
+        deferred_classes: &HashSet<Id>,
+    ) -> Option<FusedGuard> {
         let (block, consumer, taken) = at;
-        let mut best: Option<(u64, usize, usize, RuleMatch, Vec<Id>)> = None;
+        let mut best: Option<(u64, usize, FusedGuard)> = None;
         let mut register_symbols_by_pattern: HashMap<usize, HashSet<u32>> = HashMap::new();
         for (pattern_index, m) in candidates {
             let compiled = &self.compiled_patterns[*pattern_index];
@@ -2226,6 +2282,7 @@ impl InstructionSelectPass {
             let mut boundary_classes = Vec::new();
             let mut int_bindings = Vec::new();
             let mut value_bindings = Vec::new();
+            let mut deferred = Vec::new();
             let mut resolvable = true;
             // A register operand may read a bare constant only when another use
             // already forces that constant to be materialized.
@@ -2257,6 +2314,10 @@ impl InstructionSelectPass {
                             value_bindings.push((*symbol, reg));
                             boundary_classes.push(*class);
                         }
+                        None if deferred_classes.contains(class) => {
+                            deferred.push((*symbol, *class));
+                            boundary_classes.push(*class);
+                        }
                         None => {
                             resolvable = false;
                             break;
@@ -2278,18 +2339,21 @@ impl InstructionSelectPass {
                 }
             };
             if better {
-                let rule_match = RuleMatch::new(int_bindings, value_bindings)
+                let m = RuleMatch::new(int_bindings, value_bindings)
                     .with_block_binding(target_symbol, taken);
                 best = Some((
                     cost,
                     specificity,
-                    compiled.rule_index,
-                    rule_match,
-                    boundary_classes,
+                    FusedGuard {
+                        rule_index: compiled.rule_index,
+                        m,
+                        boundaries: boundary_classes,
+                        deferred,
+                    },
                 ));
             }
         }
-        best.map(|(_, _, rule_index, m, boundaries)| (rule_index, m, boundaries))
+        best.map(|(_, _, guard)| guard)
     }
 
     #[allow(clippy::too_many_arguments)]

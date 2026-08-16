@@ -28,10 +28,12 @@ module {data_layout = #data_layout} {
 // The body carries the accumulator and the counter.
 // CHECK: ^[[BODY:bb[0-9]+]](%{{[0-9]+}}: !i64, %[[IV:[0-9]+]]: !i64):
 // CHECK-NEXT: x86_64.add_imm8s {dst = %virt{{[0-9]+}}:GPR, dst_tied = %virt{{[0-9]+}}:GPR, imm = 5}
-// The counter advances by the step and is tested against the same bound.
+// The counter advances by the step and is tested against the same bound; the
+// test fuses into the back edge's branch even though the advance names no value
+// of the IR.
 // CHECK-NEXT: x86_64.add {dst = %virt[[NEXT:[0-9]+]]:GPR, dst_tied = %virt[[IV]]:GPR, src = %virt2:GPR}
 // CHECK-NEXT: x86_64.cmp {dst = %virt[[NEXT]]:GPR, src = %virt1:GPR}
-// CHECK: x86_64.jne {imm = ^[[LATCH:bb[0-9]+]]}
+// CHECK-NEXT: x86_64.jl {imm = ^[[LATCH:bb[0-9]+]]}
 // CHECK-NEXT: asm.vbr %{{[0-9]+}} ^[[EXIT]]
 // CHECK: ^[[EXIT]](%{{[0-9]+}}: !i64):
 // CHECK-NEXT: asm.vret

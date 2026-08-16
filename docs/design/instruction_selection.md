@@ -790,6 +790,12 @@ at its condition class whose operands all resolve at B (tie → most specific):
   demand overlay `mm_overlay`. The condition class is then demanded only if
   something else needs it: nothing does, and its compare op is erased with no tile;
   another consumer does, and the compare is materialized (`slt`) *and* fused.
+- **Fused on a minted operand**: a counted loop's counter advance names no value
+  of the IR, so no register exists to bind while the rules are being chosen. It is
+  a *value slot* of this block's `region_aux`, which the block materializes by
+  construction, so the operand binds after the cover to the register the advance's
+  tile defines. That is why a counted loop's back-edge test fuses (`cmp; jl`)
+  instead of materializing a boolean and re-testing it.
 - **Fallback**: no branch rule matches — the condition is forced materialized
   and `cond_nonzero` emits the branch. A bare i1 condition (block/function
   argument, no comparison) reaches here: it carries no comparison term for a
