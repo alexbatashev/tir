@@ -2033,7 +2033,38 @@ fn emit_instructions<'a>(
             }
         }
     } else {
+        // The per-instruction parser and printer functions live at module scope,
+        // and their registrations run in batches of helper functions, for the
+        // same reason the isel rules below are chunked: one body holding every
+        // instruction grows superlinearly in compile time (and overflows the
+        // stack in unoptimized builds) once a target has thousands of forms.
+        let parser_registration_chunks = registration_chunks(
+            &instruction_parser_map_inits,
+            "register_instruction_parsers_chunk",
+            quote! {
+                map: &mut std::collections::HashMap<String, Vec<tir::backend::AsmInstructionParser>>,
+                disabled: &mut std::collections::HashSet<String>,
+                features: &[Feature],
+            },
+            quote! { &mut map, &mut disabled, features },
+        );
+        let printer_registration_chunks = registration_chunks(
+            &instruction_printer_map_inits,
+            "register_instruction_printers_chunk",
+            quote! {
+                map: &mut std::collections::HashMap<String, tir::backend::AsmInstructionPrinter>,
+            },
+            quote! { &mut map },
+        );
+        let (parser_chunk_fns, parser_chunk_calls) = parser_registration_chunks;
+        let (printer_chunk_fns, printer_chunk_calls) = printer_registration_chunks;
         quote! {
+            #(#instruction_parsers_impls)*
+            #(#instruction_printers_impls)*
+
+            #(#parser_chunk_fns)*
+            #(#printer_chunk_fns)*
+
             #registry_visibility fn get_instruction_parsers(
                 features: &[Feature],
             ) -> (
@@ -2042,16 +2073,14 @@ fn emit_instructions<'a>(
             ) {
                 let mut map: std::collections::HashMap<String, Vec<tir::backend::AsmInstructionParser>> = std::collections::HashMap::new();
                 let mut disabled: std::collections::HashSet<String> = std::collections::HashSet::new();
-                #(#instruction_parsers_impls)*
-                #(#instruction_parser_map_inits)*
+                #(#parser_chunk_calls)*
                 disabled.retain(|mnemonic| !map.contains_key(mnemonic));
                 (map, disabled)
             }
 
             #registry_visibility fn get_instruction_printers() -> std::collections::HashMap<String, tir::backend::AsmInstructionPrinter> {
                 let mut map: std::collections::HashMap<String, tir::backend::AsmInstructionPrinter> = std::collections::HashMap::new();
-                #(#instruction_printers_impls)*
-                #(#instruction_printer_map_inits)*
+                #(#printer_chunk_calls)*
                 map
             }
         }
@@ -2128,6 +2157,40 @@ fn emit_instructions<'a>(
             rules
         }
     })
+}
+
+/// Split registration statements into batches of module-scope helper functions,
+/// returning the definitions and the calls that run them in order. `params` and
+/// `args` name the state each batch threads through (the map being filled, and
+/// whatever the statements read).
+fn registration_chunks(
+    statements: &[proc_macro2::TokenStream],
+    prefix: &str,
+    params: proc_macro2::TokenStream,
+    args: proc_macro2::TokenStream,
+) -> (Vec<proc_macro2::TokenStream>, Vec<proc_macro2::TokenStream>) {
+    const CHUNK_SIZE: usize = 64;
+    let defs = statements
+        .chunks(CHUNK_SIZE)
+        .enumerate()
+        .map(|(index, chunk)| {
+            let ident = format_ident!("{prefix}_{index}");
+            let params = params.clone();
+            quote! {
+                fn #ident(#params) {
+                    #(#chunk)*
+                }
+            }
+        })
+        .collect::<Vec<_>>();
+    let calls = (0..defs.len())
+        .map(|index| {
+            let ident = format_ident!("{prefix}_{index}");
+            let args = args.clone();
+            quote! { #ident(#args); }
+        })
+        .collect();
+    (defs, calls)
 }
 
 fn find_trap_handler<'a>(

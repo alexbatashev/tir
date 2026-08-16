@@ -86,6 +86,7 @@ alu!(Sub, "sub", 0b0000010)
 // CHECK-NEXT:                 ],
 // CHECK-NEXT:                 base: None,
 // CHECK-NEXT:                 file: None,
+// CHECK-NEXT:                 suffix: None,
 // CHECK-NEXT:                 parameters: {
 // CHECK-NEXT:                     "ENCODING_LEN": (
 // CHECK-NEXT:                         Integer,
@@ -367,7 +368,7 @@ alu!(Sub, "sub", 0b0000010)
 // CHECK-NEXT:                                 Str(
 // CHECK-NEXT:                                     LitStr {
 // CHECK-NEXT:                                         value: "sub",
-// CHECK-NEXT:                                         span: 1055..20482,
+// CHECK-NEXT:                                         span: 1055..20527,
 // CHECK-NEXT:                                     },
 // CHECK-NEXT:                                 ),
 // CHECK-NEXT:                             ),
@@ -382,7 +383,7 @@ alu!(Sub, "sub", 0b0000010)
 // CHECK-NEXT:                                 Int(
 // CHECK-NEXT:                                     LitInt {
 // CHECK-NEXT:                                         value: "0b0000010",
-// CHECK-NEXT:                                         span: 1055..20482,
+// CHECK-NEXT:                                         span: 1055..20527,
 // CHECK-NEXT:                                     },
 // CHECK-NEXT:                                 ),
 // CHECK-NEXT:                             ),
@@ -400,7 +401,7 @@ alu!(Sub, "sub", 0b0000010)
 // CHECK-NEXT:                                     dest: Ident(
 // CHECK-NEXT:                                         Ident {
 // CHECK-NEXT:                                             name: "rd",
-// CHECK-NEXT:                                             span: 1055..20482,
+// CHECK-NEXT:                                             span: 1055..20527,
 // CHECK-NEXT:                                         },
 // CHECK-NEXT:                                     ),
 // CHECK-NEXT:                                     value: Binary(
@@ -408,29 +409,29 @@ alu!(Sub, "sub", 0b0000010)
 // CHECK-NEXT:                                             lhs: Ident(
 // CHECK-NEXT:                                                 Ident {
 // CHECK-NEXT:                                                     name: "rs1",
-// CHECK-NEXT:                                                     span: 1055..20482,
+// CHECK-NEXT:                                                     span: 1055..20527,
 // CHECK-NEXT:                                                 },
 // CHECK-NEXT:                                             ),
 // CHECK-NEXT:                                             rhs: Ident(
 // CHECK-NEXT:                                                 Ident {
 // CHECK-NEXT:                                                     name: "rs2",
-// CHECK-NEXT:                                                     span: 1055..20482,
+// CHECK-NEXT:                                                     span: 1055..20527,
 // CHECK-NEXT:                                                 },
 // CHECK-NEXT:                                             ),
 // CHECK-NEXT:                                             op: Add,
-// CHECK-NEXT:                                             span: 1055..20482,
+// CHECK-NEXT:                                             span: 1055..20527,
 // CHECK-NEXT:                                         },
 // CHECK-NEXT:                                     ),
-// CHECK-NEXT:                                     span: 1055..20482,
+// CHECK-NEXT:                                     span: 1055..20527,
 // CHECK-NEXT:                                 },
 // CHECK-NEXT:                             ),
 // CHECK-NEXT:                         ],
 // CHECK-NEXT:                         last_expr_return: false,
-// CHECK-NEXT:                         span: 1055..20482,
+// CHECK-NEXT:                         span: 1055..20527,
 // CHECK-NEXT:                     },
 // CHECK-NEXT:                 ),
 // CHECK-NEXT:                 schedule: None,
-// CHECK-NEXT:                 span: 1055..20482,
+// CHECK-NEXT:                 span: 1055..20527,
 // CHECK-NEXT:             },
 // CHECK-NEXT:         ),
 // CHECK-NEXT:     ],
