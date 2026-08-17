@@ -597,6 +597,19 @@ coverage, and the same boundary operands, the one that is no cheaper *and* no
 more specific is dropped. So at **equal cost** the type-constrained rule wins
 (an `i32 addw` beats the untyped `add`), while a genuinely cheaper instruction
 still wins on cost alone — and specificity never distorts the PBQP objective.
+Matches whose cost, specificity and boundary demands are all equal are fully
+interchangeable — identical PBQP rows, identical conflicts — so only one
+survives (encoding variants of one definer collapse here).
+
+A **free** match — every binding is state, the root itself, or a structural
+boundary — constrains nothing: its compatibility rows are all-true and its
+effect footprint is empty. It therefore dominates *any* match at the same root
+class and result view offset that costs no less, whatever that match's
+boundaries. This is what keeps a constant class bounded: scoped assumptions
+merge every proven condition into its truth value's class, and without the
+free-tile rule each comparison node there roots hundreds of
+comparison-shaped alternatives (a 90 MB solve on one CoreMark function; the
+constant materializer prunes it to a handful).
 
 ## 4. The PBQP cover
 

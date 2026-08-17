@@ -15,7 +15,6 @@ use tir_symbolic::egraph::Id;
 
 use super::RuleMatch;
 use super::node::{class_is_pure, class_value_binding, is_low_extract_view};
-use super::pattern::CompiledIselPattern;
 
 #[derive(Clone, Debug)]
 pub(crate) struct CaptureBindings {
@@ -323,10 +322,7 @@ fn effect_tiles_conflict(
 /// match folding a class as an immediate beats one demanding it in a register
 /// (which may force a whole materializer chain), while a genuinely cheaper
 /// instruction still wins on cost alone.
-pub(crate) fn prune_dominated_matches(
-    patterns: &[CompiledIselPattern],
-    matches: &mut Vec<PbqpIselMatch>,
-) {
+pub(crate) fn prune_dominated_matches(specificity: &[usize], matches: &mut Vec<PbqpIselMatch>) {
     let footprint = |m: &PbqpIselMatch| {
         let mut boundaries = Vec::new();
         let mut internals = Vec::new();
@@ -364,7 +360,7 @@ pub(crate) fn prune_dominated_matches(
     let comparison_key = |index: usize| {
         (
             matches[index].cost,
-            patterns[matches[index].pattern_index].specificity,
+            specificity[matches[index].pattern_index],
             &footprints[index].3,
         )
     };
@@ -399,8 +395,60 @@ pub(crate) fn prune_dominated_matches(
             .iter()
             .map(|&b| representatives.iter().any(|&a| a != b && dominates(a, b)))
             .collect();
+        // Equal-key members are fully interchangeable — identical cost,
+        // constraints and conflicts — so only the representative survives.
         for (&index, &representative) in group.iter().zip(&representative_of) {
-            keep[index] = !dominated[representative];
+            keep[index] = !dominated[representative] && representatives[representative] == index;
+        }
+    }
+
+    // A free tile constrains nothing: every binding is state, the root itself,
+    // or a structural boundary, so its compatibility rows are all-true and its
+    // effect footprint empty. Any tile at the same root and view offset that
+    // costs no less is dominated by it outright, whatever its boundaries — this
+    // is what keeps a constant class (into which assumptions merge every proven
+    // condition) from carrying thousands of comparison-shaped alternatives.
+    let is_free = |m: &PbqpIselMatch| {
+        m.bindings.pattern_nodes.iter().all(|binding| {
+            binding.is_state
+                || (binding.pattern_node == m.pattern_root && binding.class == m.root)
+                || (binding.is_boundary && binding.demand == BoundaryDemand::Structural)
+        })
+    };
+    let free_key = |index: usize| {
+        (
+            matches[index].cost,
+            std::cmp::Reverse(specificity[matches[index].pattern_index]),
+        )
+    };
+    let mut best_free: HashMap<(Id, u32), usize> = HashMap::new();
+    for (index, m) in matches.iter().enumerate() {
+        if !keep[index] || !is_free(m) {
+            continue;
+        }
+        best_free
+            .entry((m.root, m.result_view_offset))
+            .and_modify(|best| {
+                if free_key(index) < free_key(*best) {
+                    *best = index;
+                }
+            })
+            .or_insert(index);
+    }
+    if !best_free.is_empty() {
+        for (index, m) in matches.iter().enumerate() {
+            let Some(&free) = best_free.get(&(m.root, m.result_view_offset)) else {
+                continue;
+            };
+            if free == index || !keep[index] {
+                continue;
+            }
+            let (free_cost, std::cmp::Reverse(free_spec)) = free_key(free);
+            let cost = m.cost;
+            let spec = specificity[m.pattern_index];
+            if cost > free_cost || (cost == free_cost && spec <= free_spec) {
+                keep[index] = false;
+            }
         }
     }
 
@@ -510,5 +558,67 @@ pub(crate) fn alternatives_compatible(
         matches!(child_alt, PbqpIselAlternative::NotDemanded)
     } else {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tile(root: u32, cost: u64, bindings: Vec<PatternNodeBinding>) -> PbqpIselMatch {
+        PbqpIselMatch {
+            pattern_index: 0,
+            rule_index: 0,
+            root: Id::from_raw(root),
+            pattern_root: Id::from_raw(0),
+            bindings: FullMatchBindings {
+                captures: CaptureBindings::new(),
+                pattern_nodes: bindings,
+            },
+            cost,
+            result_view_offset: 0,
+        }
+    }
+
+    fn register_binding(class: u32) -> PatternNodeBinding {
+        PatternNodeBinding {
+            pattern_node: Id::from_raw(1),
+            class: Id::from_raw(class),
+            is_boundary: true,
+            is_state: false,
+            demand: BoundaryDemand::Register,
+            view_offset: 0,
+        }
+    }
+
+    #[test]
+    fn interchangeable_duplicates_collapse_to_one() {
+        let mut matches = vec![
+            tile(9, 4, vec![register_binding(7)]),
+            tile(9, 4, vec![register_binding(7)]),
+        ];
+        prune_dominated_matches(&[0], &mut matches);
+        assert_eq!(matches.len(), 1);
+    }
+
+    #[test]
+    fn a_free_tile_prunes_costlier_tiles_at_its_root() {
+        let mut matches = vec![
+            tile(9, 5, vec![register_binding(7)]),
+            tile(9, 1, Vec::new()),
+        ];
+        prune_dominated_matches(&[0], &mut matches);
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].bindings.pattern_nodes.is_empty());
+    }
+
+    #[test]
+    fn a_cheaper_demanding_tile_survives_a_free_tile() {
+        let mut matches = vec![
+            tile(9, 3, vec![register_binding(7)]),
+            tile(9, 5, Vec::new()),
+        ];
+        prune_dominated_matches(&[0], &mut matches);
+        assert_eq!(matches.len(), 2);
     }
 }

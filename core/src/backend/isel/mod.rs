@@ -2583,7 +2583,12 @@ impl InstructionSelectPass {
                 });
             }
         }
-        prune_dominated_matches(&self.compiled_patterns, &mut matches);
+        let specificity: Vec<usize> = self
+            .compiled_patterns
+            .iter()
+            .map(|pattern| pattern.specificity)
+            .collect();
+        prune_dominated_matches(&specificity, &mut matches);
         matches
     }
 }
