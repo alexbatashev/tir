@@ -356,12 +356,7 @@ impl Context {
             .operations
             .iter()
             .flatten()
-            .map(|op| {
-                op.operands.capacity() * std::mem::size_of::<ValueId>()
-                    + op.results.capacity() * std::mem::size_of::<ValueId>()
-                    + op.regions.capacity() * std::mem::size_of::<RegionId>()
-                    + op.attributes.capacity() * std::mem::size_of::<NamedAttribute>()
-            })
+            .map(|op| op.heap_bytes())
             .sum();
         let blocks_heap: usize = inner
             .blocks
@@ -525,7 +520,7 @@ impl Context {
     pub fn set_op_attributes(&self, id: OpId, attributes: Vec<crate::attributes::NamedAttribute>) {
         let mut inner = self.0.write();
         if let Some(existing) = slab_get_mut(&mut inner.operations, id.index()) {
-            Arc::make_mut(existing).attributes = attributes;
+            Arc::make_mut(existing).set_attributes(attributes);
             inner.edit_op(id);
         }
     }
@@ -584,7 +579,7 @@ impl Context {
             _ => return,
         }
         if let Some(op) = slab_get_mut(&mut inner.operations, id.index()) {
-            Arc::make_mut(op).operands[index] = new;
+            Arc::make_mut(op).replace_operand_at(index, new);
         }
         inner.edit_op(id);
     }
@@ -595,7 +590,7 @@ impl Context {
     pub fn set_op_operands(&self, id: OpId, operands: Vec<ValueId>) {
         let mut inner = self.0.write();
         if let Some(op) = slab_get_mut(&mut inner.operations, id.index()) {
-            Arc::make_mut(op).operands = operands;
+            Arc::make_mut(op).set_operands(operands);
             inner.edit_op(id);
         }
     }
@@ -648,11 +643,7 @@ impl Context {
                 continue;
             }
             if let Some(instance) = slab_get_mut(&mut inner.operations, op.index()) {
-                for operand in Arc::make_mut(instance).operands.iter_mut() {
-                    if *operand == old {
-                        *operand = new;
-                    }
-                }
+                Arc::make_mut(instance).replace_operand_uses(old, new);
             }
             inner.edit_op(op);
         }
@@ -800,9 +791,9 @@ impl Context {
             return;
         };
         let instance = Arc::make_mut(instance);
-        instance.operands.push(value);
+        instance.push_operand(value);
         if let Some(attribute) = instance
-            .attributes
+            .attributes_mut()
             .iter_mut()
             .find(|attribute| attribute.name == segment_sizes)
             && let crate::attributes::AttributeValue::Array(sizes) = &mut attribute.value
@@ -822,9 +813,9 @@ impl Context {
             return;
         };
         let instance = Arc::make_mut(instance);
-        instance.operands.pop();
+        instance.pop_operand();
         if let Some(attribute) = instance
-            .attributes
+            .attributes_mut()
             .iter_mut()
             .find(|attribute| attribute.name == segment_sizes)
             && let crate::attributes::AttributeValue::Array(sizes) = &mut attribute.value
@@ -842,7 +833,7 @@ impl Context {
         let Some(instance) = slab_get_mut(&mut inner.operations, op.index()) else {
             return;
         };
-        if let Some(result) = Arc::make_mut(instance).results.pop() {
+        if let Some(result) = Arc::make_mut(instance).pop_result() {
             clear_slot(&mut inner.values, result.index());
         }
         inner.edit_op(op);
@@ -928,7 +919,7 @@ impl Context {
         };
         let mut inner = self.0.write();
         if let Some(instance) = slab_get_mut(&mut inner.operations, op.index()) {
-            Arc::make_mut(instance).results[index..].rotate_right(1);
+            Arc::make_mut(instance).rotate_results_from(index);
             inner.edit_op(op);
         }
     }
@@ -945,7 +936,7 @@ impl Context {
         };
         let mut inner = self.0.write();
         if let Some(instance) = slab_get_mut(&mut inner.operations, op.index()) {
-            Arc::make_mut(instance).operands[index..].rotate_right(1);
+            Arc::make_mut(instance).rotate_operands_from(index);
             inner.edit_op(op);
         }
         index
@@ -974,7 +965,7 @@ impl Context {
         let result = self.create_value(ty, Some(op)).id();
         let mut inner = self.0.write();
         if let Some(instance) = slab_get_mut(&mut inner.operations, op.index()) {
-            Arc::make_mut(instance).results.push(result);
+            Arc::make_mut(instance).push_result(result);
             inner.edit_op(op);
         }
         result

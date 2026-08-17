@@ -20,6 +20,7 @@ pub use float::cmpf_semantics;
 
 /// An SSA value's identity, as it appears in a semantic-graph leaf.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
 pub struct ValueId(u32);
 
 impl ValueId {

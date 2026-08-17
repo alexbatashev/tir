@@ -654,15 +654,37 @@ impl OpNameId {
     }
 }
 
+fn pack_attributes(
+    attributes: Vec<crate::attributes::NamedAttribute>,
+) -> Option<Box<[crate::attributes::NamedAttribute]>> {
+    (!attributes.is_empty()).then(|| attributes.into_boxed_slice())
+}
+
+/// SAFETY: `ValueId` is `#[repr(transparent)]` over `u32`, so the slices have
+/// identical layout.
+fn as_values(raw: &[u32]) -> &[ValueId] {
+    unsafe { std::slice::from_raw_parts(raw.as_ptr().cast::<ValueId>(), raw.len()) }
+}
+
+/// SAFETY: `RegionId` is `#[repr(transparent)]` over `u32`, so the slices have
+/// identical layout.
+fn as_regions(raw: &[u32]) -> &[RegionId] {
+    unsafe { std::slice::from_raw_parts(raw.as_ptr().cast::<RegionId>(), raw.len()) }
+}
+
+/// An operation's erased state: its identity plus its ports and attributes.
+///
+/// The ports live in one buffer, laid out as operands, then results, then
+/// regions, so that an op costs one allocation rather than four.
 #[derive(Debug, Clone)]
 pub struct OpInstance {
     pub id: OpId,
     name: OpNameId,
     pub context: ContextRef,
-    pub(crate) operands: Vec<ValueId>,
-    pub(crate) results: Vec<ValueId>,
-    pub(crate) regions: Vec<RegionId>,
-    pub(crate) attributes: Vec<crate::attributes::NamedAttribute>,
+    ports: Vec<u32>,
+    operand_count: u32,
+    result_count: u32,
+    attributes: Option<Box<[crate::attributes::NamedAttribute]>>,
 }
 
 impl OpInstance {
@@ -674,15 +696,7 @@ impl OpInstance {
         attributes: Vec<crate::attributes::NamedAttribute>,
     ) -> Self {
         let name = context.upgrade().intern_op_name(T::dialect(), T::name());
-        Self {
-            id: OpId::invalid(),
-            name,
-            context,
-            operands,
-            results,
-            regions,
-            attributes,
-        }
+        Self::pack(name, context, operands, results, regions, attributes)
     }
 
     /// Constructs an operation selected from textual input at a parser boundary.
@@ -696,31 +710,125 @@ impl OpInstance {
     ) -> Self {
         let (dialect, name) = identity;
         let name = context.upgrade().intern_op_name(dialect, name);
+        Self::pack(name, context, operands, results, regions, attributes)
+    }
+
+    fn pack(
+        name: OpNameId,
+        context: ContextRef,
+        operands: Vec<ValueId>,
+        results: Vec<ValueId>,
+        regions: Vec<RegionId>,
+        attributes: Vec<crate::attributes::NamedAttribute>,
+    ) -> Self {
+        let mut ports = Vec::with_capacity(operands.len() + results.len() + regions.len());
+        ports.extend(operands.iter().map(|id| id.number()));
+        ports.extend(results.iter().map(|id| id.number()));
+        ports.extend(regions.iter().map(|id| id.number()));
         Self {
             id: OpId::invalid(),
             name,
             context,
-            operands,
-            results,
-            regions,
-            attributes,
+            ports,
+            operand_count: operands.len() as u32,
+            result_count: results.len() as u32,
+            attributes: pack_attributes(attributes),
         }
     }
 
+    fn operand_end(&self) -> usize {
+        self.operand_count as usize
+    }
+
+    fn result_end(&self) -> usize {
+        (self.operand_count + self.result_count) as usize
+    }
+
     pub fn operands(&self) -> &[ValueId] {
-        &self.operands
+        as_values(&self.ports[..self.operand_end()])
     }
 
     pub fn results(&self) -> &[ValueId] {
-        &self.results
+        as_values(&self.ports[self.operand_end()..self.result_end()])
     }
 
     pub fn regions(&self) -> &[RegionId] {
-        &self.regions
+        as_regions(&self.ports[self.result_end()..])
     }
 
     pub fn attributes(&self) -> &[crate::attributes::NamedAttribute] {
-        &self.attributes
+        self.attributes.as_deref().unwrap_or_default()
+    }
+
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.ports.capacity() * std::mem::size_of::<u32>()
+            + std::mem::size_of_val(self.attributes())
+    }
+
+    pub(crate) fn replace_operand_at(&mut self, index: usize, value: ValueId) {
+        assert!(index < self.operand_end());
+        self.ports[index] = value.number();
+    }
+
+    pub(crate) fn set_operands(&mut self, operands: Vec<ValueId>) {
+        self.ports.splice(
+            ..self.operand_end(),
+            operands.iter().map(|value| value.number()),
+        );
+        self.operand_count = operands.len() as u32;
+    }
+
+    pub(crate) fn replace_operand_uses(&mut self, old: ValueId, new: ValueId) {
+        for port in &mut self.ports[..self.operand_count as usize] {
+            if *port == old.number() {
+                *port = new.number();
+            }
+        }
+    }
+
+    pub(crate) fn push_operand(&mut self, value: ValueId) {
+        self.ports.insert(self.operand_end(), value.number());
+        self.operand_count += 1;
+    }
+
+    pub(crate) fn pop_operand(&mut self) {
+        if self.operand_count == 0 {
+            return;
+        }
+        self.ports.remove(self.operand_end() - 1);
+        self.operand_count -= 1;
+    }
+
+    pub(crate) fn push_result(&mut self, value: ValueId) {
+        self.ports.insert(self.result_end(), value.number());
+        self.result_count += 1;
+    }
+
+    pub(crate) fn pop_result(&mut self) -> Option<ValueId> {
+        if self.result_count == 0 {
+            return None;
+        }
+        let raw = self.ports.remove(self.result_end() - 1);
+        self.result_count -= 1;
+        Some(ValueId::from_number(raw))
+    }
+
+    pub(crate) fn rotate_operands_from(&mut self, index: usize) {
+        let end = self.operand_end();
+        self.ports[index..end].rotate_right(1);
+    }
+
+    pub(crate) fn rotate_results_from(&mut self, index: usize) {
+        let (start, end) = (self.operand_end(), self.result_end());
+        self.ports[start + index..end].rotate_right(1);
+    }
+
+    pub(crate) fn set_attributes(&mut self, attributes: Vec<crate::attributes::NamedAttribute>) {
+        self.attributes = pack_attributes(attributes);
+    }
+
+    pub(crate) fn attributes_mut(&mut self) -> &mut [crate::attributes::NamedAttribute] {
+        self.attributes.as_deref_mut().unwrap_or_default()
     }
 
     /// Returns an opaque name for textual output, not operation identity.
