@@ -58,6 +58,12 @@ impl Block {
         }
     }
 
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.arguments.capacity() * std::mem::size_of::<Value>()
+            + self.operations.capacity() * std::mem::size_of::<OpId>()
+            + self.attributes.capacity() * std::mem::size_of::<NamedAttribute>()
+    }
+
     pub(crate) fn operations_mut(&mut self) -> &mut Vec<OpId> {
         &mut self.operations
     }

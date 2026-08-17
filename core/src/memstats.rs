@@ -53,6 +53,14 @@ pub struct SlabCensus {
     pub blocks_live: usize,
     pub regions_slab: usize,
     pub regions_live: usize,
+    /// Per-arena heap: `Arc` header plus entity struct plus the capacity of the
+    /// `Vec`s it owns. Attribute payloads (`Str`, `Array`, `Dict`) are not
+    /// chased, so these are estimates for ranking, like [`egraph_census`].
+    pub ops_bytes: usize,
+    pub values_bytes: usize,
+    pub blocks_bytes: usize,
+    pub regions_bytes: usize,
+    pub slab_bytes: usize,
 }
 
 /// Straddles one pass run; [`PassScope::finish`] emits the delta and census.
@@ -82,7 +90,8 @@ impl PassScope {
         );
         eprintln!(
             "tir-mem: context after={} ops_slab={} ops_live={} values_slab={} values_live={} \
-             blocks_slab={} blocks_live={} regions_slab={} regions_live={}",
+             blocks_slab={} blocks_live={} regions_slab={} regions_live={} ops_bytes={} \
+             values_bytes={} blocks_bytes={} regions_bytes={} slab_bytes={} bytes_per_live_op={}",
             self.name,
             census.ops_slab,
             census.ops_live,
@@ -92,6 +101,12 @@ impl PassScope {
             census.blocks_live,
             census.regions_slab,
             census.regions_live,
+            census.ops_bytes,
+            census.values_bytes,
+            census.blocks_bytes,
+            census.regions_bytes,
+            census.slab_bytes,
+            census.ops_bytes / census.ops_live.max(1),
         );
         let mut totals = PASS_TOTALS.lock().unwrap();
         match totals.iter_mut().find(|(name, _)| *name == self.name) {

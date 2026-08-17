@@ -33,6 +33,10 @@ impl Region {
         }
     }
 
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.blocks.read().capacity() * std::mem::size_of::<BlockId>()
+    }
+
     pub(crate) fn set_parent_op(&self, op: OpId) {
         *self.parent_op.write() = op;
     }

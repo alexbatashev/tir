@@ -313,15 +313,56 @@ impl Context {
         fn live<T>(slab: &[Option<T>]) -> usize {
             slab.iter().filter(|slot| slot.is_some()).count()
         }
+        fn entity_bytes<T>(count: usize) -> usize {
+            count * (ARC_HEADER_BYTES + std::mem::size_of::<T>())
+        }
+        const ARC_HEADER_BYTES: usize = 16;
+        const SLOT_BYTES: usize = 8;
+        let ops_live = live(&inner.operations);
+        let values_live = live(&inner.values);
+        let blocks_live = live(&inner.blocks);
+        let regions_live = live(&inner.regions);
+        let ops_heap: usize = inner
+            .operations
+            .iter()
+            .flatten()
+            .map(|op| {
+                op.operands.capacity() * std::mem::size_of::<ValueId>()
+                    + op.results.capacity() * std::mem::size_of::<ValueId>()
+                    + op.regions.capacity() * std::mem::size_of::<RegionId>()
+                    + op.attributes.capacity() * std::mem::size_of::<NamedAttribute>()
+            })
+            .sum();
+        let blocks_heap: usize = inner
+            .blocks
+            .iter()
+            .flatten()
+            .map(|block| block.heap_bytes())
+            .sum();
+        let regions_heap: usize = inner
+            .regions
+            .iter()
+            .flatten()
+            .map(|region| region.heap_bytes())
+            .sum();
         crate::memstats::SlabCensus {
             ops_slab: inner.operations.len(),
-            ops_live: live(&inner.operations),
+            ops_live,
             values_slab: inner.values.len(),
-            values_live: live(&inner.values),
+            values_live,
             blocks_slab: inner.blocks.len(),
-            blocks_live: live(&inner.blocks),
+            blocks_live,
             regions_slab: inner.regions.len(),
-            regions_live: live(&inner.regions),
+            regions_live,
+            ops_bytes: entity_bytes::<OpInstance>(ops_live) + ops_heap,
+            values_bytes: entity_bytes::<Value>(values_live),
+            blocks_bytes: entity_bytes::<Block>(blocks_live) + blocks_heap,
+            regions_bytes: entity_bytes::<Region>(regions_live) + regions_heap,
+            slab_bytes: (inner.operations.capacity()
+                + inner.values.capacity()
+                + inner.blocks.capacity()
+                + inner.regions.capacity())
+                * SLOT_BYTES,
         }
     }
 
