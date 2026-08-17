@@ -59,7 +59,7 @@ impl Pass for RestructurePass {
         if op.as_op::<FuncOp>().is_none() {
             return Ok(());
         }
-        let region = op.op().regions[0];
+        let region = op.op().regions()[0];
         if context.get_region(region).block_ids().len() < 2 {
             return Ok(());
         }
@@ -106,7 +106,7 @@ mod tests {
     fn count_ops(context: &Context, op: crate::OpId) -> usize {
         let instance = context.get_op(op);
         let mut total = 1;
-        for &region in &instance.regions {
+        for &region in instance.regions() {
             for block in context.get_region(region).block_ids() {
                 for nested in context.get_block(block).op_ids() {
                     total += count_ops(context, nested);

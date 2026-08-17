@@ -369,10 +369,10 @@ impl Rewriter {
             // result's def-site through a Def-role register attribute (the emitter
             // destination convention) — so they skip this entirely and the original
             // values stay live.
-            let new_results = self.context.get_op(new_op.id()).results.clone();
-            let results_forwarded = new_results.len() == target.op.results.len();
+            let new_results = self.context.get_op(new_op.id()).results().to_vec();
+            let results_forwarded = new_results.len() == target.op.results().len();
             if results_forwarded {
-                for (old, new) in target.op.results.iter().zip(new_results.iter()) {
+                for (old, new) in target.op.results().iter().zip(new_results.iter()) {
                     self.context.replace_value_uses(*old, *new);
                 }
             }
@@ -485,7 +485,7 @@ fn is_machine_ir(context: &Context, op_id: OpId) -> bool {
     {
         return true;
     }
-    instance.regions.iter().any(|region_id| {
+    instance.regions().iter().any(|region_id| {
         context
             .get_region(*region_id)
             .iter(context.clone())
@@ -686,7 +686,7 @@ impl PassManager {
         F: FnMut(OperationRef) -> Result<(), PassError>,
     {
         f(root.clone())?;
-        for region_id in &root.op.regions {
+        for region_id in root.op.regions() {
             // The visit may have erased `root`, reclaiming the regions it owned;
             // a region the replacement took over is still live and still walked.
             if !context.has_region(*region_id) {
@@ -947,16 +947,16 @@ mod tests {
         let clone = context.get_op(clone);
         assert_ne!(clone.id, source.id());
         let body = context
-            .get_region(clone.regions[0])
+            .get_region(clone.regions()[0])
             .iter(context.clone())
             .next()
             .expect("the clone keeps the body block");
         let argument = body.arguments()[0].id();
         assert_ne!(argument, source.body().arguments()[0].id());
         let add = context.get_op(body.op_ids()[0]);
-        assert_eq!(add.operands, vec![argument, argument]);
+        assert_eq!(add.operands(), vec![argument, argument]);
         let r#return = context.get_op(body.op_ids()[1]);
-        assert_eq!(r#return.operands, vec![add.results[0]]);
+        assert_eq!(r#return.operands(), vec![add.results()[0]]);
     }
 
     #[test]

@@ -227,7 +227,7 @@ impl SemNode {
             IrOp {
                 dialect: instance.dialect().as_str(),
                 name: instance.name().as_str(),
-                attrs: instance.attributes.clone(),
+                attrs: instance.attributes().to_vec(),
                 commutative,
                 cost,
             },

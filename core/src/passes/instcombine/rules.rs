@@ -276,7 +276,7 @@ fn gate_cases(context: &Context, node: &Node) -> Option<Vec<Option<i64>>> {
 
 fn produces_integer(context: &Context, op: crate::OpId) -> bool {
     let instance = context.get_op(op);
-    instance.results.first().is_some_and(|&result| {
+    instance.results().first().is_some_and(|&result| {
         let ty = context.get_type_data(context.get_value(result).ty());
         (ty.as_ref() as &dyn std::any::Any)
             .downcast_ref::<IntegerType>()

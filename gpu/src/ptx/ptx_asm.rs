@@ -736,7 +736,7 @@ pub fn print(context: &Context, module: &ModuleOp) -> Result<String, String> {
 
 /// Op ids of the first block of an op's single region.
 fn region_ops(context: &Context, op: &OpInstance) -> Vec<OpId> {
-    let Some(region) = op.regions.first() else {
+    let Some(region) = op.regions().first() else {
         return Vec::new();
     };
     context

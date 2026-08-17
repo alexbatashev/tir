@@ -88,7 +88,7 @@ impl Pass for TargetIntegerLegalizer {
         if op.as_interface::<dyn IntegerArithmetic>().is_none() {
             return Ok(());
         }
-        for &value in op.op().operands.iter().chain(op.op().results.iter()) {
+        for &value in op.op().operands().iter().chain(op.op().results().iter()) {
             self.check_value(context, value)?;
         }
         Ok(())

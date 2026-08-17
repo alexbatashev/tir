@@ -846,7 +846,7 @@ impl RegisterAllocationPass {
             for op_id in context.get_block(block_id).op_ids() {
                 let op = context.get_op(op_id);
                 let fixed_registers: Vec<_> = op
-                    .attributes
+                    .attributes()
                     .iter()
                     .enumerate()
                     .filter_map(|(attr_index, attr)| match &attr.value {
@@ -864,7 +864,7 @@ impl RegisterAllocationPass {
                 }
 
                 let op_ref = op_ref_in(context, block_id, op_id);
-                let mut attributes = op.attributes.clone();
+                let mut attributes = op.attributes().to_vec();
                 for (attr_index, value, class, index, is_use) in fixed_registers {
                     let ty = context.get_value(ValueId::from_number(value)).ty();
                     let fixed = context.create_value(ty, None).id().number();
@@ -903,7 +903,7 @@ impl RegisterAllocationPass {
         // Symbol-level pins the ABI precolor pass recorded on `arg_regs` and
         // `result_address`: a `FixedDef` entry pins its value at the function
         // boundary, then reads as an ordinary virtual register again.
-        let mut attributes = op.op().attributes.clone();
+        let mut attributes = op.op().attributes().to_vec();
         let pinned = ["arg_regs", "result_address"].map(|name| context.sym(name));
         let mut changed = false;
         for attr in &mut attributes {
@@ -1232,7 +1232,7 @@ fn collect_stack_allocas(
             let Some(allocation) = op.clone().as_op::<AllocaOp>() else {
                 continue;
             };
-            let Some(result) = op.results.first() else {
+            let Some(result) = op.results().first() else {
                 continue;
             };
             allocas.push(StackAlloca {
@@ -1297,7 +1297,7 @@ fn block_successors(context: &Context, blocks: &[BlockId]) -> HashMap<BlockId, V
 
 /// The blocks of an `asm.symbol` op's body region, in program order.
 pub(crate) fn symbol_body_blocks(context: &Context, op: &OperationRef) -> Vec<BlockId> {
-    let Some(&region_id) = op.op().regions.first() else {
+    let Some(&region_id) = op.op().regions().first() else {
         return Vec::new();
     };
     context
@@ -1318,7 +1318,7 @@ pub(crate) fn op_ref_in(context: &Context, block_id: BlockId, op_id: OpId) -> Op
 /// Mark a copy the allocator may coalesce away: it reads the endpoints as an
 /// affinity and erases the copy when both land in one register.
 fn mark_coalescable(context: &Context, op_id: OpId) {
-    let mut attributes = context.get_op(op_id).attributes.clone();
+    let mut attributes = context.get_op(op_id).attributes().to_vec();
     attributes
         .push(context.named_attribute(prealloc::COALESCABLE_COPY_ATTR, AttributeValue::Bool(true)));
     context.set_op_attributes(op_id, attributes);
@@ -1427,7 +1427,7 @@ fn has_attr(context: &Context, op_id: OpId, name: &str) -> bool {
 
 fn strip_attr(context: &Context, op_id: OpId, name: &str) {
     let stripped = context.sym(name);
-    let mut attrs = context.get_op(op_id).attributes.clone();
+    let mut attrs = context.get_op(op_id).attributes().to_vec();
     attrs.retain(|attr| Some(attr.name) != stripped);
     context.set_op_attributes(op_id, attrs);
 }
@@ -1534,7 +1534,7 @@ pub(crate) fn vreg_class_in(
     };
     for &block_id in blocks {
         for op_id in context.get_block(block_id).op_ids() {
-            for attr in &context.get_op(op_id).attributes {
+            for attr in context.get_op(op_id).attributes() {
                 if let Some(c) = class_of(&attr.value) {
                     return Some(c);
                 }
@@ -1577,7 +1577,7 @@ pub(crate) fn rename_attr(
     role_class: RoleClass,
 ) {
     let op = context.get_op(op_id);
-    let mut attrs = op.attributes.clone();
+    let mut attrs = op.attributes().to_vec();
     let mut changed = false;
     for attr in &mut attrs {
         let role = role_of_sym(&op, attr.name);
@@ -1637,7 +1637,7 @@ fn rewrite_registers(context: &Context, blocks: &[BlockId], assignment: &HashMap
     for &block_id in blocks {
         for op_id in context.get_block(block_id).op_ids() {
             let op = context.get_op(op_id);
-            let mut attrs = op.attributes.clone();
+            let mut attrs = op.attributes().to_vec();
             let mut changed = false;
             for attr in &mut attrs {
                 if let AttributeValue::Register(RegisterAttr::Virtual { id, .. }) = &attr.value

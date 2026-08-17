@@ -1558,12 +1558,12 @@ fn emit_instructions<'a>(
                 fmt: &mut tir::IRFormatter<'_>,
             ) -> Result<(), std::fmt::Error> {
                 fmt.write(op_name)?;
-                if !op.attributes.is_empty() {
+                if !op.attributes().is_empty() {
                     fmt.write(" ")?;
                     fmt.write("{")?;
                     let mut first = true;
                     let context = op.context.upgrade();
-                    for attr in &op.attributes {
+                    for attr in op.attributes() {
                         if !first {
                             fmt.write(", ")?;
                         }

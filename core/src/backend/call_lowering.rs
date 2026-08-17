@@ -80,7 +80,7 @@ impl CallLowering {
         if !self.prepared_functions.insert(function.op().id) {
             return Ok(());
         }
-        for &region_id in &function.op().regions {
+        for &region_id in function.op().regions() {
             let region = context.get_region(region_id);
             for block in region.iter(context.clone()) {
                 for op_id in block.op_ids() {
@@ -468,7 +468,7 @@ impl CallLowering {
                     continue;
                 }
                 let instance = context.get_op(*user);
-                if instance.operands.first() != Some(&result) {
+                if instance.operands().first() != Some(&result) {
                     return Err(PassError::InvalidRuleSet(
                         "tuple call result has a non-extraction use".to_string(),
                     ));

@@ -72,11 +72,11 @@ fn emit_add(
     let op = req.op.expect("backed by an op");
     let lhs = m
         .value_binding(0)
-        .unwrap_or_else(|| op.op().operands.first().copied().unwrap());
+        .unwrap_or_else(|| op.op().operands().first().copied().unwrap());
     let rhs = m
         .value_binding(2)
         .or_else(|| m.value_binding(1))
-        .unwrap_or_else(|| op.op().operands[1]);
+        .unwrap_or_else(|| op.op().operands()[1]);
     let result_ty = req.result_ty.expect("typed result");
     Ok(Box::new(ops::addi(context, lhs, rhs, result_ty).build()))
 }
@@ -89,7 +89,13 @@ fn emit_mul(
     let op = req.op.expect("backed by an op");
     let result_ty = req.result_ty.expect("typed result");
     Ok(Box::new(
-        ops::muli(context, op.op().operands[0], op.op().operands[1], result_ty).build(),
+        ops::muli(
+            context,
+            op.op().operands()[0],
+            op.op().operands()[1],
+            result_ty,
+        )
+        .build(),
     ))
 }
 
@@ -658,7 +664,13 @@ fn emit_sub(
     let op = req.op.expect("backed by an op");
     let result_ty = req.result_ty.expect("typed result");
     Ok(Box::new(
-        ops::subi(context, op.op().operands[0], op.op().operands[1], result_ty).build(),
+        ops::subi(
+            context,
+            op.op().operands()[0],
+            op.op().operands()[1],
+            result_ty,
+        )
+        .build(),
     ))
 }
 
@@ -1420,7 +1432,7 @@ fn seed_regions(context: &Context, src: &str) -> SeededFunction {
 
     let module =
         crate::parse::ir::parse_ir::<tir::builtin::ModuleOp>(context, src).expect("parse module");
-    let module_region = context.get_op(module.id()).regions[0];
+    let module_region = context.get_op(module.id()).regions()[0];
     let func = context
         .get_region(module_region)
         .iter(context.clone())
@@ -1428,14 +1440,14 @@ fn seed_regions(context: &Context, src: &str) -> SeededFunction {
         .and_then(|block| block.op_ids().first().copied())
         .expect("a function in the module");
     let blocks: Vec<tir::BlockId> = context
-        .get_region(context.get_op(func).regions[0])
+        .get_region(context.get_op(func).regions()[0])
         .iter(context.clone())
         .map(|block| block.id())
         .collect();
     let mut value_to_def = HashMap::new();
     for &block in &blocks {
         for op_id in context.get_block(block).op_ids() {
-            for &result in &context.get_op(op_id).results {
+            for &result in context.get_op(op_id).results() {
                 value_to_def.insert(result, op_id);
             }
         }
@@ -1484,11 +1496,11 @@ fn builder_seeds_a_loop_port_as_a_theta_over_its_edges() {
 }",
     );
 
-    let loop_op = region_ops(&context, context.get_op(func).regions[0])[0].clone();
-    let condition = region_ops(&context, loop_op.regions[0]).pop().unwrap();
-    let latch = region_ops(&context, loop_op.regions[1]).pop().unwrap();
+    let loop_op = region_ops(&context, context.get_op(func).regions()[0])[0].clone();
+    let condition = region_ops(&context, loop_op.regions()[0]).pop().unwrap();
+    let latch = region_ops(&context, loop_op.regions()[1]).pop().unwrap();
     let class_of = |value| egraph.find(value_to_class[&value]);
-    let head = class_of(condition.operands[1]);
+    let head = class_of(condition.operands()[1]);
 
     let theta = egraph
         .nodes(head)
@@ -1499,9 +1511,12 @@ fn builder_seeds_a_loop_port_as_a_theta_over_its_edges() {
     assert_eq!(theta.children.len(), 2);
     assert_eq!(
         egraph.find(theta.children[0]),
-        class_of(loop_op.operands[0])
+        class_of(loop_op.operands()[0])
     );
-    assert_eq!(egraph.find(theta.children[1]), class_of(latch.operands[0]));
+    assert_eq!(
+        egraph.find(theta.children[1]),
+        class_of(latch.operands()[0])
+    );
     // The port is still readable as the register the loop leaves it in.
     assert!(
         egraph
@@ -1751,7 +1766,7 @@ fn merged_value_classes_resolve_to_earliest_def() {
     assert_eq!(names, vec!["muli", "subi", "return"]);
 
     let sub_op = &body[1];
-    assert_eq!(sub_op.operands[0], body[0].results[0]);
+    assert_eq!(sub_op.operands()[0], body[0].results()[0]);
 }
 
 fn block_op_list(context: &Context, block: tir::BlockId) -> Vec<std::sync::Arc<tir::OpInstance>> {
@@ -1891,10 +1906,10 @@ fn refuses_cross_block_binding_to_non_escaping_value() {
     let bb1_ops = block_op_list(&context, bb1.id());
     let names: Vec<_> = bb1_ops.iter().map(|op| op.name().as_str()).collect();
     assert_eq!(names, vec!["subi", "addi", "return"]);
-    let bb1_sub = bb1_ops[0].results[0];
+    let bb1_sub = bb1_ops[0].results()[0];
     let addi = &bb1_ops[1];
     assert!(
-        addi.operands.contains(&bb1_sub),
+        addi.operands().contains(&bb1_sub),
         "the add binds the block-local recomputation"
     );
 }

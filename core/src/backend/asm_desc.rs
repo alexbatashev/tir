@@ -214,7 +214,7 @@ fn parse_immediate<'src>(
 /// Render an instruction's assembly per `desc`, or `None` if an operand
 /// attribute is missing or holds a value the syntax cannot print.
 pub fn print(desc: &InstrDesc, context: &Context, op: &OpInstance) -> Option<String> {
-    let attributes = &op.attributes;
+    let attributes = &op.attributes();
     let mut out = String::new();
     for part in desc.print {
         match part {

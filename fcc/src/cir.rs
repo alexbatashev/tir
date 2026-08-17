@@ -334,14 +334,14 @@ operation! {
 
 impl TokenScope for ForOp {
     fn token_scope_regions(&self) -> Vec<tir::RegionId> {
-        vec![self.0.regions[1]]
+        vec![self.0.regions()[1]]
     }
 }
 
 impl ForOp {
     fn custom_print(&self, fmt: &mut IRFormatter) -> Result<(), std::fmt::Error> {
         let context = self.0.context.upgrade();
-        let scope = region_scope(&context, self.0.regions[1]);
+        let scope = region_scope(&context, self.0.regions()[1]);
         fmt.write(format!("cir.for %{} cond", scope.number()))?;
         tir::region_format::print_op_region(fmt, &context, self, 0)?;
         fmt.write(" body")?;
@@ -390,14 +390,14 @@ operation! {
 
 impl TokenScope for WhileOp {
     fn token_scope_regions(&self) -> Vec<tir::RegionId> {
-        vec![self.0.regions[1]]
+        vec![self.0.regions()[1]]
     }
 }
 
 impl WhileOp {
     fn custom_print(&self, fmt: &mut IRFormatter) -> Result<(), std::fmt::Error> {
         let context = self.0.context.upgrade();
-        let scope = region_scope(&context, self.0.regions[1]);
+        let scope = region_scope(&context, self.0.regions()[1]);
         fmt.write(format!("cir.while %{} cond", scope.number()))?;
         tir::region_format::print_op_region(fmt, &context, self, 0)?;
         fmt.write(" body")?;
@@ -441,14 +441,14 @@ operation! {
 
 impl TokenScope for DoOp {
     fn token_scope_regions(&self) -> Vec<tir::RegionId> {
-        vec![self.0.regions[0]]
+        vec![self.0.regions()[0]]
     }
 }
 
 impl DoOp {
     fn custom_print(&self, fmt: &mut IRFormatter) -> Result<(), std::fmt::Error> {
         let context = self.0.context.upgrade();
-        let scope = region_scope(&context, self.0.regions[0]);
+        let scope = region_scope(&context, self.0.regions()[0]);
         fmt.write(format!("cir.do %{} body", scope.number()))?;
         tir::region_format::print_op_region(fmt, &context, self, 0)?;
         fmt.write(" cond")?;

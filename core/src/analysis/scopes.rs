@@ -24,7 +24,7 @@ pub fn loop_scope(context: &Context, body: RegionId) -> Option<ValueId> {
 
 /// The scope `op` leaves through, if it is an exit at all.
 pub fn exit_scope(op: &Arc<OpInstance>) -> Option<ValueId> {
-    (op.is::<scf::BreakOp>() || op.is::<scf::ContinueOp>()).then(|| op.operands[0])
+    (op.is::<scf::BreakOp>() || op.is::<scf::ContinueOp>()).then(|| op.operands()[0])
 }
 
 /// The scope `region`'s terminator leaves through, if it ends in an exit at all.
@@ -87,7 +87,7 @@ fn scope_exits(context: &Context, block: &Arc<Block>, scope: ValueId) -> Vec<OpI
         if exit_scope(&op) == Some(scope) {
             exits.push(op_id);
         }
-        for &region in &op.regions {
+        for &region in op.regions() {
             for nested in context.get_region(region).iter(context.clone()) {
                 exits.extend(scope_exits(context, &nested, scope));
             }
@@ -100,15 +100,15 @@ fn scope_exits(context: &Context, block: &Arc<Block>, scope: ValueId) -> Vec<OpI
 /// scope token, any other terminator's operands.
 pub fn carried_operands(op: &Arc<OpInstance>) -> &[ValueId] {
     match exit_scope(op) {
-        Some(_) => &op.operands[1..],
-        None => &op.operands,
+        Some(_) => &op.operands()[1..],
+        None => op.operands(),
     }
 }
 
 /// The scopes every exit inside `op`'s regions leaves through.
 pub fn nested_exit_scopes(context: &Context, op: &Arc<OpInstance>) -> Vec<ValueId> {
     let mut scopes = Vec::new();
-    for &region in &op.regions {
+    for &region in op.regions() {
         for block in context.get_region(region).iter(context.clone()) {
             for op_id in block.op_ids() {
                 let nested = context.get_op(op_id);

@@ -111,7 +111,7 @@ impl Emitter<'_> {
             self.bind_undefined_reads(op, block, env)?;
             self.retarget_operands(op, env);
             self.context.get_block(block).append(op);
-            for &result in &self.context.get_op(op).results {
+            for &result in self.context.get_op(op).results() {
                 if let Some(&var) = self.cfg.value_var.get(&result) {
                     env.insert(var, result);
                 }
@@ -300,7 +300,7 @@ impl Emitter<'_> {
     }
 
     fn bind_results(&self, op: OpId, ports: &[VarId], env: &mut Env) {
-        let results = self.context.get_op(op).results.clone();
+        let results = self.context.get_op(op).results().to_vec();
         for (&port, result) in ports.iter().zip(results) {
             env.insert(port, result);
         }
@@ -324,7 +324,7 @@ impl Emitter<'_> {
                 Stmt::Node(node) => {
                     assigned.extend(self.cfg.nodes[*node].assigns.iter().map(|(var, _)| *var));
                     for op in self.cfg.ops(*node) {
-                        for result in &self.context.get_op(op).results {
+                        for result in self.context.get_op(op).results() {
                             assigned.extend(self.cfg.value_var.get(result).copied());
                         }
                     }
@@ -432,13 +432,13 @@ impl Emitter<'_> {
         let mut pending = vec![op];
         while let Some(op) = pending.pop() {
             let instance = self.context.get_op(op);
-            for (index, &operand) in instance.operands.iter().enumerate() {
+            for (index, &operand) in instance.operands().iter().enumerate() {
                 let resolved = self.resolve(env, operand);
                 if resolved != operand {
                     self.context.set_op_operand(op, index, resolved);
                 }
             }
-            for &region in &instance.regions {
+            for &region in instance.regions() {
                 for block in self.context.get_region(region).block_ids() {
                     pending.extend(self.context.get_block(block).op_ids());
                 }
@@ -459,7 +459,7 @@ impl Emitter<'_> {
             .build();
         let id = op.id();
         self.context.get_block(block).append(id);
-        Ok(self.context.get_op(id).results[0])
+        Ok(self.context.get_op(id).results()[0])
     }
 }
 

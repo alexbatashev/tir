@@ -304,7 +304,7 @@ impl Program {
                 Arith::Mul => b::muli(context, argument, seed, integer).build().id(),
             };
             block.append(arithmetic);
-            let value = context.get_op(arithmetic).results[0];
+            let value = context.get_op(arithmetic).results()[0];
             let left = match specification.terminator {
                 Terminator::Return => {
                     block.append_op(b::r#return(context, value).build());

@@ -32,7 +32,7 @@ fn attr_kind_code(value: &AttributeValue) -> i32 {
 /// op or index is invalid.
 fn attr_value(ctx: &tir::Context, op: u32, i: usize) -> Option<AttributeValue> {
     let op = op_instance(ctx, op)?;
-    match op.attributes.get(i) {
+    match op.attributes().get(i) {
         Some(a) => Some(a.value.clone()),
         None => {
             set_error(format!("attribute index {i} out of range"));
@@ -72,7 +72,7 @@ pub unsafe extern "C" fn tir_op_dialect(ctx: *const tir::Context, op: u32) -> *m
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tir_op_num_operands(ctx: *const tir::Context, op: u32) -> usize {
     with_context(ctx, usize::MAX, |ctx| {
-        op_instance(ctx, op).map_or(usize::MAX, |o| o.operands.len())
+        op_instance(ctx, op).map_or(usize::MAX, |o| o.operands().len())
     })
 }
 
@@ -86,7 +86,7 @@ pub unsafe extern "C" fn tir_op_operand(ctx: *const tir::Context, op: u32, i: us
         let Some(op) = op_instance(ctx, op) else {
             return TIR_INVALID_ID;
         };
-        match op.operands.get(i) {
+        match op.operands().get(i) {
             Some(v) => v.number(),
             None => {
                 set_error(format!("operand index {i} out of range"));
@@ -103,7 +103,7 @@ pub unsafe extern "C" fn tir_op_operand(ctx: *const tir::Context, op: u32, i: us
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tir_op_num_results(ctx: *const tir::Context, op: u32) -> usize {
     with_context(ctx, usize::MAX, |ctx| {
-        op_instance(ctx, op).map_or(usize::MAX, |o| o.results.len())
+        op_instance(ctx, op).map_or(usize::MAX, |o| o.results().len())
     })
 }
 
@@ -117,7 +117,7 @@ pub unsafe extern "C" fn tir_op_result(ctx: *const tir::Context, op: u32, i: usi
         let Some(op) = op_instance(ctx, op) else {
             return TIR_INVALID_ID;
         };
-        match op.results.get(i) {
+        match op.results().get(i) {
             Some(v) => v.number(),
             None => {
                 set_error(format!("result index {i} out of range"));
@@ -134,7 +134,7 @@ pub unsafe extern "C" fn tir_op_result(ctx: *const tir::Context, op: u32, i: usi
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tir_op_num_regions(ctx: *const tir::Context, op: u32) -> usize {
     with_context(ctx, usize::MAX, |ctx| {
-        op_instance(ctx, op).map_or(usize::MAX, |o| o.regions.len())
+        op_instance(ctx, op).map_or(usize::MAX, |o| o.regions().len())
     })
 }
 
@@ -148,7 +148,7 @@ pub unsafe extern "C" fn tir_op_region(ctx: *const tir::Context, op: u32, i: usi
         let Some(op) = op_instance(ctx, op) else {
             return TIR_INVALID_ID;
         };
-        match op.regions.get(i) {
+        match op.regions().get(i) {
             Some(r) => r.number(),
             None => {
                 set_error(format!("region index {i} out of range"));
@@ -306,7 +306,7 @@ pub unsafe extern "C" fn tir_type_to_string(ctx: *const tir::Context, ty: u32) -
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tir_op_num_attributes(ctx: *const tir::Context, op: u32) -> usize {
     with_context(ctx, usize::MAX, |ctx| {
-        op_instance(ctx, op).map_or(usize::MAX, |o| o.attributes.len())
+        op_instance(ctx, op).map_or(usize::MAX, |o| o.attributes().len())
     })
 }
 
@@ -325,7 +325,7 @@ pub unsafe extern "C" fn tir_op_attribute_name(
         let Some(op) = op_instance(ctx, op) else {
             return std::ptr::null_mut();
         };
-        match op.attributes.get(i) {
+        match op.attributes().get(i) {
             Some(a) => into_cstring(ctx.resolve(a.name)),
             None => {
                 set_error(format!("attribute index {i} out of range"));

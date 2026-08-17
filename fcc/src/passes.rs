@@ -38,7 +38,7 @@ impl LowerCirStructsPass {
             operation: &Arc<tir::OpInstance>,
             result: &mut Vec<OperationRef>,
         ) {
-            for region in &operation.regions {
+            for region in operation.regions() {
                 for block in context.get_region(*region).iter(context.clone()) {
                     for operation in block.op_ids() {
                         let operation = context.get_op(operation);
@@ -322,7 +322,7 @@ impl LowerCirControlFlowPass {
             let op = context.get_op(*op_id);
             if op.is::<cir::IfOp>() {
                 return op
-                    .regions
+                    .regions()
                     .iter()
                     .all(|region| Self::body_is_structured(context, *region));
             }
@@ -335,13 +335,13 @@ impl LowerCirControlFlowPass {
             if op.is::<cir::DoOp>() {
                 return Self::do_is_structured(context, &op);
             }
-            op.regions.is_empty()
+            op.regions().is_empty()
         })
     }
 
     fn while_is_structured(context: &Context, op: &tir::OpInstance) -> bool {
-        Self::condition_operand(context, op.regions[0]).is_some()
-            && Self::body_is_structured(context, op.regions[1])
+        Self::condition_operand(context, op.regions()[0]).is_some()
+            && Self::body_is_structured(context, op.regions()[1])
     }
 
     /// A `for` loop becomes `scf.while` with the step appended to the body, so
@@ -349,29 +349,29 @@ impl LowerCirControlFlowPass {
     /// fcc raises a flag instead and never emits one here; hand-written CIR that
     /// does keeps the loop on the direct path.
     fn for_is_structured(context: &Context, op: &tir::OpInstance) -> bool {
-        let scope = Self::entry_block(context, op.regions[1]).arguments()[0].id();
-        Self::condition_operand(context, op.regions[0]).is_some()
-            && Self::body_is_structured(context, op.regions[1])
-            && Self::body_is_structured(context, op.regions[2])
-            && !Self::region_has_continue(context, op.regions[1], scope)
+        let scope = Self::entry_block(context, op.regions()[1]).arguments()[0].id();
+        Self::condition_operand(context, op.regions()[0]).is_some()
+            && Self::body_is_structured(context, op.regions()[1])
+            && Self::body_is_structured(context, op.regions()[2])
+            && !Self::region_has_continue(context, op.regions()[1], scope)
     }
 
     /// A `do` loop becomes `scf.while` with the condition appended to the body,
     /// so a `continue` — which in C jumps to that condition — must not be an
     /// `scf.continue`, exactly as in a `for`.
     fn do_is_structured(context: &Context, op: &tir::OpInstance) -> bool {
-        let Some(body) = Self::single_block(context, op.regions[0]) else {
+        let Some(body) = Self::single_block(context, op.regions()[0]) else {
             return false;
         };
         let terminates_normally = body.op_ids().last().is_some_and(|op_id| {
             let op = context.get_op(*op_id);
             op.clone().as_op::<cir::YieldOp>().is_some() || op.as_op::<cir::BreakOp>().is_some()
         });
-        let scope = Self::entry_block(context, op.regions[0]).arguments()[0].id();
+        let scope = Self::entry_block(context, op.regions()[0]).arguments()[0].id();
         terminates_normally
-            && Self::condition_operand(context, op.regions[1]).is_some()
-            && Self::body_is_structured(context, op.regions[0])
-            && !Self::region_has_continue(context, op.regions[0], scope)
+            && Self::condition_operand(context, op.regions()[1]).is_some()
+            && Self::body_is_structured(context, op.regions()[0])
+            && !Self::region_has_continue(context, op.regions()[0], scope)
     }
 
     fn region_has_continue(context: &Context, region: RegionId, scope: ValueId) -> bool {
@@ -387,7 +387,7 @@ impl LowerCirControlFlowPass {
                         .is_some_and(|exit| exit.operands()[0] == scope);
                     continues
                         || op
-                            .regions
+                            .regions()
                             .iter()
                             .any(|region| Self::region_has_continue(context, *region, scope))
                 })
@@ -408,7 +408,7 @@ impl LowerCirControlFlowPass {
                 {
                     return Some((block, op));
                 }
-                for child in &op.regions {
+                for child in op.regions() {
                     if let Some(found) = Self::next_control_op_in_region(context, *child) {
                         return Some(found);
                     }
@@ -431,9 +431,9 @@ impl LowerCirControlFlowPass {
                     let op = context.get_op(op_id);
                     let exits_direct_loop = (op.clone().as_op::<cir::BreakOp>().is_some()
                         || op.clone().as_op::<cir::ContinueOp>().is_some())
-                        && loop_targets.contains_key(&op.operands[0]);
+                        && loop_targets.contains_key(&op.operands()[0]);
                     exits_direct_loop
-                        || op.regions.iter().any(|region| {
+                        || op.regions().iter().any(|region| {
                             Self::region_uses_direct_loop_target(context, *region, loop_targets)
                         })
                 })
@@ -671,9 +671,9 @@ impl LowerCirControlFlowPass {
         let terminator = context.get_op(*block.op_ids().last().unwrap());
         let replacement: Box<dyn Operation> =
             if terminator.clone().as_op::<cir::BreakOp>().is_some() {
-                Box::new(scf::ops::r#break(context, terminator.operands[0], vec![]).build())
+                Box::new(scf::ops::r#break(context, terminator.operands()[0], vec![]).build())
             } else if terminator.clone().as_op::<cir::ContinueOp>().is_some() {
-                Box::new(scf::ops::r#continue(context, terminator.operands[0], vec![]).build())
+                Box::new(scf::ops::r#continue(context, terminator.operands()[0], vec![]).build())
             } else {
                 Box::new(scf::ops::r#yield(context, vec![]).build())
             };
@@ -699,7 +699,7 @@ impl LowerCirControlFlowPass {
         }
         let block = context.get_block(block.id());
         let terminator = context.get_op(*block.op_ids().last().unwrap());
-        let condition = terminator.operands[0];
+        let condition = terminator.operands()[0];
         let replacement = scf::ops::condition(context, condition, vec![]).build();
         rewriter.replace_op(
             &OperationRef::new(terminator, Some(block), None),
@@ -802,7 +802,7 @@ impl LowerCirControlFlowPass {
         }
         let condition = context.get_block(condition.id());
         let terminator = context.get_op(*condition.op_ids().last().unwrap());
-        let value = terminator.operands[0];
+        let value = terminator.operands()[0];
         rewriter.erase_op(&OperationRef::new(terminator, Some(condition), None))?;
 
         let repeat = context.create_region();
@@ -836,14 +836,14 @@ impl LowerCirControlFlowPass {
         op: Arc<tir::OpInstance>,
     ) -> Result<(), PassError> {
         let replacement: Box<dyn Operation> = if op.clone().as_op::<cir::WhileOp>().is_some() {
-            let condition = Self::structured_condition(context, rewriter, op.regions[0])?;
-            let body = Self::structured_body(context, rewriter, op.regions[1])?;
+            let condition = Self::structured_condition(context, rewriter, op.regions()[0])?;
+            let body = Self::structured_body(context, rewriter, op.regions()[1])?;
             Box::new(
                 scf::ops::r#while(context, vec![], vec![], Some(condition), Some(body)).build(),
             )
         } else if op.clone().as_op::<cir::ForOp>().is_some() {
-            let condition = Self::structured_condition(context, rewriter, op.regions[0])?;
-            let body = Self::structured_for_body(context, op.regions[1], op.regions[2])?;
+            let condition = Self::structured_condition(context, rewriter, op.regions()[0])?;
+            let body = Self::structured_for_body(context, op.regions()[1], op.regions()[2])?;
             Box::new(
                 scf::ops::r#while(context, vec![], vec![], Some(condition), Some(body)).build(),
             )
@@ -855,18 +855,19 @@ impl LowerCirControlFlowPass {
             let always_value = always.result();
             condition_block.append_op(always);
             condition_block.append_op(scf::ops::condition(context, always_value, vec![]).build());
-            let body = Self::structured_do_body(context, rewriter, op.regions[0], op.regions[1])?;
+            let body =
+                Self::structured_do_body(context, rewriter, op.regions()[0], op.regions()[1])?;
             Box::new(
                 scf::ops::r#while(context, vec![], vec![], Some(condition.id()), Some(body))
                     .build(),
             )
         } else {
-            let then_body = Self::structured_body(context, rewriter, op.regions[0])?;
-            let else_body = Self::structured_body(context, rewriter, op.regions[1])?;
+            let then_body = Self::structured_body(context, rewriter, op.regions()[0])?;
+            let else_body = Self::structured_body(context, rewriter, op.regions()[1])?;
             Box::new(
                 scf::ops::r#if(
                     context,
-                    op.operands[0],
+                    op.operands()[0],
                     vec![],
                     vec![],
                     Some(then_body),
@@ -890,9 +891,9 @@ impl LowerCirControlFlowPass {
         loop_targets: &mut HashMap<ValueId, LoopTargets>,
     ) -> Result<(), PassError> {
         if op.clone().as_op::<cir::WhileOp>().is_some() {
-            let scope = Self::entry_block(context, op.regions[1]).arguments()[0].id();
-            let condition = Self::extract_region(context, rewriter, op.regions[0])?;
-            let body = Self::extract_region(context, rewriter, op.regions[1])?;
+            let scope = Self::entry_block(context, op.regions()[1]).arguments()[0].id();
+            let condition = Self::extract_region(context, rewriter, op.regions()[0])?;
+            let body = Self::extract_region(context, rewriter, op.regions()[1])?;
             let continuation = Self::split_after(context, &block, &op);
             loop_targets.insert(
                 scope,
@@ -919,10 +920,10 @@ impl LowerCirControlFlowPass {
             )?;
             Self::rewrite_region_exits(context, rewriter, &body, condition[0].id(), loop_targets)?;
         } else if op.clone().as_op::<cir::ForOp>().is_some() {
-            let scope = Self::entry_block(context, op.regions[1]).arguments()[0].id();
-            let condition = Self::extract_region(context, rewriter, op.regions[0])?;
-            let body = Self::extract_region(context, rewriter, op.regions[1])?;
-            let step = Self::extract_region(context, rewriter, op.regions[2])?;
+            let scope = Self::entry_block(context, op.regions()[1]).arguments()[0].id();
+            let condition = Self::extract_region(context, rewriter, op.regions()[0])?;
+            let body = Self::extract_region(context, rewriter, op.regions()[1])?;
+            let step = Self::extract_region(context, rewriter, op.regions()[2])?;
             let continuation = Self::split_after(context, &block, &op);
             loop_targets.insert(
                 scope,
@@ -951,9 +952,9 @@ impl LowerCirControlFlowPass {
             Self::rewrite_region_exits(context, rewriter, &body, step[0].id(), loop_targets)?;
             Self::rewrite_region_exits(context, rewriter, &step, condition[0].id(), loop_targets)?;
         } else if op.clone().as_op::<cir::DoOp>().is_some() {
-            let scope = Self::entry_block(context, op.regions[0]).arguments()[0].id();
-            let body = Self::extract_region(context, rewriter, op.regions[0])?;
-            let condition = Self::extract_region(context, rewriter, op.regions[1])?;
+            let scope = Self::entry_block(context, op.regions()[0]).arguments()[0].id();
+            let body = Self::extract_region(context, rewriter, op.regions()[0])?;
+            let condition = Self::extract_region(context, rewriter, op.regions()[1])?;
             let continuation = Self::split_after(context, &block, &op);
             loop_targets.insert(
                 scope,
@@ -980,8 +981,8 @@ impl LowerCirControlFlowPass {
                 continuation.id(),
             )?;
         } else {
-            let then_blocks = Self::extract_region(context, rewriter, op.regions[0])?;
-            let else_blocks = Self::extract_region(context, rewriter, op.regions[1])?;
+            let then_blocks = Self::extract_region(context, rewriter, op.regions()[0])?;
+            let else_blocks = Self::extract_region(context, rewriter, op.regions()[1])?;
             let continuation = Self::split_after(context, &block, &op);
             Self::add_blocks(context, function_region, &then_blocks);
             Self::add_blocks(context, function_region, &else_blocks);
@@ -990,7 +991,7 @@ impl LowerCirControlFlowPass {
                 function_region,
                 std::slice::from_ref(&continuation),
             );
-            let condition = op.operands[0];
+            let condition = op.operands()[0];
             Self::erase_control_op(rewriter, &block, op)?;
             block.append_op(
                 b::cond_br(
@@ -1047,7 +1048,7 @@ impl Pass for LowerCirControlFlowPass {
         if op.as_op::<FuncOp>().is_none() {
             return Ok(());
         }
-        let function_region = op.op().regions[0];
+        let function_region = op.op().regions()[0];
         let mut loop_targets = HashMap::new();
         while let Some((block, control)) = Self::next_control_op_in_region(context, function_region)
         {
@@ -1059,12 +1060,12 @@ impl Pass for LowerCirControlFlowPass {
                 Self::do_is_structured(context, &control)
             } else if control.clone().as_op::<cir::IfOp>().is_some() {
                 control
-                    .regions
+                    .regions()
                     .iter()
                     .all(|region| Self::body_is_structured(context, *region))
             } else {
                 false
-            } && !control.regions.iter().any(|region| {
+            } && !control.regions().iter().any(|region| {
                 Self::region_uses_direct_loop_target(context, *region, &loop_targets)
             });
             if structured {

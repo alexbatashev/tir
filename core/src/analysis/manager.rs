@@ -134,7 +134,7 @@ mod tests {
 
     /// Appends an op to `module`'s body, bumping its version.
     fn edit(context: &Context, module: OpId) {
-        let body = context.get_op(module).regions[0];
+        let body = context.get_op(module).regions()[0];
         let block = context
             .get_region(body)
             .iter(context.clone())

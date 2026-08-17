@@ -25,7 +25,7 @@ impl LowerMemoryIntrinsicsPass {
             copies: &mut Vec<OperationRef>,
             sets: &mut Vec<OperationRef>,
         ) {
-            for region in &operation.regions {
+            for region in operation.regions() {
                 for block in context.get_region(*region).iter(context.clone()) {
                     for operation in block.op_ids() {
                         let operation = context.get_op(operation);

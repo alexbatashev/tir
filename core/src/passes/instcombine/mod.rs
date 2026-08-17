@@ -89,7 +89,7 @@ impl Pass for InstCombinePass {
             growing: RefCell::new(Vec::new()),
             rereads: RefCell::new(HashMap::new()),
         };
-        let body = context.get_op(root).regions[0];
+        let body = context.get_op(root).regions()[0];
         driver.process_region(body, rewriter)?;
         // Rewrites erase and insert ops within blocks but never touch the block
         // graph, so dominance survives; the value graph does not.
@@ -263,7 +263,7 @@ impl Driver<'_> {
                 (Some(operand), Some(result)) => Some((read.read_value(), operand, result)),
                 _ => None,
             });
-        let value = match (state_edge, &instance.results[..]) {
+        let value = match (state_edge, instance.results()) {
             (Some((value, ..)), _) => value,
             (None, &[value]) => value,
             _ => return Ok(()),
@@ -285,7 +285,7 @@ impl Driver<'_> {
         // one handed on — its use then moves rather than doubles. A gate keeping
         // its regions, or a chain named anywhere else, would be consumed twice.
         if ty == StateType::new(self.context)
-            && !(instance.regions.is_empty() && instance.operands.contains(&new_value))
+            && !(instance.regions().is_empty() && instance.operands().contains(&new_value))
         {
             return Ok(());
         }
@@ -299,7 +299,7 @@ impl Driver<'_> {
             }
             // Only erase a pure value op; an op with regions may have side effects
             // whose result merely became unused (left for DCE).
-            if instance.regions.is_empty() {
+            if instance.regions().is_empty() {
                 rewriter.erase_op(&target)?;
             }
         }
@@ -388,7 +388,7 @@ impl Driver<'_> {
                 continue;
             }
             let instance = self.context.get_op(op_id);
-            if instance.regions.is_empty() {
+            if instance.regions().is_empty() {
                 continue;
             }
             let guarded = instance
@@ -396,7 +396,7 @@ impl Driver<'_> {
                 .as_interface::<dyn Conditional>()
                 .map(|g| g.guarded_regions())
                 .unwrap_or_default();
-            for &sub in &instance.regions {
+            for &sub in instance.regions() {
                 match guarded.iter().find(|&&(r, ..)| r == sub) {
                     Some(&(_, value, holds)) => {
                         self.eg.push_context();
@@ -551,7 +551,7 @@ impl Driver<'_> {
         target: &OperationRef,
         rewriter: &mut Rewriter,
     ) -> Result<Option<ValueId>, PassError> {
-        let own = self.context.get_op(target.op().id).results.clone();
+        let own = self.context.get_op(target.op().id).results().to_vec();
         // The extraction's own choice leads, so it answers where nothing is nearer.
         let mut reaching: Vec<ValueId> = Vec::new();
         if let Some(named) = named.filter(|&named| self.reaches(named, target)) {
@@ -752,7 +752,7 @@ impl Driver<'_> {
         if !self.context.has_operation(op) {
             return false;
         }
-        let regions = self.context.get_op(op).regions.clone();
+        let regions = self.context.get_op(op).regions().to_vec();
         let mut block = self.context.get_op(target.op().id).parent_block();
         while let Some(current) = block {
             let Some(region) = self.context.parent_region(current) else {
@@ -778,7 +778,7 @@ impl Driver<'_> {
             (_, Prov::Op(op)) => self
                 .context
                 .has_operation(op)
-                .then(|| self.context.get_op(op).results.first().copied())
+                .then(|| self.context.get_op(op).results().first().copied())
                 .flatten(),
             _ => None,
         }
@@ -1183,7 +1183,7 @@ impl Driver<'_> {
             return Ok(None);
         };
         let results: Vec<ValueId> = template
-            .results
+            .results()
             .iter()
             .map(|&result| {
                 self.context
@@ -1192,12 +1192,12 @@ impl Driver<'_> {
             })
             .collect();
         if let Some(published) = read.state_result()
-            && let Some(index) = template.results.iter().position(|&r| r == published)
+            && let Some(index) = template.results().iter().position(|&r| r == published)
         {
             self.context.replace_value_uses(state, results[index]);
         }
         let operands = template
-            .operands
+            .operands()
             .iter()
             .map(|&operand| match operand {
                 _ if operand == location => address,
@@ -1211,7 +1211,7 @@ impl Driver<'_> {
             operands,
             results.clone(),
             vec![],
-            template.attributes.clone(),
+            template.attributes().to_vec(),
         ));
         rewriter.insert_op_before(&cursor, copy.as_dyn_op().as_ref())?;
         self.rereads

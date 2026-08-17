@@ -229,7 +229,7 @@ impl<'a> Writer<'a> {
                 }
             }
             for operation in block.iter(self.context.clone()) {
-                for result in &operation.results {
+                for result in operation.results() {
                     let id = self.id();
                     self.value_ids.insert(*result, id);
                 }
@@ -350,10 +350,10 @@ impl<'a> Writer<'a> {
         } else if op.dialect().as_str() == "spirv" {
             let opcode = opcode_for_name(op.name().as_str())
                 .ok_or_else(|| format!("unsupported SPIR-V operation {}", op.name()))?;
-            if op.results.len() != 1 {
+            if op.results().len() != 1 {
                 return Err(format!("unsupported result count for {}", op.name()));
             }
-            self.write_result_op(opcode, op.results[0], &op.operands, out)
+            self.write_result_op(opcode, op.results()[0], op.operands(), out)
         } else {
             Err(format!(
                 "unsupported operation {}.{} in SPIR-V function",

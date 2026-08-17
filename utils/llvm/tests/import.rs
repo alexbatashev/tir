@@ -18,7 +18,7 @@ fn verify_recursive(context: &Context, op_id: OpId) -> Result<(), String> {
         .as_dyn_op()
         .verify(context)
         .map_err(|e| format!("{e:?}"))?;
-    for region_id in instance.regions.clone() {
+    for region_id in instance.regions().to_vec() {
         let region = context.get_region(region_id);
         for block in region.iter(context.clone()) {
             for child in block.op_ids() {

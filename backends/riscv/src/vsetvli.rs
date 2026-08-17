@@ -210,7 +210,7 @@ impl Pass for InsertVsetvliPass {
         rewriter: &mut Rewriter,
         _analyses: &AnalysisManager,
     ) -> Result<(), PassError> {
-        let Some(&region_id) = op.op().regions.first() else {
+        let Some(&region_id) = op.op().regions().first() else {
             return Ok(());
         };
         let blocks: Vec<_> = context
@@ -282,7 +282,7 @@ impl Pass for InsertVsetvliPass {
                         4 => crate::RegClass::VRM4.id(),
                         _ => crate::RegClass::VRM8.id(),
                     };
-                    let mut attrs = body_op.attributes.clone();
+                    let mut attrs = body_op.attributes().to_vec();
                     let mut rewrote = false;
                     for a in &mut attrs {
                         if let AttributeValue::Register(RegisterAttr::Virtual {

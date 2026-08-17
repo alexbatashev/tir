@@ -858,7 +858,7 @@ mod tests {
         for block in context.get_region(region_id).iter(context.clone()) {
             for op_id in block.op_ids() {
                 let op = context.get_op(op_id);
-                for attr in &op.attributes {
+                for attr in op.attributes() {
                     assert!(
                         !matches!(
                             attr.value,

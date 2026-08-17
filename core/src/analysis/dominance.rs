@@ -211,7 +211,7 @@ impl Dag for DominatorTree {
 fn build_cfg(context: &Context, root: OpId) -> Cfg {
     let entry = context
         .get_op(root)
-        .regions
+        .regions()
         .first()
         .and_then(|region| context.get_region(*region).iter(context.clone()).next())
         .map(|block| block.id());
@@ -233,7 +233,7 @@ fn build_cfg(context: &Context, root: OpId) -> Cfg {
         // Structured control flow: any op carrying regions flows into each
         // region's entry block.
         for op_id in &op_ids {
-            for region_id in &context.get_op(*op_id).regions {
+            for region_id in context.get_op(*op_id).regions() {
                 if let Some(child) = context.get_region(*region_id).iter(context.clone()).next() {
                     edges.push(child.id());
                 }

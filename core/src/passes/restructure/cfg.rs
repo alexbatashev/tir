@@ -221,8 +221,8 @@ pub fn deep_operands(context: &Context, op: OpId) -> Vec<ValueId> {
     let mut pending = vec![op];
     while let Some(op) = pending.pop() {
         let instance = context.get_op(op);
-        operands.extend(instance.operands.iter().copied());
-        for &region in &instance.regions {
+        operands.extend(instance.operands().iter().copied());
+        for &region in instance.regions() {
             for block in context.get_region(region).block_ids() {
                 pending.extend(context.get_block(block).op_ids());
             }
@@ -398,7 +398,7 @@ impl Builder<'_> {
 
         let kept = self.context.get_op(op);
         let vars = kept
-            .operands
+            .operands()
             .iter()
             .map(|&operand| self.cfg.add_var(self.context.get_value(operand).ty()))
             .collect::<Vec<_>>();
@@ -417,12 +417,12 @@ impl Builder<'_> {
                 unreachable!()
             };
             let exit = self.context.get_op(op);
-            if exit.operands.len() != vars.len() || exit.name() != kept.name() {
+            if exit.operands().len() != vars.len() || exit.name() != kept.name() {
                 return Err(unsupported("a region with unlike exits"));
             }
             let assigns = vars
                 .iter()
-                .zip(exit.operands.iter())
+                .zip(exit.operands().iter())
                 .map(|(&var, &operand)| (var, Rhs::Value(operand)))
                 .collect();
             self.cfg.nodes[node].term = Term::Jump(Edge {
@@ -440,7 +440,7 @@ impl Builder<'_> {
         let mut reads: BTreeMap<ValueId, BTreeSet<NodeId>> = BTreeMap::new();
         for node in 0..self.cfg.nodes.len() {
             for op in self.cfg.ops(node) {
-                for &result in &self.context.get_op(op).results {
+                for &result in self.context.get_op(op).results() {
                     definition.insert(result, node);
                 }
             }

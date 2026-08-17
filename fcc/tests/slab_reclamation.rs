@@ -24,8 +24,8 @@ fn count_live(context: &Context, root: OpId) -> LiveIr {
     while let Some(op_id) = pending.pop() {
         let op = context.get_op(op_id);
         live.ops += 1;
-        values.extend(op.results.iter().copied());
-        for region_id in &op.regions {
+        values.extend(op.results().iter().copied());
+        for region_id in op.regions() {
             live.regions += 1;
             count_region(context, *region_id, &mut live, &mut values, &mut pending);
         }

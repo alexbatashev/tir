@@ -50,7 +50,7 @@ pub fn seed(context: &Context, root: OpId) -> Seeded {
         exported_states: Vec::new(),
         ops: Vec::new(),
     };
-    for region in context.get_op(root).regions.clone() {
+    for region in context.get_op(root).regions().to_vec() {
         seeder.seed_region(region);
     }
     let promotable_addresses = seeder.promotable_addresses();
@@ -138,7 +138,7 @@ impl Seeder<'_> {
         }
         let instance = self.context.get_op(op);
 
-        if !instance.regions.is_empty() {
+        if !instance.regions().is_empty() {
             self.export_states(&instance);
             if let Some(conditional) = instance.clone().as_interface::<dyn Conditional>() {
                 self.seed_gamma(&instance, conditional.as_ref());
@@ -150,14 +150,14 @@ impl Seeder<'_> {
                 // ports and results anchor, but its body is read like any other
                 // region.
                 None => {
-                    for region in instance.regions.clone() {
+                    for region in instance.regions().to_vec() {
                         self.seed_region(region);
                     }
                 }
             }
         } else if let (Some(constant), [result]) = (
             instance.clone().as_interface::<dyn ConstantLike>(),
-            &instance.results[..],
+            instance.results(),
         ) {
             let ty = self.context.get_value(*result).ty();
             let id = self
@@ -168,12 +168,12 @@ impl Seeder<'_> {
         } else if self.seed_memory(&instance) {
             return;
         } else if is_pure_value(&instance) {
-            let value = instance.results[0];
+            let value = instance.results()[0];
             let ty = self.context.get_value(value).ty();
             let commutative = instance.has_interface::<dyn Commutative>();
             let mut args: Vec<Id> = instance
-                .operands
-                .clone()
+                .operands()
+                .to_vec()
                 .iter()
                 .map(|&operand| self.class_of(operand))
                 .collect();
@@ -187,7 +187,7 @@ impl Seeder<'_> {
             self.export_states(&instance);
         }
 
-        for result in instance.results.clone() {
+        for result in instance.results().to_vec() {
             self.anchor(result);
         }
     }
@@ -201,7 +201,7 @@ impl Seeder<'_> {
     /// publishes nothing the graph can name.
     fn seed_gamma(&mut self, instance: &Arc<OpInstance>, conditional: &dyn Conditional) {
         let decision = self.class_of(conditional.decision());
-        for region in instance.regions.clone() {
+        for region in instance.regions().to_vec() {
             self.bind_arm_arguments(instance, region);
             self.seed_region(region);
         }
@@ -211,7 +211,7 @@ impl Seeder<'_> {
             .map(|&(region, _)| region)
             .filter(|&region| region_exit(self.context, region).is_none())
             .collect();
-        for (index, &result) in instance.results.clone().iter().enumerate() {
+        for (index, &result) in instance.results().to_vec().iter().enumerate() {
             let yields: Option<Vec<ValueId>> = arms
                 .iter()
                 .map(|&region| conditional.region_yields(region).get(index).copied())
@@ -251,8 +251,8 @@ impl Seeder<'_> {
             return;
         };
         let arguments: Vec<ValueId> = block.arguments().iter().map(|a| a.id()).collect();
-        let first = instance.operands.len().saturating_sub(arguments.len());
-        for (&argument, &input) in arguments.iter().zip(&instance.operands[first..]) {
+        let first = instance.operands().len().saturating_sub(arguments.len());
+        for (&argument, &input) in arguments.iter().zip(&instance.operands()[first..]) {
             let id = self.class_of(input);
             self.value_class.insert(argument, id);
         }
@@ -292,7 +292,7 @@ impl Seeder<'_> {
                 self.value_class.insert(carried[port], id);
             }
         }
-        for region in instance.regions.clone() {
+        for region in instance.regions().to_vec() {
             self.seed_region(region);
         }
         let (inits, finals) = (loop_like.inits(), loop_like.finals());
@@ -379,7 +379,8 @@ impl Seeder<'_> {
             .get_region(region)
             .iter(self.context.clone())
             .next()?;
-        let operands = &self.context.get_op(*block.op_ids().last()?).operands;
+        let op = self.context.get_op(*block.op_ids().last()?);
+        let operands = op.operands();
         let first = operands.len().checked_sub(ports)?;
         Some((region, arguments, operands[first..].to_vec()))
     }
@@ -389,7 +390,7 @@ impl Seeder<'_> {
     /// — returned, yielded out of a region, handed to a call — is observed by
     /// something the graph cannot see, and no law may drop the write that left it.
     fn export_states(&mut self, instance: &Arc<OpInstance>) {
-        for operand in instance.operands.clone() {
+        for operand in instance.operands().to_vec() {
             if self.context.get_value(operand).ty() == self.state_ty {
                 let id = self.class_of(operand);
                 self.exported_states.push(id);
@@ -441,7 +442,7 @@ impl Seeder<'_> {
     /// operand — a size, say — covers an extent the term cannot spell and is no
     /// store term at all.
     fn seed_write(&mut self, instance: &Arc<OpInstance>, write: &dyn MemoryWrite) -> bool {
-        if instance.operands.len() != STORE_OPERANDS {
+        if instance.operands().len() != STORE_OPERANDS {
             return false;
         }
         let written = write.written_value();
@@ -490,8 +491,8 @@ impl Seeder<'_> {
 
 /// A pure value op the e-graph may reason about: one result, no regions, and a declared semantic expression.
 fn is_pure_value(instance: &Arc<OpInstance>) -> bool {
-    instance.results.len() == 1
-        && instance.regions.is_empty()
+    instance.results().len() == 1
+        && instance.regions().is_empty()
         && instance
             .clone()
             .as_dyn_op()

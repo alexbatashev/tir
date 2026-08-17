@@ -66,17 +66,17 @@ fn clone_op_into(context: &Context, op: OpId, mapping: &mut Mapping) -> OpId {
     let source = context.get_op(op);
 
     let regions = source
-        .regions
+        .regions()
         .iter()
         .map(|region| clone_region_into(context, *region, mapping))
         .collect();
     let operands = source
-        .operands
+        .operands()
         .iter()
         .map(|operand| remap_value(*operand, mapping))
         .collect();
     let results: Vec<ValueId> = source
-        .results
+        .results()
         .iter()
         .map(|result| {
             let copy = context.create_value(context.get_value(*result).ty(), None);
@@ -85,7 +85,7 @@ fn clone_op_into(context: &Context, op: OpId, mapping: &mut Mapping) -> OpId {
         })
         .collect();
     let attributes = source
-        .attributes
+        .attributes()
         .iter()
         .map(|attribute| {
             NamedAttribute::new(attribute.name, remap_attribute(&attribute.value, mapping))

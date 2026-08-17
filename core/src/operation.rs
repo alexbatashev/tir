@@ -166,15 +166,15 @@ pub trait Operation: 'static + Send + Sync + Any + Verifiable + OpDefVerifiable 
     fn regions(&self) -> ContextIterator<RegionId> {
         let instance = self.op_instance();
         let context = instance.context.upgrade();
-        ContextIterator::new(context, instance.regions.clone())
+        ContextIterator::new(context, instance.regions().to_vec())
     }
 
     fn operands(&self) -> &[ValueId] {
-        &self.op_instance().operands
+        self.op_instance().operands()
     }
 
     fn attributes(&self) -> &[crate::attributes::NamedAttribute] {
-        &self.op_instance().attributes
+        self.op_instance().attributes()
     }
 
     /// The value of the attribute called `name`; see [`OpInstance::attr`].
@@ -238,7 +238,7 @@ fn verify_state_linearity(context: &Context, op_id: OpId) -> Result<(), Error> {
     let mut worklist = vec![op_id];
     while let Some(op_id) = worklist.pop() {
         let instance = context.get_op(op_id);
-        for operand in &instance.operands {
+        for operand in instance.operands() {
             if !context.has_value(*operand) || context.get_value(*operand).ty() != state {
                 continue;
             }
@@ -249,7 +249,7 @@ fn verify_state_linearity(context: &Context, op_id: OpId) -> Result<(), Error> {
                 )));
             }
         }
-        for region_id in instance.regions.iter().rev() {
+        for region_id in instance.regions().iter().rev() {
             for block in context.get_region(*region_id).iter(context.clone()) {
                 worklist.extend(block.op_ids().iter().rev());
             }
@@ -280,8 +280,8 @@ fn verify_state_ports(context: &Context, instance: &Arc<OpInstance>) -> Result<(
         }
         Ok(())
     };
-    ports(&instance.operands, "operand")?;
-    ports(&instance.results, "result")
+    ports(instance.operands(), "operand")?;
+    ports(instance.results(), "result")
 }
 
 fn verify_op_tree_ops(context: &Context, op_id: OpId) -> Result<(), Error> {
@@ -297,7 +297,7 @@ fn verify_op_tree_ops(context: &Context, op_id: OpId) -> Result<(), Error> {
     verify_state_ports(context, &instance)?;
     instance.clone().as_dyn_op().verify(context)?;
 
-    for region_id in instance.regions.clone() {
+    for region_id in instance.regions().to_vec() {
         let region = context.get_region(region_id);
         for block in region.iter(context.clone()) {
             for child in block.op_ids() {
@@ -330,7 +330,7 @@ fn verify_token_region_arguments(
         .as_interface::<dyn crate::TokenScope>()
         .map(|scope| scope.token_scope_regions())
         .unwrap_or_default();
-    for (region_index, region_id) in instance.regions.iter().enumerate() {
+    for (region_index, region_id) in instance.regions().iter().enumerate() {
         for (block_index, block) in context
             .get_region(*region_id)
             .iter(context.clone())
@@ -340,7 +340,7 @@ fn verify_token_region_arguments(
                 if argument.ty() != token {
                     continue;
                 }
-                if block_index != 0 || !scope_regions.contains(&instance.regions[region_index]) {
+                if block_index != 0 || !scope_regions.contains(&instance.regions()[region_index]) {
                     return Err(Error::VerificationError(
                         "token values are only allowed as loop body entry arguments".to_string(),
                     ));
@@ -461,7 +461,7 @@ pub fn verify_opdef_operands(
     op_name: &str,
     spec: &OpDefSpec,
 ) -> Result<(), crate::Error> {
-    let operands = &instance.operands;
+    let operands = &instance.operands();
     let operand_fields = spec.schema.operands;
     let result_fields = spec.schema.results;
 
@@ -550,12 +550,12 @@ pub fn verify_opdef_operands(
     let value_results_len = if spec.state_output {
         let state = crate::builtin::StateType::new(context);
         let has_state = instance
-            .results
+            .results()
             .last()
             .is_some_and(|id| context.has_value(*id) && context.get_value(*id).ty() == state);
-        instance.results.len() - has_state as usize
+        instance.results().len() - has_state as usize
     } else {
-        instance.results.len()
+        instance.results().len()
     };
 
     let variadic_result = result_fields.iter().any(|field| field.variadic);
@@ -585,7 +585,7 @@ pub fn verify_opdef_operands(
             op_name,
             "result",
             field.name,
-            instance.results[result_index],
+            instance.results()[result_index],
             spec.result_checkers[idx],
             constraint_name(field.ty),
         )?;
@@ -659,10 +659,10 @@ pub struct OpInstance {
     pub id: OpId,
     name: OpNameId,
     pub context: ContextRef,
-    pub operands: Vec<ValueId>,
-    pub results: Vec<ValueId>,
-    pub regions: Vec<RegionId>,
-    pub attributes: Vec<crate::attributes::NamedAttribute>,
+    pub(crate) operands: Vec<ValueId>,
+    pub(crate) results: Vec<ValueId>,
+    pub(crate) regions: Vec<RegionId>,
+    pub(crate) attributes: Vec<crate::attributes::NamedAttribute>,
 }
 
 impl OpInstance {
@@ -707,6 +707,22 @@ impl OpInstance {
         }
     }
 
+    pub fn operands(&self) -> &[ValueId] {
+        &self.operands
+    }
+
+    pub fn results(&self) -> &[ValueId] {
+        &self.results
+    }
+
+    pub fn regions(&self) -> &[RegionId] {
+        &self.regions
+    }
+
+    pub fn attributes(&self) -> &[crate::attributes::NamedAttribute] {
+        &self.attributes
+    }
+
     /// Returns an opaque name for textual output, not operation identity.
     ///
     /// ```compile_fail
@@ -736,7 +752,7 @@ impl OpInstance {
     /// [`OpInstance::attr`] for a name already interned, which is the form a
     /// repeated lookup wants: the comparison is on `u32`s.
     pub fn attr_sym(&self, name: tir_adt::Sym) -> Option<&crate::attributes::AttributeValue> {
-        self.attributes
+        self.attributes()
             .iter()
             .find(|attribute| attribute.name == name)
             .map(|attribute| &attribute.value)

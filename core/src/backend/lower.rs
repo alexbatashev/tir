@@ -75,7 +75,7 @@ pub fn lower_function_and_return(
             let mut elements = vec![None; element_types.len()];
             for user in def_use.users_of(argument.id().number()) {
                 let extract_instance = context.get_op(*user);
-                if extract_instance.operands.first() != Some(&argument.id()) {
+                if extract_instance.operands().first() != Some(&argument.id()) {
                     continue;
                 }
                 let Some(extract) = extract_instance.clone().as_op::<TupleGetOp>() else {
@@ -121,7 +121,7 @@ pub fn lower_function_and_return(
             }
         }
         let mut symbol = super::SymbolOpBuilder::new(context)
-            .body(op.op().regions[0])
+            .body(op.op().regions()[0])
             .attr("name", AttributeValue::Str(name.into()))
             .attr("arg_regs", AttributeValue::Array(arguments.into()));
         if let Some(result_address) = result_address {

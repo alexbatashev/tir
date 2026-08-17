@@ -281,7 +281,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
     let result_accessor = if has_results {
         quote! {
             pub fn result(&self) -> tir::ValueId {
-                self.0.results[0]
+                self.0.results()[0]
             }
         }
     } else {
@@ -362,7 +362,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         let result_width_body = if has_results {
             quote! {
                 let __ctx = self.0.context.upgrade();
-                let __ty = __ctx.get_value(self.0.results[0]).ty();
+                let __ty = __ctx.get_value(self.0.results()[0]).ty();
                 Some(
                     (__ctx.get_type_data(__ty).as_ref() as &dyn std::any::Any)
                         .downcast_ref::<tir::builtin::IntegerType>()
@@ -896,7 +896,7 @@ fn make_state_accessors(state: &StatePorts) -> proc_macro2::TokenStream {
                 let context = self.0.context.upgrade();
                 let state = tir::builtin::StateType::new(&context);
                 self.0
-                    .operands
+                    .operands()
                     .last()
                     .copied()
                     .filter(|id| context.has_value(*id) && context.get_value(*id).ty() == state)
@@ -912,7 +912,7 @@ fn make_state_accessors(state: &StatePorts) -> proc_macro2::TokenStream {
                 let context = self.0.context.upgrade();
                 let state = tir::builtin::StateType::new(&context);
                 self.0
-                    .results
+                    .results()
                     .last()
                     .copied()
                     .filter(|id| context.has_value(*id) && context.get_value(*id).ty() == state)
@@ -1307,7 +1307,7 @@ fn make_variadic_region_accessor(region: &Region, index: usize) -> proc_macro2::
     let func_name = format_ident!("{}", region.name);
     quote! {
         pub fn #func_name(&self) -> &[tir::RegionId] {
-            &self.0.regions[#index..]
+            &self.0.regions()[#index..]
         }
     }
 }
@@ -1359,8 +1359,8 @@ fn make_generic_printer(
 
     let result_prefix = if has_results {
         quote! {
-            if !self.0.results.is_empty() {
-                fmt.write(format!("%{} = ", self.0.results[0].number()))?;
+            if !self.0.results().is_empty() {
+                fmt.write(format!("%{} = ", self.0.results()[0].number()))?;
             }
         }
     } else {
@@ -1368,9 +1368,9 @@ fn make_generic_printer(
     };
 
     let printed_operands = if state.input {
-        quote! { &self.0.operands[..self.0.operands.len() - self.state_operand().is_some() as usize] }
+        quote! { &self.0.operands()[..self.0.operands().len() - self.state_operand().is_some() as usize] }
     } else {
-        quote! { &self.0.operands[..] }
+        quote! { &self.0.operands()[..] }
     };
 
     let operand_printer = if !operands.is_empty() {
@@ -1410,9 +1410,9 @@ fn make_generic_printer(
 
     let result_suffix = if has_results {
         quote! {
-            if !self.0.results.is_empty() {
+            if !self.0.results().is_empty() {
                 let context = self.0.context.upgrade();
-                let result_val = context.get_value(self.0.results[0]);
+                let result_val = context.get_value(self.0.results()[0]);
                 fmt.write(" : ")?;
                 context.print_type(result_val.ty(), fmt)?;
             }

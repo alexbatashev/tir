@@ -90,13 +90,13 @@ impl Pass for DeadCodeEliminationPass {
 /// with SSA results must additionally declare pure semantics, so effectful ops
 /// like calls survive even when their result is unread.
 fn is_erasable(instance: &Arc<OpInstance>, use_counts: &HashMap<u32, usize>) -> bool {
-    if !instance.regions.is_empty()
+    if !instance.regions().is_empty()
         || instance.clone().as_interface::<dyn Terminator>().is_some()
         || instance.clone().as_interface::<dyn MemoryWrite>().is_some()
     {
         return false;
     }
-    if !instance.results.is_empty() && !is_pure_value(instance) {
+    if !instance.results().is_empty() && !is_pure_value(instance) {
         return false;
     }
 

@@ -85,7 +85,7 @@ impl tir::GuardedLoop for ForOp {
 
 impl LoopOp for ForOp {
     fn loop_results(&self) -> Vec<ValueId> {
-        self.0.results.clone()
+        self.0.results().to_vec()
     }
     fn init_operands(&self) -> Vec<ValueId> {
         self.operands()[3..].to_vec()
@@ -118,7 +118,7 @@ impl tir::LoopLike for ForOp {
 
 impl TokenScope for ForOp {
     fn token_scope_regions(&self) -> Vec<tir::RegionId> {
-        vec![self.0.regions[0]]
+        vec![self.0.regions()[0]]
     }
 }
 
@@ -203,16 +203,16 @@ impl tir::GuardedLoop for WhileOp {
         let block = self.condition_region();
         let terminator = context.get_op(*block.op_ids().last().unwrap());
         tir::EntryGuard::Region {
-            region: self.0.regions[0],
+            region: self.0.regions()[0],
             arguments: block.arguments().iter().map(Value::id).collect(),
-            condition: terminator.operands[0],
+            condition: terminator.operands()[0],
         }
     }
 }
 
 impl LoopOp for WhileOp {
     fn loop_results(&self) -> Vec<ValueId> {
-        self.0.results.clone()
+        self.0.results().to_vec()
     }
     fn init_operands(&self) -> Vec<ValueId> {
         self.operands().to_vec()
@@ -249,7 +249,7 @@ impl tir::LoopLike for WhileOp {
 
 impl TokenScope for WhileOp {
     fn token_scope_regions(&self) -> Vec<tir::RegionId> {
-        vec![self.0.regions[1]]
+        vec![self.0.regions()[1]]
     }
 }
 
@@ -382,8 +382,8 @@ impl tir::Conditional for IfOp {
 
     fn guarded_regions(&self) -> Vec<(tir::RegionId, ValueId, bool)> {
         vec![
-            (self.0.regions[0], self.condition(), true),
-            (self.0.regions[1], self.condition(), false),
+            (self.0.regions()[0], self.condition(), true),
+            (self.0.regions()[1], self.condition(), false),
         ]
     }
 }
@@ -398,7 +398,7 @@ impl tir::Verifiable for IfOp {
         // result, of the matching type; a resultless `scf.if` must yield nothing.
         let result_types = self
             .0
-            .results
+            .results()
             .iter()
             .map(|&r| context.get_value(r).ty())
             .collect::<Vec<_>>();
@@ -422,13 +422,13 @@ impl IfOp {
 
     fn custom_print(&self, fmt: &mut tir::IRFormatter) -> Result<(), std::fmt::Error> {
         let context = self.0.context.upgrade();
-        if !self.0.results.is_empty() {
-            print_value_list(fmt, &self.0.results)?;
+        if !self.0.results().is_empty() {
+            print_value_list(fmt, self.0.results())?;
             fmt.write(" = ")?;
         }
         fmt.write(format!("scf.if %{}", self.condition().number()))?;
         print_gamma_inputs(fmt, self.inputs())?;
-        print_result_types(fmt, &context, &self.0.results)?;
+        print_result_types(fmt, &context, self.0.results())?;
         print_arm_arguments(fmt, self.then_body())?;
         tir::region_format::print_op_region(fmt, &context, self, 0)?;
         fmt.write(" else")?;
@@ -553,7 +553,7 @@ impl tir::Verifiable for SwitchOp {
 
         let result_types = self
             .0
-            .results
+            .results()
             .iter()
             .map(|&r| context.get_value(r).ty())
             .collect::<Vec<_>>();
@@ -603,13 +603,13 @@ impl SwitchOp {
 
     fn custom_print(&self, fmt: &mut tir::IRFormatter) -> Result<(), std::fmt::Error> {
         let context = self.0.context.upgrade();
-        if !self.0.results.is_empty() {
-            print_value_list(fmt, &self.0.results)?;
+        if !self.0.results().is_empty() {
+            print_value_list(fmt, self.0.results())?;
             fmt.write(" = ")?;
         }
         fmt.write(format!("scf.switch %{}", self.predicate().number()))?;
         print_gamma_inputs(fmt, self.inputs())?;
-        print_result_types(fmt, &context, &self.0.results)?;
+        print_result_types(fmt, &context, self.0.results())?;
         let arms = self.arms().to_vec();
         for (index, case) in self.cases().iter().enumerate() {
             fmt.write(format!(" case {case}"))?;
@@ -831,9 +831,9 @@ fn latched_values(op: &impl LoopOp) -> Vec<ValueId> {
 /// `scf.continue` carries past its scope token, and everything else's operands.
 fn exit_values(terminator: &Arc<tir::OpInstance>) -> &[ValueId] {
     if terminator.is::<BreakOp>() || terminator.is::<ContinueOp>() {
-        &terminator.operands[1..]
+        &terminator.operands()[1..]
     } else {
-        &terminator.operands
+        terminator.operands()
     }
 }
 
@@ -1172,7 +1172,7 @@ fn verify_loop_carried<T: LoopOp + Operation>(context: &Context, op: &T) -> Resu
         )));
     }
     if (terminator.is::<BreakOp>() || terminator.is::<ContinueOp>())
-        && (scope_args.len() != 1 || terminator.operands[0] != scope_args[0].id())
+        && (scope_args.len() != 1 || terminator.operands()[0] != scope_args[0].id())
     {
         return Err(Error::VerificationError(format!(
             "{label} exit must consume its body token scope"
@@ -1240,16 +1240,16 @@ fn verify_scope_exits(
 ) -> Result<(), Error> {
     for op_id in block.op_ids() {
         let op = context.get_op(op_id);
-        for &region in &op.regions {
+        for &region in op.regions() {
             for nested in context.get_region(region).iter(context.clone()) {
                 verify_scope_exits(context, &nested, scope, results, label)?;
             }
         }
         let is_exit = op.is::<BreakOp>() || op.is::<ContinueOp>();
-        if !is_exit || op.operands[0] != scope {
+        if !is_exit || op.operands()[0] != scope {
             continue;
         }
-        let carried = &op.operands[1..];
+        let carried = &op.operands()[1..];
         if carried.len() != results.len() {
             return Err(Error::VerificationError(format!(
                 "{label} carries {} values but its {}.{} carries {}",
@@ -1281,7 +1281,7 @@ fn verify_while_condition(context: &Context, op: &WhileOp) -> Result<(), Error> 
         ));
     }
     let arguments = block.arguments();
-    let results = &op.0.results;
+    let results = &op.0.results();
     if arguments.len() != results.len() {
         return Err(Error::VerificationError(format!(
             "scf.while has {} results but its condition carries {} arguments",
@@ -1290,11 +1290,11 @@ fn verify_while_condition(context: &Context, op: &WhileOp) -> Result<(), Error> 
         )));
     }
     // `scf.condition` forwards the deciding boolean plus one value per carried port.
-    if terminator.operands.len() != results.len() + 1 {
+    if terminator.operands().len() != results.len() + 1 {
         return Err(Error::VerificationError(format!(
             "scf.while has {} results but its scf.condition forwards {} values",
             results.len(),
-            terminator.operands.len().saturating_sub(1)
+            terminator.operands().len().saturating_sub(1)
         )));
     }
     for (port, &result) in results.iter().enumerate() {
@@ -1304,7 +1304,7 @@ fn verify_while_condition(context: &Context, op: &WhileOp) -> Result<(), Error> 
                 "scf.while condition argument {port} type must match the type of result {port}"
             )));
         }
-        if context.get_value(terminator.operands[port + 1]).ty() != ty {
+        if context.get_value(terminator.operands()[port + 1]).ty() != ty {
             return Err(Error::VerificationError(format!(
                 "scf.condition forwarded value {port} type must match the type of result {port}"
             )));
@@ -1345,7 +1345,7 @@ fn region_yielded_values(context: &Context, region: tir::RegionId) -> Vec<ValueI
     };
     let terminator = context.get_op(terminator);
     if terminator.is::<YieldOp>() {
-        terminator.operands.clone()
+        terminator.operands().to_vec()
     } else {
         vec![]
     }
@@ -1365,7 +1365,7 @@ fn verify_region_yield(
     if !terminator.is::<YieldOp>() {
         return Ok(());
     }
-    let operands = &terminator.operands;
+    let operands = &terminator.operands();
     if operands.len() != expected.len() {
         return Err(Error::VerificationError(format!(
             "{label} must yield {} values, but yields {}",

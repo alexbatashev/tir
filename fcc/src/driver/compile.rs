@@ -104,7 +104,7 @@ fn describe_target(
 ) -> tir::builtin::ModuleOp {
     use tir::Operation;
 
-    let mut attributes = context.get_op(module.id()).attributes.clone();
+    let mut attributes = context.get_op(module.id()).attributes().to_vec();
     let specs = [
         (tir::DATA_LAYOUT, machine.data_layout()),
         (tir::TARGET_ENV, machine.target_env()),

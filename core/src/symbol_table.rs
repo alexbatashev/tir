@@ -31,7 +31,7 @@ impl SymbolTable {
     pub fn build(context: &Context, module: OpId) -> Self {
         let mut symbols: HashMap<String, Vec<SymbolEntry>> = HashMap::new();
         let instance = context.get_op(module);
-        for region in &instance.regions {
+        for region in instance.regions() {
             for block in context.get_region(*region).iter(context.clone()) {
                 for op in block.op_ids() {
                     let op_instance = context.get_op(op);

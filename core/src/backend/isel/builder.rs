@@ -118,7 +118,7 @@ impl<'a> SemDagBuilder<'a> {
     fn build_block(&mut self, block: BlockId, float_widths: &HashSet<u32>, seeds: &mut Seeds) {
         for op_id in self.context.get_block(block).op_ids() {
             let op = self.context.get_op(op_id);
-            if !op.regions.is_empty() {
+            if !op.regions().is_empty() {
                 self.build_region_op(&op, float_widths, seeds);
             } else {
                 self.build_plain_op(op_id, &op, float_widths, seeds);
@@ -152,11 +152,11 @@ impl<'a> SemDagBuilder<'a> {
     ) {
         if let Some(root) = self.build_for_op(op).or_else(|| {
             op.is::<crate::builtin::ConstantOp>()
-                .then(|| self.build_from_value(op.results[0]))
+                .then(|| self.build_from_value(op.results()[0]))
         }) {
             seeds.roots_by_op.insert(op_id, root);
         } else if op.is::<crate::builtin::ConstantFOp>()
-            && let Some(&result) = op.results.first()
+            && let Some(&result) = op.results().first()
             && self
                 .float_width(result)
                 .is_some_and(|width| float_widths.contains(&width))
@@ -185,7 +185,7 @@ impl<'a> SemDagBuilder<'a> {
         seeds: &mut Seeds,
     ) {
         if let Some(conditional) = op.clone().as_interface::<dyn Conditional>() {
-            for region in op.regions.clone() {
+            for region in op.regions().to_vec() {
                 self.bind_region_arguments(op, region);
                 self.build_region(region, float_widths, seeds);
             }
@@ -197,7 +197,7 @@ impl<'a> SemDagBuilder<'a> {
             self.seed_theta(op, loop_like.as_ref(), float_widths, seeds);
             return;
         }
-        for region in op.regions.clone() {
+        for region in op.regions().to_vec() {
             self.build_region(region, float_widths, seeds);
         }
         self.break_state();
@@ -218,7 +218,7 @@ impl<'a> SemDagBuilder<'a> {
             .map(|&(region, _)| region)
             .filter(|&region| region_exit(self.context, region).is_none())
             .collect();
-        for (index, &result) in op.results.clone().iter().enumerate() {
+        for (index, &result) in op.results().to_vec().iter().enumerate() {
             let yields: Option<Vec<ValueId>> = arms
                 .iter()
                 .map(|&region| conditional.region_yields(region).get(index).copied())
@@ -256,8 +256,8 @@ impl<'a> SemDagBuilder<'a> {
             return;
         };
         let arguments: Vec<ValueId> = block.arguments().iter().map(|a| a.id()).collect();
-        let first = op.operands.len().saturating_sub(arguments.len());
-        for (&argument, &input) in arguments.iter().zip(&op.operands[first..]) {
+        let first = op.operands().len().saturating_sub(arguments.len());
+        for (&argument, &input) in arguments.iter().zip(&op.operands()[first..]) {
             let class = self.build_from_value(input);
             self.value_to_class.insert(argument, class);
         }
@@ -297,7 +297,7 @@ impl<'a> SemDagBuilder<'a> {
                 self.value_to_class.insert(argument, class);
             }
         }
-        for region in op.regions.clone() {
+        for region in op.regions().to_vec() {
             if tested
                 .as_ref()
                 .is_some_and(|(tested, ..)| *tested == region)
@@ -382,7 +382,8 @@ impl<'a> SemDagBuilder<'a> {
             .get_region(region)
             .iter(self.context.clone())
             .next()?;
-        let operands = &self.context.get_op(*block.op_ids().last()?).operands;
+        let op = self.context.get_op(*block.op_ids().last()?);
+        let operands = op.operands();
         let first = operands.len().checked_sub(ports)?;
         Some((region, arguments, operands[first..].to_vec()))
     }
@@ -476,7 +477,7 @@ impl<'a> SemDagBuilder<'a> {
         let Some(counted) = op.clone().as_interface::<dyn CountedLoop>() else {
             return;
         };
-        let Some(body) = op.regions.first().and_then(|&region| {
+        let Some(body) = op.regions().first().and_then(|&region| {
             self.context
                 .get_region(region)
                 .iter(self.context.clone())
@@ -622,7 +623,7 @@ impl<'a> SemDagBuilder<'a> {
         let class = if let Some(class) = self.build_memory_effect(op) {
             class
         } else {
-            let operands = self.build_operands(&op.operands);
+            let operands = self.build_operands(op.operands());
             let mut graph = SemGraph::new();
             let Some(root) = op.clone().as_dyn_op().semantic_expr(&mut graph) else {
                 // Nothing says what this operation does, so nothing says it left
@@ -639,7 +640,7 @@ impl<'a> SemDagBuilder<'a> {
             }
             class
         };
-        for result in &op.results {
+        for result in op.results() {
             self.value_to_class.insert(*result, class);
         }
         Some(class)
@@ -731,7 +732,7 @@ impl<'a> SemDagBuilder<'a> {
             return None;
         }
         let def = self.context.get_op(def_id);
-        if def.results.len() != 1
+        if def.results().len() != 1
             || def.clone().as_interface::<dyn MemoryRead>().is_some()
             || def.clone().as_interface::<dyn MemoryWrite>().is_some()
         {
@@ -739,7 +740,7 @@ impl<'a> SemDagBuilder<'a> {
         }
         let mut graph = SemGraph::new();
         let root = def.clone().as_dyn_op().semantic_expr(&mut graph)?;
-        let operands = self.build_operands(&def.operands);
+        let operands = self.build_operands(def.operands());
         let class = self.lower_typed(&graph, root, &operands);
         let comparison = self
             .egraph
@@ -773,7 +774,7 @@ impl<'a> SemDagBuilder<'a> {
             } else {
                 let mut graph = SemGraph::new();
                 if let Some(root) = def.clone().as_dyn_op().semantic_expr(&mut graph) {
-                    let operands = self.build_operands(&def.operands);
+                    let operands = self.build_operands(def.operands());
                     self.lower_typed(&graph, root, &operands)
                 } else {
                     self.add_input_value(value, value_ty)
@@ -812,7 +813,7 @@ impl<'a> SemDagBuilder<'a> {
     }
 
     fn float_constant_class(&mut self, def: &std::sync::Arc<OpInstance>) -> Option<Id> {
-        let &result = def.results.first()?;
+        let &result = def.results().first()?;
         let result_ty = self.context.get_value(result).ty();
         let width = {
             let data = self.context.get_type_data(result_ty);

@@ -203,13 +203,13 @@ fn vlen_node(
     op: &tir::OpInstance,
     g: &mut impl tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
 ) -> tir::graph::NodeId {
-    if op.operands.len() > 2 {
+    if op.operands().len() > 2 {
         let n = g.add_node(tir::sem::SymKind::Symbol);
         g.set_leaf_data(n, tir::sem::SymPayload::SymbolId(2));
         return n;
     }
     let context = op.context.upgrade();
-    let ty = context.get_value(op.results[0]).ty();
+    let ty = context.get_value(op.results()[0]).ty();
     let length = (context.get_type_data(ty).as_ref() as &dyn Any)
         .downcast_ref::<VectorType>()
         .and_then(|t| t.length())
@@ -230,7 +230,7 @@ fn sew_node(
     g: &mut impl tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
 ) -> tir::graph::NodeId {
     let context = op.context.upgrade();
-    let ty = context.get_value(op.results[0]).ty();
+    let ty = context.get_value(op.results()[0]).ty();
     let width = (context.get_type_data(ty).as_ref() as &dyn Any)
         .downcast_ref::<VectorType>()
         .map(|t| t.element(&context))

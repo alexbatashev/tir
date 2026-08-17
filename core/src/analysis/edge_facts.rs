@@ -97,7 +97,7 @@ fn collect_cfg(context: &Context, root: OpId) -> Cfg {
 
     let entry = context
         .get_op(root)
-        .regions
+        .regions()
         .first()
         .and_then(|region| context.get_region(*region).iter(context.clone()).next())
         .map(|block| block.id());
@@ -122,7 +122,7 @@ fn collect_cfg(context: &Context, root: OpId) -> Cfg {
 
         // Structured control flow: nested region entries carry an implicit edge.
         for op_id in &op_ids {
-            for region_id in &context.get_op(*op_id).regions {
+            for region_id in context.get_op(*op_id).regions() {
                 if let Some(child) = context.get_region(*region_id).iter(context.clone()).next() {
                     entry_blocks.insert(child.id());
                     targets.push(child.id());

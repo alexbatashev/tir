@@ -655,7 +655,7 @@ impl FunctionSelection {
                 // block's own definition of it — so the definition still has to
                 // be selected, and the adopted name witnesses nothing.
                 if def_block == block
-                    && !op.regions.is_empty()
+                    && !op.regions().is_empty()
                     && self.defined_in(context, class, block)
                 {
                     return false;
@@ -1284,7 +1284,7 @@ impl InstructionSelectPass {
         // solve graphs of their own when the walk reaches them.
         for block_id in function_blocks(context, op, true) {
             for op_id in context.get_block(block_id).op_ids() {
-                if !context.get_op(op_id).regions.is_empty() {
+                if !context.get_op(op_id).regions().is_empty() {
                     self.solved.insert(op_id);
                 }
             }
@@ -1384,7 +1384,7 @@ impl InstructionSelectPass {
             for (position, op_id) in context.get_block(block_id).op_ids().into_iter().enumerate() {
                 op_block.insert(op_id, block_id);
                 op_position.insert(op_id, position);
-                for result in &context.get_op(op_id).results {
+                for result in context.get_op(op_id).results() {
                     value_to_def.insert(*result, op_id);
                 }
             }
@@ -1418,7 +1418,7 @@ impl InstructionSelectPass {
             for &block_id in &function_blocks(context, op, true) {
                 for op_id in context.get_block(block_id).op_ids() {
                     let inner = context.get_op(op_id);
-                    if inner.regions.is_empty() {
+                    if inner.regions().is_empty() {
                         continue;
                     }
                     builder.build_region_control(&inner, block_id, &mut region_control);
@@ -1512,7 +1512,7 @@ impl InstructionSelectPass {
                 arg_block.insert(argument.id(), block_id);
             }
             for op_id in context.get_block(block_id).op_ids() {
-                for operand in &context.get_op(op_id).operands {
+                for operand in context.get_op(op_id).operands() {
                     *operand_uses.entry(*operand).or_insert(0) += 1;
                 }
             }
@@ -1523,7 +1523,7 @@ impl InstructionSelectPass {
         let mut region_use: HashMap<ValueId, OpId> = HashMap::new();
         for &block_id in &function_blocks(context, op, true) {
             for op_id in context.get_block(block_id).op_ids() {
-                for operand in &context.get_op(op_id).operands {
+                for operand in context.get_op(op_id).operands() {
                     let Some(def_block) = value_to_def
                         .get(operand)
                         .map(|def| op_block[def])
@@ -1551,7 +1551,7 @@ impl InstructionSelectPass {
         for (&op, &root) in &roots_by_op {
             if context
                 .get_op(op)
-                .results
+                .results()
                 .iter()
                 .any(|r| operand_uses.get(r).copied().unwrap_or(0) > 1)
             {
@@ -1593,7 +1593,7 @@ impl InstructionSelectPass {
         let mut demand = HashSet::new();
         for (&op_id, &class) in &roots_by_op {
             let def_block = op_block[&op_id];
-            for &result in &context.get_op(op_id).results {
+            for &result in context.get_op(op_id).results() {
                 if needs_register(result, class, def_block) {
                     demand.insert((chase(&egraph, class), def_block));
                 }
@@ -1601,7 +1601,7 @@ impl InstructionSelectPass {
         }
         for &(op_id, class) in &constant_candidates {
             let def_block = op_block[&op_id];
-            for &result in &context.get_op(op_id).results {
+            for &result in context.get_op(op_id).results() {
                 if needs_register(result, class, def_block) {
                     demand.insert((chase(&egraph, class), def_block));
                 }
@@ -1678,7 +1678,7 @@ impl InstructionSelectPass {
         let Some(emitters) = self.branch_emitters.as_ref() else {
             return Ok(());
         };
-        let Some(&region) = op.op().regions.first() else {
+        let Some(&region) = op.op().regions().first() else {
             return Ok(());
         };
         destruct::Destructor::new(
@@ -1752,7 +1752,7 @@ impl InstructionSelectPass {
             for (&old, new) in scheduled
                 .results
                 .iter()
-                .zip(context.get_op(op.id()).results.iter())
+                .zip(context.get_op(op.id()).results().iter())
             {
                 self.emitted_values.insert(old, *new);
             }
@@ -2042,7 +2042,7 @@ impl InstructionSelectPass {
         for &(class, _) in &tiles {
             let source_op = block_op_by_root.get(&class).copied();
             let mut results = source_op
-                .map(|op| context.get_op(op).results.clone())
+                .map(|op| context.get_op(op).results().to_vec())
                 .unwrap_or_default();
             let mut result_ty = results.first().map(|value| context.get_value(*value).ty());
             if results.is_empty() && node::class_is_pure(&fs.egraph, class) {
@@ -2139,7 +2139,7 @@ impl InstructionSelectPass {
                 value_remaps.extend(
                     context
                         .get_op(op)
-                        .results
+                        .results()
                         .iter()
                         .copied()
                         .map(|value| (value, source)),
@@ -2602,14 +2602,14 @@ fn function_blocks(context: &Context, op: &OperationRef, nested: bool) -> Vec<Bl
                 out.push(block.id());
                 if nested {
                     for op_id in block.op_ids() {
-                        walk(context, &context.get_op(op_id).regions, true, out);
+                        walk(context, context.get_op(op_id).regions(), true, out);
                     }
                 }
             }
         }
     }
     let mut blocks = Vec::new();
-    walk(context, &op.op().regions, nested, &mut blocks);
+    walk(context, op.op().regions(), nested, &mut blocks);
     blocks
 }
 
@@ -2690,7 +2690,7 @@ fn region_entry_facts(op: &Arc<OpInstance>) -> Vec<(RegionId, ValueId, bool)> {
     else {
         return Vec::new();
     };
-    op.regions
+    op.regions()
         .iter()
         .filter(|&&region| region != test)
         .map(|&region| (region, condition, true))
@@ -2791,7 +2791,7 @@ impl Pass for InstructionSelectPass {
         // shared graph and solve every block up front — a dominating-edge fact
         // reads the guard condition's *defining op*, which a dominator's commit
         // would otherwise have replaced by the time the dominated block solves.
-        if !op.op().regions.is_empty() {
+        if !op.op().regions().is_empty() {
             if let Some(lowering) = &mut self.call_lowering {
                 lowering.prepare_function(context, op, rewriter)?;
             }

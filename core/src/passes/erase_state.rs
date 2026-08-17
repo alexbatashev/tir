@@ -43,7 +43,7 @@ impl Pass for EraseStatePass {
         if op.as_op::<FuncOp>().is_none() {
             return Ok(());
         }
-        let Some(&body) = op.op().regions.first() else {
+        let Some(&body) = op.op().regions().first() else {
             return Ok(());
         };
         let state = StateType::new(context);
@@ -176,7 +176,7 @@ fn sweep_dead_slots(
 fn drop_trailing_state_operands(context: &Context, op: OpId, state: TypeId) {
     while context
         .get_op(op)
-        .operands
+        .operands()
         .last()
         .is_some_and(|&operand| context.get_value(operand).ty() == state)
     {
@@ -187,7 +187,7 @@ fn drop_trailing_state_operands(context: &Context, op: OpId, state: TypeId) {
 fn drop_trailing_state_results(context: &Context, op: OpId, state: TypeId) {
     while context
         .get_op(op)
-        .results
+        .results()
         .last()
         .is_some_and(|&result| context.get_value(result).ty() == state)
     {
@@ -212,7 +212,7 @@ fn blocks_under(context: &Context, region: RegionId) -> Vec<BlockId> {
     let mut blocks = Vec::new();
     for block in context.get_region(region).iter(context.clone()) {
         for op_id in block.op_ids() {
-            for &nested in &context.get_op(op_id).regions {
+            for &nested in context.get_op(op_id).regions() {
                 blocks.extend(blocks_under(context, nested));
             }
         }

@@ -50,7 +50,7 @@ impl Pass for ThreadStatePass {
         if op.as_op::<FuncOp>().is_none() {
             return Ok(());
         }
-        let Some(&body) = op.op().regions.first() else {
+        let Some(&body) = op.op().regions().first() else {
             return Ok(());
         };
         let block_ids = context.get_region(body).block_ids();
@@ -190,7 +190,7 @@ impl Threader<'_> {
             .collect::<Vec<_>>();
 
         let entries = op
-            .regions
+            .regions()
             .iter()
             .map(|&region| context.get_block(context.get_region(region).block_ids()[0]))
             .collect::<Vec<_>>();
@@ -207,7 +207,7 @@ impl Threader<'_> {
 
         let scope = loop_scope(
             context,
-            *op.regions.last().expect("a region to carry state"),
+            *op.regions().last().expect("a region to carry state"),
         );
         if let Some(scope) = scope {
             self.scopes.push((scope, carried.clone()));
@@ -257,7 +257,7 @@ impl Threader<'_> {
 
     /// Whether anything inside `op`'s regions accesses `chain`.
     fn touches_chain(&self, op: &Arc<OpInstance>, chain: Chain) -> bool {
-        op.regions
+        op.regions()
             .iter()
             .flat_map(|&region| region_ops(self.context, region))
             .any(|op_id| {
@@ -336,7 +336,7 @@ fn touches_memory(op: &Arc<OpInstance>) -> bool {
 fn threadable(context: &Context, block: &Arc<Block>) -> bool {
     block.op_ids().iter().all(|&op_id| {
         let op = context.get_op(op_id);
-        if op.regions.is_empty()
+        if op.regions().is_empty()
             || !(subtree_touches_memory(context, &op)
                 || !nested_exit_scopes(context, &op).is_empty())
         {
@@ -345,7 +345,7 @@ fn threadable(context: &Context, block: &Arc<Block>) -> bool {
         if !carries_state(&op) {
             return false;
         }
-        op.regions.iter().all(|&region| {
+        op.regions().iter().all(|&region| {
             let blocks = context.get_region(region).block_ids();
             let [entry] = blocks[..] else {
                 return false;
@@ -364,7 +364,7 @@ fn carries_state(op: &Arc<OpInstance>) -> bool {
 }
 
 fn subtree_touches_memory(context: &Context, op: &Arc<OpInstance>) -> bool {
-    op.regions
+    op.regions()
         .iter()
         .flat_map(|&region| region_ops(context, region))
         .any(|op_id| touches_memory(&context.get_op(op_id)))
@@ -374,7 +374,7 @@ fn block_ops(context: &Context, block: &Arc<Block>) -> Vec<OpId> {
     let mut ops = Vec::new();
     for op_id in block.op_ids() {
         ops.push(op_id);
-        for &region in &context.get_op(op_id).regions {
+        for &region in context.get_op(op_id).regions() {
             ops.extend(region_ops(context, region));
         }
     }

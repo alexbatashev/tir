@@ -37,7 +37,7 @@ pub fn print_ir(
 /// first met. Specs that repeat share one definition.
 fn collect_aliases(context: &Context, op: OpId, aliases: &mut Vec<(String, AttributeValue)>) {
     let instance = context.get_op(op);
-    for attribute in &instance.attributes {
+    for attribute in instance.attributes() {
         let name = context.resolve(attribute.name);
         let aliased = matches!(name.as_str(), DATA_LAYOUT | TARGET_ENV)
             && matches!(attribute.value, AttributeValue::Dict(_));
@@ -48,7 +48,7 @@ fn collect_aliases(context: &Context, op: OpId, aliases: &mut Vec<(String, Attri
         aliases.push((name, attribute.value.clone()));
     }
 
-    for region in &instance.regions {
+    for region in instance.regions() {
         for block in context.get_region(*region).iter(context.clone()) {
             for child in block.op_ids() {
                 collect_aliases(context, child, aliases);

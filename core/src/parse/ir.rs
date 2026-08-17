@@ -107,7 +107,7 @@ pub(crate) fn parse_single_op<'src>(
             .map_err(|e| (parser.span(), e))?;
 
         let op = op_parser(parser, context)?;
-        let results = context.get_op(op.id()).results.clone();
+        let results = context.get_op(op.id()).results().to_vec();
         for (name, result) in result_names.iter().zip(results) {
             parser.define_value(name, result);
         }

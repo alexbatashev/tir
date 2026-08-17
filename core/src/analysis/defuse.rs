@@ -70,13 +70,13 @@ pub fn op_regs(op: &Arc<OpInstance>) -> OpRegs {
     let mut regs = OpRegs::default();
 
     // Builtin SSA ops (e.g. the block terminator) name registers positionally.
-    for result in &op.results {
+    for result in op.results() {
         regs.defs.push(RegRef::Virtual {
             id: result.number(),
             class: None,
         });
     }
-    for operand in &op.operands {
+    for operand in op.operands() {
         regs.uses.push(RegRef::Virtual {
             id: operand.number(),
             class: None,
@@ -86,7 +86,7 @@ pub fn op_regs(op: &Arc<OpInstance>) -> OpRegs {
     // Machine ops carry their register operands in attributes, with a def/use role.
     // An array of registers (e.g. a call's caller-saved clobber list) applies the
     // attribute's role to every element.
-    for attr in &op.attributes {
+    for attr in op.attributes() {
         let attr_regs: Vec<&RegisterAttr> = match &attr.value {
             AttributeValue::Register(reg) => vec![reg],
             AttributeValue::Array(items) => items
@@ -202,12 +202,12 @@ impl DefUse {
     /// [`AnalysisManager`] to cache the result in.
     pub fn new<O: Into<OpId>>(context: &Context, root: O) -> Self {
         let mut result = Self::default();
-        let mut stack = context.get_op(root.into()).regions.clone();
+        let mut stack = context.get_op(root.into()).regions().to_vec();
         while let Some(region) = stack.pop() {
             for block in context.get_region(region).iter(context.clone()) {
                 for op_id in block.op_ids() {
                     let instance = context.get_op(op_id);
-                    stack.extend(instance.regions.iter().copied());
+                    stack.extend(instance.regions().iter().copied());
                     result.ops.push(op_id);
                     let regs = op_regs(&instance);
                     for def in regs.defs {

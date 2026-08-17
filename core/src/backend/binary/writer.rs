@@ -207,7 +207,7 @@ impl BinaryWriter {
         state.obj.sections[section].data.resize(aligned as usize, 0);
         state.obj.sections[section].align = state.obj.sections[section].align.max(align);
         let start = state.obj.sections[section].data.len() as u64;
-        let region = context.get_region(op.regions[0]);
+        let region = context.get_region(op.regions()[0]);
         for block in region.iter(context.clone()) {
             let offset = state.obj.sections[section].data.len() as u64;
             state.block_starts.insert(block.id(), offset);

@@ -41,7 +41,7 @@ fn run(context: &Context, ops: Vec<OpId>, values: &mut HashMap<ValueId, i64>) ->
         let named = |dialect: &str, name: &str| {
             instance.dialect().as_str() == dialect && instance.name().as_str() == name
         };
-        let read = |index: usize| values.get(&instance.operands[index]).copied();
+        let read = |index: usize| values.get(&instance.operands()[index]).copied();
         let computed = if named("builtin", "constant") {
             match instance.attr("value")? {
                 AttributeValue::Int(value) => Some(*value),
@@ -71,27 +71,27 @@ fn run(context: &Context, ops: Vec<OpId>, values: &mut HashMap<ValueId, i64>) ->
             None
         };
         if let Some(computed) = computed {
-            values.insert(instance.results[0], computed);
+            values.insert(instance.results()[0], computed);
             continue;
         }
 
         if named("builtin", "return") {
-            return Some(Leave::Return(operands(&instance.operands, values)?));
+            return Some(Leave::Return(operands(instance.operands(), values)?));
         }
         if named("scf", "yield") {
-            return Some(Leave::Yield(operands(&instance.operands, values)?));
+            return Some(Leave::Yield(operands(instance.operands(), values)?));
         }
         if named("scf", "condition") {
             let repeat = read(0)? != 0;
             return Some(Leave::Condition(
                 repeat,
-                operands(&instance.operands[1..], values)?,
+                operands(&instance.operands()[1..], values)?,
             ));
         }
 
         let results = if named("scf", "if") {
             let taken = usize::from(read(0)? == 0);
-            let Leave::Yield(results) = region(context, instance.regions[taken], &[], values)?
+            let Leave::Yield(results) = region(context, instance.regions()[taken], &[], values)?
             else {
                 return None;
             };
@@ -112,16 +112,16 @@ fn run(context: &Context, ops: Vec<OpId>, values: &mut HashMap<ValueId, i64>) ->
                 .iter()
                 .position(|case| *case == predicate)
                 .unwrap_or(cases.len());
-            let Leave::Yield(results) = region(context, instance.regions[taken], &[], values)?
+            let Leave::Yield(results) = region(context, instance.regions()[taken], &[], values)?
             else {
                 return None;
             };
             results
         } else if named("scf", "while") {
-            let mut carried = operands(&instance.operands, values)?;
+            let mut carried = operands(instance.operands(), values)?;
             loop {
                 let Leave::Condition(repeat, next) =
-                    region(context, instance.regions[0], &carried, values)?
+                    region(context, instance.regions()[0], &carried, values)?
                 else {
                     return None;
                 };
@@ -133,7 +133,7 @@ fn run(context: &Context, ops: Vec<OpId>, values: &mut HashMap<ValueId, i64>) ->
         } else {
             return None;
         };
-        for (&result, value) in instance.results.iter().zip(results) {
+        for (&result, value) in instance.results().iter().zip(results) {
             values.insert(result, value);
         }
     }

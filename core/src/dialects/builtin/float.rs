@@ -144,7 +144,7 @@ fn float_format_node(
     format: impl FnOnce(&crate::builtin::FloatType) -> u32,
 ) -> tir::graph::NodeId {
     let context = op.context.upgrade();
-    let ty = context.get_value(op.results[0]).ty();
+    let ty = context.get_value(op.results()[0]).ty();
     let ty = context.get_type_data(ty);
     let float = (ty.as_ref() as &dyn std::any::Any)
         .downcast_ref::<crate::builtin::FloatType>()

@@ -491,7 +491,7 @@ fn lower_vector_len(
         return Ok(false);
     }
     let inner = op.op();
-    let (Some(&result), Some(&avl)) = (inner.results.first(), inner.operands.first()) else {
+    let (Some(&result), Some(&avl)) = (inner.results().first(), inner.operands().first()) else {
         return Err(tir::PassError::RewriteFailed(inner.id));
     };
     // The grant is element-width-specific (VLMAX depends on SEW), so the op
@@ -1716,7 +1716,7 @@ mod tests {
                 Some(tir::attributes::AttributeValue::Int(3))
             ),
             "slliw should fold the immediate 3, got {:?}",
-            slliw.attributes
+            slliw.attributes()
         );
         // The folded constant is dead and removed; only slliw survives.
         assert_eq!(body, vec!["slliw", "vret", "symbol_end"]);
@@ -1801,7 +1801,7 @@ mod tests {
         for block in context.get_region(region_id).iter(context.clone()) {
             for op_id in block.op_ids() {
                 let op = context.get_op(op_id);
-                for attr in &op.attributes {
+                for attr in op.attributes() {
                     assert!(
                         !matches!(
                             attr.value,

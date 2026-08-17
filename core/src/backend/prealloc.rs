@@ -72,7 +72,7 @@ impl Pass for TiedOperandLoweringPass {
             for op_id in context.get_block(block_id).op_ids() {
                 let op = context.get_op(op_id);
                 let mut ties = Vec::new();
-                for attr in &op.attributes {
+                for attr in op.attributes() {
                     let name = context.resolve(attr.name);
                     let Some(base) = name.strip_suffix("_tied") else {
                         continue;
@@ -112,7 +112,7 @@ impl Pass for TiedOperandLoweringPass {
                         AttributeValue::Bool(true),
                     );
                 }
-                let mut attrs = op.attributes.clone();
+                let mut attrs = op.attributes().to_vec();
                 attrs.retain(|a| !ties.iter().any(|(name, ..)| a.name == *name));
                 context.set_op_attributes(op_id, attrs);
             }
@@ -170,10 +170,10 @@ impl Pass for BlockArgLoweringPass {
         for &block_id in &blocks {
             for op_id in context.get_block(block_id).op_ids() {
                 let op = context.get_op(op_id);
-                if !op.is::<VirtualBranchOp>() || op.operands.is_empty() {
+                if !op.is::<VirtualBranchOp>() || op.operands().is_empty() {
                     continue;
                 }
-                let args: Vec<u32> = op.operands.iter().map(|v| v.number()).collect();
+                let args: Vec<u32> = op.operands().iter().map(|v| v.number()).collect();
                 let Some(&AttributeValue::Block(dest)) = op.attr("dest") else {
                     return Err(PassError::InvalidRuleSet(
                         "vbr with block arguments is missing its 'dest' target".to_string(),
@@ -273,7 +273,7 @@ impl AbiPrecolorPass {
 }
 
 fn mark_op(context: &Context, op_id: tir::OpId, name: &str, value: AttributeValue) {
-    let mut attrs = context.get_op(op_id).attributes.clone();
+    let mut attrs = context.get_op(op_id).attributes().to_vec();
     attrs.push(context.named_attribute(name, value));
     context.set_op_attributes(op_id, attrs);
 }
@@ -378,7 +378,7 @@ impl Pass for AbiPrecolorPass {
                     continue;
                 }
                 let mut next_slot = HashMap::new();
-                for (operand_index, value) in body_op.operands.iter().copied().enumerate() {
+                for (operand_index, value) in body_op.operands().iter().copied().enumerate() {
                     let vreg = value.number();
                     let class = vreg_class_in(context, &blocks, vreg);
                     let kind = value_kind(context, value);
@@ -405,7 +405,7 @@ impl Pass for AbiPrecolorPass {
                     let op_ref = op_ref_in(context, block_id, op_id);
                     rewriter.insert_op_before(&op_ref, copy.as_ref())?;
                     context.set_op_operand(op_id, operand_index, ValueId::from_number(outgoing));
-                    let mut attrs = context.get_op(copy_id).attributes.clone();
+                    let mut attrs = context.get_op(copy_id).attributes().to_vec();
                     for attr in &mut attrs {
                         if let AttributeValue::Register(RegisterAttr::Virtual { id, .. }) =
                             &attr.value
@@ -429,7 +429,7 @@ impl Pass for AbiPrecolorPass {
         // Record the argument pins where the allocation pass finds them: the
         // pinned `arg_regs` (and `result_address`) entries become `FixedDef`.
         if !arg_pins.is_empty() {
-            let mut attrs = op.op().attributes.clone();
+            let mut attrs = op.op().attributes().to_vec();
             let pinned = ["arg_regs", "result_address"].map(|name| context.sym(name));
             for attr in &mut attrs {
                 if pinned.contains(&Some(attr.name)) {

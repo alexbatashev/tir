@@ -724,7 +724,7 @@ impl Executor {
         machine_inst: &dyn MachineInstruction,
     ) -> String {
         let mut pieces = Vec::new();
-        for attr in &op.attributes {
+        for attr in op.attributes() {
             let name = context.resolve(attr.name);
             let mut value_buf = String::new();
             let mut formatter = tir::IRFormatter::new(&mut value_buf);

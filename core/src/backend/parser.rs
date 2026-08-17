@@ -254,7 +254,7 @@ fn resolve_labels(context: &tir::Context, block: &Arc<Block>, labels: &HashMap<S
             .as_interface::<dyn MachineInstruction>()
             .is_some()
         {
-            let mut attrs = op.attributes.clone();
+            let mut attrs = op.attributes().to_vec();
             let imm = context.sym("imm");
             let mut changed = false;
             for attr in &mut attrs {
@@ -272,7 +272,7 @@ fn resolve_labels(context: &tir::Context, block: &Arc<Block>, labels: &HashMap<S
                 context.set_op_attributes(op_id, attrs);
             }
         }
-        for region_id in &op.regions {
+        for region_id in op.regions() {
             let region = context.get_region(*region_id);
             for child in region.iter(context.clone()) {
                 resolve_labels(context, &child, labels);

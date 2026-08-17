@@ -139,7 +139,7 @@ impl AsmPrinter {
             out.push_str(":\n");
             // The symbol label above names the entry block, so only non-entry
             // blocks emit their own label (branch targets must be defined).
-            let region = context.get_region(op.regions[0]);
+            let region = context.get_region(op.regions()[0]);
             for (index, block) in region.iter(context.clone()).enumerate() {
                 if index > 0 {
                     match block.attr("name") {

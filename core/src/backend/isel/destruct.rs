@@ -126,8 +126,8 @@ impl<'a> Destructor<'a> {
         {
             for op_id in block.op_ids() {
                 let op = self.context.get_op(op_id);
-                if !op.regions.is_empty() && op.clone().as_interface::<dyn LoopLike>().is_some()
-                    || !op.regions.is_empty()
+                if !op.regions().is_empty() && op.clone().as_interface::<dyn LoopLike>().is_some()
+                    || !op.regions().is_empty()
                         && op.clone().as_interface::<dyn Conditional>().is_some()
                 {
                     return Some((block, op));
@@ -269,12 +269,12 @@ impl<'a> Destructor<'a> {
         op: &Arc<OpInstance>,
     ) -> Result<(), PassError> {
         let test = self
-            .move_body(op.regions[0])
+            .move_body(op.regions()[0])
             .ok_or_else(|| Self::decline(op, "loop test has no block"))?;
         let (body, scope) = self
-            .move_loop_body(op.regions[1])
+            .move_loop_body(op.regions()[1])
             .ok_or_else(|| Self::decline(op, "loop body has no block"))?;
-        let inits = self.mapped(&op.operands);
+        let inits = self.mapped(op.operands());
         let continuation = self.split_after(rewriter, &block, op);
         self.add_block(test.id());
         if let Some(scope) = scope {
@@ -288,7 +288,7 @@ impl<'a> Destructor<'a> {
         }
         let terminator = self.terminator(&test)?;
         let ports = body.arguments().len();
-        let forwarded = self.mapped(&terminator.operands[terminator.operands.len() - ports..]);
+        let forwarded = self.mapped(&terminator.operands()[terminator.operands().len() - ports..]);
         let (taken_dest, taken_args) = self.seal_into(rewriter, &body, test.id(), &forwarded)?;
         self.add_block(continuation.id());
         self.erase(rewriter, &block, op)?;
@@ -328,7 +328,7 @@ impl<'a> Destructor<'a> {
             .ok_or_else(|| Self::decline(op, "loop carries nothing"))?;
         let latched = loop_like.latched();
         let (body, scope) = self
-            .move_loop_body(op.regions[0])
+            .move_loop_body(op.regions()[0])
             .ok_or_else(|| Self::decline(op, "loop body has no block"))?;
         if let Some(scope) = scope
             && self.leaves_through(&body, scope, RegionExit::Continue)
@@ -403,17 +403,17 @@ impl<'a> Destructor<'a> {
         let block = self.context.get_block(block.id());
         let terminator = self.terminator(&block)?;
         let (dest, args) = match region_exit_kind(&terminator) {
-            Some(RegionExit::Yield) => (fallthrough, terminator.operands.clone()),
+            Some(RegionExit::Yield) => (fallthrough, terminator.operands().to_vec()),
             Some(kind) => {
                 let targets = self
                     .targets
-                    .get(&terminator.operands[0])
+                    .get(&terminator.operands()[0])
                     .ok_or_else(|| Self::decline(&terminator, "exit names no enclosing loop"))?;
                 let dest = match kind {
                     RegionExit::Break => targets.break_dest,
                     _ => targets.continue_dest,
                 };
-                (dest, terminator.operands[1..].to_vec())
+                (dest, terminator.operands()[1..].to_vec())
             }
             None => return Ok(None),
         };
@@ -454,7 +454,7 @@ impl<'a> Destructor<'a> {
     fn leaves_through(&self, body: &Arc<Block>, scope: ValueId, kind: RegionExit) -> bool {
         body.op_ids().into_iter().any(|op_id| {
             let op = self.context.get_op(op_id);
-            region_exit_kind(&op) == Some(kind) && op.operands.first() == Some(&scope)
+            region_exit_kind(&op) == Some(kind) && op.operands().first() == Some(&scope)
         })
     }
 
@@ -564,8 +564,8 @@ impl<'a> Destructor<'a> {
     /// The inputs a gate forwards into each arm: its trailing operands, one per
     /// entry argument, the mapping the seeder read the arms under.
     fn entry_arguments(&self, op: &Arc<OpInstance>, arm: &Arc<Block>) -> Vec<ValueId> {
-        let first = op.operands.len().saturating_sub(arm.arguments().len());
-        self.mapped(&op.operands[first..])
+        let first = op.operands().len().saturating_sub(arm.arguments().len());
+        self.mapped(&op.operands()[first..])
     }
 
     fn terminator(&self, block: &Arc<Block>) -> Result<Arc<OpInstance>, PassError> {
@@ -621,7 +621,7 @@ impl<'a> Destructor<'a> {
         let block = self.context.get_block(block.id());
         let position = block.op_ids().iter().position(|id| *id == op.id).unwrap();
         let continuation = rewriter.split_block(block.id(), position + 1);
-        for &result in &op.results {
+        for &result in op.results() {
             self.context.adopt_block_argument(continuation.id(), result);
         }
         self.context.get_block(continuation.id())

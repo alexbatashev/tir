@@ -465,7 +465,7 @@ impl Context {
         instance.id = op_id;
 
         // Results are created before op id assignment in builders; patch their def-site now.
-        for result_id in &instance.results {
+        for result_id in instance.results() {
             if let Some(value) = slab_get_mut(&mut inner.values, result_id.index()) {
                 value.set_defining_op(op_id);
             }
@@ -501,7 +501,7 @@ impl Context {
             }
         }
 
-        for r in &instance.regions {
+        for r in instance.regions() {
             slab_get(&inner.regions, r.index())
                 .unwrap()
                 .set_parent_op(op_id);
@@ -567,7 +567,7 @@ impl Context {
     /// values outlive the op that defined them.
     pub(crate) fn remove_operation_keeping_results(&self, id: OpId) {
         let mut owned = self.owned_entities(vec![id]);
-        let results = self.get_op(id).results.clone();
+        let results = self.get_op(id).results().to_vec();
         owned.values.retain(|value| !results.contains(value));
         self.free(owned);
     }
@@ -577,7 +577,8 @@ impl Context {
     /// register.
     pub fn set_op_operand(&self, id: OpId, index: usize, new: ValueId) {
         let mut inner = self.0.write();
-        match slab_get(&inner.operations, id.index()).and_then(|op| op.operands.get(index).copied())
+        match slab_get(&inner.operations, id.index())
+            .and_then(|op| op.operands().get(index).copied())
         {
             Some(old) if old != new => {}
             _ => return,
@@ -642,7 +643,7 @@ impl Context {
         let mut inner = self.0.write();
         for op in ops {
             let uses_old = slab_get(&inner.operations, op.index())
-                .is_some_and(|instance| instance.operands.contains(&old));
+                .is_some_and(|instance| instance.operands().contains(&old));
             if !uses_old {
                 continue;
             }
@@ -673,7 +674,7 @@ impl Context {
     fn ops_under(&self, root: OpId) -> Vec<OpId> {
         let blocks: Vec<BlockId> = self
             .get_op(root)
-            .regions
+            .regions()
             .iter()
             .flat_map(|region| self.get_region(*region).block_ids())
             .collect();
@@ -869,7 +870,7 @@ impl Context {
     ) -> ValueId {
         let instance = self.get_op(op);
 
-        for &region in &instance.regions {
+        for &region in instance.regions() {
             let entry = self.get_region(region).block_ids()[0];
             let incoming = init.map(|_| {
                 let argument = self.append_block_argument(entry, ty).id();
@@ -922,7 +923,7 @@ impl Context {
 
     /// Move the port just appended to `op`'s results into the place it belongs.
     fn place_result(&self, op: OpId, ty: TypeId) {
-        let Some(index) = self.port_index(&self.get_op(op).results, ty) else {
+        let Some(index) = self.port_index(self.get_op(op).results(), ty) else {
             return;
         };
         let mut inner = self.0.write();
@@ -936,7 +937,8 @@ impl Context {
     /// Rotating within the trailing variadic group leaves the segment sizes
     /// describing it unchanged.
     fn place_operand(&self, op: OpId, ty: TypeId) -> usize {
-        let operands = &self.get_op(op).operands;
+        let instance = self.get_op(op);
+        let operands = instance.operands();
         let last = operands.len() - 1;
         let Some(index) = self.port_index(operands, ty) else {
             return last;
@@ -1034,7 +1036,7 @@ impl Context {
             visited_blocks.push(block);
             for op in self.get_block(block).op_ids() {
                 ops.push(op);
-                for region in &self.get_op(op).regions {
+                for region in self.get_op(op).regions() {
                     pending.extend(self.get_region(*region).block_ids());
                 }
             }
@@ -1070,8 +1072,8 @@ impl Context {
                     continue;
                 };
                 owned.ops.push(op);
-                owned.values.extend(instance.results.iter().copied());
-                for region in &instance.regions {
+                owned.values.extend(instance.results().iter().copied());
+                for region in instance.regions() {
                     let Some(handle) = self.find_region(*region) else {
                         continue;
                     };
@@ -1705,7 +1707,7 @@ mod staging_tests {
         staged.append_op(block, scf::ops::r#yield(&context, vec![]).build().id());
         context.replace_region_contents(f.then_region, staged);
 
-        assert_eq!(context.get_op(add.id()).operands, vec![f.constant; 2]);
+        assert_eq!(context.get_op(add.id()).operands(), vec![f.constant; 2]);
         assert_eq!(context.parent_block(add.id()), Some(block));
         assert_eq!(context.parent_region(block), Some(f.then_region));
         assert_eq!(
@@ -1732,7 +1734,7 @@ mod staging_tests {
         let committed = context.get_block(block);
         assert_eq!(committed.arguments().len(), 1);
         assert_eq!(committed.arguments()[0].id(), argument);
-        assert_eq!(context.get_op(add.id()).operands[0], argument);
+        assert_eq!(context.get_op(add.id()).operands()[0], argument);
     }
 
     #[test]
@@ -1753,7 +1755,7 @@ mod staging_tests {
         context.replace_region_contents(f.then_region, staged);
 
         assert_eq!(
-            context.get_op(user.id()).operands,
+            context.get_op(user.id()).operands(),
             vec![fresh.result(); 2],
             "surviving uses read the staged replacement"
         );
@@ -1821,17 +1823,17 @@ mod port_tests {
         let module: builtin::ModuleOp =
             crate::parse::ir::parse_ir(context, LOOP).expect("the fixture parses");
         let func = context
-            .get_region(context.get_op(module.id()).regions[0])
+            .get_region(context.get_op(module.id()).regions()[0])
             .iter(context.clone())
             .next()
             .expect("module body")
             .op_ids()[0];
         let body = context
-            .get_region(context.get_op(func).regions[0])
+            .get_region(context.get_op(func).regions()[0])
             .iter(context.clone())
             .next()
             .expect("function body");
-        let constant = context.get_op(body.op_ids()[0]).results[0];
+        let constant = context.get_op(body.op_ids()[0]).results()[0];
         (module.id(), body.op_ids()[1], constant)
     }
 
@@ -1845,20 +1847,20 @@ mod port_tests {
 
         let grown = context.get_op(loop_op);
         assert_eq!(
-            grown.results,
+            grown.results(),
             vec![result],
             "the port's value leaves the op"
         );
         assert_eq!(
-            grown.operands.last(),
+            grown.operands().last(),
             Some(&constant),
             "the port's initial value enters as one more operand"
         );
-        let body = single_block(&context, grown.regions[0]);
+        let body = single_block(&context, grown.regions()[0]);
         let carried = body.arguments()[0].id();
         assert_eq!(body.arguments().len(), 1);
         assert_eq!(
-            context.get_op(*body.op_ids().last().unwrap()).operands,
+            context.get_op(*body.op_ids().last().unwrap()).operands(),
             vec![carried],
             "the region yields what the port carries"
         );
@@ -1892,7 +1894,7 @@ mod port_tests {
         .build();
         let function_body = context.get_block(
             context
-                .get_region(context.get_op(loop_owner(&context, module)).regions[0])
+                .get_region(context.get_op(loop_owner(&context, module)).regions()[0])
                 .block_ids()[0],
         );
         function_body.insert(0, condition.id());
@@ -1904,17 +1906,17 @@ mod port_tests {
         });
 
         let grown = context.get_op(conditional.id());
-        assert_eq!(grown.results, vec![result]);
+        assert_eq!(grown.results(), vec![result]);
         assert_eq!(
-            grown.operands,
+            grown.operands(),
             vec![condition.result()],
             "a conditional carries nothing in"
         );
-        for &arm in &grown.regions {
+        for &arm in grown.regions() {
             let block = single_block(&context, arm);
             assert!(block.arguments().is_empty(), "an arm takes no argument");
             assert_eq!(
-                context.get_op(*block.op_ids().last().unwrap()).operands,
+                context.get_op(*block.op_ids().last().unwrap()).operands(),
                 vec![constant],
                 "every arm yields the port's value"
             );
@@ -1924,7 +1926,7 @@ mod port_tests {
 
     fn loop_owner(context: &Context, module: OpId) -> OpId {
         context
-            .get_region(context.get_op(module).regions[0])
+            .get_region(context.get_op(module).regions()[0])
             .iter(context.clone())
             .next()
             .expect("module body")
@@ -2050,7 +2052,7 @@ mod tests {
         let i32 = builtin::IntegerType::new(&context, 32);
         let input = context.create_value(i32, None);
         let produced = builtin::ops::addi(&context, input.id(), input.id(), i32).build();
-        let result = context.get_op(produced.id()).results[0];
+        let result = context.get_op(produced.id()).results()[0];
         let reader = builtin::ops::addi(&context, result, result, i32).build();
         body.append(reader.id());
 
@@ -2063,7 +2065,7 @@ mod tests {
         assert_eq!(block.arguments()[0].id(), result);
         assert!(context.is_block_argument(result));
         assert_eq!(context.get_value(result).defining_op(), None);
-        assert_eq!(context.get_op(reader.id()).operands, vec![result; 2]);
+        assert_eq!(context.get_op(reader.id()).operands(), vec![result; 2]);
     }
 
     #[test]
@@ -2139,7 +2141,7 @@ mod tests {
     fn adding_a_block_to_a_region_bumps_the_spine() {
         let context = Context::with_default_dialects();
         let (module, func, _) = module_with_function(&context);
-        let region = context.get_region(context.get_op(func).regions[0]);
+        let region = context.get_region(context.get_op(func).regions()[0]);
         let extra = context.create_block(vec![]);
         assert_bumps_spine(&context, module, func, || {
             region.add_block(extra.id());
@@ -2303,7 +2305,7 @@ mod tests {
 
         context.replace_value_uses(a.id(), b.id());
 
-        assert_eq!(context.get_op(nested.id()).operands, vec![b.id(); 2]);
+        assert_eq!(context.get_op(nested.id()).operands(), vec![b.id(); 2]);
     }
 
     #[test]
@@ -2325,7 +2327,7 @@ mod tests {
         context.replace_value_uses(argument.id(), replacement.id());
 
         assert_eq!(
-            context.get_op(reader.id()).operands,
+            context.get_op(reader.id()).operands(),
             vec![replacement.id(); 2]
         );
     }
