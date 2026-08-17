@@ -295,22 +295,20 @@ mod isa {
             reg_index(op, "base")
         }
         fn attr(op: &dyn Operation, name: &str) -> AttributeValue {
-            op.attr(name)
-                .cloned()
-                .expect("memory op operand attribute present")
+            op.attr(name).expect("memory op operand attribute present")
         }
         // The allocated index of a physical register operand, or None if the
         // operand is still virtual (canonicalization runs post-RA, so a virtual
         // operand simply means "not this op" and is left unchanged).
         fn reg_index(op: &dyn Operation, name: &str) -> Option<u16> {
             match op.attr(name)? {
-                AttributeValue::Register(RegisterAttr::Physical { index, .. }) => Some(*index),
+                AttributeValue::Register(RegisterAttr::Physical { index, .. }) => Some(index),
                 _ => None,
             }
         }
         fn reg_class(op: &dyn Operation, name: &str) -> Option<tir::backend::regalloc::RegClassId> {
             match op.attr(name)? {
-                AttributeValue::Register(RegisterAttr::Physical { class, .. }) => Some(*class),
+                AttributeValue::Register(RegisterAttr::Physical { class, .. }) => Some(class),
                 _ => None,
             }
         }
@@ -318,7 +316,7 @@ mod isa {
         // (a relocation that cannot fold to the sign-extended imm8 form).
         fn imm_int(op: &dyn Operation, name: &str) -> Option<i64> {
             match op.attr(name)? {
-                AttributeValue::Int(v) => Some(*v),
+                AttributeValue::Int(v) => Some(v),
                 _ => None,
             }
         }
@@ -902,7 +900,7 @@ mod isa {
                 ));
             }
             let dest = match br.attr("dest") {
-                Some(AttributeValue::Block(block)) => Some(*block),
+                Some(AttributeValue::Block(block)) => Some(block),
                 _ => None,
             }
             .ok_or_else(|| {

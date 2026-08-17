@@ -5,14 +5,14 @@ use std::sync::Arc;
 
 use tir::attributes::AttributeValue;
 use tir::builtin::{DeclareOp, ModuleEndOp, ModuleOp};
-use tir::{Context, OpInstance, Operation};
+use tir::{Context, OpHandle, Operation};
 
 use crate::backend::{
     BlockEndOp, DataRelocOp, LiteralOp, MachineInstruction, SectionEndOp, SectionOp, SymbolEndOp,
     SymbolOp,
 };
 
-pub type AsmInstructionPrinter = fn(&Context, &OpInstance) -> Option<String>;
+pub type AsmInstructionPrinter = fn(&Context, &OpHandle) -> Option<String>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AsmPrintError {
@@ -55,7 +55,7 @@ impl AsmPrinter {
     pub fn print_instruction(
         &self,
         context: &Context,
-        op: &OpInstance,
+        op: &OpHandle,
     ) -> Result<Option<String>, AsmPrintError> {
         let Some(printer) = self.instruction_printers.get(op.name().as_str()) else {
             return Ok(None);
@@ -94,7 +94,7 @@ impl AsmPrinter {
     pub fn print_op(
         &self,
         context: &Context,
-        op: &Arc<OpInstance>,
+        op: &OpHandle,
         out: &mut String,
     ) -> Result<(), AsmPrintError> {
         if op.is::<ModuleEndOp>()
@@ -109,12 +109,12 @@ impl AsmPrinter {
         }
 
         if let Some(section) = op.clone().as_op::<SectionOp>() {
-            let name = string_attr(op, "name").unwrap_or(".text");
+            let name = string_attr(op, "name").unwrap_or_else(|| ".text".to_string());
             if name == ".text" {
                 out.push_str(".text\n");
             } else {
                 out.push_str(".section ");
-                out.push_str(name);
+                out.push_str(&name);
                 out.push('\n');
             }
             self.print_block(context, section.body(), out)?;
@@ -123,9 +123,9 @@ impl AsmPrinter {
 
         if op.clone().as_op::<SymbolOp>().is_some() {
             let name = string_attr(op, "name").ok_or(AsmPrintError::MissingSymbolName)?;
-            if string_attr(op, "binding") != Some("local") {
+            if string_attr(op, "binding").as_deref() != Some("local") {
                 out.push_str(".global ");
-                out.push_str(name);
+                out.push_str(&name);
                 out.push('\n');
             }
             if let Some(align) = int_attr(op, "align")
@@ -135,7 +135,7 @@ impl AsmPrinter {
                 out.push_str(&align.to_string());
                 out.push('\n');
             }
-            out.push_str(name);
+            out.push_str(&name);
             out.push_str(":\n");
             // The symbol label above names the entry block, so only non-entry
             // blocks emit their own label (branch targets must be defined).
@@ -161,8 +161,8 @@ impl AsmPrinter {
                 op: LiteralOp::name(),
             })?;
             out.push_str("\t.");
-            out.push_str(kind);
-            match kind {
+            out.push_str(&kind);
+            match kind.as_str() {
                 "byte" | "half" | "word" | "dword" | "space" => {
                     let value = int_attr(op, "value").ok_or(AsmPrintError::UnsupportedOp {
                         op: LiteralOp::name(),
@@ -176,7 +176,7 @@ impl AsmPrinter {
                         op: LiteralOp::name(),
                     })?;
                     out.push_str(" \"");
-                    out.push_str(&escape_asm_string(value));
+                    out.push_str(&escape_asm_string(&value));
                     out.push_str("\"\n");
                 }
             }
@@ -197,7 +197,7 @@ impl AsmPrinter {
             out.push_str("\t.");
             out.push_str(directive);
             out.push(' ');
-            out.push_str(symbol);
+            out.push_str(&symbol);
             if addend > 0 {
                 out.push('+');
                 out.push_str(&addend.to_string());
@@ -247,13 +247,13 @@ fn escape_asm_string(value: &str) -> String {
     out
 }
 
-fn int_attr(op: &OpInstance, name: &str) -> Option<i64> {
-    op.attr(name).and_then(AttributeValue::as_int)
+fn int_attr(op: &OpHandle, name: &str) -> Option<i64> {
+    op.attr(name).as_ref().and_then(AttributeValue::as_int)
 }
 
-fn string_attr<'a>(op: &'a OpInstance, name: &str) -> Option<&'a str> {
+fn string_attr(op: &OpHandle, name: &str) -> Option<String> {
     match op.attr(name)? {
-        AttributeValue::Str(value) => Some(value),
+        AttributeValue::Str(value) => Some(value.into_string()),
         _ => None,
     }
 }

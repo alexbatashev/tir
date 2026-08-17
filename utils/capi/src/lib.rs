@@ -23,10 +23,9 @@ use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
-use std::sync::Arc;
 
 use tir::builtin::ModuleOp;
-use tir::{Context, IRFormatter, OpId, OpInstance, Operation, PassManager};
+use tir::{Context, IRFormatter, OpHandle, OpId, Operation, PassManager};
 
 /// Sentinel returned by id-producing functions on failure.
 pub const TIR_INVALID_ID: u32 = u32::MAX;
@@ -84,7 +83,7 @@ pub(crate) fn with_context<T: Copy>(
 
 /// Look up an operation by raw id, setting an error and returning `None` if the
 /// id is unknown (e.g. erased). Avoids panicking on a dangling id.
-pub(crate) fn op_instance(ctx: &Context, id: u32) -> Option<Arc<OpInstance>> {
+pub(crate) fn op_instance(ctx: &Context, id: u32) -> Option<OpHandle> {
     let op_id = OpId::from_number(id);
     if ctx.has_operation(op_id) {
         Some(ctx.get_op(op_id))

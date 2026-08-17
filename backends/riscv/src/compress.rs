@@ -50,7 +50,7 @@ pub(crate) fn compress_rv64(
 /// A physical register operand's index, whatever its class.
 fn reg(op: &dyn Operation, name: &str) -> Option<u16> {
     match op.attr(name)? {
-        AttributeValue::Register(RegisterAttr::Physical { index, .. }) => Some(*index),
+        AttributeValue::Register(RegisterAttr::Physical { index, .. }) => Some(index),
         _ => None,
     }
 }
@@ -69,7 +69,7 @@ fn reg_attr(op: &dyn Operation, name: &str) -> Option<AttributeValue> {
 /// keeping their instruction uncompressed.
 fn imm(op: &dyn Operation, name: &str) -> Option<i64> {
     match op.attr(name)? {
-        AttributeValue::Int(value) => Some(*value),
+        AttributeValue::Int(value) => Some(value),
         _ => None,
     }
 }

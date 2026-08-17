@@ -418,7 +418,7 @@ fn callee_attr(op: &impl Operation) -> String {
 }
 
 fn has_result_address(op: &impl Operation) -> bool {
-    op.attr("result_address") == Some(&AttributeValue::Bool(true))
+    op.attr("result_address") == Some(AttributeValue::Bool(true))
 }
 
 #[cfg(test)]

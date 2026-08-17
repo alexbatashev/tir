@@ -12,10 +12,10 @@ pub struct BlockId(u32);
 /// A basic block: a plain value living in the context's block slab, edited in
 /// place through [`Context`] under its write lock.
 ///
-/// Like [`crate::OpInstance`], a handle handed out by [`Context::get_block`] is a
-/// snapshot: reads answer from the copy that was current when the handle was
-/// taken, while the mutators below always edit the live block. Re-read the block
-/// from the context to observe an edit.
+/// Unlike [`crate::OpHandle`], which reads its operation as it stands, a handle
+/// handed out by [`Context::get_block`] is a snapshot: reads answer from the copy
+/// that was current when the handle was taken, while the mutators below always
+/// edit the live block. Re-read the block from the context to observe an edit.
 #[derive(Debug, Clone)]
 pub struct Block {
     id: BlockId,

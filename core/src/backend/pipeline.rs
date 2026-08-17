@@ -5,8 +5,6 @@
 //! the allocator must color, while `vret`/`vbr` are finalized *after* it
 //! because the allocator consumes their typed operands.
 
-use std::sync::Arc;
-
 use tir::Operation as _;
 use tir::{
     AnalysisManager, Context, IntegerArithmetic, OperationRef, Pass, PassError, PassManager,
@@ -171,7 +169,7 @@ pub fn lower_and_emit(
     target: &dyn TargetMachine,
     context: &Context,
     module: &ModuleOp,
-    mut emit: impl FnMut(&Context, &Arc<tir::OpInstance>) -> Result<(), String>,
+    mut emit: impl FnMut(&Context, &tir::OpHandle) -> Result<(), String>,
 ) -> Result<(), String> {
     let failed = |error: PassError| format!("backend pipeline failed: {error}");
     let body = module.body().id();

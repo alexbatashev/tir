@@ -44,7 +44,7 @@ fn run(context: &Context, ops: Vec<OpId>, values: &mut HashMap<ValueId, i64>) ->
         let read = |index: usize| values.get(&instance.operands()[index]).copied();
         let computed = if named("builtin", "constant") {
             match instance.attr("value")? {
-                AttributeValue::Int(value) => Some(*value),
+                AttributeValue::Int(value) => Some(value),
                 _ => None,
             }
         } else if named("builtin", "addi") {
@@ -58,7 +58,7 @@ fn run(context: &Context, ops: Vec<OpId>, values: &mut HashMap<ValueId, i64>) ->
             let AttributeValue::Str(predicate) = instance.attr("predicate")? else {
                 return None;
             };
-            Some(i64::from(match &**predicate {
+            Some(i64::from(match &*predicate {
                 "eq" => left == right,
                 "ne" => left != right,
                 "slt" => left < right,

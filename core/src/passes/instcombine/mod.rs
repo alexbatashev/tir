@@ -25,12 +25,11 @@ use std::rc::Rc;
 use crate::analysis::scopes::port_edges;
 use crate::analysis::{DominatingEdgeFacts, DominatorTree};
 use crate::graph::Dag;
-use std::sync::Arc;
 
 use crate::{
     AnalysisManager, BlockId, Conditional, ConstantLike, Context, EntryGuard, GuardedLoop,
-    LoopLike, MemoryRead, OpId, OpInstance, OperationRef, Pass, PassError, PassTarget, RegionId,
-    Rewriter, TokenScope, TypeId, ValueId,
+    LoopLike, MemoryRead, OpHandle, OpId, OpInstance, OperationRef, Pass, PassError, PassTarget,
+    RegionId, Rewriter, TokenScope, TypeId, ValueId,
     builtin::{FuncOp, StateType, ops},
     utils::APInt,
 };
@@ -1260,7 +1259,7 @@ impl Driver<'_> {
     /// terminator, so the value the test forwards is the latch itself and the
     /// body hands it straight back. Restructuring leaves `goto`/`while` loops in
     /// that shape.
-    fn tests_the_latch(&self, instance: &Arc<OpInstance>, body: RegionId) -> Option<RegionId> {
+    fn tests_the_latch(&self, instance: &OpHandle, body: RegionId) -> Option<RegionId> {
         let EntryGuard::Region { region, .. } = instance
             .clone()
             .as_interface::<dyn GuardedLoop>()?

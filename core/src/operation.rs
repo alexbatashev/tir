@@ -6,7 +6,7 @@ use crate::{
     region::RegionId,
     value::ValueId,
 };
-use std::{any::Any, sync::Arc};
+use std::any::Any;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct OperationName(&'static str);
@@ -65,7 +65,7 @@ impl std::fmt::Debug for DialectName {
 }
 
 pub type ErasedOpInterface = Box<dyn Any>;
-pub type OpInterfaceConverter = fn(Arc<OpInstance>) -> ErasedOpInterface;
+pub type OpInterfaceConverter = fn(OpHandle) -> ErasedOpInterface;
 
 struct InterfaceValue<I: ?Sized + 'static>(Box<I>);
 
@@ -84,7 +84,7 @@ pub fn downcast_op_interface<I: ?Sized + 'static>(erased: ErasedOpInterface) -> 
         .map(|boxed| boxed.0)
 }
 
-pub fn op_interface_converter<Op, I>(instance: Arc<OpInstance>) -> ErasedOpInterface
+pub fn op_interface_converter<Op, I>(instance: OpHandle) -> ErasedOpInterface
 where
     Op: ImplementsOpInterface<I>,
     I: ?Sized + 'static,
@@ -136,20 +136,20 @@ pub trait Operation: 'static + Send + Sync + Any + Verifiable + OpDefVerifiable 
         Self: Sized;
 
     fn id(&self) -> OpId {
-        self.op_instance().id
+        self.handle().id
     }
 
-    /// The erased instance backing this op. The `operation!` macro wires this to
+    /// The handle naming this op's storage. The `operation!` macro wires this to
     /// the newtype field; most trait methods delegate to it by default so
     /// generated ops carry no per-op copies of the plumbing.
     #[doc(hidden)]
-    fn op_instance(&self) -> &Arc<OpInstance>;
+    fn handle(&self) -> &OpHandle;
 
-    fn from_op_instance(instance: Arc<OpInstance>) -> Self
+    fn from_op_instance(instance: OpHandle) -> Self
     where
         Self: Sized;
 
-    fn from_op_instance_dyn(instance: Arc<OpInstance>) -> Box<dyn Operation>
+    fn from_op_instance_dyn(instance: OpHandle) -> Box<dyn Operation>
     where
         Self: Sized;
 
@@ -164,22 +164,21 @@ pub trait Operation: 'static + Send + Sync + Any + Verifiable + OpDefVerifiable 
         Self: Sized;
 
     fn regions(&self) -> ContextIterator<RegionId> {
-        let instance = self.op_instance();
-        let context = instance.context.upgrade();
-        ContextIterator::new(context, instance.regions().to_vec())
+        let handle = self.handle();
+        ContextIterator::new(handle.context.upgrade(), handle.regions().to_vec())
     }
 
     fn operands(&self) -> ValueIds {
-        self.op_instance().operands()
+        self.handle().operands()
     }
 
     fn attributes(&self) -> Vec<crate::attributes::NamedAttribute> {
-        self.op_instance().attributes()
+        self.handle().attributes()
     }
 
-    /// The value of the attribute called `name`; see [`OpInstance::attr`].
-    fn attr(&self, name: &str) -> Option<&crate::attributes::AttributeValue> {
-        self.op_instance().attr(name)
+    /// The value of the attribute called `name`; see [`OpHandle::attr`].
+    fn attr(&self, name: &str) -> Option<crate::attributes::AttributeValue> {
+        self.handle().attr(name)
     }
 
     fn operand_names(&self) -> &'static [&'static str] {
@@ -197,7 +196,7 @@ pub trait Operation: 'static + Send + Sync + Any + Verifiable + OpDefVerifiable 
     }
 
     fn parent_block(&self) -> Option<BlockId> {
-        self.op_instance().parent_block()
+        self.handle().parent_block()
     }
 
     /// Verifies that operation is valid.
@@ -265,7 +264,7 @@ fn verify_state_linearity(context: &Context, op_id: OpId) -> Result<(), Error> {
 /// arity rules say so. A gate or a loop accesses nothing and instead carries the
 /// chains that cross it, one port each, so the count is what crosses rather than
 /// one.
-fn verify_state_ports(context: &Context, instance: &Arc<OpInstance>) -> Result<(), Error> {
+fn verify_state_ports(context: &Context, instance: &OpHandle) -> Result<(), Error> {
     let state = crate::builtin::StateType::new(context);
     let ports = |values: &[crate::ValueId], kind: &str| {
         let is_state =
@@ -310,27 +309,25 @@ fn verify_op_tree_ops(context: &Context, op_id: OpId) -> Result<(), Error> {
 }
 
 /// Checks the metadata specs this op contributes to its nested scopes.
-fn verify_scoped_metadata(instance: &Arc<OpInstance>) -> Result<(), Error> {
+fn verify_scoped_metadata(instance: &OpHandle) -> Result<(), Error> {
     if let Some(value) = instance.attr(crate::DATA_LAYOUT) {
-        crate::layout::verify_spec(value)?;
+        crate::layout::verify_spec(&value)?;
     }
     if let Some(value) = instance.attr(crate::TARGET_ENV) {
-        crate::target_env::verify_spec(value)?;
+        crate::target_env::verify_spec(&value)?;
     }
     Ok(())
 }
 
-fn verify_token_region_arguments(
-    context: &Context,
-    instance: &Arc<OpInstance>,
-) -> Result<(), Error> {
+fn verify_token_region_arguments(context: &Context, instance: &OpHandle) -> Result<(), Error> {
     let token = crate::builtin::TokenType::new(context);
     let scope_regions = instance
         .clone()
         .as_interface::<dyn crate::TokenScope>()
         .map(|scope| scope.token_scope_regions())
         .unwrap_or_default();
-    for (region_index, region_id) in instance.regions().iter().enumerate() {
+    let regions = instance.regions();
+    for (region_index, region_id) in regions.iter().enumerate() {
         for (block_index, block) in context
             .get_region(*region_id)
             .iter(context.clone())
@@ -340,7 +337,7 @@ fn verify_token_region_arguments(
                 if argument.ty() != token {
                     continue;
                 }
-                if block_index != 0 || !scope_regions.contains(&instance.regions()[region_index]) {
+                if block_index != 0 || !scope_regions.contains(&regions[region_index]) {
                     return Err(Error::VerificationError(
                         "token values are only allowed as loop body entry arguments".to_string(),
                     ));
@@ -351,7 +348,7 @@ fn verify_token_region_arguments(
     if instance.is::<crate::builtin::FuncOp>()
         && matches!(
             instance.attr("ret_type"),
-            Some(crate::attributes::AttributeValue::Type(ty)) if *ty == token
+            Some(crate::attributes::AttributeValue::Type(ty)) if ty == token
         )
     {
         return Err(Error::VerificationError(
@@ -457,11 +454,12 @@ fn verify_def_value(
 /// [`OpDefVerifiable::verify_operands`] engine, driven by an [`OpDefSpec`].
 pub fn verify_opdef_operands(
     context: &Context,
-    instance: &OpInstance,
+    instance: &OpHandle,
     op_name: &str,
     spec: &OpDefSpec,
 ) -> Result<(), crate::Error> {
     let operands = &instance.operands();
+    let results = instance.results();
     let operand_fields = spec.schema.operands;
     let result_fields = spec.schema.results;
 
@@ -549,13 +547,12 @@ pub fn verify_opdef_operands(
     // The number of results that carry a value, i.e. all but a trailing state port.
     let value_results_len = if spec.state_output {
         let state = crate::builtin::StateType::new(context);
-        let has_state = instance
-            .results()
+        let has_state = results
             .last()
             .is_some_and(|id| context.has_value(*id) && context.get_value(*id).ty() == state);
-        instance.results().len() - has_state as usize
+        results.len() - has_state as usize
     } else {
-        instance.results().len()
+        results.len()
     };
 
     let variadic_result = result_fields.iter().any(|field| field.variadic);
@@ -585,7 +582,7 @@ pub fn verify_opdef_operands(
             op_name,
             "result",
             field.name,
-            instance.results()[result_index],
+            results[result_index],
             spec.result_checkers[idx],
             constraint_name(field.ty),
         )?;
@@ -616,7 +613,7 @@ fn attr_type_matches(attr_type: &str, value: &crate::attributes::AttributeValue)
 /// [`OpDefVerifiable::verify_attributes`] engine, driven by the op's schema.
 pub fn verify_opdef_attributes(
     context: &Context,
-    instance: &OpInstance,
+    instance: &OpHandle,
     op_name: &str,
     attr_specs: &[crate::AttrSchema],
 ) -> Result<(), crate::Error> {
@@ -629,7 +626,7 @@ pub fn verify_opdef_attributes(
             )));
         };
 
-        if !attr_type_matches(attr_type, value) {
+        if !attr_type_matches(attr_type, &value) {
             return Err(crate::Error::VerificationError(format!(
                 "{op_name} attribute '{attr_name}' expected type '{attr_type}'"
             )));
@@ -765,6 +762,10 @@ impl OpInstance {
         self.attributes.as_deref().unwrap_or_default().to_vec()
     }
 
+    pub(crate) fn name_id(&self) -> OpNameId {
+        self.name
+    }
+
     pub(crate) fn heap_bytes(&self) -> usize {
         self.ports.capacity() * std::mem::size_of::<u32>()
             + std::mem::size_of_val(self.attributes.as_deref().unwrap_or_default())
@@ -836,10 +837,79 @@ impl OpInstance {
         self.attributes.as_deref_mut().unwrap_or_default()
     }
 
+    /// The attribute called `name`, already interned. Everything an operation
+    /// answers about itself that needs the context — its spelling, its parent —
+    /// is asked of an [`OpHandle`]; a record read here is read under the context
+    /// lock, which is not reentrant.
+    pub(crate) fn attr_sym(
+        &self,
+        name: tir_adt::Sym,
+    ) -> Option<&crate::attributes::AttributeValue> {
+        self.attributes
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .find(|attribute| attribute.name == name)
+            .map(|attribute| &attribute.value)
+    }
+}
+
+/// A reference to an operation: the context that owns it, and its id.
+///
+/// Reads go to the context's storage as they are asked for, so a handle always
+/// answers with the operation as it stands now. A handle to an erased operation
+/// reads as a panic, never as some other operation: ids are never reused.
+#[derive(Clone)]
+pub struct OpHandle {
+    pub context: ContextRef,
+    pub id: OpId,
+}
+
+impl std::fmt::Debug for OpHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("OpHandle").field(&self.id).finish()
+    }
+}
+
+impl OpHandle {
+    pub fn operands(&self) -> ValueIds {
+        self.context
+            .upgrade()
+            .with_op(self.id, OpInstance::operands)
+    }
+
+    pub fn results(&self) -> ValueIds {
+        self.context.upgrade().with_op(self.id, OpInstance::results)
+    }
+
+    pub fn regions(&self) -> RegionIds {
+        self.context.upgrade().with_op(self.id, OpInstance::regions)
+    }
+
+    pub fn attributes(&self) -> Vec<crate::attributes::NamedAttribute> {
+        self.context
+            .upgrade()
+            .with_op(self.id, OpInstance::attributes)
+    }
+
+    /// The value of the attribute called `name`, resolving the name through the
+    /// owning context's interner.
+    pub fn attr(&self, name: &str) -> Option<crate::attributes::AttributeValue> {
+        self.context.upgrade().op_attr(self.id, name)
+    }
+
+    /// [`OpHandle::attr`] for a name already interned, which is the form a
+    /// repeated lookup wants: the comparison is on `u32`s.
+    pub fn attr_sym(&self, name: tir_adt::Sym) -> Option<crate::attributes::AttributeValue> {
+        self.context
+            .upgrade()
+            .with_op(self.id, |instance| instance.attr_sym(name).cloned())
+    }
+
     /// Returns an opaque name for textual output, not operation identity.
     ///
     /// ```compile_fail
-    /// fn is_function(op: &tir::OpInstance) -> bool {
+    /// fn is_function(op: &tir::OpHandle) -> bool {
     ///     op.name() == "func"
     /// }
     /// ```
@@ -852,25 +922,7 @@ impl OpInstance {
     }
 
     fn identity(&self) -> (&'static str, &'static str) {
-        self.context.upgrade().resolve_op_name(self.name)
-    }
-
-    /// The value of the attribute called `name`, resolving the name through the
-    /// owning context's interner.
-    pub fn attr(&self, name: &str) -> Option<&crate::attributes::AttributeValue> {
-        let sym = self.context.upgrade().sym(name)?;
-        self.attr_sym(sym)
-    }
-
-    /// [`OpInstance::attr`] for a name already interned, which is the form a
-    /// repeated lookup wants: the comparison is on `u32`s.
-    pub fn attr_sym(&self, name: tir_adt::Sym) -> Option<&crate::attributes::AttributeValue> {
-        self.attributes
-            .as_deref()
-            .unwrap_or_default()
-            .iter()
-            .find(|attribute| attribute.name == name)
-            .map(|attribute| &attribute.value)
+        self.context.upgrade().op_identity(self.id)
     }
 
     /// The block that holds this operation, or `None` if it is detached or the root.
@@ -878,7 +930,7 @@ impl OpInstance {
         self.context.upgrade().parent_block(self.id)
     }
 
-    /// Returns whether this instance has operation type `T`.
+    /// Returns whether this operation has type `T`.
     pub fn is<T: Operation>(&self) -> bool {
         self.identity() == (T::dialect(), T::name())
     }
@@ -887,7 +939,7 @@ impl OpInstance {
         self.identity() == (dialect, name)
     }
 
-    pub fn as_op<T: Operation + Sized>(self: Arc<Self>) -> Option<T> {
+    pub fn as_op<T: Operation + Sized>(self) -> Option<T> {
         if self.is::<T>() {
             Some(T::from_op_instance(self))
         } else {
@@ -895,21 +947,19 @@ impl OpInstance {
         }
     }
 
-    pub fn as_dyn_op(self: Arc<Self>) -> Box<dyn Operation> {
+    pub fn as_dyn_op(self) -> Box<dyn Operation> {
         let context = self.context.upgrade();
-        context.get_dyn_op(self.clone())
+        context.get_dyn_op(self)
     }
 
-    pub fn as_interface<I: ?Sized + 'static>(self: Arc<Self>) -> Option<Box<I>> {
+    pub fn as_interface<I: ?Sized + 'static>(self) -> Option<Box<I>> {
         let context = self.context.upgrade();
-        context.get_op_interface::<I>(self.clone())
+        context.get_op_interface::<I>(self)
     }
 
     pub fn has_interface<I: ?Sized + 'static>(&self) -> bool {
-        self.context
-            .upgrade()
-            .find_op_interface::<I>(self)
-            .is_some()
+        let context = self.context.upgrade();
+        context.find_op_interface::<I>(self.identity()).is_some()
     }
 }
 
@@ -944,7 +994,7 @@ impl OpId {
 }
 
 impl GetFromContext for OpId {
-    type Item = Arc<OpInstance>;
+    type Item = OpHandle;
 
     fn get_from_context(&self, context: &crate::Context) -> Self::Item {
         context.get_op(*self)

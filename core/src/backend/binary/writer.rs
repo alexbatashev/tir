@@ -142,7 +142,7 @@ impl BinaryWriter {
     pub fn write_op(
         &self,
         context: &Context,
-        op: &Arc<tir::OpInstance>,
+        op: &tir::OpHandle,
         state: &mut ObjectEmission,
         fmt: &ObjectFormatInfo,
     ) -> Result<(), BinaryEmitError> {
@@ -158,9 +158,9 @@ impl BinaryWriter {
         }
 
         if let Some(section) = op.clone().as_op::<SectionOp>() {
-            let name = string_attr(op, "name").unwrap_or(".text");
+            let name = string_attr(op, "name").unwrap_or_else(|| ".text".to_string());
             let enclosing = state.current_section;
-            state.current_section = Some(ensure_section(&mut state.obj, name));
+            state.current_section = Some(ensure_section(&mut state.obj, &name));
             self.walk_block(context, section.body(), state, fmt)?;
             state.current_section = enclosing;
             return Ok(());
@@ -187,13 +187,11 @@ impl BinaryWriter {
     fn walk_symbol(
         &self,
         context: &Context,
-        op: &Arc<tir::OpInstance>,
+        op: &tir::OpHandle,
         state: &mut ObjectEmission,
         fmt: &ObjectFormatInfo,
     ) -> Result<(), BinaryEmitError> {
-        let name = string_attr(op, "name")
-            .ok_or(BinaryEmitError::MissingSymbolName)?
-            .to_string();
+        let name = string_attr(op, "name").ok_or(BinaryEmitError::MissingSymbolName)?;
         let section = state
             .current_section
             .unwrap_or_else(|| ensure_section(&mut state.obj, ".text"));
@@ -220,12 +218,12 @@ impl BinaryWriter {
             section: Some(section),
             value: start,
             size: end - start,
-            binding: if string_attr(op, "binding") == Some("local") {
+            binding: if string_attr(op, "binding").as_deref() == Some("local") {
                 SymBinding::Local
             } else {
                 SymBinding::Global
             },
-            kind: if string_attr(op, "kind") == Some("object") {
+            kind: if string_attr(op, "kind").as_deref() == Some("object") {
                 SymKind::Object
             } else {
                 SymKind::Func
@@ -236,7 +234,7 @@ impl BinaryWriter {
 
     fn encode_op(
         &self,
-        op: &Arc<tir::OpInstance>,
+        op: &tir::OpHandle,
         state: &mut ObjectEmission,
     ) -> Result<(), BinaryEmitError> {
         let Some(encoder) = self.encoders.get(op.name().as_str()) else {
@@ -339,15 +337,12 @@ impl BinaryWriter {
 
 /// Append a data directive's bytes to the current section. String directives
 /// emit their raw bytes; numeric directives emit little-endian values.
-fn emit_literal(
-    op: &Arc<tir::OpInstance>,
-    state: &mut ObjectEmission,
-) -> Result<(), BinaryEmitError> {
+fn emit_literal(op: &tir::OpHandle, state: &mut ObjectEmission) -> Result<(), BinaryEmitError> {
     let unsupported = || BinaryEmitError::UnsupportedOp {
         op: LiteralOp::name().to_string(),
     };
     let kind = string_attr(op, "kind").ok_or_else(unsupported)?;
-    let bytes = match kind {
+    let bytes = match kind.as_str() {
         "asciz" | "string" | "ascii" => {
             let value = string_attr(op, "value").ok_or_else(unsupported)?;
             let mut bytes = value.as_bytes().to_vec();
@@ -358,11 +353,11 @@ fn emit_literal(
         }
         "byte" | "half" | "word" | "dword" | "space" => {
             let value = int_attr(op, "value").ok_or_else(unsupported)?;
-            match kind {
+            match kind.as_str() {
                 "space" => vec![0u8; usize::try_from(value).map_err(|_| unsupported())?],
                 "dword" => value.to_le_bytes().to_vec(),
                 _ => {
-                    let width = match kind {
+                    let width = match kind.as_str() {
                         "byte" => 1,
                         "half" => 2,
                         _ => 4,
@@ -389,16 +384,14 @@ fn emit_literal(
 }
 
 fn emit_data_reloc(
-    op: &Arc<tir::OpInstance>,
+    op: &tir::OpHandle,
     state: &mut ObjectEmission,
     fmt: &ObjectFormatInfo,
 ) -> Result<(), BinaryEmitError> {
     let unsupported = || BinaryEmitError::UnsupportedOp {
         op: DataRelocOp::name().to_string(),
     };
-    let symbol = string_attr(op, "symbol")
-        .ok_or_else(unsupported)?
-        .to_string();
+    let symbol = string_attr(op, "symbol").ok_or_else(unsupported)?;
     let width = int_attr(op, "width")
         .and_then(|width| u8::try_from(width).ok())
         .ok_or_else(unsupported)?;
@@ -446,13 +439,13 @@ fn ensure_section(obj: &mut ObjectFile, name: &str) -> usize {
     obj.sections.len() - 1
 }
 
-fn int_attr(op: &tir::OpInstance, name: &str) -> Option<i64> {
-    op.attr(name).and_then(AttributeValue::as_int)
+fn int_attr(op: &tir::OpHandle, name: &str) -> Option<i64> {
+    op.attr(name).as_ref().and_then(AttributeValue::as_int)
 }
 
-fn string_attr<'a>(op: &'a tir::OpInstance, name: &str) -> Option<&'a str> {
+fn string_attr(op: &tir::OpHandle, name: &str) -> Option<String> {
     match op.attr(name)? {
-        AttributeValue::Str(value) => Some(value),
+        AttributeValue::Str(value) => Some(value.into_string()),
         _ => None,
     }
 }

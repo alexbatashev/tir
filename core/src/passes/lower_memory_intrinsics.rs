@@ -1,11 +1,9 @@
-use std::sync::Arc;
-
 use crate::analysis::AnalysisManager;
 use crate::attributes::AttributeValue;
 use crate::builtin::{DeclareOp, IntegerType, ModuleOp, ops as b};
 use crate::ptr::{MemcpyOp, MemsetOp, PtrType};
 use crate::{
-    Context, OpInstance, Operation, OperationRef, Pass, PassError, PassTarget, Rewriter, TypeId,
+    Context, OpHandle, Operation, OperationRef, Pass, PassError, PassTarget, Rewriter, TypeId,
 };
 
 pub struct LowerMemoryIntrinsicsPass;
@@ -15,13 +13,10 @@ impl LowerMemoryIntrinsicsPass {
         Self
     }
 
-    fn intrinsics(
-        context: &Context,
-        root: &Arc<OpInstance>,
-    ) -> (Vec<OperationRef>, Vec<OperationRef>) {
+    fn intrinsics(context: &Context, root: &OpHandle) -> (Vec<OperationRef>, Vec<OperationRef>) {
         fn visit(
             context: &Context,
-            operation: &Arc<OpInstance>,
+            operation: &OpHandle,
             copies: &mut Vec<OperationRef>,
             sets: &mut Vec<OperationRef>,
         ) {

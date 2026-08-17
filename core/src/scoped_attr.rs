@@ -40,7 +40,7 @@ pub fn scoped_dict(context: &Context, op: OpId, key: &str) -> Option<AttributeDi
 
 fn own_dict(context: &Context, op: OpId, key: &str) -> Option<AttributeDict> {
     match context.get_op(op).attr(key) {
-        Some(AttributeValue::Dict(entries)) => Some((**entries).clone()),
+        Some(AttributeValue::Dict(entries)) => Some((*entries).clone()),
         _ => None,
     }
 }

@@ -23,7 +23,7 @@ pub use encodings::{
 pub use format::{ElfClass, ObjectFormatInfo, RelocKind};
 pub use writer::{BinaryEmitError, BinaryWriter, ObjectEmission};
 
-use tir::{BlockId, OpInstance};
+use tir::{BlockId, OpHandle};
 
 /// What an unresolved instruction operand points at.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,7 +53,7 @@ pub struct EncodedInst {
 
 /// Encodes one operation. `None` means the operation cannot be encoded
 /// (e.g. a virtual register survived register allocation).
-pub type InstructionEncoder = fn(&OpInstance) -> Option<EncodedInst>;
+pub type InstructionEncoder = fn(&OpHandle) -> Option<EncodedInst>;
 
 /// Scatters a resolved fixup value into the instruction bytes. `None` means
 /// the value does not fit the operand's encoding (out of range or misaligned).

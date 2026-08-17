@@ -95,7 +95,7 @@ impl Pass for TiedOperandLoweringPass {
                             "tied operand {name} has no register class"
                         ))
                     })?;
-                    ties.push((attr.name, *dst, *src, class));
+                    ties.push((attr.name, dst, *src, class));
                 }
                 if ties.is_empty() {
                     continue;
@@ -174,7 +174,7 @@ impl Pass for BlockArgLoweringPass {
                     continue;
                 }
                 let args: Vec<u32> = op.operands().iter().map(|v| v.number()).collect();
-                let Some(&AttributeValue::Block(dest)) = op.attr("dest") else {
+                let Some(AttributeValue::Block(dest)) = op.attr("dest") else {
                     return Err(PassError::InvalidRuleSet(
                         "vbr with block arguments is missing its 'dest' target".to_string(),
                     ));
@@ -307,10 +307,10 @@ impl Pass for AbiPrecolorPass {
         let mut arg_pins: HashMap<u32, PhysReg> = HashMap::new();
         if let Some(AttributeValue::Array(args)) = op.op().attr("arg_regs") {
             let result_address = match op.op().attr("result_address") {
-                Some(AttributeValue::Register(RegisterAttr::Virtual { id, .. })) => Some(*id),
+                Some(AttributeValue::Register(RegisterAttr::Virtual { id, .. })) => Some(id),
                 _ => None,
             };
-            let plan = plan_arguments(context, &info, self.abi, args, result_address)?;
+            let plan = plan_arguments(context, &info, self.abi, &args, result_address)?;
             let entry = blocks
                 .first()
                 .and_then(|block| context.get_block(*block).op_ids().first().copied())

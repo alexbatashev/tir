@@ -225,7 +225,7 @@ impl Pass for InsertVsetvliPass {
             let mut state: Option<ConfigState> = None;
             for op_id in context.get_block(block_id).op_ids() {
                 let body_op = context.get_op(op_id);
-                let attr = |name: &str| body_op.attr(name).cloned();
+                let attr = |name: &str| body_op.attr(name);
                 if body_op.is::<VSetVliOp>() || body_op.is::<VSetIVliOp>() {
                     // An existing configuration instruction (e.g. selected for a
                     // `vector.vector_len`) satisfies demands on its AVL, and —

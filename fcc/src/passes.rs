@@ -32,12 +32,8 @@ impl LowerCirStructsPass {
         Self
     }
 
-    fn descendants(context: &Context, root: &Arc<tir::OpInstance>) -> Vec<OperationRef> {
-        fn visit(
-            context: &Context,
-            operation: &Arc<tir::OpInstance>,
-            result: &mut Vec<OperationRef>,
-        ) {
+    fn descendants(context: &Context, root: &tir::OpHandle) -> Vec<OperationRef> {
+        fn visit(context: &Context, operation: &tir::OpHandle, result: &mut Vec<OperationRef>) {
             for region in operation.regions() {
                 for block in context.get_region(region).iter(context.clone()) {
                     for operation in block.op_ids() {
@@ -75,7 +71,7 @@ impl LowerCirStructsPass {
 
     fn uint_attribute(operation: &impl Operation, name: &str) -> u64 {
         match operation.attr(name) {
-            Some(AttributeValue::UInt(value)) => *value,
+            Some(AttributeValue::UInt(value)) => value,
             _ => panic!("{name} must be an unsigned integer attribute"),
         }
     }
@@ -212,6 +208,11 @@ impl Pass for LowerCirStructsPass {
         }
 
         for target in &descendants {
+            // An earlier rewrite may have erased this descendant; the list was
+            // taken before any of them ran.
+            if !context.has_operation(target.op().id) {
+                continue;
+            }
             let target = Self::refresh(context, target);
             let Some(member) = target.as_op::<cir::GetMemberOp>() else {
                 continue;
@@ -234,6 +235,9 @@ impl Pass for LowerCirStructsPass {
         }
 
         for target in &descendants {
+            if !context.has_operation(target.op().id) {
+                continue;
+            }
             if target.as_op::<cir::CopyStructOp>().is_none() {
                 continue;
             }
@@ -252,6 +256,9 @@ impl Pass for LowerCirStructsPass {
         }
 
         for target in &descendants {
+            if !context.has_operation(target.op().id) {
+                continue;
+            }
             if target.as_op::<cir::DefineStructOp>().is_none() {
                 continue;
             }
@@ -339,7 +346,7 @@ impl LowerCirControlFlowPass {
         })
     }
 
-    fn while_is_structured(context: &Context, op: &tir::OpInstance) -> bool {
+    fn while_is_structured(context: &Context, op: &tir::OpHandle) -> bool {
         Self::condition_operand(context, op.regions()[0]).is_some()
             && Self::body_is_structured(context, op.regions()[1])
     }
@@ -348,7 +355,7 @@ impl LowerCirControlFlowPass {
     /// a `continue` — which in C runs that step — must not be an `scf.continue`.
     /// fcc raises a flag instead and never emits one here; hand-written CIR that
     /// does keeps the loop on the direct path.
-    fn for_is_structured(context: &Context, op: &tir::OpInstance) -> bool {
+    fn for_is_structured(context: &Context, op: &tir::OpHandle) -> bool {
         let scope = Self::entry_block(context, op.regions()[1]).arguments()[0].id();
         Self::condition_operand(context, op.regions()[0]).is_some()
             && Self::body_is_structured(context, op.regions()[1])
@@ -359,7 +366,7 @@ impl LowerCirControlFlowPass {
     /// A `do` loop becomes `scf.while` with the condition appended to the body,
     /// so a `continue` — which in C jumps to that condition — must not be an
     /// `scf.continue`, exactly as in a `for`.
-    fn do_is_structured(context: &Context, op: &tir::OpInstance) -> bool {
+    fn do_is_structured(context: &Context, op: &tir::OpHandle) -> bool {
         let Some(body) = Self::single_block(context, op.regions()[0]) else {
             return false;
         };
@@ -397,7 +404,7 @@ impl LowerCirControlFlowPass {
     fn next_control_op_in_region(
         context: &Context,
         region: RegionId,
-    ) -> Option<(Arc<Block>, Arc<tir::OpInstance>)> {
+    ) -> Option<(Arc<Block>, tir::OpHandle)> {
         for block in context.get_region(region).iter(context.clone()) {
             for op_id in block.op_ids() {
                 let op = context.get_op(op_id);
@@ -440,7 +447,7 @@ impl LowerCirControlFlowPass {
             })
     }
 
-    fn split_after(context: &Context, block: &Arc<Block>, op: &Arc<tir::OpInstance>) -> Arc<Block> {
+    fn split_after(context: &Context, block: &Arc<Block>, op: &tir::OpHandle) -> Arc<Block> {
         let continuation = context.create_block(vec![]);
         let op_ids = block.op_ids();
         let position = op_ids.iter().position(|id| *id == op.id).unwrap();
@@ -454,7 +461,7 @@ impl LowerCirControlFlowPass {
     fn erase_control_op(
         rewriter: &mut Rewriter,
         block: &Arc<Block>,
-        op: Arc<tir::OpInstance>,
+        op: tir::OpHandle,
     ) -> Result<(), PassError> {
         rewriter.erase_op(&OperationRef::new(op, Some(block.clone()), None))
     }
@@ -833,7 +840,7 @@ impl LowerCirControlFlowPass {
         context: &Context,
         rewriter: &mut Rewriter,
         block: Arc<Block>,
-        op: Arc<tir::OpInstance>,
+        op: tir::OpHandle,
     ) -> Result<(), PassError> {
         let replacement: Box<dyn Operation> = if op.clone().as_op::<cir::WhileOp>().is_some() {
             let condition = Self::structured_condition(context, rewriter, op.regions()[0])?;
@@ -887,7 +894,7 @@ impl LowerCirControlFlowPass {
         rewriter: &mut Rewriter,
         function_region: RegionId,
         block: Arc<Block>,
-        op: Arc<tir::OpInstance>,
+        op: tir::OpHandle,
         loop_targets: &mut HashMap<ValueId, LoopTargets>,
     ) -> Result<(), PassError> {
         if op.clone().as_op::<cir::WhileOp>().is_some() {

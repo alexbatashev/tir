@@ -20,12 +20,11 @@ mod rules;
 mod tests;
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 
 use tir::{
-    AnalysisManager, Block, BlockId, Conditional, Context, EntryGuard, GuardedLoop, OpId,
-    OpInstance, Operation, OperationRef, Pass, PassError, PassTarget, RegionId, Rewriter,
-    Terminator, TypeId, ValueId,
+    AnalysisManager, Block, BlockId, Conditional, Context, EntryGuard, GuardedLoop, OpHandle, OpId,
+    Operation, OperationRef, Pass, PassError, PassTarget, RegionId, Rewriter, Terminator, TypeId,
+    ValueId,
     analysis::{DefUse, DominatorTree},
     graph::{Dag, MutDag, NodeId, OperandConstraint},
     sem::{
@@ -2675,7 +2674,7 @@ fn value_match_allowed(
 /// every iteration, since the condition is spelled over the ports' per-iteration
 /// heads. Regions a structured operation states nothing about (a switch case, a
 /// loop's own test) carry no fact.
-fn region_entry_facts(op: &Arc<OpInstance>) -> Vec<(RegionId, ValueId, bool)> {
+fn region_entry_facts(op: &OpHandle) -> Vec<(RegionId, ValueId, bool)> {
     if let Some(conditional) = op.clone().as_interface::<dyn Conditional>() {
         return conditional.guarded_regions();
     }

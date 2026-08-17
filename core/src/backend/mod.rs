@@ -285,7 +285,7 @@ pub trait MachineInstruction {
         Ok(())
     }
     fn spec(&self) -> &'static exec::InstSpec;
-    fn instance(&self) -> &tir::OpInstance;
+    fn instance(&self) -> &tir::OpHandle;
     fn mnemonic(&self) -> &'static str {
         self.spec().mnemonic
     }
@@ -308,7 +308,7 @@ pub fn register_attr(
     name: &str,
 ) -> Option<(tir::backend::regalloc::RegClassId, u16)> {
     match op.attr(name)? {
-        AttributeValue::Register(RegisterAttr::Physical { class, index }) => Some((*class, *index)),
+        AttributeValue::Register(RegisterAttr::Physical { class, index }) => Some((class, index)),
         _ => None,
     }
 }
@@ -366,7 +366,7 @@ pub fn f64_constant_bits(context: &tir::Context, op: &crate::builtin::ConstantFO
 }
 
 pub fn int_attr(op: &impl tir::Operation, name: &str) -> Option<i64> {
-    op.attr(name).and_then(AttributeValue::as_int)
+    op.attr(name).as_ref().and_then(AttributeValue::as_int)
 }
 
 pub mod ops {

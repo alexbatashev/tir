@@ -17,7 +17,7 @@ use std::sync::OnceLock;
 
 use tir::attributes::{AttributeValue, NamedAttribute, RegisterAttr, find_attribute};
 use tir::parse::tokens::Parser;
-use tir::{Context, OpInstance, Operation};
+use tir::{Context, OpHandle, Operation};
 
 use crate::backend::Token;
 use crate::backend::parser::parse_hex;
@@ -213,7 +213,7 @@ fn parse_immediate<'src>(
 
 /// Render an instruction's assembly per `desc`, or `None` if an operand
 /// attribute is missing or holds a value the syntax cannot print.
-pub fn print(desc: &InstrDesc, context: &Context, op: &OpInstance) -> Option<String> {
+pub fn print(desc: &InstrDesc, context: &Context, op: &OpHandle) -> Option<String> {
     let attributes = &op.attributes();
     let mut out = String::new();
     for part in desc.print {
@@ -271,7 +271,7 @@ impl DescIndex {
 
     /// Render `op`'s assembly from its descriptor, or `None` if the table has
     /// no entry for it.
-    pub fn print(&self, context: &Context, op: &OpInstance) -> Option<String> {
+    pub fn print(&self, context: &Context, op: &OpHandle) -> Option<String> {
         let desc = self
             .by_op_name
             .get_or_init(|| self.table.iter().map(|desc| (desc.op_name, desc)).collect())

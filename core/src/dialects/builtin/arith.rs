@@ -30,7 +30,7 @@ impl crate::ConstantLike for ConstantOp {
     fn constant_value(&self) -> tir::utils::APInt {
         let context = self.0.context.upgrade();
         let value = match self.0.attr("value") {
-            Some(tir::attributes::AttributeValue::Int(v)) => *v,
+            Some(tir::attributes::AttributeValue::Int(v)) => v,
             _ => 0,
         };
         let ty = context.get_value(self.result()).ty();
@@ -338,10 +338,10 @@ impl CmpIOp {
         use tir::sem::SymKind;
 
         let predicate = match self.0.attr("predicate")? {
-            tir::attributes::AttributeValue::Str(s) => &**s,
+            tir::attributes::AttributeValue::Str(s) => s,
             _ => return None,
         };
-        let (kind, swap) = match predicate {
+        let (kind, swap) = match &*predicate {
             "eq" => (SymKind::Eq, false),
             "ne" => (SymKind::Ne, false),
             "slt" => (SymKind::Lt, false),

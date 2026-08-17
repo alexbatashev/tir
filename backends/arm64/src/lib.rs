@@ -840,14 +840,11 @@ mod tests {
         );
     }
 
-    fn phys_of(
-        op: &std::sync::Arc<tir::OpInstance>,
-        name: &str,
-    ) -> Option<tir::backend::liveness::PhysReg> {
+    fn phys_of(op: &tir::OpHandle, name: &str) -> Option<tir::backend::liveness::PhysReg> {
         use tir::attributes::{AttributeValue, RegisterAttr};
         match op.attr(name)? {
             AttributeValue::Register(RegisterAttr::Physical { class, index }) => {
-                Some((*class, *index))
+                Some((class, index))
             }
             _ => None,
         }
@@ -1871,7 +1868,7 @@ mod tests {
             .expect("the call must finalize to bl");
         // bl targets the callee symbol (a link-time fixup).
         assert!(
-            matches!(bl.attr("imm"), Some(tir::attributes::AttributeValue::Str(s)) if &**s == "foo")
+            matches!(bl.attr("imm"), Some(tir::attributes::AttributeValue::Str(s)) if &*s == "foo")
         );
 
         body_blocks_have_no_virtual(&context, region.id());

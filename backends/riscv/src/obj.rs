@@ -173,7 +173,7 @@ pub(crate) fn lower_addr_of(
 
 fn block_attr(op: &dyn tir::Operation, name: &str) -> Result<tir::BlockId, tir::PassError> {
     match op.attr(name) {
-        Some(AttributeValue::Block(block)) => Some(*block),
+        Some(AttributeValue::Block(block)) => Some(block),
         _ => None,
     }
     .ok_or_else(|| tir::PassError::InvalidRuleSet(format!("branch is missing its '{name}' target")))

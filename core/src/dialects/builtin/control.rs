@@ -180,7 +180,7 @@ impl CondBranchOp {
 
 fn block_attr(op: &impl Operation, name: &str) -> BlockId {
     match op.attr(name) {
-        Some(AttributeValue::Block(id)) => *id,
+        Some(AttributeValue::Block(id)) => id,
         _ => panic!("{name} must be a block reference"),
     }
 }

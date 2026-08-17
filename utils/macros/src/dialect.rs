@@ -22,7 +22,7 @@ pub fn construct_dialect(item: TokenStream) -> TokenStream {
 
     quote! {
         pub struct #struct_name {
-            dyn_converters: std::collections::HashMap<tir::OperationName, fn(std::sync::Arc<tir::OpInstance>) -> Box<dyn tir::Operation>>,
+            dyn_converters: std::collections::HashMap<tir::OperationName, fn(tir::OpHandle) -> Box<dyn tir::Operation>>,
             parsers: std::collections::HashMap<&'static str, fn(&mut tir::parse::text::Parser<'_>, &tir::Context) -> Result<Box<dyn tir::Operation>, (tir::parse::Span, tir::Error)>>,
             type_parsers: std::collections::HashMap<&'static str, tir::TypeParser>,
         }
@@ -43,7 +43,7 @@ pub fn construct_dialect(item: TokenStream) -> TokenStream {
             #register_operations
             #register_types
 
-            fn get_dyn_op(&self, op: std::sync::Arc<tir::OpInstance>) -> Box<dyn tir::Operation> {
+            fn get_dyn_op(&self, op: tir::OpHandle) -> Box<dyn tir::Operation> {
                assert_eq!(op.dialect(), tir::DialectName::of::<Self>());
                let converter = self.dyn_converters.get(&op.name()).unwrap();
                converter(op)

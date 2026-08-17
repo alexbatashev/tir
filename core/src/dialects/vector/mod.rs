@@ -200,7 +200,7 @@ operation! {
 /// bits into: a fixed vector takes it from the result type's static length (a
 /// constant); a scalable vector takes it from the dynamic `vl` operand (index 2).
 fn vlen_node(
-    op: &tir::OpInstance,
+    op: &tir::OpHandle,
     g: &mut impl tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
 ) -> tir::graph::NodeId {
     if op.operands().len() > 2 {
@@ -226,7 +226,7 @@ fn vlen_node(
 /// for fixed and scalable vectors alike (scalability varies the lane count, not
 /// the element width). On RVV this is the demanded SEW.
 fn sew_node(
-    op: &tir::OpInstance,
+    op: &tir::OpHandle,
     g: &mut impl tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
 ) -> tir::graph::NodeId {
     let context = op.context.upgrade();

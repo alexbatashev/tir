@@ -29,13 +29,13 @@ pub enum SymSource {
 }
 
 fn register_phys(
-    instance: &crate::OpInstance,
+    instance: &crate::OpHandle,
     mnemonic: &'static str,
     name: &'static str,
 ) -> Result<(RegClassId, u16), SimTrap> {
     match instance.attr(name) {
         Some(AttributeValue::Register(RegisterAttr::Physical { class, index, .. })) => {
-            Ok((*class, *index))
+            Ok((class, index))
         }
         _ => Err(SimTrap::MissingAttribute {
             op: mnemonic,
@@ -46,7 +46,7 @@ fn register_phys(
 
 /// Builds the entry symbol table for one instruction execution.
 pub fn init_syms(
-    instance: &crate::OpInstance,
+    instance: &crate::OpHandle,
     machine: &mut dyn MachineContext,
     mnemonic: &'static str,
     sym_count: usize,
@@ -64,12 +64,14 @@ pub fn init_syms(
                 tir::sem::value_from_raw_bits(machine.read_register_bits(class.name(), index)?)
             }
             SymSource::IntAttr(name, width) => {
-                let value = instance.attr(name).and_then(AttributeValue::as_int).ok_or(
-                    SimTrap::MissingAttribute {
+                let value = instance
+                    .attr(name)
+                    .as_ref()
+                    .and_then(AttributeValue::as_int)
+                    .ok_or(SimTrap::MissingAttribute {
                         op: mnemonic,
                         attribute: name,
-                    },
-                )?;
+                    })?;
                 tir::sem::int_value_signed(*width, value)
             }
             SymSource::IsaParam(name, default) => {
@@ -124,7 +126,7 @@ pub fn eval(
 /// Writes `value` to the register named by attribute `name`, skipping the
 /// target's hardwired-zero registers.
 pub fn writeback_attr(
-    instance: &crate::OpInstance,
+    instance: &crate::OpHandle,
     machine: &mut dyn MachineContext,
     mnemonic: &'static str,
     name: &'static str,
@@ -224,7 +226,7 @@ pub struct InstSpec {
 
 /// Executes one instruction against `machine`, driven by its static spec.
 pub fn run(
-    instance: &crate::OpInstance,
+    instance: &crate::OpHandle,
     spec: &InstSpec,
     machine: &mut dyn MachineContext,
 ) -> Result<(), SimTrap> {
@@ -245,7 +247,7 @@ pub fn run(
 }
 
 fn run_effects(
-    instance: &crate::OpInstance,
+    instance: &crate::OpHandle,
     spec: &InstSpec,
     machine: &mut dyn MachineContext,
     syms: &mut [tir::sem::Value],

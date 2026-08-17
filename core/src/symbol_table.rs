@@ -218,7 +218,7 @@ pub fn symbol_name_of(op: &impl Operation) -> String {
 pub fn visibility_of(op: &impl Operation) -> Visibility {
     let private = matches!(
         op.attr("sym_visibility"),
-        Some(AttributeValue::Str(value)) if &**value == "private"
+        Some(AttributeValue::Str(value)) if &*value == "private"
     );
     if private {
         Visibility::Private

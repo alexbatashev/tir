@@ -1,11 +1,10 @@
 //! Lowering of a function's IR operations into the semantic e-graph.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 
 use tir::{
     BlockId, Conditional, Context, CountedLoop, EntryGuard, GuardedLoop, LoopLike, MemoryRead,
-    MemoryWrite, OpId, OpInstance, RegionId, TokenScope, TypeId, ValueId,
+    MemoryWrite, OpHandle, OpId, RegionId, TokenScope, TypeId, ValueId,
     attributes::AttributeValue,
     builtin::{FloatType, IntegerType},
     graph::{Dag, MetaDag, NodeId},
@@ -146,7 +145,7 @@ impl<'a> SemDagBuilder<'a> {
     fn build_plain_op(
         &mut self,
         op_id: OpId,
-        op: &Arc<OpInstance>,
+        op: &OpHandle,
         float_widths: &HashSet<u32>,
         seeds: &mut Seeds,
     ) {
@@ -178,12 +177,7 @@ impl<'a> SemDagBuilder<'a> {
     /// join this graph, and what it publishes is the γ over what its arms yield or
     /// the θ over what its edges carry. Its regions may have written anything the
     /// straight-line chain cannot spell, so the chain breaks across it.
-    fn build_region_op(
-        &mut self,
-        op: &Arc<OpInstance>,
-        float_widths: &HashSet<u32>,
-        seeds: &mut Seeds,
-    ) {
+    fn build_region_op(&mut self, op: &OpHandle, float_widths: &HashSet<u32>, seeds: &mut Seeds) {
         if let Some(conditional) = op.clone().as_interface::<dyn Conditional>() {
             for region in op.regions().to_vec() {
                 self.bind_region_arguments(op, region);
@@ -210,7 +204,7 @@ impl<'a> SemDagBuilder<'a> {
     /// An arm leaving the enclosing loop never reaches what follows the gate, so a
     /// gate one arm leaves through publishes what the arm that stays yields, and
     /// one every arm leaves through publishes nothing the graph can name.
-    fn seed_gamma(&mut self, op: &Arc<OpInstance>, conditional: &dyn Conditional) {
+    fn seed_gamma(&mut self, op: &OpHandle, conditional: &dyn Conditional) {
         let decision = self.build_from_value(conditional.decision());
         let cases = conditional.case_values();
         let arms: Vec<RegionId> = cases
@@ -246,7 +240,7 @@ impl<'a> SemDagBuilder<'a> {
 
     /// An arm's entry arguments are the inputs the gate forwards into it: the
     /// operation's trailing operands, one per argument.
-    fn bind_region_arguments(&mut self, op: &Arc<OpInstance>, region: RegionId) {
+    fn bind_region_arguments(&mut self, op: &OpHandle, region: RegionId) {
         let Some(block) = self
             .context
             .get_region(region)
@@ -273,7 +267,7 @@ impl<'a> SemDagBuilder<'a> {
     /// an induction variable no init names — anchors instead.
     fn seed_theta(
         &mut self,
-        op: &Arc<OpInstance>,
+        op: &OpHandle,
         loop_like: &dyn LoopLike,
         float_widths: &HashSet<u32>,
         seeds: &mut Seeds,
@@ -308,7 +302,7 @@ impl<'a> SemDagBuilder<'a> {
         }
         self.break_state();
 
-        let edges: Vec<Arc<OpInstance>> = op
+        let edges: Vec<OpHandle> = op
             .clone()
             .as_interface::<dyn TokenScope>()
             .into_iter()
@@ -340,7 +334,7 @@ impl<'a> SemDagBuilder<'a> {
     /// ports. `None` where an edge carries too few to name it.
     fn latched_values(
         &self,
-        edges: &[Arc<OpInstance>],
+        edges: &[OpHandle],
         port: usize,
         ports: usize,
     ) -> Option<Vec<ValueId>> {
@@ -364,7 +358,7 @@ impl<'a> SemDagBuilder<'a> {
     /// second source of truth for it.
     fn tested_values(
         &self,
-        op: &Arc<OpInstance>,
+        op: &OpHandle,
         ports: usize,
     ) -> Option<(RegionId, Vec<ValueId>, Vec<ValueId>)> {
         let guard = op.clone().as_interface::<dyn GuardedLoop>()?;
@@ -394,7 +388,7 @@ impl<'a> SemDagBuilder<'a> {
     /// per-iteration condition, and a [`CountedLoop`]'s counter recurrence.
     pub(crate) fn build_region_control(
         &mut self,
-        op: &Arc<OpInstance>,
+        op: &OpHandle,
         block: BlockId,
         control: &mut RegionControl,
     ) {
@@ -439,7 +433,7 @@ impl<'a> SemDagBuilder<'a> {
     /// see the condition they were written against.
     fn build_case_tests(
         &mut self,
-        op: &Arc<OpInstance>,
+        op: &OpHandle,
         block: BlockId,
         conditional: &dyn Conditional,
         control: &mut RegionControl,
@@ -468,7 +462,7 @@ impl<'a> SemDagBuilder<'a> {
     /// advanced counter against the same bound on the back edge.
     fn build_counter(
         &mut self,
-        op: &Arc<OpInstance>,
+        op: &OpHandle,
         block: BlockId,
         lower: ValueId,
         upper: ValueId,
@@ -613,7 +607,7 @@ impl<'a> SemDagBuilder<'a> {
         self.egraph.add(node)
     }
 
-    pub(crate) fn build_for_op(&mut self, op: &std::sync::Arc<OpInstance>) -> Option<Id> {
+    pub(crate) fn build_for_op(&mut self, op: &OpHandle) -> Option<Id> {
         // A standalone `constantf` is left for the target's pre-RA hook, like a
         // bare integer `constant`; only as an operand (see `build_from_value`)
         // does it fold into a consumer via `float_constant_class`.
@@ -658,7 +652,7 @@ impl<'a> SemDagBuilder<'a> {
         self.lower_graph_node(graph, root, operands, types.as_deref())
     }
 
-    fn build_memory_effect(&mut self, op: &std::sync::Arc<OpInstance>) -> Option<Id> {
+    fn build_memory_effect(&mut self, op: &OpHandle) -> Option<Id> {
         let read_parts = op
             .clone()
             .as_interface::<dyn MemoryRead>()
@@ -790,12 +784,7 @@ impl<'a> SemDagBuilder<'a> {
 
     /// Lower a `constant` op to an integer-literal leaf, or to an input value when its
     /// payload is not an integer.
-    fn constant_class(
-        &mut self,
-        def: &std::sync::Arc<OpInstance>,
-        value: ValueId,
-        value_ty: Option<TypeId>,
-    ) -> Id {
+    fn constant_class(&mut self, def: &OpHandle, value: ValueId, value_ty: Option<TypeId>) -> Id {
         match def.attr("value") {
             Some(AttributeValue::Int(v)) => {
                 let width = value_ty
@@ -806,13 +795,13 @@ impl<'a> SemDagBuilder<'a> {
                             .map(tir::builtin::IntegerType::width)
                     })
                     .unwrap_or(64);
-                self.add_int(APInt::new_signed(width, *v), value_ty)
+                self.add_int(APInt::new_signed(width, v), value_ty)
             }
             _ => self.add_input_value(value, value_ty),
         }
     }
 
-    fn float_constant_class(&mut self, def: &std::sync::Arc<OpInstance>) -> Option<Id> {
+    fn float_constant_class(&mut self, def: &OpHandle) -> Option<Id> {
         let &result = def.results().first()?;
         let result_ty = self.context.get_value(result).ty();
         let width = {
@@ -822,7 +811,7 @@ impl<'a> SemDagBuilder<'a> {
                 .bit_width()
         };
         let value = match def.attr("value")? {
-            AttributeValue::F64(value) => *value,
+            AttributeValue::F64(value) => value,
             _ => return None,
         };
         let bits = match width {

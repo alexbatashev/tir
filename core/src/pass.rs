@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use linkme::distributed_slice;
 
-use crate::{Block, Context, OpId, OpInstance, Operation, Value, analysis::AnalysisManager};
+use crate::{Block, Context, OpHandle, OpId, Operation, Value, analysis::AnalysisManager};
 
 /// A pass made available to the pipeline parser by name.
 ///
@@ -189,7 +189,7 @@ impl PassTarget {
         })
     }
 
-    fn matches(&self, op: &OpInstance) -> bool {
+    fn matches(&self, op: &OpHandle) -> bool {
         match self {
             PassTarget::Any => true,
             PassTarget::Operation(target) => op.is_name(target.dialect, target.name),
@@ -199,13 +199,13 @@ impl PassTarget {
 
 #[derive(Clone)]
 pub struct OperationRef {
-    op: Arc<OpInstance>,
+    op: OpHandle,
     block: Option<Arc<Block>>,
     position: Option<usize>,
 }
 
 impl OperationRef {
-    pub fn new(op: Arc<OpInstance>, block: Option<Arc<Block>>, position: Option<usize>) -> Self {
+    pub fn new(op: OpHandle, block: Option<Arc<Block>>, position: Option<usize>) -> Self {
         Self {
             op,
             block,
@@ -213,7 +213,7 @@ impl OperationRef {
         }
     }
 
-    pub fn op(&self) -> &Arc<OpInstance> {
+    pub fn op(&self) -> &OpHandle {
         &self.op
     }
 
@@ -437,16 +437,16 @@ impl Rewriter {
 
 /// Match an op against a nesting spec that is either a bare op name (`func`)
 /// or a dialect-qualified name (`builtin.func`).
-fn matches_op_name(op: &OpInstance, spec: &str) -> bool {
+fn matches_op_name(op: &OpHandle, spec: &str) -> bool {
     match spec.split_once('.') {
         Some((dialect, name)) => op.is_name(dialect, name),
         None => op.name().as_str() == spec,
     }
 }
 
-/// `root` as it stands now: an operation handle is a snapshot, and a pipeline
-/// holds its root across passes that edit it. An erased root is looked up by
-/// position, because [`Rewriter::replace_op`] keeps the replacement at the
+/// `root` as it stands now: a pipeline holds its root across passes that erase
+/// and replace it, and an [`OpHandle`] to an erased op reads as a panic. An
+/// erased root is looked up by position, because [`Rewriter::replace_op`] keeps the replacement at the
 /// erased op's index — that is where selection leaves the machine symbol it
 /// made out of a function.
 fn refreshed(context: &Context, root: &OperationRef) -> Option<OperationRef> {
@@ -590,7 +590,7 @@ impl PassManager {
         }
     }
 
-    pub fn run(&mut self, context: &Context, op: Arc<OpInstance>) -> Result<(), PassError> {
+    pub fn run(&mut self, context: &Context, op: OpHandle) -> Result<(), PassError> {
         let root = OperationRef {
             op,
             block: None,
@@ -685,8 +685,11 @@ impl PassManager {
     where
         F: FnMut(OperationRef) -> Result<(), PassError>,
     {
+        // Read before the visit: it may erase `root`, and the walk still has to
+        // descend into the regions the replacement took over.
+        let regions = root.op.regions();
         f(root.clone())?;
-        for region_id in root.op.regions() {
+        for region_id in regions {
             // The visit may have erased `root`, reclaiming the regions it owned;
             // a region the replacement took over is still live and still walked.
             if !context.has_region(region_id) {

@@ -1461,7 +1461,7 @@ fn seed_regions(context: &Context, src: &str) -> SeededFunction {
 }
 
 /// The operations of a region's single block.
-fn region_ops(context: &Context, region: tir::RegionId) -> Vec<std::sync::Arc<tir::OpInstance>> {
+fn region_ops(context: &Context, region: tir::RegionId) -> Vec<tir::OpHandle> {
     context
         .get_region(region)
         .iter(context.clone())
@@ -1769,7 +1769,7 @@ fn merged_value_classes_resolve_to_earliest_def() {
     assert_eq!(sub_op.operands()[0], body[0].results()[0]);
 }
 
-fn block_op_list(context: &Context, block: tir::BlockId) -> Vec<std::sync::Arc<tir::OpInstance>> {
+fn block_op_list(context: &Context, block: tir::BlockId) -> Vec<tir::OpHandle> {
     context
         .get_block(block)
         .op_ids()

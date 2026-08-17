@@ -11,14 +11,13 @@
 //! provenance and never takes part in that identity.
 
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
 
 use tir_adt::{APInt, FxHasher};
 use tir_symbolic::egraph::{ENode, Id};
 
 use crate::attributes::{AttributeValue, NamedAttribute};
 use crate::sem::{SymKind, SymPayload};
-use crate::{OpCost, OpId, OpInstance, Operation, TypeId, ValueId};
+use crate::{OpCost, OpHandle, OpId, Operation, TypeId, ValueId};
 
 /// An IR operation's identity: `(dialect, name, attributes)`. `commutative` and
 /// `cost` describe the operator but do not identify it.
@@ -213,12 +212,7 @@ impl SemNode {
 
     /// A seeded IR op: identity/`ty`/attrs from `instance`, `cost` from its
     /// [`OpCost`] interface.
-    pub fn seeded(
-        instance: &Arc<OpInstance>,
-        ty: TypeId,
-        commutative: bool,
-        args: Vec<Id>,
-    ) -> Self {
+    pub fn seeded(instance: &OpHandle, ty: TypeId, commutative: bool, args: Vec<Id>) -> Self {
         let cost = instance
             .clone()
             .as_interface::<dyn OpCost>()

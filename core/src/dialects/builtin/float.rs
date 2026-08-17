@@ -139,7 +139,7 @@ operation! {
 }
 
 fn float_format_node(
-    op: &tir::OpInstance,
+    op: &tir::OpHandle,
     g: &mut impl tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
     format: impl FnOnce(&crate::builtin::FloatType) -> u32,
 ) -> tir::graph::NodeId {
@@ -260,10 +260,10 @@ impl CmpFOp {
         >,
     ) -> Option<tir::graph::NodeId> {
         let predicate = match self.0.attr("predicate")? {
-            tir::attributes::AttributeValue::Str(value) => &**value,
+            tir::attributes::AttributeValue::Str(value) => value,
             _ => return None,
         };
-        cmpf_semantics(g, predicate)
+        cmpf_semantics(g, &predicate)
     }
 }
 

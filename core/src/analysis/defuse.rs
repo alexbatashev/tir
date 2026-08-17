@@ -11,12 +11,11 @@
 //! and register allocation share [`op_regs`] for their own ordered scans.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use crate::attributes::{AttributeRole, AttributeValue, RegisterAttr, RegisterSemantics};
 use crate::backend::regalloc::RegClassId;
 use crate::{
-    Context, OpId, OpInstance,
+    Context, OpHandle, OpId,
     analysis::{Analysis, AnalysisManager},
 };
 
@@ -49,7 +48,7 @@ fn role_reads(role: AttributeRole) -> bool {
 /// Resolve the register operands of one op from its SSA operands/results and its
 /// register-valued attributes (consulting the opcode's
 /// [`RegisterSemantics`] interface).
-pub fn op_regs(op: &Arc<OpInstance>) -> OpRegs {
+pub fn op_regs(op: &OpHandle) -> OpRegs {
     let attribute_roles = op
         .clone()
         .as_interface::<dyn RegisterSemantics>()
@@ -145,7 +144,7 @@ pub fn op_regs(op: &Arc<OpInstance>) -> OpRegs {
 /// fixed-register protocol reaches it through the fixed-register operands
 /// selection emits — the same accesses in the notation the allocator can act
 /// on.
-pub fn execution_regs(op: &Arc<OpInstance>) -> OpRegs {
+pub fn execution_regs(op: &OpHandle) -> OpRegs {
     let mut regs = op_regs(op);
 
     let implicit_regs = op

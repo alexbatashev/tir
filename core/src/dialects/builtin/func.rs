@@ -61,12 +61,12 @@ impl FuncOpBuilder {
 
 impl FuncOp {
     pub fn has_result_address(&self) -> bool {
-        self.attr("result_address") == Some(&tir::attributes::AttributeValue::Bool(true))
+        self.attr("result_address") == Some(tir::attributes::AttributeValue::Bool(true))
     }
 
     pub fn ret_type(&self) -> tir::TypeId {
         match self.attr("ret_type") {
-            Some(tir::attributes::AttributeValue::Type(ty)) => *ty,
+            Some(tir::attributes::AttributeValue::Type(ty)) => ty,
             _ => panic!("func must carry ret_type"),
         }
     }

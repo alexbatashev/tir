@@ -8,12 +8,11 @@
 //! after allocation.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use crate::analysis::{DefUse, RegRef, op_regs};
 use crate::backend::SymbolOp;
 use crate::{
-    AnalysisManager, ConstantLike, Context, MemoryWrite, OpInstance, OperationRef, Pass, PassError,
+    AnalysisManager, ConstantLike, Context, MemoryWrite, OpHandle, OperationRef, Pass, PassError,
     PassTarget, Rewriter, Terminator, builtin::FuncOp,
 };
 
@@ -66,9 +65,11 @@ impl Pass for DeadCodeEliminationPass {
             }
 
             let block = instance.parent_block().map(|b| context.get_block(b));
+            // Read before the erase: the op's storage goes away with it.
+            let used_regs = op_regs(&instance).uses;
             rewriter.erase_op(&OperationRef::new(instance.clone(), block, None))?;
 
-            for used in op_regs(&instance).uses {
+            for used in used_regs {
                 let RegRef::Virtual { id, .. } = used else {
                     continue;
                 };
@@ -89,7 +90,7 @@ impl Pass for DeadCodeEliminationPass {
 /// a terminator, a memory write, or any physical-register write keep it; an op
 /// with SSA results must additionally declare pure semantics, so effectful ops
 /// like calls survive even when their result is unread.
-fn is_erasable(instance: &Arc<OpInstance>, use_counts: &HashMap<u32, usize>) -> bool {
+fn is_erasable(instance: &OpHandle, use_counts: &HashMap<u32, usize>) -> bool {
     if !instance.regions().is_empty()
         || instance.clone().as_interface::<dyn Terminator>().is_some()
         || instance.clone().as_interface::<dyn MemoryWrite>().is_some()
@@ -122,7 +123,7 @@ fn is_erasable(instance: &Arc<OpInstance>, use_counts: &HashMap<u32, usize>) -> 
     defines
 }
 
-fn is_pure_value(instance: &Arc<OpInstance>) -> bool {
+fn is_pure_value(instance: &OpHandle) -> bool {
     instance
         .clone()
         .as_interface::<dyn ConstantLike>()

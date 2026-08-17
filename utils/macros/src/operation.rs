@@ -667,7 +667,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
     };
 
     quote! {
-        pub struct #struct_name(std::sync::Arc<tir::OpInstance>);
+        pub struct #struct_name(tir::OpHandle);
 
         #schema_registration
 
@@ -739,16 +739,16 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
                 self.0.id
             }
 
-            fn op_instance(&self) -> &std::sync::Arc<tir::OpInstance> {
+            fn handle(&self) -> &tir::OpHandle {
                 &self.0
             }
 
-            fn from_op_instance(instance: std::sync::Arc<tir::OpInstance>) -> Self {
+            fn from_op_instance(instance: tir::OpHandle) -> Self {
                 assert_eq!(instance.name(), tir::OperationName::of::<Self>());
                 #struct_name(instance)
             }
 
-            fn from_op_instance_dyn(instance: std::sync::Arc<tir::OpInstance>) -> Box<dyn tir::Operation> {
+            fn from_op_instance_dyn(instance: tir::OpHandle) -> Box<dyn tir::Operation> {
                 assert_eq!(instance.name(), tir::OperationName::of::<Self>());
                 Box::new(#struct_name(instance))
             }

@@ -86,7 +86,7 @@ impl DeclareOp {
     /// `None` for a data declaration, which has no signature.
     pub fn ret_type(&self) -> Option<TypeId> {
         match self.attr("ret_type")? {
-            AttributeValue::Type(ty) => Some(*ty),
+            AttributeValue::Type(ty) => Some(ty),
             _ => None,
         }
     }

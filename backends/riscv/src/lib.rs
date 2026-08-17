@@ -496,7 +496,7 @@ fn lower_vector_len(
     };
     // The grant is element-width-specific (VLMAX depends on SEW), so the op
     // names the width it configures for.
-    let Some(&AttributeValue::Int(sew)) = inner.attr("sew") else {
+    let Some(AttributeValue::Int(sew)) = inner.attr("sew") else {
         return Err(tir::PassError::InvalidRuleSet(
             "vector.vector_len requires a `sew` attribute".to_string(),
         ));
@@ -1783,14 +1783,11 @@ mod tests {
         );
     }
 
-    fn phys_of(
-        op: &std::sync::Arc<tir::OpInstance>,
-        name: &str,
-    ) -> Option<tir::backend::liveness::PhysReg> {
+    fn phys_of(op: &tir::OpHandle, name: &str) -> Option<tir::backend::liveness::PhysReg> {
         use tir::attributes::{AttributeValue, RegisterAttr};
         match op.attr(name)? {
             AttributeValue::Register(RegisterAttr::Physical { class, index }) => {
-                Some((*class, *index))
+                Some((class, index))
             }
             _ => None,
         }
@@ -2076,7 +2073,7 @@ mod tests {
         // jal links through ra and targets the callee symbol (a link-time fixup).
         assert_eq!(phys_of(&jal, "rd"), Some((RegClass::GPR.id(), 1)));
         assert!(
-            matches!(jal.attr("imm"), Some(tir::attributes::AttributeValue::Str(s)) if &**s == "foo")
+            matches!(jal.attr("imm"), Some(tir::attributes::AttributeValue::Str(s)) if &*s == "foo")
         );
 
         body_blocks_have_no_virtual(&context, region.id());

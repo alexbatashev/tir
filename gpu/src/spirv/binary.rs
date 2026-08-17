@@ -266,7 +266,7 @@ impl<'a> Writer<'a> {
 
     fn write_operation(
         &mut self,
-        op: std::sync::Arc<tir::OpInstance>,
+        op: tir::OpHandle,
         block_ids: &HashMap<BlockId, u32>,
         out: &mut Vec<u32>,
     ) -> Result<()> {
@@ -322,7 +322,7 @@ impl<'a> Writer<'a> {
             operands.extend(constant_words(
                 self.context,
                 constant.result(),
-                attr_value(&constant, "value")?,
+                &attr_value(&constant, "value")?,
             )?);
             instruction(out, 43, &operands);
             Ok(())
@@ -976,11 +976,7 @@ impl<'a> Reader<'a> {
     }
 }
 
-fn branch_argument(
-    op: std::sync::Arc<tir::OpInstance>,
-    destination: BlockId,
-    index: usize,
-) -> Option<ValueId> {
+fn branch_argument(op: tir::OpHandle, destination: BlockId, index: usize) -> Option<ValueId> {
     if let Some(branch) = op.clone().as_op::<tir::builtin::BranchOp>()
         && branch.dest() == destination
     {
@@ -1046,7 +1042,7 @@ fn write_name(out: &mut Vec<u32>, id: u32, name: &str) {
     operands.extend(encode_string(name));
     instruction(out, 5, &operands);
 }
-fn attr_value<'a>(op: &'a dyn Operation, name: &str) -> Result<&'a AttributeValue> {
+fn attr_value(op: &dyn Operation, name: &str) -> Result<AttributeValue> {
     op.attr(name)
         .ok_or_else(|| format!("missing attribute {name}"))
 }
@@ -1058,7 +1054,7 @@ fn attr_str(op: &dyn Operation, name: &str) -> Result<String> {
 }
 fn attr_type(op: &dyn Operation, name: &str) -> Result<TypeId> {
     match attr_value(op, name)? {
-        AttributeValue::Type(v) => Ok(*v),
+        AttributeValue::Type(v) => Ok(v),
         _ => Err(format!("attribute {name} must be a type")),
     }
 }
@@ -1070,7 +1066,7 @@ fn attr_array(op: &dyn Operation, name: &str) -> Result<Vec<AttributeValue>> {
 }
 fn attr_dict(op: &dyn Operation, name: &str) -> Result<BTreeMap<String, AttributeValue>> {
     match attr_value(op, name)? {
-        AttributeValue::Dict(v) => Ok((**v).clone()),
+        AttributeValue::Dict(v) => Ok((*v).clone()),
         _ => Err(format!("attribute {name} must be a dictionary")),
     }
 }

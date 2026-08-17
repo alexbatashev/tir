@@ -16,8 +16,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use tir::{
-    Block, BlockId, Conditional, Context, CountedLoop, EntryGuard, GuardedLoop, LoopLike, OpId,
-    OpInstance, OperationRef, PassError, RegionId, Rewriter, ValueId,
+    Block, BlockId, Conditional, Context, CountedLoop, EntryGuard, GuardedLoop, LoopLike, OpHandle,
+    OpId, OperationRef, PassError, RegionId, Rewriter, ValueId,
     analysis::scopes::{RegionExit, loop_scope, region_exit_kind},
     builtin::TokenType,
 };
@@ -118,7 +118,7 @@ impl<'a> Destructor<'a> {
         Ok(())
     }
 
-    fn next_structured(&self) -> Option<(Arc<Block>, Arc<OpInstance>)> {
+    fn next_structured(&self) -> Option<(Arc<Block>, OpHandle)> {
         for block in self
             .context
             .get_region(self.region)
@@ -141,7 +141,7 @@ impl<'a> Destructor<'a> {
         &mut self,
         rewriter: &mut Rewriter,
         block: Arc<Block>,
-        op: Arc<OpInstance>,
+        op: OpHandle,
     ) -> Result<(), PassError> {
         if let Some(conditional) = op.clone().as_interface::<dyn Conditional>() {
             return self.lower_gate(rewriter, block, &op, conditional.as_ref());
@@ -157,7 +157,7 @@ impl<'a> Destructor<'a> {
         }
     }
 
-    fn decline(op: &Arc<OpInstance>, reason: &str) -> PassError {
+    fn decline(op: &OpHandle, reason: &str) -> PassError {
         PassError::InvalidRuleSet(format!("cannot destruct {}: {reason}", op.name()))
     }
 
@@ -168,7 +168,7 @@ impl<'a> Destructor<'a> {
         &mut self,
         rewriter: &mut Rewriter,
         block: Arc<Block>,
-        op: &Arc<OpInstance>,
+        op: &OpHandle,
         conditional: &dyn Conditional,
     ) -> Result<(), PassError> {
         let cases = conditional.case_values();
@@ -240,7 +240,7 @@ impl<'a> Destructor<'a> {
     /// later case and no default can run — or excludes it from the chain.
     fn live_chain(
         &self,
-        op: &Arc<OpInstance>,
+        op: &OpHandle,
         arms: usize,
         default: usize,
     ) -> Result<(Vec<usize>, bool), PassError> {
@@ -266,7 +266,7 @@ impl<'a> Destructor<'a> {
         &mut self,
         rewriter: &mut Rewriter,
         block: Arc<Block>,
-        op: &Arc<OpInstance>,
+        op: &OpHandle,
     ) -> Result<(), PassError> {
         let test = self
             .move_body(op.regions()[0])
@@ -315,7 +315,7 @@ impl<'a> Destructor<'a> {
         &mut self,
         rewriter: &mut Rewriter,
         block: Arc<Block>,
-        op: &Arc<OpInstance>,
+        op: &OpHandle,
     ) -> Result<(), PassError> {
         let counted = op
             .clone()
@@ -537,14 +537,14 @@ impl<'a> Destructor<'a> {
         block.append((self.emitters.uncond)(self.context, dest, args).id());
     }
 
-    fn aux(&self, op: &Arc<OpInstance>, slot: AuxSlot) -> Result<&'a AuxEmit, PassError> {
+    fn aux(&self, op: &OpHandle, slot: AuxSlot) -> Result<&'a AuxEmit, PassError> {
         self.region_values
             .get(&(op.id, slot))
             .ok_or_else(|| Self::decline(op, &format!("{slot:?} was not selected")))
     }
 
     /// The register a counter's advance landed in.
-    fn aux_value(&self, op: &Arc<OpInstance>, slot: AuxSlot) -> Result<ValueId, PassError> {
+    fn aux_value(&self, op: &OpHandle, slot: AuxSlot) -> Result<ValueId, PassError> {
         match self.aux(op, slot)? {
             AuxEmit::Value(value) => Ok(*value),
             AuxEmit::Branch(_) | AuxEmit::Decided(_) => {
@@ -563,12 +563,12 @@ impl<'a> Destructor<'a> {
 
     /// The inputs a gate forwards into each arm: its trailing operands, one per
     /// entry argument, the mapping the seeder read the arms under.
-    fn entry_arguments(&self, op: &Arc<OpInstance>, arm: &Arc<Block>) -> Vec<ValueId> {
+    fn entry_arguments(&self, op: &OpHandle, arm: &Arc<Block>) -> Vec<ValueId> {
         let first = op.operands().len().saturating_sub(arm.arguments().len());
         self.mapped(&op.operands()[first..])
     }
 
-    fn terminator(&self, block: &Arc<Block>) -> Result<Arc<OpInstance>, PassError> {
+    fn terminator(&self, block: &Arc<Block>) -> Result<OpHandle, PassError> {
         let block = self.context.get_block(block.id());
         block
             .op_ids()
@@ -616,7 +616,7 @@ impl<'a> Destructor<'a> {
         &self,
         rewriter: &mut Rewriter,
         block: &Arc<Block>,
-        op: &Arc<OpInstance>,
+        op: &OpHandle,
     ) -> Arc<Block> {
         let block = self.context.get_block(block.id());
         let position = block.op_ids().iter().position(|id| *id == op.id).unwrap();
@@ -631,7 +631,7 @@ impl<'a> Destructor<'a> {
         &self,
         rewriter: &mut Rewriter,
         block: &Arc<Block>,
-        op: &Arc<OpInstance>,
+        op: &OpHandle,
     ) -> Result<(), PassError> {
         rewriter.erase_op(&OperationRef::new(
             op.clone(),

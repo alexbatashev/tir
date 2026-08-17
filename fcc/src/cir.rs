@@ -206,7 +206,7 @@ fn uint_attribute(operation: &impl Operation, name: &str) -> u64 {
     operation
         .attr(name)
         .and_then(|value| match value {
-            AttributeValue::UInt(value) => Some(*value),
+            AttributeValue::UInt(value) => Some(value),
             _ => None,
         })
         .unwrap()

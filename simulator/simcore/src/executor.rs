@@ -720,7 +720,7 @@ impl Executor {
 
     fn format_instruction_line(
         context: &Context,
-        op: &std::sync::Arc<tir::OpInstance>,
+        op: &tir::OpHandle,
         machine_inst: &dyn MachineInstruction,
     ) -> String {
         let mut pieces = Vec::new();

@@ -16,7 +16,7 @@ use crate::analysis::slots::collect_slots;
 use crate::builtin::{CallOp, EntryStateOpBuilder, FuncOp, IndirectCallOp, ReturnOp, StateType};
 use crate::ptr::MemcpyOp;
 use crate::{
-    Block, Context, MemoryRead, MemoryWrite, OpId, OpInstance, Operation, OperationRef, Pass,
+    Block, Context, MemoryRead, MemoryWrite, OpHandle, OpId, Operation, OperationRef, Pass,
     PassError, PassTarget, PromotableAllocation, RegionId, Rewriter, TypeId, ValueId, scf,
 };
 
@@ -176,7 +176,7 @@ impl Threader<'_> {
     /// the edits are the same: what differs is only that a γ's arms are
     /// alternatives, so each threads its own copy of the state entering the gate
     /// and the result is whichever copy the arm that ran left behind.
-    fn thread_regions(&mut self, op: &Arc<OpInstance>) {
+    fn thread_regions(&mut self, op: &OpHandle) {
         let context = self.context;
         // A chain an exit inside carries out has to cross this op as a port too:
         // the exit takes the state its own copy reached, not the one the code
@@ -256,7 +256,7 @@ impl Threader<'_> {
     }
 
     /// Whether anything inside `op`'s regions accesses `chain`.
-    fn touches_chain(&self, op: &Arc<OpInstance>, chain: Chain) -> bool {
+    fn touches_chain(&self, op: &OpHandle, chain: Chain) -> bool {
         op.regions()
             .iter()
             .flat_map(|&region| region_ops(self.context, region))
@@ -269,7 +269,7 @@ impl Threader<'_> {
     }
 
     /// The chains `op` carries out of a loop being walked, if it is such an exit.
-    fn exit_chains(&self, op: &Arc<OpInstance>) -> Option<&[Chain]> {
+    fn exit_chains(&self, op: &OpHandle) -> Option<&[Chain]> {
         let scope = exit_scope(op)?;
         self.scopes
             .iter()
@@ -278,7 +278,7 @@ impl Threader<'_> {
     }
 
     /// Every chain an exit inside `op`'s regions carries out.
-    fn nested_exit_chains(&self, op: &Arc<OpInstance>) -> BTreeSet<Chain> {
+    fn nested_exit_chains(&self, op: &OpHandle) -> BTreeSet<Chain> {
         nested_exit_scopes(self.context, op)
             .into_iter()
             .filter_map(|scope| self.scopes.iter().find(|(token, _)| *token == scope))
@@ -296,7 +296,7 @@ impl Threader<'_> {
 
 /// How `op` relates to the chains, reading an access through an untracked pointer
 /// as one that may alias anything.
-fn classify(op: &Arc<OpInstance>, tracked: &BTreeSet<ValueId>) -> Option<Effect> {
+fn classify(op: &OpHandle, tracked: &BTreeSet<ValueId>) -> Option<Effect> {
     let chain_of = |pointer| {
         if tracked.contains(&pointer) {
             Chain::Slot(pointer)
@@ -321,7 +321,7 @@ fn classify(op: &Arc<OpInstance>, tracked: &BTreeSet<ValueId>) -> Option<Effect>
 
 /// Whether `op` is one of the operations that carry state. Exporting the chain is
 /// not touching memory: a `return` alone leaves a function with nothing to thread.
-fn touches_memory(op: &Arc<OpInstance>) -> bool {
+fn touches_memory(op: &OpHandle) -> bool {
     matches!(
         classify(op, &BTreeSet::new()),
         Some(Effect::Open(_) | Effect::Access(_))
@@ -356,14 +356,14 @@ fn threadable(context: &Context, block: &Arc<Block>) -> bool {
 }
 
 /// Whether `op` can carry a chain across its regions as a port.
-fn carries_state(op: &Arc<OpInstance>) -> bool {
+fn carries_state(op: &OpHandle) -> bool {
     op.is::<scf::ForOp>()
         || op.is::<scf::WhileOp>()
         || op.is::<scf::IfOp>()
         || op.is::<scf::SwitchOp>()
 }
 
-fn subtree_touches_memory(context: &Context, op: &Arc<OpInstance>) -> bool {
+fn subtree_touches_memory(context: &Context, op: &OpHandle) -> bool {
     op.regions()
         .iter()
         .flat_map(|&region| region_ops(context, region))

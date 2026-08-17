@@ -56,9 +56,9 @@ pub use ir_formatter::IRFormatter;
 pub use layout::{DATA_LAYOUT, DataLayout, Endianness, data_layout_spec};
 pub use operand::Operand;
 pub use operation::{
-    DialectName, ErasedOpInterface, ImplementsOpInterface, OpDefSpec, OpDefVerifiable, OpId,
-    OpInstance, OpInterfaceConverter, Operation, OperationName, RegionIds, ValueIds, Verifiable,
-    downcast_op_interface, erase_op_interface, op_interface_converter, verify_op_tree,
+    DialectName, ErasedOpInterface, ImplementsOpInterface, OpDefSpec, OpDefVerifiable, OpHandle,
+    OpId, OpInstance, OpInterfaceConverter, Operation, OperationName, RegionIds, ValueIds,
+    Verifiable, downcast_op_interface, erase_op_interface, op_interface_converter, verify_op_tree,
     verify_opdef_attributes, verify_opdef_operands,
 };
 pub use pass::{

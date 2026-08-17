@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use crate::builtin::TokenType;
-use crate::{Block, Context, OpId, OpInstance, RegionId, ValueId, ValueIds, scf};
+use crate::{Block, Context, OpHandle, OpId, RegionId, ValueId, ValueIds, scf};
 
 /// The loop body's token scope: the value its `scf.break`/`scf.continue` name.
 pub fn loop_scope(context: &Context, body: RegionId) -> Option<ValueId> {
@@ -23,7 +23,7 @@ pub fn loop_scope(context: &Context, body: RegionId) -> Option<ValueId> {
 }
 
 /// The scope `op` leaves through, if it is an exit at all.
-pub fn exit_scope(op: &Arc<OpInstance>) -> Option<ValueId> {
+pub fn exit_scope(op: &OpHandle) -> Option<ValueId> {
     (op.is::<scf::BreakOp>() || op.is::<scf::ContinueOp>()).then(|| op.operands()[0])
 }
 
@@ -46,7 +46,7 @@ pub enum RegionExit {
 
 /// How `op` leaves the region it terminates, or `None` where it does not leave one
 /// — a `return`, or a terminator emission has already lowered.
-pub fn region_exit_kind(op: &Arc<OpInstance>) -> Option<RegionExit> {
+pub fn region_exit_kind(op: &OpHandle) -> Option<RegionExit> {
     if op.is::<scf::BreakOp>() {
         Some(RegionExit::Break)
     } else if op.is::<scf::ContinueOp>() {
@@ -98,7 +98,7 @@ fn scope_exits(context: &Context, block: &Arc<Block>, scope: ValueId) -> Vec<OpI
 
 /// The values an edge carries into the ports it feeds: an exit's operands past its
 /// scope token, any other terminator's operands.
-pub fn carried_operands(op: &Arc<OpInstance>) -> ValueIds {
+pub fn carried_operands(op: &OpHandle) -> ValueIds {
     let operands = op.operands();
     match exit_scope(op) {
         Some(_) => operands[1..].into(),
@@ -107,7 +107,7 @@ pub fn carried_operands(op: &Arc<OpInstance>) -> ValueIds {
 }
 
 /// The scopes every exit inside `op`'s regions leaves through.
-pub fn nested_exit_scopes(context: &Context, op: &Arc<OpInstance>) -> Vec<ValueId> {
+pub fn nested_exit_scopes(context: &Context, op: &OpHandle) -> Vec<ValueId> {
     let mut scopes = Vec::new();
     for region in op.regions() {
         for block in context.get_region(region).iter(context.clone()) {

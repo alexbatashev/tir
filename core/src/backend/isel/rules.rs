@@ -5,12 +5,10 @@
 //! function body of builder calls. [`build_rules`] and [`emit_with`] interpret
 //! the specs.
 
-use std::sync::Arc;
-
 use tir::attributes::{AttributeValue, RegisterAttr};
 use tir::graph::OperandConstraint;
 use tir::sem::{ExtendSemBytes, ExtendSemBytesTyped, SymKind};
-use tir::{Context, OpInstance, Operation, PassError};
+use tir::{Context, OpHandle, OpInstance, Operation, PassError};
 
 use crate::backend::isel::{
     EmitRequest, ImmRange, RegisterCapability, RegisterRequirement, Rule, RuleEmitFn, RuleKind,
@@ -69,7 +67,7 @@ pub struct EmitSpec {
     pub op: (&'static str, &'static str),
     /// Wraps the built instance into the typed operation. Generated as
     /// `|instance| Box::new(FooOp(instance))`.
-    pub wrap: fn(Arc<OpInstance>) -> Box<dyn Operation>,
+    pub wrap: fn(OpHandle) -> Box<dyn Operation>,
     pub attrs: &'static [EmitAttr],
     /// Every attribute the op declares; emission fills all of them.
     pub declared: &'static [&'static str],
@@ -362,7 +360,7 @@ mod tests {
         RegClassId::new(&R_CLASS)
     }
 
-    fn wrap(instance: Arc<OpInstance>) -> Box<dyn Operation> {
+    fn wrap(instance: OpHandle) -> Box<dyn Operation> {
         <ConstantOp as Operation>::from_op_instance_dyn(instance)
     }
 
@@ -417,9 +415,9 @@ mod tests {
             vec![(0, ValueId::from_number(5)), (1, ValueId::from_number(9))],
         );
         let op = emit_with(&context, &req, &m, &spec).unwrap();
-        assert_eq!(op.op_instance().name().as_str(), "constant");
+        assert_eq!(op.handle().name().as_str(), "constant");
         let expect = |name, value| {
-            assert_eq!(op.attr(name), Some(&value), "attr {name}");
+            assert_eq!(op.attr(name), Some(value), "attr {name}");
         };
         use tir::attributes::RegisterAttr as RA;
         expect(
@@ -486,13 +484,13 @@ mod tests {
         };
         let m = RuleMatch::new(vec![(3, APInt::new(8, 4))], vec![]);
         let op = emit_with(&context, &req, &m, &spec).unwrap();
-        assert_eq!(op.attr("value"), Some(&AttributeValue::Int(4)));
+        assert_eq!(op.attr("value"), Some(AttributeValue::Int(4)));
 
         let m = RuleMatch::new(vec![], vec![(3, ValueId::from_number(11))]);
         let op = emit_with(&context, &req, &m, &spec).unwrap();
         assert_eq!(
             op.attr("value"),
-            Some(&AttributeValue::Register(
+            Some(AttributeValue::Register(
                 tir::attributes::RegisterAttr::Virtual {
                     id: 11,
                     class: None,

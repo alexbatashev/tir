@@ -17,7 +17,7 @@ use crate::{
     dialects::scf::ScfDialect,
     ir_formatter::IRFormatter,
     operation::{
-        ImplementsOpInterface, OpInterfaceConverter, OpNameId, downcast_op_interface,
+        ImplementsOpInterface, OpHandle, OpInterfaceConverter, OpNameId, downcast_op_interface,
         op_interface_converter,
     },
     parse::text::Parser as IRParser,
@@ -120,7 +120,13 @@ struct Owned {
 
 struct ContextInstance {
     // Arenas are slabs indexed by the dense, monotonic id counters below; see `slab_get`.
-    operations: Vec<Option<Arc<OpInstance>>>,
+    /// Live operations, densely packed. Nothing may iterate this in place of the
+    /// ids: an erase swaps the last entry into the hole, so the order is not the
+    /// ids' order. Walk `op_slots` instead.
+    ops: Vec<OpInstance>,
+    /// Where each [`OpId`] sits in `ops`, or `u32::MAX` for an id never created
+    /// or since erased.
+    op_slots: Vec<u32>,
     last_op_id: AtomicU32,
     values: Vec<Option<Value>>,
     last_value_id: AtomicU32,
@@ -167,7 +173,47 @@ struct ContextInstance {
     op_name_ids: HashMap<(&'static str, &'static str), OpNameId>,
 }
 
+const NO_SLOT: u32 = u32::MAX;
+
 impl ContextInstance {
+    fn op(&self, id: OpId) -> Option<&OpInstance> {
+        match self.op_slots.get(id.index()).copied() {
+            Some(slot) if slot != NO_SLOT => Some(&self.ops[slot as usize]),
+            _ => None,
+        }
+    }
+
+    fn op_mut(&mut self, id: OpId) -> Option<&mut OpInstance> {
+        match self.op_slots.get(id.index()).copied() {
+            Some(slot) if slot != NO_SLOT => Some(&mut self.ops[slot as usize]),
+            _ => None,
+        }
+    }
+
+    fn put_op(&mut self, instance: OpInstance) {
+        let index = instance.id.index();
+        if index >= self.op_slots.len() {
+            self.op_slots.resize(index + 1, NO_SLOT);
+        }
+        self.op_slots[index] = self.ops.len() as u32;
+        self.ops.push(instance);
+    }
+
+    /// Give an operation's storage back, closing the hole with the last live op.
+    fn erase_op(&mut self, id: OpId) {
+        let Some(slot) = self.op_slots.get(id.index()).copied() else {
+            return;
+        };
+        if slot == NO_SLOT {
+            return;
+        }
+        self.ops.swap_remove(slot as usize);
+        if let Some(moved) = self.ops.get(slot as usize) {
+            self.op_slots[moved.id.index()] = slot;
+        }
+        self.op_slots[id.index()] = NO_SLOT;
+    }
+
     /// The op enclosing `block`, if the block sits in a region owned by one.
     fn enclosing_op(&self, block: BlockId) -> Option<OpId> {
         let region = *slab_get(&self.block_parent, block.index())?;
@@ -256,7 +302,8 @@ impl Context {
     /// Create a new empty context with no registered dialects.
     pub fn new() -> Self {
         Context(Arc::new(RwLock::new(ContextInstance {
-            operations: Vec::new(),
+            ops: Vec::new(),
+            op_slots: Vec::new(),
             last_op_id: AtomicU32::new(0),
             values: Vec::new(),
             last_value_id: AtomicU32::new(0),
@@ -325,12 +372,6 @@ impl Context {
         id
     }
 
-    /// The `(dialect, name)` pair behind `id`. Only ids this context minted are
-    /// meaningful.
-    pub(crate) fn resolve_op_name(&self, id: OpNameId) -> (&'static str, &'static str) {
-        self.0.read().op_names[id.index()]
-    }
-
     /// Pair an attribute name with its value, interning the name.
     pub fn named_attribute(&self, name: &str, value: AttributeValue) -> NamedAttribute {
         NamedAttribute::new(self.intern(name), value)
@@ -348,16 +389,12 @@ impl Context {
         }
         const ARC_HEADER_BYTES: usize = 16;
         const SLOT_BYTES: usize = 8;
-        let ops_live = live(&inner.operations);
+        const OP_SLOT_BYTES: usize = 4;
+        let ops_live = inner.ops.len();
         let values_live = live(&inner.values);
         let blocks_live = live(&inner.blocks);
         let regions_live = live(&inner.regions);
-        let ops_heap: usize = inner
-            .operations
-            .iter()
-            .flatten()
-            .map(|op| op.heap_bytes())
-            .sum();
+        let ops_heap: usize = inner.ops.iter().map(|op| op.heap_bytes()).sum();
         let blocks_heap: usize = inner
             .blocks
             .iter()
@@ -371,7 +408,7 @@ impl Context {
             .map(|region| region.heap_bytes())
             .sum();
         crate::memstats::SlabCensus {
-            ops_slab: inner.operations.len(),
+            ops_slab: inner.op_slots.len(),
             ops_live,
             values_slab: inner.values.len(),
             values_live,
@@ -379,14 +416,12 @@ impl Context {
             blocks_live,
             regions_slab: inner.regions.len(),
             regions_live,
-            ops_bytes: entity_bytes::<OpInstance>(ops_live) + ops_heap,
+            ops_bytes: ops_live * std::mem::size_of::<OpInstance>() + ops_heap,
             values_bytes: values_live * std::mem::size_of::<Value>(),
             blocks_bytes: entity_bytes::<Block>(blocks_live) + blocks_heap,
             regions_bytes: entity_bytes::<Region>(regions_live) + regions_heap,
-            slab_bytes: (inner.operations.capacity()
-                + inner.blocks.capacity()
-                + inner.regions.capacity())
-                * SLOT_BYTES
+            slab_bytes: (inner.blocks.capacity() + inner.regions.capacity()) * SLOT_BYTES
+                + inner.op_slots.capacity() * OP_SLOT_BYTES
                 + inner.values.capacity() * std::mem::size_of::<Option<Value>>(),
         }
     }
@@ -437,39 +472,62 @@ impl Context {
             })
     }
 
-    pub fn add_operation(&self, instance: OpInstance) -> Arc<OpInstance> {
-        // Machine ops carry their register operands in role-tagged attributes;
-        // resolve the opcode's roles through its RegisterSemantics interface
-        // before taking the write lock (the tables are `'static`, so they
-        // outlive the probe).
-        let probe = Arc::new(instance);
-        let attribute_roles = self
-            .get_op_interface::<dyn crate::attributes::RegisterSemantics>(probe.clone())
-            .map(|semantics| semantics.attribute_roles())
-            .unwrap_or_default();
-        let mut instance = Arc::try_unwrap(probe).expect("probe interface dropped");
+    pub fn add_operation(&self, mut instance: OpInstance) -> OpHandle {
+        let op_id = {
+            let mut inner = self.0.write();
 
-        let mut inner = self.0.write();
+            let op_id = OpId::new(
+                inner
+                    .last_op_id
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+            );
 
-        let op_id = OpId::new(
-            inner
-                .last_op_id
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
-        );
+            instance.id = op_id;
 
-        instance.id = op_id;
-
-        // Results are created before op id assignment in builders; patch their def-site now.
-        for result_id in instance.results() {
-            if let Some(value) = slab_get_mut(&mut inner.values, result_id.index()) {
-                value.set_defining_op(op_id);
+            // Results are created before op id assignment in builders; patch their def-site now.
+            for result_id in instance.results() {
+                if let Some(value) = slab_get_mut(&mut inner.values, result_id.index()) {
+                    value.set_defining_op(op_id);
+                }
             }
+
+            for r in instance.regions() {
+                slab_get(&inner.regions, r.index())
+                    .unwrap()
+                    .set_parent_op(op_id);
+            }
+
+            inner.put_op(instance);
+            op_id
+        };
+
+        // Machine ops carry their register operands in role-tagged attributes;
+        // resolving the opcode's roles goes back through the context, so it waits
+        // until the op is in storage and the lock is free.
+        let handle = OpHandle {
+            context: self.as_context_ref(),
+            id: op_id,
+        };
+        self.record_register_defs(&handle);
+        handle
+    }
+
+    /// A `Def`-role register attribute is the def-site of its virtual value, the
+    /// machine-IR spelling of an SSA result. Virtual register ids are value
+    /// numbers; physical registers have none and are skipped — they are not SSA.
+    /// ReadWrite defines too.
+    fn record_register_defs(&self, handle: &OpHandle) {
+        let Some(semantics) =
+            self.get_op_interface::<dyn crate::attributes::RegisterSemantics>(handle.clone())
+        else {
+            return;
+        };
+        let attribute_roles = semantics.attribute_roles();
+        if attribute_roles.is_empty() {
+            return;
         }
 
-        // A `Def`-role register attribute is the def-site of its virtual value, the
-        // machine-IR spelling of an SSA result. Virtual register ids are value
-        // numbers; physical registers have none and are skipped — they are not SSA.
-        // ReadWrite defines too.
+        let mut inner = self.0.write();
         for (attr_name, role) in attribute_roles {
             use crate::attributes::{AttributeRole, AttributeValue, RegisterAttr};
             if !matches!(role, AttributeRole::Def | AttributeRole::ReadWrite) {
@@ -477,40 +535,29 @@ impl Context {
             }
             // Resolved through the held instance: the context lock is not
             // reentrant, so nothing here may go back through `Context`.
-            let Some(AttributeValue::Register(register)) = inner
-                .names
-                .lookup(attr_name)
-                .and_then(|name| instance.attr_sym(name))
+            let Some(name) = inner.names.lookup(attr_name) else {
+                continue;
+            };
+            let Some(AttributeValue::Register(register)) =
+                inner.op(handle.id).and_then(|op| op.attr_sym(name))
             else {
                 continue;
             };
             let id = match register {
                 RegisterAttr::Virtual { id, .. }
                 | RegisterAttr::FixedUse { id, .. }
-                | RegisterAttr::FixedDef { id, .. } => id,
+                | RegisterAttr::FixedDef { id, .. } => *id,
                 RegisterAttr::Physical { .. } => continue,
             };
-            let value_id = ValueId::from_number(*id);
+            let value_id = ValueId::from_number(id);
             if let Some(value) = slab_get_mut(&mut inner.values, value_id.index()) {
-                value.set_defining_op(op_id);
+                value.set_defining_op(handle.id);
             }
         }
-
-        for r in instance.regions() {
-            slab_get(&inner.regions, r.index())
-                .unwrap()
-                .set_parent_op(op_id);
-        }
-
-        let instance = Arc::new(instance);
-
-        slab_put(&mut inner.operations, op_id.index(), instance.clone());
-
-        instance
     }
 
     pub fn has_operation(&self, id: OpId) -> bool {
-        slab_get(&self.0.read().operations, id.index()).is_some()
+        self.0.read().op(id).is_some()
     }
 
     /// Replace an operation's attributes in place, keeping its id, position, and
@@ -519,8 +566,8 @@ impl Context {
     /// does not update `Value::uses`, since physical registers are not SSA values.
     pub fn set_op_attributes(&self, id: OpId, attributes: Vec<crate::attributes::NamedAttribute>) {
         let mut inner = self.0.write();
-        if let Some(existing) = slab_get_mut(&mut inner.operations, id.index()) {
-            Arc::make_mut(existing).set_attributes(attributes);
+        if let Some(existing) = inner.op_mut(id) {
+            existing.set_attributes(attributes);
             inner.edit_op(id);
         }
     }
@@ -550,8 +597,8 @@ impl Context {
     /// blocks and block arguments, and every op nested in them. Called by
     /// `Rewriter::erase_op`/`replace_op` once the op has left its block, so the
     /// arenas track the *live* IR rather than accumulating erased entities.
-    /// Existing `Arc` handles (e.g. inside an `OperationRef`) keep the entities
-    /// they point at alive for as long as they are held.
+    /// An [`OpHandle`] naming an erased op (e.g. inside an `OperationRef`) reads
+    /// as a panic from here on: read what an erase needs before performing it.
     pub(crate) fn remove_operation(&self, id: OpId) {
         self.free(self.owned_entities(vec![id]));
     }
@@ -572,14 +619,15 @@ impl Context {
     /// register.
     pub fn set_op_operand(&self, id: OpId, index: usize, new: ValueId) {
         let mut inner = self.0.write();
-        match slab_get(&inner.operations, id.index())
+        match inner
+            .op(id)
             .and_then(|op| op.operands().get(index).copied())
         {
             Some(old) if old != new => {}
             _ => return,
         }
-        if let Some(op) = slab_get_mut(&mut inner.operations, id.index()) {
-            Arc::make_mut(op).replace_operand_at(index, new);
+        if let Some(op) = inner.op_mut(id) {
+            op.replace_operand_at(index, new);
         }
         inner.edit_op(id);
     }
@@ -589,8 +637,8 @@ impl Context {
     /// to explicit copies.
     pub fn set_op_operands(&self, id: OpId, operands: Vec<ValueId>) {
         let mut inner = self.0.write();
-        if let Some(op) = slab_get_mut(&mut inner.operations, id.index()) {
-            Arc::make_mut(op).set_operands(operands);
+        if let Some(op) = inner.op_mut(id) {
+            op.set_operands(operands);
             inner.edit_op(id);
         }
     }
@@ -637,13 +685,14 @@ impl Context {
 
         let mut inner = self.0.write();
         for op in ops {
-            let uses_old = slab_get(&inner.operations, op.index())
+            let uses_old = inner
+                .op(op)
                 .is_some_and(|instance| instance.operands().contains(&old));
             if !uses_old {
                 continue;
             }
-            if let Some(instance) = slab_get_mut(&mut inner.operations, op.index()) {
-                Arc::make_mut(instance).replace_operand_uses(old, new);
+            if let Some(instance) = inner.op_mut(op) {
+                instance.replace_operand_uses(old, new);
             }
             inner.edit_op(op);
         }
@@ -672,13 +721,16 @@ impl Context {
         self.subtree(&blocks).0
     }
 
+    /// Every live op, in id order. Walks the slot table, not the dense storage:
+    /// an erase reorders the latter.
     fn live_ops(&self) -> Vec<OpId> {
         let inner = self.0.read();
         inner
-            .operations
+            .op_slots
             .iter()
-            .flatten()
-            .map(|instance| instance.id)
+            .enumerate()
+            .filter(|(_, slot)| **slot != NO_SLOT)
+            .map(|(index, _)| OpId::new(index as u32))
             .collect()
     }
 
@@ -787,10 +839,9 @@ impl Context {
     pub fn append_operand(&self, op: OpId, value: ValueId) {
         let mut inner = self.0.write();
         let segment_sizes = inner.names.intern("operand_segment_sizes");
-        let Some(instance) = slab_get_mut(&mut inner.operations, op.index()) else {
+        let Some(instance) = inner.op_mut(op) else {
             return;
         };
-        let instance = Arc::make_mut(instance);
         instance.push_operand(value);
         if let Some(attribute) = instance
             .attributes_mut()
@@ -809,10 +860,9 @@ impl Context {
     pub fn pop_operand(&self, op: OpId) {
         let mut inner = self.0.write();
         let segment_sizes = inner.names.intern("operand_segment_sizes");
-        let Some(instance) = slab_get_mut(&mut inner.operations, op.index()) else {
+        let Some(instance) = inner.op_mut(op) else {
             return;
         };
-        let instance = Arc::make_mut(instance);
         instance.pop_operand();
         if let Some(attribute) = instance
             .attributes_mut()
@@ -830,10 +880,10 @@ impl Context {
     /// with the edit. The inverse of the result [`Context::grow_port`] adds.
     pub fn pop_result(&self, op: OpId) {
         let mut inner = self.0.write();
-        let Some(instance) = slab_get_mut(&mut inner.operations, op.index()) else {
+        let Some(instance) = inner.op_mut(op) else {
             return;
         };
-        if let Some(result) = Arc::make_mut(instance).pop_result() {
+        if let Some(result) = instance.pop_result() {
             clear_slot(&mut inner.values, result.index());
         }
         inner.edit_op(op);
@@ -918,8 +968,8 @@ impl Context {
             return;
         };
         let mut inner = self.0.write();
-        if let Some(instance) = slab_get_mut(&mut inner.operations, op.index()) {
-            Arc::make_mut(instance).rotate_results_from(index);
+        if let Some(instance) = inner.op_mut(op) {
+            instance.rotate_results_from(index);
             inner.edit_op(op);
         }
     }
@@ -935,8 +985,8 @@ impl Context {
             return last;
         };
         let mut inner = self.0.write();
-        if let Some(instance) = slab_get_mut(&mut inner.operations, op.index()) {
-            Arc::make_mut(instance).rotate_operands_from(index);
+        if let Some(instance) = inner.op_mut(op) {
+            instance.rotate_operands_from(index);
             inner.edit_op(op);
         }
         index
@@ -964,8 +1014,8 @@ impl Context {
     fn append_result(&self, op: OpId, ty: TypeId) -> ValueId {
         let result = self.create_value(ty, Some(op)).id();
         let mut inner = self.0.write();
-        if let Some(instance) = slab_get_mut(&mut inner.operations, op.index()) {
-            Arc::make_mut(instance).push_result(result);
+        if let Some(instance) = inner.op_mut(op) {
+            instance.push_result(result);
             inner.edit_op(op);
         }
         result
@@ -1103,12 +1153,12 @@ impl Context {
     ///
     /// Slots are emptied, never handed to another entity: ids come from monotonic
     /// per-context counters and are never reused, so a stale id can only read as
-    /// "gone", never as some later entity. The empty slot costs one word until the
-    /// context dies; the entity behind it is freed here.
+    /// "gone", never as some later entity. The empty slot costs one entry until
+    /// the context dies; the entity behind it is freed here.
     fn free(&self, owned: Owned) {
         let mut inner = self.0.write();
         for op in owned.ops {
-            clear_slot(&mut inner.operations, op.index());
+            inner.erase_op(op);
             clear_slot(&mut inner.op_parent, op.index());
         }
         for value in owned.values {
@@ -1124,8 +1174,11 @@ impl Context {
         }
     }
 
-    fn find_op(&self, id: OpId) -> Option<Arc<OpInstance>> {
-        slab_get(&self.0.read().operations, id.index()).cloned()
+    fn find_op(&self, id: OpId) -> Option<OpHandle> {
+        self.0.read().op(id).is_some().then(|| OpHandle {
+            context: self.as_context_ref(),
+            id,
+        })
     }
 
     fn find_block(&self, id: BlockId) -> Option<Arc<Block>> {
@@ -1257,10 +1310,41 @@ impl Context {
         slab_get(&inner.regions, id.index()).unwrap().clone()
     }
 
-    pub fn get_op(&self, id: OpId) -> Arc<OpInstance> {
+    /// The handle naming `id`. Panics for an id no live operation has: a handle
+    /// reads the operation as it stands, and an erased one does not stand.
+    pub fn get_op(&self, id: OpId) -> OpHandle {
         let inner = self.0.read();
+        inner.op(id).expect("live operation");
+        OpHandle {
+            context: self.as_context_ref(),
+            id,
+        }
+    }
 
-        slab_get(&inner.operations, id.index()).unwrap().clone()
+    /// Read an operation's storage record under the context lock.
+    ///
+    /// `read` must not touch the context: the lock is not reentrant.
+    pub(crate) fn with_op<R>(&self, id: OpId, read: impl FnOnce(&OpInstance) -> R) -> R {
+        let inner = self.0.read();
+        read(inner.op(id).expect("live operation"))
+    }
+
+    /// [`OpHandle::attr`]: the name is resolved in the same lock as the lookup.
+    pub(crate) fn op_attr(&self, id: OpId, name: &str) -> Option<AttributeValue> {
+        let inner = self.0.read();
+        let name = inner.names.lookup(name)?;
+        inner
+            .op(id)
+            .expect("live operation")
+            .attr_sym(name)
+            .cloned()
+    }
+
+    /// The `(dialect, name)` pair `id` is spelled by.
+    pub(crate) fn op_identity(&self, id: OpId) -> (&'static str, &'static str) {
+        let inner = self.0.read();
+        let name = inner.op(id).expect("live operation").name_id();
+        inner.op_names[name.index()]
     }
 
     pub fn register_op_interface<I: ?Sized + 'static>(
@@ -1283,35 +1367,27 @@ impl Context {
         self.register_op_interface::<I>(Op::dialect(), Op::name(), op_interface_converter::<Op, I>);
     }
 
-    pub(crate) fn get_dyn_op(&self, op: Arc<OpInstance>) -> Box<dyn Operation> {
-        let inner = self.0.read();
-
-        let dialect = inner.dialects.get(op.dialect().as_str()).unwrap();
-
+    pub(crate) fn get_dyn_op(&self, op: OpHandle) -> Box<dyn Operation> {
+        // The identity read takes the lock, so it happens before this one does.
+        let dialect_name = self.op_identity(op.id).0;
+        let dialect = self.0.read().dialects.get(dialect_name).unwrap().clone();
         dialect.get_dyn_op(op)
     }
 
-    pub(crate) fn get_op_interface<I: ?Sized + 'static>(
-        &self,
-        op: Arc<OpInstance>,
-    ) -> Option<Box<I>> {
-        let converter = self.find_op_interface::<I>(&op)?;
+    pub(crate) fn get_op_interface<I: ?Sized + 'static>(&self, op: OpHandle) -> Option<Box<I>> {
+        let converter = self.find_op_interface::<I>(self.op_identity(op.id))?;
         let erased = converter(op);
         downcast_op_interface::<I>(erased)
     }
 
     pub(crate) fn find_op_interface<I: ?Sized + 'static>(
         &self,
-        op: &OpInstance,
+        identity: (&'static str, &'static str),
     ) -> Option<OpInterfaceConverter> {
         self.0
             .read()
             .op_interface_converters
-            .get(&(
-                op.dialect().as_str(),
-                op.name().as_str(),
-                std::any::TypeId::of::<I>(),
-            ))
+            .get(&(identity.0, identity.1, std::any::TypeId::of::<I>()))
             .copied()
     }
 

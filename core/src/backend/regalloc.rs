@@ -13,7 +13,6 @@
 //! convention policy come from the selected [`crate::backend::abi::AbiInfo`].
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 
 use tir::attributes::{AttributeRole, AttributeValue, RegisterAttr};
 use tir::{
@@ -1493,7 +1492,7 @@ fn collect_stack_arg_loads(
             let Some(stack_index) =
                 op.attr(prealloc::ABI_STACK_INDEX_ATTR)
                     .and_then(|value| match value {
-                        AttributeValue::UInt(index) => Some(*index as usize),
+                        AttributeValue::UInt(index) => Some(index as usize),
                         _ => None,
                     })
             else {
@@ -1658,7 +1657,7 @@ fn rewrite_registers(context: &Context, blocks: &[BlockId], assignment: &HashMap
 }
 
 /// [`role_of`] for an interned attribute name.
-pub(crate) fn role_of_sym(op: &Arc<tir::OpInstance>, name: tir::Sym) -> AttributeRole {
+pub(crate) fn role_of_sym(op: &tir::OpHandle, name: tir::Sym) -> AttributeRole {
     let context = op.context.upgrade();
     op.clone()
         .as_interface::<dyn tir::attributes::RegisterSemantics>()
@@ -1670,7 +1669,7 @@ pub(crate) fn role_of_sym(op: &Arc<tir::OpInstance>, name: tir::Sym) -> Attribut
         .unwrap_or(AttributeRole::None)
 }
 
-pub(crate) fn role_of(op: &Arc<tir::OpInstance>, name: &str) -> AttributeRole {
+pub(crate) fn role_of(op: &tir::OpHandle, name: &str) -> AttributeRole {
     op.clone()
         .as_interface::<dyn tir::attributes::RegisterSemantics>()
         .map(|semantics| semantics.attribute_roles())

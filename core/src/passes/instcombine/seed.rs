@@ -7,7 +7,6 @@
 //! multi-result or effectful op — anchors as an input leaf.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 
 use tir_symbolic::egraph::{EGraph, Id};
 
@@ -18,7 +17,7 @@ use crate::sem::egraph::{minimal_unsigned_apint, type_width};
 use crate::sem::{Prov, SemNode as Node, SymKind};
 use crate::{
     BlockId, Commutative, Conditional, ConstantLike, Context, EntryGuard, GuardedLoop, LoopLike,
-    MemoryRead, MemoryWrite, OpId, OpInstance, RegionId, TokenScope, TypeId, ValueId,
+    MemoryRead, MemoryWrite, OpHandle, OpId, RegionId, TokenScope, TypeId, ValueId,
 };
 
 /// The operands a store term names: the location, the value it writes, and the
@@ -199,7 +198,7 @@ impl Seeder<'_> {
     /// what it would have yielded is never read: a gate one arm leaves through
     /// publishes what the arm that stays yields, and one every arm leaves through
     /// publishes nothing the graph can name.
-    fn seed_gamma(&mut self, instance: &Arc<OpInstance>, conditional: &dyn Conditional) {
+    fn seed_gamma(&mut self, instance: &OpHandle, conditional: &dyn Conditional) {
         let decision = self.class_of(conditional.decision());
         for region in instance.regions().to_vec() {
             self.bind_arm_arguments(instance, region);
@@ -241,7 +240,7 @@ impl Seeder<'_> {
 
     /// An arm's entry arguments are the inputs the gate forwards into it: the
     /// operation's trailing operands, one per argument.
-    fn bind_arm_arguments(&mut self, instance: &Arc<OpInstance>, region: RegionId) {
+    fn bind_arm_arguments(&mut self, instance: &OpHandle, region: RegionId) {
         let Some(block) = self
             .context
             .get_region(region)
@@ -267,7 +266,7 @@ impl Seeder<'_> {
     ///
     /// Only state ports: a value the loop carries is one the term graph already
     /// reads as an argument, and nothing yet asks it what the loop does to it.
-    fn seed_theta(&mut self, instance: &Arc<OpInstance>, loop_like: &dyn LoopLike) {
+    fn seed_theta(&mut self, instance: &OpHandle, loop_like: &dyn LoopLike) {
         let carried = loop_like.carried_args();
         let ports: Vec<usize> = carried
             .iter()
@@ -296,7 +295,7 @@ impl Seeder<'_> {
             self.seed_region(region);
         }
         let (inits, finals) = (loop_like.inits(), loop_like.finals());
-        let edges: Vec<Arc<OpInstance>> = instance
+        let edges: Vec<OpHandle> = instance
             .clone()
             .as_interface::<dyn TokenScope>()
             .into_iter()
@@ -341,7 +340,7 @@ impl Seeder<'_> {
     /// order. `None` where an edge carries too few to name them.
     fn carried_states(
         &self,
-        edges: &[Arc<OpInstance>],
+        edges: &[OpHandle],
         slot: usize,
         states: usize,
     ) -> Option<Vec<ValueId>> {
@@ -361,7 +360,7 @@ impl Seeder<'_> {
     /// tests nothing it carries.
     fn tested_values(
         &self,
-        instance: &Arc<OpInstance>,
+        instance: &OpHandle,
         ports: usize,
     ) -> Option<(RegionId, Vec<ValueId>, Vec<ValueId>)> {
         let guard = instance.clone().as_interface::<dyn GuardedLoop>()?;
@@ -389,7 +388,7 @@ impl Seeder<'_> {
     /// state only through the accesses on it, so a state any other operation takes
     /// — returned, yielded out of a region, handed to a call — is observed by
     /// something the graph cannot see, and no law may drop the write that left it.
-    fn export_states(&mut self, instance: &Arc<OpInstance>) {
+    fn export_states(&mut self, instance: &OpHandle) {
         for operand in instance.operands().to_vec() {
             if self.context.get_value(operand).ty() == self.state_ty {
                 let id = self.class_of(operand);
@@ -399,7 +398,7 @@ impl Seeder<'_> {
     }
 
     /// Seed a memory access over the state it reads, if it is one that names a state.
-    fn seed_memory(&mut self, instance: &Arc<OpInstance>) -> bool {
+    fn seed_memory(&mut self, instance: &OpHandle) -> bool {
         if let Some(read) = instance.clone().as_interface::<dyn MemoryRead>() {
             return self.seed_read(read.as_ref());
         }
@@ -441,7 +440,7 @@ impl Seeder<'_> {
     /// the location, the value and the state, so a write carrying any other
     /// operand — a size, say — covers an extent the term cannot spell and is no
     /// store term at all.
-    fn seed_write(&mut self, instance: &Arc<OpInstance>, write: &dyn MemoryWrite) -> bool {
+    fn seed_write(&mut self, instance: &OpHandle, write: &dyn MemoryWrite) -> bool {
         if instance.operands().len() != STORE_OPERANDS {
             return false;
         }
@@ -490,7 +489,7 @@ impl Seeder<'_> {
 }
 
 /// A pure value op the e-graph may reason about: one result, no regions, and a declared semantic expression.
-fn is_pure_value(instance: &Arc<OpInstance>) -> bool {
+fn is_pure_value(instance: &OpHandle) -> bool {
     instance.results().len() == 1
         && instance.regions().is_empty()
         && instance

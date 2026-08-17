@@ -1127,7 +1127,7 @@ fn emit_instructions<'a>(
 
         machine_instruction_impls.push(quote! {
             impl tir::backend::MachineInstruction for #name_ident {
-                fn instance(&self) -> &tir::OpInstance {
+                fn instance(&self) -> &tir::OpHandle {
                     &self.0
                 }
 
@@ -1552,7 +1552,7 @@ fn emit_instructions<'a>(
     let text_only_format_helpers = if text_only && !instruction_defs.is_empty() {
         quote! {
             fn custom_print_text_operation(
-                op: &tir::OpInstance,
+                op: &tir::OpHandle,
                 op_name: &str,
                 register_attributes: &[&str],
                 fmt: &mut tir::IRFormatter<'_>,
@@ -1657,7 +1657,7 @@ fn emit_instructions<'a>(
 
             fn print_instruction_asm(
                 context: &tir::Context,
-                op: &tir::OpInstance,
+                op: &tir::OpHandle,
             ) -> Option<String> {
                 INSTRUCTION_DESC_INDEX.print(context, op)
             }

@@ -225,7 +225,7 @@ impl TupleGetOp {
 
     pub fn index(&self) -> usize {
         match self.attr("index") {
-            Some(crate::attributes::AttributeValue::UInt(index)) => *index as usize,
+            Some(crate::attributes::AttributeValue::UInt(index)) => index as usize,
             _ => panic!("tuple_get must carry an index"),
         }
     }

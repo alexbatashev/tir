@@ -5,7 +5,7 @@
 //! `[op_lo, op_lo + width)` map to word bits `[word_lo, word_lo + width)`.
 
 use tir::attributes::{AttributeValue, NamedAttribute, RegisterAttr};
-use tir::{Context, OpId, OpInstance};
+use tir::{Context, OpHandle, OpId, OpInstance};
 
 use crate::backend::binary::{EncodedInst, FixupTarget, InstFixup};
 use crate::backend::regalloc::RegClassId;
@@ -64,13 +64,13 @@ pub struct EncodeSpec {
 /// Interprets an [`EncodeSpec`]. `None` when an operand cannot be encoded (e.g.
 /// a virtual register survived register allocation); symbol/block operands
 /// become fixups with their bits left zero.
-pub fn encode_with(op: &OpInstance, spec: &EncodeSpec) -> Option<EncodedInst> {
+pub fn encode_with(op: &OpHandle, spec: &EncodeSpec) -> Option<EncodedInst> {
     let mut word = spec.const_word;
     let mut fixups = Vec::new();
     for field in spec.fields {
         if field.register {
             let value = match op.attr(field.attr)? {
-                AttributeValue::Register(RegisterAttr::Physical { index, .. }) => *index as u128,
+                AttributeValue::Register(RegisterAttr::Physical { index, .. }) => index as u128,
                 _ => return None,
             };
             scatter(&mut word, value, field.runs);
@@ -81,19 +81,19 @@ pub fn encode_with(op: &OpInstance, spec: &EncodeSpec) -> Option<EncodedInst> {
         match op.attr(field.attr)? {
             AttributeValue::Int(v) => {
                 if let Some((min, max, _)) = field.int_range
-                    && !(min..max).contains(v)
+                    && !(min..max).contains(&v)
                 {
                     return None;
                 }
-                scatter(&mut word, *v as u128, field.runs);
+                scatter(&mut word, v as u128, field.runs);
             }
             AttributeValue::UInt(v) => {
                 if let Some((_, _, umax)) = field.int_range
-                    && *v >= umax
+                    && v >= umax
                 {
                     return None;
                 }
-                scatter(&mut word, *v as u128, field.runs);
+                scatter(&mut word, v as u128, field.runs);
             }
             AttributeValue::Str(s) => fixups.push(InstFixup {
                 operand: field.attr,
@@ -101,7 +101,7 @@ pub fn encode_with(op: &OpInstance, spec: &EncodeSpec) -> Option<EncodedInst> {
             }),
             AttributeValue::Block(b) => fixups.push(InstFixup {
                 operand: field.attr,
-                target: FixupTarget::Block(*b),
+                target: FixupTarget::Block(b),
             }),
             _ => return None,
         }
@@ -241,7 +241,7 @@ mod tests {
         })
     }
 
-    fn op_with(attrs: Vec<(&str, AttributeValue)>) -> (Context, OpInstance) {
+    fn op_with(attrs: Vec<(&str, AttributeValue)>) -> (Context, tir::OpHandle) {
         let context = Context::with_default_dialects();
         let attributes = attrs
             .into_iter()
@@ -255,7 +255,8 @@ mod tests {
             vec![],
             attributes,
         );
-        (context, instance)
+        let handle = context.add_operation(instance);
+        (context, handle)
     }
 
     // `lui rd, imm`: 55 | rd << 7 | (imm & 0xFFFFF) << 12
@@ -406,8 +407,8 @@ mod tests {
         let op = context.get_op(id);
         assert_eq!(op.dialect().as_str(), "test");
         assert_eq!(op.name().as_str(), "beq");
-        assert_eq!(op.attr("rs1"), Some(&phys(5)),);
-        assert_eq!(op.attr("imm"), Some(&AttributeValue::Int(2)));
+        assert_eq!(op.attr("rs1"), Some(phys(5)));
+        assert_eq!(op.attr("imm"), Some(AttributeValue::Int(2)));
 
         assert!(decode_with(&context, word | 1 << 14, &BEQ_DECODE).is_none());
     }

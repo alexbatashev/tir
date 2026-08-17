@@ -18,7 +18,7 @@ use tir::attributes::{AttributeValue, NamedAttribute, RegisterAttr};
 use tir::backend::asm_syntax::{AsmSyntaxPart, InstrSyntax};
 use tir::backend::{SectionOp, SymbolEndOp, SymbolOp};
 use tir::builtin::{ModuleEndOpBuilder, ModuleOp, ModuleOpBuilder};
-use tir::{Context, OpId, OpInstance, Operation};
+use tir::{Context, OpHandle, OpId, OpInstance, Operation};
 
 use super::{LabelOp, LabelOpBuilder};
 
@@ -624,18 +624,18 @@ pub fn parse(context: &Context, text: &str) -> Result<ModuleOp, String> {
 // Printing
 // ---------------------------------------------------------------------------
 
-fn attr_str(op: &OpInstance, name: &str) -> Option<String> {
+fn attr_str(op: &OpHandle, name: &str) -> Option<String> {
     match op.attr(name)? {
         AttributeValue::Str(s) => Some(s.to_string()),
         _ => None,
     }
 }
 
-fn attr_bool(op: &OpInstance, name: &str) -> bool {
+fn attr_bool(op: &OpHandle, name: &str) -> bool {
     matches!(op.attr(name), Some(AttributeValue::Bool(true)))
 }
 
-fn render_operand(op: &OpInstance, name: &str) -> Result<String, String> {
+fn render_operand(op: &OpHandle, name: &str) -> Result<String, String> {
     let value = op
         .attr(name)
         .ok_or_else(|| format!("op `{}` missing operand `{name}`", op.name().as_str()))?;
@@ -650,11 +650,7 @@ fn render_operand(op: &OpInstance, name: &str) -> Result<String, String> {
     })
 }
 
-fn print_instruction(
-    op: &OpInstance,
-    syntax: &InstrSyntax,
-    out: &mut String,
-) -> Result<(), String> {
+fn print_instruction(op: &OpHandle, syntax: &InstrSyntax, out: &mut String) -> Result<(), String> {
     out.push('\t');
     if let Some(pred) = attr_str(op, "pred") {
         out.push('@');
@@ -735,7 +731,7 @@ pub fn print(context: &Context, module: &ModuleOp) -> Result<String, String> {
 }
 
 /// Op ids of the first block of an op's single region.
-fn region_ops(context: &Context, op: &OpInstance) -> Vec<OpId> {
+fn region_ops(context: &Context, op: &OpHandle) -> Vec<OpId> {
     let Some(region) = op.regions().first().copied() else {
         return Vec::new();
     };

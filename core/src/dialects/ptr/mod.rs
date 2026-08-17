@@ -190,7 +190,7 @@ impl AllocaOp {
 
 fn uint_attribute(op: &impl Operation, name: &str) -> u64 {
     match op.attr(name) {
-        Some(AttributeValue::UInt(value)) => *value,
+        Some(AttributeValue::UInt(value)) => value,
         _ => panic!("{name} must be an unsigned integer attribute"),
     }
 }
@@ -268,7 +268,7 @@ impl CmpOp {
         let context = self.0.context.upgrade();
         crate::DataLayout::for_instance(&context, &self.0)?.pointer_size()?;
 
-        let (kind, swap) = match predicate(self)? {
+        let (kind, swap) = match predicate(self)?.as_str() {
             "eq" => (SymKind::Eq, false),
             "ne" => (SymKind::Ne, false),
             "ult" => (SymKind::ULt, false),
@@ -304,7 +304,7 @@ impl CmpOpBuilder {
 impl tir::Verifiable for CmpOp {
     fn verify_impl(&self, _context: &Context) -> Result<(), Error> {
         match predicate(self) {
-            Some(pred) if POINTER_PREDICATES.contains(&pred) => Ok(()),
+            Some(pred) if POINTER_PREDICATES.contains(&pred.as_str()) => Ok(()),
             Some(pred) => Err(Error::VerificationError(format!(
                 "ptr.cmp predicate '{pred}' is not a pointer comparison (expected {})",
                 POINTER_PREDICATES.join(", ")
@@ -316,9 +316,9 @@ impl tir::Verifiable for CmpOp {
     }
 }
 
-fn predicate(op: &impl Operation) -> Option<&str> {
+fn predicate(op: &impl Operation) -> Option<String> {
     match op.attr("predicate")? {
-        AttributeValue::Str(value) => Some(value),
+        AttributeValue::Str(value) => Some(value.into_string()),
         _ => None,
     }
 }

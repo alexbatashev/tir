@@ -839,7 +839,7 @@ fn latched_values(op: &impl LoopOp) -> Vec<ValueId> {
 
 /// The carried values a structured terminator transfers: everything a `scf.break` or
 /// `scf.continue` carries past its scope token, and everything else's operands.
-fn exit_values(terminator: &Arc<tir::OpInstance>) -> ValueIds {
+fn exit_values(terminator: &tir::OpHandle) -> ValueIds {
     let operands = terminator.operands();
     if terminator.is::<BreakOp>() || terminator.is::<ContinueOp>() {
         operands[1..].into()

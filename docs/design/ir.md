@@ -81,7 +81,8 @@ Conventions:
   previously captured id set must tolerate dead ids.
 - Op identity is the `(dialect: &'static str, name: &'static str)` pair.
   Typed op structs (`AddIOp`, `ForOp`, …) are zero-cost newtype wrappers over
-  `Arc<OpInstance>`; `op.is::<ForOp>()` compares the pair. The
+  `OpHandle`, the `(context, id)` pair naming an op; `op.is::<ForOp>()`
+  compares the identity pair. The
   `OperationName`/`DialectName` newtypes exist so string comparison against
   op names does not compile.
 - A block argument is a `Value` with `defining_op == None`. There is no
@@ -89,25 +90,26 @@ Conventions:
 
 ### 2.2 Storage and the mutability discipline
 
-All entities live in `Context` slabs (`Vec<Option<Arc<T>>>` indexed by id).
-`OpInstance`, `Block`, and `Region` are plain structs with **no interior
-mutability** — no per-field locks, no cells. Mutation happens in exactly one
-place: inside the Context's write lock, via `Arc::make_mut`, invoked only by
+Blocks and regions live in `Context` slabs (`Vec<Option<Arc<T>>>` indexed by
+id); operations live in a dense `Vec<OpInstance>` with a slot table mapping
+`OpId` to its position. `OpInstance`, `Block`, and `Region` are plain structs
+with **no interior mutability** — no per-field locks, no cells. Mutation
+happens in exactly one place: inside the Context's write lock, invoked only by
 the tree-edit API. Consequences developers rely on:
 
-- Holding an `Arc<OpInstance>` (or `Arc<Block>`) is a consistent snapshot.
-  It can never change underneath you; a concurrent edit produces a *new*
-  instance behind the same id.
-- Structural sharing is automatic: an edit clones only the entities on the
-  edited spine; untouched subtrees keep their `Arc` identity.
+- An `OpHandle` reads its operation **as it stands**: each accessor takes the
+  context lock and copies out. It is not a snapshot, and a handle to an erased
+  op panics rather than answering — read what you need before erasing.
+- Holding an `Arc<Block>` is still a consistent snapshot: an edit produces a
+  new instance behind the same id, so re-read to observe it.
 - The green core stores **no derived data**. In particular it does not
   maintain use lists (the `DefUse` view owns those, §7.3), and blocks do not
   store successor/predecessor lists (CFG edges are read from the
   `Terminator` interface where a CFG exists at all).
 
-The storage layout (`Arc` slabs) is an implementation detail behind the
-tree-edit and accessor API. A data-oriented SoA layout may replace it later
-without changing anything in this document except this sentence.
+The storage layout is an implementation detail behind the tree-edit and
+accessor API. A data-oriented SoA layout may replace what is left of the `Arc`
+slabs without changing anything in this document except this sentence.
 
 ### 2.3 Versions
 

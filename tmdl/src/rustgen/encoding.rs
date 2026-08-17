@@ -217,7 +217,7 @@ fn emit_instruction_encoder(
             };
 
         fn #encode_fn_ident(
-            op: &tir::OpInstance,
+            op: &tir::OpHandle,
         ) -> Option<tir::backend::binary::EncodedInst> {
             tir::backend::binary::encode_with(op, &#encode_spec_ident)
         }
