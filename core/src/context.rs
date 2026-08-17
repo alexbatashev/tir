@@ -17,7 +17,8 @@ use crate::{
     dialects::scf::ScfDialect,
     ir_formatter::IRFormatter,
     operation::{
-        ImplementsOpInterface, OpInterfaceConverter, downcast_op_interface, op_interface_converter,
+        ImplementsOpInterface, OpInterfaceConverter, OpNameId, downcast_op_interface,
+        op_interface_converter,
     },
     parse::text::Parser as IRParser,
     ptr::PtrDialect,
@@ -159,6 +160,11 @@ struct ContextInstance {
     /// attribute name instead of a heap `String` per instance. One table per
     /// context: a [`Sym`] means nothing outside the context that minted it.
     names: Interner,
+    /// The `(dialect, name)` pairs ops are identified by, so an op carries four
+    /// bytes of identity instead of two fat pointers. Ids are dense and handed
+    /// out in construction order.
+    op_names: Vec<(&'static str, &'static str)>,
+    op_name_ids: HashMap<(&'static str, &'static str), OpNameId>,
 }
 
 impl ContextInstance {
@@ -269,6 +275,8 @@ impl Context {
             type_cache: vec![],
             type_lookup: HashMap::new(),
             names: schema_vocabulary(),
+            op_names: Vec::new(),
+            op_name_ids: HashMap::new(),
         })))
     }
 
@@ -299,6 +307,28 @@ impl Context {
     /// The name behind `sym`. Only ids this context minted are meaningful.
     pub fn resolve(&self, sym: Sym) -> String {
         self.0.read().names.resolve(sym).to_string()
+    }
+
+    /// The id this context keys the op identity `(dialect, name)` by, minting
+    /// one if the pair is new.
+    pub(crate) fn intern_op_name(&self, dialect: &'static str, name: &'static str) -> OpNameId {
+        if let Some(id) = self.0.read().op_name_ids.get(&(dialect, name)) {
+            return *id;
+        }
+        let mut inner = self.0.write();
+        if let Some(id) = inner.op_name_ids.get(&(dialect, name)) {
+            return *id;
+        }
+        let id = OpNameId::new(inner.op_names.len() as u32);
+        inner.op_names.push((dialect, name));
+        inner.op_name_ids.insert((dialect, name), id);
+        id
+    }
+
+    /// The `(dialect, name)` pair behind `id`. Only ids this context minted are
+    /// meaningful.
+    pub(crate) fn resolve_op_name(&self, id: OpNameId) -> (&'static str, &'static str) {
+        self.0.read().op_names[id.index()]
     }
 
     /// Pair an attribute name with its value, interning the name.

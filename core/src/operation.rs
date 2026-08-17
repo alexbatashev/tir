@@ -639,11 +639,25 @@ pub fn verify_opdef_attributes(
     Ok(())
 }
 
+/// A dense id for an op's `(dialect, name)` pair, minted by the context that
+/// owns the op. Meaningless outside that context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct OpNameId(u32);
+
+impl OpNameId {
+    pub(crate) fn new(index: u32) -> Self {
+        Self(index)
+    }
+
+    pub(crate) fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct OpInstance {
     pub id: OpId,
-    name: &'static str,
-    dialect: &'static str,
+    name: OpNameId,
     pub context: ContextRef,
     pub operands: Vec<ValueId>,
     pub results: Vec<ValueId>,
@@ -659,10 +673,10 @@ impl OpInstance {
         regions: Vec<RegionId>,
         attributes: Vec<crate::attributes::NamedAttribute>,
     ) -> Self {
+        let name = context.upgrade().intern_op_name(T::dialect(), T::name());
         Self {
             id: OpId::invalid(),
-            name: T::name(),
-            dialect: T::dialect(),
+            name,
             context,
             operands,
             results,
@@ -681,10 +695,10 @@ impl OpInstance {
         attributes: Vec<crate::attributes::NamedAttribute>,
     ) -> Self {
         let (dialect, name) = identity;
+        let name = context.upgrade().intern_op_name(dialect, name);
         Self {
             id: OpId::invalid(),
             name,
-            dialect,
             context,
             operands,
             results,
@@ -701,11 +715,15 @@ impl OpInstance {
     /// }
     /// ```
     pub fn name(&self) -> OperationName {
-        OperationName(self.name)
+        OperationName(self.identity().1)
     }
 
     pub fn dialect(&self) -> DialectName {
-        DialectName(self.dialect)
+        DialectName(self.identity().0)
+    }
+
+    fn identity(&self) -> (&'static str, &'static str) {
+        self.context.upgrade().resolve_op_name(self.name)
     }
 
     /// The value of the attribute called `name`, resolving the name through the
@@ -731,11 +749,11 @@ impl OpInstance {
 
     /// Returns whether this instance has operation type `T`.
     pub fn is<T: Operation>(&self) -> bool {
-        self.dialect == T::dialect() && self.name == T::name()
+        self.identity() == (T::dialect(), T::name())
     }
 
     pub(crate) fn is_name(&self, dialect: &str, name: &str) -> bool {
-        self.dialect == dialect && self.name == name
+        self.identity() == (dialect, name)
     }
 
     pub fn as_op<T: Operation + Sized>(self: Arc<Self>) -> Option<T> {
