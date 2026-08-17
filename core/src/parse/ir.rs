@@ -1,11 +1,12 @@
+use crate::BlockHandle;
+use crate::RegionHandle;
 use std::any::Any;
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use crate::attributes::{AttributeValue, NamedAttribute};
 use crate::block::BlockId;
 use crate::value::Value;
-use crate::{Block, Context, Error, Operation, Region};
+use crate::{Context, Error, Operation};
 
 use super::common::{Cursor, Span};
 use super::text::Parser as TextParser;
@@ -118,7 +119,7 @@ pub(crate) fn parse_single_op<'src>(
 }
 
 impl<'src> TextParser<'src> {
-    pub fn parse_region(&mut self, context: &Context) -> Result<Arc<Region>, (Span, Error)> {
+    pub fn parse_region(&mut self, context: &Context) -> Result<RegionHandle, (Span, Error)> {
         self.parse_region_with_entry_args(context, vec![])
     }
 
@@ -126,7 +127,7 @@ impl<'src> TextParser<'src> {
         &mut self,
         context: &Context,
         entry_args: Vec<Value>,
-    ) -> Result<Arc<Region>, (Span, Error)> {
+    ) -> Result<RegionHandle, (Span, Error)> {
         if !self.parse_token("{") {
             return Err((self.span(), Error::ExpectedToken("{")));
         }
@@ -150,8 +151,8 @@ impl<'src> TextParser<'src> {
     fn parse_region_body(
         &mut self,
         context: &Context,
-        region: &Arc<Region>,
-        current: &mut Arc<Block>,
+        region: &RegionHandle,
+        current: &mut BlockHandle,
     ) -> ParseResult<()> {
         loop {
             self.skip_trivia();
@@ -319,10 +320,10 @@ impl<'src> TextParser<'src> {
     fn block_at_region_index(
         &mut self,
         context: &Context,
-        region: &Arc<Region>,
+        region: &RegionHandle,
         index: u32,
         named_args: Vec<(String, crate::TypeId)>,
-    ) -> Result<Arc<Block>, (Span, Error)> {
+    ) -> Result<BlockHandle, (Span, Error)> {
         let existing = self
             .region_parse
             .as_ref()

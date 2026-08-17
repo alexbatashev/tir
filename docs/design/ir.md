@@ -90,18 +90,17 @@ Conventions:
 
 ### 2.2 Storage and the mutability discipline
 
-Blocks and regions live in `Context` slabs (`Vec<Option<Arc<T>>>` indexed by
-id); operations live in a dense `Vec<OpInstance>` with a slot table mapping
-`OpId` to its position. `OpInstance`, `Block`, and `Region` are plain structs
-with **no interior mutability** — no per-field locks, no cells. Mutation
-happens in exactly one place: inside the Context's write lock, invoked only by
-the tree-edit API. Consequences developers rely on:
+Operations, values, blocks and regions each live in a dense `Vec` inside
+`Context`, with a slot table mapping the entity's id to its position. `OpInstance`,
+`Block`, and `Region` are plain structs with **no interior mutability** — no
+per-field locks, no cells. Mutation happens in exactly one place: inside the
+Context's write lock, invoked only by the tree-edit API. Consequences developers
+rely on:
 
-- An `OpHandle` reads its operation **as it stands**: each accessor takes the
-  context lock and copies out. It is not a snapshot, and a handle to an erased
-  op panics rather than answering — read what you need before erasing.
-- Holding an `Arc<Block>` is still a consistent snapshot: an edit produces a
-  new instance behind the same id, so re-read to observe it.
+- An `OpHandle`, `BlockHandle` or `RegionHandle` reads its entity **as it
+  stands**: each accessor takes the context lock and copies out. It is not a
+  snapshot, and a handle to an erased entity panics rather than answering — read
+  what you need before erasing.
 - The green core stores **no derived data**. In particular it does not
   maintain use lists (the `DefUse` view owns those, §7.3), and blocks do not
   store successor/predecessor lists (CFG edges are read from the

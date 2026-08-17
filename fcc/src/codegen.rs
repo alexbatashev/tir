@@ -80,7 +80,7 @@ struct FnCodegen<'a> {
     context: &'a Context,
     typed: &'a TypedAst,
     ast: &'a Ast,
-    builder: std::sync::Arc<tir::Block>,
+    builder: tir::BlockHandle,
     locals: HashMap<EntityId, Slot>,
     globals: &'a HashMap<EntityId, Global>,
     signatures: &'a HashMap<EntityId, Signature>,
@@ -104,13 +104,13 @@ struct FnCodegen<'a> {
     /// Set for functions that contain a label, which are lowered as a flat
     /// graph of blocks and branches and raised back to structured control flow
     /// by the `restructure` pass. Every `return` leaves through this block.
-    exit_block: Option<std::sync::Arc<tir::Block>>,
+    exit_block: Option<tir::BlockHandle>,
     /// The block each label names, created the first time it is mentioned.
-    label_blocks: HashMap<String, std::sync::Arc<tir::Block>>,
+    label_blocks: HashMap<String, tir::BlockHandle>,
     /// Where a `break` and a `continue` leave the innermost construct that owns
     /// them, while lowering flat.
-    break_blocks: Vec<std::sync::Arc<tir::Block>>,
-    continue_blocks: Vec<std::sync::Arc<tir::Block>>,
+    break_blocks: Vec<tir::BlockHandle>,
+    continue_blocks: Vec<tir::BlockHandle>,
     /// Lowered values in the expression subtree currently being emitted. The AST
     /// is a DAG, so shared children reuse their first lowering.
     values: HashMap<NodeId, LoweredExpr>,
@@ -2156,7 +2156,7 @@ impl FnCodegen<'_> {
 
     /// A fresh block of the function body, appended after the ones emitted so
     /// far.
-    fn new_block(&mut self) -> std::sync::Arc<tir::Block> {
+    fn new_block(&mut self) -> tir::BlockHandle {
         let block = self.context.create_block(vec![]);
         self.context
             .get_region(self.body_region)
@@ -2166,14 +2166,14 @@ impl FnCodegen<'_> {
 
     /// Continue emitting into `block`, which the branch that reaches it has
     /// already been emitted for.
-    fn enter_block(&mut self, block: std::sync::Arc<tir::Block>) {
+    fn enter_block(&mut self, block: tir::BlockHandle) {
         self.builder = block;
         self.terminated = false;
     }
 
     /// End the current block by falling through to `block`, unless it already
     /// left through a branch of its own.
-    fn leave_block(&mut self, block: &std::sync::Arc<tir::Block>) {
+    fn leave_block(&mut self, block: &tir::BlockHandle) {
         if self.terminated {
             return;
         }
@@ -2185,8 +2185,8 @@ impl FnCodegen<'_> {
     fn branch_on(
         &mut self,
         condition: ValueId,
-        if_true: &std::sync::Arc<tir::Block>,
-        if_false: &std::sync::Arc<tir::Block>,
+        if_true: &tir::BlockHandle,
+        if_false: &tir::BlockHandle,
     ) {
         self.builder.append_op(
             b::cond_br(
@@ -2204,7 +2204,7 @@ impl FnCodegen<'_> {
 
     /// The block a label names, shared by the label itself and every `goto`
     /// that reaches it, whichever comes first in the source.
-    fn label_block(&mut self, statement: NodeId) -> std::sync::Arc<tir::Block> {
+    fn label_block(&mut self, statement: NodeId) -> tir::BlockHandle {
         let Some(AstLeaf::Label(name)) = self.ast.get_leaf_data(statement) else {
             unreachable!("label and goto nodes carry a label payload");
         };
@@ -2363,8 +2363,8 @@ impl FnCodegen<'_> {
     fn lower_flat_loop_body(
         &mut self,
         body: NodeId,
-        exit: &std::sync::Arc<tir::Block>,
-        next: &std::sync::Arc<tir::Block>,
+        exit: &tir::BlockHandle,
+        next: &tir::BlockHandle,
     ) -> Result<(), Diagnostic> {
         self.break_blocks.push(exit.clone());
         self.continue_blocks.push(next.clone());
@@ -2437,7 +2437,7 @@ impl FnCodegen<'_> {
     fn lower_switch_arms(
         &mut self,
         items: &[SwitchItem],
-        arms: &[Option<std::sync::Arc<tir::Block>>],
+        arms: &[Option<tir::BlockHandle>],
     ) -> Result<(), Diagnostic> {
         for (item, arm) in items.iter().zip(arms) {
             match (item, arm) {
@@ -3299,7 +3299,7 @@ impl FnCodegen<'_> {
 
     fn in_block<T>(
         &mut self,
-        block: std::sync::Arc<tir::Block>,
+        block: tir::BlockHandle,
         lower: impl FnOnce(&mut Self) -> Result<T, Diagnostic>,
     ) -> Result<T, Diagnostic> {
         let outer = std::mem::replace(&mut self.builder, block);
@@ -3310,7 +3310,7 @@ impl FnCodegen<'_> {
         result
     }
 
-    fn ensure_cir_yield(&mut self, block: std::sync::Arc<tir::Block>) {
+    fn ensure_cir_yield(&mut self, block: tir::BlockHandle) {
         let block = self.context.get_block(block.id());
         let terminated = block.op_ids().last().is_some_and(|op| {
             self.context
@@ -4477,7 +4477,7 @@ impl FnCodegen<'_> {
         rhs_node: NodeId,
         result: Slot,
         result_ty: TypeId,
-        block: std::sync::Arc<tir::Block>,
+        block: tir::BlockHandle,
         evaluate_rhs: bool,
         constant: i64,
     ) -> Result<(), Diagnostic> {
@@ -4548,7 +4548,7 @@ impl FnCodegen<'_> {
         &mut self,
         node: NodeId,
         result: Slot,
-        block: std::sync::Arc<tir::Block>,
+        block: tir::BlockHandle,
     ) -> Result<(), Diagnostic> {
         let value = self.lower_expr_node(node)?;
         let value = self.materialize(value);

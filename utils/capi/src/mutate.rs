@@ -4,14 +4,14 @@
 //! structurally. All entities are addressed by raw `u32` ids.
 
 use std::ffi::c_char;
-use std::sync::Arc;
+use tir::BlockHandle;
 
-use tir::{Block, BlockId, OpId, RegionId, TypeId};
+use tir::{BlockId, OpId, RegionId, TypeId};
 
 use crate::{TIR_INVALID_ID, set_error, str_from_raw, with_context};
 
 /// Fetch a block by raw id, or set an error and return `None`.
-fn block_checked(ctx: &tir::Context, block: u32) -> Option<Arc<Block>> {
+fn block_checked(ctx: &tir::Context, block: u32) -> Option<BlockHandle> {
     let bid = BlockId::from_number(block);
     if ctx.has_block(bid) {
         Some(ctx.get_block(bid))

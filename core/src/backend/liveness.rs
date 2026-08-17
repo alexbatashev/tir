@@ -366,10 +366,9 @@ fn record_class(result: &mut Liveness, id: u32, class: &Option<RegClassId>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use tir::backend::regalloc::RegClassInfo;
     use tir::builtin::{IntegerType, ops};
-    use tir::{Block, Operation, TypeId, ValueId};
+    use tir::{BlockHandle, Operation, TypeId, ValueId};
 
     tir::helpers::operation! {
         PhysDefOp {
@@ -454,7 +453,7 @@ mod tests {
     }
 
     // Append an op reading virtual register `id` through class `class`.
-    fn vreg_use(context: &Context, block: &Arc<Block>, id: u32, class: RegClassId) {
+    fn vreg_use(context: &Context, block: &BlockHandle, id: u32, class: RegClassId) {
         use tir::attributes::{AttributeValue, RegisterAttr};
 
         PhysUseOp::register_interfaces(context);
@@ -585,7 +584,7 @@ mod tests {
     // `addi %a, %b` whose fresh result names a new virtual register (a def), with
     // its two operands read as uses — enough for liveness, which resolves builtin
     // SSA ops positionally.
-    fn addi(context: &Context, block: &Arc<Block>, a: ValueId, b: ValueId, ty: TypeId) -> ValueId {
+    fn addi(context: &Context, block: &BlockHandle, a: ValueId, b: ValueId, ty: TypeId) -> ValueId {
         block
             .append_op(ops::addi(context, a, b, ty).build())
             .result()
@@ -680,7 +679,13 @@ mod tests {
 
     // Append an op that reads (`is_def == false`) or writes (`is_def == true`) the
     // physical register `class[index]` via a role-tagged register attribute.
-    fn phys_op(context: &Context, block: &Arc<Block>, class: RegClassId, index: u16, is_def: bool) {
+    fn phys_op(
+        context: &Context,
+        block: &BlockHandle,
+        class: RegClassId,
+        index: u16,
+        is_def: bool,
+    ) {
         use tir::attributes::{AttributeValue, RegisterAttr};
 
         // The test dialect is never registered, so hook the role interfaces in

@@ -21,8 +21,9 @@ mod tests;
 
 use std::collections::{HashMap, HashSet};
 
+use tir::BlockHandle;
 use tir::{
-    AnalysisManager, Block, BlockId, Conditional, Context, EntryGuard, GuardedLoop, OpHandle, OpId,
+    AnalysisManager, BlockId, Conditional, Context, EntryGuard, GuardedLoop, OpHandle, OpId,
     Operation, OperationRef, Pass, PassError, PassTarget, RegionId, Rewriter, Terminator, TypeId,
     ValueId,
     analysis::{DefUse, DominatorTree},
@@ -1636,7 +1637,7 @@ impl InstructionSelectPass {
     fn solve_block(
         &self,
         context: &Context,
-        block: &Block,
+        block: &BlockHandle,
         fs: &mut FunctionSelection,
         dom: &DominatorTree,
         scoped: bool,
@@ -1694,7 +1695,7 @@ impl InstructionSelectPass {
     fn commit_block_solution(
         &mut self,
         context: &Context,
-        block: &Block,
+        block: &BlockHandle,
         rewriter: &mut Rewriter,
     ) -> Result<(), PassError> {
         if !self.emitted_blocks.insert(block.id()) {
@@ -1798,7 +1799,7 @@ impl InstructionSelectPass {
     fn solve_block_inner(
         &self,
         context: &Context,
-        block: &Block,
+        block: &BlockHandle,
         fs: &FunctionSelection,
         dom: &DominatorTree,
         match_roots: &[Id],
@@ -2629,7 +2630,7 @@ fn enclosing_carrier(context: &Context, from: BlockId, def_block: BlockId) -> Op
 
 /// Op order then destruction-auxiliary order, first occurrence kept: the seeds
 /// feed scoped saturation and match search, whose order must be reproducible.
-fn block_root_seeds(block: &Block, fs: &FunctionSelection) -> Vec<Id> {
+fn block_root_seeds(block: &BlockHandle, fs: &FunctionSelection) -> Vec<Id> {
     let mut seen = HashSet::new();
     let mut roots: Vec<Id> = Vec::new();
     let candidates = block

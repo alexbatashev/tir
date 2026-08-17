@@ -215,11 +215,7 @@ fn text_instruction_layout(object: &ObjectFile, expected: usize) -> Option<Instr
 
 /// Recursively gather the ids of every machine instruction reachable from `block`,
 /// in program order, descending through `section`/`symbol` containers.
-fn collect_instructions(
-    context: &Context,
-    block: std::sync::Arc<tir::Block>,
-    out: &mut Vec<tir::OpId>,
-) {
+fn collect_instructions(context: &Context, block: tir::BlockHandle, out: &mut Vec<tir::OpId>) {
     for op_id in block.op_ids() {
         let op = context.get_op(op_id);
         if let Some(section) = op.clone().as_op::<SectionOp>() {

@@ -12,7 +12,7 @@ use tir_adt::{Interner, Sym};
 use crate::{
     Block, Dialect, Error, OpId, OpInstance, Operation, OperationParser, Region, TypeId,
     attributes::{AttributeValue, NamedAttribute},
-    block::BlockId,
+    block::{BlockHandle, BlockId},
     builtin::BuiltinDialect,
     dialects::scf::ScfDialect,
     ir_formatter::IRFormatter,
@@ -22,7 +22,7 @@ use crate::{
     },
     parse::text::Parser as IRParser,
     ptr::PtrDialect,
-    region::RegionId,
+    region::{RegionHandle, RegionId},
     ty::{Type, TypeParser},
     value::{Value, ValueId},
     vector::VectorDialect,
@@ -81,18 +81,13 @@ pub trait GetFromContext {
     fn get_from_context(&self, context: &Context) -> Self::Item;
 }
 
-/// Read an entry from a slab arena indexed by a dense id, or `None` if the id was
+/// Read an entry from a side table indexed by a dense id, or `None` if the id was
 /// never inserted or has been removed.
 fn slab_get<T>(slab: &[Option<T>], idx: usize) -> Option<&T> {
     slab.get(idx).and_then(Option::as_ref)
 }
 
-/// Mutable counterpart of [`slab_get`], for in-place edits via `Arc::make_mut`.
-fn slab_get_mut<T>(slab: &mut [Option<T>], idx: usize) -> Option<&mut T> {
-    slab.get_mut(idx).and_then(Option::as_mut)
-}
-
-/// Insert into a slab arena at a dense id, growing the backing vector as needed.
+/// Insert into a side table at a dense id, growing the backing vector as needed.
 /// Ids come from per-context monotonic counters, so the vector stays dense.
 fn slab_put<T>(slab: &mut Vec<Option<T>>, idx: usize, val: T) {
     if idx >= slab.len() {
@@ -101,11 +96,83 @@ fn slab_put<T>(slab: &mut Vec<Option<T>>, idx: usize, val: T) {
     slab[idx] = Some(val);
 }
 
-/// Give a slab slot's contents back. The slot itself is kept empty forever; see
-/// [`Context::free`].
+/// Give a side-table slot's contents back. The slot itself is kept empty forever;
+/// see [`Context::free`].
 fn clear_slot<T>(slab: &mut [Option<T>], idx: usize) {
     if let Some(slot) = slab.get_mut(idx) {
         *slot = None;
+    }
+}
+
+const NO_SLOT: u32 = u32::MAX;
+
+/// Dense storage for one entity kind: the entities themselves, packed back to
+/// back, plus the table saying where each dense id sits. Nothing may iterate
+/// `items` in place of the ids — an erase closes the hole with the last entity,
+/// so their order is not the ids' order. Walk `slots` instead.
+struct Slab<T> {
+    items: Vec<T>,
+    /// Where each id sits in `items`, or [`NO_SLOT`] for an id never created or
+    /// since erased.
+    slots: Vec<u32>,
+}
+
+impl<T> Slab<T> {
+    fn new() -> Self {
+        Slab {
+            items: Vec::new(),
+            slots: Vec::new(),
+        }
+    }
+
+    fn slot(&self, index: usize) -> Option<usize> {
+        match self.slots.get(index).copied() {
+            Some(slot) if slot != NO_SLOT => Some(slot as usize),
+            _ => None,
+        }
+    }
+
+    fn get(&self, index: usize) -> Option<&T> {
+        self.slot(index).map(|slot| &self.items[slot])
+    }
+
+    fn get_mut(&mut self, index: usize) -> Option<&mut T> {
+        self.slot(index).map(|slot| &mut self.items[slot])
+    }
+
+    /// Store `item` under `index`, replacing whatever that id held.
+    fn put(&mut self, index: usize, item: T) {
+        if let Some(slot) = self.slot(index) {
+            self.items[slot] = item;
+            return;
+        }
+        if index >= self.slots.len() {
+            self.slots.resize(index + 1, NO_SLOT);
+        }
+        self.slots[index] = self.items.len() as u32;
+        self.items.push(item);
+    }
+
+    /// Give an entity's storage back, closing the hole with the last live entity
+    /// and repairing that entity's slot, which `id_of` reads off it.
+    fn erase(&mut self, index: usize, id_of: impl Fn(&T) -> usize) {
+        let Some(slot) = self.slot(index) else {
+            return;
+        };
+        self.items.swap_remove(slot);
+        if let Some(moved) = self.items.get(slot) {
+            self.slots[id_of(moved)] = slot as u32;
+        }
+        self.slots[index] = NO_SLOT;
+    }
+
+    /// Ids in increasing order, live ones only.
+    fn live_ids(&self) -> impl Iterator<Item = usize> + '_ {
+        self.slots
+            .iter()
+            .enumerate()
+            .filter(|(_, slot)| **slot != NO_SLOT)
+            .map(|(index, _)| index)
     }
 }
 
@@ -119,20 +186,15 @@ struct Owned {
 }
 
 struct ContextInstance {
-    // Arenas are slabs indexed by the dense, monotonic id counters below; see `slab_get`.
-    /// Live operations, densely packed. Nothing may iterate this in place of the
-    /// ids: an erase swaps the last entry into the hole, so the order is not the
-    /// ids' order. Walk `op_slots` instead.
-    ops: Vec<OpInstance>,
-    /// Where each [`OpId`] sits in `ops`, or `u32::MAX` for an id never created
-    /// or since erased.
-    op_slots: Vec<u32>,
+    // Entities live densely in [`Slab`]s keyed by the monotonic id counters below;
+    // the reverse indices after them are plain side tables.
+    ops: Slab<OpInstance>,
     last_op_id: AtomicU32,
-    values: Vec<Option<Value>>,
+    values: Slab<Value>,
     last_value_id: AtomicU32,
-    regions: Vec<Option<Arc<Region>>>,
+    regions: Slab<Region>,
     last_region_id: AtomicU32,
-    blocks: Vec<Option<Arc<Block>>>,
+    blocks: Slab<Block>,
     last_block_id: AtomicU32,
     /// Reverse index from an operation to the block that holds it, maintained by
     /// `Block`'s membership mutators. Lets `parent_block` answer in O(1) instead of
@@ -173,51 +235,59 @@ struct ContextInstance {
     op_name_ids: HashMap<(&'static str, &'static str), OpNameId>,
 }
 
-const NO_SLOT: u32 = u32::MAX;
-
 impl ContextInstance {
     fn op(&self, id: OpId) -> Option<&OpInstance> {
-        match self.op_slots.get(id.index()).copied() {
-            Some(slot) if slot != NO_SLOT => Some(&self.ops[slot as usize]),
-            _ => None,
-        }
+        self.ops.get(id.index())
     }
 
     fn op_mut(&mut self, id: OpId) -> Option<&mut OpInstance> {
-        match self.op_slots.get(id.index()).copied() {
-            Some(slot) if slot != NO_SLOT => Some(&mut self.ops[slot as usize]),
-            _ => None,
-        }
+        self.ops.get_mut(id.index())
     }
 
-    fn put_op(&mut self, instance: OpInstance) {
-        let index = instance.id.index();
-        if index >= self.op_slots.len() {
-            self.op_slots.resize(index + 1, NO_SLOT);
-        }
-        self.op_slots[index] = self.ops.len() as u32;
-        self.ops.push(instance);
+    fn block(&self, id: BlockId) -> Option<&Block> {
+        self.blocks.get(id.index())
     }
 
-    /// Give an operation's storage back, closing the hole with the last live op.
+    fn block_mut(&mut self, id: BlockId) -> Option<&mut Block> {
+        self.blocks.get_mut(id.index())
+    }
+
+    fn region(&self, id: RegionId) -> Option<&Region> {
+        self.regions.get(id.index())
+    }
+
+    fn region_mut(&mut self, id: RegionId) -> Option<&mut Region> {
+        self.regions.get_mut(id.index())
+    }
+
+    fn value(&self, id: ValueId) -> Option<&Value> {
+        self.values.get(id.index())
+    }
+
+    fn value_mut(&mut self, id: ValueId) -> Option<&mut Value> {
+        self.values.get_mut(id.index())
+    }
+
     fn erase_op(&mut self, id: OpId) {
-        let Some(slot) = self.op_slots.get(id.index()).copied() else {
-            return;
-        };
-        if slot == NO_SLOT {
-            return;
-        }
-        self.ops.swap_remove(slot as usize);
-        if let Some(moved) = self.ops.get(slot as usize) {
-            self.op_slots[moved.id.index()] = slot;
-        }
-        self.op_slots[id.index()] = NO_SLOT;
+        self.ops.erase(id.index(), |op| op.id.index());
+    }
+
+    fn erase_block(&mut self, id: BlockId) {
+        self.blocks.erase(id.index(), |block| block.id().index());
+    }
+
+    fn erase_region(&mut self, id: RegionId) {
+        self.regions.erase(id.index(), |region| region.id().index());
+    }
+
+    fn erase_value(&mut self, id: ValueId) {
+        self.values.erase(id.index(), |value| value.id().index());
     }
 
     /// The op enclosing `block`, if the block sits in a region owned by one.
     fn enclosing_op(&self, block: BlockId) -> Option<OpId> {
         let region = *slab_get(&self.block_parent, block.index())?;
-        slab_get(&self.regions, region.index())?.parent_op()
+        self.region(region)?.parent_op()
     }
 
     /// The op enclosing `op`, walking out through its block and region.
@@ -271,7 +341,7 @@ impl ContextInstance {
 
     /// `region`'s block list changed.
     fn edit_region(&mut self, region: RegionId) {
-        if let Some(op) = slab_get(&self.regions, region.index()).and_then(|r| r.parent_op()) {
+        if let Some(op) = self.region(region).and_then(Region::parent_op) {
             self.edit_subtree(op);
         }
     }
@@ -302,14 +372,13 @@ impl Context {
     /// Create a new empty context with no registered dialects.
     pub fn new() -> Self {
         Context(Arc::new(RwLock::new(ContextInstance {
-            ops: Vec::new(),
-            op_slots: Vec::new(),
+            ops: Slab::new(),
             last_op_id: AtomicU32::new(0),
-            values: Vec::new(),
+            values: Slab::new(),
             last_value_id: AtomicU32::new(0),
-            regions: Vec::new(),
+            regions: Slab::new(),
             last_region_id: AtomicU32::new(0),
-            blocks: Vec::new(),
+            blocks: Slab::new(),
             last_block_id: AtomicU32::new(0),
             op_parent: Vec::new(),
             block_parent: Vec::new(),
@@ -381,48 +450,32 @@ impl Context {
     /// census (see [`crate::memstats`]).
     pub fn slab_census(&self) -> crate::memstats::SlabCensus {
         let inner = self.0.read();
-        fn live<T>(slab: &[Option<T>]) -> usize {
-            slab.iter().filter(|slot| slot.is_some()).count()
-        }
-        fn entity_bytes<T>(count: usize) -> usize {
-            count * (ARC_HEADER_BYTES + std::mem::size_of::<T>())
-        }
-        const ARC_HEADER_BYTES: usize = 16;
-        const SLOT_BYTES: usize = 8;
-        const OP_SLOT_BYTES: usize = 4;
-        let ops_live = inner.ops.len();
-        let values_live = live(&inner.values);
-        let blocks_live = live(&inner.blocks);
-        let regions_live = live(&inner.regions);
-        let ops_heap: usize = inner.ops.iter().map(|op| op.heap_bytes()).sum();
-        let blocks_heap: usize = inner
-            .blocks
-            .iter()
-            .flatten()
-            .map(|block| block.heap_bytes())
-            .sum();
-        let regions_heap: usize = inner
-            .regions
-            .iter()
-            .flatten()
-            .map(|region| region.heap_bytes())
-            .sum();
+        const SLOT_BYTES: usize = 4;
+        let ops_live = inner.ops.items.len();
+        let values_live = inner.values.items.len();
+        let blocks_live = inner.blocks.items.len();
+        let regions_live = inner.regions.items.len();
+        let ops_heap: usize = inner.ops.items.iter().map(OpInstance::heap_bytes).sum();
+        let blocks_heap: usize = inner.blocks.items.iter().map(Block::heap_bytes).sum();
+        let regions_heap: usize = inner.regions.items.iter().map(Region::heap_bytes).sum();
         crate::memstats::SlabCensus {
-            ops_slab: inner.op_slots.len(),
+            ops_slab: inner.ops.slots.len(),
             ops_live,
-            values_slab: inner.values.len(),
+            values_slab: inner.values.slots.len(),
             values_live,
-            blocks_slab: inner.blocks.len(),
+            blocks_slab: inner.blocks.slots.len(),
             blocks_live,
-            regions_slab: inner.regions.len(),
+            regions_slab: inner.regions.slots.len(),
             regions_live,
             ops_bytes: ops_live * std::mem::size_of::<OpInstance>() + ops_heap,
             values_bytes: values_live * std::mem::size_of::<Value>(),
-            blocks_bytes: entity_bytes::<Block>(blocks_live) + blocks_heap,
-            regions_bytes: entity_bytes::<Region>(regions_live) + regions_heap,
-            slab_bytes: (inner.blocks.capacity() + inner.regions.capacity()) * SLOT_BYTES
-                + inner.op_slots.capacity() * OP_SLOT_BYTES
-                + inner.values.capacity() * std::mem::size_of::<Option<Value>>(),
+            blocks_bytes: blocks_live * std::mem::size_of::<Block>() + blocks_heap,
+            regions_bytes: regions_live * std::mem::size_of::<Region>() + regions_heap,
+            slab_bytes: (inner.ops.slots.capacity()
+                + inner.values.slots.capacity()
+                + inner.blocks.slots.capacity()
+                + inner.regions.slots.capacity())
+                * SLOT_BYTES,
         }
     }
 
@@ -486,18 +539,16 @@ impl Context {
 
             // Results are created before op id assignment in builders; patch their def-site now.
             for result_id in instance.results() {
-                if let Some(value) = slab_get_mut(&mut inner.values, result_id.index()) {
+                if let Some(value) = inner.value_mut(result_id) {
                     value.set_defining_op(op_id);
                 }
             }
 
             for r in instance.regions() {
-                slab_get(&inner.regions, r.index())
-                    .unwrap()
-                    .set_parent_op(op_id);
+                inner.region_mut(r).unwrap().set_parent_op(op_id);
             }
 
-            inner.put_op(instance);
+            inner.ops.put(op_id.index(), instance);
             op_id
         };
 
@@ -550,7 +601,7 @@ impl Context {
                 RegisterAttr::Physical { .. } => continue,
             };
             let value_id = ValueId::from_number(id);
-            if let Some(value) = slab_get_mut(&mut inner.values, value_id.index()) {
+            if let Some(value) = inner.value_mut(value_id) {
                 value.set_defining_op(handle.id);
             }
         }
@@ -653,14 +704,13 @@ impl Context {
         );
 
         let value = Value::new(value_id, ty, defining_op);
-        slab_put(&mut inner.values, value_id.index(), value.clone());
+        inner.values.put(value_id.index(), value.clone());
 
         value
     }
 
     pub fn get_value(&self, id: ValueId) -> Value {
-        let inner = self.0.read();
-        slab_get(&inner.values, id.index()).unwrap().clone()
+        self.0.read().value(id).expect("live value").clone()
     }
 
     /// Replace every SSA operand use of `old` with `new`.
@@ -704,7 +754,7 @@ impl Context {
     /// scan of everything live.
     fn use_scope(&self, value: ValueId) -> Option<OpId> {
         let inner = self.0.read();
-        match slab_get(&inner.values, value.index())?.defining_op() {
+        match inner.value(value)?.defining_op() {
             Some(op) => inner.enclosing_op_of(op),
             None => inner.enclosing_op(*slab_get(&inner.value_block, value.index())?),
         }
@@ -726,24 +776,22 @@ impl Context {
     fn live_ops(&self) -> Vec<OpId> {
         let inner = self.0.read();
         inner
-            .op_slots
-            .iter()
-            .enumerate()
-            .filter(|(_, slot)| **slot != NO_SLOT)
-            .map(|(index, _)| OpId::new(index as u32))
+            .ops
+            .live_ids()
+            .map(|index| OpId::new(index as u32))
             .collect()
     }
 
     pub fn has_value(&self, id: ValueId) -> bool {
-        slab_get(&self.0.read().values, id.index()).is_some()
+        self.0.read().value(id).is_some()
     }
 
     pub fn has_region(&self, id: RegionId) -> bool {
-        slab_get(&self.0.read().regions, id.index()).is_some()
+        self.0.read().region(id).is_some()
     }
 
     pub fn has_block(&self, id: BlockId) -> bool {
-        slab_get(&self.0.read().blocks, id.index()).is_some()
+        self.0.read().block(id).is_some()
     }
 
     pub fn is_block_argument(&self, id: ValueId) -> bool {
@@ -751,7 +799,7 @@ impl Context {
         slab_get(&inner.value_block, id.index()).is_some()
     }
 
-    pub fn create_region(&self) -> Arc<Region> {
+    pub fn create_region(&self) -> RegionHandle {
         let mut inner = self.0.write();
 
         let region_id = RegionId::new(
@@ -760,14 +808,15 @@ impl Context {
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
         );
 
-        let region = Arc::new(Region::new(region_id, self.as_context_ref()));
-        slab_put(&mut inner.regions, region_id.index(), region.clone());
+        inner.regions.put(region_id.index(), Region::new(region_id));
 
-        region
+        RegionHandle {
+            context: self.as_context_ref(),
+            id: region_id,
+        }
     }
 
-    pub fn create_block(&self, arguments: Vec<Value>) -> Arc<Block> {
-        let context = self.as_context_ref();
+    pub fn create_block(&self, arguments: Vec<Value>) -> BlockHandle {
         let mut inner = self.0.write();
 
         let block_id = BlockId::new(
@@ -779,10 +828,14 @@ impl Context {
         for argument in &arguments {
             slab_put(&mut inner.value_block, argument.id().index(), block_id);
         }
-        let block = Arc::new(Block::new(block_id, arguments, context));
-        slab_put(&mut inner.blocks, block_id.index(), block.clone());
+        inner
+            .blocks
+            .put(block_id.index(), Block::new(block_id, arguments));
 
-        block
+        BlockHandle {
+            context: self.as_context_ref(),
+            id: block_id,
+        }
     }
 
     /// Append `value`'s type as a new entry argument of `block` and return the
@@ -791,8 +844,8 @@ impl Context {
     pub fn append_block_argument(&self, block: BlockId, ty: TypeId) -> Value {
         let value = self.create_value(ty, None);
         let mut inner = self.0.write();
-        if let Some(entry) = slab_get_mut(&mut inner.blocks, block.index()) {
-            Arc::make_mut(entry).arguments_mut().push(value.clone());
+        if let Some(entry) = inner.block_mut(block) {
+            entry.arguments_mut().push(value.clone());
             slab_put(&mut inner.value_block, value.id().index(), block);
             inner.edit_block(block);
         }
@@ -809,15 +862,15 @@ impl Context {
     /// becomes the parameter of the block continuing it.
     pub fn adopt_block_argument(&self, block: BlockId, value: ValueId) {
         let mut inner = self.0.write();
-        let Some(ty) = slab_get(&inner.values, value.index()).map(|value| value.ty()) else {
+        let Some(ty) = inner.value(value).map(Value::ty) else {
             return;
         };
         let adopted = Value::new(value, ty, None);
-        let Some(entry) = slab_get_mut(&mut inner.blocks, block.index()) else {
+        let Some(entry) = inner.block_mut(block) else {
             return;
         };
-        Arc::make_mut(entry).arguments_mut().push(adopted.clone());
-        slab_put(&mut inner.values, value.index(), adopted);
+        entry.arguments_mut().push(adopted.clone());
+        inner.values.put(value.index(), adopted);
         slab_put(&mut inner.value_block, value.index(), block);
         inner.edit_block(block);
     }
@@ -826,10 +879,10 @@ impl Context {
     /// argument: it stops being a definition with the edit.
     pub fn remove_block_argument(&self, block: BlockId, index: usize) -> Value {
         let mut inner = self.0.write();
-        let entry = slab_get_mut(&mut inner.blocks, block.index()).expect("live block");
-        let argument = Arc::make_mut(entry).arguments_mut().remove(index);
+        let entry = inner.block_mut(block).expect("live block");
+        let argument = entry.arguments_mut().remove(index);
         clear_slot(&mut inner.value_block, argument.id().index());
-        clear_slot(&mut inner.values, argument.id().index());
+        inner.erase_value(argument.id());
         inner.edit_block(block);
         argument
     }
@@ -884,7 +937,7 @@ impl Context {
             return;
         };
         if let Some(result) = instance.pop_result() {
-            clear_slot(&mut inner.values, result.index());
+            inner.erase_value(result);
         }
         inner.edit_op(op);
     }
@@ -1004,8 +1057,8 @@ impl Context {
             return;
         };
         let mut inner = self.0.write();
-        if let Some(entry) = slab_get_mut(&mut inner.blocks, block.index()) {
-            Arc::make_mut(entry).arguments_mut()[index..].rotate_right(1);
+        if let Some(entry) = inner.block_mut(block) {
+            entry.arguments_mut()[index..].rotate_right(1);
             inner.edit_block(block);
         }
     }
@@ -1162,15 +1215,15 @@ impl Context {
             clear_slot(&mut inner.op_parent, op.index());
         }
         for value in owned.values {
-            clear_slot(&mut inner.values, value.index());
+            inner.erase_value(value);
             clear_slot(&mut inner.value_block, value.index());
         }
         for block in owned.blocks {
-            clear_slot(&mut inner.blocks, block.index());
+            inner.erase_block(block);
             clear_slot(&mut inner.block_parent, block.index());
         }
         for region in owned.regions {
-            clear_slot(&mut inner.regions, region.index());
+            inner.erase_region(region);
         }
     }
 
@@ -1181,19 +1234,25 @@ impl Context {
         })
     }
 
-    fn find_block(&self, id: BlockId) -> Option<Arc<Block>> {
-        slab_get(&self.0.read().blocks, id.index()).cloned()
+    fn find_block(&self, id: BlockId) -> Option<BlockHandle> {
+        self.0.read().block(id).is_some().then(|| BlockHandle {
+            context: self.as_context_ref(),
+            id,
+        })
     }
 
-    fn find_region(&self, id: RegionId) -> Option<Arc<Region>> {
-        slab_get(&self.0.read().regions, id.index()).cloned()
+    fn find_region(&self, id: RegionId) -> Option<RegionHandle> {
+        self.0.read().region(id).is_some().then(|| RegionHandle {
+            context: self.as_context_ref(),
+            id,
+        })
     }
 
     /// Insert `op` into `block` at `index`, recording the new parent.
     pub(crate) fn insert_op(&self, block: BlockId, index: usize, op: OpId) {
         let mut inner = self.0.write();
-        if let Some(entry) = slab_get_mut(&mut inner.blocks, block.index()) {
-            Arc::make_mut(entry).operations_mut().insert(index, op);
+        if let Some(entry) = inner.block_mut(block) {
+            entry.operations_mut().insert(index, op);
         }
         slab_put(&mut inner.op_parent, op.index(), block);
         inner.edit_block(block);
@@ -1202,8 +1261,8 @@ impl Context {
     /// Insert `op` after everything `block` currently holds.
     pub(crate) fn append_op(&self, block: BlockId, op: OpId) {
         let mut inner = self.0.write();
-        if let Some(entry) = slab_get_mut(&mut inner.blocks, block.index()) {
-            Arc::make_mut(entry).operations_mut().push(op);
+        if let Some(entry) = inner.block_mut(block) {
+            entry.operations_mut().push(op);
         }
         slab_put(&mut inner.op_parent, op.index(), block);
         inner.edit_block(block);
@@ -1211,10 +1270,10 @@ impl Context {
 
     pub(crate) fn replace_op_in_block(&self, block: BlockId, old: OpId, new: OpId) -> bool {
         let mut inner = self.0.write();
-        let Some(entry) = slab_get_mut(&mut inner.blocks, block.index()) else {
+        let Some(entry) = inner.block_mut(block) else {
             return false;
         };
-        let operations = Arc::make_mut(entry).operations_mut();
+        let operations = entry.operations_mut();
         let Some(position) = operations.iter().position(|id| *id == old) else {
             return false;
         };
@@ -1229,10 +1288,10 @@ impl Context {
 
     pub(crate) fn remove_op_from_block(&self, block: BlockId, op: OpId) -> bool {
         let mut inner = self.0.write();
-        let Some(entry) = slab_get_mut(&mut inner.blocks, block.index()) else {
+        let Some(entry) = inner.block_mut(block) else {
             return false;
         };
-        let operations = Arc::make_mut(entry).operations_mut();
+        let operations = entry.operations_mut();
         let Some(position) = operations.iter().position(|id| *id == op) else {
             return false;
         };
@@ -1252,13 +1311,87 @@ impl Context {
     ) {
         let mut inner = self.0.write();
         let name = inner.names.intern(name);
-        if let Some(entry) = slab_get_mut(&mut inner.blocks, block.index()) {
-            let attributes = Arc::make_mut(entry).attributes_mut();
+        if let Some(entry) = inner.block_mut(block) {
+            let attributes = entry.attributes_mut();
             match attributes.iter_mut().find(|a| a.name == name) {
                 Some(attribute) => attribute.value = value,
                 None => attributes.push(crate::attributes::NamedAttribute::new(name, value)),
             }
             inner.edit_block(block);
+        }
+    }
+
+    /// [`BlockHandle::attr`]: the name is resolved in the same lock as the lookup.
+    pub(crate) fn block_attr(
+        &self,
+        block: BlockId,
+        name: &str,
+    ) -> Option<crate::attributes::AttributeValue> {
+        let inner = self.0.read();
+        let name = inner.names.lookup(name)?;
+        inner
+            .block(block)
+            .expect("live block")
+            .attributes()
+            .iter()
+            .find(|attribute| attribute.name == name)
+            .map(|attribute| attribute.value.clone())
+    }
+
+    /// Read a block's storage record under the context lock.
+    ///
+    /// `read` must not touch the context: the lock is not reentrant.
+    pub(crate) fn with_block<R>(&self, id: BlockId, read: impl FnOnce(&Block) -> R) -> R {
+        let inner = self.0.read();
+        read(inner.block(id).expect("live block"))
+    }
+
+    /// The operation owning `region`, if it has been attached to one.
+    pub(crate) fn region_parent_op(&self, region: RegionId) -> Option<OpId> {
+        self.0
+            .read()
+            .region(region)
+            .expect("live region")
+            .parent_op()
+    }
+
+    pub(crate) fn region_block_ids(&self, region: RegionId) -> Vec<BlockId> {
+        self.0
+            .read()
+            .region(region)
+            .expect("live region")
+            .blocks()
+            .to_vec()
+    }
+
+    pub(crate) fn add_block_to_region(&self, region: RegionId, block: BlockId) {
+        let mut inner = self.0.write();
+        if let Some(entry) = inner.region_mut(region) {
+            entry.blocks_mut().push(block);
+        }
+        slab_put(&mut inner.block_parent, block.index(), region);
+        inner.edit_region(region);
+    }
+
+    pub(crate) fn remove_block_from_region(&self, region: RegionId, block: BlockId) -> bool {
+        let mut inner = self.0.write();
+        let Some(entry) = inner.region_mut(region) else {
+            return false;
+        };
+        let blocks = entry.blocks_mut();
+        let Some(position) = blocks.iter().position(|id| *id == block) else {
+            return false;
+        };
+        blocks.remove(position);
+        clear_slot(&mut inner.block_parent, block.index());
+        inner.edit_region(region);
+        true
+    }
+
+    pub(crate) fn set_region_blocks(&self, region: RegionId, blocks: Vec<BlockId>) {
+        let mut inner = self.0.write();
+        if let Some(entry) = inner.region_mut(region) {
+            *entry.blocks_mut() = blocks;
         }
     }
 
@@ -1281,33 +1414,23 @@ impl Context {
         slab_get(&self.0.read().block_parent, block.index()).copied()
     }
 
-    pub(crate) fn set_block_parent(&self, block: BlockId, region: RegionId) {
-        let mut inner = self.0.write();
-        slab_put(&mut inner.block_parent, block.index(), region);
-        inner.edit_region(region);
-    }
-
-    pub(crate) fn clear_block_parent(&self, block: BlockId) {
-        let mut inner = self.0.write();
-        let region = slab_get(&inner.block_parent, block.index()).copied();
-        if let Some(slot) = inner.block_parent.get_mut(block.index()) {
-            *slot = None;
-        }
-        if let Some(region) = region {
-            inner.edit_region(region);
+    /// The handle naming `id`. Panics for an id no live block has: a handle reads
+    /// the block as it stands, and an erased one does not stand.
+    pub fn get_block(&self, id: BlockId) -> BlockHandle {
+        self.0.read().block(id).expect("live block");
+        BlockHandle {
+            context: self.as_context_ref(),
+            id,
         }
     }
 
-    pub fn get_block(&self, id: BlockId) -> Arc<Block> {
-        let inner = self.0.read();
-
-        slab_get(&inner.blocks, id.index()).unwrap().clone()
-    }
-
-    pub fn get_region(&self, id: RegionId) -> Arc<Region> {
-        let inner = self.0.read();
-
-        slab_get(&inner.regions, id.index()).unwrap().clone()
+    /// The handle naming `id`; see [`Context::get_block`].
+    pub fn get_region(&self, id: RegionId) -> RegionHandle {
+        self.0.read().region(id).expect("live region");
+        RegionHandle {
+            context: self.as_context_ref(),
+            id,
+        }
     }
 
     /// The handle naming `id`. Panics for an id no live operation has: a handle
@@ -1603,9 +1726,9 @@ impl<I: GetFromContext> DoubleEndedIterator for ContextIterator<I> {
 mod staging_tests {
     use super::Context;
     use crate::{
-        Block, BlockId, IRFormatter, OpId, Operand, Operation, RegionId, ValueId, builtin, scf,
+        BlockHandle, BlockId, IRFormatter, OpId, Operand, Operation, RegionId, ValueId, builtin,
+        scf,
     };
-    use std::sync::Arc;
 
     /// `module { func demo(%cond) { %c = 1; scf.if %cond { %old = 7; scf.yield }; return } }`
     /// — a region owned by an op nested inside a function, so a commit to it has a
@@ -1620,7 +1743,7 @@ mod staging_tests {
         old: ValueId,
         /// `%c`, defined outside it and still live after a commit.
         constant: ValueId,
-        module_body: Arc<Block>,
+        module_body: BlockHandle,
     }
 
     fn fixture(context: &Context) -> Fixture {
@@ -2009,7 +2132,7 @@ mod port_tests {
             .op_ids()[0]
     }
 
-    fn single_block(context: &Context, region: RegionId) -> std::sync::Arc<crate::Block> {
+    fn single_block(context: &Context, region: RegionId) -> crate::BlockHandle {
         context.get_block(context.get_region(region).block_ids()[0])
     }
 }
@@ -2017,8 +2140,7 @@ mod port_tests {
 #[cfg(test)]
 mod tests {
     use super::Context;
-    use crate::{Block, Commutative, OpId, Operand, Operation, Terminator, builtin};
-    use std::sync::Arc;
+    use crate::{BlockHandle, Commutative, OpId, Operand, Operation, Terminator, builtin};
 
     #[test]
     fn default_context() {
@@ -2077,7 +2199,7 @@ mod tests {
 
     /// `module { func demo { ^entry: } }` — the func body sits two regions deep,
     /// so an edit there must reach the module to prove root-ward propagation.
-    fn module_with_function(context: &Context) -> (OpId, OpId, Arc<Block>) {
+    fn module_with_function(context: &Context) -> (OpId, OpId, BlockHandle) {
         let i32 = builtin::IntegerType::new(context, 32);
         let region = context.create_region();
         let block = context.create_block(vec![]);

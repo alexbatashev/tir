@@ -1,8 +1,8 @@
-use std::sync::Arc;
+use crate::BlockHandle;
 
 use linkme::distributed_slice;
 
-use crate::{Block, Context, OpHandle, OpId, Operation, Value, analysis::AnalysisManager};
+use crate::{Context, OpHandle, OpId, Operation, Value, analysis::AnalysisManager};
 
 /// A pass made available to the pipeline parser by name.
 ///
@@ -200,12 +200,12 @@ impl PassTarget {
 #[derive(Clone)]
 pub struct OperationRef {
     op: OpHandle,
-    block: Option<Arc<Block>>,
+    block: Option<BlockHandle>,
     position: Option<usize>,
 }
 
 impl OperationRef {
-    pub fn new(op: OpHandle, block: Option<Arc<Block>>, position: Option<usize>) -> Self {
+    pub fn new(op: OpHandle, block: Option<BlockHandle>, position: Option<usize>) -> Self {
         Self {
             op,
             block,
@@ -217,7 +217,7 @@ impl OperationRef {
         &self.op
     }
 
-    pub fn block(&self) -> Option<&Arc<Block>> {
+    pub fn block(&self) -> Option<&BlockHandle> {
         self.block.as_ref()
     }
 
@@ -304,7 +304,7 @@ impl Rewriter {
 
     /// Move everything `block` holds from `at` onward into a fresh block, which
     /// is returned detached: the caller decides where in a region it belongs.
-    pub fn split_block(&mut self, block: crate::BlockId, at: usize) -> Arc<Block> {
+    pub fn split_block(&mut self, block: crate::BlockId, at: usize) -> BlockHandle {
         let source = self.context.get_block(block);
         let tail = source.op_ids().split_off(at);
         let split = self.context.create_block(vec![]);
@@ -312,7 +312,7 @@ impl Rewriter {
             source.remove_op(op);
             split.append(op);
         }
-        self.context.get_block(split.id())
+        split
     }
 
     /// Copy `op` and everything under it, returning the copy. The copy is
@@ -701,8 +701,9 @@ impl PassManager {
                 for (index, op_id) in op_ids.into_iter().enumerate() {
                     // A pass run earlier in this walk may have erased or replaced a
                     // later op in the same block (isel rewrites the whole block at
-                    // once); the snapshot still holds the old id. Skip ops that are no
-                    // longer live — a replacement carries a new id and isn't revisited.
+                    // once); the id list read before the loop still holds the old id.
+                    // Skip ops that are no longer live — a replacement carries a new
+                    // id and isn't revisited.
                     if !context.has_operation(op_id) {
                         continue;
                     }
@@ -1128,8 +1129,6 @@ mod tests {
         pm.run(&context, context.get_op(module.id()))
             .expect("pass pipeline should succeed");
 
-        // Block handles are snapshots; re-read to see what the pipeline left.
-        let func_body = context.get_block(func_body.id());
         let op_names: Vec<_> = func_body
             .op_ids()
             .into_iter()

@@ -4,11 +4,11 @@
 //! silent drop.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use tir::BlockHandle;
 
 use tir::builtin::{self, IntegerType, UnitType, ops as bops};
 use tir::ptr::{PtrType, ops as pops};
-use tir::{Block, Context, Operand, TypeId, ValueId};
+use tir::{Context, Operand, TypeId, ValueId};
 
 use crate::ast::{self, BinOp, CastOp, Inst, Type};
 use crate::error::Error;
@@ -27,7 +27,7 @@ pub fn import(context: &Context, module: &ast::Module) -> Result<builtin::Module
 /// LLVM `declare` lines carry no body and are not parsed, so a call to a
 /// function this module does not define is reconstructed as a declaration from
 /// the call site's types.
-fn declare_external_callees(context: &Context, module: &builtin::ModuleOp, body: &Block) {
+fn declare_external_callees(context: &Context, module: &builtin::ModuleOp, body: &BlockHandle) {
     let table = tir::SymbolTable::build(context, tir::Operation::id(module));
     let mut declarations = Vec::new();
     for op in module.body().iter(context.clone()) {
@@ -81,8 +81,8 @@ fn lower_function(context: &Context, func: &ast::Function) -> Result<builtin::Fu
     }
 
     // Pre-create every block so branches can resolve targets by label.
-    let mut blocks: Vec<Arc<Block>> = Vec::new();
-    let mut by_label: HashMap<String, Arc<Block>> = HashMap::new();
+    let mut blocks: Vec<BlockHandle> = Vec::new();
+    let mut by_label: HashMap<String, BlockHandle> = HashMap::new();
     for (i, block) in func.blocks.iter().enumerate() {
         let args = if i == 0 {
             std::mem::take(&mut entry_args)
@@ -113,9 +113,9 @@ fn lower_function(context: &Context, func: &ast::Function) -> Result<builtin::Fu
 fn lower_inst(
     context: &Context,
     inst: &Inst,
-    body: &Block,
+    body: &BlockHandle,
     values: &mut HashMap<String, ValueId>,
-    by_label: &HashMap<String, Arc<Block>>,
+    by_label: &HashMap<String, BlockHandle>,
 ) -> Result<(), Error> {
     // Resolve an operand to a value, materialising a `builtin.constant` for
     // inline integer literals (TIR has no inline constants).

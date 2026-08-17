@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use tir::BlockHandle;
 
 use tir::analysis::AnalysisManager;
 use tir::attributes::AttributeValue;
@@ -8,8 +8,8 @@ use tir::builtin::{
 };
 use tir::ptr::{PtrType, ops as p};
 use tir::{
-    Block, BlockId, Context, Operation, OperationRef, Pass, PassError, PassTarget, RegionId,
-    Rewriter, ValueId, scf,
+    BlockId, Context, Operation, OperationRef, Pass, PassError, PassTarget, RegionId, Rewriter,
+    ValueId, scf,
 };
 
 use crate::cir;
@@ -284,7 +284,7 @@ impl LowerCirControlFlowPass {
         Self
     }
 
-    fn single_block(context: &Context, region: RegionId) -> Option<Arc<Block>> {
+    fn single_block(context: &Context, region: RegionId) -> Option<BlockHandle> {
         let blocks = context
             .get_region(region)
             .iter(context.clone())
@@ -292,7 +292,7 @@ impl LowerCirControlFlowPass {
         (blocks.len() == 1).then(|| blocks[0].clone())
     }
 
-    fn entry_block(context: &Context, region: RegionId) -> Arc<Block> {
+    fn entry_block(context: &Context, region: RegionId) -> BlockHandle {
         context
             .get_region(region)
             .iter(context.clone())
@@ -404,7 +404,7 @@ impl LowerCirControlFlowPass {
     fn next_control_op_in_region(
         context: &Context,
         region: RegionId,
-    ) -> Option<(Arc<Block>, tir::OpHandle)> {
+    ) -> Option<(BlockHandle, tir::OpHandle)> {
         for block in context.get_region(region).iter(context.clone()) {
             for op_id in block.op_ids() {
                 let op = context.get_op(op_id);
@@ -447,7 +447,7 @@ impl LowerCirControlFlowPass {
             })
     }
 
-    fn split_after(context: &Context, block: &Arc<Block>, op: &tir::OpHandle) -> Arc<Block> {
+    fn split_after(context: &Context, block: &BlockHandle, op: &tir::OpHandle) -> BlockHandle {
         let continuation = context.create_block(vec![]);
         let op_ids = block.op_ids();
         let position = op_ids.iter().position(|id| *id == op.id).unwrap();
@@ -460,13 +460,13 @@ impl LowerCirControlFlowPass {
 
     fn erase_control_op(
         rewriter: &mut Rewriter,
-        block: &Arc<Block>,
+        block: &BlockHandle,
         op: tir::OpHandle,
     ) -> Result<(), PassError> {
         rewriter.erase_op(&OperationRef::new(op, Some(block.clone()), None))
     }
 
-    fn add_blocks(context: &Context, region: RegionId, blocks: &[Arc<Block>]) {
+    fn add_blocks(context: &Context, region: RegionId, blocks: &[BlockHandle]) {
         let region = context.get_region(region);
         for block in blocks {
             region.add_block(block.id());
@@ -476,7 +476,7 @@ impl LowerCirControlFlowPass {
     fn rewrite_internal_branches(
         context: &Context,
         rewriter: &mut Rewriter,
-        blocks: &[Arc<Block>],
+        blocks: &[BlockHandle],
         mapping: &HashMap<BlockId, BlockId>,
     ) -> Result<(), PassError> {
         for block in blocks {
@@ -531,7 +531,7 @@ impl LowerCirControlFlowPass {
         context: &Context,
         rewriter: &mut Rewriter,
         region: RegionId,
-    ) -> Result<Vec<Arc<Block>>, PassError> {
+    ) -> Result<Vec<BlockHandle>, PassError> {
         let old_blocks = context
             .get_region(region)
             .iter(context.clone())
@@ -566,7 +566,7 @@ impl LowerCirControlFlowPass {
     fn replace_with_branch(
         context: &Context,
         rewriter: &mut Rewriter,
-        block: &Arc<Block>,
+        block: &BlockHandle,
         destination: BlockId,
     ) -> Result<(), PassError> {
         let block = context.get_block(block.id());
@@ -581,7 +581,7 @@ impl LowerCirControlFlowPass {
     fn rewrite_condition(
         context: &Context,
         rewriter: &mut Rewriter,
-        block: &Arc<Block>,
+        block: &BlockHandle,
         true_dest: BlockId,
         false_dest: BlockId,
     ) -> Result<(), PassError> {
@@ -606,7 +606,7 @@ impl LowerCirControlFlowPass {
     fn rewrite_region_exits(
         context: &Context,
         rewriter: &mut Rewriter,
-        blocks: &[Arc<Block>],
+        blocks: &[BlockHandle],
         normal_dest: BlockId,
         loop_targets: &HashMap<ValueId, LoopTargets>,
     ) -> Result<(), PassError> {
@@ -839,7 +839,7 @@ impl LowerCirControlFlowPass {
     fn lower_structured(
         context: &Context,
         rewriter: &mut Rewriter,
-        block: Arc<Block>,
+        block: BlockHandle,
         op: tir::OpHandle,
     ) -> Result<(), PassError> {
         let replacement: Box<dyn Operation> = if op.clone().as_op::<cir::WhileOp>().is_some() {
@@ -893,7 +893,7 @@ impl LowerCirControlFlowPass {
         context: &Context,
         rewriter: &mut Rewriter,
         function_region: RegionId,
-        block: Arc<Block>,
+        block: BlockHandle,
         op: tir::OpHandle,
         loop_targets: &mut HashMap<ValueId, LoopTargets>,
     ) -> Result<(), PassError> {

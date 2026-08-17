@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{self, Display};
-use std::sync::Arc;
 
 use tir::attributes::AttributeValue;
 use tir::builtin::{DeclareOp, ModuleEndOp, ModuleOp};
@@ -80,7 +79,7 @@ impl AsmPrinter {
     fn print_block(
         &self,
         context: &Context,
-        block: Arc<tir::Block>,
+        block: tir::BlockHandle,
         out: &mut String,
     ) -> Result<(), AsmPrintError> {
         for op_id in block.op_ids() {

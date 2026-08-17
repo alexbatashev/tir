@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use crate::builtin::{IntegerType, TokenType};
 use crate::{
     Conditional, Context, CountedLoop, Error, GuardedLoop, LoopLike, Operation, Terminator,
@@ -90,7 +88,7 @@ impl LoopOp for ForOp {
     fn init_operands(&self) -> Vec<ValueId> {
         self.operands()[3..].to_vec()
     }
-    fn body_block(&self) -> Arc<tir::Block> {
+    fn body_block(&self) -> tir::BlockHandle {
         self.body()
     }
     fn iter_args(&self) -> Vec<ValueId> {
@@ -217,7 +215,7 @@ impl LoopOp for WhileOp {
     fn init_operands(&self) -> Vec<ValueId> {
         self.operands().to_vec()
     }
-    fn body_block(&self) -> Arc<tir::Block> {
+    fn body_block(&self) -> tir::BlockHandle {
         self.body()
     }
     fn iter_args(&self) -> Vec<ValueId> {
@@ -813,7 +811,7 @@ fn expect_token(
 trait LoopOp: Operation {
     fn loop_results(&self) -> Vec<ValueId>;
     fn init_operands(&self) -> Vec<ValueId>;
-    fn body_block(&self) -> Arc<tir::Block>;
+    fn body_block(&self) -> tir::BlockHandle;
     /// The values bound by the printed `iter_args` clause: where the loop observes the
     /// carried values on entry to an iteration.
     fn iter_args(&self) -> Vec<ValueId>;
@@ -916,7 +914,7 @@ fn print_loop_tail(
 fn print_scope(
     fmt: &mut tir::IRFormatter,
     context: &Context,
-    body: Arc<tir::Block>,
+    body: tir::BlockHandle,
 ) -> Result<(), std::fmt::Error> {
     if let Some(scope) = body
         .arguments()
@@ -964,7 +962,7 @@ fn print_gamma_inputs(
 /// gives the forwarded inputs.
 fn print_arm_arguments(
     fmt: &mut tir::IRFormatter,
-    arm: Arc<tir::Block>,
+    arm: tir::BlockHandle,
 ) -> Result<(), std::fmt::Error> {
     let arguments = arm.arguments();
     if arguments.is_empty() {
@@ -976,7 +974,7 @@ fn print_arm_arguments(
 }
 
 /// The single block of a γ arm.
-fn arm_block(context: &Context, arm: tir::RegionId) -> Arc<tir::Block> {
+fn arm_block(context: &Context, arm: tir::RegionId) -> tir::BlockHandle {
     context.get_block(context.get_region(arm).block_ids()[0])
 }
 
@@ -1030,7 +1028,7 @@ fn parse_arm(
 /// matching in type, so every arm reads the same values under names of its own.
 fn verify_arm_arguments(
     context: &Context,
-    arm: Arc<tir::Block>,
+    arm: tir::BlockHandle,
     inputs: &[ValueId],
     label: &str,
 ) -> Result<(), Error> {
@@ -1143,7 +1141,7 @@ fn parse_body_carried(
 }
 
 /// The loop body's carried arguments: every entry argument but the token scope.
-fn carried_arguments(context: &Context, body: &Arc<tir::Block>) -> Vec<ValueId> {
+fn carried_arguments(context: &Context, body: &tir::BlockHandle) -> Vec<ValueId> {
     let token = TokenType::new(context);
     body.arguments()
         .iter()
@@ -1161,13 +1159,12 @@ fn verify_loop_carried<T: LoopOp + Operation>(context: &Context, op: &T) -> Resu
     let terminator = context.get_op(*body.op_ids().last().unwrap());
     let yielded = exit_values(&terminator).to_vec();
     let token = TokenType::new(context);
-    let scope_args = body
-        .arguments()
+    let arguments = body.arguments();
+    let scope_args = arguments
         .iter()
         .filter(|argument| argument.ty() == token)
         .collect::<Vec<_>>();
-    let body_args = body
-        .arguments()
+    let body_args = arguments
         .iter()
         .filter(|argument| argument.ty() != token)
         .collect::<Vec<_>>();
@@ -1244,7 +1241,7 @@ fn verify_loop_carried<T: LoopOp + Operation>(context: &Context, op: &T) -> Resu
 /// the loop's carried ports, so it carries one value per port, matching in type.
 fn verify_scope_exits(
     context: &Context,
-    block: &Arc<tir::Block>,
+    block: &tir::BlockHandle,
     scope: ValueId,
     results: &[ValueId],
     label: &str,
@@ -1366,7 +1363,7 @@ fn region_yielded_values(context: &Context, region: tir::RegionId) -> Vec<ValueI
 /// type. Assumes the terminator already exists.
 fn verify_region_yield(
     context: &Context,
-    block: Arc<tir::Block>,
+    block: tir::BlockHandle,
     expected: &[tir::TypeId],
     label: &str,
 ) -> Result<(), Error> {
@@ -1406,7 +1403,7 @@ fn verify_i1_operand(context: &Context, value: ValueId, label: &str) -> Result<(
 
 fn verify_single_block_region_has_terminator(
     context: &Context,
-    block: Arc<tir::Block>,
+    block: tir::BlockHandle,
     label: &str,
 ) -> Result<(), Error> {
     if block.op_ids().is_empty() {

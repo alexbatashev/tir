@@ -13,11 +13,11 @@
 //! [`AuxSlot`]s.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use tir::BlockHandle;
 
 use tir::{
-    Block, BlockId, Conditional, Context, CountedLoop, EntryGuard, GuardedLoop, LoopLike, OpHandle,
-    OpId, OperationRef, PassError, RegionId, Rewriter, ValueId,
+    BlockId, Conditional, Context, CountedLoop, EntryGuard, GuardedLoop, LoopLike, OpHandle, OpId,
+    OperationRef, PassError, RegionId, Rewriter, ValueId,
     analysis::scopes::{RegionExit, loop_scope, region_exit_kind},
     builtin::TokenType,
 };
@@ -118,7 +118,7 @@ impl<'a> Destructor<'a> {
         Ok(())
     }
 
-    fn next_structured(&self) -> Option<(Arc<Block>, OpHandle)> {
+    fn next_structured(&self) -> Option<(BlockHandle, OpHandle)> {
         for block in self
             .context
             .get_region(self.region)
@@ -140,7 +140,7 @@ impl<'a> Destructor<'a> {
     fn lower_one(
         &mut self,
         rewriter: &mut Rewriter,
-        block: Arc<Block>,
+        block: BlockHandle,
         op: OpHandle,
     ) -> Result<(), PassError> {
         if let Some(conditional) = op.clone().as_interface::<dyn Conditional>() {
@@ -167,7 +167,7 @@ impl<'a> Destructor<'a> {
     fn lower_gate(
         &mut self,
         rewriter: &mut Rewriter,
-        block: Arc<Block>,
+        block: BlockHandle,
         op: &OpHandle,
         conditional: &dyn Conditional,
     ) -> Result<(), PassError> {
@@ -178,7 +178,7 @@ impl<'a> Destructor<'a> {
         let (tests, default_reached) = self.live_chain(op, cases.len(), default)?;
         // An arm no edge can reach is left in the operation's own region, so
         // erasing the operation takes it — and everything nested in it — away.
-        let mut arms: Vec<Option<Arc<Block>>> = vec![None; cases.len()];
+        let mut arms: Vec<Option<BlockHandle>> = vec![None; cases.len()];
         for index in tests
             .iter()
             .copied()
@@ -265,7 +265,7 @@ impl<'a> Destructor<'a> {
     fn lower_tested_loop(
         &mut self,
         rewriter: &mut Rewriter,
-        block: Arc<Block>,
+        block: BlockHandle,
         op: &OpHandle,
     ) -> Result<(), PassError> {
         let test = self
@@ -314,7 +314,7 @@ impl<'a> Destructor<'a> {
     fn lower_counted_loop(
         &mut self,
         rewriter: &mut Rewriter,
-        block: Arc<Block>,
+        block: BlockHandle,
         op: &OpHandle,
     ) -> Result<(), PassError> {
         let counted = op
@@ -397,7 +397,7 @@ impl<'a> Destructor<'a> {
     fn seal(
         &self,
         rewriter: &mut Rewriter,
-        block: &Arc<Block>,
+        block: &BlockHandle,
         fallthrough: BlockId,
     ) -> Result<Option<Forward>, PassError> {
         let block = self.context.get_block(block.id());
@@ -437,7 +437,7 @@ impl<'a> Destructor<'a> {
     fn seal_into(
         &self,
         rewriter: &mut Rewriter,
-        block: &Arc<Block>,
+        block: &BlockHandle,
         fallthrough: BlockId,
         incoming: &[ValueId],
     ) -> Result<(BlockId, Vec<ValueId>), PassError> {
@@ -451,7 +451,7 @@ impl<'a> Destructor<'a> {
     }
 
     /// Whether `body` holds an exit of `kind` leaving `scope`.
-    fn leaves_through(&self, body: &Arc<Block>, scope: ValueId, kind: RegionExit) -> bool {
+    fn leaves_through(&self, body: &BlockHandle, scope: ValueId, kind: RegionExit) -> bool {
         body.op_ids().into_iter().any(|op_id| {
             let op = self.context.get_op(op_id);
             region_exit_kind(&op) == Some(kind) && op.operands().first() == Some(&scope)
@@ -463,7 +463,7 @@ impl<'a> Destructor<'a> {
     /// through carrying its own.
     fn branch(
         &self,
-        block: &Arc<Block>,
+        block: &BlockHandle,
         test: &AuxEmit,
         taken: BlockId,
         taken_args: &[ValueId],
@@ -533,7 +533,7 @@ impl<'a> Destructor<'a> {
         Ok(())
     }
 
-    fn jump(&self, block: &Arc<Block>, dest: BlockId, args: &[ValueId]) {
+    fn jump(&self, block: &BlockHandle, dest: BlockId, args: &[ValueId]) {
         block.append((self.emitters.uncond)(self.context, dest, args).id());
     }
 
@@ -563,12 +563,12 @@ impl<'a> Destructor<'a> {
 
     /// The inputs a gate forwards into each arm: its trailing operands, one per
     /// entry argument, the mapping the seeder read the arms under.
-    fn entry_arguments(&self, op: &OpHandle, arm: &Arc<Block>) -> Vec<ValueId> {
+    fn entry_arguments(&self, op: &OpHandle, arm: &BlockHandle) -> Vec<ValueId> {
         let first = op.operands().len().saturating_sub(arm.arguments().len());
         self.mapped(&op.operands()[first..])
     }
 
-    fn terminator(&self, block: &Arc<Block>) -> Result<OpHandle, PassError> {
+    fn terminator(&self, block: &BlockHandle) -> Result<OpHandle, PassError> {
         let block = self.context.get_block(block.id());
         block
             .op_ids()
@@ -582,7 +582,7 @@ impl<'a> Destructor<'a> {
     }
 
     /// Take a region's block out of it, so erasing the operation cannot reclaim it.
-    fn move_body(&self, region: RegionId) -> Option<Arc<Block>> {
+    fn move_body(&self, region: RegionId) -> Option<BlockHandle> {
         let block = self
             .context
             .get_region(region)
@@ -594,7 +594,7 @@ impl<'a> Destructor<'a> {
 
     /// A loop body, ready to be a block: the token its exits name is not a value of
     /// a CFG, so the argument carrying it goes.
-    fn move_loop_body(&self, region: RegionId) -> Option<(Arc<Block>, Option<ValueId>)> {
+    fn move_loop_body(&self, region: RegionId) -> Option<(BlockHandle, Option<ValueId>)> {
         let scope = loop_scope(self.context, region);
         let body = self.move_body(region)?;
         let token = TokenType::new(self.context);
@@ -615,9 +615,9 @@ impl<'a> Destructor<'a> {
     fn split_after(
         &self,
         rewriter: &mut Rewriter,
-        block: &Arc<Block>,
+        block: &BlockHandle,
         op: &OpHandle,
-    ) -> Arc<Block> {
+    ) -> BlockHandle {
         let block = self.context.get_block(block.id());
         let position = block.op_ids().iter().position(|id| *id == op.id).unwrap();
         let continuation = rewriter.split_block(block.id(), position + 1);
@@ -630,7 +630,7 @@ impl<'a> Destructor<'a> {
     fn erase(
         &self,
         rewriter: &mut Rewriter,
-        block: &Arc<Block>,
+        block: &BlockHandle,
         op: &OpHandle,
     ) -> Result<(), PassError> {
         rewriter.erase_op(&OperationRef::new(

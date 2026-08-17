@@ -10,11 +10,11 @@
 //! compiled and run, so the generated graphs gate the backend as well as the
 //! pass: what a host-compiled function returns must be what the graph computes.
 
-use std::sync::Arc;
+use tir::BlockHandle;
 
 use tir::builtin::ops as b;
 use tir::builtin::{FuncOp, IntegerType, ModuleOp};
-use tir::{Block, Context, IRFormatter, Operation, PassManager};
+use tir::{Context, IRFormatter, Operation, PassManager};
 
 /// How many backward edges a run may take.
 const FUEL: i64 = 16;
@@ -278,7 +278,7 @@ impl Program {
                 region.add_block(block.id());
                 block
             })
-            .collect::<Vec<Arc<Block>>>();
+            .collect::<Vec<BlockHandle>>();
 
         let seed = entry
             .append_op(b::addi(context, arguments[0], arguments[1], integer).build())

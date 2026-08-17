@@ -1696,8 +1696,7 @@ mod tests {
         assert_eq!(frame.stable_size(), 24);
     }
     use std::collections::BTreeSet;
-    use std::sync::Arc;
-    use tir::Block;
+    use tir::BlockHandle;
     use tir::builtin::{IntegerType, ops};
 
     fn three_reg_info() -> RegisterInfo {
@@ -1881,7 +1880,13 @@ mod tests {
         }
     }
 
-    fn addi(context: &Context, block: &Arc<Block>, a: ValueId, b: ValueId, ty: tir::TypeId) -> u32 {
+    fn addi(
+        context: &Context,
+        block: &BlockHandle,
+        a: ValueId,
+        b: ValueId,
+        ty: tir::TypeId,
+    ) -> u32 {
         block
             .append_op(ops::addi(context, a, b, ty).build())
             .result()

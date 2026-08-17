@@ -6,7 +6,7 @@ use tir::builtin::{
     FloatType, FuncOp, IntegerType, ModuleOp as BuiltinModuleOp, UnitType, ops as bops,
 };
 use tir::vector::VectorType;
-use tir::{Block, BlockId, Context, Operation, TypeId, ValueId};
+use tir::{BlockHandle, BlockId, Context, Operation, TypeId, ValueId};
 
 use super::*;
 
@@ -611,7 +611,7 @@ impl<'a> Reader<'a> {
         Ok(())
     }
 
-    fn read_globals(&mut self, body: &Block) -> Result<()> {
+    fn read_globals(&mut self, body: &BlockHandle) -> Result<()> {
         for inst in self
             .instructions
             .clone()
@@ -640,7 +640,7 @@ impl<'a> Reader<'a> {
         Ok(())
     }
 
-    fn read_entries(&self, body: &Block) -> Result<()> {
+    fn read_entries(&self, body: &BlockHandle) -> Result<()> {
         for inst in &self.instructions {
             if inst.opcode == 15 {
                 let (name, used) = decode_string_with_len(&inst.operands[2..])?;
@@ -696,7 +696,7 @@ impl<'a> Reader<'a> {
         Ok(())
     }
 
-    fn read_functions(&mut self, body: &Block) -> Result<()> {
+    fn read_functions(&mut self, body: &BlockHandle) -> Result<()> {
         let mut index = 0;
         while index < self.instructions.len() {
             if self.instructions[index].opcode != 54 {

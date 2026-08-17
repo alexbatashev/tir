@@ -1,9 +1,10 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use tir::BlockHandle;
+use tir::RegionHandle;
 
 use tir::attributes::AttributeValue;
 use tir::{
-    Block, BlockId, Operation, Region,
+    BlockId, Operation,
     builtin::{ModuleEndOpBuilder, ModuleOp, ModuleOpBuilder},
     parse::tokens::Parser,
 };
@@ -21,12 +22,12 @@ pub type AsmInstructionParser =
 /// so its instructions land ahead of everything the block holds rather than at
 /// its end.
 pub struct AsmCursor {
-    block: Arc<Block>,
+    block: BlockHandle,
     position: usize,
 }
 
 impl AsmCursor {
-    pub fn at_start(block: Arc<Block>) -> Self {
+    pub fn at_start(block: BlockHandle) -> Self {
         Self { block, position: 0 }
     }
 
@@ -79,8 +80,8 @@ impl AsmParser {
         // Local labels seen so far, mapped to the block they name. After parsing
         // we rewrite branch immediates that reference one of these.
         let mut labels: HashMap<String, BlockId> = HashMap::new();
-        let mut cur_region: Option<Arc<Region>> = None;
-        let mut cur_entry: Option<Arc<Block>> = None;
+        let mut cur_region: Option<RegionHandle> = None;
+        let mut cur_entry: Option<BlockHandle> = None;
         // Whether the insertion point is still the symbol's entry block, and
         // whether that block already received content or an entry label.
         let mut at_entry = false;
@@ -246,7 +247,7 @@ impl AsmParser {
 /// Rewrite branch immediates that name a local label into a block reference, so
 /// the encoder emits a pc-relative fixup instead of a symbol relocation.
 /// Unknown identifiers stay as `Str` and become external symbol references.
-fn resolve_labels(context: &tir::Context, block: &Arc<Block>, labels: &HashMap<String, BlockId>) {
+fn resolve_labels(context: &tir::Context, block: &BlockHandle, labels: &HashMap<String, BlockId>) {
     for op_id in block.op_ids() {
         let op = context.get_op(op_id);
         if op

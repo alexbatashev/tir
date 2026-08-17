@@ -41,7 +41,7 @@ pub mod helpers {
 pub mod parse;
 
 pub use analysis::{Analysis, AnalysisManager};
-pub use block::{Block, BlockId};
+pub use block::{Block, BlockHandle, BlockId};
 pub use context::{Context, ContextIterator, ContextRef, GetFromContext, StagedRegion};
 pub use diagnostics::{print_error_range, print_parse_error};
 pub use dialect::{Dialect, OperationParser};
@@ -66,7 +66,7 @@ pub use pass::{
     parse_pipeline, registered_passes,
 };
 pub use print::print_ir;
-pub use region::{Region, RegionId};
+pub use region::{Region, RegionHandle, RegionId};
 pub use schema::{
     AttrSchema, FieldSchema, OP_SCHEMAS, OpSchema, TYPE_SCHEMAS, TypeArg, TypeParam, TypeParamKind,
     TypeSchema, build_type, schema_json, type_schema_json,

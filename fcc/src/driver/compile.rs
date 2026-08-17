@@ -115,7 +115,6 @@ fn describe_target(
         }
     }
     context.set_op_attributes(module.id(), attributes);
-    // Op handles are snapshots, so the caller needs the updated one.
     context
         .get_op(module.id())
         .as_op::<tir::builtin::ModuleOp>()

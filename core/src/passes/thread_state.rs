@@ -7,8 +7,8 @@
 //! at its allocation; everything else — escaping slots, unknown pointers, calls —
 //! shares one conservative chain, which the function's `return` exports.
 
+use crate::BlockHandle;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 
 use crate::analysis::AnalysisManager;
 use crate::analysis::scopes::{exit_scope, loop_scope, nested_exit_scopes};
@@ -16,8 +16,8 @@ use crate::analysis::slots::collect_slots;
 use crate::builtin::{CallOp, EntryStateOpBuilder, FuncOp, IndirectCallOp, ReturnOp, StateType};
 use crate::ptr::MemcpyOp;
 use crate::{
-    Block, Context, MemoryRead, MemoryWrite, OpHandle, OpId, Operation, OperationRef, Pass,
-    PassError, PassTarget, PromotableAllocation, RegionId, Rewriter, TypeId, ValueId, scf,
+    Context, MemoryRead, MemoryWrite, OpHandle, OpId, Operation, OperationRef, Pass, PassError,
+    PassTarget, PromotableAllocation, RegionId, Rewriter, TypeId, ValueId, scf,
 };
 
 #[derive(Default)]
@@ -127,7 +127,7 @@ struct Threader<'a> {
 }
 
 impl Threader<'_> {
-    fn walk(&mut self, block: &Arc<Block>) {
+    fn walk(&mut self, block: &BlockHandle) {
         for op_id in block.op_ids() {
             let op = self.context.get_op(op_id);
             match classify(&op, &self.tracked) {
@@ -333,7 +333,7 @@ fn touches_memory(op: &OpHandle) -> bool {
 /// An op whose regions neither touch memory nor are left through an exit is
 /// transparent and needs nothing; one that is left through an exit has to be
 /// walked to feed that edge, so it is held to the same shape.
-fn threadable(context: &Context, block: &Arc<Block>) -> bool {
+fn threadable(context: &Context, block: &BlockHandle) -> bool {
     block.op_ids().iter().all(|&op_id| {
         let op = context.get_op(op_id);
         if op.regions().is_empty()
@@ -370,7 +370,7 @@ fn subtree_touches_memory(context: &Context, op: &OpHandle) -> bool {
         .any(|op_id| touches_memory(&context.get_op(op_id)))
 }
 
-fn block_ops(context: &Context, block: &Arc<Block>) -> Vec<OpId> {
+fn block_ops(context: &Context, block: &BlockHandle) -> Vec<OpId> {
     let mut ops = Vec::new();
     for op_id in block.op_ids() {
         ops.push(op_id);

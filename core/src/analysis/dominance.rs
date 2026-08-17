@@ -392,11 +392,10 @@ fn domtree_postorder(root: DomNode, children: &HashMap<DomNode, Vec<DomNode>>) -
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
-    use std::sync::Arc;
 
     use super::*;
     use crate::{
-        Block, Context, Operand, Operation, RegionId,
+        BlockHandle, Context, Operand, Operation, RegionId,
         builtin::{IntegerType, UnitType, ops},
     };
 
@@ -421,7 +420,7 @@ mod tests {
             .id()
     }
 
-    fn terminate(block: &Arc<Block>, op: impl Operation) {
+    fn terminate(block: &BlockHandle, op: impl Operation) {
         block.append_op(op);
     }
 

@@ -1,10 +1,11 @@
+use crate::BlockHandle;
+use crate::RegionHandle;
 use std::collections::HashMap;
-use std::sync::Arc;
 
-use crate::{Block, Context, IRFormatter, Operation, Region};
+use crate::{Context, IRFormatter, Operation};
 
 pub fn region_block_numbers(
-    region: &Arc<Region>,
+    region: &RegionHandle,
     context: &Context,
 ) -> HashMap<crate::BlockId, u32> {
     region
@@ -17,7 +18,7 @@ pub fn region_block_numbers(
 pub fn print_block_label(
     fmt: &mut IRFormatter,
     context: &Context,
-    block: &Arc<Block>,
+    block: &BlockHandle,
     index: u32,
 ) -> Result<(), std::fmt::Error> {
     fmt.write(format!("^bb{index}"))?;
@@ -56,7 +57,7 @@ pub fn print_block_label(
 pub fn print_region(
     fmt: &mut IRFormatter,
     context: &Context,
-    region: &Arc<Region>,
+    region: &RegionHandle,
 ) -> Result<(), std::fmt::Error> {
     let numbers = region_block_numbers(region, context);
     fmt.push_region_block_numbers(numbers);

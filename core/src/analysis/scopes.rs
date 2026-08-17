@@ -4,10 +4,10 @@
 //! names that token to leave through it. A transform growing a carried port has to
 //! feed every such edge, so it tracks the scopes it is walking inside.
 
-use std::sync::Arc;
+use crate::BlockHandle;
 
 use crate::builtin::TokenType;
-use crate::{Block, Context, OpHandle, OpId, RegionId, ValueId, ValueIds, scf};
+use crate::{Context, OpHandle, OpId, RegionId, ValueId, ValueIds, scf};
 
 /// The loop body's token scope: the value its `scf.break`/`scf.continue` name.
 pub fn loop_scope(context: &Context, body: RegionId) -> Option<ValueId> {
@@ -80,7 +80,7 @@ pub fn port_edges(context: &Context, body: RegionId) -> Vec<OpId> {
 }
 
 /// The exits leaving `scope` from `block`'s region tree, outermost first.
-fn scope_exits(context: &Context, block: &Arc<Block>, scope: ValueId) -> Vec<OpId> {
+fn scope_exits(context: &Context, block: &BlockHandle, scope: ValueId) -> Vec<OpId> {
     let mut exits = Vec::new();
     for op_id in block.op_ids() {
         let op = context.get_op(op_id);

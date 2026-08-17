@@ -1,14 +1,13 @@
+use crate::RegionHandle;
 use std::collections::HashMap;
-use std::sync::Arc;
 
-use crate::Region;
 use crate::attributes::AttributeValue;
 use crate::block::BlockId;
 use crate::parse::common::{Cursor, Span};
 use crate::value::ValueId;
 
 pub(crate) struct RegionParseState {
-    pub region: Arc<Region>,
+    pub region: RegionHandle,
     pub indices: HashMap<u32, BlockId>,
 }
 

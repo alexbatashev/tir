@@ -1294,7 +1294,7 @@ fn make_region_accessors(regions: &[Region]) -> proc_macro2::TokenStream {
 fn make_region_accessor(region: &Region, index: usize) -> proc_macro2::TokenStream {
     let func_name = format_ident!("{}", region.name);
     quote! {
-        pub fn #func_name(&self) -> std::sync::Arc<tir::Region> {
+        pub fn #func_name(&self) -> tir::RegionHandle {
             use tir::Operation;
             self.regions().nth(#index).unwrap()
         }
@@ -1316,7 +1316,7 @@ fn make_single_block_region_accessor(region: &Region, index: usize) -> proc_macr
     let func_name = format_ident!("{}", region.name);
 
     quote! {
-        pub fn #func_name(&self) -> std::sync::Arc<tir::Block> {
+        pub fn #func_name(&self) -> tir::BlockHandle {
             use tir::Operation;
             let context = self.0.context.upgrade();
             let region = self.regions().nth(#index).unwrap();

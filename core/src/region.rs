@@ -1,7 +1,3 @@
-use std::sync::Arc;
-
-use parking_lot::RwLock;
-
 use crate::{
     BlockId, Context, ContextIterator, GetFromContext, OpId, Terminator, context::ContextRef,
 };
@@ -10,97 +6,110 @@ use crate::{
 #[repr(transparent)]
 pub struct RegionId(u32);
 
+/// A region's storage record, living densely in the context's region slab and
+/// edited in place through [`Context`] under its write lock. Reads go through
+/// [`RegionHandle`].
 #[derive(Debug)]
 pub struct Region {
     id: RegionId,
-    blocks: RwLock<Vec<BlockId>>,
-    parent_op: RwLock<OpId>,
-    /// Handle back to the owning context, used to keep its block-to-parent-region
-    /// index in step with `add_block`. Never held across a context lock.
-    context: ContextRef,
+    blocks: Vec<BlockId>,
+    parent_op: OpId,
 }
 
 impl Region {
+    pub(crate) fn new(id: RegionId) -> Region {
+        Region {
+            id,
+            blocks: vec![],
+            parent_op: OpId::invalid(),
+        }
+    }
+
+    pub(crate) fn id(&self) -> RegionId {
+        self.id
+    }
+
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.blocks.capacity() * std::mem::size_of::<BlockId>()
+    }
+
+    pub(crate) fn set_parent_op(&mut self, op: OpId) {
+        self.parent_op = op;
+    }
+
+    /// The operation owning this region, if it has been attached to one.
+    pub(crate) fn parent_op(&self) -> Option<OpId> {
+        (self.parent_op != OpId::invalid()).then_some(self.parent_op)
+    }
+
+    pub(crate) fn blocks(&self) -> &[BlockId] {
+        &self.blocks
+    }
+
+    pub(crate) fn blocks_mut(&mut self) -> &mut Vec<BlockId> {
+        &mut self.blocks
+    }
+}
+
+/// A reference to a region: the context that owns it, and its id. Reads answer
+/// with the region as it stands now; see [`crate::OpHandle`].
+#[derive(Clone)]
+pub struct RegionHandle {
+    pub context: ContextRef,
+    pub id: RegionId,
+}
+
+impl std::fmt::Debug for RegionHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("RegionHandle").field(&self.id).finish()
+    }
+}
+
+impl RegionHandle {
     pub fn id(&self) -> RegionId {
         self.id
     }
 
-    pub(crate) fn new(id: RegionId, context: ContextRef) -> Region {
-        Region {
-            id,
-            blocks: RwLock::new(vec![]),
-            parent_op: RwLock::new(OpId::invalid()),
-            context,
-        }
-    }
-
-    pub(crate) fn heap_bytes(&self) -> usize {
-        self.blocks.read().capacity() * std::mem::size_of::<BlockId>()
-    }
-
-    pub(crate) fn set_parent_op(&self, op: OpId) {
-        *self.parent_op.write() = op;
-    }
-
     /// The operation owning this region, if it has been attached to one.
     pub fn parent_op(&self) -> Option<OpId> {
-        let op = *self.parent_op.read();
-        (op != OpId::invalid()).then_some(op)
+        self.context.upgrade().region_parent_op(self.id)
     }
 
     pub fn add_block(&self, id: BlockId) {
-        self.blocks.write().push(id);
-        self.context.upgrade().set_block_parent(id, self.id);
+        self.context.upgrade().add_block_to_region(self.id, id);
     }
 
     pub fn remove_block(&self, id: BlockId) -> bool {
-        let removed = {
-            let mut blocks = self.blocks.write();
-            match blocks.iter().position(|block_id| *block_id == id) {
-                Some(position) => {
-                    blocks.remove(position);
-                    true
-                }
-                None => false,
-            }
-        };
-        if removed {
-            self.context.upgrade().clear_block_parent(id);
-        }
-        removed
+        self.context.upgrade().remove_block_from_region(self.id, id)
     }
 
-    pub(crate) fn block_ids(&self) -> Vec<BlockId> {
-        self.blocks.read().clone()
+    pub fn block_ids(&self) -> Vec<BlockId> {
+        self.context.upgrade().region_block_ids(self.id)
     }
 
     /// Replace the whole block list at once. Only [`Context::replace_region_contents`]
     /// uses this: it owns the parent bookkeeping and the single version bump the
     /// swap is allowed to make, which the per-block mutators above would each repeat.
     pub(crate) fn set_blocks(&self, blocks: Vec<BlockId>) {
-        *self.blocks.write() = blocks;
+        self.context.upgrade().set_region_blocks(self.id, blocks);
     }
 
     pub fn iter(&self, context: Context) -> ContextIterator<BlockId> {
-        ContextIterator::new(context, self.blocks.read().clone())
+        ContextIterator::new(context, self.block_ids())
     }
 
     pub fn verify(&self, context: &Context) -> Result<(), crate::Error> {
-        let blocks = self.blocks.read();
-
-        for block_id in &*blocks {
-            let block = context.get_block(*block_id);
-            if block.op_ids().is_empty() {
+        for block_id in self.block_ids() {
+            let block = context.get_block(block_id);
+            let ops = block.op_ids();
+            if ops.is_empty() {
                 return Err(crate::Error::VerificationError(
                     "basic blocks must have at least one operation".to_string(),
                 ));
             }
 
-            let last_op = *block.op_ids().last().unwrap();
-
-            let op = last_op.get_from_context(context);
-            let terminator = op.as_interface::<dyn Terminator>();
-            if terminator.is_none() {
+            let op = ops.last().unwrap().get_from_context(context);
+            if op.as_interface::<dyn Terminator>().is_none() {
                 return Err(crate::Error::VerificationError(
                     "basic blocks must end with a terminator".to_string(),
                 ));
@@ -130,7 +139,7 @@ impl RegionId {
 }
 
 impl GetFromContext for RegionId {
-    type Item = Arc<Region>;
+    type Item = RegionHandle;
 
     fn get_from_context(&self, context: &Context) -> Self::Item {
         context.get_region(*self)
