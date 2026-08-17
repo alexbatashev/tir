@@ -121,7 +121,7 @@ struct ContextInstance {
     // Arenas are slabs indexed by the dense, monotonic id counters below; see `slab_get`.
     operations: Vec<Option<Arc<OpInstance>>>,
     last_op_id: AtomicU32,
-    values: Vec<Option<Arc<Value>>>,
+    values: Vec<Option<Value>>,
     last_value_id: AtomicU32,
     regions: Vec<Option<Arc<Region>>>,
     last_region_id: AtomicU32,
@@ -355,14 +355,14 @@ impl Context {
             regions_slab: inner.regions.len(),
             regions_live,
             ops_bytes: entity_bytes::<OpInstance>(ops_live) + ops_heap,
-            values_bytes: entity_bytes::<Value>(values_live),
+            values_bytes: values_live * std::mem::size_of::<Value>(),
             blocks_bytes: entity_bytes::<Block>(blocks_live) + blocks_heap,
             regions_bytes: entity_bytes::<Region>(regions_live) + regions_heap,
             slab_bytes: (inner.operations.capacity()
-                + inner.values.capacity()
                 + inner.blocks.capacity()
                 + inner.regions.capacity())
-                * SLOT_BYTES,
+                * SLOT_BYTES
+                + inner.values.capacity() * std::mem::size_of::<Option<Value>>(),
         }
     }
 
@@ -437,7 +437,7 @@ impl Context {
         // Results are created before op id assignment in builders; patch their def-site now.
         for result_id in &instance.results {
             if let Some(value) = slab_get_mut(&mut inner.values, result_id.index()) {
-                Arc::make_mut(value).set_defining_op(op_id);
+                value.set_defining_op(op_id);
             }
         }
 
@@ -467,7 +467,7 @@ impl Context {
             };
             let value_id = ValueId::from_number(*id);
             if let Some(value) = slab_get_mut(&mut inner.values, value_id.index()) {
-                Arc::make_mut(value).set_defining_op(op_id);
+                value.set_defining_op(op_id);
             }
         }
 
@@ -579,12 +579,12 @@ impl Context {
         );
 
         let value = Value::new(value_id, ty, defining_op);
-        slab_put(&mut inner.values, value_id.index(), Arc::new(value.clone()));
+        slab_put(&mut inner.values, value_id.index(), value.clone());
 
         value
     }
 
-    pub fn get_value(&self, id: ValueId) -> Arc<Value> {
+    pub fn get_value(&self, id: ValueId) -> Value {
         let inner = self.0.read();
         slab_get(&inner.values, id.index()).unwrap().clone()
     }
@@ -743,7 +743,7 @@ impl Context {
             return;
         };
         Arc::make_mut(entry).arguments_mut().push(adopted.clone());
-        slab_put(&mut inner.values, value.index(), Arc::new(adopted));
+        slab_put(&mut inner.values, value.index(), adopted);
         slab_put(&mut inner.value_block, value.index(), block);
         inner.edit_block(block);
     }
