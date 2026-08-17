@@ -113,7 +113,6 @@ execute/20021127-1.c
 execute/20021219-1.c
 execute/20030105-1.c
 execute/20030109-1.c
-execute/20030128-1.c
 execute/20030216-1.c
 execute/20030218-1.c
 execute/20030221-1.c
@@ -161,6 +160,7 @@ execute/20040423-1.c
 execute/20040520-1.c
 execute/20040625-1.c
 execute/20040629-1.c
+execute/20040703-1.c
 execute/20040705-1.c
 execute/20040705-2.c
 execute/20040707-1.c
@@ -274,12 +274,12 @@ execute/20141022-1.c
 execute/20141107-1.c
 execute/20141125-1.c
 execute/20150611-1.c
-execute/20170111-1.c
 execute/20170401-1.c
 execute/20170401-2.c
 execute/20170419-1.c
 execute/20171008-1.c
 execute/20180112-1.c
+execute/20180131-1.c
 execute/20180226-1.c
 execute/20180921-1.c
 execute/20181120-1.c
@@ -435,7 +435,6 @@ execute/960209-1.c
 execute/960215-1.c
 execute/960218-1.c
 execute/960301-1.c
-execute/960302-1.c
 execute/960311-1.c
 execute/960311-2.c
 execute/960311-3.c
@@ -453,6 +452,7 @@ execute/960608-1.c
 execute/960802-1.c
 execute/960830-1.c
 execute/960909-1.c
+execute/961004-1.c
 execute/961026-1.c
 execute/961112-1.c
 execute/961122-1.c
@@ -472,7 +472,6 @@ execute/980608-1.c
 execute/980707-1.c
 execute/980709-1.c
 execute/980716-1.c
-execute/981001-1.c
 execute/981019-1.c
 execute/981130-1.c
 execute/981206-1.c
@@ -490,6 +489,7 @@ execute/990604-1.c
 execute/990628-1.c
 execute/990826-0.c
 execute/991014-1.c
+execute/991016-1.c
 execute/991023-1.c
 execute/991030-1.c
 execute/991112-1.c
@@ -919,7 +919,6 @@ execute/pr28982a.c
 execute/pr28982b.c
 execute/pr29006.c
 execute/pr29156.c
-execute/pr29798.c
 execute/pr30314.c
 execute/pr30778.c
 execute/pr31072.c
@@ -928,6 +927,7 @@ execute/pr31448-2.c
 execute/pr31448.c
 execute/pr32244-1.c
 execute/pr32500.c
+execute/pr33142.c
 execute/pr33382.c
 execute/pr33631.c
 execute/pr33870-1.c
@@ -949,7 +949,6 @@ execute/pr35472.c
 execute/pr36034-1.c
 execute/pr36034-2.c
 execute/pr36038.c
-execute/pr36077.c
 execute/pr36321.c
 execute/pr36339.c
 execute/pr36343.c
@@ -1048,7 +1047,6 @@ execute/pr52979-1.c
 execute/pr52979-2.c
 execute/pr53084.c
 execute/pr53160.c
-execute/pr53465.c
 execute/pr53645-2.c
 execute/pr53645.c
 execute/pr53688.c
