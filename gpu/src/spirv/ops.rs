@@ -178,8 +178,8 @@ impl AccessChainOp {
         self.operands()[0]
     }
 
-    pub fn indices(&self) -> &[ValueId] {
-        &self.operands()[1..]
+    pub fn indices(&self) -> tir::ValueIds {
+        self.operands()[1..].into()
     }
 }
 

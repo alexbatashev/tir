@@ -57,9 +57,9 @@ pub use layout::{DATA_LAYOUT, DataLayout, Endianness, data_layout_spec};
 pub use operand::Operand;
 pub use operation::{
     DialectName, ErasedOpInterface, ImplementsOpInterface, OpDefSpec, OpDefVerifiable, OpId,
-    OpInstance, OpInterfaceConverter, Operation, OperationName, Verifiable, downcast_op_interface,
-    erase_op_interface, op_interface_converter, verify_op_tree, verify_opdef_attributes,
-    verify_opdef_operands,
+    OpInstance, OpInterfaceConverter, Operation, OperationName, RegionIds, ValueIds, Verifiable,
+    downcast_op_interface, erase_op_interface, op_interface_converter, verify_op_tree,
+    verify_opdef_attributes, verify_opdef_operands,
 };
 pub use pass::{
     OperationRef, PASSES, Pass, PassError, PassInfo, PassManager, PassTarget, Rewriter, build_pass,

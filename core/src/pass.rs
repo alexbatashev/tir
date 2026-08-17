@@ -689,10 +689,10 @@ impl PassManager {
         for region_id in root.op.regions() {
             // The visit may have erased `root`, reclaiming the regions it owned;
             // a region the replacement took over is still live and still walked.
-            if !context.has_region(*region_id) {
+            if !context.has_region(region_id) {
                 continue;
             }
-            let region = context.get_region(*region_id);
+            let region = context.get_region(region_id);
             for block in region.iter(context.clone()) {
                 let op_ids = block.op_ids();
                 for (index, op_id) in op_ids.into_iter().enumerate() {
@@ -954,9 +954,9 @@ mod tests {
         let argument = body.arguments()[0].id();
         assert_ne!(argument, source.body().arguments()[0].id());
         let add = context.get_op(body.op_ids()[0]);
-        assert_eq!(add.operands(), vec![argument, argument]);
+        assert_eq!(add.operands().as_slice(), vec![argument, argument]);
         let r#return = context.get_op(body.op_ids()[1]);
-        assert_eq!(r#return.operands(), vec![add.results()[0]]);
+        assert_eq!(r#return.operands().as_slice(), vec![add.results()[0]]);
     }
 
     #[test]

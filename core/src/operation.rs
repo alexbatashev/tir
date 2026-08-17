@@ -169,11 +169,11 @@ pub trait Operation: 'static + Send + Sync + Any + Verifiable + OpDefVerifiable 
         ContextIterator::new(context, instance.regions().to_vec())
     }
 
-    fn operands(&self) -> &[ValueId] {
+    fn operands(&self) -> ValueIds {
         self.op_instance().operands()
     }
 
-    fn attributes(&self) -> &[crate::attributes::NamedAttribute] {
+    fn attributes(&self) -> Vec<crate::attributes::NamedAttribute> {
         self.op_instance().attributes()
     }
 
@@ -239,10 +239,10 @@ fn verify_state_linearity(context: &Context, op_id: OpId) -> Result<(), Error> {
     while let Some(op_id) = worklist.pop() {
         let instance = context.get_op(op_id);
         for operand in instance.operands() {
-            if !context.has_value(*operand) || context.get_value(*operand).ty() != state {
+            if !context.has_value(operand) || context.get_value(operand).ty() != state {
                 continue;
             }
-            if !consumed.insert(*operand) {
+            if !consumed.insert(operand) {
                 return Err(Error::VerificationError(format!(
                     "state value %{} is used more than once",
                     operand.number()
@@ -280,8 +280,8 @@ fn verify_state_ports(context: &Context, instance: &Arc<OpInstance>) -> Result<(
         }
         Ok(())
     };
-    ports(instance.operands(), "operand")?;
-    ports(instance.results(), "result")
+    ports(&instance.operands(), "operand")?;
+    ports(&instance.results(), "result")
 }
 
 fn verify_op_tree_ops(context: &Context, op_id: OpId) -> Result<(), Error> {
@@ -672,6 +672,9 @@ fn as_regions(raw: &[u32]) -> &[RegionId] {
     unsafe { std::slice::from_raw_parts(raw.as_ptr().cast::<RegionId>(), raw.len()) }
 }
 
+pub type ValueIds = smallvec::SmallVec<[ValueId; 4]>;
+pub type RegionIds = smallvec::SmallVec<[RegionId; 2]>;
+
 /// An operation's erased state: its identity plus its ports and attributes.
 ///
 /// The ports live in one buffer, laid out as operands, then results, then
@@ -744,25 +747,27 @@ impl OpInstance {
         (self.operand_count + self.result_count) as usize
     }
 
-    pub fn operands(&self) -> &[ValueId] {
-        as_values(&self.ports[..self.operand_end()])
+    pub fn operands(&self) -> ValueIds {
+        ValueIds::from_slice(as_values(&self.ports[..self.operand_end()]))
     }
 
-    pub fn results(&self) -> &[ValueId] {
-        as_values(&self.ports[self.operand_end()..self.result_end()])
+    pub fn results(&self) -> ValueIds {
+        ValueIds::from_slice(as_values(
+            &self.ports[self.operand_end()..self.result_end()],
+        ))
     }
 
-    pub fn regions(&self) -> &[RegionId] {
-        as_regions(&self.ports[self.result_end()..])
+    pub fn regions(&self) -> RegionIds {
+        RegionIds::from_slice(as_regions(&self.ports[self.result_end()..]))
     }
 
-    pub fn attributes(&self) -> &[crate::attributes::NamedAttribute] {
-        self.attributes.as_deref().unwrap_or_default()
+    pub fn attributes(&self) -> Vec<crate::attributes::NamedAttribute> {
+        self.attributes.as_deref().unwrap_or_default().to_vec()
     }
 
     pub(crate) fn heap_bytes(&self) -> usize {
         self.ports.capacity() * std::mem::size_of::<u32>()
-            + std::mem::size_of_val(self.attributes())
+            + std::mem::size_of_val(self.attributes.as_deref().unwrap_or_default())
     }
 
     pub(crate) fn replace_operand_at(&mut self, index: usize, value: ValueId) {
@@ -860,7 +865,9 @@ impl OpInstance {
     /// [`OpInstance::attr`] for a name already interned, which is the form a
     /// repeated lookup wants: the comparison is on `u32`s.
     pub fn attr_sym(&self, name: tir_adt::Sym) -> Option<&crate::attributes::AttributeValue> {
-        self.attributes()
+        self.attributes
+            .as_deref()
+            .unwrap_or_default()
             .iter()
             .find(|attribute| attribute.name == name)
             .map(|attribute| &attribute.value)

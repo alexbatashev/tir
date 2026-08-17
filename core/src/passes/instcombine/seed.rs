@@ -157,7 +157,7 @@ impl Seeder<'_> {
             }
         } else if let (Some(constant), [result]) = (
             instance.clone().as_interface::<dyn ConstantLike>(),
-            instance.results(),
+            instance.results().as_slice(),
         ) {
             let ty = self.context.get_value(*result).ty();
             let id = self

@@ -76,10 +76,10 @@ pub fn collect_slots(context: &Context, op_ids: &[OpId]) -> BTreeMap<ValueId, Sl
         }
 
         for operand in instance.operands() {
-            if Some(*operand) == read_location || Some(*operand) == write_location {
+            if Some(operand) == read_location || Some(operand) == write_location {
                 continue;
             }
-            if let Some(slot) = slots.get_mut(operand) {
+            if let Some(slot) = slots.get_mut(&operand) {
                 slot.escapes = true;
             }
         }

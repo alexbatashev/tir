@@ -212,7 +212,7 @@ fn blocks_under(context: &Context, region: RegionId) -> Vec<BlockId> {
     let mut blocks = Vec::new();
     for block in context.get_region(region).iter(context.clone()) {
         for op_id in block.op_ids() {
-            for &nested in context.get_op(op_id).regions() {
+            for nested in context.get_op(op_id).regions() {
                 blocks.extend(blocks_under(context, nested));
             }
         }

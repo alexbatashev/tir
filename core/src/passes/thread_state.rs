@@ -374,7 +374,7 @@ fn block_ops(context: &Context, block: &Arc<Block>) -> Vec<OpId> {
     let mut ops = Vec::new();
     for op_id in block.op_ids() {
         ops.push(op_id);
-        for &region in context.get_op(op_id).regions() {
+        for region in context.get_op(op_id).regions() {
             ops.extend(region_ops(context, region));
         }
     }

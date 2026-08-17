@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::builtin::{IntegerType, TokenType};
 use crate::{
     Conditional, Context, CountedLoop, Error, GuardedLoop, LoopLike, Operation, Terminator,
-    TokenScope, TypeId, ValueId, dialect, operation,
+    TokenScope, TypeId, ValueId, ValueIds, dialect, operation,
 };
 
 use crate as tir;
@@ -327,7 +327,7 @@ impl Terminator for ConditionOp {}
 impl ConditionOp {
     fn custom_print(&self, fmt: &mut tir::IRFormatter) -> Result<(), std::fmt::Error> {
         fmt.write("scf.condition ")?;
-        print_value_list(fmt, self.operands())?;
+        print_value_list(fmt, &self.operands())?;
         fmt.write("\n")
     }
 
@@ -405,8 +405,18 @@ impl tir::Verifiable for IfOp {
         verify_region_yield(context, self.then_body(), &result_types, "scf.if then body")?;
         verify_region_yield(context, self.else_body(), &result_types, "scf.if else body")?;
 
-        verify_arm_arguments(context, self.then_body(), self.inputs(), "scf.if then body")?;
-        verify_arm_arguments(context, self.else_body(), self.inputs(), "scf.if else body")
+        verify_arm_arguments(
+            context,
+            self.then_body(),
+            &self.inputs(),
+            "scf.if then body",
+        )?;
+        verify_arm_arguments(
+            context,
+            self.else_body(),
+            &self.inputs(),
+            "scf.if else body",
+        )
     }
 }
 
@@ -416,19 +426,19 @@ impl IfOp {
     }
 
     /// The values the gate forwards to every arm as its entry arguments.
-    fn inputs(&self) -> &[ValueId] {
-        &self.operands()[1..]
+    fn inputs(&self) -> ValueIds {
+        self.operands()[1..].into()
     }
 
     fn custom_print(&self, fmt: &mut tir::IRFormatter) -> Result<(), std::fmt::Error> {
         let context = self.0.context.upgrade();
         if !self.0.results().is_empty() {
-            print_value_list(fmt, self.0.results())?;
+            print_value_list(fmt, &self.0.results())?;
             fmt.write(" = ")?;
         }
         fmt.write(format!("scf.if %{}", self.condition().number()))?;
-        print_gamma_inputs(fmt, self.inputs())?;
-        print_result_types(fmt, &context, self.0.results())?;
+        print_gamma_inputs(fmt, &self.inputs())?;
+        print_result_types(fmt, &context, &self.0.results())?;
         print_arm_arguments(fmt, self.then_body())?;
         tir::region_format::print_op_region(fmt, &context, self, 0)?;
         fmt.write(" else")?;
@@ -569,7 +579,7 @@ impl tir::Verifiable for SwitchOp {
                 .ok_or_else(|| Error::VerificationError(format!("{label} must contain a block")))?;
             verify_single_block_region_has_terminator(context, block.clone(), &label)?;
             verify_region_yield(context, block.clone(), &result_types, &label)?;
-            verify_arm_arguments(context, block, self.inputs(), &label)?;
+            verify_arm_arguments(context, block, &self.inputs(), &label)?;
         }
         Ok(())
     }
@@ -581,8 +591,8 @@ impl SwitchOp {
     }
 
     /// The values the gate forwards to every arm as its entry arguments.
-    fn inputs(&self) -> &[ValueId] {
-        &self.operands()[1..]
+    fn inputs(&self) -> ValueIds {
+        self.operands()[1..].into()
     }
 
     /// The case value selecting each non-default arm, in arm order.
@@ -604,12 +614,12 @@ impl SwitchOp {
     fn custom_print(&self, fmt: &mut tir::IRFormatter) -> Result<(), std::fmt::Error> {
         let context = self.0.context.upgrade();
         if !self.0.results().is_empty() {
-            print_value_list(fmt, self.0.results())?;
+            print_value_list(fmt, &self.0.results())?;
             fmt.write(" = ")?;
         }
         fmt.write(format!("scf.switch %{}", self.predicate().number()))?;
-        print_gamma_inputs(fmt, self.inputs())?;
-        print_result_types(fmt, &context, self.0.results())?;
+        print_gamma_inputs(fmt, &self.inputs())?;
+        print_result_types(fmt, &context, &self.0.results())?;
         let arms = self.arms().to_vec();
         for (index, case) in self.cases().iter().enumerate() {
             fmt.write(format!(" case {case}"))?;
@@ -670,7 +680,7 @@ impl Terminator for BreakOp {}
 
 impl BreakOp {
     fn custom_print(&self, fmt: &mut tir::IRFormatter) -> Result<(), std::fmt::Error> {
-        print_exit(fmt, "scf.break", self.operands())
+        print_exit(fmt, "scf.break", &self.operands())
     }
 
     fn custom_parse(
@@ -704,7 +714,7 @@ impl Terminator for ContinueOp {}
 
 impl ContinueOp {
     fn custom_print(&self, fmt: &mut tir::IRFormatter) -> Result<(), std::fmt::Error> {
-        print_exit(fmt, "scf.continue", self.operands())
+        print_exit(fmt, "scf.continue", &self.operands())
     }
 
     fn custom_parse(
@@ -751,7 +761,7 @@ impl YieldOp {
         fmt.write("scf.yield")?;
         if !self.operands().is_empty() {
             fmt.write(" ")?;
-            print_value_list(fmt, self.operands())?;
+            print_value_list(fmt, &self.operands())?;
         }
         fmt.write("\n")
     }
@@ -829,11 +839,12 @@ fn latched_values(op: &impl LoopOp) -> Vec<ValueId> {
 
 /// The carried values a structured terminator transfers: everything a `scf.break` or
 /// `scf.continue` carries past its scope token, and everything else's operands.
-fn exit_values(terminator: &Arc<tir::OpInstance>) -> &[ValueId] {
+fn exit_values(terminator: &Arc<tir::OpInstance>) -> ValueIds {
+    let operands = terminator.operands();
     if terminator.is::<BreakOp>() || terminator.is::<ContinueOp>() {
-        &terminator.operands()[1..]
+        operands[1..].into()
     } else {
-        terminator.operands()
+        operands
     }
 }
 
@@ -1240,7 +1251,7 @@ fn verify_scope_exits(
 ) -> Result<(), Error> {
     for op_id in block.op_ids() {
         let op = context.get_op(op_id);
-        for &region in op.regions() {
+        for region in op.regions() {
             for nested in context.get_region(region).iter(context.clone()) {
                 verify_scope_exits(context, &nested, scope, results, label)?;
             }

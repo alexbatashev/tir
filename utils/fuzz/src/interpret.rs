@@ -76,10 +76,10 @@ fn run(context: &Context, ops: Vec<OpId>, values: &mut HashMap<ValueId, i64>) ->
         }
 
         if named("builtin", "return") {
-            return Some(Leave::Return(operands(instance.operands(), values)?));
+            return Some(Leave::Return(operands(&instance.operands(), values)?));
         }
         if named("scf", "yield") {
-            return Some(Leave::Yield(operands(instance.operands(), values)?));
+            return Some(Leave::Yield(operands(&instance.operands(), values)?));
         }
         if named("scf", "condition") {
             let repeat = read(0)? != 0;
@@ -118,7 +118,7 @@ fn run(context: &Context, ops: Vec<OpId>, values: &mut HashMap<ValueId, i64>) ->
             };
             results
         } else if named("scf", "while") {
-            let mut carried = operands(instance.operands(), values)?;
+            let mut carried = operands(&instance.operands(), values)?;
             loop {
                 let Leave::Condition(repeat, next) =
                     region(context, instance.regions()[0], &carried, values)?

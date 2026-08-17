@@ -39,7 +39,7 @@ impl LowerCirStructsPass {
             result: &mut Vec<OperationRef>,
         ) {
             for region in operation.regions() {
-                for block in context.get_region(*region).iter(context.clone()) {
+                for block in context.get_region(region).iter(context.clone()) {
                     for operation in block.op_ids() {
                         let operation = context.get_op(operation);
                         result.push(OperationRef::new(
@@ -409,7 +409,7 @@ impl LowerCirControlFlowPass {
                     return Some((block, op));
                 }
                 for child in op.regions() {
-                    if let Some(found) = Self::next_control_op_in_region(context, *child) {
+                    if let Some(found) = Self::next_control_op_in_region(context, child) {
                         return Some(found);
                     }
                 }

@@ -329,9 +329,9 @@ mod tests {
 
         let arg_id = func.body().arguments()[0].id();
         let ops: Vec<_> = func.body().iter(context.clone()).collect();
-        assert_eq!(ops[0].operands(), vec![arg_id, arg_id]);
+        assert_eq!(ops[0].operands().as_slice(), vec![arg_id, arg_id]);
         let sum_id = ops[0].results()[0];
-        assert_eq!(ops[1].operands(), vec![sum_id]);
+        assert_eq!(ops[1].operands().as_slice(), vec![sum_id]);
     }
 
     #[test]

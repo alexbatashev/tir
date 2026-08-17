@@ -274,7 +274,7 @@ impl<'a> Destructor<'a> {
         let (body, scope) = self
             .move_loop_body(op.regions()[1])
             .ok_or_else(|| Self::decline(op, "loop body has no block"))?;
-        let inits = self.mapped(op.operands());
+        let inits = self.mapped(&op.operands());
         let continuation = self.split_after(rewriter, &block, op);
         self.add_block(test.id());
         if let Some(scope) = scope {
@@ -621,7 +621,7 @@ impl<'a> Destructor<'a> {
         let block = self.context.get_block(block.id());
         let position = block.op_ids().iter().position(|id| *id == op.id).unwrap();
         let continuation = rewriter.split_block(block.id(), position + 1);
-        for &result in op.results() {
+        for result in op.results() {
             self.context.adopt_block_argument(continuation.id(), result);
         }
         self.context.get_block(continuation.id())

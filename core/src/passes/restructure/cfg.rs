@@ -222,7 +222,7 @@ pub fn deep_operands(context: &Context, op: OpId) -> Vec<ValueId> {
     while let Some(op) = pending.pop() {
         let instance = context.get_op(op);
         operands.extend(instance.operands().iter().copied());
-        for &region in instance.regions() {
+        for region in instance.regions() {
             for block in context.get_region(region).block_ids() {
                 pending.extend(context.get_block(block).op_ids());
             }
@@ -440,7 +440,7 @@ impl Builder<'_> {
         let mut reads: BTreeMap<ValueId, BTreeSet<NodeId>> = BTreeMap::new();
         for node in 0..self.cfg.nodes.len() {
             for op in self.cfg.ops(node) {
-                for &result in self.context.get_op(op).results() {
+                for result in self.context.get_op(op).results() {
                     definition.insert(result, node);
                 }
             }

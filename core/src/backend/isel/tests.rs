@@ -1447,7 +1447,7 @@ fn seed_regions(context: &Context, src: &str) -> SeededFunction {
     let mut value_to_def = HashMap::new();
     for &block in &blocks {
         for op_id in context.get_block(block).op_ids() {
-            for &result in context.get_op(op_id).results() {
+            for result in context.get_op(op_id).results() {
                 value_to_def.insert(result, op_id);
             }
         }

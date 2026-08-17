@@ -263,9 +263,9 @@ impl Driver<'_> {
                 (Some(operand), Some(result)) => Some((read.read_value(), operand, result)),
                 _ => None,
             });
-        let value = match (state_edge, instance.results()) {
+        let value = match (state_edge, instance.results().as_slice()) {
             (Some((value, ..)), _) => value,
-            (None, &[value]) => value,
+            (None, [value]) => *value,
             _ => return Ok(()),
         };
         let Some(&class) = self.value_class.get(&value) else {
@@ -396,7 +396,7 @@ impl Driver<'_> {
                 .as_interface::<dyn Conditional>()
                 .map(|g| g.guarded_regions())
                 .unwrap_or_default();
-            for &sub in instance.regions() {
+            for sub in instance.regions() {
                 match guarded.iter().find(|&&(r, ..)| r == sub) {
                     Some(&(_, value, holds)) => {
                         self.eg.push_context();

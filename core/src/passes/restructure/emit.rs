@@ -111,7 +111,7 @@ impl Emitter<'_> {
             self.bind_undefined_reads(op, block, env)?;
             self.retarget_operands(op, env);
             self.context.get_block(block).append(op);
-            for &result in self.context.get_op(op).results() {
+            for result in self.context.get_op(op).results() {
                 if let Some(&var) = self.cfg.value_var.get(&result) {
                     env.insert(var, result);
                 }
@@ -325,7 +325,7 @@ impl Emitter<'_> {
                     assigned.extend(self.cfg.nodes[*node].assigns.iter().map(|(var, _)| *var));
                     for op in self.cfg.ops(*node) {
                         for result in self.context.get_op(op).results() {
-                            assigned.extend(self.cfg.value_var.get(result).copied());
+                            assigned.extend(self.cfg.value_var.get(&result).copied());
                         }
                     }
                 }
@@ -438,7 +438,7 @@ impl Emitter<'_> {
                     self.context.set_op_operand(op, index, resolved);
                 }
             }
-            for &region in instance.regions() {
+            for region in instance.regions() {
                 for block in self.context.get_region(region).block_ids() {
                     pending.extend(self.context.get_block(block).op_ids());
                 }

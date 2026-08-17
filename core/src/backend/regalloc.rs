@@ -1232,7 +1232,7 @@ fn collect_stack_allocas(
             let Some(allocation) = op.clone().as_op::<AllocaOp>() else {
                 continue;
             };
-            let Some(result) = op.results().first() else {
+            let Some(result) = op.results().first().copied() else {
                 continue;
             };
             allocas.push(StackAlloca {

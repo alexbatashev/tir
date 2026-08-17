@@ -4566,7 +4566,7 @@ fn body_blocks(context: &Context, regions: &[tir::RegionId]) -> Vec<tir::BlockId
         for block in context.get_region(region).iter(context.clone()) {
             blocks.push(block.id());
             for op_id in block.op_ids() {
-                blocks.extend(body_blocks(context, context.get_op(op_id).regions()));
+                blocks.extend(body_blocks(context, &context.get_op(op_id).regions()));
             }
         }
     }
@@ -4619,7 +4619,7 @@ pub fn lower_data(context: &Context, module: &ModuleOp) -> Result<(), tir::PassE
         }
         // A string use sits wherever the body puts it, including inside the
         // structured regions the backend takes.
-        for block_id in body_blocks(context, op.regions()) {
+        for block_id in body_blocks(context, &op.regions()) {
             let block = context.get_block(block_id);
             for op_id in block.op_ids() {
                 let op = context.get_op(op_id);

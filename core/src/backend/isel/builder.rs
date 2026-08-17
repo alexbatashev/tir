@@ -623,7 +623,7 @@ impl<'a> SemDagBuilder<'a> {
         let class = if let Some(class) = self.build_memory_effect(op) {
             class
         } else {
-            let operands = self.build_operands(op.operands());
+            let operands = self.build_operands(&op.operands());
             let mut graph = SemGraph::new();
             let Some(root) = op.clone().as_dyn_op().semantic_expr(&mut graph) else {
                 // Nothing says what this operation does, so nothing says it left
@@ -641,7 +641,7 @@ impl<'a> SemDagBuilder<'a> {
             class
         };
         for result in op.results() {
-            self.value_to_class.insert(*result, class);
+            self.value_to_class.insert(result, class);
         }
         Some(class)
     }
@@ -740,7 +740,7 @@ impl<'a> SemDagBuilder<'a> {
         }
         let mut graph = SemGraph::new();
         let root = def.clone().as_dyn_op().semantic_expr(&mut graph)?;
-        let operands = self.build_operands(def.operands());
+        let operands = self.build_operands(&def.operands());
         let class = self.lower_typed(&graph, root, &operands);
         let comparison = self
             .egraph
@@ -774,7 +774,7 @@ impl<'a> SemDagBuilder<'a> {
             } else {
                 let mut graph = SemGraph::new();
                 if let Some(root) = def.clone().as_dyn_op().semantic_expr(&mut graph) {
-                    let operands = self.build_operands(def.operands());
+                    let operands = self.build_operands(&def.operands());
                     self.lower_typed(&graph, root, &operands)
                 } else {
                     self.add_input_value(value, value_ty)

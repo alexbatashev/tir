@@ -27,7 +27,7 @@ fn count_live(context: &Context, root: OpId) -> LiveIr {
         values.extend(op.results().iter().copied());
         for region_id in op.regions() {
             live.regions += 1;
-            count_region(context, *region_id, &mut live, &mut values, &mut pending);
+            count_region(context, region_id, &mut live, &mut values, &mut pending);
         }
     }
     live.values = values.len();

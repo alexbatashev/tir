@@ -94,7 +94,7 @@ fn transfer(cfg: &Cfg, live_in: &[BTreeSet<VarId>], node: NodeId) -> BTreeSet<Va
     }
     for op in cfg.ops(node).into_iter().rev() {
         let instance = cfg.context.get_op(op);
-        for &result in instance.results() {
+        for result in instance.results() {
             if let Some(var) = var_of(cfg, result) {
                 live.remove(&var);
             }

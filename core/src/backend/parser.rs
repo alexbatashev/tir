@@ -273,7 +273,7 @@ fn resolve_labels(context: &tir::Context, block: &Arc<Block>, labels: &HashMap<S
             }
         }
         for region_id in op.regions() {
-            let region = context.get_region(*region_id);
+            let region = context.get_region(region_id);
             for child in region.iter(context.clone()) {
                 resolve_labels(context, &child, labels);
             }

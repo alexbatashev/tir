@@ -1306,8 +1306,8 @@ fn make_region_accessor(region: &Region, index: usize) -> proc_macro2::TokenStre
 fn make_variadic_region_accessor(region: &Region, index: usize) -> proc_macro2::TokenStream {
     let func_name = format_ident!("{}", region.name);
     quote! {
-        pub fn #func_name(&self) -> &[tir::RegionId] {
-            &self.0.regions()[#index..]
+        pub fn #func_name(&self) -> tir::RegionIds {
+            self.0.regions()[#index..].into()
         }
     }
 }
@@ -1368,9 +1368,15 @@ fn make_generic_printer(
     };
 
     let printed_operands = if state.input {
-        quote! { &self.0.operands()[..self.0.operands().len() - self.state_operand().is_some() as usize] }
+        quote! {
+            {
+                let mut printed = self.0.operands();
+                printed.truncate(printed.len() - self.state_operand().is_some() as usize);
+                printed
+            }
+        }
     } else {
-        quote! { &self.0.operands()[..] }
+        quote! { self.0.operands() }
     };
 
     let operand_printer = if !operands.is_empty() {

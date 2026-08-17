@@ -32,7 +32,7 @@ impl SymbolTable {
         let mut symbols: HashMap<String, Vec<SymbolEntry>> = HashMap::new();
         let instance = context.get_op(module);
         for region in instance.regions() {
-            for block in context.get_region(*region).iter(context.clone()) {
+            for block in context.get_region(region).iter(context.clone()) {
                 for op in block.op_ids() {
                     let op_instance = context.get_op(op);
                     let Some(symbol) = op_instance.as_interface::<dyn Symbol>() else {

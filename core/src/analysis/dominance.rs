@@ -234,7 +234,7 @@ fn build_cfg(context: &Context, root: OpId) -> Cfg {
         // region's entry block.
         for op_id in &op_ids {
             for region_id in context.get_op(*op_id).regions() {
-                if let Some(child) = context.get_region(*region_id).iter(context.clone()).next() {
+                if let Some(child) = context.get_region(region_id).iter(context.clone()).next() {
                     edges.push(child.id());
                 }
             }

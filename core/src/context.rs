@@ -861,7 +861,7 @@ impl Context {
     ) -> ValueId {
         let instance = self.get_op(op);
 
-        for &region in instance.regions() {
+        for region in instance.regions() {
             let entry = self.get_region(region).block_ids()[0];
             let incoming = init.map(|_| {
                 let argument = self.append_block_argument(entry, ty).id();
@@ -914,7 +914,7 @@ impl Context {
 
     /// Move the port just appended to `op`'s results into the place it belongs.
     fn place_result(&self, op: OpId, ty: TypeId) {
-        let Some(index) = self.port_index(self.get_op(op).results(), ty) else {
+        let Some(index) = self.port_index(&self.get_op(op).results(), ty) else {
             return;
         };
         let mut inner = self.0.write();
@@ -931,7 +931,7 @@ impl Context {
         let instance = self.get_op(op);
         let operands = instance.operands();
         let last = operands.len() - 1;
-        let Some(index) = self.port_index(operands, ty) else {
+        let Some(index) = self.port_index(&operands, ty) else {
             return last;
         };
         let mut inner = self.0.write();
@@ -1028,7 +1028,7 @@ impl Context {
             for op in self.get_block(block).op_ids() {
                 ops.push(op);
                 for region in self.get_op(op).regions() {
-                    pending.extend(self.get_region(*region).block_ids());
+                    pending.extend(self.get_region(region).block_ids());
                 }
             }
         }
@@ -1065,17 +1065,17 @@ impl Context {
                 owned.ops.push(op);
                 owned.values.extend(instance.results().iter().copied());
                 for region in instance.regions() {
-                    let Some(handle) = self.find_region(*region) else {
+                    let Some(handle) = self.find_region(region) else {
                         continue;
                     };
                     if handle.parent_op() != Some(op) {
                         continue;
                     }
-                    owned.regions.push(*region);
+                    owned.regions.push(region);
                     let held = handle
                         .block_ids()
                         .into_iter()
-                        .filter(|block| self.parent_region(*block) == Some(*region));
+                        .filter(|block| self.parent_region(*block) == Some(region));
                     blocks.extend(held);
                 }
             }
@@ -1698,7 +1698,10 @@ mod staging_tests {
         staged.append_op(block, scf::ops::r#yield(&context, vec![]).build().id());
         context.replace_region_contents(f.then_region, staged);
 
-        assert_eq!(context.get_op(add.id()).operands(), vec![f.constant; 2]);
+        assert_eq!(
+            context.get_op(add.id()).operands().as_slice(),
+            vec![f.constant; 2]
+        );
         assert_eq!(context.parent_block(add.id()), Some(block));
         assert_eq!(context.parent_region(block), Some(f.then_region));
         assert_eq!(
@@ -1746,7 +1749,7 @@ mod staging_tests {
         context.replace_region_contents(f.then_region, staged);
 
         assert_eq!(
-            context.get_op(user.id()).operands(),
+            context.get_op(user.id()).operands().as_slice(),
             vec![fresh.result(); 2],
             "surviving uses read the staged replacement"
         );
@@ -1838,7 +1841,7 @@ mod port_tests {
 
         let grown = context.get_op(loop_op);
         assert_eq!(
-            grown.results(),
+            grown.results().as_slice(),
             vec![result],
             "the port's value leaves the op"
         );
@@ -1851,7 +1854,10 @@ mod port_tests {
         let carried = body.arguments()[0].id();
         assert_eq!(body.arguments().len(), 1);
         assert_eq!(
-            context.get_op(*body.op_ids().last().unwrap()).operands(),
+            context
+                .get_op(*body.op_ids().last().unwrap())
+                .operands()
+                .as_slice(),
             vec![carried],
             "the region yields what the port carries"
         );
@@ -1897,17 +1903,20 @@ mod port_tests {
         });
 
         let grown = context.get_op(conditional.id());
-        assert_eq!(grown.results(), vec![result]);
+        assert_eq!(grown.results().as_slice(), vec![result]);
         assert_eq!(
-            grown.operands(),
+            grown.operands().as_slice(),
             vec![condition.result()],
             "a conditional carries nothing in"
         );
-        for &arm in grown.regions() {
+        for arm in grown.regions() {
             let block = single_block(&context, arm);
             assert!(block.arguments().is_empty(), "an arm takes no argument");
             assert_eq!(
-                context.get_op(*block.op_ids().last().unwrap()).operands(),
+                context
+                    .get_op(*block.op_ids().last().unwrap())
+                    .operands()
+                    .as_slice(),
                 vec![constant],
                 "every arm yields the port's value"
             );
@@ -2056,7 +2065,10 @@ mod tests {
         assert_eq!(block.arguments()[0].id(), result);
         assert!(context.is_block_argument(result));
         assert_eq!(context.get_value(result).defining_op(), None);
-        assert_eq!(context.get_op(reader.id()).operands(), vec![result; 2]);
+        assert_eq!(
+            context.get_op(reader.id()).operands().as_slice(),
+            vec![result; 2]
+        );
     }
 
     #[test]
@@ -2296,7 +2308,10 @@ mod tests {
 
         context.replace_value_uses(a.id(), b.id());
 
-        assert_eq!(context.get_op(nested.id()).operands(), vec![b.id(); 2]);
+        assert_eq!(
+            context.get_op(nested.id()).operands().as_slice(),
+            vec![b.id(); 2]
+        );
     }
 
     #[test]
@@ -2318,7 +2333,7 @@ mod tests {
         context.replace_value_uses(argument.id(), replacement.id());
 
         assert_eq!(
-            context.get_op(reader.id()).operands(),
+            context.get_op(reader.id()).operands().as_slice(),
             vec![replacement.id(); 2]
         );
     }

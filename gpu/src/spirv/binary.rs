@@ -231,7 +231,7 @@ impl<'a> Writer<'a> {
             for operation in block.iter(self.context.clone()) {
                 for result in operation.results() {
                     let id = self.id();
-                    self.value_ids.insert(*result, id);
+                    self.value_ids.insert(result, id);
                 }
             }
         }
@@ -271,7 +271,7 @@ impl<'a> Writer<'a> {
         out: &mut Vec<u32>,
     ) -> Result<()> {
         if let Some(load) = op.clone().as_op::<LoadOp>() {
-            self.write_result_op(61, load.result(), load.operands(), out)
+            self.write_result_op(61, load.result(), &load.operands(), out)
         } else if let Some(store) = op.clone().as_op::<StoreOp>() {
             instruction(
                 out,
@@ -283,7 +283,7 @@ impl<'a> Writer<'a> {
             );
             Ok(())
         } else if let Some(access) = op.clone().as_op::<AccessChainOp>() {
-            self.write_result_op(65, access.result(), access.operands(), out)
+            self.write_result_op(65, access.result(), &access.operands(), out)
         } else if let Some(barrier) = op.clone().as_op::<ControlBarrierOp>() {
             instruction(
                 out,
@@ -353,7 +353,7 @@ impl<'a> Writer<'a> {
             if op.results().len() != 1 {
                 return Err(format!("unsupported result count for {}", op.name()));
             }
-            self.write_result_op(opcode, op.results()[0], op.operands(), out)
+            self.write_result_op(opcode, op.results()[0], &op.operands(), out)
         } else {
             Err(format!(
                 "unsupported operation {}.{} in SPIR-V function",

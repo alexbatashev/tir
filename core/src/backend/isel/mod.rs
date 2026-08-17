@@ -1385,7 +1385,7 @@ impl InstructionSelectPass {
                 op_block.insert(op_id, block_id);
                 op_position.insert(op_id, position);
                 for result in context.get_op(op_id).results() {
-                    value_to_def.insert(*result, op_id);
+                    value_to_def.insert(result, op_id);
                 }
             }
         }
@@ -1513,7 +1513,7 @@ impl InstructionSelectPass {
             }
             for op_id in context.get_block(block_id).op_ids() {
                 for operand in context.get_op(op_id).operands() {
-                    *operand_uses.entry(*operand).or_insert(0) += 1;
+                    *operand_uses.entry(operand).or_insert(0) += 1;
                 }
             }
         }
@@ -1525,9 +1525,9 @@ impl InstructionSelectPass {
             for op_id in context.get_block(block_id).op_ids() {
                 for operand in context.get_op(op_id).operands() {
                     let Some(def_block) = value_to_def
-                        .get(operand)
+                        .get(&operand)
                         .map(|def| op_block[def])
-                        .or_else(|| arg_block.get(operand).copied())
+                        .or_else(|| arg_block.get(&operand).copied())
                     else {
                         continue;
                     };
@@ -1538,10 +1538,10 @@ impl InstructionSelectPass {
                         continue;
                     };
                     let earlier = region_use
-                        .get(operand)
+                        .get(&operand)
                         .is_none_or(|held| op_position[&carrier] < op_position[held]);
                     if earlier {
-                        region_use.insert(*operand, carrier);
+                        region_use.insert(operand, carrier);
                     }
                 }
             }
@@ -1593,7 +1593,7 @@ impl InstructionSelectPass {
         let mut demand = HashSet::new();
         for (&op_id, &class) in &roots_by_op {
             let def_block = op_block[&op_id];
-            for &result in context.get_op(op_id).results() {
+            for result in context.get_op(op_id).results() {
                 if needs_register(result, class, def_block) {
                     demand.insert((chase(&egraph, class), def_block));
                 }
@@ -1601,7 +1601,7 @@ impl InstructionSelectPass {
         }
         for &(op_id, class) in &constant_candidates {
             let def_block = op_block[&op_id];
-            for &result in context.get_op(op_id).results() {
+            for result in context.get_op(op_id).results() {
                 if needs_register(result, class, def_block) {
                     demand.insert((chase(&egraph, class), def_block));
                 }
@@ -2602,14 +2602,14 @@ fn function_blocks(context: &Context, op: &OperationRef, nested: bool) -> Vec<Bl
                 out.push(block.id());
                 if nested {
                     for op_id in block.op_ids() {
-                        walk(context, context.get_op(op_id).regions(), true, out);
+                        walk(context, &context.get_op(op_id).regions(), true, out);
                     }
                 }
             }
         }
     }
     let mut blocks = Vec::new();
-    walk(context, op.op().regions(), nested, &mut blocks);
+    walk(context, &op.op().regions(), nested, &mut blocks);
     blocks
 }
 

@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use crate::builtin::TokenType;
-use crate::{Block, Context, OpId, OpInstance, RegionId, ValueId, scf};
+use crate::{Block, Context, OpId, OpInstance, RegionId, ValueId, ValueIds, scf};
 
 /// The loop body's token scope: the value its `scf.break`/`scf.continue` name.
 pub fn loop_scope(context: &Context, body: RegionId) -> Option<ValueId> {
@@ -87,7 +87,7 @@ fn scope_exits(context: &Context, block: &Arc<Block>, scope: ValueId) -> Vec<OpI
         if exit_scope(&op) == Some(scope) {
             exits.push(op_id);
         }
-        for &region in op.regions() {
+        for region in op.regions() {
             for nested in context.get_region(region).iter(context.clone()) {
                 exits.extend(scope_exits(context, &nested, scope));
             }
@@ -98,17 +98,18 @@ fn scope_exits(context: &Context, block: &Arc<Block>, scope: ValueId) -> Vec<OpI
 
 /// The values an edge carries into the ports it feeds: an exit's operands past its
 /// scope token, any other terminator's operands.
-pub fn carried_operands(op: &Arc<OpInstance>) -> &[ValueId] {
+pub fn carried_operands(op: &Arc<OpInstance>) -> ValueIds {
+    let operands = op.operands();
     match exit_scope(op) {
-        Some(_) => &op.operands()[1..],
-        None => op.operands(),
+        Some(_) => operands[1..].into(),
+        None => operands,
     }
 }
 
 /// The scopes every exit inside `op`'s regions leaves through.
 pub fn nested_exit_scopes(context: &Context, op: &Arc<OpInstance>) -> Vec<ValueId> {
     let mut scopes = Vec::new();
-    for &region in op.regions() {
+    for region in op.regions() {
         for block in context.get_region(region).iter(context.clone()) {
             for op_id in block.op_ids() {
                 let nested = context.get_op(op_id);
