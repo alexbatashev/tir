@@ -10,7 +10,7 @@
 use crate::operation;
 
 use crate as tir;
-use crate::{Commutative, Context, OpId, SameOperandType, attributes::AttributeValue};
+use crate::{Commutative, Context, OpId, SameOperandAndResultType, attributes::AttributeValue};
 
 /// The attribute consulted by [`fp_math_flags`], valid on blocks and on
 /// region-owning operations. Its value is a string accepted by
@@ -322,13 +322,13 @@ operation! {
         results: R {
             result: "crate::builtin::FloatType",
         },
-        interfaces: [Commutative, SameOperandType],
+        interfaces: [Commutative, SameOperandAndResultType],
         sem: "(set result (fadd lhs rhs))",
     }
 }
 
 impl Commutative for AddFOp {}
-impl SameOperandType for AddFOp {}
+impl SameOperandAndResultType for AddFOp {}
 
 operation! {
     SubFOp {
@@ -341,12 +341,12 @@ operation! {
         results: R {
             result: "crate::builtin::FloatType",
         },
-        interfaces: [SameOperandType],
+        interfaces: [SameOperandAndResultType],
         sem: "(set result (fsub lhs rhs))",
     }
 }
 
-impl SameOperandType for SubFOp {}
+impl SameOperandAndResultType for SubFOp {}
 
 operation! {
     MulFOp {
@@ -359,13 +359,13 @@ operation! {
         results: R {
             result: "crate::builtin::FloatType",
         },
-        interfaces: [Commutative, SameOperandType],
+        interfaces: [Commutative, SameOperandAndResultType],
         sem: "(set result (fmul lhs rhs))",
     }
 }
 
 impl Commutative for MulFOp {}
-impl SameOperandType for MulFOp {}
+impl SameOperandAndResultType for MulFOp {}
 
 operation! {
     DivFOp {
@@ -378,12 +378,12 @@ operation! {
         results: R {
             result: "crate::builtin::FloatType",
         },
-        interfaces: [SameOperandType],
+        interfaces: [SameOperandAndResultType],
         sem: "(set result (fdiv lhs rhs))",
     }
 }
 
-impl SameOperandType for DivFOp {}
+impl SameOperandAndResultType for DivFOp {}
 
 #[cfg(test)]
 mod tests {
@@ -391,6 +391,7 @@ mod tests {
     use crate::{
         Operation,
         builtin::{FloatType, UnitType, ops},
+        func::ops as func_ops,
         parse::ir::parse_ir,
         sem::Value,
     };
@@ -516,7 +517,7 @@ mod tests {
     fn fp_math_flags_inherited_from_region_owner() {
         let context = Context::with_default_dialects();
         let f32_ty = FloatType::f32(&context);
-        let func = ops::func(&context, "fma_candidate", UnitType::new(&context), None)
+        let func = func_ops::func(&context, "fma_candidate", UnitType::new(&context), None)
             .attr(FPMATH_ATTR, AttributeValue::Str("contract".into()))
             .build();
         let a = context.create_value(f32_ty, None);
@@ -537,7 +538,7 @@ mod tests {
     fn fp_math_flags_block_overrides_owner() {
         let context = Context::with_default_dialects();
         let f32_ty = FloatType::f32(&context);
-        let func = ops::func(&context, "scoped", UnitType::new(&context), None)
+        let func = func_ops::func(&context, "scoped", UnitType::new(&context), None)
             .attr(FPMATH_ATTR, AttributeValue::Str("fast".into()))
             .build();
         let a = context.create_value(f32_ty, None);
@@ -574,10 +575,10 @@ mod tests {
     fn fpmath_block_attribute_roundtrip() {
         let context = Context::with_default_dialects();
         let src = r#"module {
-func @scoped(%0: !f32) -> !f32 {
+func.func @scoped(%0: !f32) -> !f32 {
 ^bb0 {fpmath = "contract"}:
 %1 = addf %0, %0 : !f32
-return %1
+func.return %1
 }
 module_end
 }"#;

@@ -22,7 +22,7 @@ fn covers_default_dialects() {
 
     let dialects: std::collections::HashSet<&str> =
         ops.iter().map(|o| o["dialect"].as_str().unwrap()).collect();
-    for d in ["builtin", "ptr", "scf", "vector"] {
+    for d in ["builtin", "cfg", "func", "state", "ptr", "scf", "vector"] {
         assert!(dialects.contains(d), "schema missing dialect `{d}`");
     }
 }
@@ -50,5 +50,5 @@ fn describes_addi_faithfully() {
         .map(|v| v.as_str().unwrap())
         .collect();
     assert!(interfaces.contains(&"Commutative"));
-    assert!(interfaces.contains(&"SameOperandType"));
+    assert!(interfaces.contains(&"SameOperandAndResultType"));
 }

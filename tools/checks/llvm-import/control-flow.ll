@@ -1,12 +1,12 @@
 ; RUN: tir llvm-import %s | filecheck %s
 
-; CHECK: func @choose
+; CHECK: func.func @choose
 ; CHECK: alloca
-; CHECK: cond_br
+; CHECK: cfg.cond_br
 ; CHECK: store
-; CHECK: br ^
+; CHECK: cfg.br ^
 ; CHECK: load
-; CHECK: return
+; CHECK: func.return
 
 define i32 @choose(i1 %c, i32 %x, i32 %y) {
 entry:

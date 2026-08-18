@@ -4,26 +4,26 @@
 // dispatch on it after the loop picks the continuation up again.
 
 module {
-  func @brk(%0: !i1, %1: !i32) -> !i32 {
-    br ^bb1(%1 : !i32)
+  func.func @brk(%0: !i1, %1: !i32) -> !i32 {
+    cfg.br ^bb1(%1 : !i32)
   ^bb1(%2: !i32):
-    cond_br %0, ^bb2, ^bb4
+    cfg.cond_br %0, ^bb2, ^bb4
   ^bb2:
     %3 = addi %2, %2 : !i32
-    cond_br %0, ^bb3, ^bb5
+    cfg.cond_br %0, ^bb3, ^bb5
   ^bb3:
-    br ^bb1(%3 : !i32)
+    cfg.br ^bb1(%3 : !i32)
   ^bb4:
-    return %2
+    func.return %2
   ^bb5:
-    return %3
+    func.return %3
   }
   module_end
 }
 
-// CHECK-LABEL: func @brk
+// CHECK-LABEL: func.func @brk
 // CHECK-NOT: br
 // CHECK: scf.while iter_args
 // CHECK: scf.condition
 // CHECK: scf.switch %{{[0-9]+}} -> !i32 case 0 {
-// CHECK: return
+// CHECK: func.return

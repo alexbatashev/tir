@@ -1,12 +1,12 @@
 // RUN: fcc compile --stage ir -o - %S/../Inputs/codegen_switch.c | filecheck %s
 
-// CHECK: func @classify
+// CHECK: func.func @classify
 // CHECK: cmpi {{.*}} {predicate = "eq"}
+// CHECK: scf.if
 // CHECK: cmpi {{.*}} {predicate = "eq"}
+// CHECK: scf.if
 // CHECK: cmpi {{.*}} {predicate = "eq"}
-// CHECK: cir.if
-// CHECK: ptr.store
-// CHECK: cir.if
+// CHECK: scf.switch
 // CHECK: addi
 // CHECK: ptr.store
-// CHECK: return
+// CHECK: func.return

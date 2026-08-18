@@ -74,18 +74,33 @@ pub(super) fn lower_to_ir(
         d.eprint();
         std::process::exit(1);
     });
+    lower_cir_structs(context, &module);
     restructure(context, &module);
     describe_target(context, &module, machine.as_ref())
 }
 
-/// Raise the functions codegen emitted as a flat graph of blocks — the ones
-/// holding a `goto` — back to structured control flow. A function emitted
-/// structurally is one block, which the pass leaves alone.
+/// Replace the frontend's struct operations with pointer arithmetic, so no
+/// `cir` operation survives in a function body: restructuring accepts CFG form
+/// only, and `cir` is not part of it.
+fn lower_cir_structs(context: &tir::Context, module: &tir::builtin::ModuleOp) {
+    use tir::Operation;
+
+    let mut pm = tir::PassManager::new();
+    pm.add_pass(crate::passes::LowerCirStructsPass::new());
+    pm.run(context, context.get_op(module.id()))
+        .unwrap_or_else(|e| {
+            eprintln!("fcc: error: struct lowering failed: {e}");
+            std::process::exit(1);
+        });
+}
+
+/// Raise the flat graph of blocks codegen emits back to structured control
+/// flow. A function whose body is one block is left alone.
 fn restructure(context: &tir::Context, module: &tir::builtin::ModuleOp) {
     use tir::Operation;
 
     let mut pm = tir::PassManager::new();
-    pm.nest::<tir::builtin::FuncOp>()
+    pm.nest::<tir::func::FuncOp>()
         .add_pass(tir::passes::RestructurePass::new());
     pm.run(context, context.get_op(module.id()))
         .unwrap_or_else(|e| {
@@ -174,9 +189,7 @@ pub(super) fn emit_machine_code(
     );
 
     let mut pm = tir::PassManager::new();
-    pm.add_pass(crate::passes::LowerCirStructsPass::new());
-    let function_pipeline = pm.nest::<tir::builtin::FuncOp>();
-    function_pipeline.add_pass(crate::passes::LowerCirControlFlowPass::new());
+    let function_pipeline = pm.nest::<tir::func::FuncOp>();
     function_pipeline.add_pass(tir::passes::ThreadStatePass::new());
     function_pipeline.add_pass(tir::passes::InstCombinePass::new());
     // Memory state describes the structured mid-end only; codegen takes the
