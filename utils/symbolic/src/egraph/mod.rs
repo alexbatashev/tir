@@ -71,6 +71,11 @@ pub struct EGraph<L: ENode> {
     /// these so a popped scope leaves the base structurally identical. One frame per
     /// context; nested pops revert only the innermost.
     scope_created: Vec<Vec<ScopeCreated>>,
+    /// Scoped facts: canonical class -> the constant it is assumed to evaluate to.
+    /// `scope_assumed` logs, per open context, each key it wrote with the entry it
+    /// overwrote, so `pop_context` restores exactly the enclosing table.
+    assumed: FxHashMap<Id, L>,
+    scope_assumed: Vec<Vec<(Id, Option<L>)>>,
 }
 
 /// Aggregated read view of the innermost scope, as of the last refresh. Only merged
@@ -138,6 +143,8 @@ impl<L: ENode> EGraph<L> {
             view: ScopeView::default(),
             scope_memo: Vec::new(),
             scope_created: Vec::new(),
+            assumed: FxHashMap::default(),
+            scope_assumed: Vec::new(),
         }
     }
 
@@ -173,6 +180,7 @@ impl<L: ENode> EGraph<L> {
         self.unionfind.push_context();
         self.scope_memo.push(Memo::default());
         self.scope_created.push(Vec::new());
+        self.scope_assumed.push(Vec::new());
         self.scope_members.push(frame);
         self.refresh_view();
     }
@@ -182,6 +190,12 @@ impl<L: ENode> EGraph<L> {
     pub fn pop_context(&mut self) {
         if let Some(created) = self.scope_created.pop() {
             self.undo_created(created);
+        }
+        for (key, previous) in self.scope_assumed.pop().into_iter().flatten().rev() {
+            match previous {
+                Some(node) => self.assumed.insert(key, node),
+                None => self.assumed.remove(&key),
+            };
         }
         self.unionfind.pop_context();
         self.scope_memo.pop();
@@ -310,6 +324,7 @@ impl<L: ENode> EGraph<L> {
             .iter()
             .flatten()
             .map(|created| self.find(created.id))
+            .chain(self.assumed.keys().map(|&class| self.find(class)))
             .chain(
                 self.scope_members
                     .last()
@@ -341,6 +356,22 @@ impl<L: ENode> EGraph<L> {
         }
         dirty.sort_unstable();
         dirty
+    }
+
+    /// Assume, inside the current scope, that `class` evaluates to constant `node`.
+    /// A fact, not a merge: the class keeps its own identity and parents, so only
+    /// its users see a change. Panics with no scope open — an unscoped assumption
+    /// would never be popped.
+    pub fn assume_const(&mut self, class: Id, node: L) {
+        let frame = self.scope_assumed.last_mut().expect("open scope");
+        let root = Id::from_raw(self.unionfind.find(class.0));
+        let previous = self.assumed.insert(root, node);
+        frame.push((root, previous));
+    }
+
+    /// The constant `class` is assumed to evaluate to in the open scopes, if any.
+    pub fn assumed_const(&self, class: Id) -> Option<&L> {
+        self.assumed.get(&self.find(class))
     }
 
     /// Intern `node`, returning its e-class. A non-unique node equal to an existing
@@ -375,6 +406,7 @@ impl<L: ENode> EGraph<L> {
         }
         let survivor = Id::from_raw(self.unionfind.union(ra.0, rb.0));
         let absorbed = if survivor == ra { rb } else { ra };
+        self.rekey_assumption(absorbed, survivor);
         if let Some(frame) = self.scope_members.last_mut() {
             // Scope overlay only; base classes stay intact for `pop_context`.
             let taken = frame.remove(&absorbed).unwrap_or_else(|| vec![absorbed]);
@@ -390,6 +422,22 @@ impl<L: ENode> EGraph<L> {
         }
         self.pending.push(survivor);
         survivor
+    }
+
+    /// Move a fact keyed on a just-absorbed class under the survivor, logged as
+    /// writes of the current scope so its pop puts both keys back. The survivor's
+    /// own fact wins when both carry one.
+    fn rekey_assumption(&mut self, absorbed: Id, survivor: Id) {
+        let Some(node) = self.assumed.remove(&absorbed) else {
+            return;
+        };
+        let frame = self.scope_assumed.last_mut().expect("open scope");
+        frame.push((absorbed, Some(node.clone())));
+        if self.assumed.contains_key(&survivor) {
+            return;
+        }
+        self.assumed.insert(survivor, node);
+        frame.push((survivor, None));
     }
 
     /// Saturate in place with `rules`. Each iteration searches all rules against one
