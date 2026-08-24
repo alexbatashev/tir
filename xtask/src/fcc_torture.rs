@@ -53,10 +53,14 @@ pub fn run(sh: &Shell, root: &Path, bless: bool, fcc: Option<&Path>) -> anyhow::
 }
 
 /// Fetches the pinned torture checkout and returns the execute cases fcc is
-/// expected to run correctly, which the differential fuzzer uses as a corpus.
+/// expected to compile and run correctly, which the differential fuzzer and
+/// the compile-time bench use as a corpus.
 pub fn execute_corpus(sh: &Shell, root: &Path) -> anyhow::Result<Vec<PathBuf>> {
     let corpus = fetch_corpus(sh, root)?;
-    let known_failures = parse_allowlist(&fs::read_to_string(root.join(EXECUTE_ALLOWLIST_PATH))?)?;
+    let mut known_failures = parse_allowlist(&fs::read_to_string(root.join(ALLOWLIST_PATH))?)?;
+    known_failures.extend(parse_allowlist(&fs::read_to_string(
+        root.join(EXECUTE_ALLOWLIST_PATH),
+    )?)?);
     let mut files = Vec::new();
     collect_c_files(&corpus.join("execute"), &mut files)?;
     files.retain(|file| !known_failures.contains(&relative_path(&corpus, file)));

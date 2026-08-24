@@ -94,6 +94,54 @@ jobs:
           target/ci/xtask fcc-fuzz --fcc "$PWD/target/ci/fcc" \
             --seed "$SEED" --iterations 500
 
+  # Compile-time tracking for fcc: the sum over the passing torture execute
+  # cases plus coremark, against last night's numbers restored from the cache.
+  # The bench needs a release compiler, not the `ci` profile the other jobs
+  # ship, so it builds its own.
+  fcc-bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_MANIFEST_DIR: ${{ github.workspace }}/xtask
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: rui314/setup-mold@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: bench
+      - uses: actions/cache@v6
+        with:
+          path: target/test-suites
+          key: fcc-bench-corpus-9aab80ddc5b2fa0eef80008e718067ab45f42c50-1f483d5b8316753a742cbf5590caf5bd0a4e4777
+      # Cache keys are immutable, so every run saves under its own id and the
+      # next run restores the newest one as its baseline.
+      - uses: actions/cache/restore@v6
+        with:
+          path: fcc-bench-baseline.json
+          key: fcc-bench-results-${{ github.run_id }}
+          restore-keys: fcc-bench-results-
+      - run: cargo build --locked --release -p fcc --bin fcc
+      - run: |
+          if [ -f fcc-bench-baseline.json ]; then
+            baseline="--baseline fcc-bench-baseline.json"
+          fi
+          cargo run --locked -p xtask -- fcc-bench --fcc "$PWD/target/release/fcc" \
+            --output fcc-bench.json $baseline
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: fcc-bench
+          path: fcc-bench.json
+      # Only a green run becomes the next baseline, so the threshold ratchets
+      # instead of following a regression.
+      - run: mv fcc-bench.json fcc-bench-baseline.json
+      - uses: actions/cache/save@v6
+        with:
+          path: fcc-bench-baseline.json
+          key: fcc-bench-results-${{ github.run_id }}
+
   libfuzzer:
     runs-on: ubuntu-latest
     strategy:
@@ -123,7 +171,7 @@ jobs:
   # green again, so a persistent failure never piles up duplicates.
   report:
     if: always()
-    needs: [build-and-package, lints, corpus, differential-fuzz, libfuzzer]
+    needs: [build-and-package, lints, corpus, differential-fuzz, fcc-bench, libfuzzer]
     runs-on: ubuntu-latest
     permissions:
       contents: read

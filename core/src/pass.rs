@@ -648,6 +648,7 @@ impl PassManager {
         match entry {
             PassNode::Pass(pass) => {
                 let scope = crate::memstats::pass_scope(pass.name());
+                let started = timing::enabled().then(std::time::Instant::now);
                 rewriter.set_results_claimed(pass.emits_machine_ir());
                 let version_before = context.op_version(root.op.id);
                 PassManager::walk_ops(context, root, &mut |op_ref| {
@@ -672,6 +673,9 @@ impl PassManager {
                             error,
                         }
                     })?;
+                }
+                if let Some(started) = started {
+                    timing::record(pass.name(), started.elapsed());
                 }
                 if let Some(scope) = scope {
                     scope.finish(context.slab_census());
@@ -733,5 +737,57 @@ impl PassManager {
 impl Default for PassManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Print wall time per pass as `tir-time:` lines on stderr, slowest first, when
+/// `TIR_TIME_PASSES` is set. Totals accumulate over every pipeline run in the
+/// process, so call this once at the end; `wall` is the whole run, so the gap
+/// to the pass total is the time spent outside passes (frontend, emission).
+pub fn report_pass_timing(wall: std::time::Duration) {
+    timing::summary(wall);
+}
+
+mod timing {
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Duration;
+
+    static TOTALS: Mutex<Vec<(&'static str, Duration, usize)>> = Mutex::new(Vec::new());
+
+    pub fn enabled() -> bool {
+        static FROM_ENV: OnceLock<bool> = OnceLock::new();
+        *FROM_ENV
+            .get_or_init(|| std::env::var_os("TIR_TIME_PASSES").is_some_and(|value| value != "0"))
+    }
+
+    pub fn record(name: &'static str, elapsed: Duration) {
+        let mut totals = TOTALS.lock().unwrap();
+        match totals.iter_mut().find(|(pass, ..)| *pass == name) {
+            Some((_, total, runs)) => {
+                *total += elapsed;
+                *runs += 1;
+            }
+            None => totals.push((name, elapsed, 1)),
+        }
+    }
+
+    pub fn summary(wall: Duration) {
+        if !enabled() {
+            return;
+        }
+        let mut totals = TOTALS.lock().unwrap().clone();
+        totals.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+        let total: Duration = totals.iter().map(|(_, elapsed, _)| *elapsed).sum();
+        eprintln!(
+            "tir-time: summary wall_ms={:.3} passes_ms={:.3}",
+            wall.as_secs_f64() * 1e3,
+            total.as_secs_f64() * 1e3
+        );
+        for (name, elapsed, runs) in totals {
+            eprintln!(
+                "tir-time: pass name={name} total_ms={:.3} runs={runs}",
+                elapsed.as_secs_f64() * 1e3
+            );
+        }
     }
 }

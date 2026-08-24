@@ -17,6 +17,7 @@ pub fn execute(actions: &[Action], opts: &DriverOptions) -> Result<(), DriverErr
         dry_run(actions, opts);
         return Ok(());
     }
+    let started = std::time::Instant::now();
     // Temp objects for compile-to-link live here until every link completes.
     let mut temp_dir: Option<TempDir> = None;
     let mut sink: Option<Box<dyn Write>> = None;
@@ -66,6 +67,7 @@ pub fn execute(actions: &[Action], opts: &DriverOptions) -> Result<(), DriverErr
             }
         }
     }
+    tir::report_pass_timing(started.elapsed());
     Ok(())
 }
 

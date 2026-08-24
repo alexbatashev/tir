@@ -65,7 +65,7 @@ pub use operation::{
 };
 pub use pass::{
     OperationRef, PASSES, Pass, PassError, PassInfo, PassManager, PassTarget, Rewriter, build_pass,
-    parse_pipeline, registered_passes,
+    parse_pipeline, registered_passes, report_pass_timing,
 };
 pub use print::print_ir;
 pub use region::{Region, RegionHandle, RegionId};
