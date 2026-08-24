@@ -10,6 +10,7 @@ open_issues=$(gh issue list --state open --limit 200 --json number,title)
 reproduce() {
   case "$1" in
     corpus) echo 'cargo xtask fcc-fuzz --corpus' ;;
+    fcc-bench) echo 'cargo xtask fcc-bench' ;;
     differential-fuzz) echo "cargo xtask fcc-fuzz --seed $SEED --iterations 500" ;;
     libfuzzer) echo 'cargo +nightly fuzz run --fuzz-dir utils/fuzz <target>' ;;
     lints) echo 'cargo clippy --workspace --all-targets --no-deps -- -D warnings' ;;

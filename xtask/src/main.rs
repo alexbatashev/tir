@@ -1,3 +1,4 @@
+mod fcc_bench;
 mod fcc_corpus;
 mod fcc_fuzz;
 mod fcc_torture;
@@ -31,6 +32,10 @@ fn main() -> anyhow::Result<()> {
         Some("fcc-torture") => {
             let options = fcc_torture_options(env::args().skip(2))?;
             fcc_torture::run(&sh, &project_root(), options.bless, options.fcc.as_deref())?;
+        }
+        Some("fcc-bench") => {
+            let options = fcc_bench_options(env::args().skip(2))?;
+            fcc_bench::run(&sh, &project_root(), options)?;
         }
         Some("fcc-corpus") => {
             fcc_corpus::run(&sh, &project_root(), fcc_corpus_mode(env::args().skip(2))?)?;
@@ -73,6 +78,25 @@ fn fcc_torture_options(mut args: impl Iterator<Item = String>) -> anyhow::Result
 fn take_value(args: &mut impl Iterator<Item = String>, flag: &str) -> anyhow::Result<String> {
     args.next()
         .ok_or_else(|| anyhow::anyhow!("{flag} needs a value"))
+}
+
+fn fcc_bench_options(mut args: impl Iterator<Item = String>) -> anyhow::Result<fcc_bench::Options> {
+    let mut options = fcc_bench::Options {
+        fcc: None,
+        output: None,
+        baseline: None,
+    };
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--fcc" => options.fcc = Some(PathBuf::from(take_value(&mut args, "--fcc")?)),
+            "--output" => options.output = Some(PathBuf::from(take_value(&mut args, "--output")?)),
+            "--baseline" => {
+                options.baseline = Some(PathBuf::from(take_value(&mut args, "--baseline")?))
+            }
+            other => anyhow::bail!("unknown fcc-bench flag: {other}"),
+        }
+    }
+    Ok(options)
 }
 
 fn fcc_corpus_mode(mut args: impl Iterator<Item = String>) -> anyhow::Result<fcc_corpus::Mode> {
@@ -349,6 +373,10 @@ isa-test-suite   run differential ISA tests against a golden oracle (riscv/Spike
 fcc-torture [--bless] [--fcc <path>]
                  compile the pinned GCC C torture corpus through codegen and
                  compare the failures against the recorded baseline
+fcc-bench [--fcc <path>] [--output <file.json>] [--baseline <file.json>]
+                 time fcc and gcc -O0 on the passing torture execute cases and
+                 coremark; print the sum, median ratio and slowest cases, and
+                 fail on a >10 % sum regression against the baseline
 fcc-corpus [--baseline <dir> | --diff <dir> | --determinism]
                  compile the fcc .c corpus to x86_64 asm and capture, diff or
                  double-compile it
