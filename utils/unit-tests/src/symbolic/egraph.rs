@@ -528,3 +528,96 @@ fn scope_dirty_closes_upward_over_parents() {
     assert_eq!(g.scope_dirty(), expected);
     g.pop_context();
 }
+
+#[test]
+fn assume_const_is_read_under_the_scope_and_gone_after_pop() {
+    let mut g = EGraph::new();
+    let a = sym(&mut g, 0);
+    g.rebuild();
+
+    assert!(g.assumed_const(a).is_none());
+    g.push_context();
+    g.assume_const(a, Math::Num(1));
+    assert!(matches!(g.assumed_const(a), Some(Math::Num(1))));
+    g.pop_context();
+    assert!(g.assumed_const(a).is_none());
+}
+
+#[test]
+fn nested_assumption_shadows_and_restores_the_outer_one() {
+    let mut g = EGraph::new();
+    let a = sym(&mut g, 0);
+    g.rebuild();
+
+    g.push_context();
+    g.assume_const(a, Math::Num(1));
+    g.push_context();
+    g.assume_const(a, Math::Num(0));
+    assert!(matches!(g.assumed_const(a), Some(Math::Num(0))));
+    g.pop_context();
+    assert!(matches!(g.assumed_const(a), Some(Math::Num(1))));
+    g.pop_context();
+    assert!(g.assumed_const(a).is_none());
+}
+
+#[test]
+fn assumption_follows_the_class_through_a_scoped_union() {
+    let mut g = EGraph::new();
+    let a = sym(&mut g, 0);
+    let b = sym(&mut g, 1);
+    g.rebuild();
+
+    g.push_context();
+    g.assume_const(a, Math::Num(1));
+    g.union(a, b);
+    g.rebuild();
+    assert!(matches!(g.assumed_const(b), Some(Math::Num(1))));
+    g.pop_context();
+    assert!(g.assumed_const(a).is_none());
+    assert!(g.assumed_const(b).is_none());
+}
+
+#[test]
+fn inner_union_rekeys_an_outer_assumption_and_pop_restores_it() {
+    let mut g = EGraph::new();
+    let a = sym(&mut g, 0);
+    let b = sym(&mut g, 1);
+    g.rebuild();
+
+    g.push_context();
+    g.assume_const(a, Math::Num(1));
+    g.push_context();
+    g.union(a, b);
+    g.rebuild();
+    assert!(matches!(g.assumed_const(b), Some(Math::Num(1))));
+    g.pop_context();
+    assert!(matches!(g.assumed_const(a), Some(Math::Num(1))));
+    assert!(g.assumed_const(b).is_none());
+    g.pop_context();
+}
+
+#[test]
+fn scope_dirty_holds_an_assumed_class_and_its_parents() {
+    let mut g = EGraph::new();
+    let a = sym(&mut g, 0);
+    let b = sym(&mut g, 1);
+    let sum = add(&mut g, a, b);
+    sym(&mut g, 2);
+    g.rebuild();
+
+    g.push_context();
+    g.assume_const(a, Math::Num(0));
+    let mut expected = vec![g.find(a), g.find(sum)];
+    expected.sort();
+    assert_eq!(g.scope_dirty(), expected);
+    g.pop_context();
+    assert!(g.scope_dirty().is_empty());
+}
+
+#[test]
+#[should_panic(expected = "open scope")]
+fn assume_const_without_a_scope_panics() {
+    let mut g = EGraph::new();
+    let a = sym(&mut g, 0);
+    g.assume_const(a, Math::Num(1));
+}

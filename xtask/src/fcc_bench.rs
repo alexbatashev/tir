@@ -63,6 +63,9 @@ pub fn run(sh: &Shell, root: &Path, options: Options) -> anyhow::Result<()> {
             root.join("target/release/fcc")
         }
     };
+    // Coremark units compile from their checkout, so a relative path must not
+    // be resolved against that directory.
+    let fcc = fcc.canonicalize()?;
     let mut cases = execute_corpus(sh, root)?
         .into_iter()
         .map(|file| Case {

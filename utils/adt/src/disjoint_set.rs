@@ -148,9 +148,17 @@ impl DisjointSet {
 /// layers unions that [`Self::pop_context`] discards; with none open it is a plain
 /// [`DisjointSet`]. [`Self::find`] must go bottom-up (base, then each layer) — a
 /// top-down find misses a layer redirect for an element with no entry in that layer.
+///
+/// `hint` caches each element's last answer, stamped with the `epoch` the
+/// partition was in; a union or pop bumps the epoch, so a cache hit skips the
+/// per-layer walk without any undo log. Path compression across layers would
+/// need one — a pop must be able to forget it — and a trail per find is the
+/// memory wall this avoids: a cache is dropped, never unwound.
 pub struct ScopedDisjointSet {
     base: DisjointSetImpl,
     layers: Vec<DisjointSetImpl>,
+    hint: UnsafeCell<Vec<(u32, u32)>>,
+    epoch: u32,
 }
 
 impl Default for ScopedDisjointSet {
@@ -164,6 +172,8 @@ impl ScopedDisjointSet {
         Self {
             base: DisjointSetImpl::with_size(size),
             layers: Vec::new(),
+            hint: UnsafeCell::new(vec![(0, u32::MAX); size]),
+            epoch: 0,
         }
     }
 
@@ -186,6 +196,7 @@ impl ScopedDisjointSet {
         for layer in &mut self.layers {
             layer.push();
         }
+        self.hint.get_mut().push((0, u32::MAX));
         id
     }
 
@@ -198,14 +209,20 @@ impl ScopedDisjointSet {
     /// Leave the current assumption scope, discarding its unions.
     pub fn pop_context(&mut self) {
         self.layers.pop();
+        self.epoch += 1;
     }
 
     /// Canonicalize `x` bottom-up: through the base, then each open layer in order.
     pub fn find(&self, x: u32) -> u32 {
+        let hint = unsafe { &mut *self.hint.get() };
+        if hint[x as usize].1 == self.epoch {
+            return hint[x as usize].0;
+        }
         let mut root = self.base.find_root(x);
         for layer in &self.layers {
             root = layer.find_root(root);
         }
+        hint[x as usize] = (root, self.epoch);
         root
     }
 
@@ -216,6 +233,7 @@ impl ScopedDisjointSet {
         if rx == ry {
             return rx;
         }
+        self.epoch += 1;
         match self.layers.last_mut() {
             Some(top) => top.union(rx, ry).1,
             None => self.base.union(rx, ry).1,
@@ -498,5 +516,49 @@ mod tests {
         assert!(uf.connected(0, c));
         uf.pop_context();
         assert!(!uf.connected(0, c));
+    }
+
+    #[test]
+    fn scoped_find_after_a_later_union_reports_the_new_root() {
+        let mut uf = ScopedDisjointSet::new(4);
+        uf.push_context();
+        uf.union(0, 1);
+        let first = uf.find(0);
+        uf.union(first, 2);
+        assert_eq!(uf.find(0), uf.find(2));
+        assert_eq!(uf.find(1), uf.find(2));
+        uf.pop_context();
+    }
+
+    #[test]
+    fn scoped_find_after_pop_forgets_the_popped_root() {
+        let mut uf = ScopedDisjointSet::new(4);
+        uf.union(0, 1);
+        let base = uf.find(0);
+        uf.push_context();
+        uf.union(0, 2);
+        assert_eq!(uf.find(0), uf.find(2));
+        uf.pop_context();
+        assert_eq!(uf.find(0), base);
+        assert_ne!(uf.find(0), uf.find(2));
+    }
+
+    #[test]
+    fn scoped_find_tracks_a_nested_union_and_its_pop() {
+        let mut uf = ScopedDisjointSet::new(4);
+        uf.push_context();
+        uf.union(0, 1);
+        let outer = uf.find(0);
+        uf.push_context();
+        uf.union(0, 3);
+        assert_eq!(uf.find(1), uf.find(3));
+        uf.pop_context();
+        assert_eq!(uf.find(1), outer);
+        assert_ne!(uf.find(1), uf.find(3));
+        uf.push_context();
+        assert_eq!(uf.find(1), outer);
+        uf.pop_context();
+        uf.pop_context();
+        assert_ne!(uf.find(0), uf.find(1));
     }
 }

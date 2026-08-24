@@ -43,7 +43,7 @@ impl CaptureBindings {
         class_values: &HashMap<Id, Vec<ValueId>>,
     ) -> RuleMatch {
         // A class can carry both a proven constant and a register value (an
-        // assumption merges a condition with its truth value); record both so
+        // assumption proves a condition equal to its truth value); record both so
         // immediate-folding and register-reading emitters each find theirs.
         let mut int_bindings = Vec::new();
         let mut value_bindings = Vec::new();
