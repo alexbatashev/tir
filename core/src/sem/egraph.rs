@@ -19,12 +19,17 @@ use tir_adt::APInt;
 /// values a region or a function computes.
 pub type SemEGraph = EGraph<SemNode>;
 
-/// The constant a class is proven to hold, if any member is an integer literal.
+/// The constant a class is proven to hold: an integer literal member, or the
+/// value the open assumption scope proves it evaluates to.
 pub(crate) fn class_int_binding(egraph: &SemEGraph, class: Id) -> Option<APInt> {
-    egraph.nodes(class).iter().find_map(|n| match &n.payload {
+    let int = |n: &SemNode| match &n.payload {
         Some(SemPayload::Expr(SymPayload::Int(v))) => Some(v.clone()),
         _ => None,
-    })
+    };
+    egraph
+        .assumed_const(class)
+        .and_then(int)
+        .or_else(|| egraph.nodes(class).iter().find_map(int))
 }
 
 /// An unsigned literal at its minimal width. Widths identify a constant class,

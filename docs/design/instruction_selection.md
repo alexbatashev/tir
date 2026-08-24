@@ -800,7 +800,7 @@ then looks up its own hits and `best_guard_branch` picks the cheapest match root
 at its condition class whose operands all resolve at B (tie → most specific):
 
 - **Decided**: the condition class already holds a constant — the block's
-  assumption scope merged a re-tested condition with its truth (a nested gate's
+  assumption scope proved a re-tested condition equal to its truth (a nested gate's
   test under an enclosing region's entry fact), or the test was written constant.
   No branch rule is consulted and nothing joins `mm_overlay`, so the condition is
   not materialized; destruction emits the single edge the decision picks
@@ -1002,16 +1002,27 @@ asserted in an **assumption scope** (`push_context`) private to its solve. The
 scope may hold **several** facts (one per enclosing region); `assert_fact` applies
 each, reading the condition's `prepared` `ConditionExpr`:
 
-- the condition class ≡ its known truth value (0/1),
-- the defining comparison ≡ the same truth, its *complement* comparison
-  (`!(a<b)` is `a>=b`) ≡ the opposite,
-- an `eq`-true / `ne`-false fact additionally asserts `lhs ≡ rhs`, so scope
-  congruence merges everything computed from equal operands.
+- the condition class is *assumed* to evaluate to its known truth value (0/1)
+  (`EGraph::assume_const`),
+- the defining comparison is assumed the same truth, its *complement* comparison
+  (`!(a<b)` is `a>=b`) the opposite,
+- an `eq`-true / `ne`-false fact additionally asserts `lhs ≡ rhs` (a union), so
+  scope congruence merges everything computed from equal operands.
+
+A truth fact is a scoped side entry on the condition's own class, not a union
+with the literal's class. The alternative — merging every proven condition into
+the one hash-consed `1@1` class — made all of them equal to each other and to
+every literal `1` in the function, so a block's scope dirtied most of the
+function and a compare-shaped pattern matched the constant class once per
+enclosing scope. As a fact, the class keeps its identity and parents: readers
+that ask for a class's constant (`class_int_binding`, the matcher's integer
+leaves) see the fact exactly as they saw the merged literal, and `scope_dirty`
+holds only the condition, its users, and what the `lhs ≡ rhs` merge touched.
 
 After asserting, the block `rebuild`s and **saturates inside the scope**, so the
 rewrites propagate the facts. Consequences then fall out of the ordinary
 machinery: a re-computed identical (or complement, or operand-swapped-under-`eq`)
-compare's class now holds a constant, so the compare op is erased with no tile and
+compare's class now reads as a constant, so the compare op is erased with no tile and
 its test is *decided* (above) rather than branched on; a value consumer folds the
 known immediate
 (`RuleMatch` records *both* the int and register binding when a class carries
@@ -1051,7 +1062,7 @@ class (chasing low-bit truncations to the class that owns the register):
      block was asked to place it (`placed_at`), or that selection never touched at
      all — closest dominator first, via `dom_distance`.
 
-A class may resolve to both (an assumption merged it with its truth constant). A
+A class may resolve to both (an assumption proves it equal to its truth constant). A
 class with candidate values but none legal is *unresolvable*, and the cover treats
 it as unavailable: the block tiles it itself.
 

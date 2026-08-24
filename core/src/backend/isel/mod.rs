@@ -68,11 +68,13 @@ struct FunctionMatches {
 
 impl FunctionMatches {
     /// The patterns worth searching at `class`: those rooted on an operator it
-    /// holds, plus the root-agnostic ones. Ascending index, so a class's matches
-    /// come out in the same pattern order the base search recorded them in.
+    /// holds (or on the constant its scope assumes it to be), plus the
+    /// root-agnostic ones. Ascending index, so a class's matches come out in the
+    /// same pattern order the base search recorded them in.
     fn patterns_rooting_at(&self, fs: &FunctionSelection, class: Id) -> Vec<usize> {
         let mut indices = self.anywhere.clone();
-        for node in fs.egraph.nodes(class) {
+        let assumed = fs.egraph.assumed_const(class).into_iter();
+        for node in fs.egraph.nodes(class).iter().chain(assumed) {
             indices.extend(self.by_op.get(&node.op_key()).into_iter().flatten());
         }
         indices.sort_unstable();
@@ -602,7 +604,7 @@ struct FunctionSelection {
 
 /// A boundary class resolved to concrete operands for a consumer: the proven
 /// constant it folds to as an immediate, and/or the register value legal under
-/// the dominance rule. A class can carry both (an assumption merges a value with
+/// the dominance rule. A class can carry both (an assumption proves a value equal to
 /// its truth constant); a valueless (pure or rewrite-introduced) class neither.
 struct Binding {
     int: Option<APInt>,
@@ -1958,7 +1960,7 @@ impl InstructionSelectPass {
         for &(op, slot, class) in fs.region_aux.get(&block_id).into_iter().flatten() {
             let class = fs.egraph.find(class);
             // The scope this block solves under may already decide the test — an
-            // enclosing region's entry fact merges a re-tested condition with its
+            // enclosing region's entry fact proves a re-tested condition equal to its
             // truth. Then no branch is selected and nothing is demanded: the
             // destruction takes the edge the decision picks.
             if slot != AuxSlot::Advance
@@ -2887,21 +2889,21 @@ fn region_entry_facts(op: &OpHandle) -> Vec<(RegionId, ValueId, bool)> {
 }
 
 /// Assert one entry fact in the current scope: the condition (and its defining
-/// comparison, when there is one) equals its known truth value, the complement
-/// comparison equals the opposite, and an `eq`/`ne` guard makes its operands
-/// congruent.
+/// comparison, when there is one) is assumed to equal its known truth value, the
+/// complement comparison the opposite, and an `eq`/`ne` guard makes its operands
+/// congruent. Facts, not unions into the constant class: the literal's own class
+/// and its users stay untouched, so the scope dirties only the condition's users.
 fn assert_fact(context: &Context, egraph: &mut SemEGraph, expr: &ConditionExpr, holds: bool) {
-    let truth = |egraph: &mut SemEGraph, holds: bool| {
-        egraph.add(template_node(
+    let truth = |holds: bool| {
+        template_node(
             SymKind::Constant,
             Some(SymPayload::Int(APInt::new(1, holds as u64))),
             None,
-        ))
+        )
     };
-    let known = truth(egraph, holds);
-    egraph.union(expr.condition, known);
+    egraph.assume_const(expr.condition, truth(holds));
     if let Some((compare, kind, lhs, rhs)) = expr.compare {
-        egraph.union(compare, known);
+        egraph.assume_const(compare, truth(holds));
         if let Some(complement) = complement_comparison(kind) {
             let mut node = template_node(
                 complement,
@@ -2910,8 +2912,7 @@ fn assert_fact(context: &Context, egraph: &mut SemEGraph, expr: &ConditionExpr, 
             );
             node.children = vec![lhs, rhs];
             let complement_class = egraph.add(node);
-            let opposite = truth(egraph, !holds);
-            egraph.union(complement_class, opposite);
+            egraph.assume_const(complement_class, truth(!holds));
         }
         if (kind == SymKind::Eq && holds) || (kind == SymKind::Ne && !holds) {
             egraph.union(lhs, rhs);
