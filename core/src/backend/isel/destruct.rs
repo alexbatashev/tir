@@ -355,8 +355,13 @@ impl<'a> Destructor<'a> {
         }
         self.erase(rewriter, &block, op)?;
 
+        // Selection minted the counter as a trailing body argument only where no
+        // carried port already counted; where one did, the ports are the whole edge.
+        let minted = body.arguments().len() > inits.len();
         let mut entry = inits.clone();
-        entry.push(self.value(lower));
+        if minted {
+            entry.push(self.value(lower));
+        }
         self.branch(
             &block,
             self.aux(op, AuxSlot::Entry)?,
@@ -367,7 +372,9 @@ impl<'a> Destructor<'a> {
         )?;
 
         let mut back = self.mapped(&latched);
-        back.push(self.aux_value(op, AuxSlot::Advance)?);
+        if minted {
+            back.push(self.aux_value(op, AuxSlot::Advance)?);
+        }
         let exit = self.mapped(&latched);
         let terminator = self.terminator(&body)?;
         let body_block = self.context.get_block(body.id());

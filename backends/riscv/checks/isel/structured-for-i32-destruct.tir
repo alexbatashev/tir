@@ -1,0 +1,30 @@
+// RUN: tir mc --march=rv32i --stage=isel %s | filecheck %s
+
+// A counted loop counts through the type its bounds name, on a machine whose
+// index width already matches: the counter is the bounds' own `!i32`, and the
+// zero-trip guard and the latch are the same signed comparison against the bound.
+
+#data_layout = {types = {p = {abi = 32, size = 32}}}
+
+module {data_layout = #data_layout} {
+  %fn_count = func.func @count(%lb: !i32, %ub: !i32, %st: !i32, %init: !i32) -> !i32 {
+    %c = constant {value = 5} : !i32
+    %r = scf.for %lb, %ub, %st iter_args(%acc = %init) -> !i32 {
+      %n = addi %acc, %c : !i32
+      scf.yield %n
+    }
+    func.return %r
+  }
+  module_end
+}
+
+// CHECK-NOT: scf.
+// The zero-trip guard, fused into its branch.
+// CHECK: riscv.blt {rs1 = %virt0:GPR, rs2 = %virt1:GPR, imm = ^[[ENTER:bb[0-9]+]]}
+// The counter enters the body as its trailing argument, advances by the step and
+// is tested against the same bound on the back edge.
+// CHECK: ^{{bb[0-9]+}}(%{{[0-9]+}}: !i32, %[[IV:[0-9]+]]: !i32):
+// CHECK: riscv.add {rd = %virt[[NEXT:[0-9]+]]:GPR, rs1 = %virt[[IV]]:GPR, rs2 = %virt2:GPR}
+// CHECK-NEXT: riscv.blt {rs1 = %virt[[NEXT]]:GPR, rs2 = %virt1:GPR, imm = ^{{bb[0-9]+}}}
+// CHECK: ^[[ENTER]]:
+// CHECK-NOT: scf.

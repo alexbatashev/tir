@@ -75,6 +75,7 @@ pub(super) fn lower_to_ir(
         std::process::exit(1);
     });
     lower_cir_structs(context, &module);
+    raise_loops(context, &module);
     restructure(context, &module);
     describe_target(context, &module, machine.as_ref())
 }
@@ -90,6 +91,22 @@ fn lower_cir_structs(context: &tir::Context, module: &tir::builtin::ModuleOp) {
     pm.run(context, context.get_op(module.id()))
         .unwrap_or_else(|e| {
             eprintln!("fcc: error: struct lowering failed: {e}");
+            std::process::exit(1);
+        });
+}
+
+/// Turn the `cir` loop ops codegen emits into `scf.for` where the counted shape
+/// is provable, and into blocks and branches where it is not. No `cir` operation
+/// survives into restructuring.
+fn raise_loops(context: &tir::Context, module: &tir::builtin::ModuleOp) {
+    use tir::Operation;
+
+    let mut pm = tir::PassManager::new();
+    pm.nest::<tir::func::FuncOp>()
+        .add_pass(crate::passes::RaiseLoopsPass::new());
+    pm.run(context, context.get_op(module.id()))
+        .unwrap_or_else(|e| {
+            eprintln!("fcc: error: loop raising failed: {e}");
             std::process::exit(1);
         });
 }

@@ -383,6 +383,21 @@ impl Type for TokenType {
     fn hash(&self, _state: &mut dyn std::hash::Hasher) {}
 }
 
+/// The type a counted loop counts through: the abstract [`IndexType`], or a
+/// concrete [`IntegerType`] when the counter has to reproduce a source type's
+/// wrapping rather than an address computation's width.
+pub struct Counter;
+
+impl TypeConstraint for Counter {
+    fn satisfies(ty: &dyn Type) -> bool
+    where
+        Self: Sized + 'static,
+    {
+        let ty = ty as &dyn Any;
+        ty.downcast_ref::<IndexType>().is_some() || ty.downcast_ref::<IntegerType>().is_some()
+    }
+}
+
 pub struct Integer<const N: usize>;
 
 impl<const N: usize> TypeConstraint for Integer<N> {

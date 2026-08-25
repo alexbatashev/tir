@@ -19,8 +19,11 @@
 //!   context-free, and two arms of a gate writing one value to one address are one
 //!   term, so unioning a class an arm yields with the state before it would take
 //!   that arm back before its write. The applier therefore fires only when the
-//!   accesses reading the inner state are the overwriting store alone, and the
-//!   seeder recorded no operation outside the term graph observing it.
+//!   accesses reading the inner state are the overwriting store alone, the seeder
+//!   recorded no operation outside the term graph observing it, and the state the
+//!   inner store was handed is not a loop's carried port — a class read both at
+//!   the head of an iteration and where the loop was left, so a store landing in
+//!   it would answer a read after the loop with what the body overwrote.
 
 use tir_symbolic::egraph::{EGraph, ENode, Id, Pattern, Rewrite, Rhs, Var};
 
@@ -73,6 +76,17 @@ pub(crate) fn eliminate_dead_store(exported: Vec<Id>) -> Rule {
             let Some(before) = overwritten_state(eg, state, written) else {
                 return;
             };
+            // A loop's carried port is one class read at more than one point of the
+            // program — the head of an iteration, and where the loop was left. A
+            // store node landing in it answers for both, so a read after the loop
+            // would forward the value the body overwrote.
+            if eg
+                .nodes(before)
+                .iter()
+                .any(|node| node.sym() == Some(SymKind::Theta))
+            {
+                return;
+            }
             eg.union(state, before);
         },
     )

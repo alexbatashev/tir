@@ -480,12 +480,21 @@ impl<'a> SemDagBuilder<'a> {
             return;
         };
         // The counter leaves the abstract index type behind: what it counts through
-        // is ordinary integer arithmetic, at the width the layout gives an index.
-        let Some(ty) = crate::DataLayout::for_op(self.context, op.id)
-            .and_then(|layout| layout.index_width())
-            .map(|width| IntegerType::new(self.context, width))
-        else {
-            return;
+        // is ordinary integer arithmetic, at the width the bounds themselves name and
+        // — for `!index` bounds, which name none — at the width the layout gives an
+        // index. Widening a bounded width would change where the counter wraps.
+        let bounds = self.context.get_value(lower).ty();
+        let ty = match type_width(self.context, bounds) {
+            Some(_) => bounds,
+            None => {
+                let Some(ty) = crate::DataLayout::for_op(self.context, op.id)
+                    .and_then(|layout| layout.index_width())
+                    .map(|width| IntegerType::new(self.context, width))
+                else {
+                    return;
+                };
+                ty
+            }
         };
         let boolean = IntegerType::new(self.context, 1);
         let lower_class = self.reinterpret(lower, ty);
@@ -493,13 +502,21 @@ impl<'a> SemDagBuilder<'a> {
         let entry = self.add_op(SymKind::Lt, vec![lower_class, upper_class], Some(boolean));
         control.record(block, op.id, AuxSlot::Entry, entry);
 
-        // The counter is minted as the body's trailing argument, not as a loose
-        // value: a machine instruction names its operands' registers by value, so
-        // the counter has to be the value the back edge writes before any
-        // instruction reading it is emitted.
-        let counter = self.context.append_block_argument(body.id(), ty).id();
-        let counter_class = self.add_input_value(counter, Some(ty));
-        self.value_to_class.insert(counter, counter_class);
+        // A port the loop already carries and already counts through — a frontend's
+        // induction variable, raised — is the counter: the back edge writes it, so a
+        // second recurrence would only be the same addition twice.
+        //
+        // Where no port counts, the counter is minted as the body's trailing
+        // argument rather than as a loose value: a machine instruction names its
+        // operands' registers by value, so the counter has to be the value the back
+        // edge writes before any instruction reading it is emitted.
+        let counter = self.counting_port(op, lower, ty).unwrap_or_else(|| {
+            let minted = self.context.append_block_argument(body.id(), ty).id();
+            let class = self.add_input_value(minted, Some(ty));
+            self.value_to_class.insert(minted, class);
+            minted
+        });
+        let counter_class = self.build_from_value(counter);
         let step = self.reinterpret(counted.step(), ty);
         let advance = self.add_op(SymKind::Add, vec![counter_class, step], Some(ty));
         let latch = self.add_op(SymKind::Lt, vec![advance, upper_class], Some(boolean));
@@ -507,11 +524,45 @@ impl<'a> SemDagBuilder<'a> {
         control.record(body.id(), op.id, AuxSlot::Latch, latch);
     }
 
+    /// The carried port a counted loop already counts through: one entered with the
+    /// lower bound and latched with itself plus the step, at the counter's own type.
+    /// `None` when the loop carries no such port, which is every loop but a raised
+    /// one.
+    fn counting_port(&mut self, op: &OpHandle, lower: ValueId, ty: TypeId) -> Option<ValueId> {
+        let counted = op.clone().as_interface::<dyn CountedLoop>()?;
+        let loop_like = op.clone().as_interface::<dyn LoopLike>()?;
+        let inits = loop_like.inits();
+        let ports = loop_like.carried_args();
+        let latched = loop_like.latched();
+        if latched.len() != ports.len() {
+            return None;
+        }
+        for port in 0..ports.len() {
+            if inits.get(port) != Some(&lower) || self.context.get_value(ports[port]).ty() != ty {
+                continue;
+            }
+            let counter = self.build_from_value(ports[port]);
+            let step = self.build_from_value(counted.step());
+            let advance = self.add_op(SymKind::Add, vec![counter, step], Some(ty));
+            let next = self.build_from_value(latched[port]);
+            if self.egraph.find(advance) == self.egraph.find(next) {
+                return Some(ports[port]);
+            }
+        }
+        None
+    }
+
     /// Read `value` at `ty`: the same register seen at a concrete width, joined to
     /// the class the value's own type gives it. What the abstract index type a
     /// counted loop's bounds carry means once the counting is ordinary arithmetic.
     fn reinterpret(&mut self, value: ValueId, ty: TypeId) -> Id {
         let own = self.build_from_value(value);
+        // A value already of `ty` is its own view. Joining an opaque leaf into its
+        // class anyway would cost a literal bound its immediate form, and would leave
+        // the loop's own arithmetic in a class the counter's advance never finds.
+        if self.context.get_value(value).ty() == ty {
+            return own;
+        }
         let viewed = self.add_input_value(value, Some(ty));
         self.egraph.union(own, viewed)
     }

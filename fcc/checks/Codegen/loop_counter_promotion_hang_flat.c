@@ -1,16 +1,17 @@
-// RUN: fcc compile --stage obj --march x86_64 -o /tmp/fcc-lcp-hang.o %s
-// RUN: cc /tmp/fcc-lcp-hang.o -o /tmp/fcc-lcp-hang.bin
-// RUN: timeout 5 /tmp/fcc-lcp-hang.bin
+// XFAIL: *
+// RUN: fcc compile --stage obj --march x86_64 -o /tmp/fcc-lcp-hang-flat.o %s
+// RUN: cc /tmp/fcc-lcp-hang-flat.o -o /tmp/fcc-lcp-hang-flat.bin
+// RUN: timeout 5 /tmp/fcc-lcp-hang-flat.bin
 
-// Found by `cargo xtask fcc-fuzz` (reduced from seed 127): instcombine wires a
-// foreign constant into a nested rotated loop's counter yield, so the counter
-// never advances and the loop never exits. Counted loops no longer reach that
-// shape — they are raised to `scf.for` instead of restructured into a rotated
-// `scf.while` — so this program now terminates and must keep doing so. The
-// instcombine defect itself is still open: `loop_counter_promotion_hang_flat.c`
-// is the same reduction forced down the flat path, and still hangs.
+// The reduction of `loop_counter_promotion_hang.c` with a label in it, which
+// lowers every loop in the function flat and so restructures them into the
+// rotated `scf.while` the instcombine defect needs. The label is the whole
+// difference: keeping this reproducer is what stops loop raising from hiding a
+// bug it does not fix.
 
 int f0(int a, int b) {
+    goto start;
+start:;
     for (int i = 0; i < 6; i++) {
         for (int i = 0; i < 1; i++) {
             for (int i = 0; i < 5; i++) {

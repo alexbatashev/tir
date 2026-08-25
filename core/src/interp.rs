@@ -420,17 +420,23 @@ impl Interpreter<'_> {
         self.exec_region(region)
     }
 
+    /// A counted loop's bound, read at the width the bounds' own type gives it and
+    /// read as signed: `scf.for` counts while the counter is signed-less-than the
+    /// upper bound, and it wraps where that width wraps.
+    fn counter_bound(&mut self, value: ValueId) -> Result<APInt> {
+        match self.value_of(value)? {
+            Value::Int(bound) => Ok(bound.with_signed(true)),
+            _ => Err(InterpError::Message(
+                "scf.for bounds must be integers".into(),
+            )),
+        }
+    }
+
     fn exec_for(&mut self, op_id: OpId) -> Result<Flow> {
         let op = ForOp::from_op_instance(self.context.get_op(op_id));
-        let lower = self
-            .value_of(op.lower_bound())?
-            .to_i64()
-            .unwrap_or_default();
-        let upper = self
-            .value_of(op.upper_bound())?
-            .to_i64()
-            .unwrap_or_default();
-        let step = self.value_of(op.step())?.to_i64().unwrap_or_default();
+        let lower = self.counter_bound(op.lower_bound())?;
+        let upper = self.counter_bound(op.upper_bound())?;
+        let step = self.counter_bound(op.step())?;
 
         let body_region = op.handle().regions()[0];
         let token = TokenType::new(self.context);
@@ -442,14 +448,14 @@ impl Interpreter<'_> {
             .collect::<Result<_>>()?;
 
         let mut counter = lower;
-        while counter < upper {
+        while counter.slt(&upper) {
             let flow = self.enter_loop_body(body_region, &carried_args, &carried)?;
             match flow {
                 Flow::Values(values) | Flow::Continue(values) => carried = values,
                 Flow::Break(values) => return Ok(Flow::Values(values)),
                 flow => return Ok(flow),
             }
-            counter += step;
+            counter = counter.add(&step).with_signed(true);
         }
         Ok(Flow::Values(carried))
     }
