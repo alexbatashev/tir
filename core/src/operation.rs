@@ -776,6 +776,12 @@ impl OpInstance {
         self.ports[index] = value.number();
     }
 
+    pub(crate) fn replace_result_at(&mut self, index: usize, value: ValueId) {
+        let port = self.operand_end() + index;
+        assert!(port < self.result_end());
+        self.ports[port] = value.number();
+    }
+
     pub(crate) fn set_operands(&mut self, operands: Vec<ValueId>) {
         self.ports.splice(
             ..self.operand_end(),

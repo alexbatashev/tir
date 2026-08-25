@@ -80,28 +80,28 @@ module {
 }
 
 // CHECK: asm.symbol {name = "f"
-// CHECK: arm64.fadd {fd = %virt2:FPR64, fa = %virt0:FPR64, fb = %virt1:FPR64}
+// CHECK: arm64.fadd {fd = %[[V2:[0-9]+]]:FPR64, fa = %[[V0:[0-9]+]]:FPR64, fb = %[[V1:[0-9]+]]:FPR64}
 // CHECK-NEXT: arm64.fsub
 // CHECK-NEXT: arm64.fmul
 // CHECK-NEXT: arm64.fdiv
 // CHECK-NEXT: asm.vret
-// CHECK: asm.symbol {name = "convert", arg_regs = [%virt{{[0-9]+}}:GPR]}
-// CHECK: arm64.scvtf_d_w {fd = %virt{{[0-9]+}}:FPR64, rn = %virt{{[0-9]+}}:GPR}
+// CHECK: asm.symbol {name = "convert", arg_regs = [%{{[0-9]+}}:GPR]
+// CHECK: arm64.scvtf_d_w {fd = %{{[0-9]+}}:FPR64, rn = %{{[0-9]+}}:GPR}
 // CHECK: asm.vret
-// CHECK: asm.symbol {name = "convert_unsigned", arg_regs = [%virt{{[0-9]+}}:GPR]}
-// CHECK: arm64.ucvtf_d_w {fd = %virt{{[0-9]+}}:FPR64, rn = %virt{{[0-9]+}}:GPR}
+// CHECK: asm.symbol {name = "convert_unsigned", arg_regs = [%{{[0-9]+}}:GPR]
+// CHECK: arm64.ucvtf_d_w {fd = %{{[0-9]+}}:FPR64, rn = %{{[0-9]+}}:GPR}
 // CHECK: asm.vret
 // CHECK: asm.symbol {name = "convert_to_signed"
-// CHECK: arm64.fcvtzs_w_d {rd = %virt{{[0-9]+}}:GPR, fa = %virt{{[0-9]+}}:FPR64}
+// CHECK: arm64.fcvtzs_w_d {rd = %{{[0-9]+}}:GPR, fa = %{{[0-9]+}}:FPR64}
 // CHECK: asm.vret
 // CHECK: asm.symbol {name = "convert_to_unsigned"
-// CHECK: arm64.fcvtzu_w_d {rd = %virt{{[0-9]+}}:GPR, fa = %virt{{[0-9]+}}:FPR64}
+// CHECK: arm64.fcvtzu_w_d {rd = %{{[0-9]+}}:GPR, fa = %{{[0-9]+}}:FPR64}
 // CHECK: asm.vret
 // CHECK: asm.symbol {name = "convert_to_signed_i64"
-// CHECK: arm64.fcvtzs_x_d {rd = %virt{{[0-9]+}}:GPR, fa = %virt{{[0-9]+}}:FPR64}
+// CHECK: arm64.fcvtzs_x_d {rd = %{{[0-9]+}}:GPR, fa = %{{[0-9]+}}:FPR64}
 // CHECK: asm.vret
 // CHECK: asm.symbol {name = "convert_to_unsigned_i64"
-// CHECK: arm64.fcvtzu_x_d {rd = %virt{{[0-9]+}}:GPR, fa = %virt{{[0-9]+}}:FPR64}
+// CHECK: arm64.fcvtzu_x_d {rd = %{{[0-9]+}}:GPR, fa = %{{[0-9]+}}:FPR64}
 // CHECK: asm.vret
 // CHECK: asm.symbol {name = "convert_to_signed_i64_trunc_store"
 // CHECK: arm64.load_float_double
@@ -109,10 +109,10 @@ module {
 // CHECK: arm64.store_word
 // CHECK: arm64.load_word_unsigned
 // CHECK: asm.symbol {name = "bits_to_double"
-// CHECK: arm64.fmov_d_x {fd = %virt{{[0-9]+}}:FPR64, rn = %virt{{[0-9]+}}:GPR}
+// CHECK: arm64.fmov_d_x {fd = %{{[0-9]+}}:FPR64, rn = %{{[0-9]+}}:GPR}
 // CHECK: asm.vret
 // CHECK: asm.symbol {name = "double_to_bits"
-// CHECK: arm64.fmov_x_d {rd = %virt{{[0-9]+}}:GPR, fa = %virt{{[0-9]+}}:FPR64}
+// CHECK: arm64.fmov_x_d {rd = %{{[0-9]+}}:GPR, fa = %{{[0-9]+}}:FPR64}
 // CHECK: asm.vret
 // CHECK-LABEL: asm.symbol {name = "less"
 // CHECK: arm64.fcmp_d

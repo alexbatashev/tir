@@ -20,9 +20,9 @@ module {data_layout = #data_layout} {
 
 // CHECK-NOT: scf.
 // The zero-trip guard compares the bounds at their own width.
-// CHECK: arm64.cmp_w {rn = %virt0:GPR32, rm = %virt1:GPR32}
+// CHECK: arm64.cmp_w {rn = %[[V0:[0-9]+]]:GPR, rm = %[[V1:[0-9]+]]:GPR}
 // The counter is minted as a 32-bit body argument, advanced and tested 32 bits wide.
-// CHECK: ^{{bb[0-9]+}}(%{{[0-9]+}}: !i64, %[[IV:[0-9]+]]: !i32):
-// CHECK: arm64.add_w {rd = %virt[[NEXT:[0-9]+]]:GPR32, rn = %virt[[IV]]:GPR32, rm = %virt2:GPR32}
-// CHECK-NEXT: arm64.cmp_w {rn = %virt[[NEXT]]:GPR32, rm = %virt1:GPR32}
+// CHECK: ^{{bb[0-9]+}}(%{{[0-9]+}}: !arm64.GPR, %[[IV:[0-9]+]]: !arm64.GPR):
+// CHECK: arm64.add_w {rd = %[[NEXT:[0-9]+]]:GPR32, rn = %[[IV]]:GPR, rm = %[[V2:[0-9]+]]:GPR}
+// CHECK-NEXT: arm64.cmp_w {rn = %[[NEXT]]:GPR32, rm = %[[V1]]:GPR}
 // CHECK-NOT: scf.

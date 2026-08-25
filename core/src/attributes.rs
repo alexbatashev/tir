@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use tir_adt::Sym;
 
 use crate::backend::regalloc::RegClassId;
-use crate::{BlockId, Context, TypeId};
+use crate::{BlockId, Context, TypeId, ValueId};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AttributeValue {
@@ -16,6 +16,10 @@ pub enum AttributeValue {
     Array(Box<[AttributeValue]>),
     Dict(Box<BTreeMap<String, AttributeValue>>),
     Register(RegisterAttr),
+    /// A reference to an SSA value that is not an operand: the `asm.symbol`
+    /// argument list, which names values the ABI places rather than values the
+    /// op reads.
+    Value(ValueId),
     Type(TypeId),
     /// A reference to a basic block, used by terminators to name their successors
     /// (e.g. the targets of `br`/`cond_br`).
@@ -42,58 +46,24 @@ pub struct ImplicitReg {
     pub role: AttributeRole,
 }
 
-/// Per-opcode register semantics the generic IR cannot see from an instance
-/// alone: the def/use role of each register-valued attribute.
-///
-/// An ordinary op interface: ops that have register semantics (machine
-/// instructions; TMDL rustgen derives the tables from the instruction
-/// definition) implement it and list it in their `interfaces:`, and analyses
-/// resolve it through the interface registry like any other interface. The
-/// generic core carries no knowledge of it beyond this definition.
-pub trait RegisterSemantics {
-    fn verify_interface(
-        &self,
-        _this: &dyn crate::Operation,
-        _context: &Context,
-    ) -> Result<(), crate::Error> {
-        Ok(())
-    }
-    fn attribute_roles(&self) -> &'static [(&'static str, AttributeRole)] {
-        &[]
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegisterAttr {
-    Physical {
-        class: RegClassId,
-        index: u16,
-    },
-    Virtual {
-        id: u32,
-        class: Option<RegClassId>,
-    },
-    /// A virtual value read from one physical register at this operation.
-    FixedUse {
-        id: u32,
-        class: RegClassId,
-        index: u16,
-    },
-    /// A virtual value defined in one required physical register.
-    FixedDef {
-        id: u32,
+    /// A physical register the instruction names directly: an assembler input,
+    /// a hardwired `x0`, the stack pointer in prologue code.
+    Physical { class: RegClassId, index: u16 },
+    /// One entry of a function's register assignment (see
+    /// [`crate::backend::RegAssignment`]): `value` lives in `class[index]`.
+    Assigned {
+        value: ValueId,
         class: RegClassId,
         index: u16,
     },
 }
 
 impl RegisterAttr {
-    pub fn class(&self) -> Option<RegClassId> {
+    pub fn class(&self) -> RegClassId {
         match self {
-            Self::Physical { class, .. }
-            | Self::FixedUse { class, .. }
-            | Self::FixedDef { class, .. } => Some(*class),
-            Self::Virtual { class, .. } => *class,
+            Self::Physical { class, .. } | Self::Assigned { class, .. } => *class,
         }
     }
 }
@@ -188,20 +158,21 @@ impl AttributeValue {
                 RegisterAttr::Physical { class, index } => {
                     fmt.write(format!("{}[{}]", class.name(), index))
                 }
-                RegisterAttr::Virtual { id, class } => {
-                    if let Some(cls) = class {
-                        fmt.write(format!("%virt{}:{}", id, cls.name()))
-                    } else {
-                        fmt.write(format!("%virt{}", id))
-                    }
-                }
-                RegisterAttr::FixedUse { id, class, index } => {
-                    fmt.write(format!("%virt{}:{}@{}", id, class.name(), index))
-                }
-                RegisterAttr::FixedDef { id, class, index } => {
-                    fmt.write(format!("%virt{}:{}@{}", id, class.name(), index))
-                }
+                RegisterAttr::Assigned {
+                    value,
+                    class,
+                    index,
+                } => fmt.write(format!("%{}:{}[{}]", value.number(), class.name(), index)),
             },
+            // A value the op names rather than reads. Its register class is its
+            // type, printed with it so an ABI argument list says what it holds.
+            AttributeValue::Value(value) => {
+                fmt.write(format!("%{}", value.number()))?;
+                match crate::backend::value_class(context, *value) {
+                    Some(class) => fmt.write(format!(":{}", class.name())),
+                    None => Ok(()),
+                }
+            }
             AttributeValue::Type(ty) => context.print_type(*ty, fmt),
             AttributeValue::Block(block) => {
                 fmt.write(format!("^bb{}", fmt.region_block_number(*block)))

@@ -20,10 +20,10 @@ module {
   module_end
 }
 
-// CHECK: ^[[THEN:bb[0-9]+]](%{{[0-9]+}}: !i64, %{{[0-9]+}}: !i64):
-// CHECK-NEXT: x86_64.imul {dst = %virt[[ARM:[0-9]+]]:GPR
+// CHECK: ^[[THEN:bb[0-9]+]](%{{[0-9]+}}: !x86_64.GPR, %{{[0-9]+}}: !x86_64.GPR):
+// CHECK-NEXT: x86_64.imul {dst = %[[ARM:[0-9]+]]:GPR
 // CHECK-NEXT: x86_64.add
-// CHECK: ^{{bb[0-9]+}}(%{{[0-9]+}}: !i64):
-// CHECK-NEXT: x86_64.imul {dst = %{{virt[0-9]+}}:GPR, dst_tied = %{{virt[0-9]+}}:GPR, src = %{{virt[0-9]+}}:GPR}
+// CHECK: ^{{bb[0-9]+}}(%{{[0-9]+}}: !x86_64.GPR):
+// CHECK-NEXT: x86_64.imul {dst = %{{[0-9]+}}:GPR, dst_tied = %{{[0-9]+}}:GPR, src = %{{[0-9]+}}:GPR}
 // CHECK-NEXT: asm.vret
-// CHECK-NOT: %virt[[ARM]]:GPR
+// CHECK-NOT: %[[ARM]]:GPR

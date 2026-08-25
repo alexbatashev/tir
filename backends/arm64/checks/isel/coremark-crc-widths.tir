@@ -42,11 +42,11 @@ module {
 // CHECK-LABEL: asm.symbol {name = "crc_bit_branch"
 // CHECK: arm64.ldrh
 // CHECK: arm64.lslv_w
-// CHECK: arm64.asr_w {rd = %virt{{[0-9]+}}:GPR32, rn = %virt{{[0-9]+}}:GPR32, imm = 16}
+// CHECK: arm64.asr_w {rd = %{{[0-9]+}}:GPR32, rn = %{{[0-9]+}}:GPR32, imm = 16}
 // CHECK: arm64.asr_w
 // CHECK: arm64.strb
 // CHECK: arm64.ldrb
-// CHECK: arm64.cbnz_w {rt = %virt{{[0-9]+}}:GPR32, imm = ^bb1}
+// CHECK: arm64.cbnz_w {rt = %{{[0-9]+}}:GPR32, imm = ^bb1}
 // CHECK-LABEL: asm.symbol {name = "crc_shift_u16"
 // CHECK: arm64.lsr_h
 // CHECK-LABEL: asm.symbol {name = "crc_shift_u8"

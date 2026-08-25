@@ -1,136 +1,99 @@
-//! Def-use and use-def chains over the unified virtual-register space.
+//! Def-use and use-def chains over machine and mid-end IR.
 //!
-//! An op's register operands live in two notations: SSA `operands`/`results`,
-//! and [`RegisterAttr`] attributes tagged with an [`AttributeRole`] on machine
-//! ops. A virtual register's `id` equals the SSA value number, so both name the
-//! same register; [`op_regs`] resolves either notation into one `u32` space.
+//! A register operand is an SSA operand or result — [`op_regs`] reads them
+//! directly — plus the physical registers an instruction names without an SSA
+//! value: the literals its register slots hold, and the caller-saved set a call
+//! destroys.
 //!
 //! [`DefUse`] indexes those per-op defs and uses across every op nested under a
-//! root: def-use chains (`users_of`) answer "who reads this register", use-def
-//! chains (`defs_of`) answer "who wrote the register this op reads". Liveness
-//! and register allocation share [`op_regs`] for their own ordered scans.
+//! root: def-use chains (`users_of`) answer "who reads this value", use-def
+//! chains (`defs_of`) answer "who wrote the value this op reads". Liveness and
+//! register allocation share [`op_regs`] for their own ordered scans.
 
 use std::collections::HashMap;
 
-use crate::attributes::{AttributeRole, AttributeValue, RegisterAttr, RegisterSemantics};
+use crate::attributes::{AttributeRole, AttributeValue, RegisterAttr};
 use crate::backend::regalloc::RegClassId;
 use crate::{
-    Context, OpHandle, OpId,
+    Context, OpHandle, OpId, ValueId,
     analysis::{Analysis, AnalysisManager},
 };
 
-/// A register operand resolved from an operation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RegRef {
-    Virtual { id: u32, class: Option<RegClassId> },
-    Physical { class: RegClassId, index: u16 },
-}
+/// A physical register: its class handle and encoding index.
+pub type PhysReg = (RegClassId, u16);
 
-/// The register operands of a single operation, split by direction. A
-/// read-modify-write operand appears in both `defs` and `uses`.
+/// The attribute a call carries the registers it destroys in: an array of
+/// physical registers, which are not values and so are not in its operands.
+pub const CLOBBERS_ATTR: &str = "clobbers";
+
+/// The registers of a single operation, split by direction. Values are SSA
+/// operands and results; physical registers are the ones the instruction names
+/// directly and are not SSA.
 #[derive(Clone, Debug, Default)]
 pub struct OpRegs {
-    pub defs: Vec<RegRef>,
-    pub uses: Vec<RegRef>,
+    pub defs: Vec<ValueId>,
+    pub uses: Vec<ValueId>,
+    pub phys_defs: Vec<PhysReg>,
+    pub phys_uses: Vec<PhysReg>,
 }
 
-fn role_writes(role: AttributeRole) -> bool {
-    matches!(
-        role,
-        AttributeRole::Def | AttributeRole::Clobber | AttributeRole::ReadWrite
-    )
-}
-
-fn role_reads(role: AttributeRole) -> bool {
-    matches!(role, AttributeRole::Use | AttributeRole::ReadWrite)
-}
-
-/// Resolve the register operands of one op from its SSA operands/results and its
-/// register-valued attributes (consulting the opcode's
-/// [`RegisterSemantics`] interface).
+/// The registers one op reads and writes: its SSA results and operands, the
+/// physical registers its register slots name directly, and the registers a
+/// call destroys.
 pub fn op_regs(op: &OpHandle) -> OpRegs {
-    let attribute_roles = op
-        .clone()
-        .as_interface::<dyn RegisterSemantics>()
-        .map(|semantics| semantics.attribute_roles())
-        .unwrap_or_default();
-    // The roles name attributes; resolve them once against this context's
-    // interner so the per-attribute lookup below is a `u32` compare. An op with
-    // no register semantics (every mid-end op) resolves nothing.
-    let roles: Vec<(Option<tir_adt::Sym>, AttributeRole)> = if attribute_roles.is_empty() {
-        Vec::new()
-    } else {
-        let context = op.context.upgrade();
-        attribute_roles
-            .iter()
-            .map(|(name, role)| (context.sym(name), *role))
-            .collect()
+    op_regs_from(op, &crate::backend::reg_slots(op))
+}
+
+/// [`op_regs`] over slots the caller has already resolved, for a scan that
+/// wants both them and the registers — liveness reads every instruction once.
+pub fn op_regs_from(op: &OpHandle, slots: &[crate::backend::SlotRef]) -> OpRegs {
+    let mut regs = OpRegs {
+        defs: op.results().to_vec(),
+        uses: op.operands().to_vec(),
+        phys_defs: Vec::new(),
+        phys_uses: Vec::new(),
     };
-    let mut regs = OpRegs::default();
-
-    // Builtin SSA ops (e.g. the block terminator) name registers positionally.
-    for result in op.results() {
-        regs.defs.push(RegRef::Virtual {
-            id: result.number(),
-            class: None,
-        });
-    }
-    for operand in op.operands() {
-        regs.uses.push(RegRef::Virtual {
-            id: operand.number(),
-            class: None,
-        });
-    }
-
-    // Machine ops carry their register operands in attributes, with a def/use role.
-    // An array of registers (e.g. a call's caller-saved clobber list) applies the
-    // attribute's role to every element.
-    for attr in op.attributes() {
-        let attr_regs: Vec<&RegisterAttr> = match &attr.value {
-            AttributeValue::Register(reg) => vec![reg],
-            AttributeValue::Array(items) => items
-                .iter()
-                .filter_map(|item| match item {
-                    AttributeValue::Register(reg) => Some(reg),
-                    _ => None,
-                })
-                .collect(),
-            _ => continue,
-        };
-        let role = roles
-            .iter()
-            .find(|(name, _)| *name == Some(attr.name))
-            .map(|(_, role)| *role)
-            .unwrap_or(AttributeRole::None);
-
-        for reg in attr_regs {
-            let reg_ref = match reg {
-                RegisterAttr::Virtual { id, class } => RegRef::Virtual {
-                    id: *id,
-                    class: *class,
-                },
-                RegisterAttr::FixedUse { id, class, .. } => RegRef::Virtual {
-                    id: *id,
-                    class: Some(*class),
-                },
-                RegisterAttr::FixedDef { id, class, .. } => RegRef::Virtual {
-                    id: *id,
-                    class: Some(*class),
-                },
-                RegisterAttr::Physical { class, index } => RegRef::Physical {
-                    class: *class,
-                    index: *index,
-                },
-            };
-            if role_writes(role) {
-                regs.defs.push(reg_ref);
-            }
-            if role_reads(role) {
-                regs.uses.push(reg_ref);
+    for slot in slots {
+        if let crate::backend::RegSlot::Phys(register) = slot.slot {
+            if slot.port.def {
+                regs.phys_defs.push(register);
+            } else {
+                regs.phys_uses.push(register);
             }
         }
     }
-
+    // A two-address destination whose tied source slot is absent — an
+    // assembled instruction, whose tie no lowering has turned into a copy —
+    // is read as well as written.
+    for port in crate::backend::reg_ports(op) {
+        let Some(destination) = port.tied_to else {
+            continue;
+        };
+        if slots.iter().any(|slot| slot.port.name == port.name) {
+            continue;
+        }
+        match slots
+            .iter()
+            .find(|slot| slot.port.name == destination)
+            .map(|slot| slot.slot)
+        {
+            Some(crate::backend::RegSlot::Phys(register)) => regs.phys_uses.push(register),
+            Some(crate::backend::RegSlot::Value(value)) => regs.uses.push(value),
+            None => {}
+        }
+    }
+    op.context
+        .upgrade()
+        .with_attr(op.id, CLOBBERS_ATTR, |clobbers| {
+            let AttributeValue::Array(clobbers) = clobbers else {
+                return;
+            };
+            for clobber in clobbers.iter() {
+                if let AttributeValue::Register(RegisterAttr::Physical { class, index }) = clobber {
+                    regs.phys_defs.push((*class, *index));
+                }
+            }
+        });
     regs
 }
 
@@ -139,11 +102,6 @@ pub fn op_regs(op: &OpHandle) -> OpRegs {
 /// `EFLAGS::zf`, `GPR::rax`), plus the read a write through a merging
 /// sub-register view implies. This is the view a timing model reconstructs
 /// dependencies from.
-///
-/// Register allocation uses [`op_regs`] instead: it assigns operands, and the
-/// fixed-register protocol reaches it through the fixed-register operands
-/// selection emits — the same accesses in the notation the allocator can act
-/// on.
 pub fn execution_regs(op: &OpHandle) -> OpRegs {
     let mut regs = op_regs(op);
 
@@ -153,31 +111,28 @@ pub fn execution_regs(op: &OpHandle) -> OpRegs {
         .map(|mi| mi.info().implicit_regs)
         .unwrap_or_default();
     for implicit in implicit_regs {
-        let reg_ref = RegRef::Physical {
-            class: implicit.class,
-            index: implicit.index,
-        };
-        if role_writes(implicit.role) {
-            regs.defs.push(reg_ref);
+        let register = (implicit.class, implicit.index);
+        if matches!(
+            implicit.role,
+            AttributeRole::Def | AttributeRole::Clobber | AttributeRole::ReadWrite
+        ) {
+            regs.phys_defs.push(register);
         }
-        if role_reads(implicit.role) {
-            regs.uses.push(reg_ref);
+        if matches!(implicit.role, AttributeRole::Use | AttributeRole::ReadWrite) {
+            regs.phys_uses.push(register);
         }
     }
 
     // A write through a merging sub-register view (an x86 8/16-bit destination)
     // preserves the rest of the physical register, so it reads it too. A
     // zero-extending view (x86 32-bit) writes the whole register and does not.
-    let merging: Vec<RegRef> = regs
-        .defs
+    let merging: Vec<PhysReg> = regs
+        .phys_defs
         .iter()
-        .filter(|def| match def {
-            RegRef::Physical { class, .. } => class.view.merge,
-            RegRef::Virtual { .. } => false,
-        })
+        .filter(|(class, _)| class.view.merge)
         .copied()
         .collect();
-    regs.uses.extend(merging);
+    regs.phys_uses.extend(merging);
 
     regs
 }
@@ -187,10 +142,10 @@ pub fn execution_regs(op: &OpHandle) -> OpRegs {
 /// lifetimes are liveness's business.
 #[derive(Default)]
 pub struct DefUse {
-    /// Register → ops that read it, in walk order (def-use direction).
+    /// Value → ops that read it, in walk order (def-use direction).
     users: HashMap<u32, Vec<OpId>>,
-    /// Register → ops that write it (use-def direction). Empty for values
-    /// defined by block arguments.
+    /// Value → ops that write it (use-def direction). Empty for values defined
+    /// by block arguments.
     defs: HashMap<u32, Vec<OpId>>,
     /// Every op visited, in walk order.
     ops: Vec<OpId>,
@@ -208,16 +163,11 @@ impl DefUse {
                     let instance = context.get_op(op_id);
                     stack.extend(instance.regions().iter().copied());
                     result.ops.push(op_id);
-                    let regs = op_regs(&instance);
-                    for def in regs.defs {
-                        if let RegRef::Virtual { id, .. } = def {
-                            result.defs.entry(id).or_default().push(op_id);
-                        }
+                    for def in instance.results() {
+                        result.defs.entry(def.number()).or_default().push(op_id);
                     }
-                    for used in regs.uses {
-                        if let RegRef::Virtual { id, .. } = used {
-                            result.users.entry(id).or_default().push(op_id);
-                        }
+                    for used in instance.operands() {
+                        result.users.entry(used.number()).or_default().push(op_id);
                     }
                 }
             }
@@ -230,26 +180,26 @@ impl DefUse {
         &self.ops
     }
 
-    /// The ops reading `reg`.
-    pub fn users_of(&self, reg: u32) -> &[OpId] {
-        self.users.get(&reg).map(Vec::as_slice).unwrap_or(&[])
+    /// The ops reading `value`.
+    pub fn users_of(&self, value: u32) -> &[OpId] {
+        self.users.get(&value).map(Vec::as_slice).unwrap_or(&[])
     }
 
-    /// The ops writing `reg`.
-    pub fn defs_of(&self, reg: u32) -> &[OpId] {
-        self.defs.get(&reg).map(Vec::as_slice).unwrap_or(&[])
+    /// The ops writing `value`.
+    pub fn defs_of(&self, value: u32) -> &[OpId] {
+        self.defs.get(&value).map(Vec::as_slice).unwrap_or(&[])
     }
 
-    pub fn is_used(&self, reg: u32) -> bool {
-        !self.users_of(reg).is_empty()
+    pub fn is_used(&self, value: u32) -> bool {
+        !self.users_of(value).is_empty()
     }
 
-    /// The number of reading ops per register, as a mutable starting point for
+    /// The number of reading ops per value, as a mutable starting point for
     /// worklist algorithms that retire uses as they erase ops.
     pub fn use_counts(&self) -> HashMap<u32, usize> {
         self.users
             .iter()
-            .map(|(&reg, users)| (reg, users.len()))
+            .map(|(&value, users)| (value, users.len()))
             .collect()
     }
 }

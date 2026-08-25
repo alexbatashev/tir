@@ -9,6 +9,7 @@ use tir_adt::APInt;
 /// register-class fixture for the regalloc, liveness and encoding tests.
 pub static R_CLASSES: [RegClassInfo; 1] = [RegClassInfo {
     name: "R",
+    dialect: "test",
     file: "R",
     registers: &[0, 1, 2, 3, 4, 5, 6, 7],
     group_width: 1,
@@ -16,6 +17,7 @@ pub static R_CLASSES: [RegClassInfo; 1] = [RegClassInfo {
         bit_offset: 0,
         merge: false,
     },
+    print_name: tir::backend::regalloc::no_register_name,
 }];
 
 pub const fn r() -> RegClassId {

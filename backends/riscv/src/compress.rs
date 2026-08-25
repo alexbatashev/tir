@@ -11,7 +11,8 @@
 //! would turn a long branch into a hard error instead of a wider encoding.
 
 use tir::Operation;
-use tir::attributes::{AttributeValue, RegisterAttr};
+use tir::attributes::AttributeValue;
+use tir::backend::{RegSlot, reg_slot};
 
 use crate::{
     AddImmOp, AddImmWordOp, AddOp, AddWordOp, AndImmOp, AndOp, CAddImm4SpNOpBuilder,
@@ -47,22 +48,11 @@ pub(crate) fn compress_rv64(
     compress(context, op, rewriter, 64)
 }
 
-/// A physical register operand's index, whatever its class.
-fn reg(op: &dyn Operation, name: &str) -> Option<u16> {
-    match op.attr(name)? {
-        AttributeValue::Register(RegisterAttr::Physical { index, .. }) => Some(index),
-        _ => None,
-    }
-}
-
-/// A register operand's attribute value, passed through to the compressed
-/// form unchanged (encoders mask the index to the field width; printers and
-/// the simulator resolve the class through the shared register file).
-fn reg_attr(op: &dyn Operation, name: &str) -> Option<AttributeValue> {
-    match op.attr(name)? {
-        value @ AttributeValue::Register(RegisterAttr::Physical { .. }) => Some(value.clone()),
-        _ => None,
-    }
+/// A register slot of an instruction, carried through to the compressed form
+/// unchanged: the same value stays in the same register, so the function's
+/// assignment still describes it.
+fn slot(op: &dyn Operation, name: &str) -> Option<RegSlot> {
+    reg_slot(op.handle(), name)
 }
 
 /// An integer immediate operand. Symbol/block operands (fixups) return None,
@@ -98,6 +88,11 @@ fn compress(
     let replace = |rewriter: &mut tir::Rewriter, new_op: Box<dyn Operation>| {
         rewriter.replace_op(op, new_op.as_ref()).map(|()| true)
     };
+    // Compression runs after allocation, so every register slot resolves to the
+    // register it was given.
+    let reg = |inner: &dyn Operation, name: &str| {
+        tir::backend::op_slot_register(context, inner.handle(), name).map(|(_, index)| index)
+    };
 
     // The return sequence compresses to `c.jr ra` (finalize would otherwise
     // expand it to the full `jalr x0, x1, 0`).
@@ -114,46 +109,47 @@ fn compress(
         else {
             return Ok(false);
         };
-        let rd_attr = reg_attr(&inner, "rd").expect("checked above");
+        let rd_slot = slot(&inner, "rd").expect("checked above");
         if value == 0 {
             if rd == 0 && rs1 == 0 {
                 return replace(rewriter, Box::new(CNopOpBuilder::new(context).build()));
             }
             if rd != 0 && rs1 != 0 {
-                let mv = CMoveOpBuilder::new(context)
-                    .attr("rd", rd_attr)
-                    .attr("rs2", reg_attr(&inner, "rs1").expect("checked above"))
-                    .build();
-                return replace(rewriter, Box::new(mv));
+                let mv = CMoveOpBuilder::new(context);
+                let mv = tir::reg_use!(mv, rs2, slot(&inner, "rs1").expect("checked above"));
+                let mv = tir::reg_def!(mv, rd, rd_slot);
+                return replace(rewriter, Box::new(mv.build()));
             }
             return Ok(false);
         }
         if rd == 2 && rs1 == 2 && value % 16 == 0 && (-512..512).contains(&value) {
+            // `c.addi16sp` names the stack pointer implicitly, in both
+            // directions; the slots say which register that is.
+            let sp = phys(&(crate::RegClass::GPR.id(), 2));
             let addi16sp = CAddImm16SpOpBuilder::new(context)
+                .attr("x2", sp.clone())
+                .attr("x2_def", sp)
                 .attr("imm", AttributeValue::Int(value))
                 .build();
             return replace(rewriter, Box::new(addi16sp));
         }
+        let imm = AttributeValue::Int(value);
         if rd == rs1 && rd != 0 && fits_simm6(value) {
-            let addi = CAddImmOpBuilder::new(context)
-                .attr("rd", rd_attr)
-                .attr("imm", AttributeValue::Int(value))
-                .build();
-            return replace(rewriter, Box::new(addi));
+            let addi = CAddImmOpBuilder::new(context).attr("imm", imm);
+            // `c.addi` is two-address: it reads the destination it writes.
+            let addi = tir::reg_use!(addi, rd_tied, slot(&inner, "rs1").expect("checked above"));
+            return replace(rewriter, Box::new(tir::reg_def!(addi, rd, rd_slot).build()));
         }
         if rs1 == 0 && rd != 0 && fits_simm6(value) {
-            let li = CLoadImmOpBuilder::new(context)
-                .attr("rd", rd_attr)
-                .attr("imm", AttributeValue::Int(value))
-                .build();
-            return replace(rewriter, Box::new(li));
+            let li = CLoadImmOpBuilder::new(context).attr("imm", imm);
+            return replace(rewriter, Box::new(tir::reg_def!(li, rd, rd_slot).build()));
         }
         if rs1 == 2 && is_c_reg(rd) && value > 0 && fits_uimm(value, 10, 4) {
-            let addi4spn = CAddImm4SpNOpBuilder::new(context)
-                .attr("rd", rd_attr)
-                .attr("imm", AttributeValue::Int(value))
-                .build();
-            return replace(rewriter, Box::new(addi4spn));
+            let addi4spn = CAddImm4SpNOpBuilder::new(context).attr("imm", imm);
+            return replace(
+                rewriter,
+                Box::new(tir::reg_def!(addi4spn, rd, rd_slot).build()),
+            );
         }
         return Ok(false);
     }
@@ -167,11 +163,10 @@ fn compress(
             return Ok(false);
         };
         if rd == rs1 && rd != 0 && fits_simm6(value) {
-            let addiw = CAddImmWordOpBuilder::new(context)
-                .attr("rd", reg_attr(&inner, "rd").expect("checked above"))
-                .attr("imm", AttributeValue::Int(value))
-                .build();
-            return replace(rewriter, Box::new(addiw));
+            let addiw = CAddImmWordOpBuilder::new(context).attr("imm", AttributeValue::Int(value));
+            let addiw = tir::reg_use!(addiw, rd_tied, slot(&inner, "rs1").expect("checked above"));
+            let addiw = tir::reg_def!(addiw, rd, slot(&inner, "rd").expect("checked above"));
+            return replace(rewriter, Box::new(addiw.build()));
         }
         return Ok(false);
     }
@@ -184,11 +179,9 @@ fn compress(
         // compressed form holds its 6 low bits sign-extended.
         let value = ((value & 0xFFFFF) << 44) >> 44;
         if rd != 0 && rd != 2 && value != 0 && fits_simm6(value) {
-            let lui = CLoadUpperImmOpBuilder::new(context)
-                .attr("rd", reg_attr(&inner, "rd").expect("checked above"))
-                .attr("imm", AttributeValue::Int(value))
-                .build();
-            return replace(rewriter, Box::new(lui));
+            let lui = CLoadUpperImmOpBuilder::new(context).attr("imm", AttributeValue::Int(value));
+            let lui = tir::reg_def!(lui, rd, slot(&inner, "rd").expect("checked above"));
+            return replace(rewriter, Box::new(lui.build()));
         }
         return Ok(false);
     }
@@ -199,7 +192,7 @@ fn compress(
         else {
             return Ok(false);
         };
-        let rd_attr = reg_attr(&inner, "rd").expect("checked above");
+        let rd_slot = slot(&inner, "rd").expect("checked above");
         let src = if rd == rs1 && rs2 != 0 {
             Some("rs2")
         } else if rd == rs2 && rs1 != 0 {
@@ -210,11 +203,12 @@ fn compress(
         if rd != 0
             && let Some(src) = src
         {
-            let add = CAddOpBuilder::new(context)
-                .attr("rd", rd_attr)
-                .attr("rs2", reg_attr(&inner, src).expect("checked above"))
-                .build();
-            return replace(rewriter, Box::new(add));
+            let add = CAddOpBuilder::new(context);
+            // `c.add` is two-address: the destination is also the first source.
+            let tied = if src == "rs2" { "rs1" } else { "rs2" };
+            let add = tir::reg_use!(add, rd_tied, slot(&inner, tied).expect("checked above"));
+            let add = tir::reg_use!(add, rs2, slot(&inner, src).expect("checked above"));
+            return replace(rewriter, Box::new(tir::reg_def!(add, rd, rd_slot).build()));
         }
         let src = if rs1 == 0 && rs2 != 0 {
             Some("rs2")
@@ -226,11 +220,9 @@ fn compress(
         if rd != 0
             && let Some(src) = src
         {
-            let mv = CMoveOpBuilder::new(context)
-                .attr("rd", rd_attr)
-                .attr("rs2", reg_attr(&inner, src).expect("checked above"))
-                .build();
-            return replace(rewriter, Box::new(mv));
+            let mv = CMoveOpBuilder::new(context);
+            let mv = tir::reg_use!(mv, rs2, slot(&inner, src).expect("checked above"));
+            return replace(rewriter, Box::new(tir::reg_def!(mv, rd, rd_slot).build()));
         }
         return Ok(false);
     }
@@ -257,11 +249,15 @@ fn compress(
                     && is_c_reg(rs2)
                     && let Some(src) = src
                 {
-                    let new_op = $builder::new(context)
-                        .attr("rd", reg_attr(&inner, "rd").expect("checked above"))
-                        .attr("rs2", reg_attr(&inner, src).expect("checked above"))
-                        .build();
-                    return replace(rewriter, Box::new(new_op));
+                    let tied = if src == "rs2" { "rs1" } else { "rs2" };
+                    let new_op = $builder::new(context);
+                    let new_op =
+                        tir::reg_use!(new_op, rd_tied, slot(&inner, tied).expect("checked above"));
+                    let new_op =
+                        tir::reg_use!(new_op, rs2, slot(&inner, src).expect("checked above"));
+                    let new_op =
+                        tir::reg_def!(new_op, rd, slot(&inner, "rd").expect("checked above"));
+                    return replace(rewriter, Box::new(new_op.build()));
                 }
                 return Ok(false);
             }
@@ -287,11 +283,12 @@ fn compress(
                 };
                 #[allow(clippy::redundant_closure_call)]
                 if rd == rs1 && ($rd_ok)(rd) && ($imm_ok)(value) {
-                    let new_op = $builder::new(context)
-                        .attr("rd", reg_attr(&inner, "rd").expect("checked above"))
-                        .attr("imm", AttributeValue::Int(value))
-                        .build();
-                    return replace(rewriter, Box::new(new_op));
+                    let new_op = $builder::new(context).attr("imm", AttributeValue::Int(value));
+                    let new_op =
+                        tir::reg_use!(new_op, rd_tied, slot(&inner, "rs1").expect("checked above"));
+                    let new_op =
+                        tir::reg_def!(new_op, rd, slot(&inner, "rd").expect("checked above"));
+                    return replace(rewriter, Box::new(new_op.build()));
                 }
                 return Ok(false);
             }
@@ -321,30 +318,34 @@ fn compress(
     // Loads and stores: sp-relative forms take the full register set and a
     // wider offset; the general forms need both registers in x8..x15.
     macro_rules! mem_op {
-        ($ty:ty, $data:literal, $scale:literal, $sp_bits:literal, $c_bits:literal,
+        ($ty:ty, $dir:ident, $data:ident, $scale:literal, $sp_bits:literal, $c_bits:literal,
          $sp_builder:ident, $c_builder:ident, $data_ok:expr, $sp_data_ok:expr) => {
             if let Some(inner) = op.as_op::<$ty>() {
-                let (Some(data), Some(rs1), Some(value)) =
-                    (reg(&inner, $data), reg(&inner, "rs1"), imm(&inner, "imm"))
-                else {
+                let (Some(data), Some(rs1), Some(value)) = (
+                    reg(&inner, stringify!($data)),
+                    reg(&inner, "rs1"),
+                    imm(&inner, "imm"),
+                ) else {
                     return Ok(false);
                 };
+                let data_slot = slot(&inner, stringify!($data)).expect("checked above");
                 #[allow(clippy::redundant_closure_call)]
                 if rs1 == 2 && ($sp_data_ok)(data) && fits_uimm(value, $sp_bits, $scale) {
+                    // The sp-relative forms name the stack pointer implicitly;
+                    // the slot says which register that is.
                     let new_op = $sp_builder::new(context)
-                        .attr($data, reg_attr(&inner, $data).expect("checked above"))
-                        .attr("imm", AttributeValue::Int(value))
-                        .build();
-                    return replace(rewriter, Box::new(new_op));
+                        .attr("x2", phys(&(crate::RegClass::GPR.id(), 2)))
+                        .attr("imm", AttributeValue::Int(value));
+                    let new_op = tir::$dir!(new_op, $data, data_slot);
+                    return replace(rewriter, Box::new(new_op.build()));
                 }
                 #[allow(clippy::redundant_closure_call)]
                 if ($data_ok)(data) && is_c_reg(rs1) && fits_uimm(value, $c_bits, $scale) {
-                    let new_op = $c_builder::new(context)
-                        .attr($data, reg_attr(&inner, $data).expect("checked above"))
-                        .attr("rs1", reg_attr(&inner, "rs1").expect("checked above"))
-                        .attr("imm", AttributeValue::Int(value))
-                        .build();
-                    return replace(rewriter, Box::new(new_op));
+                    let new_op = $c_builder::new(context).attr("imm", AttributeValue::Int(value));
+                    let new_op =
+                        tir::reg_use!(new_op, rs1, slot(&inner, "rs1").expect("checked above"));
+                    let new_op = tir::$dir!(new_op, $data, data_slot);
+                    return replace(rewriter, Box::new(new_op.build()));
                 }
                 return Ok(false);
             }
@@ -354,7 +355,8 @@ fn compress(
     let not_zero = |r: u16| r != 0;
     mem_op!(
         LoadWordOp,
-        "rd",
+        reg_def,
+        rd,
         4,
         8,
         7,
@@ -365,7 +367,8 @@ fn compress(
     );
     mem_op!(
         StoreWordOp,
-        "rs2",
+        reg_use,
+        rs2,
         4,
         8,
         7,
@@ -377,7 +380,8 @@ fn compress(
     if xlen == 64 {
         mem_op!(
             LoadDoubleWordOp,
-            "rd",
+            reg_def,
+            rd,
             8,
             9,
             8,
@@ -388,7 +392,8 @@ fn compress(
         );
         mem_op!(
             StoreDoubleWordOp,
-            "rs2",
+            reg_use,
+            rs2,
             8,
             9,
             8,
@@ -403,7 +408,8 @@ fn compress(
     // conjunction. The word forms are rv32-only.
     mem_op!(
         FLoadDoubleOp,
-        "fd",
+        reg_def,
+        fd,
         8,
         9,
         8,
@@ -414,7 +420,8 @@ fn compress(
     );
     mem_op!(
         FStoreDoubleOp,
-        "fs2",
+        reg_use,
+        fs2,
         8,
         9,
         8,
@@ -426,7 +433,8 @@ fn compress(
     if xlen == 32 {
         mem_op!(
             FLoadWordOp,
-            "fd",
+            reg_def,
+            fd,
             4,
             8,
             7,
@@ -437,7 +445,8 @@ fn compress(
         );
         mem_op!(
             FStoreWordOp,
-            "fs2",
+            reg_use,
+            fs2,
             4,
             8,
             7,
@@ -455,18 +464,17 @@ fn compress(
             return Ok(false);
         };
         if value == 0 && rs1 != 0 {
-            let rs1_attr = reg_attr(&inner, "rs1").expect("checked above");
+            let rs1_slot = slot(&inner, "rs1").expect("checked above");
             if rd == 0 {
-                let jr = CJumpRegOpBuilder::new(context)
-                    .attr("rs1", rs1_attr)
-                    .build();
-                return replace(rewriter, Box::new(jr));
+                let jr = CJumpRegOpBuilder::new(context);
+                return replace(rewriter, Box::new(tir::reg_use!(jr, rs1, rs1_slot).build()));
             }
             if rd == 1 {
-                let jalr = CJumpAndLinkRegOpBuilder::new(context)
-                    .attr("rs1", rs1_attr)
-                    .build();
-                return replace(rewriter, Box::new(jalr));
+                let jalr = CJumpAndLinkRegOpBuilder::new(context);
+                return replace(
+                    rewriter,
+                    Box::new(tir::reg_use!(jalr, rs1, rs1_slot).build()),
+                );
             }
         }
         return Ok(false);

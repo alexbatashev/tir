@@ -249,15 +249,6 @@ pub trait Pass: Send {
         PassTarget::Any
     }
 
-    /// The IR contract this pass leaves behind. Instruction selection rewrites
-    /// SSA operations into machine instructions, which record their destination
-    /// as a register attribute instead of an SSA result (see
-    /// [`Rewriter::replace_op`]); [`crate::verify_op_tree`] checks the SSA
-    /// contract, so it does not describe that output.
-    fn emits_machine_ir(&self) -> bool {
-        false
-    }
-
     /// Run on `op`. A pass reports nothing about what it changed: every edit
     /// bumps the version stamps of the ops it touched (see
     /// [`Context::op_version`]), which is what invalidates cached analyses and
@@ -273,23 +264,11 @@ pub trait Pass: Send {
 
 pub struct Rewriter {
     context: Context,
-    /// Set while a machine-emitting pass runs. Such a pass replaces a source op
-    /// with machine ops that declare no SSA results and instead claim the
-    /// original result's def-site through a Def-role register attribute, so the
-    /// erased op's result values must outlive it.
-    results_claimed: bool,
 }
 
 impl Rewriter {
     pub fn new(context: Context) -> Self {
-        Self {
-            context,
-            results_claimed: false,
-        }
-    }
-
-    pub(crate) fn set_results_claimed(&mut self, claimed: bool) {
-        self.results_claimed = claimed;
+        Self { context }
     }
 
     pub fn context(&self) -> &Context {
@@ -374,19 +353,55 @@ impl Rewriter {
         if block.replace_op(target.op.id, new_op.id()) {
             // Rewrite SSA uses of the old results to the new op's results when the
             // shapes line up, so consumers don't dangle on the erased op's values.
-            // Machine ops declare no SSA results — they instead claim the original
-            // result's def-site through a Def-role register attribute (the emitter
-            // destination convention) — so they skip this entirely and the original
-            // values stay live.
             let new_results = self.context.get_op(new_op.id()).results().to_vec();
-            let results_forwarded = new_results.len() == target.op.results().len();
-            if results_forwarded {
+            if new_results.len() == target.op.results().len() {
                 for (old, new) in target.op.results().iter().zip(new_results.iter()) {
                     self.context.replace_value_uses(*old, *new);
                 }
             }
-            // Drop the old op and what it owns so nothing lingers as a phantom.
-            self.remove(target.op.id, results_forwarded);
+            // Drop the old op and what it owns so nothing lingers as a phantom,
+            // except the values the replacement adopted as its own results.
+            self.context
+                .remove_operation_except(target.op.id, &new_results);
+            Ok(())
+        } else {
+            Err(PassError::RewriteFailed(target.op.id))
+        }
+    }
+
+    /// Erase `op` but keep the values it defined. Register allocation erases a
+    /// copy it granted one register at both ends: the move is gone, the value it
+    /// produced lives on in that register, and the ops naming it still do.
+    pub fn erase_op_keeping_results(&mut self, target: &OperationRef) -> Result<(), PassError> {
+        let block = target
+            .block
+            .as_ref()
+            .ok_or(PassError::MissingBlock(target.name().as_str()))?;
+        if block.remove_op(target.op.id) {
+            let results = target.op.results().to_vec();
+            self.context.remove_operation_except(target.op.id, &results);
+            Ok(())
+        } else {
+            Err(PassError::RewriteFailed(target.op.id))
+        }
+    }
+
+    /// [`Rewriter::replace_op`] keeping the values `target` defined. A function
+    /// becoming an `asm.symbol` loses the SSA result that named it, but the
+    /// calls in every other function of the module still name it — they resolve
+    /// it by symbol name, and the value only has to stay readable until they do.
+    pub fn replace_op_keeping_results(
+        &mut self,
+        target: &OperationRef,
+        new_op: &dyn Operation,
+    ) -> Result<(), PassError> {
+        let block = target
+            .block
+            .as_ref()
+            .ok_or(PassError::MissingBlock(target.name().as_str()))?;
+        if block.replace_op(target.op.id, new_op.id()) {
+            let results = target.op.results().to_vec();
+            self.context.remove_operation_except(target.op.id, &results);
             Ok(())
         } else {
             Err(PassError::RewriteFailed(target.op.id))
@@ -399,20 +414,10 @@ impl Rewriter {
             .as_ref()
             .ok_or(PassError::MissingBlock(target.name().as_str()))?;
         if block.remove_op(target.op.id) {
-            self.remove(target.op.id, true);
+            self.context.remove_operation(target.op.id);
             Ok(())
         } else {
             Err(PassError::RewriteFailed(target.op.id))
-        }
-    }
-
-    /// Erase `op` and the entities it owns. Its result values go with it unless
-    /// they were forwarded to a replacement or are claimed by machine ops.
-    fn remove(&self, op: OpId, results_dead: bool) {
-        if results_dead && !self.results_claimed {
-            self.context.remove_operation(op);
-        } else {
-            self.context.remove_operation_keeping_results(op);
         }
     }
 
@@ -479,11 +484,11 @@ fn refreshed(context: &Context, root: &OperationRef) -> Option<OperationRef> {
 }
 
 /// Whether `op`'s tree has entered the machine layer — it holds a target
-/// instruction, or one of the `asm` dialect's containers and pseudos. A machine
-/// instruction declares no SSA results; it claims its destination through a
-/// register attribute (see [`Rewriter::replace_op`]). The SSA contract
-/// [`crate::verify_op_tree`] checks therefore does not describe such a tree, and
-/// no verifier expresses the machine contract yet.
+/// instruction, or one of the `asm` dialect's containers and pseudos. Machine
+/// IR is not SSA (block-parameter destruction leaves a parameter defined once
+/// per predecessor), so the contract [`crate::verify_op_tree`] checks does not
+/// describe such a tree; [`crate::backend::verify_machine_ir`] states the one
+/// that does.
 fn is_machine_ir(context: &Context, op_id: OpId) -> bool {
     if !context.has_operation(op_id) {
         return false;
@@ -649,7 +654,6 @@ impl PassManager {
             PassNode::Pass(pass) => {
                 let scope = crate::memstats::pass_scope(pass.name());
                 let started = timing::enabled().then(std::time::Instant::now);
-                rewriter.set_results_claimed(pass.emits_machine_ir());
                 let version_before = context.op_version(root.op.id);
                 PassManager::walk_ops(context, root, &mut |op_ref| {
                     if pass.target().matches(op_ref.op()) {
@@ -662,16 +666,15 @@ impl PassManager {
                 // than from the pass's own report.
                 let mutated = context.op_version(root.op.id) != version_before;
                 let dirty = context.take_dirty_ops();
-                if mutated
-                    && verify_ir.unwrap_or_else(ir_verification_enabled)
-                    && !pass.emits_machine_ir()
-                    && !is_machine_ir(context, root.op.id)
-                {
-                    verify_dirty_subtrees(context, root.op.id, &dirty).map_err(|error| {
-                        PassError::InvalidIR {
-                            pass: pass.name(),
-                            error,
-                        }
+                if mutated && verify_ir.unwrap_or_else(ir_verification_enabled) {
+                    let result = if is_machine_ir(context, root.op.id) {
+                        crate::backend::verify_machine_ir(context, root.op.id)
+                    } else {
+                        verify_dirty_subtrees(context, root.op.id, &dirty)
+                    };
+                    result.map_err(|error| PassError::InvalidIR {
+                        pass: pass.name(),
+                        error,
                     })?;
                 }
                 if let Some(started) = started {

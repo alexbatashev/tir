@@ -18,7 +18,7 @@ module {
 }
 
 // CHECK: asm.symbol {name = "z8"
-// CHECK: riscv.andi {rd = %virt{{[0-9]+}}:GPR, rs1 = %virt{{[0-9]+}}:GPR, imm = 255}
+// CHECK: riscv.andi {rd = %{{[0-9]+}}:GPR, rs1 = %{{[0-9]+}}:GPR, imm = 255}
 // CHECK: asm.symbol {name = "z16"
-// CHECK: riscv.slli {rd = %virt[[T:[0-9]+]]:GPR, rs1 = %virt{{[0-9]+}}:GPR, imm = 48}
-// CHECK-NEXT: riscv.srli {rd = %virt{{[0-9]+}}:GPR, rs1 = %virt[[T]]:GPR, imm = 48}
+// CHECK: riscv.slli {rd = %[[T:[0-9]+]]:GPR, rs1 = %{{[0-9]+}}:GPR, imm = 48}
+// CHECK-NEXT: riscv.srli {rd = %{{[0-9]+}}:GPR, rs1 = %[[T]]:GPR, imm = 48}

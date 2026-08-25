@@ -1,8 +1,8 @@
 //! Liveness analysis over machine IR.
 //!
-//! Register operands are resolved through [`op_regs`] (see
-//! [`crate::analysis::defuse`]), which unifies SSA `operands`/`results` and
-//! register-valued attributes into a single `u32` virtual-register space.
+//! Register operands are SSA operands and results, read through [`op_regs`]
+//! (see [`crate::analysis::defuse`]); a virtual register is a value, named here
+//! by its value number.
 //!
 //! The analysis computes, per block, the standard backward live-in/live-out sets,
 //! then replays a backward scan to derive the interference the register allocator
@@ -13,12 +13,11 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use tir::backend::regalloc::RegClassId;
-use tir::{BlockId, Context};
+use tir::{BlockId, Context, ValueId};
 
-pub use crate::analysis::defuse::{OpRegs, RegRef, execution_regs, op_regs};
+pub use crate::analysis::defuse::{OpRegs, PhysReg, execution_regs, op_regs};
 
-/// A physical register: its class handle and encoding index.
-pub type PhysReg = (RegClassId, u16);
+use crate::backend::registers::value_class;
 
 /// Per-op register information cached for the backward scans.
 struct OpInfo {
@@ -96,10 +95,8 @@ fn referenced_vregs(context: &Context, blocks: &[BlockId]) -> BTreeSet<u32> {
     for &block_id in blocks {
         for op_id in context.get_block(block_id).op_ids() {
             let regs = op_regs(&context.get_op(op_id));
-            for r in regs.uses.iter().chain(&regs.defs) {
-                if let RegRef::Virtual { id, .. } = r {
-                    referenced.insert(*id);
-                }
+            for value in regs.uses.iter().chain(&regs.defs) {
+                referenced.insert(value.number());
             }
         }
     }
@@ -118,6 +115,7 @@ pub fn analyze(
 ) -> Liveness {
     let mut result = Liveness::default();
     let referenced = referenced_vregs(context, blocks);
+    let mut value_classes: HashMap<ValueId, Option<RegClassId>> = HashMap::new();
 
     // 1. Gather per-block, per-op register info; discover vreg classes.
     let mut block_infos: Vec<BlockInfo> = Vec::new();
@@ -146,42 +144,46 @@ pub fn analyze(
 
         for op_id in block.op_ids() {
             let op = context.get_op(op_id);
-            let regs = op_regs(&op);
+            let slots = crate::backend::reg_slots(&op);
+            let regs = crate::analysis::defuse::op_regs_from(&op, &slots);
+            let port_classes = slot_classes(&slots);
 
             let mut def_vregs = Vec::new();
             let mut use_vregs = Vec::new();
             let mut clobbers = Vec::new();
             let mut phys_uses = Vec::new();
 
-            for r in &regs.uses {
-                match r {
-                    RegRef::Virtual { id, class } => {
-                        record_class(&mut result, *id, class);
-                        result.vregs.insert(*id);
-                        use_vregs.push(*id);
-                        if !defined.contains(id) {
-                            exposed_uses.insert(*id);
-                        }
-                    }
-                    RegRef::Physical { class, index } => {
-                        phys_uses.push((*class, *index));
-                    }
+            for value in &regs.uses {
+                let id = value.number();
+                record_class(
+                    &mut result,
+                    context,
+                    *value,
+                    slot_class(&port_classes, *value),
+                    &mut value_classes,
+                );
+                result.vregs.insert(id);
+                use_vregs.push(id);
+                if !defined.contains(&id) {
+                    exposed_uses.insert(id);
                 }
             }
-            for r in &regs.defs {
-                match r {
-                    RegRef::Virtual { id, class } => {
-                        record_class(&mut result, *id, class);
-                        result.vregs.insert(*id);
-                        def_vregs.push(*id);
-                        defined.insert(*id);
-                        block_defs.insert(*id);
-                    }
-                    RegRef::Physical { class, index } => {
-                        clobbers.push((*class, *index));
-                    }
-                }
+            for value in &regs.defs {
+                let id = value.number();
+                record_class(
+                    &mut result,
+                    context,
+                    *value,
+                    slot_class(&port_classes, *value),
+                    &mut value_classes,
+                );
+                result.vregs.insert(id);
+                def_vregs.push(id);
+                defined.insert(id);
+                block_defs.insert(id);
             }
+            phys_uses.extend(regs.phys_uses.iter().copied());
+            clobbers.extend(regs.phys_defs.iter().copied());
 
             ops.push(OpInfo {
                 def_vregs,
@@ -332,17 +334,55 @@ pub fn analyze(
     result
 }
 
-/// Constrain vreg `id` to `class`. A vreg referenced through several classes must
+/// The class each resolved register slot narrows its value to. A value read
+/// through several slots must satisfy them all at once.
+fn slot_classes(slots: &[crate::backend::SlotRef]) -> Vec<(ValueId, RegClassId)> {
+    let mut classes = Vec::with_capacity(slots.len());
+    for slot in slots {
+        if let (crate::backend::RegSlot::Value(value), Some(class)) = (slot.slot, slot.port.class)
+            && !classes.iter().any(|(seen, _)| *seen == value)
+        {
+            classes.push((value, class));
+        }
+    }
+    classes
+}
+
+/// Constrain `value` to the class its type names, narrowed by the class the
+/// slot reading it encodes. A vreg referenced through several classes must
 /// satisfy all of them at once, so the constraints intersect: it may only be
 /// assigned a register every one of them encodes (an x86 value read by a REX-free
 /// operand form is confined to that form's low registers even where it is also
 /// copied through the full `GPR` class). Classes viewing different files or
 /// different offsets of one file, or sharing no register, cannot both hold and are
 /// reported instead of silently resolved to one of them.
-fn record_class(result: &mut Liveness, id: u32, class: &Option<RegClassId>) {
-    let Some(class) = *class else {
-        return;
-    };
+/// The class the slot reading `value` narrows it to, if any.
+fn slot_class(classes: &[(ValueId, RegClassId)], value: ValueId) -> Option<RegClassId> {
+    classes
+        .iter()
+        .find(|(slot, _)| *slot == value)
+        .map(|(_, class)| *class)
+}
+
+fn record_class(
+    result: &mut Liveness,
+    context: &Context,
+    value: ValueId,
+    port_class: Option<RegClassId>,
+    seen: &mut HashMap<ValueId, Option<RegClassId>>,
+) {
+    let id = value.number();
+    // A value's own class is its type, which does not change while the scan
+    // runs; reading it goes through the type interner, so read it once.
+    let own = *seen
+        .entry(value)
+        .or_insert_with(|| value_class(context, value));
+    for class in own.iter().chain(port_class.iter()) {
+        record_one_class(result, id, *class);
+    }
+}
+
+fn record_one_class(result: &mut Liveness, id: u32, class: RegClassId) {
     let Some(current) = result.vreg_class.get(&id).copied() else {
         result.vreg_class.insert(id, class);
         result
@@ -350,6 +390,18 @@ fn record_class(result: &mut Liveness, id: u32, class: &Option<RegClassId>) {
             .insert(id, class.registers.iter().copied().collect());
         return;
     };
+    // A register group named through a single-register slot (an RVV LMUL group
+    // in a `VR` operand) allocates as the group: the wider class decides, and
+    // the narrower one constrains nothing.
+    if class.group_width != current.group_width && class.file() == current.file() {
+        if class.group_width > current.group_width {
+            result.vreg_class.insert(id, class);
+            result
+                .allowed_indices
+                .insert(id, class.registers.iter().copied().collect());
+        }
+        return;
+    }
     if !class.shares_view_with(current) {
         result.class_conflicts.entry(id).or_insert((current, class));
         return;

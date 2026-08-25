@@ -39,4 +39,8 @@ impl Value {
     pub(crate) fn set_defining_op(&mut self, op: OpId) {
         self.defining_op = Some(op);
     }
+
+    pub(crate) fn set_ty(&mut self, ty: TypeId) {
+        self.ty = ty;
+    }
 }

@@ -23,5 +23,5 @@ module {
 
 // The loop's own test, and then the body: nothing but the edge leaving it.
 // CHECK: x86_64.jne
-// CHECK: ^{{bb[0-9]+}}(%{{[0-9]+}}: !i32):
+// CHECK: ^{{bb[0-9]+}}(%{{[0-9]+}}: !x86_64.GPR):
 // CHECK-NEXT: asm.vbr ^{{bb[0-9]+}}

@@ -4,25 +4,50 @@ use std::collections::BTreeSet;
 
 use tir::backend::liveness::analyze;
 use tir::backend::regalloc::{RegClassId, RegClassInfo, RegisterView};
+use tir::backend::{ControlFlow, InstrInfo, MachineInstruction, RegClassType, RegPort};
 use tir::builtin::{ops, IntegerType};
 use tir::{BlockHandle, Context, Operation, TypeId, ValueId};
 
 use super::fixtures::r;
 
+// The test ops: each names one register slot. A slot's class is a per-opcode
+// fact, so there is one op per class the tests constrain a value through; the
+// value's own class is its type.
+macro_rules! slot_op {
+    ($op:ident, $ports:ident, $name:literal, $class:expr, $def:literal) => {
+        static $ports: [RegPort; 1] = [RegPort {
+            name: "r",
+            class: $class,
+            def: $def,
+            tied_to: None,
+        }];
+
+        impl MachineInstruction for $op {
+            fn info(&self) -> &'static InstrInfo {
+                static INFO: InstrInfo = InstrInfo {
+                    name: $name,
+                    mnemonic: $name,
+                    control_flow: ControlFlow::None,
+                    regs: &$ports,
+                    ..InstrInfo::BASE
+                };
+                &INFO
+            }
+
+            fn instance(&self) -> &tir::OpHandle {
+                &self.0
+            }
+        }
+    };
+}
+
 tir::helpers::operation! {
     PhysDefOp {
         name: "phys_def",
         dialect: "test",
-        attributes: A {
-            r: "Register",
-        },
-        interfaces: [tir::attributes::RegisterSemantics],
-    }
-}
-
-impl tir::attributes::RegisterSemantics for PhysDefOp {
-    fn attribute_roles(&self) -> &'static [(&'static str, tir::attributes::AttributeRole)] {
-        &[("r", tir::attributes::AttributeRole::Def)]
+        operands: O { r: "?tir::backend::RegClassType", },
+        results: R { regs: "*tir::backend::RegClassType" },
+        interfaces: [tir::backend::MachineInstruction],
     }
 }
 
@@ -30,22 +55,86 @@ tir::helpers::operation! {
     PhysUseOp {
         name: "phys_use",
         dialect: "test",
-        attributes: A {
-            r: "Register",
-        },
-        interfaces: [tir::attributes::RegisterSemantics],
+        operands: O { r: "?tir::backend::RegClassType", },
+        results: R { regs: "*tir::backend::RegClassType" },
+        interfaces: [tir::backend::MachineInstruction],
     }
 }
 
-impl tir::attributes::RegisterSemantics for PhysUseOp {
-    fn attribute_roles(&self) -> &'static [(&'static str, tir::attributes::AttributeRole)] {
-        &[("r", tir::attributes::AttributeRole::Use)]
+tir::helpers::operation! {
+    UseROp {
+        name: "use_r",
+        dialect: "test",
+        operands: O { r: "?tir::backend::RegClassType", },
+        results: R { regs: "*tir::backend::RegClassType" },
+        interfaces: [tir::backend::MachineInstruction],
     }
 }
+
+tir::helpers::operation! {
+    UseRlowOp {
+        name: "use_rlow",
+        dialect: "test",
+        operands: O { r: "?tir::backend::RegClassType", },
+        results: R { regs: "*tir::backend::RegClassType" },
+        interfaces: [tir::backend::MachineInstruction],
+    }
+}
+
+tir::helpers::operation! {
+    UseRhighOp {
+        name: "use_rhigh",
+        dialect: "test",
+        operands: O { r: "?tir::backend::RegClassType", },
+        results: R { regs: "*tir::backend::RegClassType" },
+        interfaces: [tir::backend::MachineInstruction],
+    }
+}
+
+tir::helpers::operation! {
+    UseRmidOp {
+        name: "use_rmid",
+        dialect: "test",
+        operands: O { r: "?tir::backend::RegClassType", },
+        results: R { regs: "*tir::backend::RegClassType" },
+        interfaces: [tir::backend::MachineInstruction],
+    }
+}
+
+tir::helpers::operation! {
+    UseROtherOp {
+        name: "use_rother",
+        dialect: "test",
+        operands: O { r: "?tir::backend::RegClassType", },
+        results: R { regs: "*tir::backend::RegClassType" },
+        interfaces: [tir::backend::MachineInstruction],
+    }
+}
+
+slot_op!(PhysDefOp, PHYS_DEF_PORTS, "phys_def", None, true);
+slot_op!(PhysUseOp, PHYS_USE_PORTS, "phys_use", None, false);
+slot_op!(UseROp, USE_R_PORTS, "use_r", Some(r()), false);
+slot_op!(UseRlowOp, USE_RLOW_PORTS, "use_rlow", Some(r_low()), false);
+slot_op!(
+    UseRhighOp,
+    USE_RHIGH_PORTS,
+    "use_rhigh",
+    Some(r_high()),
+    false
+);
+slot_op!(UseRmidOp, USE_RMID_PORTS, "use_rmid", Some(r_mid()), false);
+slot_op!(
+    UseROtherOp,
+    USE_ROTHER_PORTS,
+    "use_rother",
+    Some(r_other()),
+    false
+);
 
 // A subclass of `R` over the same file and view: fewer encodable registers.
 static R_LOW_CLASS: RegClassInfo = RegClassInfo {
     name: "Rlow",
+    dialect: "test",
     file: "R",
     registers: &[0, 1],
     group_width: 1,
@@ -53,12 +142,14 @@ static R_LOW_CLASS: RegClassInfo = RegClassInfo {
         bit_offset: 0,
         merge: false,
     },
+    print_name: tir::backend::regalloc::no_register_name,
 };
 
 // Same file and index set as `Rlow`, but a different architectural view (an
 // x86 high-byte class): no register satisfies both constraints.
 static R_HIGH_CLASS: RegClassInfo = RegClassInfo {
     name: "Rhigh",
+    dialect: "test",
     file: "R",
     registers: &[0, 1],
     group_width: 1,
@@ -66,94 +157,127 @@ static R_HIGH_CLASS: RegClassInfo = RegClassInfo {
         bit_offset: 8,
         merge: true,
     },
+    print_name: tir::backend::regalloc::no_register_name,
 };
 
-fn r_low() -> RegClassId {
+const fn r_low() -> RegClassId {
     RegClassId::new(&R_LOW_CLASS)
 }
 
-fn r_high() -> RegClassId {
+const fn r_high() -> RegClassId {
     RegClassId::new(&R_HIGH_CLASS)
 }
 
-// Append an op reading virtual register `id` through class `class`.
-fn vreg_use(context: &Context, block: &BlockHandle, id: u32, class: RegClassId) {
-    use tir::attributes::{AttributeValue, RegisterAttr};
+// Two classes over one view where neither contains the other (x86 `GPR32low`,
+// which includes esp, and `GPRaddrIndex`, which excludes rsp but reaches r8+).
+static R_MID_CLASS: RegClassInfo = RegClassInfo {
+    name: "Rmid",
+    dialect: "test",
+    file: "R",
+    registers: &[1, 2, 3],
+    group_width: 1,
+    view: RegisterView {
+        bit_offset: 0,
+        merge: false,
+    },
+    print_name: tir::backend::regalloc::no_register_name,
+};
 
-    PhysUseOp::register_interfaces(context);
-    let register = AttributeValue::Register(RegisterAttr::Virtual {
-        id,
-        class: Some(class),
-    });
-    let op = PhysUseOpBuilder::new(context)
-        .attr("r", register)
-        .build()
-        .id();
+const fn r_mid() -> RegClassId {
+    RegClassId::new(&R_MID_CLASS)
+}
+
+// Over one view with `Rlow`, but sharing no register with it.
+static R_OTHER_CLASS: RegClassInfo = RegClassInfo {
+    name: "Rother",
+    dialect: "test",
+    file: "R",
+    registers: &[2, 3],
+    group_width: 1,
+    view: RegisterView {
+        bit_offset: 0,
+        merge: false,
+    },
+    print_name: tir::backend::regalloc::no_register_name,
+};
+
+const fn r_other() -> RegClassId {
+    RegClassId::new(&R_OTHER_CLASS)
+}
+
+// A value of class `class`, the only thing its type says about it.
+fn reg_value(context: &Context, class: RegClassId) -> ValueId {
+    context
+        .create_value(RegClassType::new(context, class), None)
+        .id()
+}
+
+// Append an op reading `value` through the register slot of class `class`.
+fn vreg_use(context: &Context, block: &BlockHandle, value: ValueId, class: RegClassId) {
+    macro_rules! read {
+        ($op:ident, $builder:ident) => {{
+            $op::register_interfaces(context);
+            $builder::new(context).r(value).build().id()
+        }};
+    }
+    let op = match class.name() {
+        "R" => read!(UseROp, UseROpBuilder),
+        "Rlow" => read!(UseRlowOp, UseRlowOpBuilder),
+        "Rhigh" => read!(UseRhighOp, UseRhighOpBuilder),
+        "Rmid" => read!(UseRmidOp, UseRmidOpBuilder),
+        "Rother" => read!(UseROtherOp, UseROtherOpBuilder),
+        other => unreachable!("no test op reads through {other}"),
+    };
     block.append(op);
 }
 
-// A vreg constrained by two classes over one file and view must end up in the
+// A value constrained by two classes over one file and view must end up in the
 // narrower one — the wider constraint is satisfied by every register of the
 // narrower, but not the other way round. Order of appearance is irrelevant.
 #[test]
 fn narrower_class_constraint_wins() {
     for wide_first in [true, false] {
         let context = Context::with_default_dialects();
-        let ty = IntegerType::new(&context, 64);
-        let a = context.create_value(ty, None);
-        let a_id = a.id().number();
-        let block = context.create_block(vec![a]);
+        let a = reg_value(&context, r());
+        let block = context.create_block(vec![context.get_value(a)]);
 
         if wide_first {
-            vreg_use(&context, &block, a_id, r());
-            vreg_use(&context, &block, a_id, r_low());
+            vreg_use(&context, &block, a, r());
+            vreg_use(&context, &block, a, r_low());
         } else {
-            vreg_use(&context, &block, a_id, r_low());
-            vreg_use(&context, &block, a_id, r());
+            vreg_use(&context, &block, a, r_low());
+            vreg_use(&context, &block, a, r());
         }
 
         let liveness = analyze(&context, &[block.id()], |_| Vec::new());
         assert_eq!(
-            liveness.vreg_class.get(&a_id),
+            liveness.vreg_class.get(&a.number()),
             Some(&r_low()),
             "the narrower operand class must survive (wide first: {wide_first})",
         );
         assert_eq!(
-            liveness.allowed_indices.get(&a_id),
+            liveness.allowed_indices.get(&a.number()),
             Some(&BTreeSet::from([0, 1])),
         );
         assert!(liveness.class_conflicts.is_empty());
     }
 }
 
-// Two classes over one view where neither contains the other (x86 `GPR32low`,
-// which includes esp, and `GPRaddrIndex`, which excludes rsp but reaches r8+):
-// the vreg is allocatable from the indices both encode, and nothing else.
+// Two classes over one view where neither contains the other: the value is
+// allocatable from the indices both encode, and nothing else.
 #[test]
 fn overlapping_classes_intersect_their_indices() {
-    static R_MID_CLASS: RegClassInfo = RegClassInfo {
-        name: "Rmid",
-        file: "R",
-        registers: &[1, 2, 3],
-        group_width: 1,
-        view: RegisterView {
-            bit_offset: 0,
-            merge: false,
-        },
-    };
     let context = Context::with_default_dialects();
-    let ty = IntegerType::new(&context, 64);
-    let a = context.create_value(ty, None);
-    let a_id = a.id().number();
-    let block = context.create_block(vec![a]);
+    let a = reg_value(&context, r());
+    let block = context.create_block(vec![context.get_value(a)]);
 
-    vreg_use(&context, &block, a_id, r_low()); // {0, 1}
-    vreg_use(&context, &block, a_id, RegClassId::new(&R_MID_CLASS)); // {1, 2, 3}
+    vreg_use(&context, &block, a, r_low()); // {0, 1}
+    vreg_use(&context, &block, a, r_mid()); // {1, 2, 3}
 
     let liveness = analyze(&context, &[block.id()], |_| Vec::new());
     assert!(liveness.class_conflicts.is_empty());
     assert_eq!(
-        liveness.allowed_indices.get(&a_id),
+        liveness.allowed_indices.get(&a.number()),
         Some(&BTreeSet::from([1])),
     );
 }
@@ -161,46 +285,31 @@ fn overlapping_classes_intersect_their_indices() {
 // Classes over one view with no register in common cannot both be honored.
 #[test]
 fn disjoint_classes_over_one_view_are_reported() {
-    static R_OTHER_CLASS: RegClassInfo = RegClassInfo {
-        name: "Rother",
-        file: "R",
-        registers: &[2, 3],
-        group_width: 1,
-        view: RegisterView {
-            bit_offset: 0,
-            merge: false,
-        },
-    };
     let context = Context::with_default_dialects();
-    let ty = IntegerType::new(&context, 64);
-    let a = context.create_value(ty, None);
-    let a_id = a.id().number();
-    let block = context.create_block(vec![a]);
+    let a = reg_value(&context, r());
+    let block = context.create_block(vec![context.get_value(a)]);
 
-    vreg_use(&context, &block, a_id, r_low()); // {0, 1}
-    vreg_use(&context, &block, a_id, RegClassId::new(&R_OTHER_CLASS)); // {2, 3}
+    vreg_use(&context, &block, a, r_low()); // {0, 1}
+    vreg_use(&context, &block, a, r_other()); // {2, 3}
 
     let liveness = analyze(&context, &[block.id()], |_| Vec::new());
-    assert!(liveness.class_conflicts.contains_key(&a_id));
+    assert!(liveness.class_conflicts.contains_key(&a.number()));
 }
 
-// Two classes where neither is a subclass of the other (here: different views
-// of the same file) cannot both be honored; the allocator must be told rather
-// than silently keeping one.
+// A value's own class and the class of a slot reading it must share a view;
+// here they do not (an x86 high-byte slot reading an offset-0 value), and the
+// allocator must be told rather than silently keeping one.
 #[test]
 fn incompatible_class_constraints_are_reported() {
     let context = Context::with_default_dialects();
-    let ty = IntegerType::new(&context, 64);
-    let a = context.create_value(ty, None);
-    let a_id = a.id().number();
-    let block = context.create_block(vec![a]);
+    let a = reg_value(&context, r_low());
+    let block = context.create_block(vec![context.get_value(a)]);
 
-    vreg_use(&context, &block, a_id, r_low());
-    vreg_use(&context, &block, a_id, r_high());
+    vreg_use(&context, &block, a, r_high());
 
     let liveness = analyze(&context, &[block.id()], |_| Vec::new());
     assert_eq!(
-        liveness.class_conflicts.get(&a_id),
+        liveness.class_conflicts.get(&a.number()),
         Some(&(r_low(), r_high())),
     );
 }

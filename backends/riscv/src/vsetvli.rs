@@ -11,10 +11,12 @@
 //! consecutive instructions sharing a configuration share one configuration
 //! instruction.
 
-use tir::attributes::{AttributeValue, RegisterAttr};
-use tir::backend::{SymbolOp, VirtualCallOp, VirtualIndirectCallOp};
-use tir::builtin::IntegerType;
-use tir::{AnalysisManager, Context, OpId, OperationRef, Pass, PassError, PassTarget, Rewriter};
+use tir::attributes::AttributeValue;
+use tir::backend::{RegSlot, SymbolOp, VirtualCallOp, VirtualIndirectCallOp, reg_slot};
+use tir::{
+    AnalysisManager, Context, OpHandle, OpId, OperationRef, Pass, PassError, PassTarget, Rewriter,
+    ValueId,
+};
 
 use crate::{AddImmOpBuilder, VSetIVliOp, VSetIVliOpBuilder, VSetVliOp, VSetVliOpBuilder};
 
@@ -31,8 +33,8 @@ const VLEN_MIN: i64 = 128;
 /// group holds `vl` elements of `sew` bits at the guaranteed minimum VLEN. A
 /// register AVL (EVL-style, granted at run time) fits a single register by
 /// construction.
-fn lmul_for(avl: &AttributeValue, sew: i64) -> Result<i64, PassError> {
-    let AttributeValue::Int(vl) = avl else {
+fn lmul_for(avl: &Demand, sew: i64) -> Result<i64, PassError> {
+    let Demand::Imm(vl) = avl else {
         return Ok(1);
     };
     let bits = vl * sew;
@@ -51,7 +53,7 @@ fn lmul_for(avl: &AttributeValue, sew: i64) -> Result<i64, PassError> {
 pub(crate) fn vr_class_for_bits(
     total_bits: i64,
 ) -> Result<tir::backend::regalloc::RegClassId, PassError> {
-    match lmul_for(&AttributeValue::Int(1), total_bits)? {
+    match lmul_for(&Demand::Imm(1), total_bits)? {
         1 => Ok(crate::RegClass::VR.id()),
         2 => Ok(crate::RegClass::VRM2.id()),
         4 => Ok(crate::RegClass::VRM4.id()),
@@ -87,28 +89,32 @@ pub(crate) fn vtypei_for(sew: i64, lmul: i64) -> Result<i64, PassError> {
     Ok((1 << 7) | (1 << 6) | (vsew << 3) | vlmul)
 }
 
-/// An AVL demand's identity: the immediate or the SSA value it binds. Register
-/// classes are deliberately ignored — the demand attribute carries no class
-/// while a vsetvli's operands do, and the virtual register id alone names the
-/// value.
-#[derive(Clone, Debug, PartialEq)]
-enum ConfigKey {
+/// A vector-length demand, and the identity a configuration is keyed by: the
+/// immediate the instruction was selected with, or the value its `VCSR::vl`
+/// read bound to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Demand {
     Imm(i64),
-    Vreg(u32),
+    Value(ValueId),
 }
 
-fn config_key(value: &AttributeValue) -> Option<ConfigKey> {
-    match value {
-        AttributeValue::Int(v) => Some(ConfigKey::Imm(*v)),
-        AttributeValue::Register(RegisterAttr::Virtual { id, .. }) => Some(ConfigKey::Vreg(*id)),
-        _ => None,
+/// The demand a register slot of `op` carries: an integer the slot was
+/// materialized to, or the value it reads.
+fn demand(op: &OpHandle, name: &str) -> Option<Demand> {
+    match op.attr(name) {
+        Some(AttributeValue::Int(v)) => Some(Demand::Imm(v)),
+        Some(_) => None,
+        None => match reg_slot(op, name)? {
+            RegSlot::Value(value) => Some(Demand::Value(value)),
+            RegSlot::Phys(_) => None,
+        },
     }
 }
 
 /// The configuration the vector unit holds: the AVL demand keys the granted
 /// `vl` satisfies, and the packed `vtypei` in effect.
 struct ConfigState {
-    keys: Vec<ConfigKey>,
+    keys: Vec<Demand>,
     vtypei: i64,
 }
 
@@ -129,61 +135,41 @@ impl InsertVsetvliPass {
         context: &Context,
         rewriter: &mut Rewriter,
         anchor: &OperationRef,
-        avl: &AttributeValue,
+        avl: Demand,
         vtypei: i64,
     ) -> Result<(), PassError> {
-        let x0 = AttributeValue::Register(RegisterAttr::Physical {
-            class: crate::RegClass::GPR.id(),
-            index: 0,
-        });
+        let _ = self.xlen;
+        let x0 = tir::backend::phys_attr((crate::RegClass::GPR.id(), 0));
+        let vtypei = AttributeValue::Int(vtypei);
         match avl {
-            AttributeValue::Int(v) if (0..=UIMM5_MAX).contains(v) => {
+            Demand::Imm(v) if (0..=UIMM5_MAX).contains(&v) => {
                 let op = VSetIVliOpBuilder::new(context)
                     .attr("rd", x0)
-                    .attr("avl", AttributeValue::Int(*v))
-                    .attr("vtypei", AttributeValue::Int(vtypei))
+                    .attr("avl", AttributeValue::Int(v))
+                    .attr("vtypei", vtypei)
                     .build();
                 rewriter.insert_op_before(anchor, &op)
             }
-            AttributeValue::Int(v) if (0..=SIMM12_MAX).contains(v) => {
-                let ty = IntegerType::new(context, self.xlen);
-                let avl_reg = context.create_value(ty, None).id().number();
+            Demand::Imm(v) if (0..=SIMM12_MAX).contains(&v) => {
+                let avl_reg = context.create_value(crate::gpr_ty(context), None).id();
                 let li = AddImmOpBuilder::new(context)
-                    .attr(
-                        "rd",
-                        AttributeValue::Register(RegisterAttr::Virtual {
-                            id: avl_reg,
-                            class: Some(crate::RegClass::GPR.id()),
-                        }),
-                    )
+                    .result_values(vec![avl_reg])
                     .attr("rs1", x0.clone())
-                    .attr("imm", AttributeValue::Int(*v))
+                    .attr("imm", AttributeValue::Int(v))
                     .build();
                 rewriter.insert_op_before(anchor, &li)?;
                 let op = VSetVliOpBuilder::new(context)
                     .attr("rd", x0)
-                    .attr(
-                        "avl",
-                        AttributeValue::Register(RegisterAttr::Virtual {
-                            id: avl_reg,
-                            class: Some(crate::RegClass::GPR.id()),
-                        }),
-                    )
-                    .attr("vtypei", AttributeValue::Int(vtypei))
+                    .avl(avl_reg)
+                    .attr("vtypei", vtypei)
                     .build();
                 rewriter.insert_op_before(anchor, &op)
             }
-            AttributeValue::Register(RegisterAttr::Virtual { id, .. }) => {
+            Demand::Value(value) => {
                 let op = VSetVliOpBuilder::new(context)
                     .attr("rd", x0)
-                    .attr(
-                        "avl",
-                        AttributeValue::Register(RegisterAttr::Virtual {
-                            id: *id,
-                            class: Some(crate::RegClass::GPR.id()),
-                        }),
-                    )
-                    .attr("vtypei", AttributeValue::Int(vtypei))
+                    .avl(value)
+                    .attr("vtypei", vtypei)
                     .build();
                 rewriter.insert_op_before(anchor, &op)
             }
@@ -229,41 +215,32 @@ impl Pass for InsertVsetvliPass {
                 if body_op.is::<VSetVliOp>() || body_op.is::<VSetIVliOp>() {
                     // An existing configuration instruction (e.g. selected for a
                     // `vector.vector_len`) satisfies demands on its AVL, and —
-                    // when its grant is live (`rd` a virtual register) — demands
-                    // on the granted count, since `vl` equals `rd`'s value.
-                    state = attr("vtypei")
-                        .as_ref()
-                        .and_then(config_key)
-                        .and_then(|vtypei_key| match vtypei_key {
-                            ConfigKey::Imm(vtypei) => {
-                                let mut keys: Vec<ConfigKey> = attr("avl")
-                                    .as_ref()
-                                    .and_then(config_key)
-                                    .into_iter()
-                                    .collect();
-                                if let Some(AttributeValue::Register(RegisterAttr::Virtual {
-                                    id,
-                                    ..
-                                })) = attr("rd")
-                                {
-                                    keys.push(ConfigKey::Vreg(id));
-                                }
-                                Some(ConfigState { keys, vtypei })
+                    // when its grant is live (`rd` a value) — demands on the
+                    // granted count, since `vl` equals `rd`'s value.
+                    state = match attr("vtypei") {
+                        Some(AttributeValue::Int(vtypei)) => {
+                            let mut keys: Vec<Demand> =
+                                demand(&body_op, "avl").into_iter().collect();
+                            if let Some(RegSlot::Value(value)) = reg_slot(&body_op, "rd") {
+                                keys.push(Demand::Value(value));
                             }
-                            ConfigKey::Vreg(_) => None,
-                        });
+                            Some(ConfigState { keys, vtypei })
+                        }
+                        _ => None,
+                    };
                     continue;
                 }
                 if body_op.is::<VirtualCallOp>() || body_op.is::<VirtualIndirectCallOp>() {
                     state = None;
                     continue;
                 }
-                let Some(avl) = attr("vl") else {
+                if body_op.attr("vl").is_none() && reg_slot(&body_op, "vl").is_none() {
                     continue;
-                };
-                let Some(key) = config_key(&avl) else {
+                }
+                let Some(key) = demand(&body_op, "vl") else {
                     return Err(PassError::InvalidRuleSet(format!(
-                        "unsupported vector-length demand {avl:?}"
+                        "vector op '{}' has an unsupported vector-length demand",
+                        body_op.name().as_str()
                     )));
                 };
                 let Some(AttributeValue::Int(sew)) = attr("sew") else {
@@ -273,30 +250,23 @@ impl Pass for InsertVsetvliPass {
                     )));
                 };
                 // LMUL legalization: an op whose demanded elements exceed one
-                // register works on a register group, so its `VR` operands move
-                // to the group class and the allocator assigns aligned spans.
-                let lmul = lmul_for(&avl, sew)?;
+                // register works on a register group, so the values its `VR`
+                // slots name move to the group class and the allocator assigns
+                // aligned spans.
+                let lmul = lmul_for(&key, sew)?;
                 if lmul > 1 {
                     let group = match lmul {
                         2 => crate::RegClass::VRM2.id(),
                         4 => crate::RegClass::VRM4.id(),
                         _ => crate::RegClass::VRM8.id(),
                     };
-                    let mut attrs = body_op.attributes().to_vec();
-                    let mut rewrote = false;
-                    for a in &mut attrs {
-                        if let AttributeValue::Register(RegisterAttr::Virtual {
-                            class: Some(c),
-                            ..
-                        }) = &mut a.value
-                            && *c == crate::RegClass::VR.id()
+                    let group_ty = tir::backend::RegClassType::new(context, group);
+                    for slot in tir::backend::reg_slots(&body_op) {
+                        if slot.port.class == Some(crate::RegClass::VR.id())
+                            && let RegSlot::Value(value) = slot.slot
                         {
-                            *c = group;
-                            rewrote = true;
+                            context.retype_value(value, group_ty);
                         }
-                    }
-                    if rewrote {
-                        context.set_op_attributes(op_id, attrs);
                     }
                 }
                 let vtypei = vtypei_for(sew, lmul)?;
@@ -307,7 +277,7 @@ impl Pass for InsertVsetvliPass {
                     continue;
                 }
                 let anchor = op_ref_in(context, block_id, op_id);
-                self.insert_config(context, rewriter, &anchor, &avl, vtypei)?;
+                self.insert_config(context, rewriter, &anchor, key, vtypei)?;
                 state = Some(ConfigState {
                     keys: vec![key],
                     vtypei,

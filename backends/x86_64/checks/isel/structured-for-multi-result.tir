@@ -21,10 +21,10 @@ module {data_layout = #data_layout} {
 
 // CHECK-NOT: scf.
 // The body reads one argument per port, plus the minted counter.
-// CHECK: ^[[BODY:bb[0-9]+]](%{{[0-9]+}}: !i64, %{{[0-9]+}}: !i64, %{{[0-9]+}}: !i64):
+// CHECK: ^[[BODY:bb[0-9]+]](%{{[0-9]+}}: !x86_64.GPR, %{{[0-9]+}}: !x86_64.GPR, %{{[0-9]+}}: !x86_64.GPR):
 // Both ports leave on the exit edge, and the continuation reads them both.
 // CHECK: asm.vbr %{{[0-9]+}}, %{{[0-9]+}} ^[[JOIN:bb[0-9]+]]
-// CHECK: ^[[JOIN]](%{{[0-9]+}}: !i64, %{{[0-9]+}}: !i64):
+// CHECK: ^[[JOIN]](%{{[0-9]+}}: !x86_64.GPR, %{{[0-9]+}}: !x86_64.GPR):
 // The back edge carries both advanced ports and the advanced counter.
 // CHECK: asm.vbr %{{[0-9]+}}, %{{[0-9]+}}, %{{[0-9]+}} ^[[BODY]]
 // CHECK-NOT: scf.

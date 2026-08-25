@@ -6,7 +6,7 @@
 //! means a generated op carries a table of [`SymSource`]s and one call per
 //! effect instead of an inlined copy of the interpreter plumbing.
 
-use crate::attributes::{AttributeValue, RegisterAttr};
+use crate::attributes::AttributeValue;
 use crate::backend::regalloc::RegClassId;
 use crate::backend::{InstrInfo, MachineContext, MachineMemory, RegisterValue, SimTrap};
 
@@ -33,10 +33,10 @@ fn register_phys(
     mnemonic: &'static str,
     name: &'static str,
 ) -> Result<(RegClassId, u16), SimTrap> {
-    match instance.attr(name) {
-        Some(AttributeValue::Register(RegisterAttr::Physical { class, index, .. })) => {
-            Ok((class, index))
-        }
+    // Execution runs on instructions whose registers are physical: decoded or
+    // assembled input, or emitted code read back through its assignment.
+    match crate::backend::reg_slot(instance, name) {
+        Some(crate::backend::RegSlot::Phys(register)) => Ok(register),
         _ => Err(SimTrap::MissingAttribute {
             op: mnemonic,
             attribute: name,

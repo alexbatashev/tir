@@ -21,12 +21,12 @@ module {
   module_end
 }
 
-// CHECK: x86_64.add {dst = %virt[[SUM:[0-9]+]]:GPR
+// CHECK: x86_64.add {dst = %[[SUM:[0-9]+]]:GPR
 // CHECK: x86_64.jne {imm = ^[[TRAMPOLINE:bb[0-9]+]]}
 // CHECK-NEXT: asm.vbr %[[SUM]] ^[[ELSE:bb[0-9]+]]
-// CHECK: ^[[THEN:bb[0-9]+]](%[[P:[0-9]+]]: !i64):
-// CHECK-NEXT: x86_64.imul {{.*}}src = %virt[[P]]:GPR}
-// CHECK: ^[[ELSE]](%[[Q:[0-9]+]]: !i64):
-// CHECK-NEXT: x86_64.sub {{.*}}dst_tied = %virt[[Q]]:GPR
+// CHECK: ^[[THEN:bb[0-9]+]](%[[P:[0-9]+]]: !x86_64.GPR):
+// CHECK-NEXT: x86_64.imul {dst = %{{[0-9]+}}:GPR, dst_tied = %{{[0-9]+}}:GPR, src = %{{[0-9]+}}:GPR}
+// CHECK: ^[[ELSE]](%[[Q:[0-9]+]]: !x86_64.GPR):
+// CHECK-NEXT: x86_64.sub {dst = %{{[0-9]+}}:GPR
 // CHECK: ^[[TRAMPOLINE]]:
 // CHECK-NEXT: asm.vbr %[[SUM]] ^[[THEN]]

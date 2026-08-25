@@ -22,16 +22,16 @@ module {
 // %0 dies at the first add, so that tie coalesces and the add runs in place.
 // %1 is live across it, so the second add's tie still copies.
 // CHECK-LABEL: accumulate
-// CHECK:      x86_64.mov {dst = rax, src = rsi}
-// CHECK-NEXT: x86_64.add {dst = rdi, src = rax}
-// CHECK-NEXT: x86_64.add {dst = rax, src = rdi}
+// CHECK:      x86_64.mov {dst = %{{[0-9]+}}:rax, src = %{{[0-9]+}}:rsi}
+// CHECK-NEXT: x86_64.add {dst = %{{[0-9]+}}:rdi, dst_tied = %{{[0-9]+}}:rdi, src = %{{[0-9]+}}:rax}
+// CHECK-NEXT: x86_64.add {dst = %{{[0-9]+}}:rax, dst_tied = %{{[0-9]+}}:rax, src = %{{[0-9]+}}:rdi}
 // CHECK-NEXT: asm.vret
 
 // %0 is read again after the first add, so that tie's ends interfere and its
 // copy survives; the ties of the second add and the imul still coalesce.
 // CHECK-LABEL: keep
-// CHECK:      x86_64.mov {dst = rax, src = rdi}
-// CHECK-NEXT: x86_64.add {dst = rax, src = rsi}
-// CHECK-NEXT: x86_64.add {dst = rdi, src = rax}
-// CHECK-NEXT: x86_64.imul {dst = rax, src = rdi}
+// CHECK:      x86_64.mov {dst = %{{[0-9]+}}:rax, src = %{{[0-9]+}}:rdi}
+// CHECK-NEXT: x86_64.add {dst = %{{[0-9]+}}:rax, dst_tied = %{{[0-9]+}}:rax, src = %{{[0-9]+}}:rsi}
+// CHECK-NEXT: x86_64.add {dst = %{{[0-9]+}}:rdi, dst_tied = %{{[0-9]+}}:rdi, src = %{{[0-9]+}}:rax}
+// CHECK-NEXT: x86_64.imul {dst = %{{[0-9]+}}:rax, dst_tied = %{{[0-9]+}}:rax, src = %{{[0-9]+}}:rdi}
 // CHECK-NEXT: asm.vret

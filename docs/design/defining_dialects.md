@@ -129,10 +129,6 @@ operation! {
         results: R {
             result: "crate::builtin::IntegerType",
         },
-        roles: R {
-            lhs: Use,
-            rhs: Use,
-        },
         regions: R {
             body: Region {
                 single_block: true,
@@ -151,10 +147,10 @@ sections above.
 - `attributes`: declares required attribute names and their expected attribute
   kinds. The generated verifier checks the shape.
 - `operands`: declares ordered operands and their type constraints.
-- `results`: declares result slots and their type constraints. Current builders
-  use one `result_type` field for result-producing operations.
-- `roles`: marks machine operands as `Use` or `Def`. This matters for backend
-  liveness and register allocation.
+- `results`: declares result slots and their type constraints. Builders use one
+  `result_type` field, or `result_types`/`result_values` for a variadic result
+  group — which is what a machine instruction declares, one result per register
+  slot it writes.
 - `regions`: declares nested regions. A `single_block` region is auto-created by
   the builder when omitted.
 - `interfaces`: registers dynamic operation interfaces with the `Context`.

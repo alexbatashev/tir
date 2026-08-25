@@ -62,6 +62,8 @@ fn emit_instructions<'a>(
     let mut rule_spec_idents: Vec<proc_macro2::Ident> = vec![];
     let mut machine_instruction_impls: Vec<proc_macro2::TokenStream> = vec![];
     let mut instruction_custom_format_impls: Vec<proc_macro2::TokenStream> = vec![];
+    // One `RegPort` table per instruction, referenced by its `InstrInfo`.
+    let mut instruction_reg_ports: Vec<proc_macro2::TokenStream> = vec![];
     let mut as_sem_expr_impls: Vec<proc_macro2::TokenStream> = vec![];
     let mut instruction_encoder_impls: Vec<proc_macro2::TokenStream> = vec![];
     let mut instruction_decoder_impls: Vec<proc_macro2::TokenStream> = vec![];
@@ -215,13 +217,15 @@ fn emit_instructions<'a>(
         let ops_map = ops.clone().into_iter().collect::<HashMap<_, _>>();
         let defined_register_operands = infer_defined_register_operands(&inst.behavior, &ops);
 
-        // Build attributes schema from operands
+        // Build attributes schema from the operands that are not registers: a
+        // register operand is an SSA port, and the slot's attribute exists only
+        // when it names a physical register (see `tir::backend::RegPort`).
         let attrs_schema = {
             let mut items = vec![];
             for (name, ty) in &ops {
                 let field_ident = format_ident!("{}", name);
                 let ty_ts = match ty {
-                    Type::Struct(_) => quote! { Register },
+                    Type::Struct(_) => continue,
                     Type::Integer | Type::Bits(_) => quote! { Integer },
                     Type::String => quote! { String },
                     _ => unreachable!("HM type vars should not appear as operand types"),
@@ -315,45 +319,104 @@ fn emit_instructions<'a>(
             reads
         };
 
-        // Build roles from behavior assignments so we don't depend on naming
-        // conventions. An operand both written and read (e.g. the two-address x86
-        // `dst = dst + src`) is ReadWrite; its isel-emitted op additionally carries
-        // a `<name>_tied` register attribute naming the value the read binds to,
-        // which register allocation lowers to a copy (see `lower_tied_operands`).
+        // The op's register ports, in the order the emitters bind them: the
+        // declared register operands (a two-address destination followed by the
+        // `_tied` slot its read binds through), the registers the behavior reads
+        // by path, then the fixed-register slots. A register operand is an SSA
+        // operand or result, so this order is also the port order
+        // `tir::backend::reg_slots` walks.
         let read_register_operands = infer_read_register_operands(&inst.behavior, &ops);
-        let attribute_roles: Vec<(String, proc_macro2::TokenStream)> = {
-            let mut items = vec![];
-            for (name, ty) in &ops {
-                if let Type::Struct(_) = ty {
-                    let role = if defined_register_operands.contains(name) {
-                        if read_register_operands.contains(name) {
-                            quote! { ReadWrite }
-                        } else {
-                            quote! { Def }
-                        }
-                    } else {
-                        quote! { Use }
-                    };
-                    items.push((name.clone(), role));
-                    if defined_register_operands.contains(name)
-                        && read_register_operands.contains(name)
-                    {
-                        items.push((format!("{name}_tied"), quote! { Use }));
+        let mut ports: Vec<(String, Option<String>, bool, Option<String>)> = vec![];
+        for (name, ty) in &ops {
+            if !matches!(ty, Type::Struct(_)) {
+                continue;
+            }
+            let Type::Struct(class_name) = ty else {
+                unreachable!()
+            };
+            let defines = defined_register_operands.contains(name);
+            ports.push((name.clone(), Some(class_name.clone()), defines, None));
+            if defines && read_register_operands.contains(name) {
+                ports.push((
+                    format!("{name}_tied"),
+                    Some(class_name.clone()),
+                    false,
+                    Some(name.clone()),
+                ));
+            }
+        }
+        // A demand slot carries its class at run time (a target pass decides it),
+        // so the port constrains nothing beyond the value's own type.
+        for (name, _) in &implicit_reads {
+            ports.push((name.clone(), None, false, None));
+        }
+        for (slot, class_name, is_def) in fixed_register_role_items(
+            inst,
+            &ops,
+            &register_index_map,
+            &register_name_map,
+            &flag_classes,
+            &pc_classes,
+        ) {
+            ports.push((slot, Some(class_name), is_def, None));
+        }
+
+        let port_entries: Vec<proc_macro2::TokenStream> = ports
+            .iter()
+            .map(|(name, class_name, is_def, tied_to)| {
+                let name_lit = proc_macro2::Literal::string(name);
+                let class = match class_name {
+                    Some(class_name) => {
+                        let id = reg_class_id(class_name);
+                        quote! { Some(#id) }
+                    }
+                    None => quote! { None },
+                };
+                let tied = match tied_to {
+                    Some(destination) => {
+                        let lit = proc_macro2::Literal::string(destination);
+                        quote! { Some(#lit) }
+                    }
+                    None => quote! { None },
+                };
+                quote! {
+                    tir::backend::RegPort {
+                        name: #name_lit,
+                        class: #class,
+                        def: #is_def,
+                        tied_to: #tied,
                     }
                 }
+            })
+            .collect();
+        let ports_ident = format_ident!("REGS_{}", inst.name.to_uppercase());
+        let port_count = port_entries.len();
+        instruction_reg_ports.push(quote! {
+            #[allow(dead_code)]
+            static #ports_ident: [tir::backend::RegPort; #port_count] = [#(#port_entries),*];
+        });
+
+        let operands_schema = {
+            let items = ports.iter().filter(|(_, _, is_def, _)| !is_def).map(
+                |(name, _, _, _)| {
+                    let field = format_ident!("{}", name);
+                    quote! { #field: "?tir::backend::RegClassType" }
+                },
+            );
+            let items: Vec<_> = items.collect();
+            if items.is_empty() {
+                quote! {}
+            } else {
+                quote! { operands: O { #(#items,)* }, }
             }
-            for (name, _) in &implicit_reads {
-                items.push((name.clone(), quote! { Use }));
-            }
-            items.extend(fixed_register_role_items(
-                inst,
-                &ops,
-                &register_index_map,
-                &register_name_map,
-                &flag_classes,
-                &pc_classes,
-            ));
-            items
+        };
+        // Results are variadic: an instruction defining several registers (x86
+        // `div`, writing both halves of the quotient/remainder pair) has one
+        // result per def port, and one that defines none has no results.
+        let results_schema = if ports.iter().any(|(_, _, is_def, _)| *is_def) {
+            quote! { results: R { regs: "*tir::backend::RegClassType" }, }
+        } else {
+            quote! {}
         };
 
         // An instruction that writes `PC::pc` transfers control, so it is a
@@ -365,7 +428,7 @@ fn emit_instructions<'a>(
         let is_terminator = uncond_pc || cond_pc;
         let (interfaces_list, terminator_impl) = if is_terminator {
             (
-                quote! { [tir::backend::MachineInstruction, tir::attributes::RegisterSemantics, tir::Terminator] },
+                quote! { [tir::backend::MachineInstruction, tir::Terminator] },
                 quote! {
                     impl tir::Terminator for #name_ident {
                         fn successors(&self) -> Vec<tir::BlockId> {
@@ -375,172 +438,36 @@ fn emit_instructions<'a>(
                 },
             )
         } else {
-            (
-                quote! { [tir::backend::MachineInstruction, tir::attributes::RegisterSemantics] },
-                quote! {},
-            )
+            (quote! { [tir::backend::MachineInstruction] }, quote! {})
         };
 
-        // The op's register semantics: the def/use role of each register
-        // attribute. The fixed registers the behavior names by path
-        // (`EFLAGS::zf`, `GPR::rax`) are a per-opcode fact, so they live in the
-        // instruction's `InstrInfo` instead.
         let implicit_items = implicit_register_items(inst, &register_index_map, &pc_classes);
-        let role_entries = attribute_roles.iter().map(|(name, role)| {
-            let name_lit = proc_macro2::Literal::string(name);
-            quote! { (#name_lit, tir::attributes::AttributeRole::#role) }
-        });
-        let register_semantics_impl = quote! {
-            impl tir::attributes::RegisterSemantics for #name_ident {
-                fn attribute_roles(
-                    &self,
-                ) -> &'static [(&'static str, tir::attributes::AttributeRole)] {
-                    &[ #(#role_entries),* ]
-                }
-            }
-        };
 
         instruction_defs.push(quote! {
             operation! {
                 #name_ident {
                     name: #op_name_lit,
                     dialect: #dialect,
+                    #operands_schema
+                    #results_schema
                     attributes: A { #attrs_schema },
                     interfaces: #interfaces_list,
                     format: custom,
                 }
             }
 
-            #register_semantics_impl
-
             #terminator_impl
         });
 
-        let op_display_name = format!("{}.{}", dialect, op_name);
-        let op_display_name_lit = proc_macro2::Literal::string(&op_display_name);
-        let mut register_attr_print_arms = Vec::new();
-        let mut text_only_register_attrs = Vec::new();
-        for (op_name, op_ty) in &ops {
-            if let Type::Struct(class_name) = op_ty {
-                let attr_name_lit = proc_macro2::Literal::string(op_name);
-                text_only_register_attrs.push(attr_name_lit.clone());
-                let print_fn_ident = format_ident!("print_{}", class_name.to_lowercase());
-                // Text-only targets use one nominal operand class and derive the real
-                // class per register (PTX banks), so print through the attribute's
-                // stored class. Encoded targets print through the operand's declared
-                // class table: the operand position fixes the class, so an aliasing
-                // physical register (e.g. `("GPR", 29)` landing in a `GPRsp` operand)
-                // still prints the right name.
-                let print_body = if text_only {
-                    quote! {
-                        if let tir::attributes::AttributeValue::Register(tir::attributes::RegisterAttr::Physical { class, index }) = &attr.value {
-                            if let Some(name) = register_name(class.name(), *index, false) {
-                                fmt.write(name)?;
-                            } else {
-                                attr.value.print(fmt, &context)?;
-                            }
-                        } else {
-                            attr.value.print(fmt, &context)?;
-                        }
-                    }
-                } else {
-                    quote! {
-                        if let tir::attributes::AttributeValue::Register(tir::attributes::RegisterAttr::Physical { index, .. }) = &attr.value {
-                            if let Some(name) = #print_fn_ident(*index, false) {
-                                fmt.write(name)?;
-                            } else {
-                                attr.value.print(fmt, &context)?;
-                            }
-                        } else {
-                            attr.value.print(fmt, &context)?;
-                        }
-                    }
-                };
-                register_attr_print_arms.push(quote! {
-                    #attr_name_lit => { #print_body }
-                });
-            }
-        }
-        // A demand attribute holds a value register whose class is only known at
-        // run time (the attribute value carries it), so it prints through the
-        // class-dispatching `register_name`.
-        for (name, _) in &implicit_reads {
-            let attr_name_lit = proc_macro2::Literal::string(name);
-            text_only_register_attrs.push(attr_name_lit.clone());
-            register_attr_print_arms.push(quote! {
-                #attr_name_lit => {
-                    if let tir::attributes::AttributeValue::Register(tir::attributes::RegisterAttr::Physical { class, index }) = &attr.value {
-                        if let Some(name) = register_name(class.name(), *index, false) {
-                            fmt.write(name)?;
-                        } else {
-                            attr.value.print(fmt, &context)?;
-                        }
-                    } else {
-                        attr.value.print(fmt, &context)?;
-                    }
-                }
-            });
-        }
-        let custom_print_attr_body = if register_attr_print_arms.is_empty() {
-            quote! {
-                attr.value.print(fmt, &context)?;
-            }
-        } else {
-            quote! {
-                match context.resolve(attr.name).as_str() {
-                    #(#register_attr_print_arms,)*
-                    _ => attr.value.print(fmt, &context)?,
-                }
-            }
-        };
-        let custom_format_impl = if text_only {
-            quote! {
+        // One shared printer: what a slot is called, what class it admits and
+        // whether it is a result are fields of the opcode's `InstrInfo`.
+        instruction_custom_format_impls.push(quote! {
+            impl #name_ident {
                 fn custom_print<'a, 'b: 'a>(
                     &'a self,
                     fmt: &'a mut tir::IRFormatter<'b>,
                 ) -> Result<(), std::fmt::Error> {
-                    custom_print_text_operation(
-                        &self.0,
-                        #op_display_name_lit,
-                        &[#(#text_only_register_attrs),*],
-                        fmt,
-                    )
-                }
-
-                fn custom_parse<'src>(
-                    parser: &mut tir::parse::text::Parser<'src>,
-                    _context: &tir::Context,
-                ) -> Result<Box<dyn tir::Operation>, (tir::parse::Span, tir::Error)> {
-                    custom_parse_text_operation(parser)
-                }
-            }
-        } else {
-            quote! {
-                fn custom_print<'a, 'b: 'a>(
-                    &'a self,
-                    fmt: &'a mut tir::IRFormatter<'b>,
-                ) -> Result<(), std::fmt::Error> {
-                    use tir::Operation;
-
-                    fmt.write(#op_display_name_lit)?;
-                    if !self.attributes().is_empty() {
-                        fmt.write(" ")?;
-                        fmt.write("{")?;
-                        let mut first = true;
-                        let context = self.0.context.upgrade();
-                        for attr in self.attributes() {
-                            if !first {
-                                fmt.write(", ")?;
-                            }
-                            first = false;
-                            fmt.write(context.resolve(attr.name))?;
-                            fmt.write(" = ")?;
-                            #custom_print_attr_body
-                        }
-                        fmt.write("}")?;
-                    }
-                    fmt.write("\n")?;
-                    Ok(())
+                    tir::backend::print_machine_op(fmt, self)
                 }
 
                 fn custom_parse<'src>(
@@ -549,11 +476,6 @@ fn emit_instructions<'a>(
                 ) -> Result<Box<dyn tir::Operation>, (tir::parse::Span, tir::Error)> {
                     Err((tir::parse::Span(parser.pos()), tir::Error::ExpectedOpName))
                 }
-            }
-        };
-        instruction_custom_format_impls.push(quote! {
-            impl #name_ident {
-                #custom_format_impl
             }
         });
 
@@ -751,14 +673,13 @@ fn emit_instructions<'a>(
                 emit_attrs.push(emit_attr_int_or_value(name, *sym));
             }
 
-            let declared: Vec<String> = ops.iter().map(|(name, _)| name.clone()).collect();
             let (emitter_ts, emit_shim) = emit_emitter_spec(
                 &rule_key,
                 dialect,
                 op_name,
                 &name_ident,
                 &emit_attrs,
-                &declared,
+                &inst.name,
             );
             let (rule_ts, rule_spec_ident) = emit_rule_spec(
                 &rule_key,
@@ -881,7 +802,7 @@ fn emit_instructions<'a>(
                     op_name,
                     &name_ident,
                     &zero_emit_attrs,
-                    &declared,
+                    &inst.name,
                 );
                 let zero_pattern_spec = SpecPattern {
                     offset: zero_pattern_offset,
@@ -1470,6 +1391,9 @@ fn emit_instructions<'a>(
         if !implicit_items.is_empty() {
             info_fields.push(quote! { implicit_regs: &[ #(#implicit_items),* ] });
         }
+        if port_count != 0 {
+            info_fields.push(quote! { regs: &#ports_ident });
+        }
         let (reads_memory, writes_memory) = behavior_memory_effects(&inst.behavior);
         if reads_memory || writes_memory {
             info_fields.push(quote! {
@@ -1589,61 +1513,6 @@ fn emit_instructions<'a>(
         quote! {}
     };
 
-    let text_only_format_helpers = if text_only && !instruction_defs.is_empty() {
-        quote! {
-            fn custom_print_text_operation(
-                op: &tir::OpHandle,
-                op_name: &str,
-                register_attributes: &[&str],
-                fmt: &mut tir::IRFormatter<'_>,
-            ) -> Result<(), std::fmt::Error> {
-                fmt.write(op_name)?;
-                if !op.attributes().is_empty() {
-                    fmt.write(" ")?;
-                    fmt.write("{")?;
-                    let mut first = true;
-                    let context = op.context.upgrade();
-                    for attr in op.attributes() {
-                        if !first {
-                            fmt.write(", ")?;
-                        }
-                        first = false;
-                        let name = context.resolve(attr.name);
-                        fmt.write(&name)?;
-                        fmt.write(" = ")?;
-                        if register_attributes.contains(&name.as_str()) {
-                            if let tir::attributes::AttributeValue::Register(
-                                tir::attributes::RegisterAttr::Physical { class, index },
-                            ) = &attr.value
-                            {
-                                if let Some(name) = register_name(class.name(), *index, false) {
-                                    fmt.write(name)?;
-                                } else {
-                                    attr.value.print(fmt, &context)?;
-                                }
-                            } else {
-                                attr.value.print(fmt, &context)?;
-                            }
-                        } else {
-                            attr.value.print(fmt, &context)?;
-                        }
-                    }
-                    fmt.write("}")?;
-                }
-                fmt.write("\n")?;
-                Ok(())
-            }
-
-            fn custom_parse_text_operation<'src>(
-                parser: &mut tir::parse::text::Parser<'src>,
-            ) -> Result<Box<dyn tir::Operation>, (tir::parse::Span, tir::Error)> {
-                Err((tir::parse::Span(parser.pos()), tir::Error::ExpectedOpName))
-            }
-        }
-    } else {
-        quote! {}
-    };
-
     // The `ENCODE_*`/`PATCH_*` specs object emission interprets, reached through
     // `InstrInfo`. Only targets with a binary encoding have any.
     let encoder_section = if text_only {
@@ -1690,7 +1559,7 @@ fn emit_instructions<'a>(
 
     Ok(quote! {
         #(#instruction_defs)*
-        #text_only_format_helpers
+        #(#instruction_reg_ports)*
         #(#instruction_custom_format_impls)*
         #(#machine_instruction_impls)*
         #(#as_sem_expr_impls)*

@@ -19,5 +19,5 @@ module {
 // allocation.
 // CHECK: asm.symbol {name = "vadd"
 // CHECK-NOT: riscv.vsetivli
-// CHECK: riscv.vadd.vv {vd = %virt2:VR, vs2 = %virt0:VR, vs1 = %virt1:VR, sew = 32, vl = 4}
+// CHECK: riscv.vadd.vv {vd = %[[V2:[0-9]+]]:VR, vs2 = %[[V0:[0-9]+]]:VR, vs1 = %[[V1:[0-9]+]]:VR, sew = 32, vl = 4}
 // CHECK: asm.vret

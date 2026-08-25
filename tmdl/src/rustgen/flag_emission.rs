@@ -248,14 +248,13 @@ fn emit_flag_branch_rules(
             isel_rule_emitters.push(prelude_ts);
 
             let emit_attrs = [emit_attr_block(&b_sem.target_operand, target_symbol)];
-            let declared: Vec<String> = b.ops.iter().map(|(name, _)| name.clone()).collect();
             let (emitter_ts, emit_shim) = emit_emitter_spec(
                 &rule_key,
                 dialect,
                 &b.op_name,
                 &b_op_ty_ident,
                 &emit_attrs,
-                &declared,
+                &b.inst.name,
             );
             let (rule_ts, rule_ident) = emit_rule_spec(
                 &rule_key,
@@ -527,14 +526,13 @@ fn emit_aliased_zero_branch_rules(
                 emit_attr_value(name_a, 0, &class_id),
                 emit_attr_value(name_b, 0, &class_id),
             ];
-            let d_declared: Vec<String> = d.ops.iter().map(|(name, _)| name.clone()).collect();
             let (prelude_ts, prelude_shim) = emit_emitter_spec(
                 &prelude_key,
                 dialect,
                 &d.op_name,
                 &d_op_ty_ident,
                 &prelude_attrs,
-                &d_declared,
+                &d.inst.name,
             );
             if emitted_preludes.insert(d.inst.name.clone()) {
                 isel_rule_emitters.push(prelude_ts);
@@ -557,14 +555,13 @@ fn emit_aliased_zero_branch_rules(
             );
 
             let emit_attrs = [emit_attr_block(&b_sem.target_operand, target_symbol)];
-            let declared: Vec<String> = b.ops.iter().map(|(name, _)| name.clone()).collect();
             let (emitter_ts, emit_shim) = emit_emitter_spec(
                 &rule_key,
                 dialect,
                 &b.op_name,
                 &b_op_ty_ident,
                 &emit_attrs,
-                &declared,
+                &b.inst.name,
             );
             let constraints =
                 [constraint_entry(0, quote! { tir::graph::OperandConstraint::Register })];
@@ -892,14 +889,13 @@ fn emit_flag_reader_rules(
 
             let mut emit_attrs = vec![emit_attr_result(&r_sem.dest_operand, 0, &dest_class_id)];
             emit_attrs.extend(reader_attrs);
-            let declared: Vec<String> = r.ops.iter().map(|(name, _)| name.clone()).collect();
             let (emitter_ts, emit_shim) = emit_emitter_spec(
                 &rule_key,
                 dialect,
                 &r.op_name,
                 &r_op_ty_ident,
                 &emit_attrs,
-                &declared,
+                &r.inst.name,
             );
             let (rule_ts, rule_ident) = emit_rule_spec(
                 &rule_key,

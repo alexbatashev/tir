@@ -12,10 +12,10 @@ module {
   module_end
 }
 
-// RV64: riscv.addw {rd = {{x[0-9]+}}, rs1 = x10, rs2 = x11}
+// RV64: riscv.addw {rd = %{{[0-9]+}}:{{x[0-9]+}}, rs1 = %{{[0-9]+}}:x10, rs2 = %{{[0-9]+}}:x11}
 // RV64: riscv.subw
-// RV32: riscv.add {rd = {{x[0-9]+}}, rs1 = x10, rs2 = x11}
+// RV32: riscv.add {rd = %{{[0-9]+}}:{{x[0-9]+}}, rs1 = %{{[0-9]+}}:x10, rs2 = %{{[0-9]+}}:x11}
 // RV32: riscv.sub
 // CHECK: riscv.and
-// CHECK: riscv.or {rd = x10,
+// CHECK: riscv.or {rd = %{{[0-9]+}}:x10
 // CHECK: asm.vret

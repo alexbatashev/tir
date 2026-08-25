@@ -73,28 +73,28 @@ module {
   module_end
 }
 
-// CHECK:      x86_64.addsd_norex {dst = %virt2:XMMlow, dst_tied = %virt0:XMMlow, src = %virt1:XMMlow}
-// CHECK-NEXT: x86_64.mulsd_norex {dst = %virt3:XMMlow, dst_tied = %virt1:XMMlow, src = %virt2:XMMlow}
-// CHECK-NEXT: x86_64.subsd_norex {dst = %virt4:XMMlow, dst_tied = %virt3:XMMlow, src = %virt0:XMMlow}
-// CHECK-NEXT: x86_64.divsd_norex {dst = %virt5:XMMlow, dst_tied = %virt4:XMMlow, src = %virt1:XMMlow}
+// CHECK:      x86_64.addsd_norex {dst = %55:XMMlow, dst_tied = %0:XMM, src = %1:XMM}
+// CHECK-NEXT: x86_64.mulsd_norex {dst = %56:XMMlow, dst_tied = %1:XMM, src = %55:XMMlow}
+// CHECK-NEXT: x86_64.subsd_norex {dst = %57:XMMlow, dst_tied = %56:XMMlow, src = %0:XMM}
+// CHECK-NEXT: x86_64.divsd_norex {dst = %58:XMMlow, dst_tied = %57:XMMlow, src = %1:XMM}
 // CHECK-NEXT: asm.vret
-// CHECK:      x86_64.cvtsi2sd32_norex {dst = %virt8:XMMlow, src = %virt7:GPR32low}
-// CHECK:      x86_64.movzxd {dst = %virt[[ZEXT:[0-9]+]]:GPR, src = %virt10:GPR32}
-// CHECK-NEXT: x86_64.cvtsi2sd64 {dst = %virt11:XMM, src = %virt[[ZEXT]]:GPR}
-// CHECK:      x86_64.cvttsd2si32_norex {dst = %virt14:GPR32low, src = %virt13:XMMlow}
+// CHECK:      x86_64.cvtsi2sd32_norex {dst = %59:XMMlow, src = %7:GPR}
+// CHECK:      x86_64.movzxd {dst = %[[ZEXT:[0-9]+]]:GPR, src = %10:GPR}
+// CHECK-NEXT: x86_64.cvtsi2sd64 {dst = %62:XMM, src = %[[ZEXT]]:GPR}
+// CHECK:      x86_64.cvttsd2si32_norex {dst = %63:GPR32low, src = %13:XMM}
 // The i32 result is the low half of the 64-bit conversion: a zero-instruction
 // re-view, so no truncating mov follows.
-// CHECK:      x86_64.cvttsd2si64 {dst = %virt{{[0-9]+}}:GPR, src = %virt{{[0-9]+}}:XMM}
+// CHECK:      x86_64.cvttsd2si64 {dst = %{{[0-9]+}}:GPR, src = %{{[0-9]+}}:XMM}
 // CHECK-NEXT: asm.vret
-// CHECK:      x86_64.movq_xmm_gpr {dst = %virt{{[0-9]+}}:XMMzx, src = %virt{{[0-9]+}}:GPR}
-// CHECK:      x86_64.movq_gpr_xmm {dst = %virt{{[0-9]+}}:GPR, src = %virt{{[0-9]+}}:XMM}
+// CHECK:      x86_64.movq_xmm_gpr {dst = %{{[0-9]+}}:XMMzx, src = %{{[0-9]+}}:GPR}
+// CHECK:      x86_64.movq_gpr_xmm {dst = %{{[0-9]+}}:GPR, src = %{{[0-9]+}}:XMM}
 // CHECK-LABEL: asm.symbol {name = "shared_zero"
-// CHECK:      x86_64.mov_imm {dst = %virt[[ZERO:[0-9]+]]:GPR, imm = 0}
-// CHECK-NEXT: x86_64.movq_xmm_gpr {dst = %virt{{[0-9]+}}:XMMzx, src = %virt[[ZERO]]:GPR}
+// CHECK:      x86_64.mov_imm {dst = %[[ZERO:[0-9]+]]:GPR, imm = 0}
+// CHECK-NEXT: x86_64.movq_xmm_gpr {dst = %{{[0-9]+}}:XMMzx, src = %[[ZERO]]:GPR}
 // CHECK:      x86_64.movsd_store_disp_norex
 // CHECK:      x86_64.mov_load
-// CHECK:      x86_64.ucomisd_norex {lhs = %virt{{[0-9]+}}:XMMlow, rhs = %virt{{[0-9]+}}:XMMlow}
-// CHECK-NEXT: x86_64.seta_norex {dst = %virt{{[0-9]+}}:GPR8low}
+// CHECK:      x86_64.ucomisd_norex {lhs = %{{[0-9]+}}:XMM, rhs = %{{[0-9]+}}:XMM}
+// CHECK-NEXT: x86_64.seta_norex {dst = %{{[0-9]+}}:GPR8low}
 // CHECK:      x86_64.ucomisd_norex
 // CHECK-NEXT: x86_64.setae_norex
 // CHECK:      x86_64.ucomisd_norex

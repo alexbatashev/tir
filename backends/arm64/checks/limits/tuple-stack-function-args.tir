@@ -15,8 +15,8 @@ module {
   module_end
 }
 
-// CHECK: arm64.load_float_double {ft = {{d[0-9]+}}, rn = sp, imm = 0}
-// CHECK: arm64.load_float_double {ft = {{d[0-9]+}}, rn = sp, imm = 8}
-// CHECK: arm64.load_float_double {ft = {{d[0-9]+}}, rn = sp, imm = 16}
-// CHECK: arm64.load_float_double {ft = {{d[0-9]+}}, rn = sp, imm = 24}
+// CHECK: arm64.load_float_double {ft = %{{[0-9]+}}:{{d[0-9]+}}, rn = sp, imm = 0}
+// CHECK: arm64.load_float_double {ft = %{{[0-9]+}}:{{d[0-9]+}}, rn = sp, imm = 8}
+// CHECK: arm64.load_float_double {ft = %{{[0-9]+}}:{{d[0-9]+}}, rn = sp, imm = 16}
+// CHECK: arm64.load_float_double {ft = %{{[0-9]+}}:{{d[0-9]+}}, rn = sp, imm = 24}
 // CHECK: asm.vret

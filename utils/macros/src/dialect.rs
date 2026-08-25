@@ -15,10 +15,11 @@ pub fn construct_dialect(item: TokenStream) -> TokenStream {
         name,
         operations,
         types,
+        type_parsers,
     } = parse_macro_input!(item as Dialect);
 
     let register_operations = make_register_operations(&struct_name, &operations);
-    let register_types = make_register_types(&name, &types);
+    let register_types = make_register_types(&name, &types, type_parsers.as_ref());
 
     quote! {
         pub struct #struct_name {
@@ -70,6 +71,11 @@ struct Dialect {
     name: String,
     operations: Vec<Ident>,
     types: Vec<Ident>,
+    /// An expression yielding `(parse key, TypeParser)` pairs registered
+    /// alongside the declared types. A target uses it for the one type per
+    /// register class its TMDL description declares, which no fixed list of
+    /// idents can name.
+    type_parsers: Option<Expr>,
 }
 
 impl Parse for Dialect {
@@ -136,11 +142,17 @@ impl Parse for Dialect {
             })
             .unwrap_or_default();
 
+        let type_parsers = struct_.fields.iter().find_map(|f| match &f.member {
+            Member::Named(ident) if ident == "type_parsers" => Some(f.expr.clone()),
+            _ => None,
+        });
+
         Ok(Dialect {
             struct_name,
             name,
             operations,
             types,
+            type_parsers,
         })
     }
 }
@@ -217,7 +229,11 @@ fn make_register_operations(dialect: &Ident, operations: &[Ident]) -> proc_macro
     }
 }
 
-fn make_register_types(_dialect_name: &str, types: &[Ident]) -> proc_macro2::TokenStream {
+fn make_register_types(
+    _dialect_name: &str,
+    types: &[Ident],
+    type_parsers: Option<&Expr>,
+) -> proc_macro2::TokenStream {
     let ty = types
         .iter()
         .map(|name| {
@@ -229,10 +245,18 @@ fn make_register_types(_dialect_name: &str, types: &[Ident]) -> proc_macro2::Tok
             }
         })
         .collect::<Vec<_>>();
+    let extra = type_parsers.map(|expr| {
+        quote! {
+            for (key, parser) in #expr {
+                self.type_parsers.insert(key, parser);
+            }
+        }
+    });
     quote! {
         fn register_types(&mut self, _context: &tir::Context) {
             use tir::Type;
             #(#ty)*
+            #extra
         }
     }
 }

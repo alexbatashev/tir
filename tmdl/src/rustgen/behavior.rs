@@ -506,9 +506,8 @@ fn emit_cond_branch_rule(
     let imm_range_entries =
         imm_range_spec_entries(&immediate_operand_ranges(pattern, ops, variable_symbols));
 
-    let declared: Vec<String> = ops.iter().map(|(name, _)| name.clone()).collect();
     let (emitter_ts, emit_shim) =
-        emit_emitter_spec(rule_name, dialect, op_name, op_ty_ident, &emit_attrs, &declared);
+        emit_emitter_spec(rule_name, dialect, op_name, op_ty_ident, &emit_attrs, inst_name);
     let target_symbol_lit = proc_macro2::Literal::u32_unsuffixed(target_symbol);
     let (rule_ts, rule_ident) = emit_rule_spec(
         rule_name,

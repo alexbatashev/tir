@@ -558,58 +558,9 @@ impl Context {
             op_id
         };
 
-        // Machine ops carry their register operands in role-tagged attributes;
-        // resolving the opcode's roles goes back through the context, so it waits
-        // until the op is in storage and the lock is free.
-        let handle = OpHandle {
+        OpHandle {
             context: self.as_context_ref(),
             id: op_id,
-        };
-        self.record_register_defs(&handle);
-        handle
-    }
-
-    /// A `Def`-role register attribute is the def-site of its virtual value, the
-    /// machine-IR spelling of an SSA result. Virtual register ids are value
-    /// numbers; physical registers have none and are skipped — they are not SSA.
-    /// ReadWrite defines too.
-    fn record_register_defs(&self, handle: &OpHandle) {
-        let Some(semantics) =
-            self.get_op_interface::<dyn crate::attributes::RegisterSemantics>(handle.clone())
-        else {
-            return;
-        };
-        let attribute_roles = semantics.attribute_roles();
-        if attribute_roles.is_empty() {
-            return;
-        }
-
-        let mut inner = self.0.write();
-        for (attr_name, role) in attribute_roles {
-            use crate::attributes::{AttributeRole, AttributeValue, RegisterAttr};
-            if !matches!(role, AttributeRole::Def | AttributeRole::ReadWrite) {
-                continue;
-            }
-            // Resolved through the held instance: the context lock is not
-            // reentrant, so nothing here may go back through `Context`.
-            let Some(name) = inner.names.lookup(attr_name) else {
-                continue;
-            };
-            let Some(AttributeValue::Register(register)) =
-                inner.op(handle.id).and_then(|op| op.attr_sym(name))
-            else {
-                continue;
-            };
-            let id = match register {
-                RegisterAttr::Virtual { id, .. }
-                | RegisterAttr::FixedUse { id, .. }
-                | RegisterAttr::FixedDef { id, .. } => *id,
-                RegisterAttr::Physical { .. } => continue,
-            };
-            let value_id = ValueId::from_number(id);
-            if let Some(value) = inner.value_mut(value_id) {
-                value.set_defining_op(handle.id);
-            }
         }
     }
 
@@ -618,9 +569,7 @@ impl Context {
     }
 
     /// Replace an operation's attributes in place, keeping its id, position, and
-    /// regions. Register allocation uses this to rewrite virtual register operands
-    /// to physical ones once the def-use chain is no longer needed; it deliberately
-    /// does not update `Value::uses`, since physical registers are not SSA values.
+    /// regions.
     pub fn set_op_attributes(&self, id: OpId, attributes: Vec<crate::attributes::NamedAttribute>) {
         let mut inner = self.0.write();
         if let Some(existing) = inner.op_mut(id) {
@@ -657,17 +606,16 @@ impl Context {
     /// An [`OpHandle`] naming an erased op (e.g. inside an `OperationRef`) reads
     /// as a panic from here on: read what an erase needs before performing it.
     pub(crate) fn remove_operation(&self, id: OpId) {
-        self.free(self.owned_entities(vec![id]));
+        self.remove_operation_except(id, &[]);
     }
 
-    /// [`Context::remove_operation`] for a replacement that hands the erased op's
-    /// result values to the new op: machine ops declare no SSA results and claim
-    /// the original result's def-site through a register attribute, so those
-    /// values outlive the op that defined them.
-    pub(crate) fn remove_operation_keeping_results(&self, id: OpId) {
+    /// [`Context::remove_operation`] for a replacement that adopted some of the
+    /// erased op's result values: a post-allocation re-encoding keeps the values
+    /// the register assignment already placed, so they outlive the op that used
+    /// to define them.
+    pub(crate) fn remove_operation_except(&self, id: OpId, keep: &[ValueId]) {
         let mut owned = self.owned_entities(vec![id]);
-        let results = self.get_op(id).results().to_vec();
-        owned.values.retain(|value| !results.contains(value));
+        owned.values.retain(|value| !keep.contains(value));
         self.free(owned);
     }
 
@@ -700,6 +648,52 @@ impl Context {
         }
     }
 
+    /// Replace a single operation's SSA result at `index`, moving the
+    /// definition of `new` onto this op. Register allocation uses it to rename a
+    /// spilled definition onto the fresh value the spill store writes back.
+    pub fn set_op_result(&self, id: OpId, index: usize, new: ValueId) {
+        let mut inner = self.0.write();
+        match inner.op(id).and_then(|op| op.results().get(index).copied()) {
+            Some(old) if old != new => {}
+            _ => return,
+        }
+        if let Some(op) = inner.op_mut(id) {
+            op.replace_result_at(index, new);
+        }
+        if let Some(value) = inner.value_mut(new) {
+            value.set_defining_op(id);
+        }
+        inner.edit_op(id);
+    }
+
+    /// Give a value a new type, keeping its id and every use of it.
+    /// Instruction selection retypes the values a machine instruction names to
+    /// the register classes they live in: a register class is what a machine
+    /// instruction can say about a value, and no copy is paid for the change.
+    pub fn retype_value(&self, value: ValueId, ty: TypeId) {
+        let mut inner = self.0.write();
+        if let Some(value) = inner.value_mut(value) {
+            value.set_ty(ty);
+        }
+    }
+
+    /// [`Context::retype_value`] for a block argument, whose type the block
+    /// stores alongside the value arena's copy.
+    pub fn retype_block_argument(&self, block: BlockId, index: usize, ty: TypeId) {
+        let mut inner = self.0.write();
+        let Some(argument) = inner
+            .block_mut(block)
+            .and_then(|block| block.arguments_mut().get_mut(index))
+        else {
+            return;
+        };
+        argument.set_ty(ty);
+        let value_id = argument.id();
+        if let Some(value) = inner.value_mut(value_id) {
+            value.set_ty(ty);
+        }
+    }
+
     pub fn create_value(&self, ty: TypeId, defining_op: Option<OpId>) -> Value {
         let mut inner = self.0.write();
 
@@ -726,9 +720,9 @@ impl Context {
     /// [`DefUse`](crate::analysis::DefUse) analysis is the cached index passes
     /// query. The edit applies to the tree: a use in a block an edit has taken
     /// out of it is not rewritten, which is what
-    /// [`StagedRegion::replace_value`] exists for. Register-attribute uses are
-    /// intentionally left untouched: they are not SSA operands and belong to
-    /// machine IR.
+    /// [`StagedRegion::replace_value`] exists for. Attributes naming a value are
+    /// left untouched: they record where the ABI places a value, not a read of
+    /// it.
     pub fn replace_value_uses(&self, old: ValueId, new: ValueId) {
         if old == new {
             return;
@@ -886,10 +880,9 @@ impl Context {
     /// had.
     ///
     /// Nothing is renamed, which is the point: the value keeps its identity, so
-    /// every reader goes on naming it — including the register attributes machine
-    /// IR carries, which are not operands and which no rename reaches. The
-    /// definition it leaves must be going away, so what an operation produced
-    /// becomes the parameter of the block continuing it.
+    /// every reader goes on naming it. The definition it leaves must be going
+    /// away, so what an operation produced becomes the parameter of the block
+    /// continuing it.
     pub fn adopt_block_argument(&self, block: BlockId, value: ValueId) {
         let mut inner = self.0.write();
         let Some(ty) = inner.value(value).map(Value::ty) else {
@@ -1196,7 +1189,16 @@ impl Context {
                     continue;
                 };
                 owned.ops.push(op);
-                owned.values.extend(instance.results().iter().copied());
+                // A result a rewrite has adopted as a block argument (region
+                // destruction hands a region's result to the join block) belongs
+                // to that block now, and outlives the op that produced it.
+                owned.values.extend(
+                    instance
+                        .results()
+                        .iter()
+                        .copied()
+                        .filter(|value| !self.is_block_argument(*value)),
+                );
                 for region in instance.regions() {
                     let Some(handle) = self.find_region(region) else {
                         continue;
@@ -1477,6 +1479,20 @@ impl Context {
     /// Read an operation's storage record under the context lock.
     ///
     /// `read` must not touch the context: the lock is not reentrant.
+    /// Read an attribute of `op` in place. For an attribute large enough that
+    /// cloning it per lookup would matter — the register assignment of a whole
+    /// function, read once per instruction slot.
+    pub fn with_attr<R>(
+        &self,
+        id: OpId,
+        name: &str,
+        read: impl FnOnce(&AttributeValue) -> R,
+    ) -> Option<R> {
+        let inner = self.0.read();
+        let name = inner.names.lookup(name)?;
+        inner.op(id)?.attr_sym(name).map(read)
+    }
+
     pub(crate) fn with_op<R>(&self, id: OpId, read: impl FnOnce(&OpInstance) -> R) -> R {
         let inner = self.0.read();
         read(inner.op(id).expect("live operation"))

@@ -8,4 +8,4 @@ module {
   module_end
 }
 
-// CHECK: arm64.fadd_s {fd = %virt2:FPR32, fa = %virt0:FPR32, fb = %virt1:FPR32}
+// CHECK: arm64.fadd_s {fd = %[[V2:[0-9]+]]:FPR32, fa = %[[V0:[0-9]+]]:GPR, fb = %[[V1:[0-9]+]]:GPR}

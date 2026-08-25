@@ -195,6 +195,15 @@ fn collect_referenced_idents(expr: &ast::Expr, operands: &HashSet<&str>, out: &m
             }
         }
         ast::Expr::Call(c) => {
+            // `regnum(op)` reads the operand's encoding index, not the value in
+            // its register: an instruction that only asks which register an
+            // operand names does not read that register.
+            if matches!(
+                c.callee.as_ref(),
+                ast::Expr::BuiltinFunction(ast::BuiltinFunction::Regnum)
+            ) {
+                return;
+            }
             collect_referenced_idents(&c.callee, operands, out);
             for arg in &c.arguments {
                 collect_referenced_idents(arg, operands, out);

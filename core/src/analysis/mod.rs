@@ -11,7 +11,7 @@ pub mod solver;
 
 pub use alias_facts::{AliasFacts, AliasResult, Base, PointerFact};
 pub use constant_facts::{ConstantFacts, Fact};
-pub use defuse::{DefUse, OpRegs, RegRef, execution_regs, op_regs};
+pub use defuse::{DefUse, OpRegs, PhysReg, execution_regs, op_regs};
 pub use dominance::*;
 pub use edge_facts::*;
 pub use escape_facts::{Escape, EscapeFacts};

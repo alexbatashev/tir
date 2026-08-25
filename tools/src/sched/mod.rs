@@ -117,7 +117,7 @@ pub fn run(args: ToolArgs) -> Result<(), Box<dyn Error>> {
         let info = mi.info();
         let regs = execution_regs(&op);
         let text = asm_printer
-            .print_instruction(&context, &op)?
+            .print_instruction(&context, &op, &tir::backend::RegAssignment::default())?
             .ok_or_else(|| format!("'{}' has no assembly syntax", op.name()))?;
         let (pc, width_bytes) = layout
             .as_ref()
@@ -127,8 +127,8 @@ pub fn run(args: ToolArgs) -> Result<(), Box<dyn Error>> {
             text,
             key: info.name.to_string(),
             class: info.sched_on(&model),
-            defs: phys_regs(&regs.defs, Some(&prf)),
-            uses: phys_regs(&regs.uses, Some(&prf)),
+            defs: phys_regs(&regs.phys_defs, Some(&prf)),
+            uses: phys_regs(&regs.phys_uses, Some(&prf)),
             branch: None,
             pc,
             width_bytes,

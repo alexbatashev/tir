@@ -11,5 +11,5 @@ module {
 }
 
 // CHECK: asm.vcall {callee = "make_pair"
-// CHECK: arm64.orr {rd = x0, rn = x31, rm = x1}
+// CHECK: arm64.orr {rd = %{{[0-9]+}}:x0, rn = x31, rm = x1}
 // CHECK: asm.vret

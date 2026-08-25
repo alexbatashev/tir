@@ -17,7 +17,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use tir::backend::liveness::RegRef;
+use tir::backend::liveness::PhysReg;
 use tir::backend::regalloc::RegisterInfo;
 use tir::backend::sched::{InstrSchedClass, MachineModel};
 
@@ -60,23 +60,20 @@ pub struct BranchOutcome {
     pub taken: bool,
 }
 
-/// Filter register references down to physical `(class, index)` keys — the
-/// granularity the dependence reconstruction works at. `alias` normalizes the
-/// class to its physical register file, so classes that alias the same file
-/// index-for-index (e.g. arm64 `GPRsp` vs `GPR`) produce matching keys —
-/// without it a load's `GPRsp`-classed base address never depends on the `GPR`
-/// write that produced it.
-pub fn phys_regs(refs: &[RegRef], alias: Option<&Prf>) -> Vec<(String, u16)> {
+/// Physical register references as `(class, index)` keys — the granularity the
+/// dependence reconstruction works at. `alias` normalizes the class to its
+/// physical register file, so classes that alias the same file index-for-index
+/// (e.g. arm64 `GPRsp` vs `GPR`) produce matching keys — without it a load's
+/// `GPRsp`-classed base address never depends on the `GPR` write that produced
+/// it.
+pub fn phys_regs(refs: &[PhysReg], alias: Option<&Prf>) -> Vec<(String, u16)> {
     refs.iter()
-        .filter_map(|r| match r {
-            RegRef::Physical { class, index } => {
-                let class = match alias {
-                    Some(p) => p.file_of(class.name()).to_string(),
-                    None => class.name().to_string(),
-                };
-                Some((class, *index))
-            }
-            RegRef::Virtual { .. } => None,
+        .map(|(class, index)| {
+            let class = match alias {
+                Some(p) => p.file_of(class.name()).to_string(),
+                None => class.name().to_string(),
+            };
+            (class, *index)
         })
         .collect()
 }

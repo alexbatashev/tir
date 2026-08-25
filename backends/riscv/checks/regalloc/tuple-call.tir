@@ -11,5 +11,5 @@ module {
 }
 
 // CHECK: asm.vcall {callee = "make_pair"
-// CHECK: riscv.addi {rd = x10, rs1 = x11, imm = 0}
+// CHECK: riscv.addi {rd = %{{[0-9]+}}:x10, rs1 = x11, imm = 0}
 // CHECK: asm.vret

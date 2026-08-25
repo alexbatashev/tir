@@ -12,7 +12,7 @@ module {
   module_end
 }
 
-// ISEL: x86_64.movabs {dst = rax, imm = 1234605616436508552}
+// ISEL: x86_64.movabs {dst = %{{[0-9]+}}:rax, imm = 1234605616436508552}
 
 // movabs rax, 0x1122334455667788: REX.W=48, B8, then the 8 immediate bytes
 // little-endian.

@@ -20,7 +20,7 @@ module {
 // CHECK-NEXT: x86_64.jne {imm = ^[[TAKEN:bb[0-9]+]]}
 // CHECK-NEXT: asm.vbr %{{[0-9]+}} ^[[JOIN:bb[0-9]+]]
 // CHECK-NEXT: asm.symbol_end
-// CHECK-NEXT: ^[[JOIN]](%[[R:[0-9]+]]: !i64):
+// CHECK-NEXT: ^[[JOIN]](%[[R:[0-9]+]]: !x86_64.GPR):
 // CHECK-NEXT: asm.vret %[[R]]
 // CHECK-NEXT: ^[[TAKEN]]:
 // CHECK-NEXT: asm.vbr %{{[0-9]+}} ^[[JOIN]]

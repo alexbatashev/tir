@@ -11,5 +11,5 @@ module {
 }
 
 // CHECK: asm.vcall {callee = "make_quad"
-// CHECK: arm64.fmov_reg64 {fd = d0, fa = d3}
+// CHECK: arm64.fmov_reg64 {fd = %{{[0-9]+}}:d0, fa = d3}
 // CHECK: asm.vret

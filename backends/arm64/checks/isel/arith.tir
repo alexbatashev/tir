@@ -20,17 +20,17 @@ module {
 }
 
 // i32 arithmetic selects the w-register forms.
-// CHECK: asm.symbol {name = "chain", arg_regs = [%virt0:GPR, %virt1:GPR]}
-// CHECK: arm64.add_w {rd = %virt2:GPR32, rn = %virt0:GPR32, rm = %virt1:GPR32}
-// CHECK: arm64.sub_w {rd = %virt3:GPR32, rn = %virt2:GPR32, rm = %virt1:GPR32}
-// CHECK: arm64.and_w {rd = %virt4:GPR32, rn = %virt0:GPR32, rm = %virt3:GPR32}
-// CHECK: arm64.orr_w {rd = %virt5:GPR32, rn = %virt1:GPR32, rm = %virt4:GPR32}
+// CHECK: asm.symbol {name = "chain", arg_regs = [%[[V0:[0-9]+]]:GPR, %[[V1:[0-9]+]]:GPR]
+// CHECK: arm64.add_w {rd = %[[V2:[0-9]+]]:GPR32, rn = %[[V0]]:GPR, rm = %[[V1]]:GPR}
+// CHECK: arm64.sub_w {rd = %[[V3:[0-9]+]]:GPR32, rn = %[[V2]]:GPR32, rm = %[[V1]]:GPR}
+// CHECK: arm64.and_w {rd = %[[V4:[0-9]+]]:GPR32, rn = %[[V0]]:GPR, rm = %[[V3]]:GPR32}
+// CHECK: arm64.orr_w {rd = %[[V5:[0-9]+]]:GPR32, rn = %[[V1]]:GPR, rm = %[[V4]]:GPR32}
 // CHECK: asm.vret
 
 // i64 arithmetic selects the x-register forms.
-// CHECK: asm.symbol {name = "chain64", arg_regs = [%virt7:GPR, %virt8:GPR, %virt9:GPR]}
-// CHECK: arm64.add {rd = %virt10:GPR, rn = %virt7:GPR, rm = %virt8:GPR}
-// CHECK: arm64.sub {rd = %virt11:GPR, rn = %virt10:GPR, rm = %virt9:GPR}
-// CHECK: arm64.and {rd = %virt12:GPR, rn = %virt7:GPR, rm = %virt11:GPR}
-// CHECK: arm64.orr {rd = %virt13:GPR, rn = %virt8:GPR, rm = %virt12:GPR}
+// CHECK: asm.symbol {name = "chain64", arg_regs = [%[[V7:[0-9]+]]:GPR, %[[V8:[0-9]+]]:GPR, %[[V9:[0-9]+]]:GPR]
+// CHECK: arm64.add {rd = %[[V10:[0-9]+]]:GPR, rn = %[[V7]]:GPR, rm = %[[V8]]:GPR}
+// CHECK: arm64.sub {rd = %[[V11:[0-9]+]]:GPR, rn = %[[V10]]:GPR, rm = %[[V9]]:GPR}
+// CHECK: arm64.and {rd = %[[V12:[0-9]+]]:GPR, rn = %[[V7]]:GPR, rm = %[[V11]]:GPR}
+// CHECK: arm64.orr {rd = %[[V13:[0-9]+]]:GPR, rn = %[[V8]]:GPR, rm = %[[V12]]:GPR}
 // CHECK: asm.vret

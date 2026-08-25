@@ -1,0 +1,18 @@
+// RUN: tir mc --march=rv64ifd --stage=isel %s | filecheck %s
+
+// A function's incoming arguments are retyped in place to the classes the ABI
+// passes them in — a tuple per element — so a machine instruction reads one
+// directly. No copy is paid for the change.
+
+module {
+  %f = func.func @args(%0: !i64, %1: !f64, %2: !tuple<!i64, !f64>) -> !i64 {
+    %3 = tuple_get %2 {index = 0} : !i64
+    %4 = addi %0, %3 : !i64
+    func.return %4
+  }
+  module_end
+}
+
+// CHECK: asm.symbol {name = "args", arg_regs = [%[[A:[0-9]+]]:GPR, %{{[0-9]+}}:FPR64, [%[[T:[0-9]+]]:GPR, %{{[0-9]+}}:FPR64]]}
+// CHECK-NEXT: .add{{.*}}%[[A]]:GPR{{.*}}%[[T]]:GPR
+// CHECK-NEXT: asm.vret

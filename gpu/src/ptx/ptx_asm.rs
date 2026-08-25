@@ -635,15 +635,28 @@ fn attr_bool(op: &OpHandle, name: &str) -> bool {
     matches!(op.attr(name), Some(AttributeValue::Bool(true)))
 }
 
+/// A PTX operand as text: an allocated register by bank and index, an
+/// unallocated one by its value (ptxas allocates the rest), or the literal the
+/// slot holds.
 fn render_operand(op: &OpHandle, name: &str) -> Result<String, String> {
+    if let Some(slot) = tir::backend::reg_slot(op, name) {
+        let context = op.context.upgrade();
+        return Ok(match slot {
+            tir::backend::RegSlot::Phys((class, index)) => {
+                format!("{}{}", class.name().to_lowercase(), index)
+            }
+            tir::backend::RegSlot::Value(value) => {
+                match tir::backend::assigned_register(&context, op, value) {
+                    Some((class, index)) => format!("{}{}", class.name().to_lowercase(), index),
+                    None => format!("%{}", value.number()),
+                }
+            }
+        });
+    }
     let value = op
         .attr(name)
         .ok_or_else(|| format!("op `{}` missing operand `{name}`", op.name().as_str()))?;
     Ok(match value {
-        AttributeValue::Register(RegisterAttr::Physical { class, index }) => {
-            format!("{}{}", class.name().to_lowercase(), index)
-        }
-        AttributeValue::Register(RegisterAttr::Virtual { id, .. }) => format!("%virt{id}"),
         AttributeValue::Str(s) => s.to_string(),
         AttributeValue::Int(i) => i.to_string(),
         other => format!("{other:?}"),

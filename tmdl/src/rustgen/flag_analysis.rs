@@ -948,14 +948,13 @@ fn emit_flag_definer_prelude(
         }
     }
 
-    let declared: Vec<String> = d.ops.iter().map(|(name, _)| name.clone()).collect();
     let (emitter_ts, prelude_shim) = emit_emitter_spec(
         &prelude_key,
         dialect,
         &d.op_name,
         &d_op_ty_ident,
         &prelude_attrs,
-        &declared,
+        &d.inst.name,
     );
     let emitter_ts = if emitted_preludes.insert(d.inst.name.clone()) {
         emitter_ts

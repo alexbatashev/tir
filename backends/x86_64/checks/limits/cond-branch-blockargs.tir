@@ -15,10 +15,10 @@ module {
   module_end
 }
 
-// CHECK:      x86_64.mov {dst = rax, src = rsi}
+// CHECK:      x86_64.mov {dst = %{{[0-9]+}}:rax, src = %{{[0-9]+}}:rsi}
 // CHECK-NEXT: x86_64.test
 // CHECK-NEXT: x86_64.jne {imm = ^[[TAKEN:bb[0-9]+]]}
 // CHECK-NEXT: asm.vbr ^[[JOIN:bb[0-9]+]]
 // CHECK:      ^[[TAKEN]]:
-// CHECK-NEXT: x86_64.mov {dst = rax, src = rdi}
+// CHECK-NEXT: x86_64.mov {dst = %{{[0-9]+}}:rax, src = %{{[0-9]+}}:rdi}
 // CHECK-NEXT: asm.vbr ^[[JOIN]]

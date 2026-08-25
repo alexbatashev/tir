@@ -25,6 +25,7 @@ fn attr_kind_code(value: &AttributeValue) -> i32 {
         AttributeValue::Register(_) => 8,
         AttributeValue::Type(_) => 9,
         AttributeValue::Block(_) => 10,
+        AttributeValue::Value(_) => 11,
     }
 }
 

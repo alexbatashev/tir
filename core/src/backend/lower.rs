@@ -8,6 +8,14 @@ use tir::{AnalysisManager, Context, OperationRef, Pass, PassError, PassTarget, R
 
 use crate::backend::isel::OpLowering;
 use crate::backend::regalloc::RegClassId;
+use crate::backend::{RegClassType, type_class};
+
+/// Give `value` the type of the register class it lives in. Selection is done
+/// by the time this runs, so nothing reads the mid-end type any more and the
+/// class becomes the one thing machine IR says about the value.
+fn retype(context: &Context, value: tir::ValueId, class: RegClassId) {
+    context.retype_value(value, RegClassType::new(context, class));
+}
 
 pub fn lower_function_and_return(
     context: &Context,
@@ -15,7 +23,7 @@ pub fn lower_function_and_return(
     rewriter: &mut Rewriter,
     argument_class: impl Fn(TypeId) -> Result<RegClassId, PassError>,
 ) -> Result<bool, PassError> {
-    use tir::attributes::{AttributeValue, RegisterAttr};
+    use tir::attributes::AttributeValue;
     use tir::builtin::{MakeTupleOp, TupleGetOp, TupleType};
     use tir::func::{FuncOp, ReturnOp};
     use tir::{Operation, Symbol};
@@ -54,10 +62,9 @@ pub fn lower_function_and_return(
                 )
             })?;
             argument_alignments.next();
-            Some(AttributeValue::Register(RegisterAttr::Virtual {
-                id: argument.id().number(),
-                class: Some(argument_class(argument.ty())?),
-            }))
+            let class = argument_class(argument.ty())?;
+            retype(context, argument.id(), class);
+            Some(AttributeValue::Value(argument.id()))
         } else {
             None
         };
@@ -65,10 +72,9 @@ pub fn lower_function_and_return(
             let ty = context.get_type_data(argument.ty());
             let Some(tuple) = (ty.as_ref() as &dyn std::any::Any).downcast_ref::<TupleType>()
             else {
-                arguments.push(AttributeValue::Register(RegisterAttr::Virtual {
-                    id: argument.id().number(),
-                    class: Some(argument_class(argument.ty())?),
-                }));
+                let class = argument_class(argument.ty())?;
+                retype(context, argument.id(), class);
+                arguments.push(AttributeValue::Value(argument.id()));
                 continue;
             };
 
@@ -103,11 +109,14 @@ pub fn lower_function_and_return(
                 .into_iter()
                 .zip(elements)
                 .map(|(ty, value)| {
-                    let value = value.unwrap_or_else(|| context.create_value(ty, None).id());
-                    Ok(AttributeValue::Register(RegisterAttr::Virtual {
-                        id: value.number(),
-                        class: Some(argument_class(ty)?),
-                    }))
+                    // The element gets its own register value: the extraction
+                    // that produced it is erased below, and its result with it.
+                    let class_ty = super::RegClassType::new(context, argument_class(ty)?);
+                    let element = context.create_value(class_ty, None).id();
+                    if let Some(extracted) = value {
+                        context.replace_value_uses(extracted, element);
+                    }
+                    Ok(AttributeValue::Value(element))
                 })
                 .collect::<Result<Vec<_>, PassError>>()?;
             if alignment == 1 {
@@ -121,6 +130,31 @@ pub fn lower_function_and_return(
                 )));
             }
         }
+        // Block parameters carrying a region's results are the other values that
+        // reach machine instructions without being defined by one, so they are
+        // retyped through the same map. A tuple parameter is not a register: its
+        // elements are, and they were retyped above.
+        for block in context
+            .get_region(op.op().regions()[0])
+            .iter(context.clone())
+        {
+            for (index, argument) in block.arguments().iter().enumerate() {
+                if type_class(context, argument.ty()).is_some() {
+                    continue;
+                }
+                let ty = context.get_type_data(argument.ty());
+                if (ty.as_ref() as &dyn std::any::Any)
+                    .downcast_ref::<TupleType>()
+                    .is_some()
+                {
+                    continue;
+                }
+                let class = argument_class(argument.ty())?;
+                let class_ty = RegClassType::new(context, class);
+                context.retype_block_argument(block.id(), index, class_ty);
+            }
+        }
+
         let mut symbol = super::SymbolOpBuilder::new(context)
             .body(op.op().regions()[0])
             .attr("name", AttributeValue::Str(name.into()))
@@ -132,7 +166,7 @@ pub fn lower_function_and_return(
             symbol = symbol.attr("binding", AttributeValue::Str("local".to_string().into()));
         }
         let symbol = symbol.build();
-        rewriter.replace_op(op, &symbol)?;
+        rewriter.replace_op_keeping_results(op, &symbol)?;
         for (extract, block) in tuple_extracts {
             rewriter.erase_op(&OperationRef::new(
                 context.get_op(extract),

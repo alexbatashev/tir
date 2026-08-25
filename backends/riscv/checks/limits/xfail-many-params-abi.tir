@@ -11,5 +11,5 @@ module {
   module_end
 }
 
-// CHECK: riscv.ld {rd = x{{[0-9]+}}, rs1 = x2, imm = 0}
-// CHECK: riscv.ld {rd = x{{[0-9]+}}, rs1 = x2, imm = 8}
+// CHECK: riscv.ld {rd = %{{[0-9]+}}:x{{[0-9]+}}, rs1 = x2, imm = 0}
+// CHECK: riscv.ld {rd = %{{[0-9]+}}:x{{[0-9]+}}, rs1 = x2, imm = 8}

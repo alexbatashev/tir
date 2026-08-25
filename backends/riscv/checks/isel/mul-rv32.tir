@@ -9,5 +9,5 @@ module {
 }
 
 // RV32 has no word multiply instruction; plain mul is the 32-bit operation.
-// CHECK: asm.symbol {name = "mul32", arg_regs = [%virt0:GPR, %virt1:GPR]}
-// CHECK: riscv.mul {rd = %virt2:GPR, rs1 = %virt0:GPR, rs2 = %virt1:GPR}
+// CHECK: asm.symbol {name = "mul32", arg_regs = [%[[V0:[0-9]+]]:GPR, %[[V1:[0-9]+]]:GPR]
+// CHECK: riscv.mul {rd = %[[V2:[0-9]+]]:GPR, rs1 = %[[V0]]:GPR, rs2 = %[[V1]]:GPR}

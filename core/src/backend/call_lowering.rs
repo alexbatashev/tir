@@ -15,20 +15,20 @@ use crate::backend::abi::{
     reserve_indirect_result_argument, type_kind, value_kind,
 };
 use crate::backend::liveness::PhysReg;
+use crate::backend::regalloc::RegClassId;
+use crate::backend::registers::RegSlot;
 
 pub trait CallEmitter: Send + Sync {
-    fn copy(
-        &self,
-        context: &Context,
-        dst: AttributeValue,
-        src: AttributeValue,
-    ) -> Box<dyn Operation>;
+    /// A register-to-register move. Either end is a value the copy defines or
+    /// reads, or a physical register the calling convention names.
+    fn copy(&self, context: &Context, dst: RegSlot, src: RegSlot) -> Box<dyn Operation>;
 
     fn stack_arg_store(
         &self,
         _context: &Context,
         _abi: &AbiInfo,
-        _value: AttributeValue,
+        _value: ValueId,
+        _class: RegClassId,
         _offset: i64,
     ) -> Result<Box<dyn Operation>, PassError> {
         Err(PassError::InvalidRuleSet(
@@ -205,19 +205,22 @@ impl CallLowering {
         for (argument_index, (arg, alignment)) in
             args.into_iter().zip(argument_alignments).enumerate()
         {
+            // The elements the preparation pass recorded describe the argument
+            // on their own, so a tuple whose producing call has already been
+            // lowered away need not be read back.
+            if let Some(elements) = self
+                .tuple_argument_elements
+                .get(&(op.op().id, argument_index + argument_offset))
+            {
+                lowered_arguments.push((elements.clone(), alignment));
+                continue;
+            }
             let ty = context.get_type_data(context.get_value(arg).ty());
             if (ty.as_ref() as &dyn std::any::Any)
                 .downcast_ref::<TupleType>()
                 .is_none()
             {
                 lowered_arguments.push((vec![arg], alignment));
-                continue;
-            }
-            if let Some(elements) = self
-                .tuple_argument_elements
-                .get(&(op.op().id, argument_index + argument_offset))
-            {
-                lowered_arguments.push((elements.clone(), alignment));
                 continue;
             }
             let defining_op = context.get_value(arg).defining_op().ok_or_else(|| {
@@ -248,14 +251,20 @@ impl CallLowering {
             align_argument_group(
                 self.abi,
                 alignment,
-                values.iter().map(|&value| value_kind(context, value)),
+                values
+                    .iter()
+                    .map(|&value| value_kind(context, self.abi, value)),
                 &mut trial_slots,
             );
             let direct = if self.abi.argument_group_fits_register_limit(values.len()) {
                 values
                     .iter()
                     .map(|&value| {
-                        next_register(self.abi, value_kind(context, value), &mut trial_slots)
+                        next_register(
+                            self.abi,
+                            value_kind(context, self.abi, value),
+                            &mut trial_slots,
+                        )
                     })
                     .collect::<Option<Vec<_>>>()
             } else {
@@ -272,13 +281,14 @@ impl CallLowering {
                 if self.abi.argument_group_rollback() == GroupRollback::Exhaust {
                     exhaust_argument_registers(
                         self.abi,
-                        value_kind(context, value),
+                        value_kind(context, self.abi, value),
                         &mut next_slot,
                     );
                 }
-                let class = stack_class(self.abi, value_kind(context, value)).ok_or_else(|| {
-                    PassError::InvalidRuleSet("ABI has no argument sequence".to_string())
-                })?;
+                let class = stack_class(self.abi, value_kind(context, self.abi, value))
+                    .ok_or_else(|| {
+                        PassError::InvalidRuleSet("ABI has no argument sequence".to_string())
+                    })?;
                 argument_values.push(value);
                 argument_locations.push(ArgumentLocation::Stack {
                     class,
@@ -305,14 +315,13 @@ impl CallLowering {
                 PassError::InvalidRuleSet("ABI has no integer argument registers".to_string())
             })?;
 
+        // An argument value must not be pinned for its whole live range, so the
+        // call reads a copy of it made right here.
         let detach = |rewriter: &mut Rewriter, value: ValueId, class| {
-            let ty = context.get_value(value).ty();
-            let fresh = context.create_value(ty, None).id().number();
-            let copy = self.emitter.copy(
-                context,
-                virtual_reg(fresh, class),
-                virtual_reg(value.number(), class),
-            );
+            let fresh = fresh_reg(context, class);
+            let copy = self
+                .emitter
+                .copy(context, RegSlot::Value(fresh), RegSlot::Value(value));
             rewriter.insert_op_before(op, copy.as_ref()).map(|()| fresh)
         };
 
@@ -338,7 +347,7 @@ impl CallLowering {
             .zip(&argument_locations)
             .filter(|&(value, location)| {
                 matches!(location, ArgumentLocation::Register(_))
-                    && value_kind(context, *value) == ValueKind::Float
+                    && value_kind(context, self.abi, *value) == ValueKind::Float
             })
             .count() as u8;
         for prefix in
@@ -349,11 +358,10 @@ impl CallLowering {
         }
 
         let saved_ra = if let Some(ra) = self.abi.ra {
-            let ty = tir::builtin::IntegerType::new(context, self.abi.stack.slot_size * 8);
-            let saved = context.create_value(ty, None).id().number();
+            let saved = fresh_reg(context, ra.0);
             let copy = self
                 .emitter
-                .copy(context, virtual_reg(saved, ra.0), physical_reg(ra));
+                .copy(context, RegSlot::Value(saved), RegSlot::Phys(ra));
             rewriter.insert_op_before(op, copy.as_ref())?;
             Some((saved, ra))
         } else {
@@ -363,30 +371,23 @@ impl CallLowering {
         for (&fresh, location) in fresh_args.iter().zip(&argument_locations) {
             match *location {
                 ArgumentLocation::Register(register) => {
-                    let copy = self.emitter.copy(
-                        context,
-                        physical_reg(register),
-                        virtual_reg(fresh, register.0),
-                    );
+                    let copy =
+                        self.emitter
+                            .copy(context, RegSlot::Phys(register), RegSlot::Value(fresh));
                     rewriter.insert_op_before(op, copy.as_ref())?;
                 }
                 ArgumentLocation::Stack { class, offset } => {
-                    let store = self.emitter.stack_arg_store(
-                        context,
-                        self.abi,
-                        virtual_reg(fresh, class),
-                        offset,
-                    )?;
+                    let store = self
+                        .emitter
+                        .stack_arg_store(context, self.abi, fresh, class, offset)?;
                     rewriter.insert_op_before(op, store.as_ref())?;
                 }
             }
         }
         if let Some((fresh, register)) = fresh_result_address {
-            let copy = self.emitter.copy(
-                context,
-                physical_reg(register),
-                virtual_reg(fresh, register.0),
-            );
+            let copy = self
+                .emitter
+                .copy(context, RegSlot::Phys(register), RegSlot::Value(fresh));
             rewriter.insert_op_before(op, copy.as_ref())?;
         }
 
@@ -395,7 +396,12 @@ impl CallLowering {
                 .caller_saved
                 .iter()
                 .copied()
-                .map(physical_reg)
+                .map(|register| {
+                    AttributeValue::Register(RegisterAttr::Physical {
+                        class: register.0,
+                        index: register.1,
+                    })
+                })
                 .collect::<Vec<_>>()
                 .into(),
         );
@@ -409,13 +415,7 @@ impl CallLowering {
             ),
             Callee::Indirect(_) => Box::new(
                 super::VirtualIndirectCallOpBuilder::new(context)
-                    .attr(
-                        "callee_reg",
-                        virtual_reg(
-                            fresh_callee.expect("indirect callee was detached"),
-                            indirect_class,
-                        ),
-                    )
+                    .callee(fresh_callee.expect("indirect callee was detached"))
                     .outgoing_stack_size(u64::from(outgoing_size))
                     .attr("clobbers", clobbers)
                     .build(),
@@ -428,7 +428,7 @@ impl CallLowering {
 
         let restore = saved_ra.map(|(saved, ra)| {
             self.emitter
-                .copy(context, physical_reg(ra), virtual_reg(saved, ra.0))
+                .copy(context, RegSlot::Phys(ra), RegSlot::Value(saved))
         });
         if let Some(restore) = &restore {
             rewriter.insert_op_before(op, restore.as_ref())?;
@@ -481,22 +481,27 @@ impl CallLowering {
             extracts.sort_by_key(|(index, result, ..)| (*index, result.number()));
 
             for &(_, extracted, register, _) in &extracts {
-                let copy = self.emitter.copy(
-                    context,
-                    virtual_reg(extracted.number(), register.0),
-                    physical_reg(register),
+                // The copy takes over the extraction's value: it is the one the
+                // rest of the function — and this pass's own record of the
+                // tuple's elements — already names.
+                context.retype_value(
+                    extracted,
+                    crate::backend::RegClassType::new(context, register.0),
                 );
+                let copy =
+                    self.emitter
+                        .copy(context, RegSlot::Value(extracted), RegSlot::Phys(register));
                 rewriter.insert_op_before(op, copy.as_ref())?;
             }
             for (_, _, _, extract) in extracts {
-                rewriter.erase_op(&extract)?;
+                rewriter.erase_op_keeping_results(&extract)?;
             }
             rewriter.erase_op(op)?;
             erase_dead_tuple_arguments(context, rewriter, &tuple_arguments)?;
             return Ok(true);
         }
 
-        let kind = value_kind(context, result);
+        let kind = value_kind(context, self.abi, result);
         let return_reg = self
             .abi
             .rets
@@ -513,11 +518,12 @@ impl CallLowering {
             .and_then(|sequence| sequence.regs.first())
             .copied()
             .ok_or_else(|| PassError::InvalidRuleSet("ABI has no return register".to_string()))?;
-        let copy = self.emitter.copy(
-            context,
-            virtual_reg(result.number(), return_reg.0),
-            physical_reg(return_reg),
-        );
+        // The call op is erased below and takes its result with it, so the copy
+        // defines a register value of its own.
+        let returned = fresh_reg(context, return_reg.0);
+        let copy = self
+            .emitter
+            .copy(context, RegSlot::Value(returned), RegSlot::Phys(return_reg));
         rewriter.replace_op(op, copy.as_ref())?;
         erase_dead_tuple_arguments(context, rewriter, &tuple_arguments)?;
         Ok(true)
@@ -692,18 +698,11 @@ fn stack_class(abi: &AbiInfo, mut kind: ValueKind) -> Option<crate::backend::reg
     }
 }
 
-fn physical_reg(reg: PhysReg) -> AttributeValue {
-    AttributeValue::Register(RegisterAttr::Physical {
-        class: reg.0,
-        index: reg.1,
-    })
-}
-
-fn virtual_reg(id: u32, class: crate::backend::regalloc::RegClassId) -> AttributeValue {
-    AttributeValue::Register(RegisterAttr::Virtual {
-        id,
-        class: Some(class),
-    })
+/// A fresh value of `class`, the type a machine instruction reads it through.
+fn fresh_reg(context: &Context, class: RegClassId) -> ValueId {
+    context
+        .create_value(crate::backend::RegClassType::new(context, class), None)
+        .id()
 }
 
 /// Where a call's target comes from: a named symbol when the callee traces back

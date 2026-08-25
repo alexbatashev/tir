@@ -22,20 +22,20 @@ module {data_layout = #data_layout} {
 
 // CHECK-NOT: scf.
 // The zero-trip guard, before the loop, fused into its branch.
-// CHECK: x86_64.cmp {dst = %virt0:GPR, src = %virt1:GPR}
+// CHECK: x86_64.cmp {dst = %[[V0:[0-9]+]]:GPR, src = %[[V1:[0-9]+]]:GPR}
 // CHECK-NEXT: x86_64.jl {imm = ^[[ENTER:bb[0-9]+]]}
 // CHECK-NEXT: asm.vbr %{{[0-9]+}} ^[[EXIT:bb[0-9]+]]
 // The body carries the accumulator and the counter.
-// CHECK: ^[[BODY:bb[0-9]+]](%{{[0-9]+}}: !i64, %[[IV:[0-9]+]]: !i64):
-// CHECK-NEXT: x86_64.add_imm8s {dst = %virt{{[0-9]+}}:GPR, dst_tied = %virt{{[0-9]+}}:GPR, imm = 5}
+// CHECK: ^[[BODY:bb[0-9]+]](%{{[0-9]+}}: !x86_64.GPR, %[[IV:[0-9]+]]: !x86_64.GPR):
+// CHECK-NEXT: x86_64.add_imm8s {dst = %{{[0-9]+}}:GPR, dst_tied = %{{[0-9]+}}:GPR, imm = 5}
 // The counter advances by the step and is tested against the same bound; the
 // test fuses into the back edge's branch even though the advance names no value
 // of the IR.
-// CHECK-NEXT: x86_64.add {dst = %virt[[NEXT:[0-9]+]]:GPR, dst_tied = %virt[[IV]]:GPR, src = %virt2:GPR}
-// CHECK-NEXT: x86_64.cmp {dst = %virt[[NEXT]]:GPR, src = %virt1:GPR}
+// CHECK-NEXT: x86_64.add {dst = %[[NEXT:[0-9]+]]:GPR, dst_tied = %[[IV]]:GPR, src = %[[V2:[0-9]+]]:GPR}
+// CHECK-NEXT: x86_64.cmp {dst = %[[NEXT]]:GPR, src = %[[V1]]:GPR}
 // CHECK-NEXT: x86_64.jl {imm = ^[[LATCH:bb[0-9]+]]}
 // CHECK-NEXT: asm.vbr %{{[0-9]+}} ^[[EXIT]]
-// CHECK: ^[[EXIT]](%{{[0-9]+}}: !i64):
+// CHECK: ^[[EXIT]](%{{[0-9]+}}: !x86_64.GPR):
 // CHECK-NEXT: asm.vret
 // CHECK: ^[[ENTER]]:
 // CHECK-NEXT: asm.vbr %{{[0-9]+}}, %{{[0-9]+}} ^[[BODY]]

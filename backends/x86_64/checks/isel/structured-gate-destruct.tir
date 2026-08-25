@@ -20,7 +20,7 @@ module {
 }
 
 // CHECK-NOT: scf.
-// CHECK: x86_64.test_imm32 {dst = %virt0:GPR32, imm = 1}
+// CHECK: x86_64.test_imm32 {dst = %[[V0:[0-9]+]]:GPR, imm = 1}
 // CHECK-NEXT: x86_64.jne {imm = ^[[THEN:bb[0-9]+]]}
 // CHECK-NEXT: asm.vbr ^[[ELSE:bb[0-9]+]]
 // CHECK: ^[[THEN]]:
@@ -29,6 +29,6 @@ module {
 // CHECK: ^[[ELSE]]:
 // CHECK-NEXT: x86_64.sub
 // CHECK-NEXT: asm.vbr %{{[0-9]+}} ^[[JOIN]]
-// CHECK: ^[[JOIN]](%{{[0-9]+}}: !i64):
+// CHECK: ^[[JOIN]](%{{[0-9]+}}: !x86_64.GPR):
 // CHECK-NEXT: asm.vret
 // CHECK-NOT: scf.

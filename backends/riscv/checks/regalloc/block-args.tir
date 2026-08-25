@@ -20,13 +20,13 @@ module {
   module_end
 }
 
-// CHECK: riscv.blt {rs1 = x10, rs2 = x11, imm = ^[[TAKEN:bb[0-9]+]]}
+// CHECK: riscv.blt {rs1 = %{{[0-9]+}}:x10, rs2 = %{{[0-9]+}}:x11, imm = ^[[TAKEN:bb[0-9]+]]}
 // The fallthrough arm forwards %b into the merge parameter's register (a0 = x10).
-// CHECK-NEXT: riscv.addi {rd = x10, rs1 = x13, imm = 0}
+// CHECK-NEXT: riscv.addi {rd = %{{[0-9]+}}:x10, rs1 = %{{[0-9]+}}:x13, imm = 0}
 // CHECK-NEXT: asm.vbr ^[[JOIN:bb[0-9]+]]
-// CHECK: ^[[JOIN]](%{{[0-9]+}}: !i64):
+// CHECK: ^[[JOIN]](%{{[0-9]+}}: !riscv.GPR):
 // CHECK-NEXT: asm.vret
 // The taken arm forwards %a into the very same register.
 // CHECK: ^[[TAKEN]]:
-// CHECK-NEXT: riscv.addi {rd = x10, rs1 = x12, imm = 0}
+// CHECK-NEXT: riscv.addi {rd = %{{[0-9]+}}:x10, rs1 = %{{[0-9]+}}:x12, imm = 0}
 // CHECK-NEXT: asm.vbr ^[[JOIN]]

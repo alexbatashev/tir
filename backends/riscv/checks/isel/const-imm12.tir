@@ -11,7 +11,7 @@ module {
   }
   // CHECK: asm.symbol {name = "five"
   // CHECK-NOT: constant
-  // CHECK: riscv.addi {rd = %virt0:GPR, rs1 = x0, imm = 5}
+  // CHECK: riscv.addi {rd = %[[V0:[0-9]+]]:GPR, rs1 = x0, imm = 5}
   // CHECK: asm.vret
 
   %fn_neg_one = func.func @neg_one() -> !i64 {
@@ -20,7 +20,7 @@ module {
   }
   // CHECK: asm.symbol {name = "neg_one"
   // CHECK-NOT: constant
-  // CHECK: riscv.addi {rd = %virt2:GPR, rs1 = x0, imm = -1}
+  // CHECK: riscv.addi {rd = %[[V2:[0-9]+]]:GPR, rs1 = x0, imm = -1}
 
   %fn_imm_max = func.func @imm_max() -> !i64 {
     %0 = constant {value = 2047} : !i64
@@ -28,7 +28,7 @@ module {
   }
   // CHECK: asm.symbol {name = "imm_max"
   // CHECK-NOT: constant
-  // CHECK: riscv.addi {rd = %virt4:GPR, rs1 = x0, imm = 2047}
+  // CHECK: riscv.addi {rd = %[[V4:[0-9]+]]:GPR, rs1 = x0, imm = 2047}
 
   %fn_imm_min = func.func @imm_min() -> !i64 {
     %0 = constant {value = -2048} : !i64
@@ -36,7 +36,7 @@ module {
   }
   // CHECK: asm.symbol {name = "imm_min"
   // CHECK-NOT: constant
-  // CHECK: riscv.addi {rd = %virt6:GPR, rs1 = x0, imm = -2048}
+  // CHECK: riscv.addi {rd = %[[V6:[0-9]+]]:GPR, rs1 = x0, imm = -2048}
 
   // A constant consumed only as another instruction's immediate keeps folding:
   // no li is materialized for it.
@@ -48,7 +48,7 @@ module {
   // CHECK: asm.symbol {name = "fold_only"
   // CHECK-NOT: constant
   // CHECK-NOT: rs1 = x0
-  // CHECK: riscv.addi {rd = %virt10:GPR, rs1 = %virt8:GPR, imm = 7}
+  // CHECK: riscv.addi {rd = %[[V10:[0-9]+]]:GPR, rs1 = %[[V8:[0-9]+]]:GPR, imm = 7}
 
   // A constant both folded into a live consumer and returned by value: the
   // consumer keeps the folded immediate while one li materializes the
@@ -62,8 +62,8 @@ module {
   }
   // CHECK: asm.symbol {name = "fold_and_escape"
   // CHECK-NOT: constant
-  // CHECK: riscv.addi {rd = %virt13:GPR, rs1 = x0, imm = 9}
-  // CHECK: riscv.addi {rd = %virt14:GPR, rs1 = %virt12:GPR, imm = 9}
+  // CHECK: riscv.addi {rd = %[[V13:[0-9]+]]:GPR, rs1 = x0, imm = 9}
+  // CHECK: riscv.addi {rd = %[[V14:[0-9]+]]:GPR, rs1 = %[[V12:[0-9]+]]:GPR, imm = 9}
   // CHECK: riscv.sd
   module_end
 }

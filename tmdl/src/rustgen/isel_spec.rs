@@ -127,22 +127,19 @@ fn emit_emitter_spec(
     op_name: &str,
     op_ty_ident: &proc_macro2::Ident,
     attrs: &[proc_macro2::TokenStream],
-    declared: &[String],
+    inst_name: &str,
 ) -> (proc_macro2::TokenStream, proc_macro2::Ident) {
     let spec_ident = format_ident!("EMIT_{}", rule_key.to_uppercase());
     let shim_ident = format_ident!("emit_isel_{}", rule_key);
     let dialect_lit = proc_macro2::Literal::string(dialect);
     let op_name_lit = proc_macro2::Literal::string(op_name);
-    let declared_lits: Vec<proc_macro2::Literal> = declared
-        .iter()
-        .map(|n| proc_macro2::Literal::string(n))
-        .collect();
+    let ports_ident = format_ident!("REGS_{}", inst_name.to_uppercase());
     let tokens = quote! {
         static #spec_ident: tir::backend::isel::EmitSpec = tir::backend::isel::EmitSpec {
             op: (#dialect_lit, #op_name_lit),
             wrap: <#op_ty_ident as tir::Operation>::from_op_instance_dyn,
             attrs: &[#(#attrs),*],
-            declared: &[#(#declared_lits),*],
+            regs: &#ports_ident,
         };
 
         fn #shim_ident(

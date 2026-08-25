@@ -27,9 +27,9 @@ int classify(int value, int flag)
 }
 
 // CHECK: classify:
-// CHECK: cmp ecx, edi
-// CHECK: add edi, 100
 // CHECK: cmp eax, edi
+// CHECK: add edi, 100
+// CHECK: cmp ecx, edi
 // CHECK: add edi, 101
 // CHECK: cmp edi, 2
 // CHECK: add edi, 102

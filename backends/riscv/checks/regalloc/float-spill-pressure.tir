@@ -96,7 +96,7 @@ module {
 // CHECK-NEXT: riscv.addi {rd = x2, rs1 = x2, imm = -{{[0-9]+}}}
 // FP spill stores and reloads go through the stack pointer.
 // CHECK: riscv.fsw {rs1 = x2,
-// CHECK: riscv.flw {fd = {{f[0-9]+}}, rs1 = x2,
+// CHECK: riscv.flw {fd = %{{[0-9]+}}:{{f[0-9]+}}, rs1 = x2,
 // CHECK: asm.vret
 // ABSENT-NOT: riscv.sd
 // ABSENT-NOT: riscv.ld {

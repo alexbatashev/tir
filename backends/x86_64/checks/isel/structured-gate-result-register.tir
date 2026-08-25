@@ -20,6 +20,6 @@ module {
   module_end
 }
 
-// CHECK: ^{{bb[0-9]+}}(%[[R:[0-9]+]]: !i64):
-// CHECK-NEXT: x86_64.imul {dst = %virt[[PROD:[0-9]+]]:GPR
-// CHECK-NEXT: x86_64.add {dst = %{{virt[0-9]+}}:GPR, dst_tied = %virt[[R]]:GPR, src = %virt[[PROD]]:GPR}
+// CHECK: ^{{bb[0-9]+}}(%[[R:[0-9]+]]: !x86_64.GPR):
+// CHECK-NEXT: x86_64.imul {dst = %[[PROD:[0-9]+]]:GPR
+// CHECK-NEXT: x86_64.add {dst = %{{[0-9]+}}:GPR, dst_tied = %[[R]]:GPR, src = %[[PROD]]:GPR}

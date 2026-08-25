@@ -616,9 +616,9 @@ impl<'a> Destructor<'a> {
     }
 
     /// Split `block` after `op`, the continuation adopting what the operation
-    /// produced as its parameters. Adopted, not renamed: a register attribute is
-    /// not an operand, so a rename would leave the tiles already emitted for the
-    /// readers naming a value nothing defines any more.
+    /// produced as its parameters. Adopted, not renamed: the tiles already
+    /// emitted name those values, and a rename reaches only the readers that
+    /// exist when it runs.
     fn split_after(
         &self,
         rewriter: &mut Rewriter,
