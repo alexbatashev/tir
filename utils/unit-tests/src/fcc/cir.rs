@@ -4,11 +4,37 @@
 
 use tir::{builtin::ModuleOp, parse::ir::parse_ir, verify_op_tree, Context, Operation};
 
-fn verify(module: &str) -> Result<(), tir::Error> {
+fn cir_context() -> Context {
     let context = Context::with_default_dialects();
     context.register_dialect::<fcc::cir::CirDialect>();
+    context
+}
+
+fn verify(module: &str) -> Result<(), tir::Error> {
+    let context = cir_context();
     let module = parse_ir::<ModuleOp>(&context, module).expect("parse module");
     verify_op_tree(&context, module.id())
+}
+
+fn print(module: &ModuleOp) -> String {
+    let mut printed = String::new();
+    let mut fmt = tir::IRFormatter::new(&mut printed);
+    module.print(&mut fmt).expect("print module");
+    printed
+}
+
+/// Parse `module`, print it, and parse the printed form again: the two printings
+/// agree exactly when the op's syntax carries everything its structure holds.
+fn roundtrip(module: &str) -> String {
+    let context = cir_context();
+    let parsed = parse_ir::<ModuleOp>(&context, module).expect("parse module");
+    verify_op_tree(&context, parsed.id()).expect("verify module");
+    let printed = print(&parsed);
+
+    let context = cir_context();
+    let reparsed = parse_ir::<ModuleOp>(&context, &printed).expect("parse printed module");
+    assert_eq!(printed, print(&reparsed), "printing is not stable");
+    printed
 }
 
 #[test]
@@ -54,4 +80,150 @@ fn variadic_call_rejects_a_mismatched_fixed_prefix() {
 }"#,
     )
     .expect_err("the fixed prefix must still match");
+}
+
+#[test]
+fn for_loop_round_trips() {
+    let printed = roundtrip(
+        r#"module {
+  %fn_count = func.func @count() -> !i32 {
+    %0 = ptr.alloca {size = 4, align = 4} : !ptr.p
+    cir.for cond {
+      %1 = ptr.load %0 : !i32
+      %2 = constant {value = 3} : !i32
+      %3 = cmpi %1, %2 {predicate = "slt"} : !i1
+      cir.condition %3
+    } step {
+      %4 = ptr.load %0 : !i32
+      %5 = constant {value = 1} : !i32
+      %6 = addi %4, %5 : !i32
+      ptr.store %6, %0
+      cir.yield
+    } body {
+      cir.yield
+    }
+    %7 = ptr.load %0 : !i32
+    func.return %7
+  }
+  module_end
+}"#,
+    );
+    assert!(printed.contains("cir.for cond {"), "{printed}");
+    assert!(printed.contains(" step {"), "{printed}");
+    assert!(printed.contains(" body {"), "{printed}");
+}
+
+#[test]
+fn while_loop_round_trips() {
+    let printed = roundtrip(
+        r#"module {
+  %fn_spin = func.func @spin(%0: !i1) {
+    cir.while cond {
+      cir.condition %0
+    } body {
+      cir.break
+    }
+    func.return
+  }
+  module_end
+}"#,
+    );
+    assert!(printed.contains("cir.while cond {"), "{printed}");
+    assert!(printed.contains(" body {"), "{printed}");
+}
+
+#[test]
+fn do_loop_round_trips() {
+    let printed = roundtrip(
+        r#"module {
+  %fn_spin = func.func @spin(%0: !i1) {
+    cir.do body {
+      cir.continue
+    } cond {
+      cir.condition %0
+    }
+    func.return
+  }
+  module_end
+}"#,
+    );
+    assert!(printed.contains("cir.do body {"), "{printed}");
+    assert!(printed.contains(" cond {"), "{printed}");
+}
+
+#[test]
+fn loop_regions_admit_multiple_blocks() {
+    roundtrip(
+        r#"module {
+  %fn_spin = func.func @spin(%0: !i1) {
+    cir.while cond {
+      cfg.cond_br %0, ^bb1, ^bb2
+      ^bb1:
+      cfg.br ^bb2
+      ^bb2:
+      cir.condition %0
+    } body {
+      cir.yield
+    }
+    func.return
+  }
+  module_end
+}"#,
+    );
+}
+
+#[test]
+fn condition_region_must_end_in_a_condition() {
+    verify(
+        r#"module {
+  %fn_spin = func.func @spin(%0: !i1) {
+    cir.while cond {
+      cir.yield
+    } body {
+      cir.yield
+    }
+    func.return
+  }
+  module_end
+}"#,
+    )
+    .expect_err("a cir.while condition region ends in cir.condition");
+}
+
+#[test]
+fn body_region_must_not_end_in_a_condition() {
+    verify(
+        r#"module {
+  %fn_spin = func.func @spin(%0: !i1) {
+    cir.while cond {
+      cir.condition %0
+    } body {
+      cir.condition %0
+    }
+    func.return
+  }
+  module_end
+}"#,
+    )
+    .expect_err("a cir.while body region ends in cir.yield, cir.break or cir.continue");
+}
+
+#[test]
+fn step_region_admits_no_break() {
+    verify(
+        r#"module {
+  %fn_spin = func.func @spin(%0: !i1) {
+    cir.for cond {
+      cir.condition %0
+    } step {
+      cir.break
+    } body {
+      cir.yield
+    }
+    func.return
+  }
+  module_end
+}"#,
+    )
+    .expect_err("a for step region only falls through");
 }

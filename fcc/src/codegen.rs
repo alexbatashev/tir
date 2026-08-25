@@ -6,9 +6,11 @@
 //! `ptr.load` and writes become `ptr.store`. Arithmetic uses the `builtin`
 //! integer ops; C-only literals and variadic markers use the local `cir` dialect.
 //!
-//! Control flow is emitted structured — `cir` loops and conditionals — except in
-//! a function holding a label, which becomes a flat graph of blocks and branches
-//! for the `restructure` pass to raise.
+//! Loops are emitted as `cir` loop ops, which keep the source shape — condition,
+//! step and body in regions of their own — for the `raise-loops` pass to read.
+//! Everything else is a flat graph of blocks and branches for `restructure` to
+//! raise, and so is a whole function holding a label or a `return` under a loop:
+//! both name edges a loop region cannot carry.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -26,6 +28,16 @@ use crate::cir::{self, StructType, VarArgsType};
 use crate::diagnostics::{Diagnostic, EmptyTranslationUnit, UnsupportedConstruct};
 use crate::lexer::{decode_c_escapes, decode_character_constant};
 use crate::sema::{EntityId, QualType, TargetProfile, TypeKind, TypedAst, ValueCategory};
+
+/// Where a `break` or a `continue` leaves the innermost construct that owns it.
+#[derive(Clone)]
+enum ExitTarget {
+    /// A block of the region being emitted: a `switch` break, or any exit of a
+    /// function lowered flat.
+    Block(tir::BlockHandle),
+    /// The enclosing `cir` loop op, left through `cir.break` or `cir.continue`.
+    Loop,
+}
 
 /// A local variable: the pointer to its stack slot and the slot's element type.
 #[derive(Clone, Copy)]
@@ -146,16 +158,19 @@ struct FnCodegen<'a> {
     return_slot: Option<Slot>,
     /// The type a `return` converts its value to, for a function returning one.
     result_type: Option<QualType>,
-    /// The function body's region, which the lowering appends blocks to.
-    body_region: tir::RegionId,
+    /// The region the lowering appends blocks to: the function body, or a region
+    /// of the `cir` loop op currently being emitted.
+    region: tir::RegionId,
     /// The one block every `return` leaves through.
     exit_block: Option<tir::BlockHandle>,
     /// The block each label names, created the first time it is mentioned.
     label_blocks: HashMap<String, tir::BlockHandle>,
+    /// Whether this function's loops become `cir` loop ops.
+    structured_loops: bool,
     /// Where a `break` and a `continue` leave the innermost construct that owns
-    /// them, while lowering flat.
-    break_blocks: Vec<tir::BlockHandle>,
-    continue_blocks: Vec<tir::BlockHandle>,
+    /// them.
+    break_targets: Vec<ExitTarget>,
+    continue_targets: Vec<ExitTarget>,
     /// Lowered values in the expression subtree currently being emitted. The AST
     /// is a DAG, so shared children reuse their first lowering.
     values: HashMap<NodeId, LoweredExpr>,
@@ -1329,6 +1344,22 @@ fn is_integer_aggregate(typed: &TypedAst, ty: QualType) -> bool {
     }
 }
 
+/// Whether `statement` holds an edge a `cir` loop region cannot carry: a label or
+/// a `goto`, which name blocks anywhere in the function, or a `return` under a
+/// loop, which leaves for the function's one exit block. One of them anywhere in a
+/// function lowers all of its loops flat.
+fn crosses_loop_boundary(ast: &Ast, statement: NodeId, in_loop: bool) -> bool {
+    let kind = ast.get_node(statement).kind;
+    match kind {
+        AstKind::Goto | AstKind::Label => return true,
+        AstKind::Return => return in_loop,
+        _ => {}
+    }
+    let in_loop = in_loop || matches!(kind, AstKind::While | AstKind::DoWhile | AstKind::For);
+    ast.children(statement)
+        .any(|child| crosses_loop_boundary(ast, child, in_loop))
+}
+
 fn lower_function(
     context: &Context,
     typed: &TypedAst,
@@ -1410,11 +1441,12 @@ fn lower_function(
         terminated: false,
         return_slot: None,
         result_type: None,
-        body_region: region.id(),
+        region: region.id(),
         exit_block: None,
         label_blocks: HashMap::new(),
-        break_blocks: Vec::new(),
-        continue_blocks: Vec::new(),
+        structured_loops: false,
+        break_targets: Vec::new(),
+        continue_targets: Vec::new(),
         values: HashMap::new(),
     };
     cg.lower_body(func, &param_ids[parameter_start..], &signature.params)?;
@@ -2121,10 +2153,10 @@ impl FnCodegen<'_> {
         self.lower_statements(&statements, result, returns_void)
     }
 
-    /// Lower a function body as a flat graph of blocks and branches: a `goto` is
-    /// an edge like any other, and the `restructure` pass raises the whole body
-    /// back to structured control flow. Every `return` stores its value and
-    /// leaves through the one exit block.
+    /// Lower a function body, structured loops apart, as a flat graph of blocks
+    /// and branches: a `goto` is an edge like any other, and the `restructure`
+    /// pass raises the whole body back to structured control flow. Every `return`
+    /// stores its value and leaves through the one exit block.
     fn lower_statements(
         &mut self,
         statements: &[NodeId],
@@ -2136,6 +2168,9 @@ impl FnCodegen<'_> {
         for &statement in statements {
             self.hoist_declarations(statement);
         }
+        self.structured_loops = statements
+            .iter()
+            .all(|&statement| !crosses_loop_boundary(self.ast, statement, false));
         if !returns_void {
             self.result_type = Some(result);
             self.open_return_value_slot(result);
@@ -2149,9 +2184,7 @@ impl FnCodegen<'_> {
         self.store_main_exit_status(result);
         self.leave_block(&exit);
 
-        self.context
-            .get_region(self.body_region)
-            .add_block(exit.id());
+        self.context.get_region(self.region).add_block(exit.id());
         self.enter_block(exit);
         let operand = self.return_operand(result, returns_void);
         self.builder
@@ -2188,9 +2221,7 @@ impl FnCodegen<'_> {
     /// far.
     fn new_block(&mut self) -> tir::BlockHandle {
         let block = self.context.create_block(vec![]);
-        self.context
-            .get_region(self.body_region)
-            .add_block(block.id());
+        self.context.get_region(self.region).add_block(block.id());
         block
     }
 
@@ -2289,13 +2320,21 @@ impl FnCodegen<'_> {
                 Ok(())
             }
             AstKind::Break => {
-                let target = self.break_blocks.last().unwrap().clone();
-                self.leave_block(&target);
+                match self.break_targets.last().cloned().unwrap() {
+                    ExitTarget::Block(block) => self.leave_block(&block),
+                    ExitTarget::Loop => {
+                        self.terminate_with(cir::ops::r#break(self.context).build())
+                    }
+                }
                 Ok(())
             }
             AstKind::Continue => {
-                let target = self.continue_blocks.last().unwrap().clone();
-                self.leave_block(&target);
+                match self.continue_targets.last().cloned().unwrap() {
+                    ExitTarget::Block(block) => self.leave_block(&block),
+                    ExitTarget::Loop => {
+                        self.terminate_with(cir::ops::r#continue(self.context).build())
+                    }
+                }
                 Ok(())
             }
             AstKind::If => {
@@ -2326,69 +2365,59 @@ impl FnCodegen<'_> {
                 let mut children = ast.children(stmt);
                 let condition = children.next().unwrap();
                 let body = children.next().unwrap();
-                let header = self.new_block();
-                let body_block = self.new_block();
-                let exit = self.new_block();
-                self.leave_block(&header);
-
-                self.enter_block(header.clone());
-                let value = self.lower_condition(condition)?;
-                self.branch_on(value, &body_block, &exit);
-
-                self.enter_block(body_block);
-                self.lower_loop_body(body, &exit, &header)?;
-                self.leave_block(&header);
-
-                self.enter_block(exit);
+                if !self.structured_loops {
+                    return self.lower_flat_while(condition, body);
+                }
+                let condition_region = self.lower_condition_region(condition, false)?;
+                let body_region = self.lower_body_region(body)?;
+                let op = cir::WhileOpBuilder::new(self.context)
+                    .condition_region(condition_region)
+                    .body_region(body_region)
+                    .build();
+                self.builder.append_op(op);
                 Ok(())
             }
             AstKind::DoWhile => {
                 let mut children = ast.children(stmt);
                 let body = children.next().unwrap();
                 let condition = children.next().unwrap();
-                let body_block = self.new_block();
-                let latch = self.new_block();
-                let exit = self.new_block();
-                self.leave_block(&body_block);
-
-                self.enter_block(body_block.clone());
-                self.lower_loop_body(body, &exit, &latch)?;
-                self.leave_block(&latch);
-
-                self.enter_block(latch);
-                let value = self.lower_condition(condition)?;
-                self.branch_on(value, &body_block, &exit);
-
-                self.enter_block(exit);
+                if !self.structured_loops {
+                    return self.lower_flat_do_while(body, condition);
+                }
+                let body_region = self.lower_body_region(body)?;
+                let condition_region = self.lower_condition_region(condition, false)?;
+                let op = cir::DoOpBuilder::new(self.context)
+                    .body_region(body_region)
+                    .condition_region(condition_region)
+                    .build();
+                self.builder.append_op(op);
                 Ok(())
             }
             AstKind::For => {
                 let children = ast.children(stmt).collect::<Vec<_>>();
-                let [init, condition, step, body] = children.as_slice() else {
+                let [init, condition, step, body] = *children.as_slice() else {
                     unreachable!("for statement has four children");
                 };
-                if ast.get_node(*init).kind != AstKind::Empty {
-                    self.lower_stmt(*init)?;
+                // The init clause runs once, before the loop, so it stays inline.
+                if ast.get_node(init).kind != AstKind::Empty {
+                    self.lower_stmt(init)?;
                 }
-                let header = self.new_block();
-                let body_block = self.new_block();
-                let step_block = self.new_block();
-                let exit = self.new_block();
-                self.leave_block(&header);
-
-                self.enter_block(header.clone());
-                let value = self.lower_for_condition(*condition)?;
-                self.branch_on(value, &body_block, &exit);
-
-                self.enter_block(body_block);
-                self.lower_loop_body(*body, &exit, &step_block)?;
-                self.leave_block(&step_block);
-
-                self.enter_block(step_block);
-                self.lower_for_step(*step)?;
-                self.leave_block(&header);
-
-                self.enter_block(exit);
+                if !self.structured_loops {
+                    return self.lower_flat_for(condition, step, body);
+                }
+                let condition_region = self.lower_condition_region(condition, true)?;
+                let body_region = self.lower_body_region(body)?;
+                let step_region = self.lower_region(|cg| {
+                    cg.lower_for_step(step)?;
+                    cg.terminate_with(cir::ops::r#yield(cg.context).build());
+                    Ok(())
+                })?;
+                let op = cir::ForOpBuilder::new(self.context)
+                    .condition_region(condition_region)
+                    .step_region(step_region)
+                    .body_region(body_region)
+                    .build();
+                self.builder.append_op(op);
                 Ok(())
             }
             AstKind::Switch => self.lower_switch(stmt),
@@ -2396,18 +2425,142 @@ impl FnCodegen<'_> {
         }
     }
 
-    fn lower_loop_body(
+    fn lower_flat_while(&mut self, condition: NodeId, body: NodeId) -> Result<(), Diagnostic> {
+        let header = self.new_block();
+        let body_block = self.new_block();
+        let exit = self.new_block();
+        self.leave_block(&header);
+
+        self.enter_block(header.clone());
+        let value = self.lower_condition(condition)?;
+        self.branch_on(value, &body_block, &exit);
+
+        self.enter_block(body_block);
+        self.lower_flat_loop_body(body, &exit, &header)?;
+        self.leave_block(&header);
+
+        self.enter_block(exit);
+        Ok(())
+    }
+
+    fn lower_flat_do_while(&mut self, body: NodeId, condition: NodeId) -> Result<(), Diagnostic> {
+        let body_block = self.new_block();
+        let latch = self.new_block();
+        let exit = self.new_block();
+        self.leave_block(&body_block);
+
+        self.enter_block(body_block.clone());
+        self.lower_flat_loop_body(body, &exit, &latch)?;
+        self.leave_block(&latch);
+
+        self.enter_block(latch);
+        let value = self.lower_condition(condition)?;
+        self.branch_on(value, &body_block, &exit);
+
+        self.enter_block(exit);
+        Ok(())
+    }
+
+    fn lower_flat_for(
+        &mut self,
+        condition: NodeId,
+        step: NodeId,
+        body: NodeId,
+    ) -> Result<(), Diagnostic> {
+        let header = self.new_block();
+        let body_block = self.new_block();
+        let step_block = self.new_block();
+        let exit = self.new_block();
+        self.leave_block(&header);
+
+        self.enter_block(header.clone());
+        let value = self.lower_for_condition(condition)?;
+        self.branch_on(value, &body_block, &exit);
+
+        self.enter_block(body_block);
+        self.lower_flat_loop_body(body, &exit, &step_block)?;
+        self.leave_block(&step_block);
+
+        self.enter_block(step_block);
+        self.lower_for_step(step)?;
+        self.leave_block(&header);
+
+        self.enter_block(exit);
+        Ok(())
+    }
+
+    fn lower_flat_loop_body(
         &mut self,
         body: NodeId,
         exit: &tir::BlockHandle,
         next: &tir::BlockHandle,
     ) -> Result<(), Diagnostic> {
-        self.break_blocks.push(exit.clone());
-        self.continue_blocks.push(next.clone());
+        self.break_targets.push(ExitTarget::Block(exit.clone()));
+        self.continue_targets.push(ExitTarget::Block(next.clone()));
         let lowered = self.lower_stmt(body);
-        self.continue_blocks.pop();
-        self.break_blocks.pop();
+        self.continue_targets.pop();
+        self.break_targets.pop();
         lowered
+    }
+
+    /// Lower a loop's condition into a region of its own, leaving through
+    /// `cir.condition`. An omitted `for` condition is the constant true C gives it.
+    fn lower_condition_region(
+        &mut self,
+        condition: NodeId,
+        omittable: bool,
+    ) -> Result<tir::RegionId, Diagnostic> {
+        self.lower_region(|cg| {
+            let value = if omittable {
+                cg.lower_for_condition(condition)?
+            } else {
+                cg.lower_condition(condition)?
+            };
+            cg.terminate_with(cir::ops::condition(cg.context, value).build());
+            Ok(())
+        })
+    }
+
+    /// Lower a loop body into a region of its own, where `break` and `continue`
+    /// name the loop op rather than a block.
+    fn lower_body_region(&mut self, body: NodeId) -> Result<tir::RegionId, Diagnostic> {
+        self.lower_region(|cg| {
+            cg.break_targets.push(ExitTarget::Loop);
+            cg.continue_targets.push(ExitTarget::Loop);
+            let lowered = cg.lower_stmt(body);
+            cg.continue_targets.pop();
+            cg.break_targets.pop();
+            lowered?;
+            cg.terminate_with(cir::ops::r#yield(cg.context).build());
+            Ok(())
+        })
+    }
+
+    /// Emit `lower` into a fresh region, restoring the enclosing one afterwards.
+    fn lower_region(
+        &mut self,
+        lower: impl FnOnce(&mut Self) -> Result<(), Diagnostic>,
+    ) -> Result<tir::RegionId, Diagnostic> {
+        let region = self.context.create_region();
+        let entry = self.context.create_block(vec![]);
+        region.add_block(entry.id());
+        let enclosing = (
+            std::mem::replace(&mut self.region, region.id()),
+            std::mem::replace(&mut self.builder, entry),
+            std::mem::replace(&mut self.terminated, false),
+        );
+        let lowered = lower(self);
+        (self.region, self.builder, self.terminated) = enclosing;
+        lowered.map(|()| region.id())
+    }
+
+    /// End the block being emitted with `terminator`, unless it already left.
+    fn terminate_with(&mut self, terminator: impl Operation) {
+        if self.terminated {
+            return;
+        }
+        self.builder.append_op(terminator);
+        self.terminated = true;
     }
 
     /// Lower a `switch` as the comparison chain it is: the controlling value is
@@ -2459,9 +2612,9 @@ impl FnCodegen<'_> {
         }
         self.leave_block(default.as_ref().unwrap_or(&exit));
 
-        self.break_blocks.push(exit.clone());
+        self.break_targets.push(ExitTarget::Block(exit.clone()));
         let lowered = self.lower_switch_arms(&items, &arms);
-        self.break_blocks.pop();
+        self.break_targets.pop();
         lowered?;
         self.leave_block(&exit);
         self.enter_block(exit);

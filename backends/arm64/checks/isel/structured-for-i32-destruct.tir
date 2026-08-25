@@ -1,0 +1,28 @@
+// RUN: tir mc --march=arm64 --stage=isel %s | filecheck %s
+
+// A counted loop counts through the type its bounds name. Bounds of a concrete
+// integer width make the counter that width, so the wrapping the source language
+// defines survives destruction instead of being widened to the index type.
+
+#data_layout = {types = {p = {abi = 64, size = 64}}}
+
+module {data_layout = #data_layout} {
+  %fn_count = func.func @count(%lb: !i32, %ub: !i32, %st: !i32, %init: !i64) -> !i64 {
+    %c = constant {value = 5} : !i64
+    %r = scf.for %lb, %ub, %st iter_args(%acc = %init) -> !i64 {
+      %n = addi %acc, %c : !i64
+      scf.yield %n
+    }
+    func.return %r
+  }
+  module_end
+}
+
+// CHECK-NOT: scf.
+// The zero-trip guard compares the bounds at their own width.
+// CHECK: arm64.cmp_w {rn = %virt0:GPR32, rm = %virt1:GPR32}
+// The counter is minted as a 32-bit body argument, advanced and tested 32 bits wide.
+// CHECK: ^{{bb[0-9]+}}(%{{[0-9]+}}: !i64, %[[IV:[0-9]+]]: !i32):
+// CHECK: arm64.add_w {rd = %virt[[NEXT:[0-9]+]]:GPR32, rn = %virt[[IV]]:GPR32, rm = %virt2:GPR32}
+// CHECK-NEXT: arm64.cmp_w {rn = %virt[[NEXT]]:GPR32, rm = %virt1:GPR32}
+// CHECK-NOT: scf.

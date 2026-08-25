@@ -40,9 +40,9 @@ operation! {
         format: "custom",
         verifier: "true",
         operands: O {
-            lower_bound: "crate::builtin::IndexType",
-            upper_bound: "crate::builtin::IndexType",
-            step: "crate::builtin::IndexType",
+            lower_bound: "crate::builtin::Counter",
+            upper_bound: "crate::builtin::Counter",
+            step: "crate::builtin::Counter",
             inits: "*AnyConstraint",
         },
         results: R {
@@ -123,6 +123,7 @@ impl TokenScope for ForOp {
 impl tir::Verifiable for ForOp {
     fn verify_impl(&self, context: &Context) -> Result<(), Error> {
         verify_single_block_region_has_terminator(context, self.body(), "scf.for body")?;
+        verify_counter_type(context, self)?;
         verify_loop_carried(context, self)
     }
 }
@@ -1146,6 +1147,25 @@ fn carried_arguments(context: &Context, body: &tir::BlockHandle) -> Vec<ValueId>
         .filter(|argument| argument.ty() != token)
         .map(Value::id)
         .collect()
+}
+
+/// Verify a counted loop counts through one type: whatever `!index` or integer width
+/// the lower bound names, the upper bound and step name too. Mixing widths would leave
+/// the counter's arithmetic — and so its trip count — undefined.
+fn verify_counter_type(context: &Context, op: &ForOp) -> Result<(), Error> {
+    let [lower, upper, step] = op.operands()[..3] else {
+        unreachable!("scf.for takes three bounds");
+    };
+    let expected = context.get_value(lower).ty();
+    for (bound, name) in [(upper, "upper bound"), (step, "step")] {
+        let found = context.get_value(bound).ty();
+        if found != expected {
+            return Err(Error::VerificationError(format!(
+                "scf.for {name} counts through a different type than its lower bound"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Verify a loop's carried ports: the init operands, the body's carried arguments, the

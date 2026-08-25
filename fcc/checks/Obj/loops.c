@@ -5,8 +5,10 @@
 // CHECK: File: ELF32 LSB REL
 // CHECK: Symbol count: value=0x0
 
+// A counted loop destructs rotated: the zero-trip guard and the latch are both
+// the same signed comparison against the bound, fused into their branches.
 // ASM: count:
-// ASM: slti
+// ASM: blt
 // ASM: jal
 
 // CONTROL: stop_early:

@@ -27,8 +27,8 @@ object ◀─ emission ◀─ machine CFG ◀─ selection from the e-graph view
 ```
 
 - **cir** (and any future frontend dialect) owns frontend control flow, and
-  may emit either structured scf directly (preferred where the AST is
-  structured — it preserves loop bounds) or an arbitrary CFG. Unstructured
+  may emit its own structured ops (preferred where the AST is structured —
+  they preserve loop bounds for a mid-end pass to read) or an arbitrary CFG. Unstructured
   control flow is first-class *input*: the `restructure` pass (§5.2)
   totally converts any CFG region — irreducible included — to the structured
   form. Structure is a guarantee the compiler provides, never a restriction
@@ -265,9 +265,12 @@ through `Terminator`/`BranchTerminator`/`BranchGuard` (dialect-agnostic):
    conditional trees; continuation points that several paths share are
    selected by predicate values rather than duplicated.
 
-Consumers: fcc emits flat CFG for functions containing `goto` (all other
-constructs lower structured directly, preserving counted-loop shape) and
-`restructure` raises them — there are no refused shapes. Hand-written
+Consumers: fcc emits its loops as `cir` loop ops, which the `raise-loops`
+pass turns into `scf.for` where the counted shape is provable and into the
+same blocks and branches otherwise. Flat CFG is what a whole function gets
+when it holds a `goto` or a label, or a `return` under a loop — both name
+edges a loop region cannot carry — and what every refused loop gets;
+`restructure` raises them all, and there are no refused shapes. Hand-written
 CFG-form `.tir` and tir-jit input take the same path. The backend contract
 is *structured regions in, machine CFG out*; the machine CFG reappears only
 at emission-time destruction.

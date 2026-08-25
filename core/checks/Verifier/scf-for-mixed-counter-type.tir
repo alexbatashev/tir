@@ -1,0 +1,16 @@
+// RUN: not tir opt --verify %s
+
+// A counted loop counts through one type. Bounds naming different widths leave
+// the counter's arithmetic — and so its trip count — undefined, so they fail
+// verification.
+
+module {
+  %fn_bad = func.func @bad(%0: !i32, %1: !i64, %2: !i32) -> !i32 {
+    scf.for %0, %1, %2 {
+      scf.yield
+    }
+    %3 = constant {value = 0} : !i32
+    func.return %3
+  }
+  module_end
+}
